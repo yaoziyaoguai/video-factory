@@ -187,6 +187,212 @@ class PipelineTest(unittest.TestCase):
             self.assertIn("risk_level", plan["items"][0])
             self.assertIn("automation_difficulty", plan["items"][0])
 
+    def test_candidate_draft_exports_niche_aware_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "data" / "video_factory.sqlite"
+            workspace = root / "workspace"
+
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "loop-start",
+                    "loop-2-script-quality",
+                    "Loop 2: Script Quality",
+                    "--objective",
+                    "Generate niche-aware scripts.",
+                ]
+            )
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "generate-topics",
+                    "--loop",
+                    "loop-2-script-quality",
+                    "--count",
+                    "30",
+                ]
+            )
+            candidates = Store(db).list_topic_candidates(limit=1)
+            exit_code = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "draft-candidate",
+                    str(candidates[0].id),
+                ]
+            )
+
+            script_path = workspace / "exports" / "1" / "script.json"
+            script = json.loads(script_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertNotEqual(script["niche_slug"], "general")
+            self.assertTrue(script["structure"])
+            self.assertGreaterEqual(len(script["quality_checks"]), 2)
+            self.assertEqual(len(script["scenes"]), 5)
+            self.assertIn(script["title"], script["scenes"][0]["search_terms"])
+
+    def test_record_metric_and_export_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "data" / "video_factory.sqlite"
+            workspace = root / "workspace"
+
+            record_exit = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "record-metric",
+                    "--platform",
+                    "douyin",
+                    "--views",
+                    "1000",
+                    "--likes",
+                    "80",
+                    "--comments",
+                    "12",
+                    "--follows",
+                    "9",
+                    "--shares",
+                    "5",
+                    "--saves",
+                    "20",
+                    "--completion-rate",
+                    "0.41",
+                    "--avg-watch-seconds",
+                    "18.5",
+                    "--published-at",
+                    "2026-08-20T20:00:00+08:00",
+                ]
+            )
+            report_exit = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "metrics-report",
+                    "--platform",
+                    "douyin",
+                ]
+            )
+
+            report_path = workspace / "reports" / "metrics-douyin.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(record_exit, 0)
+            self.assertEqual(report_exit, 0)
+            self.assertEqual(report["count"], 1)
+            self.assertEqual(report["items"][0]["follow_rate"], 0.009)
+            self.assertEqual(report["totals"]["views"], 1000)
+
+    def test_render_job_dry_run_exports_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "data" / "video_factory.sqlite"
+            workspace = root / "workspace"
+
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "add-topic",
+                    "普通人做决定前最该避开的 3 个坑",
+                    "--angle",
+                    "强收藏清单",
+                ]
+            )
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "draft",
+                    "1",
+                ]
+            )
+            render_exit = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "render-job",
+                    "1",
+                    "--dry-run",
+                ]
+            )
+
+            manifest_path = workspace / "renders" / "1" / "render_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(render_exit, 0)
+            self.assertEqual(manifest["resolution"], "1080x1920")
+            self.assertEqual(len(manifest["slides"]), 5)
+
+    def test_local_asset_matching(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "data" / "video_factory.sqlite"
+            workspace = root / "workspace"
+
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "add-topic",
+                    "普通人做决定前最该避开的 3 个坑",
+                    "--angle",
+                    "强收藏清单",
+                ]
+            )
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "draft",
+                    "1",
+                ]
+            )
+            add_asset_exit = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "add-local-asset",
+                    str(workspace / "assets" / "decision-checklist.png"),
+                    "--media-type",
+                    "image",
+                    "--tag",
+                    "普通人做决定前最该避开的 3 个坑",
+                    "--tag",
+                    "checklist",
+                    "--license-note",
+                    "created by owner",
+                ]
+            )
+            match_exit = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "match-assets",
+                    "1",
+                ]
+            )
+
+            match_path = workspace / "asset-matches" / "job-1.json"
+            matches = json.loads(match_path.read_text(encoding="utf-8"))
+            self.assertEqual(add_asset_exit, 0)
+            self.assertEqual(match_exit, 0)
+            self.assertTrue(matches["matches"][0]["suggestions"])
+            self.assertEqual(matches["matches"][0]["suggestions"][0]["media_type"], "image")
+
 
 if __name__ == "__main__":
     unittest.main()

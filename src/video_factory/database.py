@@ -4,7 +4,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from .domain import EngineeringLoop, LoopEvent, Niche, Scene, Topic, TopicCandidate
+from .domain import (
+    EngineeringLoop,
+    LocalAsset,
+    LoopEvent,
+    Niche,
+    PublishingMetric,
+    Scene,
+    Topic,
+    TopicCandidate,
+)
 
 
 SCHEMA = """
@@ -133,6 +142,35 @@ CREATE TABLE IF NOT EXISTS content_plans (
     output_path TEXT NOT NULL,
     created_at TEXT NOT NULL,
     FOREIGN KEY (loop_id) REFERENCES engineering_loops(id)
+);
+
+CREATE TABLE IF NOT EXISTS publishing_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER,
+    candidate_id INTEGER,
+    platform TEXT NOT NULL,
+    views INTEGER NOT NULL,
+    likes INTEGER NOT NULL,
+    comments INTEGER NOT NULL,
+    follows INTEGER NOT NULL,
+    shares INTEGER NOT NULL,
+    saves INTEGER NOT NULL,
+    completion_rate REAL NOT NULL,
+    avg_watch_seconds REAL NOT NULL,
+    published_at TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    FOREIGN KEY (job_id) REFERENCES jobs(id),
+    FOREIGN KEY (candidate_id) REFERENCES topic_candidates(id)
+);
+
+CREATE TABLE IF NOT EXISTS local_assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL UNIQUE,
+    media_type TEXT NOT NULL,
+    tags_json TEXT NOT NULL,
+    license_note TEXT NOT NULL,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 """
 
@@ -379,6 +417,19 @@ class Store:
             )
             return int(cursor.lastrowid)
 
+    def update_loop_status(self, loop_id: int, status: str, completed: bool = False) -> None:
+        now = utc_now()
+        completed_at = now if completed else None
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE engineering_loops
+                SET status = ?, updated_at = ?, completed_at = ?
+                WHERE id = ?
+                """,
+                (status, now, completed_at, loop_id),
+            )
+
     def get_loop_events(self, loop_id: int) -> List[LoopEvent]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -541,6 +592,16 @@ class Store:
             rows = conn.execute(query, params).fetchall()
         return [topic_candidate_from_row(row) for row in rows]
 
+    def get_topic_candidate(self, candidate_id: int) -> TopicCandidate:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM topic_candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"Topic candidate not found: {candidate_id}")
+        return topic_candidate_from_row(row)
+
     def create_content_plan(
         self,
         loop_id: Optional[int],
@@ -570,6 +631,123 @@ class Store:
                 ),
             )
             return int(cursor.lastrowid)
+
+    def add_publishing_metric(
+        self,
+        job_id: Optional[int],
+        candidate_id: Optional[int],
+        platform: str,
+        views: int,
+        likes: int,
+        comments: int,
+        follows: int,
+        shares: int,
+        saves: int,
+        completion_rate: float,
+        avg_watch_seconds: float,
+        published_at: str,
+    ) -> int:
+        recorded_at = utc_now()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO publishing_metrics (
+                    job_id,
+                    candidate_id,
+                    platform,
+                    views,
+                    likes,
+                    comments,
+                    follows,
+                    shares,
+                    saves,
+                    completion_rate,
+                    avg_watch_seconds,
+                    published_at,
+                    recorded_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    candidate_id,
+                    platform,
+                    views,
+                    likes,
+                    comments,
+                    follows,
+                    shares,
+                    saves,
+                    completion_rate,
+                    avg_watch_seconds,
+                    published_at,
+                    recorded_at,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def list_publishing_metrics(self, platform: Optional[str] = None) -> List[PublishingMetric]:
+        query = "SELECT * FROM publishing_metrics"
+        params = []
+        if platform:
+            query += " WHERE platform = ?"
+            params.append(platform)
+        query += " ORDER BY published_at ASC, id ASC"
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [publishing_metric_from_row(row) for row in rows]
+
+    def add_local_asset(
+        self,
+        path: Path,
+        media_type: str,
+        tags: Iterable[str],
+        license_note: str,
+        source: str,
+    ) -> int:
+        created_at = utc_now()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO local_assets (
+                    path,
+                    media_type,
+                    tags_json,
+                    license_note,
+                    source,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    media_type = excluded.media_type,
+                    tags_json = excluded.tags_json,
+                    license_note = excluded.license_note,
+                    source = excluded.source
+                """,
+                (
+                    str(path),
+                    media_type,
+                    json.dumps(list(tags), ensure_ascii=False),
+                    license_note,
+                    source,
+                    created_at,
+                ),
+            )
+            if cursor.lastrowid:
+                return int(cursor.lastrowid)
+            row = conn.execute("SELECT id FROM local_assets WHERE path = ?", (str(path),)).fetchone()
+            return int(row["id"])
+
+    def list_local_assets(self, media_type: Optional[str] = None) -> List[LocalAsset]:
+        query = "SELECT * FROM local_assets"
+        params = []
+        if media_type:
+            query += " WHERE media_type = ?"
+            params.append(media_type)
+        query += " ORDER BY id ASC"
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [local_asset_from_row(row) for row in rows]
 
 
 def topic_from_row(row: sqlite3.Row) -> Topic:
@@ -635,5 +813,36 @@ def topic_candidate_from_row(row: sqlite3.Row) -> TopicCandidate:
         score=int(row["score"]),
         rationale=str(row["rationale"]),
         status=str(row["status"]),
+        created_at=str(row["created_at"]),
+    )
+
+
+def publishing_metric_from_row(row: sqlite3.Row) -> PublishingMetric:
+    return PublishingMetric(
+        id=int(row["id"]),
+        job_id=row["job_id"],
+        candidate_id=row["candidate_id"],
+        platform=str(row["platform"]),
+        views=int(row["views"]),
+        likes=int(row["likes"]),
+        comments=int(row["comments"]),
+        follows=int(row["follows"]),
+        shares=int(row["shares"]),
+        saves=int(row["saves"]),
+        completion_rate=float(row["completion_rate"]),
+        avg_watch_seconds=float(row["avg_watch_seconds"]),
+        published_at=str(row["published_at"]),
+        recorded_at=str(row["recorded_at"]),
+    )
+
+
+def local_asset_from_row(row: sqlite3.Row) -> LocalAsset:
+    return LocalAsset(
+        id=int(row["id"]),
+        path=str(row["path"]),
+        media_type=str(row["media_type"]),
+        tags=json.loads(str(row["tags_json"])),
+        license_note=str(row["license_note"]),
+        source=str(row["source"]),
         created_at=str(row["created_at"]),
     )

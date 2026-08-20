@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from .assets import match_assets_to_scenes, normalize_tags, write_asset_matches
 from .content_strategy import (
     default_niches,
     generate_candidate_drafts,
@@ -13,7 +14,9 @@ from .content_strategy import (
 from .database import Store
 from .exporter import write_review_package, write_script
 from .loop_engine import merge_criteria, normalize_slug, validate_phase, validate_status
-from .script_service import draft_script
+from .metrics import default_metrics_report_path, write_metrics_report
+from .renderer import render_job_manifest
+from .script_service import draft_candidate_script, draft_script
 
 
 DEFAULT_DB = Path("data/video_factory.sqlite")
@@ -60,6 +63,27 @@ def main(argv: Optional[list] = None) -> int:
         store.update_job(job_id, status="scripted", script_path=script_path)
         print(f"Created job #{job_id} for topic #{topic.id}")
         print(f"Script: {script_path}")
+        return 0
+
+    if args.command == "draft-candidate":
+        store.init()
+        candidate = store.get_topic_candidate(args.candidate_id)
+        topic_id = store.add_topic(
+            title=candidate.title,
+            angle=candidate.angle,
+            source=f"candidate:{candidate.id}",
+            priority=candidate.score,
+        )
+        topic = store.get_topic(topic_id)
+        draft = draft_candidate_script(candidate, duration_target=args.duration)
+        job_id = store.create_job(topic.id, args.duration)
+        script_path = write_script(args.workspace, job_id, draft)
+        store.replace_scenes(job_id, draft.scenes)
+        export_dir = write_review_package(args.workspace, job_id, topic, draft, script_path)
+        store.update_job(job_id, status="export_ready", script_path=script_path, export_dir=export_dir)
+        print(f"Created job #{job_id} from candidate #{candidate.id}")
+        print(f"Script: {script_path}")
+        print(f"Export package: {export_dir}")
         return 0
 
     if args.command == "export":
@@ -142,6 +166,21 @@ def main(argv: Optional[list] = None) -> int:
         print(f"Completed loop #{loop.id}: {loop.slug}")
         return 0
 
+    if args.command == "loop-status":
+        store.init()
+        loop = store.get_loop(args.loop_ref)
+        status = validate_status(args.status)
+        store.update_loop_status(loop.id, status=status, completed=status == "completed")
+        store.add_loop_event(
+            loop_id=loop.id,
+            phase=args.phase,
+            status=status,
+            summary=args.summary,
+            evidence=args.evidence,
+        )
+        print(f"Updated loop #{loop.id} to {status}: {loop.slug}")
+        return 0
+
     if args.command == "seed-niches":
         store.init()
         niches = default_niches()
@@ -221,6 +260,81 @@ def main(argv: Optional[list] = None) -> int:
         print(f"Exported week plan: {output}")
         return 0
 
+    if args.command == "record-metric":
+        store.init()
+        metric_id = store.add_publishing_metric(
+            job_id=args.job_id,
+            candidate_id=args.candidate_id,
+            platform=args.platform,
+            views=args.views,
+            likes=args.likes,
+            comments=args.comments,
+            follows=args.follows,
+            shares=args.shares,
+            saves=args.saves,
+            completion_rate=args.completion_rate,
+            avg_watch_seconds=args.avg_watch_seconds,
+            published_at=args.published_at,
+        )
+        print(f"Recorded metric #{metric_id} for {args.platform}.")
+        return 0
+
+    if args.command == "metrics-report":
+        store.init()
+        metrics = store.list_publishing_metrics(platform=args.platform)
+        output = args.output or default_metrics_report_path(args.workspace, args.platform)
+        write_metrics_report(output, metrics)
+        print(f"Exported metrics report: {output}")
+        return 0
+
+    if args.command == "render-job":
+        store.init()
+        job = store.get_job(args.job_id)
+        if not job["script_path"]:
+            raise SystemExit(f"Job #{args.job_id} has no script. Run draft first.")
+        try:
+            manifest_path = render_job_manifest(
+                job_id=args.job_id,
+                script_path=Path(str(job["script_path"])),
+                workspace=args.workspace,
+                dry_run=args.dry_run,
+            )
+        except RuntimeError as error:
+            raise SystemExit(str(error))
+        print(f"Render manifest: {manifest_path}")
+        return 0
+
+    if args.command == "add-local-asset":
+        store.init()
+        asset_id = store.add_local_asset(
+            path=args.path,
+            media_type=args.media_type,
+            tags=normalize_tags(args.tag),
+            license_note=args.license_note,
+            source=args.source,
+        )
+        print(f"Registered local asset #{asset_id}: {args.path}")
+        return 0
+
+    if args.command == "list-local-assets":
+        store.init()
+        assets = store.list_local_assets(media_type=args.media_type)
+        for asset in assets:
+            print(f"#{asset.id} {asset.media_type} {asset.path} | tags={','.join(asset.tags)}")
+        if not assets:
+            print("No local assets found.")
+        return 0
+
+    if args.command == "match-assets":
+        store.init()
+        scenes = store.get_scenes(args.job_id)
+        assets = store.list_local_assets(media_type=args.media_type)
+        matches = match_assets_to_scenes(scenes, assets)
+        output = args.output or args.workspace / "asset-matches" / f"job-{args.job_id}.json"
+        write_asset_matches(output, matches)
+        print(f"Exported asset matches: {output}")
+        return 0
+
     if args.command == "show-job":
         store.init()
         job = store.get_job(args.job_id)
@@ -275,6 +389,10 @@ def build_parser() -> argparse.ArgumentParser:
     draft.add_argument("topic_id", type=int)
     draft.add_argument("--duration", type=int, default=45)
 
+    draft_candidate = subparsers.add_parser("draft-candidate")
+    draft_candidate.add_argument("candidate_id", type=int)
+    draft_candidate.add_argument("--duration", type=int, default=45)
+
     export = subparsers.add_parser("export")
     export.add_argument("job_id", type=int)
 
@@ -302,6 +420,13 @@ def build_parser() -> argparse.ArgumentParser:
     loop_complete.add_argument("loop_ref")
     loop_complete.add_argument("--verification", action="append", default=[])
 
+    loop_status = subparsers.add_parser("loop-status")
+    loop_status.add_argument("loop_ref")
+    loop_status.add_argument("--status", required=True)
+    loop_status.add_argument("--phase", default="learn")
+    loop_status.add_argument("--summary", required=True)
+    loop_status.add_argument("--evidence", action="append", default=[])
+
     subparsers.add_parser("seed-niches")
 
     subparsers.add_parser("list-niches")
@@ -320,6 +445,43 @@ def build_parser() -> argparse.ArgumentParser:
     export_week_plan.add_argument("--count", type=int, default=7)
     export_week_plan.add_argument("--output", type=Path, default=None)
 
+    record_metric = subparsers.add_parser("record-metric")
+    record_metric.add_argument("--job-id", type=int, default=None)
+    record_metric.add_argument("--candidate-id", type=int, default=None)
+    record_metric.add_argument("--platform", required=True)
+    record_metric.add_argument("--views", type=int, required=True)
+    record_metric.add_argument("--likes", type=int, default=0)
+    record_metric.add_argument("--comments", type=int, default=0)
+    record_metric.add_argument("--follows", type=int, default=0)
+    record_metric.add_argument("--shares", type=int, default=0)
+    record_metric.add_argument("--saves", type=int, default=0)
+    record_metric.add_argument("--completion-rate", type=float, default=0)
+    record_metric.add_argument("--avg-watch-seconds", type=float, default=0)
+    record_metric.add_argument("--published-at", default="")
+
+    metrics_report = subparsers.add_parser("metrics-report")
+    metrics_report.add_argument("--platform", default=None)
+    metrics_report.add_argument("--output", type=Path, default=None)
+
+    render_job = subparsers.add_parser("render-job")
+    render_job.add_argument("job_id", type=int)
+    render_job.add_argument("--dry-run", action="store_true")
+
+    add_local_asset = subparsers.add_parser("add-local-asset")
+    add_local_asset.add_argument("path", type=Path)
+    add_local_asset.add_argument("--media-type", choices=["image", "video", "audio"], required=True)
+    add_local_asset.add_argument("--tag", action="append", default=[])
+    add_local_asset.add_argument("--license-note", default="manual review required")
+    add_local_asset.add_argument("--source", default="local")
+
+    list_local_assets = subparsers.add_parser("list-local-assets")
+    list_local_assets.add_argument("--media-type", default=None)
+
+    match_assets = subparsers.add_parser("match-assets")
+    match_assets.add_argument("job_id", type=int)
+    match_assets.add_argument("--media-type", default=None)
+    match_assets.add_argument("--output", type=Path, default=None)
+
     show_job = subparsers.add_parser("show-job")
     show_job.add_argument("job_id", type=int)
 
@@ -336,6 +498,10 @@ def draft_from_script_json(path: Path):
         hook=payload["hook"],
         duration_target=int(payload["duration_target"]),
         disclosure_required=bool(payload.get("disclosure_required", True)),
+        niche_slug=str(payload.get("niche_slug", "general")),
+        structure=str(payload.get("structure", "通用短视频结构")),
+        quality_checks=list(payload.get("quality_checks", [])),
+        platform_notes=dict(payload.get("platform_notes", {})),
         hashtags=list(payload.get("hashtags", [])),
         scenes=[
             Scene(
