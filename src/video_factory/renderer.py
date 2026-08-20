@@ -148,7 +148,8 @@ def render_asset_video(
     scene_commands = []
     for scene in manifest["slides"]:
         asset = scene_assets[int(scene["position"])]
-        caption_path = write_caption_overlay(manifest, scene, captions_dir, width, height)
+        caption_style = "minimal" if asset.get("provider") == "local" else "subtitle"
+        caption_path = write_caption_overlay(manifest, scene, captions_dir, width, height, style=caption_style)
         clip_path, command = render_scene_clip(scene, asset, caption_path, clips_dir, width, height)
         clips.append(clip_path)
         scene_commands.append(command)
@@ -197,45 +198,61 @@ def render_asset_video(
     return output_file
 
 
-def write_caption_overlay(manifest: dict, scene: dict, captions_dir: Path, width: int, height: int) -> Path:
+def write_caption_overlay(
+    manifest: dict,
+    scene: dict,
+    captions_dir: Path,
+    width: int,
+    height: int,
+    style: str = "subtitle",
+) -> Path:
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError as error:
         raise RuntimeError("Pillow is required for MP4 rendering. Install project dependencies first.") from error
 
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    title_font = load_font(ImageFont, max(26, width // 36))
-    note_font = load_font(ImageFont, max(24, width // 45))
-    margin = max(56, width // 13)
-    panel_top = int(height * 0.64)
-    panel_bottom = height - margin
+    caption_path = captions_dir / f"scene_{scene['position']:02d}.png"
+    if style == "minimal":
+        image.save(caption_path)
+        return caption_path
 
-    draw.rounded_rectangle(
-        (margin, panel_top, width - margin, panel_bottom),
-        radius=24,
-        fill=(5, 10, 22, 218),
-    )
-    draw.text((margin + 34, panel_top + 24), manifest["title"], font=title_font, fill="#bfdbfe")
-    draw_fitting_multiline(
+    draw = ImageDraw.Draw(image)
+    margin = max(56, width // 13)
+    title_font = load_font(ImageFont, max(24, width // 42))
+    body_font, body_lines = fit_multiline(
         draw,
         scene["text"],
-        (margin + 34, panel_top + 82),
         ImageFont,
-        max(42, width // 24),
-        30,
-        "#f8fafc",
-        width - margin * 2 - 68,
-        panel_bottom - panel_top - 148,
-        line_spacing=14,
+        max(54, width // 20),
+        34,
+        width - margin * 2,
+        int(height * 0.25),
+        line_spacing=12,
     )
+    body_height = multiline_height(draw, body_lines, body_font, 12)
+    body_y = height - max(96, height // 20) - body_height
+    title_y = body_y - max(58, height // 36)
+
+    draw_bottom_scrim(draw, width, height, max(0, title_y - 96), height)
     draw.text(
-        (margin + 34, panel_bottom - 48),
-        f"Scene {scene['position']} / {len(manifest['slides'])}",
-        font=note_font,
-        fill="#93c5fd",
+        (margin, title_y),
+        f"{manifest['title']}  {int(scene['position']):02d}/{len(manifest['slides']):02d}",
+        font=title_font,
+        fill=(219, 234, 254, 232),
+        stroke_width=2,
+        stroke_fill=(2, 6, 23, 190),
     )
-    caption_path = captions_dir / f"scene_{scene['position']:02d}.png"
+    draw_stroked_multiline(
+        draw,
+        body_lines,
+        (margin, body_y),
+        body_font,
+        "#ffffff",
+        line_spacing=12,
+        stroke_width=4,
+        stroke_fill=(2, 6, 23, 210),
+    )
     image.save(caption_path)
     return caption_path
 
@@ -384,6 +401,51 @@ def draw_fitting_multiline(
         draw.text((x, y), line, font=font, fill=fill)
         box = draw.textbbox((x, y), line, font=font)
         y += box[3] - box[1] + line_spacing
+
+
+def fit_multiline(
+    draw,
+    text: str,
+    ImageFont,
+    initial_size: int,
+    min_size: int,
+    max_width: int,
+    max_height: int,
+    line_spacing: int,
+):
+    font = load_font(ImageFont, initial_size)
+    lines = wrap_text_by_pixels(draw, text, font, max_width)
+    for size in range(initial_size, min_size - 1, -2):
+        font = load_font(ImageFont, size)
+        lines = wrap_text_by_pixels(draw, text, font, max_width)
+        if multiline_height(draw, lines, font, line_spacing) <= max_height:
+            break
+    return font, lines
+
+
+def draw_stroked_multiline(
+    draw,
+    lines: list[str],
+    position: tuple[int, int],
+    font,
+    fill: str,
+    line_spacing: int,
+    stroke_width: int,
+    stroke_fill,
+) -> None:
+    x, y = position
+    for line in lines:
+        draw.text((x, y), line, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=stroke_fill)
+        box = draw.textbbox((x, y), line, font=font, stroke_width=stroke_width)
+        y += box[3] - box[1] + line_spacing
+
+
+def draw_bottom_scrim(draw, width: int, height: int, start_y: int, end_y: int) -> None:
+    span = max(1, end_y - start_y)
+    for y in range(start_y, end_y, 6):
+        ratio = (y - start_y) / span
+        alpha = int(24 + 170 * ratio)
+        draw.rectangle((0, y, width, y + 6), fill=(2, 6, 23, alpha))
 
 
 def multiline_height(draw, lines: list[str], font, line_spacing: int) -> int:

@@ -26,6 +26,6 @@ PYTHONPATH=src python3 -m video_factory render-job 3 --require-assets
 ffprobe -v error -show_entries format=duration:stream=width,height,codec_type -of json workspace/renders/3/final.mp4
 ```
 
-## Browser/API Key Status
+## API Key Status
 
-Chrome browser control connected, but provider pages timed out during automated navigation. Pexels also returned Cloudflare challenge content to direct HTTP fetch. Continue with local engineering and ask the user to finish provider login/API-key creation if browser automation remains blocked.
+Pexels API key has been configured locally in `.env.local`, which is ignored by git. Direct API search and media download are working through the CLI. Do not commit provider keys; rotate the key if it was exposed in chat or logs.

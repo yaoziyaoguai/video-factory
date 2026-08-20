@@ -3,6 +3,7 @@ import os
 import re
 import urllib.parse
 import urllib.request
+from urllib.error import HTTPError, URLError
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,11 +16,13 @@ PROVIDER_KEY_ENV = {
     "pexels": "PEXELS_API_KEY",
     "pixabay": "PIXABAY_API_KEY",
 }
+MAX_ASSET_DOWNLOAD_BYTES = 12_000_000
 
 PROVIDER_LICENSE_NOTE = {
     "pexels": "Pexels free stock license; review current provider license before publishing.",
     "pixabay": "Pixabay Content License; cache API responses for 24h and avoid systematic mass downloads.",
     "mock": "Generated local placeholder for tests and visual pipeline checks; not a real stock asset.",
+    "local": "Owner-generated local graphic card; no external stock license required.",
 }
 
 
@@ -52,12 +55,15 @@ def search_scene_asset_candidates(
     }
     for scene in scenes:
         query = query_for_scene(scene)
-        candidates = search_stock_assets(
-            provider=provider,
-            query=query,
-            media_type=media_type,
-            limit=limit,
-        )
+        if scene.visual_strategy == "local":
+            candidates = [local_card_candidate(scene, query)]
+        else:
+            candidates = search_stock_assets(
+                provider=provider,
+                query=query,
+                media_type=media_type,
+                limit=limit,
+            )
         report["scene_candidates"].append(
             {
                 "scene_position": scene.position,
@@ -85,6 +91,25 @@ def prepare_scene_assets(
 
     for scene in scenes:
         query = query_for_scene(scene)
+        if scene.visual_strategy == "local":
+            actual_path = write_local_scene_card(scene, asset_dir / f"scene_{scene.position:02d}_local_card.png")
+            scene_assets.append(
+                SceneAsset(
+                    scene_position=scene.position,
+                    provider="local",
+                    asset_id=f"scene-{scene.position:02d}-card",
+                    media_type="image",
+                    width=1080,
+                    height=1920,
+                    duration=float(scene.duration),
+                    local_path=str(actual_path),
+                    source_url="local://video-factory/card",
+                    creator="VideoFactory",
+                    license_note=PROVIDER_LICENSE_NOTE["local"],
+                    query=query,
+                )
+            )
+            continue
         candidates = search_stock_assets(
             provider=provider,
             query=query,
@@ -93,25 +118,34 @@ def prepare_scene_assets(
         )
         if not candidates:
             raise RuntimeError(f"No {provider} {media_type} asset found for scene {scene.position}: {query}")
-        candidate = candidates[0]
-        local_path = asset_dir / local_filename(scene.position, candidate)
-        actual_path = materialize_candidate(candidate, local_path)
-        scene_assets.append(
-            SceneAsset(
-                scene_position=scene.position,
-                provider=candidate.provider,
-                asset_id=candidate.asset_id,
-                media_type=candidate.media_type,
-                width=candidate.width,
-                height=candidate.height,
-                duration=candidate.duration,
-                local_path=str(actual_path),
-                source_url=candidate.source_url,
-                creator=candidate.creator,
-                license_note=candidate.license_note,
-                query=candidate.query,
+        last_error: Optional[RuntimeError] = None
+        for candidate in candidates:
+            local_path = asset_dir / local_filename(scene.position, candidate)
+            try:
+                actual_path = materialize_candidate(candidate, local_path)
+            except RuntimeError as error:
+                last_error = error
+                continue
+            scene_assets.append(
+                SceneAsset(
+                    scene_position=scene.position,
+                    provider=candidate.provider,
+                    asset_id=candidate.asset_id,
+                    media_type=candidate.media_type,
+                    width=candidate.width,
+                    height=candidate.height,
+                    duration=candidate.duration,
+                    local_path=str(actual_path),
+                    source_url=candidate.source_url,
+                    creator=candidate.creator,
+                    license_note=candidate.license_note,
+                    query=candidate.query,
+                )
             )
-        )
+            break
+        else:
+            detail = f" Last error: {last_error}" if last_error else ""
+            raise RuntimeError(f"No downloadable {provider} {media_type} asset found for scene {scene.position}: {query}.{detail}")
 
     return write_asset_plan(default_asset_plan_path(workspace, job_id), job_id, scene_assets)
 
@@ -161,7 +195,7 @@ def search_pexels(
         )
     else:
         raise ValueError(f"Unsupported media_type for Pexels: {media_type}")
-    request = urllib.request.Request(url, headers={"Authorization": key})
+    request = urllib.request.Request(url, headers=api_headers({"Authorization": key}))
     payload = fetch_json(request, opener)
     if media_type == "video":
         return normalize_pexels_videos(payload, query, limit)
@@ -199,7 +233,7 @@ def search_pixabay(
         )
     else:
         raise ValueError(f"Unsupported media_type for Pixabay: {media_type}")
-    payload = fetch_json(urllib.request.Request(url), opener)
+    payload = fetch_json(urllib.request.Request(url, headers=api_headers()), opener)
     if media_type == "video":
         return normalize_pixabay_videos(payload, query, limit)
     return normalize_pixabay_images(payload, query, limit)
@@ -334,6 +368,24 @@ def mock_asset_candidates(query: str, media_type: str, limit: int) -> List[Stock
     ]
 
 
+def local_card_candidate(scene: Scene, query: str) -> StockAssetCandidate:
+    return StockAssetCandidate(
+        provider="local",
+        asset_id=f"scene-{scene.position:02d}-card",
+        media_type="image",
+        width=1080,
+        height=1920,
+        duration=float(scene.duration),
+        preview_url=f"local://video-factory/card/{scene.position}",
+        download_url=f"local://video-factory/card/{scene.position}",
+        source_url="local://video-factory/card",
+        creator="VideoFactory",
+        license_note=PROVIDER_LICENSE_NOTE["local"],
+        query=query,
+        score=1000,
+    )
+
+
 def write_asset_plan(path: Path, job_id: int, scene_assets: Iterable[SceneAsset]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -354,9 +406,16 @@ def candidate_to_dict(candidate: StockAssetCandidate) -> dict:
 
 
 def query_for_scene(scene: Scene) -> str:
+    visual_query = english_query_from_visual_prompt(scene.visual_prompt)
+    if visual_query:
+        return visual_query
+    for term in scene.search_terms:
+        cleaned_term = english_query_from_visual_prompt(term)
+        if cleaned_term:
+            return cleaned_term
     for term in scene.search_terms:
         if term.strip():
-            return term.strip()
+            return term.strip()[:100]
     return scene.visual_prompt.strip()
 
 
@@ -371,17 +430,53 @@ def provider_key(provider: str, environ: Optional[dict] = None) -> str:
 
 def fetch_json(request: urllib.request.Request, opener: Optional[Callable] = None) -> dict:
     active_opener = opener or urllib.request.urlopen
-    with active_opener(request, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with active_opener(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(f"Provider request failed with HTTP {error.code}: {detail}") from error
+    except URLError as error:
+        raise RuntimeError(f"Provider request failed: {error}") from error
 
 
 def materialize_candidate(candidate: StockAssetCandidate, local_path: Path) -> Path:
     local_path.parent.mkdir(parents=True, exist_ok=True)
     if candidate.download_url.startswith("mock://"):
         return write_mock_image(candidate, local_path)
-    with urllib.request.urlopen(candidate.download_url, timeout=60) as response:
-        local_path.write_bytes(response.read())
+    request = urllib.request.Request(candidate.download_url, headers=download_headers(candidate.source_url))
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            content_length = int(response.headers.get("Content-Length") or 0)
+            if content_length > MAX_ASSET_DOWNLOAD_BYTES:
+                raise RuntimeError(
+                    f"Asset download is too large ({content_length} bytes) for {candidate.provider}:{candidate.asset_id}"
+                )
+            write_response_body(response, local_path, MAX_ASSET_DOWNLOAD_BYTES)
+    except HTTPError as error:
+        raise RuntimeError(
+            f"Asset download failed with HTTP {error.code} for {candidate.provider}:{candidate.asset_id}"
+        ) from error
+    except URLError as error:
+        raise RuntimeError(f"Asset download failed for {candidate.provider}:{candidate.asset_id}: {error}") from error
     return local_path
+
+
+def write_response_body(response, local_path: Path, max_bytes: int) -> None:
+    downloaded = 0
+    try:
+        with local_path.open("wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                downloaded += len(chunk)
+                if downloaded > max_bytes:
+                    raise RuntimeError(f"Asset download exceeded {max_bytes} bytes: {local_path}")
+                output.write(chunk)
+    except Exception:
+        local_path.unlink(missing_ok=True)
+        raise
 
 
 def write_mock_image(candidate: StockAssetCandidate, local_path: Path) -> Path:
@@ -408,6 +503,160 @@ def write_mock_image(candidate: StockAssetCandidate, local_path: Path) -> Path:
     return local_path
 
 
+def write_local_scene_card(scene: Scene, local_path: Path) -> Path:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as error:
+        raise RuntimeError("Pillow is required to create local scene cards.") from error
+
+    local_path = local_path.with_suffix(".png")
+    width, height = 1080, 1920
+    style = local_card_style(scene.position)
+    title, items, kicker = local_card_content(scene)
+    image = Image.new("RGB", (width, height), style["background"])
+    draw = ImageDraw.Draw(image)
+
+    draw_editorial_background(draw, width, height, style)
+    label_font = local_card_font(ImageFont, 34)
+    title_font = local_card_font(ImageFont, 86)
+    kicker_font = local_card_font(ImageFont, 42)
+    item_font = local_card_font(ImageFont, local_card_item_size(items))
+    small_font = local_card_font(ImageFont, 28)
+    margin = 86
+
+    draw.text((margin, 90), "生活避坑清单", font=small_font, fill=style["muted"])
+    draw.text((width - margin - 118, 84), f"{scene.position:02d}", font=label_font, fill=style["accent"])
+    draw.line((margin, 158, width - margin, 158), fill=style["rule"], width=3)
+    draw.text((margin, 260), kicker, font=kicker_font, fill=style["accent"])
+    draw_wrapped_text(
+        draw,
+        title,
+        (margin, 330),
+        title_font,
+        style["ink"],
+        width - margin * 2,
+        line_spacing=20,
+    )
+
+    y = 760
+    for index, item in enumerate(items[:4], start=1):
+        number = f"{index:02d}"
+        draw.text((margin, y + 6), number, font=label_font, fill=style["accent"])
+        y = draw_wrapped_text(
+            draw,
+            item,
+            (margin + 118, y),
+            item_font,
+            style["ink"],
+            width - margin * 2 - 118,
+            line_spacing=16,
+        )
+        draw.line((margin + 118, y + 20, width - margin, y + 20), fill=style["rule"], width=2)
+        y += 74
+
+    draw.text((margin, height - 150), "少一点临场发挥，多一个提前规则。", font=small_font, fill=style["muted"])
+    image.save(local_path)
+    return local_path
+
+
+def local_card_style(scene_position: int) -> dict:
+    styles = [
+        {
+            "background": "#f6f8fb",
+            "ink": "#111827",
+            "muted": "#64748b",
+            "accent": "#dc2626",
+            "rule": "#cbd5e1",
+        },
+        {
+            "background": "#101828",
+            "ink": "#f8fafc",
+            "muted": "#94a3b8",
+            "accent": "#facc15",
+            "rule": "#334155",
+        },
+        {
+            "background": "#f8fafc",
+            "ink": "#0f172a",
+            "muted": "#475569",
+            "accent": "#0f766e",
+            "rule": "#cbd5e1",
+        },
+    ]
+    return styles[scene_position % len(styles)]
+
+
+def local_card_content(scene: Scene) -> tuple[str, list[str], str]:
+    sentences = split_chinese_sentences(scene.narration)
+    if scene.position == 2 or len(sentences) >= 3:
+        return "先避开这 3 个坑", sentences[:3], "收藏清单"
+    if "低成本提醒" in scene.narration or "道理" in scene.narration:
+        return "真正有用的是提醒", ["别靠临场发挥", "提前放一个低成本提醒"], "反直觉"
+    if "今天" in scene.narration or "一件事" in scene.narration:
+        return "下次先停三秒", ["写下最像你的那个坑", "遇到时先停三秒", "再决定"], "马上能做"
+    if "收藏" in scene.narration or "评论" in scene.narration:
+        return "把这张清单留下", ["收藏备用", "评论区告诉我：你最想避开什么坑？"], "留给下次"
+    return "记住这一句", sentences[:2] or [scene.narration], "关键提醒"
+
+
+def split_chinese_sentences(text: str) -> list[str]:
+    parts = [part.strip(" ；;。.") for part in re.split(r"[。；;]", text) if part.strip(" ；;。.")]
+    return parts or [text.strip()]
+
+
+def draw_editorial_background(draw, width: int, height: int, style: dict) -> None:
+    for y in range(0, height, 240):
+        draw.line((0, y, width, y), fill=style["rule"], width=1)
+    draw.rectangle((0, height - 300, width, height), fill=style["background"])
+    draw.line((0, height - 300, width, height - 300), fill=style["rule"], width=2)
+
+
+def draw_wrapped_text(draw, text: str, position: tuple[int, int], font, fill: str, max_width: int, line_spacing: int) -> int:
+    x, y = position
+    for line in wrap_text_by_pixels(draw, text, font, max_width):
+        draw.text((x, y), line, font=font, fill=fill)
+        box = draw.textbbox((x, y), line, font=font)
+        y += box[3] - box[1] + line_spacing
+    return y
+
+
+def local_card_item_size(items: list[str]) -> int:
+    longest = max((len(item) for item in items), default=0)
+    if longest >= 24:
+        return 48
+    if longest >= 18:
+        return 52
+    return 58
+
+
+def wrap_text_by_pixels(draw, text: str, font, max_width: int) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for char in text:
+        candidate = current + char
+        box = draw.textbbox((0, 0), candidate, font=font)
+        if current and box[2] - box[0] > max_width:
+            lines.append(current)
+            current = char
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def local_card_font(ImageFont, size: int):
+    for candidate in [
+        Path("/System/Library/Fonts/PingFang.ttc"),
+        Path("/System/Library/Fonts/STHeiti Light.ttc"),
+        Path("/Library/Fonts/Arial Unicode.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    ]:
+        if candidate.exists():
+            return ImageFont.truetype(str(candidate), size)
+    return ImageFont.load_default()
+
+
 def local_filename(scene_position: int, candidate: StockAssetCandidate) -> str:
     return f"scene_{scene_position:02d}_{candidate.provider}_{safe_slug(candidate.asset_id)}{extension_for(candidate)}"
 
@@ -428,10 +677,10 @@ def best_media_file(files: Iterable[dict]) -> Optional[dict]:
         return None
     return sorted(
         usable,
-        key=lambda item: quality_score(
+        key=lambda item: media_file_score(
             int(item.get("width") or 0),
             int(item.get("height") or 0),
-            0,
+            int(item.get("size") or 0),
         ),
         reverse=True,
     )[0]
@@ -443,13 +692,50 @@ def best_pixabay_video(videos: dict) -> Optional[dict]:
         return None
     return sorted(
         usable,
-        key=lambda item: quality_score(
+        key=lambda item: media_file_score(
             int(item.get("width") or 0),
             int(item.get("height") or 0),
-            0,
+            int(item.get("size") or 0),
         ),
         reverse=True,
     )[0]
+
+
+def api_headers(extra: Optional[dict] = None) -> dict:
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "VideoFactory/0.1 (https://github.com/yaoziyaoguai/vedio-factory)",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def download_headers(source_url: str = "") -> dict:
+    headers = {
+        "Accept": "video/mp4,image/*,*/*",
+        "User-Agent": "VideoFactory/0.1 (https://github.com/yaoziyaoguai/vedio-factory)",
+    }
+    if source_url:
+        headers["Referer"] = source_url
+    return headers
+
+
+def english_query_from_visual_prompt(value: str) -> str:
+    before_topic = value.split("topic:", 1)[0]
+    ascii_parts = re.findall(r"[A-Za-z][A-Za-z0-9 ,'-]{2,}", before_topic)
+    query = " ".join(part.strip(" ,") for part in ascii_parts if part.strip(" ,"))
+    return " ".join(query.split())[:100]
+
+
+def media_file_score(width: int, height: int, size: int) -> int:
+    if width <= 0 or height <= 0:
+        return 0
+    orientation_bonus = 1_000_000 if height >= width else 0
+    minimum_bonus = 500_000 if width >= 720 and height >= 1280 else 0
+    target_penalty = abs(width - 1080) + abs(height - 1920)
+    oversized_penalty = max(0, size - 4_000_000) // 1000
+    return orientation_bonus + minimum_bonus - target_penalty - oversized_penalty
 
 
 def quality_score(width: int, height: int, duration: float) -> int:

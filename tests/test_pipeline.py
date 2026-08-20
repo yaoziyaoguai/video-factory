@@ -10,8 +10,10 @@ from unittest.mock import patch
 
 from video_factory.cli import main
 from video_factory.database import Store
+from video_factory.domain import Scene
 from video_factory.exporter import write_review_package, write_script
-from video_factory.script_service import draft_script
+from video_factory.script_service import draft_script, draft_script_from_values
+from video_factory.stock_assets import api_headers, download_headers, media_file_score, prepare_scene_assets, query_for_scene
 
 
 def run_cli(args):
@@ -502,6 +504,76 @@ class PipelineTest(unittest.TestCase):
                 )
 
             self.assertIn("PEXELS_API_KEY", str(error.exception))
+
+    def test_stock_asset_queries_prefer_english_visual_prompt(self):
+        scene = Scene(
+            position=1,
+            narration="做选择前先停三秒。",
+            duration=8,
+            visual_strategy="stock",
+            visual_prompt="busy ordinary person, decision stress, vertical, topic: 普通人做决定",
+            search_terms=["普通人做决定前最该避开的 3 个坑", "选择困难"],
+        )
+
+        self.assertEqual(query_for_scene(scene), "busy ordinary person, decision stress, vertical")
+
+    def test_stock_asset_requests_include_provider_safe_headers(self):
+        headers = api_headers({"Authorization": "test-key"})
+
+        self.assertIn("VideoFactory/0.1", headers["User-Agent"])
+        self.assertEqual(headers["Accept"], "application/json")
+        self.assertEqual(headers["Authorization"], "test-key")
+
+    def test_stock_asset_download_headers_accept_media(self):
+        headers = download_headers("https://www.pexels.com/video/example/")
+
+        self.assertIn("video/mp4", headers["Accept"])
+        self.assertEqual(headers["Referer"], "https://www.pexels.com/video/example/")
+        self.assertNotEqual(headers["Accept"], "application/json")
+
+    def test_stock_asset_file_score_prefers_vertical_1080p_over_large_4k(self):
+        self.assertGreater(
+            media_file_score(1080, 1920, 2_800_000),
+            media_file_score(2160, 3840, 13_000_000),
+        )
+
+    def test_life_avoidance_script_carries_director_constraints(self):
+        draft = draft_script_from_values(
+            title="普通人做决定前最该避开的 3 个坑",
+            angle="强收藏清单",
+            niche_slug="life-avoidance",
+            audience="普通上班族",
+        )
+
+        self.assertIn("art_direction", draft.platform_notes)
+        self.assertEqual([scene.visual_strategy for scene in draft.scenes], ["stock", "local", "local", "local", "local"])
+        self.assertLessEqual(max(len(scene.narration) for scene in draft.scenes), 32)
+
+    def test_prepare_assets_generates_local_cards_for_local_strategy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            draft = draft_script_from_values(
+                title="普通人做决定前最该避开的 3 个坑",
+                angle="强收藏清单",
+                niche_slug="life-avoidance",
+                audience="普通上班族",
+            )
+
+            plan_path = prepare_scene_assets(
+                job_id=1,
+                scenes=draft.scenes,
+                workspace=workspace,
+                provider="mock",
+                media_type="image",
+            )
+
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            providers = [asset["provider"] for asset in plan["scene_assets"]]
+            self.assertEqual(providers, ["mock", "local", "local", "local", "local"])
+            for asset in plan["scene_assets"]:
+                self.assertTrue(Path(asset["local_path"]).exists())
+            self.assertEqual(plan["scene_assets"][1]["license_note"], "Owner-generated local graphic card; no external stock license required.")
 
     def test_render_job_requires_assets_when_requested(self):
         with tempfile.TemporaryDirectory() as tmp:

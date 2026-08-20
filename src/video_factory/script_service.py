@@ -33,11 +33,11 @@ SCRIPT_BLUEPRINTS = {
         "structure": "痛点 -> 3 条清单 -> 反直觉解释 -> 今日行动 -> 收藏提示",
         "hook": "这个坑很多人不是不知道，而是每次都在最忙的时候忘了避开。",
         "beats": [
-            ("hook", "stock", "busy ordinary person, decision stress, vertical"),
-            ("list", "local", "clean checklist card, three points, vertical"),
-            ("explain", "stock", "desk notes, practical life planning, vertical"),
-            ("action", "local", "single action card, minimal typography, vertical"),
-            ("save", "local", "ending card, save this checklist"),
+            ("hook", "stock", "asian office worker overwhelmed at desk, practical decision stress, vertical"),
+            ("list", "local", "editorial checklist card, three short rules, clean Chinese typography, vertical"),
+            ("explain", "local", "editorial insight card, low-cost reminder, clean Chinese typography, vertical"),
+            ("action", "local", "bold action card, one tiny habit, high contrast Chinese typography, vertical"),
+            ("save", "local", "save checklist ending card, comment prompt, clean Chinese typography, vertical"),
         ],
         "quality_checks": ["建议必须低风险可执行", "避免医疗/法律/投资建议", "标题和正文都要适合收藏"],
     },
@@ -129,6 +129,7 @@ def draft_script_from_values(
         platform_notes={
             "douyin": "发布前人工检查 AIGC 标识、素材来源和标题是否过度承诺。",
             "review_focus": "先看前 3 秒 hook、字幕密度、事实/建议风险。",
+            "art_direction": director_note_for_niche(niche_slug),
         },
     )
 
@@ -216,11 +217,11 @@ def build_niche_narrations(title: str, angle: str, audience: str, niche_slug: st
             "你想看哪个历史人物的反常识故事？评论区留名字，我去查资料。",
         ],
         "life-avoidance": [
-            f"「{title}」这件事，最适合做成收藏清单，因为它每天都会发生。",
-            f"第一个坑，是把问题拖到最忙的时候才处理；第二个坑，是用感觉替代规则；第三个坑，是不复盘。角度：{angle}。",
-            "真正有用的不是知道很多道理，而是提前给自己设一个低成本提醒。",
-            "今天就做一个动作：把这条里最像你的那个坑写下来，下次遇到先停三秒。",
-            "这类清单我会继续做。你最想避开什么坑？评论区告诉我。",
+            "做决定前，先避开这 3 个坑。每天都会用到。",
+            "别拖到最忙才处理。别用感觉替代规则。别做完不复盘。",
+            "真正有用的不是道理多，而是提前放一个低成本提醒。",
+            "今天只做一件事：写下最像你的那个坑，下次先停三秒。",
+            "收藏这张清单。你最想避开什么坑？评论区告诉我。",
         ],
         "light-science": [
             f"「{title}」听起来像生活问题，其实背后有一个很简单的机制。",
@@ -238,3 +239,14 @@ def build_niche_narrations(title: str, angle: str, audience: str, niche_slug: st
         ],
     }
     return templates.get(niche_slug, [])
+
+
+def director_note_for_niche(niche_slug: str) -> str:
+    notes = {
+        "life-avoidance": "真实镜头只表现日常压力和记录动作；清单、行动、结尾必须使用自有设计卡，避免图库素材把信息讲散。",
+        "emotion-stories": "镜头要安静、克制，避免夸张哭泣或争吵；画面留白服务情绪，不做戏剧化狗血。",
+        "history-curiosities": "历史类画面优先文献、器物、环境氛围，避免用不准确的具象人物替代事实。",
+        "light-science": "视觉语言要像轻科普板书，少用医学化大脑图和夸张特效。",
+        "healing-bedtime": "低对比、慢节奏、暖光，禁止高饱和鸡汤感。",
+    }
+    return notes.get(niche_slug, "先定义一个视觉母题，再选素材；每个镜头必须服务同一种情绪。")
