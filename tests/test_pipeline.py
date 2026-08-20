@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -7,6 +9,12 @@ from video_factory.cli import main
 from video_factory.database import Store
 from video_factory.exporter import write_review_package, write_script
 from video_factory.script_service import draft_script
+
+
+def run_cli(args):
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        return main(args)
 
 
 class PipelineTest(unittest.TestCase):
@@ -41,7 +49,7 @@ class PipelineTest(unittest.TestCase):
     def test_cli_demo_with_custom_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            exit_code = main(
+            exit_code = run_cli(
                 [
                     "--db",
                     str(root / "data" / "video_factory.sqlite"),
@@ -53,6 +61,131 @@ class PipelineTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertTrue((root / "workspace" / "exports" / "1" / "script.json").exists())
+
+    def test_loop_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "data" / "video_factory.sqlite"
+
+            start_exit = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "loop-start",
+                    "Loop 1 Topic Experiments",
+                    "Loop 1: Topic Experiments",
+                    "--objective",
+                    "Build a repeatable way to choose the first week of video topics.",
+                    "--criterion",
+                    "Generate a first-week content plan.",
+                    "--criterion",
+                    "Record verification evidence.",
+                    "--branch",
+                    "codex/loop-engineering-foundation",
+                ]
+            )
+            repeat_start_exit = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "loop-start",
+                    "loop-1-topic-experiments",
+                    "Loop 1: Topic Experiments",
+                    "--objective",
+                    "Duplicate invocation should return the existing loop.",
+                ]
+            )
+            event_exit = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "loop-event",
+                    "loop-1-topic-experiments",
+                    "--phase",
+                    "plan",
+                    "--status",
+                    "completed",
+                    "--summary",
+                    "Plan written.",
+                    "--evidence",
+                    "docs/loops/001-topic-experiment.md",
+                ]
+            )
+            complete_exit = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "loop-complete",
+                    "loop-1-topic-experiments",
+                    "--verification",
+                    "make test",
+                ]
+            )
+
+            store = Store(db)
+            loop = store.get_loop("loop-1-topic-experiments")
+            events = store.get_loop_events(loop.id)
+            self.assertEqual(start_exit, 0)
+            self.assertEqual(repeat_start_exit, 0)
+            self.assertEqual(event_exit, 0)
+            self.assertEqual(complete_exit, 0)
+            self.assertEqual(loop.status, "completed")
+            self.assertEqual(len(events), 3)
+
+    def test_topic_candidates_and_week_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "data" / "video_factory.sqlite"
+            workspace = root / "workspace"
+
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "loop-start",
+                    "loop-1-topic-experiments",
+                    "Loop 1: Topic Experiments",
+                    "--objective",
+                    "Choose first-week topics.",
+                ]
+            )
+            generate_exit = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "generate-topics",
+                    "--loop",
+                    "loop-1-topic-experiments",
+                    "--count",
+                    "30",
+                ]
+            )
+            export_exit = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "export-week-plan",
+                    "--loop",
+                    "loop-1-topic-experiments",
+                    "--count",
+                    "7",
+                ]
+            )
+
+            store = Store(db)
+            loop = store.get_loop("loop-1-topic-experiments")
+            candidates = store.list_topic_candidates(loop_id=loop.id)
+            plan_path = workspace / "week-plans" / "loop-1-topic-experiments-week-1.json"
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(generate_exit, 0)
+            self.assertEqual(export_exit, 0)
+            self.assertEqual(len(candidates), 30)
+            self.assertEqual(len(plan["items"]), 7)
+            self.assertIn("risk_level", plan["items"][0])
+            self.assertIn("automation_difficulty", plan["items"][0])
 
 
 if __name__ == "__main__":

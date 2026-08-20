@@ -58,3 +58,35 @@ PYTHONPATH=src python3 -m video_factory --db data/video_factory.sqlite --workspa
 2. 根据播放、完播、点赞、关注率选择胜出的赛道。
 3. 再为胜出赛道做专用 prompt、字幕模板、画面模板。
 4. 最后再接入自动素材、TTS、视频合成和平台上传。
+
+## Loop Engineering
+
+VideoFactory 用 loop 管理每次工程迭代。一个 loop 必须有目标、成功标准、阶段事件和验证证据。
+
+```bash
+PYTHONPATH=src python3 -m video_factory loop-start "loop-1-topic-experiments" \
+  "Loop 1: Topic Experiments" \
+  --objective "Build a repeatable way to choose the first week of video topics." \
+  --criterion "Export a first-week content plan."
+
+PYTHONPATH=src python3 -m video_factory loop-event loop-1-topic-experiments \
+  --phase plan \
+  --status completed \
+  --summary "Loop plan written." \
+  --evidence "docs/loops/001-topic-experiment.md"
+
+PYTHONPATH=src python3 -m video_factory loop-show loop-1-topic-experiments
+```
+
+完整工作流见 [docs/loop-engineering.md](docs/loop-engineering.md)。
+
+## Loop 1: 选题实验
+
+```bash
+PYTHONPATH=src python3 -m video_factory seed-niches
+PYTHONPATH=src python3 -m video_factory generate-topics --loop loop-1-topic-experiments --count 30
+PYTHONPATH=src python3 -m video_factory list-candidates --loop loop-1-topic-experiments --limit 10
+PYTHONPATH=src python3 -m video_factory export-week-plan --loop loop-1-topic-experiments --count 7
+```
+
+默认导出到 `workspace/week-plans/loop-1-topic-experiments-week-1.json`。

@@ -1,10 +1,18 @@
 import argparse
 import json
+import subprocess
 from pathlib import Path
 from typing import Optional
 
+from .content_strategy import (
+    default_niches,
+    generate_candidate_drafts,
+    select_week_plan,
+    write_week_plan,
+)
 from .database import Store
 from .exporter import write_review_package, write_script
+from .loop_engine import merge_criteria, normalize_slug, validate_phase, validate_status
 from .script_service import draft_script
 
 
@@ -67,6 +75,152 @@ def main(argv: Optional[list] = None) -> int:
         print(f"Export package: {export_dir}")
         return 0
 
+    if args.command == "loop-start":
+        store.init()
+        slug = normalize_slug(args.slug)
+        branch = args.branch or current_git_branch()
+        try:
+            existing_loop = store.get_loop(slug)
+        except ValueError:
+            existing_loop = None
+        if existing_loop is not None:
+            print(f"Loop already exists #{existing_loop.id}: {existing_loop.slug}")
+            return 0
+        loop_id = store.create_loop(
+            slug=slug,
+            title=args.title,
+            objective=args.objective,
+            success_criteria=merge_criteria(args.criterion),
+            branch=branch,
+        )
+        store.add_loop_event(
+            loop_id=loop_id,
+            phase="discover",
+            status="completed",
+            summary="Loop opened and success criteria recorded.",
+            evidence=[],
+        )
+        print(f"Started loop #{loop_id}: {slug}")
+        return 0
+
+    if args.command == "loop-list":
+        store.init()
+        loops = store.list_loops(status=args.status)
+        for loop in loops:
+            print(f"#{loop.id} [{loop.status}] {loop.slug} | {loop.title} | {loop.branch}")
+        if not loops:
+            print("No loops found.")
+        return 0
+
+    if args.command == "loop-show":
+        store.init()
+        loop = store.get_loop(args.loop_ref)
+        events = store.get_loop_events(loop.id)
+        print(json.dumps(loop.__dict__, ensure_ascii=False, indent=2))
+        print(json.dumps([event.__dict__ for event in events], ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "loop-event":
+        store.init()
+        loop = store.get_loop(args.loop_ref)
+        phase = validate_phase(args.phase)
+        status = validate_status(args.status)
+        event_id = store.add_loop_event(
+            loop_id=loop.id,
+            phase=phase,
+            status=status,
+            summary=args.summary,
+            evidence=args.evidence,
+        )
+        print(f"Added loop event #{event_id} to {loop.slug}: {phase}/{status}")
+        return 0
+
+    if args.command == "loop-complete":
+        store.init()
+        loop = store.get_loop(args.loop_ref)
+        store.complete_loop(loop.id, verification=args.verification)
+        print(f"Completed loop #{loop.id}: {loop.slug}")
+        return 0
+
+    if args.command == "seed-niches":
+        store.init()
+        niches = default_niches()
+        store.upsert_niches(niches)
+        print(f"Seeded {len(niches)} niches.")
+        return 0
+
+    if args.command == "list-niches":
+        store.init()
+        niches = store.list_niches()
+        for niche in niches:
+            print(f"{niche.slug} | fit {niche.automation_fit}/10 | {niche.name} | {niche.audience}")
+        if not niches:
+            print("No niches found. Run seed-niches first.")
+        return 0
+
+    if args.command == "generate-topics":
+        store.init()
+        store.upsert_niches(default_niches())
+        loop = store.get_loop(args.loop) if args.loop else None
+        loop_id = loop.id if loop else None
+        store.clear_topic_candidates(loop_id)
+        drafts = generate_candidate_drafts(args.count)
+        for draft in drafts:
+            store.add_topic_candidate(loop_id=loop_id, **draft)
+        if loop is not None:
+            store.add_loop_event(
+                loop_id=loop.id,
+                phase="implement",
+                status="completed",
+                summary=f"Generated {len(drafts)} topic candidates.",
+                evidence=[f"topic_candidates:{len(drafts)}"],
+            )
+        print(f"Generated {len(drafts)} topic candidates.")
+        return 0
+
+    if args.command == "list-candidates":
+        store.init()
+        loop = store.get_loop(args.loop) if args.loop else None
+        candidates = store.list_topic_candidates(
+            loop_id=loop.id if loop else None,
+            niche_slug=args.niche,
+            limit=args.limit,
+        )
+        for candidate in candidates:
+            print(
+                f"#{candidate.id} score={candidate.score} risk={candidate.risk_level} "
+                f"diff={candidate.automation_difficulty} {candidate.niche_slug} | {candidate.title}"
+            )
+        if not candidates:
+            print("No candidates found. Run generate-topics first.")
+        return 0
+
+    if args.command == "export-week-plan":
+        store.init()
+        loop = store.get_loop(args.loop) if args.loop else None
+        candidates = store.list_topic_candidates(loop_id=loop.id if loop else None)
+        selected = select_week_plan(candidates, count=args.count)
+        if len(selected) < args.count:
+            raise SystemExit(f"Only {len(selected)} candidates available. Run generate-topics first.")
+        output = args.output or default_week_plan_output(args.workspace, loop.slug if loop else "adhoc")
+        write_week_plan(output, selected)
+        store.create_content_plan(
+            loop_id=loop.id if loop else None,
+            name=output.stem,
+            candidate_ids=[candidate.id for candidate in selected],
+            output_path=output,
+        )
+        if loop is not None:
+            store.add_loop_event(
+                loop_id=loop.id,
+                phase="verify",
+                status="completed",
+                summary=f"Exported a {len(selected)} item first-week content plan.",
+                evidence=[str(output)],
+            )
+        print(f"Exported week plan: {output}")
+        return 0
+
     if args.command == "show-job":
         store.init()
         job = store.get_job(args.job_id)
@@ -124,6 +278,48 @@ def build_parser() -> argparse.ArgumentParser:
     export = subparsers.add_parser("export")
     export.add_argument("job_id", type=int)
 
+    loop_start = subparsers.add_parser("loop-start")
+    loop_start.add_argument("slug")
+    loop_start.add_argument("title")
+    loop_start.add_argument("--objective", required=True)
+    loop_start.add_argument("--criterion", action="append", default=[])
+    loop_start.add_argument("--branch", default="")
+
+    loop_list = subparsers.add_parser("loop-list")
+    loop_list.add_argument("--status", default=None)
+
+    loop_show = subparsers.add_parser("loop-show")
+    loop_show.add_argument("loop_ref")
+
+    loop_event = subparsers.add_parser("loop-event")
+    loop_event.add_argument("loop_ref")
+    loop_event.add_argument("--phase", required=True)
+    loop_event.add_argument("--status", required=True)
+    loop_event.add_argument("--summary", required=True)
+    loop_event.add_argument("--evidence", action="append", default=[])
+
+    loop_complete = subparsers.add_parser("loop-complete")
+    loop_complete.add_argument("loop_ref")
+    loop_complete.add_argument("--verification", action="append", default=[])
+
+    subparsers.add_parser("seed-niches")
+
+    subparsers.add_parser("list-niches")
+
+    generate_topics = subparsers.add_parser("generate-topics")
+    generate_topics.add_argument("--loop", default=None)
+    generate_topics.add_argument("--count", type=int, default=30)
+
+    list_candidates = subparsers.add_parser("list-candidates")
+    list_candidates.add_argument("--loop", default=None)
+    list_candidates.add_argument("--niche", default=None)
+    list_candidates.add_argument("--limit", type=int, default=20)
+
+    export_week_plan = subparsers.add_parser("export-week-plan")
+    export_week_plan.add_argument("--loop", default=None)
+    export_week_plan.add_argument("--count", type=int, default=7)
+    export_week_plan.add_argument("--output", type=Path, default=None)
+
     show_job = subparsers.add_parser("show-job")
     show_job.add_argument("job_id", type=int)
 
@@ -153,3 +349,20 @@ def draft_from_script_json(path: Path):
             for item in payload["scenes"]
         ],
     )
+
+
+def current_git_branch() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    return result.stdout.strip()
+
+
+def default_week_plan_output(workspace: Path, slug: str) -> Path:
+    return workspace / "week-plans" / f"{slug}-week-1.json"
