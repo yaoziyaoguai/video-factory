@@ -1,0 +1,13 @@
+[project]
+name = "video-factory"
+version = "0.1.0"
+description = "Local-first short video production workflow MVP."
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+video-factory = "video_factory.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
