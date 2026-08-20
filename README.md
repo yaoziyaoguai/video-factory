@@ -13,10 +13,13 @@ VideoFactory 是一个本地优先的短视频生产 MVP。第一版目标不是
 
 ```bash
 cd /Users/jinkun.wang/work_space/veidofactory
+python3 -m pip install --user .
 make init
 make demo
 make test
 ```
+
+macOS 系统 Python 可能会把入口脚本放到 `~/Library/Python/3.9/bin/video-factory`。如果这个目录不在 `PATH`，继续用下文的 `PYTHONPATH=src python3 -m video_factory ...` 也可以。
 
 手动流程示例：
 
@@ -118,10 +121,11 @@ PYTHONPATH=src python3 -m video_factory record-metric \
 PYTHONPATH=src python3 -m video_factory metrics-report --platform douyin
 ```
 
-渲染预检。真实 MP4 输出需要本机安装 `ffmpeg` 和 `ffprobe`：
+渲染预检与基础 MP4 输出。`--dry-run` 只写 manifest；不加 `--dry-run` 会生成分镜 PNG 并调用 `ffmpeg` 合成 `workspace/renders/<job_id>/final.mp4`：
 
 ```bash
 PYTHONPATH=src python3 -m video_factory render-job 3 --dry-run
+PYTHONPATH=src python3 -m video_factory render-job 3
 ```
 
 登记本地素材并匹配到分镜：

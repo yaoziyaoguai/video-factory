@@ -3,7 +3,9 @@ name = "video-factory"
 version = "0.1.0"
 description = "Local-first short video production workflow MVP."
 requires-python = ">=3.9"
-dependencies = []
+dependencies = [
+    "Pillow>=10.0",
+]
 
 [project.scripts]
 video-factory = "video_factory.cli:main"
