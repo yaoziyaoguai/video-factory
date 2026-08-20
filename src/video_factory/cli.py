@@ -17,6 +17,7 @@ from .loop_engine import merge_criteria, normalize_slug, validate_phase, validat
 from .metrics import default_metrics_report_path, write_metrics_report
 from .renderer import render_job_manifest
 from .script_service import draft_candidate_script, draft_script
+from .stock_assets import prepare_scene_assets, search_scene_asset_candidates
 
 
 DEFAULT_DB = Path("data/video_factory.sqlite")
@@ -298,10 +299,46 @@ def main(argv: Optional[list] = None) -> int:
                 script_path=Path(str(job["script_path"])),
                 workspace=args.workspace,
                 dry_run=args.dry_run,
+                require_assets=args.require_assets,
+                asset_plan_path=args.asset_plan,
             )
         except RuntimeError as error:
             raise SystemExit(str(error))
         print(f"Render manifest: {manifest_path}")
+        return 0
+
+    if args.command == "asset-search":
+        store.init()
+        scenes = store.get_scenes(args.job_id)
+        try:
+            output = search_scene_asset_candidates(
+                job_id=args.job_id,
+                scenes=scenes,
+                workspace=args.workspace,
+                provider=args.provider,
+                media_type=args.media_type,
+                limit=args.limit,
+            )
+        except RuntimeError as error:
+            raise SystemExit(str(error))
+        print(f"Exported asset candidates: {output}")
+        return 0
+
+    if args.command == "prepare-assets":
+        store.init()
+        scenes = store.get_scenes(args.job_id)
+        try:
+            output = prepare_scene_assets(
+                job_id=args.job_id,
+                scenes=scenes,
+                workspace=args.workspace,
+                provider=args.provider,
+                media_type=args.media_type,
+                limit=args.limit,
+            )
+        except RuntimeError as error:
+            raise SystemExit(str(error))
+        print(f"Prepared asset plan: {output}")
         return 0
 
     if args.command == "add-local-asset":
@@ -466,6 +503,20 @@ def build_parser() -> argparse.ArgumentParser:
     render_job = subparsers.add_parser("render-job")
     render_job.add_argument("job_id", type=int)
     render_job.add_argument("--dry-run", action="store_true")
+    render_job.add_argument("--require-assets", action="store_true")
+    render_job.add_argument("--asset-plan", type=Path, default=None)
+
+    asset_search = subparsers.add_parser("asset-search")
+    asset_search.add_argument("job_id", type=int)
+    asset_search.add_argument("--provider", choices=["mock", "pexels", "pixabay"], default="pexels")
+    asset_search.add_argument("--media-type", choices=["image", "video"], default="video")
+    asset_search.add_argument("--limit", type=int, default=3)
+
+    prepare_assets = subparsers.add_parser("prepare-assets")
+    prepare_assets.add_argument("job_id", type=int)
+    prepare_assets.add_argument("--provider", choices=["mock", "pexels", "pixabay"], default="pexels")
+    prepare_assets.add_argument("--media-type", choices=["image", "video"], default="video")
+    prepare_assets.add_argument("--limit", type=int, default=3)
 
     add_local_asset = subparsers.add_parser("add-local-asset")
     add_local_asset.add_argument("path", type=Path)

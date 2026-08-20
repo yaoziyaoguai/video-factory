@@ -115,3 +115,36 @@ class LocalAsset:
     license_note: str
     source: str
     created_at: str
+
+
+@dataclass(frozen=True)
+class StockAssetCandidate:
+    provider: str
+    asset_id: str
+    media_type: str
+    width: int
+    height: int
+    duration: float
+    preview_url: str
+    download_url: str
+    source_url: str
+    creator: str
+    license_note: str
+    query: str
+    score: int
+
+
+@dataclass(frozen=True)
+class SceneAsset:
+    scene_position: int
+    provider: str
+    asset_id: str
+    media_type: str
+    width: int
+    height: int
+    duration: float
+    local_path: str
+    source_url: str
+    creator: str
+    license_note: str
+    query: str

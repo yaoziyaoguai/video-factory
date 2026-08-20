@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -405,6 +406,226 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(sum(1 for line in concat_lines if line.startswith("file ")), 5)
             self.assertTrue(manifest["rendered"])
             self.assertEqual(manifest["probe"]["streams"][0]["height"], 1920)
+
+    def test_prepare_assets_writes_license_aware_asset_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "data" / "video_factory.sqlite"
+            workspace = root / "workspace"
+
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "add-topic",
+                    "普通人做决定前最该避开的 3 个坑",
+                    "--angle",
+                    "强收藏清单",
+                ]
+            )
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "draft",
+                    "1",
+                ]
+            )
+            exit_code = run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "prepare-assets",
+                    "1",
+                    "--provider",
+                    "mock",
+                    "--media-type",
+                    "image",
+                ]
+            )
+
+            plan_path = workspace / "assets" / "job-1" / "asset_plan.json"
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(plan["job_id"], 1)
+            self.assertEqual(len(plan["scene_assets"]), 5)
+            first = plan["scene_assets"][0]
+            self.assertEqual(first["provider"], "mock")
+            self.assertTrue(Path(first["local_path"]).exists())
+            self.assertIn("license_note", first)
+            self.assertIn("source_url", first)
+            self.assertIn("creator", first)
+
+    def test_asset_search_reports_missing_provider_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "data" / "video_factory.sqlite"
+            workspace = root / "workspace"
+
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "add-topic",
+                    "普通人做决定前最该避开的 3 个坑",
+                    "--angle",
+                    "强收藏清单",
+                ]
+            )
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "draft",
+                    "1",
+                ]
+            )
+
+            with patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit) as error:
+                run_cli(
+                    [
+                        "--db",
+                        str(db),
+                        "--workspace",
+                        str(workspace),
+                        "asset-search",
+                        "1",
+                        "--provider",
+                        "pexels",
+                    ]
+                )
+
+            self.assertIn("PEXELS_API_KEY", str(error.exception))
+
+    def test_render_job_requires_assets_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "data" / "video_factory.sqlite"
+            workspace = root / "workspace"
+
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "add-topic",
+                    "普通人做决定前最该避开的 3 个坑",
+                    "--angle",
+                    "强收藏清单",
+                ]
+            )
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "draft",
+                    "1",
+                ]
+            )
+
+            with self.assertRaises(SystemExit) as error:
+                run_cli(
+                    [
+                        "--db",
+                        str(db),
+                        "--workspace",
+                        str(workspace),
+                        "render-job",
+                        "1",
+                        "--require-assets",
+                    ]
+                )
+
+            self.assertIn("requires an asset plan", str(error.exception))
+
+    def test_render_job_uses_prepared_assets_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "data" / "video_factory.sqlite"
+            workspace = root / "workspace"
+
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "add-topic",
+                    "普通人做决定前最该避开的 3 个坑",
+                    "--angle",
+                    "强收藏清单",
+                ]
+            )
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "draft",
+                    "1",
+                ]
+            )
+            run_cli(
+                [
+                    "--db",
+                    str(db),
+                    "--workspace",
+                    str(workspace),
+                    "prepare-assets",
+                    "1",
+                    "--provider",
+                    "mock",
+                    "--media-type",
+                    "image",
+                ]
+            )
+
+            def fake_subprocess_run(command, check, capture_output, text):
+                if command[0] == "ffmpeg":
+                    Path(command[-1]).write_bytes(b"fake-mp4")
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if command[0] == "ffprobe":
+                    payload = {
+                        "streams": [
+                            {
+                                "codec_name": "h264",
+                                "codec_type": "video",
+                                "width": 1080,
+                                "height": 1920,
+                            }
+                        ],
+                        "format": {"duration": "45.000000"},
+                    }
+                    return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+                raise AssertionError(command)
+
+            with patch("video_factory.renderer.ffmpeg_available", return_value=True), patch(
+                "video_factory.renderer.subprocess.run",
+                side_effect=fake_subprocess_run,
+            ):
+                render_exit = run_cli(
+                    [
+                        "--db",
+                        str(db),
+                        "--workspace",
+                        str(workspace),
+                        "render-job",
+                        "1",
+                        "--require-assets",
+                    ]
+                )
+
+            manifest = json.loads((workspace / "renders" / "1" / "render_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(render_exit, 0)
+            self.assertEqual(manifest["visual_quality"], "stock_asset")
+            self.assertEqual(len(manifest["asset_plan"]["scene_assets"]), 5)
+            self.assertTrue((workspace / "renders" / "1" / "captions" / "scene_01.png").exists())
 
     def test_local_asset_matching(self):
         with tempfile.TemporaryDirectory() as tmp:

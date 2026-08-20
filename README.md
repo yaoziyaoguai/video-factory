@@ -128,6 +128,25 @@ PYTHONPATH=src python3 -m video_factory render-job 3 --dry-run
 PYTHONPATH=src python3 -m video_factory render-job 3
 ```
 
+免费素材驱动的更高质量路径：
+
+```bash
+cp .env.example .env.local
+# 填入 PEXELS_API_KEY 或 PIXABAY_API_KEY；不要提交 .env.local
+set -a; source .env.local; set +a
+
+PYTHONPATH=src python3 -m video_factory asset-search 3 --provider pexels --media-type video
+PYTHONPATH=src python3 -m video_factory prepare-assets 3 --provider pexels --media-type video
+PYTHONPATH=src python3 -m video_factory render-job 3 --require-assets
+```
+
+没有 key 时可以用 mock provider 验证工程链路，但 mock 不是可发布素材：
+
+```bash
+PYTHONPATH=src python3 -m video_factory prepare-assets 3 --provider mock --media-type image
+PYTHONPATH=src python3 -m video_factory render-job 3 --require-assets
+```
+
 登记本地素材并匹配到分镜：
 
 ```bash
