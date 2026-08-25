@@ -8,12 +8,17 @@ container="video_factory_prod"
 broker_service=vf-codex-broker
 broker_root=/opt/video-factory/codex-broker
 broker_socket=/run/video-factory-codex/worker.sock
+trend_network=video-factory-trends
 compose=(docker compose --project-name video-factory --env-file "$environment_file" -f "$repository_root/docker/docker-compose.prod.yml")
 
 if [[ ! -f "$environment_file" ]]; then
   echo "Missing production environment file: $environment_file" >&2
   exit 1
 fi
+
+# 应用与自托管热点容器只经内部网络通信；没有部署热点时保留空网络，应用会如实报告离线。
+docker network inspect "$trend_network" >/dev/null 2>&1 \
+  || docker network create --driver bridge "$trend_network" >/dev/null
 
 bridge_gid="$(getent group vf-bridge | cut -d: -f3 || true)"
 if [[ -z "$bridge_gid" ]]; then

@@ -50,10 +50,10 @@ export class TrendGateway {
     this.now = options.now ?? (() => new Date());
     this.timeoutMs = options.timeoutMs ?? 5_000;
     this.services = [
-      service("trendradar", "TrendRadar", "collector", environment.VIDEO_FACTORY_TRENDRADAR_URL ?? "http://127.0.0.1:8080", "/"),
-      service("newsnow", "NewsNow", "aggregator", environment.VIDEO_FACTORY_NEWSNOW_URL ?? "http://127.0.0.1:4444", "/api/s?id=weibo"),
-      service("dailyhot", "DailyHotApi", "aggregator", environment.VIDEO_FACTORY_DAILYHOT_URL ?? "http://127.0.0.1:6688", "/douyin"),
-      service("rsshub", "RSSHub", "feed", environment.VIDEO_FACTORY_RSSHUB_URL ?? "http://127.0.0.1:1200", "/"),
+      service("trendradar", "TrendRadar", "collector", configuredUrl(environment.VIDEO_FACTORY_TRENDRADAR_URL, "http://127.0.0.1:8080"), "/"),
+      service("newsnow", "NewsNow", "aggregator", configuredUrl(environment.VIDEO_FACTORY_NEWSNOW_URL, "http://127.0.0.1:4444"), "/api/s?id=weibo"),
+      service("dailyhot", "DailyHotApi", "aggregator", configuredUrl(environment.VIDEO_FACTORY_DAILYHOT_URL, "http://127.0.0.1:6688"), "/douyin"),
+      service("rsshub", "RSSHub", "feed", configuredUrl(environment.VIDEO_FACTORY_RSSHUB_URL, "http://127.0.0.1:1200"), "/"),
     ];
   }
 
@@ -156,6 +156,10 @@ export class TrendGateway {
       signal: AbortSignal.timeout(this.timeoutMs),
     });
   }
+}
+
+function configuredUrl(value: string | undefined, fallback: string): string {
+  return value?.trim() || fallback;
 }
 
 function service(

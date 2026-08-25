@@ -37,6 +37,9 @@ services:
       VIDEO_FACTORY_CODEX_SOCKET_PATH: ${VIDEO_FACTORY_CODEX_SOCKET_PATH:-/run/video-factory-codex/worker.sock}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - trend-services
     # 数字 gid 经 OCI additionalGids 生效，容器内无需 /etc/group 条目；
     # 须设为宿主机 vf-bridge 组的实际 gid（默认 1001 仅与主组重合的占位值）。
     group_add:
@@ -67,3 +70,8 @@ services:
 volumes:
   video_factory_workspace:
     driver: local
+
+networks:
+  trend-services:
+    name: video-factory-trends
+    external: true

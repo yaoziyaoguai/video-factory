@@ -38,6 +38,27 @@ describe("TrendGateway", () => {
     assert.equal(services[0]?.lastCheckedAt, "2026-08-24T08:00:00.000Z");
   });
 
+  it("falls back to valid local URLs when environment values are blank", async () => {
+    const requested: string[] = [];
+    const gateway = new TrendGateway({
+      environment: {
+        VIDEO_FACTORY_TRENDRADAR_URL: " ",
+        VIDEO_FACTORY_NEWSNOW_URL: "",
+        VIDEO_FACTORY_DAILYHOT_URL: "",
+        VIDEO_FACTORY_RSSHUB_URL: " ",
+      },
+      fetcher: async (input) => {
+        requested.push(String(input));
+        return jsonResponse({ code: 200, status: "success", data: [], items: [] });
+      },
+    });
+
+    await gateway.listServices();
+
+    assert.equal(requested.some((url) => url.startsWith("http://127.0.0.1:8080/")), true);
+    assert.equal(requested.some((url) => url.startsWith("http://127.0.0.1:4444/")), true);
+  });
+
   it("marks an unreachable service stopped without hiding healthy services", async () => {
     const fetcher: typeof fetch = async (input) => {
       if (String(input).includes(":1200/")) throw new Error("connection refused");

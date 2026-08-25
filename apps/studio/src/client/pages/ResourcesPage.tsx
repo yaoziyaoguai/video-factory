@@ -126,16 +126,17 @@ export function ResourcesPage() {
         {!trendError ? (
           <div className="signal-desk-layout">
             <div className="service-ledger" aria-label="热点服务">
-              {trendLoading ? <div className="region-loading">正在读取热点...</div> : services.map((service) => (
-                <article key={service.id} className="service-row">
+              {trendLoading ? <div className="region-loading">正在读取热点...</div> : services.map((service) => {
+                const serviceUrl = browserServiceUrl(service.baseUrl);
+                return <article key={service.id} className="service-row">
                   <span className={`service-light is-${service.status}`} />
                   <div><strong>{service.label}</strong><small>{serviceKind(service.kind)}</small></div>
                   <span>{service.itemCount === undefined ? SERVICE_STATUS[service.status] : `${service.itemCount} 条`}</span>
-                  {service.baseUrl
-                    ? <a href={service.baseUrl} target="_blank" rel="noreferrer" title={`打开 ${service.label}`}><ArrowUpRight aria-hidden="true" size={15} /></a>
+                  {serviceUrl
+                    ? <a href={serviceUrl} target="_blank" rel="noreferrer" title={`打开 ${service.label}`}><ArrowUpRight aria-hidden="true" size={15} /></a>
                     : <span aria-label={`${service.label} 未配置地址`} />}
-                </article>
-              ))}
+                </article>;
+              })}
               {trendSources.filter((source) => source.status !== "ready").slice(0, 3).map((source) => (
                 <article key={source.id} className="service-row is-muted">
                   <span className="service-light is-degraded" />
@@ -236,6 +237,16 @@ function isProductionReady(provider: StudioProvider): boolean {
 
 function serviceKind(kind: StudioTrendService["kind"]): string {
   return kind === "collector" ? "采集与历史" : kind === "feed" ? "中文 RSS 路由" : "榜单接口";
+}
+
+function browserServiceUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.hostname === "host.docker.internal" || url.hostname.startsWith("vf-")) return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
+  }
 }
 
 function platformLabel(platform: string): string {

@@ -17,8 +17,9 @@ Alibaba ECS
     ├── Nginx :80/:443
     │     └── video.wangjinkun333.me -> 127.0.0.1:4317
     └── Docker
-          └── video_factory_prod -> named volume /data/factory
-                └── 只读挂载 /run/video-factory-codex，经 Unix socket 调用 Codex（不挂载 ~/.codex）
+          ├── video_factory_prod -> named volume /data/factory
+          │     └── 只读挂载 /run/video-factory-codex，经 Unix socket 调用 Codex（不挂载 ~/.codex）
+          └── video-factory-trends 内部网络 -> TrendRadar / NewsNow / DailyHot / RSSHub
 ```
 
 应用端口只绑定服务器 `127.0.0.1`，公网只能通过 Nginx 和 HTTPS 访问。生产模式强制启用单用户登录；密码只保存 scrypt 哈希，会话 Cookie 使用 `HttpOnly`、`SameSite=Strict` 和 `Secure`。
@@ -49,7 +50,7 @@ openssl rand -hex 32
 - `VIDEO_FACTORY_AUTH_SESSION_SECRET`：`openssl` 输出，至少 32 个字符
 - 准备启用的素材、热点 Provider 配置（Codex socket 的 gid 由部署脚本自动派生，见第 2 节）
 
-生产文件权限应为 `600`，不得提交到 Git。容器内的 `127.0.0.1` 指容器自身；访问宿主机服务时使用 `host.docker.internal`。
+生产文件权限应为 `600`，不得提交到 Git。自托管热点按示例使用 `vf-*` 容器 DNS；这些地址只在 `video-factory-trends` 内部网络可见。
 
 ## 2. 宿主机 Codex bridge（首次部署前）
 
@@ -70,7 +71,17 @@ bash scripts/setup-codex-broker-host.sh
 
 systemd 加固说明：真实 `~/.codex` 整体只读；Broker 使用 `/var/lib/video-factory-codex/codex-home` 保存 CLI 可变状态，其中 `auth.json` 只是指向真实登录凭据的只读链接。应用容器只挂载 `/run/video-factory-codex`，无法读取两个 Codex Home。首次真实任务后仍需用 `journalctl -u vf-codex-broker` 确认运行状态。
 
-## 3. 首次启动与健康检查
+## 3. 自托管热点（推荐）
+
+热点服务不运行语义模型，可以在同一台 ECS 上以轻量容器部署：
+
+```bash
+make setup-local-trends
+```
+
+脚本幂等创建 `video-factory-trends` 内部网络，并启动 TrendRadar、NewsNow、DailyHotApi 与 RSSHub；服务端口只发布到宿主机 `127.0.0.1`。应用通过容器 DNS 访问，浏览器不会拿到不可访问的内部跳转链接。统一信号网关当前消费 NewsNow 与 DailyHotApi，TrendRadar 和 RSSHub 提供健康与后续扩展边界。
+
+## 4. 首次启动与健康检查
 
 完成第 2 节的宿主机初始化后再执行部署；部署脚本会拒绝在缺少 `vf-bridge` 组时启动。
 
@@ -82,7 +93,7 @@ docker inspect --format '{{.State.Health.Status}}' video_factory_prod
 
 部署脚本会在旧容器继续服务时构建候选镜像，切换后轮询健康端点；失败时恢复上一镜像并回滚上一个 broker release。再次部署前会备份轻量 JSON 工作流状态，视频与音频不重复备份。脚本不做“排空运行中制作”的等待：`/api/runs` 受登录会话保护而部署不持有凭据；被中断的 run 会显式标记失败并可重新发起。
 
-## 4. 接入子域名和 TLS
+## 5. 接入子域名和 TLS
 
 在阿里云 DNS 为 `video.wangjinkun333.me` 添加 `A` 记录，指向 ECS 公网 IP。该记录复用现有域名，不产生新的域名购买费用。
 
@@ -104,7 +115,7 @@ sudo certbot --nginx -d video.wangjinkun333.me
 curl --fail https://video.wangjinkun333.me/api/health
 ```
 
-## 5. GitHub Actions Secrets
+## 6. GitHub Actions Secrets
 
 仓库 `Settings -> Secrets and variables -> Actions` 需要：
 
@@ -118,7 +129,7 @@ curl --fail https://video.wangjinkun333.me/api/health
 
 Pull Request 只执行验证；`main` 推送通过测试和依赖审计后才会自动部署。建议为 GitHub `production` Environment 增加保护规则。
 
-## 6. 数据、能力与已知边界
+## 7. 数据、能力与已知边界
 
 - 工作区保存在 Docker named volume `video_factory_workspace`，重建容器不会丢失。
 - 自动备份只覆盖工作流 JSON 状态；正式生产需要再把成片和素材同步到 OSS，并配置生命周期策略。

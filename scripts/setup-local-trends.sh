@@ -11,6 +11,7 @@ readonly TREND_RADAR_MCP_IMAGE="wantcat/trendradar-mcp:latest"
 readonly NEWSNOW_IMAGE="ghcr.io/ourongxing/newsnow:latest"
 readonly DAILYHOT_IMAGE="imsyy/dailyhot-api:latest"
 readonly RSSHUB_IMAGE="diygod/rsshub:latest"
+readonly TREND_NETWORK="video-factory-trends"
 
 pull_image() {
   local image="$1"
@@ -31,7 +32,7 @@ replace_container() {
   if docker container inspect "${name}" >/dev/null 2>&1; then
     docker rm -f "${name}" >/dev/null
   fi
-  docker run -d --name "${name}" --restart unless-stopped "$@" >/dev/null
+  docker run -d --name "${name}" --restart unless-stopped --network "${TREND_NETWORK}" "$@" >/dev/null
 }
 
 wait_for_url() {
@@ -52,6 +53,8 @@ wait_for_url() {
 }
 
 mkdir -p "${LOCAL_DIR}" "${SMOKE_DIR}"
+docker network inspect "${TREND_NETWORK}" >/dev/null 2>&1 \
+  || docker network create --driver bridge "${TREND_NETWORK}" >/dev/null
 
 if [[ ! -d "${TREND_RADAR_DIR}/.git" ]]; then
   git clone --depth 1 https://github.com/sansan0/TrendRadar.git "${TREND_RADAR_DIR}"
