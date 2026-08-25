@@ -1,5 +1,3 @@
-import { access } from "node:fs/promises";
-import path from "node:path";
 import type {
   StudioTrendCandidate,
   StudioTrendService,
@@ -9,7 +7,7 @@ import type {
 } from "../shared/api.js";
 import { buildTrendSourceCatalog } from "./provider-catalog.js";
 import { TrendGateway } from "./trend-gateway.js";
-import { OllamaTrendIdeaModel, TrendOpportunityAgent } from "./trend-opportunity-agent.js";
+import { TrendOpportunityAgent } from "./trend-opportunity-agent.js";
 
 export interface TrendStudioOptions {
   repositoryRoot: string;
@@ -63,26 +61,6 @@ export class TrendStudio {
 
   private async loadCandidates(): Promise<StudioTrendCandidate[]> {
     if (this.agent) return this.agent.listCandidates();
-    const runtime = this.options.environment.VIDEO_FACTORY_AGENT_RUNTIME
-      ? path.resolve(this.options.environment.VIDEO_FACTORY_AGENT_RUNTIME)
-      : path.join(this.options.repositoryRoot, ".local", "agent");
-    const model = await fileExists(path.join(runtime, "qwen3.ready.json"))
-      ? new OllamaTrendIdeaModel({
-          ...(this.options.environment.VIDEO_FACTORY_OLLAMA_URL
-            ? { endpoint: this.options.environment.VIDEO_FACTORY_OLLAMA_URL }
-            : {}),
-          model: this.options.environment.VIDEO_FACTORY_TOPIC_MODEL ?? "qwen3:4b",
-        })
-      : undefined;
-    return new TrendOpportunityAgent({ signals: this.gateway, ...(model ? { model } : {}) }).listCandidates();
-  }
-}
-
-async function fileExists(target: string): Promise<boolean> {
-  try {
-    await access(target);
-    return true;
-  } catch {
-    return false;
+    return new TrendOpportunityAgent({ signals: this.gateway }).listCandidates();
   }
 }

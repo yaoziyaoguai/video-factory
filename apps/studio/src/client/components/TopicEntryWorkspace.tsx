@@ -126,7 +126,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
           {modeError ? (
             <div className="candidate-error" role="alert"><AlertCircle aria-hidden="true" size={20} /><div><strong>{mode === "trend" ? "热点候选暂时不可用" : "系列候选暂时不可用"}</strong><span>{modeError}</span></div><button className="button button-secondary" type="button" onClick={() => props.onRetry(candidateMode)}><RefreshCw aria-hidden="true" size={15} />重试</button></div>
           ) : modeLoading && modeItems.length === 0 ? (
-            <div className="candidate-loading"><RadioTower aria-hidden="true" size={24} /><div><h2>{mode === "trend" ? "正在生成今日提案" : "正在读取系列选题"}</h2><p>{mode === "trend" ? "本地模型首次启动可能需要约 1 分钟；系列和自定义创作仍可立即使用。" : "系列策划在本地运行，通常几秒内就会出现。"}</p></div>{mode === "trend" ? <button className="button button-secondary" type="button" onClick={props.onManual}>录入自己的选题</button> : null}</div>
+            <div className="candidate-loading"><RadioTower aria-hidden="true" size={24} /><div><h2>{mode === "trend" ? "正在生成今日提案" : "正在读取系列选题"}</h2><p>{mode === "trend" ? "Codex 正在阅读热点并形成提案，通常需要 1–3 分钟；系列和自定义创作仍可立即使用。" : "系列策划通常几秒内就会出现。"}</p></div>{mode === "trend" ? <button className="button button-secondary" type="button" onClick={props.onManual}>录入自己的选题</button> : null}</div>
           ) : mode === "series" && props.series.length === 0 ? (
             <div className="series-empty"><LibraryBig aria-hidden="true" size={28} /><div><h3>先创建一个可持续的系列</h3><p>定义受众、栏目承诺和内容支柱后，系统会给出连续编号的下一集候选。</p></div><button className="button button-primary" type="button" onClick={props.onCreateSeries}>创建第一个系列</button></div>
           ) : mode === "trend" && modeItems.length === 0 ? (

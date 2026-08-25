@@ -15,10 +15,6 @@ const RECOMMENDED_VOICES = new Set([
   "macos:Tingting",
   "macos:Meijia",
   "macos:Sinji",
-  "kokoro:zf_001",
-  "kokoro:zf_002",
-  "kokoro:zm_009",
-  "kokoro:zm_010",
 ]);
 type VoiceFilter = "recommended" | "female" | "male" | "system";
 
@@ -35,16 +31,16 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
     [direction.profileId, voices],
   );
   const filteredVoices = useMemo(() => voices.filter((voice) => {
-    if (filter === "female") return voice.engine === "kokoro" && voice.gender === "female";
-    if (filter === "male") return voice.engine === "kokoro" && voice.gender === "male";
-    if (filter === "system") return voice.engine !== "kokoro";
+    if (filter === "female") return voice.gender === "female";
+    if (filter === "male") return voice.gender === "male";
+    if (filter === "system") return voice.engine === "macos";
     return RECOMMENDED_VOICES.has(voice.id) || voice.id === direction.profileId;
   }), [direction.profileId, filter, voices]);
   const filterCounts = useMemo(() => ({
     recommended: voices.filter((voice) => RECOMMENDED_VOICES.has(voice.id) || voice.id === direction.profileId).length,
-    female: voices.filter((voice) => voice.engine === "kokoro" && voice.gender === "female").length,
-    male: voices.filter((voice) => voice.engine === "kokoro" && voice.gender === "male").length,
-    system: voices.filter((voice) => voice.engine !== "kokoro").length,
+    female: voices.filter((voice) => voice.gender === "female").length,
+    male: voices.filter((voice) => voice.gender === "male").length,
+    system: voices.filter((voice) => voice.engine === "macos").length,
   }), [direction.profileId, voices]);
 
   useEffect(() => setDirection(value), [value]);
@@ -90,18 +86,18 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
     <section className="voice-studio" aria-labelledby="voice-studio-title">
       <div className="compact-section-heading">
         <div><span>{sectionLabel}</span><h3 id="voice-studio-title">{title}</h3></div>
-        <small>{loading ? "正在读取音色" : `${voices.length} 种本地中文音色`}</small>
+        <small>{loading ? "正在读取音色" : `${voices.length} 种可用中文音色`}</small>
       </div>
 
-      {loading ? <div className="region-loading">正在整理本地演员表...</div> : null}
+      {loading ? <div className="region-loading">正在整理声音演员表...</div> : null}
       {!loading && voices.length > 0 ? (
         <div className="voice-studio-layout">
           <div className="voice-selection">
             <div className="voice-filters" role="tablist" aria-label="音色分类">
               {([
                 ["recommended", "推荐"],
-                ["female", "Kokoro 女声"],
-                ["male", "Kokoro 男声"],
+                ["female", "女声"],
+                ["male", "男声"],
                 ["system", "系统音色"],
               ] as const).map(([id, label]) => (
                 <button key={id} type="button" role="tab" aria-selected={filter === id} onClick={() => setFilter(id)}>
@@ -123,7 +119,7 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
                   <span className="voice-card-mark"><Mic2 aria-hidden="true" size={17} /></span>
                   <span className="voice-card-copy">
                     <strong>{voice.label}</strong>
-                    <small>{voice.engine === "kokoro" ? "Kokoro 神经音色" : voice.description ?? voice.locale}</small>
+                    <small>{voice.engine === "macos" ? voice.description ?? voice.locale : "云端声音演员"}</small>
                   </span>
                   <button
                     className="icon-button voice-preview-button"
@@ -158,6 +154,15 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
             {audioUrl ? <audio className="voice-audio" aria-label="声音试听" controls autoPlay src={audioUrl}><track kind="captions" /></audio> : (
               <div className="voice-audio-placeholder"><Volume2 aria-hidden="true" size={17} /><span>{selected?.label ?? "选择一个音色"}</span></div>
             )}
+          </div>
+        </div>
+      ) : null}
+      {!loading && voices.length === 0 && !error ? (
+        <div className="voice-empty" role="status">
+          <Mic2 aria-hidden="true" size={19} />
+          <div>
+            <strong>当前没有正式配音演员</strong>
+            <span>云服务器未接入 TTS API，测试音轨不会用于成片。</span>
           </div>
         </div>
       ) : null}

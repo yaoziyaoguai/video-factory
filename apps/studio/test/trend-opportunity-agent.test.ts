@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { TrendOpportunityAgent, type TrendIdeaModel } from "../src/server/trend-opportunity-agent.js";
+import { CodexBridgeClient, type CodexTaskKind } from "@video-factory/production-pipeline";
+import {
+  CodexTopicIdeaModel,
+  TrendOpportunityAgent,
+  type TrendIdeaModel,
+} from "../src/server/trend-opportunity-agent.js";
 import type { StudioTrendSignal } from "../src/shared/api.js";
 
 const signals: StudioTrendSignal[] = [
@@ -25,8 +30,53 @@ const signals: StudioTrendSignal[] = [
   },
 ];
 
+class CapturingCodexClient extends CodexBridgeClient {
+  readonly calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
+
+  constructor(private readonly respond: () => unknown) {
+    super({ socketPath: "/nonexistent/vf-codex.sock", sleep: async () => {} });
+  }
+
+  async runTask(kind: CodexTaskKind, payload: unknown): Promise<unknown> {
+    this.calls.push({ kind, payload });
+    return this.respond();
+  }
+}
+
 describe("TrendOpportunityAgent", () => {
-  it("builds traceable zero-cost candidates when no local model is ready", async () => {
+  it("sends a structured topic-ideas task through the codex bridge", async () => {
+    const codexClient = new CapturingCodexClient(() => ({
+      ideas: [{
+        signalId: "signal-ai",
+        title: "下班后的 AI 时间账本",
+        track: "ai-daily-life",
+        audience: "普通上班族",
+        painPoint: "工具很多，却没有减少疲惫",
+        hook: "真正偷走你下班时间的，可能不是加班。",
+        rationale: "适合做低成本生活实验。",
+        novelty: 85,
+        seriesPotential: 88,
+        monetization: 72,
+      }],
+    }));
+    const model = new CodexTopicIdeaModel(codexClient);
+
+    const ideas = await model.generate(signals);
+
+    assert.equal(model.id, "api-topic-editor-v1");
+    assert.equal(ideas[0]?.title, "下班后的 AI 时间账本");
+    assert.equal(codexClient.calls.length, 1);
+    assert.equal(codexClient.calls[0]?.kind, "topic-ideas");
+    const payload = codexClient.calls[0]!.payload as Record<string, unknown>;
+    assert.equal("directive" in payload, false);
+    assert.deepEqual(Object.keys(payload), ["signals"]);
+    assert.deepEqual(payload.signals, [
+      { id: "signal-ai", platform: "douyin", rank: 2, title: "普通人开始用 AI 管理下班后的时间", heat: 9_800_000 },
+      { id: "signal-weather", platform: "weibo", rank: 1, title: "台风路径发生变化", heat: null },
+    ]);
+  });
+
+  it("builds traceable zero-cost candidates when no semantic model is ready", async () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => signals },
       now: () => new Date("2026-08-24T08:05:00.000Z"),
@@ -46,7 +96,7 @@ describe("TrendOpportunityAgent", () => {
 
   it("uses a local idea model while preserving source evidence and bounded scores", async () => {
     const model: TrendIdeaModel = {
-      id: "qwen3:4b",
+      id: "api-topic-editor-v1",
       generate: async () => [{
         signalId: "signal-ai",
         title: "下班后的 AI 时间账本",
@@ -70,7 +120,7 @@ describe("TrendOpportunityAgent", () => {
 
     assert.equal(candidate?.title, "下班后的 AI 时间账本");
     assert.equal(candidate?.hook, "真正偷走你下班时间的，可能不是加班。");
-    assert.equal(candidate?.providerId, "qwen3:4b");
+    assert.equal(candidate?.providerId, "api-topic-editor-v1");
     assert.equal(candidate?.score.novelty, 85);
     assert.equal(candidate?.score.seriesPotential, 88);
     assert.equal(candidate?.score.monetization, 72);
@@ -91,7 +141,7 @@ describe("TrendOpportunityAgent", () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async (input) => { requestedLimit = input.limit ?? 0; return broadSignals; } },
       model: {
-        id: "qwen3:4b",
+        id: "api-topic-editor-v1",
         generate: async () => [{
           signalId: "signal-0",
           title: "下班后的 AI 时间账本",
@@ -111,7 +161,7 @@ describe("TrendOpportunityAgent", () => {
 
     assert.equal(requestedLimit, 160);
     assert.equal(candidates.length, 18);
-    assert.equal(candidates.some((candidate) => candidate.providerId === "qwen3:4b"), true);
+    assert.equal(candidates.some((candidate) => candidate.providerId === "api-topic-editor-v1"), true);
     assert.equal(candidates.some((candidate) => candidate.providerId === "trend-heuristic-v1"), true);
   });
 
@@ -127,7 +177,7 @@ describe("TrendOpportunityAgent", () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => crowdedSignals },
       model: {
-        id: "qwen3:4b",
+        id: "api-topic-editor-v1",
         generate: async () => [{
           signalId: "crowded-0",
           title: "热点背后的普通人选择",
@@ -146,7 +196,7 @@ describe("TrendOpportunityAgent", () => {
     const candidates = await agent.listCandidates();
 
     assert.equal(candidates.length, 60);
-    assert.equal(candidates.some((candidate) => candidate.providerId === "qwen3:4b"), true);
+    assert.equal(candidates.some((candidate) => candidate.providerId === "api-topic-editor-v1"), true);
   });
 
   it("merges independent sources for the same trend into one candidate", async () => {
@@ -242,10 +292,10 @@ describe("TrendOpportunityAgent", () => {
     assert.equal(Object.keys(counts).length, 6);
   });
 
-  it("falls back deterministically when the local model fails", async () => {
+  it("falls back deterministically when the semantic model fails", async () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => signals },
-      model: { id: "qwen3:4b", generate: async () => { throw new Error("model offline"); } },
+      model: { id: "api-topic-editor-v1", generate: async () => { throw new Error("model offline"); } },
     });
 
     const candidates = await agent.listCandidates();
@@ -254,12 +304,12 @@ describe("TrendOpportunityAgent", () => {
     assert.match(candidates[0]?.rationale ?? "", /排名/);
   });
 
-  it("retries one smaller batch when a small model returns malformed structured output", async () => {
+  it("retries one smaller batch when the model returns malformed structured output", async () => {
     let calls = 0;
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => [signals[0]!] },
       model: {
-        id: "qwen3:4b",
+        id: "api-topic-editor-v1",
         generate: async () => {
           calls += 1;
           if (calls === 1) throw new SyntaxError("invalid JSON");
@@ -282,14 +332,14 @@ describe("TrendOpportunityAgent", () => {
     const [candidate] = await agent.listCandidates();
 
     assert.equal(calls, 2);
-    assert.equal(candidate?.providerId, "qwen3:4b");
+    assert.equal(candidate?.providerId, "api-topic-editor-v1");
   });
 
-  it("removes unsupported numbers, quotes, and interview claims from small-model output", async () => {
+  it("removes unsupported numbers, quotes, and interview claims from model output", async () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => signals },
       model: {
-        id: "qwen3:4b",
+        id: "api-topic-editor-v1",
         generate: async () => [{
           signalId: "signal-ai",
           title: "AI 时间管理让效率提升 90%",
@@ -310,7 +360,7 @@ describe("TrendOpportunityAgent", () => {
     assert.doesNotMatch(candidate?.title ?? "", /90%/);
     assert.doesNotMatch(candidate?.hook ?? "", /专家|90%|3 分钟/);
     assert.match(candidate?.rationale ?? "", /已移除/);
-    assert.equal(candidate?.providerId, "qwen3:4b");
+    assert.equal(candidate?.providerId, "api-topic-editor-v1");
   });
 
   it("rejects unsupported acronyms and clickbait claims in model titles", async () => {
@@ -325,7 +375,7 @@ describe("TrendOpportunityAgent", () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => [sportsSignal] },
       model: {
-        id: "qwen3:4b",
+        id: "api-topic-editor-v1",
         generate: async () => [{
           signalId: sportsSignal.id,
           title: "2026冠军内幕：AI训练赛数据的秘密",
@@ -361,7 +411,7 @@ describe("TrendOpportunityAgent", () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => [conflictSignal] },
       model: {
-        id: "qwen3:4b",
+        id: "api-topic-editor-v1",
         generate: async () => [{
           signalId: conflictSignal.id,
           title: "以军空袭叙引发冲突，平民伤亡数据未公开",
@@ -414,7 +464,7 @@ describe("TrendOpportunityAgent", () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => [reviewSignal] },
       model: {
-        id: "qwen3:4b",
+        id: "api-topic-editor-v1",
         generate: async () => [{
           signalId: reviewSignal.id,
           title: "帮扶老人遭索赔：善意与规则如何平衡",
@@ -449,7 +499,7 @@ describe("TrendOpportunityAgent", () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => [deathSignal] },
       model: {
-        id: "qwen3:4b",
+        id: "api-topic-editor-v1",
         generate: async () => [{
           signalId: deathSignal.id,
           title: "全国政协副主席陈武逝世，网络曾传其病危",
@@ -473,11 +523,11 @@ describe("TrendOpportunityAgent", () => {
     assert.match(candidate?.rationale ?? "", /未采用模型扩写/);
   });
 
-  it("uses bounded baseline scores when a small model returns an all-zero scorecard", async () => {
+  it("uses bounded baseline scores when the model returns an all-zero scorecard", async () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => [signals[0]!] },
       model: {
-        id: "qwen3:4b",
+        id: "api-topic-editor-v1",
         generate: async () => [{
           signalId: "signal-ai",
           title: "AI 与下班时间",
@@ -504,7 +554,7 @@ describe("TrendOpportunityAgent", () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => [signals[0]!] },
       model: {
-        id: "qwen3:4b",
+        id: "api-topic-editor-v1",
         generate: async () => [{
           signalId: "signal-ai",
           title: "普通人的 AI 时间管理",

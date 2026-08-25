@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CodexBridgeClient } from "@video-factory/production-pipeline";
 import { scoreTopicCandidate } from "@video-factory/workflow-core";
 import type {
   StudioTrendCandidate,
@@ -70,7 +71,7 @@ export class TrendOpportunityAgent {
           return selectCandidatePortfolio(selectedByModel, ruleCandidates, TREND_CANDIDATE_LIMIT);
         }
       } catch {
-        // 本地模型是增强节点；不可用时仍需稳定输出可追溯的规则候选。
+        // 模型是增强节点；不可用时仍需稳定输出可追溯的规则候选。
       }
     }
     return selectCandidatePortfolio([], signalGroups.map((group) => this.fromSignal(group)).sort(byFinalScore), TREND_CANDIDATE_LIMIT);
@@ -192,71 +193,28 @@ async function generateModelIdeas(model: TrendIdeaModel, signals: StudioTrendSig
   }
 }
 
-export interface OllamaTrendIdeaModelOptions {
-  endpoint?: string;
-  model?: string;
-  fetcher?: typeof fetch;
-  timeoutMs?: number;
-}
+// providerId 保持 api-topic-editor-v1，与 provider catalog 及既有候选记录兼容。
+export class CodexTopicIdeaModel implements TrendIdeaModel {
+  readonly id = "api-topic-editor-v1";
+  private readonly client: CodexBridgeClient;
 
-export class OllamaTrendIdeaModel implements TrendIdeaModel {
-  readonly id: string;
-  private readonly endpoint: string;
-  private readonly fetcher: typeof fetch;
-  private readonly timeoutMs: number;
-
-  constructor(options: OllamaTrendIdeaModelOptions = {}) {
-    this.id = options.model ?? "qwen3:4b";
-    this.endpoint = (options.endpoint ?? "http://127.0.0.1:11434").replace(/\/$/, "");
-    this.fetcher = options.fetcher ?? fetch;
-    this.timeoutMs = options.timeoutMs ?? 120_000;
+  constructor(client: CodexBridgeClient) {
+    this.client = client;
   }
 
   async generate(signals: StudioTrendSignal[]): Promise<TrendModelIdea[]> {
-    const response = await this.fetcher(`${this.endpoint}/api/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      signal: AbortSignal.timeout(this.timeoutMs),
-      body: JSON.stringify({
-        model: this.id,
-        stream: false,
-        think: false,
-        format: ideaSchema,
-        options: { temperature: 0.35, top_p: 0.85, num_predict: 1600 },
-        messages: [
-          { role: "system", content: "你是严谨的中文短视频选题总编。只输出符合 JSON Schema 的内容。不得编造原始热点中不存在的引语、人物表态、百分比、因果或采访素材；证据不足就使用问题句或观察角度。避免把灾害、伤亡、政治突发娱乐化。优先选择能长期连载、免费素材可覆盖、对普通人有具体价值的角度。" },
-          { role: "user", content: `从以下实时热点中提出最多 8 个原创短视频角度。signalId 必须原样引用；track 必须是小写英文 slug，例如 sports-context；title 必须是编辑命题，不能原样复述热搜；hook 要在 2 秒内建立冲突，但只能使用输入中可验证的信息，不得假装有采访或独家画面。novelty、seriesPotential、monetization 必须填写 0-100 的整数。\n${JSON.stringify(signals.map((item) => ({ id: item.id, platform: item.platform, rank: item.rank, title: item.title, heat: item.heat ?? null })))}` },
-        ],
-      }),
-    });
-    if (!response.ok) throw new Error(`Ollama returned HTTP ${response.status}.`);
-    const body = await response.json() as { message?: { content?: string } };
-    const parsed = JSON.parse(body.message?.content ?? "{}") as { ideas?: unknown[] };
+    const parsed = await this.client.runTask("topic-ideas", {
+      signals: signals.map((item) => ({
+        id: item.id,
+        platform: item.platform,
+        rank: item.rank,
+        title: item.title,
+        heat: item.heat ?? null,
+      })),
+    }) as { ideas?: unknown[] };
     return (parsed.ideas ?? []).flatMap(parseModelIdea);
   }
 }
-
-const ideaSchema = {
-  type: "object",
-  required: ["ideas"],
-  properties: {
-    ideas: {
-      type: "array",
-      maxItems: 8,
-      items: {
-        type: "object",
-        required: ["signalId", "title", "track", "audience", "painPoint", "hook", "rationale", "novelty", "seriesPotential", "monetization"],
-        properties: {
-          signalId: { type: "string" }, title: { type: "string" }, track: { type: "string", pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
-          audience: { type: "string" }, painPoint: { type: "string" }, hook: { type: "string" }, rationale: { type: "string" },
-          novelty: { type: "number", minimum: 0, maximum: 100 },
-          seriesPotential: { type: "number", minimum: 0, maximum: 100 },
-          monetization: { type: "number", minimum: 0, maximum: 100 },
-        },
-      },
-    },
-  },
-} as const;
 
 function parseModelIdea(value: unknown): TrendModelIdea[] {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return [];

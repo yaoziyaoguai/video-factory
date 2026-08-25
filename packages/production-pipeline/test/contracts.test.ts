@@ -91,7 +91,7 @@ describe("ProductionBrief", () => {
       ...validBrief,
       providers: {
         ...validBrief.providers,
-        director: "ollama-visual-director-v1",
+        director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
       },
       director: {
@@ -110,7 +110,7 @@ describe("ProductionBrief", () => {
       profileId: "auto",
       assetProviderIds: ["local-editorial-v1", "pexels-stock-v1", "seedance-video-v1"],
     });
-    assert.equal(brief.providers.director, "ollama-visual-director-v1");
+    assert.equal(brief.providers.director, "api-visual-director-v1");
     assert.equal(brief.providers.assets, "ai-shot-router-v1");
   });
 
@@ -118,7 +118,7 @@ describe("ProductionBrief", () => {
     assert.throws(
       () => pipeline.parseBrief({
         ...validBrief,
-        providers: { ...validBrief.providers, director: "ollama-visual-director-v1", assets: "ai-shot-router-v1" },
+        providers: { ...validBrief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
         director: { profileId: "auto", assetProviderIds: [] },
       }),
       /director\.assetProviderIds/,
@@ -126,7 +126,7 @@ describe("ProductionBrief", () => {
     assert.throws(
       () => pipeline.parseBrief({
         ...validBrief,
-        providers: { ...validBrief.providers, director: "ollama-visual-director-v1", assets: "ai-shot-router-v1" },
+        providers: { ...validBrief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
         director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1", "pexels-stock-v1"] },
       }),
       /must not contain duplicates/,

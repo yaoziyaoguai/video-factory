@@ -12,7 +12,10 @@ def synthesize_kokoro_audio(text: str, output_path: Path, voice: str, rate: int)
     python = runtime_root / ".venv" / "bin" / "python"
     marker = runtime_root / "kokoro.ready.json"
     if not python.exists() or not marker.exists():
-        raise RuntimeError("Kokoro local voice is not ready. Run 'make setup-local-voice' first.")
+        raise RuntimeError(
+            "Kokoro local voice runtime is not provisioned in this deployment; "
+            "the Web studio no longer installs or advertises local voice models."
+        )
     script = Path(__file__).resolve()
     speed = max(0.65, min(1.45, rate / 180.0))
     import subprocess

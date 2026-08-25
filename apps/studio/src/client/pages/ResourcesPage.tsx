@@ -194,18 +194,24 @@ function ResourceError({ title, message, retry }: { title: string; message: stri
 
 function ProviderRow({ provider, isDefault, onSetDefault }: { provider: StudioProvider; isDefault: boolean; onSetDefault: (providerId: string) => void }) {
   const ready = isProductionReady(provider);
-  const Icon = provider.billing === "metered" ? Sparkles : Film;
+  const Icon = provider.billing === "free" ? Film : Sparkles;
   return (
     <article className="provider-ledger-row">
       <span className="provider-ledger-icon"><Icon aria-hidden="true" size={18} /></span>
       <div><strong>{provider.label}</strong><small>{provider.description ?? provider.id}</small></div>
       <span>{(provider.modes ?? []).slice(0, 3).join(" · ")}</span>
-      <strong className={provider.billing === "metered" ? "is-metered" : ""}>{provider.billing === "metered" ? "按量计费" : "免费"}</strong>
+      <strong className={provider.billing === "metered" ? "is-metered" : ""}>{billingLabel(provider.billing)}</strong>
       <span className={ready ? "ledger-state is-ready" : "ledger-state"}>{ready ? "可用" : provider.status === "planned" ? "规划中" : "需要配置"}</span>
       {ready ? <button className={isDefault ? "provider-default is-active" : "provider-default"} type="button" disabled={isDefault} onClick={() => onSetDefault(provider.id)}>{isDefault ? "制作默认" : "设为默认"}</button> : <span />}
       {provider.docsUrl ? <a href={provider.docsUrl} target="_blank" rel="noreferrer" title={`${provider.label} 文档`}><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
     </article>
   );
+}
+
+function billingLabel(billing: StudioProvider["billing"]): string {
+  if (billing === "metered") return "按量计费";
+  if (billing === "subscription") return "订阅额度";
+  return "免费";
 }
 
 function FoundationProvider({ provider }: { provider: StudioProvider }) {

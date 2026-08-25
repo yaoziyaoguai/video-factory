@@ -34,15 +34,25 @@ services:
       VIDEO_FACTORY_NEWSNOW_URL: ${VIDEO_FACTORY_NEWSNOW_URL:-}
       VIDEO_FACTORY_DAILYHOT_URL: ${VIDEO_FACTORY_DAILYHOT_URL:-}
       VIDEO_FACTORY_RSSHUB_URL: ${VIDEO_FACTORY_RSSHUB_URL:-}
-      VIDEO_FACTORY_OLLAMA_URL: ${VIDEO_FACTORY_OLLAMA_URL:-}
-      VIDEO_FACTORY_TOPIC_MODEL: ${VIDEO_FACTORY_TOPIC_MODEL:-qwen3:4b}
-      VIDEO_FACTORY_DIRECTOR_MODEL: ${VIDEO_FACTORY_DIRECTOR_MODEL:-qwen3:8b}
+      VIDEO_FACTORY_CODEX_SOCKET_PATH: ${VIDEO_FACTORY_CODEX_SOCKET_PATH:-/run/video-factory-codex/worker.sock}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # 数字 gid 经 OCI additionalGids 生效，容器内无需 /etc/group 条目；
+    # 须设为宿主机 vf-bridge 组的实际 gid（默认 1001 仅与主组重合的占位值）。
+    group_add:
+      - "${VIDEO_FACTORY_CODEX_SOCKET_GID:-1001}"
     ports:
       - "127.0.0.1:${VIDEO_FACTORY_HOST_PORT:-4317}:4317"
     volumes:
       - video_factory_workspace:/data/factory
+      # read_only 只阻止文件系统变更；Unix socket 的 connect 是协议写不是文件系统写，
+      # 因此安全边界不在此处，而在 broker 的 kind 白名单与 socket 0660 组权限。
+      - type: bind
+        source: ${VIDEO_FACTORY_CODEX_RUNTIME_DIR:-/run/video-factory-codex}
+        target: /run/video-factory-codex
+        read_only: true
+        bind:
+          create_host_path: false
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=512m,uid=1001,gid=1001
@@ -50,8 +60,8 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    mem_limit: 3g
-    cpus: 2.5
+    mem_limit: 2g
+    cpus: 2
     stop_grace_period: 30s
 
 volumes:

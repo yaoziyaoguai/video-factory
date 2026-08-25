@@ -52,7 +52,7 @@ const opportunity: StudioOpportunity = {
 
 const providers: StudioProvider[] = [
   { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" },
-  { id: "ollama-visual-director-v1", capability: "storyboard.plan", label: "本地视觉导演", available: true, kind: "local" },
+  { id: "api-visual-director-v1", capability: "storyboard.plan", label: "本地视觉导演", available: true, kind: "local" },
   { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑卡片", available: true, kind: "local" },
   { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" },
   { id: "python-ffmpeg-v1", capability: "video.render", label: "FFmpeg 渲染", available: true, kind: "local" },
@@ -103,8 +103,8 @@ function candidate(index: number, category: StudioCandidateInboxItem["category"]
     audience: "中文短视频用户",
     painPoint: "信息很多但缺少判断",
     hook: `这是第 ${index} 条可核验的开场钩子。`,
-    rationale: "来自本地模型与真实热点。",
-    providerId: "qwen3:4b",
+    rationale: "来自语义模型与真实热点。",
+    providerId: "api-topic-editor-v1",
     generatedAt: "2026-08-24T08:05:00.000Z",
     evidence: [{ source: "dailyhot", platform: "douyin", keyword: `候选 ${index}`, strength: 90 }],
     score: {
@@ -406,7 +406,7 @@ describe("Creative OS", () => {
       painPoint: "工具很多，却没有减少疲惫",
       hook: "真正偷走你下班时间的，可能不是加班。",
       rationale: "热点规模与低成本生活实验相交。",
-      providerId: "qwen3:4b",
+      providerId: "api-topic-editor-v1",
       generatedAt: "2026-08-24T08:05:00.000Z",
       evidence: [{ source: "dailyhot", platform: "douyin", keyword: "AI 时间", strength: 96 }],
       score: {
@@ -420,7 +420,7 @@ describe("Creative OS", () => {
 
     await screen.findByRole("heading", { name: "热点候选收件箱" });
     expect(screen.getAllByText("下班后的 AI 时间账本").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Qwen3 本地提案").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Codex 选题总编").length).toBeGreaterThan(0);
     await user.click(screen.getByRole("button", { name: "采用候选 下班后的 AI 时间账本" }));
 
     expect(adopt).toHaveBeenCalledWith("trend-1", {});
@@ -485,7 +485,7 @@ describe("Creative OS", () => {
       painPoint: "信息很多但缺少判断",
       hook: "先看证据，再谈结论。",
       rationale: "来自本地热点信号。",
-      providerId: "qwen3:4b",
+      providerId: "api-topic-editor-v1",
       generatedAt: "2026-08-24T08:05:00.000Z",
       evidence: [{ source: "dailyhot", platform: "douyin", keyword: "热点", strength: 80 }],
       score: {

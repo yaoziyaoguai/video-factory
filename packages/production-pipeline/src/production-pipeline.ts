@@ -15,6 +15,8 @@ import {
   type WorkflowDefinition,
   type WorkflowRun,
 } from "@video-factory/workflow-core";
+import { validatePublishCopy, type PublishCopy, type PublishCopyWriter } from "./codex-publish-copy.js";
+import { validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput } from "./codex-screenwriter.js";
 import { parseBrief, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
 import { FileRunStore } from "./run-store.js";
 import type { WorkerResponse } from "./python-worker-client.js";
@@ -32,7 +34,9 @@ interface WorkerClient {
 export interface ProductionPipelineOptions {
   workspaceRoot: string;
   worker: WorkerClient;
+  screenwriterAgent?: ScreenwriterAgent;
   directorAgent?: VisualDirectorAgent;
+  publishCopyWriter?: PublishCopyWriter;
   assetProviders?: VisualAssetProviderCapability[];
   clock?: () => string;
   idFactory?: (prefix: string) => string;
@@ -184,6 +188,13 @@ export class ProductionPipeline {
 
   private createRegistry(brief: ProductionBrief): ProviderRegistry {
     const registry = new ProviderRegistry();
+    if (brief.providers.script === "codex-screenwriter-v1") {
+      const screenwriterAgent = this.options.screenwriterAgent;
+      if (!screenwriterAgent || screenwriterAgent.id !== brief.providers.script) {
+        throw new Error(`Script provider '${brief.providers.script}' is not configured.`);
+      }
+      registry.register(new ScreenwriterProvider(screenwriterAgent));
+    }
     if (brief.director) {
       const directorAgent = this.options.directorAgent;
       if (!directorAgent || directorAgent.id !== brief.providers.director) {
@@ -241,7 +252,9 @@ export class ProductionPipeline {
           artifacts: [jsonArtifact("production_brief", brief, "video-factory/brief-v1", "brief", [])],
         }),
       },
-      workerNode("script", "Draft script", "script.draft", brief.providers.script, ["brief"], ["brief"], () => ({ brief }), "编剧"),
+      ...(brief.providers.script === "codex-screenwriter-v1"
+        ? [screenwriterNode(brief, this.options.screenwriterAgent, this.runsRoot)]
+        : [workerNode("script", "Draft script", "script.draft", brief.providers.script, ["brief"], ["brief"], () => ({ brief }), "编剧")]),
       ...(brief.director ? [directorNode(brief, this.options, this.runsRoot)] : []),
       workerNode(
         "assets",
@@ -319,20 +332,53 @@ export class ProductionPipeline {
       },
       {
         id: "publish-package",
-        label: "Create publish package",
-        role: "制片人",
+        label: "发布文案与发布包",
+        role: "发行编辑",
         capability: "publish.package",
         mode: "automatic",
         dependsOn: ["final-review"],
         execute: async (_input, context) => {
           await verifyStoredArtifacts(context.artifacts);
           const artifactIds = context.artifacts.map((artifact) => artifact.id);
+          const scriptParentIds = context.artifacts
+            .filter((artifact) => artifact.producer?.nodeId === "script")
+            .map((artifact) => artifact.id);
+          // 文案是增强能力：失败不让已过审的成片失败，也不暴露异常文本；pipeline 层不重试。
+          const copyOutcome = await generatePublishCopy({
+            writer: this.options.publishCopyWriter,
+            brief,
+            scriptPath: outputPath(context, "script", "scriptPath"),
+          });
+          const copyArtifacts: ArtifactDraft[] = [];
+          if (copyOutcome.writerId !== undefined) {
+            const copyPath = path.join(this.runsRoot, context.runId, "publish", "publish_copy.json");
+            const copyContent = `${JSON.stringify(copyOutcome.copy, null, 2)}\n`;
+            await writeTextAtomically(copyPath, copyContent);
+            copyArtifacts.push(fileArtifact(
+              "publish_copy",
+              copyPath,
+              copyContent,
+              "application/json",
+              "video-factory/publish-copy-v1",
+              "publish-package",
+              scriptParentIds,
+              copyOutcome.writerId,
+              "AI-generated platform copy; review before upload.",
+            ));
+          }
           const packagePath = path.join(this.runsRoot, context.runId, "publish", "publish_package.json");
           const payload = {
             version: "video-factory/publish-package-v1",
             runId: context.runId,
             platform: brief.platform,
-            title: brief.title,
+            title: copyOutcome.copy.title,
+            copy: {
+              source: copyOutcome.source,
+              title: copyOutcome.copy.title,
+              description: copyOutcome.copy.description,
+              hashtags: copyOutcome.copy.hashtags,
+              ...(copyOutcome.fallbackReason !== undefined ? { fallbackReason: copyOutcome.fallbackReason } : {}),
+            },
             approval: approvalDecision
               ? {
                   status: "approved",
@@ -368,6 +414,7 @@ export class ProductionPipeline {
                 "video-factory-ts-v1",
                 "Generated publish package; platform upload remains a manual action.",
               ),
+              ...copyArtifacts,
             ],
           };
         },
@@ -425,6 +472,20 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, unkno
 
   run(input: VisualDirectorAgentInput): Promise<unknown> {
     return this.agent.plan(input);
+  }
+}
+
+class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, unknown> {
+  readonly capability: Capability = "script.draft";
+
+  constructor(private readonly agent: ScreenwriterAgent) {}
+
+  get id(): string {
+    return this.agent.id;
+  }
+
+  run(input: ScreenwriterAgentInput): Promise<unknown> {
+    return this.agent.draft(input);
   }
 }
 
@@ -512,6 +573,127 @@ function directorNode(
   };
 }
 
+// codex 编剧节点：输出与 worker 模板同契约的 script.json，下游节点无任何特判。
+// 节点层对 agent 返回的 unknown 独立做 validateScriptDraft 硬校验，注入的 agent 无法绕过；
+// 校验或 agent 失败即节点失败，绝不回退到本地模板。
+function screenwriterNode(
+  brief: ProductionBrief,
+  agent: ScreenwriterAgent | undefined,
+  runsRoot: string,
+): NodeDefinition {
+  const providerId = brief.providers.script;
+  if (providerId !== "codex-screenwriter-v1" || !agent) {
+    throw new Error(`Script provider '${providerId}' is not configured.`);
+  }
+  return {
+    id: "script",
+    label: "Draft script",
+    role: "编剧",
+    capability: "script.draft",
+    providerId,
+    mode: "automatic",
+    dependsOn: ["brief"],
+    getInput: () => ({ brief }),
+    execute: async (_input, context) => {
+      const rawDraft = await context.resolveProvider<ScreenwriterAgentInput, unknown>({
+        capability: "script.draft",
+        providerId,
+      }).run({
+        brief: {
+          title: brief.title,
+          angle: brief.angle,
+          audience: brief.audience,
+          nicheSlug: brief.nicheSlug,
+          platform: brief.platform,
+          durationSeconds: brief.durationSeconds,
+        },
+      }, context);
+      const draft = validateScriptDraft(rawDraft, { durationSeconds: brief.durationSeconds });
+      const scriptPath = path.join(runsRoot, context.runId, "nodes", "script", "attempt-1", "script.json");
+      const content = `${JSON.stringify(draft, null, 2)}\n`;
+      await writeTextAtomically(scriptPath, content);
+      const parentArtifactIds = context.artifacts
+        .filter((artifact) => artifact.producer?.nodeId === "brief")
+        .map((artifact) => artifact.id);
+      return {
+        status: "succeeded",
+        output: { scriptPath },
+        artifacts: [fileArtifact(
+          "script",
+          scriptPath,
+          content,
+          "application/json",
+          "video-factory/script-draft-v1",
+          "script",
+          parentArtifactIds,
+          providerId,
+          "AI-generated script; facts and claims require human review before publication.",
+        )],
+      };
+    },
+  };
+}
+
+interface PublishCopyOutcome {
+  copy: PublishCopy;
+  source: string;
+  fallbackReason?: string;
+  writerId?: string;
+}
+
+// 发布文案的门面：成功返回模型结果，任何失败都降级为 brief-title 回退，不向上抛异常。
+async function generatePublishCopy(input: {
+  writer: PublishCopyWriter | undefined;
+  brief: ProductionBrief;
+  scriptPath: string;
+}): Promise<PublishCopyOutcome> {
+  if (!input.writer) return fallbackCopyOutcome(input.brief);
+  try {
+    const narrations = await readNarrations(input.scriptPath);
+    const rawCopy = await input.writer.write({
+      platform: input.brief.platform,
+      brief: {
+        title: input.brief.title,
+        angle: input.brief.angle,
+        audience: input.brief.audience,
+        nicheSlug: input.brief.nicheSlug,
+      },
+      narrations,
+    });
+    const copy = validatePublishCopy(rawCopy);
+    return { copy, source: input.writer.id, writerId: input.writer.id };
+  } catch {
+    return fallbackCopyOutcome(input.brief);
+  }
+}
+
+function fallbackCopyOutcome(brief: ProductionBrief): PublishCopyOutcome {
+  return {
+    copy: { title: brief.title, description: "", hashtags: [] },
+    source: "brief-title",
+    fallbackReason: "codex-publish-copy-unavailable",
+  };
+}
+
+async function readNarrations(scriptPath: string): Promise<string[]> {
+  const script = JSON.parse(await readFile(scriptPath, "utf8")) as { scenes?: unknown };
+  if (!Array.isArray(script.scenes)) throw new Error("Publish copy requires a script with scenes.");
+  const narrations = script.scenes.map((scene, index) => {
+    if (typeof scene !== "object" || scene === null || Array.isArray(scene)) {
+      throw new Error(`Script scene ${index + 1} must be an object.`);
+    }
+    const narration = (scene as Record<string, unknown>).narration;
+    if (typeof narration !== "string" || !narration.trim()) {
+      throw new Error(`Script scene ${index + 1} narration must be a non-empty string.`);
+    }
+    return narration.trim();
+  });
+  if (narrations.length < 3 || narrations.length > 10) {
+    throw new Error("Publish copy requires 3 to 10 script narrations.");
+  }
+  return narrations;
+}
+
 function parseDirectorScenes(value: unknown): VisualDirectorAgentInput["scenes"] {
   if (!Array.isArray(value) || value.length === 0) throw new Error("AI director requires a script with scenes.");
   return value.map((entry, index) => {
@@ -543,7 +725,9 @@ function requiredOutputString(value: unknown, field: string): string {
 
 function providerConfigs(brief: ProductionBrief): ProviderConfig[] {
   return [
-    providerConfig(brief.providers.script, "script.draft", "script"),
+    ...(brief.providers.script === "codex-screenwriter-v1"
+      ? []
+      : [providerConfig(brief.providers.script, "script.draft", "script")]),
     providerConfig(brief.providers.assets, "asset.prepare", "assets", {
       maxPaidShots: brief.economics.maxPaidShots,
       maxCostCny: brief.economics.maxCostCny,

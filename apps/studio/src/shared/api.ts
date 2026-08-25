@@ -60,7 +60,7 @@ export interface StudioProvider {
   available: boolean;
   kind: "local" | "external" | "test";
   status?: "ready" | "needs_config" | "planned";
-  billing?: "free" | "metered";
+  billing?: "free" | "subscription" | "metered";
   description?: string;
   modes?: string[];
   latency?: "instant" | "seconds" | "minutes";

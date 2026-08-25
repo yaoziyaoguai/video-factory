@@ -28,7 +28,7 @@ jobs:
       - run: python -m pip install -e .
       - run: PYTHONPATH=src python -m unittest discover -s tests
       - run: npm test
-      - run: bash -n scripts/deploy-production.sh scripts/backup-production.sh
+      - run: bash -n scripts/deploy-production.sh scripts/backup-production.sh scripts/setup-codex-broker-host.sh
       - run: docker compose --env-file .env.docker.prod.example -f docker/docker-compose.prod.yml config --quiet
       - run: docker build --file docker/Dockerfile --tag video-factory:ci .
       - name: Render a Linux container smoke video

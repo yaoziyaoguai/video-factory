@@ -1,6 +1,6 @@
 # VideoFactory Creative OS
 
-Creative OS 是本地短视频流水线的正式 Web 工作台。它把中文热点聚合、本地 Agent 提案、持久系列、自定义选题、证据核验、可执行视觉计划、可替换 Provider、生产运行、视频审片和制作复盘放进同一个系统；React 页面不复制 workflow 逻辑，Fastify 不生成演示热点或平台指标。
+Creative OS 是本地短视频流水线的正式 Web 工作台。它把中文热点聚合、Codex 选题提案、持久系列、自定义选题、证据核验、可执行视觉计划、可替换 Provider、生产运行、视频审片和制作复盘放进同一个系统；React 页面不复制 workflow 逻辑，Fastify 不生成演示热点或平台指标。
 
 ## 启动
 
@@ -10,9 +10,6 @@ Creative OS 是本地短视频流水线的正式 Web 工作台。它把中文热
 cd /Users/jinkun.wang/work_space/veidofactory
 npm install
 make setup-local-trends
-make setup-local-agent
-# 可选：Kokoro 本地中文配音
-make setup-local-voice
 npm run studio:dev
 ```
 
@@ -41,7 +38,7 @@ npm run studio:dev
 ```mermaid
 flowchart LR
     A[TrendRadar / NewsNow / DailyHot / RSSHub] --> B[TrendGateway 去重与证据标准化]
-    B --> C[Ollama + Qwen3 选题 Agent]
+    B --> C[宿主机 Codex 选题总编]
     C --> D[分类 / 风险 / 事实收敛]
     D --> E[热点候选]
     V[(series.json)] --> W[SeriesPlanner 下一集]
@@ -73,7 +70,7 @@ flowchart LR
     AB --> AC[制作复盘]
 ```
 
-当前已经实现本地热点服务、DailyHotApi/NewsNow 信号聚合、Qwen3 提案、热点分类分面、可信度闸门、持久系列、AI 导演与逐镜素材路由、创作默认值、人工终审、多平台发布编排和基于 persisted runs 的制作统计。TrendRadar 与 RSSHub 当前只接入健康检查；抖音、头条、快手和 B 站的正式发布适配器需在官方应用与账号权限获批后启用，小红书当前只提供人工上传包。模型不可用时页面会显示确定性降级来源，不冒充 Qwen 结果。
+当前已经实现本地热点服务、DailyHotApi/NewsNow 信号聚合、Codex 选题提案、热点分类分面、可信度闸门、持久系列、AI 导演与逐镜素材路由、创作默认值、人工终审、多平台发布编排和基于 persisted runs 的制作统计。TrendRadar 与 RSSHub 当前只接入健康检查；抖音、头条、快手和 B 站的正式发布适配器需在官方应用与账号权限获批后启用，小红书当前只提供人工上传包。模型不可用时页面会显示确定性降级来源，不冒充模型结果。
 
 ## 使用方法
 
@@ -83,7 +80,7 @@ flowchart LR
 
 ### 1. 启动本地情报底座
 
-`make setup-local-trends` 会以 Docker 运行四个只绑定本机的开源服务。`make setup-local-agent` 会安装/启动 Ollama，分别拉取用于选题的 `qwen3:4b` 与用于逐镜导演决策的 `qwen3:8b`，并执行结构化输出烟雾测试。资源页展示每个服务最近一次健康检查的 URL、状态和错误证据；Today 从 DailyHotApi 与 NewsNow 读取抖音、微博、知乎、B 站榜单，去重后交给选题 Agent。
+`make setup-local-trends` 会以 Docker 运行四个只绑定本机的开源服务。语义模型统一来自宿主机 Codex bridge（`make codex-broker-status` 可探测），不部署任何自托管本地模型。资源页展示每个服务最近一次健康检查的 URL、状态和错误证据；Today 从 DailyHotApi 与 NewsNow 读取抖音、微博、知乎、B 站榜单，去重后交给 Codex 选题总编。
 
 TrendRadar 自带 11 个中文平台榜单与静态报告，当前关闭其内置 AI 分析和翻译，避免未配置 key 的调用。TrendRadar MCP 保留在 `127.0.0.1:3333`，供后续 Agent Graph 接入。
 
@@ -171,7 +168,7 @@ API 会重新校验输入并由 workflow-core 计算最终分，不接受前端�
 ```mermaid
 flowchart TB
     Trends[本地热点服务] --> Gateway[TrendGateway]
-    Gateway --> Agent[Qwen3 Opportunity Agent]
+    Gateway --> Agent[Codex 选题总编]
     Agent --> Guard[Risk + Grounding Guard]
     Guard --> Inbox[CandidateInboxStudio]
     Series[(JsonSeriesStore)] --> Planner[SeriesPlanner]
@@ -188,7 +185,7 @@ flowchart TB
     Pipeline --> Runner[WorkflowRunner]
     Runner --> Registry[ProviderRegistry]
     Registry --> Worker[Python media worker]
-    Worker --> Media[Pillow / say / Kokoro / FFmpeg / ffprobe]
+    Worker --> Media[Pillow / say / FFmpeg / ffprobe]
     Pipeline --> Runs[(FileRunStore / run.json)]
     Pipeline -->|checkpoint| Service
     Service -->|SSE run snapshot| Browser
@@ -205,7 +202,7 @@ flowchart TB
 | 能力 | 当前状态 | 真实边界 |
 | --- | --- | --- |
 | 中文热点底座 | 部分实现 | 4 套服务可自托管并独立报告健康；统一信号网关当前读取 DailyHotApi 与 NewsNow |
-| 本地选题 Agent | 已实现 | Ollama + Qwen3；结构化输出；失败时明确标记 heuristic fallback |
+| Codex 选题总编 | 已实现 | 宿主机 Codex bridge；结构化输出；失败时明确标记 heuristic fallback |
 | 候选收件箱 | 已实现 | 热点/系列统一查询；分类、平台、时效、风险分面；渐进加载；采用后去重 |
 | 事实与风险闸门 | 已实现 | 中风险显式确认；高风险要求 2 条独立 URL 来源；敏感公共事件只使用来源可支撑的陈述 |
 | 视觉导演计划 | 已实现 | 每个候选给出开场、展开、收束三拍；素材策略可在 Brief 中替换 |
@@ -215,9 +212,9 @@ flowchart TB
 | Production Brief | 已实现 | 从机会预填但必须人工确认 |
 | 创作默认值 | 已实现 | 声音方向、素材 Provider 与经济型制作方案持久化并自动继承 |
 | 站内创作向导 | 已实现 | 首次自动出现；15 步跨页向导；当前页向导；悬浮入口；可提前结束 |
-| 本地制作 | 已实现 | 脚本、编辑卡片、macOS/Kokoro 配音、FFmpeg mastering、ffprobe |
+| 本地制作 | 已实现 | 脚本、编辑卡片、macOS 配音、FFmpeg mastering、ffprobe |
 | 外部素材 | 可插拔 | Pexels/Pixabay 需要 key，未配置时禁用 |
-| Agent/LLM 导演 | 部分实现 | Qwen3 负责选题提案；正式脚本与导演判断仍保留人工和模板边界 |
+| Codex 语义层 | 已实现 | 选题总编、编剧、视觉导演、发行编辑四角色；人工终审与确定性技术质检保留为硬边界 |
 | 自动趋势采集 | 部分实现 | DailyHotApi/NewsNow 已归一化；TrendRadar/RSSHub 当前仅做健康检查 |
 | AI 视频生成 | 可配置 | Seedance/Wan 已实现异步适配与预计成本门禁；默认关闭，需 key、模型 ID 和估价 |
 | 审片与发布包 | 已实现 | 视频 Range 播放、技术报告、批准/打回、发布包 |

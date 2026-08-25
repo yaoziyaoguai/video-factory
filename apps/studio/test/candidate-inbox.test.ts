@@ -18,7 +18,7 @@ const trendCandidate = {
   painPoint: "工具很多但不知道是否真省时间",
   hook: "别先看演示，先看它能不能替你完成一件真任务。",
   rationale: "来自可追溯热点信号。",
-  providerId: "qwen3:4b",
+  providerId: "api-topic-editor-v1",
   generatedAt: "2026-08-24T08:05:00.000Z",
   evidence: [{
     source: "dailyhot",

@@ -23,7 +23,7 @@ const runSummary: StudioRunSummary = {
 
 const providers: StudioProvider[] = [
   { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" },
-  { id: "ollama-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "local" },
+  { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "local" },
   { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
   { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑卡片", available: true, kind: "local" },
   { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: false, kind: "external", requirement: "需要 PEXELS_API_KEY" },
@@ -92,7 +92,7 @@ describe("Studio client", () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "voices").mockResolvedValue([
       { id: "macos:Tingting", providerId: "macos-say-v1", label: "Tingting", locale: "zh-CN", engine: "macos", curated: true },
-      { id: "kokoro:zf_001", providerId: "kokoro-local-v1", label: "女声 01", locale: "zh-CN", engine: "kokoro", gender: "female", curated: true },
+      { id: "macos:Meijia", providerId: "macos-say-v1", label: "Meijia", locale: "zh-CN", engine: "macos", curated: true },
     ]);
     const preview = vi.spyOn(studioApi, "voicePreview").mockResolvedValue("blob:voice-preview");
     const onChange = vi.fn();
@@ -101,42 +101,47 @@ describe("Studio client", () => {
       onChange={onChange}
     />);
 
-    await screen.findByRole("radio", { name: /女声 01/ });
-    await user.click(screen.getByRole("radio", { name: /女声 01/ }));
-    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ profileId: "kokoro:zf_001" }), "kokoro-local-v1");
+    await screen.findByRole("radio", { name: /Meijia/ });
+    await user.click(screen.getByRole("radio", { name: /Meijia/ }));
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ profileId: "macos:Meijia" }), "macos-say-v1");
 
-    await user.click(screen.getByRole("button", { name: "试听 女声 01" }));
+    await user.click(screen.getByRole("button", { name: "试听 Meijia" }));
     expect(preview).toHaveBeenCalledWith(expect.objectContaining({
-      profileId: "kokoro:zf_001",
+      profileId: "macos:Meijia",
       masteringPreset: "natural",
     }));
     expect(await screen.findByLabelText("声音试听")).toHaveAttribute("src", "blob:voice-preview");
 
     await user.click(screen.getByRole("radio", { name: "社交清晰" }));
-    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ masteringPreset: "social" }), "kokoro-local-v1");
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ masteringPreset: "social" }), "macos-say-v1");
 
     fireEvent.change(screen.getByRole("slider", { name: "语速" }), { target: { value: "205" } });
-    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ rate: 205 }), "kokoro-local-v1");
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ rate: 205 }), "macos-say-v1");
   });
 
-  it("starts with a concise voice shortlist and exposes every engine through filters", async () => {
+  it("starts with a concise voice shortlist and exposes every system voice through filters", async () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "voices").mockResolvedValue([
       { id: "macos:Tingting", providerId: "macos-say-v1", label: "Tingting", locale: "zh-CN", engine: "macos", curated: true },
       { id: "macos:Flo", providerId: "macos-say-v1", label: "Flo", locale: "zh-CN", engine: "macos", curated: true },
-      { id: "kokoro:zf_001", providerId: "kokoro-local-v1", label: "女声 01", locale: "zh-CN", engine: "kokoro", gender: "female", curated: true },
-      { id: "kokoro:zf_003", providerId: "kokoro-local-v1", label: "女声 03", locale: "zh-CN", engine: "kokoro", gender: "female", curated: true },
-      { id: "kokoro:zm_011", providerId: "kokoro-local-v1", label: "男声 11", locale: "zh-CN", engine: "kokoro", gender: "male", curated: true },
+      { id: "macos:Meijia", providerId: "macos-say-v1", label: "Meijia", locale: "zh-CN", engine: "macos", curated: true },
     ]);
     render(<VoiceStudio value={{ profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" }} onChange={() => undefined} />);
 
     expect(await screen.findByRole("tab", { name: /推荐/ })).toHaveAttribute("aria-selected", "true");
-    expect(screen.queryByRole("radio", { name: /女声 03/ })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("tab", { name: /Kokoro 女声/ }));
-    expect(screen.getByRole("radio", { name: /女声 03/ })).toBeInTheDocument();
-    expect(screen.queryByRole("radio", { name: /男声 11/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: /Flo/ })).not.toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: /系统音色/ }));
     expect(screen.getByRole("radio", { name: /Flo/ })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Meijia/ })).toBeInTheDocument();
+  });
+
+  it("explains why production voice is unavailable instead of leaving an empty panel", async () => {
+    vi.spyOn(studioApi, "voices").mockResolvedValue([]);
+
+    render(<VoiceStudio value={{ profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" }} onChange={() => undefined} />);
+
+    expect(await screen.findByText("当前没有正式配音演员")).toBeInTheDocument();
+    expect(screen.getByText(/测试音轨不会用于成片/)).toBeInTheDocument();
   });
 
   it("presents production state and the next human action in a scannable queue", async () => {
@@ -189,7 +194,7 @@ describe("Studio client", () => {
       nicheSlug: expect.stringMatching(/^topic-[a-f0-9]{8}$/),
       protocolVersion: "video-factory/brief-v1",
       reviewMode: "manual",
-      providers: expect.objectContaining({ director: "ollama-visual-director-v1", assets: "ai-shot-router-v1" }),
+      providers: expect.objectContaining({ script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1" }),
       director: {
         profileId: "auto",
         assetProviderIds: ["local-editorial-v1"],
@@ -213,28 +218,48 @@ describe("Studio client", () => {
     expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
   });
 
-  it("keeps the default Kokoro profile and execution provider aligned", async () => {
+  it("keeps the selected macOS voice profile and execution provider aligned", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-    const kokoroProviders: StudioProvider[] = [
-      ...providers,
-      { id: "kokoro-local-v1", capability: "voice.synthesize", label: "Kokoro 中文神经配音", available: true, kind: "local" },
-    ];
     vi.spyOn(studioApi, "voices").mockResolvedValue([
       { id: "macos:Tingting", providerId: "macos-say-v1", label: "Tingting", locale: "zh-CN", engine: "macos", curated: true },
-      { id: "kokoro:zf_001", providerId: "kokoro-local-v1", label: "女声 01", locale: "zh-CN", engine: "kokoro", gender: "female", curated: true },
+      { id: "macos:Meijia", providerId: "macos-say-v1", label: "Meijia", locale: "zh-CN", engine: "macos", curated: true },
     ]);
-    render(<NewRunDialog open providers={kokoroProviders} onClose={() => undefined} onSubmit={onSubmit} />);
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
 
-    await screen.findByRole("radio", { name: /女声 01/ });
-    await user.type(screen.getByLabelText("视频标题"), "默认神经旁白也要真正生效");
-    await user.type(screen.getByLabelText("内容角度"), "比较两种本地配音链路");
+    await screen.findByRole("radio", { name: /Meijia/ });
+    await user.click(screen.getByRole("radio", { name: /Meijia/ }));
+    await user.type(screen.getByLabelText("视频标题"), "系统旁白选择也要真正生效");
+    await user.type(screen.getByLabelText("内容角度"), "确认所选音色进入制作参数");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
     await user.click(screen.getByRole("button", { name: "开始制作" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      providers: expect.objectContaining({ voice: "kokoro-local-v1" }),
-      voiceDirection: expect.objectContaining({ profileId: "kokoro:zf_001" }),
+      providers: expect.objectContaining({ voice: "macos-say-v1" }),
+      voiceDirection: expect.objectContaining({ profileId: "macos:Meijia" }),
+    }));
+  });
+
+  it("prefers the codex screenwriter for scripting when the bridge is available", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const codexProviders: StudioProvider[] = [
+      ...providers,
+      { id: "codex-screenwriter-v1", capability: "script.draft", label: "Codex 编剧", available: true, kind: "external" },
+    ];
+    render(<NewRunDialog open providers={codexProviders} onClose={() => undefined} onSubmit={onSubmit} />);
+
+    await user.type(screen.getByLabelText("视频标题"), "用编剧写出第一条真的能拍的脚本");
+    await user.type(screen.getByLabelText("内容角度"), "把清单变成三个具体动作");
+    await user.type(screen.getByLabelText("目标受众"), "普通上班族");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      providers: expect.objectContaining({
+        script: "codex-screenwriter-v1",
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+      }),
     }));
   });
 
@@ -267,7 +292,7 @@ describe("Studio client", () => {
     expect(screen.getByLabelText("预计成本上限")).toHaveValue(3.5);
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      providers: expect.objectContaining({ assets: "ai-shot-router-v1", director: "ollama-visual-director-v1" }),
+      providers: expect.objectContaining({ assets: "ai-shot-router-v1", director: "api-visual-director-v1" }),
       director: expect.objectContaining({
         profileId: "auto",
         assetProviderIds: expect.arrayContaining(["local-editorial-v1", "seedance-video-v1"]),

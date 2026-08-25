@@ -10,7 +10,7 @@ import type {
   StudioVoiceProfile,
 } from "../shared/api.js";
 import { LocalCapabilityService } from "./local-capabilities.js";
-import { buildProviderCatalog } from "./provider-catalog.js";
+import { buildProviderCatalog, type CodexCatalogAvailability } from "./provider-catalog.js";
 
 export interface CapabilityStudioOptions {
   repositoryRoot: string;
@@ -18,6 +18,7 @@ export interface CapabilityStudioOptions {
   environment: NodeJS.ProcessEnv;
   commandAvailable?: (command: string) => Promise<boolean>;
   localCapabilities?: Pick<LocalCapabilityService, "report" | "listVoices" | "preview">;
+  codexAvailability?: CodexCatalogAvailability;
 }
 
 export class CapabilityStudio {
@@ -48,16 +49,13 @@ export class CapabilityStudio {
   }
 
   async listProviders(): Promise<StudioProvider[]> {
-    const [health, localCapabilities] = await Promise.all([this.health(), this.localCapabilities.report()]);
-    const capabilityReady = (id: string): boolean => localCapabilities.some((item) => item.id === id && item.state === "ready");
+    const health = await this.health();
     return buildProviderCatalog({
       python: health.runtime.python ?? false,
       ffmpeg: health.runtime.ffmpeg ?? false,
       ffprobe: health.runtime.ffprobe ?? false,
       say: health.runtime.say ?? false,
-      kokoro: capabilityReady("kokoro-local"),
-      ollama: capabilityReady("qwen3-local"),
-    }, this.options.environment);
+    }, this.options.environment, this.options.codexAvailability);
   }
 
   listLocalCapabilities(): Promise<StudioLocalCapability[]> {

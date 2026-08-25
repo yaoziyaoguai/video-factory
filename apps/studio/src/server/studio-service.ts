@@ -37,6 +37,7 @@ import type { LocalCapabilityService } from "./local-capabilities.js";
 import { OpportunityStudio } from "./opportunity-studio.js";
 import { JsonOpportunityStore, type StudioOpportunityRepository } from "./opportunity-store.js";
 import { ProductionStudio, type StudioPipelinePort } from "./production-studio.js";
+import type { CodexCatalogAvailability } from "./provider-catalog.js";
 import { buildPublishTargetCatalog, PublishingStudio, type PlatformPublisher } from "./publishing-studio.js";
 import { SeriesStudio } from "./series-studio.js";
 import { JsonSeriesStore, type StudioSeriesRepository } from "./series-store.js";
@@ -54,6 +55,7 @@ export interface StudioServiceOptions {
   opportunities?: StudioOpportunityRepository;
   environment?: NodeJS.ProcessEnv;
   commandAvailable?: (command: string) => Promise<boolean>;
+  codexAvailability?: CodexCatalogAvailability;
   now?: () => Date;
   createId?: () => string;
   localCapabilities?: Pick<LocalCapabilityService, "report" | "listVoices" | "preview">;
@@ -88,6 +90,7 @@ export class StudioService {
       environment,
       ...(options.commandAvailable ? { commandAvailable: options.commandAvailable } : {}),
       ...(options.localCapabilities ? { localCapabilities: options.localCapabilities } : {}),
+      ...(options.codexAvailability ? { codexAvailability: options.codexAvailability } : {}),
     });
     this.trends = new TrendStudio({
       repositoryRoot,

@@ -9,8 +9,8 @@ VideoFactory 是一个本地优先的短视频 Creative OS。当前 Web Studio �
 - 用 Python/Pillow/FFmpeg/macOS `say` 跑通 `brief -> 脚本 -> 画面 -> 配音 -> 渲染 -> 机器质检 -> 人工终审 -> 发布包`。
 - 用 React/Fastify Creative OS 提供今日机会、制作记录、素材与模型、实验复盘和视频优先的审片现场。
 - 用 TrendRadar、NewsNow、DailyHotApi、RSSHub 组成可自托管热点底座，由统一网关去重并保留来源证据。
-- 用本地 Ollama + Qwen3 把真实热点整理为选题提案；模型不可用时明确降级到确定性筛选，不伪造模型结果。
-- 自动发现 macOS 中文声音，并可选安装 Kokoro 本地语音；语速、停顿和 FFmpeg 后期处理进入正式 production brief。
+- 语义层统一使用宿主机 Codex（ChatGPT 订阅）承担选题总编、编剧、视觉导演与发行编辑四个角色；bridge 不可用时新建制作在能力选择处回落到确定性筛选与本地模板并如实标注来源，已绑定 Codex 的制作则明确失败，绝不静默降级。
+- 自动发现 macOS 中文声音；语速、停顿和 FFmpeg 后期处理进入正式 production brief。
 - 机会必须包含至少一条来源声明；人工录入内容由用户自行核验，平台指标仅在数据连接器接入后展示。
 - 保留原有 SQLite CLI，用于选题实验、历史 job、指标记录和兼容路径。
 - 保留人工审核和手动发布，不在 MVP 阶段自动点击平台发布。
@@ -25,13 +25,10 @@ npm install
 make setup-local-runtime
 make init
 make setup-local-trends
-make setup-local-agent
-# 推荐：安装更自然的本地 Kokoro 中文配音，首次下载会较慢
-make setup-local-voice
 npm run studio:dev
 ```
 
-浏览器打开 [http://127.0.0.1:4317](http://127.0.0.1:4317)。本地服务安装脚本是幂等的；热点服务由 Docker 运行，Qwen3 由 Ollama 运行，完成过烟雾测试后才会在资源页显示为“可用”。Today 把热点机会、系列选题和自定义创作作为三个并列入口；只有人工点击“采用到制作区”后才会进入正式机会与制作。默认本地能力不需要 API key，流程到“人工终审”后可在审片台批准或打回。
+浏览器打开 [http://127.0.0.1:4317](http://127.0.0.1:4317)。本地服务安装脚本是幂等的；热点服务由 Docker 运行，Codex bridge 作为宿主机 systemd 服务运行（见生产部署指南），socket 健康检查通过后选题、编剧、导演与发行编辑才会在资源页显示为“可用”。Today 把热点机会、系列选题和自定义创作作为三个并列入口；只有人工点击“采用到制作区”后才会进入正式机会与制作。默认本地能力不需要 API key，流程到“人工终审”后可在审片台批准或打回。
 
 本地服务管理：
 
@@ -39,10 +36,10 @@ npm run studio:dev
 make local-trends-status
 make local-trends-stop
 make setup-local-trends
-curl http://127.0.0.1:11434/api/tags
+make codex-broker-status
 ```
 
-默认端口为 TrendRadar `8080`、TrendRadar MCP `3333`、NewsNow `4444`、DailyHotApi `6688`、RSSHub `1200` 和 Ollama `11434`。所有服务只绑定 `127.0.0.1`；API key 不写入仓库，也不会由配置页面回传。
+默认端口为 TrendRadar `8080`、TrendRadar MCP `3333`、NewsNow `4444`、DailyHotApi `6688` 和 RSSHub `1200`。所有服务只绑定 `127.0.0.1`；API key 不写入仓库，也不会由配置页面回传。
 
 默认“经济日更”配方不允许计费调用，预计成本上限为 `¥0`。免费图库或付费视频模型按需配置：
 
@@ -90,14 +87,9 @@ PYTHONPATH=src python3 -m video_factory --db data/video_factory.sqlite --workspa
 - `compliance.json`
 - `asset_manifest.json`
 
-## MVP 边界
+## 语义层与技术质检边界
 
-当前选题提案可使用本地 Qwen3，但正式脚本生成器仍是确定性模板，方便先验证数据结构和流程。它不是最终内容质量方案。下一步可以把 `script_service.py` 替换成：
-
-- 本地 Ollama 模型
-- OpenAI-compatible API
-- 人工写稿 + 自动分镜
-- 按赛道定制的 prompt pack
+一条热点视频最多调用四次 Codex 语义角色：选题总编（热点转选题）、编剧（分镜脚本）、视觉导演（视觉圣经与逐镜路由）、发行编辑（人工终审通过后的平台标题/描述/话题标签）。系列与自定义创作入口会跳过选题总编；bridge 不可用时，新建制作在能力选择处回落（选题→确定性评分、脚本→本地模板），发行文案回退简报标题并标注来源；已绑定 Codex 的制作在 bridge 失效时明确失败，不静默降级。每个任务受理后至多执行一次（不自动重放），调用次数受订阅配额约束。技术质检（分辨率、时长、轨道、产物哈希）始终由 ffprobe 与确定性规则执行，不使用模型。
 
 ## 推荐后续路线
 
@@ -161,13 +153,7 @@ npm run factory -- run examples/briefs/life-avoidance-local.json \
   --workspace workspace/factory
 ```
 
-已配置 Pexels 并安装 Kokoro 后，可运行免费实拍 + 本地神经配音样片：
-
-```bash
-node --env-file=.env --import tsx packages/production-pipeline/src/cli.ts run \
-  examples/briefs/city-reset-pexels-kokoro.json \
-  --workspace workspace/pexels-kokoro
-```
+已配置 Pexels 后，可把 brief 中的素材 Provider 换成 `pexels-stock-v1` 运行免费实拍样片；配音默认使用 macOS 系统中文音色。
 
 `durationSeconds` 当前接受 20-180 秒。生产 pipeline 会在每个节点后 checkpoint，校验 provider/capability 绑定，并在 worker 返回及生成发布包前复核 artifact 路径、SHA-256 和大小。
 

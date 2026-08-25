@@ -896,6 +896,11 @@ h1, h2, .creative-stage blockquote, .brand strong { font-family: "Noto Serif SC 
 .voice-studio > .compact-section-heading { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--line-strong); }
 .voice-studio > .compact-section-heading h3 { font-family: "Noto Serif SC Variable", serif; font-size: 23px; font-weight: 700; }
 .voice-studio > .compact-section-heading > div > span { width: auto; min-width: 34px; padding: 0 7px; color: var(--accent); background: transparent; border: 1px solid #e6aaa3; }
+.voice-empty { display: flex; min-height: 96px; align-items: center; gap: 14px; padding: 20px 0; color: var(--muted); border-bottom: 1px solid var(--line); }
+.voice-empty svg { flex: 0 0 auto; color: var(--accent); }
+.voice-empty div { display: grid; gap: 4px; }
+.voice-empty strong { color: var(--ink); font-family: "Noto Serif SC Variable", serif; font-size: 17px; }
+.voice-empty span { font-size: 13px; }
 .voice-studio-layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, .55fr); gap: 28px; }
 .voice-selection { min-width: 0; }
 .voice-filters { display: flex; min-width: 0; overflow-x: auto; border-bottom: 1px solid var(--line); }

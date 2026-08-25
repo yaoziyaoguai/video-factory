@@ -216,7 +216,7 @@ function groupArtifacts(run: StudioRunDetail) {
     render: "视频渲染",
     "technical-review": "机器质检",
     "final-review": "人工终审",
-    "publish-package": "发布包",
+    "publish-package": "发布文案与发布包",
   };
   const grouped = new Map<string, StudioRunDetail["artifacts"]>();
   for (const artifact of run.artifacts) {

@@ -396,7 +396,7 @@ describe("Studio API", () => {
         painPoint: "时间被工具反向占用",
         hook: "真正偷走你下班时间的，可能不是加班。",
         rationale: "抖音热点与低成本生活实验相交。",
-        providerId: "qwen3:4b",
+        providerId: "api-topic-editor-v1",
         generatedAt: "2026-08-24T08:05:00.000Z",
         evidence: [{ source: "dailyhot", platform: "douyin", keyword: "AI 时间", strength: 96 }],
         score: {
@@ -411,7 +411,7 @@ describe("Studio API", () => {
     const refreshed = await app.inject({ method: "POST", url: "/api/trend-candidates/refresh" });
 
     assert.equal(response.statusCode, 200);
-    assert.equal(response.json()[0].providerId, "qwen3:4b");
+    assert.equal(response.json()[0].providerId, "api-topic-editor-v1");
     assert.equal(response.json()[0].evidence[0].source, "dailyhot");
     assert.equal(refreshed.statusCode, 200);
     assert.equal(refreshCalls, 1);

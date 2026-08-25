@@ -1,4 +1,5 @@
 import type { StudioProvider, StudioTrendService, StudioTrendSource } from "../shared/api.js";
+import { resolveCodexSocketPath, type CodexProviderSettings } from "./codex-provider-settings.js";
 import { readMeteredVideoProviderSettings } from "./video-provider-settings.js";
 
 export interface ProviderRuntime {
@@ -6,28 +7,35 @@ export interface ProviderRuntime {
   ffmpeg: boolean;
   ffprobe: boolean;
   say: boolean;
-  kokoro: boolean;
-  ollama: boolean;
 }
 
-export function buildProviderCatalog(runtime: ProviderRuntime, environment: NodeJS.ProcessEnv): StudioProvider[] {
+export type CodexCatalogAvailability = Pick<CodexProviderSettings, "available" | "reason">;
+
+export function buildProviderCatalog(
+  runtime: ProviderRuntime,
+  environment: NodeJS.ProcessEnv,
+  codexAvailability?: CodexCatalogAvailability,
+): StudioProvider[] {
   const videoSettings = readMeteredVideoProviderSettings(environment);
   const seedanceSettings = videoSettings.find((setting) => setting.providerId === "seedance-video-v1");
   const wanSettings = videoSettings.find((setting) => setting.providerId === "wan-video-v1");
   const seedanceAvailable = runtime.python && seedanceSettings !== undefined;
   const wanAvailable = runtime.python && wanSettings !== undefined;
+  const codex = codexAvailability ?? probeCodexSynchronously(environment);
+  const codexRequirement = `${resolveCodexSocketPath(environment).requirement}${codex.reason ? ` 当前：${codex.reason}` : ""}`;
 
   return [
     provider({
-      id: "qwen3-local-v1",
+      id: "api-topic-editor-v1",
       capability: "topic.intelligence",
-      label: "Qwen3 本地选题 Agent",
-      available: runtime.ollama,
-      kind: "local",
-      description: "把实时热点转译为可拍摄、可连载的中文短视频角度；失败时回退到确定性评分。",
+      label: "Codex 选题总编",
+      available: codex.available,
+      kind: "external",
+      billing: "subscription",
+      description: "通过宿主机 Codex 把实时热点转译为可拍摄、可连载的中文短视频角度；失败时回退到确定性评分。",
       modes: ["热点理解", "选题提案", "结构化输出"],
       latency: "seconds",
-      requirement: "需要运行 make setup-local-agent",
+      requirement: codexRequirement,
     }),
     provider({
       id: "python-template-v1",
@@ -41,26 +49,39 @@ export function buildProviderCatalog(runtime: ProviderRuntime, environment: Node
       requirement: "需要 python3",
     }),
     provider({
-      id: "ollama-visual-director-v1",
+      id: "codex-screenwriter-v1",
+      capability: "script.draft",
+      label: "Codex 编剧",
+      available: codex.available,
+      kind: "external",
+      billing: "subscription",
+      description: "按选题角度撰写可拍、可朗读、可核验的分镜脚本；编剧失败时制作明确失败，不回退模板。",
+      modes: ["口语旁白", "3-10 场分镜", "逐场画面指令"],
+      latency: "seconds",
+      requirement: codexRequirement,
+    }),
+    provider({
+      id: "api-visual-director-v1",
       capability: "storyboard.plan",
-      label: "AI 视觉导演",
-      available: runtime.ollama,
-      kind: "local",
+      label: "Codex 视觉导演",
+      available: codex.available,
+      kind: "external",
+      billing: "subscription",
       description: "生成视觉圣经，并根据叙事、真实性、连续性和预算逐镜选择素材来源。",
       modes: ["导演角色", "视觉圣经", "逐镜路由"],
       latency: "seconds",
-      requirement: "需要运行 make setup-local-agent",
+      requirement: codexRequirement,
     }),
     provider({
       id: "ai-shot-router-v1",
       capability: "asset.prepare",
       label: "AI 逐镜路由",
-      available: runtime.python && runtime.ollama,
-      kind: "local",
+      available: runtime.python && codex.available,
+      kind: "external",
       description: "执行导演计划；每个镜头可独立调用本地、图库或视频生成能力。",
       modes: ["逐镜决策", "多来源", "预算门禁"],
       latency: "seconds",
-      requirement: "需要 Python 和本地导演 Agent",
+      requirement: "需要 Python 和 Codex 视觉导演",
     }),
     provider({
       id: "local-editorial-v1",
@@ -142,17 +163,6 @@ export function buildProviderCatalog(runtime: ProviderRuntime, environment: Node
       requirement: "需要 macOS say",
     }),
     provider({
-      id: "kokoro-local-v1",
-      capability: "voice.synthesize",
-      label: "Kokoro 中文神经配音",
-      available: runtime.python && runtime.ffmpeg && runtime.kokoro,
-      kind: "local",
-      description: "本地中文神经语音，离线生成、零调用成本，适合正式旁白试听与生产。",
-      modes: ["普通话", "本地神经模型", "多音色"],
-      latency: "seconds",
-      requirement: "需要运行本地声音搭建并通过模型烟雾测试",
-    }),
-    provider({
       id: "ffmpeg-tone-test-v1",
       capability: "voice.synthesize",
       label: "测试音轨",
@@ -184,6 +194,18 @@ export function buildProviderCatalog(runtime: ProviderRuntime, environment: Node
       modes: ["技术门禁", "产物校验"],
       latency: "seconds",
       requirement: "需要 python3、ffmpeg 和 ffprobe",
+    }),
+    provider({
+      id: "codex-publish-copy-v1",
+      capability: "publish.copy",
+      label: "Codex 发行编辑",
+      available: codex.available,
+      kind: "external",
+      billing: "subscription",
+      description: "人工终审通过后为成片生成平台标题、描述与话题标签；不可用时发布包回退使用简报标题并如实标注来源。",
+      modes: ["平台标题", "发布描述", "话题标签"],
+      latency: "seconds",
+      requirement: codexRequirement,
     }),
   ];
 }
@@ -297,6 +319,15 @@ function provider(input: Omit<StudioProvider, "status" | "billing"> & Partial<Pi
     delete value.requirement;
   }
   return value;
+}
+
+// 同步调用无法核对 /health 协议，必须保守地报告不可用；生产启动路径会注入异步健康探测结果。
+function probeCodexSynchronously(environment: NodeJS.ProcessEnv): CodexCatalogAvailability {
+  const resolution = resolveCodexSocketPath(environment);
+  return {
+    available: false,
+    reason: `尚未对 Codex bridge socket '${resolution.socketPath}' 完成协议健康检查。`,
+  };
 }
 
 function plannedVideoProvider(id: string, label: string, description: string): StudioProvider {

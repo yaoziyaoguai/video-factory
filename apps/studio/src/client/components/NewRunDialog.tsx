@@ -43,8 +43,8 @@ interface CapabilityDefinition {
 }
 
 const CAPABILITIES: CapabilityDefinition[] = [
-  { key: "script", capability: "script.draft", label: "脚本生成", role: "编剧", description: "结构、钩子与分镜文案", preferred: "python-template-v1", icon: FileText },
-  { key: "director", capability: "storyboard.plan", label: "导演方案", role: "导演", description: "视觉圣经与逐镜素材决策", preferred: "ollama-visual-director-v1", icon: Clapperboard },
+  { key: "script", capability: "script.draft", label: "脚本生成", role: "编剧", description: "结构、钩子与分镜文案", preferred: "codex-screenwriter-v1", icon: FileText },
+  { key: "director", capability: "storyboard.plan", label: "导演方案", role: "导演", description: "视觉圣经与逐镜素材决策", preferred: "api-visual-director-v1", icon: Clapperboard },
   { key: "assets", capability: "asset.prepare", label: "画面素材", role: "素材导演", description: "执行 AI 导演生成的逐镜路由", preferred: "ai-shot-router-v1", icon: Image },
   { key: "voice", capability: "voice.synthesize", label: "配音", role: "声音导演", description: "旁白音色与语速", preferred: "macos-say-v1", icon: Mic2 },
   { key: "render", capability: "video.render", label: "视频渲染", role: "剪辑师", description: "9:16 合成、字幕与音轨", preferred: "python-ffmpeg-v1", icon: Film },
@@ -132,7 +132,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
       ...defaults,
       ...(initialValues?.providers ?? {}),
       assets: "ai-shot-router-v1",
-      director: "ollama-visual-director-v1",
+      director: defaults.director ?? "",
       voice: providerForVoiceProfile(initialVoiceDirection.profileId),
     };
     const initialRecipe = initialValues?.economics?.recipeId ?? creatorSettings?.defaultRecipeId ?? "economy-daily";
@@ -450,9 +450,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
 }
 
 function defaultVoiceDirection(providers: StudioProvider[]): StudioProductionInput["voiceDirection"] {
-  const kokoroReady = providers.some((provider) => provider.id === "kokoro-local-v1" && provider.available);
   return {
-    profileId: kokoroReady ? "kokoro:zf_001" : "macos:Tingting",
+    profileId: "macos:Tingting",
     rate: 185,
     pauseScale: 1,
     masteringPreset: "natural",
@@ -472,7 +471,6 @@ function providerDefaults(providers: StudioProvider[]): StudioProductionInput["p
 }
 
 function providerForVoiceProfile(profileId: string): string {
-  if (profileId.startsWith("kokoro:")) return "kokoro-local-v1";
   if (profileId.startsWith("tone:")) return "ffmpeg-tone-test-v1";
   return "macos-say-v1";
 }
@@ -489,7 +487,7 @@ function estimatedRecipeBudget(
 }
 
 function recipeAvailable(recipe: (typeof RECIPES)[number], providers: StudioProvider[]): boolean {
-  const foundationReady = providers.some((provider) => provider.id === "ollama-visual-director-v1" && provider.available)
+  const foundationReady = providers.some((provider) => provider.id === "api-visual-director-v1" && provider.available)
     && providers.some((provider) => provider.id === "ai-shot-router-v1" && provider.available);
   if (!foundationReady) return false;
   if (recipe.maxPaidShots === 0) {

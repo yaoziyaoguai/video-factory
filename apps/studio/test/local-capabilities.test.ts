@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -49,13 +49,12 @@ describe("local capability discovery", () => {
     assert.equal(profiles.every((profile) => profile.providerId === "macos-say-v1"), true);
   });
 
-  it("reports command, voice, and optional model evidence without secrets", async () => {
+  it("reports command and system voice evidence without self-hosted models or secrets", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-capabilities-"));
     const service = new LocalCapabilityService({
       repositoryRoot: "/repo",
       workspaceRoot,
       environment: { SECRET_TOKEN: "must-not-leak" },
-      architecture: "arm64",
       commandAvailable: async (command) => ["python3", "ffmpeg", "ffprobe", "say", "uv"].includes(command),
       runCommand: async (command, args) => {
         if (command === "say" && args[0] === "-v") return { stdout: voiceOutput, stderr: "" };
@@ -69,23 +68,23 @@ describe("local capability discovery", () => {
 
     assert.equal(report.find((item) => item.id === "macos-voices")?.state, "ready");
     assert.match(report.find((item) => item.id === "macos-voices")?.evidence ?? "", /4 个中文音色/);
-    assert.equal(report.find((item) => item.id === "kokoro-local")?.state, "available");
+    assert.equal(report.some((item) => item.id === "kokoro-local" || item.id === "qwen3-local"), false);
     assert.equal(voices.length, 4);
     assert.doesNotMatch(JSON.stringify({ report, voices }), /must-not-leak/);
   });
 
-  it("does not offer the Apple Silicon Kokoro bootstrap on x64", async () => {
+  it("does not discover self-hosted models even when old binaries and markers remain", async () => {
     const service = new LocalCapabilityService({
       repositoryRoot: "/repo",
       workspaceRoot: "/workspace",
-      architecture: "x64",
-      commandAvailable: async (command) => command === "uv",
-      pathExists: async () => false,
+      commandAvailable: async (command) => ["ollama", "uv"].includes(command),
+      pathExists: async (target) => target.includes("kokoro.ready.json") || target.includes("qwen3.ready.json"),
     });
 
     const report = await service.report();
 
-    assert.equal(report.find((item) => item.id === "kokoro-local")?.state, "missing");
+    assert.equal(report.some((item) => item.id === "kokoro-local" || item.id === "qwen3-local"), false);
+    assert.equal((await service.listVoices()).some((voice) => voice.providerId === "kokoro-local-v1"), false);
   });
 
   it("honors verified project runtime directories from configuration", async () => {
@@ -94,13 +93,11 @@ describe("local capability discovery", () => {
       workspaceRoot: "/workspace",
       environment: {
         VIDEO_FACTORY_PYTHON_RUNTIME: "/runtime/python",
-        VIDEO_FACTORY_AGENT_RUNTIME: "/runtime/agent",
       },
-      commandAvailable: async (command) => command === "ollama",
+      commandAvailable: async () => false,
       pathExists: async (target) => [
         "/runtime/python/.venv/bin/python",
         "/runtime/python/python.ready.json",
-        "/runtime/agent/qwen3.ready.json",
       ].includes(target),
     });
 
@@ -108,35 +105,6 @@ describe("local capability discovery", () => {
 
     assert.equal(report.find((item) => item.id === "python")?.state, "ready");
     assert.match(report.find((item) => item.id === "python")?.evidence ?? "", /项目 Python/);
-    assert.equal(report.find((item) => item.id === "qwen3-local")?.state, "ready");
-  });
-
-  it("gives first-run neural voice synthesis a longer execution budget", async () => {
-    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-voice-preview-"));
-    const commandBudgets: Array<{ command: string; timeoutMs: number | undefined }> = [];
-    const service = new LocalCapabilityService({
-      repositoryRoot: "/repo",
-      workspaceRoot,
-      commandAvailable: async () => false,
-      pathExists: async (target) => target.endsWith("kokoro.ready.json"),
-      runCommand: async (command, args, execution) => {
-        commandBudgets.push({ command, timeoutMs: execution?.timeoutMs });
-        const outputPath = command === "ffmpeg" ? args.at(-1) : args[args.indexOf("--output") + 1];
-        if (outputPath) await writeFile(outputPath, "audio");
-        return { stdout: "", stderr: "" };
-      },
-    });
-
-    const preview = await service.preview({
-      profileId: "kokoro:zf_002",
-      text: "第一次试听也应该可靠完成。",
-      rate: 180,
-      pauseScale: 1,
-      masteringPreset: "natural",
-    });
-
-    assert.equal(preview?.contentType, "audio/mp4");
-    assert.equal(commandBudgets[0]?.timeoutMs, 180_000);
-    assert.equal(commandBudgets[1]?.timeoutMs, undefined);
+    assert.equal(report.some((item) => item.id === "qwen3-local"), false);
   });
 });

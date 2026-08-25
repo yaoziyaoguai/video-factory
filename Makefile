@@ -2,9 +2,10 @@ LOCAL_PYTHON := $(CURDIR)/.local/python/.venv/bin/python
 PYTHON ?= $(if $(wildcard $(LOCAL_PYTHON)),$(LOCAL_PYTHON),python3)
 DB ?= data/video_factory.sqlite
 WORKSPACE ?= workspace
+CODEX_SOCKET ?= /run/video-factory-codex/worker.sock
 RUN = PYTHONPATH=src $(PYTHON) -m video_factory
 
-.PHONY: init demo test test-py test-ts test-e2e typecheck sample-production setup-local-runtime setup-local-voice setup-local-agent setup-local-trends local-trends-status local-trends-stop
+.PHONY: init demo test test-py test-ts test-e2e typecheck sample-production setup-local-runtime setup-local-trends local-trends-status local-trends-stop codex-broker-build codex-broker-test codex-broker-status
 
 init:
 	$(RUN) --db $(DB) init
@@ -32,12 +33,6 @@ sample-production:
 setup-local-runtime:
 	bash scripts/setup-local-runtime.sh
 
-setup-local-voice:
-	bash scripts/setup-local-voice.sh
-
-setup-local-agent:
-	bash scripts/setup-local-agent.sh
-
 setup-local-trends:
 	bash scripts/setup-local-trends.sh
 
@@ -46,6 +41,16 @@ local-trends-status:
 
 local-trends-stop:
 	bash scripts/local-trends.sh stop
+
+codex-broker-build:
+	npm run build:broker
+
+codex-broker-test:
+	npm run test:broker
+
+# 只探测已运行的宿主机 broker，不启动任何服务。
+codex-broker-status:
+	-curl --fail --silent --show-error --unix-socket $(CODEX_SOCKET) http://localhost/health
 
 typecheck:
 	npm run typecheck

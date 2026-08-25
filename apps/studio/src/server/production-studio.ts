@@ -50,7 +50,7 @@ const WORKFLOW_NODES: Array<{ id: string; label: string; role: string }> = [
   { id: "render", label: "渲染", role: "剪辑师" },
   { id: "technical-review", label: "机器质检", role: "技术质检" },
   { id: "final-review", label: "人工终审", role: "总导演" },
-  { id: "publish-package", label: "发布包", role: "制片人" },
+  { id: "publish-package", label: "发布文案与发布包", role: "发行编辑" },
 ];
 
 export class ProductionStudio {

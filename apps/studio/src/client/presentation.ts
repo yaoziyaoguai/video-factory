@@ -7,7 +7,7 @@ export const RUN_NODE_LABELS: Record<string, string> = {
   render: "渲染",
   "technical-review": "机器质检",
   "final-review": "人工终审",
-  "publish-package": "发布包",
+  "publish-package": "发布文案与发布包",
 };
 
 export const RUN_NODE_ORDER = Object.keys(RUN_NODE_LABELS);
@@ -42,13 +42,14 @@ export function providerLabel(providerId?: string): string | undefined {
   return ({
     "video-factory-ts-v1": "VideoFactory 本地编排",
     "python-template-v1": "本地模板脚本",
-    "ollama-visual-director-v1": "AI 视觉导演",
+    "codex-screenwriter-v1": "Codex 编剧",
+    "api-visual-director-v1": "Codex 视觉导演",
+    "codex-publish-copy-v1": "Codex 发行编辑",
     "ai-shot-router-v1": "AI 逐镜路由",
     "local-editorial-v1": "本地编辑画面",
     "pexels-stock-v1": "Pexels 图库",
     "pixabay-stock-v1": "Pixabay 图库",
     "macos-say-v1": "macOS 系统配音",
-    "kokoro-local-v1": "Kokoro 本地配音",
     "python-ffmpeg-v1": "FFmpeg 本地渲染",
     "python-technical-review-v1": "本地机器质检",
   } as Record<string, string>)[providerId] ?? providerId;
@@ -56,9 +57,9 @@ export function providerLabel(providerId?: string): string | undefined {
 
 export function proposalSourceLabel(providerId: string): string {
   if (providerId === "series-planner-v1") return "系列策划器";
-  if (providerId.startsWith("qwen3")) return "Qwen3 本地提案";
+  if (providerId === "api-topic-editor-v1") return "Codex 选题总编";
   if (providerId.includes("heuristic") || providerId.includes("deterministic")) return "本地规则提案";
-  return "本地选题提案";
+  return "API 总编提案";
 }
 
 export const TOPIC_CATEGORY_LABELS = {
@@ -82,6 +83,5 @@ export const TOPIC_CATEGORY_LABELS = {
 export function scoreSourceLabel(source: string): string {
   if (source.startsWith("人工维度评分")) return "人工评分";
   if (source.startsWith("历史记录")) return "历史评分";
-  if (source.includes("qwen3")) return "Qwen3 本地评分";
   return source.replace(/\s*·\s*[a-z0-9._:-]+$/i, "");
 }

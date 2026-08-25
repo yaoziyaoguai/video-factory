@@ -185,6 +185,9 @@ describe("StudioService", () => {
     assert.equal(summaries[0]?.nextAction, "review");
     assert.equal(summaries[0]?.videoContentUrl, "/api/runs/run-1/artifacts/artifact-video/content");
     assert.equal(detail?.nodes.find((node) => node.id === "final-review")?.label, "人工终审");
+    const publishNode = detail?.nodes.find((node) => node.id === "publish-package");
+    assert.equal(publishNode?.label, "发布文案与发布包");
+    assert.equal(publishNode?.role, "发行编辑");
     assert.equal(detail?.nodes.at(-1)?.status, "pending");
     assert.equal(detail?.activeIntervention?.id, "intervention-1");
     assert.equal(detail?.videoArtifactId, "artifact-video");
@@ -253,6 +256,31 @@ describe("StudioService", () => {
         maxCostCny: 4,
       },
     });
+    assert.equal(pipeline.dispatchCount, 1);
+  });
+
+  it("lets the Codex director run inside economy-daily without metered gating", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      codexAvailability: { available: true, reason: "" },
+    });
+
+    const result = await service.startRun({
+      ...brief,
+      providers: {
+        ...brief.providers,
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+      },
+      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+    });
+
+    assert.deepEqual(result, { runId: "run-1", status: "running" });
     assert.equal(pipeline.dispatchCount, 1);
   });
 
@@ -342,6 +370,7 @@ describe("StudioService", () => {
       workspaceRoot,
       pipeline: new FakePipeline(waitingRun(workspaceRoot)),
       commandAvailable: async (command) => command !== "say",
+      codexAvailability: { available: true, reason: "" },
       environment: {
         PEXELS_API_KEY: "secret-value",
         ARK_API_KEY: "seedance-secret",
@@ -354,6 +383,24 @@ describe("StudioService", () => {
     const serialized = JSON.stringify(providers);
 
     assert.equal(providers.find((provider) => provider.id === "pexels-stock-v1")?.available, true);
+    const codexTopic = providers.find((provider) => provider.id === "api-topic-editor-v1");
+    assert.equal(codexTopic?.available, true);
+    assert.equal(codexTopic?.billing, "subscription");
+    assert.equal(codexTopic?.kind, "external");
+    const codexDirector = providers.find((provider) => provider.id === "api-visual-director-v1");
+    assert.equal(codexDirector?.available, true);
+    assert.equal(codexDirector?.billing, "subscription");
+    assert.equal(codexDirector?.kind, "external");
+    const codexScreenwriter = providers.find((provider) => provider.id === "codex-screenwriter-v1");
+    assert.equal(codexScreenwriter?.available, true);
+    assert.equal(codexScreenwriter?.billing, "subscription");
+    assert.equal(codexScreenwriter?.kind, "external");
+    const codexPublishCopy = providers.find((provider) => provider.id === "codex-publish-copy-v1");
+    assert.equal(codexPublishCopy?.available, true);
+    assert.equal(codexPublishCopy?.billing, "subscription");
+    assert.equal(codexPublishCopy?.kind, "external");
+    assert.equal(providers.find((provider) => provider.id === "python-template-v1")?.available, true);
+    assert.equal(providers.some((provider) => provider.id.includes("ollama") || provider.id.includes("qwen")), false);
     assert.equal(providers.find((provider) => provider.id === "macos-say-v1")?.available, false);
     const seedance = providers.find((provider) => provider.id === "seedance-video-v1");
     assert.equal(seedance?.available, true);
@@ -363,23 +410,13 @@ describe("StudioService", () => {
     assert.equal(providers.find((provider) => provider.id === "kling-video-v1")?.status, "planned");
     assert.doesNotMatch(serialized, /secret-value/);
     assert.doesNotMatch(serialized, /seedance-secret/);
+    assert.doesNotMatch(serialized, /topic-secret|director-secret/);
   });
 
-  it("advertises Kokoro only after the local model smoke test is ready", async () => {
+  it("never advertises retired self-hosted model providers", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
-    const unavailable = new StudioService({
-      workspaceRoot,
-      pipeline,
-      commandAvailable: allCommandsAvailable,
-      environment: {},
-      localCapabilities: {
-        report: async () => [{ id: "kokoro-local", label: "Kokoro", category: "voice", state: "available", evidence: "可安装" }],
-        listVoices: async () => [],
-        preview: async () => undefined,
-      },
-    });
-    const ready = new StudioService({
+    const service = new StudioService({
       workspaceRoot,
       pipeline,
       commandAvailable: allCommandsAvailable,
@@ -391,11 +428,8 @@ describe("StudioService", () => {
       },
     });
 
-    assert.equal((await unavailable.listProviders()).find((provider) => provider.id === "kokoro-local-v1")?.available, false);
-    const provider = (await ready.listProviders()).find((candidate) => candidate.id === "kokoro-local-v1");
-    assert.equal(provider?.available, true);
-    assert.equal(provider?.status, "ready");
-    assert.match(provider?.description ?? "", /神经/);
+    const providerIds = (await service.listProviders()).map((provider) => provider.id);
+    assert.equal(providerIds.some((id) => id.includes("ollama") || id.includes("qwen") || id.includes("kokoro")), false);
   });
 
   it("reports honest trend-source readiness without fabricating signals", async () => {
@@ -445,8 +479,8 @@ describe("StudioService", () => {
       audience: "普通创作者",
       painPoint: "信息很多但缺少判断",
       hook: "先看证据，再决定做不做。",
-      rationale: "来自本地模型与真实热点。",
-      providerId: "qwen3:4b",
+      rationale: "来自语义模型与真实热点。",
+      providerId: "api-topic-editor-v1",
       generatedAt: "2026-08-24T00:00:00.000Z",
       evidence: [{ source: "dailyhot", platform: "douyin", keyword: "证据", strength: 90 }],
       score: {

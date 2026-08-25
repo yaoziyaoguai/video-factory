@@ -227,7 +227,7 @@ class WorkerContractTest(unittest.TestCase):
             }
 
             with patch.dict(os.environ, {"VIDEO_FACTORY_VOICE_RUNTIME": str(root / "missing-runtime")}, clear=False):
-                with self.assertRaisesRegex(RuntimeError, "setup-local-voice"):
+                with self.assertRaisesRegex(RuntimeError, "not provisioned in this deployment"):
                     handle_request(request)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")

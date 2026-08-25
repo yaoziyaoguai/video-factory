@@ -17,7 +17,7 @@ Accepted for the next implementation loop.
 VideoFactory 采用 TS-first 架构：
 
 - TypeScript 作为产品域、workflow、provider registry、API 和 Studio UI 的主语言。
-- Python 保留为 media/ML worker 层，承接已有 FFmpeg、Pillow、素材准备、未来 whisper/TTS/本地模型等能力。
+- Python 保留为 media worker 层，承接 FFmpeg、Pillow、素材准备，以及未来的云端转写与 TTS Provider 适配。
 - Remotion 作为后续视频模板和动态渲染的优先方向。
 - LangGraph.js / Mastra / OpenAI Agents SDK 可以作为 agent runtime 候选，但核心业务协议不直接绑定某一个框架。
 

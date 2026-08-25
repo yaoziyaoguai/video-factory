@@ -208,7 +208,7 @@ describe("ProductionPipeline", () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
     const worker = new FakeWorker();
     const directorAgent: pipeline.VisualDirectorAgent = {
-      id: "ollama-visual-director-v1",
+      id: "api-visual-director-v1",
       plan: async (input) => ({
         version: "video-factory/director-plan-v1",
         requestedProfileId: input.brief.requestedProfileId,
@@ -252,7 +252,7 @@ describe("ProductionPipeline", () => {
       ...brief,
       providers: {
         ...brief.providers,
-        director: "ollama-visual-director-v1",
+        director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
       },
       director: {
@@ -465,7 +465,7 @@ describe("ProductionPipeline", () => {
       ...brief,
       providers: {
         ...brief.providers,
-        director: "ollama-visual-director-v1",
+        director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
       },
       director: {

@@ -13,27 +13,6 @@ import type {
 
 const execFileAsync = promisify(execFile);
 const CURATED_MACOS_VOICES = new Set(["Tingting", "Meijia", "Sinji", "Sandy", "Shelley", "Reed"]);
-const KOKORO_PROFILES: StudioVoiceProfile[] = ([
-  ["zf_001", "女声 01", "female"],
-  ["zf_002", "女声 02", "female"],
-  ["zf_003", "女声 03", "female"],
-  ["zf_004", "女声 04", "female"],
-  ["zf_005", "女声 05", "female"],
-  ["zm_009", "男声 09", "male"],
-  ["zm_010", "男声 10", "male"],
-  ["zm_011", "男声 11", "male"],
-  ["zm_012", "男声 12", "male"],
-  ["zm_013", "男声 13", "male"],
-] satisfies Array<[string, string, "female" | "male"]>).map(([id, label, gender]) => ({
-  id: `kokoro:${id}`,
-  providerId: "kokoro-local-v1",
-  label,
-  locale: "zh-CN",
-  engine: "kokoro",
-  gender,
-  curated: true,
-  description: `中文神经音色 ${id}`,
-}));
 
 export interface CommandResult {
   stdout: string;
@@ -51,7 +30,6 @@ export interface LocalCapabilityServiceOptions {
   commandAvailable?: (command: string) => Promise<boolean>;
   runCommand?: (command: string, args: string[], execution?: CommandExecutionOptions) => Promise<CommandResult>;
   pathExists?: (target: string) => Promise<boolean>;
-  architecture?: NodeJS.Architecture;
 }
 
 export class LocalCapabilityService {
@@ -63,14 +41,12 @@ export class LocalCapabilityService {
     execution?: CommandExecutionOptions,
   ) => Promise<CommandResult>;
   private readonly pathExists: (target: string) => Promise<boolean>;
-  private readonly architecture: NodeJS.Architecture;
 
   constructor(private readonly options: LocalCapabilityServiceOptions) {
     this.environment = options.environment ?? process.env;
     this.commandAvailable = options.commandAvailable ?? defaultCommandAvailable;
     this.runCommand = options.runCommand ?? defaultRunCommand;
     this.pathExists = options.pathExists ?? defaultPathExists;
-    this.architecture = options.architecture ?? process.arch;
   }
 
   async listVoices(): Promise<StudioVoiceProfile[]> {
@@ -82,32 +58,22 @@ export class LocalCapabilityService {
         profiles = [];
       }
     }
-    const voiceRoot = this.voiceRuntimeRoot();
-    if (await this.pathExists(path.join(voiceRoot, "kokoro.ready.json"))) {
-      profiles.push(...KOKORO_PROFILES);
-    }
     return profiles;
   }
 
   async report(): Promise<StudioLocalCapability[]> {
-    const [python, ffmpeg, ffprobe, say, uv, docker, ollama, voices] = await Promise.all([
+    const [python, ffmpeg, ffprobe, say, docker, voices] = await Promise.all([
       this.commandAvailable("python3"),
       this.commandAvailable("ffmpeg"),
       this.commandAvailable("ffprobe"),
       this.commandAvailable("say"),
-      this.commandAvailable("uv"),
       this.commandAvailable("docker"),
-      this.commandAvailable("ollama"),
       this.listVoices(),
     ]);
-    const voiceRoot = this.voiceRuntimeRoot();
     const pythonRoot = this.pythonRuntimeRoot();
-    const [kokoroPython, kokoroReady, projectPython, projectPythonReady, qwenReady] = await Promise.all([
-      this.pathExists(path.join(voiceRoot, ".venv", "bin", "python")),
-      this.pathExists(path.join(voiceRoot, "kokoro.ready.json")),
+    const [projectPython, projectPythonReady] = await Promise.all([
       this.pathExists(path.join(pythonRoot, ".venv", "bin", "python")),
       this.pathExists(path.join(pythonRoot, "python.ready.json")),
-      this.pathExists(path.join(this.agentRuntimeRoot(), "qwen3.ready.json")),
     ]);
     return [
       runtimeCapability(
@@ -125,24 +91,6 @@ export class LocalCapabilityService {
         state: say && voices.length > 0 ? "ready" : "missing",
         evidence: say ? `发现 ${voices.length} 个中文音色` : "未发现 macOS say",
       },
-      {
-        id: "kokoro-local",
-        label: "Kokoro 本地神经配音",
-        category: "voice",
-        state: kokoroPython && kokoroReady ? "ready" : uv && this.architecture === "arm64" ? "available" : "missing",
-        evidence: kokoroPython && kokoroReady
-          ? "本地运行时与模型已通过烟雾测试"
-          : uv && this.architecture === "arm64"
-            ? "Apple Silicon 与 uv 已就绪，可自动搭建"
-            : "需要 Apple Silicon 与 uv",
-      },
-      {
-        id: "qwen3-local",
-        label: "Qwen3 本地选题 Agent",
-        category: "trend",
-        state: ollama && qwenReady ? "ready" : ollama ? "available" : "missing",
-        evidence: ollama && qwenReady ? "Qwen3 本地模型已通过结构化选题检查" : ollama ? "Ollama 已安装，模型尚未通过结构化选题检查" : "未发现 Ollama",
-      },
     ];
   }
 
@@ -157,35 +105,15 @@ export class LocalCapabilityService {
     await mkdir(previewRoot, { recursive: true });
     const rawPath = path.join(previewRoot, `${identity}.aiff`);
     try {
-      if (profile.engine === "macos") {
-        await this.runCommand("say", [
-          "-v",
-          profile.label,
-          "-r",
-          String(Math.round(input.rate)),
-          "-o",
-          rawPath,
-          withDirectedPauses(input.text, input.pauseScale),
-        ]);
-      } else {
-        await this.runCommand(
-          path.join(this.voiceRuntimeRoot(), ".venv", "bin", "python"),
-          [
-            path.join(this.options.repositoryRoot, "src", "video_factory", "kokoro_voice.py"),
-            "--text",
-            input.text,
-            "--voice",
-            profile.id.slice("kokoro:".length),
-            "--speed",
-            String(Math.max(0.65, Math.min(1.45, input.rate / 180))),
-            "--output",
-            rawPath,
-            "--runtime-root",
-            this.voiceRuntimeRoot(),
-          ],
-          { timeoutMs: 180_000 },
-        );
-      }
+      await this.runCommand("say", [
+        "-v",
+        profile.label,
+        "-r",
+        String(Math.round(input.rate)),
+        "-o",
+        rawPath,
+        withDirectedPauses(input.text, input.pauseScale),
+      ]);
       await this.runCommand("ffmpeg", [
         "-hide_banner",
         "-loglevel",
@@ -211,23 +139,12 @@ export class LocalCapabilityService {
     }
   }
 
-  private voiceRuntimeRoot(): string {
-    return this.environment.VIDEO_FACTORY_VOICE_RUNTIME
-      ? path.resolve(this.environment.VIDEO_FACTORY_VOICE_RUNTIME)
-      : path.join(this.options.repositoryRoot, ".local", "voice");
-  }
-
   private pythonRuntimeRoot(): string {
     return this.environment.VIDEO_FACTORY_PYTHON_RUNTIME
       ? path.resolve(this.environment.VIDEO_FACTORY_PYTHON_RUNTIME)
       : path.join(this.options.repositoryRoot, ".local", "python");
   }
 
-  private agentRuntimeRoot(): string {
-    return this.environment.VIDEO_FACTORY_AGENT_RUNTIME
-      ? path.resolve(this.environment.VIDEO_FACTORY_AGENT_RUNTIME)
-      : path.join(this.options.repositoryRoot, ".local", "agent");
-  }
 }
 
 export function parseMacOSVoiceList(output: string): StudioVoiceProfile[] {
