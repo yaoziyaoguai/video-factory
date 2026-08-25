@@ -36,6 +36,7 @@ describe("TrendGateway", () => {
     assert.deepEqual(services.map((service) => service.id), ["trendradar", "newsnow", "dailyhot", "rsshub"]);
     assert.equal(services[2]?.itemCount, 1);
     assert.equal(services[0]?.lastCheckedAt, "2026-08-24T08:00:00.000Z");
+    assert.equal(services[0]?.baseUrl, "http://127.0.0.1:8080");
   });
 
   it("falls back to valid local URLs when environment values are blank", async () => {
