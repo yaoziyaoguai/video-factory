@@ -87,7 +87,7 @@ export interface StudioTrendService {
   label: string;
   kind: "collector" | "aggregator" | "feed";
   status: StudioTrendServiceState;
-  baseUrl: string;
+  baseUrl?: string;
   lastCheckedAt: string;
   itemCount?: number;
   detail?: string;

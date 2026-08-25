@@ -59,6 +59,22 @@ describe("TrendGateway", () => {
     assert.equal(requested.some((url) => url.startsWith("http://127.0.0.1:4444/")), true);
   });
 
+  it("does not expose internal container hostnames in service status", async () => {
+    const gateway = new TrendGateway({
+      environment: {
+        VIDEO_FACTORY_TRENDRADAR_URL: "http://vf-trendradar:8080",
+        VIDEO_FACTORY_NEWSNOW_URL: "http://vf-newsnow:4444",
+        VIDEO_FACTORY_DAILYHOT_URL: "http://vf-dailyhot:6688",
+        VIDEO_FACTORY_RSSHUB_URL: "http://vf-rsshub:1200",
+      },
+      fetcher: async () => jsonResponse({ code: 200, status: "success", data: [], items: [] }),
+    });
+
+    const services = await gateway.listServices();
+
+    assert.equal(services.every((service) => service.baseUrl === undefined), true);
+  });
+
   it("marks an unreachable service stopped without hiding healthy services", async () => {
     const fetcher: typeof fetch = async (input) => {
       if (String(input).includes(":1200/")) throw new Error("connection refused");

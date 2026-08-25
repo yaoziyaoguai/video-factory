@@ -239,7 +239,8 @@ function serviceKind(kind: StudioTrendService["kind"]): string {
   return kind === "collector" ? "采集与历史" : kind === "feed" ? "中文 RSS 路由" : "榜单接口";
 }
 
-function browserServiceUrl(value: string): string | undefined {
+function browserServiceUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
   try {
     const url = new URL(value);
     if (url.hostname === "host.docker.internal" || url.hostname.startsWith("vf-")) return undefined;

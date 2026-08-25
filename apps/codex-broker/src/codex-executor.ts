@@ -298,8 +298,8 @@ export class CodexExecutor {
 // --ignore-user-config、--ignore-rules、--output-schema、--json、-o/--output-last-message、
 // --skip-git-repo-check、--disable。即使任务数据发生提示注入，模型也拿不到 shell 工具；
 // read-only sandbox 仍作为第二道操作系统边界保留。
-// 不覆盖 CODEX_HOME（vf-codex 的登录态在 ~/.codex，隔离会破坏鉴权），隔离由
-// --ignore-user-config/--ignore-rules/--ephemeral 与每任务临时 -C 目录共同完成；
+// CODEX_HOME 由 systemd unit 指向隔离目录，auth.json 是指向真实登录态的只读链接；
+// argv 只负责 --ignore-user-config/--ignore-rules/--ephemeral 与每任务临时 -C 目录；
 // 该目录刻意不是 Git 仓库，必须显式跳过 repo 信任检查，否则 codex exec 以退出码 1 拒绝运行。
 export function buildCodexExecCommand(input: {
   codexBin: string;

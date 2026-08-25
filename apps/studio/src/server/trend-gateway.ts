@@ -183,10 +183,19 @@ function statusFrom(
     label: definition.label,
     kind: definition.kind,
     status,
-    baseUrl: definition.baseUrl,
+    ...(browserVisibleBaseUrl(definition.baseUrl) ? { baseUrl: definition.baseUrl } : {}),
     lastCheckedAt,
     detail,
   };
+}
+
+function browserVisibleBaseUrl(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname;
+    return hostname !== "host.docker.internal" && !hostname.startsWith("vf-");
+  } catch {
+    return false;
+  }
 }
 
 async function responseItemCount(response: Response): Promise<number | undefined> {
