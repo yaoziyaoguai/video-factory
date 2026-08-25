@@ -105,7 +105,7 @@ export function ResourcesPage() {
         <div>
           <p className="eyebrow">创作资源库</p>
           <h1>素材与模型</h1>
-          <p className="page-summary">热点、声音、画面与本地引擎，在这里形成一套有来源、有成本边界的创作语汇。</p>
+          <p className="page-summary">热点、声音、画面与制作服务，在这里形成一套有来源、有成本边界的创作语汇。</p>
         </div>
         <button className="icon-button" type="button" onClick={() => void load()} title="刷新能力状态">
           <RefreshCw aria-hidden="true" size={17} />
@@ -113,20 +113,20 @@ export function ResourcesPage() {
       </header>
 
       <section className="resource-masthead" aria-label="能力概览" data-tour="resource-overview">
-        <div><span>本地热点服务</span><strong>{serviceError ? "—" : `${readyServices}/${services.length}`}</strong></div>
+        <div><span>热点服务</span><strong>{serviceError ? "—" : `${readyServices}/${services.length}`}</strong></div>
         <div><span>画面来源</span><strong>{providerError ? "—" : readyVisual}</strong></div>
-        <div><span>本地运行时</span><strong>{capabilities.filter((item) => item.state === "ready").length}</strong></div>
+        <div><span>运行时</span><strong>{capabilities.filter((item) => item.state === "ready").length}</strong></div>
         <div className="resource-budget"><Gauge aria-hidden="true" size={17} /><span>经济日更估算</span><strong>¥0</strong></div>
       </section>
 
       <section className="resource-section signal-desk" data-tour="resource-trends">
-        <ResourceHeading eyebrow="信号台" title="热点接入" meta="最近一次本地采集 · 来源可追溯" />
+        <ResourceHeading eyebrow="信号台" title="热点接入" meta="最近一次采集 · 来源可追溯" />
         {trendError ? <ResourceError title="热点源状态未知" message={trendError} retry={load} /> : null}
-        {serviceError ? <ResourceError title="本地服务状态未知" message={serviceError} retry={load} /> : null}
+        {serviceError ? <ResourceError title="热点服务状态未知" message={serviceError} retry={load} /> : null}
         {!trendError ? (
           <div className="signal-desk-layout">
-            <div className="service-ledger" aria-label="本地热点服务">
-              {trendLoading ? <div className="region-loading">正在读取本地热点...</div> : services.map((service) => (
+            <div className="service-ledger" aria-label="热点服务">
+              {trendLoading ? <div className="region-loading">正在读取热点...</div> : services.map((service) => (
                 <article key={service.id} className="service-row">
                   <span className={`service-light is-${service.status}`} />
                   <div><strong>{service.label}</strong><small>{serviceKind(service.kind)}</small></div>
@@ -173,7 +173,7 @@ export function ResourcesPage() {
       </section>
 
       <section className="resource-section foundation-registry">
-        <ResourceHeading eyebrow="本地制作" title="制作底座" meta="脚本、渲染与机器质检" />
+        <ResourceHeading eyebrow="生产底座" title="制作能力" meta="脚本、渲染与机器质检" />
         {providerLoading ? <div className="region-loading">正在读取生产底座...</div> : providerError ? null : (
           <div className="foundation-grid" aria-label="制作能力列表">
             {foundationProviders.map((provider) => <FoundationProvider key={provider.id} provider={provider} />)}

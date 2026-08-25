@@ -40,9 +40,9 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
           <button className="tour-help-button" type="button" onClick={() => setGuideOpen(true)} title="打开创作向导" aria-label="打开创作向导">
             <CircleHelp aria-hidden="true" size={17} /><span>创作向导</span>
           </button>
-          <div className="studio-status" title={healthy ? "本地引擎就绪" : "运行环境状态"}>
+          <div className="studio-status" title={healthy ? "制作服务就绪" : "运行环境状态"}>
             <span className={`health-dot ${healthy === false ? "health-down" : ""}`} />
-            <span>{healthy === undefined ? "检查引擎" : healthy ? "本地引擎就绪" : "引擎需要检查"}</span>
+            <span>{healthy === undefined ? "检查服务" : healthy ? "制作服务就绪" : "服务需要检查"}</span>
           </div>
           {onLogout ? <button className="studio-logout" type="button" onClick={() => void onLogout()} title="退出登录"><LogOut aria-hidden="true" size={16} /><span>{username ?? "退出登录"}</span></button> : null}
         </div>
@@ -53,7 +53,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
           <strong>VideoFactory</strong>
         </NavLink>
         <div className="mobile-header-actions">
-          <span className={`health-dot ${healthy === false ? "health-down" : ""}`} title={healthy ? "本地引擎就绪" : "运行环境状态"} />
+          <span className={`health-dot ${healthy === false ? "health-down" : ""}`} title={healthy ? "制作服务就绪" : "运行环境状态"} />
           <button className="tour-help-button" type="button" onClick={() => setGuideOpen(true)} title="打开创作向导" aria-label="打开创作向导"><CircleHelp aria-hidden="true" size={19} /></button>
           {onLogout ? <button className="tour-help-button" type="button" onClick={() => void onLogout()} title="退出登录" aria-label="退出登录"><LogOut aria-hidden="true" size={18} /></button> : null}
         </div>

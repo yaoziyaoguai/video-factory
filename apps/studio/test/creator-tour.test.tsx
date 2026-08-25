@@ -94,6 +94,7 @@ describe("creator tour routing", () => {
     expect(driverMock.instance.drive).toHaveBeenCalledOnce();
 
     const config = driverMock.factory.mock.calls[0]?.[0];
+    expect(config?.steps?.some((step) => step.element === '[data-tour="candidate-adopt"]:not(:disabled)')).toBe(false);
     (config?.onDestroyed as (() => void) | undefined)?.();
     expect(window.localStorage.getItem(CREATOR_TOUR_STORAGE_KEY)).toBe(CREATOR_TOUR_VERSION);
     unmount();
@@ -195,7 +196,8 @@ describe("creator tour routing", () => {
     fireEvent.click(screen.getByRole("button", { name: "完整带我做一条" }));
 
     const config = driverMock.factory.mock.calls[0]?.[0];
-    expect(config?.steps?.some((step) => step.element === '[data-tour="candidate-adopt"]')).toBe(true);
+    const adoptionStep = config?.steps?.find((step) => step.element === '[data-tour="candidate-adopt"]:not(:disabled)');
+    expect(adoptionStep).toMatchObject({ advanceOnClick: true, disableActiveInteraction: false });
   });
 
   it("adds an explicit early-exit control to every tour popover", async () => {

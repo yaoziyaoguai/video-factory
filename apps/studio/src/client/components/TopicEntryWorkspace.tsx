@@ -107,7 +107,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             <div>
               <p className="eyebrow">{mode === "trend" ? "实时信号" : "系列策划"}</p>
               <h2>{mode === "trend" ? "热点候选收件箱" : "系列选题台"}</h2>
-              <p>{mode === "trend" ? "信号已经过本地 Agent 转译；先筛选，再核验证据。" : "每个系列保留长期承诺，策划器只生成接下来的可制作集数。"}</p>
+              <p>{mode === "trend" ? "信号已经过选题 Agent 转译；先筛选，再核验证据。" : "每个系列保留长期承诺，策划器只生成接下来的可制作集数。"}</p>
             </div>
             {mode === "trend" ? (
               <div className="trend-refresh-status" aria-label="热点更新状态">

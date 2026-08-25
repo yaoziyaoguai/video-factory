@@ -25,7 +25,7 @@ export function useCreatorTour(): CreatorTourControls {
     }
     let lifecycle: { tour: Driver; rememberCompletion: boolean };
     const tour = driver({
-      steps,
+      steps: availableTourSteps(steps),
       animate: !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches,
       duration: 240,
       overlayColor: "#11131a",
@@ -103,6 +103,29 @@ export function useCreatorTour(): CreatorTourControls {
   }, []);
 
   return { startFullTour, startPageTour };
+}
+
+const FUTURE_PRODUCTION_TARGETS = new Set([
+  '[data-tour="opportunity-focus"]',
+  '[data-tour="visual-direction"]',
+  '[data-tour="director-panel"]',
+  '[data-tour="create-production"]',
+  '[data-tour="production-recipes"]',
+  '[data-tour="production-start"]',
+]);
+
+// 候选被采用后，后续生产控件才会出现；其余不存在的控件直接跳过，避免空状态导览长时间卡住。
+function availableTourSteps(steps: DriveStep[]): DriveStep[] {
+  const canAdopt = document.querySelector('[data-tour="candidate-adopt"]:not(:disabled)') !== null;
+  const hasProductionContext = canAdopt
+    || document.querySelector('[data-tour="opportunity-focus"], [data-tour="create-production"], [data-tour="production-recipes"]') !== null;
+
+  return steps.filter((step) => {
+    if (!step.element || typeof step.element !== "string") return true;
+    if (step.element === '[data-tour="candidate-adopt"]:not(:disabled)') return canAdopt;
+    if (FUTURE_PRODUCTION_TARGETS.has(step.element) && hasProductionContext) return true;
+    return document.querySelector(step.element) !== null;
+  });
 }
 
 function addEarlyExitControl(popover: PopoverDOM, { driver: tour }: { driver: Driver }): void {

@@ -17,13 +17,16 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
     },
   },
   {
-    element: '[data-tour="candidate-adopt"]',
-    waitForElement: 60_000,
+    element: '[data-tour="candidate-adopt"]:not(:disabled)',
+    advanceOnClick: true,
+    disableActiveInteraction: false,
+    waitForElement: 5_000,
     popover: {
       title: "采用候选，才会进入制作区",
       description: "先看原始来源与证据门禁。常规候选可直接采用；敏感候选需要确认核验，证据不足的高风险热点会被阻止。",
       side: "top",
       align: "end",
+      showButtons: ["previous", "close"],
     },
   },
   {
@@ -80,7 +83,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
     waitForElement: 8_000,
     popover: {
       title: "先选经济边界",
-      description: "“经济日更”优先使用免费本地能力。付费模型配方会明确展示镜头数与预算上限。",
+      description: "“经济日更”优先使用已就绪的低成本能力。付费模型配方会明确展示镜头数与预算上限。",
       side: "right",
       align: "start",
     },
@@ -261,11 +264,11 @@ const RUN_TOUR_STEPS: DriveStep[] = [
 const RESOURCE_TOUR_STEPS: DriveStep[] = [
   {
     element: '[data-tour="resource-overview"]',
-    popover: { title: "先看哪些能力已经可用", description: "这里汇总本地热点、画面来源、运行时和默认预算。", side: "bottom", align: "start" },
+    popover: { title: "先看哪些能力已经可用", description: "这里汇总热点服务、画面来源、运行时和默认预算。", side: "bottom", align: "start" },
   },
   {
     element: '[data-tour="resource-trends"]',
-    popover: { title: "热点必须有来源", description: "本地热点服务、最近采集结果和原始链接都在这里；离线或需要配置会明确标出。", side: "top", align: "center" },
+    popover: { title: "热点必须有来源", description: "热点采集服务、最近采集结果和原始链接都在这里；离线或需要配置会明确标出。", side: "top", align: "center" },
   },
   {
     element: '[data-tour="resource-voice"]',
@@ -273,7 +276,7 @@ const RESOURCE_TOUR_STEPS: DriveStep[] = [
   },
   {
     element: '[data-tour="resource-visual"]',
-    popover: { title: "画面来源可以替换", description: "免费图库、本地能力和付费生成模型都通过统一能力接口接入；不可用项会说明配置要求。", side: "top", align: "center" },
+    popover: { title: "画面来源可以替换", description: "免费图库、自托管能力和付费生成模型都通过统一能力接口接入；不可用项会说明配置要求。", side: "top", align: "center" },
   },
 ];
 
