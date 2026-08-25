@@ -558,6 +558,7 @@ body { background: var(--canvas); }
 .studio-v3 .provider-ledger-row { grid-template-columns: 38px minmax(210px, 1.2fr) minmax(150px, .7fr) 56px 68px 76px 24px; }
 .studio-v3 .provider-default { min-height: 28px; padding: 0 8px; color: var(--blue); background: #ffffff; border: 1px solid #b9c9e5; font: inherit; font-size: 9px; font-weight: 750; cursor: pointer; }
 .studio-v3 .provider-default.is-active { color: var(--green); background: var(--green-soft); border-color: #bfdece; cursor: default; }
+.studio-v3 .provider-default.is-static { display: grid; place-items: center; color: var(--muted); background: #f4f5f1; border-color: var(--line); cursor: default; }
 
 .studio-v3 .production-strip-review > a { padding: 7px 10px; color: #ffffff; background: var(--accent); border-radius: 5px; }
 .studio-v3 .project-edition { grid-template-columns: repeat(4, minmax(0, 1fr)); }

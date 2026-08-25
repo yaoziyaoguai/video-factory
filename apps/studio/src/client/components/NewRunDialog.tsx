@@ -128,12 +128,16 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   useEffect(() => {
     if (!open) return;
     const initialVoiceDirection = initialValues?.voiceDirection ?? creatorSettings?.voiceDirection ?? defaultVoiceDirection(providers);
+    const requestedVoiceProvider = providerForVoiceProfile(initialVoiceDirection.profileId);
+    const readyVoiceProvider = providers.find((provider) => {
+      return provider.id === requestedVoiceProvider && provider.capability === "voice.synthesize" && provider.available && provider.kind !== "test";
+    });
     const initialBindings = {
       ...defaults,
       ...(initialValues?.providers ?? {}),
       assets: "ai-shot-router-v1",
       director: defaults.director ?? "",
-      voice: providerForVoiceProfile(initialVoiceDirection.profileId),
+      voice: readyVoiceProvider?.id ?? defaults.voice ?? "",
     };
     const initialRecipe = initialValues?.economics?.recipeId ?? creatorSettings?.defaultRecipeId ?? "economy-daily";
     const recipe = RECIPES.find((item) => item.id === initialRecipe) ?? RECIPES[0]!;
@@ -510,7 +514,7 @@ function sourceIdsForRecipe(
   const free = providers
     .filter((provider) => isAssetSource(provider) && provider.available && provider.billing !== "metered")
     .map((provider) => provider.id);
-  if (preferredId && providers.some((provider) => provider.id === preferredId && provider.available) && !free.includes(preferredId)) {
+  if (preferredId && providers.some((provider) => provider.id === preferredId && provider.available && isAssetSource(provider)) && !free.includes(preferredId)) {
     free.push(preferredId);
   }
   if (recipe.maxPaidShots === 0) return free;

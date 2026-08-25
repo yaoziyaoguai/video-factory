@@ -351,7 +351,32 @@ describe("Studio client", () => {
     expect(screen.getByRole("checkbox", { name: /Pexels 视频/ })).toBeChecked();
   });
 
-  it("blocks dispatch when only a test provider can serve a required node", () => {
+  it("never treats the shot router itself as a director asset source", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<NewRunDialog
+      open
+      providers={providers}
+      creatorSettings={{
+        voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+        defaultRecipeId: "economy-daily",
+        defaultAssetProviderId: "ai-shot-router-v1",
+      }}
+      onClose={() => undefined}
+      onSubmit={onSubmit}
+    />);
+
+    await user.type(screen.getByLabelText("视频标题"), "素材路由不能把自己当素材");
+    await user.type(screen.getByLabelText("内容角度"), "验证编排器与素材来源的边界");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      director: expect.objectContaining({ assetProviderIds: ["local-editorial-v1"] }),
+    }));
+  });
+
+  it("blocks dispatch and shows voice as unconfigured when only a test provider can serve it", async () => {
     const providersWithTestVoice = [
       ...providers.filter((provider) => provider.capability !== "voice.synthesize"),
       { id: "ffmpeg-tone-test-v1", capability: "voice.synthesize", label: "测试音轨", available: true, kind: "test" as const },
@@ -361,6 +386,8 @@ describe("Studio client", () => {
     expect(screen.queryByRole("option", { name: "测试音轨" })).not.toBeInTheDocument();
     expect(screen.getByText(/缺少正式生产能力：配音/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    await userEvent.setup().click(screen.getByText("高级：逐节点配置"));
+    expect(screen.getByRole("button", { name: /04配音声音导演未配置/ })).toBeInTheDocument();
   });
 
   it("traps dialog focus and restores the trigger after closing", async () => {

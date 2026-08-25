@@ -677,6 +677,7 @@ describe("Creative OS", () => {
     const user = userEvent.setup();
     const readyProviders = [
       ...providers,
+      { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" as const, status: "ready" as const, billing: "free" as const },
       { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external" as const, status: "ready" as const, billing: "free" as const },
     ];
     const initialSettings = {
@@ -704,5 +705,9 @@ describe("Creative OS", () => {
     expect(pexelsRow).not.toBeNull();
     await user.click(within(pexelsRow!).getByRole("button", { name: "设为默认" }));
     expect(update).toHaveBeenLastCalledWith({ defaultAssetProviderId: "pexels-stock-v1" });
+    const routerRow = screen.getByText("AI 逐镜路由").closest("article");
+    expect(routerRow).not.toBeNull();
+    expect(within(routerRow!).queryByRole("button", { name: "设为默认" })).not.toBeInTheDocument();
+    expect(within(routerRow!).getByText("系统路由")).toBeInTheDocument();
   });
 });

@@ -131,7 +131,9 @@ export function ResourcesPage() {
                   <span className={`service-light is-${service.status}`} />
                   <div><strong>{service.label}</strong><small>{serviceKind(service.kind)}</small></div>
                   <span>{service.itemCount === undefined ? SERVICE_STATUS[service.status] : `${service.itemCount} 条`}</span>
-                  <a href={service.baseUrl} target="_blank" rel="noreferrer" title={`打开 ${service.label}`}><ArrowUpRight aria-hidden="true" size={15} /></a>
+                  {service.baseUrl
+                    ? <a href={service.baseUrl} target="_blank" rel="noreferrer" title={`打开 ${service.label}`}><ArrowUpRight aria-hidden="true" size={15} /></a>
+                    : <span aria-label={`${service.label} 未配置地址`} />}
                 </article>
               ))}
               {trendSources.filter((source) => source.status !== "ready").slice(0, 3).map((source) => (
@@ -169,7 +171,7 @@ export function ResourcesPage() {
         <ResourceHeading eyebrow="画面资源" title="生成与素材模型" meta={`${readyVisual} 项可直接生产`} />
         {providerLoading ? <div className="region-loading">正在读取画面能力...</div> : providerError ? (
           <ResourceError title="画面能力状态未知" message={providerError} retry={load} />
-        ) : <div className="provider-ledger">{visualProviders.map((provider) => <ProviderRow key={provider.id} provider={provider} isDefault={settings?.defaultAssetProviderId === provider.id} onSetDefault={(providerId) => void saveDefaults({ defaultAssetProviderId: providerId }, `${provider.label} 已设为默认画面能力。`)} />)}</div>}
+        ) : <div className="provider-ledger">{visualProviders.map((provider) => <ProviderRow key={provider.id} provider={provider} isDefault={settings?.defaultAssetProviderId === provider.id} canSetDefault={provider.id !== "ai-shot-router-v1"} onSetDefault={(providerId) => void saveDefaults({ defaultAssetProviderId: providerId }, `${provider.label} 已设为默认画面能力。`)} />)}</div>}
       </section>
 
       <section className="resource-section foundation-registry">
@@ -192,7 +194,7 @@ function ResourceError({ title, message, retry }: { title: string; message: stri
   return <div className="page-error" role="alert"><AlertCircle aria-hidden="true" size={18} /><span><strong>{title}</strong>{message}</span><button className="icon-button" type="button" onClick={() => void retry()} title="重试"><RefreshCw aria-hidden="true" size={17} /></button></div>;
 }
 
-function ProviderRow({ provider, isDefault, onSetDefault }: { provider: StudioProvider; isDefault: boolean; onSetDefault: (providerId: string) => void }) {
+function ProviderRow({ provider, isDefault, canSetDefault, onSetDefault }: { provider: StudioProvider; isDefault: boolean; canSetDefault: boolean; onSetDefault: (providerId: string) => void }) {
   const ready = isProductionReady(provider);
   const Icon = provider.billing === "free" ? Film : Sparkles;
   return (
@@ -202,7 +204,7 @@ function ProviderRow({ provider, isDefault, onSetDefault }: { provider: StudioPr
       <span>{(provider.modes ?? []).slice(0, 3).join(" · ")}</span>
       <strong className={provider.billing === "metered" ? "is-metered" : ""}>{billingLabel(provider.billing)}</strong>
       <span className={ready ? "ledger-state is-ready" : "ledger-state"}>{ready ? "可用" : provider.status === "planned" ? "规划中" : "需要配置"}</span>
-      {ready ? <button className={isDefault ? "provider-default is-active" : "provider-default"} type="button" disabled={isDefault} onClick={() => onSetDefault(provider.id)}>{isDefault ? "制作默认" : "设为默认"}</button> : <span />}
+      {ready && canSetDefault ? <button className={isDefault ? "provider-default is-active" : "provider-default"} type="button" disabled={isDefault} onClick={() => onSetDefault(provider.id)}>{isDefault ? "制作默认" : "设为默认"}</button> : ready ? <span className="provider-default is-static">系统路由</span> : <span />}
       {provider.docsUrl ? <a href={provider.docsUrl} target="_blank" rel="noreferrer" title={`${provider.label} 文档`}><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
     </article>
   );
