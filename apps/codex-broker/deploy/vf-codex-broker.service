@@ -8,6 +8,8 @@ Type=simple
 User=vf-codex
 Group=vf-bridge
 Environment=HOME=/home/vf-codex
+# 运行状态写入独立目录；auth.json 是指向真实登录凭据的只读符号链接。
+Environment=CODEX_HOME=/var/lib/video-factory-codex/codex-home
 # Codex CLI 的 shebang 是 #!/usr/bin/env node：broker 自带的 node symlink 与
 # vf-codex 自有 node22 必须排在系统路径之前。
 Environment=PATH=/opt/video-factory/codex-broker/bin:/home/vf-codex/.local/node22/bin:/home/vf-codex/.local/bin:/usr/local/bin:/usr/bin:/bin
@@ -23,9 +25,8 @@ Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20
 
-# 加固：保留网络出口；auth 所在的 ~/.codex 只读，仅放行 sessions/log 两个 CLI 写入目录
-# （无法在本仓库证实的妥协：首次真实任务后须用 journalctl -u vf-codex-broker 验证；
-# 若 CLI 触及其他 home 写入，unit 会以 EPERM 响亮失败，而非静默降级）。
+# 加固：保留网络出口；真实 ~/.codex 全部只读。Codex 的可变状态只写入
+# /var/lib/video-factory-codex/codex-home，应用容器无法挂载该目录。
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
@@ -43,7 +44,7 @@ LockPersonality=true
 SystemCallArchitectures=native
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/var/lib/video-factory-codex /run/video-factory-codex /home/vf-codex/.codex/sessions /home/vf-codex/.codex/log
+ReadWritePaths=/var/lib/video-factory-codex /run/video-factory-codex
 
 [Install]
 WantedBy=multi-user.target

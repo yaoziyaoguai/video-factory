@@ -9,6 +9,7 @@ broker_user=vf-codex
 broker_group=vf-bridge
 broker_gid="${CODEX_BRIDGE_GID:-22002}"
 broker_home=/home/vf-codex
+broker_codex_home=/var/lib/video-factory-codex/codex-home
 broker_socket=/run/video-factory-codex/worker.sock
 env_file=/etc/video-factory/codex-broker.env
 unit_source="$repository_root/apps/codex-broker/deploy/vf-codex-broker.service"
@@ -41,6 +42,7 @@ fi
 
 install -d -m 0755 "$broker_root" "$broker_root/bin" "$broker_root/releases"
 install -d -o "$broker_user" -g "$broker_group" -m 0750 /var/lib/video-factory-codex /var/lib/video-factory-codex/workspace
+install -d -o "$broker_user" -g "$broker_group" -m 0750 "$broker_codex_home"
 install -d -o "$broker_user" -g "$broker_user" -m 0700 "$broker_home/.codex" \
   "$broker_home/.codex/sessions" "$broker_home/.codex/log"
 
@@ -72,6 +74,18 @@ done
 
 if ! runuser -u "$broker_user" -- env HOME="$broker_home" PATH="$codex_path" "$codex_bin" login status >/dev/null 2>&1; then
   fail "Codex 未登录。请操作员手动执行：runuser -u $broker_user -- env HOME=$broker_home PATH=$codex_path $codex_bin login ，完成后重跑本脚本。本脚本不会自动复制任何 auth。"
+fi
+
+# 可变 CLI 状态与真实登录目录分离。只链接 auth，不复制凭据，也不向容器暴露该目录。
+codex_auth="$broker_home/.codex/auth.json"
+[[ -f "$codex_auth" ]] || fail "Codex 登录状态存在但未找到 $codex_auth；请重新登录后重试。"
+if [[ -e "$broker_codex_home/auth.json" && ! -L "$broker_codex_home/auth.json" ]]; then
+  fail "$broker_codex_home/auth.json 已存在且不是符号链接；拒绝覆盖。"
+fi
+ln -sfn "$codex_auth" "$broker_codex_home/auth.json"
+chown -h "$broker_user:$broker_group" "$broker_codex_home/auth.json"
+if ! runuser -u "$broker_user" -- env HOME="$broker_home" CODEX_HOME="$broker_codex_home" PATH="$codex_path" "$codex_bin" login status >/dev/null 2>&1; then
+  fail "隔离 CODEX_HOME 无法读取登录状态；请检查 $broker_codex_home/auth.json。"
 fi
 
 ln -sfn "$node_bin" "$broker_root/bin/node"

@@ -11,6 +11,8 @@ GitHub Actions ── test / build / audit / Docker build
     ▼
 Alibaba ECS
     ├── systemd: vf-codex-broker（vf-codex 用户，/opt/video-factory/codex-broker）
+    │     ├── CODEX_HOME=/var/lib/video-factory-codex/codex-home（可变运行状态）
+    │     ├── auth.json -> /home/vf-codex/.codex/auth.json（只读链接）
     │     └── /run/video-factory-codex/worker.sock 0660 vf-codex:vf-bridge
     ├── Nginx :80/:443
     │     └── video.wangjinkun333.me -> 127.0.0.1:4317
@@ -66,7 +68,7 @@ bash scripts/setup-codex-broker-host.sh
 
 超时与重放策略：broker 任务 deadline 为 285s，先于容器侧统一的 330s 客户端 deadline；任务一旦被受理，任何执行期失败（含超时）都返回 422 且客户端不重放——任务至多执行一次。仅连接层 ENOENT/ECONNREFUSED 与 503（队列满/停机，未受理）会做有界重试。已知边界：排队等待计入客户端 330s deadline，饱和时客户端可能放弃仍在排队的任务（同样不重放）。
 
-systemd 加固说明：`~/.codex` 只读，仅 `sessions`、`log` 两个子目录可写（配合 `--ephemeral`）。这是未在本仓库证实的妥协——首次真实任务后用 `journalctl -u vf-codex-broker` 确认；若 CLI 触及其他 home 写入，unit 会以 EPERM 响亮失败而非静默降级。
+systemd 加固说明：真实 `~/.codex` 整体只读；Broker 使用 `/var/lib/video-factory-codex/codex-home` 保存 CLI 可变状态，其中 `auth.json` 只是指向真实登录凭据的只读链接。应用容器只挂载 `/run/video-factory-codex`，无法读取两个 Codex Home。首次真实任务后仍需用 `journalctl -u vf-codex-broker` 确认运行状态。
 
 ## 3. 首次启动与健康检查
 
@@ -93,6 +95,8 @@ sudo nginx -t
 sudo systemctl reload nginx
 sudo certbot --nginx -d video.wangjinkun333.me
 ```
+
+中国大陆 ECS 的域名必须先完成有效 ICP 备案。若 HTTP 返回 `Server: Beaver` 和 `Non-compliance ICP Filing`，这是阿里云在实例外层的合规拦截，Nginx 与 Certbot 都无法绕过；完成备案后再签发证书。
 
 最后验证：
 
