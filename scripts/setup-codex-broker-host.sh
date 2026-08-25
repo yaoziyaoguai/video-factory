@@ -75,6 +75,7 @@ if ! runuser -u "$broker_user" -- env HOME="$broker_home" PATH="$codex_path" "$c
 fi
 
 ln -sfn "$node_bin" "$broker_root/bin/node"
+install -d -m 0755 "$(dirname "$env_file")"
 env_tmp="$(mktemp)"
 {
   grep -v '^CODEX_BIN=' "$env_file" 2>/dev/null || true
