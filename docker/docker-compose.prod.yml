@@ -1,3 +1,5 @@
+name: video-factory
+
 services:
   app:
     image: video-factory:candidate

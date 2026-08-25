@@ -5,7 +5,7 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 environment_file="${VIDEO_FACTORY_ENV_FILE:-$repository_root/.env.docker.prod}"
 public_health_url="${PUBLIC_HEALTH_URL:-}"
 container="video_factory_prod"
-compose=(docker compose --env-file "$environment_file" -f "$repository_root/docker/docker-compose.prod.yml")
+compose=(docker compose --project-name video-factory --env-file "$environment_file" -f "$repository_root/docker/docker-compose.prod.yml")
 
 if [[ ! -f "$environment_file" ]]; then
   echo "Missing production environment file: $environment_file" >&2
