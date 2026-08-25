@@ -51,6 +51,7 @@ export interface LocalCapabilityServiceOptions {
   commandAvailable?: (command: string) => Promise<boolean>;
   runCommand?: (command: string, args: string[], execution?: CommandExecutionOptions) => Promise<CommandResult>;
   pathExists?: (target: string) => Promise<boolean>;
+  architecture?: NodeJS.Architecture;
 }
 
 export class LocalCapabilityService {
@@ -62,12 +63,14 @@ export class LocalCapabilityService {
     execution?: CommandExecutionOptions,
   ) => Promise<CommandResult>;
   private readonly pathExists: (target: string) => Promise<boolean>;
+  private readonly architecture: NodeJS.Architecture;
 
   constructor(private readonly options: LocalCapabilityServiceOptions) {
     this.environment = options.environment ?? process.env;
     this.commandAvailable = options.commandAvailable ?? defaultCommandAvailable;
     this.runCommand = options.runCommand ?? defaultRunCommand;
     this.pathExists = options.pathExists ?? defaultPathExists;
+    this.architecture = options.architecture ?? process.arch;
   }
 
   async listVoices(): Promise<StudioVoiceProfile[]> {
@@ -126,10 +129,10 @@ export class LocalCapabilityService {
         id: "kokoro-local",
         label: "Kokoro 本地神经配音",
         category: "voice",
-        state: kokoroPython && kokoroReady ? "ready" : uv && process.arch === "arm64" ? "available" : "missing",
+        state: kokoroPython && kokoroReady ? "ready" : uv && this.architecture === "arm64" ? "available" : "missing",
         evidence: kokoroPython && kokoroReady
           ? "本地运行时与模型已通过烟雾测试"
-          : uv && process.arch === "arm64"
+          : uv && this.architecture === "arm64"
             ? "Apple Silicon 与 uv 已就绪，可自动搭建"
             : "需要 Apple Silicon 与 uv",
       },

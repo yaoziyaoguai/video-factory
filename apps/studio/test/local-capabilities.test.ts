@@ -55,6 +55,7 @@ describe("local capability discovery", () => {
       repositoryRoot: "/repo",
       workspaceRoot,
       environment: { SECRET_TOKEN: "must-not-leak" },
+      architecture: "arm64",
       commandAvailable: async (command) => ["python3", "ffmpeg", "ffprobe", "say", "uv"].includes(command),
       runCommand: async (command, args) => {
         if (command === "say" && args[0] === "-v") return { stdout: voiceOutput, stderr: "" };
@@ -71,6 +72,20 @@ describe("local capability discovery", () => {
     assert.equal(report.find((item) => item.id === "kokoro-local")?.state, "available");
     assert.equal(voices.length, 4);
     assert.doesNotMatch(JSON.stringify({ report, voices }), /must-not-leak/);
+  });
+
+  it("does not offer the Apple Silicon Kokoro bootstrap on x64", async () => {
+    const service = new LocalCapabilityService({
+      repositoryRoot: "/repo",
+      workspaceRoot: "/workspace",
+      architecture: "x64",
+      commandAvailable: async (command) => command === "uv",
+      pathExists: async () => false,
+    });
+
+    const report = await service.report();
+
+    assert.equal(report.find((item) => item.id === "kokoro-local")?.state, "missing");
   });
 
   it("honors verified project runtime directories from configuration", async () => {
