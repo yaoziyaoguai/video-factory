@@ -1,0 +1,162 @@
+import type {
+  StudioCandidateInbox,
+  StudioCandidateAdoptionInput,
+  StudioCandidateInboxItem,
+  StudioCandidateInboxQuery,
+  StudioCandidateVerification,
+  StudioOpportunity,
+  StudioOpportunityEvidence,
+  StudioOpportunityInput,
+  StudioTrendCandidate,
+} from "../shared/api.js";
+import type { OpportunityStudio } from "./opportunity-studio.js";
+import type { SeriesStudio } from "./series-studio.js";
+import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
+import { classifyTopicCategory, topicFreshness, topicRiskLevel } from "./topic-taxonomy.js";
+
+export interface CandidateInboxStudioOptions {
+  trends: { listCandidates(): Promise<StudioTrendCandidate[]> };
+  series: Pick<SeriesStudio, "listCandidates" | "advanceEpisode">;
+  opportunities: Pick<OpportunityStudio, "list" | "create">;
+  now?: () => Date;
+}
+
+export class CandidateInboxStudio {
+  private readonly now: () => Date;
+
+  constructor(private readonly options: CandidateInboxStudioOptions) {
+    this.now = options.now ?? (() => new Date());
+  }
+
+  async list(query: StudioCandidateInboxQuery): Promise<StudioCandidateInbox> {
+    const includeTrends = !query.origins?.length || query.origins.includes("trend");
+    const includeSeries = !query.origins?.length || query.origins.includes("series");
+    const [trendCandidates, seriesCandidates, adoptedOpportunities] = await Promise.all([
+      includeTrends ? this.options.trends.listCandidates() : Promise.resolve([]),
+      includeSeries ? this.options.series.listCandidates() : Promise.resolve([]),
+      this.options.opportunities.list(),
+    ]);
+    const adoptedIds = new Set(adoptedOpportunities.map((item) => item.id));
+    const available = [
+      ...trendCandidates.map((candidate) => this.normalizeTrend(candidate)),
+      ...seriesCandidates,
+    ].filter((candidate) => !adoptedIds.has(candidate.id));
+    const facets = buildFacets(available);
+    const filtered = available
+      .filter((item) => !query.origins?.length || query.origins.includes(item.origin))
+      .filter((item) => !query.categories?.length || query.categories.includes(item.category))
+      .filter((item) => !query.platforms?.length || query.platforms.includes(item.platform))
+      .sort((left, right) => right.score.final - left.score.final || left.title.localeCompare(right.title, "zh-CN"));
+    const limit = Math.max(1, Math.min(200, Math.floor(query.limit ?? 100)));
+    return { items: filtered.slice(0, limit), facets, generatedAt: this.now().toISOString() };
+  }
+
+  async adopt(candidateId: string, adoptionInput: StudioCandidateAdoptionInput = {}): Promise<StudioOpportunity> {
+    const origins = candidateId.startsWith("series-") ? ["series" as const] : ["trend" as const];
+    const candidate = (await this.list({ origins, limit: 200 })).items.find((item) => item.id === candidateId);
+    if (!candidate) throw new StudioNotFoundError("这条候选已被采用或已经失效，请刷新候选收件箱。");
+    if (candidate.verification.status === "blocked") {
+      throw new StudioConflictError(candidate.verification.reasons[0] ?? "这条候选尚未达到可采用的证据标准。");
+    }
+    if (candidate.verification.status === "review_required" && !adoptionInput.verificationConfirmed) {
+      throw new StudioConflictError("请先查看原始证据并确认核验，再采用这条候选。");
+    }
+    const { final: _final, ...scores } = candidate.score;
+    const input: StudioOpportunityInput = {
+      candidateId: candidate.id,
+      origin: candidate.origin,
+      category: candidate.category,
+      title: candidate.title,
+      platform: candidate.platform,
+      track: candidate.track,
+      audience: candidate.audience,
+      painPoint: candidate.painPoint,
+      hook: candidate.hook,
+      evidence: candidate.evidence,
+      scores,
+      verification: candidate.verification.status === "review_required"
+        ? { ...candidate.verification, status: "verified", reasons: ["已由创作者查看原始证据并确认核验。"] }
+        : candidate.verification,
+      ...(candidate.visualPlan ? { visualPlan: candidate.visualPlan } : {}),
+      ...(candidate.seriesId ? { seriesId: candidate.seriesId } : {}),
+      ...(candidate.seriesName ? { seriesName: candidate.seriesName } : {}),
+      ...(candidate.episodeNumber ? { episodeNumber: candidate.episodeNumber } : {}),
+    };
+    const opportunity = await this.options.opportunities.create(input);
+    if (candidate.origin === "series" && candidate.seriesId && candidate.episodeNumber) {
+      await this.options.series.advanceEpisode(candidate.seriesId, candidate.episodeNumber);
+    }
+    return opportunity;
+  }
+
+  private normalizeTrend(candidate: StudioTrendCandidate): StudioCandidateInboxItem {
+    const collectedAt = candidate.evidence
+      .map((item) => item.collectedAt)
+      .filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)))
+      .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
+    return {
+      ...candidate,
+      origin: "trend",
+      category: candidate.category ?? classifyTopicCategory(candidate.title, candidate.track),
+      freshness: candidate.freshness ?? topicFreshness(collectedAt, this.now()),
+      risk: candidate.risk ?? topicRiskLevel(candidate.title),
+      verification: candidateVerification(
+        candidate.risk ?? topicRiskLevel(candidate.title),
+        candidate.evidence,
+      ),
+    };
+  }
+}
+
+function candidateVerification(
+  risk: StudioCandidateInboxItem["risk"],
+  evidence: StudioCandidateInboxItem["evidence"],
+): StudioCandidateVerification {
+  const independentSources = new Set(evidence.map(evidenceIdentity).filter(Boolean)).size;
+  const linkedSources = new Set(
+    evidence.filter((item) => item.evidenceUrl).map(evidenceIdentity).filter(Boolean),
+  ).size;
+  if (risk === "high" && (independentSources < 2 || linkedSources < 2)) {
+    return {
+      status: "blocked",
+      independentSources,
+      requiredSources: 2,
+      reasons: ["高风险热点至少需要 2 个独立来源和可打开的原始链接。"],
+    };
+  }
+  if (risk === "high" || risk === "review") {
+    return {
+      status: "review_required",
+      independentSources,
+      requiredSources: risk === "high" ? 2 : 1,
+      reasons: ["采用前需要人工查看原始来源，确认标题与开场没有超出证据。"],
+    };
+  }
+  return {
+    status: "ready",
+    independentSources,
+    requiredSources: 1,
+    reasons: ["常规风险候选，可进入制作区继续核验。"],
+  };
+}
+
+function evidenceIdentity(evidence: StudioOpportunityEvidence): string {
+  if (evidence.evidenceUrl) {
+    try {
+      return new URL(evidence.evidenceUrl).hostname.toLowerCase().replace(/^(?:www|m)\./, "");
+    } catch {
+      // 非标准链接继续使用发布平台，不能退回聚合器名称制造虚假的独立性。
+    }
+  }
+  return evidence.platform.trim().toLowerCase() || evidence.source.trim().toLowerCase();
+}
+
+function buildFacets(items: StudioCandidateInboxItem[]): StudioCandidateInbox["facets"] {
+  const facets: StudioCandidateInbox["facets"] = { total: items.length, origins: {}, categories: {}, platforms: {} };
+  for (const item of items) {
+    facets.origins[item.origin] = (facets.origins[item.origin] ?? 0) + 1;
+    facets.categories[item.category] = (facets.categories[item.category] ?? 0) + 1;
+    facets.platforms[item.platform] = (facets.platforms[item.platform] ?? 0) + 1;
+  }
+  return facets;
+}

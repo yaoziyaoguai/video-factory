@@ -13,6 +13,7 @@ FONT_CANDIDATES = [
     Path("/System/Library/Fonts/STHeiti Light.ttc"),
     Path("/System/Library/Fonts/PingFang.ttc"),
     Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    Path("/usr/share/fonts/noto/NotoSansCJK-Regular.ttc"),
     Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
 ]
 
@@ -39,6 +40,13 @@ def write_render_manifest(
         "requires_ffmpeg": True,
         "ffmpeg_available": ffmpeg_available(),
         "visual_quality": "preview",
+        "aigc": {
+            "explicit_label": "AI 辅助创作",
+            "visible_from_seconds": 0,
+            "visible_scene_position": 1,
+            "implicit_metadata": "AI-generated or AI-assisted content; creator=VideoFactory",
+            "platform_declaration_required": True,
+        },
         "output_file": str(output_dir / "final.mp4"),
         "slides": [
             {
@@ -69,6 +77,27 @@ def attach_asset_plan(manifest_path: Path, asset_plan: Optional[dict]) -> None:
     )
 
 
+def attach_voiceover_plan(manifest_path: Path, voiceover_plan: Optional[dict]) -> None:
+    if voiceover_plan is None:
+        return
+    track_path = Path(str(voiceover_plan.get("track_path", "")))
+    if not track_path.is_file():
+        raise RuntimeError(f"Voiceover plan track does not exist: {track_path}")
+    durations = {
+        int(scene["position"]): float(scene["duration"])
+        for scene in voiceover_plan.get("scenes", [])
+    }
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    positions = {int(slide["position"]) for slide in manifest["slides"]}
+    if set(durations) != positions:
+        raise RuntimeError("Voiceover plan scene positions do not match the render manifest.")
+    for slide in manifest["slides"]:
+        slide["duration"] = durations[int(slide["position"])]
+    manifest["duration_target"] = round(sum(durations.values()), 3)
+    manifest["voiceover_plan"] = voiceover_plan
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def render_script_video(
     manifest_path: Path,
     output_dir: Path,
@@ -82,6 +111,8 @@ def render_script_video(
     concat_path = write_concat_file(output_dir / "concat.txt", frames)
     output_file = Path(str(manifest["output_file"]))
 
+    audio_input = render_audio_input(manifest)
+    temporary_output = output_file.with_name(f"{output_file.stem}.partial{output_file.suffix}")
     command = [
         "ffmpeg",
         "-y",
@@ -91,10 +122,11 @@ def render_script_video(
         "0",
         "-i",
         str(concat_path),
-        "-f",
-        "lavfi",
-        "-i",
-        "anullsrc=channel_layout=stereo:sample_rate=44100",
+        *audio_input,
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
         "-vf",
         f"fps=30,format=yuv420p,scale={width}:{height}",
         "-shortest",
@@ -108,11 +140,13 @@ def render_script_video(
         "aac",
         "-b:a",
         "96k",
+        "-metadata",
+        "comment=AI-generated or AI-assisted content; creator=VideoFactory",
         "-movflags",
         "+faststart",
-        str(output_file),
+        str(temporary_output),
     ]
-    subprocess.run(command, check=True, capture_output=True, text=True)
+    run_atomic_ffmpeg(command, temporary_output, output_file)
 
     manifest["rendered"] = True
     manifest["visual_quality"] = manifest.get("visual_quality", "preview")
@@ -148,7 +182,7 @@ def render_asset_video(
     scene_commands = []
     for scene in manifest["slides"]:
         asset = scene_assets[int(scene["position"])]
-        caption_style = "minimal" if asset.get("provider") == "local" else "subtitle"
+        caption_style = "editorial" if asset.get("provider") == "local" else "subtitle"
         caption_path = write_caption_overlay(manifest, scene, captions_dir, width, height, style=caption_style)
         clip_path, command = render_scene_clip(scene, asset, caption_path, clips_dir, width, height)
         clips.append(clip_path)
@@ -156,6 +190,8 @@ def render_asset_video(
 
     clips_concat_path = write_clip_concat_file(output_dir / "clips.txt", clips)
     output_file = Path(str(manifest["output_file"]))
+    audio_input = render_audio_input(manifest)
+    temporary_output = output_file.with_name(f"{output_file.stem}.partial{output_file.suffix}")
     final_command = [
         "ffmpeg",
         "-y",
@@ -165,10 +201,11 @@ def render_asset_video(
         "0",
         "-i",
         str(clips_concat_path),
-        "-f",
-        "lavfi",
-        "-i",
-        "anullsrc=channel_layout=stereo:sample_rate=44100",
+        *audio_input,
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
         "-shortest",
         "-c:v",
         "copy",
@@ -176,14 +213,17 @@ def render_asset_video(
         "aac",
         "-b:a",
         "96k",
+        "-metadata",
+        "comment=AI-generated or AI-assisted content; creator=VideoFactory",
         "-movflags",
         "+faststart",
-        str(output_file),
+        str(temporary_output),
     ]
-    subprocess.run(final_command, check=True, capture_output=True, text=True)
+    run_atomic_ffmpeg(final_command, temporary_output, output_file)
 
     manifest["rendered"] = True
-    manifest["visual_quality"] = "stock_asset"
+    providers = {str(asset.get("provider", "unknown")) for asset in asset_plan.get("scene_assets", [])}
+    manifest["visual_quality"] = "local_editorial" if providers == {"local"} else "stock_asset"
     manifest["asset_plan"] = asset_plan
     manifest["captions_dir"] = str(captions_dir)
     manifest["clips_dir"] = str(clips_dir)
@@ -213,12 +253,45 @@ def write_caption_overlay(
 
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     caption_path = captions_dir / f"scene_{scene['position']:02d}.png"
-    if style == "minimal":
+    draw = ImageDraw.Draw(image)
+    margin = max(56, width // 13)
+    if style == "editorial":
+        label_font = load_font(ImageFont, max(24, width // 38))
+        body_font, body_lines = fit_multiline(
+            draw,
+            scene["text"],
+            ImageFont,
+            max(40, width // 24),
+            30,
+            width - margin * 2,
+            int(height * 0.19),
+            line_spacing=12,
+        )
+        body_height = multiline_height(draw, body_lines, body_font, 12)
+        body_y = height - max(116, height // 16) - body_height
+        label_y = body_y - max(54, height // 42)
+        panel_top = max(int(height * 0.69), label_y - 42)
+        draw.rectangle((0, panel_top, width, height), fill=(7, 12, 23, 224))
+        draw.text(
+            (margin, label_y),
+            f"旁白  {int(scene['position']):02d}/{len(manifest['slides']):02d}",
+            font=label_font,
+            fill=(250, 204, 21, 235),
+        )
+        draw_stroked_multiline(
+            draw,
+            body_lines,
+            (margin, body_y),
+            body_font,
+            "#ffffff",
+            line_spacing=12,
+            stroke_width=2,
+            stroke_fill=(0, 0, 0, 180),
+        )
+        draw_aigc_badge(draw, ImageFont, width, scene)
         image.save(caption_path)
         return caption_path
 
-    draw = ImageDraw.Draw(image)
-    margin = max(56, width // 13)
     title_font = load_font(ImageFont, max(24, width // 42))
     body_font, body_lines = fit_multiline(
         draw,
@@ -253,6 +326,7 @@ def write_caption_overlay(
         stroke_width=4,
         stroke_fill=(2, 6, 23, 210),
     )
+    draw_aigc_badge(draw, ImageFont, width, scene)
     image.save(caption_path)
     return caption_path
 
@@ -285,7 +359,9 @@ def render_scene_clip(
         (
             f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
             f"crop={width}:{height},setsar=1[bg];"
-            "[bg][1:v]overlay=0:0,format=yuv420p[v]"
+            f"[bg][1:v]overlay=0:0,"
+            f"drawbox=x=0:y={height - 10}:w='min(iw,iw*t/{duration:.3f})':h=10:"
+            "color=white@0.72:t=fill,format=yuv420p[v]"
         ),
         "-map",
         "[v]",
@@ -361,12 +437,35 @@ def write_scene_frames(manifest: dict, frames_dir: Path, width: int, height: int
             width - margin * 2,
             line_spacing=12,
         )
+        draw_aigc_badge(draw, ImageFont, width, scene)
 
         frame_path = frames_dir / f"scene_{scene['position']:02d}.png"
         image.save(frame_path)
         frames.append((frame_path, float(scene["duration"])))
 
     return frames
+
+
+def draw_aigc_badge(draw, ImageFont, width: int, scene: dict) -> None:
+    if int(scene["position"]) != 1:
+        return
+    text = "AI 辅助创作"
+    font = load_font(ImageFont, max(22, width // 44))
+    box = draw.textbbox((0, 0), text, font=font)
+    padding_x = max(11, width // 90)
+    padding_y = max(7, width // 150)
+    x = max(34, width // 28)
+    y = max(34, width // 28)
+    badge_width = box[2] - box[0] + padding_x * 2
+    badge_height = box[3] - box[1] + padding_y * 2
+    draw.rounded_rectangle(
+        (x, y, x + badge_width, y + badge_height),
+        radius=max(4, width // 180),
+        fill=(12, 17, 24, 218),
+        outline=(255, 255, 255, 90),
+        width=max(1, width // 540),
+    )
+    draw.text((x + padding_x, y + padding_y - box[1]), text, font=font, fill=(255, 255, 255, 245))
 
 
 def draw_multiline(draw, text: str, position: tuple[int, int], font, fill: str, max_width: int, line_spacing: int) -> None:
@@ -537,6 +636,28 @@ def escape_concat_path(path: Path) -> str:
     return str(path.resolve()).replace("'", "\\'")
 
 
+def render_audio_input(manifest: dict) -> list[str]:
+    voiceover_plan = manifest.get("voiceover_plan")
+    if voiceover_plan:
+        return ["-i", str(voiceover_plan["track_path"])]
+    return [
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=channel_layout=stereo:sample_rate=44100",
+    ]
+
+
+def run_atomic_ffmpeg(command: list[str], temporary_output: Path, output_file: Path) -> None:
+    temporary_output.unlink(missing_ok=True)
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+        temporary_output.replace(output_file)
+    except Exception:
+        temporary_output.unlink(missing_ok=True)
+        raise
+
+
 def render_job_manifest(
     job_id: int,
     script_path: Path,
@@ -544,12 +665,20 @@ def render_job_manifest(
     dry_run: bool = False,
     require_assets: bool = False,
     asset_plan_path: Optional[Path] = None,
+    voiceover_plan_path: Optional[Path] = None,
+    resolution: str = "1080x1920",
 ) -> Path:
     output_dir = workspace / "renders" / str(job_id)
-    manifest_path = write_render_manifest(job_id, script_path, output_dir)
+    manifest_path = write_render_manifest(job_id, script_path, output_dir, resolution=resolution)
     resolved_asset_plan_path = asset_plan_path or default_asset_plan_path(workspace, job_id)
     asset_plan = load_asset_plan(resolved_asset_plan_path) if resolved_asset_plan_path.exists() else None
+    voiceover_plan = (
+        json.loads(voiceover_plan_path.read_text(encoding="utf-8"))
+        if voiceover_plan_path is not None and voiceover_plan_path.exists()
+        else None
+    )
     attach_asset_plan(manifest_path, asset_plan)
+    attach_voiceover_plan(manifest_path, voiceover_plan)
     if dry_run:
         return manifest_path
     if require_assets and asset_plan is None:
@@ -562,9 +691,9 @@ def render_job_manifest(
     if not ffmpeg_available():
         raise RuntimeError("FFmpeg and ffprobe are required for MP4 rendering. Install them, then rerun render-job.")
     if asset_plan is not None:
-        render_asset_video(manifest_path, output_dir, asset_plan)
+        render_asset_video(manifest_path, output_dir, asset_plan, resolution=resolution)
         return manifest_path
-    render_script_video(manifest_path, output_dir)
+    render_script_video(manifest_path, output_dir, resolution=resolution)
     return manifest_path
 
 

@@ -13,7 +13,15 @@ from video_factory.database import Store
 from video_factory.domain import Scene
 from video_factory.exporter import write_review_package, write_script
 from video_factory.script_service import draft_script, draft_script_from_values
-from video_factory.stock_assets import api_headers, download_headers, media_file_score, prepare_scene_assets, query_for_scene
+from video_factory.stock_assets import (
+    api_headers,
+    download_headers,
+    media_file_score,
+    prepare_scene_assets,
+    query_for_scene,
+    resolve_director_stock_query,
+    write_response_body,
+)
 
 
 def run_cli(args):
@@ -408,6 +416,8 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(sum(1 for line in concat_lines if line.startswith("file ")), 5)
             self.assertTrue(manifest["rendered"])
             self.assertEqual(manifest["probe"]["streams"][0]["height"], 1920)
+            self.assertEqual(manifest["aigc"]["explicit_label"], "AI 辅助创作")
+            self.assertIn("comment=AI-generated or AI-assisted content; creator=VideoFactory", manifest["ffmpeg_command"])
 
     def test_prepare_assets_writes_license_aware_asset_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -517,6 +527,44 @@ class PipelineTest(unittest.TestCase):
 
         self.assertEqual(query_for_scene(scene), "busy ordinary person, decision stress, vertical")
 
+    def test_stock_asset_queries_translate_known_chinese_topics_into_shot_intent(self):
+        hook = Scene(
+            position=1,
+            narration="下班后先停十分钟。",
+            duration=5,
+            visual_strategy="stock",
+            visual_prompt="vertical short video hook, emotional close-up, 下班后的十分钟",
+            search_terms=["下班后的十分钟", "reaction emotion"],
+        )
+        action = Scene(
+            position=4,
+            narration="写下一个更小的选择。",
+            duration=5,
+            visual_strategy="stock",
+            visual_prompt="person taking notes, practical takeaway, 下班后的十分钟",
+            search_terms=["下班后的十分钟", "takeaway notes"],
+        )
+
+        self.assertEqual(query_for_scene(hook), "asian office worker tired after work")
+        self.assertEqual(query_for_scene(action), "asian person journaling at home")
+
+    def test_director_stock_query_keeps_ai_intent_but_localizes_known_chinese_topics(self):
+        scene = Scene(
+            position=3,
+            narration="真正难退出的，是大脑还在等待下一条工作消息。",
+            duration=5,
+            visual_strategy="stock",
+            visual_prompt="conceptual illustration of hidden reason",
+            search_terms=["关掉工作消息后，大脑为什么还停不下来"],
+        )
+
+        resolved = resolve_director_stock_query(
+            scene,
+            "conceptual illustration of hidden reason behind 关掉工作消息后，大脑为什么还停不下来",
+        )
+
+        self.assertEqual(resolved, "asian person quiet reflection night")
+
     def test_stock_asset_requests_include_provider_safe_headers(self):
         headers = api_headers({"Authorization": "test-key"})
 
@@ -537,6 +585,24 @@ class PipelineTest(unittest.TestCase):
             media_file_score(2160, 3840, 13_000_000),
         )
 
+    def test_stock_asset_download_has_a_total_deadline_and_removes_partial_file(self):
+        class TrickleResponse:
+            def read1(self, _size):
+                return b"partial"
+
+        ticks = iter((0.0, 0.0, 2.0, 6.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "partial.mp4"
+            with self.assertRaisesRegex(RuntimeError, "timed out after 5s"):
+                write_response_body(
+                    TrickleResponse(),
+                    output,
+                    max_bytes=1024,
+                    max_seconds=5,
+                    clock=lambda: next(ticks),
+                )
+            self.assertFalse(output.exists())
+
     def test_life_avoidance_script_carries_director_constraints(self):
         draft = draft_script_from_values(
             title="普通人做决定前最该避开的 3 个坑",
@@ -547,6 +613,19 @@ class PipelineTest(unittest.TestCase):
 
         self.assertIn("art_direction", draft.platform_notes)
         self.assertEqual([scene.visual_strategy for scene in draft.scenes], ["stock", "local", "local", "local", "local"])
+        self.assertLessEqual(max(len(scene.narration) for scene in draft.scenes), 32)
+        self.assertIn("普通人做决定前最该避开的 3 个坑", draft.scenes[0].narration)
+
+    def test_general_short_script_keeps_narration_within_a_spoken_length_budget(self):
+        draft = draft_script_from_values(
+            title="准备跳槽前，先检查这 3 件事",
+            angle="低风险、可收藏的实用清单",
+            niche_slug="career-avoidance",
+            audience="有决策压力的普通上班族",
+            duration_target=24,
+        )
+
+        self.assertIn("准备跳槽前", draft.scenes[0].narration)
         self.assertLessEqual(max(len(scene.narration) for scene in draft.scenes), 32)
 
     def test_prepare_assets_generates_local_cards_for_local_strategy(self):

@@ -1,0 +1,118 @@
+.driver-popover.video-factory-tour {
+  width: min(340px, calc(100vw - 28px));
+  max-width: min(340px, calc(100vw - 28px));
+  padding: 0;
+  overflow: hidden;
+  color: #f4f3ed;
+  background: #191c22;
+  border: 1px solid #3a3e47;
+  border-top: 4px solid #ef5b3f;
+  border-radius: 8px;
+  box-shadow: 0 24px 64px rgb(0 0 0 / 34%);
+}
+
+.video-factory-tour .driver-popover-title {
+  padding: 19px 20px 0;
+  color: #ffffff;
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
+  font-size: 19px;
+  font-weight: 720;
+  line-height: 1.45;
+}
+
+.video-factory-tour .driver-popover-description {
+  padding: 9px 20px 18px;
+  color: #bfc4ce;
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.video-factory-tour .driver-popover-footer {
+  min-height: 54px;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 10px 20px;
+  background: #22262e;
+  border-top: 1px solid #353a44;
+}
+
+.video-factory-tour .driver-popover-progress-text {
+  color: #8f96a3;
+  font-family: "Manrope Variable", sans-serif;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.video-factory-tour .driver-popover-navigation-btns {
+  gap: 6px;
+}
+
+.video-factory-tour .tour-end-button {
+  min-height: 32px;
+  margin: 0 0 0 auto;
+  padding: 0 4px;
+  color: #aeb4bf;
+  background: transparent;
+  border: 0;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.video-factory-tour .tour-end-button:hover {
+  color: #ffffff;
+}
+
+.video-factory-tour button.driver-popover-prev-btn,
+.video-factory-tour button.driver-popover-next-btn {
+  min-height: 34px;
+  margin: 0;
+  padding: 0 12px;
+  color: #eef0f5;
+  text-shadow: none;
+  background: #313640;
+  border: 1px solid #454b57;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.video-factory-tour button.driver-popover-next-btn {
+  color: #ffffff;
+  background: #2e5ee8;
+  border-color: #2e5ee8;
+}
+
+.video-factory-tour button.driver-popover-prev-btn:hover,
+.video-factory-tour button.driver-popover-next-btn:hover {
+  filter: brightness(1.08);
+}
+
+.video-factory-tour .driver-popover-close-btn {
+  top: 9px;
+  right: 9px;
+  width: 32px;
+  height: 32px;
+  color: #9da4b0;
+  font-size: 21px;
+}
+
+.video-factory-tour .driver-popover-close-btn:hover {
+  color: #ffffff;
+}
+
+.video-factory-tour.driver-popover-arrow-side-left .driver-popover-arrow { border-left-color: #191c22; }
+.video-factory-tour.driver-popover-arrow-side-right .driver-popover-arrow { border-right-color: #191c22; }
+.video-factory-tour.driver-popover-arrow-side-top .driver-popover-arrow { border-top-color: #191c22; }
+.video-factory-tour.driver-popover-arrow-side-bottom .driver-popover-arrow { border-bottom-color: #191c22; }
+
+@media (max-width: 700px) {
+  .driver-popover.video-factory-tour { width: min(326px, calc(100vw - 20px)); }
+  .video-factory-tour .driver-popover-title { padding: 17px 17px 0; font-size: 17px; }
+  .video-factory-tour .driver-popover-description { padding: 8px 17px 15px; line-height: 1.65; }
+  .video-factory-tour .driver-popover-footer { flex-wrap: wrap; padding-left: 17px; }
+  .video-factory-tour .driver-popover-progress-text { flex: 1 0 auto; }
+  .video-factory-tour .tour-end-button { margin-left: 0; }
+}

@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
@@ -17,6 +18,58 @@ PROVIDER_KEY_ENV = {
     "pixabay": "PIXABAY_API_KEY",
 }
 MAX_ASSET_DOWNLOAD_BYTES = 12_000_000
+MAX_ASSET_DOWNLOAD_SECONDS = 45
+
+TOPIC_SHOT_QUERIES = (
+    (("下班", "上班", "职场", "工作", "加班"), (
+        "asian office worker tired after work",
+        "asian office worker commute home evening",
+        "asian person quiet reflection night",
+        "asian person journaling at home",
+    )),
+    (("篮球", "男篮", "女篮", "冠军", "世锦赛"), (
+        "asian athlete basketball close up",
+        "basketball team training gym",
+        "athlete focused before game",
+        "basketball coach writing strategy",
+    )),
+    (("台风", "天气", "暴雨", "高温", "降温"), (
+        "storm clouds city close up",
+        "asian city rain street",
+        "weather radar storm map",
+        "person checking weather phone",
+    )),
+    (("经济", "数据", "消费", "就业", "房价"), (
+        "asian city business people close up",
+        "people shopping asian city",
+        "financial data screen close up",
+        "person planning budget notebook",
+    )),
+    (("开学", "学生", "学校", "考试", "教育"), (
+        "asian student school close up",
+        "students walking campus",
+        "student studying alone library",
+        "student writing study plan",
+    )),
+    (("乡村", "农村", "留守", "回家"), (
+        "asian family reunion close up",
+        "chinese rural village daily life",
+        "quiet village home evening",
+        "family preparing dinner home",
+    )),
+    (("美食", "餐厅", "面", "小吃", "咖啡"), (
+        "asian street food close up",
+        "chinese restaurant daily life",
+        "chef preparing food detail",
+        "person writing food review",
+    )),
+    (("睡眠", "失眠", "睡前", "熬夜", "疲惫"), (
+        "asian person tired close up",
+        "quiet bedroom night routine",
+        "person reflecting by window night",
+        "person writing bedtime journal",
+    )),
+)
 
 PROVIDER_LICENSE_NOTE = {
     "pexels": "Pexels free stock license; review current provider license before publishing.",
@@ -55,7 +108,7 @@ def search_scene_asset_candidates(
     }
     for scene in scenes:
         query = query_for_scene(scene)
-        if scene.visual_strategy == "local":
+        if provider == "local" or scene.visual_strategy == "local":
             candidates = [local_card_candidate(scene, query)]
         else:
             candidates = search_stock_assets(
@@ -91,7 +144,7 @@ def prepare_scene_assets(
 
     for scene in scenes:
         query = query_for_scene(scene)
-        if scene.visual_strategy == "local":
+        if provider == "local" or scene.visual_strategy == "local":
             actual_path = write_local_scene_card(scene, asset_dir / f"scene_{scene.position:02d}_local_card.png")
             scene_assets.append(
                 SceneAsset(
@@ -148,6 +201,156 @@ def prepare_scene_assets(
             raise RuntimeError(f"No downloadable {provider} {media_type} asset found for scene {scene.position}: {query}.{detail}")
 
     return write_asset_plan(default_asset_plan_path(workspace, job_id), job_id, scene_assets)
+
+
+def prepare_routed_scene_assets(
+    job_id: int,
+    scenes: Iterable[Scene],
+    workspace: Path,
+    director_plan: dict,
+    media_type: str = "video",
+    limit: int = 3,
+) -> Path:
+    asset_dir = workspace / "assets" / f"job-{job_id}"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    shots = director_plan.get("shots")
+    if not isinstance(shots, list):
+        raise ValueError("Director plan shots must be an array")
+    routes = {int(shot["scenePosition"]): shot for shot in shots if isinstance(shot, dict)}
+    scene_assets: List[SceneAsset] = []
+    routing_records = []
+
+    for scene in scenes:
+        route = routes.get(scene.position)
+        if route is None:
+            raise ValueError(f"Director plan is missing scene {scene.position}")
+        preferred_id = required_route_text(route, "preferredProviderId", scene.position)
+        alternatives = route.get("alternativeProviderIds", [])
+        if not isinstance(alternatives, list) or any(not isinstance(item, str) or not item.strip() for item in alternatives):
+            raise ValueError(f"Director plan alternatives are invalid for scene {scene.position}")
+        director_query = required_route_text(route, "query", scene.position)
+        provider_ids = [preferred_id, *[item.strip() for item in alternatives if item.strip() != preferred_id]]
+        actual_asset = None
+        actual_provider_id = None
+        generation_pending = is_generative_provider(preferred_id)
+        errors = []
+
+        for provider_id in provider_ids:
+            try:
+                if is_generative_provider(provider_id):
+                    actual_asset = materialize_local_scene(scene, director_query, asset_dir)
+                    actual_provider_id = "local-editorial-v1"
+                    break
+                provider = stock_provider_name(provider_id)
+                if provider == "local":
+                    actual_asset = materialize_local_scene(scene, director_query, asset_dir)
+                    actual_provider_id = provider_id
+                    break
+                stock_query = resolve_director_stock_query(scene, director_query)
+                candidates = search_stock_assets(provider=provider, query=stock_query, media_type=media_type, limit=limit)
+                actual_asset = materialize_first_candidate(scene, candidates, asset_dir)
+                if actual_asset is not None:
+                    actual_provider_id = provider_id
+                    break
+                errors.append(f"{provider_id}: no downloadable candidates")
+            except (RuntimeError, ValueError) as error:
+                errors.append(f"{provider_id}: {error}")
+
+        if actual_asset is None or actual_provider_id is None:
+            raise RuntimeError(f"No director-selected asset could be prepared for scene {scene.position}: {'; '.join(errors)}")
+        scene_assets.append(actual_asset)
+        routing_records.append({
+            "scene_position": scene.position,
+            "preferred_provider_id": preferred_id,
+            "actual_provider_id": actual_provider_id,
+            "actual_provider": actual_asset.provider,
+            "fallback_used": actual_provider_id != preferred_id and not generation_pending,
+            "generation_pending": generation_pending,
+            "director_query": director_query,
+            "query": actual_asset.query,
+            "rationale": str(route.get("rationale") or ""),
+        })
+
+    plan_path = write_asset_plan(default_asset_plan_path(workspace, job_id), job_id, scene_assets)
+    payload = load_asset_plan(plan_path)
+    payload["director_routing"] = routing_records
+    payload["director_plan_version"] = str(director_plan.get("version") or "video-factory/director-plan-v1")
+    plan_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return plan_path
+
+
+def materialize_local_scene(scene: Scene, query: str, asset_dir: Path) -> SceneAsset:
+    actual_path = write_local_scene_card(scene, asset_dir / f"scene_{scene.position:02d}_local_card.png")
+    return SceneAsset(
+        scene_position=scene.position,
+        provider="local",
+        asset_id=f"scene-{scene.position:02d}-card",
+        media_type="image",
+        width=1080,
+        height=1920,
+        duration=float(scene.duration),
+        local_path=str(actual_path),
+        source_url="local://video-factory/card",
+        creator="VideoFactory",
+        license_note=PROVIDER_LICENSE_NOTE["local"],
+        query=query,
+    )
+
+
+def materialize_first_candidate(
+    scene: Scene,
+    candidates: Iterable[StockAssetCandidate],
+    asset_dir: Path,
+) -> Optional[SceneAsset]:
+    for candidate in candidates:
+        try:
+            actual_path = materialize_candidate(candidate, asset_dir / local_filename(scene.position, candidate))
+        except RuntimeError:
+            continue
+        return SceneAsset(
+            scene_position=scene.position,
+            provider=candidate.provider,
+            asset_id=candidate.asset_id,
+            media_type=candidate.media_type,
+            width=candidate.width,
+            height=candidate.height,
+            duration=scene.duration,
+            local_path=str(actual_path),
+            source_url=candidate.source_url,
+            creator=candidate.creator,
+            license_note=candidate.license_note,
+            query=candidate.query,
+        )
+    return None
+
+
+def stock_provider_name(provider_id: str) -> str:
+    providers = {
+        "local-editorial-v1": "local",
+        "pexels-stock-v1": "pexels",
+        "pixabay-stock-v1": "pixabay",
+    }
+    provider = providers.get(provider_id)
+    if provider is None:
+        raise ValueError(f"Unsupported director asset provider: {provider_id}")
+    return provider
+
+
+def is_generative_provider(provider_id: str) -> bool:
+    return provider_id in {
+        "seedance-video-v1",
+        "wan-video-v1",
+        "kling-video-v1",
+        "hailuo-video-v1",
+        "vidu-video-v1",
+    }
+
+
+def required_route_text(route: dict, field: str, scene_position: int) -> str:
+    value = route.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Director plan {field} is invalid for scene {scene_position}")
+    return value.strip()
 
 
 def search_stock_assets(
@@ -406,6 +609,9 @@ def candidate_to_dict(candidate: StockAssetCandidate) -> dict:
 
 
 def query_for_scene(scene: Scene) -> str:
+    semantic_query = semantic_query_for_scene(scene)
+    if semantic_query:
+        return semantic_query
     visual_query = english_query_from_visual_prompt(scene.visual_prompt)
     if visual_query:
         return visual_query
@@ -417,6 +623,38 @@ def query_for_scene(scene: Scene) -> str:
         if term.strip():
             return term.strip()[:100]
     return scene.visual_prompt.strip()
+
+
+def resolve_director_stock_query(scene: Scene, director_query: str) -> str:
+    contextual_scene = Scene(
+        position=scene.position,
+        narration=scene.narration,
+        duration=scene.duration,
+        visual_strategy=scene.visual_strategy,
+        visual_prompt=director_query,
+        search_terms=[*scene.search_terms, scene.visual_prompt, scene.narration],
+    )
+    semantic_query = semantic_query_for_scene(contextual_scene)
+    if semantic_query:
+        return semantic_query
+    return english_query_from_visual_prompt(director_query) or query_for_scene(scene)
+
+
+def semantic_query_for_scene(scene: Scene) -> str:
+    source = " ".join([scene.visual_prompt, *scene.search_terms])
+    lowered = source.lower()
+    search_terms = {term.strip().lower() for term in scene.search_terms}
+    shot_index = 0
+    if any(marker in lowered for marker in ("daily life", "relatable problem")) or search_terms.intersection({"scene", "setting", "list"}):
+        shot_index = 1
+    elif any(marker in lowered for marker in ("conceptual", "hidden reason")) or search_terms.intersection({"insight", "mechanism", "turn", "explain"}):
+        shot_index = 2
+    elif any(marker in lowered for marker in ("taking notes", "practical takeaway")) or search_terms.intersection({"takeaway", "action", "tip"}):
+        shot_index = 3
+    for keywords, queries in TOPIC_SHOT_QUERIES:
+        if any(keyword in source for keyword in keywords):
+            return queries[shot_index]
+    return ""
 
 
 def provider_key(provider: str, environ: Optional[dict] = None) -> str:
@@ -462,12 +700,25 @@ def materialize_candidate(candidate: StockAssetCandidate, local_path: Path) -> P
     return local_path
 
 
-def write_response_body(response, local_path: Path, max_bytes: int) -> None:
+def write_response_body(
+    response,
+    local_path: Path,
+    max_bytes: int,
+    max_seconds: float = MAX_ASSET_DOWNLOAD_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
     downloaded = 0
+    started_at = clock()
+    read_chunk = getattr(response, "read1", None) or response.read
     try:
         with local_path.open("wb") as output:
             while True:
-                chunk = response.read(1024 * 1024)
+                if clock() - started_at > max_seconds:
+                    raise RuntimeError(f"Asset download timed out after {max_seconds:g}s: {local_path}")
+                # read1 returns currently buffered bytes instead of waiting to fill a large chunk.
+                chunk = read_chunk(64 * 1024)
+                if clock() - started_at > max_seconds:
+                    raise RuntimeError(f"Asset download timed out after {max_seconds:g}s: {local_path}")
                 if not chunk:
                     break
                 downloaded += len(chunk)
@@ -651,6 +902,7 @@ def local_card_font(ImageFont, size: int):
         Path("/System/Library/Fonts/STHeiti Light.ttc"),
         Path("/Library/Fonts/Arial Unicode.ttf"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/noto/NotoSansCJK-Regular.ttc"),
     ]:
         if candidate.exists():
             return ImageFont.truetype(str(candidate), size)

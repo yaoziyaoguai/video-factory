@@ -137,12 +137,14 @@ def draft_script_from_values(
 def draft_general_script(title: str, angle: str, duration_target: int) -> ScriptDraft:
     per_scene = max(4.0, round(duration_target / 5, 1))
     hook = f"你以为「{title}」只是普通话题？真正影响完播的，是前 3 秒有没有戳中人。"
+    short_title = compact_text(title, 16)
+    short_angle = compact_text(angle, 12)
     scenes = [
-        Scene(1, hook, per_scene, "stock", f"vertical short video hook, emotional close-up, {title}", build_search_terms(title, "reaction emotion")),
-        Scene(2, f"这条视频先抓住一个角度：{angle}。不要讲大道理，先讲一个观众马上能代入的场景。", per_scene, "stock", f"daily life scene, relatable problem, {title}", build_search_terms(title, "daily life problem")),
-        Scene(3, "接着给出一个反转：观众以为问题在表面，其实真正的原因藏在选择、习惯或信息差里。", per_scene, "image", f"conceptual illustration of hidden reason behind {title}, cinematic, vertical", build_search_terms(title, "surprise insight")),
-        Scene(4, "然后用一句能记住的话收束，让观众觉得这条内容不是刷过就忘，而是值得收藏。", per_scene, "stock", f"person taking notes, practical takeaway, {title}", build_search_terms(title, "takeaway notes")),
-        Scene(5, "最后留一个开放问题，引导评论。你遇到过类似情况吗？评论区说一个，我继续做下一条。", per_scene, "local", "brand ending card with question prompt", ["comments", "question", "short video ending"]),
+        Scene(1, f"{short_title}，先看真正影响结果的那一点。", per_scene, "stock", f"vertical short video hook, emotional close-up, {title}", build_search_terms(title, "reaction emotion")),
+        Scene(2, f"先抓一个角度：{short_angle}。", per_scene, "stock", f"daily life scene, relatable problem, {title}", build_search_terms(title, "daily life problem")),
+        Scene(3, "问题往往不在表面，而在选择、习惯或信息差。", per_scene, "image", f"conceptual illustration of hidden reason behind {title}, cinematic, vertical", build_search_terms(title, "surprise insight")),
+        Scene(4, "先停一下，再做一个更小、更明确的选择。", per_scene, "stock", f"person taking notes, practical takeaway, {title}", build_search_terms(title, "takeaway notes")),
+        Scene(5, "你也遇到过吗？评论区聊聊。", per_scene, "local", "brand ending card with question prompt", ["comments", "question", "short video ending"]),
     ]
     return ScriptDraft(
         title=title,
@@ -217,7 +219,7 @@ def build_niche_narrations(title: str, angle: str, audience: str, niche_slug: st
             "你想看哪个历史人物的反常识故事？评论区留名字，我去查资料。",
         ],
         "life-avoidance": [
-            "做决定前，先避开这 3 个坑。每天都会用到。",
+            f"{title}。先别急，先记住这三点。",
             "别拖到最忙才处理。别用感觉替代规则。别做完不复盘。",
             "真正有用的不是道理多，而是提前放一个低成本提醒。",
             "今天只做一件事：写下最像你的那个坑，下次先停三秒。",
@@ -239,6 +241,13 @@ def build_niche_narrations(title: str, angle: str, audience: str, niche_slug: st
         ],
     }
     return templates.get(niche_slug, [])
+
+
+def compact_text(value: str, max_chars: int) -> str:
+    clean = re.sub(r"\s+", " ", value).strip()
+    if len(clean) <= max_chars:
+        return clean
+    return clean[: max_chars - 1].rstrip("，。！？；：,.!?:; ") + "…"
 
 
 def director_note_for_niche(niche_slug: str) -> str:

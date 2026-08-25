@@ -1,0 +1,29 @@
+{
+  "protocolVersion": "video-factory/brief-v1",
+  "title": "下班后的十分钟，先把自己还给自己",
+  "angle": "用城市夜晚与回家动作，讲一个低成本恢复精力的方法",
+  "audience": "工作日精力透支的城市上班族",
+  "nicheSlug": "city-evening-reset",
+  "durationSeconds": 24,
+  "platform": "douyin",
+  "reviewMode": "manual",
+  "economics": {
+    "recipeId": "free-stock",
+    "allowMeteredProviders": false,
+    "maxPaidShots": 0,
+    "maxCostCny": 0
+  },
+  "voiceDirection": {
+    "profileId": "kokoro:zf_001",
+    "rate": 185,
+    "pauseScale": 1,
+    "masteringPreset": "intimate"
+  },
+  "providers": {
+    "script": "python-template-v1",
+    "assets": "pexels-stock-v1",
+    "voice": "kokoro-local-v1",
+    "render": "python-ffmpeg-v1",
+    "technicalReview": "python-technical-review-v1"
+  }
+}

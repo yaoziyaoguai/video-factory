@@ -1,0 +1,57 @@
+services:
+  app:
+    image: video-factory:candidate
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: video_factory_prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      STUDIO_HOST: 0.0.0.0
+      STUDIO_PORT: 4317
+      VIDEO_FACTORY_WORKSPACE: /data/factory
+      VIDEO_FACTORY_AUTH_USERNAME: ${VIDEO_FACTORY_AUTH_USERNAME:-}
+      VIDEO_FACTORY_AUTH_PASSWORD_HASH: ${VIDEO_FACTORY_AUTH_PASSWORD_HASH:-}
+      VIDEO_FACTORY_AUTH_SESSION_SECRET: ${VIDEO_FACTORY_AUTH_SESSION_SECRET:-}
+      VIDEO_FACTORY_AUTH_SESSION_TTL_SECONDS: ${VIDEO_FACTORY_AUTH_SESSION_TTL_SECONDS:-43200}
+      PEXELS_API_KEY: ${PEXELS_API_KEY:-}
+      PIXABAY_API_KEY: ${PIXABAY_API_KEY:-}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      SEEDANCE_MODEL_ID: ${SEEDANCE_MODEL_ID:-}
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: ${SEEDANCE_ESTIMATED_CNY_PER_CLIP:-}
+      SEEDANCE_BASE_URL: ${SEEDANCE_BASE_URL:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_WORKSPACE_ID: ${DASHSCOPE_WORKSPACE_ID:-}
+      WAN_MODEL_ID: ${WAN_MODEL_ID:-}
+      WAN_ESTIMATED_CNY_PER_CLIP: ${WAN_ESTIMATED_CNY_PER_CLIP:-}
+      WAN_BASE_URL: ${WAN_BASE_URL:-}
+      DOUYIN_HOTSEARCH_ENABLED: ${DOUYIN_HOTSEARCH_ENABLED:-0}
+      DOUYIN_CLIENT_TOKEN: ${DOUYIN_CLIENT_TOKEN:-}
+      VIDEO_FACTORY_TRENDRADAR_URL: ${VIDEO_FACTORY_TRENDRADAR_URL:-}
+      VIDEO_FACTORY_NEWSNOW_URL: ${VIDEO_FACTORY_NEWSNOW_URL:-}
+      VIDEO_FACTORY_DAILYHOT_URL: ${VIDEO_FACTORY_DAILYHOT_URL:-}
+      VIDEO_FACTORY_RSSHUB_URL: ${VIDEO_FACTORY_RSSHUB_URL:-}
+      VIDEO_FACTORY_OLLAMA_URL: ${VIDEO_FACTORY_OLLAMA_URL:-}
+      VIDEO_FACTORY_TOPIC_MODEL: ${VIDEO_FACTORY_TOPIC_MODEL:-qwen3:4b}
+      VIDEO_FACTORY_DIRECTOR_MODEL: ${VIDEO_FACTORY_DIRECTOR_MODEL:-qwen3:8b}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${VIDEO_FACTORY_HOST_PORT:-4317}:4317"
+    volumes:
+      - video_factory_workspace:/data/factory
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m,uid=1001,gid=1001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 3g
+    cpus: 2.5
+    stop_grace_period: 30s
+
+volumes:
+  video_factory_workspace:
+    driver: local

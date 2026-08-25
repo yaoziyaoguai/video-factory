@@ -1,0 +1,41 @@
+{
+  "name": "@video-factory/studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.server.build.json",
+    "dev": "concurrently --kill-others --names api,web --prefix-colors blue,green \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:client": "vite --host 127.0.0.1",
+    "dev:server": "STUDIO_DEV=1 tsx watch src/server/main.ts",
+    "start": "node dist/server/server/main.js",
+    "test": "vitest run && node --import tsx --test test/api-contract.test.ts test/auth.test.ts test/candidate-inbox.test.ts test/creator-settings-store.test.ts test/local-capabilities.test.ts test/opportunity-store.test.ts test/production-worker.test.ts test/publishing-studio.test.ts test/series-planner.test.ts test/series-store.test.ts test/server.test.ts test/studio-service.test.ts test/topic-taxonomy.test.ts test/trend-gateway.test.ts test/trend-opportunity-agent.test.ts test/visual-plan.test.ts",
+    "typecheck": "tsc -p tsconfig.server.json && tsc -p tsconfig.client.json"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.3",
+    "@fontsource-variable/manrope": "^5.3.0",
+    "@fontsource-variable/noto-sans-sc": "^5.3.0",
+    "@fontsource-variable/noto-serif-sc": "^5.3.0",
+    "@video-factory/production-pipeline": "0.1.0",
+    "@video-factory/workflow-core": "0.1.0",
+    "driver.js": "^1.8.0",
+    "fastify": "^5.12.1",
+    "lucide-react": "^1.33.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.13.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.5",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.4",
+    "concurrently": "^10.0.5",
+    "jsdom": "^29.0.0",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  }
+}
