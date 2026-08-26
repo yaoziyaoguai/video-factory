@@ -215,6 +215,41 @@ describe("StudioService", () => {
     );
   });
 
+  it("enforces manual review and a server-side hard budget before dispatch", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: { VIDEO_FACTORY_MAX_RUN_COST_CNY: "8" },
+    });
+
+    await assert.rejects(() => service.startRun({ ...brief, reviewMode: "automatic" }), /人工终审/);
+    await assert.rejects(() => service.startRun({
+      ...brief,
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 9 },
+    }), /服务端安全上限.*8/);
+    assert.equal(pipeline.dispatchCount, 0);
+  });
+
+  it("persists production idempotency across service restarts", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const firstService = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const first = await firstService.startRun(brief, "production-request-1");
+    const restartedService = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+    const repeated = await restartedService.startRun(brief, "production-request-1");
+
+    assert.deepEqual(repeated, first);
+    assert.equal(pipeline.dispatchCount, 1);
+    await assert.rejects(
+      () => restartedService.startRun({ ...brief, title: "不同参数" }, "production-request-1"),
+      /另一组参数/,
+    );
+  });
+
   it("blocks metered providers when paid generation is disabled or underfunded", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -226,6 +261,8 @@ describe("StudioService", () => {
         ARK_API_KEY: "seedance-key",
         SEEDANCE_MODEL_ID: "seedance-model",
         SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
+        SEEDREAM_MODEL_ID: "seedream-model",
+        SEEDREAM_ESTIMATED_CNY_PER_IMAGE: "0.25",
       },
     });
     const seedanceBrief = {
@@ -376,6 +413,8 @@ describe("StudioService", () => {
         ARK_API_KEY: "seedance-secret",
         SEEDANCE_MODEL_ID: "seedance-model",
         SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
+        SEEDREAM_MODEL_ID: "seedream-model",
+        SEEDREAM_ESTIMATED_CNY_PER_IMAGE: "0.25",
       },
     });
 
@@ -407,6 +446,11 @@ describe("StudioService", () => {
     assert.equal(seedance?.billing, "metered");
     assert.equal(seedance?.estimatedCnyPerClip, 3.5);
     assert.equal(seedance?.status, "ready");
+    const seedream = providers.find((provider) => provider.id === "seedream-image-v1");
+    assert.equal(seedream?.available, true);
+    assert.equal(seedream?.billing, "metered");
+    assert.equal(seedream?.estimatedCnyPerClip, 0.25);
+    assert.equal(seedream?.status, "ready");
     assert.equal(providers.find((provider) => provider.id === "kling-video-v1")?.status, "planned");
     assert.doesNotMatch(serialized, /secret-value/);
     assert.doesNotMatch(serialized, /seedance-secret/);

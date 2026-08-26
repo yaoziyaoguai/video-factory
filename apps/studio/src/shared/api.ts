@@ -21,7 +21,7 @@ export interface StudioVoiceProfile {
   providerId: string;
   label: string;
   locale: "zh-CN" | "zh-TW" | "zh-HK";
-  engine: "macos" | "kokoro";
+  engine: "macos" | "kokoro" | "minimax";
   gender?: "female" | "male" | "neutral";
   curated?: boolean;
   description?: string;
@@ -41,16 +41,34 @@ export type StudioVoiceDirection = Omit<StudioVoicePreviewInput, "text">;
 
 export type StudioProductionRecipeId = "economy-daily" | "free-stock" | "keyshot-ai" | "cinematic-ai" | "custom";
 
+export type StudioDirectorProfileId =
+  | "auto"
+  | "documentary-observer"
+  | "quiet-humanism"
+  | "urban-poetic"
+  | "chromatic-storytelling"
+  | "geometric-control"
+  | "suspense-staging";
+
+export interface StudioProductionDefaults {
+  directorProfileId: StudioDirectorProfileId;
+  reviewMode: "manual" | "automatic";
+  platform: "douyin" | "xiaohongshu" | "bilibili";
+  durationSeconds: 20 | 24 | 30 | 45;
+}
+
 export interface StudioCreatorSettings {
   voiceDirection: StudioVoiceDirection;
   defaultRecipeId: StudioProductionRecipeId;
   defaultAssetProviderId?: string;
+  productionDefaults: StudioProductionDefaults;
 }
 
 export interface StudioCreatorSettingsPatch {
   voiceDirection?: StudioVoiceDirection;
   defaultRecipeId?: StudioProductionRecipeId;
   defaultAssetProviderId?: string;
+  productionDefaults?: Partial<StudioProductionDefaults>;
 }
 
 export interface StudioProvider {
@@ -130,6 +148,14 @@ export type StudioCandidateOrigin = "trend" | "series";
 export type StudioCandidateFreshness = "live" | "today" | "evergreen";
 export type StudioCandidateRisk = "low" | "review" | "high";
 export type StudioVerificationStatus = "ready" | "review_required" | "blocked" | "verified";
+export type StudioEditorialVerdict = "produce_video" | "produce_image_story" | "skip";
+
+export interface StudioEditorialDecision {
+  verdict: StudioEditorialVerdict;
+  score: number;
+  reasons: string[];
+  guardrails: string[];
+}
 
 export interface StudioCandidateVerification {
   status: StudioVerificationStatus;
@@ -171,6 +197,7 @@ export interface StudioTrendCandidate {
   category?: StudioTopicCategory;
   freshness?: StudioCandidateFreshness;
   risk?: StudioCandidateRisk;
+  editorialDecision?: StudioEditorialDecision;
 }
 
 export interface StudioCandidateInboxItem extends StudioTrendCandidate {
@@ -179,6 +206,7 @@ export interface StudioCandidateInboxItem extends StudioTrendCandidate {
   freshness: StudioCandidateFreshness;
   risk: StudioCandidateRisk;
   verification: StudioCandidateVerification;
+  editorialDecision: StudioEditorialDecision;
   seriesId?: string;
   seriesName?: string;
   episodeNumber?: number;
@@ -188,6 +216,7 @@ export interface StudioCandidateInboxQuery {
   origins?: StudioCandidateOrigin[];
   categories?: StudioTopicCategory[];
   platforms?: string[];
+  verdicts?: StudioEditorialVerdict[];
   limit?: number;
 }
 
@@ -196,6 +225,7 @@ export interface StudioCandidateInboxFacets {
   origins: Partial<Record<StudioCandidateOrigin, number>>;
   categories: Partial<Record<StudioTopicCategory, number>>;
   platforms: Record<string, number>;
+  verdicts: Partial<Record<StudioEditorialVerdict, number>>;
 }
 
 export interface StudioCandidateInbox {
@@ -282,6 +312,7 @@ export interface StudioOpportunity {
   seriesName?: string;
   episodeNumber?: number;
   verification?: StudioCandidateVerification;
+  editorialDecision?: StudioEditorialDecision;
   visualPlan?: StudioVisualPlan;
 }
 
@@ -301,6 +332,7 @@ export interface StudioOpportunityInput {
   seriesName?: string;
   episodeNumber?: number;
   verification?: StudioCandidateVerification;
+  editorialDecision?: StudioEditorialDecision;
   visualPlan?: StudioVisualPlan;
 }
 
@@ -399,6 +431,11 @@ export interface StudioProductionInput {
   durationSeconds: number;
   platform: string;
   reviewMode: "manual" | "automatic";
+  editorial?: {
+    verdict: "produce_video" | "produce_image_story";
+    reasons: string[];
+    guardrails: string[];
+  };
   voiceDirection: StudioVoiceDirection;
   providers: {
     script: string;
@@ -491,8 +528,8 @@ export interface StudioArtifactResource {
 export function parseStudioVoicePreviewInput(value: unknown): StudioVoicePreviewInput {
   const input = requiredObject(value, "试听参数");
   const profileId = requiredTrimmedString(input.profileId, "试听音色");
-  if (!profileId.startsWith("macos:") && !profileId.startsWith("kokoro:")) {
-    throw new StudioInputError("请选择当前设备支持的本地音色。");
+  if (!profileId.startsWith("macos:") && !profileId.startsWith("kokoro:") && !profileId.startsWith("minimax:")) {
+    throw new StudioInputError("请选择当前服务支持的声音演员。");
   }
   const text = requiredTrimmedString(input.text, "试听文案");
   if (text.length > 180) {
@@ -518,8 +555,8 @@ export function parseStudioCreatorSettingsPatch(value: unknown): StudioCreatorSe
   if (input.voiceDirection !== undefined) {
     const direction = requiredObject(input.voiceDirection, "默认声音");
     const profileId = requiredTrimmedString(direction.profileId, "默认音色");
-    if (!profileId.startsWith("macos:") && !profileId.startsWith("kokoro:")) {
-      throw new StudioInputError("请选择当前设备支持的本地音色。");
+    if (!profileId.startsWith("macos:") && !profileId.startsWith("kokoro:") && !profileId.startsWith("minimax:")) {
+      throw new StudioInputError("请选择当前服务支持的声音演员。");
     }
     if (direction.masteringPreset !== "natural" && direction.masteringPreset !== "intimate" && direction.masteringPreset !== "social") {
       throw new StudioInputError("声音质感选项无效。");
@@ -543,6 +580,45 @@ export function parseStudioCreatorSettingsPatch(value: unknown): StudioCreatorSe
       throw new StudioInputError("默认画面能力编号格式不正确。");
     }
     patch.defaultAssetProviderId = providerId;
+  }
+  if (input.productionDefaults !== undefined) {
+    const defaults = requiredObject(input.productionDefaults, "默认生产参数");
+    const productionDefaults: Partial<StudioProductionDefaults> = {};
+    if (defaults.directorProfileId !== undefined) {
+      const directorProfileId = String(defaults.directorProfileId);
+      if (!new Set<StudioDirectorProfileId>([
+        "auto",
+        "documentary-observer",
+        "quiet-humanism",
+        "urban-poetic",
+        "chromatic-storytelling",
+        "geometric-control",
+        "suspense-staging",
+      ]).has(directorProfileId as StudioDirectorProfileId)) {
+        throw new StudioInputError("默认导演角色无效。");
+      }
+      productionDefaults.directorProfileId = directorProfileId as StudioDirectorProfileId;
+    }
+    if (defaults.reviewMode !== undefined) {
+      if (defaults.reviewMode !== "manual") {
+        throw new StudioInputError("正式制作必须保留人工终审。");
+      }
+      productionDefaults.reviewMode = "manual";
+    }
+    if (defaults.platform !== undefined) {
+      if (defaults.platform !== "douyin" && defaults.platform !== "xiaohongshu" && defaults.platform !== "bilibili") {
+        throw new StudioInputError("默认目标平台无效。");
+      }
+      productionDefaults.platform = defaults.platform;
+    }
+    if (defaults.durationSeconds !== undefined) {
+      const durationSeconds = Number(defaults.durationSeconds);
+      if (durationSeconds !== 20 && durationSeconds !== 24 && durationSeconds !== 30 && durationSeconds !== 45) {
+        throw new StudioInputError("默认视频时长无效。");
+      }
+      productionDefaults.durationSeconds = durationSeconds;
+    }
+    patch.productionDefaults = productionDefaults;
   }
   return patch;
 }
@@ -697,6 +773,9 @@ export function parseStudioOpportunityInput(value: unknown): StudioOpportunityIn
   const episodeNumber = input.episodeNumber === undefined
     ? undefined
     : positiveInteger(input.episodeNumber, "系列集数");
+  const editorialDecision = input.editorialDecision === undefined
+    ? undefined
+    : parseEditorialDecision(input.editorialDecision);
 
   return {
     title: requiredTrimmedString(input.title, "标题"),
@@ -713,6 +792,21 @@ export function parseStudioOpportunityInput(value: unknown): StudioOpportunityIn
     ...(optionalString(input.seriesId) ? { seriesId: optionalString(input.seriesId)! } : {}),
     ...(optionalString(input.seriesName) ? { seriesName: optionalString(input.seriesName)! } : {}),
     ...(episodeNumber ? { episodeNumber } : {}),
+    ...(editorialDecision ? { editorialDecision } : {}),
+  };
+}
+
+function parseEditorialDecision(value: unknown): StudioEditorialDecision {
+  const input = requiredObject(value, "编辑决策");
+  const verdict = requiredTrimmedString(input.verdict, "编辑结论");
+  if (verdict !== "produce_video" && verdict !== "produce_image_story" && verdict !== "skip") {
+    throw new StudioInputError("编辑结论无效。");
+  }
+  return {
+    verdict,
+    score: boundedNumber(input.score, "生产价值分"),
+    reasons: requiredStringArray(input.reasons, "编辑理由"),
+    guardrails: requiredStringArray(input.guardrails, "制作边界"),
   };
 }
 
@@ -798,6 +892,11 @@ function optionalString(value: unknown): string | undefined {
     throw new StudioInputError("可选内容必须是文字。");
   }
   return value.trim() || undefined;
+}
+
+function requiredStringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length === 0) throw new StudioInputError(`${label}不能为空。`);
+  return value.map((item, index) => requiredTrimmedString(item, `${label}第 ${index + 1} 项`));
 }
 
 function boundedNumber(value: unknown, label: string): number {

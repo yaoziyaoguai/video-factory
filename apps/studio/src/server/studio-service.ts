@@ -18,6 +18,7 @@ import type {
   StudioPublishBatch,
   StudioPublishInput,
   StudioPublishReadiness,
+  StudioPublishTarget,
   StudioRunDetail,
   StudioRunSummary,
   StudioSeries,
@@ -120,6 +121,7 @@ export class StudioService {
       workspaceRoot: options.workspaceRoot,
       pipeline: options.pipeline,
       listProviders: () => this.capabilities.listProviders(),
+      maxRunCostCny: positiveNumber(environment.VIDEO_FACTORY_MAX_RUN_COST_CNY, 20),
     });
     this.publishing = new PublishingStudio({
       workspaceRoot: options.workspaceRoot,
@@ -174,7 +176,9 @@ export class StudioService {
 
   listRuns(): Promise<StudioRunSummary[]> { return this.production.list(); }
   getRun(runId: string): Promise<StudioRunDetail | undefined> { return this.production.get(runId); }
-  startRun(input: unknown): Promise<StartRunResponse> { return this.production.start(input); }
+  startRun(input: unknown, idempotencyKey?: string): Promise<StartRunResponse> {
+    return this.production.start(input, idempotencyKey);
+  }
   decide(runId: string, input: StudioDecisionInput): Promise<StudioRunDetail> { return this.production.decide(runId, input); }
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void {
     return this.production.subscribe(runId, listener);
@@ -183,7 +187,14 @@ export class StudioService {
     return this.production.resolveArtifact(runId, artifactId);
   }
   publishReadiness(runId: string): Promise<StudioPublishReadiness> { return this.publishing.readiness(runId); }
+  async listPublishTargets(): Promise<StudioPublishTarget[]> { return this.publishing.listTargets(); }
   publish(runId: string, input: StudioPublishInput): Promise<StudioPublishBatch> {
     return this.publishing.publish(runId, input);
   }
+}
+
+function positiveNumber(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }

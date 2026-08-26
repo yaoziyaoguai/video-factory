@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import path from "node:path";
 import type { WorkerArtifactDescriptor, WorkerResponse } from "./python-worker-client.js";
 import type {
@@ -7,6 +8,10 @@ import type {
   VideoGenerationProgress,
   VideoGenerationRequest,
 } from "./video-generation.js";
+import type {
+  ImageGenerationAdapter,
+  ImageGenerationProgress,
+} from "./image-generation.js";
 
 interface WorkerClient {
   run(request: Record<string, unknown>): Promise<WorkerResponse>;
@@ -17,11 +22,17 @@ export interface VideoGenerationAdapterBinding {
   estimatedCnyPerClip: number;
 }
 
+export interface ImageGenerationAdapterBinding {
+  adapter: ImageGenerationAdapter;
+  estimatedCnyPerImage: number;
+}
+
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export interface GenerativeAssetWorkerClientOptions {
   fallback: WorkerClient;
   adapters: VideoGenerationAdapterBinding[];
+  imageAdapters?: ImageGenerationAdapterBinding[];
   fetch?: FetchLike;
   maxDownloadBytes?: number;
 }
@@ -39,20 +50,38 @@ interface GenerationJob {
   taskId?: string;
   status: VideoGenerationProgress["status"];
   estimatedCostCny: number;
+  mediaType: "image" | "video";
   videoUrl?: string;
+  imageUrl?: string;
   error?: string;
 }
 
 interface RoutedShot {
   scenePosition: number;
-  providerId: string;
+  providerIds: string[];
   generationPrompt: string;
 }
 
-const KNOWN_METERED_ASSET_PROVIDERS = new Set(["seedance-video-v1", "wan-video-v1"]);
+interface ResolvedAssetBinding {
+  mediaType: "image" | "video";
+  estimatedCnyPerAsset: number;
+  generate(
+    scene: ScriptScene,
+    prompt: string,
+    onProgress: (progress: VideoGenerationProgress | ImageGenerationProgress) => Promise<void>,
+  ): Promise<{ taskId: string; url: string }>;
+}
+
+const KNOWN_METERED_ASSET_PROVIDERS = new Set([
+  "seedream-image-v1",
+  "seedance-video-v1",
+  "hailuo-video-v1",
+  "wan-video-v1",
+]);
 
 export class GenerativeAssetWorkerClient implements WorkerClient {
   private readonly adapters = new Map<string, VideoGenerationAdapterBinding>();
+  private readonly imageAdapters = new Map<string, ImageGenerationAdapterBinding>();
   private readonly fetch: FetchLike;
   private readonly maxDownloadBytes: number;
 
@@ -65,6 +94,15 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         throw new Error(`Adapter '${binding.adapter.providerId}' is already configured.`);
       }
       this.adapters.set(binding.adapter.providerId, binding);
+    }
+    for (const binding of options.imageAdapters ?? []) {
+      if (!Number.isFinite(binding.estimatedCnyPerImage) || binding.estimatedCnyPerImage <= 0) {
+        throw new Error(`Adapter '${binding.adapter.providerId}' must have a positive estimatedCnyPerImage.`);
+      }
+      if (this.adapters.has(binding.adapter.providerId) || this.imageAdapters.has(binding.adapter.providerId)) {
+        throw new Error(`Adapter '${binding.adapter.providerId}' is already configured.`);
+      }
+      this.imageAdapters.set(binding.adapter.providerId, binding);
     }
     this.fetch = options.fetch ?? fetch;
     this.maxDownloadBytes = options.maxDownloadBytes ?? 200 * 1024 * 1024;
@@ -79,7 +117,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     if (providerId === "ai-shot-router-v1") {
       return this.runDirectorRoutes(request, parameters);
     }
-    const binding = this.adapters.get(providerId);
+    const binding = this.resolveBinding(providerId);
     if (!binding) {
       if (KNOWN_METERED_ASSET_PROVIDERS.has(providerId)) {
         throw new Error(`Metered asset provider '${providerId}' is not configured in this worker.`);
@@ -89,7 +127,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
 
     const maxPaidShots = boundedInteger(parameters.maxPaidShots, "maxPaidShots", 1, 20);
     const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0.01, 100_000);
-    const estimatedCost = roundMoney(maxPaidShots * binding.estimatedCnyPerClip);
+    const estimatedCost = roundMoney(maxPaidShots * binding.estimatedCnyPerAsset);
     if (estimatedCost > maxCostCny) {
       throw new Error(`Estimated cost ¥${estimatedCost} exceeds the production budget ¥${maxCostCny}.`);
     }
@@ -122,34 +160,36 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         scenePosition: scene.position,
         providerId,
         status: "submitted",
-        estimatedCostCny: binding.estimatedCnyPerClip,
+        estimatedCostCny: binding.estimatedCnyPerAsset,
+        mediaType: binding.mediaType,
       };
       jobs.push(job);
       try {
-        const generated = await binding.adapter.generate(
-          generationRequest(scene),
+        const generated = await binding.generate(
+          scene,
+          scene.visualPrompt,
           async (progress) => {
             applyProgress(job, progress);
             await writeJobs(jobsPath, jobs);
           },
         );
-        const clipPath = path.join(outputDir, `scene_${String(scene.position).padStart(2, "0")}_${providerId}.mp4`);
-        await downloadVideo(this.fetch, generated.videoUrl, clipPath, this.maxDownloadBytes);
-        applyProgress(job, {
-          providerId,
-          taskId: generated.taskId,
-          status: "succeeded",
-          videoUrl: generated.videoUrl,
-        });
+        const media = await downloadGeneratedAsset(
+          this.fetch,
+          generated.url,
+          path.join(outputDir, `scene_${String(scene.position).padStart(2, "0")}_${providerId}`),
+          binding.mediaType,
+          this.maxDownloadBytes,
+        );
+        applySucceeded(job, generated.taskId, generated.url);
         await writeJobs(jobsPath, jobs);
-        replaceSceneAsset(assets, scene, generated.taskId, generated.videoUrl, clipPath, providerId);
+        replaceSceneAsset(assets, scene, generated.taskId, generated.url, media.path, providerId, binding.mediaType);
         mediaArtifacts.push(await describeFile(
-          clipPath,
+          media.path,
           "media_asset",
-          "video/mp4",
+          media.contentType,
           providerId,
           request,
-          "AI-generated video; review provider terms, likeness rights, and AIGC disclosure before publishing.",
+          `AI-generated ${binding.mediaType}; review provider terms, likeness rights, and AIGC disclosure before publishing.`,
         ));
       } catch (error) {
         job.status = "failed";
@@ -167,7 +207,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       attemptedScenes: jobs.length,
       generatedScenes,
       fallbackScenes,
-      estimatedCostCny: roundMoney(jobs.length * binding.estimatedCnyPerClip),
+      estimatedCostCny: roundMoney(jobs.length * binding.estimatedCnyPerAsset),
       jobsPath,
       localBaselinePreserved: true,
     };
@@ -205,7 +245,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         attemptedScenes: jobs.length,
         generatedScenes,
         fallbackScenes,
-        estimatedCostCny: roundMoney(jobs.length * binding.estimatedCnyPerClip),
+        estimatedCostCny: roundMoney(jobs.length * binding.estimatedCnyPerAsset),
       },
     };
   }
@@ -226,21 +266,24 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const directorPlan = requiredRecord(JSON.parse(await readFile(directorPlanPath, "utf8")), "Director plan");
     const routedShots = parseRoutedShots(directorPlan.shots);
     const generatedRoutes = routedShots.flatMap((route) => {
-      const binding = this.adapters.get(route.providerId);
-      if (!binding) {
-        if (KNOWN_METERED_ASSET_PROVIDERS.has(route.providerId)) {
-          throw new Error(`AI director selected unconfigured metered provider '${route.providerId}'.`);
+      const providerId = route.providerIds.find((candidate) => this.resolveBinding(candidate));
+      const binding = providerId ? this.resolveBinding(providerId) : undefined;
+      if (!providerId || !binding) {
+        const hasLocalFallback = route.providerIds.some((candidate) => !KNOWN_METERED_ASSET_PROVIDERS.has(candidate));
+        const unconfiguredMetered = route.providerIds.find((candidate) => KNOWN_METERED_ASSET_PROVIDERS.has(candidate));
+        if (unconfiguredMetered && !hasLocalFallback) {
+          throw new Error(`AI director selected unconfigured metered provider '${unconfiguredMetered}'.`);
         }
         return [];
       }
       const scene = sceneByPosition.get(route.scenePosition);
       if (!scene) throw new Error(`AI director selected unknown script scene ${route.scenePosition}.`);
-      return [{ route, scene, binding }];
+      return [{ route, scene, binding, providerId }];
     });
     if (generatedRoutes.length > maxPaidShots) {
       throw new Error(`AI director selected ${generatedRoutes.length} paid shots, exceeding the limit ${maxPaidShots}.`);
     }
-    const estimatedCost = roundMoney(generatedRoutes.reduce((sum, item) => sum + item.binding.estimatedCnyPerClip, 0));
+    const estimatedCost = roundMoney(generatedRoutes.reduce((sum, item) => sum + item.binding.estimatedCnyPerAsset, 0));
     if (estimatedCost > maxCostCny) {
       throw new Error(`Estimated cost ¥${estimatedCost} exceeds the production budget ¥${maxCostCny}.`);
     }
@@ -257,39 +300,41 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const jobs: GenerationJob[] = [];
     const mediaArtifacts: WorkerArtifactDescriptor[] = [];
 
-    for (const { route, scene, binding } of generatedRoutes) {
+    for (const { route, scene, binding, providerId } of generatedRoutes) {
       const job: GenerationJob = {
         scenePosition: scene.position,
-        providerId: route.providerId,
+        providerId,
         status: "submitted",
-        estimatedCostCny: binding.estimatedCnyPerClip,
+        estimatedCostCny: binding.estimatedCnyPerAsset,
+        mediaType: binding.mediaType,
       };
       jobs.push(job);
       try {
-        const generated = await binding.adapter.generate(
-          generationRequest(scene, route.generationPrompt),
+        const generated = await binding.generate(
+          scene,
+          route.generationPrompt || scene.visualPrompt,
           async (progress) => {
             applyProgress(job, progress);
             await writeJobs(jobsPath, jobs);
           },
         );
-        const clipPath = path.join(outputDir, `scene_${String(scene.position).padStart(2, "0")}_${route.providerId}.mp4`);
-        await downloadVideo(this.fetch, generated.videoUrl, clipPath, this.maxDownloadBytes);
-        applyProgress(job, {
-          providerId: route.providerId,
-          taskId: generated.taskId,
-          status: "succeeded",
-          videoUrl: generated.videoUrl,
-        });
+        const media = await downloadGeneratedAsset(
+          this.fetch,
+          generated.url,
+          path.join(outputDir, `scene_${String(scene.position).padStart(2, "0")}_${providerId}`),
+          binding.mediaType,
+          this.maxDownloadBytes,
+        );
+        applySucceeded(job, generated.taskId, generated.url);
         await writeJobs(jobsPath, jobs);
-        replaceSceneAsset(assets, scene, generated.taskId, generated.videoUrl, clipPath, route.providerId);
+        replaceSceneAsset(assets, scene, generated.taskId, generated.url, media.path, providerId, binding.mediaType);
         mediaArtifacts.push(await describeFile(
-          clipPath,
+          media.path,
           "media_asset",
-          "video/mp4",
-          route.providerId,
+          media.contentType,
+          providerId,
           request,
-          "AI-generated video selected by the director plan; review terms, likeness rights, and AIGC disclosure.",
+          `AI-generated ${binding.mediaType} selected by the director plan; review terms, likeness rights, and AIGC disclosure.`,
         ));
       } catch (error) {
         job.status = "failed";
@@ -349,6 +394,32 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       },
     };
   }
+
+  private resolveBinding(providerId: string): ResolvedAssetBinding | undefined {
+    const video = this.adapters.get(providerId);
+    if (video) {
+      return {
+        mediaType: "video",
+        estimatedCnyPerAsset: video.estimatedCnyPerClip,
+        generate: async (scene, prompt, onProgress) => {
+          const result = await video.adapter.generate(generationRequest(scene, prompt), onProgress);
+          return { taskId: result.taskId, url: result.videoUrl };
+        },
+      };
+    }
+    const image = this.imageAdapters.get(providerId);
+    if (image) {
+      return {
+        mediaType: "image",
+        estimatedCnyPerAsset: image.estimatedCnyPerImage,
+        generate: async (_scene, prompt, onProgress) => {
+          const result = await image.adapter.generate({ prompt, ratio: "9:16" }, onProgress);
+          return { taskId: result.taskId, url: result.imageUrl };
+        },
+      };
+    }
+    return undefined;
+  }
 }
 
 function parseScenes(value: unknown): ScriptScene[] {
@@ -380,7 +451,10 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
     const shot = requiredRecord(entry, `Director shot ${index + 1}`);
     return {
       scenePosition: boundedInteger(shot.scenePosition, `Director shot ${index + 1} scenePosition`, 1, 10_000),
-      providerId: requiredString(shot.preferredProviderId, `Director shot ${index + 1} preferredProviderId`),
+      providerIds: [
+        requiredString(shot.preferredProviderId, `Director shot ${index + 1} preferredProviderId`),
+        ...optionalStringArray(shot.alternativeProviderIds, `Director shot ${index + 1} alternativeProviderIds`),
+      ],
       generationPrompt: typeof shot.generationPrompt === "string" && shot.generationPrompt.trim()
         ? shot.generationPrompt.trim()
         : "",
@@ -388,11 +462,25 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
   });
 }
 
-function applyProgress(job: GenerationJob, progress: VideoGenerationProgress): void {
+function optionalStringArray(value: unknown, label: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array.`);
+  return value.map((entry, index) => requiredString(entry, `${label}[${index}]`));
+}
+
+function applyProgress(job: GenerationJob, progress: VideoGenerationProgress | ImageGenerationProgress): void {
   job.taskId = progress.taskId;
   job.status = progress.status;
-  if (progress.videoUrl) job.videoUrl = progress.videoUrl;
+  if ("videoUrl" in progress && progress.videoUrl) job.videoUrl = progress.videoUrl;
+  if ("imageUrl" in progress && progress.imageUrl) job.imageUrl = progress.imageUrl;
   if (progress.error) job.error = progress.error;
+}
+
+function applySucceeded(job: GenerationJob, taskId: string, url: string): void {
+  job.taskId = taskId;
+  job.status = "succeeded";
+  if (job.mediaType === "video") job.videoUrl = url;
+  else job.imageUrl = url;
 }
 
 function replaceSceneAsset(
@@ -402,19 +490,20 @@ function replaceSceneAsset(
   videoUrl: string,
   clipPath: string,
   providerId: string,
+  mediaType: "image" | "video",
 ): void {
   const next = {
     scene_position: scene.position,
     provider: providerId,
     asset_id: taskId,
-    media_type: "video",
-    width: 720,
-    height: 1280,
+    media_type: mediaType,
+    width: mediaType === "video" ? 720 : 1440,
+    height: mediaType === "video" ? 1280 : 2560,
     duration: scene.duration,
     local_path: clipPath,
     source_url: videoUrl,
     creator: providerId,
-    license_note: "AI-generated video; provider terms and AIGC disclosure apply.",
+    license_note: `AI-generated ${mediaType}; provider terms and AIGC disclosure apply.`,
     query: scene.visualPrompt,
   };
   const index = assets.findIndex((asset) => {
@@ -425,22 +514,119 @@ function replaceSceneAsset(
   else assets.push(next);
 }
 
-async function downloadVideo(fetcher: FetchLike, url: string, destination: string, maxBytes: number): Promise<void> {
-  const response = await fetcher(url);
+async function downloadGeneratedAsset(
+  fetcher: FetchLike,
+  url: string,
+  destinationStem: string,
+  mediaType: "image" | "video",
+  maxBytes: number,
+): Promise<{ path: string; contentType: string }> {
+  let currentUrl = validatedMediaUrl(url);
+  let response: Response | undefined;
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    response = await fetcher(currentUrl, { redirect: "manual" });
+    if (![301, 302, 303, 307, 308].includes(response.status)) break;
+    const location = response.headers.get("location");
+    if (!location) throw new Error(`Generated ${mediaType} redirect did not include a location.`);
+    if (redirects === 5) throw new Error(`Generated ${mediaType} download exceeded the redirect limit.`);
+    currentUrl = validatedMediaUrl(new URL(location, currentUrl).toString());
+  }
+  if (!response) throw new Error(`Generated ${mediaType} download did not return a response.`);
   if (!response.ok) {
-    throw new Error(`Generated video download failed with status ${response.status}.`);
+    throw new Error(`Generated ${mediaType} download failed with status ${response.status}.`);
   }
   const contentLength = Number(response.headers.get("content-length") ?? "0");
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new Error(`Generated video exceeds the ${maxBytes}-byte download limit.`);
+    throw new Error(`Generated ${mediaType} exceeds the ${maxBytes}-byte download limit.`);
   }
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.byteLength > maxBytes) {
-    throw new Error(`Generated video exceeds the ${maxBytes}-byte download limit.`);
-  }
+  const bytes = await readLimitedBody(response, mediaType, maxBytes);
+  const rawContentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  const contentType = validatedMediaContentType(mediaType, rawContentType);
+  const extension = mediaType === "video" ? "mp4" : imageExtension(contentType);
+  const destination = `${destinationStem}.${extension}`;
   const temporary = `${destination}.partial`;
   await writeFile(temporary, bytes);
   await rename(temporary, destination);
+  return { path: destination, contentType };
+}
+
+function validatedMediaUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Generated media URL is invalid.");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("Generated media URL must use HTTP or HTTPS.");
+  }
+  if (url.username || url.password || isBlockedMediaHost(url.hostname)) {
+    throw new Error("Generated media URL points to a private or unsafe network destination.");
+  }
+  return url.toString();
+}
+
+function isBlockedMediaHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return true;
+  if (isIP(host) === 4) {
+    const [first, second] = host.split(".").map(Number);
+    return first === 0
+      || first === 10
+      || first === 127
+      || first! >= 224
+      || first === 169 && second === 254
+      || first === 172 && second! >= 16 && second! <= 31
+      || first === 192 && (second === 0 || second === 168)
+      || first === 198 && (second === 18 || second === 19)
+      || first === 100 && second! >= 64 && second! <= 127;
+  }
+  if (isIP(host) === 6) {
+    return host === "::" || host === "::1" || host.startsWith("fc") || host.startsWith("fd")
+      || /^fe[89ab]/.test(host) || host.startsWith("::ffff:127.") || host.startsWith("::ffff:10.");
+  }
+  return false;
+}
+
+async function readLimitedBody(response: Response, mediaType: "image" | "video", maxBytes: number): Promise<Buffer> {
+  if (!response.body) throw new Error(`Generated ${mediaType} download returned an empty body.`);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > maxBytes) {
+      await reader.cancel();
+      throw new Error(`Generated ${mediaType} exceeds the ${maxBytes}-byte download limit.`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks);
+}
+
+function validatedMediaContentType(mediaType: "image" | "video", value: string | undefined): string {
+  if (mediaType === "video") {
+    if (value && value !== "video/mp4" && value !== "application/octet-stream") {
+      throw new Error(`Generated video returned unsupported content type '${value}'.`);
+    }
+    return "video/mp4";
+  }
+  if (value && value !== "application/octet-stream" && !["image/jpeg", "image/webp", "image/png"].includes(value)) {
+    throw new Error(`Generated image returned unsupported content type '${value}'.`);
+  }
+  return supportedImageContentType(value);
+}
+
+function supportedImageContentType(value: string | undefined): string {
+  return value === "image/jpeg" || value === "image/webp" || value === "image/png" ? value : "image/png";
+}
+
+function imageExtension(contentType: string): string {
+  if (contentType === "image/jpeg") return "jpg";
+  if (contentType === "image/webp") return "webp";
+  return "png";
 }
 
 async function writeJobs(pathname: string, jobs: GenerationJob[]): Promise<void> {

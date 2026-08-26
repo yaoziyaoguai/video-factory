@@ -1,19 +1,25 @@
 import { AlertCircle, ArrowLeft, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import type { StudioDecisionInput, StudioRunDetail } from "../../shared/api.js";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import type { StudioCreatorSettings, StudioDecisionInput, StudioProductionInput, StudioProvider, StudioRunDetail } from "../../shared/api.js";
 import { studioApi, subscribeToRun } from "../api.js";
+import { NewRunDialog } from "../components/NewRunDialog.js";
 import { RunWorkbench } from "../components/RunWorkbench.js";
 import { MultiPlatformPublishDialog } from "../components/MultiPlatformPublishDialog.js";
 
 export function RunPage() {
   const { runId = "" } = useParams();
+  const navigate = useNavigate();
   const [run, setRun] = useState<StudioRunDetail>();
   const [loading, setLoading] = useState(true);
   const [decisionPending, setDecisionPending] = useState(false);
   const [error, setError] = useState<string>();
   const [connectionWarning, setConnectionWarning] = useState<string>();
   const [publishing, setPublishing] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [restartProviders, setRestartProviders] = useState<StudioProvider[]>([]);
+  const [restartSettings, setRestartSettings] = useState<StudioCreatorSettings>();
+  const [restartRequestId, setRestartRequestId] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -57,6 +63,25 @@ export function RunPage() {
     }
   }
 
+  async function beginRestart() {
+    setError(undefined);
+    try {
+      const [providers, settings] = await Promise.all([studioApi.providers(), studioApi.settings()]);
+      setRestartProviders(providers);
+      setRestartSettings(settings);
+      setRestartRequestId(crypto.randomUUID());
+      setRestarting(true);
+    } catch (caught) {
+      setError(`无法读取重新制作所需配置：${caught instanceof Error ? caught.message : String(caught)}`);
+    }
+  }
+
+  async function restartProduction(input: StudioProductionInput) {
+    const result = await studioApi.start(input, restartRequestId);
+    setRestarting(false);
+    navigate(`/projects/${result.runId}`);
+  }
+
   if (loading) {
     return <div className="page-loading"><LoaderCircle aria-hidden="true" size={22} />正在读取生产现场...</div>;
   }
@@ -75,8 +100,24 @@ export function RunPage() {
       <div className="run-back-row"><Link to="/projects"><ArrowLeft aria-hidden="true" size={16} />制作记录</Link></div>
       {connectionWarning ? <div className="inline-error" role="status"><AlertCircle aria-hidden="true" size={16} />{connectionWarning}</div> : null}
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
-      <RunWorkbench run={run} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} />
+      <RunWorkbench run={run} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} />
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
+      <NewRunDialog
+        open={restarting}
+        providers={restartProviders}
+        {...(restartSettings ? { creatorSettings: restartSettings } : {})}
+        initialValues={{
+          title: run.title,
+          angle: run.angle,
+          audience: run.audience,
+          nicheSlug: run.nicheSlug,
+          platform: run.platform,
+          durationSeconds: run.durationSeconds,
+          reviewMode: "manual",
+        }}
+        onClose={() => setRestarting(false)}
+        onSubmit={restartProduction}
+      />
     </>
   );
 }

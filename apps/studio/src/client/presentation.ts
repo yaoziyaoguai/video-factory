@@ -49,6 +49,8 @@ export function providerLabel(providerId?: string): string | undefined {
     "local-editorial-v1": "本地编辑画面",
     "pexels-stock-v1": "Pexels 图库",
     "pixabay-stock-v1": "Pixabay 图库",
+    "seedance-video-v1": "Seedance 视频生成",
+    "hailuo-video-v1": "MiniMax 海螺视频生成",
     "macos-say-v1": "macOS 系统配音",
     "python-ffmpeg-v1": "FFmpeg 本地渲染",
     "python-technical-review-v1": "本地机器质检",

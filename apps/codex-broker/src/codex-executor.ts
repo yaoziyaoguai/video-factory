@@ -52,6 +52,11 @@ export interface ScriptBrief {
   nicheSlug: string;
   platform: string;
   durationSeconds: number;
+  editorial?: {
+    verdict: "produce_video" | "produce_image_story";
+    reasons: string[];
+    guardrails: string[];
+  };
 }
 
 export interface ScriptDraftPayload {
@@ -426,17 +431,40 @@ function requiredText(value: unknown, field: string): string {
 // script-draft 的 brief 在受理前做字段级校验：越界值直接 400，不进入 codex。
 function requireScriptBrief(value: unknown): ScriptBrief {
   const record = requireRecord(value, "payload.brief");
+  assertExactKeys(
+    record,
+    ["title", "angle", "audience", "nicheSlug", "platform", "durationSeconds", "editorial"],
+    "payload.brief",
+  );
   const durationSeconds = record.durationSeconds;
   if (!Number.isInteger(durationSeconds) || Number(durationSeconds) < 20 || Number(durationSeconds) > 180) {
     throw new CodexExecutorError("payload.brief.durationSeconds must be an integer between 20 and 180.", false);
   }
-  return {
+  const brief: ScriptBrief = {
     title: requiredText(record.title, "payload.brief.title"),
     angle: requiredText(record.angle, "payload.brief.angle"),
     audience: requiredText(record.audience, "payload.brief.audience"),
     nicheSlug: requiredText(record.nicheSlug, "payload.brief.nicheSlug"),
     platform: requiredText(record.platform, "payload.brief.platform"),
     durationSeconds: Number(durationSeconds),
+  };
+  if (record.editorial !== undefined) brief.editorial = requireEditorialBrief(record.editorial);
+  return brief;
+}
+
+function requireEditorialBrief(value: unknown): NonNullable<ScriptBrief["editorial"]> {
+  const record = requireRecord(value, "payload.brief.editorial");
+  assertExactKeys(record, ["verdict", "reasons", "guardrails"], "payload.brief.editorial");
+  if (record.verdict !== "produce_video" && record.verdict !== "produce_image_story") {
+    throw new CodexExecutorError(
+      "payload.brief.editorial.verdict must be produce_video or produce_image_story.",
+      false,
+    );
+  }
+  return {
+    verdict: record.verdict,
+    reasons: stringArray(record.reasons, "payload.brief.editorial.reasons"),
+    guardrails: stringArray(record.guardrails, "payload.brief.editorial.guardrails"),
   };
 }
 

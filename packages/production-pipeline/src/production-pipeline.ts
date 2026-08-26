@@ -535,6 +535,7 @@ function directorNode(
           platform: brief.platform,
           durationSeconds: brief.durationSeconds,
           requestedProfileId: direction.profileId,
+          ...(brief.editorial ? { editorial: brief.editorial } : {}),
         },
         scenes,
         assetProviders,
@@ -606,6 +607,7 @@ function screenwriterNode(
           nicheSlug: brief.nicheSlug,
           platform: brief.platform,
           durationSeconds: brief.durationSeconds,
+          ...(brief.editorial ? { editorial: brief.editorial } : {}),
         },
       }, context);
       const draft = validateScriptDraft(rawDraft, { durationSeconds: brief.durationSeconds });
@@ -760,11 +762,13 @@ function providerConfig(
       "pexels-stock-v1": { provider: "pexels", mediaType: "video" },
       "pixabay-stock-v1": { provider: "pixabay", mediaType: "video" },
       "seedance-video-v1": { provider: "seedance", mediaType: "video" },
+      "hailuo-video-v1": { provider: "minimax", mediaType: "video" },
       "wan-video-v1": { provider: "wan", mediaType: "video" },
     },
     "voice.synthesize": {
       "macos-say-v1": { provider: "macos-say", voice: "Tingting", rate: 190 },
       "kokoro-local-v1": { provider: "kokoro", voice: "zf_001", rate: 180 },
+      "minimax-tts-v1": { provider: "minimax", voice: "female-chengshu", rate: 190 },
       "ffmpeg-tone-test-v1": { provider: "tone" },
     },
     "video.render": {

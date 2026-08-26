@@ -7,15 +7,15 @@ VideoFactory 是一个本地优先的短视频 Creative OS。当前 Web Studio �
 - 用 TS workflow-core 表达节点、provider、artifact、人工介入和质量门禁。
 - 用 TS production pipeline 持久化 run，并通过版本化 JSON 协议调度 Python media worker。
 - 用 Python/Pillow/FFmpeg/macOS `say` 跑通 `brief -> 脚本 -> 画面 -> 配音 -> 渲染 -> 机器质检 -> 人工终审 -> 发布包`。
-- 用 React/Fastify Creative OS 提供今日机会、制作记录、素材与模型、实验复盘和视频优先的审片现场。
+- 用 React/Fastify Creative OS 提供今日机会、制作记录、总配置、实验复盘和视频优先的审片现场。
 - 用 TrendRadar、NewsNow、DailyHotApi、RSSHub 组成可自托管热点底座，由统一网关去重并保留来源证据。
 - 语义层统一使用宿主机 Codex（ChatGPT 订阅）承担选题总编、编剧、视觉导演与发行编辑四个角色；bridge 不可用时新建制作在能力选择处回落到确定性筛选与本地模板并如实标注来源，已绑定 Codex 的制作则明确失败，绝不静默降级。
 - 自动发现 macOS 中文声音；语速、停顿和 FFmpeg 后期处理进入正式 production brief。
 - 机会必须包含至少一条来源声明；人工录入内容由用户自行核验，平台指标仅在数据连接器接入后展示。
 - 保留原有 SQLite CLI，用于选题实验、历史 job、指标记录和兼容路径。
 - 保留人工审核和手动发布，不在 MVP 阶段自动点击平台发布。
-- Seedance 与 Wan 已接入统一异步生成协议；默认关闭，只有配置完整并通过镜头数与人民币预算双门禁后才调用。
-- 可灵、海螺、Vidu 保留为明确的规划项，不会伪装成可用 Provider。
+- Seedance、MiniMax 海螺与 Wan 已接入统一异步生成协议；默认关闭，只有配置完整并通过镜头数与人民币预算双门禁后才调用。
+- 可灵与 Vidu 保留为明确的规划项，不会伪装成可用 Provider。
 
 ## 快速开始
 
@@ -28,7 +28,7 @@ make setup-local-trends
 npm run studio:dev
 ```
 
-浏览器打开 [http://127.0.0.1:4317](http://127.0.0.1:4317)。本地服务安装脚本是幂等的；热点服务由 Docker 运行，Codex bridge 作为宿主机 systemd 服务运行（见生产部署指南），socket 健康检查通过后选题、编剧、导演与发行编辑才会在资源页显示为“可用”。Today 把热点机会、系列选题和自定义创作作为三个并列入口；只有人工点击“采用到制作区”后才会进入正式机会与制作。默认本地能力不需要 API key，流程到“人工终审”后可在审片台批准或打回。
+浏览器打开 [http://127.0.0.1:4317](http://127.0.0.1:4317)。开发机推荐运行 `make studio-local`，它会校验当前 ChatGPT/Codex 登录、启动本地 Codex bridge，再启动 Studio；只调试确定性流程时仍可运行 `npm run studio:dev`。热点服务由 Docker 运行，生产环境 Codex bridge 作为宿主机 systemd 服务运行（见生产部署指南）。socket 健康检查通过后选题、编剧、导演与发行编辑才会在总配置显示为“可用”。Today 把热点机会、系列选题和自定义创作作为三个并列入口；只有人工点击“采用到制作区”后才会进入正式机会与制作。
 
 本地服务管理：
 
@@ -41,7 +41,7 @@ make codex-broker-status
 
 默认端口为 TrendRadar `8080`、TrendRadar MCP `3333`、NewsNow `4444`、DailyHotApi `6688` 和 RSSHub `1200`。所有服务只绑定 `127.0.0.1`；API key 不写入仓库，也不会由配置页面回传。
 
-默认“经济日更”配方不允许计费调用，预计成本上限为 `¥0`。免费图库或付费视频模型按需配置：
+默认“经济日更”配方不允许计费调用，预计成本上限为 `¥0`。免费图库或付费图片、视频模型按需配置：
 
 ```bash
 cp .env.example .env
@@ -51,7 +51,7 @@ npm run studio:dev
 
 Studio 会自动读取仓库根目录的 `.env`，shell 中已经存在的环境变量优先。配置 `PEXELS_API_KEY` 后才会启用 Pexels；密钥只在忽略文件中保存，API 和资源页不会返回密钥值。
 
-Seedance 需要 `ARK_API_KEY`、`SEEDANCE_MODEL_ID` 和 `SEEDANCE_ESTIMATED_CNY_PER_CLIP`；Wan 需要 `DASHSCOPE_API_KEY`、`DASHSCOPE_WORKSPACE_ID`、`WAN_MODEL_ID` 和 `WAN_ESTIMATED_CNY_PER_CLIP`。估价用于生产前预算门禁，应按账号实际计费配置一个保守值，不代表厂商实时价格。
+Seedream 需要 `ARK_API_KEY`、`SEEDREAM_MODEL_ID` 和 `SEEDREAM_ESTIMATED_CNY_PER_IMAGE`；Seedance 需要 `ARK_API_KEY`、`SEEDANCE_MODEL_ID` 和 `SEEDANCE_ESTIMATED_CNY_PER_CLIP`；MiniMax 海螺需要 `MINIMAX_API_KEY`、`MINIMAX_VIDEO_MODEL_ID` 和 `MINIMAX_ESTIMATED_CNY_PER_CLIP`；Wan 需要 `DASHSCOPE_API_KEY`、`DASHSCOPE_WORKSPACE_ID`、`WAN_MODEL_ID` 和 `WAN_ESTIMATED_CNY_PER_CLIP`。MiniMax 云配音只需 `MINIMAX_API_KEY`，默认使用 `speech-2.8-turbo`。估价用于生产前预算门禁，应按账号实际计费配置一个保守值，不代表厂商实时价格。
 
 完整验证：
 

@@ -1,4 +1,5 @@
-import { realpath, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { WorkflowRun } from "@video-factory/workflow-core";
 import {
@@ -39,6 +40,7 @@ export interface ProductionStudioOptions {
   workspaceRoot: string;
   pipeline: StudioPipelinePort;
   listProviders: () => Promise<StudioProvider[]>;
+  maxRunCostCny?: number;
 }
 
 const WORKFLOW_NODES: Array<{ id: string; label: string; role: string }> = [
@@ -56,6 +58,7 @@ const WORKFLOW_NODES: Array<{ id: string; label: string; role: string }> = [
 export class ProductionStudio {
   private readonly listeners = new Map<string, Set<(run: StudioRunDetail) => void>>();
   private readonly completions = new Set<Promise<void>>();
+  private readonly startsInFlight = new Map<string, Promise<StartRunResponse>>();
 
   constructor(private readonly options: ProductionStudioOptions) {}
 
@@ -72,9 +75,30 @@ export class ProductionStudio {
     }
   }
 
-  async start(input: unknown): Promise<StartRunResponse> {
+  async start(input: unknown, idempotencyKey?: string): Promise<StartRunResponse> {
     const brief = parseBriefWithInputError(input);
+    if (brief.reviewMode !== "manual") {
+      throw new StudioInputError("正式制作必须经过人工终审，不能自动跳过发布前确认。");
+    }
+    const maxRunCostCny = this.options.maxRunCostCny ?? 20;
+    if (brief.economics.maxCostCny > maxRunCostCny) {
+      throw new StudioInputError(`本次成本上限不能超过服务端安全上限 ¥${maxRunCostCny}。`);
+    }
     await this.assertProvidersAvailable(brief);
+    if (!idempotencyKey) return this.dispatchBrief(brief);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(idempotencyKey)) {
+      throw new StudioInputError("制作请求编号格式不正确。");
+    }
+    const existing = this.startsInFlight.get(idempotencyKey);
+    if (existing) return existing;
+    const operation = this.startIdempotently(brief, idempotencyKey).finally(() => {
+      if (this.startsInFlight.get(idempotencyKey) === operation) this.startsInFlight.delete(idempotencyKey);
+    });
+    this.startsInFlight.set(idempotencyKey, operation);
+    return operation;
+  }
+
+  private async dispatchBrief(brief: ProductionBrief): Promise<StartRunResponse> {
     const dispatched = await this.options.pipeline.dispatch(brief, (run) => this.publish(toRunDetail(run)));
     const tracked: Promise<void> = dispatched.completion
       .then(() => undefined)
@@ -85,6 +109,39 @@ export class ProductionStudio {
       .finally(() => this.completions.delete(tracked));
     this.completions.add(tracked);
     return { runId: dispatched.runId, status: "running" };
+  }
+
+  private async startIdempotently(brief: ProductionBrief, idempotencyKey: string): Promise<StartRunResponse> {
+    const directory = path.join(this.options.workspaceRoot, "idempotency", "production-start");
+    const recordPath = path.join(directory, `${idempotencyKey}.json`);
+    const digest = createHash("sha256").update(JSON.stringify(brief)).digest("hex");
+    await mkdir(directory, { recursive: true });
+    try {
+      const handle = await open(recordPath, "wx");
+      try {
+        await handle.writeFile(`${JSON.stringify({ version: 1, state: "pending", digest })}\n`, "utf8");
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      if (!hasCode(error, "EEXIST")) throw error;
+      const previous = await readStartRecord(recordPath);
+      if (previous.digest !== digest) {
+        throw new StudioConflictError("这个制作请求编号已被另一组参数使用，请重新打开制作方案。");
+      }
+      if (previous.state === "completed" && previous.response) return previous.response;
+      throw new StudioConflictError("相同制作请求仍在处理中，请稍后查看制作记录，不会重复扣费。");
+    }
+
+    let response: StartRunResponse;
+    try {
+      response = await this.dispatchBrief(brief);
+    } catch (error) {
+      await rm(recordPath, { force: true });
+      throw error;
+    }
+    await writeStartRecord(recordPath, { version: 1, state: "completed", digest, response });
+    return response;
   }
 
   async decide(runId: string, input: StudioDecisionInput): Promise<StudioRunDetail> {
@@ -202,6 +259,29 @@ export class ProductionStudio {
   private publish(run: StudioRunDetail): void {
     for (const listener of this.listeners.get(run.id) ?? []) listener(structuredClone(run));
   }
+}
+
+interface StartRecord {
+  version: 1;
+  state: "pending" | "completed";
+  digest: string;
+  response?: StartRunResponse;
+}
+
+async function readStartRecord(recordPath: string): Promise<StartRecord> {
+  try {
+    const value = JSON.parse(await readFile(recordPath, "utf8")) as StartRecord;
+    if (value.version !== 1 || (value.state !== "pending" && value.state !== "completed") || !value.digest) throw new Error();
+    return value;
+  } catch {
+    throw new StudioConflictError("制作幂等记录无法读取；为避免重复扣费，请先检查制作记录。");
+  }
+}
+
+async function writeStartRecord(recordPath: string, record: StartRecord): Promise<void> {
+  const temporaryPath = `${recordPath}.${process.pid}.tmp`;
+  await writeFile(temporaryPath, `${JSON.stringify(record)}\n`, "utf8");
+  await rename(temporaryPath, recordPath);
 }
 
 function toRunSummary(run: WorkflowRun<ProductionBrief>): StudioRunSummary {

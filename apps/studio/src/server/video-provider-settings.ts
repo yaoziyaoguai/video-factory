@@ -1,4 +1,4 @@
-export type MeteredVideoProviderSettings = SeedanceProviderSettings | WanProviderSettings;
+export type MeteredVideoProviderSettings = MiniMaxProviderSettings | SeedanceProviderSettings | WanProviderSettings;
 
 interface CommonProviderSettings {
   apiKey: string;
@@ -9,6 +9,10 @@ interface CommonProviderSettings {
 
 export interface SeedanceProviderSettings extends CommonProviderSettings {
   providerId: "seedance-video-v1";
+}
+
+export interface MiniMaxProviderSettings extends CommonProviderSettings {
+  providerId: "hailuo-video-v1";
 }
 
 export interface WanProviderSettings extends CommonProviderSettings {
@@ -28,6 +32,17 @@ export function readMeteredVideoProviderSettings(
       model: environment.SEEDANCE_MODEL_ID,
       estimatedCnyPerClip: seedanceEstimate,
       ...(environment.SEEDANCE_BASE_URL ? { baseUrl: environment.SEEDANCE_BASE_URL } : {}),
+    });
+  }
+
+  const miniMaxEstimate = positiveNumber(environment.MINIMAX_ESTIMATED_CNY_PER_CLIP);
+  if (environment.MINIMAX_API_KEY && environment.MINIMAX_VIDEO_MODEL_ID && miniMaxEstimate !== undefined) {
+    settings.push({
+      providerId: "hailuo-video-v1",
+      apiKey: environment.MINIMAX_API_KEY,
+      model: environment.MINIMAX_VIDEO_MODEL_ID,
+      estimatedCnyPerClip: miniMaxEstimate,
+      ...(environment.MINIMAX_BASE_URL ? { baseUrl: environment.MINIMAX_BASE_URL } : {}),
     });
   }
 

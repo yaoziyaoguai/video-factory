@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from video_factory.stock_assets import (
     prepare_scene_assets,
     query_for_scene,
     resolve_director_stock_query,
+    search_pixabay,
     write_response_body,
 )
 
@@ -514,6 +516,37 @@ class PipelineTest(unittest.TestCase):
                 )
 
             self.assertIn("PEXELS_API_KEY", str(error.exception))
+
+    def test_pixabay_search_uses_provider_minimum_page_size(self):
+        requested_urls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return b'{"hits": []}'
+
+        def opener(request, timeout):
+            requested_urls.append(request.full_url)
+            return FakeResponse()
+
+        for media_type in ("image", "video"):
+            with self.subTest(media_type=media_type):
+                result = search_pixabay(
+                    "city",
+                    media_type,
+                    2,
+                    opener=opener,
+                    environ={"PIXABAY_API_KEY": "test-key"},
+                )
+
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(requested_urls[-1]).query)
+                self.assertEqual(query["per_page"], ["3"])
+                self.assertEqual(result, [])
 
     def test_stock_asset_queries_prefer_english_visual_prompt(self):
         scene = Scene(

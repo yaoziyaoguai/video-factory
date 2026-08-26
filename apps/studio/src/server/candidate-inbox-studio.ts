@@ -13,6 +13,7 @@ import type { OpportunityStudio } from "./opportunity-studio.js";
 import type { SeriesStudio } from "./series-studio.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 import { classifyTopicCategory, topicFreshness, topicRiskLevel } from "./topic-taxonomy.js";
+import { decideEditorialFormat } from "./editorial-decision.js";
 
 export interface CandidateInboxStudioOptions {
   trends: { listCandidates(): Promise<StudioTrendCandidate[]> };
@@ -39,13 +40,17 @@ export class CandidateInboxStudio {
     const adoptedIds = new Set(adoptedOpportunities.map((item) => item.id));
     const available = [
       ...trendCandidates.map((candidate) => this.normalizeTrend(candidate)),
-      ...seriesCandidates,
+      ...seriesCandidates.map((candidate) => ({
+        ...candidate,
+        editorialDecision: candidate.editorialDecision ?? decideEditorialFormat(candidate),
+      })),
     ].filter((candidate) => !adoptedIds.has(candidate.id));
     const facets = buildFacets(available);
     const filtered = available
       .filter((item) => !query.origins?.length || query.origins.includes(item.origin))
       .filter((item) => !query.categories?.length || query.categories.includes(item.category))
       .filter((item) => !query.platforms?.length || query.platforms.includes(item.platform))
+      .filter((item) => !query.verdicts?.length || query.verdicts.includes(item.editorialDecision.verdict))
       .sort((left, right) => right.score.final - left.score.final || left.title.localeCompare(right.title, "zh-CN"));
     const limit = Math.max(1, Math.min(200, Math.floor(query.limit ?? 100)));
     return { items: filtered.slice(0, limit), facets, generatedAt: this.now().toISOString() };
@@ -57,6 +62,9 @@ export class CandidateInboxStudio {
     if (!candidate) throw new StudioNotFoundError("这条候选已被采用或已经失效，请刷新候选收件箱。");
     if (candidate.verification.status === "blocked") {
       throw new StudioConflictError(candidate.verification.reasons[0] ?? "这条候选尚未达到可采用的证据标准。");
+    }
+    if (candidate.editorialDecision.verdict === "skip") {
+      throw new StudioConflictError(candidate.editorialDecision.reasons[0] ?? "这条候选当前不值得进入生产。");
     }
     if (candidate.verification.status === "review_required" && !adoptionInput.verificationConfirmed) {
       throw new StudioConflictError("请先查看原始证据并确认核验，再采用这条候选。");
@@ -77,6 +85,7 @@ export class CandidateInboxStudio {
       verification: candidate.verification.status === "review_required"
         ? { ...candidate.verification, status: "verified", reasons: ["已由创作者查看原始证据并确认核验。"] }
         : candidate.verification,
+      editorialDecision: candidate.editorialDecision,
       ...(candidate.visualPlan ? { visualPlan: candidate.visualPlan } : {}),
       ...(candidate.seriesId ? { seriesId: candidate.seriesId } : {}),
       ...(candidate.seriesName ? { seriesName: candidate.seriesName } : {}),
@@ -94,16 +103,21 @@ export class CandidateInboxStudio {
       .map((item) => item.collectedAt)
       .filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)))
       .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
-    return {
+    const category = candidate.category ?? classifyTopicCategory(candidate.title, candidate.track);
+    const freshness = candidate.freshness ?? topicFreshness(collectedAt, this.now());
+    const risk = candidate.risk ?? topicRiskLevel(candidate.title);
+    const verification = candidateVerification(risk, candidate.evidence);
+    const normalized = {
       ...candidate,
-      origin: "trend",
-      category: candidate.category ?? classifyTopicCategory(candidate.title, candidate.track),
-      freshness: candidate.freshness ?? topicFreshness(collectedAt, this.now()),
-      risk: candidate.risk ?? topicRiskLevel(candidate.title),
-      verification: candidateVerification(
-        candidate.risk ?? topicRiskLevel(candidate.title),
-        candidate.evidence,
-      ),
+      origin: "trend" as const,
+      category,
+      freshness,
+      risk,
+      verification,
+    };
+    return {
+      ...normalized,
+      editorialDecision: candidate.editorialDecision ?? decideEditorialFormat(normalized),
     };
   }
 }
@@ -152,11 +166,12 @@ function evidenceIdentity(evidence: StudioOpportunityEvidence): string {
 }
 
 function buildFacets(items: StudioCandidateInboxItem[]): StudioCandidateInbox["facets"] {
-  const facets: StudioCandidateInbox["facets"] = { total: items.length, origins: {}, categories: {}, platforms: {} };
+  const facets: StudioCandidateInbox["facets"] = { total: items.length, origins: {}, categories: {}, platforms: {}, verdicts: {} };
   for (const item of items) {
     facets.origins[item.origin] = (facets.origins[item.origin] ?? 0) + 1;
     facets.categories[item.category] = (facets.categories[item.category] ?? 0) + 1;
     facets.platforms[item.platform] = (facets.platforms[item.platform] ?? 0) + 1;
+    facets.verdicts[item.editorialDecision.verdict] = (facets.verdicts[item.editorialDecision.verdict] ?? 0) + 1;
   }
   return facets;
 }

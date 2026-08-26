@@ -1,5 +1,5 @@
 import { ArrowRight, CircleHelp, Play, Sparkles, X } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 interface GuideDockProps {
   open: boolean;
@@ -12,13 +12,19 @@ interface GuideDockProps {
 const WORKFLOW_STEPS = ["选选题", "定方案", "跑制作", "做审片", "多端发布", "看复盘"];
 
 export function GuideDock({ open, pathname, onOpenChange, onStartFullTour, onStartPageTour }: GuideDockProps) {
+  const panelRef = useRef<HTMLElement>(null);
+  const primaryActionRef = useRef<HTMLButtonElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const wasOpenRef = useRef(false);
+
   useEffect(() => {
-    if (!open) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onOpenChange(false);
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
+    if (open && !wasOpenRef.current) {
+      returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      window.requestAnimationFrame(() => primaryActionRef.current?.focus());
+    } else if (!open && wasOpenRef.current) {
+      window.requestAnimationFrame(() => returnFocusRef.current?.focus());
+    }
+    wasOpenRef.current = open;
   }, [onOpenChange, open]);
 
   const context = guideContext(pathname);
@@ -26,11 +32,30 @@ export function GuideDock({ open, pathname, onOpenChange, onStartFullTour, onSta
     onOpenChange(false);
     callback();
   };
+  const handleDialogKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onOpenChange(false);
+      return;
+    }
+    if (event.key !== "Tab" || !panelRef.current) return;
+    const focusable = [...panelRef.current.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], [tabindex]:not([tabindex='-1'])")];
+    if (focusable.length === 0) return;
+    const first = focusable[0]!;
+    const last = focusable.at(-1)!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
 
   return (
     <div className={`guide-dock ${open ? "is-open" : ""}`} data-tour="creator-guide">
       {open ? (
-        <section id="creator-guide-panel" className="guide-dock-panel" role="dialog" aria-label="创作向导">
+        <section ref={panelRef} id="creator-guide-panel" className="guide-dock-panel" role="dialog" aria-modal="true" aria-label="创作向导" onKeyDown={handleDialogKeyDown}>
           <header>
             <span><Sparkles aria-hidden="true" size={15} />CREATOR ROUTE</span>
             <button type="button" onClick={() => onOpenChange(false)} aria-label="收起创作向导" title="收起">
@@ -47,7 +72,7 @@ export function GuideDock({ open, pathname, onOpenChange, onStartFullTour, onSta
             ))}
           </ol>
           <div className="guide-dock-actions">
-            <button className="guide-action-primary" type="button" onClick={() => start(onStartFullTour)}>
+            <button ref={primaryActionRef} className="guide-action-primary" type="button" onClick={() => start(onStartFullTour)}>
               <Play aria-hidden="true" size={16} />完整带我做一条
             </button>
             <button type="button" onClick={() => start(onStartPageTour)}>
@@ -81,7 +106,7 @@ function guideContext(pathname: string): { title: string; description: string; s
     return { title: "生产现场，先判断要不要动手", description: "看节点进度和成片；出现人工判断时审片，批准后可下载发布包或进入多平台发布。", step: 3 };
   }
   if (pathname === "/resources") {
-    return { title: "在这里准备创作能力", description: "检查热点、声音、画面与模型是否在线，再回今日机会开拍。", step: 1 };
+    return { title: "先把创作习惯和能力配好", description: "保存新建制作的默认值，再检查热点、声音、画面、模型和发布出口。", step: 1 };
   }
   if (pathname === "/experiments") {
     return { title: "查看当前可验证结果", description: "这里先汇总制作结果；平台表现要等导出或授权连接器接入后再复盘。", step: 5 };

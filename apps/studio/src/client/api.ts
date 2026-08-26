@@ -15,6 +15,7 @@ import type {
   StudioPublishBatch,
   StudioPublishInput,
   StudioPublishReadiness,
+  StudioPublishTarget,
   StudioProvider,
   StudioRunDetail,
   StudioRunSummary,
@@ -56,6 +57,7 @@ export const studioApi = {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   }),
+  publishTargets: () => requestJson<StudioPublishTarget[]>("/api/publish-targets"),
   trendSources: () => requestJson<StudioTrendSource[]>("/api/trend-sources"),
   trendServices: () => requestJson<StudioTrendService[]>("/api/trend-services"),
   trendSignals: (platforms = ["douyin", "kuaishou", "weibo", "baidu", "toutiao", "zhihu", "bilibili", "thepaper", "36kr", "ithome", "sspai", "hupu", "tieba", "guokr"], limit = 160) => {
@@ -69,6 +71,7 @@ export const studioApi = {
     if (input.origins?.length) query.set("origins", input.origins.join(","));
     if (input.categories?.length) query.set("categories", input.categories.join(","));
     if (input.platforms?.length) query.set("platforms", input.platforms.join(","));
+    if (input.verdicts?.length) query.set("verdicts", input.verdicts.join(","));
     if (input.limit) query.set("limit", String(input.limit));
     const suffix = query.size > 0 ? `?${query}` : "";
     return requestJson<StudioCandidateInbox>(`/api/candidate-inbox${suffix}`);
@@ -99,9 +102,9 @@ export const studioApi = {
   ),
   runs: () => requestJson<StudioRunSummary[]>("/api/runs"),
   run: (runId: string) => requestJson<StudioRunDetail>(`/api/runs/${encodeURIComponent(runId)}`),
-  start: (input: StudioProductionInput) => requestJson<StartRunResponse>("/api/runs", {
+  start: (input: StudioProductionInput, idempotencyKey: string = crypto.randomUUID()) => requestJson<StartRunResponse>("/api/runs", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
     body: JSON.stringify(input),
   }),
   decide: (runId: string, input: StudioDecisionInput) => requestJson<StudioRunDetail>(

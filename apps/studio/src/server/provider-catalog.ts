@@ -1,6 +1,7 @@
 import type { StudioProvider, StudioTrendService, StudioTrendSource } from "../shared/api.js";
 import { resolveCodexSocketPath, type CodexProviderSettings } from "./codex-provider-settings.js";
 import { readMeteredVideoProviderSettings } from "./video-provider-settings.js";
+import { readMeteredImageProviderSettings } from "./image-provider-settings.js";
 
 export interface ProviderRuntime {
   python: boolean;
@@ -17,9 +18,14 @@ export function buildProviderCatalog(
   codexAvailability?: CodexCatalogAvailability,
 ): StudioProvider[] {
   const videoSettings = readMeteredVideoProviderSettings(environment);
+  const imageSettings = readMeteredImageProviderSettings(environment);
+  const seedreamSettings = imageSettings.find((setting) => setting.providerId === "seedream-image-v1");
   const seedanceSettings = videoSettings.find((setting) => setting.providerId === "seedance-video-v1");
+  const miniMaxSettings = videoSettings.find((setting) => setting.providerId === "hailuo-video-v1");
   const wanSettings = videoSettings.find((setting) => setting.providerId === "wan-video-v1");
   const seedanceAvailable = runtime.python && seedanceSettings !== undefined;
+  const seedreamAvailable = runtime.python && seedreamSettings !== undefined;
+  const miniMaxAvailable = runtime.python && miniMaxSettings !== undefined;
   const wanAvailable = runtime.python && wanSettings !== undefined;
   const codex = codexAvailability ?? probeCodexSynchronously(environment);
   const codexRequirement = `${resolveCodexSocketPath(environment).requirement}${codex.reason ? ` 当前：${codex.reason}` : ""}`;
@@ -78,7 +84,7 @@ export function buildProviderCatalog(
       label: "AI 逐镜路由",
       available: runtime.python && codex.available,
       kind: "external",
-      description: "执行导演计划；每个镜头可独立调用本地、图库或视频生成能力。",
+      description: "执行导演计划；每个镜头可独立调用本地、图库或图片及视频生成能力。",
       modes: ["逐镜决策", "多来源", "预算门禁"],
       latency: "seconds",
       requirement: "需要 Python 和 Codex 视觉导演",
@@ -119,6 +125,21 @@ export function buildProviderCatalog(
       docsUrl: "https://pixabay.com/api/docs/",
     }),
     provider({
+      id: "seedream-image-v1",
+      capability: "asset.prepare",
+      label: "Seedream 关键画面",
+      available: seedreamAvailable,
+      kind: "external",
+      billing: "metered",
+      status: seedreamAvailable ? "ready" : "needs_config",
+      description: "火山方舟同步生成竖屏关键画面，适合解释性插画、概念视觉和系列统一风格。",
+      modes: ["文生图", "9:16", "单张关键画面"],
+      latency: "seconds",
+      ...(seedreamSettings ? { estimatedCnyPerClip: seedreamSettings.estimatedCnyPerImage } : {}),
+      requirement: "需要 ARK_API_KEY；模型与单图估价可用保守默认值覆盖",
+      docsUrl: "https://api.volcengine.com/api-docs/view?action=ImageGenerations&serviceCode=ark&version=2024-01-01",
+    }),
+    provider({
       id: "seedance-video-v1",
       capability: "asset.prepare",
       label: "Seedance 关键镜头",
@@ -132,6 +153,21 @@ export function buildProviderCatalog(
       ...(seedanceSettings ? { estimatedCnyPerClip: seedanceSettings.estimatedCnyPerClip } : {}),
       requirement: "需要 ARK_API_KEY、SEEDANCE_MODEL_ID 和 SEEDANCE_ESTIMATED_CNY_PER_CLIP",
       docsUrl: "https://www.volcengine.com/docs/82379/1520757?lang=zh",
+    }),
+    provider({
+      id: "hailuo-video-v1",
+      capability: "asset.prepare",
+      label: "MiniMax 海螺关键镜头",
+      available: miniMaxAvailable,
+      kind: "external",
+      billing: "metered",
+      status: miniMaxAvailable ? "ready" : "needs_config",
+      description: "MiniMax 海螺异步视频生成，适合需要明确运镜的少量表现镜头。",
+      modes: ["文生视频", "768P", "6 秒", "成片裁切为 9:16"],
+      latency: "minutes",
+      ...(miniMaxSettings ? { estimatedCnyPerClip: miniMaxSettings.estimatedCnyPerClip } : {}),
+      requirement: "需要 MINIMAX_API_KEY、MINIMAX_VIDEO_MODEL_ID 和 MINIMAX_ESTIMATED_CNY_PER_CLIP",
+      docsUrl: "https://platform.minimaxi.com/docs/api-reference/video-generation-t2v",
     }),
     provider({
       id: "wan-video-v1",
@@ -149,8 +185,21 @@ export function buildProviderCatalog(
       docsUrl: "https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference",
     }),
     plannedVideoProvider("kling-video-v1", "Kling 可灵", "可灵官方 API 的模型目录与鉴权适配将在账号权限确认后启用。"),
-    plannedVideoProvider("hailuo-video-v1", "Hailuo 海螺", "首尾帧和主体参考能力将在统一生成任务协议上接入。"),
     plannedVideoProvider("vidu-video-v1", "Vidu", "参考生视频、模板和口型能力将在统一生成任务协议上接入。"),
+    provider({
+      id: "minimax-tts-v1",
+      capability: "voice.synthesize",
+      label: "MiniMax 中文声音演员",
+      available: runtime.python && runtime.ffmpeg && Boolean(environment.MINIMAX_API_KEY),
+      kind: "external",
+      billing: "metered",
+      status: runtime.python && runtime.ffmpeg && Boolean(environment.MINIMAX_API_KEY) ? "ready" : "needs_config",
+      description: "使用 speech-2.8-turbo 合成自然中文旁白，逐场缓存后再由 FFmpeg 做响度与节奏统一。",
+      modes: ["普通话", "多角色", "情绪与语速", "云端生成"],
+      latency: "seconds",
+      requirement: "需要 MINIMAX_API_KEY，可选 MINIMAX_TTS_MODEL_ID",
+      docsUrl: "https://platform.minimaxi.com/docs/api-reference/speech-t2a-http",
+    }),
     provider({
       id: "macos-say-v1",
       capability: "voice.synthesize",

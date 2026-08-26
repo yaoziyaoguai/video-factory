@@ -138,6 +138,11 @@ export interface VisualDirectorAgentInput {
     platform: string;
     durationSeconds: number;
     requestedProfileId: ProductionDirectorProfileId;
+    editorial?: {
+      verdict: "produce_video" | "produce_image_story";
+      reasons: string[];
+      guardrails: string[];
+    };
   };
   scenes: Array<{
     position: number;

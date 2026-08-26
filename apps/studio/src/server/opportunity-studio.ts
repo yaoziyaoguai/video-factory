@@ -74,6 +74,7 @@ export class OpportunityStudio {
         ...(input.seriesName ? { seriesName: input.seriesName } : {}),
         ...(input.episodeNumber ? { episodeNumber: input.episodeNumber } : {}),
         ...(input.verification ? { verification: structuredClone(input.verification) } : {}),
+        ...(input.editorialDecision ? { editorialDecision: structuredClone(input.editorialDecision) } : {}),
         visualPlan,
       }));
     } catch (error) {
@@ -121,6 +122,7 @@ function toOpportunity(record: OpportunityRecord): StudioOpportunity {
     ...(record.seriesName ? { seriesName: record.seriesName } : {}),
     ...(record.episodeNumber ? { episodeNumber: record.episodeNumber } : {}),
     ...(record.verification ? { verification: structuredClone(record.verification) } : {}),
+    ...(record.editorialDecision ? { editorialDecision: structuredClone(record.editorialDecision) } : {}),
     visualPlan: structuredClone(visualPlan),
   };
 }

@@ -16,6 +16,7 @@
     "factory": "tsx packages/production-pipeline/src/cli.ts",
     "studio:build": "npm run build:pipeline && npm run build --workspace @video-factory/studio",
     "studio:dev": "npm run build:pipeline && npm run dev --workspace @video-factory/studio",
+    "studio:dev:codex": "bash scripts/studio-dev-with-codex.sh",
     "studio:start": "npm run start --workspace @video-factory/studio",
     "studio:test": "npm run build:pipeline && npm test --workspace @video-factory/studio",
     "typecheck": "tsc -p packages/workflow-core/tsconfig.json && tsc -p packages/production-pipeline/tsconfig.json && npm run build:pipeline && npm run typecheck --workspace @video-factory/studio && npm run typecheck:broker",

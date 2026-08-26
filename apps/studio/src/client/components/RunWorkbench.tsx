@@ -11,9 +11,10 @@ interface RunWorkbenchProps {
   decisionPending: boolean;
   onDecision: (input: StudioDecisionInput) => Promise<void>;
   onOpenPublish?: () => void;
+  onRestart?: () => void;
 }
 
-export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish }: RunWorkbenchProps) {
+export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, onRestart }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
@@ -97,6 +98,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish }
               <h2>当前状态</h2>
               <p>{runStateMessage(run)}</p>
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />多平台发布</button> : null}
+              {(run.status === "failed" || run.status === "rejected") && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
             </section>
           )}
 

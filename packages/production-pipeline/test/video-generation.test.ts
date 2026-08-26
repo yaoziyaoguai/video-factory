@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { SeedanceVideoAdapter, WanVideoAdapter } from "../src/index.js";
+import { MiniMaxVideoAdapter, SeedanceVideoAdapter, WanVideoAdapter } from "../src/index.js";
 
 describe("metered video generation adapters", () => {
   it("normalizes the Seedance asynchronous task lifecycle", async () => {
@@ -98,6 +98,67 @@ describe("metered video generation adapters", () => {
         watermark: false,
       },
     });
+  });
+
+  it("normalizes the MiniMax task and file retrieval lifecycle", async () => {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const responses = [
+      jsonResponse({ task_id: "minimax-task-1", base_resp: { status_code: 0, status_msg: "success" } }),
+      jsonResponse({ task_id: "minimax-task-1", status: "Processing", base_resp: { status_code: 0, status_msg: "success" } }),
+      jsonResponse({
+        task_id: "minimax-task-1",
+        status: "Success",
+        file_id: "minimax-file-1",
+        base_resp: { status_code: 0, status_msg: "success" },
+      }),
+      jsonResponse({
+        file: { file_id: "minimax-file-1", download_url: "https://example.com/minimax.mp4" },
+        base_resp: { status_code: 0, status_msg: "success" },
+      }),
+    ];
+    const adapter = new MiniMaxVideoAdapter({
+      apiKey: "test-key",
+      model: "MiniMax-Hailuo-2.3",
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return responses.shift()!;
+      },
+      sleep: async () => undefined,
+      pollIntervalMs: 1,
+      timeoutMs: 100,
+    });
+
+    const result = await adapter.generate({ prompt: "雨夜里的霓虹街道", durationSeconds: 8, ratio: "9:16" });
+
+    assert.deepEqual(result, {
+      providerId: "hailuo-video-v1",
+      taskId: "minimax-task-1",
+      videoUrl: "https://example.com/minimax.mp4",
+    });
+    assert.equal(requests[0]?.url, "https://api.minimaxi.com/v1/video_generation");
+    assert.equal(requests[1]?.url, "https://api.minimaxi.com/v1/query/video_generation?task_id=minimax-task-1");
+    assert.equal(requests[3]?.url, "https://api.minimaxi.com/v1/files/retrieve?file_id=minimax-file-1");
+    assert.deepEqual(JSON.parse(String(requests[0]?.init?.body)), {
+      model: "MiniMax-Hailuo-2.3",
+      prompt: "竖屏 9:16 构图。雨夜里的霓虹街道",
+      duration: 6,
+      resolution: "768P",
+      prompt_optimizer: true,
+      aigc_watermark: false,
+    });
+  });
+
+  it("surfaces MiniMax application-level errors returned with HTTP 200", async () => {
+    const adapter = new MiniMaxVideoAdapter({
+      apiKey: "test-key",
+      model: "MiniMax-Hailuo-2.3",
+      fetch: async () => jsonResponse({ base_resp: { status_code: 1008, status_msg: "insufficient balance" } }),
+    });
+
+    await assert.rejects(
+      () => adapter.generate({ prompt: "测试余额错误", durationSeconds: 6, ratio: "9:16" }),
+      /insufficient balance/,
+    );
   });
 
   it("surfaces a failed provider task and emits failed progress", async () => {

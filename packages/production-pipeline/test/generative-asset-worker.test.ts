@@ -8,6 +8,7 @@ import {
   GenerativeAssetWorkerClient,
   WORKER_PROTOCOL_VERSION,
   type VideoGenerationAdapter,
+  type ImageGenerationAdapter,
   type WorkerResponse,
 } from "../src/index.js";
 
@@ -68,6 +69,7 @@ describe("GenerativeAssetWorkerClient", () => {
       taskId: "task-1",
       status: "succeeded",
       estimatedCostCny: 3.5,
+      mediaType: "video",
       videoUrl: "https://example.com/generated.mp4",
     });
     assert.equal(response.artifacts.some((artifact) => artifact.kind === "generation_jobs"), true);
@@ -187,7 +189,7 @@ describe("GenerativeAssetWorkerClient", () => {
           },
         },
       }],
-      fetch: async () => new Response("routed-video"),
+      fetch: async () => new Response("routed-video", { headers: { "content-type": "video/mp4" } }),
     });
 
     const response = await subject.run(routedWorkerRequest(scriptPath, directorPlanPath, outputDir, 1, 4));
@@ -234,6 +236,153 @@ describe("GenerativeAssetWorkerClient", () => {
       /estimated cost.*7.*budget.*6/i,
     );
     assert.equal(called, false);
+  });
+
+  it("lets the director mix generated images and videos per shot", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const directorPlanPath = path.join(root, "director_plan.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "食物成分剖面" },
+      { position: 2, duration: 5, visual_strategy: "generated", visual_prompt: "蒸汽升起的早餐" },
+    ] }));
+    await writeFile(directorPlanPath, JSON.stringify({ shots: [
+      { scenePosition: 1, preferredProviderId: "seedream-image-v1", generationPrompt: "中式早餐食材剖面，编辑摄影" },
+      { scenePosition: 2, preferredProviderId: "seedance-video-v1", generationPrompt: "早餐蒸汽缓慢上升，微距镜头" },
+    ] }));
+    const imageAdapter: ImageGenerationAdapter = {
+      providerId: "seedream-image-v1",
+      generate: async () => ({
+        providerId: "seedream-image-v1",
+        taskId: "image-task",
+        imageUrl: "https://example.com/generated.png",
+      }),
+    };
+    const videoAdapter: VideoGenerationAdapter = {
+      providerId: "seedance-video-v1",
+      generate: async () => ({
+        providerId: "seedance-video-v1",
+        taskId: "video-task",
+        videoUrl: "https://example.com/generated.mp4",
+      }),
+    };
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{ adapter: videoAdapter, estimatedCnyPerClip: 3.5 }],
+      imageAdapters: [{ adapter: imageAdapter, estimatedCnyPerImage: 0.25 }],
+      fetch: async (input) => new Response(
+        String(input).endsWith(".png") ? "generated-image" : "generated-video",
+        { headers: { "content-type": String(input).endsWith(".png") ? "image/png" : "video/mp4" } },
+      ),
+    });
+
+    const response = await subject.run(routedWorkerRequest(scriptPath, directorPlanPath, outputDir, 2, 4));
+    const plan = JSON.parse(await readFile(String(response.output?.assetPlanPath), "utf8"));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.equal(plan.scene_assets[0].provider, "seedream-image-v1");
+    assert.equal(plan.scene_assets[0].media_type, "image");
+    assert.match(plan.scene_assets[0].local_path, /seedream-image-v1\.png$/);
+    assert.equal(plan.scene_assets[1].provider, "seedance-video-v1");
+    assert.equal(plan.scene_assets[1].media_type, "video");
+    assert.deepEqual(jobs.jobs.map((job: { mediaType: string }) => job.mediaType), ["image", "video"]);
+    assert.equal(plan.generation.estimatedCostCny, 3.75);
+  });
+
+  it("uses the first configured alternative selected by the director", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const directorPlanPath = path.join(root, "director_plan.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "城市雨夜" },
+    ] }));
+    await writeFile(directorPlanPath, JSON.stringify({ shots: [
+      {
+        scenePosition: 1,
+        preferredProviderId: "hailuo-video-v1",
+        alternativeProviderIds: ["seedance-video-v1", "local-editorial-v1"],
+        generationPrompt: "雨夜城市，纪实电影镜头",
+      },
+    ] }));
+    let generated = false;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 3.5,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => {
+            generated = true;
+            return { providerId: "seedance-video-v1", taskId: "alternative-task", videoUrl: "https://example.com/alternative.mp4" };
+          },
+        },
+      }],
+      fetch: async () => new Response("alternative-video", { headers: { "content-type": "video/mp4" } }),
+    });
+
+    const response = await subject.run(routedWorkerRequest(scriptPath, directorPlanPath, outputDir, 1, 4));
+    const plan = JSON.parse(await readFile(String(response.output?.assetPlanPath), "utf8"));
+
+    assert.equal(generated, true);
+    assert.equal(plan.scene_assets[0].provider, "seedance-video-v1");
+  });
+
+  it("blocks private media URLs before any download request", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "私网测试" },
+    ] }));
+    let downloads = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({ providerId: "seedance-video-v1", taskId: "private-task", videoUrl: "http://127.0.0.1/private.mp4" }),
+        },
+      }],
+      fetch: async () => {
+        downloads += 1;
+        return new Response("must-not-download");
+      },
+    });
+
+    await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.equal(downloads, 0);
+    assert.match(jobs.jobs[0].error, /private or unsafe/);
+  });
+
+  it("stops streaming generated media as soon as the byte limit is exceeded", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "大小测试" },
+    ] }));
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({ providerId: "seedance-video-v1", taskId: "large-task", videoUrl: "https://example.com/large.mp4" }),
+        },
+      }],
+      maxDownloadBytes: 5,
+      fetch: async () => new Response("123456789", { headers: { "content-type": "video/mp4" } }),
+    });
+
+    await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.match(jobs.jobs[0].error, /5-byte download limit/);
   });
 });
 

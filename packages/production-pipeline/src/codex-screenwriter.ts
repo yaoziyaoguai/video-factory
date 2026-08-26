@@ -24,6 +24,11 @@ export interface ScreenwriterAgentInput {
     nicheSlug: string;
     platform: string;
     durationSeconds: number;
+    editorial?: {
+      verdict: "produce_video" | "produce_image_story";
+      reasons: string[];
+      guardrails: string[];
+    };
   };
 }
 

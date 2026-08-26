@@ -264,7 +264,11 @@ const RUN_TOUR_STEPS: DriveStep[] = [
 const RESOURCE_TOUR_STEPS: DriveStep[] = [
   {
     element: '[data-tour="resource-overview"]',
-    popover: { title: "先看哪些能力已经可用", description: "这里汇总热点服务、画面来源、运行时和默认预算。", side: "bottom", align: "start" },
+    popover: { title: "先看整套工厂是否可用", description: "这里汇总热点服务、画面来源、生产岗位和发布出口。", side: "bottom", align: "start" },
+  },
+  {
+    element: '[data-tour="configuration-defaults"]',
+    popover: { title: "把常用选择保存为默认", description: "成本策略、导演角色、平台、时长和终审方式会自动带入下一条新制作，创建时仍可单独修改。", side: "bottom", align: "center" },
   },
   {
     element: '[data-tour="resource-trends"]',
@@ -277,6 +281,10 @@ const RESOURCE_TOUR_STEPS: DriveStep[] = [
   {
     element: '[data-tour="resource-visual"]',
     popover: { title: "画面来源可以替换", description: "免费图库、自托管能力和付费生成模型都通过统一能力接口接入；不可用项会说明配置要求。", side: "top", align: "center" },
+  },
+  {
+    element: '[data-tour="configuration-publishing"]',
+    popover: { title: "发布能力以官方权限为准", description: "能自动发布、需要授权或只能导出发布包都会如实显示；系统不会绕过平台审核。", side: "top", align: "center" },
   },
 ];
 

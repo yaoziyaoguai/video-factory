@@ -83,8 +83,8 @@ workspace/factory/runs/<run-id>/
 | Brief 合同 | `video-factory/brief-v1`，校验必填字段、20-180 秒、终审模式与 Provider binding | 自动 | 可新增协议版本 |
 | 工作流调度 | TS DAG、依赖排序、节点状态、失败/拒绝传播 | 自动 | Node/Provider 接口可扩展 |
 | 脚本 | `python-template-v1` | 自动 | 可增加 LLM、规则模板或人工脚本 Provider |
-| 素材 | `local-editorial-v1`、`pexels-stock-v1`、`pixabay-stock-v1` | 自动 | brief 中替换 Provider，无需改 graph |
-| 配音 | `macos-say-v1`；`ffmpeg-tone-test-v1` 仅用于测试 | 自动 | 可增加商业 TTS 或真人录音 Provider |
+| 素材 | AI 导演逐镜路由本地卡片、Pexels、Pixabay、Seedream 图片及已配置的视频模型 | 自动 | 图片/视频 Provider 通过 adapter 扩展，无需改 graph |
+| 配音 | `minimax-tts-v1`、`macos-say-v1`；`ffmpeg-tone-test-v1` 仅用于测试 | 自动 | 可继续增加云 TTS 或真人录音 Provider |
 | 渲染 | Python + FFmpeg，H.264/AAC，1080x1920 | 自动 | 可增加 Remotion 或其他渲染 Provider |
 | 技术审片 | 分辨率、编码、音量、时长、分镜覆盖、素材存在性 | 自动 | 可增加视觉/内容质量模型 |
 | 最终审片 | `manual` 支持跨进程 approve/reject；`automatic` 可跳过人工节点 | 可配置 | 当前人工动作严格限制为 approve/reject |
@@ -248,7 +248,7 @@ jq '.providers.assets = "pixabay-stock-v1"' \
 | 下一阶段 | 抖音等平台自动上传 | 需要平台权限、风控策略、AIGC 标识和失败补偿 |
 | 下一阶段 | 发布后 T+24h 指标回流 | 先用 3 条真实发布验证字段与节奏，再自动化 |
 | 未实现 | 分布式队列、跨主机锁、自动 retry/resume | 当前单机每天一条的目标不要求这些设施 |
-| 待验证 | 高品质 TTS、外部素材对播放表现的增益 | 先用真实数据判断，不提前增加持续成本 |
+| 待验证 | 云端 TTS、AI 图片/视频对播放表现的实际增益 | 逐条记录成本与完播数据，不提前增加持续成本 |
 
 ## 7. Loop 10 的正确入口
 

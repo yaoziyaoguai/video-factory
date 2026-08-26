@@ -93,6 +93,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   const [maxPaidShots, setMaxPaidShots] = useState(0);
   const [budgetCny, setBudgetCny] = useState(0);
   const [directorProfileId, setDirectorProfileId] = useState<StudioDirectorProfileId>("auto");
+  const [platform, setPlatform] = useState("douyin");
+  const [durationSeconds, setDurationSeconds] = useState(24);
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([]);
   const [voiceDirection, setVoiceDirection] = useState<StudioProductionInput["voiceDirection"]>(() => defaultVoiceDirection(providers));
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -100,6 +102,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   const [error, setError] = useState<string>();
   const dialogRef = useDialogFocus<HTMLElement>(open, onClose, submitting);
   const activeCapability = CAPABILITIES.find((item) => item.key === activeKey) ?? CAPABILITIES[1]!;
+  const editorial = initialValues?.editorial;
+  const imageStory = editorial?.verdict === "produce_image_story";
   const activeProviders = providers.filter((provider) => {
     if (provider.capability !== activeCapability.capability || provider.kind === "test") return false;
     return activeKey !== "assets" || provider.id === "ai-shot-router-v1";
@@ -139,27 +143,32 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
       director: defaults.director ?? "",
       voice: readyVoiceProvider?.id ?? defaults.voice ?? "",
     };
-    const initialRecipe = initialValues?.economics?.recipeId ?? creatorSettings?.defaultRecipeId ?? "economy-daily";
+    const initialRecipe = imageStory
+      ? "free-stock"
+      : initialValues?.economics?.recipeId ?? creatorSettings?.defaultRecipeId ?? "economy-daily";
     const recipe = RECIPES.find((item) => item.id === initialRecipe) ?? RECIPES[0]!;
-    const initialProfile = initialValues?.director?.profileId ?? "auto";
+    const initialProfile = initialValues?.director?.profileId ?? creatorSettings?.productionDefaults?.directorProfileId ?? "auto";
     const sourceIds = initialValues?.director?.assetProviderIds
       ?? sourceIdsForRecipe(recipe, providers, creatorSettings?.defaultAssetProviderId);
     setBindings(initialBindings);
     setRecipeId(recipe.id);
-    setMaxPaidShots(initialValues?.economics?.maxPaidShots ?? recipe.maxPaidShots);
-    setBudgetCny(initialValues?.economics?.maxCostCny ?? estimatedRecipeBudget(recipe, sourceIds, providers));
+    setMaxPaidShots(imageStory ? 0 : initialValues?.economics?.maxPaidShots ?? recipe.maxPaidShots);
+    setBudgetCny(imageStory ? 0 : initialValues?.economics?.maxCostCny ?? estimatedRecipeBudget(recipe, sourceIds, providers));
     setDirectorProfileId(initialProfile);
+    setPlatform(initialValues?.platform ?? creatorSettings?.productionDefaults?.platform ?? "douyin");
+    setDurationSeconds(initialValues?.durationSeconds ?? creatorSettings?.productionDefaults?.durationSeconds ?? 24);
     setAssetProviderIds(sourceIds);
     setVoiceDirection(initialVoiceDirection);
     setActiveKey("assets");
     setAdvancedOpen(false);
     setError(undefined);
-  }, [creatorSettings, defaults, open, providers]);
+  }, [creatorSettings, defaults, imageStory, open, providers]);
 
   if (!open) return null;
 
   function applyRecipe(nextId: RecipeId) {
     const recipe = RECIPES.find((item) => item.id === nextId) ?? RECIPES[0]!;
+    if (imageStory && recipe.maxPaidShots > 0) return;
     const sourceIds = sourceIdsForRecipe(recipe, providers);
     setRecipeId(nextId);
     setMaxPaidShots(recipe.maxPaidShots);
@@ -196,9 +205,10 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
         angle: requiredString(data, "angle"),
         audience: requiredString(data, "audience"),
         nicheSlug: initialValues?.nicheSlug ?? topicSlug(requiredString(data, "title")),
-        durationSeconds: Number(data.get("durationSeconds")),
-        platform: requiredString(data, "platform"),
-        reviewMode: data.get("reviewMode") === "automatic" ? "automatic" : "manual",
+        durationSeconds,
+        platform,
+        reviewMode: "manual",
+        ...(editorial ? { editorial } : {}),
         voiceDirection,
         providers: bindings,
         director: { profileId: directorProfileId, assetProviderIds },
@@ -253,7 +263,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 </label>
                 <label className="field field-compact">
                   <span>目标平台</span>
-                  <select name="platform" defaultValue={initialValues?.platform ?? "douyin"}>
+                  <select name="platform" value={platform} onChange={(event) => setPlatform(event.target.value)}>
                     <option value="douyin">抖音</option>
                     <option value="xiaohongshu">小红书</option>
                     <option value="bilibili">哔哩哔哩</option>
@@ -261,7 +271,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 </label>
                 <label className="field field-compact">
                   <span>视频时长</span>
-                  <select name="durationSeconds" defaultValue={String(initialValues?.durationSeconds ?? 24)}>
+                  <select name="durationSeconds" value={String(durationSeconds)} onChange={(event) => setDurationSeconds(Number(event.target.value))}>
                     <option value="20">20 秒</option>
                     <option value="24">24 秒</option>
                     <option value="30">30 秒</option>
@@ -269,6 +279,13 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                   </select>
                 </label>
               </div>
+              {imageStory ? (
+                <div className="editorial-brief-note" role="note">
+                  <strong>总编建议 · 图文成片</strong>
+                  <span>{editorial?.reasons[0]}</span>
+                  <small>{editorial?.guardrails[0]}</small>
+                </div>
+              ) : null}
             </section>
 
             <section className="director-casting-section" aria-labelledby="director-casting-title">
@@ -298,7 +315,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
               <fieldset className="recipe-options">
                 <legend className="sr-only">制作配方</legend>
                 {RECIPES.map((recipe) => {
-                  const available = recipeAvailable(recipe, providers);
+                  const available = recipeAvailable(recipe, providers) && (!imageStory || recipe.maxPaidShots === 0);
                   return (
                   <label key={recipe.id} className={available ? "recipe-option" : "recipe-option is-disabled"}>
                     <input type="radio" name="recipe" value={recipe.id} checked={recipeId === recipe.id} disabled={!available} onChange={() => applyRecipe(recipe.id)} />
@@ -423,11 +440,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
             />
 
             <section className="production-guardrails" aria-label="生产门禁">
-              <fieldset className="segmented-control review-control">
-                <legend>终审模式</legend>
-                <label><input type="radio" name="reviewMode" value="manual" defaultChecked /><span>人工终审</span></label>
-                <label><input type="radio" name="reviewMode" value="automatic" /><span>跳过人工终审</span></label>
-              </fieldset>
+              <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>
               <label className="budget-control">
                 <span><CircleDollarSign aria-hidden="true" size={16} /><strong>预计成本上限</strong></span>
                 <span className="budget-input"><span>¥</span><input aria-label="预计成本上限" type="number" min={minimumBudget} step="0.1" value={displayedBudget} disabled={!meteredSelected} onChange={(event) => setBudgetCny(Number(event.target.value))} /></span>
@@ -454,8 +467,11 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
 }
 
 function defaultVoiceDirection(providers: StudioProvider[]): StudioProductionInput["voiceDirection"] {
+  const profileId = providers.some((provider) => provider.id === "minimax-tts-v1" && provider.available)
+    ? "minimax:Chinese (Mandarin)_News_Anchor"
+    : "macos:Tingting";
   return {
-    profileId: "macos:Tingting",
+    profileId,
     rate: 185,
     pauseScale: 1,
     masteringPreset: "natural",
@@ -476,6 +492,8 @@ function providerDefaults(providers: StudioProvider[]): StudioProductionInput["p
 
 function providerForVoiceProfile(profileId: string): string {
   if (profileId.startsWith("tone:")) return "ffmpeg-tone-test-v1";
+  if (profileId.startsWith("kokoro:")) return "kokoro-local-v1";
+  if (profileId.startsWith("minimax:")) return "minimax-tts-v1";
   return "macos-say-v1";
 }
 

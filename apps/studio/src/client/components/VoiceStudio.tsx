@@ -15,8 +15,12 @@ const RECOMMENDED_VOICES = new Set([
   "macos:Tingting",
   "macos:Meijia",
   "macos:Sinji",
+  "minimax:Chinese (Mandarin)_News_Anchor",
+  "minimax:Chinese (Mandarin)_Reliable_Executive",
+  "minimax:male-qn-jingying",
+  "minimax:female-chengshu",
 ]);
-type VoiceFilter = "recommended" | "female" | "male" | "system";
+type VoiceFilter = "recommended" | "female" | "male" | "cloud" | "system";
 
 export function VoiceStudio({ value, onChange, title = "声音导演", sectionLabel = "04" }: VoiceStudioProps) {
   const [voices, setVoices] = useState<StudioVoiceProfile[]>([]);
@@ -33,6 +37,7 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
   const filteredVoices = useMemo(() => voices.filter((voice) => {
     if (filter === "female") return voice.gender === "female";
     if (filter === "male") return voice.gender === "male";
+    if (filter === "cloud") return voice.engine === "minimax";
     if (filter === "system") return voice.engine === "macos";
     return RECOMMENDED_VOICES.has(voice.id) || voice.id === direction.profileId;
   }), [direction.profileId, filter, voices]);
@@ -40,6 +45,7 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
     recommended: voices.filter((voice) => RECOMMENDED_VOICES.has(voice.id) || voice.id === direction.profileId).length,
     female: voices.filter((voice) => voice.gender === "female").length,
     male: voices.filter((voice) => voice.gender === "male").length,
+    cloud: voices.filter((voice) => voice.engine === "minimax").length,
     system: voices.filter((voice) => voice.engine === "macos").length,
   }), [direction.profileId, voices]);
 
@@ -98,6 +104,7 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
                 ["recommended", "推荐"],
                 ["female", "女声"],
                 ["male", "男声"],
+                ["cloud", "云端演员"],
                 ["system", "系统音色"],
               ] as const).map(([id, label]) => (
                 <button key={id} type="button" role="tab" aria-selected={filter === id} onClick={() => setFilter(id)}>
@@ -119,7 +126,7 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
                   <span className="voice-card-mark"><Mic2 aria-hidden="true" size={17} /></span>
                   <span className="voice-card-copy">
                     <strong>{voice.label}</strong>
-                    <small>{voice.engine === "macos" ? voice.description ?? voice.locale : "云端声音演员"}</small>
+                    <small>{voice.description ?? (voice.engine === "macos" ? voice.locale : "云端声音演员")}</small>
                   </span>
                   <button
                     className="icon-button voice-preview-button"

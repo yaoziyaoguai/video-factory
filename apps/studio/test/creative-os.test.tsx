@@ -97,6 +97,7 @@ function candidate(index: number, category: StudioCandidateInboxItem["category"]
     freshness: "live",
     risk: "low",
     verification: { status: "ready", independentSources: 1, requiredSources: 1, reasons: ["常规风险"] },
+    editorialDecision: { verdict: "produce_video", score: 82, reasons: ["适合视频表达。"], guardrails: ["逐镜核验。"] },
     title: `候选提案 ${index}`,
     platform: index % 2 === 0 ? "bilibili" : "douyin",
     track: "daily-observer",
@@ -125,6 +126,11 @@ function inbox(items: StudioCandidateInboxItem[]) {
         society: items.filter((item) => item.category === "society").length,
       },
       platforms: { douyin: items.filter((item) => item.platform === "douyin").length },
+      verdicts: {
+        produce_video: items.filter((item) => item.editorialDecision.verdict === "produce_video").length,
+        produce_image_story: items.filter((item) => item.editorialDecision.verdict === "produce_image_story").length,
+        skip: items.filter((item) => item.editorialDecision.verdict === "skip").length,
+      },
     },
     generatedAt: "2026-08-24T09:00:00.000Z",
   };
@@ -240,7 +246,7 @@ describe("Creative OS", () => {
     const navigation = within(screen.getByRole("navigation", { name: "主导航" }));
     expect(navigation.getByRole("link", { name: /今日机会/ })).toHaveAttribute("href", "/");
     expect(navigation.getByRole("link", { name: /制作记录/ })).toHaveAttribute("href", "/projects");
-    expect(navigation.getByRole("link", { name: /素材与模型/ })).toHaveAttribute("href", "/resources");
+    expect(navigation.getByRole("link", { name: /总配置/ })).toHaveAttribute("href", "/resources");
     expect(navigation.getByRole("link", { name: /制作复盘/ })).toHaveAttribute("href", "/experiments");
   });
 
@@ -263,6 +269,25 @@ describe("Creative OS", () => {
     expect(screen.getAllByText(/人工评分/).length).toBeGreaterThan(0);
     await user.click(screen.getByRole("button", { name: "新建制作" }));
     expect(onProduce).toHaveBeenCalledOnce();
+  });
+
+  it("carries the configured default duration into an adopted opportunity", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([opportunity]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "economy-daily",
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 45 },
+    });
+    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+
+    await user.click(await screen.findByRole("button", { name: "新建制作" }));
+
+    expect(screen.getByRole("combobox", { name: "视频时长" })).toHaveValue("45");
   });
 
   it("presents an executable visual plan for every topic without fake stock frames", () => {
@@ -291,12 +316,15 @@ describe("Creative OS", () => {
   it("does not turn failed resource or analytics requests into fake empty metrics", async () => {
     vi.spyOn(studioApi, "providers").mockRejectedValue(new Error("provider registry offline"));
     vi.spyOn(studioApi, "trendSources").mockRejectedValue(new Error("trend registry offline"));
+    vi.spyOn(studioApi, "settings").mockRejectedValue(new Error("settings store offline"));
     vi.spyOn(studioApi, "runs").mockRejectedValue(new Error("run store offline"));
     render(<MemoryRouter><ResourcesPage /><ExperimentsPage /></MemoryRouter>);
 
     await waitFor(() => expect(screen.getByText("画面能力状态未知")).toBeInTheDocument());
     expect(screen.getByText("热点源状态未知")).toBeInTheDocument();
     expect(screen.getByText("制作统计未知")).toBeInTheDocument();
+    expect(screen.getByText("创作默认值读取失败")).toBeInTheDocument();
+    expect(screen.queryByText("当前默认值已保存")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("制作统计")).not.toBeInTheDocument();
     expect(screen.queryByText("尚未配置")).not.toBeInTheDocument();
   });
@@ -399,6 +427,7 @@ describe("Creative OS", () => {
       freshness: "live",
       risk: "low",
       verification: { status: "ready", independentSources: 1, requiredSources: 1, reasons: ["常规风险"] },
+      editorialDecision: { verdict: "produce_video", score: 86, reasons: ["适合视频表达。"], guardrails: ["逐镜核验。"] },
       title: "下班后的 AI 时间账本",
       platform: "douyin",
       track: "ai-daily-life",
@@ -478,6 +507,7 @@ describe("Creative OS", () => {
       freshness: "today",
       risk: "low",
       verification: { status: "ready", independentSources: 1, requiredSources: 1, reasons: ["常规风险"] },
+      editorialDecision: { verdict: "produce_video", score: 78, reasons: ["适合视频表达。"], guardrails: ["逐镜核验。"] },
       title: "一个待核验的热点角度",
       platform: "douyin",
       track: "ordinary-life",
@@ -671,6 +701,7 @@ describe("Creative OS", () => {
     expect(screen.getByText("抖音官方热点")).toBeInTheDocument();
     expect(screen.getAllByText("按量计费").length).toBeGreaterThan(0);
     expect(screen.getAllByText("需要配置").length).toBeGreaterThan(0);
+    expect(screen.getByText("需要 ARK_API_KEY")).toBeInTheDocument();
   });
 
   it("persists voice and visual choices as production defaults", async () => {
@@ -683,6 +714,7 @@ describe("Creative OS", () => {
     const initialSettings = {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
       defaultRecipeId: "economy-daily" as const,
+      productionDefaults: { directorProfileId: "auto" as const, reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
     };
     vi.spyOn(studioApi, "providers").mockResolvedValue(readyProviders);
     vi.spyOn(studioApi, "voices").mockResolvedValue([
@@ -693,10 +725,17 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "trendSignals").mockResolvedValue([]);
     vi.spyOn(studioApi, "localCapabilities").mockResolvedValue([]);
     vi.spyOn(studioApi, "settings").mockResolvedValue(initialSettings);
-    const update = vi.spyOn(studioApi, "updateSettings").mockImplementation(async (patch) => ({ ...initialSettings, ...patch }));
+    vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
+    const update = vi.spyOn(studioApi, "updateSettings").mockImplementation(async (patch) => ({
+      ...initialSettings,
+      ...patch,
+      productionDefaults: { ...initialSettings.productionDefaults, ...patch.productionDefaults },
+    }));
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
     expect(await screen.findByRole("button", { name: "已是制作默认" })).toBeDisabled();
+    expect(screen.getByRole("heading", { name: "新建制作默认值" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "发布渠道" })).toBeInTheDocument();
     fireEvent.change(screen.getByRole("slider", { name: "语速" }), { target: { value: "190" } });
     await user.click(await screen.findByRole("button", { name: "设为制作默认" }));
     expect(update).toHaveBeenCalledWith({ voiceDirection: { ...initialSettings.voiceDirection, rate: 190 } });
@@ -709,5 +748,18 @@ describe("Creative OS", () => {
     expect(routerRow).not.toBeNull();
     expect(within(routerRow!).queryByRole("button", { name: "设为默认" })).not.toBeInTheDocument();
     expect(within(routerRow!).getByText("系统路由")).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "默认导演角色" }), "documentary-observer");
+    await user.selectOptions(screen.getByRole("combobox", { name: "默认目标平台" }), "bilibili");
+    await user.click(screen.getByRole("button", { name: "保存创作默认" }));
+    expect(update).toHaveBeenLastCalledWith({
+      defaultRecipeId: "economy-daily",
+      productionDefaults: {
+        directorProfileId: "documentary-observer",
+        reviewMode: "manual",
+        platform: "bilibili",
+        durationSeconds: 24,
+      },
+    });
   });
 });

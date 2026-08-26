@@ -303,6 +303,28 @@ describe("ProductionPipeline", () => {
     assert.equal(parameters.profileId, "kokoro:zf_001");
   });
 
+  it("routes a MiniMax actor through cloud speech synthesis", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
+    const worker = new FakeWorker();
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+
+    await subject.start({
+      ...brief,
+      providers: { ...brief.providers, voice: "minimax-tts-v1" },
+      voiceDirection: {
+        profileId: "minimax:Chinese (Mandarin)_News_Anchor",
+        rate: 190,
+        pauseScale: 1,
+        masteringPreset: "natural",
+      },
+    });
+
+    const parameters = worker.calls.find((call) => call.capability === "voice.synthesize")?.parameters as Record<string, unknown>;
+    assert.equal(parameters.provider, "minimax");
+    assert.equal(parameters.voice, "Chinese (Mandarin)_News_Anchor");
+    assert.equal(parameters.profileId, "minimax:Chinese (Mandarin)_News_Anchor");
+  });
+
   it("lists persisted runs through the production service", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
     const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });

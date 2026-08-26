@@ -2,13 +2,17 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import {
   GenerativeAssetWorkerClient,
+  MiniMaxVideoAdapter,
   PythonWorkerClient,
+  SeedreamImageAdapter,
   SeedanceVideoAdapter,
   WanVideoAdapter,
   type VisualAssetProviderCapability,
+  type ImageGenerationAdapterBinding,
   type VideoGenerationAdapterBinding,
 } from "@video-factory/production-pipeline";
 import { readMeteredVideoProviderSettings } from "./video-provider-settings.js";
+import { readMeteredImageProviderSettings } from "./image-provider-settings.js";
 
 export interface ProductionWorkerOptions {
   repositoryRoot: string;
@@ -30,7 +34,13 @@ export function buildProductionWorker(options: ProductionWorkerOptions): Generat
           model: setting.model,
           ...(setting.baseUrl ? { baseUrl: setting.baseUrl } : {}),
         })
-      : new WanVideoAdapter({
+      : setting.providerId === "hailuo-video-v1"
+        ? new MiniMaxVideoAdapter({
+            apiKey: setting.apiKey,
+            model: setting.model,
+            ...(setting.baseUrl ? { baseUrl: setting.baseUrl } : {}),
+          })
+        : new WanVideoAdapter({
           apiKey: setting.apiKey,
           model: setting.model,
           workspaceId: setting.workspaceId,
@@ -38,7 +48,15 @@ export function buildProductionWorker(options: ProductionWorkerOptions): Generat
         });
     return { adapter, estimatedCnyPerClip: setting.estimatedCnyPerClip };
   });
-  return new GenerativeAssetWorkerClient({ fallback, adapters });
+  const imageAdapters: ImageGenerationAdapterBinding[] = readMeteredImageProviderSettings(options.environment).map((setting) => ({
+    adapter: new SeedreamImageAdapter({
+      apiKey: setting.apiKey,
+      model: setting.model,
+      ...(setting.baseUrl ? { baseUrl: setting.baseUrl } : {}),
+    }),
+    estimatedCnyPerImage: setting.estimatedCnyPerImage,
+  }));
+  return new GenerativeAssetWorkerClient({ fallback, adapters, imageAdapters });
 }
 
 export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOptions, "environment">): VisualAssetProviderCapability[] {
@@ -72,10 +90,24 @@ export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOption
       constraints: ["通用图库不是具体新闻事件证据", "不得把图库人物描述为事件当事人", "中文语义搜索结果可能需要人工复核"],
     });
   }
+  for (const setting of readMeteredImageProviderSettings(options.environment)) {
+    providers.push({
+      id: setting.providerId,
+      label: "Seedream 关键画面",
+      billing: "metered",
+      modes: ["AI 图片", "9:16"],
+      strengths: ["解释性插画、抽象概念、无法检索到的关键静态画面与统一系列视觉"],
+      constraints: ["合成内容不得作为事实证据", "人物、品牌与地标需要规避权利和误导风险", "成片必须保留 AIGC 标识"],
+      estimatedCnyPerClip: setting.estimatedCnyPerImage,
+      generative: true,
+    });
+  }
   for (const setting of readMeteredVideoProviderSettings(options.environment)) {
     providers.push({
       id: setting.providerId,
-      label: setting.providerId === "seedance-video-v1" ? "Seedance 关键镜头" : "Wan 关键镜头",
+      label: setting.providerId === "seedance-video-v1"
+        ? "Seedance 关键镜头"
+        : setting.providerId === "hailuo-video-v1" ? "MiniMax 海螺关键镜头" : "Wan 关键镜头",
       billing: "metered",
       modes: ["AI 视频", "9:16"],
       strengths: ["难以实拍的概念视觉、情绪化转场与关键表现镜头"],

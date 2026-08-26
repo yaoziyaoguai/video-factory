@@ -26,6 +26,8 @@ export class TrendStudio {
   private readonly agent: Pick<TrendOpportunityAgent, "listCandidates"> | undefined;
   private candidateCache: { expiresAt: number; values: StudioTrendCandidate[] } | undefined;
   private candidateLoading: Promise<StudioTrendCandidate[]> | undefined;
+  private candidateLoadingForced = false;
+  private queuedRefresh: Promise<StudioTrendCandidate[]> | undefined;
 
   constructor(private readonly options: TrendStudioOptions) {
     this.gateway = options.trendGateway ?? new TrendGateway({ environment: options.environment });
@@ -47,15 +49,34 @@ export class TrendStudio {
   async listCandidates(options: TrendCandidateReadOptions = {}): Promise<StudioTrendCandidate[]> {
     const now = this.options.now().getTime();
     if (!options.forceRefresh && this.candidateCache && this.candidateCache.expiresAt > now) return this.candidateCache.values;
-    if (this.candidateLoading) return this.candidateLoading;
+    if (this.candidateLoading) {
+      if (!options.forceRefresh || this.candidateLoadingForced) return this.candidateLoading;
+      if (this.queuedRefresh) return this.queuedRefresh;
+      const current = this.candidateLoading;
+      const queued = current.catch(() => undefined).then(() => this.startCandidateLoad(true));
+      this.queuedRefresh = queued;
+      try {
+        return await queued;
+      } finally {
+        if (this.queuedRefresh === queued) this.queuedRefresh = undefined;
+      }
+    }
+    return this.startCandidateLoad(Boolean(options.forceRefresh));
+  }
+
+  private async startCandidateLoad(forceRefresh: boolean): Promise<StudioTrendCandidate[]> {
     const loading = this.loadCandidates();
     this.candidateLoading = loading;
+    this.candidateLoadingForced = forceRefresh;
     try {
       const values = await loading;
-      this.candidateCache = { expiresAt: now + 5 * 60 * 1000, values };
+      this.candidateCache = { expiresAt: this.options.now().getTime() + 5 * 60 * 1000, values };
       return values;
     } finally {
-      if (this.candidateLoading === loading) this.candidateLoading = undefined;
+      if (this.candidateLoading === loading) {
+        this.candidateLoading = undefined;
+        this.candidateLoadingForced = false;
+      }
     }
   }
 

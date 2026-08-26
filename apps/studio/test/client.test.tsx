@@ -329,7 +329,41 @@ describe("Studio client", () => {
     expect(screen.queryByLabelText("选题系列")).not.toBeInTheDocument();
   });
 
+  it("locks an editorial image story to a free production path", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <NewRunDialog
+        open
+        providers={providers}
+        initialValues={{
+          title: "警方通报一项社会事件调查进展",
+          angle: "只解释原始来源已经确认的内容",
+          audience: "关注公共信息的普通用户",
+          nicheSlug: "public-update",
+          editorial: {
+            verdict: "produce_image_story",
+            reasons: ["信息价值高于动作价值。"],
+            guardrails: ["不得用 AI 生成画面虚构现场。"],
+          },
+        }}
+        onClose={() => undefined}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByRole("radio", { name: /全免费精搜/ })).toBeChecked();
+    expect(screen.getByText(/图文成片/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      editorial: expect.objectContaining({ verdict: "produce_image_story" }),
+      economics: expect.objectContaining({ allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 }),
+    }));
+  });
+
   it("uses persisted creator defaults for recipe, voice, and asset provider", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
     const configuredProviders: StudioProvider[] = [
       ...providers.map((provider) => provider.id === "pexels-stock-v1" ? { ...provider, available: true, status: "ready" as const } : provider),
     ];
@@ -340,15 +374,31 @@ describe("Studio client", () => {
         voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
         defaultRecipeId: "free-stock",
         defaultAssetProviderId: "pexels-stock-v1",
+        productionDefaults: { directorProfileId: "documentary-observer", reviewMode: "manual", platform: "bilibili", durationSeconds: 30 },
       }}
       onClose={() => undefined}
-      onSubmit={async () => undefined}
+      onSubmit={onSubmit}
     />);
 
     expect(screen.getByRole("radio", { name: /全免费精搜/ })).toBeChecked();
+    expect(screen.getByRole("combobox", { name: "导演角色" })).toHaveValue("documentary-observer");
+    expect(screen.getByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
+    expect(screen.getByRole("combobox", { name: "视频时长" })).toHaveValue("30");
+    expect(screen.getByLabelText("终审模式")).toHaveTextContent("人工终审");
     expect(await screen.findByRole("slider", { name: "语速" })).toHaveValue("205");
-    await userEvent.setup().click(screen.getByText("高级：逐节点配置"));
+    await user.click(screen.getByText("高级：逐节点配置"));
     expect(screen.getByRole("checkbox", { name: /Pexels 视频/ })).toBeChecked();
+    await user.type(screen.getByLabelText("视频标题"), "默认值真实进入生产单");
+    await user.type(screen.getByLabelText("内容角度"), "验证总配置不是展示页");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "bilibili",
+      durationSeconds: 30,
+      reviewMode: "manual",
+      director: expect.objectContaining({ profileId: "documentary-observer" }),
+      economics: expect.objectContaining({ recipeId: "free-stock" }),
+    }));
   });
 
   it("never treats the shot router itself as a director asset source", async () => {
@@ -361,6 +411,7 @@ describe("Studio client", () => {
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         defaultRecipeId: "economy-daily",
         defaultAssetProviderId: "ai-shot-router-v1",
+        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
@@ -550,5 +601,21 @@ describe("Studio client", () => {
 
     expect(screen.queryByRole("dialog", { name: "打回这条视频" })).not.toBeInTheDocument();
     expect(screen.getByText("字幕需要精简")).toBeInTheDocument();
+  });
+
+  it("offers a recoverable route after a failed production", async () => {
+    const user = userEvent.setup();
+    const onRestart = vi.fn();
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    render(<RunWorkbench
+      run={{ ...withoutIntervention, status: "failed" }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onRestart={onRestart}
+    />);
+
+    await user.click(screen.getByRole("button", { name: "调整方案后重新制作" }));
+
+    expect(onRestart).toHaveBeenCalledOnce();
   });
 });

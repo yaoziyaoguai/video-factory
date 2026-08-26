@@ -3,6 +3,7 @@ export type {
   ProductionBrief,
   ProductionDirectorDirection,
   ProductionDirectorProfileId,
+  ProductionEditorialDirection,
   ProductionEconomics,
   ProductionProviderBindings,
   ProductionRecipeId,
@@ -65,8 +66,9 @@ export type {
   ProductionPipelineOptions,
   ProductionRunListener,
 } from "./production-pipeline.js";
-export { SeedanceVideoAdapter, WanVideoAdapter } from "./video-generation.js";
+export { MiniMaxVideoAdapter, SeedanceVideoAdapter, WanVideoAdapter } from "./video-generation.js";
 export type {
+  MiniMaxVideoAdapterOptions,
   SeedanceVideoAdapterOptions,
   VideoAspectRatio,
   VideoGenerationAdapter,
@@ -75,9 +77,19 @@ export type {
   VideoGenerationResult,
   WanVideoAdapterOptions,
 } from "./video-generation.js";
+export { SeedreamImageAdapter } from "./image-generation.js";
+export type {
+  ImageAspectRatio,
+  ImageGenerationAdapter,
+  ImageGenerationProgress,
+  ImageGenerationRequest,
+  ImageGenerationResult,
+  SeedreamImageAdapterOptions,
+} from "./image-generation.js";
 export { GenerativeAssetWorkerClient } from "./generative-asset-worker.js";
 export type {
   GenerativeAssetWorkerClientOptions,
+  ImageGenerationAdapterBinding,
   VideoGenerationAdapterBinding,
 } from "./generative-asset-worker.js";
 export { runCli } from "./cli.js";

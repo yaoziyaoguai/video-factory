@@ -67,6 +67,12 @@ export class SeriesPlanner {
         requiredSources: 1,
         reasons: ["系列候选来自创作者已保存的栏目定义。"],
       },
+      editorialDecision: {
+        verdict: "produce_video",
+        score: 91,
+        reasons: ["系列内容有持续叙事承诺，适合用动作、过程和连续镜头建立栏目记忆。"],
+        guardrails: ["每集必须提供新的验证、行动或结论，不能只重复栏目模板。"],
+      },
       seriesId: series.id,
       seriesName: series.name,
       episodeNumber,

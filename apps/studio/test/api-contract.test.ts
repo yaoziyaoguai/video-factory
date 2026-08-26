@@ -44,12 +44,53 @@ describe("creator settings API contracts", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 190, pauseScale: 1.1, masteringPreset: "social" },
       defaultRecipeId: "free-stock",
       defaultAssetProviderId: "pexels-stock-v1",
+      productionDefaults: {
+        directorProfileId: "documentary-observer",
+        reviewMode: "manual",
+        platform: "douyin",
+        durationSeconds: 30,
+      },
     }), {
       voiceDirection: { profileId: "macos:Tingting", rate: 190, pauseScale: 1.1, masteringPreset: "social" },
       defaultRecipeId: "free-stock",
       defaultAssetProviderId: "pexels-stock-v1",
+      productionDefaults: {
+        directorProfileId: "documentary-observer",
+        reviewMode: "manual",
+        platform: "douyin",
+        durationSeconds: 30,
+      },
     });
     assert.throws(() => parseStudioCreatorSettingsPatch({ defaultRecipeId: "unlimited-paid" }), /默认制作配方无效/);
+    assert.throws(() => parseStudioCreatorSettingsPatch({ productionDefaults: { directorProfileId: "famous-person" } }), /默认导演角色无效/);
+    assert.throws(() => parseStudioCreatorSettingsPatch({ productionDefaults: { durationSeconds: 120 } }), /默认视频时长/);
+    assert.throws(() => parseStudioCreatorSettingsPatch({ productionDefaults: { reviewMode: "automatic" } }), /人工终审/);
+  });
+
+  it("accepts a configured cloud voice as the creator default", () => {
+    assert.deepEqual(parseStudioCreatorSettingsPatch({
+      voiceDirection: {
+        profileId: "minimax:Chinese (Mandarin)_News_Anchor",
+        rate: 185,
+        pauseScale: 1,
+        masteringPreset: "natural",
+      },
+    }), {
+      voiceDirection: {
+        profileId: "minimax:Chinese (Mandarin)_News_Anchor",
+        rate: 185,
+        pauseScale: 1,
+        masteringPreset: "natural",
+      },
+    });
+    assert.throws(() => parseStudioCreatorSettingsPatch({
+      voiceDirection: {
+        profileId: "remote:unknown",
+        rate: 185,
+        pauseScale: 1,
+        masteringPreset: "natural",
+      },
+    }), /支持的声音演员/);
   });
 });
 
@@ -175,7 +216,7 @@ describe("voice preview API contracts", () => {
         pauseScale: 1,
         masteringPreset: "social",
       }),
-      (error: unknown) => error instanceof StudioInputError && /本地音色/.test(error.message),
+      (error: unknown) => error instanceof StudioInputError && /支持的声音演员/.test(error.message),
     );
     assert.throws(
       () => parseStudioVoicePreviewInput({

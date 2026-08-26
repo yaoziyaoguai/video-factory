@@ -104,7 +104,7 @@ sudo cp deploy/nginx/video.wangjinkun333.me.conf /etc/nginx/sites-available/vide
 sudo ln -s /etc/nginx/sites-available/video.wangjinkun333.me /etc/nginx/sites-enabled/video.wangjinkun333.me
 sudo nginx -t
 sudo systemctl reload nginx
-sudo certbot --nginx -d video.wangjinkun333.me
+sudo certbot --nginx --redirect -d video.wangjinkun333.me
 ```
 
 中国大陆 ECS 的域名必须先完成有效 ICP 备案。若 HTTP 返回 `Server: Beaver` 和 `Non-compliance ICP Filing`，这是阿里云在实例外层的合规拦截，Nginx 与 Certbot 都无法绕过；完成备案后再签发证书。
@@ -134,5 +134,5 @@ Pull Request 只执行验证；`main` 推送通过测试和依赖审计后才会
 - 工作区保存在 Docker named volume `video_factory_workspace`，重建容器不会丢失。
 - 自动备份只覆盖工作流 JSON 状态；正式生产需要再把成片和素材同步到 OSS，并配置生命周期策略。
 - 镜像内置 Python、Pillow、FFmpeg、ffprobe 和 Noto CJK 字体。
-- Linux 镜像没有 macOS `say`；生产环境正式配音需接入外部 TTS Provider，测试音轨不应作为正式配音交付。
+- Linux 镜像没有 macOS `say`；配置 `MINIMAX_API_KEY` 后使用 MiniMax 云端声音演员，未配置时测试音轨不应作为正式配音交付。
 - 热点服务适合独立容器或独立进程；Codex 语义层以宿主机 systemd 服务运行（见第 2 节），与 Web 镜像解耦。

@@ -378,7 +378,14 @@ body { background: var(--canvas); }
 .studio-v3 .trend-refresh-status .icon-button:disabled svg { animation: trend-refresh-spin 1.1s linear infinite; }
 @keyframes trend-refresh-spin { to { transform: rotate(360deg); } }
 
-.studio-v3 .candidate-filters { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 10px 13px; background: #f7f7f4; border-bottom: 1px solid var(--line); }
+.studio-v3 .candidate-filters { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: flex-start; gap: 8px 14px; padding: 10px 13px; background: #f7f7f4; border-bottom: 1px solid var(--line); }
+.studio-v3 .verdict-filter { display: flex; min-width: 0; grid-column: 1 / -1; flex-wrap: wrap; gap: 5px; padding-bottom: 8px; border-bottom: 1px solid #e2e3dd; }
+.studio-v3 .verdict-filter button { display: inline-flex; min-height: 30px; align-items: center; gap: 6px; padding: 0 10px; color: #555c56; background: #ffffff; border: 1px solid #d4d6cf; border-radius: 4px; font: inherit; font-size: 10px; font-weight: 740; cursor: pointer; }
+.studio-v3 .verdict-filter button span { color: #969b93; font-variant-numeric: tabular-nums; }
+.studio-v3 .verdict-filter button:hover { color: var(--ink); border-color: #aeb2aa; }
+.studio-v3 .verdict-filter button:disabled { opacity: .4; cursor: default; }
+.studio-v3 .verdict-filter button.is-active { color: #ffffff; background: #1f2420; border-color: #1f2420; }
+.studio-v3 .verdict-filter button.is-active span { color: #d7ddd7; }
 .studio-v3 .category-filter { display: flex; min-width: 0; flex-wrap: wrap; gap: 4px; }
 .studio-v3 .category-filter button { display: inline-flex; min-height: 32px; flex: 0 0 auto; align-items: center; gap: 5px; padding: 0 9px; color: #666a63; background: transparent; border: 1px solid transparent; border-radius: 5px; font: inherit; font-size: 10px; font-weight: 720; cursor: pointer; }
 .studio-v3 .category-filter button span { color: #959990; font-variant-numeric: tabular-nums; }
@@ -411,6 +418,13 @@ body { background: var(--canvas); }
 .studio-v3 .candidate-detail h3 { margin: 18px 0 0; font-family: "Noto Serif SC Variable", "Songti SC", serif; font-size: 24px; font-weight: 720; line-height: 1.42; }
 .studio-v3 .candidate-detail blockquote { margin: 18px 0 0; padding: 0 0 0 14px; color: #323933; border-left: 3px solid #ff836c; font-family: "Noto Serif SC Variable", "Songti SC", serif; font-size: 16px; line-height: 1.62; }
 .studio-v3 .candidate-detail > p { margin: 15px 0 0; color: #6b716a; font-size: 11px; line-height: 1.7; }
+.studio-v3 .editorial-decision { display: grid; gap: 4px; margin-top: 14px; padding: 11px 12px; background: #ffffff; border: 1px solid #d7d9d1; border-left: 4px solid var(--blue); border-radius: 5px; }
+.studio-v3 .editorial-decision > span { color: #777d76; font-size: 8px; font-weight: 800; }
+.studio-v3 .editorial-decision strong { color: var(--ink); font-size: 11px; }
+.studio-v3 .editorial-decision p { margin: 0; color: #555c56; font-size: 9px; line-height: 1.55; }
+.studio-v3 .editorial-decision small { color: #888d86; font-size: 8px; line-height: 1.5; }
+.studio-v3 .editorial-decision.is-produce_image_story { border-left-color: #bf7b1c; }
+.studio-v3 .editorial-decision.is-skip { border-left-color: var(--red); }
 .studio-v3 .candidate-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 16px; }
 .studio-v3 .candidate-meta span { display: inline-flex; min-height: 25px; align-items: center; gap: 4px; padding: 0 7px; color: #656b64; background: #ffffff; border: 1px solid #d8d8d1; border-radius: 4px; font-size: 9px; font-weight: 700; }
 .studio-v3 .candidate-meta span.is-risk { color: #a32f26; background: #fff0ed; border-color: #efc0b9; }
@@ -476,6 +490,8 @@ body { background: var(--canvas); }
   .studio-v3 .series-controls .button { width: 40px; min-width: 40px; padding: 0; overflow: hidden; gap: 0; color: transparent; font-size: 0; }
   .studio-v3 .series-controls .button svg { color: #ffffff; }
   .studio-v3 .candidate-filters { align-items: flex-end; padding: 7px; }
+  .studio-v3 .verdict-filter { flex-wrap: nowrap; overflow-x: auto; }
+  .studio-v3 .verdict-filter button { flex: 0 0 auto; }
   .studio-v3 .category-filter { margin-right: auto; }
   .studio-v3 .platform-filter > span { display: none; }
   .studio-v3 .platform-filter select { width: 106px; }

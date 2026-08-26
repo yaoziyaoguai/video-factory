@@ -67,6 +67,17 @@ describe("ProductionBrief", () => {
     );
   });
 
+  it("routes a MiniMax actor profile through the cloud TTS provider", () => {
+    const brief = pipeline.parseBrief({
+      ...validBrief,
+      providers: { ...validBrief.providers, voice: "minimax-tts-v1" },
+      voiceDirection: { ...validBrief.voiceDirection, profileId: "minimax:female-chengshu" },
+    });
+
+    assert.equal(brief.providers.voice, "minimax-tts-v1");
+    assert.equal(brief.voiceDirection.profileId, "minimax:female-chengshu");
+  });
+
   it("accepts a bounded paid-generation budget", () => {
     const brief = pipeline.parseBrief({
       ...validBrief,
@@ -84,6 +95,24 @@ describe("ProductionBrief", () => {
       maxPaidShots: 1,
       maxCostCny: 8,
     });
+  });
+
+  it("preserves an editorial image-story direction and rejects skipped topics", () => {
+    const brief = pipeline.parseBrief({
+      ...validBrief,
+      editorial: {
+        verdict: "produce_image_story",
+        reasons: ["公共事件应以来源和数据卡为主。"],
+        guardrails: ["不得用生成画面虚构现场。"],
+      },
+    });
+
+    assert.equal(brief.editorial?.verdict, "produce_image_story");
+    assert.match(brief.editorial?.guardrails[0] ?? "", /不得/);
+    assert.throws(() => pipeline.parseBrief({
+      ...validBrief,
+      editorial: { verdict: "skip", reasons: ["不值得生产"], guardrails: ["停止"] },
+    }), /editorial\.verdict/);
   });
 
   it("accepts an AI director and a source pool without prescribing a material mix", () => {

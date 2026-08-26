@@ -102,6 +102,11 @@ function scriptRequest(): { protocolVersion: string; kind: string; payload: Reco
         nicheSlug: "life-avoidance",
         platform: "douyin",
         durationSeconds: 24,
+        editorial: {
+          verdict: "produce_image_story",
+          reasons: ["事件需要事实边界"],
+          guardrails: ["不要虚构现场画面"],
+        },
       },
     },
   };
@@ -144,6 +149,12 @@ describe("parseTaskRequest", () => {
 
     const script = parseTaskRequest(scriptRequest());
     assert.equal(script.kind, "script-draft");
+    if (script.kind !== "script-draft") throw new Error("expected script-draft task");
+    assert.deepEqual(script.payload.brief.editorial, {
+      verdict: "produce_image_story",
+      reasons: ["事件需要事实边界"],
+      guardrails: ["不要虚构现场画面"],
+    });
     assert.deepEqual(script.payload.brief, scriptRequest().payload.brief);
 
     const publish = parseTaskRequest(publishCopyRequest());

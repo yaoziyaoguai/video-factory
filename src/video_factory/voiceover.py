@@ -1,8 +1,10 @@
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
+from urllib.request import Request, urlopen
 
 from .kokoro_voice import synthesize_kokoro_audio
 
@@ -188,7 +190,77 @@ def synthesize_raw_audio(
             rate=rate,
         )
 
+    if provider == "minimax":
+        raw_path = output_dir / f"scene_{position:02d}_raw.mp3"
+        return synthesize_minimax_audio(
+            text=text,
+            output_path=raw_path,
+            voice=voice or "female-chengshu",
+            rate=rate,
+            pause_scale=pause_scale,
+        )
+
     raise RuntimeError(f"Unsupported voice provider: {provider}")
+
+
+def synthesize_minimax_audio(
+    text: str,
+    output_path: Path,
+    voice: str,
+    rate: int,
+    pause_scale: float = 1.0,
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> Path:
+    key = api_key or os.environ.get("MINIMAX_API_KEY")
+    if not key:
+        raise RuntimeError("The minimax voice provider requires MINIMAX_API_KEY.")
+    endpoint = (base_url or os.environ.get("MINIMAX_TTS_BASE_URL") or "https://api.minimaxi.com/v1").rstrip("/")
+    payload = {
+        "model": model or os.environ.get("MINIMAX_TTS_MODEL_ID") or "speech-2.8-turbo",
+        "text": minimax_directed_text(text, pause_scale),
+        "stream": False,
+        "voice_setting": {
+            "voice_id": voice,
+            "speed": round(min(max(rate / 190, 0.5), 2.0), 2),
+            "vol": 1,
+            "pitch": 0,
+        },
+        "audio_setting": {
+            "sample_rate": 32000,
+            "bitrate": 128000,
+            "format": "mp3",
+            "channel": 1,
+        },
+        "language_boost": "Chinese",
+        "output_format": "hex",
+        "subtitle_enable": False,
+    }
+    request = Request(
+        f"{endpoint}/t2a_v2",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=90) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except Exception as error:
+        raise RuntimeError(f"MiniMax speech synthesis request failed: {error}") from error
+
+    base_response = result.get("base_resp") or {}
+    audio_hex = (result.get("data") or {}).get("audio")
+    if base_response.get("status_code") != 0 or not isinstance(audio_hex, str) or not audio_hex:
+        message = str(base_response.get("status_msg") or "no audio returned")
+        raise RuntimeError(f"MiniMax speech synthesis failed: {message}")
+    try:
+        audio = bytes.fromhex(audio_hex)
+    except ValueError as error:
+        raise RuntimeError("MiniMax speech synthesis returned invalid hex audio.") from error
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(audio)
+    return output_path
 
 
 def probe_audio_duration(path: Path) -> float:
@@ -215,6 +287,8 @@ def default_voice(provider: str) -> str:
         return "Tingting"
     if provider == "kokoro":
         return "zf_001"
+    if provider == "minimax":
+        return "female-chengshu"
     return "test-tone"
 
 
@@ -223,6 +297,8 @@ def default_profile(provider: str, voice: Optional[str]) -> str:
         return f"macos:{voice or 'Tingting'}"
     if provider == "kokoro":
         return f"kokoro:{voice or 'zf_001'}"
+    if provider == "minimax":
+        return f"minimax:{voice or 'female-chengshu'}"
     return "tone:test-tone"
 
 
@@ -234,6 +310,19 @@ def directed_text(text: str, pause_scale: float) -> str:
         directed = directed.replace(punctuation, f"{punctuation} [[slnc {comma_pause}]] ")
     for punctuation in "。！？!?":
         directed = directed.replace(punctuation, f"{punctuation} [[slnc {sentence_pause}]] ")
+    return directed
+
+
+def minimax_directed_text(text: str, pause_scale: float) -> str:
+    """用自然换行提示云端 TTS 停顿，避免发送可能被朗读的私有控制标记。"""
+    scale = min(max(float(pause_scale), 0.5), 2.0)
+    comma_breaks = max(0, round(scale - 0.5))
+    sentence_breaks = max(1, round(scale * 1.5))
+    directed = text.strip()
+    for punctuation in "，、；：":
+        directed = directed.replace(punctuation, punctuation + "\n" * comma_breaks)
+    for punctuation in "。！？!?":
+        directed = directed.replace(punctuation, punctuation + "\n" * sentence_breaks)
     return directed
 
 

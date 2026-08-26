@@ -106,6 +106,79 @@ export class SeedanceVideoAdapter implements VideoGenerationAdapter {
   }
 }
 
+export interface MiniMaxVideoAdapterOptions extends AsyncAdapterOptions {
+  baseUrl?: string;
+}
+
+export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
+  readonly providerId = "hailuo-video-v1";
+  private readonly fetch: FetchLike;
+  private readonly sleep: Sleep;
+  private readonly pollIntervalMs: number;
+  private readonly timeoutMs: number;
+  private readonly baseUrl: string;
+
+  constructor(private readonly options: MiniMaxVideoAdapterOptions) {
+    validateOptions(options);
+    this.fetch = options.fetch ?? fetch;
+    this.sleep = options.sleep ?? defaultSleep;
+    this.pollIntervalMs = options.pollIntervalMs ?? 15_000;
+    this.timeoutMs = options.timeoutMs ?? 20 * 60_000;
+    this.baseUrl = stripTrailingSlash(options.baseUrl ?? "https://api.minimaxi.com/v1");
+  }
+
+  async generate(
+    request: VideoGenerationRequest,
+    onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+  ): Promise<VideoGenerationResult> {
+    validateRequest(request);
+    const submitted = await requestJson(this.fetch, `${this.baseUrl}/video_generation`, {
+      method: "POST",
+      headers: authHeaders(this.options.apiKey),
+      body: JSON.stringify({
+        model: this.options.model,
+        prompt: miniMaxPrompt(request),
+        duration: 6,
+        resolution: "768P",
+        prompt_optimizer: true,
+        aigc_watermark: false,
+      }),
+    });
+    assertMiniMaxSuccess(submitted);
+    const taskId = requiredString(submitted.task_id, "MiniMax task id");
+    await onProgress?.({ providerId: this.providerId, taskId, status: "submitted" });
+    const startedAt = Date.now();
+    while (Date.now() - startedAt <= this.timeoutMs) {
+      const queryUrl = new URL(`${this.baseUrl}/query/video_generation`);
+      queryUrl.searchParams.set("task_id", taskId);
+      const task = await requestJson(this.fetch, queryUrl.toString(), { headers: authHeaders(this.options.apiKey) });
+      assertMiniMaxSuccess(task);
+      const status = requiredString(task.status, "MiniMax task status");
+      if (status === "Success") {
+        const fileId = requiredString(task.file_id, "MiniMax file id");
+        const fileUrl = new URL(`${this.baseUrl}/files/retrieve`);
+        fileUrl.searchParams.set("file_id", fileId);
+        const retrieved = await requestJson(this.fetch, fileUrl.toString(), { headers: authHeaders(this.options.apiKey) });
+        assertMiniMaxSuccess(retrieved);
+        const file = requiredRecord(retrieved.file, "MiniMax file");
+        const videoUrl = requiredHttpUrl(file.download_url, "MiniMax video URL");
+        await onProgress?.({ providerId: this.providerId, taskId, status: "succeeded", videoUrl });
+        return { providerId: this.providerId, taskId, videoUrl };
+      }
+      if (status === "Fail") {
+        const message = miniMaxError(task, `MiniMax task '${taskId}' failed.`);
+        await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
+        throw new Error(message);
+      }
+      await onProgress?.({ providerId: this.providerId, taskId, status: "running" });
+      await this.sleep(this.pollIntervalMs);
+    }
+    const message = `MiniMax task '${taskId}' timed out after ${this.timeoutMs}ms.`;
+    await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
+    throw new Error(message);
+  }
+}
+
 export interface WanVideoAdapterOptions extends AsyncAdapterOptions {
   workspaceId: string;
   baseUrl?: string;
@@ -208,6 +281,29 @@ function validateRequest(request: VideoGenerationRequest): void {
   if (!Number.isInteger(request.durationSeconds) || request.durationSeconds < 2 || request.durationSeconds > 15) {
     throw new Error("Video generation durationSeconds must be an integer between 2 and 15.");
   }
+}
+
+function miniMaxPrompt(request: VideoGenerationRequest): string {
+  const composition = request.ratio === "9:16" ? "竖屏 9:16 构图。" : `${request.ratio} 构图。`;
+  return `${composition}${request.prompt}`;
+}
+
+function assertMiniMaxSuccess(value: Record<string, unknown>): void {
+  if (value.base_resp === undefined) return;
+  const baseResponse = requiredRecord(value.base_resp, "MiniMax base response");
+  if (baseResponse.status_code !== 0) {
+    throw new Error(miniMaxError(value, "MiniMax request failed."));
+  }
+}
+
+function miniMaxError(value: Record<string, unknown>, fallback: string): string {
+  if (typeof value.base_resp === "object" && value.base_resp !== null && !Array.isArray(value.base_resp)) {
+    const statusMessage = (value.base_resp as Record<string, unknown>).status_msg;
+    if (typeof statusMessage === "string" && statusMessage.trim() && statusMessage !== "success") {
+      return statusMessage.trim();
+    }
+  }
+  return providerError(value, fallback);
 }
 
 async function requestJson(fetcher: FetchLike, url: string, init: RequestInit): Promise<Record<string, unknown>> {

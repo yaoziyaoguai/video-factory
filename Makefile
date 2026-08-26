@@ -5,7 +5,7 @@ WORKSPACE ?= workspace
 CODEX_SOCKET ?= /run/video-factory-codex/worker.sock
 RUN = PYTHONPATH=src $(PYTHON) -m video_factory
 
-.PHONY: init demo test test-py test-ts test-e2e typecheck sample-production setup-local-runtime setup-local-trends local-trends-status local-trends-stop codex-broker-build codex-broker-test codex-broker-status
+.PHONY: init demo test test-py test-ts test-e2e typecheck sample-production studio-local setup-local-runtime setup-local-trends local-trends-status local-trends-stop codex-broker-build codex-broker-test codex-broker-status
 
 init:
 	$(RUN) --db $(DB) init
@@ -29,6 +29,9 @@ test-e2e:
 
 sample-production:
 	npm run factory -- run examples/briefs/life-avoidance-local.json --workspace $(WORKSPACE)/factory
+
+studio-local:
+	npm run studio:dev:codex
 
 setup-local-runtime:
 	bash scripts/setup-local-runtime.sh

@@ -20,6 +20,7 @@ const SCREENWRITER_DIRECTIVE = [
   "每场只承载一个可拍摄的视觉动作；visual_prompt 描述观众实际看见的画面。",
   "visual_strategy 只能是 stock（图库实拍）、image（图库图片）、local（本地编辑卡片）。",
   "不得编造数字、引语或当事人表态；证据不足时用问题句。",
+  "输入含 editorial 时必须遵守其 verdict 和 guardrails；produce_image_story 应优先来源卡、数据卡与静态实证，不写成虚构现场。",
   "search_terms 是中文短词组，用于图库检索，不要放整句话。",
   "场景数在 3 到 10 之间，总时长贴近目标时长。",
   "只输出 JSON 对象，不要输出解释文字或 Markdown。",
@@ -37,6 +38,7 @@ const DIRECTOR_PLAN_DIRECTIVE = [
   "preferredProviderId、rationale、query 和 generationPrompt 必须相互一致，alternativeProviderIds 也必须能真实承接该镜头。",
   "只能使用输入提供的 Provider ID，必须覆盖每个场景且不得重复。",
   "evidence 镜头不得选择 AI 生成 Provider；不确定时优先真实素材并降低 confidence。",
+  "输入含 editorial 时，其 guardrails 是硬约束；produce_image_story 不得把具体事件改造成生成式现场或当事人表演。",
   "requestedProfileId 为 auto 时，根据题材选择最合适的非 auto 导演角色。",
   "只输出 JSON 对象，不要输出解释文字或 Markdown。",
 ].join("\n");

@@ -100,7 +100,9 @@ describe("CandidateInboxStudio", () => {
 
     const listed = await inbox.list({ origins: ["trend"] });
     assert.equal(listed.items.find((item) => item.id === highRisk.id)?.verification.status, "blocked");
+    assert.equal(listed.items.find((item) => item.id === highRisk.id)?.editorialDecision.verdict, "skip");
     assert.equal(listed.items.find((item) => item.id === review.id)?.verification.status, "review_required");
+    assert.equal(listed.items.find((item) => item.id === review.id)?.editorialDecision.verdict, "produce_image_story");
     await assert.rejects(() => inbox.adopt(highRisk.id, { verificationConfirmed: true }), /至少需要 2 个独立来源/);
     await assert.rejects(() => inbox.adopt(review.id, {}), /确认核验/);
     const adopted = await inbox.adopt(review.id, { verificationConfirmed: true });
@@ -185,12 +187,14 @@ describe("CandidateInboxStudio", () => {
     assert.equal(filtered.items.length, 1);
     assert.equal(filtered.items[0]?.category, "technology");
     assert.equal(filtered.items[0]?.freshness, "live");
+    assert.equal(filtered.items[0]?.editorialDecision.verdict, "produce_video");
 
     const seriesCandidate = all.items.find((item) => item.origin === "series")!;
     const adopted = await inbox.adopt(seriesCandidate.id);
 
     assert.equal(adopted.id, seriesCandidate.id);
     assert.equal(adopted.origin, "series");
+    assert.equal(adopted.editorialDecision?.verdict, "produce_video");
     assert.equal(adopted.seriesId, "series-1");
     assert.equal((await series.list())[0]?.nextEpisodeNumber, 2);
     assert.equal((await inbox.list({})).items.some((item) => item.id === seriesCandidate.id), false);

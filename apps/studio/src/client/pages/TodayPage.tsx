@@ -56,6 +56,7 @@ export function TodayPage() {
   const adoptedSectionRef = useRef<HTMLElement>(null);
   const trendLoadingRef = useRef(false);
   const lastTrendRefreshAtRef = useRef(0);
+  const productionRequestIdRef = useRef<string | undefined>(undefined);
 
   const loadTrendInbox = useCallback(async (forceRefresh = false) => {
     if (trendLoadingRef.current) return;
@@ -189,7 +190,9 @@ export function TodayPage() {
   }
 
   async function startProduction(input: StudioProductionInput) {
-    const result = await studioApi.start(input);
+    const requestId = productionRequestIdRef.current ?? crypto.randomUUID();
+    productionRequestIdRef.current = requestId;
+    const result = await studioApi.start(input, requestId);
     if (selected && (selected.status === "draft" || selected.status === "shortlisted")) {
       try {
         const approved = await studioApi.updateOpportunityStatus(selected.id, "approved");
@@ -199,6 +202,7 @@ export function TodayPage() {
       }
     }
     setJourneyStep(2);
+    productionRequestIdRef.current = undefined;
     setProductionDialogOpen(false);
     navigate(`/projects/${result.runId}`);
   }
@@ -206,6 +210,11 @@ export function TodayPage() {
   function openOpportunityDialog(mode: "manual" | "json") {
     setOpportunityDialogMode(mode);
     setOpportunityDialogOpen(true);
+  }
+
+  function openProductionDialog() {
+    productionRequestIdRef.current = crypto.randomUUID();
+    setProductionDialogOpen(true);
   }
 
   return (
@@ -235,14 +244,28 @@ export function TodayPage() {
           <div className="director-workspace">
             <OpportunityRail opportunities={opportunities} selectedId={selected.id} onSelect={(id) => { setSelectedId(id); setJourneyStep(1); }} onCreate={() => openOpportunityDialog("manual")} />
             <OpportunityFocus key={selected.id} opportunity={selected} />
-            <DirectorPanel opportunity={selected} providers={providers} {...(providersLoading || providersError ? { providerError: providersLoading ? "正在读取能力状态..." : `能力状态读取失败：${providersError}` } : {})} onProduce={() => setProductionDialogOpen(true)} />
+            <DirectorPanel opportunity={selected} providers={providers} {...(providersLoading || providersError ? { providerError: providersLoading ? "正在读取能力状态..." : `能力状态读取失败：${providersError}` } : {})} onProduce={openProductionDialog} />
           </div>
         ) : <div className="awaiting-adoption"><RadioTower aria-hidden="true" size={22} /><span>从上方采用一条候选，它会在这里进入内容确认与制作。</span></div>}
       </section>
 
       <OpportunityDialog open={opportunityDialogOpen} initialMode={opportunityDialogMode} onClose={() => setOpportunityDialogOpen(false)} onSubmit={createOpportunity} />
       <SeriesDialog open={seriesDialogOpen} onClose={() => setSeriesDialogOpen(false)} onSubmit={createSeries} />
-      <NewRunDialog open={productionDialogOpen} providers={providers} {...(creatorSettings ? { creatorSettings } : {})} {...(selected ? { initialValues: { title: selected.title, angle: selected.hook, audience: selected.audience, nicheSlug: selected.track, platform: selected.platform, durationSeconds: 24 } } : {})} onClose={() => setProductionDialogOpen(false)} onSubmit={startProduction} />
+      <NewRunDialog open={productionDialogOpen} providers={providers} {...(creatorSettings ? { creatorSettings } : {})} {...(selected ? { initialValues: {
+        title: selected.title,
+        angle: selected.hook,
+        audience: selected.audience,
+        nicheSlug: selected.track,
+        platform: selected.platform,
+        durationSeconds: creatorSettings?.productionDefaults.durationSeconds ?? 24,
+        ...(selected.editorialDecision?.verdict !== "skip" && selected.editorialDecision ? {
+          editorial: {
+            verdict: selected.editorialDecision.verdict,
+            reasons: selected.editorialDecision.reasons,
+            guardrails: selected.editorialDecision.guardrails,
+          },
+        } : {}),
+      } } : {})} onClose={() => setProductionDialogOpen(false)} onSubmit={startProduction} />
     </main>
   );
 }
@@ -264,11 +287,12 @@ function mergeInboxes(...inboxes: Array<StudioCandidateInbox | undefined>): Stud
 }
 
 function buildInboxFacets(items: StudioCandidateInboxItem[]): StudioCandidateInbox["facets"] {
-  const facets: StudioCandidateInbox["facets"] = { total: items.length, origins: {}, categories: {}, platforms: {} };
+  const facets: StudioCandidateInbox["facets"] = { total: items.length, origins: {}, categories: {}, platforms: {}, verdicts: {} };
   for (const item of items) {
     facets.origins[item.origin] = (facets.origins[item.origin] ?? 0) + 1;
     facets.categories[item.category] = (facets.categories[item.category] ?? 0) + 1;
     facets.platforms[item.platform] = (facets.platforms[item.platform] ?? 0) + 1;
+    facets.verdicts[item.editorialDecision.verdict] = (facets.verdicts[item.editorialDecision.verdict] ?? 0) + 1;
   }
   return facets;
 }

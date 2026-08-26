@@ -72,6 +72,21 @@ describe("PublishingStudio", () => {
     assert.equal(calls, 0);
   });
 
+  it("does not label a legacy automatic run as human-approved", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
+    const subject = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => ({ ...completedRun, reviewMode: "automatic", decisions: [] }),
+      loadPublishPackage,
+      publishers: [],
+    });
+
+    const readiness = await subject.readiness("run-1");
+
+    assert.equal(readiness.ready, false);
+    assert.match(readiness.checks.find((check) => check.id === "approval")?.detail ?? "", /人工批准/);
+  });
+
   it("dispatches ready platforms once and reuses the persisted result for the same request ID", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
     const calls: string[] = [];

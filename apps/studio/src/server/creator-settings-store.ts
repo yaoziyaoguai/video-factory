@@ -21,6 +21,12 @@ export const DEFAULT_CREATOR_SETTINGS: StudioCreatorSettings = {
     masteringPreset: "natural",
   },
   defaultRecipeId: "economy-daily",
+  productionDefaults: {
+    directorProfileId: "auto",
+    reviewMode: "manual",
+    platform: "douyin",
+    durationSeconds: 24,
+  },
 };
 
 export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
@@ -43,6 +49,11 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
         ...file.settings,
         ...patch,
         ...(patch.voiceDirection ? { voiceDirection: { ...patch.voiceDirection } } : {}),
+        productionDefaults: {
+          ...file.settings.productionDefaults,
+          ...patch.productionDefaults,
+          reviewMode: "manual",
+        },
       };
       await this.write({ version: 1, settings });
       return structuredClone(settings);
@@ -57,7 +68,19 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
       if (parsed.version !== 1 || !parsed.settings?.voiceDirection || !parsed.settings.defaultRecipeId) {
         throw new Error(`Unsupported creator settings format at '${this.filePath}'.`);
       }
-      return parsed;
+      return {
+        version: 1,
+        settings: {
+          ...structuredClone(DEFAULT_CREATOR_SETTINGS),
+          ...parsed.settings,
+          voiceDirection: { ...DEFAULT_CREATOR_SETTINGS.voiceDirection, ...parsed.settings.voiceDirection },
+          productionDefaults: {
+            ...DEFAULT_CREATOR_SETTINGS.productionDefaults,
+            ...parsed.settings.productionDefaults,
+            reviewMode: "manual",
+          },
+        },
+      };
     } catch (error) {
       if (hasCode(error, "ENOENT")) return { version: 1, settings: structuredClone(DEFAULT_CREATOR_SETTINGS) };
       throw error;

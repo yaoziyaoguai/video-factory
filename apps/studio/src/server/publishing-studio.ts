@@ -52,6 +52,10 @@ export class PublishingStudio {
     this.now = options.now ?? (() => new Date());
   }
 
+  listTargets(): StudioPublishTarget[] {
+    return this.targets.map((target) => ({ ...target }));
+  }
+
   async readiness(runId: string): Promise<StudioPublishReadiness> {
     const run = await this.requiredRun(runId);
     const publishPackage = await this.options.loadPublishPackage(run);
@@ -60,7 +64,7 @@ export class PublishingStudio {
       runId,
       ready: !checks.some((check) => check.status === "blocked"),
       title: run.title,
-      targets: this.targets.map((target) => ({ ...target })),
+      targets: this.listTargets(),
       checks,
     };
   }
@@ -158,10 +162,10 @@ export function buildPublishTargetCatalog(): StudioPublishTarget[] {
     {
       id: "douyin",
       label: "抖音",
-      mode: "official_api",
-      status: "planned",
-      requirement: "需要通过抖音开放平台应用审核、申请 video.create 权限并完成账号 OAuth 授权。",
-      docsUrl: "https://open.douyin.com/platform/resource/docs/ability/content-management/douyin-publish-solution",
+      mode: "export_package",
+      status: "manual_only",
+      requirement: "当前为个人主体，不满足抖音 H5/SDK 投稿能力的企业准入条件；先导出发布包，再由本人在抖音内确认发布。",
+      docsUrl: "https://developer.open-douyin.com/docs/resource/zh-CN/dop/operation-standard/platform-capabilities/useclue",
     },
     {
       id: "toutiao",
@@ -199,7 +203,8 @@ export function buildPublishTargetCatalog(): StudioPublishTarget[] {
 
 function complianceChecks(run: StudioRunDetail, publishPackage: unknown): StudioPublishCheck[] {
   const checks: StudioPublishCheck[] = [];
-  checks.push(run.status === "succeeded" && Boolean(run.publishPackageArtifactId)
+  const humanApproved = run.decisions.some((decision) => decision.action === "approve");
+  checks.push(run.status === "succeeded" && Boolean(run.publishPackageArtifactId) && humanApproved
     ? { id: "approval", label: "终审与发布包", status: "passed", detail: "已通过人工终审并生成发布包。" }
     : { id: "approval", label: "终审与发布包", status: "blocked", detail: "成片必须先通过人工批准并生成发布包。" });
   checks.push(run.videoArtifactId

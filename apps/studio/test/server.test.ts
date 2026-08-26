@@ -65,12 +65,20 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     getCreatorSettings: async () => ({
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "economy-daily",
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     }),
     updateCreatorSettings: async (input) => ({
       voiceDirection: input.voiceDirection ?? { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: input.defaultRecipeId ?? "economy-daily",
+      productionDefaults: {
+        directorProfileId: input.productionDefaults?.directorProfileId ?? "auto",
+        reviewMode: input.productionDefaults?.reviewMode ?? "manual",
+        platform: input.productionDefaults?.platform ?? "douyin",
+        durationSeconds: input.productionDefaults?.durationSeconds ?? 24,
+      },
       ...(input.defaultAssetProviderId ? { defaultAssetProviderId: input.defaultAssetProviderId } : {}),
     }),
+    listPublishTargets: async () => [],
     listTrendSources: async () => [],
     listTrendServices: async () => [],
     listTrendSignals: async () => [],
@@ -78,7 +86,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     refreshTrendCandidates: async () => [],
     listCandidateInbox: async () => ({
       items: [],
-      facets: { total: 0, origins: {}, categories: {}, platforms: {} },
+      facets: { total: 0, origins: {}, categories: {}, platforms: {}, verdicts: {} },
       generatedAt: "2026-08-24T09:00:00.000Z",
     }),
     adoptCandidate: async () => {
@@ -218,6 +226,12 @@ describe("Studio API", () => {
         return {
           voiceDirection: input.voiceDirection ?? { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
           defaultRecipeId: input.defaultRecipeId ?? "economy-daily",
+          productionDefaults: {
+            directorProfileId: input.productionDefaults?.directorProfileId ?? "auto",
+            reviewMode: input.productionDefaults?.reviewMode ?? "manual",
+            platform: input.productionDefaults?.platform ?? "douyin",
+            durationSeconds: input.productionDefaults?.durationSeconds ?? 24,
+          },
         };
       },
     }) });
@@ -247,7 +261,7 @@ describe("Studio API", () => {
       receivedQuery = input;
       return {
         items: [],
-        facets: { total: 0, origins: {}, categories: {}, platforms: {} },
+        facets: { total: 0, origins: {}, categories: {}, platforms: {}, verdicts: {} },
         generatedAt: "2026-08-24T09:00:00.000Z",
       };
     };
@@ -479,7 +493,7 @@ describe("Studio API", () => {
     const app = buildStudioApp({ service: fakeService() });
 
     const list = await app.inject({ method: "GET", url: "/api/runs" });
-    const started = await app.inject({ method: "POST", url: "/api/runs", payload: { title: "第二条视频" } });
+    const started = await app.inject({ method: "POST", url: "/api/runs", headers: { "idempotency-key": "start-run-2" }, payload: { title: "第二条视频" } });
     const detail = await app.inject({ method: "GET", url: "/api/runs/run-1" });
     const decision = await app.inject({
       method: "POST",

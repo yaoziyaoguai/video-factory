@@ -338,6 +338,7 @@ def stock_provider_name(provider_id: str) -> str:
 
 def is_generative_provider(provider_id: str) -> bool:
     return provider_id in {
+        "seedream-image-v1",
         "seedance-video-v1",
         "wan-video-v1",
         "kling-video-v1",
@@ -413,13 +414,14 @@ def search_pixabay(
     environ: Optional[dict] = None,
 ) -> List[StockAssetCandidate]:
     key = provider_key("pixabay", environ)
+    request_limit = max(limit, 3)
     if media_type == "video":
         url = "https://pixabay.com/api/videos/?" + urllib.parse.urlencode(
             {
                 "key": key,
                 "q": query,
                 "orientation": "vertical",
-                "per_page": limit,
+                "per_page": request_limit,
                 "safesearch": "true",
             }
         )
@@ -430,7 +432,7 @@ def search_pixabay(
                 "q": query,
                 "orientation": "vertical",
                 "image_type": "photo",
-                "per_page": limit,
+                "per_page": request_limit,
                 "safesearch": "true",
             }
         )

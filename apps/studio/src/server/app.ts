@@ -29,6 +29,7 @@ import {
   type StudioPublishBatch,
   type StudioPublishInput,
   type StudioPublishReadiness,
+  type StudioPublishTarget,
   type StudioVoicePreviewInput,
   type StudioVoiceProfile,
   type StudioTrendSource,
@@ -42,6 +43,7 @@ import {
   type StudioSeriesInput,
   type StudioTopicCategory,
   type StudioCandidateOrigin,
+  type StudioEditorialVerdict,
 } from "../shared/api.js";
 
 export interface StudioServicePort {
@@ -67,10 +69,11 @@ export interface StudioServicePort {
   updateOpportunityStatus(opportunityId: string, status: StudioOpportunityStatus): Promise<StudioOpportunity>;
   listRuns(): Promise<StudioRunSummary[]>;
   getRun(runId: string): Promise<StudioRunDetail | undefined>;
-  startRun(input: unknown): Promise<StartRunResponse>;
+  startRun(input: unknown, idempotencyKey?: string): Promise<StartRunResponse>;
   decide(runId: string, input: StudioDecisionInput): Promise<StudioRunDetail>;
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void;
   resolveArtifact(runId: string, artifactId: string): Promise<StudioArtifactResource | undefined>;
+  listPublishTargets(): Promise<StudioPublishTarget[]>;
   publishReadiness(runId: string): Promise<StudioPublishReadiness>;
   publish(runId: string, input: StudioPublishInput): Promise<StudioPublishBatch>;
 }
@@ -133,6 +136,7 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     return options.service.updateCreatorSettings(parseStudioCreatorSettingsPatch(request.body));
   });
   app.get("/api/trend-sources", async () => options.service.listTrendSources());
+  app.get("/api/publish-targets", async () => options.service.listPublishTargets());
   app.get("/api/trend-services", async () => options.service.listTrendServices());
   app.get<{ Querystring: { platforms?: string; limit?: string } }>("/api/trend-signals", async (request) => {
     const platforms = request.query.platforms?.split(",").map((value) => value.trim()).filter(Boolean);
@@ -144,7 +148,7 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   });
   app.get("/api/trend-candidates", async () => options.service.listTrendCandidates());
   app.post("/api/trend-candidates/refresh", async () => options.service.refreshTrendCandidates());
-  app.get<{ Querystring: { origins?: string; categories?: string; platforms?: string; limit?: string } }>(
+  app.get<{ Querystring: { origins?: string; categories?: string; platforms?: string; verdicts?: string; limit?: string } }>(
     "/api/candidate-inbox",
     async (request) => options.service.listCandidateInbox(parseCandidateInboxQuery(request.query)),
   );
@@ -198,7 +202,11 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   );
 
   app.post("/api/runs", async (request, reply) => {
-    const response = await options.service.startRun(request.body);
+    const idempotencyKey = request.headers["idempotency-key"];
+    if (typeof idempotencyKey !== "string" || !SAFE_ROUTE_ID.test(idempotencyKey)) {
+      throw new StudioInputError("创建制作必须携带有效的 Idempotency-Key，以避免重复计费。");
+    }
+    const response = await options.service.startRun(request.body, idempotencyKey);
     return reply.code(202).send(response);
   });
 
@@ -333,6 +341,7 @@ function parseLoginInput(value: unknown): { username: string; password: string }
 }
 
 const CANDIDATE_ORIGINS = new Set<StudioCandidateOrigin>(["trend", "series"]);
+const EDITORIAL_VERDICTS = new Set(["produce_video", "produce_image_story", "skip"]);
 const TOPIC_CATEGORIES = new Set<StudioTopicCategory>([
   "society", "finance-career", "technology", "lifestyle", "health-sports", "education", "entertainment", "local-culture",
   "food", "travel", "gaming", "automotive", "fashion-beauty", "parenting", "agriculture-rural",
@@ -342,6 +351,7 @@ function parseCandidateInboxQuery(query: {
   origins?: string;
   categories?: string;
   platforms?: string;
+  verdicts?: string;
   limit?: string;
 }): StudioCandidateInboxQuery {
   const origins = splitQuery(query.origins);
@@ -353,6 +363,10 @@ function parseCandidateInboxQuery(query: {
     throw new StudioInputError("内容分类筛选无效。");
   }
   const platforms = splitQuery(query.platforms);
+  const verdicts = splitQuery(query.verdicts);
+  if (verdicts.some((value) => !EDITORIAL_VERDICTS.has(value))) {
+    throw new StudioInputError("生产建议筛选无效。");
+  }
   const limit = query.limit === undefined ? undefined : Number(query.limit);
   if (limit !== undefined && (!Number.isSafeInteger(limit) || limit <= 0 || limit > 200)) {
     throw new StudioInputError("候选数量必须是 1 到 200 之间的整数。");
@@ -361,6 +375,7 @@ function parseCandidateInboxQuery(query: {
     ...(origins.length ? { origins: origins as StudioCandidateOrigin[] } : {}),
     ...(categories.length ? { categories: categories as StudioTopicCategory[] } : {}),
     ...(platforms.length ? { platforms } : {}),
+    ...(verdicts.length ? { verdicts: verdicts as StudioEditorialVerdict[] } : {}),
     ...(limit !== undefined ? { limit } : {}),
   };
 }

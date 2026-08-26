@@ -18,6 +18,7 @@ import type {
   StudioCandidateInbox,
   StudioCandidateInboxItem,
   StudioCandidateOrigin,
+  StudioEditorialVerdict,
   StudioSeries,
   StudioTopicCategory,
 } from "../../shared/api.js";
@@ -47,6 +48,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const [mode, setMode] = useState<EntryMode>("trend");
   const [category, setCategory] = useState<StudioTopicCategory | "all">("all");
   const [platform, setPlatform] = useState("all");
+  const [verdict, setVerdict] = useState<StudioEditorialVerdict | "all">("all");
   const [selectedId, setSelectedId] = useState<string>();
   const [selectedSeriesId, setSelectedSeriesId] = useState<string>();
   const [verificationCandidate, setVerificationCandidate] = useState<StudioCandidateInboxItem>();
@@ -56,10 +58,12 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
     ? modeItems.filter((item) => item.seriesId === selectedSeriesId)
     : modeItems;
   const categoryCounts = countCategories(seriesItems);
+  const verdictCounts = countVerdicts(seriesItems);
   const platforms = [...new Set(seriesItems.map((item) => item.platform))];
   const visibleItems = seriesItems
     .filter((item) => category === "all" || item.category === category)
-    .filter((item) => platform === "all" || item.platform === platform);
+    .filter((item) => platform === "all" || item.platform === platform)
+    .filter((item) => verdict === "all" || item.editorialDecision.verdict === verdict);
   const selected = visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0];
   const candidateMode = mode === "trend" || mode === "series" ? mode : "trend";
   const modeLoading = props.loading[candidateMode] === true;
@@ -76,6 +80,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   useEffect(() => {
     setCategory("all");
     setPlatform("all");
+    setVerdict("all");
     setSelectedId(undefined);
   }, [mode, selectedSeriesId]);
 
@@ -134,6 +139,12 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
           ) : (
             <>
               <div className="candidate-filters" aria-label="候选筛选">
+                <div className="verdict-filter" aria-label="生产建议">
+                  <button type="button" className={verdict === "all" ? "is-active" : ""} onClick={() => setVerdict("all")}>全部建议 <span>{seriesItems.length}</span></button>
+                  {(["produce_video", "produce_image_story", "skip"] as const).map((item) => (
+                    <button key={item} type="button" className={verdict === item ? "is-active" : ""} disabled={!verdictCounts[item]} onClick={() => setVerdict(item)}>{editorialVerdictLabel(item)} <span>{verdictCounts[item] ?? 0}</span></button>
+                  ))}
+                </div>
                 <div className="category-filter" aria-label="内容分类">
                   <button type="button" className={category === "all" ? "is-active" : ""} onClick={() => setCategory("all")}>全部 <span>{seriesItems.length}</span></button>
                   {(mode === "trend" ? CATEGORY_ORDER : CATEGORY_ORDER.filter((item) => categoryCounts[item])).map((item) => (
@@ -148,7 +159,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                     {visibleItems.map((item, index) => (
                       <button key={item.id} type="button" className={`candidate-row${selected?.id === item.id ? " is-active" : ""}`} aria-label={`查看${item.title}`} onClick={() => setSelectedId(item.id)}>
                         <span className="candidate-number">{String(index + 1).padStart(2, "0")}</span>
-                        <span className="candidate-row-copy"><small>{TOPIC_CATEGORY_LABELS[item.category]} · {platformLabel(item.platform)}</small><strong>{item.title}</strong><span>{item.hook}</span></span>
+                        <span className="candidate-row-copy"><small>{TOPIC_CATEGORY_LABELS[item.category]} · {platformLabel(item.platform)} · {editorialVerdictLabel(item.editorialDecision.verdict)}</small><strong>{item.title}</strong><span>{item.hook}</span></span>
                         <span className="candidate-score">{item.score.final}</span>
                       </button>
                     ))}
@@ -179,13 +190,20 @@ function EntryTab({ active, icon, label, note, onClick }: { active: boolean; ico
 }
 
 function CandidateDetail({ item, adopting, disabled, onAdopt }: { item: StudioCandidateInboxItem; adopting: boolean; disabled: boolean; onAdopt: () => Promise<void> }) {
-  const blocked = item.verification.status === "blocked";
+  const skipped = item.editorialDecision.verdict === "skip";
+  const blocked = item.verification.status === "blocked" || skipped;
   return (
     <article className="candidate-detail" aria-labelledby="candidate-detail-title">
       <header><span>{item.origin === "series" ? `${item.seriesName} · 第 ${item.episodeNumber} 集` : `${TOPIC_CATEGORY_LABELS[item.category]}观察`}</span><strong aria-label={`候选评分 ${item.score.final}`}>{item.score.final}</strong></header>
       <h3 id="candidate-detail-title">{item.title}</h3>
       <blockquote>{item.hook}</blockquote>
       <p>{item.rationale}</p>
+      <div className={`editorial-decision is-${item.editorialDecision.verdict}`}>
+        <span>总编建议</span>
+        <strong>{editorialVerdictLabel(item.editorialDecision.verdict)} · {item.editorialDecision.score} 分</strong>
+        <p>{item.editorialDecision.reasons[0]}</p>
+        <small>{item.editorialDecision.guardrails[0]}</small>
+      </div>
       <div className="candidate-meta">
         <span><Clock3 aria-hidden="true" size={13} />{item.freshness === "live" ? "实时" : item.freshness === "today" ? "今日" : "常青"}</span>
         <span className={item.risk === "high" ? "is-risk" : ""}><ShieldAlert aria-hidden="true" size={13} />{item.risk === "high" ? "高风险核验" : item.risk === "review" ? "需要核验" : "常规核验"}</span>
@@ -205,9 +223,17 @@ function CandidateDetail({ item, adopting, disabled, onAdopt }: { item: StudioCa
       </details>
       <div className="candidate-evidence"><span>原始证据</span>{item.evidence.slice(0, 2).map((evidence) => evidence.evidenceUrl ? <a key={`${evidence.source}-${evidence.keyword}`} href={evidence.evidenceUrl} target="_blank" rel="noreferrer"><strong>{evidence.keyword}</strong><small>{evidence.source} · 强度 {evidence.strength}</small></a> : <div key={`${evidence.source}-${evidence.keyword}`}><strong>{evidence.keyword}</strong><small>{evidence.source} · 强度 {evidence.strength}</small></div>)}</div>
       <div className={`candidate-verification is-${item.verification.status}`}><ShieldAlert aria-hidden="true" size={15} /><span><strong>{blocked ? "证据不足，暂不可采用" : item.verification.status === "review_required" ? "采用前需要你核验" : "可进入制作区"}</strong><small>{item.verification.reasons[0]}</small></span><output>{item.evidence.length} 条证据 · {item.verification.independentSources} 个独立源（需 {item.verification.requiredSources} 个）</output></div>
-      <button className="button button-primary candidate-adopt" data-tour="candidate-adopt" type="button" aria-label={`采用候选 ${item.title}`} disabled={disabled || blocked} onClick={() => void onAdopt()}>{adopting ? "正在采用..." : blocked ? "等待补充来源" : item.verification.status === "review_required" ? "核验后采用" : "采用到制作区"}<ArrowRight aria-hidden="true" size={16} /></button>
+      <button className="button button-primary candidate-adopt" data-tour="candidate-adopt" type="button" aria-label={`采用候选 ${item.title}`} disabled={disabled || blocked} onClick={() => void onAdopt()}>{adopting ? "正在采用..." : skipped ? "当前不建议生产" : item.verification.status === "blocked" ? "等待补充来源" : item.verification.status === "review_required" ? "核验后采用" : "采用到制作区"}<ArrowRight aria-hidden="true" size={16} /></button>
     </article>
   );
+}
+
+function editorialVerdictLabel(verdict: StudioEditorialVerdict): string {
+  return {
+    produce_video: "建议视频",
+    produce_image_story: "建议图文成片",
+    skip: "暂不生产",
+  }[verdict];
 }
 
 function CustomEntry({ onManual, onImport }: { onManual: () => void; onImport: () => void }) {
@@ -225,6 +251,13 @@ function CustomEntry({ onManual, onImport }: { onManual: () => void; onImport: (
 function countCategories(items: StudioCandidateInboxItem[]): Partial<Record<StudioTopicCategory, number>> {
   return items.reduce<Partial<Record<StudioTopicCategory, number>>>((counts, item) => {
     counts[item.category] = (counts[item.category] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function countVerdicts(items: StudioCandidateInboxItem[]): Partial<Record<StudioEditorialVerdict, number>> {
+  return items.reduce<Partial<Record<StudioEditorialVerdict, number>>>((counts, item) => {
+    counts[item.editorialDecision.verdict] = (counts[item.editorialDecision.verdict] ?? 0) + 1;
     return counts;
   }, {});
 }

@@ -45,6 +45,12 @@ export interface ProductionVoiceDirection {
   masteringPreset: ProductionMasteringPreset;
 }
 
+export interface ProductionEditorialDirection {
+  verdict: "produce_video" | "produce_image_story";
+  reasons: string[];
+  guardrails: string[];
+}
+
 export interface ProductionBrief {
   protocolVersion: typeof BRIEF_PROTOCOL_VERSION;
   title: string;
@@ -58,6 +64,7 @@ export interface ProductionBrief {
   director?: ProductionDirectorDirection;
   economics: ProductionEconomics;
   voiceDirection: ProductionVoiceDirection;
+  editorial?: ProductionEditorialDirection;
 }
 
 export function parseBrief(value: unknown): ProductionBrief {
@@ -74,6 +81,7 @@ export function parseBrief(value: unknown): ProductionBrief {
   const director = parseDirectorDirection(value.director, providers);
   const economics = parseEconomics(value.economics);
   const voiceDirection = parseVoiceDirection(value.voiceDirection);
+  const editorial = parseEditorialDirection(value.editorial);
   const voiceProvider = requireString(providers.voice, "providers.voice");
   const expectedVoiceProvider = voiceProviderForProfile(voiceDirection.profileId);
   if (voiceProvider !== expectedVoiceProvider) {
@@ -109,6 +117,20 @@ export function parseBrief(value: unknown): ProductionBrief {
     ...(director ? { director } : {}),
     economics,
     voiceDirection,
+    ...(editorial ? { editorial } : {}),
+  };
+}
+
+function parseEditorialDirection(value: unknown): ProductionEditorialDirection | undefined {
+  if (value === undefined) return undefined;
+  const input = requireRecord(value, "editorial");
+  if (input.verdict !== "produce_video" && input.verdict !== "produce_image_story") {
+    throw new Error("editorial.verdict must be 'produce_video' or 'produce_image_story'.");
+  }
+  return {
+    verdict: input.verdict,
+    reasons: requireStringArray(input.reasons, "editorial.reasons"),
+    guardrails: requireStringArray(input.guardrails, "editorial.guardrails"),
   };
 }
 
@@ -137,6 +159,7 @@ function parseDirectorDirection(
 
 function voiceProviderForProfile(profileId: string): string {
   if (profileId.startsWith("kokoro:")) return "kokoro-local-v1";
+  if (profileId.startsWith("minimax:")) return "minimax-tts-v1";
   if (profileId.startsWith("tone:")) return "ffmpeg-tone-test-v1";
   return "macos-say-v1";
 }
@@ -152,8 +175,8 @@ function parseVoiceDirection(value: unknown): ProductionVoiceDirection {
   }
   const input = requireRecord(value, "voiceDirection");
   const profileId = requireString(input.profileId, "voiceDirection.profileId");
-  if (!/^(macos|kokoro|tone):.+/.test(profileId)) {
-    throw new Error("voiceDirection.profileId must identify a supported local voice profile.");
+  if (!/^(macos|kokoro|minimax|tone):.+/.test(profileId)) {
+    throw new Error("voiceDirection.profileId must identify a supported voice profile.");
   }
   const rate = boundedNumber(input.rate, "voiceDirection.rate", 120, 260, true);
   const pauseScale = boundedNumber(input.pauseScale, "voiceDirection.pauseScale", 0.5, 2, false);
@@ -210,6 +233,11 @@ function requireString(value: unknown, field: string): string {
     throw new Error(`${field} must be a non-empty string.`);
   }
   return value.trim();
+}
+
+function requireStringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`${field} must be a non-empty string array.`);
+  return value.map((item, index) => requireString(item, `${field}[${index}]`));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -124,7 +124,11 @@ class WorkerContractTest(unittest.TestCase):
                 "shots": [
                     {
                         "scenePosition": scene["position"],
-                        "preferredProviderId": "pexels-stock-v1" if scene["position"] == 2 else "local-editorial-v1",
+                        "preferredProviderId": (
+                            "pexels-stock-v1" if scene["position"] == 2
+                            else "seedream-image-v1" if scene["position"] == 3
+                            else "local-editorial-v1"
+                        ),
                         "alternativeProviderIds": ["local-editorial-v1"],
                         "query": f"director query {scene['position']}",
                         "generationPrompt": scene["visual_prompt"],
@@ -172,6 +176,10 @@ class WorkerContractTest(unittest.TestCase):
             self.assertEqual(plan["director_routing"][1]["preferred_provider_id"], "pexels-stock-v1")
             self.assertEqual(plan["director_routing"][1]["actual_provider"], "pexels")
             self.assertFalse(plan["director_routing"][1]["fallback_used"])
+            self.assertEqual(plan["director_routing"][2]["preferred_provider_id"], "seedream-image-v1")
+            self.assertEqual(plan["director_routing"][2]["actual_provider"], "local")
+            self.assertTrue(plan["director_routing"][2]["generation_pending"])
+            self.assertFalse(plan["director_routing"][2]["fallback_used"])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_voice_provider_builds_a_non_silent_timeline_for_every_scene(self):

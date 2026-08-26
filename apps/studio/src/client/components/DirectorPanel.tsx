@@ -62,8 +62,8 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
 
       <div className="model-state">
         <span>选题智能</span>
-        <strong>{hasTopicAgent ? "本地选题 Agent 已接入" : "本地规则路径可用"}</strong>
-        <small>{hasTopicAgent ? "热点转译、机会评分与证据门禁已运行" : "当前使用可追溯规则评分，仍由你确认最终叙事"}</small>
+        <strong>{hasTopicAgent ? "Codex 选题总编已接入" : "规则总编可用"}</strong>
+        <small>{hasTopicAgent ? "热点转译、机会评分与证据门禁由 Codex 执行" : "当前使用可追溯规则评分，仍由你确认最终叙事"}</small>
       </div>
 
       <div className="director-actions">
