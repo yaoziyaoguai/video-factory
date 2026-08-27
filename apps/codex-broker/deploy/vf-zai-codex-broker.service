@@ -14,8 +14,8 @@ Environment=PATH=/opt/video-factory/codex-broker/bin:/home/vf-zai-codex/.local/n
 Environment=CODEX_BIN=/opt/video-factory/codex-broker/bin/codex
 # 文件只包含 ZAI_API_KEY，部署时必须安装为 root:root 0600；值不得写入 unit 或命令行。
 EnvironmentFile=/etc/video-factory/zai-codex-broker.env
-ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %U:%G /etc/video-factory/zai-codex-broker.env)" = root:root'
-ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %a /etc/video-factory/zai-codex-broker.env)" = 600'
+ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %%U:%%G /etc/video-factory/zai-codex-broker.env)" = root:root'
+ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %%a /etc/video-factory/zai-codex-broker.env)" = 600'
 Environment=VIDEO_FACTORY_CODEX_PROFILE=zai
 Environment=VIDEO_FACTORY_CODEX_EFFORT=max
 Environment=VIDEO_FACTORY_CODEX_MODEL_CATALOG_PATH=/var/lib/video-factory-zai-codex/codex-home/models.json
