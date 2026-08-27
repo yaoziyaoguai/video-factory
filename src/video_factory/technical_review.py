@@ -28,7 +28,7 @@ def review_video(
     max_volume = detect_max_volume(video_path)
     duration = float(probe.get("format", {}).get("duration") or 0)
     duration_target = float(script.get("duration_target") or 0)
-    duration_tolerance = max(2.0, duration_target * 0.15)
+    duration_tolerance = target_duration_tolerance(duration_target)
 
     checks = [
         check("video_stream", video_stream is not None, "Video stream is decodable."),
@@ -106,3 +106,8 @@ def detect_max_volume(video_path: Path) -> Optional[float]:
 
 def check(check_id: str, passed: bool, detail: str) -> dict:
     return {"id": check_id, "passed": bool(passed), "detail": detail}
+
+
+def target_duration_tolerance(duration_target: float) -> float:
+    """短视频时长是创作目标，给自然旁白保留有限弹性。"""
+    return max(2.0, duration_target * 0.2)

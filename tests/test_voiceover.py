@@ -22,10 +22,10 @@ class _Response:
 
 
 class MiniMaxVoiceoverTest(unittest.TestCase):
-    def test_scene_tempo_fits_normal_overflow_and_caps_extreme_scripts(self):
-        self.assertAlmostEqual(scene_tempo(3.646, 1.9), 3.646 / 1.9)
+    def test_scene_tempo_preserves_voice_quality_with_a_bounded_speedup(self):
+        self.assertEqual(scene_tempo(3.646, 1.9), 1.35)
         self.assertEqual(scene_tempo(1.5, 1.9), 1.0)
-        self.assertEqual(scene_tempo(6.0, 1.9), 2.0)
+        self.assertEqual(scene_tempo(6.0, 1.9), 1.35)
 
     def test_writes_hex_audio_from_the_minimax_speech_api(self):
         with tempfile.TemporaryDirectory() as tmp:

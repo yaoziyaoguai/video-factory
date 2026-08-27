@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 from .kokoro_voice import synthesize_kokoro_audio
 
 
-MAX_SCENE_TEMPO = 2.0
+MAX_SCENE_TEMPO = 1.35
 
 
 def synthesize_voiceover_plan(
