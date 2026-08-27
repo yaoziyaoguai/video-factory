@@ -28,6 +28,15 @@ fi
 zai_broker_runtime_dir="${zai_broker_runtime_dir:-/run/video-factory-zai-codex}"
 zai_broker_socket="$zai_broker_runtime_dir/worker.sock"
 
+ensure_zai_runtime_mount() {
+  if [[ ! -e "$zai_broker_runtime_dir" ]]; then
+    install -d -o root -g vf-bridge -m 0750 "$zai_broker_runtime_dir"
+  elif [[ ! -d "$zai_broker_runtime_dir" ]]; then
+    echo "$zai_broker_runtime_dir exists but is not a directory." >&2
+    return 1
+  fi
+}
+
 # 应用与自托管热点容器只经内部网络通信；没有部署热点时保留空网络，应用会如实报告离线。
 docker network inspect "$trend_network" >/dev/null 2>&1 \
   || docker network create --driver bridge "$trend_network" >/dev/null
@@ -41,12 +50,7 @@ fi
 # 覆盖 env-file 里可能残留的旧值；不解析、也不改写任何含密文件。
 export VIDEO_FACTORY_CODEX_SOCKET_GID="$bridge_gid"
 if [[ "$zai_broker_enabled" -eq 0 ]]; then
-  if [[ ! -e "$zai_broker_runtime_dir" ]]; then
-    install -d -o root -g vf-bridge -m 0750 "$zai_broker_runtime_dir"
-  elif [[ ! -d "$zai_broker_runtime_dir" ]]; then
-    echo "$zai_broker_runtime_dir exists but is not a directory." >&2
-    exit 1
-  fi
+  ensure_zai_runtime_mount || exit 1
 fi
 
 # 不做“排空运行中制作”的等待：/api/runs 受登录会话保护，本脚本不持有凭据，
@@ -97,6 +101,8 @@ restart_brokers() {
     if ! systemctl restart "$zai_broker_service" || ! wait_for_broker_health "$zai_broker_socket" 20; then
       echo "Optional ZAI visual-review broker is unavailable; continuing with the primary Codex broker." >&2
       zai_broker_enabled=0
+      systemctl stop "$zai_broker_service" || true
+      ensure_zai_runtime_mount || failed=1
     fi
   fi
   return "$failed"
