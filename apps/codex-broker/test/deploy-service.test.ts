@@ -78,6 +78,22 @@ describe("ZAI systemd service sample", () => {
 });
 
 describe("production deployment transaction", () => {
+  it("uses a regional Alpine mirror only for ECS deployment builds", async () => {
+    const [dockerfile, compose, deploy] = await Promise.all([
+      readFile(path.join(repositoryRoot, "docker", "Dockerfile"), "utf8"),
+      readFile(path.join(repositoryRoot, "docker", "docker-compose.prod.yml"), "utf8"),
+      readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8"),
+    ]);
+
+    assert.match(dockerfile, /^ARG ALPINE_MIRROR$/m);
+    assert.match(dockerfile, /^ARG NODE_IMAGE=node:22-alpine$/m);
+    assert.match(dockerfile, /^FROM \$\{NODE_IMAGE\} AS dependencies$/m);
+    assert.doesNotMatch(dockerfile, /^RUN sed .*mirrors\.aliyun\.com/m);
+    assert.match(compose, /NODE_IMAGE: \$\{NODE_IMAGE:-node:22-alpine\}/);
+    assert.match(compose, /ALPINE_MIRROR: \$\{ALPINE_MIRROR:-\}/);
+    assert.match(deploy, /ALPINE_MIRROR="\$\{ALPINE_MIRROR:-https:\/\/mirrors\.aliyun\.com\/alpine\}"/);
+  });
+
   it("installs a physical shared Node runtime instead of linking into a private home", async () => {
     const script = await readFile(
       path.join(repositoryRoot, "scripts", "setup-codex-broker-host.sh"),

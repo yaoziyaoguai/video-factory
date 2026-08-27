@@ -30,7 +30,11 @@ jobs:
       - run: npm test
       - run: bash -n scripts/deploy-production.sh scripts/backup-production.sh scripts/setup-codex-broker-host.sh scripts/setup-zai-codex-broker-host.sh
       - run: docker compose --env-file .env.docker.prod.example -f docker/docker-compose.prod.yml config --quiet
-      - run: docker build --file docker/Dockerfile --tag video-factory:ci .
+      - run: >-
+          docker build
+          --build-arg NODE_IMAGE=public.ecr.aws/docker/library/node:22-alpine
+          --file docker/Dockerfile
+          --tag video-factory:ci .
       - name: Render a Linux container smoke video
         run: >-
           docker run --rm video-factory:ci

@@ -1,4 +1,6 @@
-FROM node:22-alpine AS dependencies
+ARG NODE_IMAGE=node:22-alpine
+
+FROM ${NODE_IMAGE} AS dependencies
 
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -18,7 +20,9 @@ FROM dependencies AS production-dependencies
 
 RUN npm prune --omit=dev
 
-FROM node:22-alpine AS runtime
+FROM ${NODE_IMAGE} AS runtime
+
+ARG ALPINE_MIRROR
 
 ENV NODE_ENV=production \
     STUDIO_HOST=0.0.0.0 \
@@ -26,7 +30,9 @@ ENV NODE_ENV=production \
     VIDEO_FACTORY_WORKSPACE=/data/factory \
     PYTHONUNBUFFERED=1
 
-RUN sed -i 's|https://dl-cdn.alpinelinux.org/alpine|https://mirrors.aliyun.com/alpine|g' /etc/apk/repositories \
+RUN if [ -n "$ALPINE_MIRROR" ]; then \
+      sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR%/}|g" /etc/apk/repositories; \
+    fi \
     && apk add --no-cache \
       ca-certificates \
       ffmpeg \
