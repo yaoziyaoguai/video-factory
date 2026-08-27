@@ -1,4 +1,4 @@
-import { CodexBridgeClient } from "./codex-chat.js";
+import { CodexBridgeClient, type CodexTaskExecution } from "./codex-chat.js";
 import {
   VISUAL_DIRECTOR_PROFILES,
   validateVisualDirectorPlan,
@@ -17,8 +17,8 @@ export interface CodexVisualDirectorAgentOptions {
   sleep?: (milliseconds: number) => Promise<void>;
 }
 
-// 330s > broker 285s 任务 deadline：broker 先终止 codex，客户端拿到带上下文的终态错误且不重放。
-const DEFAULT_DIRECTOR_TIMEOUT_MS = 330_000;
+// 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
+const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
@@ -51,15 +51,30 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
     });
     return validateVisualDirectorPlan(rawPlan, validationFor(input));
   }
+
+  async planDetailed(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<VisualDirectorPlan>> {
+    const execution = await this.client.runTaskDetailed("director-plan", {
+      directorProfiles: VISUAL_DIRECTOR_PROFILES,
+      ...input,
+    });
+    return {
+      output: validateVisualDirectorPlan(execution.output, validationFor(input)),
+      ...(execution.trace ? { trace: execution.trace } : {}),
+    };
+  }
 }
 
-// VisualDirectorAgentInput 不携带 generative 标记；evidence 镜头禁用生成式 Provider 的硬门禁
-// 仍由 directorNode 基于完整 capability 目录执行，这里负责结构、Provider 白名单、场景覆盖与预算校验。
 function validationFor(input: VisualDirectorAgentInput): VisualDirectorPlanValidation {
   return {
     scenePositions: input.scenes.map((scene) => scene.position),
+    sceneDurations: Object.fromEntries(input.scenes.map((scene) => [scene.position, scene.duration])),
     allowedProviderIds: input.assetProviders.map((provider) => provider.id),
-    generativeProviderIds: [],
+    generativeProviderIds: input.assetProviders
+      .filter((provider) => provider.deliveryTypes.some((type) => type === "generated_image" || type === "generated_video"))
+      .map((provider) => provider.id),
+    providerDeliveryTypes: Object.fromEntries(
+      input.assetProviders.map((provider) => [provider.id, provider.deliveryTypes]),
+    ),
     estimatedCnyPerClip: Object.fromEntries(
       input.assetProviders.map((provider): [string, number] => [provider.id, provider.estimatedCnyPerClip]),
     ),

@@ -9,7 +9,7 @@
     "dev:client": "vite --host 127.0.0.1",
     "dev:server": "STUDIO_DEV=1 tsx watch src/server/main.ts",
     "start": "node dist/server/server/main.js",
-    "test": "vitest run && node --import tsx --test test/api-contract.test.ts test/auth.test.ts test/candidate-inbox.test.ts test/codex-provider-settings.test.ts test/creator-settings-store.test.ts test/local-capabilities.test.ts test/opportunity-store.test.ts test/production-worker.test.ts test/publishing-studio.test.ts test/series-planner.test.ts test/series-store.test.ts test/server.test.ts test/studio-service.test.ts test/topic-taxonomy.test.ts test/trend-gateway.test.ts test/trend-opportunity-agent.test.ts test/visual-plan.test.ts",
+    "test": "vitest run && node --import tsx --test test/api-contract.test.ts test/auth.test.ts test/candidate-inbox.test.ts test/codex-provider-settings.test.ts test/cost-studio.test.ts test/creator-settings-store.test.ts test/local-capabilities.test.ts test/opportunity-store.test.ts test/production-worker.test.ts test/publishing-studio.test.ts test/review-media-preprocessor.test.ts test/series-planner.test.ts test/series-store.test.ts test/server.test.ts test/studio-service.test.ts test/template-catalog.test.ts test/template-store.test.ts test/topic-taxonomy.test.ts test/trend-gateway.test.ts test/trend-opportunity-agent.test.ts test/visual-plan.test.ts",
     "typecheck": "tsc -p tsconfig.server.json && tsc -p tsconfig.client.json"
   },
   "dependencies": {
@@ -18,6 +18,7 @@
     "@fontsource-variable/noto-sans-sc": "^5.3.0",
     "@fontsource-variable/noto-serif-sc": "^5.3.0",
     "@video-factory/production-pipeline": "0.1.0",
+    "@video-factory/template-core": "0.1.0",
     "@video-factory/workflow-core": "0.1.0",
     "driver.js": "^1.8.0",
     "fastify": "^5.12.1",

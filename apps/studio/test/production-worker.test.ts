@@ -111,6 +111,7 @@ describe("metered image provider settings", () => {
       label: "Seedream 关键画面",
       billing: "metered",
       modes: ["AI 图片", "9:16"],
+      deliveryTypes: ["generated_image"],
       strengths: ["解释性插画、抽象概念、无法检索到的关键静态画面与统一系列视觉"],
       constraints: ["合成内容不得作为事实证据", "人物、品牌与地标需要规避权利和误导风险", "成片必须保留 AIGC 标识"],
       estimatedCnyPerClip: 0.25,

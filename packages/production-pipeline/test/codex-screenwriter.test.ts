@@ -89,18 +89,35 @@ describe("CodexScreenwriterAgent", () => {
     assert.deepEqual(validateScriptDraft(validDraft(), { durationSeconds: 24 }), validDraft());
   });
 
+  it("preserves the v2 viewer promise and inspectable shot intent", () => {
+    const draft = {
+      viewerPromise: "看完能用一杯水判断窗边光线方向。",
+      narrativeArc: "误区、动作验证、结论。",
+      scenes: [1, 2, 3].map((position) => validScene(position, {
+        purpose: position === 1 ? "结果钩子" : "动作验证",
+        visible_action: "手拉开窗帘，杯沿高光从暗变亮。",
+        on_screen_text: "看高光移动",
+        sound_cue: "窗帘摩擦声",
+        success_criteria: ["手完成拉帘", "杯沿亮度明显变化"],
+        failure_conditions: ["只有静态杯子", "窗帘没有变化"],
+      })),
+    };
+
+    assert.deepEqual(validateScriptDraft(draft, { durationSeconds: 24 }), draft);
+  });
+
   it("rejects non-contract drafts without any fallback", async () => {
     const cases: Array<{ name: string; output: () => unknown; pattern: RegExp }> = [
       { name: "missing scenes", output: () => ({}), pattern: /scenes must be an array/ },
       {
         name: "too few scenes",
         output: () => ({ scenes: [validScene(1), validScene(2)] }),
-        pattern: /between 3 and 10 scenes; got 2/,
+        pattern: /between 3 and 24 scenes; got 2/,
       },
       {
         name: "too many scenes",
-        output: () => ({ scenes: Array.from({ length: 11 }, (_, index) => validScene(index + 1)) }),
-        pattern: /between 3 and 10 scenes; got 11/,
+        output: () => ({ scenes: Array.from({ length: 25 }, (_, index) => validScene(index + 1)) }),
+        pattern: /between 3 and 24 scenes; got 25/,
       },
       {
         name: "position gap",
@@ -115,7 +132,7 @@ describe("CodexScreenwriterAgent", () => {
       {
         name: "invalid strategy",
         output: () => ({ scenes: [validScene(1), validScene(2), validScene(3, { visual_strategy: "editorial" })] }),
-        pattern: /visual_strategy must be one of stock, image, local/,
+        pattern: /visual_strategy must be one of stock, image, generated, local/,
       },
       {
         name: "empty search terms",

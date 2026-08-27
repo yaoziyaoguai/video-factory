@@ -8,7 +8,7 @@ import { studioApi, subscribeToRun } from "../src/client/api.js";
 import { ProductionQueue } from "../src/client/components/ProductionQueue.js";
 import { RunWorkbench } from "../src/client/components/RunWorkbench.js";
 import { MultiPlatformPublishDialog } from "../src/client/components/MultiPlatformPublishDialog.js";
-import type { StudioProvider, StudioRunDetail, StudioRunSummary } from "../src/shared/api.js";
+import type { StudioProvider, StudioRunDetail, StudioRunSummary, StudioTemplate } from "../src/shared/api.js";
 
 const runSummary: StudioRunSummary = {
   id: "run-1",
@@ -32,7 +32,39 @@ const providers: StudioProvider[] = [
   { id: "python-technical-review-v1", capability: "quality.review", label: "本地技术审片", available: true, kind: "local" },
 ];
 
+function template(id: string, name: string): StudioTemplate {
+  return {
+    id,
+    version: 3,
+    status: "published",
+    name,
+    description: `${name}模板`,
+    category: "knowledge",
+    platforms: ["douyin"],
+    durationSeconds: 24,
+    automationLevel: "assisted",
+    storyStructure: [
+      { id: "hook", label: "开场", purpose: "抓住注意", required: true },
+      { id: "body", label: "解释", purpose: "展开内容", required: true },
+      { id: "close", label: "收束", purpose: "留下结论", required: true },
+    ],
+    shotSlots: [{ id: "shot", beatId: "hook", purpose: "开场", durationSeconds: 4, allowedCapabilities: ["asset.search"], manualReplacement: true }],
+    visualSystem: { composition: "主体清晰", colorIntent: "自然", subtitleDensity: "medium", pacing: "measured" },
+    soundSystem: { voiceIntent: "可信", pace: "medium", musicIntent: "克制" },
+    qualityRules: [{ id: "facts", label: "事实", dimension: "factual", required: true, threshold: 80 }],
+    capabilityRequirements: [{ capability: "script.draft", required: true }],
+    costPolicy: { currency: "CNY", maxCost: 8, maxPaidShots: 1 },
+    createdAt: "2026-08-27T00:00:00.000Z",
+    updatedAt: "2026-08-27T00:00:00.000Z",
+    builtIn: true,
+  };
+}
+
 beforeEach(() => {
+  vi.spyOn(studioApi, "templates").mockResolvedValue({
+    storeRevision: 0,
+    templates: [template("knowledge-explainer", "知识解释"), template("photo-story", "照片故事"), template("trend-fact-brief", "热点事实简报")],
+  });
   vi.spyOn(studioApi, "voices").mockResolvedValue([
     { id: "macos:Tingting", providerId: "macos-say-v1", label: "Tingting", locale: "zh-CN", engine: "macos", curated: true },
   ]);
@@ -156,7 +188,7 @@ describe("Studio client", () => {
     expect(screen.getByText(runSummary.title)).toBeInTheDocument();
     expect(screen.getAllByText("等你审片").length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: /进入审片/ })[0]).toHaveAttribute("href", "/projects/run-1");
-    await user.click(screen.getByRole("button", { name: "筛选：等你审片" }));
+    await user.click(screen.getByRole("button", { name: "筛选：待你处理" }));
     expect(screen.queryByText("已经完成的内容")).not.toBeInTheDocument();
   });
 
@@ -194,6 +226,10 @@ describe("Studio client", () => {
       nicheSlug: expect.stringMatching(/^topic-[a-f0-9]{8}$/),
       protocolVersion: "video-factory/brief-v1",
       reviewMode: "manual",
+      template: {
+        templateId: "knowledge-explainer",
+        runOverrides: { durationSeconds: 24, automationLevel: "assisted" },
+      },
       providers: expect.objectContaining({ script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1" }),
       director: {
         profileId: "auto",
@@ -215,7 +251,74 @@ describe("Studio client", () => {
 
     rerender(<NewRunDialog open={false} providers={providers} onClose={onClose} onSubmit={onSubmit} />);
     rerender(<NewRunDialog open providers={providers} onClose={onClose} onSubmit={onSubmit} />);
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled());
+  });
+
+  it("blocks production when the published template catalog cannot be loaded", async () => {
+    vi.mocked(studioApi.templates).mockRejectedValueOnce(new Error("模板服务离线"));
+    const onSubmit = vi.fn(async () => undefined);
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
+
+    expect(await screen.findByText(/无法读取模板目录：模板服务离线/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("applies the selected template automation level and preserves a custom duration", async () => {
+    const automaticTemplate = {
+      ...template("automatic-custom", "自动化自定义模板"),
+      durationSeconds: 27,
+      automationLevel: "automatic" as const,
+    };
+    vi.mocked(studioApi.templates).mockResolvedValueOnce({ storeRevision: 1, templates: [automaticTemplate] });
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
+
+    expect(await screen.findByRole("option", { name: "27 秒" })).toBeInTheDocument();
+    await user.type(screen.getByLabelText("视频标题"), "一条模板驱动的视频");
+    await user.type(screen.getByLabelText("内容角度"), "验证模板快照而不是写死参数");
+    await user.type(screen.getByLabelText("目标受众"), "内容创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      durationSeconds: 27,
+      template: {
+        templateId: "automatic-custom",
+        runOverrides: { durationSeconds: 27, automationLevel: "automatic" },
+      },
+    }));
+  });
+
+  it("enables the optional Codex visual-review role only when its broker is available", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const providersWithVisualReview: StudioProvider[] = [
+      ...providers,
+      {
+        id: "codex-visual-review-v1",
+        capability: "quality.review.visual",
+        label: "Codex 视觉审片",
+        available: true,
+        kind: "external",
+        billing: "subscription",
+      },
+    ];
+    render(<NewRunDialog open providers={providersWithVisualReview} onClose={() => undefined} onSubmit={onSubmit} />);
+
+    const visualReview = screen.getByRole("checkbox", { name: /视觉审片/ });
+    expect(visualReview).toBeChecked();
+    await user.type(screen.getByLabelText("视频标题"), "视觉审片必须进入生产单");
+    await user.type(screen.getByLabelText("内容角度"), "验证可选模型角色的开关");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
+      providers: expect.objectContaining({ visualReview: "codex-visual-review-v1" }),
+    }));
+
+    await user.click(visualReview);
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(onSubmit.mock.calls.at(-1)?.[0].providers).not.toHaveProperty("visualReview");
   });
 
   it("keeps the selected macOS voice profile and execution provider aligned", async () => {
@@ -237,6 +340,44 @@ describe("Studio client", () => {
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ voice: "macos-say-v1" }),
       voiceDirection: expect.objectContaining({ profileId: "macos:Meijia" }),
+    }));
+  });
+
+  it("replaces an unavailable macOS creator voice before a cloud run can be submitted", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const cloudProviders: StudioProvider[] = [
+      ...providers.filter((provider) => provider.id !== "macos-say-v1"),
+      {
+        id: "minimax-tts-v1",
+        capability: "voice.synthesize",
+        label: "MiniMax 云端配音",
+        available: true,
+        kind: "external",
+        billing: "metered",
+      },
+    ];
+    vi.mocked(studioApi.voices).mockReturnValueOnce(new Promise(() => undefined));
+    render(<NewRunDialog
+      open
+      providers={cloudProviders}
+      creatorSettings={{
+        voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
+        defaultRecipeId: "economy-daily",
+        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      }}
+      onClose={() => undefined}
+      onSubmit={onSubmit}
+    />);
+
+    await user.type(screen.getByLabelText("视频标题"), "云端配音初始化不能产生竞态");
+    await user.type(screen.getByLabelText("内容角度"), "即使音色目录仍在加载也应提交可执行配置");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      providers: expect.objectContaining({ voice: "minimax-tts-v1" }),
+      voiceDirection: expect.objectContaining({ profileId: "minimax:Chinese (Mandarin)_News_Anchor" }),
     }));
   });
 
@@ -289,6 +430,9 @@ describe("Studio client", () => {
     await user.click(screen.getByText("高级：逐节点配置"));
 
     expect(screen.getByRole("checkbox", { name: /Seedance 关键镜头/ })).toBeChecked();
+    const localBaseline = screen.getByRole("checkbox", { name: /本地编辑卡片/ });
+    expect(localBaseline).toBeChecked();
+    expect(localBaseline).toBeDisabled();
     expect(screen.getByLabelText("预计成本上限")).toHaveValue(3.5);
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
@@ -476,7 +620,7 @@ describe("Studio client", () => {
     expect(screen.getByRole("dialog", { name: "确认批准成片" })).toBeInTheDocument();
     expect(onDecision).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "确认批准并生成发布包" }));
-    expect(onDecision).toHaveBeenCalledWith({ action: "approve", actor: "director" });
+    expect(onDecision).toHaveBeenCalledWith({ action: "approve" });
   });
 
   it("shows the director's visual bible and AI-generated per-shot routes", async () => {

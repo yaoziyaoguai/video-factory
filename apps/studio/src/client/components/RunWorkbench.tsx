@@ -1,10 +1,12 @@
 import { AlertTriangle, Check, Download, FileJson, RotateCcw, Send, X, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { StudioDecisionInput, StudioRunDetail } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { platformLabel, providerLabel } from "../presentation.js";
 import { DirectorPlanPanel } from "./DirectorPlanPanel.js";
+import { NodeWorkspace } from "./NodeWorkspace.js";
+import { RunCostDetailPanel } from "./CostDashboard.js";
 
 interface RunWorkbenchProps {
   run: StudioRunDetail;
@@ -12,9 +14,15 @@ interface RunWorkbenchProps {
   onDecision: (input: StudioDecisionInput) => Promise<void>;
   onOpenPublish?: () => void;
   onRestart?: () => void;
+  costDetail?: StudioCostRunDetail;
+  nodeMutationPending?: boolean;
+  onOverrideNode?: (nodeId: string, input: StudioNodeOverrideInput) => Promise<void>;
+  onOverrideNodeInput?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
+  onAuthorizeSpend?: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
+  onRegenerateStale?: () => Promise<void>;
 }
 
-export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, onRestart }: RunWorkbenchProps) {
+export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, onOverrideNode, onOverrideNodeInput, onAuthorizeSpend, onRegenerateStale }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
@@ -50,6 +58,23 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
             <span>{node.role ? `${node.role} · ${node.label}` : node.label}</span>
           </div>
         ))}
+      </section>
+
+      <section className="role-workspaces" aria-labelledby="role-workspaces-title">
+        <header className="section-heading"><div><p className="eyebrow">逐节点审阅</p><h2 id="role-workspaces-title">角色工作台</h2><p>展开节点查看模型、API、版本与交付；人工修改会成为有效版本，并自动标记后续结果过期。</p></div><span>{run.nodes.filter((node) => node.status === "succeeded").length}/{run.nodes.length}</span></header>
+        <div className="node-workspace-list">
+          {run.nodes.map((node) => <NodeWorkspace
+            key={node.id}
+            node={node}
+            nodes={run.nodes}
+            runStatus={run.status}
+            artifacts={run.artifacts.filter((artifact) => node.artifactIds.includes(artifact.id))}
+            busy={nodeMutationPending}
+            onOverride={onOverrideNode ?? (async () => undefined)}
+            onInputOverride={onOverrideNodeInput ?? (async () => undefined)}
+            onAuthorize={onAuthorizeSpend ?? (async () => undefined)}
+          />)}
+        </div>
       </section>
 
       <div className="review-layout">
@@ -99,32 +124,40 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
               <p>{runStateMessage(run)}</p>
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />多平台发布</button> : null}
               {(run.status === "failed" || run.status === "rejected") && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
+              {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />按人工版本继续生成</button> : null}
             </section>
           )}
 
-          {directorPlan?.contentUrl ? <DirectorPlanPanel contentUrl={directorPlan.contentUrl} /> : null}
-
-          <section className="detail-section" aria-label="生产产物" data-tour="run-artifacts">
-            <div className="section-heading"><h2>质量与产物</h2><span>{run.artifacts.length} 项</span></div>
-            <div className="artifact-groups">
-              {artifactGroups.map((group) => (
-                <section className="artifact-group" key={group.nodeId}>
-                  <h3>{group.label}<span>{group.artifacts.length}</span></h3>
-                  <div className="artifact-list">
-                    {group.artifacts.map((artifact) => (
-                      <a className="artifact-row" href={artifact.contentUrl} key={artifact.id} aria-disabled={!artifact.contentUrl}>
-                        <FileJson aria-hidden="true" size={17} />
-                        <span><strong>{artifactLabel(artifact.kind)}</strong><small>{providerLabel(artifact.providerId) ?? artifact.schemaVersion ?? artifact.kind}</small></span>
-                        {artifact.contentUrl ? <Download aria-hidden="true" size={15} /> : null}
-                      </a>
-                    ))}
-                  </div>
-                </section>
-              ))}
-            </div>
-          </section>
         </aside>
       </div>
+
+      {directorPlan?.contentUrl ? <DirectorPlanPanel contentUrl={directorPlan.contentUrl} /> : null}
+      {costDetail ? <RunCostDetailPanel detail={costDetail} /> : null}
+
+      <section className="detail-section run-artifact-section" aria-label="生产产物" data-tour="run-artifacts">
+        <div className="section-heading"><h2>质量与产物</h2><span>{run.artifacts.length} 项</span></div>
+        <div className="artifact-groups">
+          {artifactGroups.map((group) => (
+            <section className="artifact-group" key={group.nodeId}>
+              <h3>{group.label}<span>{group.artifacts.length}</span></h3>
+              <div className="artifact-list">
+                {group.artifacts.map((artifact) => artifact.contentUrl ? (
+                  <a className="artifact-row" href={artifact.contentUrl} key={artifact.id}>
+                    <FileJson aria-hidden="true" size={17} />
+                    <span><strong>{artifactLabel(artifact.kind, artifact.producerNodeId)}</strong><small>{providerLabel(artifact.providerId) ?? artifact.schemaVersion ?? artifact.kind}</small></span>
+                    <Download aria-hidden="true" size={15} />
+                  </a>
+                ) : (
+                  <div className="artifact-row" aria-disabled="true" title="该产物没有可读取的文件地址" key={artifact.id}>
+                    <FileJson aria-hidden="true" size={17} />
+                    <span><strong>{artifactLabel(artifact.kind, artifact.producerNodeId)}</strong><small>暂不可打开 · 尚无文件地址</small></span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      </section>
 
       {rejecting ? (
         <div className="dialog-backdrop" role="presentation">
@@ -143,7 +176,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
                 className="button button-danger"
                 type="button"
                 disabled={!rejectNote.trim() || decisionPending}
-                onClick={() => void onDecision({ action: "reject", actor: "director", note: rejectNote.trim() })}
+                  onClick={() => void onDecision({ action: "reject", note: rejectNote.trim() })}
               >
                 <RotateCcw aria-hidden="true" size={17} />确认打回
               </button>
@@ -161,7 +194,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
             <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p><strong>批准后将生成发布包。</strong><span>这会结束人工终审；请确认已经完整观看画面、字幕并听过声音。</span></p></div>
             <footer className="dialog-actions">
               <button className="button button-ghost" type="button" onClick={() => setApproving(false)} disabled={decisionPending}>再看一遍</button>
-              <button className="button button-primary" type="button" disabled={decisionPending} onClick={() => void onDecision({ action: "approve", actor: "director" })}><Check aria-hidden="true" size={17} />{decisionPending ? "正在批准..." : "确认批准并生成发布包"}</button>
+              <button className="button button-primary" type="button" disabled={decisionPending} onClick={() => void onDecision({ action: "approve" })}><Check aria-hidden="true" size={17} />{decisionPending ? "正在批准..." : "确认批准并生成发布包"}</button>
             </footer>
           </section>
         </div>
@@ -185,10 +218,14 @@ function runStateMessage(run: StudioRunDetail): string {
   if (run.status === "failed") {
     return safeRunError(run.nodes.find((node) => node.status === "failed")?.error);
   }
+  if (run.status === "awaiting_spend_approval") return "即将进入付费节点，请先检查前序交付、模型和费用上限。";
+  if (run.status === "approval_invalidated") return "输入、模型或预算发生了变化，之前的费用确认已失效，请重新检查。";
+  if (run.status === "stale") return "上游内容已被人工修改，后续旧结果不会继续使用，需要重新生成。";
   return "制作正在自动执行，详情页会实时更新；连接中断时会明确提示。";
 }
 
-function artifactLabel(kind: string): string {
+function artifactLabel(kind: string, producerNodeId?: string): string {
+  if (kind === "review_report" && producerNodeId === "visual-review") return "视觉审片报告";
   const labels: Record<string, string> = {
     production_brief: "生产需求",
     script: "脚本",

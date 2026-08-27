@@ -78,6 +78,11 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
       },
       ...(input.defaultAssetProviderId ? { defaultAssetProviderId: input.defaultAssetProviderId } : {}),
     }),
+    listTemplates: async () => ({ storeRevision: 0, templates: [] }),
+    getTemplate: async () => undefined,
+    cloneTemplate: async () => { throw new Error("not configured"); },
+    saveTemplateDraft: async () => { throw new Error("not configured"); },
+    publishTemplate: async () => { throw new Error("not configured"); },
     listPublishTargets: async () => [],
     listTrendSources: async () => [],
     listTrendServices: async () => [],
@@ -105,11 +110,28 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
       throw new Error("not configured");
     },
     listRuns: async () => ([runDetail()]),
+    costDashboard: async () => ({
+      currency: "CNY",
+      totals: { estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0 },
+      byProvider: [],
+      byNode: [],
+      runs: [],
+    }),
+    runCostDetail: async (runId) => ({
+      runId,
+      title: "第一条视频",
+      totals: { estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0 },
+      lines: [],
+    }),
     getRun: async (runId) => runId === "run-1"
       ? runDetail()
       : undefined,
     startRun: async () => ({ runId: "run-2", status: "running" }),
     decide: async (_runId, input) => runDetail(input.action === "approve" ? "succeeded" : "rejected"),
+    applyNodeOverride: async () => runDetail("stale"),
+    applyNodeInputOverride: async () => runDetail("stale"),
+    authorizeSpend: async () => runDetail("running"),
+    resumeStale: async () => runDetail("running"),
     subscribe: () => () => undefined,
     resolveArtifact: async () => undefined,
     publishReadiness: async (runId) => ({
@@ -131,6 +153,126 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
 }
 
 describe("Studio API", () => {
+  it("exposes cost ledgers, editable node versions, spend approval, and stale regeneration", async () => {
+    const calls: string[] = [];
+    const service = fakeService({
+      costDashboard: async () => ({
+        currency: "CNY",
+        totals: { estimatedCostCny: 2.4, authorizedCostCny: 3, actualCostCny: 0, actualPendingCount: 1, meteredCalls: 1, subscriptionCalls: 0, freeCalls: 1, failedMeteredCalls: 0 },
+        byProvider: [],
+        byNode: [],
+        runs: [],
+      }),
+      applyNodeOverride: async (_runId, nodeId, input, actor) => { calls.push(`override:${nodeId}:${String((input.output as { hook?: string }).hook)}:${actor}`); return runDetail("stale"); },
+      applyNodeInputOverride: async (_runId, nodeId, input, actor) => { calls.push(`input:${nodeId}:${String((input.input as { title?: string }).title)}:${actor}`); return runDetail("stale"); },
+      authorizeSpend: async (_runId, nodeId, input, approvedBy) => { calls.push(`spend:${nodeId}:${input.modelId}:${approvedBy}`); return runDetail("running"); },
+      resumeStale: async () => { calls.push("regenerate"); return runDetail("running"); },
+    });
+    const app = buildStudioApp({ service });
+
+    const costs = await app.inject({ method: "GET", url: "/api/costs" });
+    const override = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/override", payload: { actor: "editor", output: { hook: "人工钩子" } } });
+    const inputOverride = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/input-override", payload: { actor: "forged", input: { title: "人工题目" } } });
+    const spend = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/assets/spend-authorizations", payload: { inputVersionIds: ["version-1"], providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02", maxCostCny: 3, maxAttempts: 1, approvedBy: "owner" } });
+    const regenerate = await app.inject({ method: "POST", url: "/api/runs/run-1/regenerate-stale" });
+
+    assert.equal(costs.statusCode, 200);
+    assert.equal(costs.json().totals.actualPendingCount, 1);
+    assert.equal(override.statusCode, 200);
+    assert.equal(inputOverride.statusCode, 200);
+    assert.equal(spend.statusCode, 200);
+    assert.equal(regenerate.statusCode, 200);
+    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "spend:assets:MiniMax-Hailuo-02:studio-owner", "regenerate"]);
+    await app.close();
+  });
+
+  it("accepts a structured document override without trusting a client actor", async () => {
+    const calls: Array<{ actor: string; input: unknown }> = [];
+    const service = fakeService({
+      applyNodeOverride: async (_runId, _nodeId, input, actor) => {
+        calls.push({ actor, input });
+        return runDetail("stale");
+      },
+    });
+    const app = buildStudioApp({ service });
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/runs/run-1/nodes/script/override",
+      payload: {
+        actor: "forged-actor",
+        document: { artifactId: "artifact-script", content: { title: "人工脚本" } },
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(calls, [{
+      actor: "studio-owner",
+      input: { document: { artifactId: "artifact-script", content: { title: "人工脚本" } } },
+    }]);
+    await app.close();
+  });
+
+  it("exposes template catalog and validates template mutations", async () => {
+    const template = {
+      id: "knowledge-explainer",
+      version: 1,
+      status: "published" as const,
+      name: "知识解释",
+      description: "讲清一个问题。",
+      category: "knowledge",
+      platforms: ["douyin"],
+      durationSeconds: 36,
+      automationLevel: "assisted" as const,
+      storyStructure: [{ id: "hook", label: "钩子", purpose: "提出问题", required: true }],
+      shotSlots: [{ id: "shot-hook", beatId: "hook", purpose: "提出问题", durationSeconds: 4, allowedCapabilities: ["asset.search"], manualReplacement: true }],
+      visualSystem: { composition: "主体清晰", colorIntent: "中性色", subtitleDensity: "medium" as const, pacing: "measured" as const },
+      soundSystem: { voiceIntent: "可信", pace: "medium" as const, musicIntent: "克制" },
+      qualityRules: [{ id: "facts", label: "事实", dimension: "factual" as const, required: true, threshold: 80 }],
+      capabilityRequirements: [{ capability: "script.draft", required: true }],
+      costPolicy: { currency: "CNY" as const, maxCost: 5, maxPaidShots: 1 },
+      createdAt: "2026-08-27T00:00:00.000Z",
+      updatedAt: "2026-08-27T00:00:00.000Z",
+      builtIn: true,
+    };
+    const app = buildStudioApp({
+      service: fakeService({
+        listTemplates: async () => ({ storeRevision: 0, templates: [template] }),
+        getTemplate: async () => template,
+        cloneTemplate: async (input) => ({ storeRevision: 1, template: { ...template, id: input.newId, name: input.name, status: "draft", builtIn: false } }),
+      }),
+    });
+
+    const catalog = await app.inject({ method: "GET", url: "/api/templates" });
+    const cloned = await app.inject({
+      method: "POST",
+      url: "/api/templates/clone",
+      headers: { "x-video-factory-request": "studio" },
+      payload: { sourceId: "knowledge-explainer", newId: "my-explainer", name: "我的解释", expectedRevision: 0 },
+    });
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/api/templates/clone",
+      headers: { "x-video-factory-request": "studio" },
+      payload: { sourceId: "knowledge-explainer", newId: "../escape", name: "错误", expectedRevision: 0 },
+    });
+    const invalidDraft = await app.inject({
+      method: "PUT",
+      url: "/api/templates/knowledge-explainer/draft",
+      headers: { "x-video-factory-request": "studio" },
+      payload: { expectedRevision: 0, template: { id: "knowledge-explainer", version: 1 } },
+    });
+
+    assert.equal(catalog.statusCode, 200);
+    assert.equal(catalog.json().templates[0].name, "知识解释");
+    assert.equal(cloned.statusCode, 201);
+    assert.equal(cloned.json().template.id, "my-explainer");
+    assert.equal(invalid.statusCode, 400);
+    assert.equal(invalidDraft.statusCode, 400);
+    assert.match(invalidDraft.json().error, /模板参数不正确/);
+    await app.close();
+  });
+
   it("keeps health public while requiring a signed session for studio data", async () => {
     const app = buildStudioApp({
       service: fakeService(),

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import type { HumanDecisionDraft, WorkflowRun } from "@video-factory/workflow-core";
+import type { HumanDecisionDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
 import type {
   DispatchedProductionRun,
   ProductionBrief,
@@ -108,9 +108,13 @@ function waitingRun(workspaceRoot: string): WorkflowRun<ProductionBrief> {
 
 class FakePipeline implements StudioPipelinePort {
   run: WorkflowRun<ProductionBrief>;
+  showError?: Error;
   listener?: ProductionRunListener;
   lastDecision?: HumanDecisionDraft;
+  lastOverride?: NodeOverrideDraft;
+  lastAuthorization?: SpendAuthorizationDraft;
   dispatchCount = 0;
+  lastInput?: unknown;
 
   constructor(run: WorkflowRun<ProductionBrief>) {
     this.run = run;
@@ -121,6 +125,7 @@ class FakePipeline implements StudioPipelinePort {
   }
 
   async show(runId: string): Promise<WorkflowRun<ProductionBrief>> {
+    if (this.showError) throw this.showError;
     if (runId !== this.run.id) {
       const error = new Error("missing") as NodeJS.ErrnoException;
       error.code = "ENOENT";
@@ -129,8 +134,18 @@ class FakePipeline implements StudioPipelinePort {
     return this.run;
   }
 
-  async dispatch(_input: unknown, listener?: ProductionRunListener): Promise<DispatchedProductionRun> {
+  async loadPersisted(runId: string): Promise<WorkflowRun<ProductionBrief>> {
+    if (runId !== this.run.id) {
+      const error = new Error("missing") as NodeJS.ErrnoException;
+      error.code = "ENOENT";
+      throw error;
+    }
+    return this.run;
+  }
+
+  async dispatch(input: unknown, listener?: ProductionRunListener): Promise<DispatchedProductionRun> {
     this.dispatchCount += 1;
+    this.lastInput = input;
     this.listener = listener;
     return { runId: this.run.id, completion: Promise.resolve(this.run) };
   }
@@ -142,6 +157,20 @@ class FakePipeline implements StudioPipelinePort {
       revision: 1,
       status: decision.action === "approve" ? "succeeded" : "rejected",
     };
+    return this.run;
+  }
+
+  async applyNodeOverride(_runId: string, override: NodeOverrideDraft): Promise<WorkflowRun<ProductionBrief>> {
+    this.lastOverride = override;
+    return this.run;
+  }
+
+  async authorizeSpend(_runId: string, authorization: SpendAuthorizationDraft): Promise<WorkflowRun<ProductionBrief>> {
+    this.lastAuthorization = authorization;
+    return this.run;
+  }
+
+  async resumeStale(_runId: string): Promise<WorkflowRun<ProductionBrief>> {
     return this.run;
   }
 }
@@ -205,6 +234,9 @@ describe("StudioService", () => {
     await pipeline.listener?.(pipeline.run);
 
     assert.deepEqual(result, { runId: "run-1", status: "running" });
+    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot?.templateId, "knowledge-explainer");
+    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot?.resolvedBlueprint.platform, "douyin");
+    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot?.resolvedBlueprint.durationSeconds, 24);
     assert.deepEqual(snapshots, ["needs_human"]);
     await assert.rejects(
       () => service.startRun({
@@ -321,6 +353,34 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
+  it("rejects a partially metered director pool without a free fallback", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      codexAvailability: { available: true, reason: "" },
+      environment: {
+        ARK_API_KEY: "seedance-key",
+        SEEDANCE_MODEL_ID: "seedance-model",
+        SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
+      },
+    });
+
+    await assert.rejects(() => service.startRun({
+      ...brief,
+      providers: {
+        ...brief.providers,
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+      },
+      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 3.5 },
+    }), /至少保留一个免费素材来源/);
+    assert.equal(pipeline.dispatchCount, 0);
+  });
+
   it("refuses test-only providers at the server production boundary", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -352,14 +412,14 @@ describe("StudioService", () => {
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
-    await service.decide("run-1", { action: "approve", actor: "jinkun" });
+    await service.decide("run-1", { action: "approve" }, "jinkun");
 
     assert.equal(pipeline.lastDecision?.interventionId, "intervention-1");
     assert.equal(pipeline.lastDecision?.action, "approve");
 
     pipeline.run = waitingRun(workspaceRoot);
     await assert.rejects(
-      () => service.decide("run-1", { action: "reject", actor: "jinkun" }),
+      () => service.decide("run-1", { action: "reject" }, "jinkun"),
       (error: unknown) => error instanceof StudioConflictError && /填写原因/.test(error.message),
     );
   });
@@ -373,9 +433,202 @@ describe("StudioService", () => {
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
     await assert.rejects(
-      () => service.decide("run-1", { action: "approve", actor: "director" }),
+      () => service.decide("run-1", { action: "approve" }, "director"),
       (error: unknown) => error instanceof StudioConflictError && /刷新/.test(error.message),
     );
+  });
+
+  it("rejects node edits while a run is active and validates output against the current node schema", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const run = waitingRun(workspaceRoot);
+    run.status = "running";
+    run.nodeRuns.unshift({
+      nodeId: "script",
+      status: "succeeded",
+      output: { hook: "旧钩子", scenes: [{ narration: "旧旁白" }] },
+      artifactIds: [],
+      qualityGateResults: [],
+    });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(
+      () => service.applyNodeOverride("run-1", "script", { output: { hook: "新钩子", scenes: [{ narration: "新旁白" }] } }, "trusted-owner"),
+      /仍在执行/,
+    );
+    pipeline.run = { ...pipeline.run, status: "needs_human" };
+    await assert.rejects(
+      () => service.applyNodeOverride("run-1", "script", { output: { hook: 42, scenes: [] } }, "trusted-owner"),
+      /output\.hook.*文字/,
+    );
+    await service.applyNodeOverride(
+      "run-1",
+      "script",
+      { output: { hook: "新钩子", scenes: [{ narration: "新旁白" }] } },
+      "trusted-owner",
+    );
+    assert.equal(pipeline.lastOverride?.actor, "trusted-owner");
+  });
+
+  it("requires explicit confirmation before editing a terminal run", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const run = waitingRun(workspaceRoot);
+    run.status = "succeeded";
+    run.nodeRuns.unshift({ nodeId: "script", status: "succeeded", output: { hook: "旧钩子" }, artifactIds: [], qualityGateResults: [] });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(
+      () => service.applyNodeOverride("run-1", "script", { output: { hook: "修订钩子" } }, "trusted-owner"),
+      /明确确认/,
+    );
+    await service.applyNodeOverride(
+      "run-1",
+      "script",
+      { output: { hook: "修订钩子" }, confirmTerminalEdit: true },
+      "trusted-owner",
+    );
+    assert.equal(pipeline.lastOverride?.actor, "trusted-owner");
+  });
+
+  it("rejects a stale spend confirmation and authorizes only the current server plan", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const run = waitingRun(workspaceRoot);
+    run.status = "awaiting_spend_approval";
+    run.nodeRuns.unshift({
+      nodeId: "assets",
+      status: "awaiting_spend_approval",
+      artifactIds: [],
+      qualityGateResults: [],
+      spendPlan: {
+        id: "plan-current",
+        inputVersionIds: ["script-human-v2"],
+        providerId: "hailuo-video-v1",
+        modelId: "MiniMax-Hailuo-02",
+        estimatedCostCny: 2.4,
+        maxCostCny: 3,
+        maxAttempts: 1,
+        createdAt: "2026-08-27T00:00:00.000Z",
+      },
+    });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(
+      () => service.authorizeSpend("run-1", "assets", {
+        inputVersionIds: ["script-generated-v1"],
+        providerId: "hailuo-video-v1",
+        modelId: "MiniMax-Hailuo-02",
+        maxCostCny: 3,
+        maxAttempts: 1,
+      }, "trusted-owner"),
+      /费用计划或上游版本已经变化/,
+    );
+    assert.equal(pipeline.lastAuthorization, undefined);
+
+    await service.authorizeSpend("run-1", "assets", {
+      inputVersionIds: ["script-human-v2"],
+      providerId: "hailuo-video-v1",
+      modelId: "MiniMax-Hailuo-02",
+      maxCostCny: 3,
+      maxAttempts: 1,
+    }, "trusted-owner");
+    assert.deepEqual(pipeline.lastAuthorization, {
+      nodeId: "assets",
+      inputVersionIds: ["script-human-v2"],
+      providerId: "hailuo-video-v1",
+      modelId: "MiniMax-Hailuo-02",
+      maxCostCny: 3,
+      maxAttempts: 1,
+      approvedBy: "trusted-owner",
+    });
+  });
+
+  it("stores an edited JSON artifact as an immutable human version and rewires the node output", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const run = waitingRun(workspaceRoot);
+    const scriptPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "attempt-1", "script.json");
+    await mkdir(path.dirname(scriptPath), { recursive: true });
+    await writeFile(scriptPath, `${JSON.stringify({ title: "旧脚本", scenes: [{ narration: "旧旁白" }] })}\n`, "utf8");
+    run.nodeRuns.unshift({
+      nodeId: "script",
+      status: "succeeded",
+      output: { scriptPath },
+      artifactIds: ["artifact-script"],
+      qualityGateResults: [],
+      outputState: {
+        nodeId: "script",
+        generatedVersionId: "script-generated-v1",
+        effectiveVersionId: "script-generated-v1",
+        stale: false,
+        versions: [{
+          id: "script-generated-v1",
+          nodeId: "script",
+          source: "generated",
+          artifactIds: ["artifact-script"],
+          output: { scriptPath },
+          inputVersionIds: [],
+          createdAt: "2026-08-21T10:00:20.000Z",
+          createdBy: "codex-screenwriter-v1",
+          schemaVersion: "video-factory/script-v1",
+        }],
+      },
+    });
+    run.artifacts.push({
+      id: "artifact-script",
+      kind: "script",
+      uri: scriptPath,
+      createdAt: "2026-08-21T10:00:20.000Z",
+      contentType: "application/json",
+      schemaVersion: "video-factory/script-v1",
+      producer: { nodeId: "script", attempt: 1 },
+      provenance: { providerId: "codex-screenwriter-v1" },
+    });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await service.applyNodeOverride("run-1", "script", {
+      document: {
+        artifactId: "artifact-script",
+        content: { title: "人工脚本", scenes: [{ narration: "人工旁白" }] },
+      },
+    }, "trusted-owner");
+
+    const override = pipeline.lastOverride!;
+    const humanPath = (override.output as { scriptPath: string }).scriptPath;
+    assert.notEqual(humanPath, scriptPath);
+    assert.match(humanPath, /nodes\/script\/human-revisions\/.+\.json$/);
+    assert.deepEqual(JSON.parse(await readFile(humanPath, "utf8")), {
+      title: "人工脚本",
+      scenes: [{ narration: "人工旁白" }],
+    });
+    assert.equal(JSON.parse(await readFile(scriptPath, "utf8")).title, "旧脚本");
+    assert.equal(override.artifacts?.[0]?.uri, humanPath);
+    assert.equal(override.artifacts?.[0]?.provenance?.providerId, "human-editor");
+    assert.deepEqual(override.artifacts?.[0]?.parentArtifactIds, ["artifact-script"]);
+    assert.equal(override.expectedVersionId, "script-generated-v1");
+  });
+
+  it("rejects document edits that do not target the node's current JSON artifact", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const run = waitingRun(workspaceRoot);
+    run.nodeRuns.unshift({
+      nodeId: "script",
+      status: "succeeded",
+      output: { scriptPath: path.join(workspaceRoot, "runs", "run-1", "script.json") },
+      artifactIds: [],
+      qualityGateResults: [],
+    });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(
+      () => service.applyNodeOverride("run-1", "script", {
+        document: { artifactId: "artifact-video", content: { title: "越权修改" } },
+      }, "trusted-owner"),
+      /当前可编辑产物/,
+    );
+    assert.equal(pipeline.lastOverride, undefined);
   });
 
   it("resolves only artifacts contained by the selected run directory", async () => {
@@ -399,6 +652,22 @@ describe("StudioService", () => {
       artifacts: [{ ...run.artifacts[0]!, uri: outsidePath }],
     };
     await assert.rejects(() => service.resolveArtifact("run-1", "artifact-video"), /outside run directory/);
+  });
+
+  it("serves persisted artifacts even when a legacy brief cannot be rehydrated", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const run = waitingRun(workspaceRoot);
+    const videoPath = run.artifacts[0]!.uri!;
+    await mkdir(path.dirname(videoPath), { recursive: true });
+    await writeFile(videoPath, "legacy-video", "utf8");
+    const pipeline = new FakePipeline(run);
+    pipeline.showError = new Error("legacy brief no longer satisfies the current contract");
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const resource = await service.resolveArtifact("run-1", "artifact-video");
+
+    assert.equal(resource?.path, await realpath(videoPath));
+    assert.equal(resource?.sizeBytes, 12);
   });
 
   it("reports provider availability without returning environment values", async () => {

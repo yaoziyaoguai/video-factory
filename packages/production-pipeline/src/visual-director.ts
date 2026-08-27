@@ -3,6 +3,8 @@ import {
   type ProductionDirectorProfileId,
   type ProductionEconomics,
 } from "./contracts.js";
+import type { ProductionBlueprint } from "@video-factory/template-core";
+import type { CodexTaskExecution } from "./codex-chat.js";
 
 export const DIRECTOR_PLAN_VERSION = "video-factory/director-plan-v1" as const;
 
@@ -88,15 +90,25 @@ export const VISUAL_DIRECTOR_PROFILES: readonly VisualDirectorProfileDefinition[
 ] as const;
 
 export type ShotAuthenticityPolicy = "evidence" | "illustrative" | "expressive";
+export type VisualAssetDeliveryType =
+  | "editorial_card"
+  | "stock_video"
+  | "stock_image"
+  | "generated_image"
+  | "generated_video";
 
 export interface VisualBible {
+  viewerPromise?: string;
   narrativeApproach: string;
+  motif?: string;
   pacing: string;
   composition: string;
   camera: string;
   color: string;
   continuity: string;
+  transitionGrammar?: string;
   sound: string;
+  antiPatterns?: string[];
 }
 
 export interface ShotDecision {
@@ -104,7 +116,18 @@ export interface ShotDecision {
   narrativeRole: string;
   authenticityPolicy: ShotAuthenticityPolicy;
   preferredProviderId: string;
+  deliveryType: VisualAssetDeliveryType;
   alternativeProviderIds: string[];
+  subject?: string;
+  environment?: string;
+  visibleAction?: string;
+  temporalBeats?: string[];
+  shotSize?: string;
+  camera?: string;
+  lighting?: string;
+  negativeConstraints?: string[];
+  referenceRequirements?: string[];
+  successCriteria?: string[];
   query: string;
   generationPrompt: string;
   rationale: string;
@@ -124,8 +147,10 @@ export interface VisualDirectorPlan {
 
 export interface VisualDirectorPlanValidation {
   scenePositions: number[];
+  sceneDurations?: Record<number, number>;
   allowedProviderIds: string[];
   generativeProviderIds: string[];
+  providerDeliveryTypes?: Record<string, VisualAssetDeliveryType[]>;
   estimatedCnyPerClip: Record<string, number>;
   economics: ProductionEconomics;
 }
@@ -138,6 +163,7 @@ export interface VisualDirectorAgentInput {
     platform: string;
     durationSeconds: number;
     requestedProfileId: ProductionDirectorProfileId;
+    templateBlueprint?: ProductionBlueprint;
     editorial?: {
       verdict: "produce_video" | "produce_image_story";
       reasons: string[];
@@ -149,12 +175,20 @@ export interface VisualDirectorAgentInput {
     narration: string;
     duration: number;
     visualPrompt: string;
+    visualStrategy: "stock" | "image" | "generated" | "local";
+    visibleAction: string;
+    onScreenText?: string;
+    soundCue?: string;
+    successCriteria: string[];
+    failureConditions: string[];
+    searchTerms: string[];
   }>;
   assetProviders: Array<{
     id: string;
     label: string;
     billing: "free" | "metered";
     modes: string[];
+    deliveryTypes: VisualAssetDeliveryType[];
     strengths: string[];
     constraints: string[];
     estimatedCnyPerClip: number;
@@ -167,6 +201,7 @@ export interface VisualAssetProviderCapability {
   label: string;
   billing: "free" | "metered";
   modes: string[];
+  deliveryTypes: VisualAssetDeliveryType[];
   strengths?: string[];
   constraints?: string[];
   estimatedCnyPerClip?: number;
@@ -176,6 +211,7 @@ export interface VisualAssetProviderCapability {
 export interface VisualDirectorAgent {
   id: string;
   plan(input: VisualDirectorAgentInput): Promise<unknown>;
+  planDetailed?(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<unknown>>;
 }
 
 export function validateVisualDirectorPlan(value: unknown, options: VisualDirectorPlanValidation): VisualDirectorPlan {
@@ -187,13 +223,25 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
   const resolvedProfileId = profileId(input.resolvedProfileId, "resolvedProfileId", false) as Exclude<ProductionDirectorProfileId, "auto">;
   const visualBibleInput = record(input.visualBible, "visualBible");
   const visualBible: VisualBible = {
+    ...(optionalText(visualBibleInput.viewerPromise, "visualBible.viewerPromise") !== undefined
+      ? { viewerPromise: optionalText(visualBibleInput.viewerPromise, "visualBible.viewerPromise")! }
+      : {}),
     narrativeApproach: text(visualBibleInput.narrativeApproach, "visualBible.narrativeApproach"),
+    ...(optionalText(visualBibleInput.motif, "visualBible.motif") !== undefined
+      ? { motif: optionalText(visualBibleInput.motif, "visualBible.motif")! }
+      : {}),
     pacing: text(visualBibleInput.pacing, "visualBible.pacing"),
     composition: text(visualBibleInput.composition, "visualBible.composition"),
     camera: text(visualBibleInput.camera, "visualBible.camera"),
     color: text(visualBibleInput.color, "visualBible.color"),
     continuity: text(visualBibleInput.continuity, "visualBible.continuity"),
+    ...(optionalText(visualBibleInput.transitionGrammar, "visualBible.transitionGrammar") !== undefined
+      ? { transitionGrammar: optionalText(visualBibleInput.transitionGrammar, "visualBible.transitionGrammar")! }
+      : {}),
     sound: text(visualBibleInput.sound, "visualBible.sound"),
+    ...(optionalStringArray(visualBibleInput.antiPatterns, "visualBible.antiPatterns") !== undefined
+      ? { antiPatterns: optionalStringArray(visualBibleInput.antiPatterns, "visualBible.antiPatterns")! }
+      : {}),
   };
   if (!Array.isArray(input.shots)) throw new Error("Director plan shots must be an array.");
 
@@ -207,19 +255,60 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
     if (seen.has(scenePosition)) throw new Error(`Director plan contains duplicate scene ${scenePosition}.`);
     seen.add(scenePosition);
     const preferredProviderId = providerId(shot.preferredProviderId, allowed, `shots[${index}].preferredProviderId`);
+    const deliveryType = assetDeliveryType(shot.deliveryType, `shots[${index}].deliveryType`);
+    assertProviderDeliveryType(preferredProviderId, deliveryType, options, `shots[${index}].preferredProviderId`);
     const alternativeProviderIds = stringArray(shot.alternativeProviderIds, `shots[${index}].alternativeProviderIds`)
       .filter((id) => id !== preferredProviderId);
-    for (const id of alternativeProviderIds) providerId(id, allowed, `shots[${index}].alternativeProviderIds`);
+    for (const id of alternativeProviderIds) {
+      providerId(id, allowed, `shots[${index}].alternativeProviderIds`);
+      assertProviderDeliveryType(id, deliveryType, options, `shots[${index}].alternativeProviderIds`);
+    }
     const authenticityPolicy = authenticity(shot.authenticityPolicy, `shots[${index}].authenticityPolicy`);
     if (authenticityPolicy === "evidence" && [preferredProviderId, ...alternativeProviderIds].some((id) => generative.has(id))) {
       throw new Error(`Director plan evidence shot ${scenePosition} cannot use a generative provider.`);
+    }
+    const beats = optionalStringArray(shot.temporalBeats, `shots[${index}].temporalBeats`);
+    const sceneDuration = options.sceneDurations?.[scenePosition];
+    if (sceneDuration !== undefined) {
+      validateTemporalBeats(beats, sceneDuration, `shots[${index}].temporalBeats`);
     }
     return {
       scenePosition,
       narrativeRole: text(shot.narrativeRole, `shots[${index}].narrativeRole`),
       authenticityPolicy,
       preferredProviderId,
+      deliveryType,
       alternativeProviderIds: [...new Set(alternativeProviderIds)],
+      ...(optionalText(shot.subject, `shots[${index}].subject`) !== undefined
+        ? { subject: optionalText(shot.subject, `shots[${index}].subject`)! }
+        : {}),
+      ...(optionalText(shot.environment, `shots[${index}].environment`) !== undefined
+        ? { environment: optionalText(shot.environment, `shots[${index}].environment`)! }
+        : {}),
+      ...(optionalText(shot.visibleAction, `shots[${index}].visibleAction`) !== undefined
+        ? { visibleAction: optionalText(shot.visibleAction, `shots[${index}].visibleAction`)! }
+        : {}),
+      ...(beats !== undefined
+        ? { temporalBeats: beats }
+        : {}),
+      ...(optionalText(shot.shotSize, `shots[${index}].shotSize`) !== undefined
+        ? { shotSize: optionalText(shot.shotSize, `shots[${index}].shotSize`)! }
+        : {}),
+      ...(optionalText(shot.camera, `shots[${index}].camera`) !== undefined
+        ? { camera: optionalText(shot.camera, `shots[${index}].camera`)! }
+        : {}),
+      ...(optionalText(shot.lighting, `shots[${index}].lighting`) !== undefined
+        ? { lighting: optionalText(shot.lighting, `shots[${index}].lighting`)! }
+        : {}),
+      ...(optionalStringArray(shot.negativeConstraints, `shots[${index}].negativeConstraints`) !== undefined
+        ? { negativeConstraints: optionalStringArray(shot.negativeConstraints, `shots[${index}].negativeConstraints`)! }
+        : {}),
+      ...(optionalStringArray(shot.referenceRequirements, `shots[${index}].referenceRequirements`, true) !== undefined
+        ? { referenceRequirements: optionalStringArray(shot.referenceRequirements, `shots[${index}].referenceRequirements`, true)! }
+        : {}),
+      ...(optionalStringArray(shot.successCriteria, `shots[${index}].successCriteria`) !== undefined
+        ? { successCriteria: optionalStringArray(shot.successCriteria, `shots[${index}].successCriteria`)! }
+        : {}),
       query: text(shot.query, `shots[${index}].query`),
       generationPrompt: text(shot.generationPrompt, `shots[${index}].generationPrompt`),
       rationale: text(shot.rationale, `shots[${index}].rationale`),
@@ -269,6 +358,31 @@ function providerId(value: unknown, allowed: Set<string>, field: string): string
   return id;
 }
 
+function assetDeliveryType(value: unknown, field: string): VisualAssetDeliveryType {
+  if (
+    value !== "editorial_card"
+    && value !== "stock_video"
+    && value !== "stock_image"
+    && value !== "generated_image"
+    && value !== "generated_video"
+  ) {
+    throw new Error(`${field} is invalid.`);
+  }
+  return value;
+}
+
+function assertProviderDeliveryType(
+  provider: string,
+  deliveryType: VisualAssetDeliveryType,
+  options: VisualDirectorPlanValidation,
+  field: string,
+): void {
+  const supported = options.providerDeliveryTypes?.[provider];
+  if (supported && !supported.includes(deliveryType)) {
+    throw new Error(`${field} '${provider}' cannot deliver '${deliveryType}'.`);
+  }
+}
+
 function serverCost(providerId: string, costs: Record<string, number>): number {
   const value = costs[providerId] ?? 0;
   if (!Number.isFinite(value) || value < 0) throw new Error(`Server cost for '${providerId}' is invalid.`);
@@ -285,6 +399,34 @@ function authenticity(value: unknown, field: string): ShotAuthenticityPolicy {
 function stringArray(value: unknown, field: string): string[] {
   if (!Array.isArray(value)) throw new Error(`${field} must be an array.`);
   return value.map((entry, index) => text(entry, `${field}[${index}]`));
+}
+
+function optionalText(value: unknown, field: string): string | undefined {
+  return value === undefined ? undefined : text(value, field);
+}
+
+function optionalStringArray(value: unknown, field: string, allowEmpty = false): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || (!allowEmpty && value.length < 1) || value.length > 10) {
+    throw new Error(`${field} must be an array of ${allowEmpty ? "0" : "1"} to 10 strings.`);
+  }
+  return value.map((entry, index) => text(entry, `${field}[${index}]`));
+}
+
+function validateTemporalBeats(beats: string[] | undefined, duration: number, field: string): void {
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error(`${field} scene duration is invalid.`);
+  if (!beats || beats.length < 2) throw new Error(`${field} must contain at least two timed beats.`);
+  let previousEnd = 0;
+  beats.forEach((beat, index) => {
+    const match = /^\[\s*(\d+(?:\.\d+)?)s\s*-\s*(\d+(?:\.\d+)?)s\s*\]\s*\S[\s\S]*$/i.exec(beat);
+    if (!match) throw new Error(`${field}[${index}] must use the format [0s-2s] description.`);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    if (end <= start) throw new Error(`${field}[${index}] must end after it starts.`);
+    if (start < previousEnd) throw new Error(`${field}[${index}] overlaps or is out of order.`);
+    if (end > duration) throw new Error(`${field}[${index}] exceeds the ${duration}s scene duration.`);
+    previousEnd = end;
+  });
 }
 
 function record(value: unknown, field: string): Record<string, unknown> {

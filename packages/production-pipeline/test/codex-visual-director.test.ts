@@ -27,12 +27,25 @@ function directorInput(): VisualDirectorAgentInput {
       durationSeconds: 24,
       requestedProfileId: "urban-poetic",
     },
-    scenes: [{ position: 1, narration: "夜晚开始了", duration: 5, visualPrompt: "雨夜城市" }],
+    scenes: [{
+      position: 1,
+      narration: "夜晚开始了",
+      duration: 5,
+      visualPrompt: "雨夜城市",
+      visualStrategy: "local",
+      visibleAction: "标题逐行出现",
+      onScreenText: "下班后的城市",
+      soundCue: "雨声渐入",
+      successCriteria: ["标题可读"],
+      failureConditions: ["出现虚构人物"],
+      searchTerms: [],
+    }],
     assetProviders: [{
       id: "local-editorial-v1",
       label: "本地",
       billing: "free",
       modes: ["本地"],
+      deliveryTypes: ["editorial_card"],
       strengths: ["标题卡、数据卡与清单步骤"],
       constraints: ["不包含真实人物动作或现场环境"],
       estimatedCnyPerClip: 0,
@@ -48,20 +61,35 @@ function validPlan(): Record<string, unknown> {
     resolvedProfileId: "urban-poetic",
     profileRationale: "都市夜景与人物情绪适配。",
     visualBible: {
+      viewerPromise: "看见夜晚如何改变人的行动节奏。",
       narrativeApproach: "碎片化观察",
+      motif: "反光路面与暖色窗光",
       pacing: "短促后停顿",
       composition: "偏置近景",
       camera: "缓慢横移",
       color: "霓虹综合色",
       continuity: "同一雨夜",
+      transitionGrammar: "用动作方向和光源匹配切换",
       sound: "环境声与低频音乐",
+      antiPatterns: ["静态卡片超过三秒", "无人物动机的霓虹空镜"],
     },
     shots: [{
       scenePosition: 1,
       narrativeRole: "情绪钩子",
       authenticityPolicy: "expressive",
       preferredProviderId: "local-editorial-v1",
+      deliveryType: "editorial_card",
       alternativeProviderIds: [],
+      subject: "下班后停在便利店门口的上班族",
+      environment: "雨夜街角与便利店暖光",
+      visibleAction: "人物收起雨伞并抬头看向店内",
+      temporalBeats: ["[0s-2s] 雨伞占据前景，人物进入", "[2s-5s] 收伞并抬头，暖光落在脸侧"],
+      shotSize: "中近景",
+      camera: "轻微手持跟进后稳定",
+      lighting: "冷色雨夜环境光与暖色店内光对照",
+      negativeConstraints: ["不出现文字水印", "不改变人物服装"],
+      referenceRequirements: [],
+      successCriteria: ["能看见完整收伞动作", "冷暖光关系清晰"],
       query: "雨夜 城市 人物",
       generationPrompt: "雨夜城市人物近景",
       rationale: "适合情绪表达。",
@@ -124,11 +152,43 @@ describe("CodexVisualDirectorAgent", () => {
     const input = directorInput();
     input.scenes = [
       ...input.scenes,
-      { position: 2, narration: "第二幕", duration: 5, visualPrompt: "便利店灯箱" },
+      {
+        position: 2,
+        narration: "第二幕",
+        duration: 5,
+        visualPrompt: "便利店灯箱",
+        visualStrategy: "stock",
+        visibleAction: "人物走进便利店",
+        successCriteria: ["动作完整"],
+        failureConditions: ["只有静态文字"],
+        searchTerms: ["便利店", "夜晚"],
+      },
     ];
     const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => validPlan()) });
 
     await assert.rejects(() => agent.plan(input), /must cover every script scene exactly once/);
+  });
+
+  it("rejects evidence shots routed to a generated delivery provider", async () => {
+    const input = directorInput();
+    input.assetProviders.push({
+      id: "seedream-image-v1",
+      label: "Seedream",
+      billing: "free",
+      modes: ["AI 图片"],
+      deliveryTypes: ["generated_image"],
+      strengths: ["解释性画面"],
+      constraints: ["不得作为事实证据"],
+      estimatedCnyPerClip: 0,
+    });
+    const generatedPlan = validPlan();
+    const generatedShot = (generatedPlan.shots as Array<Record<string, unknown>>)[0]!;
+    generatedShot.authenticityPolicy = "evidence";
+    generatedShot.preferredProviderId = "seedream-image-v1";
+    generatedShot.deliveryType = "generated_image";
+    const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => generatedPlan) });
+
+    await assert.rejects(() => agent.plan(input), /evidence shot.*generative provider/);
   });
 
   it("keeps the historical provider id for persisted briefs", () => {

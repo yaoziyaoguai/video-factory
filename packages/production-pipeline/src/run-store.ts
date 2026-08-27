@@ -148,10 +148,17 @@ export class FileRunStore {
           await rm(lockPath, { force: true });
           continue;
         }
-        throw new Error(`Run '${runId}' is locked by another writer.`);
+        throw new RunLockedError(runId);
       }
     }
-    throw new Error(`Run '${runId}' is locked by another writer.`);
+    throw new RunLockedError(runId);
+  }
+}
+
+export class RunLockedError extends Error {
+  constructor(runId: string) {
+    super(`Run '${runId}' is locked by another writer.`);
+    this.name = "RunLockedError";
   }
 }
 

@@ -1,4 +1,4 @@
-import { CodexBridgeClient } from "./codex-chat.js";
+import { CodexBridgeClient, type CodexTaskExecution } from "./codex-chat.js";
 
 export interface PublishCopy {
   title: string;
@@ -21,6 +21,7 @@ export interface PublishCopyInput {
 export interface PublishCopyWriter {
   id: string;
   write(input: PublishCopyInput): Promise<unknown>;
+  writeDetailed?(input: PublishCopyInput): Promise<CodexTaskExecution<unknown>>;
 }
 
 export interface CodexPublishCopyWriterOptions {
@@ -32,8 +33,8 @@ export interface CodexPublishCopyWriterOptions {
   sleep?: (milliseconds: number) => Promise<void>;
 }
 
-// 330s > broker 285s 任务 deadline：broker 先终止 codex，客户端拿到带上下文的终态错误且不重放。
-const DEFAULT_PUBLISH_COPY_TIMEOUT_MS = 330_000;
+// 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
+const DEFAULT_PUBLISH_COPY_TIMEOUT_MS = 660_000;
 const DEFAULT_PUBLISH_COPY_MAX_ATTEMPTS = 2;
 
 // id 固定为 codex-publish-copy-v1：发布包记录 copy.source 时按该 id 标注来源。
@@ -67,6 +68,19 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
       narrations: input.narrations,
     });
     return validatePublishCopy(rawCopy);
+  }
+
+  async writeDetailed(input: PublishCopyInput): Promise<CodexTaskExecution<PublishCopy>> {
+    validatePublishCopyInput(input);
+    const execution = await this.client.runTaskDetailed("publish-copy", {
+      platform: input.platform,
+      brief: input.brief,
+      narrations: input.narrations,
+    });
+    return {
+      output: validatePublishCopy(execution.output),
+      ...(execution.trace ? { trace: execution.trace } : {}),
+    };
   }
 }
 
@@ -119,9 +133,9 @@ function validatePublishCopyInput(input: PublishCopyInput): void {
   }
   if (!Array.isArray(input.narrations)
     || input.narrations.length < 3
-    || input.narrations.length > 10
+    || input.narrations.length > 24
     || input.narrations.some((entry) => typeof entry !== "string" || !entry.trim())) {
-    throw new Error("Publish copy narrations must contain 3 to 10 non-empty entries.");
+    throw new Error("Publish copy narrations must contain 3 to 24 non-empty entries.");
   }
 }
 

@@ -5,6 +5,7 @@ COPY package.json package-lock.json ./
 COPY apps/codex-broker/package.json apps/codex-broker/package.json
 COPY apps/studio/package.json apps/studio/package.json
 COPY packages/production-pipeline/package.json packages/production-pipeline/package.json
+COPY packages/template-core/package.json packages/template-core/package.json
 COPY packages/workflow-core/package.json packages/workflow-core/package.json
 RUN npm ci
 
@@ -44,8 +45,10 @@ COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY package.json package-lock.json ./
 COPY apps/codex-broker/package.json apps/codex-broker/package.json
 COPY packages/production-pipeline/package.json packages/production-pipeline/package.json
+COPY packages/template-core/package.json packages/template-core/package.json
 COPY packages/workflow-core/package.json packages/workflow-core/package.json
 COPY --from=builder /app/packages/production-pipeline/dist packages/production-pipeline/dist
+COPY --from=builder /app/packages/template-core/dist packages/template-core/dist
 COPY --from=builder /app/packages/workflow-core/dist packages/workflow-core/dist
 COPY apps/studio/package.json apps/studio/package.json
 COPY --from=builder /app/apps/studio/dist apps/studio/dist

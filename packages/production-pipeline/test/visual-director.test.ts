@@ -4,6 +4,7 @@ import {
   validateVisualDirectorPlan,
   type ProductionEconomics,
   type VisualDirectorPlan,
+  type VisualDirectorPlanValidation,
 } from "../src/index.js";
 
 const economics: ProductionEconomics = {
@@ -38,7 +39,10 @@ function shot(scenePosition: number, preferredProviderId: string): VisualDirecto
     narrativeRole: scenePosition === 1 ? "冲突钩子" : "证据推进",
     authenticityPolicy: scenePosition === 1 ? "illustrative" : "evidence",
     preferredProviderId,
-    alternativeProviderIds: ["local-editorial-v1"],
+    deliveryType: preferredProviderId === "seedance-video-v1"
+      ? "generated_video"
+      : preferredProviderId === "pexels-stock-v1" ? "stock_video" : "editorial_card",
+    alternativeProviderIds: [],
     query: `第 ${scenePosition} 镜头检索词`,
     generationPrompt: `第 ${scenePosition} 镜头生成提示`,
     rationale: "与本镜头的叙事职责最匹配。",
@@ -56,6 +60,11 @@ describe("validateVisualDirectorPlan", () => {
         scenePositions: [1, 2, 3],
         allowedProviderIds: ["local-editorial-v1", "pexels-stock-v1", "seedance-video-v1"],
         generativeProviderIds: ["seedance-video-v1"],
+        providerDeliveryTypes: {
+          "local-editorial-v1": ["editorial_card"],
+          "pexels-stock-v1": ["stock_video", "stock_image"],
+          "seedance-video-v1": ["generated_video"],
+        },
         estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
         economics,
       },
@@ -70,10 +79,14 @@ describe("validateVisualDirectorPlan", () => {
   });
 
   it("rejects missing, duplicate, unknown and evidence-generation routes", () => {
-    const options = {
+    const options: VisualDirectorPlanValidation = {
       scenePositions: [1, 2],
       allowedProviderIds: ["local-editorial-v1", "seedance-video-v1"],
       generativeProviderIds: ["seedance-video-v1"],
+      providerDeliveryTypes: {
+        "local-editorial-v1": ["editorial_card"],
+        "seedance-video-v1": ["generated_video"],
+      },
       estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
       economics,
     };
@@ -96,8 +109,44 @@ describe("validateVisualDirectorPlan", () => {
       scenePositions: [1, 2],
       allowedProviderIds: ["local-editorial-v1", "seedance-video-v1"],
       generativeProviderIds: ["seedance-video-v1"],
+      providerDeliveryTypes: {
+        "local-editorial-v1": ["editorial_card"],
+        "seedance-video-v1": ["generated_video"],
+      },
       estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
       economics,
     }), /paid-shot limit/);
+  });
+
+  it("rejects a provider that cannot deliver the declared asset type", () => {
+    const invalid = shot(1, "local-editorial-v1");
+    invalid.deliveryType = "generated_video";
+    assert.throws(() => validateVisualDirectorPlan(plan([invalid]), {
+      scenePositions: [1],
+      allowedProviderIds: ["local-editorial-v1"],
+      generativeProviderIds: [],
+      providerDeliveryTypes: { "local-editorial-v1": ["editorial_card"] },
+      estimatedCnyPerClip: {},
+      economics,
+    }), /cannot deliver 'generated_video'/);
+  });
+
+  it("rejects temporal beats that exceed or overlap the script scene", () => {
+    const options: VisualDirectorPlanValidation = {
+      scenePositions: [1],
+      sceneDurations: { 1: 5 },
+      allowedProviderIds: ["local-editorial-v1"],
+      generativeProviderIds: [],
+      providerDeliveryTypes: { "local-editorial-v1": ["editorial_card"] },
+      estimatedCnyPerClip: {},
+      economics,
+    };
+    const overflow = { ...shot(1, "local-editorial-v1"), temporalBeats: ["[0s-2s] 保持全画面", "[2s-6s] 整体轻推近"] };
+    const overlap = { ...shot(1, "local-editorial-v1"), temporalBeats: ["[0s-3s] 保持全画面", "[2s-5s] 整体轻推近"] };
+    const malformed = { ...shot(1, "local-editorial-v1"), temporalBeats: ["开始时保持全画面", "[2s-5s] 整体轻推近"] };
+
+    assert.throws(() => validateVisualDirectorPlan(plan([overflow]), options), /exceeds the 5s scene duration/);
+    assert.throws(() => validateVisualDirectorPlan(plan([overlap]), options), /overlaps or is out of order/);
+    assert.throws(() => validateVisualDirectorPlan(plan([malformed]), options), /must use the format/);
   });
 });

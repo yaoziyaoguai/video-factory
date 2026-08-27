@@ -107,6 +107,28 @@ describe("CodexBridgeClient", () => {
     }
   });
 
+  it("returns the immutable prompt, prompt pack, provider, and model through the detailed API", async () => {
+    const trace = {
+      taskKind: "script-draft",
+      promptVersion: "video-factory/screenwriter-v2",
+      prompt: "Prompt Pack: video-factory/screenwriter-v2\nactual prompt",
+      providerId: "openai",
+      modelId: "gpt-5.4",
+    } as const;
+    const bridge = await startBridge((_request, response) => {
+      respondWithJson(response, 200, { ok: true, output: "{\"scenes\":[]}", trace });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
+
+      const result = await client.runTaskDetailed("script-draft", { brief: {} });
+
+      assert.deepEqual(result, { output: { scenes: [] }, trace });
+    } finally {
+      await bridge.close();
+    }
+  });
+
   it("aborts on timeout and never replays the task", async () => {
     const bridge = await startBridge((_request, _response) => {
       // 挂起不响应，模拟 broker 无应答。

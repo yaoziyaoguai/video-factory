@@ -5,7 +5,7 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
-from .stock_assets import default_asset_plan_path, load_asset_plan
+from .stock_assets import default_asset_plan_path, load_asset_plan, local_card_style
 
 
 FONT_CANDIDATES = [
@@ -271,7 +271,7 @@ def write_caption_overlay(
         body_y = height - max(116, height // 16) - body_height
         label_y = body_y - max(54, height // 42)
         panel_top = max(int(height * 0.69), label_y - 42)
-        draw.rectangle((0, panel_top, width, height), fill=(7, 12, 23, 224))
+        draw.rectangle((0, panel_top, width, height), fill=(7, 12, 23, 248))
         draw.text(
             (margin, label_y),
             f"旁白  {int(scene['position']):02d}/{len(manifest['slides']):02d}",
@@ -344,8 +344,35 @@ def render_scene_clip(
     clip_path = clips_dir / f"scene_{scene['position']:02d}.mp4"
     if asset["media_type"] == "video":
         input_args = ["-stream_loop", "-1", "-t", f"{duration:.3f}", "-i", str(asset_path)]
+        background_filter = (
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},setsar=1"
+        )
     elif asset["media_type"] == "image":
-        input_args = ["-loop", "1", "-t", f"{duration:.3f}", "-i", str(asset_path)]
+        input_args = [
+            "-framerate",
+            "30",
+            "-loop",
+            "1",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(asset_path),
+        ]
+        background_filter = (
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},"
+            "zoompan=z='min(zoom+0.00045,1.065)':"
+            "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"d=1:s={width}x{height}:fps=30,setsar=1"
+        )
+        if asset.get("provider") == "local":
+            background = local_card_style(int(scene["position"]))["background"].replace("#", "0x")
+            background_filter += (
+                ",fade=t=in:st=0:d=0.35:color=white,"
+                f"drawbox=x=170:y=665:w=860:h=185:color={background}@1:t=fill:enable='lt(t,1.35)',"
+                f"drawbox=x=170:y=835:w=860:h=185:color={background}@1:t=fill:enable='lt(t,2.85)'"
+            )
     else:
         raise RuntimeError(f"Unsupported scene asset media type: {asset['media_type']}")
 
@@ -357,8 +384,7 @@ def render_scene_clip(
         str(caption_path),
         "-filter_complex",
         (
-            f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},setsar=1[bg];"
+            f"[0:v]{background_filter}[bg];"
             f"[bg][1:v]overlay=0:0,"
             f"drawbox=x=0:y={height - 10}:w='min(iw,iw*t/{duration:.3f})':h=10:"
             "color=white@0.72:t=fill,format=yuv420p[v]"
@@ -563,8 +589,12 @@ def wrap_text_by_pixels(draw, text: str, font, max_width: int) -> list[str]:
             candidate = current + char
             box = draw.textbbox((0, 0), candidate, font=font)
             if current and box[2] - box[0] > max_width:
-                lines.append(current)
-                current = char
+                if char in "，。！？；：、）】》」』…,.!?;:":
+                    lines.append(candidate)
+                    current = ""
+                else:
+                    lines.append(current)
+                    current = char
             else:
                 current = candidate
         if current:

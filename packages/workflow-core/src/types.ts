@@ -14,7 +14,10 @@ export type WorkflowStatus =
   | "succeeded"
   | "failed"
   | "needs_human"
-  | "rejected";
+  | "rejected"
+  | "stale"
+  | "awaiting_spend_approval"
+  | "approval_invalidated";
 
 export type NodeStatus =
   | "pending"
@@ -23,11 +26,20 @@ export type NodeStatus =
   | "failed"
   | "needs_human"
   | "rejected"
-  | "skipped";
+  | "skipped"
+  | "stale"
+  | "awaiting_spend_approval"
+  | "approval_invalidated";
 
 export type NodeMode = "automatic" | "manual" | "hybrid";
 
 export type QualityGateStatus = "passed" | "failed" | "needs_human";
+
+export type ExecutionTransport = "unix_socket" | "local_process" | "http_api" | "human";
+
+export type BillingType = "subscription" | "metered" | "free" | "local_compute" | "human";
+
+export type NodeExecutionReceiptStatus = "succeeded" | "failed" | "rejected" | "needs_human";
 
 export type ArtifactKind =
   | "topic_signal"
@@ -140,9 +152,130 @@ export interface QualityGateDefinition<TOutput = unknown> {
   evaluate: (context: WorkflowContext, output: TOutput) => Promise<QualityGateResult> | QualityGateResult;
 }
 
+export interface NodeExecutionReceiptDraft {
+  providerId: string;
+  providerLabel: string;
+  modelId: string;
+  transport: ExecutionTransport;
+  billing: BillingType;
+  estimatedCostCny?: number;
+  actualCostCny?: number;
+  requestId?: string;
+  fallbackFromProviderId?: string;
+  fallbackReason?: string;
+}
+
+export interface NodeExecutionReceipt extends NodeExecutionReceiptDraft {
+  nodeId: string;
+  role?: string;
+  capability: Capability;
+  status: NodeExecutionReceiptStatus;
+  spendAuthorizationId?: string;
+  authorizedCostCny?: number;
+  startedAt: string;
+  finishedAt: string;
+}
+
+export type NodeOutputSource = "generated" | "human";
+
+export interface NodeOutputVersion<TOutput = unknown> {
+  id: string;
+  nodeId: string;
+  source: NodeOutputSource;
+  artifactIds: string[];
+  output?: TOutput;
+  inputVersionIds: string[];
+  parentVersionId?: string;
+  createdAt: string;
+  createdBy: string;
+  schemaVersion: string;
+}
+
+export interface NodeOutputState<TOutput = unknown> {
+  nodeId: string;
+  generatedVersionId: string;
+  effectiveVersionId: string;
+  stale: boolean;
+  versions: NodeOutputVersion<TOutput>[];
+}
+
+export type NodeInputSource = "derived" | "human" | "reconstructed";
+
+export interface NodeInputVersion<TInput = unknown> {
+  id: string;
+  nodeId: string;
+  source: NodeInputSource;
+  value: TInput;
+  upstreamVersionIds: string[];
+  parentVersionId?: string;
+  createdAt: string;
+  createdBy: string;
+  schemaVersion: string;
+}
+
+export interface NodeInputState<TInput = unknown> {
+  nodeId: string;
+  effectiveVersionId: string;
+  stale: boolean;
+  versions: NodeInputVersion<TInput>[];
+}
+
+export interface NodeInputOverrideDraft<TInput = unknown> {
+  nodeId: string;
+  actor: string;
+  input: TInput;
+  expectedVersionId?: string;
+  allowTerminalEdit?: boolean;
+  schemaVersion?: string;
+}
+
+export interface NodeOverrideDraft<TOutput = unknown> {
+  nodeId: string;
+  actor: string;
+  output?: TOutput;
+  artifacts?: ArtifactDraft[];
+  expectedVersionId?: string;
+  allowTerminalEdit?: boolean;
+  schemaVersion?: string;
+}
+
+export interface SpendPlan {
+  id: string;
+  nodeId: string;
+  inputVersionIds: string[];
+  providerId: string;
+  modelId: string;
+  estimatedCostCny: number;
+  maxCostCny: number;
+  maxAttempts: number;
+  createdAt: string;
+}
+
+export interface SpendAuthorizationDraft {
+  nodeId: string;
+  inputVersionIds: string[];
+  providerId: string;
+  modelId: string;
+  maxCostCny: number;
+  maxAttempts: number;
+  approvedBy: string;
+}
+
+export interface SpendAuthorization extends SpendAuthorizationDraft {
+  id: string;
+  approvedAt: string;
+}
+
 export interface Provider<TInput = unknown, TOutput = unknown> {
   id: string;
+  label?: string;
+  modelId?: string;
   capability: Capability;
+  transport?: ExecutionTransport;
+  billing?: BillingType;
+  estimatedCostCny?: number;
+  maxCostCny?: number;
+  maxAttempts?: number;
   run: (input: TInput, context: WorkflowContext) => Promise<TOutput> | TOutput;
 }
 
@@ -154,6 +287,7 @@ export interface ProviderSelector {
 interface NodeExecutionBase<TOutput = unknown> {
   output?: TOutput;
   artifacts?: ArtifactDraft[];
+  receipt?: NodeExecutionReceiptDraft;
   error?: string;
 }
 
@@ -172,6 +306,8 @@ export interface NodeDefinition<TInput = unknown, TOutput = unknown> {
   providerId?: string;
   getInput?: (context: WorkflowContext) => TInput;
   execute?: (input: TInput, context: WorkflowContext) => Promise<NodeExecutionResult<TOutput>> | NodeExecutionResult<TOutput>;
+  validateInputOverride?: (input: unknown, context: WorkflowContext) => TInput;
+  validateOverride?: (output: unknown, context: WorkflowContext) => TOutput;
   qualityGates?: QualityGateDefinition<TOutput>[];
 }
 
@@ -185,6 +321,11 @@ export interface NodeRun<TOutput = unknown> {
   artifactIds: string[];
   qualityGateResults: QualityGateResult[];
   intervention?: HumanIntervention;
+  executionReceipt?: NodeExecutionReceipt;
+  inputState?: NodeInputState;
+  outputState?: NodeOutputState<TOutput>;
+  spendPlan?: SpendPlan;
+  spendAuthorizationId?: string;
   error?: string;
 }
 
@@ -208,6 +349,8 @@ export interface WorkflowRun<TInitialInput = unknown> {
   artifacts: Artifact[];
   interventions: HumanIntervention[];
   decisions: HumanDecision[];
+  executionReceipts?: NodeExecutionReceipt[];
+  spendAuthorizations?: SpendAuthorization[];
 }
 
 export interface WorkflowContext<TInitialInput = unknown> {
@@ -216,6 +359,7 @@ export interface WorkflowContext<TInitialInput = unknown> {
   initialInput: TInitialInput;
   artifacts: readonly Artifact[];
   outputs: ReadonlyMap<string, unknown>;
+  readonly spendAuthorization: Readonly<SpendAuthorization> | undefined;
   now: () => string;
   nextId: (prefix: string) => string;
   addArtifact: <TData = unknown>(draft: ArtifactDraft<TData>) => Artifact<TData>;

@@ -166,7 +166,16 @@ describe("GenerativeAssetWorkerClient", () => {
           preferredProviderId: "seedance-video-v1",
           alternativeProviderIds: ["local-editorial-v1"],
           query: "",
-          generationPrompt: "中式早餐特写，蒸汽上升，暖色自然光，竖屏",
+          generationPrompt: "中式早餐特写；预算已经审批；版权需要人工确认",
+          subject: "刚出锅的中式早餐",
+          environment: "清晨街边摊位",
+          visibleAction: "白色蒸汽从食物表面持续上升",
+          temporalBeats: ["[0s-2s] 镜头贴近食物表面", "[2s-5s] 蒸汽上升并掠过侧逆光"],
+          shotSize: "微距特写",
+          camera: "缓慢推进后保持稳定",
+          lighting: "暖色自然侧逆光",
+          negativeConstraints: ["不出现文字水印"],
+          successCriteria: ["蒸汽持续可见", "食物主体不变形"],
           rationale: "付费只用于无法精准检索的核心特写",
         },
       ],
@@ -197,7 +206,12 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(response.status, "succeeded");
     assert.equal((fallback.calls[0]?.parameters as Record<string, unknown>).provider, "ai-router");
     assert.equal((fallback.calls[0]?.input as Record<string, unknown>).directorPlanPath, directorPlanPath);
-    assert.deepEqual(generated, ["中式早餐特写，蒸汽上升，暖色自然光，竖屏"]);
+    assert.equal(generated.length, 1);
+    assert.match(generated[0]!, /导演执行描述：中式早餐特写/);
+    assert.match(generated[0]!, /\[0s-2s\]/);
+    assert.match(generated[0]!, /可见动作：白色蒸汽/);
+    assert.match(generated[0]!, /必须实现：蒸汽持续可见/);
+    assert.doesNotMatch(generated[0]!, /预算|审批|版权|工作流/);
     const plan = JSON.parse(await readFile(String(response.output?.assetPlanPath), "utf8"));
     assert.equal(plan.scene_assets[0].provider, "pexels");
     assert.equal(plan.scene_assets[1].provider, "seedance-video-v1");

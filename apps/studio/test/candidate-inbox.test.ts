@@ -148,6 +148,28 @@ describe("CandidateInboxStudio", () => {
     assert.equal(listed?.verification.independentSources, 1);
   });
 
+  it("can adopt a candidate the user saw just before a background trend refresh", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-refreshed-inbox-"));
+    const opportunities = new OpportunityStudio({
+      opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
+    });
+    const series = new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) });
+    let currentCandidates = [trendCandidate];
+    const inbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => currentCandidates },
+      series,
+      opportunities,
+    });
+
+    const [visibleCandidate] = (await inbox.list({ origins: ["trend"] })).items;
+    currentCandidates = [{ ...trendCandidate, id: "trend-after-refresh", title: "刷新后的另一条候选" }];
+
+    const adopted = await inbox.adopt(visibleCandidate!.id);
+
+    assert.equal(adopted.id, trendCandidate.id);
+    await assert.rejects(() => inbox.adopt(visibleCandidate!.id), /已被采用|已经失效/);
+  });
+
   it("combines classified trend and series candidates, filters facets, and adopts exactly once", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-topic-inbox-"));
     const now = () => new Date("2026-08-24T09:00:00.000Z");

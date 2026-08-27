@@ -7,18 +7,35 @@ import type {
   HumanIntervention,
   HumanInterventionDraft,
   NodeDefinition,
+  NodeExecutionReceipt,
+  NodeExecutionReceiptDraft,
+  NodeExecutionReceiptStatus,
   NodeExecutionResult,
+  NodeInputOverrideDraft,
+  NodeOverrideDraft,
   NodeRun,
   NodeStatus,
   Provider,
   ProviderSelector,
   QualityGateDefinition,
   QualityGateResult,
+  SpendAuthorization,
+  SpendAuthorizationDraft,
+  SpendPlan,
   WorkflowContext,
   WorkflowDefinition,
   WorkflowRun,
   WorkflowStatus,
 } from "./types.js";
+
+const MAX_MANUAL_VERSION_BYTES = 1_000_000;
+
+export class NodeVersionConflictError extends Error {
+  constructor(readonly nodeId: string, readonly expectedVersionId: string, readonly actualVersionId: string) {
+    super(`Node '${nodeId}' effective version changed from '${expectedVersionId}' to '${actualVersionId}'.`);
+    this.name = "NodeVersionConflictError";
+  }
+}
 
 export interface WorkflowRunnerOptions {
   providers?: ProviderRegistry;
@@ -28,6 +45,8 @@ export interface WorkflowRunnerOptions {
 }
 
 class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitialInput> {
+  private activeSpendAuthorization: Readonly<SpendAuthorization> | undefined;
+
   constructor(
     readonly runId: string,
     readonly workflowId: string,
@@ -81,7 +100,35 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
   }
 
   resolveProvider<TInput = unknown, TOutput = unknown>(selector: ProviderSelector): Provider<TInput, TOutput> {
+    const provider = this.providers.resolve<TInput, TOutput>(selector);
+    if (provider.billing === "metered") {
+      validateMeteredProvider(provider);
+      if (!this.activeSpendAuthorization || !authorizationMatchesProvider(this.activeSpendAuthorization, provider)) {
+        throw new Error(`Metered provider '${provider.id}' is outside the active spend authorization.`);
+      }
+    }
+    return provider;
+  }
+
+  resolveProviderForNode<TInput = unknown, TOutput = unknown>(selector: ProviderSelector): Provider<TInput, TOutput> {
     return this.providers.resolve<TInput, TOutput>(selector);
+  }
+
+  get spendAuthorization(): Readonly<SpendAuthorization> | undefined {
+    return this.activeSpendAuthorization;
+  }
+
+  async withSpendAuthorization<T>(
+    authorization: Readonly<SpendAuthorization> | undefined,
+    execute: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.activeSpendAuthorization;
+    this.activeSpendAuthorization = authorization;
+    try {
+      return await execute();
+    } finally {
+      this.activeSpendAuthorization = previous;
+    }
   }
 }
 
@@ -122,10 +169,42 @@ export class WorkflowRunner {
       artifacts: context.artifacts,
       interventions: [],
       decisions: [],
+      spendAuthorizations: [],
     };
 
     await this.checkpoint?.(run);
     return this.continueRun(definition, run, context);
+  }
+
+  hydrateLegacyVersionStates<TInitialInput>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+    options: { allowVersionMismatch?: boolean } = {},
+  ): WorkflowRun<TInitialInput> {
+    validateWorkflowDefinition(definition);
+    if (
+      previousRun.workflowId !== definition.id
+      || (!options.allowVersionMismatch && previousRun.workflowVersion !== definition.version)
+    ) {
+      throw new Error("Workflow definition does not match the persisted run.");
+    }
+    const run = cloneWorkflowRun(previousRun);
+    const outputs = new Map<string, unknown>();
+    for (const nodeRun of run.nodeRuns) {
+      if (nodeRun.output !== undefined) outputs.set(nodeRun.nodeId, nodeRun.output);
+    }
+    const context = new InMemoryWorkflowContext(
+      run.id,
+      definition.id,
+      run.initialInput,
+      this.providers,
+      this.clock,
+      this.idFactory,
+      run.artifacts,
+      outputs,
+    );
+    normalizeLegacyVersionStates(definition, run, context);
+    return run;
   }
 
   async resume<TInitialInput>(
@@ -178,7 +257,395 @@ export class WorkflowRunner {
       run.artifacts,
       outputs,
     );
+    normalizeLegacyVersionStates(definition, run, context);
 
+    await this.checkpoint?.(run);
+    return this.continueRun(definition, run, context);
+  }
+
+  applyNodeOverride<TInitialInput, TOutput = unknown>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+    override: NodeOverrideDraft<TOutput>,
+  ): WorkflowRun<TInitialInput> {
+    validateWorkflowDefinition(definition);
+    if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
+      throw new Error("Workflow definition does not match the persisted run.");
+    }
+    if (!override.actor.trim()) {
+      throw new Error("Node override actor is required.");
+    }
+    if (previousRun.status === "rejected") {
+      throw new Error(`Rejected run '${previousRun.id}' must be restarted instead of overridden.`);
+    }
+    if ((previousRun.status === "succeeded" || previousRun.status === "failed") && override.allowTerminalEdit !== true) {
+      throw new Error(`Terminal run '${previousRun.id}' requires explicit confirmation before a node override.`);
+    }
+    const node = definition.nodes.find((candidate) => candidate.id === override.nodeId);
+    const previousNodeRun = previousRun.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId);
+    if (!node || !previousNodeRun) {
+      throw new Error(`Unknown completed node '${override.nodeId}'.`);
+    }
+    if (previousNodeRun.status === "running") {
+      throw new Error(`Node '${override.nodeId}' cannot be overridden while it is running.`);
+    }
+
+    const run = cloneWorkflowRun(previousRun);
+    const nodeRun = run.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId)!;
+    const outputs = new Map<string, unknown>();
+    for (const completed of run.nodeRuns) {
+      if (completed.output !== undefined) {
+        outputs.set(completed.nodeId, completed.output);
+      }
+    }
+    const context = new InMemoryWorkflowContext(
+      run.id,
+      definition.id,
+      run.initialInput,
+      this.providers,
+      this.clock,
+      this.idFactory,
+      run.artifacts,
+      outputs,
+    );
+    normalizeLegacyVersionStates(definition, run, context);
+    const outputState = nodeRun.outputState ?? createLegacyOutputState(node, nodeRun, run.nodeRuns);
+    if (override.expectedVersionId && override.expectedVersionId !== outputState.effectiveVersionId) {
+      throw new NodeVersionConflictError(node.id, override.expectedVersionId, outputState.effectiveVersionId);
+    }
+    const validatedOutput = override.output === undefined
+      ? undefined
+      : node.validateOverride
+        ? node.validateOverride(override.output, context)
+        : override.output;
+    assertManualVersionSize(validatedOutput, `${node.id} output`);
+    const previousVersion = outputState.versions.find((candidate) => candidate.id === outputState.effectiveVersionId);
+    assertFileReferenceChangesAuthorized(previousVersion?.output ?? nodeRun.output, validatedOutput, override.artifacts ?? []);
+    const newArtifactIds = (override.artifacts ?? []).map((draft) => context.addArtifact(draft).id);
+    const replacementKinds = new Set(
+      newArtifactIds.map((artifactId) => run.artifacts.find((artifact) => artifact.id === artifactId)?.kind).filter(Boolean),
+    );
+    const inheritedArtifactIds = (previousVersion?.artifactIds ?? nodeRun.artifactIds)
+      .filter((artifactId) => {
+        const kind = run.artifacts.find((artifact) => artifact.id === artifactId)?.kind;
+        return kind === undefined || !replacementKinds.has(kind);
+      });
+    const artifactIds = [...new Set([...inheritedArtifactIds, ...newArtifactIds])];
+    const parentVersionId = outputState.effectiveVersionId;
+    const versionId = context.nextId("version");
+    const version = {
+      id: versionId,
+      nodeId: node.id,
+      source: "human" as const,
+      artifactIds,
+      inputVersionIds: executionInputVersionIds(node, nodeRun, run.nodeRuns),
+      parentVersionId,
+      createdAt: context.now(),
+      createdBy: override.actor,
+      schemaVersion:
+        override.schemaVersion
+        ?? outputState.versions.find((candidate) => candidate.id === parentVersionId)?.schemaVersion
+        ?? "1",
+      ...(validatedOutput !== undefined ? { output: validatedOutput } : {}),
+    };
+
+    nodeRun.artifactIds = artifactIds;
+    if (validatedOutput !== undefined) {
+      nodeRun.output = validatedOutput;
+    } else {
+      delete nodeRun.output;
+    }
+    nodeRun.status = "succeeded";
+    delete nodeRun.intervention;
+    delete nodeRun.spendPlan;
+    delete nodeRun.spendAuthorizationId;
+    nodeRun.outputState = {
+      ...outputState,
+      effectiveVersionId: versionId,
+      stale: false,
+      versions: [...outputState.versions, version],
+    };
+
+    const descendants = descendantNodeIds(definition.nodes, node.id);
+    for (const descendant of run.nodeRuns) {
+      if (!descendants.has(descendant.nodeId)) {
+        continue;
+      }
+      descendant.status = "stale";
+      delete descendant.intervention;
+      delete descendant.spendPlan;
+      delete descendant.spendAuthorizationId;
+      if (descendant.outputState) {
+        descendant.outputState.stale = true;
+      }
+      if (descendant.inputState) {
+        descendant.inputState.stale = true;
+      }
+    }
+
+    const invalidatedNodeIds = new Set([node.id, ...descendants]);
+    run.interventions = run.interventions.filter((intervention) => !invalidatedNodeIds.has(intervention.nodeId));
+    run.spendAuthorizations = (run.spendAuthorizations ?? [])
+      .filter((authorization) => !invalidatedNodeIds.has(authorization.nodeId));
+
+    run.revision += 1;
+    if (descendants.size > 0) {
+      run.status = "stale";
+      delete run.finishedAt;
+    } else {
+      run.status = "succeeded";
+      run.finishedAt = this.clock();
+    }
+    return run;
+  }
+
+  applyNodeInputOverride<TInitialInput, TInput = unknown>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+    override: NodeInputOverrideDraft<TInput>,
+  ): WorkflowRun<TInitialInput> {
+    validateWorkflowDefinition(definition);
+    if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
+      throw new Error("Workflow definition does not match the persisted run.");
+    }
+    if (!override.actor.trim()) {
+      throw new Error("Node input override actor is required.");
+    }
+    if (previousRun.status === "rejected") {
+      throw new Error(`Rejected run '${previousRun.id}' must be restarted instead of overridden.`);
+    }
+    if ((previousRun.status === "succeeded" || previousRun.status === "failed") && override.allowTerminalEdit !== true) {
+      throw new Error(`Terminal run '${previousRun.id}' requires explicit confirmation before a node input override.`);
+    }
+
+    const node = definition.nodes.find((candidate) => candidate.id === override.nodeId);
+    const previousNodeRun = previousRun.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId);
+    if (!node || !previousNodeRun) {
+      throw new Error(`Unknown started node '${override.nodeId}'.`);
+    }
+    if (previousNodeRun.status === "running") {
+      throw new Error(`Node '${override.nodeId}' input cannot be overridden while it is running.`);
+    }
+
+    const run = cloneWorkflowRun(previousRun);
+    const nodeRun = run.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId)!;
+    const outputs = new Map<string, unknown>();
+    for (const completed of run.nodeRuns) {
+      if (completed.output !== undefined) outputs.set(completed.nodeId, completed.output);
+    }
+    const context = new InMemoryWorkflowContext(
+      run.id,
+      definition.id,
+      run.initialInput,
+      this.providers,
+      this.clock,
+      this.idFactory,
+      run.artifacts,
+      outputs,
+    );
+    normalizeLegacyVersionStates(definition, run, context);
+    const previousInputState = nodeRun.inputState;
+    if (!previousInputState) throw new Error(`Node '${node.id}' has no editable input version.`);
+    if (override.expectedVersionId && override.expectedVersionId !== previousInputState.effectiveVersionId) {
+      throw new NodeVersionConflictError(node.id, override.expectedVersionId, previousInputState.effectiveVersionId);
+    }
+    assertManualVersionSize(override.input, `${node.id} input`);
+    const validatedInput = node.validateInputOverride
+      ? node.validateInputOverride(override.input, context)
+      : override.input;
+    assertManualVersionSize(validatedInput, `${node.id} input`);
+    const previousInput = previousInputState.versions.find(
+      (candidate) => candidate.id === previousInputState.effectiveVersionId,
+    )?.value;
+    assertFileReferenceChangesAuthorized(previousInput, validatedInput, []);
+    const upstreamVersionIds = inputVersionIdsForNode(node, run.nodeRuns);
+    const parentVersionId = previousInputState?.effectiveVersionId;
+    const versionId = context.nextId("input-version");
+    const version = {
+      id: versionId,
+      nodeId: node.id,
+      source: "human" as const,
+      value: validatedInput,
+      upstreamVersionIds,
+      ...(parentVersionId ? { parentVersionId } : {}),
+      createdAt: context.now(),
+      createdBy: override.actor,
+      schemaVersion:
+        override.schemaVersion
+        ?? previousInputState?.versions.find((candidate) => candidate.id === parentVersionId)?.schemaVersion
+        ?? "1",
+    };
+    nodeRun.inputState = {
+      nodeId: node.id,
+      effectiveVersionId: versionId,
+      stale: false,
+      versions: [...(previousInputState?.versions ?? []), version],
+    };
+    nodeRun.status = "stale";
+    delete nodeRun.intervention;
+    delete nodeRun.spendPlan;
+    delete nodeRun.spendAuthorizationId;
+    if (nodeRun.outputState) nodeRun.outputState.stale = true;
+
+    const descendants = descendantNodeIds(definition.nodes, node.id);
+    for (const descendant of run.nodeRuns) {
+      if (!descendants.has(descendant.nodeId)) continue;
+      descendant.status = "stale";
+      delete descendant.intervention;
+      delete descendant.spendPlan;
+      delete descendant.spendAuthorizationId;
+      if (descendant.outputState) descendant.outputState.stale = true;
+      if (descendant.inputState) descendant.inputState.stale = true;
+    }
+
+    const invalidatedNodeIds = new Set([node.id, ...descendants]);
+    run.interventions = run.interventions.filter((intervention) => !invalidatedNodeIds.has(intervention.nodeId));
+    run.spendAuthorizations = (run.spendAuthorizations ?? [])
+      .filter((authorization) => !invalidatedNodeIds.has(authorization.nodeId));
+    run.revision += 1;
+    run.status = "stale";
+    delete run.finishedAt;
+    return run;
+  }
+
+  async authorizeSpend<TInitialInput>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+    draft: SpendAuthorizationDraft,
+  ): Promise<WorkflowRun<TInitialInput>> {
+    validateWorkflowDefinition(definition);
+    if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
+      throw new Error("Workflow definition does not match the persisted run.");
+    }
+    if (
+      previousRun.status !== "awaiting_spend_approval"
+      && previousRun.status !== "approval_invalidated"
+    ) {
+      throw new Error(`Run '${previousRun.id}' is not waiting for spend approval.`);
+    }
+    validateSpendAuthorizationDraft(draft);
+    if (!draft.approvedBy.trim()) {
+      throw new Error("Spend authorization approver is required.");
+    }
+
+    const run = cloneWorkflowRun(previousRun);
+    const waitingNode = run.nodeRuns.find((nodeRun) => nodeRun.nodeId === draft.nodeId);
+    const node = definition.nodes.find((candidate) => candidate.id === draft.nodeId);
+    if (
+      !waitingNode?.spendPlan
+      || !node
+      || !["awaiting_spend_approval", "approval_invalidated"].includes(waitingNode.status)
+    ) {
+      throw new Error(`Node '${draft.nodeId}' is not awaiting spend approval.`);
+    }
+
+    const outputs = new Map<string, unknown>();
+    for (const nodeRun of run.nodeRuns) {
+      if (nodeRun.status === "succeeded" && nodeRun.output !== undefined) {
+        outputs.set(nodeRun.nodeId, nodeRun.output);
+      }
+    }
+    const context = new InMemoryWorkflowContext(
+      run.id,
+      definition.id,
+      run.initialInput,
+      this.providers,
+      this.clock,
+      this.idFactory,
+      run.artifacts,
+      outputs,
+    );
+    normalizeLegacyVersionStates(definition, run, context);
+    const provider = resolveNodeProvider(node, context);
+    const inputVersionIds = executionInputVersionIds(node, waitingNode, run.nodeRuns);
+    if (!provider || provider.billing !== "metered") {
+      throw new Error(`Node '${draft.nodeId}' no longer resolves to a metered provider.`);
+    }
+    if (!spendPlanMatchesExecution(waitingNode.spendPlan, node, provider, inputVersionIds)) {
+      waitingNode.spendPlan = createSpendPlan(node, provider, inputVersionIds, context);
+      waitingNode.status = "approval_invalidated";
+      delete waitingNode.spendAuthorizationId;
+      run.revision += 1;
+      run.status = "approval_invalidated";
+      delete run.finishedAt;
+      return run;
+    }
+    if (!authorizationMatchesPlan(draft, waitingNode.spendPlan)) {
+      throw new Error(`Spend authorization does not match the active plan for node '${draft.nodeId}'.`);
+    }
+
+    const authorization: SpendAuthorization = {
+      ...draft,
+      inputVersionIds: [...draft.inputVersionIds],
+      id: this.idFactory("spend-authorization"),
+      approvedAt: this.clock(),
+    };
+    (run.spendAuthorizations ??= []).push(authorization);
+    waitingNode.spendAuthorizationId = authorization.id;
+    waitingNode.status = "pending";
+    delete waitingNode.finishedAt;
+    run.revision += 1;
+    run.status = "running";
+    delete run.finishedAt;
+    await this.checkpoint?.(run);
+    return this.continueRun(definition, run, context);
+  }
+
+  async resumeStale<TInitialInput>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+  ): Promise<WorkflowRun<TInitialInput>> {
+    validateWorkflowDefinition(definition);
+    if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
+      throw new Error("Workflow definition does not match the persisted run.");
+    }
+    if (previousRun.status !== "stale") {
+      throw new Error(`Run '${previousRun.id}' has no stale nodes to regenerate.`);
+    }
+    const run = cloneWorkflowRun(previousRun);
+    for (const nodeRun of run.nodeRuns) {
+      if (nodeRun.status !== "stale" || !nodeRun.inputState?.stale) continue;
+      const effectiveInput = nodeRun.inputState.versions.find(
+        (version) => version.id === nodeRun.inputState?.effectiveVersionId,
+      );
+      if (effectiveInput?.source === "human") {
+        throw new Error(
+          `Node '${nodeRun.nodeId}' has a stale human input that must be reviewed and saved again before regeneration.`,
+        );
+      }
+    }
+    const outputs = new Map<string, unknown>();
+    for (const nodeRun of run.nodeRuns) {
+      if (nodeRun.status === "stale") {
+        nodeRun.status = "pending";
+        nodeRun.artifactIds = [];
+        nodeRun.qualityGateResults = [];
+        delete nodeRun.output;
+        delete nodeRun.finishedAt;
+        delete nodeRun.error;
+        delete nodeRun.intervention;
+        delete nodeRun.executionReceipt;
+        delete nodeRun.spendPlan;
+        delete nodeRun.spendAuthorizationId;
+      } else if (nodeRun.status === "succeeded" && nodeRun.output !== undefined) {
+        outputs.set(nodeRun.nodeId, nodeRun.output);
+      }
+    }
+    const context = new InMemoryWorkflowContext(
+      run.id,
+      definition.id,
+      run.initialInput,
+      this.providers,
+      this.clock,
+      this.idFactory,
+      run.artifacts,
+      outputs,
+    );
+    normalizeLegacyVersionStates(definition, run, context);
+    run.revision += 1;
+    run.status = "running";
+    delete run.finishedAt;
+    await this.checkpoint?.(run);
     return this.continueRun(definition, run, context);
   }
 
@@ -187,24 +654,31 @@ export class WorkflowRunner {
     run: WorkflowRun<TInitialInput>,
     context: InMemoryWorkflowContext<TInitialInput>,
   ): Promise<WorkflowRun<TInitialInput>> {
-    const completedNodeIds = new Set(run.nodeRuns.map((nodeRun) => nodeRun.nodeId));
-
     for (const node of orderNodes(definition.nodes)) {
-      if (completedNodeIds.has(node.id)) {
+      const existingNodeRun = run.nodeRuns.find((nodeRun) => nodeRun.nodeId === node.id);
+      if (existingNodeRun && existingNodeRun.status !== "pending") {
         continue;
       }
 
       const nodeRun = await this.runNode(
         node,
         context as InMemoryWorkflowContext<unknown>,
+        inputVersionIdsForNode(node, run.nodeRuns),
+        run.spendAuthorizations ?? [],
+        existingNodeRun,
         async (runningNode) => {
-          run.nodeRuns.push(runningNode);
+          if (!existingNodeRun) {
+            run.nodeRuns.push(runningNode);
+          }
           await this.checkpoint?.(run);
         },
       );
 
       if (nodeRun.output !== undefined) {
         context.outputs.set(node.id, nodeRun.output);
+      }
+      if (nodeRun.executionReceipt) {
+        (run.executionReceipts ??= []).push({ ...nodeRun.executionReceipt });
       }
       if (nodeRun.intervention) {
         run.interventions.push(nodeRun.intervention);
@@ -230,22 +704,60 @@ export class WorkflowRunner {
   private async runNode<TInput, TOutput>(
     node: NodeDefinition<TInput, TOutput>,
     context: InMemoryWorkflowContext<unknown>,
+    upstreamVersionIds: string[],
+    spendAuthorizations: readonly SpendAuthorization[],
+    existingNodeRun: NodeRun<TOutput> | undefined,
     onStarted: (nodeRun: NodeRun<TOutput>) => Promise<void> | void,
   ): Promise<NodeRun<TOutput>> {
-    const nodeRun: NodeRun<TOutput> = {
+    const nodeRun: NodeRun<TOutput> = existingNodeRun ?? {
       nodeId: node.id,
       ...(node.role ? { role: node.role } : {}),
-      status: "running",
+      status: "pending",
       startedAt: context.now(),
       artifactIds: [],
       qualityGateResults: [],
     };
+    nodeRun.status = "running";
+    nodeRun.startedAt = context.now();
 
     await onStarted(nodeRun);
 
+    let receiptDraft = inlineReceiptDraft(node);
+    let authorization: SpendAuthorization | undefined;
     try {
-      const input = node.getInput ? node.getInput(context) : (context.initialInput as TInput);
-      const result = await executeNode(node, input, context);
+      const derivedInput = node.getInput ? node.getInput(context) : (context.initialInput as TInput);
+      const input = resolveEffectiveNodeInput(node, nodeRun, derivedInput, upstreamVersionIds, context);
+      const inputVersionIds = executionInputVersionIdsFromUpstream(nodeRun, upstreamVersionIds);
+      const provider = resolveNodeProvider(node, context);
+      if (provider) {
+        receiptDraft = providerReceiptDraft(provider);
+      }
+      if (provider?.billing === "metered") {
+        validateMeteredProvider(provider);
+        const spendPlan = nodeRun.spendPlan ?? createSpendPlan(node, provider, inputVersionIds, context);
+        nodeRun.spendPlan = spendPlan;
+        if (!spendPlanMatchesExecution(spendPlan, node, provider, inputVersionIds)) {
+          throw new Error(`Spend plan for node '${node.id}' no longer matches its metered provider.`);
+        }
+        authorization = spendAuthorizations.find((candidate) => authorizationMatchesPlan(candidate, spendPlan));
+        if (!authorization) {
+          nodeRun.status = "awaiting_spend_approval";
+          return nodeRun;
+        }
+        nodeRun.spendAuthorizationId = authorization.id;
+      }
+
+      const execution = await context.withSpendAuthorization(
+        authorization,
+        () => executeNode(node, input, context, provider),
+      );
+      const result = execution.result;
+      receiptDraft = execution.receipt;
+      const executionFinishedAt = context.now();
+
+      const status = result.status ?? "succeeded";
+      validateNodeResultStatus(node.id, status, result);
+      validateReceiptCosts(receiptDraft, authorization);
 
       for (const draft of result.artifacts ?? []) {
         const artifact = context.addArtifact(draft);
@@ -256,8 +768,26 @@ export class WorkflowRunner {
         nodeRun.output = result.output;
       }
 
-      const status = result.status ?? "succeeded";
-      validateNodeResultStatus(node.id, status, result);
+      nodeRun.executionReceipt = createExecutionReceipt(
+        node,
+        execution.receipt,
+        nodeRun.startedAt,
+        executionFinishedAt,
+        status,
+        authorization,
+      );
+      const previousVersions = nodeRun.outputState?.versions ?? [];
+      nodeRun.outputState = createGeneratedOutputState(
+        node,
+        nodeRun,
+        inputVersionIds,
+        nodeRun.executionReceipt.providerId,
+        context,
+      );
+      if (previousVersions.length) {
+        nodeRun.outputState.versions = [...previousVersions, ...nodeRun.outputState.versions];
+      }
+
       if (status !== "succeeded") {
         nodeRun.status = status;
         if (result.error !== undefined) {
@@ -290,6 +820,16 @@ export class WorkflowRunner {
       nodeRun.status = "failed";
       nodeRun.error = error instanceof Error ? error.message : String(error);
       nodeRun.finishedAt = context.now();
+      if (!nodeRun.executionReceipt) {
+        nodeRun.executionReceipt = createExecutionReceipt(
+          node,
+          sanitizeFailureReceiptDraft(receiptDraft),
+          nodeRun.startedAt,
+          nodeRun.finishedAt,
+          "failed",
+          authorization,
+        );
+      }
       return nodeRun;
     }
   }
@@ -334,6 +874,34 @@ function cloneWorkflowRun<TInitialInput>(run: WorkflowRun<TInitialInput>): Workf
       if (nodeRun.intervention) {
         clone.intervention = { ...nodeRun.intervention };
       }
+      if (nodeRun.executionReceipt) {
+        clone.executionReceipt = { ...nodeRun.executionReceipt };
+      }
+      if (nodeRun.spendPlan) {
+        clone.spendPlan = {
+          ...nodeRun.spendPlan,
+          inputVersionIds: [...nodeRun.spendPlan.inputVersionIds],
+        };
+      }
+      if (nodeRun.outputState) {
+        clone.outputState = {
+          ...nodeRun.outputState,
+          versions: nodeRun.outputState.versions.map((version) => ({
+            ...version,
+            artifactIds: [...version.artifactIds],
+            inputVersionIds: [...version.inputVersionIds],
+          })),
+        };
+      }
+      if (nodeRun.inputState) {
+        clone.inputState = {
+          ...nodeRun.inputState,
+          versions: nodeRun.inputState.versions.map((version) => ({
+            ...version,
+            upstreamVersionIds: [...version.upstreamVersionIds],
+          })),
+        };
+      }
       return clone;
     }),
     artifacts: run.artifacts.map((artifact) => ({
@@ -344,6 +912,15 @@ function cloneWorkflowRun<TInitialInput>(run: WorkflowRun<TInitialInput>): Workf
     })),
     interventions: run.interventions.map((intervention) => ({ ...intervention })),
     decisions: run.decisions.map((decision) => ({ ...decision })),
+    ...(run.executionReceipts ? { executionReceipts: run.executionReceipts.map((receipt) => ({ ...receipt })) } : {}),
+    ...(run.spendAuthorizations
+      ? {
+          spendAuthorizations: run.spendAuthorizations.map((authorization) => ({
+            ...authorization,
+            inputVersionIds: [...authorization.inputVersionIds],
+          })),
+        }
+      : {}),
   };
 }
 
@@ -356,17 +933,488 @@ async function executeNode<TInput, TOutput>(
   node: NodeDefinition<TInput, TOutput>,
   input: TInput,
   context: WorkflowContext,
-): Promise<NodeExecutionResult<TOutput>> {
+  resolvedProvider?: Provider<TInput, TOutput>,
+): Promise<{ result: NodeExecutionResult<TOutput>; receipt: NodeExecutionReceiptDraft }> {
   if (node.execute) {
-    return node.execute(input, context);
+    const result = await node.execute(input, context);
+    return {
+      result,
+      receipt: result.receipt
+        ?? (resolvedProvider
+          ? providerReceiptDraft(resolvedProvider)
+          : inlineReceiptDraft(node)),
+    };
   }
 
+  const provider = resolvedProvider ?? resolveNodeProvider(node, context);
+  if (!provider) {
+    throw new Error(`Node '${node.id}' has no provider.`);
+  }
+  const output = await provider.run(input, context);
+  return {
+    result: { status: "succeeded", output },
+    receipt: providerReceiptDraft(provider),
+  };
+}
+
+function providerReceiptDraft(
+  provider: Pick<Provider, "id" | "label" | "modelId" | "transport" | "billing" | "estimatedCostCny">,
+): NodeExecutionReceiptDraft {
+  return {
+    providerId: provider.id,
+    providerLabel: provider.label ?? provider.id,
+    modelId: provider.modelId ?? "unspecified",
+    transport: provider.transport ?? "local_process",
+    billing: provider.billing ?? "local_compute",
+    ...(provider.estimatedCostCny !== undefined ? { estimatedCostCny: provider.estimatedCostCny } : {}),
+  };
+}
+
+function resolveNodeProvider<TInput, TOutput>(
+  node: NodeDefinition<TInput, TOutput>,
+  context: WorkflowContext,
+): Provider<TInput, TOutput> | undefined {
+  if (node.execute && !node.providerId) {
+    return undefined;
+  }
   const selector = node.providerId
     ? { capability: node.capability, providerId: node.providerId }
     : { capability: node.capability };
-  const provider = context.resolveProvider<TInput, TOutput>(selector);
-  const output = await provider.run(input, context);
-  return { status: "succeeded", output };
+  try {
+    return context instanceof InMemoryWorkflowContext
+      ? context.resolveProviderForNode<TInput, TOutput>(selector)
+      : context.resolveProvider<TInput, TOutput>(selector);
+  } catch (error) {
+    if (node.execute) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function createSpendPlan(
+  node: { id: string },
+  provider: Pick<Provider, "id" | "modelId" | "estimatedCostCny" | "maxCostCny" | "maxAttempts">,
+  inputVersionIds: string[],
+  context: WorkflowContext,
+): SpendPlan {
+  validateMeteredProvider(provider);
+  return {
+    id: context.nextId("spend-plan"),
+    nodeId: node.id,
+    inputVersionIds: [...inputVersionIds],
+    providerId: provider.id,
+    modelId: provider.modelId,
+    estimatedCostCny: provider.estimatedCostCny,
+    maxCostCny: provider.maxCostCny,
+    maxAttempts: provider.maxAttempts,
+    createdAt: context.now(),
+  };
+}
+
+function authorizationMatchesPlan(
+  authorization: SpendAuthorizationDraft,
+  plan: SpendPlan,
+): boolean {
+  return isValidSpendAuthorizationScope(authorization)
+    && authorization.nodeId === plan.nodeId
+    && authorization.providerId === plan.providerId
+    && authorization.modelId === plan.modelId
+    && authorization.maxCostCny === plan.maxCostCny
+    && authorization.maxAttempts === plan.maxAttempts
+    && authorization.inputVersionIds.length === plan.inputVersionIds.length
+    && authorization.inputVersionIds.every((versionId, index) => versionId === plan.inputVersionIds[index]);
+}
+
+function spendPlanMatchesExecution(
+  plan: SpendPlan,
+  node: { id: string },
+  provider: Pick<Provider, "id" | "modelId" | "estimatedCostCny" | "maxCostCny" | "maxAttempts">,
+  inputVersionIds: string[],
+): boolean {
+  return plan.nodeId === node.id
+    && plan.providerId === provider.id
+    && plan.modelId === provider.modelId
+    && plan.estimatedCostCny === provider.estimatedCostCny
+    && plan.maxCostCny === provider.maxCostCny
+    && plan.maxAttempts === provider.maxAttempts
+    && plan.inputVersionIds.length === inputVersionIds.length
+    && plan.inputVersionIds.every((versionId, index) => versionId === inputVersionIds[index]);
+}
+
+function createExecutionReceipt(
+  node: Pick<NodeDefinition, "id" | "role" | "capability">,
+  draft: NodeExecutionReceiptDraft,
+  startedAt: string,
+  finishedAt: string,
+  status: NodeExecutionReceiptStatus,
+  authorization?: SpendAuthorization,
+): NodeExecutionReceipt {
+  return {
+    ...draft,
+    nodeId: node.id,
+    ...(node.role ? { role: node.role } : {}),
+    capability: node.capability,
+    status,
+    ...(authorization
+      ? {
+          spendAuthorizationId: authorization.id,
+          authorizedCostCny: authorization.maxCostCny,
+        }
+      : {}),
+    startedAt,
+    finishedAt,
+  };
+}
+
+function inlineReceiptDraft(node: Pick<NodeDefinition, "id" | "label" | "providerId" | "mode">): NodeExecutionReceiptDraft {
+  return {
+    providerId: node.providerId ?? `inline:${node.id}`,
+    providerLabel: node.label,
+    modelId: "inline",
+    transport: node.mode === "manual" ? "human" : "local_process",
+    billing: node.mode === "manual" ? "human" : "local_compute",
+  };
+}
+
+function validateMeteredProvider(
+  provider: Pick<Provider, "id" | "modelId" | "estimatedCostCny" | "maxCostCny" | "maxAttempts">,
+): asserts provider is Pick<Provider, "id"> & {
+  modelId: string;
+  estimatedCostCny: number;
+  maxCostCny: number;
+  maxAttempts: number;
+} {
+  if (
+    typeof provider.modelId !== "string"
+    || !provider.modelId.trim()
+    || !isFiniteNonNegative(provider.estimatedCostCny)
+    || !isFinitePositive(provider.maxCostCny)
+    || !Number.isInteger(provider.maxAttempts)
+    || Number(provider.maxAttempts) < 1
+  ) {
+    throw new Error(`Metered provider '${provider.id}' is missing a bounded spend plan.`);
+  }
+  if (Number(provider.estimatedCostCny) > Number(provider.maxCostCny)) {
+    throw new Error(`Metered provider '${provider.id}' estimated cost exceeds its maximum cost.`);
+  }
+}
+
+function authorizationMatchesProvider(
+  authorization: SpendAuthorizationDraft,
+  provider: Pick<Provider, "id" | "modelId" | "maxCostCny" | "maxAttempts">,
+): boolean {
+  return isValidSpendAuthorizationScope(authorization)
+    && authorization.providerId === provider.id
+    && authorization.modelId === provider.modelId
+    && authorization.maxCostCny === provider.maxCostCny
+    && authorization.maxAttempts === provider.maxAttempts;
+}
+
+function validateSpendAuthorizationDraft(draft: SpendAuthorizationDraft): void {
+  if (!isValidSpendAuthorizationScope(draft)) {
+    throw new Error("Spend authorization must contain finite positive limits and a complete execution scope.");
+  }
+  if (typeof draft.approvedBy !== "string") {
+    throw new Error("Spend authorization approver is required.");
+  }
+}
+
+function isValidSpendAuthorizationScope(draft: SpendAuthorizationDraft): boolean {
+  return typeof draft.nodeId === "string"
+    && Boolean(draft.nodeId)
+    && Array.isArray(draft.inputVersionIds)
+    && draft.inputVersionIds.every((id) => typeof id === "string" && Boolean(id))
+    && typeof draft.providerId === "string"
+    && Boolean(draft.providerId)
+    && typeof draft.modelId === "string"
+    && Boolean(draft.modelId)
+    && isFinitePositive(draft.maxCostCny)
+    && Number.isInteger(draft.maxAttempts)
+    && draft.maxAttempts > 0;
+}
+
+function validateReceiptCosts(
+  receipt: NodeExecutionReceiptDraft,
+  authorization: SpendAuthorization | undefined,
+): void {
+  if (receipt.billing === "metered" && !authorization) {
+    throw new Error(`Metered receipt for provider '${receipt.providerId}' has no active spend authorization.`);
+  }
+  if (authorization && (
+    receipt.billing !== "metered"
+    || receipt.providerId !== authorization.providerId
+    || receipt.modelId !== authorization.modelId
+  )) {
+    throw new Error(`Execution receipt does not match the active authorization for provider '${authorization.providerId}'.`);
+  }
+  if (receipt.estimatedCostCny !== undefined && !isFiniteNonNegative(receipt.estimatedCostCny)) {
+    throw new Error("Execution receipt estimatedCostCny must be a finite non-negative number.");
+  }
+  if (receipt.actualCostCny !== undefined && !isFiniteNonNegative(receipt.actualCostCny)) {
+    throw new Error("Execution receipt actualCostCny must be a finite non-negative number.");
+  }
+  if (authorization && receipt.actualCostCny !== undefined && receipt.actualCostCny > authorization.maxCostCny) {
+    throw new Error(`Execution cost exceeded the authorized maximum for provider '${authorization.providerId}'.`);
+  }
+}
+
+function assertManualVersionSize(value: unknown, label: string): void {
+  const serialized = JSON.stringify(value);
+  if (serialized !== undefined && new TextEncoder().encode(serialized).byteLength > MAX_MANUAL_VERSION_BYTES) {
+    throw new Error(`${label} exceeds the 1 MB manual version limit.`);
+  }
+}
+
+function assertFileReferenceChangesAuthorized(
+  previous: unknown,
+  next: unknown,
+  artifacts: ArtifactDraft[],
+): void {
+  const previousReferences = collectFileReferences(previous);
+  const nextReferences = collectFileReferences(next);
+  const authorizedUris = new Set(
+    artifacts.map((artifact) => artifact.uri).filter((uri): uri is string => typeof uri === "string" && Boolean(uri)),
+  );
+  for (const [field, nextValue] of nextReferences) {
+    const previousValue = previousReferences.get(field);
+    if (previousValue !== undefined && previousValue !== nextValue && !authorizedUris.has(nextValue)) {
+      throw new Error(`${field} cannot be changed without a matching override artifact.`);
+    }
+    if (previousValue === undefined && !authorizedUris.has(nextValue)) {
+      throw new Error(`${field} cannot introduce a new file reference without a matching override artifact.`);
+    }
+  }
+  for (const field of previousReferences.keys()) {
+    if (!nextReferences.has(field)) throw new Error(`${field} cannot remove an existing file reference.`);
+  }
+}
+
+function collectFileReferences(value: unknown, field = "output", result = new Map<string, string>()): Map<string, string> {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectFileReferences(item, `${field}[${index}]`, result));
+    return result;
+  }
+  if (typeof value !== "object" || value === null) return result;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const childField = `${field}.${key}`;
+    if (isFileReferenceKey(key) && typeof child === "string" && child) result.set(childField, child);
+    else collectFileReferences(child, childField, result);
+  }
+  return result;
+}
+
+function isFileReferenceKey(key: string): boolean {
+  return key === "uri"
+    || key.endsWith("Path")
+    || key.endsWith("Root")
+    || key.endsWith("_path")
+    || key.endsWith("_root")
+    || key.endsWith("_file");
+}
+
+function sanitizeFailureReceiptDraft(receipt: NodeExecutionReceiptDraft): NodeExecutionReceiptDraft {
+  const sanitized = { ...receipt };
+  if (sanitized.estimatedCostCny !== undefined && !isFiniteNonNegative(sanitized.estimatedCostCny)) {
+    delete sanitized.estimatedCostCny;
+  }
+  if (sanitized.actualCostCny !== undefined && !isFiniteNonNegative(sanitized.actualCostCny)) {
+    delete sanitized.actualCostCny;
+  }
+  return sanitized;
+}
+
+function isFinitePositive(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isFiniteNonNegative(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function createGeneratedOutputState<TOutput>(
+  node: { id: string },
+  nodeRun: NodeRun<TOutput>,
+  inputVersionIds: string[],
+  createdBy: string,
+  context: WorkflowContext,
+): NonNullable<NodeRun<TOutput>["outputState"]> {
+  const versionId = context.nextId("version");
+  const version = {
+    id: versionId,
+    nodeId: node.id,
+    source: "generated" as const,
+    artifactIds: [...nodeRun.artifactIds],
+    inputVersionIds: [...inputVersionIds],
+    createdAt: context.now(),
+    createdBy,
+    schemaVersion: "1",
+    ...(nodeRun.output !== undefined ? { output: nodeRun.output } : {}),
+  };
+  return {
+    nodeId: node.id,
+    generatedVersionId: versionId,
+    effectiveVersionId: versionId,
+    stale: false,
+    versions: [version],
+  };
+}
+
+function inputVersionIdsForNode(node: { dependsOn?: string[] }, nodeRuns: NodeRun[]): string[] {
+  return (node.dependsOn ?? []).flatMap((dependencyId) => {
+    const versionId = nodeRuns.find((nodeRun) => nodeRun.nodeId === dependencyId)?.outputState?.effectiveVersionId;
+    return versionId ? [versionId] : [];
+  });
+}
+
+function executionInputVersionIds(
+  node: { dependsOn?: string[] },
+  nodeRun: NodeRun,
+  nodeRuns: NodeRun[],
+): string[] {
+  return executionInputVersionIdsFromUpstream(nodeRun, inputVersionIdsForNode(node, nodeRuns));
+}
+
+function executionInputVersionIdsFromUpstream(nodeRun: NodeRun, upstreamVersionIds: string[]): string[] {
+  const inputVersionId = nodeRun.inputState?.effectiveVersionId;
+  return [...(inputVersionId ? [inputVersionId] : []), ...upstreamVersionIds];
+}
+
+function resolveEffectiveNodeInput<TInput>(
+  node: Pick<NodeDefinition<TInput, never>, "id" | "validateInputOverride">,
+  nodeRun: NodeRun,
+  derivedInput: TInput,
+  upstreamVersionIds: string[],
+  context: WorkflowContext,
+): TInput {
+  const state = nodeRun.inputState;
+  if (state && !state.stale) {
+    const effective = state.versions.find((version) => version.id === state.effectiveVersionId);
+    if (!effective) throw new Error(`Node '${node.id}' effective input version is missing.`);
+    return effective.value as TInput;
+  }
+  if (state?.stale) {
+    const effective = state.versions.find((version) => version.id === state.effectiveVersionId);
+    if (effective?.source === "human") {
+      throw new Error(`Node '${node.id}' has a stale human input that must be reviewed before execution.`);
+    }
+  }
+
+  const versionId = context.nextId("input-version");
+  const version = {
+    id: versionId,
+    nodeId: node.id,
+    source: "derived" as const,
+    value: derivedInput,
+    upstreamVersionIds: [...upstreamVersionIds],
+    ...(state?.effectiveVersionId ? { parentVersionId: state.effectiveVersionId } : {}),
+    createdAt: context.now(),
+    createdBy: `workflow:${node.id}`,
+    schemaVersion: "1",
+  };
+  nodeRun.inputState = {
+    nodeId: node.id,
+    effectiveVersionId: versionId,
+    stale: false,
+    versions: [...(state?.versions ?? []), version],
+  };
+  return derivedInput;
+}
+
+function normalizeLegacyVersionStates<TInitialInput>(
+  definition: WorkflowDefinition,
+  run: WorkflowRun<TInitialInput>,
+  context: WorkflowContext,
+): void {
+  const orderedNodes = orderNodes(definition.nodes);
+  for (const node of orderedNodes) {
+    const nodeRun = run.nodeRuns.find((candidate) => candidate.nodeId === node.id);
+    if (!nodeRun || nodeRun.outputState || (nodeRun.output === undefined && nodeRun.artifactIds.length === 0)) {
+      continue;
+    }
+    nodeRun.outputState = createLegacyOutputState(node, nodeRun, run.nodeRuns);
+  }
+  for (const node of orderedNodes) {
+    const nodeRun = run.nodeRuns.find((candidate) => candidate.nodeId === node.id);
+    if (!nodeRun || nodeRun.inputState || nodeRun.status === "pending") continue;
+    let value: unknown;
+    try {
+      value = node.getInput ? node.getInput(context) : context.initialInput;
+    } catch {
+      continue;
+    }
+    if (value === undefined) continue;
+    const versionId = legacyVersionId("input", node.id, nodeRun.startedAt);
+    nodeRun.inputState = {
+      nodeId: node.id,
+      effectiveVersionId: versionId,
+      stale: nodeRun.status === "stale",
+      versions: [{
+        id: versionId,
+        nodeId: node.id,
+        source: "reconstructed",
+        value,
+        upstreamVersionIds: inputVersionIdsForNode(node, run.nodeRuns),
+        createdAt: nodeRun.startedAt,
+        createdBy: `legacy-reconstruction:${node.id}`,
+        schemaVersion: "1",
+      }],
+    };
+  }
+}
+
+function createLegacyOutputState(
+  node: NodeDefinition,
+  nodeRun: NodeRun,
+  nodeRuns: NodeRun[],
+): NonNullable<NodeRun["outputState"]> {
+  const versionId = legacyVersionId("output", node.id, nodeRun.startedAt);
+  return {
+    nodeId: node.id,
+    generatedVersionId: versionId,
+    effectiveVersionId: versionId,
+    stale: nodeRun.status === "stale",
+    versions: [
+      {
+        id: versionId,
+        nodeId: node.id,
+        source: "generated",
+        artifactIds: [...nodeRun.artifactIds],
+        inputVersionIds: executionInputVersionIds(node, nodeRun, nodeRuns),
+        createdAt: nodeRun.finishedAt ?? nodeRun.startedAt,
+        createdBy: nodeRun.executionReceipt?.providerId ?? "legacy",
+        schemaVersion: "1",
+        ...(nodeRun.output !== undefined ? { output: nodeRun.output } : {}),
+      },
+    ],
+  };
+}
+
+function legacyVersionId(kind: "input" | "output", nodeId: string, startedAt: string): string {
+  return `legacy-${kind}:${nodeId}:${startedAt}`;
+}
+
+function descendantNodeIds(nodes: NodeDefinition[], rootNodeId: string): Set<string> {
+  const dependents = new Map<string, string[]>();
+  for (const node of nodes) {
+    for (const dependency of node.dependsOn ?? []) {
+      const current = dependents.get(dependency) ?? [];
+      current.push(node.id);
+      dependents.set(dependency, current);
+    }
+  }
+
+  const descendants = new Set<string>();
+  const pending = [...(dependents.get(rootNodeId) ?? [])];
+  while (pending.length > 0) {
+    const nodeId = pending.shift()!;
+    if (descendants.has(nodeId)) {
+      continue;
+    }
+    descendants.add(nodeId);
+    pending.push(...(dependents.get(nodeId) ?? []));
+  }
+  return descendants;
 }
 
 async function evaluateQualityGates<TOutput>(
@@ -453,6 +1501,12 @@ function workflowStatusFromNode(status: NodeStatus): WorkflowStatus | undefined 
   }
   if (status === "rejected") {
     return "rejected";
+  }
+  if (status === "awaiting_spend_approval") {
+    return "awaiting_spend_approval";
+  }
+  if (status === "approval_invalidated") {
+    return "approval_invalidated";
   }
   return undefined;
 }

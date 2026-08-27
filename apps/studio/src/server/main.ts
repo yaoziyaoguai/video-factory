@@ -6,14 +6,21 @@ import {
   CodexBridgeClient,
   CodexPublishCopyWriter,
   CodexScreenwriterAgent,
+  CodexVisualReviewAgent,
   CodexVisualDirectorAgent,
   ProductionPipeline,
 } from "@video-factory/production-pipeline";
 import { buildStudioApp } from "./app.js";
 import { readStudioAuthEnvironment } from "./auth.js";
-import { readCodexProviderSettings } from "./codex-provider-settings.js";
+import { readCodexProviderSettings, readZaiCodexProviderSettings } from "./codex-provider-settings.js";
 import { JsonOpportunityStore } from "./opportunity-store.js";
-import { buildDirectorAssetProviders, buildProductionWorker } from "./production-worker.js";
+import {
+  buildDirectorAssetProviders,
+  buildProductionProviderRuntimeMetadata,
+  buildProductionWorker,
+  resolveProductionPython,
+} from "./production-worker.js";
+import { PythonReviewMediaPreprocessor } from "./review-media-preprocessor.js";
 import { StudioService } from "./studio-service.js";
 import { TrendGateway } from "./trend-gateway.js";
 import { CodexTopicIdeaModel, TrendOpportunityAgent } from "./trend-opportunity-agent.js";
@@ -28,22 +35,55 @@ const pythonPath = process.env.PYTHONPATH
   : path.join(repositoryRoot, "src");
 const worker = buildProductionWorker({ repositoryRoot, pythonPath, environment: process.env });
 // 启动时探测一次宿主机 Codex bridge；不可用时不创建任何 agent，保持规则与模板行为。
-const codexSettings = await readCodexProviderSettings(process.env);
-// 330s 客户端 deadline > broker 285s 任务 deadline：broker 先终止 codex 并返回明确错误，
-// 客户端不重放已受理的任务（至多执行一次）。
+const [codexSettings, zaiCodexSettings] = await Promise.all([
+  readCodexProviderSettings(process.env),
+  readZaiCodexProviderSettings(process.env),
+]);
+// 单并发 broker 中，660s 覆盖一个在途后台任务和本次 285s 执行；
+// 生产任务会插队尚未开始的热点任务，客户端仍不重放已受理任务。
 const codexClient = codexSettings.available
-  ? new CodexBridgeClient({ socketPath: codexSettings.socketPath, timeoutMs: 330_000 })
+  ? new CodexBridgeClient({ socketPath: codexSettings.socketPath, timeoutMs: 660_000 })
+  : undefined;
+const zaiCodexClient = zaiCodexSettings.available
+  ? new CodexBridgeClient({ socketPath: zaiCodexSettings.socketPath, timeoutMs: 660_000 })
   : undefined;
 const directorAgent = codexClient ? new CodexVisualDirectorAgent({ client: codexClient }) : undefined;
 const screenwriterAgent = codexClient ? new CodexScreenwriterAgent({ client: codexClient }) : undefined;
 const publishCopyWriter = codexClient ? new CodexPublishCopyWriter({ client: codexClient }) : undefined;
+const reviewMedia = new PythonReviewMediaPreprocessor({
+  repositoryRoot,
+  pythonPath,
+  pythonCommand: resolveProductionPython(repositoryRoot, process.env),
+  environment: process.env,
+});
+const visualReviewAgents = [
+  ...(zaiCodexClient ? [new CodexVisualReviewAgent({
+      client: zaiCodexClient,
+      media: reviewMedia,
+      providerId: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+    })] : []),
+  ...(codexClient ? [new CodexVisualReviewAgent({
+      client: codexClient,
+      media: new PythonReviewMediaPreprocessor({
+        repositoryRoot,
+        pythonPath,
+        pythonCommand: resolveProductionPython(repositoryRoot, process.env),
+        environment: process.env,
+      }),
+      providerId: "codex-visual-review-v1",
+      modelId: process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default",
+    })] : []),
+];
 const pipeline = new ProductionPipeline({
   workspaceRoot,
   worker,
   ...(screenwriterAgent ? { screenwriterAgent } : {}),
   ...(directorAgent ? { directorAgent } : {}),
   ...(publishCopyWriter ? { publishCopyWriter } : {}),
+  ...(visualReviewAgents.length > 0 ? { visualReviewAgents } : {}),
   assetProviders: buildDirectorAssetProviders({ environment: process.env }),
+  providerRuntimeMetadata: buildProductionProviderRuntimeMetadata(process.env),
 });
 await pipeline.recoverInterruptedRuns();
 const opportunities = new JsonOpportunityStore(path.join(workspaceRoot, "opportunities", "opportunities.json"));
@@ -53,6 +93,7 @@ const service = new StudioService({
   pipeline,
   opportunities,
   codexAvailability: { available: codexSettings.available, reason: codexSettings.reason },
+  zaiCodexAvailability: { available: zaiCodexSettings.available, reason: zaiCodexSettings.reason },
   ...(codexClient ? {
     trendAgent: new TrendOpportunityAgent({
       signals: new TrendGateway({ environment: process.env }),
@@ -63,6 +104,15 @@ const service = new StudioService({
 const development = process.env.STUDIO_DEV === "1";
 const auth = readStudioAuthEnvironment(process.env, { required: !development, secureCookie: !development });
 const app = buildStudioApp({ service, logger: true, ...(auth ? { auth } : {}) });
+const interruptedRecoveryTimer = setInterval(() => {
+  void pipeline.recoverInterruptedRuns().catch(() => {
+    app.log.error("Interrupted production recovery failed; the next recovery cycle will retry.");
+  });
+}, 30_000);
+interruptedRecoveryTimer.unref();
+app.addHook("onClose", async () => {
+  clearInterval(interruptedRecoveryTimer);
+});
 
 if (!development) {
   await app.register(fastifyStatic, {

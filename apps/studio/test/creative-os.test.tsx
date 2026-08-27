@@ -13,7 +13,7 @@ import { ExperimentsPage } from "../src/client/pages/ExperimentsPage.js";
 import { ProductionPage } from "../src/client/pages/ProductionPage.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
 import { TodayPage } from "../src/client/pages/TodayPage.js";
-import type { StudioCandidateInboxItem, StudioOpportunity, StudioProvider, StudioRunSummary, StudioTrendSource } from "../src/shared/api.js";
+import type { StudioCandidateInboxItem, StudioOpportunity, StudioProvider, StudioRunSummary, StudioTemplate, StudioTrendSource } from "../src/shared/api.js";
 
 const opportunity: StudioOpportunity = {
   id: "opportunity-1",
@@ -543,6 +543,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "voices").mockResolvedValue([
       { id: "macos:Tingting", providerId: "macos-say-v1", label: "Tingting", locale: "zh-CN", engine: "macos" },
     ]);
+    vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 0, templates: [knowledgeTemplate()] });
     const start = vi.spyOn(studioApi, "start").mockRejectedValue(new Error("制作创建失败"));
     const updateStatus = vi.spyOn(studioApi, "updateOpportunityStatus");
     render(<MemoryRouter><TodayPage /></MemoryRouter>);
@@ -763,3 +764,22 @@ describe("Creative OS", () => {
     });
   });
 });
+
+function knowledgeTemplate(): StudioTemplate {
+  return {
+    id: "knowledge-explainer", version: 2, status: "published", name: "知识解释", description: "讲清一个问题。",
+    category: "knowledge", platforms: ["douyin"], durationSeconds: 24, automationLevel: "assisted",
+    storyStructure: [
+      { id: "hook", label: "开场", purpose: "抓住注意", required: true },
+      { id: "body", label: "解释", purpose: "展开内容", required: true },
+      { id: "close", label: "收束", purpose: "留下结论", required: true },
+    ],
+    shotSlots: [{ id: "shot", beatId: "hook", purpose: "开场", durationSeconds: 4, allowedCapabilities: ["asset.search"], manualReplacement: true }],
+    visualSystem: { composition: "主体清晰", colorIntent: "自然", subtitleDensity: "medium", pacing: "measured" },
+    soundSystem: { voiceIntent: "可信", pace: "medium", musicIntent: "克制" },
+    qualityRules: [{ id: "facts", label: "事实", dimension: "factual", required: true, threshold: 80 }],
+    capabilityRequirements: [{ capability: "script.draft", required: true }],
+    costPolicy: { currency: "CNY", maxCost: 8, maxPaidShots: 1 },
+    createdAt: "2026-08-27T00:00:00.000Z", updatedAt: "2026-08-27T00:00:00.000Z", builtIn: true,
+  };
+}

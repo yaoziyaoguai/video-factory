@@ -5,23 +5,37 @@ import {
   CodexExecutorError,
   parseTaskRequest,
   type CodexExecutor,
+  type CodexTaskTrace,
   type ValidatedTask,
 } from "./codex-executor.js";
 
 const DEFAULT_SOCKET_MODE = 0o660;
 const DEFAULT_CONCURRENCY = 1;
 const DEFAULT_MAX_BACKLOG = 20;
-const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+// 6 MiB JPEG 解码预算经 base64 后是 8 MiB；额外空间仅容纳固定 JSON 元数据。
+const DEFAULT_MAX_BODY_BYTES = 9 * 1024 * 1024;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const DEFAULT_RETRY_AFTER_SECONDS = 5;
 const STALE_PROBE_TIMEOUT_MS = 500;
 
 export type TaskOutcome =
-  | { ok: true; output: string }
+  | { ok: true; output: string; trace?: CodexTaskTrace }
   | { ok: false; status: 400 | 413 | 422 | 503 | 500; message: string };
 
+interface QueuedTask {
+  task: ValidatedTask;
+  controller: AbortController;
+  active: boolean;
+  settle: (outcome: TaskOutcome) => void;
+}
+
+interface TaskSubmission {
+  outcome: Promise<TaskOutcome>;
+  cancel(): void;
+}
+
 class BrokerTaskQueue {
-  private readonly pending: Array<{ task: ValidatedTask; settle: (outcome: TaskOutcome) => void }> = [];
+  private readonly pending: QueuedTask[] = [];
   private readonly closedWaiters: Array<() => void> = [];
   private activeTasks = 0;
   private completedTasks = 0;
@@ -39,13 +53,29 @@ class BrokerTaskQueue {
   completed(): number { return this.completedTasks; }
   failed(): number { return this.failedTasks; }
 
-  submit(task: ValidatedTask): Promise<TaskOutcome> {
-    if (this.closed) return Promise.resolve(shutdownOutcome());
-    if (this.pending.length >= this.maxBacklog) return Promise.resolve(busyOutcome());
-    return new Promise<TaskOutcome>((settle) => {
-      this.pending.push({ task, settle });
+  submit(task: ValidatedTask): TaskSubmission {
+    if (this.closed) return settledSubmission(shutdownOutcome());
+    if (this.pending.length >= this.maxBacklog) return settledSubmission(busyOutcome());
+    let entry!: QueuedTask;
+    const outcome = new Promise<TaskOutcome>((settle) => {
+      entry = { task, settle, controller: new AbortController(), active: false };
+      const insertionIndex = this.pending.findIndex((queued) => taskPriority(task) < taskPriority(queued.task));
+      if (insertionIndex < 0) this.pending.push(entry);
+      else this.pending.splice(insertionIndex, 0, entry);
       void this.pump();
     });
+    return {
+      outcome,
+      cancel: () => {
+        const index = this.pending.indexOf(entry);
+        if (index >= 0) {
+          this.pending.splice(index, 1);
+          entry.settle(abandonedOutcome());
+          return;
+        }
+        if (entry.active) entry.controller.abort();
+      },
+    };
   }
 
   async close(timeoutMs: number): Promise<void> {
@@ -66,15 +96,21 @@ class BrokerTaskQueue {
   private async pump(): Promise<void> {
     while (this.activeTasks < this.concurrency && this.pending.length > 0) {
       const next = this.pending.shift()!;
+      next.active = true;
       this.activeTasks += 1;
       try {
-        const result = await this.executor.runTask(next.task);
+        const result = await this.executor.runTask(next.task, { signal: next.controller.signal });
         this.completedTasks += 1;
-        next.settle({ ok: true, output: result.output });
+        next.settle({
+          ok: true,
+          output: result.output,
+          ...(result.trace ? { trace: result.trace } : {}),
+        });
       } catch (error) {
         this.failedTasks += 1;
         next.settle(failureOutcome(error));
       } finally {
+        next.active = false;
         this.activeTasks -= 1;
       }
     }
@@ -164,6 +200,7 @@ export class CodexBrokerServer {
   healthReport(): Record<string, unknown> {
     return {
       protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+      ...this.options.executor.identity,
       active: this.queue.active(),
       queued: this.queue.queued(),
       capacity: this.concurrency,
@@ -213,15 +250,25 @@ export class CodexBrokerServer {
     }
     let task: ValidatedTask;
     try {
-      task = parseTaskRequest(parsed);
+      task = parseTaskRequest(parsed, this.options.executor.identity);
     } catch (error) {
       const message = error instanceof CodexExecutorError ? error.message : "Invalid codex task request.";
       this.sendJson(response, 400, { error: message });
       return;
     }
-    const outcome = await this.queue.submit(task);
+    const submission = this.queue.submit(task);
+    const cancelIfDisconnected = (): void => {
+      if (!response.writableEnded) submission.cancel();
+    };
+    response.once("close", cancelIfDisconnected);
+    const outcome = await submission.outcome;
+    response.off("close", cancelIfDisconnected);
     if (outcome.ok) {
-      this.sendJson(response, 200, { ok: true, output: outcome.output });
+      this.sendJson(response, 200, {
+        ok: true,
+        output: outcome.output,
+        ...(outcome.trace ? { trace: outcome.trace } : {}),
+      });
       return;
     }
     this.sendJson(
@@ -291,6 +338,18 @@ function busyOutcome(): TaskOutcome {
 
 function shutdownOutcome(): TaskOutcome {
   return { ok: false, status: 503, message: "Codex broker is shutting down." };
+}
+
+function abandonedOutcome(): TaskOutcome {
+  return { ok: false, status: 503, message: "Codex task was cancelled before execution." };
+}
+
+function settledSubmission(outcome: TaskOutcome): TaskSubmission {
+  return { outcome: Promise.resolve(outcome), cancel: () => undefined };
+}
+
+function taskPriority(task: ValidatedTask): number {
+  return task.kind === "topic-ideas" ? 1 : 0;
 }
 
 function contentLength(header: string | string[] | undefined): number | undefined {

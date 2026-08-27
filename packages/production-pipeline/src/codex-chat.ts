@@ -3,13 +3,27 @@ import http from "node:http";
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。
-export const CODEX_TASK_KINDS = ["topic-ideas", "director-plan", "script-draft", "publish-copy"] as const;
+export const CODEX_TASK_KINDS = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"] as const;
 export type CodexTaskKind = (typeof CODEX_TASK_KINDS)[number];
+
+export interface CodexTaskTrace {
+  taskKind: CodexTaskKind;
+  promptVersion: string;
+  prompt: string;
+  providerId: string;
+  modelId: string;
+}
+
+export interface CodexTaskExecution<TOutput = unknown> {
+  output: TOutput;
+  trace?: CodexTaskTrace;
+}
 
 const TASK_PATH = "/v1/tasks";
 // 只有"确证发生在任务受理之前"的连接错误才可安全重试；中途断连无法证明未受理，不重放。
 const RETRYABLE_CONNECT_CODES = new Set(["ECONNREFUSED", "ENOENT"]);
-const DEFAULT_TIMEOUT_MS = 330_000;
+// 单并发 broker 中，生产任务最多等待一个正在执行的后台任务，再获得完整执行时限。
+const DEFAULT_TIMEOUT_MS = 660_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_RETRY_DELAY_MS = 500;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
@@ -51,6 +65,10 @@ export class CodexBridgeClient {
   // 至多执行一次：仅连接层 ENOENT/ECONNREFUSED 与 HTTP 503（队列拒绝，未受理）按指数退避有界重试；
   // 超时与执行期失败直接上抛，绝不重放已受理的任务。
   async runTask(kind: CodexTaskKind, payload: unknown): Promise<unknown> {
+    return (await this.runTaskDetailed(kind, payload)).output;
+  }
+
+  async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
     if (!isCodexTaskKind(kind)) {
       throw new CodexBridgeError(`Unsupported codex task kind '${String(kind)}'.`, false);
     }
@@ -68,7 +86,7 @@ export class CodexBridgeClient {
     throw lastError ?? new CodexBridgeError("Codex bridge request failed.", false);
   }
 
-  private send(body: string): Promise<unknown> {
+  private send(body: string): Promise<CodexTaskExecution> {
     return new Promise((resolve, reject) => {
       const request = http.request({
         socketPath: this.options.socketPath,
@@ -90,7 +108,7 @@ export class CodexBridgeClient {
   private consume(
     response: http.IncomingMessage,
     request: http.ClientRequest,
-    resolve: (value: unknown) => void,
+    resolve: (value: CodexTaskExecution) => void,
     reject: (reason?: unknown) => void,
   ): void {
     const chunks: Buffer[] = [];
@@ -125,7 +143,7 @@ export class CodexBridgeClient {
   }
 }
 
-function parseEnvelope(raw: string): unknown {
+function parseEnvelope(raw: string): CodexTaskExecution {
   const envelope = parseJsonOrThrow(raw, "Codex bridge returned a non-JSON response body.");
   if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) {
     throw new CodexBridgeError("Codex bridge response envelope must be an object.", false);
@@ -134,7 +152,32 @@ function parseEnvelope(raw: string): unknown {
   if (record.ok !== true || typeof record.output !== "string") {
     throw new CodexBridgeError("Codex bridge response envelope is missing ok/output.", false);
   }
-  return parseJsonOrThrow(stripCodeFence(record.output), "Codex bridge output is not valid JSON.");
+  const output = parseJsonOrThrow(stripCodeFence(record.output), "Codex bridge output is not valid JSON.");
+  return {
+    output,
+    ...(record.trace === undefined ? {} : { trace: parseTrace(record.trace) }),
+  };
+}
+
+function parseTrace(value: unknown): CodexTaskTrace {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new CodexBridgeError("Codex bridge trace must be an object.", false);
+  }
+  const trace = value as Record<string, unknown>;
+  if (!isCodexTaskKind(String(trace.taskKind))
+    || typeof trace.promptVersion !== "string" || !trace.promptVersion
+    || typeof trace.prompt !== "string" || !trace.prompt
+    || typeof trace.providerId !== "string" || !trace.providerId
+    || typeof trace.modelId !== "string" || !trace.modelId) {
+    throw new CodexBridgeError("Codex bridge trace is invalid.", false);
+  }
+  return {
+    taskKind: trace.taskKind as CodexTaskKind,
+    promptVersion: trace.promptVersion,
+    prompt: trace.prompt,
+    providerId: trace.providerId,
+    modelId: trace.modelId,
+  };
 }
 
 function parseJsonOrThrow(value: string, terminalMessage: string): unknown {

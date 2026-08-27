@@ -85,11 +85,11 @@ describe("CodexPublishCopyWriter", () => {
     );
     await assert.rejects(
       () => writer.write({ ...publishInput(), narrations: ["第一场旁白", "第二场旁白"] }),
-      /narrations must contain 3 to 10 non-empty entries/,
+      /narrations must contain 3 to 24 non-empty entries/,
     );
     await assert.rejects(
       () => writer.write({ ...publishInput(), narrations: ["第一场旁白", " ", "第三场旁白"] }),
-      /narrations must contain 3 to 10 non-empty entries/,
+      /narrations must contain 3 to 24 non-empty entries/,
     );
     assert.equal(codexClient.calls.length, 0);
   });

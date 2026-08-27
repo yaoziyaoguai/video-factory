@@ -6,6 +6,7 @@ import { ProjectsPage } from "./pages/ProjectsPage.js";
 import { ResourcesPage } from "./pages/ResourcesPage.js";
 import { RunPage } from "./pages/RunPage.js";
 import { TodayPage } from "./pages/TodayPage.js";
+import { TemplatesPage } from "./pages/TemplatesPage.js";
 
 export function App() {
   return (
@@ -25,6 +26,7 @@ function StudioRoutes() {
       <Route path="/" element={<TodayPage />} />
       <Route path="/projects" element={<ProjectsPage />} />
       <Route path="/projects/:runId" element={<RunPage />} />
+      <Route path="/templates" element={<TemplatesPage />} />
       <Route path="/resources" element={<ResourcesPage />} />
       <Route path="/experiments" element={<ExperimentsPage />} />
       <Route path="/runs/:runId" element={<LegacyRunRedirect />} />

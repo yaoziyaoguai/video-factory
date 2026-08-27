@@ -1,4 +1,15 @@
-export type StudioRunStatus = "pending" | "running" | "succeeded" | "failed" | "needs_human" | "rejected";
+import type { ProductionBlueprintPatch, ProductionTemplateInput } from "@video-factory/template-core";
+
+export type StudioRunStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "needs_human"
+  | "rejected"
+  | "stale"
+  | "awaiting_spend_approval"
+  | "approval_invalidated";
 
 export interface StudioHealth {
   status: "ok" | "degraded";
@@ -353,7 +364,7 @@ export interface StudioRunSummary {
   startedAt: string;
   finishedAt?: string;
   currentNodeId: string;
-  nextAction?: "review";
+  nextAction?: "review" | "confirm_spend" | "regenerate";
   videoContentUrl?: string;
 }
 
@@ -375,7 +386,7 @@ export interface StudioNode {
   id: string;
   label: string;
   role?: string;
-  status: StudioRunStatus | "pending" | "skipped";
+  status: StudioRunStatus | "skipped";
   startedAt?: string;
   finishedAt?: string;
   error?: string;
@@ -385,6 +396,97 @@ export interface StudioNode {
     status: "passed" | "failed" | "needs_human";
     reasons: string[];
   }>;
+  output?: unknown;
+  inputState?: StudioNodeInputState;
+  outputState?: StudioNodeOutputState;
+  executionReceipt?: StudioNodeExecutionReceipt;
+  spendPlan?: StudioSpendPlan;
+  spendAuthorizationId?: string;
+}
+
+export interface StudioNodeInputVersion {
+  id: string;
+  source: "derived" | "human" | "reconstructed";
+  value: unknown;
+  upstreamVersionIds: string[];
+  parentVersionId?: string;
+  createdAt: string;
+  createdBy: string;
+  schemaVersion: string;
+}
+
+export interface StudioNodeInputState {
+  effectiveVersionId: string;
+  stale: boolean;
+  versions: StudioNodeInputVersion[];
+}
+
+export interface StudioNodeOutputVersion {
+  id: string;
+  source: "generated" | "human";
+  artifactIds: string[];
+  inputVersionIds: string[];
+  parentVersionId?: string;
+  createdAt: string;
+  createdBy: string;
+  schemaVersion: string;
+  output?: unknown;
+}
+
+export interface StudioNodeOutputState {
+  generatedVersionId: string;
+  effectiveVersionId: string;
+  stale: boolean;
+  versions: StudioNodeOutputVersion[];
+}
+
+export interface StudioNodeExecutionReceipt {
+  providerId: string;
+  providerLabel: string;
+  modelId: string;
+  transport: "unix_socket" | "local_process" | "http_api" | "human";
+  billing: StudioBillingType;
+  status: "succeeded" | "failed" | "rejected" | "needs_human";
+  estimatedCostCny?: number;
+  authorizedCostCny?: number;
+  actualCostCny?: number;
+  spendAuthorizationId?: string;
+  requestId?: string;
+  startedAt: string;
+  finishedAt: string;
+}
+
+export interface StudioSpendPlan {
+  id: string;
+  inputVersionIds: string[];
+  providerId: string;
+  modelId: string;
+  estimatedCostCny: number;
+  maxCostCny: number;
+  maxAttempts: number;
+  createdAt: string;
+}
+
+export interface StudioNodeOverrideInput {
+  output?: unknown;
+  document?: {
+    artifactId: string;
+    content: unknown;
+  };
+  confirmTerminalEdit?: boolean;
+}
+
+export interface StudioNodeInputOverrideInput {
+  input: unknown;
+  confirmTerminalEdit?: boolean;
+}
+
+export interface StudioSpendAuthorizationInput {
+  inputVersionIds: string[];
+  providerId: string;
+  modelId: string;
+  maxCostCny: number;
+  maxAttempts: number;
 }
 
 export interface StudioArtifact {
@@ -422,6 +524,93 @@ export interface StartRunResponse {
   status: "running";
 }
 
+export interface StudioTemplate extends ProductionTemplateInput {
+  builtIn: boolean;
+}
+
+export interface StudioTemplateCatalog {
+  storeRevision: number;
+  templates: StudioTemplate[];
+}
+
+export interface StudioTemplateSelection {
+  templateId: string;
+  templateVersion?: number;
+  runOverrides?: Pick<ProductionBlueprintPatch, "durationSeconds" | "automationLevel">;
+}
+
+export interface StudioTemplateCloneInput {
+  sourceId: string;
+  newId: string;
+  name: string;
+  expectedRevision: number;
+}
+
+export interface StudioTemplateMutation {
+  storeRevision: number;
+  template: StudioTemplate;
+}
+
+export type StudioBillingType = "free" | "subscription" | "metered" | "local_compute" | "human";
+
+export interface StudioCostLine {
+  id: string;
+  runId: string;
+  runTitle: string;
+  nodeId: string;
+  role?: string;
+  capability: string;
+  providerId: string;
+  modelId: string;
+  billing: StudioBillingType;
+  status: "succeeded" | "failed" | "unknown";
+  estimatedCostCny: number;
+  authorizedCostCny?: number;
+  spendAuthorizationId?: string;
+  actualCostCny?: number;
+  actualPending: boolean;
+  startedAt: string;
+  finishedAt?: string;
+}
+
+export interface StudioCostTotals {
+  estimatedCostCny: number;
+  authorizedCostCny: number;
+  actualCostCny: number;
+  actualPendingCount: number;
+  meteredCalls: number;
+  subscriptionCalls: number;
+  freeCalls: number;
+  failedMeteredCalls: number;
+}
+
+export interface StudioCostGroup {
+  id: string;
+  label: string;
+  calls: number;
+  estimatedCostCny: number;
+  actualCostCny: number;
+  actualPendingCount: number;
+}
+
+export interface StudioCostRunSummary {
+  runId: string;
+  title: string;
+  totals: StudioCostTotals;
+}
+
+export interface StudioCostDashboard {
+  currency: "CNY";
+  totals: StudioCostTotals;
+  byProvider: Array<StudioCostGroup & { providerId: string }>;
+  byNode: Array<StudioCostGroup & { nodeId: string }>;
+  runs: StudioCostRunSummary[];
+}
+
+export interface StudioCostRunDetail extends StudioCostRunSummary {
+  lines: StudioCostLine[];
+}
+
 export interface StudioProductionInput {
   protocolVersion: "video-factory/brief-v1";
   title: string;
@@ -431,6 +620,7 @@ export interface StudioProductionInput {
   durationSeconds: number;
   platform: string;
   reviewMode: "manual" | "automatic";
+  template?: StudioTemplateSelection;
   editorial?: {
     verdict: "produce_video" | "produce_image_story";
     reasons: string[];
@@ -444,6 +634,7 @@ export interface StudioProductionInput {
     voice: string;
     render: string;
     technicalReview: string;
+    visualReview?: string;
   };
   director?: {
     profileId: "auto" | "documentary-observer" | "quiet-humanism" | "urban-poetic" | "chromatic-storytelling" | "geometric-control" | "suspense-staging";
@@ -459,7 +650,6 @@ export interface StudioProductionInput {
 
 export interface StudioDecisionInput {
   action: "approve" | "reject";
-  actor: string;
   note?: string;
 }
 
@@ -640,15 +830,11 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
   if (input.action !== "approve" && input.action !== "reject") {
     throw new StudioInputError("请选择批准或打回。");
   }
-  if (typeof input.actor !== "string" || !input.actor.trim()) {
-    throw new StudioInputError("审片人不能为空。");
-  }
   if (input.note !== undefined && typeof input.note !== "string") {
     throw new StudioInputError("审片说明必须是文字。");
   }
   return {
     action: input.action,
-    actor: input.actor.trim(),
     ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}),
   };
 }

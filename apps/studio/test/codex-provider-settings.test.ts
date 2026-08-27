@@ -6,7 +6,9 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import {
   DEFAULT_CODEX_SOCKET_PATH,
+  DEFAULT_ZAI_CODEX_SOCKET_PATH,
   readCodexProviderSettings,
+  readZaiCodexProviderSettings,
   resolveCodexSocketPath,
   type CodexSocketStatus,
 } from "../src/server/codex-provider-settings.js";
@@ -93,7 +95,13 @@ describe("readCodexProviderSettings", () => {
     let protocolVersion = "video-factory/codex-bridge-v2";
     const server = http.createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ protocolVersion }));
+      response.end(JSON.stringify({
+        protocolVersion,
+        profileId: "openai",
+        providerId: "openai",
+        modelId: "codex-default",
+        taskKinds: ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"],
+      }));
     });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -118,6 +126,53 @@ describe("readCodexProviderSettings", () => {
   });
 });
 
+describe("readZaiCodexProviderSettings", () => {
+  it("requires the exact visual-review broker identity", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "vf-zai-codex-settings-"));
+    const socketPath = path.join(directory, "worker.sock");
+    let identity = {
+      profileId: "zai",
+      providerId: "zai-coding-plan",
+      modelId: "glm-5.3-flash",
+      taskKinds: ["visual-review"],
+    };
+    const server = http.createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ protocolVersion: "video-factory/codex-bridge-v2", ...identity }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    try {
+      const ready = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
+      assert.equal(ready.available, true);
+
+      identity = { ...identity, modelId: "GLM-4.6V-Flash" };
+      const wrongModel = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
+      assert.equal(wrongModel.available, false);
+      assert.match(wrongModel.reason, /模型身份或任务权限/);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a distinct default socket from the OpenAI Codex broker", async () => {
+    let probedPath = "";
+    await readZaiCodexProviderSettings({}, { socketProbe: async (socketPath) => {
+      probedPath = socketPath;
+      return "missing";
+    } });
+    assert.equal(probedPath, DEFAULT_ZAI_CODEX_SOCKET_PATH);
+    assert.notEqual(DEFAULT_ZAI_CODEX_SOCKET_PATH, DEFAULT_CODEX_SOCKET_PATH);
+  });
+});
+
 describe("buildProviderCatalog codex fallback", () => {
   it("does not advertise an unprobed socket as compatible", () => {
     const providers = buildProviderCatalog(
@@ -128,5 +183,33 @@ describe("buildProviderCatalog codex fallback", () => {
 
     assert.equal(codex?.available, false);
     assert.match(codex?.requirement ?? "", /尚未.*协议健康检查/);
+  });
+
+  it("advertises visual review only after the OpenAI Codex broker probe succeeds", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      { available: true, reason: "" },
+    );
+    const visualReview = providers.find((provider) => provider.id === "codex-visual-review-v1");
+
+    assert.equal(visualReview?.available, true);
+    assert.equal(visualReview?.billing, "subscription");
+    assert.equal(visualReview?.capability, "quality.review.visual");
+  });
+
+  it("advertises GLM-5.3-Flash as the preferred visual reviewer only after its isolated broker is ready", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      { available: true, reason: "" },
+      { available: true, reason: "" },
+    );
+    const glm = providers.find((provider) => provider.id === "glm-visual-review-v1");
+
+    assert.equal(glm?.available, true);
+    assert.equal(glm?.billing, "subscription");
+    assert.equal(glm?.capability, "quality.review.visual");
+    assert.match(glm?.description ?? "", /GLM-5\.3-Flash/);
   });
 });

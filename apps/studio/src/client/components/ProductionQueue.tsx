@@ -17,14 +17,21 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate }: Pro
   const [filter, setFilter] = useState<"all" | "active" | "review" | "done">("all");
   const [query, setQuery] = useState("");
   const visibleRuns = useMemo(() => runs.filter((run) => {
+    const needsAction = run.status === "needs_human"
+      || run.status === "awaiting_spend_approval"
+      || run.status === "approval_invalidated"
+      || run.status === "stale";
     const matchesFilter = filter === "all"
       || (filter === "active" && (run.status === "pending" || run.status === "running"))
-      || (filter === "review" && run.status === "needs_human")
+      || (filter === "review" && needsAction)
       || (filter === "done" && (run.status === "succeeded" || run.status === "failed" || run.status === "rejected"));
     return matchesFilter && run.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
   }), [filter, query, runs]);
   const activeCount = runs.filter((run) => run.status === "pending" || run.status === "running").length;
-  const reviewCount = runs.filter((run) => run.status === "needs_human").length;
+  const reviewCount = runs.filter((run) => run.status === "needs_human"
+    || run.status === "awaiting_spend_approval"
+    || run.status === "approval_invalidated"
+    || run.status === "stale").length;
   const finishedCount = runs.filter((run) => run.status === "succeeded").length;
   const rejectedCount = runs.filter((run) => run.status === "rejected" || run.status === "failed").length;
 
@@ -45,7 +52,7 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate }: Pro
       <section className="queue-section" aria-labelledby="today-heading" data-tour="project-queue">
         <div className="project-edition" data-tour="project-overview">
           <div><span>制作中</span><strong>{activeCount}</strong></div>
-          <div><span>等你审片</span><strong>{reviewCount}</strong></div>
+          <div><span>待你处理</span><strong>{reviewCount}</strong></div>
           <div><span>已完成</span><strong>{finishedCount}</strong></div>
           <div><span>未通过</span><strong>{rejectedCount}</strong></div>
         </div>
@@ -58,7 +65,7 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate }: Pro
             {([
               ["all", "全部"],
               ["active", "制作中"],
-              ["review", "等你审片"],
+              ["review", "待你处理"],
               ["done", "已结束"],
             ] as const).map(([value, label]) => (
               <button key={value} type="button" aria-pressed={filter === value} aria-label={`筛选：${label}`} onClick={() => setFilter(value)}>{label}</button>
@@ -110,8 +117,8 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate }: Pro
                   <h3>{run.title}</h3>
                   <div className="project-folio-state"><StatusBadge status={run.status} /><span>{runNodeLabel(run.currentNodeId)}</span></div>
                   <RunProgress currentNodeId={run.currentNodeId} status={run.status} />
-                  <Link className="project-folio-action" to={`/projects/${run.id}`} aria-label={run.nextAction === "review" ? `进入审片：${run.title}` : `查看制作：${run.title}`}>
-                    {run.nextAction === "review" ? "进入审片" : run.status === "succeeded" ? "查看成片" : "打开制作记录"}
+                  <Link className="project-folio-action" to={`/projects/${run.id}`} aria-label={runAction(run) ? `${actionLabel(runAction(run)!)}：${run.title}` : `查看制作：${run.title}`}>
+                    {runAction(run) ? actionLabel(runAction(run)!) : run.status === "succeeded" ? "查看成片" : "打开制作记录"}
                     <ArrowRight aria-hidden="true" size={16} />
                   </Link>
                 </div>
@@ -122,6 +129,18 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate }: Pro
       </section>
     </main>
   );
+}
+
+function actionLabel(action: NonNullable<StudioRunSummary["nextAction"]>): string {
+  if (action === "confirm_spend") return "确认费用";
+  if (action === "regenerate") return "确认后续生成";
+  return "进入审片";
+}
+
+function runAction(run: StudioRunSummary): StudioRunSummary["nextAction"] {
+  return run.status === "succeeded" || run.status === "failed" || run.status === "rejected"
+    ? undefined
+    : run.nextAction;
 }
 
 function RunProgress({ currentNodeId, status }: Pick<StudioRunSummary, "currentNodeId" | "status">) {

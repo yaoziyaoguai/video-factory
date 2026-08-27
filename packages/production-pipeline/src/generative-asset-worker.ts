@@ -60,6 +60,15 @@ interface RoutedShot {
   scenePosition: number;
   providerIds: string[];
   generationPrompt: string;
+  subject?: string;
+  environment?: string;
+  visibleAction?: string;
+  temporalBeats: string[];
+  shotSize?: string;
+  camera?: string;
+  lighting?: string;
+  negativeConstraints: string[];
+  successCriteria: string[];
 }
 
 interface ResolvedAssetBinding {
@@ -312,7 +321,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       try {
         const generated = await binding.generate(
           scene,
-          route.generationPrompt || scene.visualPrompt,
+          compileGenerationPrompt(providerId, route, scene),
           async (progress) => {
             applyProgress(job, progress);
             await writeJobs(jobsPath, jobs);
@@ -449,6 +458,12 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
   if (!Array.isArray(value)) throw new Error("Director plan shots must be an array.");
   return value.map((entry, index) => {
     const shot = requiredRecord(entry, `Director shot ${index + 1}`);
+    const subject = optionalString(shot.subject);
+    const environment = optionalString(shot.environment);
+    const visibleAction = optionalString(shot.visibleAction);
+    const shotSize = optionalString(shot.shotSize);
+    const camera = optionalString(shot.camera);
+    const lighting = optionalString(shot.lighting);
     return {
       scenePosition: boundedInteger(shot.scenePosition, `Director shot ${index + 1} scenePosition`, 1, 10_000),
       providerIds: [
@@ -458,8 +473,80 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
       generationPrompt: typeof shot.generationPrompt === "string" && shot.generationPrompt.trim()
         ? shot.generationPrompt.trim()
         : "",
+      ...(subject ? { subject } : {}),
+      ...(environment ? { environment } : {}),
+      ...(visibleAction ? { visibleAction } : {}),
+      temporalBeats: optionalStringArray(shot.temporalBeats, `Director shot ${index + 1} temporalBeats`),
+      ...(shotSize ? { shotSize } : {}),
+      ...(camera ? { camera } : {}),
+      ...(lighting ? { lighting } : {}),
+      negativeConstraints: optionalStringArray(shot.negativeConstraints, `Director shot ${index + 1} negativeConstraints`),
+      successCriteria: optionalStringArray(shot.successCriteria, `Director shot ${index + 1} successCriteria`),
     };
   });
+}
+
+function compileGenerationPrompt(providerId: string, route: RoutedShot, scene: ScriptScene): string {
+  const hasShotSpec = Boolean(route.subject || route.environment || route.visibleAction || route.temporalBeats.length
+    || route.shotSize || route.camera || route.lighting || route.negativeConstraints.length || route.successCriteria.length);
+  if (!hasShotSpec) return sanitizePrompt(route.generationPrompt || scene.visualPrompt);
+
+  const timeline = route.temporalBeats.map(sanitizePrompt).filter(Boolean);
+  const directorExecution = sanitizePrompt(route.generationPrompt);
+  const common = [
+    promptClause("导演执行描述", directorExecution),
+    promptClause("主体", route.subject),
+    promptClause("环境", route.environment),
+    promptClause("可见动作", route.visibleAction),
+    promptClause("景别", route.shotSize),
+    promptClause("镜头", route.camera),
+    promptClause("光线", route.lighting),
+  ].filter(Boolean);
+  const negative = route.negativeConstraints.map(sanitizePrompt).filter(Boolean);
+  const success = route.successCriteria.map(sanitizePrompt).filter(Boolean);
+
+  if (providerId === "seedance-video-v1") {
+    return [
+      "竖屏 9:16，动作连续、主体身份与环境连续。",
+      ...timeline,
+      ...common,
+      ...(success.length ? [`必须实现：${success.join("；")}`] : []),
+      ...(negative.length ? [`避免：${negative.join("；")}`] : []),
+    ].join("\n");
+  }
+  if (providerId === "hailuo-video-v1" || providerId === "wan-video-v1") {
+    return [
+      "竖屏 9:16，电影化写实画面，运动自然，主体连续。",
+      ...common,
+      ...(timeline.length ? [`动作时间线：${timeline.join("；")}`] : []),
+      ...(success.length ? [`画面验收：${success.join("；")}`] : []),
+      ...(negative.length ? [`负面约束：${negative.join("；")}`] : []),
+    ].join("\n");
+  }
+  return [
+    "竖屏 9:16，单张关键画面，主体清晰，构图可用于短视频剪辑。",
+    ...common,
+    ...(success.length ? [`画面验收：${success.join("；")}`] : []),
+    ...(negative.length ? [`负面约束：${negative.join("；")}`] : []),
+  ].join("\n");
+}
+
+function promptClause(label: string, value: string | undefined): string {
+  const safe = sanitizePrompt(value ?? "");
+  return safe ? `${label}：${safe}` : "";
+}
+
+function sanitizePrompt(value: string): string {
+  const forbidden = /审批|预算|版权|工作流|授权|付费|费用|合规/;
+  return value
+    .split(/[。；;\n]+/)
+    .map((part) => part.trim())
+    .filter((part) => part && !forbidden.test(part))
+    .join("；");
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function optionalStringArray(value: unknown, label: string): string[] {

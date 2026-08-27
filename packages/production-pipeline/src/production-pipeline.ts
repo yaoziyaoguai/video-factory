@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { parseProductionBlueprint } from "@video-factory/template-core";
 import {
   ProviderRegistry,
   WorkflowRunner,
@@ -8,17 +9,23 @@ import {
   type ArtifactDraft,
   type Capability,
   type HumanDecisionDraft,
+  type NodeInputOverrideDraft,
+  type NodeOverrideDraft,
   type NodeDefinition,
+  type NodeExecutionReceiptDraft,
   type NodeExecutionResult,
   type Provider,
+  type SpendAuthorizationDraft,
   type WorkflowContext,
   type WorkflowDefinition,
   type WorkflowRun,
 } from "@video-factory/workflow-core";
 import { validatePublishCopy, type PublishCopy, type PublishCopyWriter } from "./codex-publish-copy.js";
+import type { CodexTaskExecution, CodexTaskTrace } from "./codex-chat.js";
 import { validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput } from "./codex-screenwriter.js";
-import { parseBrief, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
-import { FileRunStore } from "./run-store.js";
+import { validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewReport } from "./codex-visual-review.js";
+import { parseBrief, parsePersistedBrief, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
+import { FileRunStore, RunLockedError } from "./run-store.js";
 import type { WorkerResponse } from "./python-worker-client.js";
 import {
   validateVisualDirectorPlan,
@@ -38,8 +45,12 @@ export interface ProductionPipelineOptions {
   directorAgent?: VisualDirectorAgent;
   publishCopyWriter?: PublishCopyWriter;
   assetProviders?: VisualAssetProviderCapability[];
+  providerRuntimeMetadata?: ProductionProviderRuntimeMetadata[];
+  visualReviewAgent?: VisualReviewAgent;
+  visualReviewAgents?: VisualReviewAgent[];
   clock?: () => string;
   idFactory?: (prefix: string) => string;
+  executionLeaseHeartbeatMs?: number;
 }
 
 export type ProductionRunListener = (run: WorkflowRun<ProductionBrief>) => Promise<void> | void;
@@ -54,6 +65,25 @@ interface ProviderConfig {
   capability: Capability;
   nodeId: string;
   parameters: Record<string, unknown>;
+  metadata?: ProductionProviderRuntimeMetadata;
+}
+
+const KNOWN_METERED_WORKER_PROVIDER_IDS = new Set([
+  "seedream-image-v1",
+  "seedance-video-v1",
+  "hailuo-video-v1",
+  "wan-video-v1",
+  "minimax-tts-v1",
+]);
+
+export interface ProductionProviderRuntimeMetadata {
+  id: string;
+  label: string;
+  modelId: string;
+  transport: "unix_socket" | "local_process" | "http_api";
+  billing: "subscription" | "metered" | "free" | "local_compute";
+  estimatedCostCny?: number;
+  maxAttempts?: number;
 }
 
 function productionNodeIds(brief: ProductionBrief): string[] {
@@ -65,12 +95,30 @@ function productionNodeIds(brief: ProductionBrief): string[] {
     "voice",
     "render",
     "technical-review",
+    ...(brief.providers.visualReview ? ["visual-review"] : []),
     "final-review",
     "publish-package",
   ];
 }
 
+function withPersistedBrief(
+  run: WorkflowRun<ProductionBrief>,
+  brief: ProductionBrief,
+): WorkflowRun<ProductionBrief> {
+  return { ...run, initialInput: brief };
+}
+
 const INTERRUPTED_RUN_ERROR = "应用重启中断了这次制作，请重新发起制作。已完成的产物仍保留在本次记录中。";
+const DEFAULT_EXECUTION_LEASE_HEARTBEAT_MS = 5_000;
+const DEFAULT_EXECUTION_LEASE_STALE_MS = 30_000;
+
+interface ExecutionLeaseHandle {
+  path: string;
+  token: string;
+  timer?: ReturnType<typeof setInterval>;
+  active: boolean;
+  pending: Promise<void>;
+}
 
 export class ProductionPipeline {
   private readonly runsRoot: string;
@@ -95,6 +143,7 @@ export class ProductionPipeline {
     const registry = this.createRegistry(brief);
     const runId = this.idFactory("run");
     let created = false;
+    let executionLease: ExecutionLeaseHandle | undefined;
     let resolveCreated!: () => void;
     let rejectCreated!: (error: unknown) => void;
     const firstCheckpoint = new Promise<void>((resolve, reject) => {
@@ -108,8 +157,14 @@ export class ProductionPipeline {
       checkpoint: async (run) => {
         const productionRun = run as WorkflowRun<ProductionBrief>;
         if (!created) {
-          await this.store.create(run);
-          created = true;
+          executionLease = await this.acquireExecutionLease(runId);
+          try {
+            await this.store.create(run);
+            created = true;
+          } catch (error) {
+            await this.releaseExecutionLease(executionLease);
+            throw error;
+          }
           await notifyListener(listener, productionRun);
           resolveCreated();
           return;
@@ -125,10 +180,27 @@ export class ProductionPipeline {
       }
     });
     await firstCheckpoint;
-    return { runId, completion };
+    const completionWithLeaseRelease = completion.then(
+      async (run) => {
+        await this.releaseExecutionLease(executionLease);
+        return run;
+      },
+      async (error: unknown) => {
+        await this.releaseExecutionLease(executionLease);
+        throw error;
+      },
+    );
+    return { runId, completion: completionWithLeaseRelease };
   }
 
   async show(runId: string): Promise<WorkflowRun<ProductionBrief>> {
+    const run = await this.store.load<ProductionBrief>(runId);
+    const brief = parsePersistedBrief(run.initialInput);
+    return new WorkflowRunner({ clock: this.clock, idFactory: this.idFactory })
+      .hydrateLegacyVersionStates(this.createWorkflow(brief), withPersistedBrief(run, brief), { allowVersionMismatch: true });
+  }
+
+  async loadPersisted(runId: string): Promise<WorkflowRun<ProductionBrief>> {
     return this.store.load<ProductionBrief>(runId);
   }
 
@@ -136,54 +208,225 @@ export class ProductionPipeline {
     return this.store.list<ProductionBrief>();
   }
 
-  async recoverInterruptedRuns(): Promise<number> {
+  async recoverInterruptedRuns(options: { leaseStaleAfterMs?: number } = {}): Promise<number> {
+    const leaseStaleAfterMs = options.leaseStaleAfterMs ?? DEFAULT_EXECUTION_LEASE_STALE_MS;
     const interrupted = (await this.store.list<ProductionBrief>())
       .filter((run) => run.status === "pending" || run.status === "running");
+    let recovered = 0;
     for (const run of interrupted) {
-      await this.store.update<ProductionBrief>(run.id, async (current) => {
-        const finishedAt = this.clock();
-        const runningNodeIndex = current.nodeRuns.findIndex((node) => node.status === "running");
-        const nodeRuns = current.nodeRuns.map((node) => ({ ...node }));
-        if (runningNodeIndex >= 0) {
-          nodeRuns[runningNodeIndex] = {
-            ...nodeRuns[runningNodeIndex]!,
+      if (await this.hasFreshExecutionLease(run.id, leaseStaleAfterMs)) continue;
+      let recoveryLease: ExecutionLeaseHandle | undefined;
+      try {
+        recoveryLease = await this.acquireExecutionLease(run.id, true);
+        await this.store.update<ProductionBrief>(run.id, async (current) => {
+          const finishedAt = this.clock();
+          const runningNodeIndex = current.nodeRuns.findIndex((node) => node.status === "running");
+          const nodeRuns = current.nodeRuns.map((node) => ({ ...node }));
+          if (runningNodeIndex >= 0) {
+            nodeRuns[runningNodeIndex] = {
+              ...nodeRuns[runningNodeIndex]!,
+              status: "failed",
+              finishedAt,
+              error: INTERRUPTED_RUN_ERROR,
+            };
+          } else {
+            const completedNodeIds = new Set(nodeRuns.map((node) => node.nodeId));
+            const interruptedNodeId = productionNodeIds(current.initialInput).find((nodeId) => !completedNodeIds.has(nodeId))
+              ?? "publish-package";
+            nodeRuns.push({
+              nodeId: interruptedNodeId,
+              status: "failed",
+              startedAt: finishedAt,
+              finishedAt,
+              artifactIds: [],
+              qualityGateResults: [],
+              error: INTERRUPTED_RUN_ERROR,
+            });
+          }
+          return {
+            ...current,
+            revision: current.revision + 1,
             status: "failed",
             finishedAt,
-            error: INTERRUPTED_RUN_ERROR,
+            nodeRuns,
           };
-        } else {
-          const completedNodeIds = new Set(nodeRuns.map((node) => node.nodeId));
-          const interruptedNodeId = productionNodeIds(current.initialInput).find((nodeId) => !completedNodeIds.has(nodeId))
-            ?? "publish-package";
-          nodeRuns.push({
-            nodeId: interruptedNodeId,
-            status: "failed",
-            startedAt: finishedAt,
-            finishedAt,
-            artifactIds: [],
-            qualityGateResults: [],
-            error: INTERRUPTED_RUN_ERROR,
-          });
-        }
-        return {
-          ...current,
-          revision: current.revision + 1,
-          status: "failed",
-          finishedAt,
-          nodeRuns,
-        };
-      });
+        });
+      } catch (error) {
+        if (error instanceof RunLockedError) continue;
+        throw error;
+      } finally {
+        await this.releaseExecutionLease(recoveryLease);
+      }
+      recovered += 1;
     }
-    return interrupted.length;
+    return recovered;
+  }
+
+  private async acquireExecutionLease(runId: string, exclusive = false): Promise<ExecutionLeaseHandle> {
+    const leasePath = this.executionLeasePath(runId);
+    await mkdir(path.dirname(leasePath), { recursive: true });
+    const handle: ExecutionLeaseHandle = {
+      path: leasePath,
+      token: randomUUID(),
+      active: true,
+      pending: Promise.resolve(),
+    };
+    if (exclusive) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await writeFile(handle.path, executionLeasePayload(handle.token), { encoding: "utf8", flag: "wx", mode: 0o600 });
+          break;
+        } catch (error) {
+          if (!hasCode(error, "EEXIST")) throw error;
+          if (attempt > 0 || await this.hasFreshExecutionLease(runId, DEFAULT_EXECUTION_LEASE_STALE_MS)) {
+            throw new RunLockedError(runId);
+          }
+          await rm(handle.path, { force: true });
+        }
+      }
+    } else {
+      await this.writeExecutionLease(handle);
+    }
+    const heartbeatMs = this.options.executionLeaseHeartbeatMs ?? DEFAULT_EXECUTION_LEASE_HEARTBEAT_MS;
+    handle.timer = setInterval(() => {
+      if (!handle.active) return;
+      handle.pending = handle.pending.then(() => this.writeExecutionLease(handle)).catch(() => undefined);
+    }, heartbeatMs);
+    handle.timer.unref();
+    return handle;
+  }
+
+  private async writeExecutionLease(handle: ExecutionLeaseHandle): Promise<void> {
+    if (!handle.active) return;
+    const temporary = `${handle.path}.tmp-${process.pid}-${randomUUID()}`;
+    await writeFile(temporary, executionLeasePayload(handle.token), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    try {
+      if (handle.active) await rename(temporary, handle.path);
+    } finally {
+      await rm(temporary, { force: true });
+    }
+  }
+
+  private async releaseExecutionLease(handle: ExecutionLeaseHandle | undefined): Promise<void> {
+    if (!handle) return;
+    handle.active = false;
+    if (handle.timer) clearInterval(handle.timer);
+    await handle.pending;
+    try {
+      const current = JSON.parse(await readFile(handle.path, "utf8")) as { token?: unknown };
+      if (current.token === handle.token) await rm(handle.path, { force: true });
+    } catch (error) {
+      if (!hasCode(error, "ENOENT") && !(error instanceof SyntaxError)) throw error;
+    }
+  }
+
+  private async hasFreshExecutionLease(runId: string, staleAfterMs: number): Promise<boolean> {
+    try {
+      const lease = JSON.parse(await readFile(this.executionLeasePath(runId), "utf8")) as { heartbeatAt?: unknown };
+      if (typeof lease.heartbeatAt !== "string") return false;
+      const heartbeatAt = Date.parse(lease.heartbeatAt);
+      const now = Date.now();
+      return Number.isFinite(heartbeatAt) && Number.isFinite(now) && now - heartbeatAt <= staleAfterMs;
+    } catch {
+      return false;
+    }
+  }
+
+  private executionLeasePath(runId: string): string {
+    return path.join(this.runsRoot, runId, ".execution-lease.json");
   }
 
   async decide(runId: string, decision: HumanDecisionDraft): Promise<WorkflowRun<ProductionBrief>> {
-    return this.store.update<ProductionBrief>(runId, async (previous) => {
-      const brief = parseBrief(previous.initialInput);
+    return this.runPersistedTransition(runId, async (previous, checkpoint) => {
+      const brief = parsePersistedBrief(previous.initialInput);
       const registry = this.createRegistry(brief);
-      const runner = new WorkflowRunner({ providers: registry, clock: this.clock, idFactory: this.idFactory });
-      return runner.resume(this.createWorkflow(brief, decision), previous, decision);
+      const runner = new WorkflowRunner({
+        providers: registry,
+        clock: this.clock,
+        idFactory: this.idFactory,
+        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+      });
+      return runner.resume(this.createWorkflow(brief, decision), withPersistedBrief(previous, brief), decision);
     });
+  }
+
+  async applyNodeOverride(runId: string, override: NodeOverrideDraft): Promise<WorkflowRun<ProductionBrief>> {
+    return this.runPersistedTransition(runId, async (previous) => {
+      await verifyNodeOverrideBoundary(this.store.runDirectory(runId), override);
+      const brief = parsePersistedBrief(previous.initialInput);
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+      });
+      return runner.applyNodeOverride(this.createWorkflow(brief), withPersistedBrief(previous, brief), override);
+    });
+  }
+
+  async applyNodeInputOverride(runId: string, override: NodeInputOverrideDraft): Promise<WorkflowRun<ProductionBrief>> {
+    return this.runPersistedTransition(runId, async (previous) => {
+      await verifyNodeInputOverrideBoundary(this.store.runDirectory(runId), override);
+      const brief = parsePersistedBrief(previous.initialInput);
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+      });
+      return runner.applyNodeInputOverride(this.createWorkflow(brief), withPersistedBrief(previous, brief), override);
+    });
+  }
+
+  async authorizeSpend(runId: string, authorization: SpendAuthorizationDraft): Promise<WorkflowRun<ProductionBrief>> {
+    return this.runPersistedTransition(runId, async (previous, checkpoint) => {
+      const brief = parsePersistedBrief(previous.initialInput);
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+      });
+      return runner.authorizeSpend(this.createWorkflow(brief), withPersistedBrief(previous, brief), authorization);
+    });
+  }
+
+  async resumeStale(runId: string): Promise<WorkflowRun<ProductionBrief>> {
+    return this.runPersistedTransition(runId, async (previous, checkpoint) => {
+      const brief = parsePersistedBrief(previous.initialInput);
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+      });
+      return runner.resumeStale(this.createWorkflow(brief), withPersistedBrief(previous, brief));
+    });
+  }
+
+  private async runPersistedTransition(
+    runId: string,
+    transition: (
+      previous: WorkflowRun<ProductionBrief>,
+      checkpoint: (run: WorkflowRun<ProductionBrief>) => Promise<void>,
+    ) => Promise<WorkflowRun<ProductionBrief>>,
+  ): Promise<WorkflowRun<ProductionBrief>> {
+    const lease = await this.acquireExecutionLease(runId, true);
+    try {
+      const previous = await this.store.load<ProductionBrief>(runId);
+      let persisted = false;
+      const checkpoint = async (run: WorkflowRun<ProductionBrief>) => {
+        if (!persisted) {
+          await this.store.save(run, previous.revision);
+          persisted = true;
+          return;
+        }
+        await this.store.checkpoint(run);
+      };
+      const result = await transition(previous, checkpoint);
+      if (!persisted) await this.store.save(result, previous.revision);
+      return result;
+    } finally {
+      await this.releaseExecutionLease(lease);
+    }
   }
 
   private createRegistry(brief: ProductionBrief): ProviderRegistry {
@@ -202,7 +445,16 @@ export class ProductionPipeline {
       }
       registry.register(new VisualDirectorProvider(directorAgent));
     }
-    for (const config of providerConfigs(brief)) {
+    if (brief.providers.visualReview) {
+      const visualReviewAgent = [
+        ...(this.options.visualReviewAgents ?? []),
+        ...(this.options.visualReviewAgent ? [this.options.visualReviewAgent] : []),
+      ].find((agent) => agent.id === brief.providers.visualReview);
+      registry.register(visualReviewAgent?.id === brief.providers.visualReview
+        ? new VisualReviewProvider(visualReviewAgent)
+        : new UnavailableVisualReviewProvider(brief.providers.visualReview));
+    }
+    for (const config of providerConfigs(brief, this.options)) {
       registry.register(new WorkerProvider(config, this.options.worker, this.runsRoot));
     }
     return registry;
@@ -231,12 +483,18 @@ export class ProductionPipeline {
       dependsOn,
       getInput,
       execute: async (input, context) => {
-        const response = await context.resolveProvider<Record<string, unknown>, WorkerResponse>({
+        const provider = context.resolveProvider<Record<string, unknown>, WorkerResponse>({
           capability,
           providerId,
-        }).run(input as Record<string, unknown>, context);
-        return workerResponseToNodeResult(response, context, parentNodeIds);
+        });
+        const response = await provider.run(input as Record<string, unknown>, context);
+        return {
+          ...workerResponseToNodeResult(response, context, parentNodeIds),
+          receipt: providerExecutionReceipt(provider, response),
+        };
       },
+      validateInputOverride: (input) => requireOutputRecord(input, `${id} input`),
+      validateOverride: (output) => validateWorkerNodeOverride(id, output),
     });
 
     const nodes: NodeDefinition[] = [
@@ -246,11 +504,17 @@ export class ProductionPipeline {
         role: "制片人",
         capability: "brief.validate",
         mode: "automatic",
-        execute: () => ({
+        getInput: (context) => context.initialInput as ProductionBrief,
+        execute: (input) => {
+          const validatedBrief = validateBriefInputOverride(input, brief);
+          return ({
           status: "succeeded",
-          output: brief,
-          artifacts: [jsonArtifact("production_brief", brief, "video-factory/brief-v1", "brief", [])],
-        }),
+          output: validatedBrief,
+          artifacts: [jsonArtifact("production_brief", validatedBrief, "video-factory/brief-v1", "brief", [])],
+          });
+        },
+        validateInputOverride: (input) => validateBriefInputOverride(input, brief),
+        validateOverride: (output) => validateBriefInputOverride(output, brief),
       },
       ...(brief.providers.script === "codex-screenwriter-v1"
         ? [screenwriterNode(brief, this.options.screenwriterAgent, this.runsRoot)]
@@ -307,16 +571,31 @@ export class ProductionPipeline {
         }),
         "技术质检",
       ),
+      ...(brief.providers.visualReview ? [visualReviewNode(brief, this.runsRoot)] : []),
       {
         id: "final-review",
         label: "Human final review",
         role: "总导演",
         capability: "quality.review.human",
         mode: brief.reviewMode === "manual" ? "manual" : "automatic",
-        dependsOn: ["technical-review"],
-        getInput: (context) => context.outputs.get("technical-review"),
+        dependsOn: [brief.providers.visualReview ? "visual-review" : "technical-review"],
+        getInput: (context) => context.outputs.get(brief.providers.visualReview ? "visual-review" : "technical-review"),
         execute: (input) => {
           if (brief.reviewMode === "automatic") {
+            const recommendation = visualReviewRecommendation(input);
+            if (recommendation === "reject" || recommendation === "revise") {
+              return {
+                status: "needs_human",
+                output: input,
+                intervention: {
+                  reason: recommendation === "reject"
+                    ? "视觉审片判定存在阻断问题，请人工确认后再继续。"
+                    : "视觉审片建议修改，请人工确认是否继续。",
+                  requiredAction: "approve",
+                  options: ["approve", "reject"],
+                },
+              };
+            }
             return { status: "succeeded", output: input };
           }
           return {
@@ -329,6 +608,8 @@ export class ProductionPipeline {
             },
           };
         },
+        validateInputOverride: (input) => requireOutputRecord(input, "final-review input"),
+        validateOverride: (output) => requireOutputRecord(output, "final-review"),
       },
       {
         id: "publish-package",
@@ -337,21 +618,36 @@ export class ProductionPipeline {
         capability: "publish.package",
         mode: "automatic",
         dependsOn: ["final-review"],
-        execute: async (_input, context) => {
-          await verifyStoredArtifacts(context.artifacts);
-          const artifactIds = context.artifacts.map((artifact) => artifact.id);
-          const scriptParentIds = context.artifacts
+        getInput: (context) => ({
+          scriptPath: outputPath(context, "script", "scriptPath"),
+          brief: {
+            title: brief.title,
+            angle: brief.angle,
+            audience: brief.audience,
+            nicheSlug: brief.nicheSlug,
+            platform: brief.platform,
+          },
+        }),
+        validateInputOverride: (input) => validatePublishPackageInput(input),
+        execute: async (input, context) => {
+          const packageInput = validatePublishPackageInput(input);
+          const publishBrief: ProductionBrief = { ...brief, ...packageInput.brief };
+          const currentArtifacts = currentArtifactsForPackaging(context, brief);
+          await verifyStoredArtifacts(currentArtifacts);
+          const artifactIds = currentArtifacts.map((artifact) => artifact.id);
+          const scriptParentIds = currentArtifacts
             .filter((artifact) => artifact.producer?.nodeId === "script")
             .map((artifact) => artifact.id);
+          const publishAttempt = await reserveAttemptDirectory(path.join(this.runsRoot, context.runId, "publish"));
           // 文案是增强能力：失败不让已过审的成片失败，也不暴露异常文本；pipeline 层不重试。
           const copyOutcome = await generatePublishCopy({
             writer: this.options.publishCopyWriter,
-            brief,
-            scriptPath: outputPath(context, "script", "scriptPath"),
+            brief: publishBrief,
+            scriptPath: packageInput.scriptPath,
           });
           const copyArtifacts: ArtifactDraft[] = [];
           if (copyOutcome.writerId !== undefined) {
-            const copyPath = path.join(this.runsRoot, context.runId, "publish", "publish_copy.json");
+            const copyPath = path.join(publishAttempt.directory, "publish_copy.json");
             const copyContent = `${JSON.stringify(copyOutcome.copy, null, 2)}\n`;
             await writeTextAtomically(copyPath, copyContent);
             copyArtifacts.push(fileArtifact(
@@ -364,13 +660,22 @@ export class ProductionPipeline {
               scriptParentIds,
               copyOutcome.writerId,
               "AI-generated platform copy; review before upload.",
+              publishAttempt.attempt,
             ));
           }
-          const packagePath = path.join(this.runsRoot, context.runId, "publish", "publish_package.json");
+          const copyTraceArtifact = await persistModelTrace({
+            trace: copyOutcome.trace,
+            attemptDirectory: publishAttempt.directory,
+            nodeId: "publish-package",
+            attempt: publishAttempt.attempt,
+            parentArtifactIds: scriptParentIds,
+          });
+          if (copyTraceArtifact) copyArtifacts.push(copyTraceArtifact);
+          const packagePath = path.join(publishAttempt.directory, "publish_package.json");
           const payload = {
             version: "video-factory/publish-package-v1",
             runId: context.runId,
-            platform: brief.platform,
+            platform: publishBrief.platform,
             title: copyOutcome.copy.title,
             copy: {
               source: copyOutcome.source,
@@ -395,7 +700,7 @@ export class ProductionPipeline {
               platformDeclarationRequired: true,
               humanReviewRequiredBeforeUpload: true,
             },
-            artifacts: context.artifacts,
+            artifacts: currentArtifacts,
           };
           const packageContent = `${JSON.stringify(payload, null, 2)}\n`;
           await writeTextAtomically(packagePath, packageContent);
@@ -413,18 +718,20 @@ export class ProductionPipeline {
                 artifactIds,
                 "video-factory-ts-v1",
                 "Generated publish package; platform upload remains a manual action.",
+                publishAttempt.attempt,
               ),
               ...copyArtifacts,
             ],
           };
         },
+        validateOverride: (output) => validatePathOutput(output, "publishPackagePath", "publish-package"),
       },
     ];
 
     return {
       id: "daily-production",
       name: "Daily short-video production",
-      version: brief.director ? "1.1.0" : "1.0.0",
+      version: brief.providers.visualReview ? "1.2.0" : brief.director ? "1.1.0" : "1.0.0",
       nodes,
     };
   }
@@ -443,17 +750,43 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
     this.capability = config.capability;
   }
 
+  get label(): string { return this.config.metadata?.label ?? this.id; }
+  get modelId(): string { return this.config.metadata?.modelId ?? this.id; }
+  get transport(): ProductionProviderRuntimeMetadata["transport"] { return this.config.metadata?.transport ?? "local_process"; }
+  get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.config.metadata?.billing ?? "local_compute"; }
+  get estimatedCostCny(): number { return this.config.metadata?.estimatedCostCny ?? 0; }
+  get maxCostCny(): number {
+    return this.config.metadata?.billing === "metered" && typeof this.config.parameters.maxCostCny === "number"
+      ? this.config.parameters.maxCostCny
+      : 0;
+  }
+  get maxAttempts(): number {
+    return this.config.metadata?.billing === "metered" && typeof this.config.metadata.maxAttempts === "number"
+      ? this.config.metadata.maxAttempts
+      : 1;
+  }
+
   async run(input: Record<string, unknown>, context: WorkflowContext): Promise<WorkerResponse> {
-    const outputDir = path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId, "attempt-1");
+    const attempt = await reserveAttemptDirectory(path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId));
+    const outputDir = attempt.directory;
+    const parameters: Record<string, unknown> = { ...this.config.parameters, providerId: this.config.id };
+    if (this.billing === "metered") {
+      const authorization = context.spendAuthorization;
+      if (!authorization || authorization.providerId !== this.id || authorization.modelId !== this.modelId) {
+        throw new Error(`Metered provider '${this.id}' has no matching active authorization.`);
+      }
+      parameters.maxCostCny = authorization.maxCostCny;
+      parameters.maxAttempts = authorization.maxAttempts;
+    }
     const response = await this.worker.run({
       protocolVersion: WORKER_PROTOCOL_VERSION,
       commandId: context.nextId("command"),
       runId: context.runId,
       nodeRunId: this.config.nodeId,
-      attempt: 1,
+      attempt: attempt.attempt,
       capability: this.config.capability,
       input,
-      parameters: { ...this.config.parameters, providerId: this.config.id },
+      parameters,
       outputDir,
     });
     await verifyWorkerArtifacts(response, outputDir);
@@ -461,8 +794,12 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
   }
 }
 
-class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, unknown> {
+class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, CodexTaskExecution<unknown>> {
   readonly capability: Capability = "storyboard.plan";
+  readonly label = "Codex 视觉导演";
+  readonly modelId = "codex";
+  readonly transport = "unix_socket" as const;
+  readonly billing = "subscription" as const;
 
   constructor(private readonly agent: VisualDirectorAgent) {}
 
@@ -470,13 +807,19 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, unkno
     return this.agent.id;
   }
 
-  run(input: VisualDirectorAgentInput): Promise<unknown> {
-    return this.agent.plan(input);
+  async run(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<unknown>> {
+    return this.agent.planDetailed
+      ? this.agent.planDetailed(input)
+      : { output: await this.agent.plan(input) };
   }
 }
 
-class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, unknown> {
+class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTaskExecution<unknown>> {
   readonly capability: Capability = "script.draft";
+  readonly label = "Codex 编剧";
+  readonly modelId = "codex";
+  readonly transport = "unix_socket" as const;
+  readonly billing = "subscription" as const;
 
   constructor(private readonly agent: ScreenwriterAgent) {}
 
@@ -484,8 +827,41 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, unknown> 
     return this.agent.id;
   }
 
-  run(input: ScreenwriterAgentInput): Promise<unknown> {
-    return this.agent.draft(input);
+  async run(input: ScreenwriterAgentInput): Promise<CodexTaskExecution<unknown>> {
+    return this.agent.draftDetailed
+      ? this.agent.draftDetailed(input)
+      : { output: await this.agent.draft(input) };
+  }
+}
+
+class VisualReviewProvider implements Provider<VisualReviewAgentInput, CodexTaskExecution<VisualReviewReport>> {
+  readonly capability: Capability = "quality.review.visual";
+  readonly label = "Codex 视觉审片";
+  readonly transport = "unix_socket" as const;
+  readonly billing = "subscription" as const;
+
+  constructor(private readonly agent: VisualReviewAgent) {}
+
+  get id(): string { return this.agent.id; }
+  get modelId(): string { return this.agent.modelId; }
+  async run(input: VisualReviewAgentInput): Promise<CodexTaskExecution<VisualReviewReport>> {
+    return this.agent.reviewDetailed
+      ? this.agent.reviewDetailed(input)
+      : { output: await this.agent.review(input) };
+  }
+}
+
+class UnavailableVisualReviewProvider implements Provider<VisualReviewAgentInput, CodexTaskExecution<VisualReviewReport>> {
+  readonly capability: Capability = "quality.review.visual";
+  readonly label = "视觉审片（暂不可用）";
+  readonly modelId = "configured-model";
+  readonly transport = "unix_socket" as const;
+  readonly billing = "subscription" as const;
+
+  constructor(readonly id: string) {}
+
+  run(): Promise<CodexTaskExecution<VisualReviewReport>> {
+    throw new Error(`Visual review provider '${this.id}' is temporarily unavailable; configure it and regenerate this node.`);
   }
 }
 
@@ -506,7 +882,9 @@ function directorNode(
     mode: "automatic",
     dependsOn: ["script"],
     getInput: (context) => ({ scriptPath: outputPath(context, "script", "scriptPath") }),
+    validateInputOverride: (input) => ({ scriptPath: requiredOutputString(input, "scriptPath") }),
     execute: async (input, context) => {
+      const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "visual-direction"));
       const scriptPath = requiredOutputString(input, "scriptPath");
       const script = JSON.parse(await readFile(scriptPath, "utf8")) as { scenes?: unknown };
       const scenes = parseDirectorScenes(script.scenes);
@@ -519,12 +897,13 @@ function directorNode(
           label: provider.label,
           billing: provider.billing,
           modes: [...provider.modes],
+          deliveryTypes: [...provider.deliveryTypes],
           strengths: [...(provider.strengths ?? provider.modes)],
           constraints: [...(provider.constraints ?? [])],
           estimatedCnyPerClip: provider.estimatedCnyPerClip ?? 0,
         };
       });
-      const rawPlan = await context.resolveProvider<VisualDirectorAgentInput, unknown>({
+      const execution = await context.resolveProvider<VisualDirectorAgentInput, CodexTaskExecution<unknown>>({
         capability: "storyboard.plan",
         providerId,
       }).run({
@@ -535,6 +914,7 @@ function directorNode(
           platform: brief.platform,
           durationSeconds: brief.durationSeconds,
           requestedProfileId: direction.profileId,
+          ...(brief.templateSnapshot ? { templateBlueprint: brief.templateSnapshot.resolvedBlueprint } : {}),
           ...(brief.editorial ? { editorial: brief.editorial } : {}),
         },
         scenes,
@@ -542,19 +922,30 @@ function directorNode(
         economics: brief.economics,
       }, context);
       const selectedCatalog = direction.assetProviderIds.map((id) => catalog.get(id)!);
-      const plan = validateVisualDirectorPlan(rawPlan, {
+      const plan = validateVisualDirectorPlan(execution.output, {
         scenePositions: scenes.map((scene) => scene.position),
+        sceneDurations: Object.fromEntries(scenes.map((scene) => [scene.position, scene.duration])),
         allowedProviderIds: direction.assetProviderIds,
         generativeProviderIds: selectedCatalog.filter((provider) => provider.generative).map((provider) => provider.id),
+        providerDeliveryTypes: Object.fromEntries(
+          selectedCatalog.map((provider) => [provider.id, [...provider.deliveryTypes]]),
+        ),
         estimatedCnyPerClip: Object.fromEntries(selectedCatalog.map((provider) => [provider.id, provider.estimatedCnyPerClip ?? 0])),
         economics: brief.economics,
       });
-      const planPath = path.join(runsRoot, context.runId, "nodes", "visual-direction", "attempt-1", "director_plan.json");
+      const planPath = path.join(attempt.directory, "director_plan.json");
       const content = `${JSON.stringify(plan, null, 2)}\n`;
       await writeTextAtomically(planPath, content);
       const parentArtifactIds = context.artifacts
         .filter((artifact) => artifact.producer?.nodeId === "script")
         .map((artifact) => artifact.id);
+      const traceArtifact = await persistModelTrace({
+        trace: execution.trace,
+        attemptDirectory: attempt.directory,
+        nodeId: "visual-direction",
+        attempt: attempt.attempt,
+        parentArtifactIds,
+      });
       return {
         status: "succeeded",
         output: { directorPlanPath: planPath },
@@ -568,9 +959,11 @@ function directorNode(
           parentArtifactIds,
           providerId,
           "AI-generated director plan; source choices and factual framing require review.",
-        )],
+          attempt.attempt,
+        ), ...(traceArtifact ? [traceArtifact] : [])],
       };
     },
+    validateOverride: (output) => validatePathOutput(output, "directorPlanPath", "visual-direction"),
   };
 }
 
@@ -594,29 +987,50 @@ function screenwriterNode(
     providerId,
     mode: "automatic",
     dependsOn: ["brief"],
-    getInput: () => ({ brief }),
-    execute: async (_input, context) => {
-      const rawDraft = await context.resolveProvider<ScreenwriterAgentInput, unknown>({
+    getInput: (context) => ({ brief: screenwriterBrief(parseBrief(context.outputs.get("brief"))) }),
+    validateInputOverride: (input) => validateScreenwriterInput(input),
+    execute: async (input, context) => {
+      const request = validateScreenwriterInput(input);
+      const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "script"));
+      const execution = await context.resolveProvider<ScreenwriterAgentInput, CodexTaskExecution<unknown>>({
         capability: "script.draft",
         providerId,
-      }).run({
-        brief: {
-          title: brief.title,
-          angle: brief.angle,
-          audience: brief.audience,
-          nicheSlug: brief.nicheSlug,
-          platform: brief.platform,
-          durationSeconds: brief.durationSeconds,
-          ...(brief.editorial ? { editorial: brief.editorial } : {}),
+      }).run(request, context);
+      const requestedBrief = request.brief;
+      const draft = validateScriptDraft(execution.output, { durationSeconds: requestedBrief.durationSeconds });
+      const scriptPath = path.join(attempt.directory, "script.json");
+      const script = {
+        title: requestedBrief.title,
+        ...(draft.viewerPromise ? { viewerPromise: draft.viewerPromise } : {}),
+        ...(draft.narrativeArc ? { narrativeArc: draft.narrativeArc } : {}),
+        hook: draft.scenes[0]!.narration,
+        duration_target: requestedBrief.durationSeconds,
+        disclosure_required: true,
+        niche_slug: requestedBrief.nicheSlug,
+        structure: "AI 编剧短视频结构",
+        quality_checks: requestedBrief.editorial?.guardrails.length
+          ? requestedBrief.editorial.guardrails
+          : ["核验事实与数据", "人工审片后再发布"],
+        platform_notes: {
+          platform: requestedBrief.platform,
+          audience: requestedBrief.audience,
+          angle: requestedBrief.angle,
         },
-      }, context);
-      const draft = validateScriptDraft(rawDraft, { durationSeconds: brief.durationSeconds });
-      const scriptPath = path.join(runsRoot, context.runId, "nodes", "script", "attempt-1", "script.json");
-      const content = `${JSON.stringify(draft, null, 2)}\n`;
+        hashtags: [],
+        scenes: draft.scenes,
+      };
+      const content = `${JSON.stringify(script, null, 2)}\n`;
       await writeTextAtomically(scriptPath, content);
       const parentArtifactIds = context.artifacts
         .filter((artifact) => artifact.producer?.nodeId === "brief")
         .map((artifact) => artifact.id);
+      const traceArtifact = await persistModelTrace({
+        trace: execution.trace,
+        attemptDirectory: attempt.directory,
+        nodeId: "script",
+        attempt: attempt.attempt,
+        parentArtifactIds,
+      });
       return {
         status: "succeeded",
         output: { scriptPath },
@@ -630,9 +1044,11 @@ function screenwriterNode(
           parentArtifactIds,
           providerId,
           "AI-generated script; facts and claims require human review before publication.",
-        )],
+          attempt.attempt,
+        ), ...(traceArtifact ? [traceArtifact] : [])],
       };
     },
+    validateOverride: (output) => validatePathOutput(output, "scriptPath", "script"),
   };
 }
 
@@ -641,6 +1057,7 @@ interface PublishCopyOutcome {
   source: string;
   fallbackReason?: string;
   writerId?: string;
+  trace?: CodexTaskTrace;
 }
 
 // 发布文案的门面：成功返回模型结果，任何失败都降级为 brief-title 回退，不向上抛异常。
@@ -652,7 +1069,7 @@ async function generatePublishCopy(input: {
   if (!input.writer) return fallbackCopyOutcome(input.brief);
   try {
     const narrations = await readNarrations(input.scriptPath);
-    const rawCopy = await input.writer.write({
+    const request = {
       platform: input.brief.platform,
       brief: {
         title: input.brief.title,
@@ -661,9 +1078,17 @@ async function generatePublishCopy(input: {
         nicheSlug: input.brief.nicheSlug,
       },
       narrations,
-    });
-    const copy = validatePublishCopy(rawCopy);
-    return { copy, source: input.writer.id, writerId: input.writer.id };
+    };
+    const execution = input.writer.writeDetailed
+      ? await input.writer.writeDetailed(request)
+      : { output: await input.writer.write(request) };
+    const copy = validatePublishCopy(execution.output);
+    return {
+      copy,
+      source: input.writer.id,
+      writerId: input.writer.id,
+      ...(execution.trace ? { trace: execution.trace } : {}),
+    };
   } catch {
     return fallbackCopyOutcome(input.brief);
   }
@@ -690,8 +1115,8 @@ async function readNarrations(scriptPath: string): Promise<string[]> {
     }
     return narration.trim();
   });
-  if (narrations.length < 3 || narrations.length > 10) {
-    throw new Error("Publish copy requires 3 to 10 script narrations.");
+  if (narrations.length < 3 || narrations.length > 24) {
+    throw new Error("Publish copy requires 3 to 24 script narrations.");
   }
   return narrations;
 }
@@ -712,7 +1137,117 @@ function parseDirectorScenes(value: unknown): VisualDirectorAgentInput["scenes"]
       duration,
       narration: requiredOutputString(scene, "narration"),
       visualPrompt: requiredOutputString(scene, "visual_prompt"),
+      visualStrategy: visualStrategy(scene.visual_strategy),
+      visibleAction: optionalOutputString(scene.visible_action) ?? requiredOutputString(scene, "visual_prompt"),
+      ...(optionalOutputString(scene.on_screen_text) !== undefined
+        ? { onScreenText: optionalOutputString(scene.on_screen_text)! }
+        : {}),
+      ...(optionalOutputString(scene.sound_cue) !== undefined
+        ? { soundCue: optionalOutputString(scene.sound_cue)! }
+        : {}),
+      successCriteria: optionalOutputStringList(scene.success_criteria),
+      failureConditions: optionalOutputStringList(scene.failure_conditions),
+      searchTerms: optionalOutputStringList(scene.search_terms),
     };
+  });
+}
+
+function visualStrategy(value: unknown): VisualDirectorAgentInput["scenes"][number]["visualStrategy"] {
+  return value === "stock" || value === "image" || value === "generated" || value === "local" ? value : "stock";
+}
+
+function optionalOutputString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function optionalOutputStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => typeof entry === "string" && entry.trim() ? [entry.trim()] : []);
+}
+
+function screenwriterBrief(brief: ProductionBrief): ScreenwriterAgentInput["brief"] {
+  return {
+    title: brief.title,
+    angle: brief.angle,
+    audience: brief.audience,
+    nicheSlug: brief.nicheSlug,
+    platform: brief.platform,
+    durationSeconds: brief.durationSeconds,
+    ...(brief.templateSnapshot ? { templateBlueprint: brief.templateSnapshot.resolvedBlueprint } : {}),
+    ...(brief.editorial ? { editorial: brief.editorial } : {}),
+  };
+}
+
+function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
+  const input = requireOutputRecord(value, "script input");
+  const rawBrief = requireOutputRecord(input.brief, "script input brief");
+  if (rawBrief.protocolVersion === "video-factory/brief-v1") {
+    return { brief: screenwriterBrief(parseBrief(rawBrief)) };
+  }
+  const durationSeconds = Number(rawBrief.durationSeconds);
+  if (!Number.isInteger(durationSeconds) || durationSeconds < 20 || durationSeconds > 180) {
+    throw new Error("script input brief.durationSeconds must be an integer between 20 and 180.");
+  }
+  const brief: ScreenwriterAgentInput["brief"] = {
+    title: requiredOutputString(rawBrief, "title"),
+    angle: requiredOutputString(rawBrief, "angle"),
+    audience: requiredOutputString(rawBrief, "audience"),
+    nicheSlug: requiredOutputString(rawBrief, "nicheSlug"),
+    platform: requiredOutputString(rawBrief, "platform"),
+    durationSeconds,
+  };
+  if (rawBrief.templateBlueprint !== undefined) {
+    brief.templateBlueprint = parseProductionBlueprint(rawBrief.templateBlueprint);
+  }
+  if (rawBrief.editorial !== undefined) {
+    const editorial = requireOutputRecord(rawBrief.editorial, "script input editorial");
+    if (editorial.verdict !== "produce_video" && editorial.verdict !== "produce_image_story") {
+      throw new Error("script input editorial.verdict is invalid.");
+    }
+    brief.editorial = {
+      verdict: editorial.verdict,
+      reasons: stringList(editorial.reasons, "script input editorial.reasons"),
+      guardrails: stringList(editorial.guardrails, "script input editorial.guardrails"),
+    };
+  }
+  return { brief };
+}
+
+function validateVisualReviewInput(value: unknown, directorEnabled: boolean): VisualReviewAgentInput {
+  const input = requireOutputRecord(value, "visual-review input");
+  const request: VisualReviewAgentInput = {
+    videoPath: requiredOutputString(input, "videoPath"),
+    runRoot: requiredOutputString(input, "runRoot"),
+    scriptPath: requiredOutputString(input, "scriptPath"),
+    renderManifestPath: requiredOutputString(input, "renderManifestPath"),
+  };
+  if (directorEnabled) request.directorPlanPath = requiredOutputString(input, "directorPlanPath");
+  return request;
+}
+
+function validatePublishPackageInput(value: unknown): {
+  scriptPath: string;
+  brief: Pick<ProductionBrief, "title" | "angle" | "audience" | "nicheSlug" | "platform">;
+} {
+  const input = requireOutputRecord(value, "publish-package input");
+  const brief = requireOutputRecord(input.brief, "publish-package input brief");
+  return {
+    scriptPath: requiredOutputString(input, "scriptPath"),
+    brief: {
+      title: requiredOutputString(brief, "title"),
+      angle: requiredOutputString(brief, "angle"),
+      audience: requiredOutputString(brief, "audience"),
+      nicheSlug: requiredOutputString(brief, "nicheSlug"),
+      platform: requiredOutputString(brief, "platform"),
+    },
+  };
+}
+
+function stringList(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${field} must be an array.`);
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || !entry.trim()) throw new Error(`${field}[${index}] must be a non-empty string.`);
+    return entry.trim();
   });
 }
 
@@ -725,25 +1260,134 @@ function requiredOutputString(value: unknown, field: string): string {
   return item.trim();
 }
 
-function providerConfigs(brief: ProductionBrief): ProviderConfig[] {
+function visualReviewNode(
+  brief: ProductionBrief,
+  runsRoot: string,
+): NodeDefinition {
+  const providerId = brief.providers.visualReview;
+  if (!providerId) throw new Error("Visual review provider is missing.");
+  return {
+    id: "visual-review",
+    label: "Visual review",
+    role: "视觉审片员",
+    capability: "quality.review.visual",
+    providerId,
+    mode: "automatic",
+    dependsOn: ["render", "technical-review"],
+    getInput: (context) => ({
+      videoPath: outputPath(context, "render", "videoPath"),
+      runRoot: path.join(runsRoot, context.runId),
+      scriptPath: outputPath(context, "script", "scriptPath"),
+      ...(brief.director ? { directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath") } : {}),
+      renderManifestPath: outputPath(context, "render", "renderManifestPath"),
+    }),
+    validateInputOverride: (input) => validateVisualReviewInput(input, Boolean(brief.director)),
+    execute: async (input, context) => {
+      const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "visual-review"));
+      const request = validateVisualReviewInput(input, Boolean(brief.director));
+      const execution = await context.resolveProvider<VisualReviewAgentInput, CodexTaskExecution<VisualReviewReport>>({
+        capability: "quality.review.visual",
+        providerId,
+      }).run(request, context);
+      const report = execution.output;
+      const reportPath = path.join(attempt.directory, "visual_review.json");
+      const content = `${JSON.stringify(report, null, 2)}\n`;
+      await writeTextAtomically(reportPath, content);
+      const parentArtifactIds = context.artifacts
+        .filter((artifact) => artifact.producer && ["render", "technical-review"].includes(artifact.producer.nodeId))
+        .map((artifact) => artifact.id);
+      const traceArtifact = await persistModelTrace({
+        trace: execution.trace,
+        attemptDirectory: attempt.directory,
+        nodeId: "visual-review",
+        attempt: attempt.attempt,
+        parentArtifactIds,
+      });
+      return {
+        status: "succeeded",
+        output: { visualReviewPath: reportPath, report, durationMs: brief.durationSeconds * 1_000 },
+        artifacts: [fileArtifact(
+          "review_report",
+          reportPath,
+          content,
+          "application/json",
+          "video-factory/visual-review-v1",
+          "visual-review",
+          parentArtifactIds,
+          providerId,
+          "Sampled-frame AI visual review; human final review remains mandatory.",
+          attempt.attempt,
+        ), ...(traceArtifact ? [traceArtifact] : [])],
+      };
+    },
+    validateOverride: (output) => {
+      const value = requireOutputRecord(output, "visual-review");
+      const durationMs = value.durationMs === undefined
+        ? brief.durationSeconds * 1_000
+        : Number(value.durationMs);
+      if (!Number.isInteger(durationMs) || durationMs <= 0) {
+        throw new Error("visual-review durationMs must be a positive integer.");
+      }
+      return {
+        ...value,
+        visualReviewPath: requiredOutputString(value, "visualReviewPath"),
+        durationMs,
+        report: validateVisualReviewReport(value.report, durationMs),
+      };
+    },
+  };
+}
+
+function providerConfigs(brief: ProductionBrief, options: ProductionPipelineOptions): ProviderConfig[] {
+  const runtimeMetadata = new Map((options.providerRuntimeMetadata ?? []).map((item) => [item.id, item]));
+  const assetMetadata = resolveAssetRuntimeMetadata(brief, runtimeMetadata, options.assetProviders ?? []);
   return [
     ...(brief.providers.script === "codex-screenwriter-v1"
       ? []
-      : [providerConfig(brief.providers.script, "script.draft", "script")]),
+      : [providerConfig(brief.providers.script, "script.draft", "script", {}, runtimeMetadata.get(brief.providers.script))]),
     providerConfig(brief.providers.assets, "asset.prepare", "assets", {
       maxPaidShots: brief.economics.maxPaidShots,
       maxCostCny: brief.economics.maxCostCny,
-    }),
+    }, assetMetadata),
     providerConfig(brief.providers.voice, "voice.synthesize", "voice", {
       profileId: brief.voiceDirection.profileId,
       voice: brief.voiceDirection.profileId.slice(brief.voiceDirection.profileId.indexOf(":") + 1),
       rate: brief.voiceDirection.rate,
       pauseScale: brief.voiceDirection.pauseScale,
       masteringPreset: brief.voiceDirection.masteringPreset,
-    }),
-    providerConfig(brief.providers.render, "video.render", "render"),
-    providerConfig(brief.providers.technicalReview, "quality.review", "technical-review"),
+      maxCostCny: brief.economics.maxCostCny,
+    }, runtimeMetadata.get(brief.providers.voice)),
+    providerConfig(brief.providers.render, "video.render", "render", {}, runtimeMetadata.get(brief.providers.render)),
+    providerConfig(brief.providers.technicalReview, "quality.review", "technical-review", {}, runtimeMetadata.get(brief.providers.technicalReview)),
   ];
+}
+
+function resolveAssetRuntimeMetadata(
+  brief: ProductionBrief,
+  metadata: Map<string, ProductionProviderRuntimeMetadata>,
+  catalog: VisualAssetProviderCapability[],
+): ProductionProviderRuntimeMetadata | undefined {
+  const selected = metadata.get(brief.providers.assets);
+  if (brief.providers.assets !== "ai-shot-router-v1" || !brief.director) return selected;
+  const catalogById = new Map(catalog.map((item) => [item.id, item]));
+  const meteredIds = brief.director.assetProviderIds.filter((id) =>
+    catalogById.get(id)?.billing === "metered" || KNOWN_METERED_WORKER_PROVIDER_IDS.has(id));
+  const metered = meteredIds.map((id) => {
+    const item = metadata.get(id);
+    validateProviderRuntimeMetadata(id, item, true, brief.economics.maxCostCny);
+    return item!;
+  });
+  if (!metered.length) return selected;
+  const highestUnitCost = Math.max(...metered.map((item) => item.estimatedCostCny ?? 0));
+  return {
+    id: "ai-shot-router-v1",
+    label: "AI 逐镜路由（含付费镜头）",
+    modelId: metered.map((item) => item.modelId).sort().join("+") || "dynamic-router",
+    transport: "local_process",
+    billing: "metered",
+    estimatedCostCny: roundCurrency(highestUnitCost * brief.economics.maxPaidShots),
+    maxAttempts: 1,
+  };
 }
 
 function providerConfig(
@@ -751,6 +1395,7 @@ function providerConfig(
   capability: Capability,
   nodeId: string,
   parametersOverride: Record<string, unknown> = {},
+  metadata?: ProductionProviderRuntimeMetadata,
 ): ProviderConfig {
   const known: Record<string, Record<string, Record<string, unknown>>> = {
     "script.draft": {
@@ -761,6 +1406,7 @@ function providerConfig(
       "local-editorial-v1": { provider: "local", mediaType: "image" },
       "pexels-stock-v1": { provider: "pexels", mediaType: "video" },
       "pixabay-stock-v1": { provider: "pixabay", mediaType: "video" },
+      "seedream-image-v1": { provider: "seedream", mediaType: "image" },
       "seedance-video-v1": { provider: "seedance", mediaType: "video" },
       "hailuo-video-v1": { provider: "minimax", mediaType: "video" },
       "wan-video-v1": { provider: "wan", mediaType: "video" },
@@ -782,7 +1428,51 @@ function providerConfig(
   if (!parameters) {
     throw new Error(`Provider '${id}' cannot serve capability '${capability}'.`);
   }
-  return { id, capability, nodeId, parameters: { ...parameters, ...parametersOverride } };
+  validateProviderRuntimeMetadata(
+    id,
+    metadata,
+    KNOWN_METERED_WORKER_PROVIDER_IDS.has(id),
+    parametersOverride.maxCostCny,
+  );
+  return { id, capability, nodeId, parameters: { ...parameters, ...parametersOverride }, ...(metadata ? { metadata } : {}) };
+}
+
+function validateProviderRuntimeMetadata(
+  providerId: string,
+  metadata: ProductionProviderRuntimeMetadata | undefined,
+  mustBeMetered: boolean,
+  maxCostCny: unknown,
+): void {
+  if (!metadata) {
+    if (mustBeMetered) throw new Error(`Metered provider '${providerId}' requires runtime metadata.`);
+    return;
+  }
+  if (metadata.id !== providerId || !metadata.label.trim() || !metadata.modelId.trim()) {
+    throw new Error(`Provider '${providerId}' runtime metadata is invalid.`);
+  }
+  if (mustBeMetered && metadata.billing !== "metered") {
+    throw new Error(`Known metered provider '${providerId}' cannot be configured as '${metadata.billing}'.`);
+  }
+  if (metadata.billing !== "metered") return;
+  if (
+    typeof metadata.estimatedCostCny !== "number"
+    || !Number.isFinite(metadata.estimatedCostCny)
+    || metadata.estimatedCostCny < 0
+    || typeof maxCostCny !== "number"
+    || !Number.isFinite(maxCostCny)
+    || maxCostCny <= 0
+    || !Number.isInteger(metadata.maxAttempts)
+    || Number(metadata.maxAttempts) < 1
+  ) {
+    throw new Error(`Metered provider '${providerId}' requires finite positive cost and attempt limits.`);
+  }
+  if (metadata.estimatedCostCny > maxCostCny) {
+    throw new Error(`Metered provider '${providerId}' estimated cost exceeds the production limit.`);
+  }
+}
+
+function roundCurrency(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
 }
 
 function workerResponseToNodeResult(
@@ -830,6 +1520,78 @@ function workerResponseToNodeResult(
   };
 }
 
+function providerExecutionReceipt(
+  provider: Pick<Provider<any, any>, "id" | "label" | "modelId" | "transport" | "billing" | "estimatedCostCny">,
+  response: WorkerResponse,
+): NodeExecutionReceiptDraft {
+  const actualCost = response.diagnostics?.actualCostCny;
+  if (actualCost !== undefined && (typeof actualCost !== "number" || !Number.isFinite(actualCost) || actualCost < 0)) {
+    throw new Error("Worker diagnostics actualCostCny must be a finite non-negative number.");
+  }
+  return {
+    providerId: provider.id,
+    providerLabel: provider.label ?? provider.id,
+    modelId: provider.modelId ?? "unspecified",
+    transport: provider.transport ?? "local_process",
+    billing: provider.billing ?? "local_compute",
+    ...(provider.estimatedCostCny !== undefined ? { estimatedCostCny: provider.estimatedCostCny } : {}),
+    ...(actualCost !== undefined ? { actualCostCny: actualCost } : {}),
+    requestId: response.commandId,
+  };
+}
+
+function validateWorkerNodeOverride(nodeId: string, output: unknown): Record<string, unknown> {
+  const requiredFields: Record<string, string[]> = {
+    script: ["scriptPath"],
+    assets: ["assetPlanPath"],
+    voice: ["voiceoverPlanPath", "trackPath"],
+    render: ["videoPath", "renderManifestPath"],
+    "technical-review": ["reviewPath"],
+  };
+  const value = requireOutputRecord(output, nodeId);
+  const normalized = { ...value };
+  for (const field of requiredFields[nodeId] ?? []) {
+    normalized[field] = requiredOutputString(value, field);
+  }
+  if (nodeId === "technical-review" && typeof value.passed !== "boolean") {
+    throw new Error("technical-review override passed must be a boolean.");
+  }
+  return normalized;
+}
+
+function validateBriefInputOverride(value: unknown, workflowBrief: ProductionBrief): ProductionBrief {
+  const parsed = parseBrief(value);
+  const immutableConfigurationMatches = JSON.stringify({
+    providers: parsed.providers,
+    director: parsed.director,
+    economics: parsed.economics,
+    voiceDirection: parsed.voiceDirection,
+    reviewMode: parsed.reviewMode,
+  }) === JSON.stringify({
+    providers: workflowBrief.providers,
+    director: workflowBrief.director,
+    economics: workflowBrief.economics,
+    voiceDirection: workflowBrief.voiceDirection,
+    reviewMode: workflowBrief.reviewMode,
+  });
+  if (!immutableConfigurationMatches) {
+    throw new Error("Brief provider, budget, voice, director, or review configuration requires starting a new run.");
+  }
+  return parsed;
+}
+
+function validatePathOutput(output: unknown, field: string, nodeId: string): Record<string, unknown> {
+  const value = requireOutputRecord(output, nodeId);
+  return { ...value, [field]: requiredOutputString(value, field) };
+}
+
+function requireOutputRecord(output: unknown, nodeId: string): Record<string, unknown> {
+  if (typeof output !== "object" || output === null || Array.isArray(output)) {
+    throw new Error(`${nodeId} override must be an object.`);
+  }
+  return output as Record<string, unknown>;
+}
+
 function outputPath(context: WorkflowContext, nodeId: string, field: string): string {
   const output = context.outputs.get(nodeId);
   if (typeof output !== "object" || output === null || !(field in output)) {
@@ -840,6 +1602,69 @@ function outputPath(context: WorkflowContext, nodeId: string, field: string): st
     throw new Error(`Node '${nodeId}' produced an invalid '${field}'.`);
   }
   return value;
+}
+
+function visualReviewRecommendation(input: unknown): VisualReviewReport["recommendation"] | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
+  const report = (input as Record<string, unknown>).report;
+  if (typeof report !== "object" || report === null || Array.isArray(report)) return undefined;
+  const recommendation = (report as Record<string, unknown>).recommendation;
+  return recommendation === "approve" || recommendation === "revise" || recommendation === "reject"
+    ? recommendation
+    : undefined;
+}
+
+async function verifyNodeOverrideBoundary(runRoot: string, override: NodeOverrideDraft): Promise<void> {
+  const resolvedRoot = await realpath(runRoot);
+  const paths = collectOutputPaths(override.output);
+  for (const artifact of override.artifacts ?? []) {
+    if (artifact.producer && artifact.producer.nodeId !== override.nodeId) {
+      throw new Error(`Override artifact producer must be node '${override.nodeId}'.`);
+    }
+    if (!artifact.uri) continue;
+    paths.push(artifact.uri);
+    if (!artifact.sha256 || artifact.sizeBytes === undefined) {
+      throw new Error("Override file artifacts require sha256 and sizeBytes.");
+    }
+    await verifyArtifactBytes(artifact.uri, artifact.sha256, artifact.sizeBytes);
+  }
+  for (const candidate of new Set(paths)) {
+    const resolvedPath = await realpath(candidate);
+    const relative = path.relative(resolvedRoot, resolvedPath);
+    if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error(`Override path '${candidate}' is outside run '${path.basename(runRoot)}'.`);
+    }
+  }
+}
+
+async function verifyNodeInputOverrideBoundary(runRoot: string, override: NodeInputOverrideDraft): Promise<void> {
+  const resolvedRoot = await realpath(runRoot);
+  for (const candidate of new Set(collectOutputPaths(override.input, "input"))) {
+    const resolvedPath = await realpath(candidate);
+    const relative = path.relative(resolvedRoot, resolvedPath);
+    if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error(`Input override path '${candidate}' is outside run '${path.basename(runRoot)}'.`);
+    }
+  }
+}
+
+function collectOutputPaths(value: unknown, field = "output"): string[] {
+  if (Array.isArray(value)) return value.flatMap((item, index) => collectOutputPaths(item, `${field}[${index}]`));
+  if (typeof value !== "object" || value === null) return [];
+  const paths: string[] = [];
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const childField = `${field}.${key}`;
+    if (isFileReferenceKey(key) && typeof child === "string" && child) paths.push(child);
+    else paths.push(...collectOutputPaths(child, childField));
+  }
+  return paths;
+}
+
+function isFileReferenceKey(key: string): boolean {
+  return key === "uri"
+    || key.endsWith("Path")
+    || key.endsWith("_path")
+    || key.endsWith("_file");
 }
 
 function jsonArtifact(
@@ -873,6 +1698,7 @@ function fileArtifact(
   parentArtifactIds: string[],
   providerId: string,
   licenseNote: string,
+  attempt = 1,
 ): ArtifactDraft {
   return {
     kind,
@@ -882,9 +1708,48 @@ function fileArtifact(
     contentType,
     schemaVersion,
     parentArtifactIds,
-    producer: { nodeId, attempt: 1 },
+    producer: { nodeId, attempt },
     provenance: { providerId, providerVersion: "1", licenseNote },
   };
+}
+
+async function persistModelTrace(options: {
+  trace: CodexTaskTrace | undefined;
+  attemptDirectory: string;
+  nodeId: string;
+  attempt: number;
+  parentArtifactIds: string[];
+}): Promise<ArtifactDraft | undefined> {
+  if (!options.trace) return undefined;
+  const tracePath = path.join(options.attemptDirectory, "model_trace.json");
+  const payload = {
+    version: "video-factory/model-trace-v1",
+    taskKind: options.trace.taskKind,
+    promptVersion: options.trace.promptVersion,
+    providerId: options.trace.providerId,
+    modelId: options.trace.modelId,
+    prompt: options.trace.prompt,
+  };
+  const content = `${JSON.stringify(payload, null, 2)}\n`;
+  await writeTextAtomically(tracePath, content);
+  const artifact = fileArtifact(
+    "model_trace",
+    tracePath,
+    content,
+    "application/json",
+    "video-factory/model-trace-v1",
+    options.nodeId,
+    options.parentArtifactIds,
+    options.trace.providerId,
+    "Immutable execution trace containing the exact prompt, prompt pack, provider, and model; no credentials are stored.",
+    options.attempt,
+  );
+  artifact.provenance = {
+    ...artifact.provenance,
+    promptVersion: options.trace.promptVersion,
+    model: options.trace.modelId,
+  };
+  return artifact;
 }
 
 async function writeTextAtomically(destination: string, content: string): Promise<void> {
@@ -892,6 +1757,50 @@ async function writeTextAtomically(destination: string, content: string): Promis
   const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
   await writeFile(temporary, content, { encoding: "utf8", flag: "wx" });
   await rename(temporary, destination);
+}
+
+async function reserveAttemptDirectory(root: string): Promise<{ directory: string; attempt: number }> {
+  await mkdir(root, { recursive: true });
+  for (let attempt = 1; attempt <= 10_000; attempt += 1) {
+    const directory = path.join(root, `attempt-${attempt}`);
+    try {
+      await mkdir(directory);
+      return { directory, attempt };
+    } catch (error) {
+      if (hasCode(error, "EEXIST")) continue;
+      throw error;
+    }
+  }
+  throw new Error(`No execution attempt directory is available under '${root}'.`);
+}
+
+function currentArtifactsForPackaging(context: WorkflowContext, brief: ProductionBrief): Artifact[] {
+  const nodeOutputs = [
+    { nodeId: "script", paths: [outputPath(context, "script", "scriptPath")] },
+    ...(brief.director ? [{ nodeId: "visual-direction", paths: [outputPath(context, "visual-direction", "directorPlanPath")] }] : []),
+    { nodeId: "assets", paths: [outputPath(context, "assets", "assetPlanPath")] },
+    { nodeId: "voice", paths: [outputPath(context, "voice", "voiceoverPlanPath"), outputPath(context, "voice", "trackPath")] },
+    { nodeId: "render", paths: [outputPath(context, "render", "videoPath"), outputPath(context, "render", "renderManifestPath")] },
+    { nodeId: "technical-review", paths: [outputPath(context, "technical-review", "reviewPath")] },
+    ...(brief.providers.visualReview ? [{ nodeId: "visual-review", paths: [outputPath(context, "visual-review", "visualReviewPath")] }] : []),
+  ];
+  const selected: Artifact[] = [];
+  const briefArtifact = [...context.artifacts].reverse().find((artifact) => artifact.producer?.nodeId === "brief");
+  if (briefArtifact) selected.push(briefArtifact);
+  for (const nodeOutput of nodeOutputs) {
+    const matches = nodeOutput.paths.flatMap((outputUri) => {
+      const artifact = [...context.artifacts].reverse().find((candidate) =>
+        candidate.producer?.nodeId === nodeOutput.nodeId
+        && candidate.uri !== undefined
+        && path.resolve(candidate.uri) === path.resolve(outputUri));
+      return artifact ? [artifact] : [];
+    });
+    if (matches.length === 0) throw new Error(`Current node '${nodeOutput.nodeId}' has no matching artifact descriptor.`);
+    for (const artifact of matches) {
+      if (!selected.some((candidate) => candidate.id === artifact.id)) selected.push(artifact);
+    }
+  }
+  return selected;
 }
 
 async function verifyWorkerArtifacts(response: WorkerResponse, outputDir: string): Promise<void> {
@@ -937,4 +1846,17 @@ async function notifyListener(listener: ProductionRunListener | undefined, run: 
   } catch {
     // Persistence is authoritative; an observer must not fail media production.
   }
+}
+
+function executionLeasePayload(token: string): string {
+  return `${JSON.stringify({
+    version: 1,
+    token,
+    pid: process.pid,
+    heartbeatAt: new Date().toISOString(),
+  })}\n`;
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }

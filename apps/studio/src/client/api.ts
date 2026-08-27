@@ -6,6 +6,8 @@ import type {
   StudioCandidateInboxQuery,
   StudioCreatorSettings,
   StudioCreatorSettingsPatch,
+  StudioCostDashboard,
+  StudioCostRunDetail,
   StudioHealth,
   StudioLocalCapability,
   StudioOpportunity,
@@ -25,6 +27,13 @@ import type {
   StudioTrendService,
   StudioTrendSignal,
   StudioTrendCandidate,
+  StudioTemplate,
+  StudioTemplateCatalog,
+  StudioTemplateCloneInput,
+  StudioTemplateMutation,
+  StudioNodeOverrideInput,
+  StudioNodeInputOverrideInput,
+  StudioSpendAuthorizationInput,
   StudioVoicePreviewInput,
   StudioVoiceProfile,
 } from "../shared/api.js";
@@ -100,8 +109,51 @@ export const studioApi = {
       body: JSON.stringify({ status }),
     },
   ),
+  templates: () => requestJson<StudioTemplateCatalog>("/api/templates"),
+  template: (templateId: string, version?: number) => requestJson<StudioTemplate>(
+    `/api/templates/${encodeURIComponent(templateId)}${version === undefined ? "" : `?version=${version}`}`,
+  ),
+  cloneTemplate: (input: StudioTemplateCloneInput) => requestJson<StudioTemplateMutation>("/api/templates/clone", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  }),
+  saveTemplateDraft: (template: StudioTemplate, expectedRevision: number) => requestJson<StudioTemplateMutation>(
+    `/api/templates/${encodeURIComponent(template.id)}/draft`,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ template, expectedRevision }),
+    },
+  ),
+  publishTemplate: (templateId: string, expectedRevision: number) => requestJson<StudioTemplateMutation>(
+    `/api/templates/${encodeURIComponent(templateId)}/publish`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedRevision }),
+    },
+  ),
   runs: () => requestJson<StudioRunSummary[]>("/api/runs"),
+  costs: () => requestJson<StudioCostDashboard>("/api/costs"),
+  runCosts: (runId: string) => requestJson<StudioCostRunDetail>(`/api/runs/${encodeURIComponent(runId)}/costs`),
   run: (runId: string) => requestJson<StudioRunDetail>(`/api/runs/${encodeURIComponent(runId)}`),
+  overrideNode: (runId: string, nodeId: string, input: StudioNodeOverrideInput) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/override`,
+    { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  overrideNodeInput: (runId: string, nodeId: string, input: StudioNodeInputOverrideInput) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/input-override`,
+    { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  authorizeSpend: (runId: string, nodeId: string, input: StudioSpendAuthorizationInput) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/spend-authorizations`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  regenerateStale: (runId: string) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/regenerate-stale`,
+    { method: "POST" },
+  ),
   start: (input: StudioProductionInput, idempotencyKey: string = crypto.randomUUID()) => requestJson<StartRunResponse>("/api/runs", {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },

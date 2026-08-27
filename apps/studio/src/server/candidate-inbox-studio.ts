@@ -22,8 +22,11 @@ export interface CandidateInboxStudioOptions {
   now?: () => Date;
 }
 
+const TREND_CANDIDATE_RETENTION_MS = 15 * 60 * 1000;
+
 export class CandidateInboxStudio {
   private readonly now: () => Date;
+  private readonly recentTrendCandidates = new Map<string, { candidate: StudioCandidateInboxItem; expiresAt: number }>();
 
   constructor(private readonly options: CandidateInboxStudioOptions) {
     this.now = options.now ?? (() => new Date());
@@ -38,8 +41,10 @@ export class CandidateInboxStudio {
       this.options.opportunities.list(),
     ]);
     const adoptedIds = new Set(adoptedOpportunities.map((item) => item.id));
+    const normalizedTrends = trendCandidates.map((candidate) => this.normalizeTrend(candidate));
+    this.rememberTrendCandidates(normalizedTrends);
     const available = [
-      ...trendCandidates.map((candidate) => this.normalizeTrend(candidate)),
+      ...normalizedTrends,
       ...seriesCandidates.map((candidate) => ({
         ...candidate,
         editorialDecision: candidate.editorialDecision ?? decideEditorialFormat(candidate),
@@ -58,7 +63,8 @@ export class CandidateInboxStudio {
 
   async adopt(candidateId: string, adoptionInput: StudioCandidateAdoptionInput = {}): Promise<StudioOpportunity> {
     const origins = candidateId.startsWith("series-") ? ["series" as const] : ["trend" as const];
-    const candidate = (await this.list({ origins, limit: 200 })).items.find((item) => item.id === candidateId);
+    const candidate = (await this.list({ origins, limit: 200 })).items.find((item) => item.id === candidateId)
+      ?? (origins[0] === "trend" ? this.recentTrendCandidate(candidateId) : undefined);
     if (!candidate) throw new StudioNotFoundError("这条候选已被采用或已经失效，请刷新候选收件箱。");
     if (candidate.verification.status === "blocked") {
       throw new StudioConflictError(candidate.verification.reasons[0] ?? "这条候选尚未达到可采用的证据标准。");
@@ -92,6 +98,7 @@ export class CandidateInboxStudio {
       ...(candidate.episodeNumber ? { episodeNumber: candidate.episodeNumber } : {}),
     };
     const opportunity = await this.options.opportunities.create(input);
+    this.recentTrendCandidates.delete(candidateId);
     if (candidate.origin === "series" && candidate.seriesId && candidate.episodeNumber) {
       await this.options.series.advanceEpisode(candidate.seriesId, candidate.episodeNumber);
     }
@@ -119,6 +126,29 @@ export class CandidateInboxStudio {
       ...normalized,
       editorialDecision: candidate.editorialDecision ?? decideEditorialFormat(normalized),
     };
+  }
+
+  private rememberTrendCandidates(candidates: StudioCandidateInboxItem[]): void {
+    const now = this.now().getTime();
+    for (const [id, entry] of this.recentTrendCandidates) {
+      if (entry.expiresAt <= now) this.recentTrendCandidates.delete(id);
+    }
+    for (const candidate of candidates) {
+      this.recentTrendCandidates.set(candidate.id, {
+        candidate: structuredClone(candidate),
+        expiresAt: now + TREND_CANDIDATE_RETENTION_MS,
+      });
+    }
+  }
+
+  private recentTrendCandidate(candidateId: string): StudioCandidateInboxItem | undefined {
+    const entry = this.recentTrendCandidates.get(candidateId);
+    if (!entry) return undefined;
+    if (entry.expiresAt <= this.now().getTime()) {
+      this.recentTrendCandidates.delete(candidateId);
+      return undefined;
+    }
+    return structuredClone(entry.candidate);
   }
 }
 

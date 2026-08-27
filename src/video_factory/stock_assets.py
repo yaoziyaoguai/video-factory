@@ -771,27 +771,27 @@ def write_local_scene_card(scene: Scene, local_path: Path) -> Path:
 
     draw_editorial_background(draw, width, height, style)
     label_font = local_card_font(ImageFont, 34)
-    title_font = local_card_font(ImageFont, 86)
+    title_font = local_card_font(ImageFont, local_card_title_size(title))
     kicker_font = local_card_font(ImageFont, 42)
     item_font = local_card_font(ImageFont, local_card_item_size(items))
     small_font = local_card_font(ImageFont, 28)
     margin = 86
 
-    draw.text((margin, 90), "生活避坑清单", font=small_font, fill=style["muted"])
+    draw.text((margin, 90), "视觉笔记", font=small_font, fill=style["muted"])
     draw.text((width - margin - 118, 84), f"{scene.position:02d}", font=label_font, fill=style["accent"])
     draw.line((margin, 158, width - margin, 158), fill=style["rule"], width=3)
     draw.text((margin, 260), kicker, font=kicker_font, fill=style["accent"])
-    draw_wrapped_text(
+    title_bottom = draw_wrapped_text(
         draw,
         title,
         (margin, 330),
         title_font,
         style["ink"],
-        width - margin * 2,
+        width - margin * 2 - 160,
         line_spacing=20,
     )
 
-    y = 760
+    y = max(720, title_bottom + 90)
     for index, item in enumerate(items[:4], start=1):
         number = f"{index:02d}"
         draw.text((margin, y + 6), number, font=label_font, fill=style["accent"])
@@ -807,7 +807,7 @@ def write_local_scene_card(scene: Scene, local_path: Path) -> Path:
         draw.line((margin + 118, y + 20, width - margin, y + 20), fill=style["rule"], width=2)
         y += 74
 
-    draw.text((margin, height - 150), "少一点临场发挥，多一个提前规则。", font=small_font, fill=style["muted"])
+    draw.text((margin, 1280), f"SCENE {scene.position:02d}  ·  {scene.duration:.1f}s", font=small_font, fill=style["muted"])
     image.save(local_path)
     return local_path
 
@@ -815,41 +815,43 @@ def write_local_scene_card(scene: Scene, local_path: Path) -> Path:
 def local_card_style(scene_position: int) -> dict:
     styles = [
         {
-            "background": "#f6f8fb",
+            "background": "#f7f3ea",
+            "surface": "#efe7d8",
             "ink": "#111827",
-            "muted": "#64748b",
-            "accent": "#dc2626",
-            "rule": "#cbd5e1",
+            "muted": "#6b6257",
+            "accent": "#c3412f",
+            "rule": "#d8cdbd",
         },
         {
-            "background": "#101828",
-            "ink": "#f8fafc",
-            "muted": "#94a3b8",
-            "accent": "#facc15",
-            "rule": "#334155",
+            "background": "#f2f6f4",
+            "surface": "#e2ede8",
+            "ink": "#14211d",
+            "muted": "#5b6f67",
+            "accent": "#167d6a",
+            "rule": "#c7d9d1",
         },
         {
-            "background": "#f8fafc",
-            "ink": "#0f172a",
-            "muted": "#475569",
-            "accent": "#0f766e",
-            "rule": "#cbd5e1",
+            "background": "#f5f2f7",
+            "surface": "#e9e2ee",
+            "ink": "#211a27",
+            "muted": "#706478",
+            "accent": "#6b5aa6",
+            "rule": "#d8cede",
         },
     ]
-    return styles[scene_position % len(styles)]
+    return styles[(scene_position - 2) % len(styles)]
 
 
 def local_card_content(scene: Scene) -> tuple[str, list[str], str]:
-    sentences = split_chinese_sentences(scene.narration)
-    if scene.position == 2 or len(sentences) >= 3:
-        return "先避开这 3 个坑", sentences[:3], "收藏清单"
-    if "低成本提醒" in scene.narration or "道理" in scene.narration:
-        return "真正有用的是提醒", ["别靠临场发挥", "提前放一个低成本提醒"], "反直觉"
-    if "今天" in scene.narration or "一件事" in scene.narration:
-        return "下次先停三秒", ["写下最像你的那个坑", "遇到时先停三秒", "再决定"], "马上能做"
-    if "收藏" in scene.narration or "评论" in scene.narration:
-        return "把这张清单留下", ["收藏备用", "评论区告诉我：你最想避开什么坑？"], "留给下次"
-    return "记住这一句", sentences[:2] or [scene.narration], "关键提醒"
+    clauses = split_chinese_clauses(scene.narration)
+    while len(clauses) > 1 and clauses[0] in {"所以", "但是", "不过", "然后", "其实", "最后", "那么"}:
+        clauses.pop(0)
+    title = clauses[0] if clauses else scene.narration.strip()
+    items = clauses[1:4]
+    if not items:
+        prompt_clauses = split_chinese_clauses(scene.visual_prompt)
+        items = prompt_clauses[:2] or [scene.narration.strip()]
+    return title, items, "镜头要点"
 
 
 def split_chinese_sentences(text: str) -> list[str]:
@@ -857,11 +859,18 @@ def split_chinese_sentences(text: str) -> list[str]:
     return parts or [text.strip()]
 
 
+def split_chinese_clauses(text: str) -> list[str]:
+    parts = [part.strip(" ，,：:；;。！？!?") for part in re.split(r"[，,：:；;。！？!?]", text)]
+    return [part for part in parts if part]
+
+
 def draw_editorial_background(draw, width: int, height: int, style: dict) -> None:
-    for y in range(0, height, 240):
-        draw.line((0, y, width, y), fill=style["rule"], width=1)
-    draw.rectangle((0, height - 300, width, height), fill=style["background"])
-    draw.line((0, height - 300, width, height - 300), fill=style["rule"], width=2)
+    draw.rectangle((0, 0, 24, height), fill=style["accent"])
+    draw.rectangle((760, 190, width, 560), fill=style["surface"])
+    draw.arc((690, 120, 1190, 620), 95, 265, fill=style["accent"], width=8)
+    for y in range(158, 1380, 244):
+        draw.line((86, y, width - 86, y), fill=style["rule"], width=1)
+    draw.line((86, 1345, width - 86, 1345), fill=style["rule"], width=2)
 
 
 def draw_wrapped_text(draw, text: str, position: tuple[int, int], font, fill: str, max_width: int, line_spacing: int) -> int:
@@ -882,6 +891,14 @@ def local_card_item_size(items: list[str]) -> int:
     return 58
 
 
+def local_card_title_size(title: str) -> int:
+    if len(title) >= 11:
+        return 62
+    if len(title) >= 8:
+        return 70
+    return 86
+
+
 def wrap_text_by_pixels(draw, text: str, font, max_width: int) -> list[str]:
     lines: list[str] = []
     current = ""
@@ -889,8 +906,12 @@ def wrap_text_by_pixels(draw, text: str, font, max_width: int) -> list[str]:
         candidate = current + char
         box = draw.textbbox((0, 0), candidate, font=font)
         if current and box[2] - box[0] > max_width:
-            lines.append(current)
-            current = char
+            if char in "，。！？；：、）】》」』…,.!?;:":
+                lines.append(candidate)
+                current = ""
+            else:
+                lines.append(current)
+                current = char
         else:
             current = candidate
     if current:

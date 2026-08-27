@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import Fastify, { type FastifyInstance } from "fastify";
+import { parseProductionTemplate } from "@video-factory/template-core";
 import { StudioAuthenticator, type StudioAuthOptions } from "./auth.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-service.js";
 import {
@@ -19,6 +20,8 @@ import {
   type StudioCandidateInboxQuery,
   type StudioCreatorSettings,
   type StudioCreatorSettingsPatch,
+  type StudioCostDashboard,
+  type StudioCostRunDetail,
   type StudioDecisionInput,
   type StudioHealth,
   type StudioLocalCapability,
@@ -44,6 +47,13 @@ import {
   type StudioTopicCategory,
   type StudioCandidateOrigin,
   type StudioEditorialVerdict,
+  type StudioTemplate,
+  type StudioTemplateCatalog,
+  type StudioTemplateCloneInput,
+  type StudioTemplateMutation,
+  type StudioNodeInputOverrideInput,
+  type StudioNodeOverrideInput,
+  type StudioSpendAuthorizationInput,
 } from "../shared/api.js";
 
 export interface StudioServicePort {
@@ -54,6 +64,11 @@ export interface StudioServicePort {
   previewVoice(input: StudioVoicePreviewInput): Promise<StudioArtifactResource | undefined>;
   getCreatorSettings(): Promise<StudioCreatorSettings>;
   updateCreatorSettings(input: StudioCreatorSettingsPatch): Promise<StudioCreatorSettings>;
+  listTemplates(): Promise<StudioTemplateCatalog>;
+  getTemplate(id: string, version?: number): Promise<StudioTemplate | undefined>;
+  cloneTemplate(input: StudioTemplateCloneInput): Promise<StudioTemplateMutation>;
+  saveTemplateDraft(input: StudioTemplate, expectedRevision: number): Promise<StudioTemplateMutation>;
+  publishTemplate(id: string, expectedRevision: number): Promise<StudioTemplateMutation>;
   listTrendSources(): Promise<StudioTrendSource[]>;
   listTrendServices(): Promise<StudioTrendService[]>;
   listTrendSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
@@ -69,8 +84,14 @@ export interface StudioServicePort {
   updateOpportunityStatus(opportunityId: string, status: StudioOpportunityStatus): Promise<StudioOpportunity>;
   listRuns(): Promise<StudioRunSummary[]>;
   getRun(runId: string): Promise<StudioRunDetail | undefined>;
+  costDashboard(): Promise<StudioCostDashboard>;
+  runCostDetail(runId: string): Promise<StudioCostRunDetail | undefined>;
   startRun(input: unknown, idempotencyKey?: string): Promise<StartRunResponse>;
-  decide(runId: string, input: StudioDecisionInput): Promise<StudioRunDetail>;
+  decide(runId: string, input: StudioDecisionInput, actor: string): Promise<StudioRunDetail>;
+  applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
+  applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
+  authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy: string): Promise<StudioRunDetail>;
+  resumeStale(runId: string): Promise<StudioRunDetail>;
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void;
   resolveArtifact(runId: string, artifactId: string): Promise<StudioArtifactResource | undefined>;
   listPublishTargets(): Promise<StudioPublishTarget[]>;
@@ -135,6 +156,34 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   app.patch("/api/settings", async (request) => {
     return options.service.updateCreatorSettings(parseStudioCreatorSettingsPatch(request.body));
   });
+  app.get("/api/templates", async () => options.service.listTemplates());
+  app.get<{ Params: { templateId: string }; Querystring: { version?: string } }>("/api/templates/:templateId", async (request, reply) => {
+    requireSafeRouteId(request.params.templateId, "模板编号");
+    const version = request.query.version === undefined ? undefined : Number(request.query.version);
+    if (version !== undefined && (!Number.isInteger(version) || version < 1)) throw new StudioInputError("模板版本必须是正整数。");
+    const template = await options.service.getTemplate(request.params.templateId, version);
+    if (!template) return reply.code(404).send({ error: "没有找到这个模板。" });
+    return template;
+  });
+  app.post("/api/templates/clone", async (request, reply) => {
+    return reply.code(201).send(await options.service.cloneTemplate(parseTemplateCloneInput(request.body)));
+  });
+  app.put<{ Params: { templateId: string } }>("/api/templates/:templateId/draft", async (request) => {
+    requireSafeRouteId(request.params.templateId, "模板编号");
+    const body = requireRecord(request.body, "模板请求");
+    const expectedRevision = requireNonNegativeInteger(body.expectedRevision, "expectedRevision");
+    const template = parseTemplateDraft(body.template);
+    if (template.id !== request.params.templateId) throw new StudioInputError("模板编号与请求地址不一致。");
+    return options.service.saveTemplateDraft(template, expectedRevision);
+  });
+  app.post<{ Params: { templateId: string } }>("/api/templates/:templateId/publish", async (request) => {
+    requireSafeRouteId(request.params.templateId, "模板编号");
+    const body = requireRecord(request.body, "模板请求");
+    return options.service.publishTemplate(
+      request.params.templateId,
+      requireNonNegativeInteger(body.expectedRevision, "expectedRevision"),
+    );
+  });
   app.get("/api/trend-sources", async () => options.service.listTrendSources());
   app.get("/api/publish-targets", async () => options.service.listPublishTargets());
   app.get("/api/trend-services", async () => options.service.listTrendServices());
@@ -165,6 +214,7 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   });
   app.get("/api/opportunities", async () => options.service.listOpportunities());
   app.get("/api/runs", async () => options.service.listRuns());
+  app.get("/api/costs", async () => options.service.costDashboard());
 
   app.post("/api/voices/preview", async (request, reply) => {
     const input = parseStudioVoicePreviewInput(request.body);
@@ -219,10 +269,54 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     return run;
   });
 
+  app.get<{ Params: { runId: string } }>("/api/runs/:runId/costs", async (request, reply) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    const detail = await options.service.runCostDetail(request.params.runId);
+    return detail ?? reply.code(404).send({ error: "没有找到这条制作记录的消费明细。" });
+  });
+
+  app.put<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/override", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.nodeId, "节点编号");
+    return options.service.applyNodeOverride(
+      request.params.runId,
+      request.params.nodeId,
+      parseNodeOverrideInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
+  app.put<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/input-override", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.nodeId, "节点编号");
+    return options.service.applyNodeInputOverride(
+      request.params.runId,
+      request.params.nodeId,
+      parseNodeInputOverrideInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
+  app.post<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/spend-authorizations", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.nodeId, "节点编号");
+    return options.service.authorizeSpend(
+      request.params.runId,
+      request.params.nodeId,
+      parseSpendAuthorizationInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/regenerate-stale", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    return options.service.resumeStale(request.params.runId);
+  });
+
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/decisions", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     const input = parseStudioDecisionInput(request.body);
-    return options.service.decide(request.params.runId, input);
+    return options.service.decide(request.params.runId, input, trustedStudioActor(auth, request.headers.cookie));
   });
 
   app.get<{ Params: { runId: string } }>("/api/runs/:runId/publishing/readiness", async (request) => {
@@ -384,12 +478,110 @@ function splitQuery(value: string | undefined): string[] {
   return value?.split(",").map((item) => item.trim()).filter(Boolean) ?? [];
 }
 
+function parseTemplateCloneInput(value: unknown): StudioTemplateCloneInput {
+  const input = requireRecord(value, "模板请求");
+  const sourceId = requireText(input.sourceId, "sourceId");
+  const newId = requireText(input.newId, "newId");
+  const name = requireText(input.name, "name");
+  if (!SAFE_ROUTE_ID.test(sourceId) || !SAFE_ROUTE_ID.test(newId)) throw new StudioInputError("模板编号格式不正确。");
+  return {
+    sourceId,
+    newId,
+    name,
+    expectedRevision: requireNonNegativeInteger(input.expectedRevision, "expectedRevision"),
+  };
+}
+
+function parseTemplateDraft(value: unknown): StudioTemplate {
+  try {
+    return { ...parseProductionTemplate(value), builtIn: false };
+  } catch (error) {
+    throw new StudioInputError(`模板参数不正确：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new StudioInputError(`${label}格式不正确。`);
+  return value as Record<string, unknown>;
+}
+
+function requireText(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new StudioInputError(`${field} 不能为空。`);
+  return value.trim();
+}
+
+function requireNonNegativeInteger(value: unknown, field: string): number {
+  if (!Number.isInteger(value) || Number(value) < 0) throw new StudioInputError(`${field} 必须是非负整数。`);
+  return Number(value);
+}
+
+function parseNodeOverrideInput(value: unknown): StudioNodeOverrideInput {
+  const input = requireRecord(value, "节点修改请求");
+  if (input.confirmTerminalEdit !== undefined && typeof input.confirmTerminalEdit !== "boolean") {
+    throw new StudioInputError("终态编辑确认必须是布尔值。");
+  }
+  let document: StudioNodeOverrideInput["document"];
+  if (input.document !== undefined) {
+    const candidate = requireRecord(input.document, "结构化交付");
+    if (!("content" in candidate)) throw new StudioInputError("结构化交付内容不能为空。");
+    document = {
+      artifactId: requireText(candidate.artifactId, "artifactId"),
+      content: candidate.content,
+    };
+  }
+  return {
+    ...(input.output !== undefined ? { output: input.output } : {}),
+    ...(document ? { document } : {}),
+    ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
+  };
+}
+
+function parseNodeInputOverrideInput(value: unknown): StudioNodeInputOverrideInput {
+  const input = requireRecord(value, "节点输入修改请求");
+  if (!("input" in input)) throw new StudioInputError("节点输入内容不能为空。");
+  if (input.confirmTerminalEdit !== undefined && typeof input.confirmTerminalEdit !== "boolean") {
+    throw new StudioInputError("终态编辑确认必须是布尔值。");
+  }
+  return {
+    input: input.input,
+    ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
+  };
+}
+
+function parseSpendAuthorizationInput(value: unknown): StudioSpendAuthorizationInput {
+  const input = requireRecord(value, "费用授权请求");
+  if (!Array.isArray(input.inputVersionIds) || input.inputVersionIds.some((item) => typeof item !== "string" || !item)) {
+    throw new StudioInputError("输入版本清单格式不正确。");
+  }
+  return {
+    inputVersionIds: [...input.inputVersionIds] as string[],
+    providerId: requireText(input.providerId, "providerId"),
+    modelId: requireText(input.modelId, "modelId"),
+    maxCostCny: requireNonNegativeNumber(input.maxCostCny, "maxCostCny"),
+    maxAttempts: requirePositiveInteger(input.maxAttempts, "maxAttempts"),
+  };
+}
+
+function requireNonNegativeNumber(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new StudioInputError(`${field} 必须是非负数字。`);
+  return value;
+}
+
+function requirePositiveInteger(value: unknown, field: string): number {
+  if (!Number.isInteger(value) || Number(value) <= 0) throw new StudioInputError(`${field} 必须是正整数。`);
+  return Number(value);
+}
+
 function isTerminal(status: StudioRunDetail["status"]): boolean {
   return status === "succeeded" || status === "failed" || status === "rejected";
 }
 
 function requireSafeRouteId(value: string, label: string): void {
   if (!SAFE_ROUTE_ID.test(value)) throw new StudioInputError(`${label}格式不正确。`);
+}
+
+function trustedStudioActor(auth: StudioAuthenticator | undefined, cookie: string | undefined): string {
+  return auth?.authenticatedUsername(cookie) ?? "studio-owner";
 }
 
 function parseByteRange(

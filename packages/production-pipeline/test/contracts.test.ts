@@ -67,6 +67,27 @@ describe("ProductionBrief", () => {
     );
   });
 
+  it("normalizes a known legacy voice mismatch only when reading a persisted brief", () => {
+    const persisted = pipeline.parsePersistedBrief({
+      ...validBrief,
+      providers: { ...validBrief.providers, voice: "macos-say-v1" },
+      voiceDirection: { ...validBrief.voiceDirection, profileId: "kokoro:zf_001" },
+    });
+
+    assert.deepEqual(persisted.voiceDirection, {
+      ...validBrief.voiceDirection,
+      profileId: "macos:Tingting",
+    });
+    assert.throws(
+      () => pipeline.parsePersistedBrief({
+        ...validBrief,
+        providers: { ...validBrief.providers, voice: "unknown-voice-v1" },
+        voiceDirection: { ...validBrief.voiceDirection, profileId: "kokoro:zf_001" },
+      }),
+      /voiceDirection\.profileId.*providers\.voice/,
+    );
+  });
+
   it("routes a MiniMax actor profile through the cloud TTS provider", () => {
     const brief = pipeline.parseBrief({
       ...validBrief,

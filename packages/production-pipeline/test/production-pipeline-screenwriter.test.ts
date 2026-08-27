@@ -65,6 +65,26 @@ const scriptDraft: ScriptDraft = {
   ],
 };
 
+const templateSnapshot = {
+  templateId: "knowledge-explainer",
+  templateVersion: 1,
+  resolvedAt: "2026-08-27T00:00:00.000Z",
+  resolvedBlueprint: {
+    platform: "douyin",
+    durationSeconds: 24,
+    automationLevel: "assisted",
+    storyStructure: [{ id: "question", label: "提出问题", purpose: "从日常误解切入", required: true }],
+    shotSlots: [{ id: "shot-question", beatId: "question", purpose: "建立问题", durationSeconds: 6, allowedCapabilities: ["asset.search"], manualReplacement: true }],
+    visualSystem: { composition: "一个镜头一个概念", colorIntent: "自然底色", subtitleDensity: "medium", pacing: "measured" },
+    soundSystem: { voiceIntent: "聪明但不居高临下", pace: "medium", musicIntent: "轻盈节拍" },
+    qualityRules: [{ id: "facts", label: "事实准确", dimension: "factual", required: true, threshold: 80 }],
+    capabilityRequirements: [{ capability: "script.draft", required: true }],
+    costPolicy: { currency: "CNY", maxCost: 0, maxPaidShots: 0 },
+  },
+  sourceLayers: [{ layer: "template", sourceId: "knowledge-explainer@1", appliedFields: ["storyStructure"] }],
+  fieldSources: { storyStructure: "template" },
+} as const;
+
 class RecordingWorker {
   readonly requests: Array<{ capability: string; input: Record<string, unknown> }> = [];
 
@@ -132,13 +152,52 @@ function stubAgent(
 }
 
 describe("ProductionPipeline codex screenwriter", () => {
+  it("persists the exact model prompt as an immutable artifact on the generated output version", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-trace-"));
+    const worker = new RecordingWorker();
+    const agent: ScreenwriterAgent = {
+      id: "codex-screenwriter-v1",
+      draft: async () => scriptDraft,
+      draftDetailed: async () => ({
+        output: scriptDraft,
+        trace: {
+          taskKind: "script-draft",
+          promptVersion: "video-factory/screenwriter-v2",
+          prompt: "Prompt Pack: video-factory/screenwriter-v2\nactual prompt",
+          providerId: "openai",
+          modelId: "gpt-5.4",
+        },
+      }),
+    };
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker, screenwriterAgent: agent });
+
+    const run = await pipeline.start(brief);
+
+    const traceArtifact = run.artifacts.find((artifact) => artifact.kind === "model_trace");
+    assert.ok(traceArtifact?.uri);
+    assert.equal(traceArtifact.producer?.nodeId, "script");
+    assert.equal(traceArtifact.provenance.promptVersion, "video-factory/screenwriter-v2");
+    assert.equal(traceArtifact.provenance.model, "gpt-5.4");
+    assert.deepEqual(JSON.parse(await readFile(traceArtifact.uri, "utf8")), {
+      version: "video-factory/model-trace-v1",
+      taskKind: "script-draft",
+      promptVersion: "video-factory/screenwriter-v2",
+      providerId: "openai",
+      modelId: "gpt-5.4",
+      prompt: "Prompt Pack: video-factory/screenwriter-v2\nactual prompt",
+    });
+    const scriptNode = run.nodeRuns.find((node) => node.nodeId === "script");
+    const generatedVersion = scriptNode?.outputState?.versions.find((version) => version.source === "generated");
+    assert.ok(generatedVersion?.artifactIds.includes(traceArtifact.id));
+  });
+
   it("persists the codex script, feeds the same path downstream, and records provenance", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-"));
     const worker = new RecordingWorker();
     const { agent, inputs } = stubAgent(() => scriptDraft);
     const pipeline = new ProductionPipeline({ workspaceRoot, worker, screenwriterAgent: agent });
 
-    const run = await pipeline.start(brief);
+    const run = await pipeline.start({ ...brief, templateSnapshot });
 
     assert.equal(run.status, "succeeded");
     assert.equal(inputs.length, 1);
@@ -146,6 +205,7 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.equal(inputs[0]?.brief.title, brief.title);
     assert.equal(inputs[0]?.brief.platform, brief.platform);
     assert.equal(inputs[0]?.brief.durationSeconds, brief.durationSeconds);
+    assert.deepEqual(inputs[0]?.brief.templateBlueprint, templateSnapshot.resolvedBlueprint);
 
     const scriptArtifact = run.artifacts.find((artifact) => artifact.kind === "script");
     assert.ok(scriptArtifact?.uri);
@@ -154,13 +214,49 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.equal(scriptArtifact.contentType, "application/json");
     assert.equal(scriptArtifact.schemaVersion, "video-factory/script-draft-v1");
     const content = await readFile(scriptArtifact.uri, "utf8");
-    assert.deepEqual(JSON.parse(content), scriptDraft);
+    assert.deepEqual(JSON.parse(content), {
+      title: brief.title,
+      hook: scriptDraft.scenes[0]!.narration,
+      duration_target: brief.durationSeconds,
+      disclosure_required: true,
+      niche_slug: brief.nicheSlug,
+      structure: "AI 编剧短视频结构",
+      quality_checks: ["核验事实与数据", "人工审片后再发布"],
+      platform_notes: {
+        platform: brief.platform,
+        audience: brief.audience,
+        angle: brief.angle,
+      },
+      hashtags: [],
+      scenes: scriptDraft.scenes,
+    });
     assert.equal(scriptArtifact.sha256, createHash("sha256").update(content).digest("hex"));
     assert.equal(scriptArtifact.sizeBytes, Buffer.byteLength(content));
 
     const assetsRequest = worker.requests.find((request) => request.capability === "asset.prepare");
     assert.equal(assetsRequest?.input.scriptPath, scriptArtifact.uri);
     assert.equal(worker.requests.some((request) => request.capability === "script.draft"), false);
+  });
+
+  it("reruns the screenwriter from the saved human node input instead of the original brief closure", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-input-"));
+    const worker = new RecordingWorker();
+    const { agent, inputs } = stubAgent(() => scriptDraft);
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker, screenwriterAgent: agent });
+    const completed = await pipeline.start(brief);
+
+    const edited = await pipeline.applyNodeInputOverride(completed.id, {
+      nodeId: "script",
+      actor: "editor",
+      input: { brief: { ...brief, title: "人工修改后的题目" } },
+      allowTerminalEdit: true,
+    });
+    const regenerated = await pipeline.resumeStale(edited.id);
+
+    assert.equal(regenerated.status, "succeeded");
+    assert.equal(inputs.length, 2);
+    assert.equal(inputs[1]?.brief.title, "人工修改后的题目");
+    assert.equal(regenerated.nodeRuns.find((node) => node.nodeId === "script")?.inputState?.versions.at(-1)?.source, "human");
   });
 
   it("rejects before any execution when the screenwriter agent is missing or mismatched", async () => {
@@ -208,7 +304,7 @@ describe("ProductionPipeline codex screenwriter", () => {
 
     assert.equal(run.status, "failed");
     assert.equal(run.nodeRuns.at(-1)?.nodeId, "script");
-    assert.match(run.nodeRuns.at(-1)?.error ?? "", /between 3 and 10 scenes/);
+    assert.match(run.nodeRuns.at(-1)?.error ?? "", /between 3 and 24 scenes/);
     assert.equal(run.artifacts.some((artifact) => artifact.kind === "script"), false);
     assert.equal(worker.requests.length, 0);
     await assert.rejects(

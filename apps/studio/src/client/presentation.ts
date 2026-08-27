@@ -6,6 +6,7 @@ export const RUN_NODE_LABELS: Record<string, string> = {
   voice: "配音",
   render: "渲染",
   "technical-review": "机器质检",
+  "visual-review": "视觉审片",
   "final-review": "人工终审",
   "publish-package": "发布文案与发布包",
 };
@@ -40,6 +41,9 @@ export function platformLabel(platform: string): string {
 export function providerLabel(providerId?: string): string | undefined {
   if (!providerId) return undefined;
   return ({
+    "inline:brief": "VideoFactory 制片",
+    "inline:final-review": "人工终审",
+    "inline:publish-package": "本地发布编排",
     "video-factory-ts-v1": "VideoFactory 本地编排",
     "python-template-v1": "本地模板脚本",
     "codex-screenwriter-v1": "Codex 编剧",
@@ -54,6 +58,8 @@ export function providerLabel(providerId?: string): string | undefined {
     "macos-say-v1": "macOS 系统配音",
     "python-ffmpeg-v1": "FFmpeg 本地渲染",
     "python-technical-review-v1": "本地机器质检",
+    "codex-visual-review-v1": "Codex 视觉审片",
+    "glm-visual-review-v1": "GLM-5.3-Flash 视觉审片",
   } as Record<string, string>)[providerId] ?? providerId;
 }
 

@@ -1,7 +1,7 @@
 import { AlertCircle, ArrowLeft, LoaderCircle } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { StudioCreatorSettings, StudioDecisionInput, StudioProductionInput, StudioProvider, StudioRunDetail } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioCreatorSettings, StudioDecisionInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProductionInput, StudioProvider, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
 import { studioApi, subscribeToRun } from "../api.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 import { RunWorkbench } from "../components/RunWorkbench.js";
@@ -20,12 +20,22 @@ export function RunPage() {
   const [restartProviders, setRestartProviders] = useState<StudioProvider[]>([]);
   const [restartSettings, setRestartSettings] = useState<StudioCreatorSettings>();
   const [restartRequestId, setRestartRequestId] = useState("");
+  const [costDetail, setCostDetail] = useState<StudioCostRunDetail>();
+  const [costError, setCostError] = useState<string>();
+  const [nodeMutationPending, setNodeMutationPending] = useState(false);
+  const costRefreshTimer = useRef<number | undefined>(undefined);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(undefined);
     try {
-      setRun(await studioApi.run(runId));
+      const [runResult, costResult] = await Promise.allSettled([studioApi.run(runId), studioApi.runCosts(runId)]);
+      if (runResult.status === "rejected") throw runResult.reason;
+      setRun(runResult.value);
+      setCostDetail(costResult.status === "fulfilled" ? costResult.value : undefined);
+      setCostError(costResult.status === "rejected"
+        ? `成本明细读取失败：${costResult.reason instanceof Error ? costResult.reason.message : String(costResult.reason)}`
+        : undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -45,11 +55,21 @@ export function RunPage() {
       runId,
       (nextRun) => {
         setRun(nextRun);
+        if (costRefreshTimer.current === undefined) {
+          costRefreshTimer.current = window.setTimeout(() => {
+            costRefreshTimer.current = undefined;
+            void refreshCosts();
+          }, 1_000);
+        }
         setConnectionWarning(undefined);
       },
       () => setConnectionWarning("实时连接暂时中断，正在自动重连。你也可以刷新页面读取最新进度。"),
     );
   }, [runId, run !== undefined, isTerminal(run?.status)]);
+
+  useEffect(() => () => {
+    if (costRefreshTimer.current !== undefined) window.clearTimeout(costRefreshTimer.current);
+  }, [runId]);
 
   async function decide(input: StudioDecisionInput) {
     setDecisionPending(true);
@@ -82,6 +102,71 @@ export function RunPage() {
     navigate(`/projects/${result.runId}`);
   }
 
+  async function overrideNode(nodeId: string, input: StudioNodeOverrideInput) {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      setRun(await studioApi.overrideNode(runId, nodeId, input));
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
+  async function overrideNodeInput(nodeId: string, input: StudioNodeInputOverrideInput) {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      setRun(await studioApi.overrideNodeInput(runId, nodeId, input));
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
+  async function authorizeSpend(nodeId: string, input: StudioSpendAuthorizationInput) {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      setRun(await studioApi.authorizeSpend(runId, nodeId, input));
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
+  async function regenerateStale() {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      setRun(await studioApi.regenerateStale(runId));
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
+  async function refreshCosts() {
+    try {
+      setCostDetail(await studioApi.runCosts(runId));
+      setCostError(undefined);
+    } catch (caught) {
+      setCostError(`成本明细读取失败：${caught instanceof Error ? caught.message : String(caught)}`);
+    }
+  }
+
   if (loading) {
     return <div className="page-loading"><LoaderCircle aria-hidden="true" size={22} />正在读取生产现场...</div>;
   }
@@ -100,7 +185,8 @@ export function RunPage() {
       <div className="run-back-row"><Link to="/projects"><ArrowLeft aria-hidden="true" size={16} />制作记录</Link></div>
       {connectionWarning ? <div className="inline-error" role="status"><AlertCircle aria-hidden="true" size={16} />{connectionWarning}</div> : null}
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
-      <RunWorkbench run={run} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} />
+      {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
+      <RunWorkbench run={run} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} nodeMutationPending={nodeMutationPending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onAuthorizeSpend={authorizeSpend} onRegenerateStale={regenerateStale} />
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
       <NewRunDialog
         open={restarting}

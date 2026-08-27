@@ -46,6 +46,7 @@ services:
       VIDEO_FACTORY_DAILYHOT_URL: ${VIDEO_FACTORY_DAILYHOT_URL:-}
       VIDEO_FACTORY_RSSHUB_URL: ${VIDEO_FACTORY_RSSHUB_URL:-}
       VIDEO_FACTORY_CODEX_SOCKET_PATH: ${VIDEO_FACTORY_CODEX_SOCKET_PATH:-/run/video-factory-codex/worker.sock}
+      VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: ${VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH:-/run/video-factory-zai-codex/worker.sock}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -64,6 +65,12 @@ services:
       - type: bind
         source: ${VIDEO_FACTORY_CODEX_RUNTIME_DIR:-/run/video-factory-codex}
         target: /run/video-factory-codex
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VIDEO_FACTORY_ZAI_CODEX_RUNTIME_DIR:-/run/video-factory-zai-codex}
+        target: /run/video-factory-zai-codex
         read_only: true
         bind:
           create_host_path: false

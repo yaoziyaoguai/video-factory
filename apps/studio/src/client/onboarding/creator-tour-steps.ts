@@ -1,4 +1,22 @@
-import type { DriveStep } from "driver.js";
+import type { DriveStep, DriverHook } from "driver.js";
+
+const actionAdvanceListeners = new WeakMap<Element, EventListener>();
+
+const reliableActionAdvance: Pick<DriveStep, "onHighlightStarted" | "onDeselected"> = {
+  onHighlightStarted: (element, step, opts) => {
+    if (!element) return;
+    removeActionAdvanceListener(element);
+    const listener: EventListener = () => {
+      removeActionAdvanceListener(element);
+      advanceAfterHighlightSettles(step, opts);
+    };
+    actionAdvanceListeners.set(element, listener);
+    element.addEventListener("click", listener, { once: true });
+  },
+  onDeselected: (element) => {
+    if (element) removeActionAdvanceListener(element);
+  },
+};
 
 export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
   {
@@ -18,7 +36,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
   },
   {
     element: '[data-tour="candidate-adopt"]:not(:disabled)',
-    advanceOnClick: true,
+    ...reliableActionAdvance,
     disableActiveInteraction: false,
     waitForElement: 5_000,
     popover: {
@@ -67,7 +85,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
   },
   {
     element: '[data-tour="create-production"]',
-    advanceOnClick: true,
+    ...reliableActionAdvance,
     disableActiveInteraction: false,
     waitForElement: 5_000,
     popover: {
@@ -305,4 +323,21 @@ const EXPERIMENT_TOUR_STEPS: DriveStep[] = [
 function visibleTourElement(name: string): Element {
   const elements = [...document.querySelectorAll(`[data-tour="${name}"]`)];
   return elements.find((element) => element.getClientRects().length > 0) ?? elements[0] ?? document.body;
+}
+
+function removeActionAdvanceListener(element: Element): void {
+  const listener = actionAdvanceListeners.get(element);
+  if (!listener) return;
+  element.removeEventListener("click", listener);
+  actionAdvanceListeners.delete(element);
+}
+
+// driver.js 会忽略高亮动画期间的点击；等待动画状态清空后再推进，业务按钮本身仍立即响应。
+function advanceAfterHighlightSettles(step: DriveStep, opts: Parameters<DriverHook>[2]): void {
+  if (opts.driver.getActiveStep() !== step) return;
+  if (opts.driver.getState("__transitionCallback")) {
+    window.requestAnimationFrame(() => advanceAfterHighlightSettles(step, opts));
+    return;
+  }
+  opts.driver.moveNext();
 }

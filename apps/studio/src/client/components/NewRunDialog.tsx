@@ -15,10 +15,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import type { StudioCreatorSettings, StudioProductionInput, StudioProvider } from "../../shared/api.js";
+import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, StudioTemplate } from "../../shared/api.js";
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { VoiceStudio } from "./VoiceStudio.js";
+import { studioApi } from "../api.js";
+import { TemplateGallery } from "../templates/TemplateGallery.js";
 
 interface NewRunDialogProps {
   open: boolean;
@@ -40,6 +42,7 @@ interface CapabilityDefinition {
   role: string;
   preferred: string;
   icon: LucideIcon;
+  optional?: boolean;
 }
 
 const CAPABILITIES: CapabilityDefinition[] = [
@@ -49,6 +52,7 @@ const CAPABILITIES: CapabilityDefinition[] = [
   { key: "voice", capability: "voice.synthesize", label: "配音", role: "声音导演", description: "旁白音色与语速", preferred: "macos-say-v1", icon: Mic2 },
   { key: "render", capability: "video.render", label: "视频渲染", role: "剪辑师", description: "9:16 合成、字幕与音轨", preferred: "python-ffmpeg-v1", icon: Film },
   { key: "technicalReview", capability: "quality.review", label: "机器质检", role: "技术质检", description: "分辨率、时长与产物校验", preferred: "python-technical-review-v1", icon: ScanSearch },
+  { key: "visualReview", capability: "quality.review.visual", label: "视觉审片", role: "视觉审片员", description: "构图、连续性、节奏与文字可读性", preferred: "glm-visual-review-v1", icon: ScanSearch, optional: true },
 ];
 
 const RECIPES: Array<{
@@ -97,9 +101,16 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   const [durationSeconds, setDurationSeconds] = useState(24);
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([]);
   const [voiceDirection, setVoiceDirection] = useState<StudioProductionInput["voiceDirection"]>(() => defaultVoiceDirection(providers));
+  const [visualReviewEnabled, setVisualReviewEnabled] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  const [templates, setTemplates] = useState<StudioTemplate[]>([]);
+  const [templatesLoaded, setTemplatesLoaded] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState(
+    initialValues?.editorial?.verdict === "produce_image_story" ? "photo-story" : "knowledge-explainer",
+  );
+  const [templateError, setTemplateError] = useState<string>();
   const dialogRef = useDialogFocus<HTMLElement>(open, onClose, submitting);
   const activeCapability = CAPABILITIES.find((item) => item.key === activeKey) ?? CAPABILITIES[1]!;
   const editorial = initialValues?.editorial;
@@ -113,6 +124,9 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   });
   const selectedAssetSources = assetSources.filter((provider) => assetProviderIds.includes(provider.id));
   const selectedMeteredSources = selectedAssetSources.filter((provider) => provider.billing === "metered");
+  const visualReviewProvider = providers.find((provider) => {
+    return provider.capability === "quality.review.visual" && provider.id === bindings.visualReview && provider.available;
+  }) ?? providers.find((provider) => provider.capability === "quality.review.visual" && provider.available);
   const meteredSelected = selectedMeteredSources.length > 0 && maxPaidShots > 0;
   const cheapestMeteredClip = Math.min(...selectedMeteredSources.map((provider) => provider.estimatedCnyPerClip ?? Number.POSITIVE_INFINITY));
   const minimumBudget = meteredSelected && Number.isFinite(cheapestMeteredClip)
@@ -126,7 +140,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     maxCostCny: meteredSelected ? displayedBudget : 0,
   };
   const missingCapabilities = CAPABILITIES.filter((item) => {
-    return !providers.some((provider) => provider.capability === item.capability && provider.available && provider.kind !== "test");
+    return !item.optional
+      && !providers.some((provider) => provider.capability === item.capability && provider.available && provider.kind !== "test");
   });
 
   useEffect(() => {
@@ -136,12 +151,13 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     const readyVoiceProvider = providers.find((provider) => {
       return provider.id === requestedVoiceProvider && provider.capability === "voice.synthesize" && provider.available && provider.kind !== "test";
     });
+    const resolvedVoiceDirection = readyVoiceProvider ? initialVoiceDirection : defaultVoiceDirection(providers);
     const initialBindings = {
       ...defaults,
       ...(initialValues?.providers ?? {}),
       assets: "ai-shot-router-v1",
       director: defaults.director ?? "",
-      voice: readyVoiceProvider?.id ?? defaults.voice ?? "",
+      voice: providerForVoiceProfile(resolvedVoiceDirection.profileId),
     };
     const initialRecipe = imageStory
       ? "free-stock"
@@ -158,10 +174,32 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     setPlatform(initialValues?.platform ?? creatorSettings?.productionDefaults?.platform ?? "douyin");
     setDurationSeconds(initialValues?.durationSeconds ?? creatorSettings?.productionDefaults?.durationSeconds ?? 24);
     setAssetProviderIds(sourceIds);
-    setVoiceDirection(initialVoiceDirection);
+    setVoiceDirection(resolvedVoiceDirection);
+    setVisualReviewEnabled(Boolean(initialBindings.visualReview && providers.some((provider) => {
+      return provider.id === initialBindings.visualReview && provider.available;
+    })));
     setActiveKey("assets");
     setAdvancedOpen(false);
     setError(undefined);
+    const requestedTemplateId = imageStory ? "photo-story" : initialValues?.editorial ? "trend-fact-brief" : "knowledge-explainer";
+    setSelectedTemplateId(requestedTemplateId);
+    setTemplateError(undefined);
+    setTemplates([]);
+    setTemplatesLoaded(false);
+    void studioApi.templates()
+      .then((catalog) => {
+        const published = catalog.templates.filter((template) => template.status === "published");
+        if (published.length === 0) throw new Error("模板目录中没有已发布模板。");
+        setTemplates(published);
+        if (published.some((template) => template.id === requestedTemplateId)) {
+          setSelectedTemplateId(requestedTemplateId);
+        } else {
+          setSelectedTemplateId(published[0]!.id);
+          setDurationSeconds(published[0]!.durationSeconds);
+        }
+        setTemplatesLoaded(true);
+      })
+      .catch((caught) => setTemplateError(`无法读取模板目录：${caught instanceof Error ? caught.message : String(caught)} 请重试后再开始制作。`));
   }, [creatorSettings, defaults, imageStory, open, providers]);
 
   if (!open) return null;
@@ -181,12 +219,15 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   function selectProvider(provider: StudioProvider) {
     if (!provider.available) return;
     setBindings((current) => ({ ...current, [activeKey]: provider.id }));
+    if (activeKey === "visualReview") setVisualReviewEnabled(true);
   }
 
   function toggleAssetProvider(provider: StudioProvider) {
     if (!provider.available || (provider.billing === "metered" && maxPaidShots === 0)) return;
     setAssetProviderIds((current) => {
+      const baselineId = requiredFreeBaselineId(current, providers);
       if (current.includes(provider.id)) {
+        if (provider.id === baselineId) return current;
         return current.length === 1 ? current : current.filter((id) => id !== provider.id);
       }
       return [...current, provider.id];
@@ -199,6 +240,13 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     setSubmitting(true);
     setError(undefined);
     try {
+      if (!templatesLoaded || !templates.some((template) => template.id === selectedTemplateId)) {
+        throw new Error(templateError ?? "模板目录尚未加载完成，请稍后重试。");
+      }
+      const selectedTemplate = templates.find((template) => template.id === selectedTemplateId)!;
+      const providersForRun: StudioProductionInput["providers"] = { ...bindings };
+      if (visualReviewEnabled && visualReviewProvider) providersForRun.visualReview = visualReviewProvider.id;
+      else delete providersForRun.visualReview;
       await onSubmit({
         protocolVersion: "video-factory/brief-v1",
         title: requiredString(data, "title"),
@@ -210,7 +258,11 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
         reviewMode: "manual",
         ...(editorial ? { editorial } : {}),
         voiceDirection,
-        providers: bindings,
+        template: {
+          templateId: selectedTemplateId,
+          runOverrides: { durationSeconds, automationLevel: selectedTemplate.automationLevel },
+        },
+        providers: providersForRun,
         director: { profileId: directorProfileId, assetProviderIds },
         economics,
       });
@@ -233,7 +285,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
             <p>先定内容与预计成本，再选择合适的画面和声音能力。</p>
           </div>
           <div className="dialog-budget" aria-label="当前预算">
-            <span>{meteredSelected ? `${maxPaidShots} 个付费镜头上限` : "仅使用免费能力"}</span>
+            <span>{meteredSelected ? `${maxPaidShots} 个付费镜头上限` : "无按量 API 扣费"}</span>
             <strong>¥{formatMoney(displayedBudget)}</strong>
           </div>
           <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭">
@@ -243,6 +295,27 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
 
         <form className="run-form recipe-form" onSubmit={submit} key={initialValues?.title ?? "blank-production"}>
           <div className="recipe-form-scroll">
+            <section className="template-picker-section" aria-labelledby="template-picker-title">
+              <div className="compact-section-heading">
+                <div><span>00</span><h3 id="template-picker-title">视频模板</h3></div>
+                <small>模板决定叙事语法，不锁死模型和素材</small>
+              </div>
+              {templates.length > 0 ? (
+                <TemplateGallery
+                  templates={templates}
+                  selectedId={selectedTemplateId}
+                  onSelect={(template) => {
+                    setSelectedTemplateId(template.id);
+                    setDurationSeconds(template.durationSeconds);
+                  }}
+                />
+              ) : (
+                <div className="template-loading" aria-live="polite">
+                  <strong>{selectedTemplateId === "photo-story" ? "照片故事" : "知识解释"}</strong>
+                  <span>{templateError ?? "正在读取模板目录..."}</span>
+                </div>
+              )}
+            </section>
             <section className="brief-section" aria-labelledby="brief-section-title">
               <div className="compact-section-heading">
                 <div><span>01</span><h3 id="brief-section-title">内容简报</h3></div>
@@ -272,10 +345,15 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 <label className="field field-compact">
                   <span>视频时长</span>
                   <select name="durationSeconds" value={String(durationSeconds)} onChange={(event) => setDurationSeconds(Number(event.target.value))}>
+                    {![20, 24, 30, 36, 40, 42, 45, 60].includes(durationSeconds) ? <option value={durationSeconds}>{durationSeconds} 秒</option> : null}
                     <option value="20">20 秒</option>
                     <option value="24">24 秒</option>
                     <option value="30">30 秒</option>
+                    <option value="36">36 秒</option>
+                    <option value="40">40 秒</option>
+                    <option value="42">42 秒</option>
                     <option value="45">45 秒</option>
+                    <option value="60">60 秒</option>
                   </select>
                 </label>
               </div>
@@ -383,11 +461,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                           <span className="provider-choice-title">
                             <strong>{provider.label}</strong>
                             <span className={provider.billing === "metered" ? "cost-tag is-metered" : "cost-tag"}>
-                              {provider.billing === "metered"
-                                ? provider.estimatedCnyPerClip === undefined
-                                  ? "待估价"
-                                  : `约 ¥${formatMoney(provider.estimatedCnyPerClip)}/镜头`
-                                : "免费"}
+                              {providerBillingLabel(provider)}
                             </span>
                           </span>
                           <span>{provider.description ?? provider.id}</span>
@@ -412,8 +486,10 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 <div className="asset-source-options">
                   {assetSources.map((provider) => {
                     const checked = assetProviderIds.includes(provider.id);
+                    const baselineId = requiredFreeBaselineId(assetProviderIds, providers);
                     const disabled = !provider.available
                       || (provider.billing === "metered" && maxPaidShots === 0)
+                      || (checked && provider.id === baselineId)
                       || (checked && assetProviderIds.length === 1);
                     return <label key={provider.id} className={checked ? "asset-source-option is-selected" : "asset-source-option"}>
                       <input
@@ -423,7 +499,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                         onChange={() => toggleAssetProvider(provider)}
                       />
                       <span><strong>{provider.label}</strong><small>{provider.description ?? provider.id}</small></span>
-                      <em>{provider.billing === "metered" ? provider.estimatedCnyPerClip ? `约 ¥${formatMoney(provider.estimatedCnyPerClip)}/镜头` : "待估价" : "免费"}</em>
+                      <em>{providerBillingLabel(provider)}</em>
                     </label>;
                   })}
                 </div>
@@ -440,6 +516,23 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
             />
 
             <section className="production-guardrails" aria-label="生产门禁">
+              <label className={visualReviewEnabled ? "visual-review-control is-enabled" : "visual-review-control"}>
+                <input
+                  type="checkbox"
+                  checked={visualReviewEnabled && Boolean(visualReviewProvider)}
+                  disabled={!visualReviewProvider}
+                  onChange={(event) => {
+                    setVisualReviewEnabled(event.target.checked);
+                    if (event.target.checked && visualReviewProvider) {
+                      setBindings((current) => ({ ...current, visualReview: visualReviewProvider.id }));
+                    }
+                  }}
+                />
+                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片</strong></span>
+                <small>{visualReviewProvider
+                  ? `${visualReviewProvider.label} · 抽帧审查，不上传音轨`
+                  : "ZAI Codex broker 尚未接通，本次跳过视觉模型审片"}</small>
+              </label>
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>
               <label className="budget-control">
                 <span><CircleDollarSign aria-hidden="true" size={16} /><strong>预计成本上限</strong></span>
@@ -453,9 +546,9 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
           </div>
 
           <footer className="dialog-actions recipe-dialog-actions">
-            <div><strong>{RECIPES.find((recipe) => recipe.id === recipeId)?.label}</strong><span>{meteredSelected ? `预计上限 ¥${formatMoney(displayedBudget)}` : "免费制作路径"}</span></div>
+            <div><strong>{RECIPES.find((recipe) => recipe.id === recipeId)?.label}</strong><span>{meteredSelected ? `预计上限 ¥${formatMoney(displayedBudget)}` : "无按量 API 扣费"}</span></div>
             <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
-            <button className="button button-primary" type="submit" disabled={submitting || missingCapabilities.length > 0} data-tour="production-start">
+            <button className="button button-primary" type="submit" disabled={submitting || !templatesLoaded || missingCapabilities.length > 0} data-tour="production-start">
               <Check aria-hidden="true" size={17} />
               {submitting ? "正在创建..." : "开始制作"}
             </button>
@@ -546,6 +639,18 @@ function isAssetSource(provider: StudioProvider): boolean {
   return provider.capability === "asset.prepare" && provider.kind !== "test" && provider.id !== "ai-shot-router-v1";
 }
 
+function requiredFreeBaselineId(assetProviderIds: string[], providers: StudioProvider[]): string | undefined {
+  const hasMeteredSource = providers.some((provider) => {
+    return assetProviderIds.includes(provider.id) && provider.billing === "metered";
+  });
+  if (!hasMeteredSource) return undefined;
+  const selectedFreeSources = providers.filter((provider) => {
+    return assetProviderIds.includes(provider.id) && provider.available && isAssetSource(provider) && provider.billing !== "metered";
+  });
+  return selectedFreeSources.find((provider) => provider.id === "local-editorial-v1")?.id
+    ?? selectedFreeSources[0]?.id;
+}
+
 function requiredString(data: FormData, key: string): string {
   const value = data.get(key);
   const labels: Record<string, string> = { title: "视频标题", angle: "内容角度", audience: "目标受众", platform: "目标平台" };
@@ -568,4 +673,12 @@ function roundMoney(value: number): number {
 
 function formatMoney(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function providerBillingLabel(provider: StudioProvider): string {
+  if (provider.billing === "subscription") return "订阅额度";
+  if (provider.billing !== "metered") return "免费";
+  return provider.estimatedCnyPerClip === undefined
+    ? "待估价"
+    : `约 ¥${formatMoney(provider.estimatedCnyPerClip)}/镜头`;
 }

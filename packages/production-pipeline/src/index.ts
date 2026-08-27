@@ -1,4 +1,4 @@
-export { BRIEF_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION, parseBrief } from "./contracts.js";
+export { BRIEF_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION, parseBrief, parsePersistedBrief } from "./contracts.js";
 export type {
   ProductionBrief,
   ProductionDirectorDirection,
@@ -14,6 +14,7 @@ export { DIRECTOR_PLAN_VERSION, VISUAL_DIRECTOR_PROFILES, validateVisualDirector
 export type {
   ShotAuthenticityPolicy,
   ShotDecision,
+  VisualAssetDeliveryType,
   VisualBible,
   VisualAssetProviderCapability,
   VisualDirectorAgent,
@@ -28,7 +29,9 @@ export {
   CodexBridgeClient,
   CodexBridgeError,
 } from "./codex-chat.js";
-export type { CodexBridgeClientOptions, CodexTaskKind } from "./codex-chat.js";
+export type { CodexBridgeClientOptions, CodexTaskExecution, CodexTaskKind, CodexTaskTrace } from "./codex-chat.js";
+export { CodexVisualReviewAgent, validateVisualReviewReport } from "./codex-visual-review.js";
+export type { CodexVisualReviewAgentOptions, VisualReviewAgent, VisualReviewAgentInput, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport } from "./codex-visual-review.js";
 export { CodexVisualDirectorAgent } from "./codex-visual-director.js";
 export type { CodexVisualDirectorAgentOptions } from "./codex-visual-director.js";
 export {
@@ -53,7 +56,7 @@ export type {
   PublishCopyInput,
   PublishCopyWriter,
 } from "./codex-publish-copy.js";
-export { FileRunStore, StaleRunRevisionError } from "./run-store.js";
+export { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
 export { PythonWorkerClient } from "./python-worker-client.js";
 export type {
   PythonWorkerClientOptions,
@@ -64,6 +67,7 @@ export { ProductionPipeline } from "./production-pipeline.js";
 export type {
   DispatchedProductionRun,
   ProductionPipelineOptions,
+  ProductionProviderRuntimeMetadata,
   ProductionRunListener,
 } from "./production-pipeline.js";
 export { MiniMaxVideoAdapter, SeedanceVideoAdapter, WanVideoAdapter } from "./video-generation.js";

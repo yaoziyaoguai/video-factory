@@ -16,7 +16,10 @@ const driverMock = vi.hoisted(() => {
   const instance = {
     destroy: vi.fn(),
     drive: vi.fn(),
+    getActiveStep: vi.fn(),
+    getState: vi.fn(),
     isActive: vi.fn(() => false),
+    moveNext: vi.fn(),
   };
   return { factory: vi.fn((_config?: Config) => instance), instance };
 });
@@ -74,7 +77,10 @@ describe("creator tour routing", () => {
     driverMock.factory.mockClear();
     driverMock.instance.drive.mockClear();
     driverMock.instance.destroy.mockClear();
+    driverMock.instance.getActiveStep.mockReset();
+    driverMock.instance.getState.mockReset();
     driverMock.instance.isActive.mockReturnValue(false);
+    driverMock.instance.moveNext.mockClear();
     vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
   });
 
@@ -197,7 +203,38 @@ describe("creator tour routing", () => {
 
     const config = driverMock.factory.mock.calls[0]?.[0];
     const adoptionStep = config?.steps?.find((step) => step.element === '[data-tour="candidate-adopt"]:not(:disabled)');
-    expect(adoptionStep).toMatchObject({ advanceOnClick: true, disableActiveInteraction: false });
+    expect(adoptionStep).toMatchObject({
+      disableActiveInteraction: false,
+      onHighlightStarted: expect.any(Function),
+    });
+  });
+
+  it("advances action steps when the highlighted control is clicked during its animation", async () => {
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <AppShell><button data-tour="candidate-adopt">采用到制作区</button></AppShell>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: "打开创作向导" })[0]!);
+    fireEvent.click(screen.getByRole("button", { name: "完整带我做一条" }));
+
+    const config = driverMock.factory.mock.calls[0]?.[0];
+    const adoptionStep = config?.steps?.find((step) => step.element === '[data-tour="candidate-adopt"]:not(:disabled)');
+    const target = screen.getByRole("button", { name: "采用到制作区" });
+    expect(adoptionStep?.onHighlightStarted).toBeTypeOf("function");
+
+    driverMock.instance.getActiveStep.mockReturnValue(adoptionStep);
+    driverMock.instance.getState.mockReturnValueOnce(() => undefined).mockReturnValue(undefined);
+    adoptionStep?.onHighlightStarted?.(
+      target,
+      adoptionStep!,
+      { config: { duration: 240 }, driver: driverMock.instance } as never,
+    );
+    fireEvent.click(target);
+
+    expect(driverMock.instance.moveNext).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(260); });
+    expect(driverMock.instance.moveNext).toHaveBeenCalledOnce();
   });
 
   it("adds an explicit early-exit control to every tour popover", async () => {

@@ -1,5 +1,9 @@
 import type { StudioProvider, StudioTrendService, StudioTrendSource } from "../shared/api.js";
-import { resolveCodexSocketPath, type CodexProviderSettings } from "./codex-provider-settings.js";
+import {
+  resolveCodexSocketPath,
+  resolveZaiCodexSocketPath,
+  type CodexProviderSettings,
+} from "./codex-provider-settings.js";
 import { readMeteredVideoProviderSettings } from "./video-provider-settings.js";
 import { readMeteredImageProviderSettings } from "./image-provider-settings.js";
 
@@ -16,6 +20,7 @@ export function buildProviderCatalog(
   runtime: ProviderRuntime,
   environment: NodeJS.ProcessEnv,
   codexAvailability?: CodexCatalogAvailability,
+  zaiCodexAvailability?: CodexCatalogAvailability,
 ): StudioProvider[] {
   const videoSettings = readMeteredVideoProviderSettings(environment);
   const imageSettings = readMeteredImageProviderSettings(environment);
@@ -29,6 +34,8 @@ export function buildProviderCatalog(
   const wanAvailable = runtime.python && wanSettings !== undefined;
   const codex = codexAvailability ?? probeCodexSynchronously(environment);
   const codexRequirement = `${resolveCodexSocketPath(environment).requirement}${codex.reason ? ` 当前：${codex.reason}` : ""}`;
+  const zaiCodex = zaiCodexAvailability ?? { available: false, reason: "尚未完成独立 broker 协议健康检查。" };
+  const zaiCodexRequirement = `${resolveZaiCodexSocketPath(environment).requirement}${zaiCodex.reason ? ` 当前：${zaiCodex.reason}` : ""}`;
 
   return [
     provider({
@@ -197,6 +204,7 @@ export function buildProviderCatalog(
       description: "使用 speech-2.8-turbo 合成自然中文旁白，逐场缓存后再由 FFmpeg 做响度与节奏统一。",
       modes: ["普通话", "多角色", "情绪与语速", "云端生成"],
       latency: "seconds",
+      estimatedCnyPerClip: positiveEstimate(environment.MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP, 0.5),
       requirement: "需要 MINIMAX_API_KEY，可选 MINIMAX_TTS_MODEL_ID",
       docsUrl: "https://platform.minimaxi.com/docs/api-reference/speech-t2a-http",
     }),
@@ -243,6 +251,30 @@ export function buildProviderCatalog(
       modes: ["技术门禁", "产物校验"],
       latency: "seconds",
       requirement: "需要 python3、ffmpeg 和 ffprobe",
+    }),
+    provider({
+      id: "glm-visual-review-v1",
+      capability: "quality.review.visual",
+      label: "GLM-5.3-Flash 视觉审片",
+      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && zaiCodex.available,
+      kind: "external",
+      billing: "subscription",
+      description: "从成片中抽取带时间码的关键帧，由 GLM-5.3-Flash 检查构图、连续性、节奏、文字可读性与内容安全。",
+      modes: ["原生多模态", "关键帧审片", "时间码问题", "Coding Plan"],
+      latency: "seconds",
+      requirement: zaiCodexRequirement,
+    }),
+    provider({
+      id: "codex-visual-review-v1",
+      capability: "quality.review.visual",
+      label: "Codex 视觉审片",
+      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && codex.available,
+      kind: "external",
+      billing: "subscription",
+      description: "从成片中安全抽取最多 12 张关键帧，由服务器 Codex 检查构图、连续性、节奏、文字可读性与内容安全。",
+      modes: ["关键帧审片", "时间码问题", "修改建议", "订阅能力"],
+      latency: "seconds",
+      requirement: codexRequirement,
     }),
     provider({
       id: "codex-publish-copy-v1",
@@ -368,6 +400,11 @@ function provider(input: Omit<StudioProvider, "status" | "billing"> & Partial<Pi
     delete value.requirement;
   }
   return value;
+}
+
+function positiveEstimate(value: string | undefined, fallback: number): number {
+  const parsed = value?.trim() ? Number(value) : fallback;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 // 同步调用无法核对 /health 协议，必须保守地报告不可用；生产启动路径会注入异步健康探测结果。

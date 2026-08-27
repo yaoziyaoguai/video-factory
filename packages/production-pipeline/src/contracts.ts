@@ -8,6 +8,7 @@ export interface ProductionProviderBindings {
   voice: string;
   render: string;
   technicalReview: string;
+  visualReview?: string;
 }
 
 export type ProductionRecipeId = "economy-daily" | "free-stock" | "keyshot-ai" | "cinematic-ai" | "custom";
@@ -60,6 +61,7 @@ export interface ProductionBrief {
   durationSeconds: number;
   platform: string;
   reviewMode: "manual" | "automatic";
+  templateSnapshot?: ProductionTemplateSnapshot;
   providers: ProductionProviderBindings;
   director?: ProductionDirectorDirection;
   economics: ProductionEconomics;
@@ -82,6 +84,9 @@ export function parseBrief(value: unknown): ProductionBrief {
   const economics = parseEconomics(value.economics);
   const voiceDirection = parseVoiceDirection(value.voiceDirection);
   const editorial = parseEditorialDirection(value.editorial);
+  const templateSnapshot = value.templateSnapshot === undefined
+    ? undefined
+    : parseProductionTemplateSnapshot(value.templateSnapshot);
   const voiceProvider = requireString(providers.voice, "providers.voice");
   const expectedVoiceProvider = voiceProviderForProfile(voiceDirection.profileId);
   if (voiceProvider !== expectedVoiceProvider) {
@@ -106,6 +111,7 @@ export function parseBrief(value: unknown): ProductionBrief {
     durationSeconds: Number(durationSeconds),
     platform: requireString(value.platform, "platform"),
     reviewMode: value.reviewMode,
+    ...(templateSnapshot ? { templateSnapshot } : {}),
     providers: {
       script: requireString(providers.script, "providers.script"),
       ...(director ? { director: requireString(providers.director, "providers.director") } : {}),
@@ -113,12 +119,31 @@ export function parseBrief(value: unknown): ProductionBrief {
       voice: voiceProvider,
       render: requireString(providers.render, "providers.render"),
       technicalReview: requireString(providers.technicalReview, "providers.technicalReview"),
+      ...(providers.visualReview === undefined ? {} : { visualReview: requireString(providers.visualReview, "providers.visualReview") }),
     },
     ...(director ? { director } : {}),
     economics,
     voiceDirection,
     ...(editorial ? { editorial } : {}),
   };
+}
+
+export function parsePersistedBrief(value: unknown): ProductionBrief {
+  try {
+    return parseBrief(value);
+  } catch (strictError) {
+    if (!isRecord(value) || !isRecord(value.providers) || !isRecord(value.voiceDirection)) throw strictError;
+    const providerId = value.providers.voice;
+    const profileId = value.voiceDirection.profileId;
+    if (typeof providerId !== "string" || typeof profileId !== "string") throw strictError;
+    if (voiceProviderForProfile(profileId) === providerId) throw strictError;
+    const compatibleProfileId = persistedVoiceProfileForProvider(providerId);
+    if (!compatibleProfileId) throw strictError;
+    return parseBrief({
+      ...value,
+      voiceDirection: { ...value.voiceDirection, profileId: compatibleProfileId },
+    });
+  }
 }
 
 function parseEditorialDirection(value: unknown): ProductionEditorialDirection | undefined {
@@ -162,6 +187,14 @@ function voiceProviderForProfile(profileId: string): string {
   if (profileId.startsWith("minimax:")) return "minimax-tts-v1";
   if (profileId.startsWith("tone:")) return "ffmpeg-tone-test-v1";
   return "macos-say-v1";
+}
+
+function persistedVoiceProfileForProvider(providerId: string): string | undefined {
+  if (providerId === "macos-say-v1") return "macos:Tingting";
+  if (providerId === "kokoro-local-v1") return "kokoro:zf_001";
+  if (providerId === "minimax-tts-v1") return "minimax:female-chengshu";
+  if (providerId === "ffmpeg-tone-test-v1") return "tone:default";
+  return undefined;
 }
 
 function parseVoiceDirection(value: unknown): ProductionVoiceDirection {
@@ -243,3 +276,4 @@ function requireStringArray(value: unknown, field: string): string[] {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+import { parseProductionTemplateSnapshot, type ProductionTemplateSnapshot } from "@video-factory/template-core";

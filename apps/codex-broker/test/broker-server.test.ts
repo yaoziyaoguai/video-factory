@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import http from "node:http";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,20 +9,26 @@ import { CodexBrokerServer } from "../src/broker-server.js";
 import {
   CodexExecutor,
   CodexExecutorError,
+  codexExecutorProfileFor,
+  type CodexExecutionOptions,
   type CodexExecutionResult,
+  type CodexExecutorProfile,
   type ValidatedTask,
 } from "../src/codex-executor.js";
 
 class ScriptedExecutor extends CodexExecutor {
   readonly calls: ValidatedTask[] = [];
 
-  constructor(private readonly script: (task: ValidatedTask) => CodexExecutionResult | Promise<CodexExecutionResult>) {
-    super({ workspaceRoot: "/nonexistent-codex-broker" });
+  constructor(
+    private readonly script: (task: ValidatedTask, options?: CodexExecutionOptions) => CodexExecutionResult | Promise<CodexExecutionResult>,
+    profile?: CodexExecutorProfile,
+  ) {
+    super({ workspaceRoot: "/nonexistent-codex-broker", ...(profile !== undefined ? { profile } : {}) });
   }
 
-  async runTask(task: ValidatedTask): Promise<CodexExecutionResult> {
+  async runTask(task: ValidatedTask, options: CodexExecutionOptions = {}): Promise<CodexExecutionResult> {
     this.calls.push(task);
-    return this.script(task);
+    return this.script(task, options);
   }
 }
 
@@ -41,12 +48,13 @@ interface BrokerHandle {
 }
 
 interface BrokerSpec {
-  script?: (task: ValidatedTask) => CodexExecutionResult | Promise<CodexExecutionResult>;
+  script?: (task: ValidatedTask, options?: CodexExecutionOptions) => CodexExecutionResult | Promise<CodexExecutionResult>;
   concurrency?: number;
   maxBacklog?: number;
   maxBodyBytes?: number;
   shutdownTimeoutMs?: number;
   now?: () => Date;
+  profile?: CodexExecutorProfile;
 }
 
 async function startBroker(spec: BrokerSpec = {}): Promise<BrokerHandle> {
@@ -54,7 +62,10 @@ async function startBroker(spec: BrokerSpec = {}): Promise<BrokerHandle> {
   const socketPath = path.join(directory, "worker.sock");
   const server = new CodexBrokerServer({
     socketPath,
-    executor: new ScriptedExecutor(spec.script ?? (() => ({ output: "{\"ideas\":[]}" }))),
+    executor: new ScriptedExecutor(
+      spec.script ?? (() => ({ output: "{\"ideas\":[]}" })),
+      spec.profile,
+    ),
     ...(spec.concurrency !== undefined ? { concurrency: spec.concurrency } : {}),
     ...(spec.maxBacklog !== undefined ? { maxBacklog: spec.maxBacklog } : {}),
     ...(spec.maxBodyBytes !== undefined ? { maxBodyBytes: spec.maxBodyBytes } : {}),
@@ -105,6 +116,32 @@ function brokerRequest(
   });
 }
 
+function abortableBrokerRequest(
+  socketPath: string,
+  options: { method: string; path: string; body: string },
+): { abort(): void; response: Promise<BrokerResponse> } {
+  let request!: http.ClientRequest;
+  const response = new Promise<BrokerResponse>((resolve, reject) => {
+    request = http.request({
+      socketPath,
+      method: options.method,
+      path: options.path,
+      headers: { "content-length": String(Buffer.byteLength(options.body)) },
+    }, (incoming) => {
+      const chunks: Buffer[] = [];
+      incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
+      incoming.on("end", () => resolve({
+        status: incoming.statusCode ?? 0,
+        headers: incoming.headers,
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    request.on("error", reject);
+    request.end(options.body);
+  });
+  return { abort: () => request.destroy(), response };
+}
+
 async function healthReport(socketPath: string): Promise<Record<string, unknown>> {
   const response = await brokerRequest(socketPath, { method: "GET", path: "/health" });
   assert.equal(response.status, 200);
@@ -129,6 +166,45 @@ function topicTaskBody(label: string): string {
   });
 }
 
+function scriptTaskBody(label: string): string {
+  return JSON.stringify({
+    protocolVersion: "video-factory/codex-bridge-v2",
+    kind: "script-draft",
+    payload: {
+      brief: {
+        title: `脚本 ${label}`,
+        angle: "验证生产任务优先级",
+        audience: "短视频创作者",
+        nicheSlug: "qa",
+        platform: "douyin",
+        durationSeconds: 24,
+      },
+    },
+  });
+}
+
+function visualReviewTaskBody(): string {
+  const jpeg = Buffer.alloc(512 * 1024);
+  jpeg[0] = 0xff;
+  jpeg[1] = 0xd8;
+  jpeg[2] = 0xff;
+  jpeg[jpeg.length - 2] = 0xff;
+  jpeg[jpeg.length - 1] = 0xd9;
+  const sha256 = createHash("sha256").update(jpeg).digest("hex");
+  return JSON.stringify({
+    protocolVersion: "video-factory/codex-bridge-v2",
+    kind: "visual-review",
+    payload: {
+      durationMs: 1_000,
+      frames: [0, 1_000].map((timecodeMs) => ({
+        timecodeMs,
+        sha256,
+        jpegBase64: jpeg.toString("base64"),
+      })),
+    },
+  });
+}
+
 async function readFileText(target: string): Promise<string | undefined> {
   try {
     return await readFile(target, "utf8");
@@ -148,6 +224,10 @@ describe("CodexBrokerServer routes", () => {
     try {
       const report = await healthReport(broker.socketPath);
       assert.equal(report.protocolVersion, "video-factory/codex-bridge-v2");
+      assert.equal(report.profileId, "openai");
+      assert.equal(report.providerId, "openai");
+      assert.equal(report.modelId, "codex-default");
+      assert.deepEqual(report.taskKinds, ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"]);
       assert.equal(report.active, 0);
       assert.equal(report.queued, 0);
       assert.equal(report.capacity, 1);
@@ -165,9 +245,73 @@ describe("CodexBrokerServer routes", () => {
       await broker.close();
     }
   });
+
+  it("reports the ZAI identity and rejects tasks outside that profile before execution", async () => {
+    let executed = false;
+    const broker = await startBroker({
+      profile: codexExecutorProfileFor("zai"),
+      script: () => {
+        executed = true;
+        return { output: "{}" };
+      },
+    });
+    try {
+      const report = await healthReport(broker.socketPath);
+      assert.equal(report.profileId, "zai");
+      assert.equal(report.providerId, "zai-coding-plan");
+      assert.equal(report.modelId, "glm-5.3-flash");
+      assert.deepEqual(report.taskKinds, ["visual-review"]);
+
+      const response = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: topicTaskBody("wrong-profile"),
+      });
+      assert.equal(response.status, 400);
+      assert.match(JSON.parse(response.body).error, /not allowed for broker profile 'zai'/);
+      assert.equal(executed, false);
+    } finally {
+      await broker.close();
+    }
+  });
 });
 
 describe("CodexBrokerServer POST /v1/tasks", () => {
+  it("accepts bounded visual-review requests on both OpenAI and ZAI profiles", async () => {
+    const zai = await startBroker({
+      profile: codexExecutorProfileFor("zai"),
+      script: (task) => {
+        assert.equal(task.kind, "visual-review");
+        return { output: "{}" };
+      },
+    });
+    const openai = await startBroker({
+      script: (task) => {
+        assert.equal(task.kind, "visual-review");
+        return { output: "{}" };
+      },
+    });
+    const body = visualReviewTaskBody();
+    try {
+      const accepted = await brokerRequest(zai.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body,
+      });
+      assert.equal(accepted.status, 200);
+
+      const openaiAccepted = await brokerRequest(openai.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body,
+      });
+      assert.equal(openaiAccepted.status, 200);
+    } finally {
+      await zai.close();
+      await openai.close();
+    }
+  });
+
   it("returns the executor output and maps malformed requests and oversized bodies", async () => {
     const broker = await startBroker();
     const small = await startBroker({ maxBodyBytes: 32 });
@@ -306,6 +450,116 @@ describe("CodexBrokerServer queue", () => {
       assert.equal(finalReport.failed, 0);
     } finally {
       for (const gate of gates) gate.resolve();
+      await broker.close();
+    }
+  });
+
+  it("runs queued production work before background topic analysis", async () => {
+    const gates: Array<Deferred<void>> = [];
+    const order: string[] = [];
+    const broker = await startBroker({
+      concurrency: 1,
+      maxBacklog: 4,
+      script: (task) => {
+        order.push(task.kind);
+        const gate = new Deferred<void>();
+        gates.push(gate);
+        return gate.promise.then(() => ({ output: "{\"done\":true}" }));
+      },
+    });
+    try {
+      const activeBackground = brokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body: topicTaskBody("active"),
+      });
+      await waitFor(() => gates.length === 1);
+      const queuedBackground = brokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body: topicTaskBody("queued"),
+      });
+      const queuedProduction = brokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body: scriptTaskBody("priority"),
+      });
+      await waitFor(async () => (await healthReport(broker.socketPath)).queued === 2);
+
+      gates[0]!.resolve();
+      await waitFor(() => gates.length === 2);
+      assert.deepEqual(order, ["topic-ideas", "script-draft"]);
+
+      gates[1]!.resolve();
+      await waitFor(() => gates.length === 3);
+      gates[2]!.resolve();
+      assert.equal((await activeBackground).status, 200);
+      assert.equal((await queuedProduction).status, 200);
+      assert.equal((await queuedBackground).status, 200);
+    } finally {
+      for (const gate of gates) gate.resolve();
+      await broker.close();
+    }
+  });
+
+  it("removes a queued task when its client disconnects before execution", async () => {
+    const gate = new Deferred<void>();
+    const calls: string[] = [];
+    const broker = await startBroker({
+      concurrency: 1,
+      maxBacklog: 4,
+      script: (task) => {
+        calls.push(task.kind);
+        return gate.promise.then(() => ({ output: "{\"done\":true}" }));
+      },
+    });
+    try {
+      const active = brokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body: topicTaskBody("active"),
+      });
+      await waitFor(() => calls.length === 1);
+      const abandoned = abortableBrokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body: scriptTaskBody("abandoned"),
+      });
+      await waitFor(async () => (await healthReport(broker.socketPath)).queued === 1);
+
+      abandoned.abort();
+      await assert.rejects(abandoned.response);
+      await waitFor(async () => (await healthReport(broker.socketPath)).queued === 0);
+      gate.resolve();
+      assert.equal((await active).status, 200);
+      assert.deepEqual(calls, ["topic-ideas"]);
+    } finally {
+      gate.resolve();
+      await broker.close();
+    }
+  });
+
+  it("cancels active work when its client disconnects and releases capacity", async () => {
+    let aborted = false;
+    let calls = 0;
+    const broker = await startBroker({
+      concurrency: 1,
+      script: (_task, options) => {
+        calls += 1;
+        if (calls > 1) return { output: "{\"done\":true}" };
+        return new Promise<CodexExecutionResult>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => {
+            aborted = true;
+            reject(new CodexExecutorError("cancelled", true));
+          }, { once: true });
+        });
+      },
+    });
+    try {
+      const abandoned = abortableBrokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body: topicTaskBody("active-abandoned"),
+      });
+      await waitFor(async () => (await healthReport(broker.socketPath)).active === 1);
+      abandoned.abort();
+      await assert.rejects(abandoned.response);
+      await waitFor(async () => aborted && (await healthReport(broker.socketPath)).active === 0);
+
+      const next = await brokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body: scriptTaskBody("after-cancel"),
+      });
+      assert.equal(next.status, 200);
+      assert.equal(calls, 2);
+    } finally {
       await broker.close();
     }
   });

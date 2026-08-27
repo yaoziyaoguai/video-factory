@@ -8,6 +8,9 @@ const STATUS_LABELS: Record<StudioRunStatus, string> = {
   failed: "失败",
   needs_human: "等你审片",
   rejected: "已打回",
+  stale: "待重新生成",
+  awaiting_spend_approval: "待确认费用",
+  approval_invalidated: "费用确认已失效",
 };
 
 export function StatusBadge({ status }: { status: StudioRunStatus }) {
@@ -15,7 +18,7 @@ export function StatusBadge({ status }: { status: StudioRunStatus }) {
     ? LoaderCircle
     : status === "succeeded"
       ? CircleCheck
-      : status === "needs_human"
+      : status === "needs_human" || status === "awaiting_spend_approval" || status === "approval_invalidated"
         ? CircleAlert
         : status === "failed" || status === "rejected"
           ? XCircle

@@ -1,4 +1,4 @@
-import { ChartNoAxesCombined, CircleHelp, Clapperboard, Layers3, LogOut, Radar, Settings2, Sparkles } from "lucide-react";
+import { ChartNoAxesCombined, CircleHelp, Clapperboard, Layers3, LayoutTemplate, LogOut, Radar, Settings2, Sparkles } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { studioApi } from "../api.js";
@@ -33,6 +33,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
         <nav className="primary-nav" aria-label="主导航" data-tour="primary-nav">
           <NavLink to="/" end><Radar aria-hidden="true" size={18} /><span>今日机会</span></NavLink>
           <NavLink to="/projects" data-tour="projects-nav"><Layers3 aria-hidden="true" size={18} /><span>制作记录</span></NavLink>
+          <NavLink to="/templates"><LayoutTemplate aria-hidden="true" size={18} /><span>模板工坊</span></NavLink>
           <NavLink to="/resources"><Settings2 aria-hidden="true" size={18} /><span>总配置</span></NavLink>
           <NavLink to="/experiments"><ChartNoAxesCombined aria-hidden="true" size={18} /><span>制作复盘</span></NavLink>
         </nav>
@@ -62,6 +63,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
       <nav className="mobile-nav" aria-label="移动端主导航">
         <NavLink to="/" end><Radar aria-hidden="true" size={19} /><span>今日</span></NavLink>
         <NavLink to="/projects" data-tour="projects-nav"><Layers3 aria-hidden="true" size={19} /><span>制作</span></NavLink>
+        <NavLink to="/templates"><LayoutTemplate aria-hidden="true" size={19} /><span>模板</span></NavLink>
         <NavLink to="/resources"><Settings2 aria-hidden="true" size={19} /><span>配置</span></NavLink>
         <NavLink to="/experiments"><ChartNoAxesCombined aria-hidden="true" size={19} /><span>复盘</span></NavLink>
       </nav>

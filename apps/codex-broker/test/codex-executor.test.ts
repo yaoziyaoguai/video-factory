@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -9,6 +10,7 @@ import {
   CodexExecutor,
   CodexExecutorError,
   buildCodexExecCommand,
+  codexExecutorProfileFor,
   parseTaskRequest,
   type SpawnedProcess,
 } from "../src/codex-executor.js";
@@ -66,6 +68,10 @@ function flagValue(args: readonly string[], flag: string): string {
   return value!;
 }
 
+function flagValues(args: readonly string[], flag: string): string[] {
+  return args.flatMap((entry, index) => entry === flag && args[index + 1] !== undefined ? [args[index + 1]!] : []);
+}
+
 function topicRequest(): { protocolVersion: string; kind: string; payload: Record<string, unknown> } {
   return {
     protocolVersion: "video-factory/codex-bridge-v2",
@@ -83,8 +89,8 @@ function directorRequest(): { protocolVersion: string; kind: string; payload: Re
     payload: {
       directorProfiles: [{ id: "urban-poetic" }],
       brief: { title: "下班后的城市", requestedProfileId: "auto" },
-      scenes: [{ position: 1, narration: "夜晚开始了", duration: 5, visualPrompt: "雨夜城市" }],
-      assetProviders: [{ id: "local-editorial-v1", label: "本地", estimatedCnyPerClip: 0 }],
+      scenes: [{ position: 1, narration: "夜晚开始了", duration: 5, visualPrompt: "雨夜城市", visualStrategy: "local" }],
+      assetProviders: [{ id: "local-editorial-v1", label: "本地", deliveryTypes: ["editorial_card"], estimatedCnyPerClip: 0 }],
       economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
     },
   };
@@ -102,6 +108,12 @@ function scriptRequest(): { protocolVersion: string; kind: string; payload: Reco
         nicheSlug: "life-avoidance",
         platform: "douyin",
         durationSeconds: 24,
+        templateBlueprint: {
+          storyStructure: [{ id: "hook", label: "开场", purpose: "两秒内建立问题", required: true }],
+          visualSystem: { composition: "主体清晰", pacing: "measured" },
+          soundSystem: { voiceIntent: "可信", pace: "medium" },
+          costPolicy: { currency: "CNY", maxCost: 0, maxPaidShots: 0 },
+        },
         editorial: {
           verdict: "produce_image_story",
           reasons: ["事件需要事实边界"],
@@ -129,6 +141,59 @@ function publishCopyRequest(): { protocolVersion: string; kind: string; payload:
   };
 }
 
+function visualReviewRequest(
+  frames: Array<{ timecodeMs: number; jpeg: Buffer }> = [
+    { timecodeMs: 0, jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]) },
+  ],
+): { protocolVersion: string; kind: string; payload: Record<string, unknown> } {
+  return {
+    protocolVersion: "video-factory/codex-bridge-v2",
+    kind: "visual-review",
+    payload: {
+      durationMs: 10_000,
+      frames: frames.map(({ timecodeMs, jpeg }) => ({
+        timecodeMs,
+        sha256: createHash("sha256").update(jpeg).digest("hex"),
+        jpegBase64: jpeg.toString("base64"),
+      })),
+    },
+  };
+}
+
+function jpegOfSize(size: number): Buffer {
+  assert.ok(size >= 5);
+  const jpeg = Buffer.alloc(size);
+  jpeg[0] = 0xff;
+  jpeg[1] = 0xd8;
+  jpeg[2] = 0xff;
+  jpeg[size - 2] = 0xff;
+  jpeg[size - 1] = 0xd9;
+  return jpeg;
+}
+
+function visualReviewOutput(): Record<string, unknown> {
+  return {
+    version: "video-factory/visual-review-v1",
+    summary: "画面整体连贯，但字幕需要调整。",
+    scores: {
+      composition: 88,
+      continuity: 84,
+      pacing: 78,
+      legibility: 62,
+      safety: 96,
+    },
+    findings: [{
+      timecodeMs: 0,
+      category: "legibility",
+      severity: "warning",
+      description: "字幕与背景对比不足。",
+      suggestion: "增加深色底板。",
+    }],
+    confidence: 0.9,
+    recommendation: "revise",
+  };
+}
+
 function assertTerminal(error: unknown, pattern: RegExp): boolean {
   assert.ok(error instanceof CodexExecutorError, `expected CodexExecutorError, got ${String(error)}`);
   assert.equal(error.transient, false);
@@ -137,6 +202,74 @@ function assertTerminal(error: unknown, pattern: RegExp): boolean {
 }
 
 describe("parseTaskRequest", () => {
+  it("accepts a bounded visual-review frame and retains decoded JPEG bytes", () => {
+    const task = parseTaskRequest(visualReviewRequest(), codexExecutorProfileFor("openai").identity);
+    assert.equal(task.kind, "visual-review");
+    if (task.kind !== "visual-review") throw new Error("expected visual-review task");
+    assert.equal(task.payload.durationMs, 10_000);
+    assert.equal(task.payload.frames[0]?.timecodeMs, 0);
+    assert.equal(task.payload.frames[0]?.sha256.length, 64);
+    assert.deepEqual(
+      task.payload.frames[0]?.jpeg,
+      Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]),
+    );
+    assert.equal("jpegBase64" in task.payload.frames[0]!, false);
+  });
+
+  it("allows visual-review on both isolated profiles and enforces every frame boundary before execution", async () => {
+    const openaiIdentity = codexExecutorProfileFor("openai").identity;
+    const zaiIdentity = codexExecutorProfileFor("zai").identity;
+    const validMaximum = visualReviewRequest([{ timecodeMs: 0, jpeg: jpegOfSize(512 * 1024) }]);
+    assert.equal(parseTaskRequest(validMaximum, openaiIdentity).kind, "visual-review");
+    assert.equal(parseTaskRequest(validMaximum, zaiIdentity).kind, "visual-review");
+    const maximumJpeg = jpegOfSize(512 * 1024);
+    const validTotalMaximum = visualReviewRequest(Array.from(
+      { length: 12 },
+      (_, index) => ({ timecodeMs: index, jpeg: maximumJpeg }),
+    ));
+    assert.equal(parseTaskRequest(validTotalMaximum, zaiIdentity).kind, "visual-review");
+
+    const tooMany = visualReviewRequest(Array.from(
+      { length: 13 },
+      (_, index) => ({ timecodeMs: index, jpeg: jpegOfSize(5) }),
+    ));
+    const oversized = visualReviewRequest([{ timecodeMs: 0, jpeg: jpegOfSize(512 * 1024 + 1) }]);
+    const nonJpeg = visualReviewRequest();
+    const wrongHash = visualReviewRequest();
+    const nonCanonical = visualReviewRequest();
+    const duplicateTimecode = visualReviewRequest([
+      { timecodeMs: 100, jpeg: jpegOfSize(5) },
+      { timecodeMs: 100, jpeg: jpegOfSize(5) },
+    ]);
+    const outOfRangeTimecode = visualReviewRequest([{ timecodeMs: 10_001, jpeg: jpegOfSize(5) }]);
+    const forbiddenField = visualReviewRequest();
+
+    const nonJpegFrame = (nonJpeg.payload.frames as Array<Record<string, unknown>>)[0]!;
+    const pngLike = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+    nonJpegFrame.jpegBase64 = pngLike.toString("base64");
+    nonJpegFrame.sha256 = createHash("sha256").update(pngLike).digest("hex");
+    (wrongHash.payload.frames as Array<Record<string, unknown>>)[0]!.sha256 = "0".repeat(64);
+    (nonCanonical.payload.frames as Array<Record<string, unknown>>)[0]!.jpegBase64 += "\n";
+    forbiddenField.payload.path = "/etc/passwd";
+
+    const cases: Array<[Record<string, unknown>, RegExp]> = [
+      [tooMany, /1 to 12 entries/],
+      [oversized, /exceeds 524288 decoded bytes/],
+      [nonJpeg, /decode to a JPEG image/],
+      [wrongHash, /does not match/],
+      [nonCanonical, /canonical base64/],
+      [duplicateTimecode, /strictly increasing/],
+      [outOfRangeTimecode, /between 0 and payload.durationMs/],
+      [forbiddenField, /payload.path is not allowed/],
+    ];
+    for (const [request, pattern] of cases) {
+      await assert.rejects(
+        async () => parseTaskRequest(request, openaiIdentity),
+        (error: unknown) => assertTerminal(error, pattern),
+      );
+    }
+  });
+
   it("accepts data-only payloads for all four task kinds", () => {
     const topic = parseTaskRequest(topicRequest());
     assert.equal(topic.kind, "topic-ideas");
@@ -144,8 +277,8 @@ describe("parseTaskRequest", () => {
 
     const director = parseTaskRequest(directorRequest());
     assert.equal(director.kind, "director-plan");
-    assert.deepEqual(director.payload.scenes, [{ position: 1, narration: "夜晚开始了", duration: 5, visualPrompt: "雨夜城市" }]);
-    assert.deepEqual(director.payload.assetProviders, [{ id: "local-editorial-v1", label: "本地", estimatedCnyPerClip: 0 }]);
+    assert.deepEqual(director.payload.scenes, [{ position: 1, narration: "夜晚开始了", duration: 5, visualPrompt: "雨夜城市", visualStrategy: "local" }]);
+    assert.deepEqual(director.payload.assetProviders, [{ id: "local-editorial-v1", label: "本地", deliveryTypes: ["editorial_card"], estimatedCnyPerClip: 0 }]);
 
     const script = parseTaskRequest(scriptRequest());
     assert.equal(script.kind, "script-draft");
@@ -203,7 +336,7 @@ describe("parseTaskRequest", () => {
 
     const tooFewNarrations = publishCopyRequest();
     tooFewNarrations.payload.narrations = ["第一场旁白", "第二场旁白"];
-    await assert.rejects(async () => parseTaskRequest(tooFewNarrations), (error: unknown) => assertTerminal(error, /3 to 10 entries/));
+    await assert.rejects(async () => parseTaskRequest(tooFewNarrations), (error: unknown) => assertTerminal(error, /3 to 24 entries/));
 
     const missingPlatform = publishCopyRequest();
     delete missingPlatform.payload.platform;
@@ -211,7 +344,7 @@ describe("parseTaskRequest", () => {
   });
 
   it("rejects prompt text, execution settings, and every unknown key", async () => {
-    for (const builder of [topicRequest, directorRequest, scriptRequest, publishCopyRequest]) {
+    for (const builder of [topicRequest, directorRequest, scriptRequest, publishCopyRequest, visualReviewRequest]) {
       for (const key of ["directive", "task", "outputContract", "outputRules", "command", "prompt", "cwd", "model", "shell", "systemPrompt"]) {
         const request = builder();
         request.payload[key] = "rm -rf /";
@@ -231,6 +364,55 @@ describe("parseTaskRequest", () => {
 });
 
 describe("buildCodexExecCommand", () => {
+  it("defines isolated OpenAI and ZAI profile identities without embedding a credential", () => {
+    const openai = codexExecutorProfileFor("openai", "gpt-5.3-codex");
+    assert.deepEqual(openai.identity, {
+      profileId: "openai",
+      providerId: "openai",
+      modelId: "gpt-5.3-codex",
+      taskKinds: ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"],
+    });
+
+    const zai = codexExecutorProfileFor("zai");
+    assert.deepEqual(zai.identity, {
+      profileId: "zai",
+      providerId: "zai-coding-plan",
+      modelId: "glm-5.3-flash",
+      taskKinds: ["visual-review"],
+    });
+    assert.deepEqual(zai.provider, {
+      id: "zai-coding-plan",
+      name: "ZAI Coding Plan",
+      baseUrl: "https://open.bigmodel.cn/api/v1",
+      envKey: "ZAI_API_KEY",
+      wireApi: "responses",
+    });
+    assert.equal("apiKey" in zai, false);
+  });
+
+  it("builds ZAI provider argv with only the environment key name", () => {
+    const { args } = buildCodexExecCommand({
+      codexBin: "/opt/codex/bin/codex",
+      workspaceDir: "/run/task/workspace",
+      lastMessagePath: "/run/task/last-message.txt",
+      schemaPath: "/run/task/output-schema.json",
+      profile: codexExecutorProfileFor("zai"),
+    });
+
+    assert.ok(args.includes("--ignore-user-config"));
+    assert.deepEqual(args.slice(args.indexOf("--json") + 1), [
+      "--config", 'model_provider="zai-coding-plan"',
+      "--config", 'model_providers.zai-coding-plan.name="ZAI Coding Plan"',
+      "--config", 'model_providers.zai-coding-plan.base_url="https://open.bigmodel.cn/api/v1"',
+      "--config", 'model_providers.zai-coding-plan.env_key="ZAI_API_KEY"',
+      "--config", 'model_providers.zai-coding-plan.wire_api="responses"',
+      "--config", "model_providers.zai-coding-plan.requires_openai_auth=false",
+      "--model", "glm-5.3-flash",
+      "-",
+    ]);
+    assert.doesNotMatch(JSON.stringify(args), /secret|api[_-]?key['\"]?\s*[:=]\s*[^Z]/i);
+  });
+
   it("builds the verified isolation argv without shell or payload-sourced commands", () => {
     const { command, args } = buildCodexExecCommand({
       codexBin: "/opt/codex/bin/codex",
@@ -268,6 +450,133 @@ describe("buildCodexExecCommand", () => {
 });
 
 describe("CodexExecutor.runTask", () => {
+  it("redacts the ZAI environment key value from subprocess errors", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
+    const fakeSecret = "test-only-zai-secret-in-stderr";
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      profile: codexExecutorProfileFor("zai"),
+      env: { PATH: "/usr/bin", ZAI_API_KEY: fakeSecret },
+      spawnFn: fakeSpawn(({ child }) => {
+        child.stderr.end(`provider rejected credential ${fakeSecret}`);
+        child.stdout.end();
+        child.emit("close", 1, null);
+      }),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(parseTaskRequest(visualReviewRequest(), executor.identity)),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.doesNotMatch(error.message, new RegExp(fakeSecret));
+        assert.match(error.message, /\[REDACTED\]/);
+        return true;
+      },
+    );
+    assert.deepEqual(await readdir(workspaceRoot), []);
+  });
+
+  it("refuses to spawn the ZAI profile when its environment key is absent", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
+    let spawned = false;
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      profile: codexExecutorProfileFor("zai"),
+      env: { PATH: "/usr/bin" },
+      spawnFn: fakeSpawn(async ({ child, lastMessagePath }) => {
+        spawned = true;
+        await writeFile(lastMessagePath, JSON.stringify(visualReviewOutput()), "utf8");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("close", 0, null);
+      }),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(parseTaskRequest(visualReviewRequest(), executor.identity)),
+      (error: unknown) => assertTerminal(error, /ZAI_API_KEY.*environment/),
+    );
+    assert.equal(spawned, false);
+    assert.deepEqual(await readdir(workspaceRoot), []);
+  });
+
+  it("runs OpenAI visual-review with 0600 temporary JPEGs, validated output, and complete cleanup", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]);
+    const request = visualReviewRequest([{ timecodeMs: 250, jpeg }]);
+    const originalBase64 = ((request.payload.frames as Array<{ jpegBase64: string }>)[0]!).jpegBase64;
+    let capturedArgs: readonly string[] = [];
+    let capturedChild: FakeCodexChild | undefined;
+    let capturedImage: Buffer | undefined;
+    let capturedImageMode: number | undefined;
+    const completingSpawn = fakeSpawn(async ({ child, lastMessagePath }) => {
+      capturedChild = child;
+      const [imagePath] = flagValues(capturedArgs, "--image");
+      if (imagePath !== undefined) {
+        capturedImage = await readFile(imagePath);
+        capturedImageMode = (await stat(imagePath)).mode & 0o777;
+      }
+      await writeFile(lastMessagePath, JSON.stringify(visualReviewOutput()), "utf8");
+      child.stdout.end();
+      child.stderr.end();
+      child.emit("close", 0, null);
+    });
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      profile: codexExecutorProfileFor("openai"),
+      env: { PATH: "/usr/bin" },
+      spawnFn: (command, args, options) => {
+        capturedArgs = [...args];
+        return completingSpawn(command, args, options);
+      },
+    });
+
+    const result = await executor.runTask(parseTaskRequest(request, executor.identity));
+
+    assert.deepEqual(JSON.parse(result.output), visualReviewOutput());
+    const imagePaths = flagValues(capturedArgs, "--image");
+    assert.equal(imagePaths.length, 1);
+    assert.match(imagePaths[0]!, /\/images\/frame-001\.jpg$/);
+    assert.deepEqual(capturedImage, jpeg);
+    assert.equal(capturedImageMode, 0o600);
+    assert.doesNotMatch(JSON.stringify(capturedArgs), new RegExp(originalBase64));
+
+    const prompt = Buffer.concat(capturedChild?.stdinChunks ?? []).toString("utf8");
+    assert.doesNotMatch(prompt, new RegExp(originalBase64));
+    const dataSection = prompt.split("<<<TASK_DATA\n")[1]!.split("\nTASK_DATA>>>")[0]!;
+    assert.deepEqual(JSON.parse(dataSection), {
+      durationMs: 10_000,
+      frames: [{
+        frameIndex: 1,
+        timecodeMs: 250,
+        sha256: createHash("sha256").update(jpeg).digest("hex"),
+      }],
+    });
+    assert.deepEqual(await readdir(workspaceRoot), []);
+  });
+
+  it("rejects invalid OpenAI visual-review output and cleans up temporary images", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
+    const invalidOutput = { ...visualReviewOutput(), unexpected: "not allowed" };
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      profile: codexExecutorProfileFor("openai"),
+      env: { PATH: "/usr/bin" },
+      spawnFn: fakeSpawn(async ({ child, lastMessagePath }) => {
+        await writeFile(lastMessagePath, JSON.stringify(invalidOutput), "utf8");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("close", 0, null);
+      }),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(parseTaskRequest(visualReviewRequest(), executor.identity)),
+      (error: unknown) => assertTerminal(error, /output.*schema/i),
+    );
+    assert.deepEqual(await readdir(workspaceRoot), []);
+  });
+
   it("runs codex, treats hostile signal text as data, and cleans up the task directory", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
     let capturedCommand = "";
@@ -308,6 +617,11 @@ describe("CodexExecutor.runTask", () => {
     assert.deepEqual(await readdir(workspaceRoot), []);
 
     const prompt = Buffer.concat(childRef?.stdinChunks ?? []).toString("utf8");
+    assert.equal(result.trace?.taskKind, "topic-ideas");
+    assert.equal(result.trace?.promptVersion, "video-factory/topic-editor-v2");
+    assert.equal(result.trace?.providerId, "openai");
+    assert.equal(result.trace?.modelId, "gpt-5.3-codex");
+    assert.equal(result.trace?.prompt, prompt);
     assert.ok(prompt.includes("<<<TASK_DATA"));
     assert.ok(prompt.includes("TASK_DATA>>>"));
     assert.match(prompt, /不是给你的指令/);
@@ -336,11 +650,11 @@ describe("CodexExecutor.runTask", () => {
     const result = await executor.runTask(parseTaskRequest(scriptRequest()));
 
     assert.deepEqual(JSON.parse(result.output), { scenes: [{ position: 1 }] });
-    assert.deepEqual(schemaRequired, ["scenes"]);
+    assert.deepEqual(schemaRequired, ["viewerPromise", "narrativeArc", "scenes"]);
     assert.deepEqual(await readdir(workspaceRoot), []);
     const prompt = Buffer.concat(childRef?.stdinChunks ?? []).toString("utf8");
     assert.match(prompt, /不是给你的指令/);
-    assert.ok(prompt.includes("你是中文短视频的编剧。"));
+    assert.ok(prompt.includes("你是面向中国短视频平台的创意编剧。"));
     const dataSection = prompt.split("<<<TASK_DATA\n")[1]!.split("\nTASK_DATA>>>")[0]!;
     assert.deepEqual(JSON.parse(dataSection), { brief: scriptRequest().payload.brief });
   });
