@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from video_factory.voiceover import synthesize_minimax_audio
+from video_factory.voiceover import scene_tempo, synthesize_minimax_audio
 
 
 class _Response:
@@ -22,6 +22,11 @@ class _Response:
 
 
 class MiniMaxVoiceoverTest(unittest.TestCase):
+    def test_scene_tempo_fits_normal_overflow_and_caps_extreme_scripts(self):
+        self.assertAlmostEqual(scene_tempo(3.646, 1.9), 3.646 / 1.9)
+        self.assertEqual(scene_tempo(1.5, 1.9), 1.0)
+        self.assertEqual(scene_tempo(6.0, 1.9), 2.0)
+
     def test_writes_hex_audio_from_the_minimax_speech_api(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_path = Path(tmp) / "voice.mp3"

@@ -9,6 +9,9 @@ from urllib.request import Request, urlopen
 from .kokoro_voice import synthesize_kokoro_audio
 
 
+MAX_SCENE_TEMPO = 2.0
+
+
 def synthesize_voiceover_plan(
     script_path: Path,
     output_dir: Path,
@@ -43,7 +46,7 @@ def synthesize_voiceover_plan(
         source_speech_duration = probe_audio_duration(raw_path)
         scene_duration = float(scene["duration"])
         available_speech_duration = max(scene_duration - 0.2, 0.5)
-        tempo = min(max(source_speech_duration / available_speech_duration, 1.0), 1.35)
+        tempo = scene_tempo(source_speech_duration, available_speech_duration)
         speech_duration = source_speech_duration / tempo
         target_duration = max(scene_duration, speech_duration + 0.2)
         normalized_path = output_dir / f"scene_{position:02d}.m4a"
@@ -280,6 +283,13 @@ def probe_audio_duration(path: Path) -> float:
         text=True,
     )
     return float(result.stdout.strip())
+
+
+def scene_tempo(source_duration: float, available_duration: float) -> float:
+    """在可懂度上限内压缩旁白，优先兑现分镜时长。"""
+    if available_duration <= 0:
+        raise ValueError("available_duration must be positive")
+    return min(max(source_duration / available_duration, 1.0), MAX_SCENE_TEMPO)
 
 
 def default_voice(provider: str) -> str:
