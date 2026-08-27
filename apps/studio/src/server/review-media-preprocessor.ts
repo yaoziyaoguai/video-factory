@@ -20,15 +20,21 @@ export interface PythonReviewMediaPreprocessorOptions {
 export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreprocessor {
   constructor(private readonly options: PythonReviewMediaPreprocessorOptions) {}
 
-  async prepare(input: { videoPath: string; runRoot: string }): Promise<VisualReviewMediaPayload> {
+  async prepare(input: {
+    videoPath: string;
+    runRoot: string;
+    renderManifestPath?: string;
+  }): Promise<VisualReviewMediaPayload> {
+    const command = [
+      "-m", "video_factory.review_media",
+      "--video", input.videoPath,
+      "--run-root", input.runRoot,
+      "--max-frames", "12",
+      ...(input.renderManifestPath ? ["--render-manifest", input.renderManifestPath] : []),
+    ];
     let stdout: string;
     try {
-      ({ stdout } = await execFile(this.options.pythonCommand, [
-        "-m", "video_factory.review_media",
-        "--video", input.videoPath,
-        "--run-root", input.runRoot,
-        "--max-frames", "12",
-      ], {
+      ({ stdout } = await execFile(this.options.pythonCommand, command, {
         cwd: this.options.repositoryRoot,
         env: buildStudioChildEnvironment(this.options.environment ?? process.env, { PYTHONPATH: this.options.pythonPath }),
         timeout: 10 * 60 * 1000,

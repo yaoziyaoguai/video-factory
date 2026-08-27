@@ -12,6 +12,7 @@ from PIL import Image
 from video_factory.review_media import (
     MAX_FRAME_BYTES,
     MAX_TOTAL_FRAME_BYTES,
+    _select_render_timeline_timestamps,
     prepare_review_media,
 )
 
@@ -94,6 +95,74 @@ class ReviewMediaTest(unittest.TestCase):
             self.assertEqual(len(timestamps), 12)
             self.assertTrue(all(timestamp % 1000 == 0 for timestamp in timestamps))
             self.assertGreaterEqual(timestamps[-1], 14_000)
+
+    def test_uses_render_timeline_midpoints_and_preserves_the_first_screen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "run-1"
+            video_path = run_root / "render" / "final.mp4"
+            render_manifest_path = run_root / "render" / "render_manifest.json"
+            make_test_video(video_path)
+            render_manifest_path.write_text(
+                json.dumps({
+                    "slides": [
+                        {"position": 1, "duration": 1},
+                        {"position": 2, "duration": 1},
+                        {"position": 3, "duration": 1},
+                    ],
+                }),
+                encoding="utf-8",
+            )
+
+            manifest_path = prepare_review_media(
+                video_path=video_path,
+                run_root=run_root,
+                max_frames=4,
+                render_manifest_path=render_manifest_path,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                [frame["timestampMs"] for frame in manifest["frames"]],
+                [250, 500, 1500, 2500],
+            )
+
+    def test_scales_render_timeline_to_the_probed_video_duration(self):
+        self.assertEqual(
+            _select_render_timeline_timestamps(12_000, [2, 2, 2], 4),
+            [250, 2000, 6000, 10000],
+        )
+        self.assertEqual(
+            _select_render_timeline_timestamps(12_000, [2, 2, 2], 1),
+            [250],
+        )
+
+    def test_long_render_timeline_keeps_the_hook_and_scene_range(self):
+        timestamps = _select_render_timeline_timestamps(30_000, [1] * 30, 12)
+
+        self.assertEqual(len(timestamps), 12)
+        self.assertEqual(timestamps[0], 250)
+        self.assertIn(500, timestamps)
+        self.assertIn(29_500, timestamps)
+
+    def test_rejects_non_numeric_render_durations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "run-1"
+            video_path = run_root / "render" / "final.mp4"
+            render_manifest_path = run_root / "render" / "render_manifest.json"
+            make_test_video(video_path)
+
+            for invalid_duration in (True, "1.5"):
+                with self.subTest(duration=invalid_duration):
+                    render_manifest_path.write_text(
+                        json.dumps({"slides": [{"duration": invalid_duration}]}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, "duration is invalid"):
+                        prepare_review_media(
+                            video_path=video_path,
+                            run_root=run_root,
+                            render_manifest_path=render_manifest_path,
+                        )
 
     def test_rejects_direct_and_symlinked_paths_outside_the_run_root(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -56,6 +56,31 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
     }
   });
 
+  it("passes a confined render manifest so production sampling follows scene interiors", async () => {
+    const harness = await createHarness();
+    try {
+      const jpeg = makeJpeg(64);
+      const renderManifestPath = path.join(harness.runRoot, "render", "render_manifest.json");
+      await mkdir(path.dirname(renderManifestPath), { recursive: true });
+      await writeFile(renderManifestPath, JSON.stringify({ slides: [{ duration: 1 }] }));
+      await writeFrame(harness, "review_media/frame.jpg", jpeg);
+      await writeManifest(harness, [frame("review_media/frame.jpg", 100, jpeg)]);
+
+      await harness.preprocessor.prepare({
+        videoPath: harness.videoPath,
+        runRoot: harness.runRoot,
+        renderManifestPath,
+      });
+
+      assert.deepEqual(
+        (await readFile(harness.capturePath, "utf8")).trim().split("\n").slice(-2),
+        ["--render-manifest", renderManifestPath],
+      );
+    } finally {
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects parent traversal, absolute paths, and symlinks escaping the run", async () => {
     const cases = ["parent", "absolute", "symlink", "manifest"] as const;
     for (const kind of cases) {

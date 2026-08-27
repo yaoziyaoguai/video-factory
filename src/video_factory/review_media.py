@@ -28,7 +28,12 @@ SCENE_SCAN_TIMEOUT_SECONDS = 180
 FRAME_TIMEOUT_SECONDS = 30
 
 
-def prepare_review_media(video_path: Path, run_root: Path, max_frames: int = MAX_FRAMES) -> Path:
+def prepare_review_media(
+    video_path: Path,
+    run_root: Path,
+    max_frames: int = MAX_FRAMES,
+    render_manifest_path: Optional[Path] = None,
+) -> Path:
     """Create deterministic keyframes, a contact sheet, and a safe manifest."""
     root = Path(run_root).expanduser().resolve(strict=True)
     if not root.is_dir():
@@ -43,8 +48,16 @@ def prepare_review_media(video_path: Path, run_root: Path, max_frames: int = MAX
 
     probe = _probe_video(video)
     duration_ms = max(1, int(round(float(probe["duration"]) * 1000)))
-    scene_changes = _detect_scene_changes(video, duration_ms)
-    timestamps = _select_timestamps(duration_ms, scene_changes, max_frames)
+    if render_manifest_path is not None:
+        render_manifest = _resolve_run_file(render_manifest_path, root)
+        timestamps = _select_render_timeline_timestamps(
+            duration_ms,
+            _read_slide_durations(render_manifest),
+            max_frames,
+        )
+    else:
+        scene_changes = _detect_scene_changes(video, duration_ms)
+        timestamps = _select_timestamps(duration_ms, scene_changes, max_frames)
 
     output_dir = root / "review_media"
     _assert_confined(output_dir, root, "review media output")
@@ -105,8 +118,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--video", required=True)
     parser.add_argument("--run-root", required=True)
     parser.add_argument("--max-frames", type=int, default=MAX_FRAMES)
+    parser.add_argument("--render-manifest")
     args = parser.parse_args(argv)
-    manifest = prepare_review_media(Path(args.video), Path(args.run_root), args.max_frames)
+    manifest = prepare_review_media(
+        Path(args.video),
+        Path(args.run_root),
+        args.max_frames,
+        Path(args.render_manifest) if args.render_manifest else None,
+    )
     print(json.dumps({"manifestPath": str(manifest)}, ensure_ascii=False))
     return 0
 
@@ -219,6 +238,66 @@ def _select_timestamps(duration_ms: int, scene_changes: Iterable[int], max_frame
         target = int((index + 0.5) * uniform_end / remaining)
         selected.append(_nearest_available_timestamp(target, selected, duration_ms))
     return sorted(selected)
+
+
+def _read_slide_durations(render_manifest_path: Path) -> List[float]:
+    if render_manifest_path.stat().st_size > 512 * 1024:
+        raise ValueError("render manifest exceeds 524288 bytes")
+    try:
+        payload = json.loads(render_manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("render manifest must be valid UTF-8 JSON") from error
+    slides = payload.get("slides") if isinstance(payload, dict) else None
+    if not isinstance(slides, list) or not slides:
+        raise ValueError("render manifest slides must be a non-empty array")
+    durations = []
+    for index, slide in enumerate(slides):
+        if not isinstance(slide, dict):
+            raise ValueError(f"render manifest slide {index + 1} must be an object")
+        raw_duration = slide.get("duration")
+        if isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float)):
+            raise ValueError(f"render manifest slide {index + 1} duration is invalid")
+        duration = float(raw_duration)
+        if duration <= 0 or not duration < float("inf"):
+            raise ValueError(f"render manifest slide {index + 1} duration is invalid")
+        durations.append(duration)
+    return durations
+
+
+def _select_render_timeline_timestamps(
+    duration_ms: int,
+    slide_durations: Iterable[float],
+    max_frames: int,
+) -> List[int]:
+    """Sample stable scene interiors instead of transition boundaries."""
+    durations_ms = [float(duration) * 1000 for duration in slide_durations]
+    total_timeline_ms = sum(durations_ms)
+    if total_timeline_ms <= 0:
+        raise ValueError("render manifest does not contain reviewable slides")
+    timeline_scale = duration_ms / total_timeline_ms
+    cursor_ms = 0.0
+    midpoints = []
+    for source_slide_ms in durations_ms:
+        slide_ms = source_slide_ms * timeline_scale
+        midpoint = int(round(cursor_ms + slide_ms / 2))
+        midpoints.append(min(duration_ms - 1, max(0, midpoint)))
+        cursor_ms += slide_ms
+
+    first_screen = min(duration_ms - 1, 250)
+    if max_frames == 1:
+        return [first_screen]
+    desired_midpoints = min(len(midpoints), max_frames - 1)
+    if len(midpoints) > desired_midpoints:
+        if desired_midpoints == 1:
+            midpoints = [midpoints[len(midpoints) // 2]]
+        else:
+            midpoints = [
+                midpoints[round(index * (len(midpoints) - 1) / (desired_midpoints - 1))]
+                for index in range(desired_midpoints)
+            ]
+
+    selected = [first_screen, *[midpoint for midpoint in midpoints if midpoint != first_screen]]
+    return sorted(set(selected))
 
 
 def _nearest_available_timestamp(target: int, selected: List[int], duration_ms: int) -> int:

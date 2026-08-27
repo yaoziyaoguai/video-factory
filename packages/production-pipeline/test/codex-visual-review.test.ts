@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -73,8 +73,12 @@ describe("CodexVisualReviewAgent", () => {
 
   it("sends only the bounded preprocessed frame payload and validates the report", async () => {
     const calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
+    const mediaInputs: unknown[] = [];
     const agent = new CodexVisualReviewAgent({
-      media: { prepare: async () => media },
+      media: { prepare: async (input) => {
+        mediaInputs.push(input);
+        return media;
+      } },
       client: { runTask: async (kind, payload) => {
         calls.push({ kind, payload });
         return report;
@@ -85,8 +89,47 @@ describe("CodexVisualReviewAgent", () => {
 
     assert.deepEqual(result, report);
     assert.deepEqual(calls, [{ kind: "visual-review", payload: media }]);
+    assert.deepEqual(mediaInputs, [{ videoPath: "/run/final.mp4", runRoot: "/run" }]);
     assert.equal(agent.id, "codex-visual-review-v1");
     assert.equal(agent.modelId, "codex-default");
+  });
+
+  it("forwards the render manifest to media preprocessing", async () => {
+    const runRoot = await mkdtemp(path.join(tmpdir(), "video-factory-review-forward-"));
+    const renderManifestPath = path.join(runRoot, "render", "render_manifest.json");
+    await mkdir(path.dirname(renderManifestPath), { recursive: true });
+    await writeFile(renderManifestPath, JSON.stringify({ slides: [{ duration: 6 }] }));
+    const mediaInputs: unknown[] = [];
+    const agent = new CodexVisualReviewAgent({
+      media: { prepare: async (input) => {
+        mediaInputs.push(input);
+        return media;
+      } },
+      client: { runTask: async () => report },
+    });
+
+    await agent.review({
+      videoPath: path.join(runRoot, "final.mp4"),
+      runRoot,
+      renderManifestPath,
+    });
+
+    assert.deepEqual(mediaInputs, [{
+      videoPath: path.join(runRoot, "final.mp4"),
+      runRoot,
+      renderManifestPath,
+    }]);
+  });
+
+  it("returns the inspected media duration with detailed review evidence", async () => {
+    const agent = new CodexVisualReviewAgent({
+      media: { prepare: async () => media },
+      client: { runTask: async () => report },
+    });
+
+    const execution = await agent.reviewDetailed({ videoPath: "/run/final.mp4", runRoot: "/run" });
+
+    assert.equal(execution.inspectedDurationMs, media.durationMs);
   });
 
   it("records an explicitly configured provider and model identity", () => {

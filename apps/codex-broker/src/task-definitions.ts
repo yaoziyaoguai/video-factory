@@ -55,6 +55,8 @@ const DIRECTOR_PLAN_DIRECTIVE = [
   "当前本地编辑 Provider 只交付一张静态卡片，所有元素从首帧就存在，渲染器最多做整张画面的轻微推拉；不得在 temporalBeats 或 generationPrompt 中承诺逐字、逐项、箭头、图形或物件动画。",
   "deliveryType 是机器执行合同：本地卡片只能是 editorial_card；图库只能是 stock_video 或 stock_image；图片模型只能是 generated_image；视频模型只能是 generated_video。备选 Provider 也必须支持同一种交付类型。",
   "通用图库可以表现普通人物、动作和环境，但不能冒充具体事件、涉事人物或事发现场的证据。",
+  "图库是检索而不是生成：只有常见、单一、容易搜到的动作才能选择图库；需要精确多步表演、物件状态严格变化或特定界面操作时，应选择生成式能力，或把镜头改写为诚实的说明画面。",
+  "图库 query 使用 3 到 8 个具体英文概念，优先主体、动作和环境，不放运镜、光线、画幅、字幕安全区或整句提示词；同一组概念不得机械复用于相邻镜头。",
   "AI 生成画面只用于 illustrative 或 expressive 镜头，不得作为事实证据，并应避免肖像、品牌和地标误导。",
   "不设任何素材来源配额；只有当每个镜头都独立符合 Provider 能力时，才可以全部选择同一来源。",
   "preferredProviderId、rationale、query 和 generationPrompt 必须相互一致，alternativeProviderIds 也必须能真实承接该镜头。",
@@ -157,6 +159,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
         "scores 的五项评分必须是 0 到 100 的整数。",
         "confidence 必须是 0 到 1 之间的数字。",
         "没有问题时 findings 输出空数组，不要虚构问题。",
+        "只有五项评分均不低于 60 且没有 warning 或 critical finding 时才允许 recommendation=approve。",
       ],
       examples: [
         "正例：预期拉帘但关键帧里窗帘位置和照度都未变化，应在对应 timecode 标记意图未兑现并建议重生成该镜头。",
@@ -164,7 +167,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
     };
   }
   return {
-    version: "video-factory/director-v4",
+    version: "video-factory/director-v5",
     directive: DIRECTOR_PLAN_DIRECTIVE,
     task: "生成视觉圣经和逐镜素材路由。",
     outputRules: [
@@ -271,7 +274,7 @@ const DIRECTOR_PLAN_OUTPUT_SCHEMA = {
           negativeConstraints: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1 } },
           referenceRequirements: { type: "array", maxItems: 8, items: { type: "string", minLength: 1 } },
           successCriteria: { type: "array", minItems: 1, maxItems: 8, items: { type: "string", minLength: 1 } },
-          query: { type: "string" },
+          query: { type: "string", maxLength: 140 },
           generationPrompt: { type: "string" },
           rationale: { type: "string" },
           continuityNote: { type: "string" },
@@ -388,7 +391,39 @@ export function outputSchemaFor(kind: BrokerTaskKind): Record<string, unknown> {
 }
 
 export function outputValidationErrorFor(kind: BrokerTaskKind, value: unknown): string | undefined {
-  return schemaValidationError(outputSchemaFor(kind), value, "output");
+  return schemaValidationError(outputSchemaFor(kind), value, "output")
+    ?? semanticValidationErrorFor(kind, value);
+}
+
+function semanticValidationErrorFor(kind: BrokerTaskKind, value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  if (kind === "script-draft" && Array.isArray(value.scenes)) {
+    const positions = value.scenes.map((scene) => isRecord(scene) ? scene.position : undefined);
+    const invalidIndex = positions.findIndex((position, index) => position !== index + 1);
+    if (invalidIndex >= 0) return `output.scenes[${invalidIndex}].position must continue from 1 without gaps.`;
+  }
+  if (kind === "director-plan" && Array.isArray(value.shots)) {
+    const seenPositions = new Set<number>();
+    for (const [index, shot] of value.shots.entries()) {
+      if (!isRecord(shot) || typeof shot.scenePosition !== "number") continue;
+      if (seenPositions.has(shot.scenePosition)) {
+        return `output.shots[${index}].scenePosition duplicates scene ${shot.scenePosition}.`;
+      }
+      seenPositions.add(shot.scenePosition);
+    }
+  }
+  if (kind === "visual-review" && value.recommendation === "approve") {
+    const scores = isRecord(value.scores) ? Object.values(value.scores) : [];
+    if (scores.some((score) => typeof score === "number" && score < 60)) {
+      return "output.recommendation cannot approve when a review score is below 60.";
+    }
+    if (Array.isArray(value.findings) && value.findings.some((finding) => (
+      isRecord(finding) && (finding.severity === "warning" || finding.severity === "critical")
+    ))) {
+      return "output.recommendation cannot approve while warning or critical findings remain.";
+    }
+  }
+  return undefined;
 }
 
 function schemaValidationError(

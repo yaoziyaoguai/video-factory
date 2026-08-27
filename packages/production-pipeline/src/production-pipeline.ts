@@ -23,7 +23,7 @@ import {
 import { validatePublishCopy, type PublishCopy, type PublishCopyWriter } from "./codex-publish-copy.js";
 import type { CodexTaskExecution, CodexTaskTrace } from "./codex-chat.js";
 import { validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput } from "./codex-screenwriter.js";
-import { validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewReport } from "./codex-visual-review.js";
+import { validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport } from "./codex-visual-review.js";
 import { parseBrief, parsePersistedBrief, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
 import { FileRunStore, RunLockedError } from "./run-store.js";
 import type { WorkerResponse } from "./python-worker-client.js";
@@ -839,7 +839,7 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTask
   }
 }
 
-class VisualReviewProvider implements Provider<VisualReviewAgentInput, CodexTaskExecution<VisualReviewReport>> {
+class VisualReviewProvider implements Provider<VisualReviewAgentInput, VisualReviewExecution> {
   readonly capability: Capability = "quality.review.visual";
 
   constructor(
@@ -855,14 +855,14 @@ class VisualReviewProvider implements Provider<VisualReviewAgentInput, CodexTask
   get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxAttempts(): number { return this.metadata?.maxAttempts ?? 1; }
-  async run(input: VisualReviewAgentInput): Promise<CodexTaskExecution<VisualReviewReport>> {
+  async run(input: VisualReviewAgentInput): Promise<VisualReviewExecution> {
     return this.agent.reviewDetailed
       ? this.agent.reviewDetailed(input)
       : { output: await this.agent.review(input) };
   }
 }
 
-class UnavailableVisualReviewProvider implements Provider<VisualReviewAgentInput, CodexTaskExecution<VisualReviewReport>> {
+class UnavailableVisualReviewProvider implements Provider<VisualReviewAgentInput, VisualReviewExecution> {
   readonly capability: Capability = "quality.review.visual";
 
   constructor(
@@ -878,7 +878,7 @@ class UnavailableVisualReviewProvider implements Provider<VisualReviewAgentInput
   get maxCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxAttempts(): number { return this.metadata?.maxAttempts ?? 1; }
 
-  run(): Promise<CodexTaskExecution<VisualReviewReport>> {
+  run(): Promise<VisualReviewExecution> {
     throw new Error(`Visual review provider '${this.id}' is temporarily unavailable; configure it and regenerate this node.`);
   }
 }
@@ -1303,7 +1303,7 @@ function visualReviewNode(
     execute: async (input, context) => {
       const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "visual-review"));
       const request = validateVisualReviewInput(input, Boolean(brief.director));
-      const execution = await context.resolveProvider<VisualReviewAgentInput, CodexTaskExecution<VisualReviewReport>>({
+      const execution = await context.resolveProvider<VisualReviewAgentInput, VisualReviewExecution>({
         capability: "quality.review.visual",
         providerId,
       }).run(request, context);
@@ -1323,7 +1323,11 @@ function visualReviewNode(
       });
       return {
         status: "succeeded",
-        output: { visualReviewPath: reportPath, report, durationMs: brief.durationSeconds * 1_000 },
+        output: {
+          visualReviewPath: reportPath,
+          report,
+          durationMs: execution.inspectedDurationMs ?? brief.durationSeconds * 1_000,
+        },
         artifacts: [fileArtifact(
           "review_report",
           reportPath,

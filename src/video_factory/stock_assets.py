@@ -127,7 +127,7 @@ def search_scene_asset_candidates(
             {
                 "scene_position": scene.position,
                 "query": query,
-                "candidates": [candidate_to_dict(candidate) for candidate in candidates],
+                "candidates": [candidate_to_public_dict(candidate) for candidate in candidates],
             }
         )
     output = default_asset_search_report_path(workspace, job_id)
@@ -215,7 +215,7 @@ def prepare_routed_scene_assets(
     workspace: Path,
     director_plan: dict,
     media_type: str = "video",
-    limit: int = 3,
+    limit: int = 6,
 ) -> Path:
     asset_dir = workspace / "assets" / f"job-{job_id}"
     asset_dir.mkdir(parents=True, exist_ok=True)
@@ -299,6 +299,23 @@ def prepare_routed_scene_assets(
 
         if actual_asset is None or actual_provider_id is None:
             raise RuntimeError(f"No director-selected asset could be prepared for scene {scene.position}: {'; '.join(errors)}")
+        candidate_shortlist = []
+        seen_candidates: set[tuple[str, str]] = set()
+        for provider_id, candidates in duplicate_options:
+            for candidate in candidates:
+                key = (candidate.provider, candidate.asset_id)
+                if key in seen_candidates:
+                    continue
+                seen_candidates.add(key)
+                candidate_shortlist.append(candidate_to_public_dict(
+                    candidate,
+                    provider_id=provider_id,
+                    selected=(
+                        candidate.provider == actual_asset.provider
+                        and candidate.asset_id == actual_asset.asset_id
+                    ),
+                ))
+
         return actual_asset, {
             "scene_position": scene.position,
             "preferred_provider_id": preferred_id,
@@ -310,6 +327,7 @@ def prepare_routed_scene_assets(
             "requested_media_type": route_media_type,
             "query": actual_asset.query,
             "rationale": str(route.get("rationale") or ""),
+            "candidate_shortlist": candidate_shortlist,
         }
 
     with ThreadPoolExecutor(max_workers=min(ASSET_PREPARE_WORKERS, max(1, len(scene_list)))) as executor:
@@ -566,7 +584,7 @@ def normalize_pixabay_videos(payload: dict, query: str, limit: int) -> List[Stoc
                 width=width,
                 height=height,
                 duration=float(item.get("duration") or 0),
-                preview_url=str(item.get("picture_id") or ""),
+                preview_url="",
                 download_url=str(best_file.get("url") or ""),
                 source_url=str(item.get("pageURL") or ""),
                 creator=str(item.get("user") or ""),
@@ -658,8 +676,27 @@ def load_asset_plan(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def candidate_to_dict(candidate: StockAssetCandidate) -> dict:
-    return asdict(candidate)
+def candidate_to_public_dict(
+    candidate: StockAssetCandidate,
+    provider_id: Optional[str] = None,
+    selected: bool = False,
+) -> dict:
+    return {
+        "provider": candidate.provider,
+        "provider_id": provider_id,
+        "asset_id": candidate.asset_id,
+        "media_type": candidate.media_type,
+        "width": candidate.width,
+        "height": candidate.height,
+        "duration": candidate.duration,
+        "preview_url": candidate.preview_url,
+        "source_url": candidate.source_url,
+        "creator": candidate.creator,
+        "license_note": candidate.license_note,
+        "query": candidate.query,
+        "score": candidate.score,
+        "selected": selected,
+    }
 
 
 def query_for_scene(scene: Scene) -> str:

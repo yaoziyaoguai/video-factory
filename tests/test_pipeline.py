@@ -25,6 +25,7 @@ from video_factory.stock_assets import (
     prepare_scene_assets,
     query_for_scene,
     resolve_director_stock_query,
+    search_scene_asset_candidates,
     search_pixabay,
     write_response_body,
 )
@@ -520,6 +521,49 @@ class PipelineTest(unittest.TestCase):
                 )
 
             self.assertIn("PEXELS_API_KEY", str(error.exception))
+
+    def test_asset_search_report_never_persists_download_urls(self):
+        scene = Scene(
+            position=1,
+            narration="测试旁白",
+            duration=3,
+            visual_strategy="stock",
+            visual_prompt="person editing video",
+            search_terms=["video editing"],
+        )
+        candidate = StockAssetCandidate(
+            provider="pexels",
+            asset_id="candidate-1",
+            media_type="video",
+            width=1080,
+            height=1920,
+            duration=5,
+            preview_url="https://images.pexels.com/photos/1.jpg",
+            download_url="https://example.invalid/private.mp4?token=secret",
+            source_url="https://www.pexels.com/video/1",
+            creator="Creator",
+            license_note="Pexels license",
+            query="person editing video",
+            score=90,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "video_factory.stock_assets.search_stock_assets",
+            return_value=[candidate],
+        ):
+            report_path = search_scene_asset_candidates(
+                job_id=1,
+                scenes=[scene],
+                workspace=Path(tmp),
+                provider="pexels",
+                limit=6,
+            )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        saved = report["scene_candidates"][0]["candidates"][0]
+        self.assertNotIn("download_url", saved)
+        self.assertNotIn("secret", json.dumps(report))
+        self.assertEqual(saved["source_url"], "https://www.pexels.com/video/1")
 
     def test_pixabay_search_uses_provider_minimum_page_size(self):
         requested_urls = []

@@ -124,7 +124,7 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             workspace=output_dir,
             director_plan=director_plan,
             media_type=str(parameters.get("mediaType", "video")),
-            limit=int(parameters.get("limit", 3)),
+            limit=int(parameters.get("limit", 6)),
         )
     else:
         plan_path = prepare_scene_assets(
@@ -133,7 +133,7 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             workspace=output_dir,
             provider=provider,
             media_type=str(parameters.get("mediaType", "video")),
-            limit=int(parameters.get("limit", 3)),
+            limit=int(parameters.get("limit", 6)),
         )
     artifact = describe_artifact(
         path=plan_path,

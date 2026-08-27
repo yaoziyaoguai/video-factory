@@ -148,27 +148,44 @@ class WorkerContractTest(unittest.TestCase):
             }
 
             def candidate(*_args, **_kwargs):
-                return [StockAssetCandidate(
-                    provider="pexels",
-                    asset_id="pexels-2",
-                    media_type="video",
-                    width=1080,
-                    height=1920,
-                    duration=5,
-                    preview_url="https://example.com/preview.mp4",
-                    download_url="https://example.com/video.mp4",
-                    source_url="https://pexels.com/video/2",
-                    creator="Creator",
-                    license_note="Pexels license",
-                    query="director query 2",
-                    score=90,
-                )]
+                return [
+                    StockAssetCandidate(
+                        provider="pexels",
+                        asset_id="pexels-2",
+                        media_type="video",
+                        width=1080,
+                        height=1920,
+                        duration=5,
+                        preview_url="https://example.com/preview-2.jpg",
+                        download_url="https://example.com/video-2.mp4?temporary=secret",
+                        source_url="https://pexels.com/video/2",
+                        creator="Creator",
+                        license_note="Pexels license",
+                        query="director query 2",
+                        score=90,
+                    ),
+                    StockAssetCandidate(
+                        provider="pexels",
+                        asset_id="pexels-3",
+                        media_type="video",
+                        width=720,
+                        height=1280,
+                        duration=7,
+                        preview_url="https://example.com/preview-3.jpg",
+                        download_url="https://example.com/video-3.mp4?temporary=secret",
+                        source_url="https://pexels.com/video/3",
+                        creator="Alternate Creator",
+                        license_note="Pexels license",
+                        query="director query 2",
+                        score=80,
+                    ),
+                ]
 
             def materialize(_candidate, target):
                 target.write_bytes(b"video")
                 return target
 
-            with patch("video_factory.stock_assets.search_stock_assets", side_effect=candidate), patch(
+            with patch("video_factory.stock_assets.search_stock_assets", side_effect=candidate) as search_assets, patch(
                 "video_factory.stock_assets.materialize_candidate", side_effect=materialize
             ):
                 response = handle_request(request)
@@ -178,10 +195,18 @@ class WorkerContractTest(unittest.TestCase):
             self.assertEqual(plan["director_routing"][1]["preferred_provider_id"], "pexels-stock-v1")
             self.assertEqual(plan["director_routing"][1]["actual_provider"], "pexels")
             self.assertFalse(plan["director_routing"][1]["fallback_used"])
+            shortlist = plan["director_routing"][1]["candidate_shortlist"]
+            self.assertEqual([item["asset_id"] for item in shortlist], ["pexels-2", "pexels-3"])
+            self.assertTrue(shortlist[0]["selected"])
+            self.assertFalse(shortlist[1]["selected"])
+            self.assertNotIn("download_url", shortlist[0])
+            self.assertEqual(shortlist[0]["provider_id"], "pexels-stock-v1")
             self.assertEqual(plan["director_routing"][2]["preferred_provider_id"], "seedream-image-v1")
             self.assertEqual(plan["director_routing"][2]["actual_provider"], "local")
             self.assertTrue(plan["director_routing"][2]["generation_pending"])
             self.assertFalse(plan["director_routing"][2]["fallback_used"])
+            self.assertTrue(search_assets.call_args_list)
+            self.assertTrue(all(call.kwargs["limit"] == 6 for call in search_assets.call_args_list))
 
     def test_ai_router_prepares_independent_scenes_with_bounded_concurrency(self):
         with tempfile.TemporaryDirectory() as tmp:

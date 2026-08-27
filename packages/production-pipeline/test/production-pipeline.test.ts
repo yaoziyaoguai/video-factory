@@ -112,7 +112,7 @@ describe("ProductionPipeline", () => {
   it("pauses before the metered GLM visual-review role, then runs it after explicit spend approval", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-review-"));
     const worker = new FakeWorker();
-    const reviewCalls: Array<{ videoPath: string; runRoot: string }> = [];
+    const reviewCalls: pipeline.VisualReviewAgentInput[] = [];
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
       worker,
@@ -174,6 +174,7 @@ describe("ProductionPipeline", () => {
     assert.equal(waiting.workflowVersion, "1.2.0");
     assert.equal(reviewCalls.length, 1);
     assert.match(reviewCalls[0]!.videoPath, /final\.mp4$/);
+    assert.match(reviewCalls[0]!.renderManifestPath ?? "", /render_manifest\.json$/);
     assert.ok(waiting.nodeRuns.some((node) => node.nodeId === "visual-review" && node.status === "succeeded"));
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "glm-5.3-flash");
     assert.ok(waiting.artifacts.some((artifact) => artifact.kind === "review_report" && artifact.provenance.providerId === "glm-visual-review-v1"));

@@ -23,8 +23,16 @@ export interface VisualReviewAgentInput {
 }
 
 export interface VisualReviewMediaPreprocessor {
-  prepare(input: { videoPath: string; runRoot: string }): Promise<VisualReviewMediaPayload>;
+  prepare(input: {
+    videoPath: string;
+    runRoot: string;
+    renderManifestPath?: string;
+  }): Promise<VisualReviewMediaPayload>;
 }
+
+export type VisualReviewExecution = CodexTaskExecution<VisualReviewReport> & {
+  inspectedDurationMs?: number;
+};
 
 export interface VisualReviewFinding {
   timecodeMs: number;
@@ -47,7 +55,7 @@ export interface VisualReviewAgent {
   id: string;
   modelId: string;
   review(input: VisualReviewAgentInput): Promise<VisualReviewReport>;
-  reviewDetailed?(input: VisualReviewAgentInput): Promise<CodexTaskExecution<VisualReviewReport>>;
+  reviewDetailed?(input: VisualReviewAgentInput): Promise<VisualReviewExecution>;
 }
 
 export interface CodexVisualReviewAgentOptions {
@@ -71,15 +79,19 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
     return validateVisualReviewReport(await this.options.client.runTask("visual-review", payload), payload.durationMs);
   }
 
-  async reviewDetailed(input: VisualReviewAgentInput): Promise<CodexTaskExecution<VisualReviewReport>> {
+  async reviewDetailed(input: VisualReviewAgentInput): Promise<VisualReviewExecution> {
     const payload = await this.preparePayload(input);
     const client = this.options.client as Pick<CodexBridgeClient, "runTask" | "runTaskDetailed">;
     if (typeof client.runTaskDetailed !== "function") {
-      return { output: validateVisualReviewReport(await client.runTask("visual-review", payload), payload.durationMs) };
+      return {
+        output: validateVisualReviewReport(await client.runTask("visual-review", payload), payload.durationMs),
+        inspectedDurationMs: payload.durationMs,
+      };
     }
     const execution = await client.runTaskDetailed("visual-review", payload);
     return {
       output: validateVisualReviewReport(execution.output, payload.durationMs),
+      inspectedDurationMs: payload.durationMs,
       ...(execution.trace ? { trace: execution.trace } : {}),
     };
   }

@@ -31,7 +31,7 @@ export {
 } from "./codex-chat.js";
 export type { CodexBridgeClientOptions, CodexTaskExecution, CodexTaskKind, CodexTaskTrace } from "./codex-chat.js";
 export { CodexVisualReviewAgent, validateVisualReviewReport } from "./codex-visual-review.js";
-export type { CodexVisualReviewAgentOptions, VisualReviewAgent, VisualReviewAgentInput, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport } from "./codex-visual-review.js";
+export type { CodexVisualReviewAgentOptions, VisualReviewAgent, VisualReviewAgentInput, VisualReviewExecution, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport } from "./codex-visual-review.js";
 export { CodexVisualDirectorAgent } from "./codex-visual-director.js";
 export type { CodexVisualDirectorAgentOptions } from "./codex-visual-director.js";
 export {
