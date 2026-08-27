@@ -88,7 +88,11 @@ if ! runuser -u "$broker_user" -- env HOME="$broker_home" CODEX_HOME="$broker_co
   fail "隔离 CODEX_HOME 无法读取登录状态；请检查 $broker_codex_home/auth.json。"
 fi
 
-ln -sfn "$node_bin" "$broker_root/bin/node"
+shared_node_tmp="$(mktemp "$broker_root/bin/.node.XXXXXX")"
+trap 'rm -f "$shared_node_tmp"' EXIT
+install -o root -g root -m 0755 "$node_bin" "$shared_node_tmp"
+mv -f "$shared_node_tmp" "$broker_root/bin/node"
+trap - EXIT
 install -d -m 0755 "$(dirname "$env_file")"
 env_tmp="$(mktemp)"
 {

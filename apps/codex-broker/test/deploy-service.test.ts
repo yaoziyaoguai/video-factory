@@ -68,6 +68,17 @@ describe("ZAI systemd service sample", () => {
 });
 
 describe("production deployment transaction", () => {
+  it("installs a physical shared Node runtime instead of linking into a private home", async () => {
+    const script = await readFile(
+      path.join(repositoryRoot, "scripts", "setup-codex-broker-host.sh"),
+      "utf8",
+    );
+
+    assert.match(script, /install -o root -g root -m 0755 "\$node_bin" "\$shared_node_tmp"/);
+    assert.match(script, /mv -f "\$shared_node_tmp" "\$broker_root\/bin\/node"/);
+    assert.doesNotMatch(script, /ln -sfn "\$node_bin" "\$broker_root\/bin\/node"/);
+  });
+
   it("rolls back the app and every configured broker after any mutating-step failure", async () => {
     const script = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
 
