@@ -14,7 +14,7 @@ import {
   taskPromptFor,
 } from "./task-definitions.js";
 
-const ZAI_CHAT_COMPLETIONS_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
+const ZAI_CHAT_COMPLETIONS_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 const ZAI_MODEL_ID = "glm-5.3-flash";
 const DEFAULT_TIMEOUT_MS = 285_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -37,8 +37,8 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
 
   constructor(options: ZaiVisualReviewExecutorOptions = {}) {
     const environment = options.env ?? process.env;
-    this.apiKey = environment.ZAI_API_KEY?.trim() ?? "";
-    if (!this.apiKey) throw new Error("ZAI_API_KEY environment variable is required for the zai profile.");
+    this.apiKey = environment.ZAI_BIGMODEL_API_KEY?.trim() ?? "";
+    if (!this.apiKey) throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
     this.fetchFn = options.fetchFn ?? fetch;
     this.effort = options.effort ?? "max";
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;

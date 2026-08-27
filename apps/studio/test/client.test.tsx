@@ -321,6 +321,81 @@ describe("Studio client", () => {
     expect(onSubmit.mock.calls.at(-1)?.[0].providers).not.toHaveProperty("visualReview");
   });
 
+  it("shows metered GLM review cost separately from the paid-shot budget", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const providersWithGlmReview: StudioProvider[] = [
+      ...providers,
+      {
+        id: "glm-visual-review-v1",
+        capability: "quality.review.visual",
+        label: "GLM-5.3-Flash 视觉审片",
+        available: true,
+        kind: "external",
+        billing: "metered",
+        estimatedCnyPerClip: 0.1,
+        billingUnit: "run",
+      },
+    ];
+    render(<NewRunDialog open providers={providersWithGlmReview} onClose={() => undefined} onSubmit={onSubmit} />);
+
+    expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
+    expect(screen.getByText("1 次付费审片")).toBeInTheDocument();
+    expect(screen.getByText(/视觉审片预计 ¥0.1，执行前分别确认/)).toBeInTheDocument();
+    expect(screen.getByLabelText("预计成本上限")).toBeDisabled();
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("视频标题"), "按次审片预算");
+    await user.type(screen.getByLabelText("内容角度"), "审片不占付费镜头额度");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
+      providers: expect.objectContaining({ visualReview: "glm-visual-review-v1" }),
+      economics: {
+        recipeId: "economy-daily",
+        allowMeteredProviders: true,
+        maxPaidShots: 0,
+        maxCostCny: 0,
+      },
+    }));
+  });
+
+  it("treats metered voice as one separately approved run call", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const providersWithMeteredVoice: StudioProvider[] = [
+      ...providers.filter((provider) => provider.capability !== "voice.synthesize"),
+      {
+        id: "minimax-tts-v1",
+        capability: "voice.synthesize",
+        label: "MiniMax 中文声音演员",
+        available: true,
+        kind: "external",
+        billing: "metered",
+        billingUnit: "run",
+        estimatedCnyPerClip: 0.5,
+      },
+    ];
+    vi.spyOn(studioApi, "voices").mockResolvedValue([
+      { id: "minimax:Chinese (Mandarin)_News_Anchor", providerId: "minimax-tts-v1", label: "新闻主播", locale: "zh-CN", engine: "minimax", curated: true },
+    ]);
+    render(<NewRunDialog open providers={providersWithMeteredVoice} onClose={() => undefined} onSubmit={onSubmit} />);
+
+    expect(screen.getByText("1 次付费配音")).toBeInTheDocument();
+    expect(screen.getByText(/配音预计 ¥0.5，执行前分别确认/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("视频标题"), "按次配音预算");
+    await user.type(screen.getByLabelText("内容角度"), "声音调用独立确认");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
+      providers: expect.objectContaining({ voice: "minimax-tts-v1" }),
+      economics: expect.objectContaining({
+        allowMeteredProviders: true,
+        maxPaidShots: 0,
+        maxCostCny: 0,
+      }),
+    }));
+  });
+
   it("keeps the selected macOS voice profile and execution provider aligned", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

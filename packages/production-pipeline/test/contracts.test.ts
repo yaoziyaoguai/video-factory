@@ -118,6 +118,25 @@ describe("ProductionBrief", () => {
     });
   });
 
+  it("allows metered per-run roles without reserving paid-shot generation", () => {
+    const brief = pipeline.parseBrief({
+      ...validBrief,
+      economics: {
+        recipeId: "economy-daily",
+        allowMeteredProviders: true,
+        maxPaidShots: 0,
+        maxCostCny: 0,
+      },
+    });
+
+    assert.deepEqual(brief.economics, {
+      recipeId: "economy-daily",
+      allowMeteredProviders: true,
+      maxPaidShots: 0,
+      maxCostCny: 0,
+    });
+  });
+
   it("preserves an editorial image-story direction and rejects skipped topics", () => {
     const brief = pipeline.parseBrief({
       ...validBrief,

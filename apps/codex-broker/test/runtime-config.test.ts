@@ -18,7 +18,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
     const fakeSecret = "test-only-secret-not-for-a-real-request";
     const zai = brokerRuntimeConfigFromEnv({
       VIDEO_FACTORY_CODEX_PROFILE: "zai",
-      ZAI_API_KEY: fakeSecret,
+      ZAI_BIGMODEL_API_KEY: fakeSecret,
       VIDEO_FACTORY_CODEX_EFFORT: "max",
     });
     assert.equal(zai.profile.identity.profileId, "zai");
@@ -36,7 +36,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
     );
     await assert.rejects(
       async () => brokerRuntimeConfigFromEnv({ VIDEO_FACTORY_CODEX_PROFILE: "zai" }),
-      /ZAI_API_KEY environment variable is required/,
+      /ZAI_BIGMODEL_API_KEY environment variable is required/,
     );
   });
 
@@ -44,7 +44,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
     const fetchFn: typeof fetch = async () => new Response();
     const zaiEnvironment = {
       VIDEO_FACTORY_CODEX_PROFILE: "zai",
-      ZAI_API_KEY: "test-only-secret",
+      ZAI_BIGMODEL_API_KEY: "test-only-secret",
     };
     const zai = createBrokerExecutor(
       brokerRuntimeConfigFromEnv(zaiEnvironment),

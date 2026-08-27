@@ -241,8 +241,8 @@ function parseEconomics(value: unknown): ProductionEconomics {
   if (!input.allowMeteredProviders && (maxPaidShots !== 0 || maxCostCny !== 0)) {
     throw new Error("economics.maxPaidShots and economics.maxCostCny must be 0 when metered providers are disabled.");
   }
-  if (input.allowMeteredProviders && (maxPaidShots < 1 || maxCostCny <= 0)) {
-    throw new Error("economics.maxPaidShots and economics.maxCostCny must bound metered generation.");
+  if (input.allowMeteredProviders && ((maxPaidShots === 0) !== (maxCostCny === 0))) {
+    throw new Error("economics.maxPaidShots and economics.maxCostCny must either both bound metered generation or both be 0.");
   }
   return { recipeId, allowMeteredProviders: input.allowMeteredProviders, maxPaidShots, maxCostCny };
 }

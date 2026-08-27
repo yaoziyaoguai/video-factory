@@ -94,6 +94,7 @@ export interface StudioProvider {
   modes?: string[];
   latency?: "instant" | "seconds" | "minutes";
   estimatedCnyPerClip?: number;
+  billingUnit?: "clip" | "run";
   docsUrl?: string;
   requirement?: string;
 }

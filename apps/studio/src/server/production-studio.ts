@@ -107,7 +107,7 @@ export class ProductionStudio {
     if (brief.economics.maxCostCny > maxRunCostCny) {
       throw new StudioInputError(`本次成本上限不能超过服务端安全上限 ¥${maxRunCostCny}。`);
     }
-    await this.assertProvidersAvailable(brief);
+    await this.assertProvidersAvailable(brief, maxRunCostCny);
     if (this.options.resolveTemplateSnapshot) {
       try {
         brief = { ...brief, templateSnapshot: await this.options.resolveTemplateSnapshot(input, brief) };
@@ -472,8 +472,9 @@ export class ProductionStudio {
     }
   }
 
-  private async assertProvidersAvailable(brief: ProductionBrief): Promise<void> {
+  private async assertProvidersAvailable(brief: ProductionBrief, maxRunCostCny: number): Promise<void> {
     const providers = await this.options.listProviders();
+    let fixedMeteredEstimateCny = 0;
     const bindings: Array<[string, string]> = [
       ["script.draft", brief.providers.script],
       ...(brief.director && brief.providers.director ? [["storyboard.plan", brief.providers.director] as [string, string]] : []),
@@ -497,7 +498,14 @@ export class ProductionStudio {
         throw new StudioInputError(`当前配方未允许使用付费能力“${selected.label}”。`);
       }
       if (selected.estimatedCnyPerClip === undefined) {
-        throw new StudioInputError(`“${selected.label}”尚未配置单镜头估价，不能进入预算计算。`);
+        throw new StudioInputError(`“${selected.label}”尚未配置估价，不能进入预算计算。`);
+      }
+      if (selected.billingUnit === "run") {
+        fixedMeteredEstimateCny = roundMoney(fixedMeteredEstimateCny + selected.estimatedCnyPerClip);
+        continue;
+      }
+      if (brief.economics.maxPaidShots < 1) {
+        throw new StudioInputError(`“${selected.label}”按镜头计费，但本次没有设置付费镜头额度。`);
       }
       const estimatedCost = roundMoney(selected.estimatedCnyPerClip * brief.economics.maxPaidShots);
       if (estimatedCost > brief.economics.maxCostCny) {
@@ -529,6 +537,10 @@ export class ProductionStudio {
       if (hasMeteredSource && !hasFreeSource) {
         throw new StudioInputError("使用付费镜头时，导演素材池必须至少保留一个免费素材来源作为其余镜头与失败回退的保底。");
       }
+    }
+    const estimatedRunCeiling = roundMoney(brief.economics.maxCostCny + fixedMeteredEstimateCny);
+    if (estimatedRunCeiling > maxRunCostCny) {
+      throw new StudioInputError(`本次镜头预算与按次能力预计合计 ¥${estimatedRunCeiling}，超过服务端安全上限 ¥${maxRunCostCny}。`);
     }
   }
 

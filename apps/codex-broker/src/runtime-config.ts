@@ -23,8 +23,8 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
   if (profileId === "zai" && configuredModel !== undefined) {
     throw new Error("VIDEO_FACTORY_CODEX_MODEL cannot override the zai profile model.");
   }
-  if (profileId === "zai" && optionalText(env, "ZAI_API_KEY") === undefined) {
-    throw new Error("ZAI_API_KEY environment variable is required for the zai profile.");
+  if (profileId === "zai" && optionalText(env, "ZAI_BIGMODEL_API_KEY") === undefined) {
+    throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
   }
   const effort = optionalText(env, "VIDEO_FACTORY_CODEX_EFFORT") ?? "high";
   if (!ALLOWED_EFFORTS.has(effort)) {
