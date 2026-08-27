@@ -96,12 +96,26 @@ describe("production deployment transaction", () => {
 
   it("never changes ownership or mode of an existing disabled-ZAI runtime directory", async () => {
     const script = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
-    const disabledBranch = script.match(
-      /if \[\[ "\$zai_broker_enabled" -eq 0 \]\]; then([\s\S]*?)\nfi/,
+    const ensureRuntimeMount = script.match(
+      /ensure_zai_runtime_mount\(\) \{([\s\S]*?)\n\}/,
     )?.[1] ?? "";
 
-    assert.match(disabledBranch, /if \[\[ ! -e "\$zai_broker_runtime_dir" \]\]; then/);
-    assert.match(disabledBranch, /install -d -o root -g vf-bridge -m 0750 "\$zai_broker_runtime_dir"/);
-    assert.doesNotMatch(disabledBranch, /chown|chmod/);
+    assert.match(ensureRuntimeMount, /if \[\[ ! -e "\$zai_broker_runtime_dir" \]\]; then/);
+    assert.match(ensureRuntimeMount, /install -d -o root -g vf-bridge -m 0750 "\$zai_broker_runtime_dir"/);
+    assert.doesNotMatch(ensureRuntimeMount, /chown|chmod/);
+  });
+
+  it("recreates the Docker bind-mount directory when the optional ZAI broker removes it on failure", async () => {
+    const script = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
+    const restartBrokers = script.match(
+      /restart_brokers\(\) \{([\s\S]*?)\n\}/,
+    )?.[1] ?? "";
+    const optionalFailure = restartBrokers.match(
+      /if ! systemctl restart "\$zai_broker_service"[\s\S]*?then([\s\S]*?)\n    fi/,
+    )?.[1] ?? "";
+
+    assert.match(optionalFailure, /zai_broker_enabled=0/);
+    assert.match(optionalFailure, /systemctl stop "\$zai_broker_service" \|\| true/);
+    assert.match(optionalFailure, /ensure_zai_runtime_mount \|\| failed=1/);
   });
 });
