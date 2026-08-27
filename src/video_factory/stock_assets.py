@@ -636,18 +636,21 @@ def query_for_scene(scene: Scene) -> str:
 
 
 def resolve_director_stock_query(scene: Scene, director_query: str) -> str:
-    contextual_scene = Scene(
+    director_scene = Scene(
         position=scene.position,
         narration=scene.narration,
         duration=scene.duration,
         visual_strategy=scene.visual_strategy,
         visual_prompt=director_query,
-        search_terms=[*scene.search_terms, scene.visual_prompt, scene.narration],
+        search_terms=[],
     )
-    semantic_query = semantic_query_for_scene(contextual_scene)
+    semantic_query = semantic_query_for_scene(director_scene)
     if semantic_query:
         return semantic_query
-    return english_query_from_visual_prompt(director_query) or query_for_scene(scene)
+    explicit_query = english_query_from_visual_prompt(director_query)
+    if explicit_query:
+        return explicit_query
+    return semantic_query_for_scene(scene) or query_for_scene(scene)
 
 
 def semantic_query_for_scene(scene: Scene) -> str:

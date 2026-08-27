@@ -600,6 +600,26 @@ class PipelineTest(unittest.TestCase):
 
         self.assertEqual(resolved, "asian person quiet reflection night")
 
+    def test_director_stock_query_does_not_replace_specific_shot_with_broad_topic(self):
+        scene = Scene(
+            position=4,
+            narration="每过一秒，观众都在做选择。",
+            duration=2.2,
+            visual_strategy="stock",
+            visual_prompt="竖屏侧面近景，年轻人看手机时先专注，随后拇指抬起准备滑动",
+            search_terms=["咖啡", "注意力", "短视频"],
+        )
+
+        resolved = resolve_director_stock_query(
+            scene,
+            "vertical side close-up young adult watching smartphone hesitates thumb hovering above screen",
+        )
+
+        self.assertEqual(
+            resolved,
+            "vertical side close-up young adult watching smartphone hesitates thumb hovering above screen",
+        )
+
     def test_stock_asset_requests_include_provider_safe_headers(self):
         headers = api_headers({"Authorization": "test-key"})
 
