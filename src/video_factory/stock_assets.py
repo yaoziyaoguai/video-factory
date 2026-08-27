@@ -4,6 +4,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from urllib.error import HTTPError, URLError
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ MAX_ASSET_DOWNLOAD_BYTES = 12_000_000
 MAX_ASSET_DOWNLOAD_SECONDS = 45
 PROVIDER_REQUEST_ATTEMPTS = 3
 ASSET_DOWNLOAD_ATTEMPTS = 2
+ASSET_PREPARE_WORKERS = 3
 NETWORK_RETRY_DELAY_SECONDS = 0.25
 
 TOPIC_SHOT_QUERIES = (
@@ -216,14 +218,13 @@ def prepare_routed_scene_assets(
 ) -> Path:
     asset_dir = workspace / "assets" / f"job-{job_id}"
     asset_dir.mkdir(parents=True, exist_ok=True)
+    scene_list = list(scenes)
     shots = director_plan.get("shots")
     if not isinstance(shots, list):
         raise ValueError("Director plan shots must be an array")
     routes = {int(shot["scenePosition"]): shot for shot in shots if isinstance(shot, dict)}
-    scene_assets: List[SceneAsset] = []
-    routing_records = []
 
-    for scene in scenes:
+    def prepare_scene(scene: Scene):
         route = routes.get(scene.position)
         if route is None:
             raise ValueError(f"Director plan is missing scene {scene.position}")
@@ -261,8 +262,7 @@ def prepare_routed_scene_assets(
 
         if actual_asset is None or actual_provider_id is None:
             raise RuntimeError(f"No director-selected asset could be prepared for scene {scene.position}: {'; '.join(errors)}")
-        scene_assets.append(actual_asset)
-        routing_records.append({
+        return actual_asset, {
             "scene_position": scene.position,
             "preferred_provider_id": preferred_id,
             "actual_provider_id": actual_provider_id,
@@ -272,7 +272,12 @@ def prepare_routed_scene_assets(
             "director_query": director_query,
             "query": actual_asset.query,
             "rationale": str(route.get("rationale") or ""),
-        })
+        }
+
+    with ThreadPoolExecutor(max_workers=min(ASSET_PREPARE_WORKERS, max(1, len(scene_list)))) as executor:
+        prepared = list(executor.map(prepare_scene, scene_list))
+    scene_assets = [item[0] for item in prepared]
+    routing_records = [item[1] for item in prepared]
 
     plan_path = write_asset_plan(default_asset_plan_path(workspace, job_id), job_id, scene_assets)
     payload = load_asset_plan(plan_path)

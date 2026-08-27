@@ -4,11 +4,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from video_factory.domain import StockAssetCandidate
+from video_factory.domain import SceneAsset, StockAssetCandidate
 from video_factory.worker import WorkerProtocolError, handle_request, validate_request
 
 
@@ -180,6 +182,71 @@ class WorkerContractTest(unittest.TestCase):
             self.assertEqual(plan["director_routing"][2]["actual_provider"], "local")
             self.assertTrue(plan["director_routing"][2]["generation_pending"])
             self.assertFalse(plan["director_routing"][2]["fallback_used"])
+
+    def test_ai_router_prepares_independent_scenes_with_bounded_concurrency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = Path(handle_request(self.valid_request("script.draft", root / "script"))["output"]["scriptPath"])
+            script = json.loads(script_path.read_text(encoding="utf-8"))
+            director_plan_path = root / "director_plan.json"
+            director_plan_path.write_text(json.dumps({
+                "version": "video-factory/director-plan-v1",
+                "shots": [
+                    {
+                        "scenePosition": scene["position"],
+                        "preferredProviderId": "local-editorial-v1",
+                        "alternativeProviderIds": [],
+                        "query": f"director query {scene['position']}",
+                    }
+                    for scene in script["scenes"]
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "assets")
+            request["input"] = {"scriptPath": str(script_path), "directorPlanPath": str(director_plan_path)}
+            request["parameters"] = {
+                "providerId": "ai-shot-router-v1",
+                "provider": "ai-router",
+                "mediaType": "video",
+            }
+            state = {"active": 0, "peak": 0}
+            lock = threading.Lock()
+
+            def materialize(scene, query, asset_dir):
+                with lock:
+                    state["active"] += 1
+                    state["peak"] = max(state["peak"], state["active"])
+                try:
+                    time.sleep(0.05)
+                    path = asset_dir / f"scene_{scene.position:02d}_local_card.png"
+                    path.write_bytes(b"image")
+                    return SceneAsset(
+                        scene_position=scene.position,
+                        provider="local",
+                        asset_id=f"scene-{scene.position:02d}-card",
+                        media_type="image",
+                        width=1080,
+                        height=1920,
+                        duration=float(scene.duration),
+                        local_path=str(path),
+                        source_url="local://video-factory/card",
+                        creator="VideoFactory",
+                        license_note="local",
+                        query=query,
+                    )
+                finally:
+                    with lock:
+                        state["active"] -= 1
+
+            with patch("video_factory.stock_assets.materialize_local_scene", side_effect=materialize):
+                response = handle_request(request)
+
+            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
+            self.assertGreater(state["peak"], 1)
+            self.assertLessEqual(state["peak"], 3)
+            self.assertEqual(
+                [item["scene_position"] for item in plan["scene_assets"]],
+                sorted(item["scene_position"] for item in plan["scene_assets"]),
+            )
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_voice_provider_builds_a_non_silent_timeline_for_every_scene(self):
