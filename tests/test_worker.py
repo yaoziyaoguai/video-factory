@@ -248,6 +248,89 @@ class WorkerContractTest(unittest.TestCase):
                 sorted(item["scene_position"] for item in plan["scene_assets"]),
             )
 
+    def test_ai_router_avoids_reusing_a_stock_asset_when_alternatives_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = Path(handle_request(self.valid_request("script.draft", root / "script"))["output"]["scriptPath"])
+            script = json.loads(script_path.read_text(encoding="utf-8"))
+            director_plan_path = root / "director_plan.json"
+            director_plan_path.write_text(json.dumps({
+                "version": "video-factory/director-plan-v1",
+                "shots": [
+                    {
+                        "scenePosition": scene["position"],
+                        "preferredProviderId": "pexels-stock-v1",
+                        "alternativeProviderIds": [],
+                        "deliveryType": "stock_image" if scene["position"] == 1 else "stock_video",
+                        "query": f"director query {scene['position']}",
+                    }
+                    for scene in script["scenes"]
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "assets")
+            request["input"] = {"scriptPath": str(script_path), "directorPlanPath": str(director_plan_path)}
+            request["parameters"] = {
+                "providerId": "ai-shot-router-v1",
+                "provider": "ai-router",
+                "mediaType": "video",
+            }
+
+            requested_media = {}
+
+            def candidates(provider, query, media_type, limit):
+                del provider, limit
+                unique_id = query.rsplit(" ", 1)[-1]
+                requested_media[unique_id] = media_type
+                return [
+                    StockAssetCandidate(
+                        provider="pexels",
+                        asset_id="shared",
+                        media_type=media_type,
+                        width=720,
+                        height=1280,
+                        duration=5,
+                        preview_url="https://example.com/shared.jpg",
+                        download_url="https://example.com/shared.mp4",
+                        source_url="https://pexels.com/shared",
+                        creator="Creator",
+                        license_note="Pexels license",
+                        query=query,
+                        score=90,
+                    ),
+                    StockAssetCandidate(
+                        provider="pexels",
+                        asset_id=f"unique-{unique_id}",
+                        media_type=media_type,
+                        width=720,
+                        height=1280,
+                        duration=5,
+                        preview_url=f"https://example.com/{unique_id}.jpg",
+                        download_url=f"https://example.com/{unique_id}.mp4",
+                        source_url=f"https://pexels.com/{unique_id}",
+                        creator="Creator",
+                        license_note="Pexels license",
+                        query=query,
+                        score=80,
+                    ),
+                ]
+
+            def materialize(_candidate, target):
+                target.write_bytes(b"video")
+                return target
+
+            with patch("video_factory.stock_assets.search_stock_assets", side_effect=candidates), patch(
+                "video_factory.stock_assets.materialize_candidate", side_effect=materialize,
+            ):
+                response = handle_request(request)
+
+            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
+            asset_ids = [item["asset_id"] for item in plan["scene_assets"]]
+            self.assertEqual(len(asset_ids), len(set(asset_ids)))
+            self.assertEqual(asset_ids.count("shared"), 1)
+            self.assertEqual(requested_media["1"], "image")
+            self.assertEqual(requested_media["2"], "video")
+            self.assertEqual(plan["scene_assets"][0]["media_type"], "image")
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_voice_provider_builds_a_non_silent_timeline_for_every_scene(self):
         with tempfile.TemporaryDirectory() as tmp:

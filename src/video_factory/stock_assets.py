@@ -9,6 +9,7 @@ from urllib.error import HTTPError, URLError
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Callable, Iterable, List, Optional
 
 from .domain import Scene, SceneAsset, StockAssetCandidate
@@ -223,6 +224,20 @@ def prepare_routed_scene_assets(
     if not isinstance(shots, list):
         raise ValueError("Director plan shots must be an array")
     routes = {int(shot["scenePosition"]): shot for shot in shots if isinstance(shot, dict)}
+    claimed_stock_assets: set[tuple[str, str]] = set()
+    claim_lock = Lock()
+
+    def claim_candidate(candidate: StockAssetCandidate) -> bool:
+        key = (candidate.provider, candidate.asset_id)
+        with claim_lock:
+            if key in claimed_stock_assets:
+                return False
+            claimed_stock_assets.add(key)
+            return True
+
+    def release_candidate(candidate: StockAssetCandidate) -> None:
+        with claim_lock:
+            claimed_stock_assets.discard((candidate.provider, candidate.asset_id))
 
     def prepare_scene(scene: Scene):
         route = routes.get(scene.position)
@@ -233,11 +248,19 @@ def prepare_routed_scene_assets(
         if not isinstance(alternatives, list) or any(not isinstance(item, str) or not item.strip() for item in alternatives):
             raise ValueError(f"Director plan alternatives are invalid for scene {scene.position}")
         director_query = required_route_text(route, "query", scene.position)
+        delivery_type = str(route.get("deliveryType") or "").strip()
+        route_media_type = {
+            "stock_image": "image",
+            "generated_image": "image",
+            "stock_video": "video",
+            "generated_video": "video",
+        }.get(delivery_type, media_type)
         provider_ids = [preferred_id, *[item.strip() for item in alternatives if item.strip() != preferred_id]]
         actual_asset = None
         actual_provider_id = None
         generation_pending = is_generative_provider(preferred_id)
         errors = []
+        duplicate_options: list[tuple[str, List[StockAssetCandidate]]] = []
 
         for provider_id in provider_ids:
             try:
@@ -251,14 +274,28 @@ def prepare_routed_scene_assets(
                     actual_provider_id = provider_id
                     break
                 stock_query = resolve_director_stock_query(scene, director_query)
-                candidates = search_stock_assets(provider=provider, query=stock_query, media_type=media_type, limit=limit)
-                actual_asset = materialize_first_candidate(scene, candidates, asset_dir)
+                candidates = search_stock_assets(provider=provider, query=stock_query, media_type=route_media_type, limit=limit)
+                duplicate_options.append((provider_id, candidates))
+                actual_asset = materialize_first_candidate(
+                    scene,
+                    candidates,
+                    asset_dir,
+                    claim=claim_candidate,
+                    release=release_candidate,
+                )
                 if actual_asset is not None:
                     actual_provider_id = provider_id
                     break
                 errors.append(f"{provider_id}: no downloadable candidates")
             except (RuntimeError, ValueError) as error:
                 errors.append(f"{provider_id}: {error}")
+
+        if actual_asset is None:
+            for provider_id, candidates in duplicate_options:
+                actual_asset = materialize_first_candidate(scene, candidates, asset_dir)
+                if actual_asset is not None:
+                    actual_provider_id = provider_id
+                    break
 
         if actual_asset is None or actual_provider_id is None:
             raise RuntimeError(f"No director-selected asset could be prepared for scene {scene.position}: {'; '.join(errors)}")
@@ -270,6 +307,7 @@ def prepare_routed_scene_assets(
             "fallback_used": actual_provider_id != preferred_id and not generation_pending,
             "generation_pending": generation_pending,
             "director_query": director_query,
+            "requested_media_type": route_media_type,
             "query": actual_asset.query,
             "rationale": str(route.get("rationale") or ""),
         }
@@ -309,11 +347,17 @@ def materialize_first_candidate(
     scene: Scene,
     candidates: Iterable[StockAssetCandidate],
     asset_dir: Path,
+    claim: Optional[Callable[[StockAssetCandidate], bool]] = None,
+    release: Optional[Callable[[StockAssetCandidate], None]] = None,
 ) -> Optional[SceneAsset]:
     for candidate in candidates:
+        if claim is not None and not claim(candidate):
+            continue
         try:
             actual_path = materialize_candidate(candidate, asset_dir / local_filename(scene.position, candidate))
         except RuntimeError:
+            if release is not None:
+                release(candidate)
             continue
         return SceneAsset(
             scene_position=scene.position,
@@ -477,7 +521,7 @@ def normalize_pexels_videos(payload: dict, query: str, limit: int) -> List[Stock
                 score=quality_score(width, height, float(item.get("duration") or 0)),
             )
         )
-    return sorted(candidates, key=lambda candidate: candidate.score, reverse=True)[:limit]
+    return candidates[:limit]
 
 
 def normalize_pexels_images(payload: dict, query: str, limit: int) -> List[StockAssetCandidate]:
@@ -503,7 +547,7 @@ def normalize_pexels_images(payload: dict, query: str, limit: int) -> List[Stock
                 score=quality_score(width, height, 0),
             )
         )
-    return sorted(candidates, key=lambda candidate: candidate.score, reverse=True)[:limit]
+    return candidates[:limit]
 
 
 def normalize_pixabay_videos(payload: dict, query: str, limit: int) -> List[StockAssetCandidate]:
@@ -531,7 +575,7 @@ def normalize_pixabay_videos(payload: dict, query: str, limit: int) -> List[Stoc
                 score=quality_score(width, height, float(item.get("duration") or 0)),
             )
         )
-    return sorted(candidates, key=lambda candidate: candidate.score, reverse=True)[:limit]
+    return candidates[:limit]
 
 
 def normalize_pixabay_images(payload: dict, query: str, limit: int) -> List[StockAssetCandidate]:
@@ -556,7 +600,7 @@ def normalize_pixabay_images(payload: dict, query: str, limit: int) -> List[Stoc
                 score=quality_score(width, height, 0),
             )
         )
-    return sorted(candidates, key=lambda candidate: candidate.score, reverse=True)[:limit]
+    return candidates[:limit]
 
 
 def mock_asset_candidates(query: str, media_type: str, limit: int) -> List[StockAssetCandidate]:

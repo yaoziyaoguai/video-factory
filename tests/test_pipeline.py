@@ -20,6 +20,8 @@ from video_factory.stock_assets import (
     fetch_json,
     materialize_candidate,
     media_file_score,
+    normalize_pexels_videos,
+    normalize_pixabay_videos,
     prepare_scene_assets,
     query_for_scene,
     resolve_director_stock_query,
@@ -619,6 +621,47 @@ class PipelineTest(unittest.TestCase):
             resolved,
             "vertical side close-up young adult watching smartphone hesitates thumb hovering above screen",
         )
+
+    def test_stock_normalizers_preserve_provider_relevance_order(self):
+        pexels = normalize_pexels_videos({"videos": [
+            {
+                "id": 1,
+                "duration": 5,
+                "url": "https://pexels.example/relevant",
+                "image": "https://pexels.example/1.jpg",
+                "user": {"name": "A"},
+                "video_files": [{"width": 720, "height": 1280, "link": "https://pexels.example/1.mp4"}],
+            },
+            {
+                "id": 2,
+                "duration": 5,
+                "url": "https://pexels.example/less-relevant",
+                "image": "https://pexels.example/2.jpg",
+                "user": {"name": "B"},
+                "video_files": [{"width": 1080, "height": 1920, "link": "https://pexels.example/2.mp4"}],
+            },
+        ]}, "editing timeline", 2)
+        pixabay = normalize_pixabay_videos({"hits": [
+            {
+                "id": 3,
+                "duration": 5,
+                "pageURL": "https://pixabay.example/relevant",
+                "picture_id": "3",
+                "user": "A",
+                "videos": {"medium": {"width": 720, "height": 1280, "url": "https://pixabay.example/3.mp4"}},
+            },
+            {
+                "id": 4,
+                "duration": 5,
+                "pageURL": "https://pixabay.example/less-relevant",
+                "picture_id": "4",
+                "user": "B",
+                "videos": {"medium": {"width": 1080, "height": 1920, "url": "https://pixabay.example/4.mp4"}},
+            },
+        ]}, "editing timeline", 2)
+
+        self.assertEqual([candidate.asset_id for candidate in pexels], ["1", "2"])
+        self.assertEqual([candidate.asset_id for candidate in pixabay], ["3", "4"])
 
     def test_stock_asset_requests_include_provider_safe_headers(self):
         headers = api_headers({"Authorization": "test-key"})
