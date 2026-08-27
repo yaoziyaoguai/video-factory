@@ -275,10 +275,10 @@ export class WorkflowRunner {
     if (!override.actor.trim()) {
       throw new Error("Node override actor is required.");
     }
-    if (previousRun.status === "rejected") {
-      throw new Error(`Rejected run '${previousRun.id}' must be restarted instead of overridden.`);
-    }
-    if ((previousRun.status === "succeeded" || previousRun.status === "failed") && override.allowTerminalEdit !== true) {
+    if (
+      (previousRun.status === "succeeded" || previousRun.status === "failed" || previousRun.status === "rejected")
+      && override.allowTerminalEdit !== true
+    ) {
       throw new Error(`Terminal run '${previousRun.id}' requires explicit confirmation before a node override.`);
     }
     const node = definition.nodes.find((candidate) => candidate.id === override.nodeId);
@@ -411,10 +411,10 @@ export class WorkflowRunner {
     if (!override.actor.trim()) {
       throw new Error("Node input override actor is required.");
     }
-    if (previousRun.status === "rejected") {
-      throw new Error(`Rejected run '${previousRun.id}' must be restarted instead of overridden.`);
-    }
-    if ((previousRun.status === "succeeded" || previousRun.status === "failed") && override.allowTerminalEdit !== true) {
+    if (
+      (previousRun.status === "succeeded" || previousRun.status === "failed" || previousRun.status === "rejected")
+      && override.allowTerminalEdit !== true
+    ) {
       throw new Error(`Terminal run '${previousRun.id}' requires explicit confirmation before a node input override.`);
     }
 

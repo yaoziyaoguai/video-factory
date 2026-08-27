@@ -389,7 +389,7 @@ describe("ProductionPipeline", () => {
     assert.equal((await subject.show(waiting.id)).revision, waiting.revision);
   });
 
-  it("does not let an override revive a rejected run", async () => {
+  it("requires confirmation before creating a revision from a rejected run", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rejected-override-"));
     const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });
     const waiting = await subject.start(brief);
@@ -405,9 +405,17 @@ describe("ProductionPipeline", () => {
         actor: "editor",
         output: rejected.nodeRuns.find((node) => node.nodeId === "script")!.output,
       }),
-      /must be restarted/,
+      /explicit confirmation/,
     );
     assert.equal((await subject.show(rejected.id)).status, "rejected");
+
+    const revised = await subject.applyNodeOverride(rejected.id, {
+      nodeId: "script",
+      actor: "editor",
+      output: rejected.nodeRuns.find((node) => node.nodeId === "script")!.output,
+      allowTerminalEdit: true,
+    });
+    assert.equal(revised.status, "stale");
   });
 
   it("persists a manual review pause and resumes in another instance without rerunning media nodes", async () => {

@@ -667,6 +667,23 @@ describe("WorkflowRunner", () => {
     });
     assert.deepEqual(overridden.nodeRuns[0]?.output, { text: "edited" });
     assert.equal(overridden.status, "succeeded");
+
+    const rejected = structuredClone(generated);
+    rejected.status = "rejected";
+    rejected.nodeRuns[0]!.status = "rejected";
+    rejected.finishedAt = clock();
+    assert.throws(
+      () => runner.applyNodeOverride(definition, rejected, { nodeId: "script", actor: "editor", output: { text: "edited" } }),
+      /requires explicit confirmation/,
+    );
+    const revisedRejected = runner.applyNodeOverride(definition, rejected, {
+      nodeId: "script",
+      actor: "editor",
+      output: { text: "edited after review" },
+      allowTerminalEdit: true,
+    });
+    assert.deepEqual(revisedRejected.nodeRuns[0]?.output, { text: "edited after review" });
+    assert.equal(revisedRejected.status, "succeeded");
   });
 
   it("creates a human output version and marks only DAG descendants stale", async () => {
