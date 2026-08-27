@@ -1,0 +1,17 @@
+{
+  "protocolVersion": "video-factory/brief-v1",
+  "title": "做决定前，先避开这 3 个坑",
+  "angle": "低风险、可收藏的生活清单",
+  "audience": "有决策压力的普通上班族",
+  "nicheSlug": "life-avoidance",
+  "durationSeconds": 24,
+  "platform": "douyin",
+  "reviewMode": "manual",
+  "providers": {
+    "script": "python-template-v1",
+    "assets": "local-editorial-v1",
+    "voice": "macos-say-v1",
+    "render": "python-ffmpeg-v1",
+    "technicalReview": "python-technical-review-v1"
+  }
+}

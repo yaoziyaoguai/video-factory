@@ -1,0 +1,37 @@
+{
+  "name": "video-factory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "auth:hash": "tsx scripts/hash-password.ts",
+    "build": "npm run build:broker && npm run studio:build",
+    "build:broker": "npm run build --workspace @video-factory/codex-broker",
+    "build:template": "node -e \"require('node:fs').rmSync('packages/template-core/dist',{recursive:true,force:true})\" && tsc -p packages/template-core/tsconfig.build.json",
+    "build:core": "node -e \"require('node:fs').rmSync('packages/workflow-core/dist',{recursive:true,force:true})\" && tsc -p packages/workflow-core/tsconfig.build.json",
+    "build:pipeline": "npm run build:template && npm run build:core && node -e \"require('node:fs').rmSync('packages/production-pipeline/dist',{recursive:true,force:true})\" && tsc -p packages/production-pipeline/tsconfig.build.json",
+    "factory": "tsx packages/production-pipeline/src/cli.ts",
+    "studio:build": "npm run build:pipeline && npm run build --workspace @video-factory/studio",
+    "studio:dev": "npm run build:pipeline && npm run dev --workspace @video-factory/studio",
+    "studio:dev:codex": "bash scripts/studio-dev-with-codex.sh",
+    "studio:start": "npm run start --workspace @video-factory/studio",
+    "studio:test": "npm run build:pipeline && npm test --workspace @video-factory/studio",
+    "typecheck": "tsc -p packages/template-core/tsconfig.json && tsc -p packages/workflow-core/tsconfig.json && tsc -p packages/production-pipeline/tsconfig.json && npm run build:pipeline && npm run typecheck --workspace @video-factory/studio && npm run typecheck:broker",
+    "typecheck:broker": "npm run typecheck --workspace @video-factory/codex-broker",
+    "test": "npm run typecheck && npm run test:ts && npm run test:broker && npm run studio:test && npm run build && npm run test:package",
+    "test:broker": "npm run test --workspace @video-factory/codex-broker",
+    "test:package": "node --test packages/*/test/*.test.mjs",
+    "test:e2e": "npm run build:core && VIDEO_FACTORY_E2E=1 node --test --import tsx packages/production-pipeline/test/e2e.real.test.ts",
+    "test:ts": "npm run build:core && node --test --import tsx packages/*/test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "jsdom": "^29.1.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

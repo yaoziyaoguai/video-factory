@@ -1,0 +1,50 @@
+[Unit]
+Description=VideoFactory Codex bridge broker (Unix socket only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vf-codex
+Group=vf-bridge
+Environment=HOME=/home/vf-codex
+# 运行状态写入独立目录；auth.json 是指向真实登录凭据的只读符号链接。
+Environment=CODEX_HOME=/var/lib/video-factory-codex/codex-home
+# Codex CLI 的 shebang 是 #!/usr/bin/env node：broker 自带的 node symlink 与
+# vf-codex 自有 node22 必须排在系统路径之前。
+Environment=PATH=/opt/video-factory/codex-broker/bin:/home/vf-codex/.local/node22/bin:/home/vf-codex/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/video-factory/codex-broker.env
+Environment=VIDEO_FACTORY_CODEX_SOCKET_PATH=/run/video-factory-codex/worker.sock
+Environment=VIDEO_FACTORY_CODEX_WORKSPACE_ROOT=/var/lib/video-factory-codex/workspace
+# 285s 任务 deadline < 容器侧 330s 客户端 deadline：broker 先终止 codex，客户端拿到终态错误且不重放。
+Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=285000
+ExecStart=/opt/video-factory/codex-broker/bin/node /opt/video-factory/codex-broker/current/dist/main.js
+RuntimeDirectory=video-factory-codex
+RuntimeDirectoryMode=0750
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+# 加固：保留网络出口；真实 ~/.codex 全部只读。Codex 的可变状态只写入
+# /var/lib/video-factory-codex/codex-home，应用容器无法挂载该目录。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/video-factory-codex /run/video-factory-codex
+
+[Install]
+WantedBy=multi-user.target

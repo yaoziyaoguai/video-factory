@@ -1,0 +1,95 @@
+name: video-factory
+
+services:
+  app:
+    image: video-factory:candidate
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: video_factory_prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      STUDIO_HOST: 0.0.0.0
+      STUDIO_PORT: 4317
+      VIDEO_FACTORY_WORKSPACE: /data/factory
+      VIDEO_FACTORY_AUTH_USERNAME: ${VIDEO_FACTORY_AUTH_USERNAME:-}
+      VIDEO_FACTORY_AUTH_PASSWORD_HASH: ${VIDEO_FACTORY_AUTH_PASSWORD_HASH:-}
+      VIDEO_FACTORY_AUTH_SESSION_SECRET: ${VIDEO_FACTORY_AUTH_SESSION_SECRET:-}
+      VIDEO_FACTORY_AUTH_SESSION_TTL_SECONDS: ${VIDEO_FACTORY_AUTH_SESSION_TTL_SECONDS:-43200}
+      VIDEO_FACTORY_MAX_RUN_COST_CNY: ${VIDEO_FACTORY_MAX_RUN_COST_CNY:-20}
+      VIDEO_FACTORY_MAX_CLOUD_VOICE_PREVIEWS_PER_HOUR: ${VIDEO_FACTORY_MAX_CLOUD_VOICE_PREVIEWS_PER_HOUR:-12}
+      PEXELS_API_KEY: ${PEXELS_API_KEY:-}
+      PIXABAY_API_KEY: ${PIXABAY_API_KEY:-}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      SEEDREAM_MODEL_ID: ${SEEDREAM_MODEL_ID:-doubao-seedream-4-0-250828}
+      SEEDREAM_ESTIMATED_CNY_PER_IMAGE: ${SEEDREAM_ESTIMATED_CNY_PER_IMAGE:-0.25}
+      SEEDREAM_BASE_URL: ${SEEDREAM_BASE_URL:-}
+      SEEDANCE_MODEL_ID: ${SEEDANCE_MODEL_ID:-}
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: ${SEEDANCE_ESTIMATED_CNY_PER_CLIP:-}
+      SEEDANCE_BASE_URL: ${SEEDANCE_BASE_URL:-}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      MINIMAX_TTS_MODEL_ID: ${MINIMAX_TTS_MODEL_ID:-speech-2.8-turbo}
+      MINIMAX_TTS_BASE_URL: ${MINIMAX_TTS_BASE_URL:-}
+      MINIMAX_VIDEO_MODEL_ID: ${MINIMAX_VIDEO_MODEL_ID:-}
+      MINIMAX_ESTIMATED_CNY_PER_CLIP: ${MINIMAX_ESTIMATED_CNY_PER_CLIP:-}
+      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_WORKSPACE_ID: ${DASHSCOPE_WORKSPACE_ID:-}
+      WAN_MODEL_ID: ${WAN_MODEL_ID:-}
+      WAN_ESTIMATED_CNY_PER_CLIP: ${WAN_ESTIMATED_CNY_PER_CLIP:-}
+      WAN_BASE_URL: ${WAN_BASE_URL:-}
+      DOUYIN_HOTSEARCH_ENABLED: ${DOUYIN_HOTSEARCH_ENABLED:-0}
+      DOUYIN_CLIENT_TOKEN: ${DOUYIN_CLIENT_TOKEN:-}
+      VIDEO_FACTORY_TRENDRADAR_URL: ${VIDEO_FACTORY_TRENDRADAR_URL:-}
+      VIDEO_FACTORY_NEWSNOW_URL: ${VIDEO_FACTORY_NEWSNOW_URL:-}
+      VIDEO_FACTORY_DAILYHOT_URL: ${VIDEO_FACTORY_DAILYHOT_URL:-}
+      VIDEO_FACTORY_RSSHUB_URL: ${VIDEO_FACTORY_RSSHUB_URL:-}
+      VIDEO_FACTORY_CODEX_SOCKET_PATH: ${VIDEO_FACTORY_CODEX_SOCKET_PATH:-/run/video-factory-codex/worker.sock}
+      VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: ${VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH:-/run/video-factory-zai-codex/worker.sock}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - trend-services
+    # 数字 gid 经 OCI additionalGids 生效，容器内无需 /etc/group 条目；
+    # 须设为宿主机 vf-bridge 组的实际 gid（默认 1001 仅与主组重合的占位值）。
+    group_add:
+      - "${VIDEO_FACTORY_CODEX_SOCKET_GID:-1001}"
+    ports:
+      - "127.0.0.1:${VIDEO_FACTORY_HOST_PORT:-4317}:4317"
+    volumes:
+      - video_factory_workspace:/data/factory
+      # read_only 只阻止文件系统变更；Unix socket 的 connect 是协议写不是文件系统写，
+      # 因此安全边界不在此处，而在 broker 的 kind 白名单与 socket 0660 组权限。
+      - type: bind
+        source: ${VIDEO_FACTORY_CODEX_RUNTIME_DIR:-/run/video-factory-codex}
+        target: /run/video-factory-codex
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VIDEO_FACTORY_ZAI_CODEX_RUNTIME_DIR:-/run/video-factory-zai-codex}
+        target: /run/video-factory-zai-codex
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m,uid=1001,gid=1001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    cpus: 2
+    stop_grace_period: 30s
+
+volumes:
+  video_factory_workspace:
+    driver: local
+
+networks:
+  trend-services:
+    name: video-factory-trends
+    external: true
