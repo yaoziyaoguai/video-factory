@@ -72,7 +72,7 @@ jobs:
             set -euo pipefail
             release_path="${PROJECT_PATH}.release"
             cd "$PROJECT_PATH"
-            git fetch origin main
+            git fetch origin +refs/heads/main:refs/remotes/origin/main
             if [[ -e "$release_path/.git" ]]; then
               git -C "$release_path" checkout --detach origin/main
             elif [[ -e "$release_path" ]]; then
