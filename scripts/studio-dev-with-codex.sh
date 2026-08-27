@@ -8,7 +8,6 @@ workspace_root=${VIDEO_FACTORY_CODEX_WORKSPACE_ROOT:-"$runtime_root/tasks"}
 codex_bin=${CODEX_BIN:-$(command -v codex || true)}
 zai_runtime_root=${VIDEO_FACTORY_ZAI_CODEX_LOCAL_RUNTIME_ROOT:-"$repository_root/.local/runtime/zai-codex"}
 zai_socket_path=${VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH:-"$zai_runtime_root/worker.sock"}
-zai_workspace_root=${VIDEO_FACTORY_ZAI_CODEX_WORKSPACE_ROOT:-"$zai_runtime_root/tasks"}
 zai_broker_pid=""
 
 if [[ -z "$codex_bin" ]]; then
@@ -60,13 +59,10 @@ fi
 
 if [[ -f "$repository_root/.env" ]] \
   && node --env-file="$repository_root/.env" -e 'process.exit(process.env.ZAI_API_KEY?.trim() ? 0 : 1)'; then
-  mkdir -p "$zai_runtime_root" "$zai_workspace_root"
+  mkdir -p "$zai_runtime_root"
   VIDEO_FACTORY_CODEX_PROFILE=zai \
   VIDEO_FACTORY_CODEX_EFFORT=max \
-  VIDEO_FACTORY_CODEX_MODEL_CATALOG_PATH="$repository_root/apps/codex-broker/deploy/zai-models.json" \
   VIDEO_FACTORY_CODEX_SOCKET_PATH="$zai_socket_path" \
-  VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="$zai_workspace_root" \
-  CODEX_BIN="$codex_bin" \
   node --env-file="$repository_root/.env" apps/codex-broker/dist/main.js &
   zai_broker_pid=$!
   for _ in $(seq 1 50); do
@@ -80,7 +76,7 @@ if [[ -f "$repository_root/.env" ]] \
     sleep 0.1
   done
   if ! curl --fail --silent --unix-socket "$zai_socket_path" http://localhost/health >/dev/null; then
-    echo "ZAI Codex bridge did not become healthy at $zai_socket_path." >&2
+    echo "ZAI visual-review bridge did not become healthy at $zai_socket_path." >&2
     exit 1
   fi
 fi

@@ -32,11 +32,7 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
   }
 
   return {
-    profile: codexExecutorProfileFor(
-      profileId,
-      configuredModel,
-      optionalText(env, "VIDEO_FACTORY_CODEX_MODEL_CATALOG_PATH"),
-    ),
+    profile: codexExecutorProfileFor(profileId, configuredModel),
     socketPath: optionalText(env, "VIDEO_FACTORY_CODEX_SOCKET_PATH") ?? defaultSocketPath(profileId),
     workspaceRoot: optionalText(env, "VIDEO_FACTORY_CODEX_WORKSPACE_ROOT") ?? defaultWorkspaceRoot(profileId),
     codexBin: optionalText(env, "CODEX_BIN") ?? "codex",

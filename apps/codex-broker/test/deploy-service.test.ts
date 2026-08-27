@@ -15,13 +15,8 @@ describe("ZAI systemd service sample", () => {
     );
 
     assert.match(service, /^User=vf-zai-codex$/m);
-    assert.match(service, /^Environment=CODEX_HOME=\/var\/lib\/video-factory-zai-codex\/codex-home$/m);
     assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_PROFILE=zai$/m);
     assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_EFFORT=max$/m);
-    assert.match(
-      service,
-      /^Environment=VIDEO_FACTORY_CODEX_MODEL_CATALOG_PATH=\/var\/lib\/video-factory-zai-codex\/codex-home\/models\.json$/m,
-    );
     assert.match(service, /^EnvironmentFile=\/etc\/video-factory\/zai-codex-broker\.env$/m);
     assert.match(service, /stat -c %%U:%%G \/etc\/video-factory\/zai-codex-broker\.env/);
     assert.match(service, /stat -c %%a \/etc\/video-factory\/zai-codex-broker\.env/);
@@ -31,31 +26,31 @@ describe("ZAI systemd service sample", () => {
     assert.match(service, /^UMask=0007$/m);
     assert.match(service, /^RuntimeDirectoryMode=0750$/m);
     assert.match(service, /\/run\/video-factory-zai-codex\/worker\.sock/);
-    assert.match(service, /\/var\/lib\/video-factory-zai-codex\/workspace/);
+    assert.doesNotMatch(service, /CODEX_HOME|CODEX_BIN|MODEL_CATALOG/);
     assert.doesNotMatch(service, /ZAI_API_KEY\s*=/);
   });
 
-  it("ships a valid GLM-5.3-Flash model catalog with image input enabled", async () => {
-    const catalog = JSON.parse(await readFile(
-      path.join(brokerRoot, "deploy", "zai-models.json"),
-      "utf8",
-    )) as { models?: Array<{ slug?: string; input_modalities?: string[] }> };
-
-    const model = catalog.models?.find((candidate) => candidate.slug === "glm-5.3-flash");
-    assert.ok(model);
-    assert.deepEqual(model.input_modalities, ["text", "image"]);
-  });
-
-  it("installs Codex CLI with the validated Node 22 runtime first on PATH", async () => {
+  it("uses the validated shared Node runtime without installing a second Codex CLI", async () => {
     const script = await readFile(
       path.join(repositoryRoot, "scripts", "setup-zai-codex-broker-host.sh"),
       "utf8",
     );
 
-    assert.match(
-      script,
-      /env PATH="\$broker_root\/bin:[^"]*"\s+\\?\s*"\$npm_bin" install --prefix "\$broker_root\/codex-cli"/,
+    assert.match(script, /node_bin="\$broker_root\/bin\/node"/);
+    assert.match(script, /runuser -u "\$broker_user"[\s\S]*"\$node_bin" --version/);
+    assert.doesNotMatch(script, /npm_bin|codex_bin|@openai\/codex|zai-models\.json/);
+  });
+
+  it("pins the official Coding Plan Chat Completion endpoint", async () => {
+    const executor = await readFile(
+      path.join(brokerRoot, "src", "zai-visual-review-executor.ts"),
+      "utf8",
     );
+
+    assert.match(executor, /https:\/\/open\.bigmodel\.cn\/api\/coding\/paas\/v4\/chat\/completions/);
+    assert.match(executor, /model: ZAI_MODEL_ID/);
+    assert.match(executor, /type: "image_url"/);
+    assert.match(executor, /response_format: \{ type: "json_object" \}/);
   });
 
   it("keeps the Unix socket connectable by vf-bridge and explicitly fixes its mode after listen", async () => {

@@ -1,0 +1,174 @@
+import {
+  CodexExecutorError,
+  buildTaskPrompt,
+  codexExecutorProfileFor,
+  type BrokerTaskExecutor,
+  type CodexExecutionOptions,
+  type CodexExecutionResult,
+  type CodexExecutorIdentity,
+  type ValidatedTask,
+} from "./codex-executor.js";
+import {
+  outputSchemaFor,
+  outputValidationErrorFor,
+  taskPromptFor,
+} from "./task-definitions.js";
+
+const ZAI_CHAT_COMPLETIONS_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
+const ZAI_MODEL_ID = "glm-5.3-flash";
+const DEFAULT_TIMEOUT_MS = 285_000;
+const MAX_RESPONSE_BYTES = 1024 * 1024;
+
+export interface ZaiVisualReviewExecutorOptions {
+  env?: NodeJS.ProcessEnv;
+  fetchFn?: typeof fetch;
+  effort?: string;
+  timeoutMs?: number;
+}
+
+export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
+  readonly identity: CodexExecutorIdentity = codexExecutorProfileFor("zai").identity;
+  private readonly apiKey: string;
+  private readonly fetchFn: typeof fetch;
+  private readonly effort: string;
+  private readonly timeoutMs: number;
+
+  constructor(options: ZaiVisualReviewExecutorOptions = {}) {
+    const environment = options.env ?? process.env;
+    this.apiKey = environment.ZAI_API_KEY?.trim() ?? "";
+    if (!this.apiKey) throw new Error("ZAI_API_KEY environment variable is required for the zai profile.");
+    this.fetchFn = options.fetchFn ?? fetch;
+    this.effort = options.effort ?? "max";
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  }
+
+  async runTask(
+    task: ValidatedTask,
+    options: CodexExecutionOptions = {},
+  ): Promise<CodexExecutionResult> {
+    if (task.kind !== "visual-review") {
+      throw new CodexExecutorError(
+        `Task kind '${task.kind}' is not allowed for the ZAI visual-review executor.`,
+        false,
+      );
+    }
+
+    const taskPrompt = taskPromptFor(task.kind);
+    const prompt = [
+      buildTaskPrompt(task, taskPrompt),
+      "",
+      "返回对象还必须通过以下 JSON Schema：",
+      JSON.stringify(outputSchemaFor(task.kind)),
+    ].join("\n");
+    const controller = new AbortController();
+    const abort = () => controller.abort(options.signal?.reason);
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+    const timeout = setTimeout(() => controller.abort(new Error("timeout")), this.timeoutMs);
+
+    try {
+      const response = await this.fetchFn(ZAI_CHAT_COMPLETIONS_URL, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: ZAI_MODEL_ID,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "text", text: prompt },
+              ...task.payload.frames.map((frame) => ({
+                type: "image_url",
+                image_url: { url: `data:image/jpeg;base64,${frame.jpeg.toString("base64")}` },
+              })),
+            ],
+          }],
+          thinking: { type: "enabled", clear_thinking: false },
+          reasoning_effort: this.effort,
+          temperature: 1,
+          top_p: 0.95,
+          max_tokens: 8_192,
+          response_format: { type: "json_object" },
+          stream: false,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new CodexExecutorError(`ZAI Chat Completion returned HTTP ${response.status}.`, false);
+      }
+      const raw = await response.text();
+      if (Buffer.byteLength(raw, "utf8") > MAX_RESPONSE_BYTES) {
+        throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false);
+      }
+      const content = responseContent(raw);
+      const output = stripCodeFence(content);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(output);
+      } catch {
+        throw new CodexExecutorError("ZAI Chat Completion output is not valid JSON.", false);
+      }
+      const validationError = outputValidationErrorFor(task.kind, parsed);
+      if (validationError !== undefined) {
+        throw new CodexExecutorError(`ZAI output does not match visual-review schema: ${validationError}`, false);
+      }
+      const findings = (parsed as { findings: Array<{ timecodeMs: number }> }).findings;
+      if (findings.some((finding) => finding.timecodeMs > task.payload.durationMs)) {
+        throw new CodexExecutorError(
+          "ZAI output does not match visual-review schema: finding timecodeMs exceeds payload.durationMs.",
+          false,
+        );
+      }
+      return {
+        output,
+        trace: {
+          taskKind: task.kind,
+          promptVersion: taskPrompt.version,
+          prompt,
+          providerId: this.identity.providerId,
+          modelId: this.identity.modelId,
+        },
+      };
+    } catch (error) {
+      if (error instanceof CodexExecutorError) throw error;
+      const cancelled = options.signal?.aborted === true;
+      throw new CodexExecutorError(
+        cancelled
+          ? "ZAI visual-review task was cancelled because its client disconnected."
+          : `ZAI visual-review request ${controller.signal.aborted ? "timed out" : "could not connect"}.`,
+        true,
+      );
+    } finally {
+      clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abort);
+    }
+  }
+}
+
+function responseContent(raw: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new CodexExecutorError("ZAI Chat Completion returned a non-JSON response.", false);
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.choices)) {
+    throw new CodexExecutorError("ZAI Chat Completion response is missing choices.", false);
+  }
+  const choice = parsed.choices[0];
+  if (!isRecord(choice) || !isRecord(choice.message) || typeof choice.message.content !== "string") {
+    throw new CodexExecutorError("ZAI Chat Completion response is missing message content.", false);
+  }
+  return choice.message.content;
+}
+
+function stripCodeFence(value: string): string {
+  const trimmed = value.trim();
+  return /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed)?.[1] ?? trimmed;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

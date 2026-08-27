@@ -59,7 +59,7 @@ export function resolveZaiCodexSocketPath(environment: NodeJS.ProcessEnv): Codex
   return {
     socketPath: configured || DEFAULT_ZAI_CODEX_SOCKET_PATH,
     configured: configured.length > 0,
-    requirement: "需要 ZAI Codex visual-review broker 正在监听，并将 VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH 指向该 Unix socket。",
+    requirement: "需要 ZAI visual-review broker 正在监听，并将 VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH 指向该 Unix socket。",
   };
 }
 

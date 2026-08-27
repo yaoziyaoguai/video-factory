@@ -380,42 +380,8 @@ describe("buildCodexExecCommand", () => {
       modelId: "glm-5.3-flash",
       taskKinds: ["visual-review"],
     });
-    assert.deepEqual(zai.provider, {
-      id: "zai-coding-plan",
-      name: "ZAI Coding Plan",
-      baseUrl: "https://open.bigmodel.cn/api/v1",
-      envKey: "ZAI_API_KEY",
-      wireApi: "responses",
-    });
-    assert.equal(
-      zai.modelCatalogPath,
-      "/var/lib/video-factory-zai-codex/codex-home/models.json",
-    );
+    assert.equal(zai.model, undefined);
     assert.equal("apiKey" in zai, false);
-  });
-
-  it("builds ZAI provider argv with only the environment key name", () => {
-    const { args } = buildCodexExecCommand({
-      codexBin: "/opt/codex/bin/codex",
-      workspaceDir: "/run/task/workspace",
-      lastMessagePath: "/run/task/last-message.txt",
-      schemaPath: "/run/task/output-schema.json",
-      profile: codexExecutorProfileFor("zai"),
-    });
-
-    assert.ok(args.includes("--ignore-user-config"));
-    assert.deepEqual(args.slice(args.indexOf("--json") + 1), [
-      "--config", 'model_catalog_json="/var/lib/video-factory-zai-codex/codex-home/models.json"',
-      "--config", 'model_provider="zai-coding-plan"',
-      "--config", 'model_providers.zai-coding-plan.name="ZAI Coding Plan"',
-      "--config", 'model_providers.zai-coding-plan.base_url="https://open.bigmodel.cn/api/v1"',
-      "--config", 'model_providers.zai-coding-plan.env_key="ZAI_API_KEY"',
-      "--config", 'model_providers.zai-coding-plan.wire_api="responses"',
-      "--config", "model_providers.zai-coding-plan.requires_openai_auth=false",
-      "--model", "glm-5.3-flash",
-      "-",
-    ]);
-    assert.doesNotMatch(JSON.stringify(args), /secret|api[_-]?key['\"]?\s*[:=]\s*[^Z]/i);
   });
 
   it("builds the verified isolation argv without shell or payload-sourced commands", () => {
@@ -455,56 +421,6 @@ describe("buildCodexExecCommand", () => {
 });
 
 describe("CodexExecutor.runTask", () => {
-  it("redacts the ZAI environment key value from subprocess errors", async () => {
-    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
-    const fakeSecret = "test-only-zai-secret-in-stderr";
-    const executor = new CodexExecutor({
-      workspaceRoot,
-      profile: codexExecutorProfileFor("zai"),
-      env: { PATH: "/usr/bin", ZAI_API_KEY: fakeSecret },
-      spawnFn: fakeSpawn(({ child }) => {
-        child.stderr.end(`provider rejected credential ${fakeSecret}`);
-        child.stdout.end();
-        child.emit("close", 1, null);
-      }),
-    });
-
-    await assert.rejects(
-      () => executor.runTask(parseTaskRequest(visualReviewRequest(), executor.identity)),
-      (error: unknown) => {
-        assert.ok(error instanceof CodexExecutorError);
-        assert.doesNotMatch(error.message, new RegExp(fakeSecret));
-        assert.match(error.message, /\[REDACTED\]/);
-        return true;
-      },
-    );
-    assert.deepEqual(await readdir(workspaceRoot), []);
-  });
-
-  it("refuses to spawn the ZAI profile when its environment key is absent", async () => {
-    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
-    let spawned = false;
-    const executor = new CodexExecutor({
-      workspaceRoot,
-      profile: codexExecutorProfileFor("zai"),
-      env: { PATH: "/usr/bin" },
-      spawnFn: fakeSpawn(async ({ child, lastMessagePath }) => {
-        spawned = true;
-        await writeFile(lastMessagePath, JSON.stringify(visualReviewOutput()), "utf8");
-        child.stdout.end();
-        child.stderr.end();
-        child.emit("close", 0, null);
-      }),
-    });
-
-    await assert.rejects(
-      () => executor.runTask(parseTaskRequest(visualReviewRequest(), executor.identity)),
-      (error: unknown) => assertTerminal(error, /ZAI_API_KEY.*environment/),
-    );
-    assert.equal(spawned, false);
-    assert.deepEqual(await readdir(workspaceRoot), []);
-  });
-
   it("runs OpenAI visual-review with 0600 temporary JPEGs, validated output, and complete cleanup", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]);
