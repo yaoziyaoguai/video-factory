@@ -387,6 +387,10 @@ describe("buildCodexExecCommand", () => {
       envKey: "ZAI_API_KEY",
       wireApi: "responses",
     });
+    assert.equal(
+      zai.modelCatalogPath,
+      "/var/lib/video-factory-zai-codex/codex-home/models.json",
+    );
     assert.equal("apiKey" in zai, false);
   });
 
@@ -401,6 +405,7 @@ describe("buildCodexExecCommand", () => {
 
     assert.ok(args.includes("--ignore-user-config"));
     assert.deepEqual(args.slice(args.indexOf("--json") + 1), [
+      "--config", 'model_catalog_json="/var/lib/video-factory-zai-codex/codex-home/models.json"',
       "--config", 'model_provider="zai-coding-plan"',
       "--config", 'model_providers.zai-coding-plan.name="ZAI Coding Plan"',
       "--config", 'model_providers.zai-coding-plan.base_url="https://open.bigmodel.cn/api/v1"',

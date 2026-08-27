@@ -18,6 +18,7 @@ export type { BrokerTaskKind } from "./task-definitions.js";
 const OPENAI_TASK_KINDS = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"] as const;
 const ZAI_TASK_KINDS = ["visual-review"] as const;
 const ZAI_MODEL_ID = "glm-5.3-flash";
+const ZAI_MODEL_CATALOG_PATH = "/var/lib/video-factory-zai-codex/codex-home/models.json";
 
 export type CodexExecutorProfileId = "openai" | "zai";
 
@@ -39,12 +40,14 @@ export interface CodexModelProviderConfig {
 export interface CodexExecutorProfile {
   identity: CodexExecutorIdentity;
   model?: string;
+  modelCatalogPath?: string;
   provider?: CodexModelProviderConfig;
 }
 
 export function codexExecutorProfileFor(
   profileId: CodexExecutorProfileId,
   openaiModel?: string,
+  zaiModelCatalogPath = ZAI_MODEL_CATALOG_PATH,
 ): CodexExecutorProfile {
   if (profileId === "openai") {
     return {
@@ -65,6 +68,7 @@ export function codexExecutorProfileFor(
       taskKinds: [...ZAI_TASK_KINDS],
     },
     model: ZAI_MODEL_ID,
+    modelCatalogPath: zaiModelCatalogPath,
     provider: {
       id: "zai-coding-plan",
       name: "ZAI Coding Plan",
@@ -517,6 +521,9 @@ export function buildCodexExecCommand(input: {
       "--output-schema", input.schemaPath,
       "--output-last-message", input.lastMessagePath,
       "--json",
+      ...(input.profile?.modelCatalogPath !== undefined
+        ? ["--config", `model_catalog_json=${JSON.stringify(input.profile.modelCatalogPath)}`]
+        : []),
       ...providerArgs(input.profile?.provider),
       ...((input.model ?? input.profile?.model) !== undefined
         ? ["--model", (input.model ?? input.profile?.model)!]

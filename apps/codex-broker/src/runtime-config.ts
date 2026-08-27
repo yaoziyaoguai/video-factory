@@ -4,7 +4,7 @@ import {
   type CodexExecutorProfileId,
 } from "./codex-executor.js";
 
-const ALLOWED_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
+const ALLOWED_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 export interface BrokerRuntimeConfig {
   profile: CodexExecutorProfile;
@@ -28,11 +28,15 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
   }
   const effort = optionalText(env, "VIDEO_FACTORY_CODEX_EFFORT") ?? "high";
   if (!ALLOWED_EFFORTS.has(effort)) {
-    throw new Error("VIDEO_FACTORY_CODEX_EFFORT must be one of low|medium|high|xhigh.");
+    throw new Error("VIDEO_FACTORY_CODEX_EFFORT must be one of low|medium|high|xhigh|max.");
   }
 
   return {
-    profile: codexExecutorProfileFor(profileId, configuredModel),
+    profile: codexExecutorProfileFor(
+      profileId,
+      configuredModel,
+      optionalText(env, "VIDEO_FACTORY_CODEX_MODEL_CATALOG_PATH"),
+    ),
     socketPath: optionalText(env, "VIDEO_FACTORY_CODEX_SOCKET_PATH") ?? defaultSocketPath(profileId),
     workspaceRoot: optionalText(env, "VIDEO_FACTORY_CODEX_WORKSPACE_ROOT") ?? defaultWorkspaceRoot(profileId),
     codexBin: optionalText(env, "CODEX_BIN") ?? "codex",

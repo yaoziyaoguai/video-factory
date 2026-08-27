@@ -62,6 +62,8 @@ if [[ -f "$repository_root/.env" ]] \
   && node --env-file="$repository_root/.env" -e 'process.exit(process.env.ZAI_API_KEY?.trim() ? 0 : 1)'; then
   mkdir -p "$zai_runtime_root" "$zai_workspace_root"
   VIDEO_FACTORY_CODEX_PROFILE=zai \
+  VIDEO_FACTORY_CODEX_EFFORT=max \
+  VIDEO_FACTORY_CODEX_MODEL_CATALOG_PATH="$repository_root/apps/codex-broker/deploy/zai-models.json" \
   VIDEO_FACTORY_CODEX_SOCKET_PATH="$zai_socket_path" \
   VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="$zai_workspace_root" \
   CODEX_BIN="$codex_bin" \

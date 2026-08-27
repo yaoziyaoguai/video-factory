@@ -16,11 +16,15 @@ describe("brokerRuntimeConfigFromEnv", () => {
     const zai = brokerRuntimeConfigFromEnv({
       VIDEO_FACTORY_CODEX_PROFILE: "zai",
       ZAI_API_KEY: fakeSecret,
+      VIDEO_FACTORY_CODEX_MODEL_CATALOG_PATH: "/tmp/models.json",
+      VIDEO_FACTORY_CODEX_EFFORT: "max",
     });
     assert.equal(zai.profile.identity.profileId, "zai");
     assert.equal(zai.profile.identity.modelId, "glm-5.3-flash");
     assert.equal(zai.socketPath, "/run/video-factory-zai-codex/worker.sock");
     assert.equal(zai.workspaceRoot, "/var/lib/video-factory-zai-codex/workspace");
+    assert.equal(zai.profile.modelCatalogPath, "/tmp/models.json");
+    assert.equal(zai.effort, "max");
     assert.doesNotMatch(JSON.stringify(zai), new RegExp(fakeSecret));
   });
 
