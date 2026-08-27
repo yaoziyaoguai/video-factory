@@ -91,7 +91,7 @@ describe("production deployment transaction", () => {
     assert.doesNotMatch(dockerfile, /^RUN sed .*mirrors\.aliyun\.com/m);
     assert.match(compose, /NODE_IMAGE: \$\{NODE_IMAGE:-node:22-alpine\}/);
     assert.match(compose, /ALPINE_MIRROR: \$\{ALPINE_MIRROR:-\}/);
-    assert.match(deploy, /ALPINE_MIRROR="\$\{ALPINE_MIRROR:-https:\/\/mirrors\.aliyun\.com\/alpine\}"/);
+    assert.match(deploy, /ALPINE_MIRROR="\$\{ALPINE_MIRROR:-http:\/\/mirrors\.cloud\.aliyuncs\.com\/alpine\}"/);
   });
 
   it("installs a physical shared Node runtime instead of linking into a private home", async () => {

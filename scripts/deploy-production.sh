@@ -12,7 +12,7 @@ broker_socket=/run/video-factory-codex/worker.sock
 trend_network=video-factory-trends
 compose=(docker compose --project-name video-factory --env-file "$environment_file" -f "$repository_root/docker/docker-compose.prod.yml")
 # ECS 在中国大陆构建镜像时使用阿里云 Alpine 源；CI 直接 docker build 时保留全球官方源。
-export ALPINE_MIRROR="${ALPINE_MIRROR:-https://mirrors.aliyun.com/alpine}"
+export ALPINE_MIRROR="${ALPINE_MIRROR:-http://mirrors.cloud.aliyuncs.com/alpine}"
 zai_broker_enabled=0
 if systemctl cat "$zai_broker_service" >/dev/null 2>&1 && [[ -s /etc/video-factory/zai-codex-broker.env ]]; then
   zai_broker_enabled=1
