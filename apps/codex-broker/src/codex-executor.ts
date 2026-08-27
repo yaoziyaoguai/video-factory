@@ -18,7 +18,6 @@ export type { BrokerTaskKind } from "./task-definitions.js";
 const OPENAI_TASK_KINDS = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"] as const;
 const ZAI_TASK_KINDS = ["visual-review"] as const;
 const ZAI_MODEL_ID = "glm-5.3-flash";
-const ZAI_MODEL_CATALOG_PATH = "/var/lib/video-factory-zai-codex/codex-home/models.json";
 
 export type CodexExecutorProfileId = "openai" | "zai";
 
@@ -29,25 +28,14 @@ export interface CodexExecutorIdentity {
   taskKinds: readonly string[];
 }
 
-export interface CodexModelProviderConfig {
-  id: string;
-  name: string;
-  baseUrl: string;
-  envKey: string;
-  wireApi: "responses";
-}
-
 export interface CodexExecutorProfile {
   identity: CodexExecutorIdentity;
   model?: string;
-  modelCatalogPath?: string;
-  provider?: CodexModelProviderConfig;
 }
 
 export function codexExecutorProfileFor(
   profileId: CodexExecutorProfileId,
   openaiModel?: string,
-  zaiModelCatalogPath = ZAI_MODEL_CATALOG_PATH,
 ): CodexExecutorProfile {
   if (profileId === "openai") {
     return {
@@ -66,15 +54,6 @@ export function codexExecutorProfileFor(
       providerId: "zai-coding-plan",
       modelId: ZAI_MODEL_ID,
       taskKinds: [...ZAI_TASK_KINDS],
-    },
-    model: ZAI_MODEL_ID,
-    modelCatalogPath: zaiModelCatalogPath,
-    provider: {
-      id: "zai-coding-plan",
-      name: "ZAI Coding Plan",
-      baseUrl: "https://open.bigmodel.cn/api/v1",
-      envKey: "ZAI_API_KEY",
-      wireApi: "responses",
     },
   };
 }
@@ -204,6 +183,11 @@ export interface CodexExecutionResult {
   trace?: CodexTaskTrace;
 }
 
+export interface BrokerTaskExecutor {
+  readonly identity: CodexExecutorIdentity;
+  runTask(task: ValidatedTask, options?: CodexExecutionOptions): Promise<CodexExecutionResult>;
+}
+
 export interface CodexTaskTrace {
   taskKind: BrokerTaskKind;
   promptVersion: string;
@@ -292,7 +276,7 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
   };
 }
 
-export class CodexExecutor {
+export class CodexExecutor implements BrokerTaskExecutor {
   private readonly codexBin: string;
   private readonly workspaceRoot: string;
   private readonly profile: CodexExecutorProfile;
@@ -331,12 +315,8 @@ export class CodexExecutor {
         false,
       );
     }
-    const envKey = this.profile.provider?.envKey;
-    if (envKey !== undefined && !this.env[envKey]?.trim()) {
-      throw new CodexExecutorError(`${envKey} environment variable is required for this broker profile.`, false);
-    }
     const taskPrompt = taskPromptFor(task.kind, task.kind === "publish-copy" ? task.payload.platform : undefined);
-    const prompt = buildPrompt(task, taskPrompt);
+    const prompt = buildTaskPrompt(task, taskPrompt);
     if (Buffer.byteLength(prompt, "utf8") > this.maxPromptBytes) {
       throw new CodexExecutorError(`Codex prompt exceeds ${this.maxPromptBytes} bytes.`, false);
     }
@@ -429,7 +409,7 @@ export class CodexExecutor {
       throw new CodexExecutorError(`Codex task timed out after ${this.timeoutMs}ms.`, true);
     }
     if (exit.code !== 0) {
-      const excerpt = this.redactSensitiveText(await stderrPromise).slice(0, STDERR_EXCERPT_LENGTH);
+      const excerpt = (await stderrPromise).slice(0, STDERR_EXCERPT_LENGTH);
       throw new CodexExecutorError(
         `Codex exited with code ${exit.code}${exit.signal ? ` (signal ${exit.signal})` : ""}.${excerpt ? ` ${excerpt}` : ""}`,
         false,
@@ -469,23 +449,6 @@ export class CodexExecutor {
     return output;
   }
 
-  private redactSensitiveText(value: string): string {
-    const envKey = this.profile.provider?.envKey;
-    if (envKey === undefined) return value;
-    const secret = this.env[envKey];
-    if (!secret) return value;
-    const exact = value.split(secret).join("[REDACTED]");
-    const prefix = secret.slice(0, Math.min(8, secret.length));
-    const suffix = secret.slice(-Math.min(4, secret.length));
-    return exact
-      .replace(new RegExp(`${escapeRegExp(prefix)}[A-Za-z0-9._-]{4,}`, "g"), "[REDACTED]")
-      .replace(new RegExp(`[A-Za-z0-9._-]{4,}${escapeRegExp(suffix)}`, "g"), "[REDACTED]")
-      .replace(/\b(?:sk|ark)-[A-Za-z0-9._-]{8,}\b/g, "[REDACTED]");
-  }
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // argv 唯一构建点。spawn 不经过 shell，因此 --config KEY=VALUE 不需要引号转义。
@@ -521,10 +484,6 @@ export function buildCodexExecCommand(input: {
       "--output-schema", input.schemaPath,
       "--output-last-message", input.lastMessagePath,
       "--json",
-      ...(input.profile?.modelCatalogPath !== undefined
-        ? ["--config", `model_catalog_json=${JSON.stringify(input.profile.modelCatalogPath)}`]
-        : []),
-      ...providerArgs(input.profile?.provider),
       ...((input.model ?? input.profile?.model) !== undefined
         ? ["--model", (input.model ?? input.profile?.model)!]
         : []),
@@ -548,19 +507,10 @@ async function writeTaskImages(task: ValidatedTask, taskDir: string): Promise<st
   return imagePaths;
 }
 
-function providerArgs(provider: CodexModelProviderConfig | undefined): string[] {
-  if (provider === undefined) return [];
-  return [
-    "--config", `model_provider=${JSON.stringify(provider.id)}`,
-    "--config", `model_providers.${provider.id}.name=${JSON.stringify(provider.name)}`,
-    "--config", `model_providers.${provider.id}.base_url=${JSON.stringify(provider.baseUrl)}`,
-    "--config", `model_providers.${provider.id}.env_key=${JSON.stringify(provider.envKey)}`,
-    "--config", `model_providers.${provider.id}.wire_api=${JSON.stringify(provider.wireApi)}`,
-    "--config", `model_providers.${provider.id}.requires_openai_auth=false`,
-  ];
-}
-
-function buildPrompt(task: ValidatedTask, prompt = taskPromptFor(task.kind, task.kind === "publish-copy" ? task.payload.platform : undefined)): string {
+export function buildTaskPrompt(
+  task: ValidatedTask,
+  prompt = taskPromptFor(task.kind, task.kind === "publish-copy" ? task.payload.platform : undefined),
+): string {
   let data: Record<string, unknown>;
   if (task.kind === "topic-ideas") {
     data = { signals: task.payload.signals };

@@ -1,5 +1,5 @@
 [Unit]
-Description=VideoFactory ZAI Codex visual-review broker (Unix socket only)
+Description=VideoFactory ZAI visual-review broker (Unix socket only)
 After=network-online.target
 Wants=network-online.target
 
@@ -9,24 +9,18 @@ User=vf-zai-codex
 Group=vf-bridge
 UMask=0007
 Environment=HOME=/home/vf-zai-codex
-Environment=CODEX_HOME=/var/lib/video-factory-zai-codex/codex-home
-Environment=PATH=/opt/video-factory/codex-broker/bin:/home/vf-zai-codex/.local/node22/bin:/home/vf-zai-codex/.local/bin:/usr/local/bin:/usr/bin:/bin
-Environment=CODEX_BIN=/opt/video-factory/codex-broker/bin/codex
+Environment=PATH=/opt/video-factory/codex-broker/bin:/usr/local/bin:/usr/bin:/bin
 # 文件只包含 ZAI_API_KEY，部署时必须安装为 root:root 0600；值不得写入 unit 或命令行。
 EnvironmentFile=/etc/video-factory/zai-codex-broker.env
 ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %%U:%%G /etc/video-factory/zai-codex-broker.env)" = root:root'
 ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %%a /etc/video-factory/zai-codex-broker.env)" = 600'
 Environment=VIDEO_FACTORY_CODEX_PROFILE=zai
 Environment=VIDEO_FACTORY_CODEX_EFFORT=max
-Environment=VIDEO_FACTORY_CODEX_MODEL_CATALOG_PATH=/var/lib/video-factory-zai-codex/codex-home/models.json
 Environment=VIDEO_FACTORY_CODEX_SOCKET_PATH=/run/video-factory-zai-codex/worker.sock
-Environment=VIDEO_FACTORY_CODEX_WORKSPACE_ROOT=/var/lib/video-factory-zai-codex/workspace
 Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=285000
 ExecStart=/opt/video-factory/codex-broker/bin/node /opt/video-factory/codex-broker/current/dist/main.js
 RuntimeDirectory=video-factory-zai-codex
 RuntimeDirectoryMode=0750
-StateDirectory=video-factory-zai-codex
-StateDirectoryMode=0700
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20
@@ -48,7 +42,7 @@ LockPersonality=true
 SystemCallArchitectures=native
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/var/lib/video-factory-zai-codex /run/video-factory-zai-codex
+ReadWritePaths=/run/video-factory-zai-codex
 
 [Install]
 WantedBy=multi-user.target

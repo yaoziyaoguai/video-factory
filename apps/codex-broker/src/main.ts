@@ -1,5 +1,5 @@
 import { CodexBrokerServer } from "./broker-server.js";
-import { CodexExecutor } from "./codex-executor.js";
+import { createBrokerExecutor } from "./executor-factory.js";
 import { brokerRuntimeConfigFromEnv } from "./runtime-config.js";
 
 // 只信启动环境，不接受任何来自 HTTP payload 的执行参数；无 host/port 概念，只走 Unix socket。
@@ -8,13 +8,7 @@ try {
 
   const server = new CodexBrokerServer({
     socketPath: config.socketPath,
-    executor: new CodexExecutor({
-      workspaceRoot: config.workspaceRoot,
-      codexBin: config.codexBin,
-      profile: config.profile,
-      effort: config.effort,
-      timeoutMs: config.timeoutMs,
-    }),
+    executor: createBrokerExecutor(config, process.env),
     concurrency: config.concurrency,
     maxBacklog: config.maxBacklog,
   });
@@ -25,6 +19,7 @@ try {
       `profileId=${config.profile.identity.profileId}`,
       `providerId=${config.profile.identity.providerId}`,
       `modelId=${config.profile.identity.modelId}`,
+      `engine=${config.profile.identity.profileId === "zai" ? "chat-completions" : "codex-cli"}`,
       `workspace=${config.workspaceRoot}`,
       `codexBin=${config.codexBin}`,
       `effort=${config.effort}`,

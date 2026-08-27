@@ -4,7 +4,7 @@ import {
   CODEX_BRIDGE_PROTOCOL_VERSION,
   CodexExecutorError,
   parseTaskRequest,
-  type CodexExecutor,
+  type BrokerTaskExecutor,
   type CodexTaskTrace,
   type ValidatedTask,
 } from "./codex-executor.js";
@@ -43,7 +43,7 @@ class BrokerTaskQueue {
   private closed = false;
 
   constructor(
-    private readonly executor: CodexExecutor,
+    private readonly executor: BrokerTaskExecutor,
     private readonly concurrency: number,
     private readonly maxBacklog: number,
   ) {}
@@ -122,7 +122,7 @@ class BrokerTaskQueue {
 
 export interface CodexBrokerServerOptions {
   socketPath: string;
-  executor: CodexExecutor;
+  executor: BrokerTaskExecutor;
   concurrency?: number;
   maxBacklog?: number;
   maxBodyBytes?: number;
