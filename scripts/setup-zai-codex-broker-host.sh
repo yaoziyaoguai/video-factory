@@ -14,6 +14,8 @@ env_file=/etc/video-factory/zai-codex-broker.env
 unit_source="$repository_root/apps/codex-broker/deploy/vf-zai-codex-broker.service"
 unit_target=/etc/systemd/system/vf-zai-codex-broker.service
 service=vf-zai-codex-broker
+catalog_source="$repository_root/apps/codex-broker/deploy/zai-models.json"
+catalog_target="$broker_state/codex-home/models.json"
 
 fail() {
   echo "[setup-zai-codex-broker] $1" >&2
@@ -43,6 +45,10 @@ node_bin="$broker_root/bin/node"
 [[ -x "$node_bin" ]] || fail "缺少共享 Node 运行时；请先运行 setup-codex-broker-host.sh。"
 node_major="$($node_bin --version | sed -E 's/^v([0-9]+).*/\1/')"
 [[ "$node_major" -ge 22 ]] || fail "需要 Node >= 22。"
+[[ -f "$catalog_source" ]] || fail "缺少 GLM 模型目录：$catalog_source"
+"$node_bin" -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$catalog_source" \
+  || fail "GLM 模型目录不是有效 JSON。"
+install -o "$broker_user" -g "$broker_user" -m 0600 "$catalog_source" "$catalog_target"
 
 # ZAI profile 不读取 OpenAI 登录态，但仍复用同一版本的 Codex CLI 程序。
 codex_bin="$broker_root/bin/codex"

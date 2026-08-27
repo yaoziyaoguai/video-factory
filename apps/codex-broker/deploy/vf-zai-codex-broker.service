@@ -17,6 +17,8 @@ EnvironmentFile=/etc/video-factory/zai-codex-broker.env
 ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %U:%G /etc/video-factory/zai-codex-broker.env)" = root:root'
 ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %a /etc/video-factory/zai-codex-broker.env)" = 600'
 Environment=VIDEO_FACTORY_CODEX_PROFILE=zai
+Environment=VIDEO_FACTORY_CODEX_EFFORT=max
+Environment=VIDEO_FACTORY_CODEX_MODEL_CATALOG_PATH=/var/lib/video-factory-zai-codex/codex-home/models.json
 Environment=VIDEO_FACTORY_CODEX_SOCKET_PATH=/run/video-factory-zai-codex/worker.sock
 Environment=VIDEO_FACTORY_CODEX_WORKSPACE_ROOT=/var/lib/video-factory-zai-codex/workspace
 Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=285000

@@ -17,6 +17,11 @@ describe("ZAI systemd service sample", () => {
     assert.match(service, /^User=vf-zai-codex$/m);
     assert.match(service, /^Environment=CODEX_HOME=\/var\/lib\/video-factory-zai-codex\/codex-home$/m);
     assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_PROFILE=zai$/m);
+    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_EFFORT=max$/m);
+    assert.match(
+      service,
+      /^Environment=VIDEO_FACTORY_CODEX_MODEL_CATALOG_PATH=\/var\/lib\/video-factory-zai-codex\/codex-home\/models\.json$/m,
+    );
     assert.match(service, /^EnvironmentFile=\/etc\/video-factory\/zai-codex-broker\.env$/m);
     assert.match(service, /stat -c %a \/etc\/video-factory\/zai-codex-broker\.env/);
     assert.match(service, /test .* = 600/);
@@ -26,6 +31,17 @@ describe("ZAI systemd service sample", () => {
     assert.match(service, /\/run\/video-factory-zai-codex\/worker\.sock/);
     assert.match(service, /\/var\/lib\/video-factory-zai-codex\/workspace/);
     assert.doesNotMatch(service, /ZAI_API_KEY\s*=/);
+  });
+
+  it("ships a valid GLM-5.3-Flash model catalog with image input enabled", async () => {
+    const catalog = JSON.parse(await readFile(
+      path.join(brokerRoot, "deploy", "zai-models.json"),
+      "utf8",
+    )) as { models?: Array<{ slug?: string; input_modalities?: string[] }> };
+
+    const model = catalog.models?.find((candidate) => candidate.slug === "glm-5.3-flash");
+    assert.ok(model);
+    assert.deepEqual(model.input_modalities, ["text", "image"]);
   });
 
   it("keeps the Unix socket connectable by vf-bridge and explicitly fixes its mode after listen", async () => {
