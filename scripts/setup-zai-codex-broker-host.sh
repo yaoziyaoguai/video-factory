@@ -58,7 +58,8 @@ if [[ ! -x "$codex_bin" ]]; then
   codex_version="$(runuser -u vf-codex -- env HOME=/home/vf-codex PATH=/home/vf-codex/.local/node22/bin:/home/vf-codex/.local/bin:/usr/local/bin:/usr/bin:/bin "$openai_codex" --version | awk '{print $2}')"
   npm_bin=/home/vf-codex/.local/node22/bin/npm
   [[ -x "$npm_bin" ]] || fail "未找到与共享 Node 匹配的 npm。"
-  "$npm_bin" install --prefix "$broker_root/codex-cli" --omit=dev "@openai/codex@$codex_version"
+  env PATH="$broker_root/bin:/home/vf-codex/.local/node22/bin:/usr/local/bin:/usr/bin:/bin" \
+    "$npm_bin" install --prefix "$broker_root/codex-cli" --omit=dev "@openai/codex@$codex_version"
   ln -sfn "$broker_root/codex-cli/node_modules/.bin/codex" "$codex_bin"
 fi
 runuser -u "$broker_user" -- env HOME="$broker_home" CODEX_HOME="$broker_state/codex-home" PATH="$broker_root/bin:/usr/local/bin:/usr/bin:/bin" "$codex_bin" --version >/dev/null \

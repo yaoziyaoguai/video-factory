@@ -44,6 +44,18 @@ describe("ZAI systemd service sample", () => {
     assert.deepEqual(model.input_modalities, ["text", "image"]);
   });
 
+  it("installs Codex CLI with the validated Node 22 runtime first on PATH", async () => {
+    const script = await readFile(
+      path.join(repositoryRoot, "scripts", "setup-zai-codex-broker-host.sh"),
+      "utf8",
+    );
+
+    assert.match(
+      script,
+      /env PATH="\$broker_root\/bin:[^"]*"\s+\\?\s*"\$npm_bin" install --prefix "\$broker_root\/codex-cli"/,
+    );
+  });
+
   it("keeps the Unix socket connectable by vf-bridge and explicitly fixes its mode after listen", async () => {
     const server = await readFile(path.join(brokerRoot, "src", "broker-server.ts"), "utf8");
 
