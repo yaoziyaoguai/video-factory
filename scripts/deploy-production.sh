@@ -8,6 +8,7 @@ container="video_factory_prod"
 broker_service=vf-codex-broker
 zai_broker_service=vf-zai-codex-broker
 broker_root=/opt/video-factory/codex-broker
+broker_user=vf-codex
 broker_socket=/run/video-factory-codex/worker.sock
 trend_network=video-factory-trends
 compose=(docker compose --project-name video-factory --env-file "$environment_file" -f "$repository_root/docker/docker-compose.prod.yml")
@@ -39,9 +40,19 @@ ensure_zai_runtime_mount() {
   fi
 }
 
-# 应用与自托管热点容器只经内部网络通信；没有部署热点时保留空网络，应用会如实报告离线。
-docker network inspect "$trend_network" >/dev/null 2>&1 \
-  || docker network create --driver bridge "$trend_network" >/dev/null
+check_codex_upstream() {
+  local attempt
+  for attempt in 1 2 3; do
+    # ChatGPT 登录态只能证明凭据存在；401 也能证明 OpenAI TLS 出口真实可达。
+    if runuser -u "$broker_user" -- curl --silent --show-error --output /dev/null \
+      --connect-timeout 8 --max-time 15 https://api.openai.com/v1/models; then
+      return 0
+    fi
+    sleep 3
+  done
+  echo "Codex upstream is unreachable from $broker_user; leaving the current production release untouched." >&2
+  return 1
+}
 
 bridge_gid="$(getent group vf-bridge | cut -d: -f3 || true)"
 if [[ -z "$bridge_gid" ]]; then
@@ -54,6 +65,11 @@ export VIDEO_FACTORY_CODEX_SOCKET_GID="$bridge_gid"
 if [[ "$zai_broker_enabled" -eq 0 ]]; then
   ensure_zai_runtime_mount || exit 1
 fi
+check_codex_upstream || exit 1
+
+# 应用与自托管热点容器只经内部网络通信；没有部署热点时保留空网络，应用会如实报告离线。
+docker network inspect "$trend_network" >/dev/null 2>&1 \
+  || docker network create --driver bridge "$trend_network" >/dev/null
 
 # 不做“排空运行中制作”的等待：/api/runs 受登录会话保护，本脚本不持有凭据，
 # 为部署开免认证端点会削弱认证边界。被中断的 run 由 recoverInterruptedRuns

@@ -481,7 +481,7 @@ describe("ProductionPipeline", () => {
     const parentNodes = (voiceArtifact.parentArtifactIds ?? []).map((parentId) =>
       approved.artifacts.find((artifact) => artifact.id === parentId)?.producer?.nodeId,
     );
-    assert.deepEqual(parentNodes, ["script"]);
+    assert.deepEqual(parentNodes, ["script", "assets"]);
   });
 
   it("rejects provider IDs that do not serve the bound capability", async () => {
@@ -695,9 +695,53 @@ describe("ProductionPipeline", () => {
   it("routes a MiniMax actor through cloud speech synthesis", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
     const worker = new FakeWorker();
+    const directorAgent: pipeline.VisualDirectorAgent = {
+      id: "api-visual-director-v1",
+      plan: async (input) => ({
+        version: "video-factory/director-plan-v1",
+        requestedProfileId: input.brief.requestedProfileId,
+        resolvedProfileId: "documentary-observer",
+        profileRationale: "用真实动作建立可信解释。",
+        visualBible: {
+          narrativeApproach: "用动作展示问题和结果。",
+          pacing: "均匀推进",
+          composition: "中景与特写交替",
+          camera: "稳定机位",
+          color: "自然色",
+          continuity: "同一时段",
+          sound: "保留环境声",
+        },
+        shots: input.scenes.map((scene) => ({
+          scenePosition: scene.position,
+          narrativeRole: "解释",
+          authenticityPolicy: "illustrative",
+          preferredProviderId: "local-editorial-v1",
+          deliveryType: "editorial_card",
+          alternativeProviderIds: [],
+          temporalBeats: [
+            `[0s-${scene.duration / 2}s] 建立信息`,
+            `[${scene.duration / 2}s-${scene.duration}s] 保持可读`,
+          ],
+          query: scene.visualPrompt,
+          generationPrompt: scene.visualPrompt,
+          rationale: "免费本地卡片足以交付。",
+          continuityNote: "保持相同版式。",
+          confidence: 0.8,
+          estimatedCostCny: 0,
+        })),
+      }),
+    };
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
       worker,
+      directorAgent,
+      assetProviders: [{
+        id: "local-editorial-v1",
+        label: "本地编辑卡片",
+        billing: "free",
+        modes: ["本地"],
+        deliveryTypes: ["editorial_card"],
+      }],
       providerRuntimeMetadata: [{
         id: "minimax-tts-v1",
         label: "MiniMax TTS",
@@ -712,7 +756,15 @@ describe("ProductionPipeline", () => {
 
     const paused = await subject.start({
       ...brief,
-      providers: { ...brief.providers, voice: "minimax-tts-v1" },
+      providers: {
+        ...brief.providers,
+        director: "api-visual-director-v1",
+        voice: "minimax-tts-v1",
+      },
+      director: {
+        profileId: "auto",
+        assetProviderIds: ["local-editorial-v1"],
+      },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
       voiceDirection: {
         profileId: "minimax:Chinese (Mandarin)_News_Anchor",
@@ -723,6 +775,15 @@ describe("ProductionPipeline", () => {
     });
     const plan = paused.nodeRuns.find((node) => node.nodeId === "voice")?.spendPlan;
     assert.ok(plan);
+    const scriptVersionId = paused.nodeRuns.find((node) => node.nodeId === "script")?.outputState?.effectiveVersionId;
+    const assetsNode = paused.nodeRuns.find((node) => node.nodeId === "assets");
+    const voiceInputVersionId = paused.nodeRuns.find((node) => node.nodeId === "voice")?.inputState?.effectiveVersionId;
+    assert.equal(assetsNode?.status, "succeeded");
+    assert.ok(scriptVersionId);
+    assert.ok(assetsNode.outputState?.effectiveVersionId);
+    assert.ok(voiceInputVersionId);
+    assert.deepEqual(plan.inputVersionIds, [voiceInputVersionId, scriptVersionId, assetsNode.outputState.effectiveVersionId]);
+    assert.deepEqual(worker.calls.map((call) => call.capability), ["script.draft", "asset.prepare"]);
     assert.equal(plan.maxCostCny, 0.1);
     await subject.authorizeSpend(paused.id, {
       nodeId: plan.nodeId,

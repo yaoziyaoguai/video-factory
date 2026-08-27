@@ -78,6 +78,30 @@ describe("ZAI systemd service sample", () => {
 });
 
 describe("production deployment transaction", () => {
+  it("checks Codex upstream reachability before mutating the production release", async () => {
+    const script = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
+
+    const probePosition = script.indexOf("check_codex_upstream || exit 1");
+    const networkMutationPosition = script.indexOf('docker network inspect "$trend_network"');
+    const buildPosition = script.indexOf('"${compose[@]}" build app');
+    assert.ok(probePosition >= 0);
+    assert.ok(networkMutationPosition > probePosition);
+    assert.ok(buildPosition > probePosition);
+    assert.match(script, /runuser -u "\$broker_user" -- curl/);
+    assert.match(script, /https:\/\/api\.openai\.com\/v1\/models/);
+  });
+
+  it("provides a restart policy for an existing OpenAI egress tunnel", async () => {
+    const dropIn = await readFile(
+      path.join(repositoryRoot, "deploy", "systemd", "vf-openai-egress-restart.conf"),
+      "utf8",
+    );
+
+    assert.match(dropIn, /^\[Service\]$/m);
+    assert.match(dropIn, /^Restart=always$/m);
+    assert.match(dropIn, /^RestartSec=60s$/m);
+  });
+
   it("uses a regional Alpine mirror only for ECS deployment builds", async () => {
     const [dockerfile, compose, deploy] = await Promise.all([
       readFile(path.join(repositoryRoot, "docker", "Dockerfile"), "utf8"),

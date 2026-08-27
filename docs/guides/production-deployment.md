@@ -71,6 +71,20 @@ bash scripts/setup-codex-broker-host.sh
 
 systemd 加固说明：真实 `~/.codex` 整体只读；Broker 使用 `/var/lib/video-factory-codex/codex-home` 保存 CLI 可变状态，其中 `auth.json` 只是指向真实登录凭据的只读链接。应用容器只挂载 `/run/video-factory-codex`，无法读取两个 Codex Home。首次真实任务后仍需用 `journalctl -u vf-codex-broker` 确认运行状态。
 
+`codex login status` 只验证登录凭据存在，不能证明 ECS 真的能连接 OpenAI。生产部署会在切换 release 前，以 `vf-codex` 用户请求 `https://api.openai.com/v1/models`；收到任意 HTTP 响应（通常是未带 API key 的 401）即代表 TLS 出口可达，连接超时则保持旧版本不动。若 ECS 的 OpenAI 出口依赖已有 systemd 隧道，并且该隧道会在临时 `AUTH_FAILED` 后以成功状态退出，应给对应实例安装仓库内的重连策略：
+
+```bash
+sudo install -d /etc/systemd/system/openvpn-client@proton.service.d
+sudo install -m 0644 deploy/systemd/vf-openai-egress-restart.conf \
+  /etc/systemd/system/openvpn-client@proton.service.d/restart.conf
+sudo systemctl daemon-reload
+sudo systemctl restart openvpn-client@proton.service
+runuser -u vf-codex -- curl -sS -o /dev/null -w '%{http_code}\n' \
+  --connect-timeout 8 --max-time 15 https://api.openai.com/v1/models
+```
+
+最后一条命令预期快速返回 `401`；`000` 或超时表示 Codex 仍无法联网。重连策略只改变服务退出后的 systemd 行为，不包含账号、证书或隧道配置。
+
 ## 3. 自托管热点（推荐）
 
 热点服务不运行语义模型，可以在同一台 ECS 上以轻量容器部署：
