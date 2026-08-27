@@ -132,7 +132,7 @@ describe("readZaiCodexProviderSettings", () => {
     const socketPath = path.join(directory, "worker.sock");
     let identity = {
       profileId: "zai",
-      providerId: "zai-coding-plan",
+      providerId: "zai-bigmodel-api",
       modelId: "glm-5.3-flash",
       taskKinds: ["visual-review"],
     };
@@ -208,8 +208,11 @@ describe("buildProviderCatalog codex fallback", () => {
     const glm = providers.find((provider) => provider.id === "glm-visual-review-v1");
 
     assert.equal(glm?.available, true);
-    assert.equal(glm?.billing, "subscription");
+    assert.equal(glm?.billing, "metered");
+    assert.equal(glm?.estimatedCnyPerClip, 0.1);
+    assert.equal(glm?.billingUnit, "run");
     assert.equal(glm?.capability, "quality.review.visual");
     assert.match(glm?.description ?? "", /GLM-5\.3-Flash/);
+    assert.doesNotMatch(glm?.description ?? "", /Coding Plan/);
   });
 });

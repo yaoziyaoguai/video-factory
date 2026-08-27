@@ -328,6 +328,55 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
+  it("accepts one metered GLM review without treating it as a paid shot", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      zaiCodexAvailability: { available: true, reason: "" },
+    });
+
+    await service.startRun({
+      ...brief,
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      economics: {
+        recipeId: "economy-daily",
+        allowMeteredProviders: true,
+        maxPaidShots: 0,
+        maxCostCny: 0,
+      },
+    });
+
+    assert.equal(pipeline.dispatchCount, 1);
+  });
+
+  it("includes per-run model estimates in the server-side safety ceiling", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: { VIDEO_FACTORY_MAX_RUN_COST_CNY: "0.05" },
+      zaiCodexAvailability: { available: true, reason: "" },
+    });
+
+    await assert.rejects(() => service.startRun({
+      ...brief,
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      economics: {
+        recipeId: "economy-daily",
+        allowMeteredProviders: true,
+        maxPaidShots: 0,
+        maxCostCny: 0,
+      },
+    }), /按次能力预计合计.*0\.1.*安全上限.*0\.05/);
+    assert.equal(pipeline.dispatchCount, 0);
+  });
+
   it("lets the Codex director run inside economy-daily without metered gating", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));

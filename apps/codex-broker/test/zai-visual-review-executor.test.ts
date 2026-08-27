@@ -48,20 +48,20 @@ function validReport(): Record<string, unknown> {
 
 describe("ZaiVisualReviewExecutor", () => {
   it("does not fall through to the ambient process credential when an environment is injected", () => {
-    const previous = process.env.ZAI_API_KEY;
-    process.env.ZAI_API_KEY = "ambient-test-key";
+    const previous = process.env.ZAI_BIGMODEL_API_KEY;
+    process.env.ZAI_BIGMODEL_API_KEY = "ambient-test-key";
     try {
       assert.throws(
         () => new ZaiVisualReviewExecutor({ env: {} }),
-        /ZAI_API_KEY environment variable is required/,
+        /ZAI_BIGMODEL_API_KEY environment variable is required/,
       );
     } finally {
-      if (previous === undefined) delete process.env.ZAI_API_KEY;
-      else process.env.ZAI_API_KEY = previous;
+      if (previous === undefined) delete process.env.ZAI_BIGMODEL_API_KEY;
+      else process.env.ZAI_BIGMODEL_API_KEY = previous;
     }
   });
 
-  it("sends bounded frames to the official Coding Plan Chat Completion endpoint and validates the report", async () => {
+  it("sends bounded frames to the official BigModel Chat Completion endpoint and validates the report", async () => {
     let capturedUrl = "";
     let capturedInit: RequestInit | undefined;
     const fetchFn: typeof fetch = async (input, init) => {
@@ -72,14 +72,14 @@ describe("ZaiVisualReviewExecutor", () => {
       }), { status: 200, headers: { "content-type": "application/json" } });
     };
     const executor = new ZaiVisualReviewExecutor({
-      env: { ZAI_API_KEY: API_KEY },
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
       fetchFn,
       effort: "max",
     });
 
     const result = await executor.runTask(visualReviewTask());
 
-    assert.equal(capturedUrl, "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions");
+    assert.equal(capturedUrl, "https://open.bigmodel.cn/api/paas/v4/chat/completions");
     assert.equal(new Headers(capturedInit?.headers).get("authorization"), `Bearer ${API_KEY}`);
     const body = JSON.parse(String(capturedInit?.body)) as Record<string, unknown>;
     assert.equal(body.model, "glm-5.3-flash");
@@ -97,7 +97,7 @@ describe("ZaiVisualReviewExecutor", () => {
       image_url: { url: "data:image/jpeg;base64,/9j/4AAA/9k=" },
     });
     assert.deepEqual(JSON.parse(result.output), validReport());
-    assert.equal(result.trace?.providerId, "zai-coding-plan");
+    assert.equal(result.trace?.providerId, "zai-bigmodel-api");
     assert.equal(result.trace?.modelId, "glm-5.3-flash");
     assert.equal(result.trace?.taskKind, "visual-review");
     assert.doesNotMatch(result.trace?.prompt ?? "", /base64|test-only-zai-key/i);
@@ -106,7 +106,7 @@ describe("ZaiVisualReviewExecutor", () => {
   it("rejects non-visual work before any network request", async () => {
     let calls = 0;
     const executor = new ZaiVisualReviewExecutor({
-      env: { ZAI_API_KEY: API_KEY },
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
       fetchFn: async () => {
         calls += 1;
         return new Response();
@@ -124,7 +124,7 @@ describe("ZaiVisualReviewExecutor", () => {
 
   it("does not expose API error bodies or the credential", async () => {
     const executor = new ZaiVisualReviewExecutor({
-      env: { ZAI_API_KEY: API_KEY },
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
       fetchFn: async () => new Response(
         JSON.stringify({ error: { code: "1308", message: `upstream echoed ${API_KEY}` } }),
         { status: 429 },
@@ -145,7 +145,7 @@ describe("ZaiVisualReviewExecutor", () => {
 
   it("does not let a stalled HTTP error body occupy the broker request timeout", async () => {
     const executor = new ZaiVisualReviewExecutor({
-      env: { ZAI_API_KEY: API_KEY },
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
       fetchFn: async () => new Response(new ReadableStream({ start() {} }), { status: 429 }),
       timeoutMs: 2_000,
     });
@@ -158,7 +158,7 @@ describe("ZaiVisualReviewExecutor", () => {
 
   it("rejects an oversized success response without buffering it all", async () => {
     const executor = new ZaiVisualReviewExecutor({
-      env: { ZAI_API_KEY: API_KEY },
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
       fetchFn: async () => new Response(new Uint8Array(1024 * 1024 + 1), { status: 200 }),
     });
 
@@ -175,7 +175,7 @@ describe("ZaiVisualReviewExecutor", () => {
 
     await assert.rejects(
       () => new ZaiVisualReviewExecutor({
-        env: { ZAI_API_KEY: API_KEY },
+        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
         fetchFn: responseFor({ summary: "missing required fields" }),
       }).runTask(visualReviewTask()),
       /does not match visual-review schema/,
@@ -191,7 +191,7 @@ describe("ZaiVisualReviewExecutor", () => {
     }];
     await assert.rejects(
       () => new ZaiVisualReviewExecutor({
-        env: { ZAI_API_KEY: API_KEY },
+        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
         fetchFn: responseFor(lateFinding),
       }).runTask(visualReviewTask()),
       /timecodeMs exceeds payload.durationMs/,
@@ -215,7 +215,7 @@ describe("ZaiVisualReviewExecutor", () => {
       },
     }), { status: 200 });
     const executor = new ZaiVisualReviewExecutor({
-      env: { ZAI_API_KEY: API_KEY },
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
       fetchFn,
       timeoutMs: 5,
     });

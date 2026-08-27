@@ -8,6 +8,7 @@ workspace_root=${VIDEO_FACTORY_CODEX_WORKSPACE_ROOT:-"$runtime_root/tasks"}
 codex_bin=${CODEX_BIN:-$(command -v codex || true)}
 zai_runtime_root=${VIDEO_FACTORY_ZAI_CODEX_LOCAL_RUNTIME_ROOT:-"$repository_root/.local/runtime/zai-codex"}
 zai_socket_path=${VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH:-"$zai_runtime_root/worker.sock"}
+zai_env_file=${ZAI_BIGMODEL_ENV_FILE:-"$repository_root/.local/secrets/zai-bigmodel.env"}
 zai_broker_pid=""
 
 if [[ -z "$codex_bin" ]]; then
@@ -57,13 +58,19 @@ if ! curl --fail --silent --unix-socket "$socket_path" http://localhost/health >
   exit 1
 fi
 
-if [[ -f "$repository_root/.env" ]] \
-  && node --env-file="$repository_root/.env" -e 'process.exit(process.env.ZAI_API_KEY?.trim() ? 0 : 1)'; then
+if [[ -f "$zai_env_file" ]] && grep -qE '^ZAI_API_KEY=' "$zai_env_file"; then
+  echo "$zai_env_file still contains legacy ZAI_API_KEY; remove it and keep only ZAI_BIGMODEL_API_KEY." >&2
+  exit 1
+fi
+
+if [[ -f "$zai_env_file" ]] \
+  && env -u ZAI_BIGMODEL_API_KEY -u ZAI_API_KEY node --env-file="$zai_env_file" -e 'process.exit(process.env.ZAI_BIGMODEL_API_KEY?.trim() ? 0 : 1)'; then
   mkdir -p "$zai_runtime_root"
-  VIDEO_FACTORY_CODEX_PROFILE=zai \
-  VIDEO_FACTORY_CODEX_EFFORT=max \
-  VIDEO_FACTORY_CODEX_SOCKET_PATH="$zai_socket_path" \
-  node --env-file="$repository_root/.env" apps/codex-broker/dist/main.js &
+  env -u ZAI_BIGMODEL_API_KEY -u ZAI_API_KEY \
+    VIDEO_FACTORY_CODEX_PROFILE=zai \
+    VIDEO_FACTORY_CODEX_EFFORT=max \
+    VIDEO_FACTORY_CODEX_SOCKET_PATH="$zai_socket_path" \
+    node --env-file="$zai_env_file" apps/codex-broker/dist/main.js &
   zai_broker_pid=$!
   for _ in $(seq 1 50); do
     if curl --fail --silent --unix-socket "$zai_socket_path" http://localhost/health >/dev/null 2>&1; then

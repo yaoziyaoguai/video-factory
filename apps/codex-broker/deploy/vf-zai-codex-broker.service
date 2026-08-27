@@ -10,10 +10,12 @@ Group=vf-bridge
 UMask=0007
 Environment=HOME=/home/vf-zai-codex
 Environment=PATH=/opt/video-factory/codex-broker/bin:/usr/local/bin:/usr/bin:/bin
-# 文件只包含 ZAI_API_KEY，部署时必须安装为 root:root 0600；值不得写入 unit 或命令行。
+# 文件只包含 ZAI_BIGMODEL_API_KEY，部署时必须安装为 root:root 0600；值不得写入 unit 或命令行。
 EnvironmentFile=/etc/video-factory/zai-codex-broker.env
 ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %%U:%%G /etc/video-factory/zai-codex-broker.env)" = root:root'
 ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %%a /etc/video-factory/zai-codex-broker.env)" = 600'
+ExecStartPre=/usr/bin/bash -c '! /usr/bin/grep -q "^ZAI_API_KEY" /etc/video-factory/zai-codex-broker.env'
+UnsetEnvironment=ZAI_API_KEY
 Environment=VIDEO_FACTORY_CODEX_PROFILE=zai
 Environment=VIDEO_FACTORY_CODEX_EFFORT=max
 Environment=VIDEO_FACTORY_CODEX_SOCKET_PATH=/run/video-factory-zai-codex/worker.sock

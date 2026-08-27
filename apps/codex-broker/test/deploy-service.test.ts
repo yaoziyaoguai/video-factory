@@ -28,7 +28,10 @@ describe("ZAI systemd service sample", () => {
     assert.match(service, /^RuntimeDirectoryPreserve=restart$/m);
     assert.match(service, /\/run\/video-factory-zai-codex\/worker\.sock/);
     assert.doesNotMatch(service, /CODEX_HOME|CODEX_BIN|MODEL_CATALOG/);
-    assert.doesNotMatch(service, /ZAI_API_KEY\s*=/);
+    assert.match(service, /ZAI_BIGMODEL_API_KEY/);
+    assert.match(service, /^UnsetEnvironment=ZAI_API_KEY$/m);
+    assert.match(service, /grep -q "\^ZAI_API_KEY"/);
+    assert.doesNotMatch(service, /ZAI_(?:BIGMODEL_)?API_KEY\s*=/);
   });
 
   it("uses the validated shared Node runtime without installing a second Codex CLI", async () => {
@@ -42,13 +45,22 @@ describe("ZAI systemd service sample", () => {
     assert.doesNotMatch(script, /npm_bin|codex_bin|@openai\/codex|zai-models\.json/);
   });
 
-  it("pins the official Coding Plan Chat Completion endpoint", async () => {
+  it("keeps the local BigModel key in a broker-only ignored environment file", async () => {
+    const script = await readFile(path.join(repositoryRoot, "scripts", "studio-dev-with-codex.sh"), "utf8");
+
+    assert.match(script, /\.local\/secrets\/zai-bigmodel\.env/);
+    assert.match(script, /node --env-file="\$zai_env_file" apps\/codex-broker\/dist\/main\.js/);
+    assert.doesNotMatch(script, /node --env-file="\$repository_root\/\.env"/);
+  });
+
+  it("pins the official BigModel Chat Completion endpoint", async () => {
     const executor = await readFile(
       path.join(brokerRoot, "src", "zai-visual-review-executor.ts"),
       "utf8",
     );
 
-    assert.match(executor, /https:\/\/open\.bigmodel\.cn\/api\/coding\/paas\/v4\/chat\/completions/);
+    assert.match(executor, /https:\/\/open\.bigmodel\.cn\/api\/paas\/v4\/chat\/completions/);
+    assert.doesNotMatch(executor, /\/api\/coding\/paas\/v4/);
     assert.match(executor, /model: ZAI_MODEL_ID/);
     assert.match(executor, /type: "image_url"/);
     assert.match(executor, /response_format: \{ type: "json_object" \}/);
@@ -66,6 +78,22 @@ describe("ZAI systemd service sample", () => {
 });
 
 describe("production deployment transaction", () => {
+  it("uses a regional Alpine mirror only for ECS deployment builds", async () => {
+    const [dockerfile, compose, deploy] = await Promise.all([
+      readFile(path.join(repositoryRoot, "docker", "Dockerfile"), "utf8"),
+      readFile(path.join(repositoryRoot, "docker", "docker-compose.prod.yml"), "utf8"),
+      readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8"),
+    ]);
+
+    assert.match(dockerfile, /^ARG ALPINE_MIRROR$/m);
+    assert.match(dockerfile, /^ARG NODE_IMAGE=node:22-alpine$/m);
+    assert.match(dockerfile, /^FROM \$\{NODE_IMAGE\} AS dependencies$/m);
+    assert.doesNotMatch(dockerfile, /^RUN sed .*mirrors\.aliyun\.com/m);
+    assert.match(compose, /NODE_IMAGE: \$\{NODE_IMAGE:-node:22-alpine\}/);
+    assert.match(compose, /ALPINE_MIRROR: \$\{ALPINE_MIRROR:-\}/);
+    assert.match(deploy, /ALPINE_MIRROR="\$\{ALPINE_MIRROR:-https:\/\/mirrors\.aliyun\.com\/alpine\}"/);
+  });
+
   it("installs a physical shared Node runtime instead of linking into a private home", async () => {
     const script = await readFile(
       path.join(repositoryRoot, "scripts", "setup-codex-broker-host.sh"),

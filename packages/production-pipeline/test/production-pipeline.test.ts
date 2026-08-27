@@ -109,13 +109,22 @@ class FakeWorker {
 }
 
 describe("ProductionPipeline", () => {
-  it("runs the optional GLM visual-review role after technical review and before human approval", async () => {
+  it("pauses before the metered GLM visual-review role, then runs it after explicit spend approval", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-review-"));
     const worker = new FakeWorker();
     const reviewCalls: Array<{ videoPath: string; runRoot: string }> = [];
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
       worker,
+      providerRuntimeMetadata: [{
+        id: "glm-visual-review-v1",
+        label: "GLM-5.3-Flash 视觉审片",
+        modelId: "glm-5.3-flash",
+        transport: "unix_socket",
+        billing: "metered",
+        estimatedCostCny: 0.1,
+        maxAttempts: 1,
+      }],
       visualReviewAgents: [
         {
           id: "codex-visual-review-v1",
@@ -140,9 +149,25 @@ describe("ProductionPipeline", () => {
       ],
     });
 
-    const waiting = await subject.start({
+    const paused = await subject.start({
       ...brief,
       providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+    });
+    const plan = paused.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan;
+    assert.equal(paused.status, "awaiting_spend_approval");
+    assert.equal(reviewCalls.length, 0);
+    assert.ok(plan);
+    assert.equal(plan.estimatedCostCny, 0.1);
+    assert.equal(plan.maxAttempts, 1);
+
+    const waiting = await subject.authorizeSpend(paused.id, {
+      nodeId: plan.nodeId,
+      inputVersionIds: plan.inputVersionIds,
+      providerId: plan.providerId,
+      modelId: plan.modelId,
+      maxCostCny: plan.maxCostCny,
+      maxAttempts: plan.maxAttempts,
+      approvedBy: "producer",
     });
 
     assert.equal(waiting.status, "needs_human");
@@ -152,6 +177,30 @@ describe("ProductionPipeline", () => {
     assert.ok(waiting.nodeRuns.some((node) => node.nodeId === "visual-review" && node.status === "succeeded"));
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "glm-5.3-flash");
     assert.ok(waiting.artifacts.some((artifact) => artifact.kind === "review_report" && artifact.provenance.providerId === "glm-visual-review-v1"));
+  });
+
+  it("fails closed when a known metered visual reviewer has no runtime metadata", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-review-metadata-"));
+    let calls = 0;
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      visualReviewAgents: [{
+        id: "glm-visual-review-v1",
+        modelId: "glm-5.3-flash",
+        review: async () => {
+          calls += 1;
+          throw new Error("must not execute");
+        },
+      }],
+    });
+
+    await assert.rejects(() => subject.start({
+      ...brief,
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      economics: { recipeId: "economy-daily", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    }), /Metered provider 'glm-visual-review-v1' requires runtime metadata/);
+    assert.equal(calls, 0);
   });
 
   it("forces human review when automatic mode receives a non-approve visual recommendation", async () => {
@@ -655,6 +704,7 @@ describe("ProductionPipeline", () => {
         modelId: "speech-2.5-hd-preview",
         transport: "http_api",
         billing: "metered",
+        billingUnit: "run",
         estimatedCostCny: 0.1,
         maxAttempts: 1,
       }],
@@ -663,7 +713,7 @@ describe("ProductionPipeline", () => {
     const paused = await subject.start({
       ...brief,
       providers: { ...brief.providers, voice: "minimax-tts-v1" },
-      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 1 },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
       voiceDirection: {
         profileId: "minimax:Chinese (Mandarin)_News_Anchor",
         rate: 190,
@@ -673,6 +723,7 @@ describe("ProductionPipeline", () => {
     });
     const plan = paused.nodeRuns.find((node) => node.nodeId === "voice")?.spendPlan;
     assert.ok(plan);
+    assert.equal(plan.maxCostCny, 0.1);
     await subject.authorizeSpend(paused.id, {
       nodeId: plan.nodeId,
       inputVersionIds: plan.inputVersionIds,

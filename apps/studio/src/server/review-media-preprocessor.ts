@@ -4,6 +4,7 @@ import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { VisualReviewMediaPayload, VisualReviewMediaPreprocessor } from "@video-factory/production-pipeline";
+import { buildStudioChildEnvironment } from "./studio-child-environment.js";
 
 const execFile = promisify(execFileCallback);
 const MAX_FRAME_BYTES = 512 * 1024;
@@ -29,7 +30,7 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
         "--max-frames", "12",
       ], {
         cwd: this.options.repositoryRoot,
-        env: { ...(this.options.environment ?? process.env), PYTHONPATH: this.options.pythonPath },
+        env: buildStudioChildEnvironment(this.options.environment ?? process.env, { PYTHONPATH: this.options.pythonPath }),
         timeout: 10 * 60 * 1000,
         maxBuffer: 64 * 1024,
       }));

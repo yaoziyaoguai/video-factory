@@ -4,7 +4,7 @@ Date: 2026-08-27
 
 ## Goal
 
-把 VideoFactory 从只能查看最终成片的自动流水线升级为云端人机协作制作台：每个生产节点都展示本次实际执行能力、模型、Provider、计费方式和产物；每个角色都能用符合其工作的方式预览并编辑产物；人工修改后，下游只消费修改后的生效版本。生产环境同时保留 OpenAI Codex，并在阿里云新增隔离的 ZAI Codex 执行器，使用 GLM Coding Plan 的 GLM-5.3-Flash 承担视觉审片。
+把 VideoFactory 从只能查看最终成片的自动流水线升级为云端人机协作制作台：每个生产节点都展示本次实际执行能力、模型、Provider、计费方式和产物；每个角色都能用符合其工作的方式预览并编辑产物；人工修改后，下游只消费修改后的生效版本。生产环境同时保留 OpenAI Codex，并在阿里云新增隔离的 ZAI BigModel 执行器，使用普通按量 API 的 GLM-5.3-Flash 承担视觉审片。Coding Plan 订阅不得用于自建网站后端。
 
 ## Research-Validated Product Direction
 
@@ -102,12 +102,12 @@ flowchart LR
   R -->|creative and text tasks| O[OpenAI Codex Broker]
   R -->|visual review tasks| Z[ZAI Codex Broker]
   O --> OC[Codex CLI + OpenAI login]
-  Z --> ZC[Codex CLI + Coding Plan key]
+  Z --> ZC[BigModel Chat Completion + API key]
   ZC --> G[GLM-5.3-Flash]
   API --> P[Python + FFmpeg deterministic worker]
 ```
 
-两个 Broker 使用不同的 `CODEX_HOME`、systemd service、Unix socket 和任务目录。OpenAI Broker 保持现有行为；ZAI Broker 使用智谱 Responses 兼容端点和 Coding Plan 专属配置。应用容器只挂载 socket，不挂载任何 Codex 配置目录。
+两个 Broker 使用不同的 systemd service、Unix socket 和任务目录。OpenAI Broker 保持现有 Codex CLI 行为；ZAI Broker 使用智谱普通 BigModel Chat Completion API。应用容器只挂载 socket，不挂载任何凭据目录。
 
 ## Provider Routing
 
@@ -115,9 +115,9 @@ Provider Router 根据任务能力选择执行器，不允许模型自行选择�
 
 | Capability | Default provider | Fallback |
 | --- | --- | --- |
-| topic intelligence | OpenAI Codex | ZAI Codex text task |
-| script draft | OpenAI Codex | ZAI Codex text task |
-| visual direction | OpenAI Codex | ZAI Codex text task |
+| topic intelligence | OpenAI Codex | deterministic rules |
+| script draft | OpenAI Codex | none |
+| visual direction | OpenAI Codex | none |
 | publish copy | OpenAI Codex | deterministic template |
 | technical media review | Python/FFmpeg | none |
 | artistic and temporal video review | ZAI Codex / GLM-5.3-Flash | keyframes plus transcript review |
@@ -240,10 +240,10 @@ interface SpendAuthorization {
 
 ## Security And Subscription Boundaries
 
-- Coding Plan Key 存放在 ZAI Broker 专用 `CODEX_HOME` 的 0600 配置或 systemd credential 中。
+- 普通 BigModel API Key 存放在 ZAI Broker 专用的 0600 环境文件或 systemd credential 中。
 - ZAI Broker 以独立低权限用户运行；任务目录和 socket 不与 OpenAI Broker 共用。
 - Web 只返回安全的 `modelId`、Provider 标签和端点类别，例如“智谱 Responses API”，不返回 Base URL 查询参数、Key 或凭据文件。
-- 个人 Coding Plan 只服务订阅人自己的 VideoFactory。若未来开放多用户 SaaS，必须迁移到允许产品后端调用的商业 API 计费方案。
+- Coding Plan 不进入 VideoFactory 后端；当前只使用允许产品后端调用的普通按量 API。未来开放多用户 SaaS 前仍需重新核对商业条款。
 
 ## Failure Behavior
 
@@ -258,7 +258,7 @@ interface SpendAuthorization {
 1. 新建项目默认从模板中心进入，并能预览结构、平台、时长、自动化和成本信息。
 2. 模板可克隆、编辑、发布新版本，并能生成不可变运行快照；旧项目不受模板后续修改影响。
 3. 阿里云同时运行隔离的 OpenAI 与 ZAI Codex Broker，应用不依赖 Mac。
-4. ZAI Broker 使用 Coding Plan 调用 GLM-5.3-Flash，并通过一个最小真实任务验证。
+4. ZAI Broker 使用普通 BigModel API 调用 GLM-5.3-Flash，并通过一个最小真实任务验证。
 5. 每个节点展示模板期望、实际 Capability、Provider、模型、执行方式、计费类型、成本和回退信息。
 6. 脚本、导演方案、素材计划、声音计划、审片报告和发布文案至少拥有专用预览。
 7. 脚本、导演方案和发布文案支持结构化编辑；保存后保留 AI 原稿并创建人工版本。

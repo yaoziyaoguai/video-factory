@@ -258,7 +258,7 @@ describe("CodexBrokerServer routes", () => {
     try {
       const report = await healthReport(broker.socketPath);
       assert.equal(report.profileId, "zai");
-      assert.equal(report.providerId, "zai-coding-plan");
+      assert.equal(report.providerId, "zai-bigmodel-api");
       assert.equal(report.modelId, "glm-5.3-flash");
       assert.deepEqual(report.taskKinds, ["visual-review"]);
 

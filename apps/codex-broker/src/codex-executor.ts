@@ -51,7 +51,7 @@ export function codexExecutorProfileFor(
   return {
     identity: {
       profileId,
-      providerId: "zai-coding-plan",
+      providerId: "zai-bigmodel-api",
       modelId: ZAI_MODEL_ID,
       taskKinds: [...ZAI_TASK_KINDS],
     },

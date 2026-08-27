@@ -75,6 +75,7 @@ const KNOWN_METERED_WORKER_PROVIDER_IDS = new Set([
   "wan-video-v1",
   "minimax-tts-v1",
 ]);
+const KNOWN_METERED_VISUAL_REVIEW_PROVIDER_IDS = new Set(["glm-visual-review-v1"]);
 
 export interface ProductionProviderRuntimeMetadata {
   id: string;
@@ -82,6 +83,7 @@ export interface ProductionProviderRuntimeMetadata {
   modelId: string;
   transport: "unix_socket" | "local_process" | "http_api";
   billing: "subscription" | "metered" | "free" | "local_compute";
+  billingUnit?: "clip" | "run";
   estimatedCostCny?: number;
   maxAttempts?: number;
 }
@@ -450,9 +452,11 @@ export class ProductionPipeline {
         ...(this.options.visualReviewAgents ?? []),
         ...(this.options.visualReviewAgent ? [this.options.visualReviewAgent] : []),
       ].find((agent) => agent.id === brief.providers.visualReview);
+      const metadata = this.options.providerRuntimeMetadata?.find((item) => item.id === brief.providers.visualReview);
+      validateVisualReviewRuntimeMetadata(brief.providers.visualReview, metadata);
       registry.register(visualReviewAgent?.id === brief.providers.visualReview
-        ? new VisualReviewProvider(visualReviewAgent)
-        : new UnavailableVisualReviewProvider(brief.providers.visualReview));
+        ? new VisualReviewProvider(visualReviewAgent, metadata)
+        : new UnavailableVisualReviewProvider(brief.providers.visualReview, metadata));
     }
     for (const config of providerConfigs(brief, this.options)) {
       registry.register(new WorkerProvider(config, this.options.worker, this.runsRoot));
@@ -756,9 +760,10 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.config.metadata?.billing ?? "local_compute"; }
   get estimatedCostCny(): number { return this.config.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number {
-    return this.config.metadata?.billing === "metered" && typeof this.config.parameters.maxCostCny === "number"
-      ? this.config.parameters.maxCostCny
-      : 0;
+    if (this.config.metadata?.billing !== "metered") return 0;
+    return this.config.metadata.billingUnit === "run"
+      ? this.config.metadata.estimatedCostCny ?? 0
+      : typeof this.config.parameters.maxCostCny === "number" ? this.config.parameters.maxCostCny : 0;
   }
   get maxAttempts(): number {
     return this.config.metadata?.billing === "metered" && typeof this.config.metadata.maxAttempts === "number"
@@ -836,14 +841,20 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTask
 
 class VisualReviewProvider implements Provider<VisualReviewAgentInput, CodexTaskExecution<VisualReviewReport>> {
   readonly capability: Capability = "quality.review.visual";
-  readonly label = "Codex 视觉审片";
-  readonly transport = "unix_socket" as const;
-  readonly billing = "subscription" as const;
 
-  constructor(private readonly agent: VisualReviewAgent) {}
+  constructor(
+    private readonly agent: VisualReviewAgent,
+    private readonly metadata?: ProductionProviderRuntimeMetadata,
+  ) {}
 
   get id(): string { return this.agent.id; }
+  get label(): string { return this.metadata?.label ?? "Codex 视觉审片"; }
   get modelId(): string { return this.agent.modelId; }
+  get transport(): ProductionProviderRuntimeMetadata["transport"] { return this.metadata?.transport ?? "unix_socket"; }
+  get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
+  get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
+  get maxCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
+  get maxAttempts(): number { return this.metadata?.maxAttempts ?? 1; }
   async run(input: VisualReviewAgentInput): Promise<CodexTaskExecution<VisualReviewReport>> {
     return this.agent.reviewDetailed
       ? this.agent.reviewDetailed(input)
@@ -853,12 +864,19 @@ class VisualReviewProvider implements Provider<VisualReviewAgentInput, CodexTask
 
 class UnavailableVisualReviewProvider implements Provider<VisualReviewAgentInput, CodexTaskExecution<VisualReviewReport>> {
   readonly capability: Capability = "quality.review.visual";
-  readonly label = "视觉审片（暂不可用）";
-  readonly modelId = "configured-model";
-  readonly transport = "unix_socket" as const;
-  readonly billing = "subscription" as const;
 
-  constructor(readonly id: string) {}
+  constructor(
+    readonly id: string,
+    private readonly metadata?: ProductionProviderRuntimeMetadata,
+  ) {}
+
+  get label(): string { return this.metadata?.label ?? "视觉审片（暂不可用）"; }
+  get modelId(): string { return this.metadata?.modelId ?? "configured-model"; }
+  get transport(): ProductionProviderRuntimeMetadata["transport"] { return this.metadata?.transport ?? "unix_socket"; }
+  get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
+  get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
+  get maxCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
+  get maxAttempts(): number { return this.metadata?.maxAttempts ?? 1; }
 
   run(): Promise<CodexTaskExecution<VisualReviewReport>> {
     throw new Error(`Visual review provider '${this.id}' is temporarily unavailable; configure it and regenerate this node.`);
@@ -1454,21 +1472,33 @@ function validateProviderRuntimeMetadata(
     throw new Error(`Known metered provider '${providerId}' cannot be configured as '${metadata.billing}'.`);
   }
   if (metadata.billing !== "metered") return;
+  if (metadata.billingUnit !== undefined && metadata.billingUnit !== "clip" && metadata.billingUnit !== "run") {
+    throw new Error(`Metered provider '${providerId}' has an invalid billing unit.`);
+  }
   if (
     typeof metadata.estimatedCostCny !== "number"
     || !Number.isFinite(metadata.estimatedCostCny)
-    || metadata.estimatedCostCny < 0
-    || typeof maxCostCny !== "number"
-    || !Number.isFinite(maxCostCny)
-    || maxCostCny <= 0
+    || metadata.estimatedCostCny <= 0
     || !Number.isInteger(metadata.maxAttempts)
     || Number(metadata.maxAttempts) < 1
   ) {
     throw new Error(`Metered provider '${providerId}' requires finite positive cost and attempt limits.`);
   }
+  if (metadata.billingUnit === "run") return;
+  if (typeof maxCostCny !== "number" || !Number.isFinite(maxCostCny) || maxCostCny <= 0) {
+    throw new Error(`Metered provider '${providerId}' requires a finite positive generation limit.`);
+  }
   if (metadata.estimatedCostCny > maxCostCny) {
     throw new Error(`Metered provider '${providerId}' estimated cost exceeds the production limit.`);
   }
+}
+
+function validateVisualReviewRuntimeMetadata(
+  providerId: string,
+  metadata: ProductionProviderRuntimeMetadata | undefined,
+): void {
+  if (!KNOWN_METERED_VISUAL_REVIEW_PROVIDER_IDS.has(providerId)) return;
+  validateProviderRuntimeMetadata(providerId, metadata, true, metadata?.estimatedCostCny);
 }
 
 function roundCurrency(value: number): number {

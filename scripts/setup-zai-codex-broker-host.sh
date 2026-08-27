@@ -29,10 +29,13 @@ if ! id -nG "$broker_user" | tr ' ' '\n' | grep -qx "$broker_group"; then
   usermod -aG "$broker_group" "$broker_user"
 fi
 
-[[ -f "$env_file" ]] || fail "缺少 $env_file；请先以 root:root 0600 写入 ZAI_API_KEY。"
+[[ -f "$env_file" ]] || fail "缺少 $env_file；请先以 root:root 0600 写入 ZAI_BIGMODEL_API_KEY。"
 [[ "$(stat -c %U:%G "$env_file")" == "root:root" ]] || fail "$env_file 必须属于 root:root。"
 [[ "$(stat -c %a "$env_file")" == "600" ]] || fail "$env_file 权限必须是 600。"
-grep -qE '^ZAI_API_KEY=.+$' "$env_file" || fail "$env_file 缺少非空 ZAI_API_KEY。"
+grep -qE '^ZAI_BIGMODEL_API_KEY=.+$' "$env_file" || fail "$env_file 缺少非空 ZAI_BIGMODEL_API_KEY。"
+if grep -qE '^ZAI_API_KEY=' "$env_file"; then
+  fail "$env_file 仍包含旧 ZAI_API_KEY；请删除后只保留 ZAI_BIGMODEL_API_KEY。"
+fi
 
 node_bin="$broker_root/bin/node"
 [[ -x "$node_bin" ]] || fail "缺少共享 Node 运行时；请先运行 setup-codex-broker-host.sh。"

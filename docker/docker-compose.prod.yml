@@ -6,6 +6,9 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
+        ALPINE_MIRROR: ${ALPINE_MIRROR:-}
     container_name: video_factory_prod
     restart: unless-stopped
     environment:

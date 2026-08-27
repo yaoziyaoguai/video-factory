@@ -128,14 +128,27 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     return provider.capability === "quality.review.visual" && provider.id === bindings.visualReview && provider.available;
   }) ?? providers.find((provider) => provider.capability === "quality.review.visual" && provider.available);
   const meteredSelected = selectedMeteredSources.length > 0 && maxPaidShots > 0;
+  const meteredVisualReview = visualReviewEnabled && visualReviewProvider?.billing === "metered"
+    ? visualReviewProvider
+    : undefined;
+  const meteredVoiceProvider = providers.find((provider) => {
+    return provider.capability === "voice.synthesize"
+      && provider.id === bindings.voice
+      && provider.available
+      && provider.billing === "metered";
+  });
+  const visualReviewEstimate = meteredVisualReview?.estimatedCnyPerClip ?? 0;
+  const voiceEstimate = meteredVoiceProvider?.estimatedCnyPerClip ?? 0;
+  const hasMeteredCalls = meteredSelected || meteredVisualReview !== undefined || meteredVoiceProvider !== undefined;
   const cheapestMeteredClip = Math.min(...selectedMeteredSources.map((provider) => provider.estimatedCnyPerClip ?? Number.POSITIVE_INFINITY));
   const minimumBudget = meteredSelected && Number.isFinite(cheapestMeteredClip)
     ? roundMoney(cheapestMeteredClip * maxPaidShots)
     : 0;
   const displayedBudget = meteredSelected ? Math.max(budgetCny, minimumBudget) : 0;
+  const displayedTotalEstimate = roundMoney(displayedBudget + visualReviewEstimate + voiceEstimate);
   const economics: StudioProductionInput["economics"] = {
     recipeId,
-    allowMeteredProviders: Boolean(meteredSelected && maxPaidShots > 0 && displayedBudget > 0),
+    allowMeteredProviders: hasMeteredCalls,
     maxPaidShots: meteredSelected ? maxPaidShots : 0,
     maxCostCny: meteredSelected ? displayedBudget : 0,
   };
@@ -285,8 +298,14 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
             <p>先定内容与预计成本，再选择合适的画面和声音能力。</p>
           </div>
           <div className="dialog-budget" aria-label="当前预算">
-            <span>{meteredSelected ? `${maxPaidShots} 个付费镜头上限` : "无按量 API 扣费"}</span>
-            <strong>¥{formatMoney(displayedBudget)}</strong>
+            <span>{hasMeteredCalls
+              ? [
+                  meteredSelected ? `${maxPaidShots} 个付费镜头上限` : "",
+                  meteredVoiceProvider ? "1 次付费配音" : "",
+                  meteredVisualReview ? "1 次付费审片" : "",
+                ].filter(Boolean).join(" + ")
+              : "无按量 API 扣费"}</span>
+            <strong>¥{formatMoney(displayedTotalEstimate)}</strong>
           </div>
           <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭">
             <X aria-hidden="true" size={19} />
@@ -535,9 +554,13 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
               </label>
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>
               <label className="budget-control">
-                <span><CircleDollarSign aria-hidden="true" size={16} /><strong>预计成本上限</strong></span>
+                <span><CircleDollarSign aria-hidden="true" size={16} /><strong>生成预算上限</strong></span>
                 <span className="budget-input"><span>¥</span><input aria-label="预计成本上限" type="number" min={minimumBudget} step="0.1" value={displayedBudget} disabled={!meteredSelected} onChange={(event) => setBudgetCny(Number(event.target.value))} /></span>
-                <small>{meteredSelected ? `按当前估价最多 ${maxPaidShots} 个计费镜头，预计最低 ¥${formatMoney(minimumBudget)}` : "当前配方不会主动调用计费 API"}</small>
+                <small>{meteredSelected
+                  ? `最多 ${maxPaidShots} 个计费镜头，生成最低 ¥${formatMoney(minimumBudget)}${meteredVoiceProvider ? `；配音约 ¥${formatMoney(voiceEstimate)}` : ""}${meteredVisualReview ? `；审片约 ¥${formatMoney(visualReviewEstimate)}` : ""}，按量节点执行前分别确认`
+                  : meteredVoiceProvider || meteredVisualReview
+                    ? `${meteredVoiceProvider ? `配音预计 ¥${formatMoney(voiceEstimate)}` : ""}${meteredVoiceProvider && meteredVisualReview ? "；" : ""}${meteredVisualReview ? `视觉审片预计 ¥${formatMoney(visualReviewEstimate)}` : ""}，执行前分别确认`
+                    : "当前配方不会主动调用计费 API"}</small>
               </label>
             </section>
 
@@ -546,7 +569,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
           </div>
 
           <footer className="dialog-actions recipe-dialog-actions">
-            <div><strong>{RECIPES.find((recipe) => recipe.id === recipeId)?.label}</strong><span>{meteredSelected ? `预计上限 ¥${formatMoney(displayedBudget)}` : "无按量 API 扣费"}</span></div>
+            <div><strong>{RECIPES.find((recipe) => recipe.id === recipeId)?.label}</strong><span>{hasMeteredCalls ? `当前预计 ¥${formatMoney(displayedTotalEstimate)}` : "无按量 API 扣费"}</span></div>
             <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
             <button className="button button-primary" type="submit" disabled={submitting || !templatesLoaded || missingCapabilities.length > 0} data-tour="production-start">
               <Check aria-hidden="true" size={17} />
@@ -678,7 +701,8 @@ function formatMoney(value: number): string {
 function providerBillingLabel(provider: StudioProvider): string {
   if (provider.billing === "subscription") return "订阅额度";
   if (provider.billing !== "metered") return "免费";
+  const unit = provider.billingUnit === "run" ? "次" : "镜头";
   return provider.estimatedCnyPerClip === undefined
     ? "待估价"
-    : `约 ¥${formatMoney(provider.estimatedCnyPerClip)}/镜头`;
+    : `约 ¥${formatMoney(provider.estimatedCnyPerClip)}/${unit}`;
 }

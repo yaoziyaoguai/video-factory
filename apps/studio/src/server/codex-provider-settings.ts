@@ -83,7 +83,7 @@ export async function readZaiCodexProviderSettings(
 ): Promise<CodexProviderSettings> {
   return readProviderSettings(resolveZaiCodexSocketPath(environment), {
     profileId: "zai",
-    providerId: "zai-coding-plan",
+    providerId: "zai-bigmodel-api",
     modelId: "glm-5.3-flash",
     taskKinds: ["visual-review"],
   }, options);

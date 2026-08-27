@@ -27,6 +27,9 @@ import { CodexTopicIdeaModel, TrendOpportunityAgent } from "./trend-opportunity-
 
 const repositoryRoot = await findRepositoryRoot(process.cwd());
 loadLocalEnvironment(repositoryRoot);
+// BigModel 凭据只属于宿主机 broker；新旧变量即使误放进 Studio 环境也立即移除。
+delete process.env.ZAI_BIGMODEL_API_KEY;
+delete process.env.ZAI_API_KEY;
 const workspaceRoot = path.resolve(
   process.env.VIDEO_FACTORY_WORKSPACE ?? path.join(repositoryRoot, "workspace", "factory"),
 );

@@ -1,11 +1,11 @@
 # ZAI Codex Video Review Implementation Plan
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Run an isolated ZAI-backed Codex CLI on Alibaba ECS and use GLM-5.3-Flash for safe, attributable visual review without depending on the user's Mac.
+**Goal:** Run an isolated ZAI BigModel broker on Alibaba ECS and use GLM-5.3-Flash for safe, attributable visual review without depending on the user's Mac.
 
 **Architecture:** Generalize the existing allowlisted Codex broker around named executor profiles while preserving separate services, credentials, sockets, task roots, and quotas. Add a visual-review task whose media is preprocessed into bounded review inputs and whose receipt flows into the editable node workspace.
 
-**Tech Stack:** TypeScript, Codex CLI, GLM Coding Plan Responses endpoint, systemd, Unix sockets, FFmpeg, Docker Compose, Vitest
+**Tech Stack:** TypeScript, BigModel Chat Completion API, systemd, Unix sockets, FFmpeg, Docker Compose, Vitest
 
 **Spec:** `docs/superpowers/specs/2026-08-27-editable-node-workspaces-and-zai-codex-design.md`
 
@@ -13,7 +13,7 @@
 
 - Alibaba ECS is the only production runtime.
 - OpenAI and ZAI credentials, homes, sockets, and task directories are isolated.
-- Coding Plan keys never enter Git, containers, logs, process arguments, or Web responses.
+- BigModel API keys never enter Git, containers, logs, process arguments, or Web responses.
 - Broker task kinds and schemas are owned by the host, not the container.
 - Native video transport is enabled only after a bounded real test succeeds.
 
@@ -119,11 +119,11 @@
 
 **Interfaces:**
 - Produces: live ZAI broker health and one minimal GLM-5.3-Flash structured response.
-- Consumes: user-provided Coding Plan key through a non-echoing secure channel.
+- Consumes: user-provided ordinary BigModel API key through a non-echoing secure channel.
 
-- [ ] Back up the server production configuration and install the Coding Plan Key with mode 0600 without printing it.
+- [ ] Back up the server production configuration and install the BigModel API Key with mode 0600 without printing it.
 - [ ] Start the isolated ZAI broker and verify the socket health endpoint.
-- [ ] Send one tiny structured text task to prove subscription routing and record only model id, success, latency, and usage category.
+- [ ] Send one tiny structured text task to prove metered routing and record only model id, success, latency, and usage category.
 - [ ] Send one tiny image review; do not test full video until image transport is proven.
 - [ ] Test a 2-4 second low-resolution video once; if native transport fails, record the keyframe fallback and do not repeat paid attempts.
 - [ ] Verify OpenAI broker and existing VideoFactory remain healthy after the ZAI test.

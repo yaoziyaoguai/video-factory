@@ -14,6 +14,7 @@ import {
 } from "@video-factory/production-pipeline";
 import { readMeteredVideoProviderSettings } from "./video-provider-settings.js";
 import { readMeteredImageProviderSettings } from "./image-provider-settings.js";
+import { buildStudioChildEnvironment } from "./studio-child-environment.js";
 
 export interface ProductionWorkerOptions {
   repositoryRoot: string;
@@ -25,7 +26,7 @@ export function buildProductionWorker(options: ProductionWorkerOptions): Generat
   const fallback = new PythonWorkerClient({
     command: [resolveProductionPython(options.repositoryRoot, options.environment), "-m", "video_factory.worker"],
     cwd: options.repositoryRoot,
-    env: { ...options.environment, PYTHONPATH: options.pythonPath },
+    env: buildStudioChildEnvironment(options.environment, { PYTHONPATH: options.pythonPath }),
     timeoutMs: 20 * 60 * 1000,
   });
   const adapters: VideoGenerationAdapterBinding[] = readMeteredVideoProviderSettings(options.environment).map((setting) => {
@@ -142,6 +143,16 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
     { id: "kokoro-local-v1", label: "Kokoro 本地配音", modelId: "kokoro", transport: "local_process", billing: "local_compute" },
     { id: "python-ffmpeg-v1", label: "FFmpeg 竖屏渲染", modelId: "ffmpeg", transport: "local_process", billing: "local_compute" },
     { id: "python-technical-review-v1", label: "本地机器质检", modelId: "ffprobe", transport: "local_process", billing: "local_compute" },
+    {
+      id: "glm-visual-review-v1",
+      label: "GLM-5.3-Flash 视觉审片",
+      modelId: "glm-5.3-flash",
+      transport: "unix_socket",
+      billing: "metered",
+      billingUnit: "run",
+      estimatedCostCny: positiveEstimate(environment.ZAI_VISUAL_REVIEW_ESTIMATED_CNY, 0.1),
+      maxAttempts: 1,
+    },
   ];
   for (const setting of readMeteredImageProviderSettings(environment)) metadata.push({
     id: setting.providerId,
@@ -167,6 +178,7 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
     modelId: environment.MINIMAX_TTS_MODEL_ID?.trim() || "speech-2.8-turbo",
     transport: "http_api",
     billing: "metered",
+    billingUnit: "run",
     estimatedCostCny: positiveEstimate(environment.MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP, 0.5),
     maxAttempts: 1,
   });

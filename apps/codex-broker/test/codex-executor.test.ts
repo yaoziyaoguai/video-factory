@@ -376,7 +376,7 @@ describe("buildCodexExecCommand", () => {
     const zai = codexExecutorProfileFor("zai");
     assert.deepEqual(zai.identity, {
       profileId: "zai",
-      providerId: "zai-coding-plan",
+      providerId: "zai-bigmodel-api",
       modelId: "glm-5.3-flash",
       taskKinds: ["visual-review"],
     });

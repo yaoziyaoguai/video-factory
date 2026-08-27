@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildDirectorAssetProviders, resolveProductionPython } from "../src/server/production-worker.js";
+import {
+  buildDirectorAssetProviders,
+  buildProductionProviderRuntimeMetadata,
+  resolveProductionPython,
+} from "../src/server/production-worker.js";
 import { readMeteredImageProviderSettings } from "../src/server/image-provider-settings.js";
 import { readMeteredVideoProviderSettings } from "../src/server/video-provider-settings.js";
+import { buildStudioChildEnvironment } from "../src/server/studio-child-environment.js";
 
 describe("production Python runtime", () => {
   it("prefers an explicit runtime, then the verified project environment", () => {
@@ -12,6 +17,33 @@ describe("production Python runtime", () => {
       "/repo/.local/python/.venv/bin/python",
     );
     assert.equal(resolveProductionPython("/repo", {}, () => false), "python3");
+  });
+
+  it("never forwards BigModel broker credentials to Studio child processes", () => {
+    assert.deepEqual(buildStudioChildEnvironment({
+      SAFE_VALUE: "kept",
+      ZAI_BIGMODEL_API_KEY: "new-secret",
+      ZAI_API_KEY: "legacy-secret",
+    }, {
+      PYTHONPATH: "/repo/python",
+      ZAI_BIGMODEL_API_KEY: "override-secret",
+    }), {
+      SAFE_VALUE: "kept",
+      PYTHONPATH: "/repo/python",
+    });
+  });
+});
+
+describe("production provider runtime metadata", () => {
+  it("marks GLM review and MiniMax voice as per-run metered calls", () => {
+    const metadata = buildProductionProviderRuntimeMetadata({
+      MINIMAX_API_KEY: "test-only-key",
+      MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP: "0.5",
+      ZAI_VISUAL_REVIEW_ESTIMATED_CNY: "0.1",
+    });
+
+    assert.equal(metadata.find((item) => item.id === "glm-visual-review-v1")?.billingUnit, "run");
+    assert.equal(metadata.find((item) => item.id === "minimax-tts-v1")?.billingUnit, "run");
   });
 });
 
