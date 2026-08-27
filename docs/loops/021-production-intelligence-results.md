@@ -38,4 +38,9 @@ Date: 2026-08-28
 - Claude's P0 claim that `renderManifestPath` was not wired was disproved against production code and is now protected by pipeline, agent and Python preprocessor tests.
 - Pixabay video `picture_id` remains deliberately unrendered rather than guessed into an undocumented URL; image candidates and Pexels video candidates still show official previews.
 
-Browser acceptance, commit, CI deployment and cloud canary are the final loop steps.
+## Deployment And Cloud Acceptance
+
+- Commit `0015fe37b7c54fde1016417aae660be59f811c8c` passed GitHub Actions test/build, dependency security and Alibaba ECS deployment jobs.
+- Production login and authenticated read-only canary passed for session, provider catalog, the retained real-video run and cost dashboard.
+- Host `vf-codex-broker` and `vf-zai-codex-broker` services are active; after refreshing Studio's startup probe, both Codex and GLM-5.3-Flash visual-review providers report `ready`.
+- The cloud login page completed loading without horizontal overflow. The paid video remains at final human review and was neither regenerated nor published.
