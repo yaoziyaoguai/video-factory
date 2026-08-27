@@ -25,6 +25,7 @@ describe("ZAI systemd service sample", () => {
     assert.match(service, /^Group=vf-bridge$/m);
     assert.match(service, /^UMask=0007$/m);
     assert.match(service, /^RuntimeDirectoryMode=0750$/m);
+    assert.match(service, /^RuntimeDirectoryPreserve=restart$/m);
     assert.match(service, /\/run\/video-factory-zai-codex\/worker\.sock/);
     assert.doesNotMatch(service, /CODEX_HOME|CODEX_BIN|MODEL_CATALOG/);
     assert.doesNotMatch(service, /ZAI_API_KEY\s*=/);

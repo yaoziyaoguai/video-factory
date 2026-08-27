@@ -21,6 +21,7 @@ Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=285000
 ExecStart=/opt/video-factory/codex-broker/bin/node /opt/video-factory/codex-broker/current/dist/main.js
 RuntimeDirectory=video-factory-zai-codex
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20

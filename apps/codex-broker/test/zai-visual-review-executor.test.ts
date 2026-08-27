@@ -126,8 +126,8 @@ describe("ZaiVisualReviewExecutor", () => {
     const executor = new ZaiVisualReviewExecutor({
       env: { ZAI_API_KEY: API_KEY },
       fetchFn: async () => new Response(
-        JSON.stringify({ error: { message: `upstream echoed ${API_KEY}` } }),
-        { status: 401 },
+        JSON.stringify({ error: { code: "1308", message: `upstream echoed ${API_KEY}` } }),
+        { status: 429 },
       ),
     });
 
@@ -135,11 +135,36 @@ describe("ZaiVisualReviewExecutor", () => {
       () => executor.runTask(visualReviewTask()),
       (error: unknown) => {
         assert.ok(error instanceof Error);
-        assert.match(error.message, /HTTP 401/);
+        assert.match(error.message, /HTTP 429 \(code 1308\)/);
         assert.doesNotMatch(error.message, new RegExp(API_KEY));
         assert.doesNotMatch(error.message, /upstream echoed/);
         return true;
       },
+    );
+  });
+
+  it("does not let a stalled HTTP error body occupy the broker request timeout", async () => {
+    const executor = new ZaiVisualReviewExecutor({
+      env: { ZAI_API_KEY: API_KEY },
+      fetchFn: async () => new Response(new ReadableStream({ start() {} }), { status: 429 }),
+      timeoutMs: 2_000,
+    });
+    const startedAt = Date.now();
+
+    await assert.rejects(() => executor.runTask(visualReviewTask()), /HTTP 429/);
+
+    assert.ok(Date.now() - startedAt < 1_000);
+  });
+
+  it("rejects an oversized success response without buffering it all", async () => {
+    const executor = new ZaiVisualReviewExecutor({
+      env: { ZAI_API_KEY: API_KEY },
+      fetchFn: async () => new Response(new Uint8Array(1024 * 1024 + 1), { status: 200 }),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(visualReviewTask()),
+      /response exceeds 1048576 bytes/,
     );
   });
 

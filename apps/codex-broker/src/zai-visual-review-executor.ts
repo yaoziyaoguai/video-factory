@@ -18,6 +18,8 @@ const ZAI_CHAT_COMPLETIONS_URL = "https://open.bigmodel.cn/api/coding/paas/v4/ch
 const ZAI_MODEL_ID = "glm-5.3-flash";
 const DEFAULT_TIMEOUT_MS = 285_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const MAX_ERROR_RESPONSE_BYTES = 16 * 1024;
+const ERROR_RESPONSE_READ_TIMEOUT_MS = 250;
 
 export interface ZaiVisualReviewExecutorOptions {
   env?: NodeJS.ProcessEnv;
@@ -96,12 +98,13 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
         signal: controller.signal,
       });
       if (!response.ok) {
-        throw new CodexExecutorError(`ZAI Chat Completion returned HTTP ${response.status}.`, false);
+        const code = await readErrorCode(response);
+        throw new CodexExecutorError(
+          `ZAI Chat Completion returned HTTP ${response.status}${code ? ` (code ${code})` : ""}.`,
+          false,
+        );
       }
-      const raw = await response.text();
-      if (Buffer.byteLength(raw, "utf8") > MAX_RESPONSE_BYTES) {
-        throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false);
-      }
+      const raw = await readBoundedResponse(response);
       const content = responseContent(raw);
       const output = stripCodeFence(content);
       let parsed: unknown;
@@ -145,6 +148,83 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
       options.signal?.removeEventListener("abort", abort);
     }
   }
+}
+
+async function readErrorCode(response: Response): Promise<string | undefined> {
+  if (!response.body) return undefined;
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let received = 0;
+  let timeout: number | undefined;
+  const deadline = new Promise<undefined>((resolve) => {
+    timeout = setTimeout(resolve, ERROR_RESPONSE_READ_TIMEOUT_MS);
+  });
+  try {
+    while (true) {
+      const result = await Promise.race([reader.read(), deadline]);
+      if (result === undefined) {
+        await reader.cancel().catch(() => undefined);
+        return undefined;
+      }
+      if (result.done) break;
+      received += result.value.byteLength;
+      if (received > MAX_ERROR_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return undefined;
+      }
+      chunks.push(Buffer.from(result.value));
+    }
+  } catch {
+    return undefined;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    reader.releaseLock();
+  }
+  return responseErrorCode(Buffer.concat(chunks).toString("utf8"));
+}
+
+async function readBoundedResponse(response: Response): Promise<string> {
+  const declaredBytes = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredBytes) && declaredBytes > MAX_RESPONSE_BYTES) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false);
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function responseErrorCode(raw: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(parsed)) return undefined;
+  const nested = isRecord(parsed.error) ? parsed.error.code : undefined;
+  const candidate = nested ?? parsed.code;
+  if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0) {
+    return String(candidate);
+  }
+  if (typeof candidate === "string" && /^\d{3,8}$/.test(candidate)) return candidate;
+  return undefined;
 }
 
 function responseContent(raw: string): string {
