@@ -11,12 +11,14 @@ from unittest.mock import patch
 
 from video_factory.cli import main
 from video_factory.database import Store
-from video_factory.domain import Scene
+from video_factory.domain import Scene, StockAssetCandidate
 from video_factory.exporter import write_review_package, write_script
 from video_factory.script_service import draft_script, draft_script_from_values
 from video_factory.stock_assets import (
     api_headers,
     download_headers,
+    fetch_json,
+    materialize_candidate,
     media_file_score,
     prepare_scene_assets,
     query_for_scene,
@@ -604,6 +606,83 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("VideoFactory/0.1", headers["User-Agent"])
         self.assertEqual(headers["Accept"], "application/json")
         self.assertEqual(headers["Authorization"], "test-key")
+
+    def test_stock_search_retries_a_connection_reset(self):
+        attempts = 0
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return b'{"hits": []}'
+
+        def opener(request, timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionResetError(104, "Connection reset by peer")
+            return FakeResponse()
+
+        with patch("video_factory.stock_assets.time.sleep") as sleep:
+            payload = fetch_json(urllib.request.Request("https://example.invalid"), opener=opener)
+
+        self.assertEqual(payload, {"hits": []})
+        self.assertEqual(attempts, 2)
+        sleep.assert_called_once()
+
+    def test_stock_download_retries_a_connection_reset_without_leaving_a_partial_file(self):
+        attempts = 0
+
+        class FakeResponse:
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read1(self, _size):
+                return b""
+
+        def urlopen(request, timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionResetError(104, "Connection reset by peer")
+            return FakeResponse()
+
+        candidate = StockAssetCandidate(
+            provider="pexels",
+            asset_id="retry-1",
+            media_type="video",
+            width=1080,
+            height=1920,
+            duration=5,
+            preview_url="https://example.invalid/preview.jpg",
+            download_url="https://example.invalid/video.mp4",
+            source_url="https://example.invalid/source",
+            creator="test",
+            license_note="test",
+            query="test",
+            score=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("video_factory.stock_assets.urllib.request.urlopen", side_effect=urlopen), \
+             patch("video_factory.stock_assets.time.sleep") as sleep:
+            output = Path(tmp) / "asset.mp4"
+            materialize_candidate(candidate, output)
+
+            self.assertTrue(output.exists())
+            self.assertEqual(output.stat().st_size, 0)
+
+        self.assertEqual(attempts, 2)
+        sleep.assert_called_once()
 
     def test_stock_asset_download_headers_accept_media(self):
         headers = download_headers("https://www.pexels.com/video/example/")

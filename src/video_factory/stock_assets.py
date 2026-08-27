@@ -19,6 +19,9 @@ PROVIDER_KEY_ENV = {
 }
 MAX_ASSET_DOWNLOAD_BYTES = 12_000_000
 MAX_ASSET_DOWNLOAD_SECONDS = 45
+PROVIDER_REQUEST_ATTEMPTS = 3
+ASSET_DOWNLOAD_ATTEMPTS = 2
+NETWORK_RETRY_DELAY_SECONDS = 0.25
 
 TOPIC_SHOT_QUERIES = (
     (("下班", "上班", "职场", "工作", "加班"), (
@@ -670,14 +673,20 @@ def provider_key(provider: str, environ: Optional[dict] = None) -> str:
 
 def fetch_json(request: urllib.request.Request, opener: Optional[Callable] = None) -> dict:
     active_opener = opener or urllib.request.urlopen
-    try:
-        with active_opener(request, timeout=20) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")[:300]
-        raise RuntimeError(f"Provider request failed with HTTP {error.code}: {detail}") from error
-    except URLError as error:
-        raise RuntimeError(f"Provider request failed: {error}") from error
+    for attempt in range(1, PROVIDER_REQUEST_ATTEMPTS + 1):
+        try:
+            with active_opener(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")[:300]
+            raise RuntimeError(f"Provider request failed with HTTP {error.code}: {detail}") from error
+        except (URLError, ConnectionError, TimeoutError) as error:
+            if attempt == PROVIDER_REQUEST_ATTEMPTS:
+                raise RuntimeError(
+                    f"Provider request failed after {attempt} attempts: {type(error).__name__}"
+                ) from error
+            time.sleep(NETWORK_RETRY_DELAY_SECONDS * attempt)
+    raise AssertionError("Provider request retry loop exited unexpectedly")
 
 
 def materialize_candidate(candidate: StockAssetCandidate, local_path: Path) -> Path:
@@ -685,21 +694,29 @@ def materialize_candidate(candidate: StockAssetCandidate, local_path: Path) -> P
     if candidate.download_url.startswith("mock://"):
         return write_mock_image(candidate, local_path)
     request = urllib.request.Request(candidate.download_url, headers=download_headers(candidate.source_url))
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            content_length = int(response.headers.get("Content-Length") or 0)
-            if content_length > MAX_ASSET_DOWNLOAD_BYTES:
+    for attempt in range(1, ASSET_DOWNLOAD_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                content_length = int(response.headers.get("Content-Length") or 0)
+                if content_length > MAX_ASSET_DOWNLOAD_BYTES:
+                    raise RuntimeError(
+                        f"Asset download is too large ({content_length} bytes) for {candidate.provider}:{candidate.asset_id}"
+                    )
+                write_response_body(response, local_path, MAX_ASSET_DOWNLOAD_BYTES)
+            return local_path
+        except HTTPError as error:
+            raise RuntimeError(
+                f"Asset download failed with HTTP {error.code} for {candidate.provider}:{candidate.asset_id}"
+            ) from error
+        except (URLError, ConnectionError, TimeoutError) as error:
+            local_path.unlink(missing_ok=True)
+            if attempt == ASSET_DOWNLOAD_ATTEMPTS:
                 raise RuntimeError(
-                    f"Asset download is too large ({content_length} bytes) for {candidate.provider}:{candidate.asset_id}"
-                )
-            write_response_body(response, local_path, MAX_ASSET_DOWNLOAD_BYTES)
-    except HTTPError as error:
-        raise RuntimeError(
-            f"Asset download failed with HTTP {error.code} for {candidate.provider}:{candidate.asset_id}"
-        ) from error
-    except URLError as error:
-        raise RuntimeError(f"Asset download failed for {candidate.provider}:{candidate.asset_id}: {error}") from error
-    return local_path
+                    f"Asset download failed after {attempt} attempts for "
+                    f"{candidate.provider}:{candidate.asset_id}: {type(error).__name__}"
+                ) from error
+            time.sleep(NETWORK_RETRY_DELAY_SECONDS * attempt)
+    raise AssertionError("Asset download retry loop exited unexpectedly")
 
 
 def write_response_body(
