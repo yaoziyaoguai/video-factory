@@ -23,7 +23,9 @@ describe("ZAI systemd service sample", () => {
       /^Environment=VIDEO_FACTORY_CODEX_MODEL_CATALOG_PATH=\/var\/lib\/video-factory-zai-codex\/codex-home\/models\.json$/m,
     );
     assert.match(service, /^EnvironmentFile=\/etc\/video-factory\/zai-codex-broker\.env$/m);
-    assert.match(service, /stat -c %a \/etc\/video-factory\/zai-codex-broker\.env/);
+    assert.match(service, /stat -c %%U:%%G \/etc\/video-factory\/zai-codex-broker\.env/);
+    assert.match(service, /stat -c %%a \/etc\/video-factory\/zai-codex-broker\.env/);
+    assert.doesNotMatch(service, /stat -c %U:%G \/etc\/video-factory\/zai-codex-broker\.env/);
     assert.match(service, /test .* = 600/);
     assert.match(service, /^Group=vf-bridge$/m);
     assert.match(service, /^UMask=0007$/m);
