@@ -438,6 +438,21 @@ describe("Studio API", () => {
     await app.close();
   });
 
+  it("reports malformed JSON as a client error", async () => {
+    const app = buildStudioApp({ service: fakeService() });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { "content-type": "application/json" },
+      payload: '{"username":',
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.deepEqual(response.json(), { error: "请求内容不是有效的 JSON。" });
+    await app.close();
+  });
+
   it("reads and persists creator defaults", async () => {
     let savedRecipe = "";
     const app = buildStudioApp({ service: fakeService({

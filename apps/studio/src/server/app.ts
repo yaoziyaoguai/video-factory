@@ -444,6 +444,10 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       void reply.code(413).send({ error: "参考视频不能超过 30 MB。" });
       return;
     }
+    if (statusCode === 400 && code === "FST_ERR_CTP_INVALID_JSON_BODY") {
+      void reply.code(400).send({ error: "请求内容不是有效的 JSON。" });
+      return;
+    }
     if (error instanceof StudioInputError) {
       void reply.code(400).send({ error: error.message });
       return;

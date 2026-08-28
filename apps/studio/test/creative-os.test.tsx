@@ -673,13 +673,13 @@ describe("Creative OS", () => {
         id: "seedance-video-v1",
         capability: "asset.prepare",
         label: "Seedance 关键镜头",
-        available: false,
+        available: true,
         kind: "external",
-        status: "needs_config",
+        status: "ready",
         billing: "metered",
         description: "按预算生成少量关键镜头。",
         modes: ["文生视频", "9:16"],
-        requirement: "需要 ARK_API_KEY",
+        estimatedCnyPerClip: 8,
       },
       {
         id: "kling-video-v1",
@@ -693,6 +693,13 @@ describe("Creative OS", () => {
       },
     ]);
     vi.spyOn(studioApi, "trendSources").mockResolvedValue(trendSources);
+    vi.spyOn(studioApi, "trendServices").mockResolvedValue([{
+      id: "newsnow",
+      label: "NewsNow",
+      kind: "aggregator",
+      status: "ready",
+      lastCheckedAt: "2026-08-28T10:00:00.000Z",
+    }]);
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "生成与素材模型" })).toBeInTheDocument());
@@ -702,7 +709,8 @@ describe("Creative OS", () => {
     expect(screen.getByText("抖音官方热点")).toBeInTheDocument();
     expect(screen.getAllByText("按量计费").length).toBeGreaterThan(0);
     expect(screen.getAllByText("需要配置").length).toBeGreaterThan(0);
-    expect(screen.getByText("需要 ARK_API_KEY")).toBeInTheDocument();
+    expect(within(screen.getByText("Seedance 关键镜头").closest("article")!).getByText("已配置")).toBeInTheDocument();
+    expect(screen.getByLabelText("NewsNow 内部服务已连接")).toBeInTheDocument();
   });
 
   it("persists voice and visual choices as production defaults", async () => {

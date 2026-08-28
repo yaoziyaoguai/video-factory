@@ -227,7 +227,7 @@ export function ResourcesPage() {
                   <span>{service.itemCount === undefined ? SERVICE_STATUS[service.status] : `${service.itemCount} 条`}</span>
                   {serviceUrl
                     ? <a href={serviceUrl} target="_blank" rel="noreferrer" title={`打开 ${service.label}`}><ArrowUpRight aria-hidden="true" size={15} /></a>
-                    : <span aria-label={`${service.label} 未配置地址`} />}
+                    : <span aria-label={service.status === "stopped" ? `${service.label} 未配置地址` : `${service.label} 内部服务已连接`} />}
                 </article>;
               })}
               {trendSources.filter((source) => source.status !== "ready").slice(0, 3).map((source) => (
@@ -371,7 +371,7 @@ function ProviderRow({ provider, isDefault, canSetDefault, selectedModelId, onMo
       <div><strong>{provider.label}</strong><small>{provider.description ?? provider.id}</small>{!ready && provider.requirement ? <small className="provider-requirement">{provider.requirement}</small> : null}</div>
       <span>{availableModels.length || selectedModelId ? <label className="provider-model-select"><small>默认模型</small><select aria-label={`${provider.label} 默认模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(event.target.value)}><option value="">继承服务默认：{provider.defaultModelId ?? "自动选择"}</option>{staleSelection ? <option value={staleSelection} disabled>已失效：{staleSelection}</option> : null}{availableModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}</select></label> : (provider.modes ?? []).slice(0, 3).join(" · ")}</span>
       <strong className={provider.billing === "metered" ? "is-metered" : ""}>{billingLabel(provider.billing)}</strong>
-      <span className={ready ? "ledger-state is-ready" : "ledger-state"}>{ready ? "可用" : provider.status === "planned" ? "规划中" : "需要配置"}</span>
+      <span className={ready ? "ledger-state is-ready" : "ledger-state"}>{providerReadinessLabel(provider, ready)}</span>
       {ready && canSetDefault ? <button className={isDefault ? "provider-default is-active" : "provider-default"} type="button" disabled={isDefault} onClick={() => onSetDefault(provider.id)}>{isDefault ? "制作默认" : "设为默认"}</button> : ready ? <span className="provider-default is-static">系统路由</span> : <span />}
       {provider.docsUrl ? <a href={provider.docsUrl} target="_blank" rel="noreferrer" title={`${provider.label} 文档`}><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
     </article>
@@ -386,7 +386,14 @@ function billingLabel(billing: StudioProvider["billing"]): string {
 
 function FoundationProvider({ provider }: { provider: StudioProvider }) {
   const ready = isProductionReady(provider);
-  return <article className="foundation-provider"><span className={ready ? "foundation-state is-ready" : "foundation-state"}>{ready ? <Check aria-hidden="true" size={15} /> : <CircleMinus aria-hidden="true" size={15} />}</span><div><strong>{provider.label}</strong><span className="foundation-description">{provider.description ?? capabilityLabel(provider.capability)}</span></div><span>{capabilityLabel(provider.capability)}</span><small>{provider.kind === "test" ? "仅测试" : ready ? "可用" : "未配置"}</small></article>;
+  return <article className="foundation-provider"><span className={ready ? "foundation-state is-ready" : "foundation-state"}>{ready ? <Check aria-hidden="true" size={15} /> : <CircleMinus aria-hidden="true" size={15} />}</span><div><strong>{provider.label}</strong><span className="foundation-description">{provider.description ?? capabilityLabel(provider.capability)}</span></div><span>{capabilityLabel(provider.capability)}</span><small>{provider.kind === "test" ? "仅测试" : providerReadinessLabel(provider, ready)}</small></article>;
+}
+
+function providerReadinessLabel(provider: StudioProvider, ready: boolean): string {
+  if (!ready) return provider.status === "planned" ? "规划中" : "需要配置";
+  if (provider.billing === "metered") return "已配置";
+  if (provider.billing === "subscription") return "已连接";
+  return "可用";
 }
 
 function PublishTargetRow({ target }: { target: StudioPublishTarget }) {
