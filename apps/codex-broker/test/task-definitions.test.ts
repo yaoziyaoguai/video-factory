@@ -27,7 +27,7 @@ function validDirectorPlan() {
     referenceRequirements: [],
     successCriteria: ["完整看见一次上滑"],
     query: "hand swipe smartphone",
-    generationPrompt: "",
+    generationPrompt: "手机用户在自然侧光的室内完成一次清楚的向上滑动，固定近景",
     rationale: "常见单一动作适合图库检索",
     continuityNote: "承接上一镜",
     confidence: 0.8,
@@ -94,7 +94,7 @@ describe("broker-owned task definitions", () => {
 
     assert.equal(topic.version, "video-factory/topic-editor-v2");
     assert.equal(script.version, "video-factory/screenwriter-v4");
-    assert.equal(director.version, "video-factory/director-v5");
+    assert.equal(director.version, "video-factory/director-v6");
     assert.equal(review.version, "video-factory/visual-review-v3");
     assert.match(topic.directive, /值得做视频/);
     assert.match(script.directive, /观众承诺/);
@@ -151,6 +151,16 @@ describe("broker-owned task definitions", () => {
     assert.ok(directorSchema.properties.shots.items.required.includes("negativeConstraints"));
     assert.ok(directorSchema.properties.shots.items.required.includes("successCriteria"));
     assert.ok(directorSchema.properties.shots.items.required.includes("deliveryType"));
+  });
+
+  it("rejects blank director execution prompts before they reach the production pipeline", () => {
+    const invalidDirector = validDirectorPlan();
+    invalidDirector.shots[0]!.generationPrompt = "";
+
+    assert.match(
+      outputValidationErrorFor("director-plan", invalidDirector) ?? "",
+      /generationPrompt.*shorter than 1 character/,
+    );
   });
 
   it("validates nested visual-review output fields at runtime", () => {

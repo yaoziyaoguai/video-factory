@@ -213,11 +213,11 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
     };
   }
   return {
-    version: "video-factory/director-v5",
+    version: "video-factory/director-v6",
     directive: DIRECTOR_PLAN_DIRECTIVE,
     task: "生成视觉圣经和逐镜素材路由。",
     outputRules: [
-      "每个 shot 必须先完成结构化 Shot Spec，选择可执行的 deliveryType，再给出 query 与 generationPrompt。",
+      "每个 shot 必须先完成结构化 Shot Spec，选择可执行的 deliveryType，再给出非空的 query 与 generationPrompt；即使图库使用 query 检索，也要用 generationPrompt 写清最终画面执行意图。",
       "temporalBeats 至少两段，使用 [0s-2s] 形式；successCriteria 必须能从产出画面直接检查。",
     ],
     examples: [
@@ -321,7 +321,7 @@ const DIRECTOR_PLAN_OUTPUT_SCHEMA = {
           referenceRequirements: { type: "array", maxItems: 8, items: { type: "string", minLength: 1 } },
           successCriteria: { type: "array", minItems: 1, maxItems: 8, items: { type: "string", minLength: 1 } },
           query: { type: "string", maxLength: 140 },
-          generationPrompt: { type: "string" },
+          generationPrompt: { type: "string", minLength: 1 },
           rationale: { type: "string" },
           continuityNote: { type: "string" },
           confidence: { type: "number", minimum: 0, maximum: 1 },
