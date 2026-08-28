@@ -70,7 +70,32 @@ export function parseProductionTemplateSnapshot(value: unknown): ProductionTempl
     if (!LAYERS.has(layer as TemplateLayer)) throw new Error(`templateSnapshot.fieldSources.${field} is invalid.`);
     fieldSources[field] = layer as TemplateLayer;
   }
-  return deepFreeze({ templateId, templateVersion, resolvedAt, resolvedBlueprint, sourceLayers, fieldSources });
+  const modelDefaults = input.modelDefaults === undefined
+    ? undefined
+    : requireModelDefaults(input.modelDefaults, "templateSnapshot.modelDefaults");
+  return deepFreeze({
+    templateId,
+    templateVersion,
+    resolvedAt,
+    resolvedBlueprint,
+    ...(modelDefaults ? { modelDefaults } : {}),
+    sourceLayers,
+    fieldSources,
+  });
+}
+
+function requireModelDefaults(value: unknown, field: string): Record<string, string> {
+  const input = requireRecord(value, field);
+  const entries = Object.entries(input);
+  if (entries.length > 32) throw new Error(`${field} must not contain more than 32 entries.`);
+  return Object.fromEntries(entries.map(([providerId, modelId]) => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(providerId)) throw new Error(`${field}.${providerId} is invalid.`);
+    const normalized = requireString(modelId, `${field}.${providerId}`);
+    if (normalized.length > 160 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(normalized)) {
+      throw new Error(`${field}.${providerId} is invalid.`);
+    }
+    return [providerId, normalized];
+  }));
 }
 
 function requireRecord(value: unknown, field: string): Record<string, unknown> {

@@ -46,6 +46,47 @@ describe("metered video generation adapters", () => {
     });
   });
 
+  it("selects an allowlisted Seedance model per request and sends bounded quality parameters", async () => {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const adapter = new SeedanceVideoAdapter({
+      apiKey: "test-key",
+      model: "seedance-default",
+      allowedModels: ["seedance-default", "seedance-2.5"],
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return requests.length === 1
+          ? jsonResponse({ id: "seedance-task-model" })
+          : jsonResponse({ id: "seedance-task-model", status: "succeeded", content: { video_url: "https://example.com/model.mp4" } });
+      },
+      sleep: async () => undefined,
+    });
+
+    await adapter.generate({
+      prompt: "受控样片",
+      durationSeconds: 4,
+      ratio: "9:16",
+      modelId: "seedance-2.5",
+      resolution: "480p",
+      generateAudio: false,
+    });
+
+    assert.deepEqual(JSON.parse(String(requests[0]?.init?.body)), {
+      model: "seedance-2.5",
+      content: [{ type: "text", text: "受控样片" }],
+      ratio: "9:16",
+      duration: 4,
+      watermark: false,
+      generate_audio: false,
+      resolution: "480p",
+    });
+    await assert.rejects(() => adapter.generate({
+      prompt: "越权模型",
+      durationSeconds: 4,
+      ratio: "9:16",
+      modelId: "unknown-model",
+    }), /not allowed/);
+  });
+
   it("normalizes the Wan asynchronous task lifecycle", async () => {
     const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const responses = [

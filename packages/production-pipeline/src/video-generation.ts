@@ -4,6 +4,9 @@ export interface VideoGenerationRequest {
   prompt: string;
   durationSeconds: number;
   ratio: VideoAspectRatio;
+  modelId?: string;
+  resolution?: "480p" | "720p" | "1080p";
+  generateAudio?: boolean;
 }
 
 export interface VideoGenerationResult {
@@ -42,6 +45,7 @@ interface AsyncAdapterOptions {
 
 export interface SeedanceVideoAdapterOptions extends AsyncAdapterOptions {
   baseUrl?: string;
+  allowedModels?: string[];
 }
 
 export class SeedanceVideoAdapter implements VideoGenerationAdapter {
@@ -66,16 +70,18 @@ export class SeedanceVideoAdapter implements VideoGenerationAdapter {
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     validateRequest(request);
+    const model = resolveRequestedModel(request.modelId, this.options.model, this.options.allowedModels);
     const submitted = await requestJson(this.fetch, `${this.baseUrl}/contents/generations/tasks`, {
       method: "POST",
       headers: authHeaders(this.options.apiKey),
       body: JSON.stringify({
-        model: this.options.model,
+        model,
         content: [{ type: "text", text: request.prompt }],
         ratio: request.ratio,
         duration: request.durationSeconds,
         watermark: false,
-        generate_audio: false,
+        generate_audio: request.generateAudio ?? false,
+        ...(request.resolution ? { resolution: request.resolution } : {}),
       }),
     });
     const taskId = requiredString(submitted.id, "Seedance task id");
@@ -104,6 +110,14 @@ export class SeedanceVideoAdapter implements VideoGenerationAdapter {
     await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
     throw new Error(message);
   }
+}
+
+function resolveRequestedModel(requested: string | undefined, fallback: string, allowed: string[] | undefined): string {
+  const model = requested?.trim() || fallback;
+  if (allowed && !allowed.includes(model)) {
+    throw new Error(`Video model '${model}' is not allowed for this provider.`);
+  }
+  return model;
 }
 
 export interface MiniMaxVideoAdapterOptions extends AsyncAdapterOptions {

@@ -50,6 +50,7 @@ describe("readCodexProviderSettings", () => {
     assert.equal(settings.configured, true);
     assert.equal(settings.available, true);
     assert.equal(settings.reason, "");
+    assert.ok(settings.taskKinds.includes("reference-grammar"));
   });
 
   it("reports an exact reason for each failure status on the default path", async () => {
@@ -93,6 +94,7 @@ describe("readCodexProviderSettings", () => {
     const directory = await mkdtemp(path.join(tmpdir(), "vf-codex-settings-"));
     const socketPath = path.join(directory, "worker.sock");
     let protocolVersion = "video-factory/codex-bridge-v2";
+    let taskKinds = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"];
     const server = http.createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
@@ -100,7 +102,7 @@ describe("readCodexProviderSettings", () => {
         profileId: "openai",
         providerId: "openai",
         modelId: "codex-default",
-        taskKinds: ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"],
+        taskKinds,
       }));
     });
     await new Promise<void>((resolve, reject) => {
@@ -114,6 +116,12 @@ describe("readCodexProviderSettings", () => {
     try {
       const ready = await readCodexProviderSettings({ VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath });
       assert.equal(ready.available, true);
+      assert.ok(ready.taskKinds.includes("visual-review"));
+
+      taskKinds = ["topic-ideas", "script-draft"];
+      const partial = await readCodexProviderSettings({ VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath });
+      assert.equal(partial.available, true);
+      assert.deepEqual(partial.taskKinds, taskKinds);
 
       protocolVersion = "video-factory/codex-bridge-v1";
       const mismatched = await readCodexProviderSettings({ VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath });
@@ -174,6 +182,20 @@ describe("readZaiCodexProviderSettings", () => {
 });
 
 describe("buildProviderCatalog codex fallback", () => {
+  it("keeps existing broker tasks available during a capability-expanding rollout", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      { available: true, reason: "", taskKinds: ["topic-ideas", "script-draft"] },
+    );
+
+    assert.equal(providers.find((provider) => provider.id === "api-topic-editor-v1")?.available, true);
+    assert.equal(providers.find((provider) => provider.id === "codex-screenwriter-v1")?.available, true);
+    const director = providers.find((provider) => provider.id === "api-visual-director-v1");
+    assert.equal(director?.available, false);
+    assert.match(director?.requirement ?? "", /director-plan/);
+  });
+
   it("does not advertise an unprobed socket as compatible", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },

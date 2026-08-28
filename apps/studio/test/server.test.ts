@@ -79,6 +79,8 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
       ...(input.defaultAssetProviderId ? { defaultAssetProviderId: input.defaultAssetProviderId } : {}),
     }),
     listTemplates: async () => ({ storeRevision: 0, templates: [] }),
+    templateExperiments: async () => [],
+    resourceManifest: async () => ({ generatedAt: "2026-08-28T10:00:00.000Z", totalItems: 0, needsReviewCount: 0, legacyRunsWithoutManifest: 0, reconstructedRunCount: 0, unreadableManifestCount: 0, truncatedRunCount: 0, categories: { visual: 0, voice: 0, font: 0, document: 0, other: 0 }, items: [] }),
     getTemplate: async () => undefined,
     cloneTemplate: async () => { throw new Error("not configured"); },
     saveTemplateDraft: async () => { throw new Error("not configured"); },
@@ -153,6 +155,82 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
 }
 
 describe("Studio API", () => {
+  it("accepts bounded reference-video bytes without exposing a server path", async () => {
+    const calls: Array<{ label: string; mimeType: string; bytes: Buffer }> = [];
+    const app = buildStudioApp({ service: fakeService({
+      uploadReferenceVideo: async (input) => {
+        calls.push(input);
+        return {
+          uploadId: "67d86948-5517-4b17-8da1-b0a695159d4d",
+          label: input.label,
+          mimeType: "video/mp4",
+          sizeBytes: input.bytes.length,
+          sha256: "a".repeat(64),
+          createdAt: "2026-08-28T10:00:00.000Z",
+        };
+      },
+    }) });
+    const bytes = Buffer.from([0, 0, 0, 12, 102, 116, 121, 112, 105, 115, 111, 109]);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/reference-videos",
+      headers: { "content-type": "video/mp4", "x-video-factory-filename": encodeURIComponent("参考节奏.mp4") },
+      payload: bytes,
+    });
+
+    assert.equal(response.statusCode, 201);
+    assert.equal(response.json().label, "参考节奏.mp4");
+    assert.equal("path" in response.json(), false);
+    assert.deepEqual(calls[0]?.bytes, bytes);
+    await app.close();
+  });
+
+  it("rejects an empty or oversized reference upload before calling the store", async () => {
+    let calls = 0;
+    const app = buildStudioApp({ service: fakeService({
+      uploadReferenceVideo: async () => {
+        calls += 1;
+        throw new Error("must not be called");
+      },
+    }) });
+    const empty = await app.inject({
+      method: "POST",
+      url: "/api/reference-videos",
+      headers: { "x-video-factory-filename": encodeURIComponent("empty.mp4") },
+    });
+    assert.equal(empty.statusCode, 400);
+
+    const oversized = await app.inject({
+      method: "POST",
+      url: "/api/reference-videos",
+      headers: { "content-type": "video/mp4", "x-video-factory-filename": encodeURIComponent("large.mp4") },
+      payload: Buffer.alloc(30 * 1024 * 1024 + 1),
+    });
+    assert.equal(oversized.statusCode, 413);
+    assert.equal(calls, 0);
+    await app.close();
+  });
+
+  it("deletes a temporary reference video through a path-safe route", async () => {
+    const deleted: string[] = [];
+    const app = buildStudioApp({ service: fakeService({
+      deleteReferenceVideo: async (uploadId) => { deleted.push(uploadId); },
+    }) });
+
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/api/reference-videos/67d86948-5517-4b17-8da1-b0a695159d4d",
+      headers: { "x-video-factory-request": "studio" },
+    });
+
+    assert.equal(response.statusCode, 204);
+    assert.deepEqual(deleted, ["67d86948-5517-4b17-8da1-b0a695159d4d"]);
+    const unsafe = await app.inject({ method: "DELETE", url: "/api/reference-videos/%2e%2e" });
+    assert.notEqual(unsafe.statusCode, 204);
+    await app.close();
+  });
+
   it("exposes cost ledgers, editable node versions, spend approval, and stale regeneration", async () => {
     const calls: string[] = [];
     const service = fakeService({

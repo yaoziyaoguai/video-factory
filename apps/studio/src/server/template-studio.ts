@@ -48,7 +48,7 @@ export class TemplateStudio {
     return { storeRevision: result.storeRevision, template: this.toDto(result.template) };
   }
 
-  async resolveForRun(input: StudioProductionInput): Promise<ProductionTemplateSnapshot> {
+  async resolveForRun(input: TemplateRunInput): Promise<ProductionTemplateSnapshot> {
     const selection = parseTemplateSelection(input.template);
     const template = await this.store.getPublished(selection.templateId, selection.templateVersion);
     if (!template) {
@@ -77,6 +77,13 @@ export class TemplateStudio {
   private toDto(template: ProductionTemplateInput): StudioTemplate {
     return { ...structuredClone(template), builtIn: template.status === "published" && template.version === 1 && BUILTIN_IDS.has(template.id) };
   }
+}
+
+interface TemplateRunInput {
+  template?: unknown;
+  platform: string;
+  durationSeconds: number;
+  economics: Pick<StudioProductionInput["economics"], "maxCostCny" | "maxPaidShots">;
 }
 
 function parseTemplateSelection(value: unknown): NonNullable<StudioProductionInput["template"]> {

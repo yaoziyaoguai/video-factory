@@ -43,6 +43,16 @@ describe("resolveTemplateSnapshot", () => {
     assert.equal(Object.isFrozen(snapshot.resolvedBlueprint), true);
   });
 
+  it("preserves template model defaults in the immutable run snapshot", () => {
+    const snapshot = resolveTemplateSnapshot({
+      template: { ...validTemplate(), modelDefaults: { "seedance-video-v1": "doubao-seedance-2-0-fast-260128" } },
+      resolvedAt: "2026-08-28T00:00:00.000Z",
+      systemDefaults: { platform: "douyin" },
+    });
+    assert.deepEqual(snapshot.modelDefaults, { "seedance-video-v1": "doubao-seedance-2-0-fast-260128" });
+    assert.ok(Object.isFrozen(snapshot.modelDefaults));
+  });
+
   it("rejects invalid resolved timestamps and invalid merged overrides", () => {
     assert.throws(() => resolveTemplateSnapshot({
       template: validTemplate(),

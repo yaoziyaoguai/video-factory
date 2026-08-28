@@ -12,7 +12,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
       profileId: "openai",
       providerId: "openai",
       modelId: "codex-default",
-      taskKinds: ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"],
+      taskKinds: ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"],
     });
 
     const fakeSecret = "test-only-secret-not-for-a-real-request";

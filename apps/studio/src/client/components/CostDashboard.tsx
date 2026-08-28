@@ -26,7 +26,7 @@ export function RunCostDetailPanel({ detail }: { detail: StudioCostRunDetail }) 
       <header className="section-heading"><div><p className="eyebrow">本片成本</p><h2 id="run-cost-title">调用与消费明细</h2></div><ReceiptText aria-hidden="true" size={19} /></header>
       <CostMetrics totals={detail.totals} compact />
       <div className="cost-line-list">
-        {detail.lines.length ? detail.lines.map((line) => <article key={line.id}><span><strong>{line.role ? `${line.role} · ` : ""}{line.nodeId}</strong><small>{line.providerId} · {line.modelId}</small></span><span><small>{line.status === "failed" ? "调用失败" : line.billing === "metered" ? "按量付费" : line.billing === "subscription" ? "订阅额度" : "免费/本地"}</small><b>{line.actualPending ? `待回填 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
+        {detail.lines.length ? detail.lines.map((line) => <article key={line.id}><span><strong>{line.role ? `${line.role} · ` : ""}{line.nodeId}</strong><small>{line.providerId} · {line.modelId}</small></span><span><small>{line.status === "failed" ? "调用失败" : line.actualCostSource === "configured_rate" ? "按配置单价核算" : line.actualCostSource === "provider_reported" ? "供应商账单回填" : line.billing === "metered" ? "按量付费" : line.billing === "subscription" ? "订阅额度" : "免费/本地"}</small><b>{line.actualPending ? `待回填 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
       </div>
     </section>
   );
@@ -34,7 +34,7 @@ export function RunCostDetailPanel({ detail }: { detail: StudioCostRunDetail }) 
 
 function CostMetrics({ totals, compact = false }: { totals: StudioCostTotals; compact?: boolean }) {
   return <div className={compact ? "cost-metrics is-compact" : "cost-metrics"}>
-    <article><CircleDollarSign aria-hidden="true" size={17} /><span>实际消费</span><strong>{actualCostLabel(totals)}</strong></article>
+    <article><CircleDollarSign aria-hidden="true" size={17} /><span>已核算消费</span><strong>{actualCostLabel(totals)}</strong></article>
     <article><Gauge aria-hidden="true" size={17} /><span>授权上限</span><strong>¥{totals.authorizedCostCny.toFixed(2)}</strong></article>
     <article><Clock3 aria-hidden="true" size={17} /><span>待回填</span><strong>{totals.actualPendingCount}</strong></article>
     <article><RotateCcw aria-hidden="true" size={17} /><span>付费失败</span><strong>{totals.failedMeteredCalls}</strong></article>

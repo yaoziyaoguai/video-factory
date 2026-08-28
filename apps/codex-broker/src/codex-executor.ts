@@ -15,7 +15,7 @@ export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as 
 export { BROKER_TASK_KINDS } from "./task-definitions.js";
 export type { BrokerTaskKind } from "./task-definitions.js";
 
-const OPENAI_TASK_KINDS = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"] as const;
+const OPENAI_TASK_KINDS = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"] as const;
 const ZAI_TASK_KINDS = ["visual-review"] as const;
 const ZAI_MODEL_ID = "glm-5.3-flash";
 
@@ -137,11 +137,33 @@ export interface VisualReviewPayload {
   reviewContext?: Record<string, unknown>;
 }
 
+export interface AssetRankPayload {
+  version: "video-factory/asset-candidates-v1";
+  scenes: unknown[];
+  thumbnails: AssetRankThumbnail[];
+}
+
+export interface AssetRankThumbnail {
+  scenePosition: number;
+  provider: string;
+  assetId: string;
+  sha256: string;
+  jpeg: Buffer;
+}
+
+export interface ReferenceGrammarPayload {
+  durationMs: number;
+  frames: VisualReviewFrame[];
+  sourceLabel: string;
+}
+
 export type ValidatedTask =
   | { kind: "topic-ideas"; payload: TopicIdeasPayload }
   | { kind: "director-plan"; payload: DirectorPlanPayload }
   | { kind: "script-draft"; payload: ScriptDraftPayload }
   | { kind: "publish-copy"; payload: PublishCopyPayload }
+  | { kind: "asset-rank"; payload: AssetRankPayload }
+  | { kind: "reference-grammar"; payload: ReferenceGrammarPayload }
   | { kind: "visual-review"; payload: VisualReviewPayload };
 
 export interface SpawnedProcess {
@@ -262,6 +284,23 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
       kind,
       payload: requireVisualReviewPayload(record),
     };
+  }
+  if (kind === "asset-rank") {
+    assertExactKeys(record, ["version", "scenes", "thumbnails"], "payload");
+    if (record.version !== "video-factory/asset-candidates-v1") {
+      throw new CodexExecutorError("payload.version must be video-factory/asset-candidates-v1.", false);
+    }
+    const scenes = arrayValue(record.scenes, "payload.scenes");
+    if (scenes.length > 24 || Buffer.byteLength(JSON.stringify(scenes), "utf8") > 192 * 1024) {
+      throw new CodexExecutorError("payload.scenes exceeds the asset-rank boundary.", false);
+    }
+    const thumbnails = record.thumbnails === undefined ? [] : requireAssetRankThumbnails(record.thumbnails);
+    return { kind, payload: { version: record.version, scenes, thumbnails } };
+  }
+  if (kind === "reference-grammar") {
+    assertExactKeys(record, ["durationMs", "frames", "sourceLabel"], "payload");
+    const media = requireVisualReviewPayload({ durationMs: record.durationMs, frames: record.frames });
+    return { kind, payload: { durationMs: media.durationMs, frames: media.frames, sourceLabel: requiredText(record.sourceLabel, "payload.sourceLabel") } };
   }
   assertExactKeys(record, ["directorProfiles", "brief", "scenes", "assetProviders", "economics"], "payload");
   return {
@@ -495,11 +534,12 @@ export function buildCodexExecCommand(input: {
 }
 
 async function writeTaskImages(task: ValidatedTask, taskDir: string): Promise<string[]> {
-  if (task.kind !== "visual-review") return [];
+  if (task.kind !== "visual-review" && task.kind !== "reference-grammar" && task.kind !== "asset-rank") return [];
   const imagesDir = path.join(taskDir, "images");
   await mkdir(imagesDir, { mode: 0o700 });
   const imagePaths: string[] = [];
-  for (const [index, frame] of task.payload.frames.entries()) {
+  const frames = task.kind === "asset-rank" ? task.payload.thumbnails.map((thumbnail) => ({ jpeg: thumbnail.jpeg })) : task.payload.frames;
+  for (const [index, frame] of frames.entries()) {
     const imagePath = path.join(imagesDir, `frame-${String(index + 1).padStart(3, "0")}.jpg`);
     await writeFile(imagePath, frame.jpeg, { flag: "wx", mode: 0o600 });
     imagePaths.push(imagePath);
@@ -527,6 +567,24 @@ export function buildTaskPrompt(
         sha256: frame.sha256,
       })),
       ...(task.payload.reviewContext ? { reviewContext: task.payload.reviewContext } : {}),
+    };
+  } else if (task.kind === "asset-rank") {
+    data = {
+      version: task.payload.version,
+      scenes: task.payload.scenes,
+      thumbnails: task.payload.thumbnails.map((thumbnail, index) => ({
+        imageIndex: index + 1,
+        scenePosition: thumbnail.scenePosition,
+        provider: thumbnail.provider,
+        assetId: thumbnail.assetId,
+        sha256: thumbnail.sha256,
+      })),
+    };
+  } else if (task.kind === "reference-grammar") {
+    data = {
+      durationMs: task.payload.durationMs,
+      sourceLabel: task.payload.sourceLabel,
+      frames: task.payload.frames.map((frame, index) => ({ frameIndex: index + 1, timecodeMs: frame.timecodeMs, sha256: frame.sha256 })),
     };
   } else {
     data = {
@@ -683,6 +741,37 @@ function requireVisualReviewPayload(record: Record<string, unknown>): VisualRevi
     frames,
     ...(reviewContext ? { reviewContext } : {}),
   };
+}
+
+function requireAssetRankThumbnails(value: unknown): AssetRankThumbnail[] {
+  if (!Array.isArray(value) || value.length > 12) {
+    throw new CodexExecutorError("payload.thumbnails must be an array with at most 12 entries.", false);
+  }
+  let totalBytes = 0;
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const field = `payload.thumbnails[${index}]`;
+    const thumbnail = requireRecord(entry, field);
+    assertExactKeys(thumbnail, ["scenePosition", "provider", "assetId", "sha256", "jpegBase64"], field);
+    if (!Number.isInteger(thumbnail.scenePosition) || Number(thumbnail.scenePosition) < 1) {
+      throw new CodexExecutorError(`${field}.scenePosition must be a positive integer.`, false);
+    }
+    const provider = requiredText(thumbnail.provider, `${field}.provider`);
+    const assetId = requiredText(thumbnail.assetId, `${field}.assetId`);
+    const key = `${thumbnail.scenePosition}:${provider}:${assetId}`;
+    if (seen.has(key)) throw new CodexExecutorError(`${field} is duplicated.`, false);
+    seen.add(key);
+    const sha256 = requiredText(thumbnail.sha256, `${field}.sha256`);
+    if (!/^[a-f0-9]{64}$/i.test(sha256)) throw new CodexExecutorError(`${field}.sha256 is invalid.`, false);
+    const jpeg = decodeJpegBase64(thumbnail.jpegBase64, `${field}.jpegBase64`);
+    if (jpeg.length > MAX_VISUAL_REVIEW_FRAME_BYTES) throw new CodexExecutorError(`${field}.jpegBase64 is too large.`, false);
+    totalBytes += jpeg.length;
+    if (totalBytes > MAX_VISUAL_REVIEW_TOTAL_BYTES) throw new CodexExecutorError("payload.thumbnails exceed the total image boundary.", false);
+    if (createHash("sha256").update(jpeg).digest("hex") !== sha256.toLowerCase()) {
+      throw new CodexExecutorError(`${field}.sha256 does not match its image.`, false);
+    }
+    return { scenePosition: Number(thumbnail.scenePosition), provider, assetId, sha256: sha256.toLowerCase(), jpeg };
+  });
 }
 
 function decodeJpegBase64(value: unknown, field: string): Buffer {

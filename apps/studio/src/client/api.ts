@@ -19,6 +19,8 @@ import type {
   StudioPublishReadiness,
   StudioPublishTarget,
   StudioProvider,
+  StudioResourceManifest,
+  StudioReferenceVideo,
   StudioRunDetail,
   StudioRunSummary,
   StudioSeries,
@@ -31,12 +33,16 @@ import type {
   StudioTemplateCatalog,
   StudioTemplateCloneInput,
   StudioTemplateMutation,
+  StudioTemplateExperimentScorecard,
   StudioNodeOverrideInput,
   StudioNodeInputOverrideInput,
   StudioSpendAuthorizationInput,
   StudioVoicePreviewInput,
   StudioVoiceProfile,
 } from "../shared/api.js";
+
+const MAX_PENDING_START_REQUESTS = 32;
+const pendingStartKeys = new Map<string, string>();
 
 export type StudioAuthSession =
   | { enabled: false; authenticated: true }
@@ -110,6 +116,8 @@ export const studioApi = {
     },
   ),
   templates: () => requestJson<StudioTemplateCatalog>("/api/templates"),
+  templateExperiments: () => requestJson<StudioTemplateExperimentScorecard[]>("/api/template-experiments"),
+  resourceManifest: () => requestJson<StudioResourceManifest>("/api/resource-manifest"),
   template: (templateId: string, version?: number) => requestJson<StudioTemplate>(
     `/api/templates/${encodeURIComponent(templateId)}${version === undefined ? "" : `?version=${version}`}`,
   ),
@@ -138,6 +146,17 @@ export const studioApi = {
   costs: () => requestJson<StudioCostDashboard>("/api/costs"),
   runCosts: (runId: string) => requestJson<StudioCostRunDetail>(`/api/runs/${encodeURIComponent(runId)}/costs`),
   run: (runId: string) => requestJson<StudioRunDetail>(`/api/runs/${encodeURIComponent(runId)}`),
+  uploadReferenceVideo: (file: File) => requestJson<StudioReferenceVideo>("/api/reference-videos", {
+    method: "POST",
+    headers: {
+      "content-type": file.type || "application/octet-stream",
+      "x-video-factory-filename": encodeURIComponent(file.name),
+    },
+    body: file,
+  }),
+  deleteReferenceVideo: (uploadId: string) => requestEmpty(`/api/reference-videos/${encodeURIComponent(uploadId)}`, {
+    method: "DELETE",
+  }),
   overrideNode: (runId: string, nodeId: string, input: StudioNodeOverrideInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/override`,
     { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
@@ -154,11 +173,7 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/regenerate-stale`,
     { method: "POST" },
   ),
-  start: (input: StudioProductionInput, idempotencyKey: string = crypto.randomUUID()) => requestJson<StartRunResponse>("/api/runs", {
-    method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
-    body: JSON.stringify(input),
-  }),
+  start: startProduction,
   decide: (runId: string, input: StudioDecisionInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/decisions`,
     {
@@ -179,6 +194,33 @@ export const studioApi = {
     },
   ),
 };
+
+async function startProduction(input: StudioProductionInput, explicitIdempotencyKey?: string): Promise<StartRunResponse> {
+  const body = JSON.stringify(input);
+  const idempotencyKey = explicitIdempotencyKey ?? pendingStartKey(body);
+  const response = await requestJson<StartRunResponse>("/api/runs", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+    body,
+  });
+  if (explicitIdempotencyKey === undefined && pendingStartKeys.get(body) === idempotencyKey) {
+    pendingStartKeys.delete(body);
+  }
+  return response;
+}
+
+function pendingStartKey(body: string): string {
+  const existing = pendingStartKeys.get(body);
+  if (existing) return existing;
+  while (pendingStartKeys.size >= MAX_PENDING_START_REQUESTS) {
+    const oldest = pendingStartKeys.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    pendingStartKeys.delete(oldest);
+  }
+  const created = crypto.randomUUID();
+  pendingStartKeys.set(body, created);
+  return created;
+}
 
 export function subscribeToRun(
   runId: string,
@@ -201,6 +243,13 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(userFacingApiError(body?.error, response.status));
   }
   return body as T;
+}
+
+async function requestEmpty(url: string, init?: RequestInit): Promise<void> {
+  const response = await fetch(url, studioRequest(init));
+  if (response.ok) return;
+  const body = await response.json().catch(() => undefined) as { error?: string } | undefined;
+  throw new Error(userFacingApiError(body?.error, response.status));
 }
 
 async function requestObjectUrl(url: string, init: RequestInit): Promise<string> {

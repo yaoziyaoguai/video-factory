@@ -5,6 +5,7 @@ import {
 } from "./contracts.js";
 import type { ProductionBlueprint } from "@video-factory/template-core";
 import type { CodexTaskExecution } from "./codex-chat.js";
+import type { ShotGrammar } from "./reference-grammar.js";
 
 export const DIRECTOR_PLAN_VERSION = "video-factory/director-plan-v1" as const;
 
@@ -169,6 +170,7 @@ export interface VisualDirectorAgentInput {
       reasons: string[];
       guardrails: string[];
     };
+    referenceGrammar?: ShotGrammar;
   };
   scenes: Array<{
     position: number;

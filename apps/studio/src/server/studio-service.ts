@@ -17,6 +17,8 @@ import type {
   StudioOpportunityInput,
   StudioOpportunityStatus,
   StudioProvider,
+  StudioResourceManifest,
+  StudioReferenceVideo,
   StudioPublishBatch,
   StudioPublishInput,
   StudioPublishReadiness,
@@ -34,6 +36,7 @@ import type {
   StudioTemplateCatalog,
   StudioTemplateCloneInput,
   StudioTemplateMutation,
+  StudioTemplateExperimentScorecard,
   StudioProductionInput,
   StudioNodeInputOverrideInput,
   StudioNodeOverrideInput,
@@ -50,6 +53,8 @@ import type { LocalCapabilityService } from "./local-capabilities.js";
 import { OpportunityStudio } from "./opportunity-studio.js";
 import { JsonOpportunityStore, type StudioOpportunityRepository } from "./opportunity-store.js";
 import { ProductionStudio, type StudioPipelinePort } from "./production-studio.js";
+import { ReferenceVideoStore } from "./reference-video-store.js";
+import { ResourceGovernanceStudio } from "./resource-governance-studio.js";
 import type { CodexCatalogAvailability } from "./provider-catalog.js";
 import { buildPublishTargetCatalog, PublishingStudio, type PlatformPublisher } from "./publishing-studio.js";
 import { SeriesStudio } from "./series-studio.js";
@@ -99,6 +104,8 @@ export class StudioService {
   private readonly creatorSettings: CreatorSettingsRepository;
   private readonly templates: TemplateStudio;
   private readonly costs: CostStudio;
+  private readonly referenceVideos: ReferenceVideoStore;
+  private readonly resourceGovernance: ResourceGovernanceStudio;
 
   constructor(options: StudioServiceOptions) {
     const repositoryRoot = options.repositoryRoot ?? process.cwd();
@@ -151,7 +158,7 @@ export class StudioService {
         return this.templates.resolveForRun({
           ...brief,
           ...(rawTemplate !== undefined ? { template: rawTemplate } : {}),
-        } as StudioProductionInput);
+        });
       },
     });
     this.costs = new CostStudio(() => options.pipeline.list());
@@ -170,6 +177,8 @@ export class StudioService {
     });
     this.creatorSettings = options.creatorSettings
       ?? new JsonCreatorSettingsStore(path.join(options.workspaceRoot, "settings", "creator-settings.json"));
+    this.referenceVideos = new ReferenceVideoStore(path.join(options.workspaceRoot, "uploads", "reference-videos"), now);
+    this.resourceGovernance = new ResourceGovernanceStudio(options.workspaceRoot, () => options.pipeline.list(), now);
   }
 
   health(): Promise<StudioHealth> { return this.capabilities.health(); }
@@ -180,16 +189,22 @@ export class StudioService {
     return this.capabilities.previewVoice(input);
   }
   getCreatorSettings(): Promise<StudioCreatorSettings> { return this.creatorSettings.get(); }
-  updateCreatorSettings(input: StudioCreatorSettingsPatch): Promise<StudioCreatorSettings> {
+  async updateCreatorSettings(input: StudioCreatorSettingsPatch): Promise<StudioCreatorSettings> {
+    const current = await this.creatorSettings.get();
+    await this.validateModelDefaults(input.modelDefaults, current.modelDefaults);
     return this.creatorSettings.update(input);
   }
   listTemplates(): Promise<StudioTemplateCatalog> { return this.templates.list(); }
+  templateExperiments(): Promise<StudioTemplateExperimentScorecard[]> { return this.resourceGovernance.templateExperiments(); }
+  resourceManifest(): Promise<StudioResourceManifest> { return this.resourceGovernance.manifest(); }
   getTemplate(id: string, version?: number): Promise<StudioTemplate | undefined> { return this.templates.get(id, version); }
   cloneTemplate(input: StudioTemplateCloneInput): Promise<StudioTemplateMutation> {
     return this.templateMutation(() => this.templates.clone(input));
   }
-  saveTemplateDraft(input: StudioTemplate, expectedRevision: number): Promise<StudioTemplateMutation> {
+  async saveTemplateDraft(input: StudioTemplate, expectedRevision: number): Promise<StudioTemplateMutation> {
     const { builtIn: _builtIn, ...template } = input;
+    const current = await this.templates.get(template.id);
+    await this.validateModelDefaults(template.modelDefaults, current?.modelDefaults);
     return this.templateMutation(() => this.templates.saveDraft(template, expectedRevision));
   }
   publishTemplate(id: string, expectedRevision: number): Promise<StudioTemplateMutation> {
@@ -222,8 +237,98 @@ export class StudioService {
   getRun(runId: string): Promise<StudioRunDetail | undefined> { return this.production.get(runId); }
   costDashboard(): Promise<StudioCostDashboard> { return this.costs.dashboard(); }
   runCostDetail(runId: string): Promise<StudioCostRunDetail | undefined> { return this.costs.runDetail(runId); }
-  startRun(input: unknown, idempotencyKey?: string): Promise<StartRunResponse> {
-    return this.production.start(input, idempotencyKey);
+  async uploadReferenceVideo(input: { label: string; mimeType: string; bytes: Buffer }): Promise<StudioReferenceVideo> {
+    try {
+      return await this.referenceVideos.upload(input);
+    } catch (error) {
+      throw new StudioInputError(error instanceof Error ? error.message : "参考视频上传失败。");
+    }
+  }
+  async deleteReferenceVideo(uploadId: string): Promise<void> {
+    try {
+      await this.referenceVideos.remove(uploadId);
+    } catch (error) {
+      throw new StudioInputError(error instanceof Error ? error.message : "参考视频删除失败。");
+    }
+  }
+  async startRun(input: unknown, idempotencyKey?: string): Promise<StartRunResponse> {
+    const configuredInput = await this.withCreatorModelDefaults(input);
+    const replay = await this.production.replayStart(input, idempotencyKey);
+    if (replay) return replay;
+    if (!isRecord(configuredInput) || !isRecord(configuredInput.referenceVideo)) {
+      return this.production.start(configuredInput, idempotencyKey, input);
+    }
+    let reference;
+    try {
+      reference = await this.referenceVideos.resolve(String(configuredInput.referenceVideo.uploadId ?? ""));
+    } catch (error) {
+      const message = error instanceof Error && error.message.startsWith("参考视频")
+        ? error.message
+        : "参考视频不存在或已经失效。";
+      throw new StudioInputError(message);
+    }
+    const started = await this.production.start({
+      ...configuredInput,
+      referenceVideo: {
+        uploadId: reference.uploadId,
+        label: reference.label,
+        mimeType: reference.mimeType,
+        sizeBytes: reference.sizeBytes,
+        sha256: reference.sha256,
+        path: reference.path,
+      },
+    }, idempotencyKey, input);
+    this.removeReferenceUploadAfterPersistence(started.runId, reference.uploadId);
+    return started;
+  }
+
+  private removeReferenceUploadAfterPersistence(runId: string, uploadId: string): void {
+    let unsubscribe: () => void = () => undefined;
+    let finished = false;
+    const inspect = (run: StudioRunDetail | undefined) => {
+      if (finished || !run?.nodes.some((node) => node.id === "reference-grammar" && node.status === "succeeded")) return;
+      finished = true;
+      unsubscribe();
+      void this.referenceVideos.remove(uploadId).catch(() => undefined);
+    };
+    unsubscribe = this.production.subscribe(runId, inspect);
+    void this.production.get(runId).then(inspect).catch(() => undefined);
+  }
+
+  private async withCreatorModelDefaults(input: unknown): Promise<unknown> {
+    if (!isRecord(input)) return input;
+    const settings = await this.creatorSettings.get();
+    if (input.models !== undefined && (
+      !isRecord(input.models)
+      || Object.values(input.models).some((modelId) => typeof modelId !== "string")
+    )) return input;
+    const explicitModels = (input.models as Record<string, string> | undefined) ?? {};
+    const selected = selectedModelProviderIds(input);
+    const inherited = Object.fromEntries(Object.entries(settings.modelDefaults ?? {}).filter(([providerId]) => selected.has(providerId)));
+    const models = { ...inherited, ...explicitModels };
+    const modelSelectionSources = Object.fromEntries(Object.keys(models).map((providerId) => [
+      providerId,
+      providerId in explicitModels ? "run_override" : "global_default",
+    ]));
+    return {
+      ...input,
+      ...(Object.keys(models).length ? { models, modelSelectionSources } : {}),
+    };
+  }
+
+  private async validateModelDefaults(
+    modelDefaults: Record<string, string> | undefined,
+    existingDefaults: Record<string, string> | undefined,
+  ): Promise<void> {
+    if (!modelDefaults) return;
+    const providers = new Map((await this.capabilities.listProviders()).map((provider) => [provider.id, provider]));
+    for (const [providerId, modelId] of Object.entries(modelDefaults)) {
+      if (existingDefaults?.[providerId] === modelId) continue;
+      const provider = providers.get(providerId);
+      const model = provider?.modelProfiles?.find((profile) => profile.id === modelId);
+      if (!provider || !model) throw new StudioInputError(`模型“${modelId}”不属于能力“${providerId}”。`);
+      if (!model.available) throw new StudioInputError(`模型“${modelId}”当前不可用，不能保存为默认值。`);
+    }
   }
   decide(runId: string, input: StudioDecisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.decide(runId, input, actor);
@@ -277,4 +382,15 @@ function positiveNumber(value: string | undefined, fallback: number): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function selectedModelProviderIds(input: Record<string, unknown>): Set<string> {
+  const selected = new Set<string>();
+  if (isRecord(input.providers)) {
+    for (const value of Object.values(input.providers)) if (typeof value === "string") selected.add(value);
+  }
+  if (isRecord(input.director) && Array.isArray(input.director.assetProviderIds)) {
+    for (const value of input.director.assetProviderIds) if (typeof value === "string") selected.add(value);
+  }
+  return selected;
 }

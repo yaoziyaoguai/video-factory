@@ -45,6 +45,22 @@ describe("ProductionBrief", () => {
     });
   });
 
+  it("preserves bounded per-provider model selections without treating a model as a provider", () => {
+    const parsed = pipeline.parseBrief({
+      ...validBrief,
+      models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
+    });
+
+    assert.deepEqual(parsed.models, { "seedance-video-v1": "doubao-seedance-2-5-260628" });
+    assert.deepEqual(parsed.modelSelectionSources, { "seedance-video-v1": "run_override" });
+    assert.deepEqual(pipeline.parseBrief({
+      ...validBrief,
+      models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
+      modelSelectionSources: {},
+    }).modelSelectionSources, { "seedance-video-v1": "run_override" });
+    assert.throws(() => pipeline.parseBrief({ ...validBrief, models: { "seedance-video-v1": "bad model id" } }), /models\.seedance-video-v1 is invalid/);
+  });
+
   it("provides a conservative local voice direction for older briefs", () => {
     const { voiceDirection: _voiceDirection, ...legacyBrief } = validBrief;
 
@@ -200,6 +216,44 @@ describe("ProductionBrief", () => {
       }),
       /must not contain duplicates/,
     );
+  });
+
+  it("enables semantic candidate ranking only behind the director and shot-router contract", () => {
+    assert.throws(
+      () => pipeline.parseBrief({ ...validBrief, workflowFeatures: { assetSemanticRank: true, referenceGrammar: false } }),
+      /requires an AI director configuration/,
+    );
+    assert.throws(
+      () => pipeline.parseBrief({
+        ...validBrief,
+        providers: { ...validBrief.providers, director: "api-visual-director-v1" },
+        director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+        workflowFeatures: { assetSemanticRank: true, referenceGrammar: false },
+      }),
+      /requires providers\.assets 'ai-shot-router-v1'/,
+    );
+  });
+
+  it("binds reference-video workflows to a SHA-256 content identity", () => {
+    const input = {
+      ...validBrief,
+      providers: { ...validBrief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: true },
+      referenceVideo: {
+        uploadId: "67d86948-5517-4b17-8da1-b0a695159d4d",
+        label: "参考节奏.mp4",
+        mimeType: "video/mp4",
+        sizeBytes: 12,
+        path: "/tmp/reference.mp4",
+        sha256: "a".repeat(64),
+      },
+    };
+
+    assert.equal(pipeline.parseBrief(input).referenceVideo?.sha256, "a".repeat(64));
+    const { sha256: _sha256, ...unboundReference } = input.referenceVideo;
+    assert.throws(() => pipeline.parseBrief({ ...input, referenceVideo: unboundReference }), /referenceVideo\.sha256/);
+    assert.throws(() => pipeline.parseBrief({ ...input, referenceVideo: { ...input.referenceVideo, sha256: "not-a-hash" } }), /referenceVideo\.sha256/);
   });
 
   it("rejects incompatible protocol versions and incomplete provider bindings", () => {

@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from video_factory.domain import Scene
-from video_factory.renderer import render_scene_clip, wrap_text_by_pixels as wrap_caption_text
+from video_factory.renderer import font_resource, render_scene_clip, wrap_text_by_pixels as wrap_caption_text
 from video_factory.stock_assets import local_card_content, local_card_style, wrap_text_by_pixels as wrap_card_text
 
 
@@ -15,6 +15,10 @@ class FixedWidthDraw:
 
 
 class VisualRenderingTest(unittest.TestCase):
+    def test_font_inventory_does_not_claim_an_unverified_license_is_recorded(self):
+        self.assertFalse(font_resource(Path("/fonts/NotoSansCJK-Regular.ttc"))["license_verified"])
+        self.assertFalse(font_resource(None)["license_verified"])
+
     def test_local_card_content_is_derived_from_the_current_scene(self):
         scene = Scene(
             position=2,

@@ -29,6 +29,8 @@ import {
 import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 import { validateNodeOverrideOutput } from "./node-output-validator.js";
 
+const MANAGED_FILE_PLACEHOLDER = "[系统托管文件]";
+
 export interface StudioPipelinePort {
   list(): Promise<WorkflowRun<ProductionBrief>[]>;
   loadPersisted(runId: string): Promise<WorkflowRun<ProductionBrief>>;
@@ -57,7 +59,10 @@ export interface ProductionStudioOptions {
 const WORKFLOW_NODES: Array<{ id: string; label: string; role: string }> = [
   { id: "brief", label: "内容简报", role: "制片人" },
   { id: "script", label: "脚本", role: "编剧" },
+  { id: "reference-grammar", label: "参考镜头语法", role: "参考视频分析师" },
   { id: "visual-direction", label: "导演方案", role: "导演" },
+  { id: "asset-candidates", label: "候选素材", role: "素材研究员" },
+  { id: "asset-semantic-rank", label: "语义选片", role: "语义选片师" },
   { id: "assets", label: "画面", role: "素材导演" },
   { id: "voice", label: "配音", role: "声音导演" },
   { id: "render", label: "渲染", role: "剪辑师" },
@@ -69,7 +74,10 @@ const WORKFLOW_NODES: Array<{ id: string; label: string; role: string }> = [
 
 const EDITABLE_DOCUMENTS: Record<string, { pathField: string; kind: string; embeddedField?: string }> = {
   script: { pathField: "scriptPath", kind: "script" },
+  "reference-grammar": { pathField: "referenceGrammarPath", kind: "shot_grammar", embeddedField: "grammar" },
   "visual-direction": { pathField: "directorPlanPath", kind: "storyboard" },
+  "asset-candidates": { pathField: "candidateSearchPath", kind: "asset_candidates" },
+  "asset-semantic-rank": { pathField: "candidateRankingPath", kind: "asset_ranking", embeddedField: "ranking" },
   assets: { pathField: "assetPlanPath", kind: "asset_plan" },
   voice: { pathField: "voiceoverPlanPath", kind: "voiceover_plan" },
   render: { pathField: "renderManifestPath", kind: "render_manifest" },
@@ -81,7 +89,7 @@ const EDITABLE_DOCUMENTS: Record<string, { pathField: string; kind: string; embe
 export class ProductionStudio {
   private readonly listeners = new Map<string, Set<(run: StudioRunDetail) => void>>();
   private readonly completions = new Set<Promise<void>>();
-  private readonly startsInFlight = new Map<string, Promise<StartRunResponse>>();
+  private readonly startsInFlight = new Map<string, { digest: string; operation: Promise<StartRunResponse> }>();
 
   constructor(private readonly options: ProductionStudioOptions) {}
 
@@ -98,7 +106,35 @@ export class ProductionStudio {
     }
   }
 
-  async start(input: unknown, idempotencyKey?: string): Promise<StartRunResponse> {
+  async replayStart(input: unknown, idempotencyKey?: string): Promise<StartRunResponse | undefined> {
+    if (!idempotencyKey) return undefined;
+    assertIdempotencyKey(idempotencyKey);
+    const digest = startRequestDigest(input);
+    const inFlight = this.startsInFlight.get(idempotencyKey);
+    if (inFlight) {
+      if (inFlight.digest !== digest) {
+        throw new StudioConflictError("这个制作请求编号已被另一组参数使用，请重新打开制作方案。");
+      }
+      return inFlight.operation;
+    }
+    const recordPath = startRecordPath(this.options.workspaceRoot, idempotencyKey);
+    try {
+      await stat(recordPath);
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) return undefined;
+      throw error;
+    }
+    const previous = await readStartRecord(recordPath);
+    if (previous.digest !== digest) {
+      throw new StudioConflictError("这个制作请求编号已被另一组参数使用，请重新打开制作方案。");
+    }
+    if (previous.state === "completed" && previous.response) return previous.response;
+    throw new StudioConflictError("相同制作请求仍在处理中，请稍后查看制作记录，不会重复扣费。");
+  }
+
+  async start(input: unknown, idempotencyKey?: string, idempotencyInput: unknown = input): Promise<StartRunResponse> {
+    const replay = await this.replayStart(idempotencyInput, idempotencyKey);
+    if (replay) return replay;
     let brief = parseBriefWithInputError(input);
     if (brief.reviewMode !== "manual") {
       throw new StudioInputError("正式制作必须经过人工终审，不能自动跳过发布前确认。");
@@ -107,25 +143,29 @@ export class ProductionStudio {
     if (brief.economics.maxCostCny > maxRunCostCny) {
       throw new StudioInputError(`本次成本上限不能超过服务端安全上限 ¥${maxRunCostCny}。`);
     }
-    await this.assertProvidersAvailable(brief, maxRunCostCny);
     if (this.options.resolveTemplateSnapshot) {
       try {
-        brief = { ...brief, templateSnapshot: await this.options.resolveTemplateSnapshot(input, brief) };
+        const templateSnapshot = await this.options.resolveTemplateSnapshot(input, brief);
+        brief = applyTemplateModelDefaults({ ...brief, templateSnapshot }, templateSnapshot.modelDefaults);
       } catch (error) {
         throw new StudioInputError(error instanceof Error ? error.message : "模板解析失败。");
       }
     }
+    await this.assertProvidersAvailable(brief, maxRunCostCny);
     if (!idempotencyKey) return this.dispatchBrief(brief);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(idempotencyKey)) {
-      throw new StudioInputError("制作请求编号格式不正确。");
-    }
+    assertIdempotencyKey(idempotencyKey);
     const existing = this.startsInFlight.get(idempotencyKey);
-    if (existing) return existing;
-    const requestDigest = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+    const requestDigest = startRequestDigest(idempotencyInput);
+    if (existing) {
+      if (existing.digest !== requestDigest) {
+        throw new StudioConflictError("这个制作请求编号已被另一组参数使用，请重新打开制作方案。");
+      }
+      return existing.operation;
+    }
     const operation = this.startIdempotently(brief, idempotencyKey, requestDigest).finally(() => {
-      if (this.startsInFlight.get(idempotencyKey) === operation) this.startsInFlight.delete(idempotencyKey);
+      if (this.startsInFlight.get(idempotencyKey)?.operation === operation) this.startsInFlight.delete(idempotencyKey);
     });
-    this.startsInFlight.set(idempotencyKey, operation);
+    this.startsInFlight.set(idempotencyKey, { digest: requestDigest, operation });
     return operation;
   }
 
@@ -144,7 +184,7 @@ export class ProductionStudio {
 
   private async startIdempotently(brief: ProductionBrief, idempotencyKey: string, digest: string): Promise<StartRunResponse> {
     const directory = path.join(this.options.workspaceRoot, "idempotency", "production-start");
-    const recordPath = path.join(directory, `${idempotencyKey}.json`);
+    const recordPath = startRecordPath(this.options.workspaceRoot, idempotencyKey);
     await mkdir(directory, { recursive: true });
     try {
       const handle = await open(recordPath, "wx");
@@ -219,9 +259,11 @@ export class ProductionStudio {
     if (editsOutput === editsDocument) throw new StudioInputError("请选择一种节点交付进行修改。");
     const effectiveVersion = node.outputState?.versions.find((version) => version.id === node.outputState?.effectiveVersionId);
     const reference = effectiveVersion?.output ?? node.output;
-    let overrideOutput = input.output;
+    let overrideOutput = input.output === undefined
+      ? undefined
+      : restoreManagedFileReferences(input.output, reference);
     let overrideArtifacts: ArtifactDraft[] | undefined;
-    let humanDocumentPath: string | undefined;
+    let humanDocumentPaths: string[] = [];
     if (input.document) {
       const prepared = await this.prepareDocumentOverride({
         runId,
@@ -233,8 +275,8 @@ export class ProductionStudio {
         document: input.document,
       });
       overrideOutput = prepared.output;
-      overrideArtifacts = [prepared.artifact];
-      humanDocumentPath = prepared.artifact.uri;
+      overrideArtifacts = prepared.artifacts;
+      humanDocumentPaths = prepared.cleanupPaths;
     }
     validateNodeOverrideOutput({
       output: overrideOutput,
@@ -259,7 +301,9 @@ export class ProductionStudio {
       this.publish(detail);
       return detail;
     } catch (error) {
-      if (humanDocumentPath && !persisted) await rm(humanDocumentPath, { force: true }).catch(() => undefined);
+      if (!persisted) {
+        await Promise.all(humanDocumentPaths.map((candidate) => rm(candidate, { force: true }).catch(() => undefined)));
+      }
       if (error instanceof StaleRunRevisionError || error instanceof NodeVersionConflictError || (error instanceof Error && /locked by another writer/.test(error.message))) {
         throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
       }
@@ -291,7 +335,7 @@ export class ProductionStudio {
       const updated = await this.options.pipeline.applyNodeInputOverride(runId, {
         nodeId,
         actor,
-        input: structuredClone(input.input),
+        input: restoreManagedFileReferences(input.input, effectiveInputVersion?.value),
         ...(effectiveInputVersion ? { expectedVersionId: effectiveInputVersion.id } : {}),
         allowTerminalEdit: isTerminalRun(current.status) && input.confirmTerminalEdit === true,
       });
@@ -314,7 +358,7 @@ export class ProductionStudio {
     nodeArtifactIds: string[];
     runArtifacts: WorkflowRun<ProductionBrief>["artifacts"];
     document: NonNullable<StudioNodeOverrideInput["document"]>;
-  }): Promise<{ output: Record<string, unknown>; artifact: ArtifactDraft }> {
+  }): Promise<{ output: Record<string, unknown>; artifacts: ArtifactDraft[]; cleanupPaths: string[] }> {
     const contract = EDITABLE_DOCUMENTS[options.nodeId];
     if (!contract) throw new StudioInputError(`节点“${options.nodeId}”没有可编辑的结构化产物。`);
     if (!isRecord(options.reference)) throw new StudioInputError(`节点“${options.nodeId}”尚无可编辑的结构化交付。`);
@@ -344,18 +388,31 @@ export class ProductionStudio {
       runRoot,
     });
 
+    const revisionId = randomUUID();
     const content = `${JSON.stringify(options.document.content, null, 2)}\n`;
-    const destination = path.join(runRoot, "nodes", options.nodeId, "human-revisions", `${randomUUID()}.json`);
-    await writePrivateTextAtomically(destination, content);
+    const destination = path.join(runRoot, "nodes", options.nodeId, "human-revisions", `${revisionId}.json`);
     const output = structuredClone(options.reference);
     output[contract.pathField] = destination;
+    const privateRevision = options.nodeId === "asset-candidates"
+      ? await prepareCandidateInventoryRevision(runRoot, options.reference, options.document.content, revisionId)
+      : undefined;
+    if (privateRevision) output.candidateInventoryPath = privateRevision.destination;
     if (contract.embeddedField) output[contract.embeddedField] = structuredClone(options.document.content);
     if (options.nodeId === "technical-review" && isRecord(options.document.content)) {
       output.passed = options.document.content.status === "passed";
     }
+    const cleanupPaths = [destination, ...(privateRevision ? [privateRevision.destination] : [])];
+    try {
+      await writePrivateTextAtomically(destination, content);
+      if (privateRevision) await writePrivateTextAtomically(privateRevision.destination, privateRevision.content);
+    } catch (error) {
+      await Promise.all(cleanupPaths.map((candidate) => rm(candidate, { force: true }).catch(() => undefined)));
+      throw error;
+    }
     return {
       output,
-      artifact: {
+      cleanupPaths,
+      artifacts: [{
         kind: artifact.kind,
         uri: destination,
         sha256: createHash("sha256").update(content).digest("hex"),
@@ -370,7 +427,22 @@ export class ProductionStudio {
           creator: options.actor,
           licenseNote: "Human-edited derivative retained as an immutable revision.",
         },
-      },
+      }, ...(privateRevision ? [{
+        kind: "candidate_inventory_private",
+        uri: privateRevision.destination,
+        sha256: createHash("sha256").update(privateRevision.content).digest("hex"),
+        sizeBytes: Buffer.byteLength(privateRevision.content),
+        contentType: "application/json",
+        schemaVersion: "video-factory/asset-candidate-inventory-v1",
+        parentArtifactIds: [artifact.id],
+        producer: { nodeId: options.nodeId, attempt: artifact.producer?.attempt ?? 1 },
+        provenance: {
+          providerId: "human-editor-private-state",
+          providerVersion: "1",
+          creator: options.actor,
+          licenseNote: "Private runtime inventory synchronized to the reviewed public candidate revision.",
+        },
+      } satisfies ArtifactDraft] : [])],
     };
   }
 
@@ -449,7 +521,7 @@ export class ProductionStudio {
       throw error;
     }
     const artifact = run.artifacts.find((candidate) => candidate.id === artifactId);
-    if (!artifact?.uri) return undefined;
+    if (!artifact?.uri || isPrivateArtifactKind(artifact.kind)) return undefined;
     const [runRoot, artifactPath] = await Promise.all([
       realpath(path.join(this.options.workspaceRoot, "runs", runId)),
       realpath(artifact.uri),
@@ -474,6 +546,32 @@ export class ProductionStudio {
 
   private async assertProvidersAvailable(brief: ProductionBrief, maxRunCostCny: number): Promise<void> {
     const providers = await this.options.listProviders();
+    const selectedProviderIds = new Set([
+      brief.providers.script,
+      ...(brief.providers.director ? [brief.providers.director] : []),
+      brief.providers.assets,
+      brief.providers.voice,
+      brief.providers.render,
+      brief.providers.technicalReview,
+      ...(brief.providers.visualReview ? [brief.providers.visualReview] : []),
+      ...(brief.director?.assetProviderIds ?? []),
+      ...(brief.workflowFeatures?.referenceGrammar ? ["codex-reference-grammar-v1"] : []),
+    ]);
+    if (brief.workflowFeatures?.referenceGrammar) {
+      const referenceProvider = providers.find((provider) => provider.id === "codex-reference-grammar-v1");
+      if (!referenceProvider?.available || referenceProvider.capability !== "reference.grammar") {
+        throw new StudioInputError("参考视频分析能力当前不可用，请检查 Codex Broker 后重试。");
+      }
+    }
+    for (const [providerId, modelId] of Object.entries(brief.models ?? {})) {
+      if (!selectedProviderIds.has(providerId)) {
+        throw new StudioInputError(`模型“${modelId}”绑定到了本次未启用的能力“${providerId}”。`);
+      }
+      const provider = providers.find((candidate) => candidate.id === providerId);
+      const model = provider?.modelProfiles?.find((candidate) => candidate.id === modelId);
+      if (!provider || !model) throw new StudioInputError(`“${provider?.label ?? providerId}”不支持模型“${modelId}”。`);
+      if (!model.available) throw new StudioInputError(`模型“${model.label}”当前不可用。`);
+    }
     let fixedMeteredEstimateCny = 0;
     const bindings: Array<[string, string]> = [
       ["script.draft", brief.providers.script],
@@ -497,17 +595,18 @@ export class ProductionStudio {
       if (!brief.economics.allowMeteredProviders) {
         throw new StudioInputError(`当前配方未允许使用付费能力“${selected.label}”。`);
       }
-      if (selected.estimatedCnyPerClip === undefined) {
+      const selectedEstimate = modelEstimate(selected, brief.models?.[selected.id]);
+      if (selectedEstimate === undefined) {
         throw new StudioInputError(`“${selected.label}”尚未配置估价，不能进入预算计算。`);
       }
       if (selected.billingUnit === "run") {
-        fixedMeteredEstimateCny = roundMoney(fixedMeteredEstimateCny + selected.estimatedCnyPerClip);
+        fixedMeteredEstimateCny = roundMoney(fixedMeteredEstimateCny + selectedEstimate);
         continue;
       }
       if (brief.economics.maxPaidShots < 1) {
         throw new StudioInputError(`“${selected.label}”按镜头计费，但本次没有设置付费镜头额度。`);
       }
-      const estimatedCost = roundMoney(selected.estimatedCnyPerClip * brief.economics.maxPaidShots);
+      const estimatedCost = roundMoney(selectedEstimate * brief.economics.maxPaidShots);
       if (estimatedCost > brief.economics.maxCostCny) {
         throw new StudioInputError(`“${selected.label}”预计需要 ¥${estimatedCost}，超过本次预计成本上限 ¥${brief.economics.maxCostCny}。`);
       }
@@ -527,7 +626,8 @@ export class ProductionStudio {
           if (!brief.economics.allowMeteredProviders) {
             throw new StudioInputError(`当前成本策略未允许使用“${selected.label}”。`);
           }
-          if (!selected.estimatedCnyPerClip || selected.estimatedCnyPerClip > brief.economics.maxCostCny) {
+          const selectedEstimate = modelEstimate(selected, brief.models?.[selected.id]);
+          if (!selectedEstimate || selectedEstimate > brief.economics.maxCostCny) {
             throw new StudioInputError(`“${selected.label}”的单镜估价超过本次成本上限。`);
           }
         } else {
@@ -549,11 +649,171 @@ export class ProductionStudio {
   }
 }
 
+async function prepareCandidateInventoryRevision(
+  runRoot: string,
+  reference: Record<string, unknown>,
+  publicDocument: unknown,
+  revisionId: string,
+): Promise<{ destination: string; content: string }> {
+  const inventoryPath = reference.candidateInventoryPath;
+  if (typeof inventoryPath !== "string") {
+    throw new StudioInputError("候选素材缺少私有下载清单，请重新生成候选素材后再编辑。");
+  }
+  await assertContainedFile(runRoot, inventoryPath);
+  let inventoryDocument: unknown;
+  try {
+    inventoryDocument = JSON.parse(await readFile(inventoryPath, "utf8"));
+  } catch {
+    throw new StudioInputError("候选素材的私有下载清单无法读取，请重新生成候选素材。");
+  }
+  const publicReport = candidateReport(publicDocument, "候选素材清单");
+  const privateInventory = candidateReport(inventoryDocument, "候选素材私有清单");
+  if (privateInventory.version !== "video-factory/asset-candidate-inventory-v1") {
+    throw new StudioInputError("候选素材私有清单版本不受支持，请重新生成候选素材。");
+  }
+  const privateScenes = sceneCandidateMap(privateInventory.scene_candidates, "候选素材私有清单");
+  const publicScenes = sceneCandidateMap(publicReport.scene_candidates, "候选素材清单");
+  if (publicScenes.size !== privateScenes.size || [...privateScenes.keys()].some((position) => !publicScenes.has(position))) {
+    throw new StudioInputError("人工修订必须保留原有的全部场景；可以删除或重排每个场景内的候选素材。");
+  }
+
+  const sceneCandidates = publicReport.scene_candidates.map((publicScene, sceneIndex) => {
+    const scenePosition = candidateScenePosition(publicScene, `候选素材清单第 ${sceneIndex + 1} 个场景`);
+    const privateScene = privateScenes.get(scenePosition)!;
+    const privateCandidates = candidateArray(privateScene.candidates, `场景 ${scenePosition} 的私有候选素材`);
+    const indexed = new Map<string, Record<string, unknown>>();
+    for (const [candidateIndex, candidate] of privateCandidates.entries()) {
+      const key = candidateIdentity(candidate, `场景 ${scenePosition} 的私有候选素材 ${candidateIndex + 1}`);
+      if (indexed.has(key)) throw new StudioInputError(`场景 ${scenePosition} 的私有候选素材存在重复身份。`);
+      indexed.set(key, candidate);
+    }
+    const selected = candidateArray(publicScene.candidates, `场景 ${scenePosition} 的候选素材`).map((candidate, candidateIndex) => {
+      const key = candidateIdentity(candidate, `场景 ${scenePosition} 的候选素材 ${candidateIndex + 1}`);
+      const match = indexed.get(key);
+      if (!match) throw new StudioInputError(`场景 ${scenePosition} 包含不属于原候选池的素材，不能写入私有下载清单。`);
+      assertCandidateSourceFieldsUnchanged(candidate, match, `场景 ${scenePosition} 的候选素材 ${candidateIndex + 1}`);
+      indexed.delete(key);
+      return structuredClone(match);
+    });
+    return { scene_position: scenePosition, candidates: selected };
+  });
+  const revisedInventory = { ...privateInventory, scene_candidates: sceneCandidates };
+  return {
+    destination: path.join(runRoot, "nodes", "asset-candidates", "human-revisions", `${revisionId}.inventory.private.json`),
+    content: `${JSON.stringify(revisedInventory, null, 2)}\n`,
+  };
+}
+
+function candidateReport(value: unknown, label: string): Record<string, unknown> & { version: string; scene_candidates: Record<string, unknown>[] } {
+  if (!isRecord(value) || typeof value.version !== "string" || !Array.isArray(value.scene_candidates)) {
+    throw new StudioInputError(`${label}格式不正确。`);
+  }
+  return { ...value, version: value.version, scene_candidates: candidateArray(value.scene_candidates, label) };
+}
+
+function sceneCandidateMap(scenes: Record<string, unknown>[], label: string): Map<number, Record<string, unknown>> {
+  const result = new Map<number, Record<string, unknown>>();
+  for (const [index, scene] of scenes.entries()) {
+    const position = candidateScenePosition(scene, `${label}第 ${index + 1} 个场景`);
+    if (result.has(position)) throw new StudioInputError(`${label}包含重复场景 ${position}。`);
+    result.set(position, scene);
+  }
+  return result;
+}
+
+function candidateScenePosition(scene: Record<string, unknown>, label: string): number {
+  if (!Number.isInteger(scene.scene_position) || Number(scene.scene_position) < 1) {
+    throw new StudioInputError(`${label}缺少有效场景编号。`);
+  }
+  return Number(scene.scene_position);
+}
+
+function candidateArray(value: unknown, label: string): Record<string, unknown>[] {
+  if (!Array.isArray(value) || value.some((candidate) => !isRecord(candidate))) {
+    throw new StudioInputError(`${label}格式不正确。`);
+  }
+  return value as Record<string, unknown>[];
+}
+
+function candidateIdentity(candidate: Record<string, unknown>, label: string): string {
+  const provider = typeof candidate.provider_id === "string" && candidate.provider_id.trim()
+    ? candidate.provider_id.trim()
+    : typeof candidate.provider === "string" ? candidate.provider.trim() : "";
+  const assetId = typeof candidate.asset_id === "string" ? candidate.asset_id.trim() : "";
+  if (!provider || !assetId) throw new StudioInputError(`${label}缺少素材来源或素材编号。`);
+  return `${provider}\u0000${assetId}`;
+}
+
+const IMMUTABLE_CANDIDATE_FIELDS = [
+  "provider",
+  "provider_id",
+  "asset_id",
+  "media_type",
+  "width",
+  "height",
+  "duration",
+  "preview_url",
+  "source_url",
+  "creator",
+  "license_note",
+] as const;
+
+function assertCandidateSourceFieldsUnchanged(
+  candidate: Record<string, unknown>,
+  original: Record<string, unknown>,
+  label: string,
+): void {
+  for (const field of IMMUTABLE_CANDIDATE_FIELDS) {
+    if (!Object.is(candidate[field], original[field])) {
+      throw new StudioInputError(`${label}的来源字段 ${field} 不能修改；可以删除、重排素材，或调整查询和评分。`);
+    }
+  }
+}
+
+function applyTemplateModelDefaults(
+  brief: ProductionBrief,
+  templateDefaults: Record<string, string> | undefined,
+): ProductionBrief {
+  if (!templateDefaults || Object.keys(templateDefaults).length === 0) return brief;
+  const models = { ...(brief.models ?? {}) };
+  const sources = { ...(brief.modelSelectionSources ?? {}) };
+  const selectedProviders = new Set([
+    ...Object.values(brief.providers).filter((value): value is string => typeof value === "string"),
+    ...(brief.director?.assetProviderIds ?? []),
+  ]);
+  for (const [providerId, modelId] of Object.entries(templateDefaults)) {
+    if (!selectedProviders.has(providerId)) continue;
+    if (sources[providerId] === "run_override" || sources[providerId] === "node_override") continue;
+    models[providerId] = modelId;
+    sources[providerId] = "template_default";
+  }
+  return { ...brief, models, modelSelectionSources: sources };
+}
+
+function modelEstimate(provider: StudioProvider, modelId: string | undefined): number | undefined {
+  if (!modelId) return provider.estimatedCnyPerClip;
+  return provider.modelProfiles?.find((model) => model.id === modelId)?.estimatedCnyPerClip;
+}
+
 interface StartRecord {
   version: 1;
   state: "pending" | "completed";
   digest: string;
   response?: StartRunResponse;
+}
+
+function assertIdempotencyKey(idempotencyKey: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(idempotencyKey)) {
+    throw new StudioInputError("制作请求编号格式不正确。");
+  }
+}
+
+function startRecordPath(workspaceRoot: string, idempotencyKey: string): string {
+  return path.join(workspaceRoot, "idempotency", "production-start", `${idempotencyKey}.json`);
+}
+
+function startRequestDigest(input: unknown): string {
+  return createHash("sha256").update(JSON.stringify(input) ?? "undefined").digest("hex");
 }
 
 async function readStartRecord(recordPath: string): Promise<StartRecord> {
@@ -574,8 +834,10 @@ async function writeStartRecord(recordPath: string, record: StartRecord): Promis
 
 function toRunSummary(run: WorkflowRun<ProductionBrief>): StudioRunSummary {
   const currentNodeId = run.nodeRuns.at(-1)?.nodeId ?? "brief";
-  const videoArtifact = run.artifacts.find((artifact) => artifact.kind === "render" && artifact.contentType === "video/mp4")
-    ?? run.artifacts.find((artifact) => artifact.producer?.nodeId === "render" && artifact.contentType === "video/mp4");
+  const videoArtifact = effectiveNodeArtifact(run, "render", (artifact) =>
+    artifact.kind === "render" && artifact.contentType === "video/mp4")
+    ?? [...run.artifacts].reverse().find((artifact) =>
+      artifact.producer?.nodeId === "render" && artifact.contentType === "video/mp4");
   return {
     id: run.id,
     title: run.initialInput.title,
@@ -608,17 +870,31 @@ function toRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
     ...(artifact.producer ? { producerNodeId: artifact.producer.nodeId } : {}),
     ...(artifact.provenance.providerId ? { providerId: artifact.provenance.providerId } : {}),
     ...(artifact.provenance.licenseNote ? { licenseNote: artifact.provenance.licenseNote } : {}),
-    ...(artifact.uri ? { contentUrl: `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}/content` } : {}),
+    ...(artifact.uri && !isPrivateArtifactKind(artifact.kind) ? { contentUrl: `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}/content` } : {}),
   }));
   const nodeRuns = new Map(run.nodeRuns.map((node) => [node.nodeId, node]));
+  const executionPlans = new Map((run.executionPlan ?? []).map((plan) => [plan.nodeId, plan]));
   const workflowNodes = run.initialInput.director
     ? WORKFLOW_NODES
     : WORKFLOW_NODES.filter((item) => item.id !== "visual-direction");
-  const visibleNodes = run.initialInput.providers.visualReview
+  const semanticNodes = run.initialInput.workflowFeatures?.assetSemanticRank
     ? workflowNodes
-    : workflowNodes.filter((item) => item.id !== "visual-review");
+    : workflowNodes.filter((item) => item.id !== "asset-candidates" && item.id !== "asset-semantic-rank");
+  const referenceNodes = run.initialInput.workflowFeatures?.referenceGrammar
+    ? semanticNodes
+    : semanticNodes.filter((item) => item.id !== "reference-grammar");
+  const visibleNodes = run.initialInput.providers.visualReview
+    ? referenceNodes
+    : referenceNodes.filter((item) => item.id !== "visual-review");
   const nodes = visibleNodes.map(({ id, label, role }): StudioNode => {
     const node = nodeRuns.get(id);
+    const plannedExecution = executionPlans.get(id);
+    const safeExecutionReceipt = node?.executionReceipt
+      ? redactManagedFileReferences(node.executionReceipt) as NonNullable<StudioNode["executionReceipt"]>
+      : undefined;
+    const safePlannedExecution = plannedExecution
+      ? redactManagedFileReferences(plannedExecution) as NonNullable<StudioNode["plannedExecution"]>
+      : undefined;
     return {
       id,
       label,
@@ -626,14 +902,14 @@ function toRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
       status: node?.status ?? "pending",
       ...(node?.startedAt ? { startedAt: node.startedAt } : {}),
       ...(node?.finishedAt ? { finishedAt: node.finishedAt } : {}),
-      ...(node?.error ? { error: node.error } : {}),
+      ...(node?.error ? { error: redactManagedPathText(node.error) } : {}),
       artifactIds: [...(node?.artifactIds ?? [])],
       qualityGateResults: (node?.qualityGateResults ?? []).map((result) => ({
         gateId: result.gateId,
         status: result.status,
-        reasons: [...result.reasons],
+        reasons: result.reasons.map(redactManagedPathText),
       })),
-      ...(node?.output !== undefined ? { output: structuredClone(node.output) } : {}),
+      ...(node?.output !== undefined ? { output: redactManagedFileReferences(node.output) } : {}),
       ...(node?.inputState ? {
         inputState: {
           effectiveVersionId: node.inputState.effectiveVersionId,
@@ -641,7 +917,7 @@ function toRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
           versions: node.inputState.versions.map((version) => ({
             id: version.id,
             source: version.source,
-            value: structuredClone(version.value),
+            value: redactManagedFileReferences(version.value),
             upstreamVersionIds: [...version.upstreamVersionIds],
             ...(version.parentVersionId ? { parentVersionId: version.parentVersionId } : {}),
             createdAt: version.createdAt,
@@ -664,11 +940,16 @@ function toRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
             createdAt: version.createdAt,
             createdBy: version.createdBy,
             schemaVersion: version.schemaVersion,
-            ...(version.output !== undefined ? { output: structuredClone(version.output) } : {}),
+            ...(version.output !== undefined ? { output: redactManagedFileReferences(version.output) } : {}),
           })),
         },
       } : {}),
-      ...(node?.executionReceipt ? { executionReceipt: { ...node.executionReceipt } } : {}),
+      ...(safeExecutionReceipt ? { executionReceipt: safeExecutionReceipt } : {}),
+      ...(safePlannedExecution ? {
+        plannedExecution: {
+          ...safePlannedExecution,
+        },
+      } : {}),
       ...(node?.spendPlan ? { spendPlan: { ...node.spendPlan, inputVersionIds: [...node.spendPlan.inputVersionIds] } } : {}),
       ...(node?.spendAuthorizationId ? { spendAuthorizationId: node.spendAuthorizationId } : {}),
     };
@@ -688,9 +969,13 @@ function toRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
     ...(decision.note ? { note: decision.note } : {}),
     createdAt: decision.createdAt,
   }));
-  const videoArtifactId = run.artifacts.find((artifact) => artifact.kind === "render" && artifact.contentType === "video/mp4")?.id
-    ?? run.artifacts.find((artifact) => artifact.producer?.nodeId === "render" && artifact.contentType === "video/mp4")?.id;
-  const publishPackageArtifactId = run.artifacts.find((artifact) => artifact.kind === "publish_package")?.id;
+  const videoArtifactId = effectiveNodeArtifact(run, "render", (artifact) =>
+    artifact.kind === "render" && artifact.contentType === "video/mp4")?.id
+    ?? [...run.artifacts].reverse().find((artifact) =>
+      artifact.producer?.nodeId === "render" && artifact.contentType === "video/mp4")?.id;
+  const publishPackageArtifactId = effectiveNodeArtifact(run, "publish-package", (artifact) =>
+    artifact.kind === "publish_package")?.id
+    ?? [...run.artifacts].reverse().find((artifact) => artifact.kind === "publish_package")?.id;
   return {
     ...toRunSummary(run),
     revision: run.revision,
@@ -705,6 +990,23 @@ function toRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
     ...(videoArtifactId ? { videoArtifactId } : {}),
     ...(publishPackageArtifactId ? { publishPackageArtifactId } : {}),
   };
+}
+
+function effectiveNodeArtifact(
+  run: WorkflowRun<ProductionBrief>,
+  nodeId: string,
+  matches: (artifact: WorkflowRun<ProductionBrief>["artifacts"][number]) => boolean,
+): WorkflowRun<ProductionBrief>["artifacts"][number] | undefined {
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+  const effectiveVersion = node?.outputState?.versions.find(
+    (version) => version.id === node.outputState?.effectiveVersionId,
+  );
+  const artifactIds = effectiveVersion?.artifactIds ?? node?.artifactIds ?? [];
+  for (const artifactId of [...artifactIds].reverse()) {
+    const artifact = run.artifacts.find((candidate) => candidate.id === artifactId);
+    if (artifact && matches(artifact)) return artifact;
+  }
+  return undefined;
 }
 
 function parseBriefWithInputError(value: unknown): ProductionBrief {
@@ -740,6 +1042,52 @@ function hasCode(error: unknown, code: string): boolean {
 
 function isTerminalRun(status: WorkflowRun<ProductionBrief>["status"]): boolean {
   return status === "succeeded" || status === "failed" || status === "rejected";
+}
+
+function isPrivateArtifactKind(kind: string): boolean {
+  return kind === "reference_video" || kind === "candidate_inventory_private";
+}
+
+function redactManagedFileReferences(value: unknown): unknown {
+  if (typeof value === "string") {
+    return redactManagedPathText(value);
+  }
+  if (Array.isArray(value)) return value.map((item) => redactManagedFileReferences(item));
+  if (!isRecord(value)) return structuredClone(value);
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, redactManagedFileReferences(item)]),
+  );
+}
+
+function redactManagedPathText(value: string): string {
+  if (isAbsoluteFilePath(value)) return MANAGED_FILE_PLACEHOLDER;
+  return value
+    .replace(
+      /(^|[\s"'`(=])\/(?:Users|home|var|tmp|private|opt|srv|etc|run|root|mnt|Volumes)(?:\/[^\s"'`<>),;\]}]+)+/g,
+      `$1${MANAGED_FILE_PLACEHOLDER}`,
+    )
+    .replace(/(^|[\s"'`(=])[A-Za-z]:\\[^\s"'`<>),;\]}]+/g, `$1${MANAGED_FILE_PLACEHOLDER}`);
+}
+
+function restoreManagedFileReferences(value: unknown, reference: unknown): unknown {
+  if (value === MANAGED_FILE_PLACEHOLDER) {
+    return typeof reference === "string" && isAbsoluteFilePath(reference)
+      ? reference
+      : value;
+  }
+  if (Array.isArray(value)) {
+    const referenceItems = Array.isArray(reference) ? reference : [];
+    return value.map((item, index) => restoreManagedFileReferences(item, referenceItems[index]));
+  }
+  if (!isRecord(value)) return structuredClone(value);
+  const referenceRecord = isRecord(reference) ? reference : {};
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, restoreManagedFileReferences(item, referenceRecord[key])]),
+  );
+}
+
+function isAbsoluteFilePath(value: string): boolean {
+  return path.isAbsolute(value) || path.win32.isAbsolute(value);
 }
 
 async function assertContainedFile(runRoot: string, candidate: string): Promise<void> {

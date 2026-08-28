@@ -53,6 +53,7 @@ export function resolveTemplateSnapshot(input: ResolveTemplateSnapshotInput): Pr
     templateVersion: template.version,
     resolvedAt: input.resolvedAt,
     resolvedBlueprint,
+    ...(template.modelDefaults ? { modelDefaults: clone(template.modelDefaults) } : {}),
     sourceLayers,
     fieldSources,
   });

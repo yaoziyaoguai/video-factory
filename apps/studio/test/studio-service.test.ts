@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import type { HumanDecisionDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
+import type { HumanDecisionDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
 import type {
   DispatchedProductionRun,
   ProductionBrief,
@@ -53,6 +53,19 @@ function waitingRun(workspaceRoot: string): WorkflowRun<ProductionBrief> {
     initialInput: brief,
     startedAt: "2026-08-21T10:00:00.000Z",
     finishedAt: "2026-08-21T10:01:00.000Z",
+    executionPlan: [{
+      nodeId: "publish-package",
+      role: "发行编辑",
+      capability: "publish.package",
+      providerId: "codex-publish-copy-v1",
+      providerLabel: "Codex 发行编辑",
+      modelId: "gpt-5.4",
+      transport: "unix_socket",
+      billing: "subscription",
+      configurationSource: "template_default",
+      parameters: { promptPack: "video-factory/publish-copy-v2" },
+      estimatedCostCny: 0,
+    }],
     nodeRuns: [
       {
         nodeId: "render",
@@ -112,9 +125,11 @@ class FakePipeline implements StudioPipelinePort {
   listener?: ProductionRunListener;
   lastDecision?: HumanDecisionDraft;
   lastOverride?: NodeOverrideDraft;
+  lastInputOverride?: NodeInputOverrideDraft;
   lastAuthorization?: SpendAuthorizationDraft;
   dispatchCount = 0;
   lastInput?: unknown;
+  dispatchGate?: Promise<void>;
 
   constructor(run: WorkflowRun<ProductionBrief>) {
     this.run = run;
@@ -147,6 +162,7 @@ class FakePipeline implements StudioPipelinePort {
     this.dispatchCount += 1;
     this.lastInput = input;
     this.listener = listener;
+    await this.dispatchGate;
     return { runId: this.run.id, completion: Promise.resolve(this.run) };
   }
 
@@ -162,6 +178,11 @@ class FakePipeline implements StudioPipelinePort {
 
   async applyNodeOverride(_runId: string, override: NodeOverrideDraft): Promise<WorkflowRun<ProductionBrief>> {
     this.lastOverride = override;
+    return this.run;
+  }
+
+  async applyNodeInputOverride(_runId: string, override: NodeInputOverrideDraft): Promise<WorkflowRun<ProductionBrief>> {
+    this.lastInputOverride = override;
     return this.run;
   }
 
@@ -217,10 +238,88 @@ describe("StudioService", () => {
     const publishNode = detail?.nodes.find((node) => node.id === "publish-package");
     assert.equal(publishNode?.label, "发布文案与发布包");
     assert.equal(publishNode?.role, "发行编辑");
+    assert.equal(publishNode?.plannedExecution?.modelId, "gpt-5.4");
+    assert.equal(publishNode?.plannedExecution?.configurationSource, "template_default");
+    assert.deepEqual(publishNode?.plannedExecution?.parameters, { promptPack: "video-factory/publish-copy-v2" });
     assert.equal(detail?.nodes.at(-1)?.status, "pending");
     assert.equal(detail?.activeIntervention?.id, "intervention-1");
     assert.equal(detail?.videoArtifactId, "artifact-video");
     assert.equal(detail?.artifacts[0]?.contentUrl, "/api/runs/run-1/artifacts/artifact-video/content");
+  });
+
+  it("maps the effective render and publish-package versions instead of historical artifacts", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const run = waitingRun(workspaceRoot);
+    const newVideoPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "render", "attempt-2", "final.mp4");
+    const oldPackagePath = path.join(workspaceRoot, "runs", "run-1", "publish", "attempt-1", "publish_package.json");
+    const newPackagePath = path.join(workspaceRoot, "runs", "run-1", "publish", "attempt-2", "publish_package.json");
+    run.artifacts.push(
+      {
+        id: "artifact-video-current",
+        kind: "render",
+        uri: newVideoPath,
+        createdAt: "2026-08-21T10:02:00.000Z",
+        contentType: "video/mp4",
+        producer: { nodeId: "render", attempt: 2 },
+        provenance: { providerId: "python-ffmpeg-v1" },
+      },
+      {
+        id: "artifact-package-old",
+        kind: "publish_package",
+        uri: oldPackagePath,
+        createdAt: "2026-08-21T10:03:00.000Z",
+        contentType: "application/json",
+        producer: { nodeId: "publish-package", attempt: 1 },
+        provenance: { providerId: "codex-publish-copy-v1" },
+      },
+      {
+        id: "artifact-package-current",
+        kind: "publish_package",
+        uri: newPackagePath,
+        createdAt: "2026-08-21T10:04:00.000Z",
+        contentType: "application/json",
+        producer: { nodeId: "publish-package", attempt: 2 },
+        provenance: { providerId: "codex-publish-copy-v1" },
+      },
+    );
+    run.nodeRuns[0]!.artifactIds = ["artifact-video-current"];
+    run.nodeRuns[0]!.outputState = {
+      generatedVersionId: "render-v1",
+      effectiveVersionId: "render-v2",
+      stale: false,
+      versions: [
+        { id: "render-v1", nodeId: "render", source: "generated", artifactIds: ["artifact-video"], inputVersionIds: [], createdAt: "2026-08-21T10:00:50.000Z", createdBy: "python-ffmpeg-v1", schemaVersion: "1" },
+        { id: "render-v2", nodeId: "render", source: "generated", artifactIds: ["artifact-video-current"], inputVersionIds: [], createdAt: "2026-08-21T10:02:00.000Z", createdBy: "python-ffmpeg-v1", schemaVersion: "1" },
+      ],
+    };
+    run.nodeRuns.push({
+      nodeId: "publish-package",
+      status: "succeeded",
+      artifactIds: ["artifact-package-current"],
+      qualityGateResults: [],
+      outputState: {
+        generatedVersionId: "package-v1",
+        effectiveVersionId: "package-v2",
+        stale: false,
+        versions: [
+          { id: "package-v1", nodeId: "publish-package", source: "generated", artifactIds: ["artifact-package-old"], inputVersionIds: [], createdAt: "2026-08-21T10:03:00.000Z", createdBy: "codex-publish-copy-v1", schemaVersion: "1" },
+          { id: "package-v2", nodeId: "publish-package", source: "generated", artifactIds: ["artifact-package-current"], inputVersionIds: [], createdAt: "2026-08-21T10:04:00.000Z", createdBy: "codex-publish-copy-v1", schemaVersion: "1" },
+        ],
+      },
+    });
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(run),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+
+    const [summary] = await service.listRuns();
+    const detail = await service.getRun("run-1");
+
+    assert.equal(summary?.videoContentUrl, "/api/runs/run-1/artifacts/artifact-video-current/content");
+    assert.equal(detail?.videoArtifactId, "artifact-video-current");
+    assert.equal(detail?.publishPackageArtifactId, "artifact-package-current");
   });
 
   it("dispatches valid available providers and publishes snapshots", async () => {
@@ -282,6 +381,106 @@ describe("StudioService", () => {
     );
   });
 
+  it("rejects an empty idempotent start as user input instead of failing while hashing it", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-empty-start-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(
+      () => service.startRun(undefined, "empty-production-request-1"),
+      /制作参数不符合要求/,
+    );
+    assert.equal(pipeline.dispatchCount, 0);
+  });
+
+  it("rejects different parameters that reuse an in-flight idempotency key", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-in-flight-idempotency-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    let releaseDispatch!: () => void;
+    pipeline.dispatchGate = new Promise<void>((resolve) => { releaseDispatch = resolve; });
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const first = service.startRun(brief, "in-flight-production-request-1");
+    while (pipeline.dispatchCount === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+    await assert.rejects(
+      () => service.startRun({ ...brief, title: "另一条制作" }, "in-flight-production-request-1"),
+      /另一组参数/,
+    );
+    releaseDispatch();
+
+    assert.deepEqual(await first, { runId: "run-1", status: "running" });
+    assert.equal(pipeline.dispatchCount, 1);
+  });
+
+  it("replays the original start after global model defaults change", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-model-idempotency-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const environment = {
+      ARK_API_KEY: "seedance-key",
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
+    };
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment });
+    await service.updateCreatorSettings({ modelDefaults: { "seedance-video-v1": "doubao-seedance-2-5-260628" } });
+    const input = {
+      ...brief,
+      providers: { ...brief.providers, assets: "seedance-video-v1" },
+      economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 4 },
+    };
+
+    const first = await service.startRun(input, "model-default-request-1");
+    assert.equal((pipeline.lastInput as ProductionBrief).models?.["seedance-video-v1"], "doubao-seedance-2-5-260628");
+    await service.updateCreatorSettings({ modelDefaults: { "seedance-video-v1": "doubao-seedance-2-0-260128" } });
+    const restarted = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment });
+
+    assert.deepEqual(await restarted.startRun(input, "model-default-request-1"), first);
+    assert.equal(pipeline.dispatchCount, 1);
+  });
+
+  it("replays a referenced start after the persisted node safely releases its temporary upload", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-reference-idempotency-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const availability = { available: true, reason: "", taskKinds: ["reference-grammar", "director-plan"] };
+    const firstService = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      codexAvailability: availability,
+    });
+    const uploaded = await firstService.uploadReferenceVideo({
+      label: "参考节奏.mp4",
+      mimeType: "video/mp4",
+      bytes: Buffer.from([0, 0, 0, 12, 102, 116, 121, 112, 105, 115, 111, 109]),
+    });
+    const input = {
+      ...brief,
+      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: true },
+      referenceVideo: { uploadId: uploaded.uploadId, label: uploaded.label },
+    };
+
+    const first = await firstService.startRun(input, "referenced-production-request-1");
+    pipeline.run = {
+      ...pipeline.run,
+      initialInput: pipeline.lastInput as ProductionBrief,
+      nodeRuns: [{ nodeId: "reference-grammar", status: "succeeded", artifactIds: [], qualityGateResults: [] }, ...pipeline.run.nodeRuns],
+    };
+    pipeline.listener?.(pipeline.run);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const restarted = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      codexAvailability: availability,
+    });
+    assert.deepEqual(await restarted.startRun(input, "referenced-production-request-1"), first);
+    await assert.rejects(() => restarted.startRun(input, "referenced-production-request-2"), /参考视频不存在或已经失效/);
+    assert.equal(pipeline.dispatchCount, 1);
+  });
+
   it("blocks metered providers when paid generation is disabled or underfunded", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -291,7 +490,7 @@ describe("StudioService", () => {
       commandAvailable: allCommandsAvailable,
       environment: {
         ARK_API_KEY: "seedance-key",
-        SEEDANCE_MODEL_ID: "seedance-model",
+        SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
         SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
         SEEDREAM_MODEL_ID: "seedream-model",
         SEEDREAM_ESTIMATED_CNY_PER_IMAGE: "0.25",
@@ -377,6 +576,80 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 0);
   });
 
+  it("resolves model defaults as global, then template, then explicit run override", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const environment = {
+      ARK_API_KEY: "test-ark-key",
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
+    };
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment });
+    await service.updateCreatorSettings({ modelDefaults: { "seedance-video-v1": "doubao-seedance-1-5-pro-251215" } });
+    const catalog = await service.listTemplates();
+    const cloned = await service.cloneTemplate({
+      sourceId: "knowledge-explainer",
+      newId: "knowledge-model-routing",
+      name: "知识模型路由",
+      expectedRevision: catalog.storeRevision,
+    });
+    const saved = await service.saveTemplateDraft({
+      ...cloned.template,
+      modelDefaults: { "seedance-video-v1": "doubao-seedance-2-0-fast-260128" },
+    }, cloned.storeRevision);
+    await service.publishTemplate(saved.template.id, saved.storeRevision);
+    const paidBrief = {
+      ...brief,
+      template: { templateId: "knowledge-model-routing" },
+      providers: { ...brief.providers, assets: "seedance-video-v1" },
+      economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 4 },
+    };
+
+    await service.startRun(paidBrief);
+    assert.equal((pipeline.lastInput as ProductionBrief).models?.["seedance-video-v1"], "doubao-seedance-2-0-fast-260128");
+    assert.equal((pipeline.lastInput as ProductionBrief).modelSelectionSources?.["seedance-video-v1"], "template_default");
+
+    await service.startRun({
+      ...paidBrief,
+      models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
+    });
+    assert.equal((pipeline.lastInput as ProductionBrief).models?.["seedance-video-v1"], "doubao-seedance-2-5-260628");
+    assert.equal((pipeline.lastInput as ProductionBrief).modelSelectionSources?.["seedance-video-v1"], "run_override");
+  });
+
+  it("rejects an invalid explicit model instead of silently replacing it with the global default", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-invalid-model-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const environment = { ARK_API_KEY: "test-ark-key", SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5" };
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment });
+    await service.updateCreatorSettings({ modelDefaults: { "seedance-video-v1": "doubao-seedance-2-5-260628" } });
+
+    await assert.rejects(() => service.startRun({
+      ...brief,
+      providers: { ...brief.providers, assets: "seedance-video-v1" },
+      economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 4 },
+      models: { "seedance-video-v1": 123 },
+    }), /制作参数不符合要求/);
+    assert.equal(pipeline.dispatchCount, 0);
+  });
+
+  it("allows an unchanged stale model default to be cleared after provider credentials disappear", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const configured = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: { ARK_API_KEY: "test-ark-key", SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5" } });
+    const stale = { "seedance-video-v1": "doubao-seedance-1-5-pro-251215" };
+    await configured.updateCreatorSettings({ modelDefaults: stale });
+
+    const restarted = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+    const preserved = await restarted.updateCreatorSettings({
+      modelDefaults: stale,
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 30 },
+    });
+    assert.deepEqual(preserved.modelDefaults, stale);
+    const cleared = await restarted.updateCreatorSettings({ modelDefaults: {} });
+    assert.deepEqual(cleared.modelDefaults, {});
+    await assert.rejects(() => restarted.updateCreatorSettings({ modelDefaults: { "seedance-video-v1": "unknown-model" } }), /不属于能力/);
+  });
+
   it("lets the Codex director run inside economy-daily without metered gating", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -412,7 +685,7 @@ describe("StudioService", () => {
       codexAvailability: { available: true, reason: "" },
       environment: {
         ARK_API_KEY: "seedance-key",
-        SEEDANCE_MODEL_ID: "seedance-model",
+        SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
         SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
       },
     });
@@ -658,6 +931,190 @@ describe("StudioService", () => {
     assert.equal(override.expectedVersionId, "script-generated-v1");
   });
 
+  it("keeps the private candidate inventory in sync with a human candidate edit", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const run = waitingRun(workspaceRoot);
+    const nodeRoot = path.join(workspaceRoot, "runs", "run-1", "nodes", "asset-candidates", "attempt-1");
+    const candidateSearchPath = path.join(nodeRoot, "asset_candidates.json");
+    const candidateInventoryPath = path.join(nodeRoot, "asset_candidate_inventory.private.json");
+    const candidate = (assetId: string) => ({
+      provider: "pexels",
+      provider_id: "pexels-stock-v1",
+      asset_id: assetId,
+      media_type: "video",
+      width: 1080,
+      height: 1920,
+      duration: 5,
+      preview_url: `https://images.example/${assetId}.jpg`,
+      source_url: `https://www.pexels.com/video/${assetId}`,
+      creator: "Creator",
+      license_note: "Pexels license",
+      query: "早餐摊",
+      score: 90,
+    });
+    const report = {
+      version: "video-factory/asset-candidates-v1",
+      scene_candidates: [{
+        scene_position: 1,
+        intent: { subject: "早餐摊" },
+        query: "早餐摊",
+        candidates: [candidate("one"), candidate("two")],
+        search_errors: [],
+      }],
+    };
+    const inventory = {
+      version: "video-factory/asset-candidate-inventory-v1",
+      scene_candidates: [{
+        scene_position: 1,
+        candidates: [
+          { ...candidate("one"), download_url: "https://private.example/one?token=one" },
+          { ...candidate("two"), download_url: "https://private.example/two?token=two" },
+        ],
+      }],
+    };
+    await mkdir(nodeRoot, { recursive: true });
+    await Promise.all([
+      writeFile(candidateSearchPath, `${JSON.stringify(report)}\n`, "utf8"),
+      writeFile(candidateInventoryPath, `${JSON.stringify(inventory)}\n`, "utf8"),
+    ]);
+    run.initialInput = {
+      ...run.initialInput,
+      workflowFeatures: { assetSemanticRank: true },
+    };
+    run.nodeRuns.unshift({
+      nodeId: "asset-candidates",
+      status: "succeeded",
+      error: `broker socket '${candidateInventoryPath}' failed`,
+      output: { candidateSearchPath, candidateInventoryPath },
+      artifactIds: ["artifact-candidates"],
+      qualityGateResults: [{ gateId: "private-path", status: "passed", reasons: [`checked ${candidateInventoryPath}`] }],
+      executionReceipt: {
+        nodeId: "asset-candidates",
+        capability: "asset.search",
+        providerId: "asset-candidate-search-v1",
+        providerLabel: "素材候选搜索",
+        modelId: "search-v1",
+        transport: "local_process",
+        billing: "free",
+        parameters: { inputPath: candidateInventoryPath, notes: [`loaded ${candidateInventoryPath}`] },
+        fallbackReason: `private worker failed at ${candidateInventoryPath}`,
+        status: "succeeded",
+        startedAt: "2026-08-21T10:00:19.000Z",
+        finishedAt: "2026-08-21T10:00:20.000Z",
+      },
+      outputState: {
+        nodeId: "asset-candidates",
+        generatedVersionId: "candidate-output-v1",
+        effectiveVersionId: "candidate-output-v1",
+        stale: false,
+        versions: [{
+          id: "candidate-output-v1",
+          nodeId: "asset-candidates",
+          source: "generated",
+          artifactIds: ["artifact-candidates"],
+          inputVersionIds: [],
+          output: { candidateSearchPath, candidateInventoryPath },
+          createdAt: "2026-08-21T10:00:20.000Z",
+          createdBy: "asset-candidate-search-v1",
+          schemaVersion: "video-factory/asset-candidates-v1",
+        }],
+      },
+    }, {
+      nodeId: "assets",
+      status: "stale",
+      artifactIds: [],
+      qualityGateResults: [],
+      inputState: {
+        nodeId: "assets",
+        effectiveVersionId: "assets-input-v1",
+        stale: false,
+        versions: [{
+          id: "assets-input-v1",
+          nodeId: "assets",
+          source: "derived",
+          value: { candidateInventoryPath, selectedAssetIds: ["one"] },
+          upstreamVersionIds: ["candidate-output-v1"],
+          createdAt: "2026-08-21T10:00:21.000Z",
+          createdBy: "workflow:assets",
+          schemaVersion: "1",
+        }],
+      },
+    });
+    run.artifacts.push({
+      id: "artifact-candidates",
+      kind: "asset_candidates",
+      uri: candidateSearchPath,
+      createdAt: "2026-08-21T10:00:20.000Z",
+      contentType: "application/json",
+      producer: { nodeId: "asset-candidates", attempt: 1 },
+      provenance: { providerId: "asset-candidate-search-v1" },
+    });
+    run.executionPlan?.unshift({
+      nodeId: "asset-candidates",
+      capability: "asset.search",
+      providerId: "asset-candidate-search-v1",
+      providerLabel: "素材候选搜索",
+      modelId: "search-v1",
+      transport: "local_process",
+      billing: "free",
+      parameters: { inputPath: candidateInventoryPath, notes: [`planned ${candidateInventoryPath}`] },
+      snapshotSource: "created",
+    });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+    const edited = structuredClone(report);
+    edited.scene_candidates[0]!.candidates = [candidate("two")];
+
+    const detail = await service.getRun("run-1");
+    const candidateNode = detail?.nodes.find((node) => node.id === "asset-candidates");
+    const assetsNode = detail?.nodes.find((node) => node.id === "assets");
+    assert.equal((candidateNode?.output as { candidateInventoryPath?: string }).candidateInventoryPath, "[系统托管文件]");
+    assert.equal(
+      (candidateNode?.outputState?.versions[0]?.output as { candidateInventoryPath?: string }).candidateInventoryPath,
+      "[系统托管文件]",
+    );
+    assert.equal(
+      (assetsNode?.inputState?.versions[0]?.value as { candidateInventoryPath?: string }).candidateInventoryPath,
+      "[系统托管文件]",
+    );
+    assert.equal(JSON.stringify(detail).includes(candidateInventoryPath), false);
+    assert.match(candidateNode?.error ?? "", /\[系统托管文件\]/);
+    assert.match(candidateNode?.qualityGateResults[0]?.reasons[0] ?? "", /\[系统托管文件\]/);
+    assert.equal(candidateNode?.executionReceipt?.parameters?.inputPath, "[系统托管文件]");
+    assert.match(String(candidateNode?.executionReceipt?.parameters?.notes?.[0]), /\[系统托管文件\]/);
+    assert.equal(candidateNode?.plannedExecution?.parameters?.inputPath, "[系统托管文件]");
+
+    await service.applyNodeInputOverride("run-1", "assets", {
+      input: { candidateInventoryPath: "[系统托管文件]", selectedAssetIds: ["two"] },
+    }, "trusted-owner");
+    assert.deepEqual(pipeline.lastInputOverride?.input, { candidateInventoryPath, selectedAssetIds: ["two"] });
+
+    await service.applyNodeOverride("run-1", "asset-candidates", {
+      document: { artifactId: "artifact-candidates", content: edited },
+    }, "trusted-owner");
+
+    const output = pipeline.lastOverride!.output as { candidateSearchPath: string; candidateInventoryPath: string };
+    assert.match(output.candidateSearchPath, /human-revisions\/.+\.json$/);
+    assert.match(output.candidateInventoryPath, /human-revisions\/.+\.inventory\.private\.json$/);
+    assert.notEqual(output.candidateInventoryPath, candidateInventoryPath);
+    const revisedInventory = JSON.parse(await readFile(output.candidateInventoryPath, "utf8"));
+    assert.deepEqual(revisedInventory.scene_candidates[0].candidates.map((item: { asset_id: string }) => item.asset_id), ["two"]);
+    assert.equal(JSON.stringify(revisedInventory).includes("token=one"), false);
+    assert.equal(JSON.stringify(revisedInventory).includes("token=two"), true);
+    assert.equal(pipeline.lastOverride!.artifacts?.length, 2);
+    assert.equal(pipeline.lastOverride!.artifacts?.[1]?.kind, "candidate_inventory_private");
+    assert.equal(pipeline.lastOverride!.artifacts?.[1]?.uri, output.candidateInventoryPath);
+
+    const forged = structuredClone(report);
+    forged.scene_candidates[0]!.candidates[0]!.preview_url = "http://127.0.0.1/private";
+    await assert.rejects(
+      () => service.applyNodeOverride("run-1", "asset-candidates", {
+        document: { artifactId: "artifact-candidates", content: forged },
+      }, "trusted-owner"),
+      /preview_url 不能修改/,
+    );
+  });
+
   it("rejects document edits that do not target the node's current JSON artifact", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const run = waitingRun(workspaceRoot);
@@ -694,6 +1151,36 @@ describe("StudioService", () => {
     assert.equal(resource?.path, await realpath(videoPath));
     assert.equal(resource?.sizeBytes, 11);
 
+    const referencePath = path.join(workspaceRoot, "runs", "run-1", "reference.mp4");
+    await writeFile(referencePath, "private-reference", "utf8");
+    pipeline.run = {
+      ...run,
+      artifacts: [...run.artifacts, {
+        id: "artifact-reference",
+        kind: "reference_video",
+        uri: referencePath,
+        createdAt: "2026-08-28T10:00:00.000Z",
+        provenance: { providerId: "creator-upload" },
+      }],
+    };
+    assert.equal(await service.resolveArtifact("run-1", "artifact-reference"), undefined);
+    assert.equal((await service.getRun("run-1"))?.artifacts.find((artifact) => artifact.id === "artifact-reference")?.contentUrl, undefined);
+
+    const privateInventoryPath = path.join(workspaceRoot, "runs", "run-1", "candidate_inventory.private.json");
+    await writeFile(privateInventoryPath, '{"secret":"token"}\n', "utf8");
+    pipeline.run = {
+      ...pipeline.run,
+      artifacts: [...pipeline.run.artifacts, {
+        id: "artifact-private-inventory",
+        kind: "candidate_inventory_private",
+        uri: privateInventoryPath,
+        createdAt: "2026-08-28T10:00:00.000Z",
+        provenance: { providerId: "human-editor-private-state" },
+      }],
+    };
+    assert.equal(await service.resolveArtifact("run-1", "artifact-private-inventory"), undefined);
+    assert.equal((await service.getRun("run-1"))?.artifacts.find((artifact) => artifact.id === "artifact-private-inventory")?.contentUrl, undefined);
+
     const outsidePath = path.join(workspaceRoot, "outside.mp4");
     await writeFile(outsidePath, "outside", "utf8");
     pipeline.run = {
@@ -729,7 +1216,7 @@ describe("StudioService", () => {
       environment: {
         PEXELS_API_KEY: "secret-value",
         ARK_API_KEY: "seedance-secret",
-        SEEDANCE_MODEL_ID: "seedance-model",
+        SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
         SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
         SEEDREAM_MODEL_ID: "seedream-model",
         SEEDREAM_ESTIMATED_CNY_PER_IMAGE: "0.25",

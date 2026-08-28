@@ -127,6 +127,19 @@ describe("TrendGateway", () => {
     assert.equal(signals.every((signal) => Boolean(signal.collectedAt)), true);
   });
 
+  it("drops non-http links returned by an upstream trend service", async () => {
+    const gateway = new TrendGateway({
+      fetcher: async (input) => String(input).includes(":6688/")
+        ? jsonResponse({ code: 200, data: [{ title: "危险链接", url: "javascript:alert(1)" }] })
+        : jsonResponse({ status: "success", items: [{ title: "本地文件", url: "file:///etc/passwd" }] }),
+    });
+
+    const signals = await gateway.listSignals({ platforms: ["douyin"], limit: 10 });
+
+    assert.equal(signals.length, 2);
+    assert.equal(signals.every((signal) => signal.url === undefined), true);
+  });
+
   it("covers a broad Chinese trend source set by default and balances platforms by rank", async () => {
     const requested = new Set<string>();
     const fetcher: typeof fetch = async (input) => {

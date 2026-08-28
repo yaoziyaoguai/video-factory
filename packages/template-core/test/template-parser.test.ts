@@ -49,4 +49,16 @@ describe("parseProductionTemplate", () => {
     const draft = parseProductionTemplate({ ...validTemplate(), status: "draft" });
     assert.equal(Object.isFrozen(draft), false);
   });
+
+  it("accepts bounded provider model defaults and rejects secret-like or malformed identifiers", () => {
+    const parsed = parseProductionTemplate({
+      ...validTemplate(),
+      modelDefaults: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
+    });
+    assert.equal(parsed.modelDefaults?.["seedance-video-v1"], "doubao-seedance-2-5-260628");
+    assert.throws(() => parseProductionTemplate({
+      ...validTemplate(),
+      modelDefaults: { "bad provider": "model" },
+    }), /modelDefaults provider id/);
+  });
 });

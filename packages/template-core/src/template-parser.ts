@@ -28,12 +28,29 @@ export function parseProductionTemplate(value: unknown): ProductionTemplate {
     qualityRules: qualityRules(input.qualityRules),
     capabilityRequirements: capabilityRequirements(input.capabilityRequirements),
     costPolicy: costPolicy(input.costPolicy),
+    ...(input.modelDefaults === undefined ? {} : { modelDefaults: modelDefaults(input.modelDefaults) }),
     createdAt: isoTimestamp(input.createdAt, "createdAt"),
     updatedAt: isoTimestamp(input.updatedAt, "updatedAt"),
   };
 
   validateReferences(template);
   return template.status === "published" ? deepFreeze(template) : template;
+}
+
+function modelDefaults(value: unknown): Record<string, string> {
+  const input = record(value, "modelDefaults");
+  const entries = Object.entries(input);
+  if (entries.length > 32) throw new Error("modelDefaults must not contain more than 32 entries.");
+  return Object.fromEntries(entries.map(([providerId, modelId]) => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(providerId)) {
+      throw new Error(`modelDefaults provider id '${providerId}' is invalid.`);
+    }
+    const normalized = text(modelId, `modelDefaults.${providerId}`);
+    if (normalized.length > 160 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(normalized)) {
+      throw new Error(`modelDefaults.${providerId} is invalid.`);
+    }
+    return [providerId, normalized];
+  }));
 }
 
 function storyBeats(value: unknown): StoryBeatTemplate[] {

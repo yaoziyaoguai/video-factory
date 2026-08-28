@@ -14,7 +14,7 @@ describe("CostStudio", () => {
       ],
       executionReceipts: [
         { id: "receipt-1", nodeId: "script", capability: "script.draft", providerId: "openai-codex", modelId: "codex", billing: "subscription", status: "succeeded", startedAt: "2026-08-27T10:00:00.000Z", finishedAt: "2026-08-27T10:00:02.000Z", estimatedCostCny: 0 },
-        { id: "receipt-2", nodeId: "assets", capability: "asset.generate.video", providerId: "minimax-video", modelId: "MiniMax-Hailuo", billing: "metered", status: "succeeded", spendAuthorizationId: "spend-1", startedAt: "2026-08-27T10:01:00.000Z", finishedAt: "2026-08-27T10:03:00.000Z", estimatedCostCny: 5, actualCostCny: 4.2 },
+        { id: "receipt-2", nodeId: "assets", capability: "asset.generate.video", providerId: "minimax-video", modelId: "MiniMax-Hailuo", billing: "metered", status: "succeeded", spendAuthorizationId: "spend-1", startedAt: "2026-08-27T10:01:00.000Z", finishedAt: "2026-08-27T10:03:00.000Z", estimatedCostCny: 5, actualCostCny: 4.2, actualCostSource: "configured_rate" },
         { id: "receipt-3", nodeId: "render", capability: "video.render", providerId: "python-ffmpeg-v1", modelId: "ffmpeg", billing: "free", status: "succeeded", startedAt: "2026-08-27T10:04:00.000Z", finishedAt: "2026-08-27T10:04:10.000Z", estimatedCostCny: 0 },
       ],
       spendAuthorizations: [
@@ -36,6 +36,7 @@ describe("CostStudio", () => {
     assert.equal(dashboard.byProvider.find((item) => item.providerId === "minimax-video")?.actualCostCny, 4.2);
     assert.equal(dashboard.runs[0]?.title, "第一条付费成片");
     assert.equal((await studio.runDetail("run-1"))?.lines[1]?.authorizedCostCny, 6);
+    assert.equal((await studio.runDetail("run-1"))?.lines[1]?.actualCostSource, "configured_rate");
   });
 
   it("keeps unknown actual spend pending and counts failed metered retries", async () => {

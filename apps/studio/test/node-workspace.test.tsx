@@ -48,9 +48,12 @@ const succeededNode: StudioNode = {
     modelId: "codex",
     transport: "unix_socket",
     billing: "subscription",
+    configurationSource: "template_default",
+    parameters: { promptPack: "video-factory/screenwriter-v4", temperature: 0.4 },
     status: "succeeded",
     startedAt: "2026-08-27T00:00:00.000Z",
     finishedAt: "2026-08-27T00:00:01.000Z",
+    actualModelIds: ["codex-runtime-actual"],
   },
 };
 
@@ -66,14 +69,49 @@ describe("node production workspaces", () => {
     await userEvent.click(screen.getByRole("tab", { name: "角色与模型" }));
     expect(screen.getByText("codex-screenwriter-v1")).toBeInTheDocument();
     expect(screen.getByText("codex", { selector: "span" })).toBeInTheDocument();
+    expect(screen.getByText("codex-runtime-actual")).toBeInTheDocument();
+    expect(screen.getByText("模板默认")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("查看本次实际参数"));
+    expect(screen.getByText(/screenwriter-v4/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("tab", { name: "输出" }));
     await userEvent.click(screen.getByRole("button", { name: "编辑" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "脚本交付内容" }), { target: { value: "{\"hook\":\"人工钩子\"}" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "开场钩子" }), { target: { value: "人工钩子" } });
     await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
 
     expect(onOverride).toHaveBeenCalledWith("script", {
       output: { hook: "人工钩子" },
     });
+  });
+
+  it("shows the immutable planned provider and model before a node executes", async () => {
+    const pendingNode: StudioNode = {
+      id: "visual-direction",
+      label: "导演方案",
+      role: "导演",
+      status: "pending",
+      artifactIds: [],
+      qualityGateResults: [],
+      plannedExecution: {
+        providerId: "api-visual-director-v1",
+        providerLabel: "Codex 视觉导演",
+        modelId: "gpt-5.4",
+        transport: "unix_socket",
+        billing: "subscription",
+        configurationSource: "template_default",
+        parameters: { promptPack: "video-factory/director-v5" },
+        estimatedCostCny: 0,
+        snapshotSource: "created",
+      },
+    };
+    render(<NodeWorkspace node={pendingNode} runStatus="running" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+
+    expect(screen.getByText(/Codex 视觉导演 · gpt-5.4/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "角色与模型" }));
+    expect(screen.getByText("api-visual-director-v1")).toBeInTheDocument();
+    expect(screen.getByText("模板默认")).toBeInTheDocument();
+    expect(screen.getByText(/创建任务时保存的执行计划/)).toBeInTheDocument();
+    await userEvent.click(screen.getByText("查看计划参数"));
+    expect(screen.getByText(/director-v5/)).toBeInTheDocument();
   });
 
   it("shows the effective node input and saves a human input version", async () => {
@@ -89,11 +127,9 @@ describe("node production workspaces", () => {
     />);
 
     await userEvent.click(screen.getByRole("tab", { name: "输入" }));
-    expect(screen.getByText(/旧题目/)).toBeInTheDocument();
+    expect(screen.getAllByText(/旧题目/).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("button", { name: "编辑输入" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "脚本输入内容" }), {
-      target: { value: "{\"brief\":{\"title\":\"人工题目\"}}" },
-    });
+    fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "人工题目" } });
     await userEvent.click(screen.getByRole("button", { name: "保存为人工输入版本" }));
 
     expect(onInputOverride).toHaveBeenCalledWith("script", {
@@ -257,7 +293,8 @@ describe("node production workspaces", () => {
 
     expect((await screen.findAllByText(/旧脚本/)).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("button", { name: "编辑" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "脚本交付内容" }), {
+    await userEvent.click(screen.getByRole("button", { name: "JSON 专家" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "脚本交付内容 JSON" }), {
       target: { value: "{\"title\":\"人工脚本\",\"scenes\":[{\"narration\":\"人工旁白\"}]}" },
     });
     await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));

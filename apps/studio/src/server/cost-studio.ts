@@ -66,6 +66,9 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       return value.nodeId === nodeId && value.providerId === providerId && (value.modelId === modelId || value.modelId === undefined);
     });
     const actualCost = nonNegativeNumber(receipt.actualCostCny);
+    const actualCostSource = receipt.actualCostSource === "provider_reported" || receipt.actualCostSource === "configured_rate"
+      ? receipt.actualCostSource
+      : undefined;
     const status = receipt.status === "failed" ? "failed" : receipt.status === "succeeded" ? "succeeded" : "unknown";
     const estimatedCostCny = nonNegativeNumber(receipt.estimatedCostCny) ?? 0;
     const authorizedCostCny = nonNegativeNumber(receipt.authorizedCostCny)
@@ -90,6 +93,7 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
         : {}),
       ...(spendAuthorizationId ? { spendAuthorizationId } : {}),
       ...(actualCost !== undefined ? { actualCostCny: actualCost } : {}),
+      ...(actualCostSource !== undefined ? { actualCostSource } : {}),
       actualPending: billing === "metered" && actualCost === undefined,
       startedAt,
       ...(text(receipt.finishedAt) ? { finishedAt: text(receipt.finishedAt) } : {}),

@@ -1281,7 +1281,28 @@ describe("ProductionPipeline", () => {
 
   it("reruns stale nodes in immutable attempt directories and packages only current artifacts", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rerun-"));
-    const worker = new FakeWorker();
+    class SourceLeakWorker extends FakeWorker {
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const response = await super.run(request);
+        if (request.capability !== "asset.prepare") return response;
+        const assetPlanPath = String(response.output?.assetPlanPath);
+        const content = JSON.stringify({
+          scene_assets: [{
+            scene_position: 1,
+            provider: "pexels-stock-v1",
+            source_url: path.join(workspaceRoot, "private", "credential.txt"),
+            creator: "fixture",
+            license_note: "Fixture license.",
+          }],
+        });
+        await writeFile(assetPlanPath, content, "utf8");
+        response.artifacts[0]!.kind = "asset_plan";
+        response.artifacts[0]!.sha256 = createHash("sha256").update(content).digest("hex");
+        response.artifacts[0]!.sizeBytes = Buffer.byteLength(content);
+        return response;
+      }
+    }
+    const worker = new SourceLeakWorker();
     const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
     const waiting = await subject.start(brief);
     const scriptOutput = waiting.nodeRuns.find((node) => node.nodeId === "script")?.output;
@@ -1315,11 +1336,16 @@ describe("ProductionPipeline", () => {
     assert.equal(approved.status, "succeeded");
     const packageArtifact = approved.artifacts.find((artifact) => artifact.kind === "publish_package");
     assert.ok(packageArtifact?.uri);
-    const payload = JSON.parse(await readFile(packageArtifact.uri, "utf8")) as { artifacts: Artifact[] };
-    const packagedUris = payload.artifacts.flatMap((artifact) => artifact.uri ? [artifact.uri] : []);
-    assert.equal(new Set(packagedUris).size, packagedUris.length);
-    assert.ok(packagedUris.some((uri) => /attempt-2/.test(uri)));
-    assert.ok(packagedUris.every((uri) => !/attempt-1/.test(uri) || /nodes\/script\//.test(uri)));
+    const packageBytes = await readFile(packageArtifact.uri, "utf8");
+    const payload = JSON.parse(packageBytes) as { artifacts: Array<Omit<Artifact, "uri" | "data">> };
+    const resourceManifestArtifact = approved.artifacts.find((artifact) => artifact.kind === "resource_manifest");
+    assert.ok(resourceManifestArtifact?.uri);
+    const resourceManifestBytes = await readFile(resourceManifestArtifact.uri, "utf8");
+    assert.equal(new Set(payload.artifacts.map((artifact) => artifact.id)).size, payload.artifacts.length);
+    assert.ok(payload.artifacts.some((artifact) => artifact.producer?.attempt === 2));
+    assert.ok(payload.artifacts.every((artifact) => !("uri" in artifact) && !("data" in artifact)));
+    assert.equal(packageBytes.includes(workspaceRoot), false);
+    assert.equal(resourceManifestBytes.includes(workspaceRoot), false);
   });
 
   it("refuses approval when an artifact changed after technical review", async () => {

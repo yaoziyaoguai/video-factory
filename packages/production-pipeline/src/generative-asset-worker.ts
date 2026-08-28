@@ -20,6 +20,17 @@ interface WorkerClient {
 export interface VideoGenerationAdapterBinding {
   adapter: VideoGenerationAdapter;
   estimatedCnyPerClip: number;
+  modelPrices?: Record<string, number>;
+  defaultModelId?: string;
+  modelProfiles?: Record<string, VideoGenerationRuntimeProfile>;
+}
+
+export interface VideoGenerationRuntimeProfile {
+  taskTypes: Array<"text-to-video" | "image-to-video">;
+  resolutions: string[];
+  minDurationSeconds: number;
+  maxDurationSeconds: number;
+  supportsAudio: boolean;
 }
 
 export interface ImageGenerationAdapterBinding {
@@ -51,6 +62,7 @@ interface GenerationJob {
   status: VideoGenerationProgress["status"];
   estimatedCostCny: number;
   mediaType: "image" | "video";
+  modelId?: string;
   videoUrl?: string;
   imageUrl?: string;
   error?: string;
@@ -74,6 +86,7 @@ interface RoutedShot {
 interface ResolvedAssetBinding {
   mediaType: "image" | "video";
   estimatedCnyPerAsset: number;
+  modelId?: string;
   generate(
     scene: ScriptScene,
     prompt: string,
@@ -81,11 +94,24 @@ interface ResolvedAssetBinding {
   ): Promise<{ taskId: string; url: string }>;
 }
 
+interface RouteResolutionFailure {
+  scenePosition: number;
+  providerId: string;
+  modelId?: string;
+  reason: string;
+}
+
 const KNOWN_METERED_ASSET_PROVIDERS = new Set([
   "seedream-image-v1",
   "seedance-video-v1",
   "hailuo-video-v1",
   "wan-video-v1",
+]);
+
+const KNOWN_FREE_ASSET_PROVIDERS = new Set([
+  "local-editorial-v1",
+  "pexels-stock-v1",
+  "pixabay-stock-v1",
 ]);
 
 export class GenerativeAssetWorkerClient implements WorkerClient {
@@ -98,6 +124,17 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     for (const binding of options.adapters) {
       if (!Number.isFinite(binding.estimatedCnyPerClip) || binding.estimatedCnyPerClip <= 0) {
         throw new Error(`Adapter '${binding.adapter.providerId}' must have a positive estimatedCnyPerClip.`);
+      }
+      for (const [modelId, price] of Object.entries(binding.modelPrices ?? {})) {
+        if (!modelId.trim() || !Number.isFinite(price) || price <= 0) {
+          throw new Error(`Adapter '${binding.adapter.providerId}' has an invalid price for model '${modelId}'.`);
+        }
+      }
+      for (const [modelId, profile] of Object.entries(binding.modelProfiles ?? {})) {
+        validateVideoRuntimeProfile(binding.adapter.providerId, modelId, profile);
+        if (binding.modelPrices && binding.modelPrices[modelId] === undefined) {
+          throw new Error(`Adapter '${binding.adapter.providerId}' is missing a price for model '${modelId}'.`);
+        }
       }
       if (this.adapters.has(binding.adapter.providerId)) {
         throw new Error(`Adapter '${binding.adapter.providerId}' is already configured.`);
@@ -126,7 +163,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     if (providerId === "ai-shot-router-v1") {
       return this.runDirectorRoutes(request, parameters);
     }
-    const binding = this.resolveBinding(providerId);
+    const modelSelections = optionalStringRecord(parameters.modelSelections, "modelSelections");
+    const modelId = modelSelections[providerId];
+    const binding = this.resolveBinding(providerId, modelId);
     if (!binding) {
       if (KNOWN_METERED_ASSET_PROVIDERS.has(providerId)) {
         throw new Error(`Metered asset provider '${providerId}' is not configured in this worker.`);
@@ -171,6 +210,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         status: "submitted",
         estimatedCostCny: binding.estimatedCnyPerAsset,
         mediaType: binding.mediaType,
+        ...(binding.modelId ? { modelId: binding.modelId } : {}),
       };
       jobs.push(job);
       try {
@@ -209,6 +249,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
 
     const generatedScenes = jobs.filter((job) => job.status === "succeeded").length;
     const fallbackScenes = jobs.length - generatedScenes;
+    const accountedCostCny = roundMoney(jobs.reduce((sum, job) => sum + job.estimatedCostCny, 0));
     plan.scene_assets = assets;
     plan.generation = {
       providerId,
@@ -217,6 +258,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       generatedScenes,
       fallbackScenes,
       estimatedCostCny: roundMoney(jobs.length * binding.estimatedCnyPerAsset),
+      actualCostCny: accountedCostCny,
+      actualCostSource: "configured_rate",
       jobsPath,
       localBaselinePreserved: true,
     };
@@ -255,6 +298,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         generatedScenes,
         fallbackScenes,
         estimatedCostCny: roundMoney(jobs.length * binding.estimatedCnyPerAsset),
+        actualCostCny: accountedCostCny,
+        actualCostSource: "configured_rate",
+        ...actualModelDiagnostics(jobs),
       },
     };
   }
@@ -274,20 +320,58 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const sceneByPosition = new Map(scenes.map((scene) => [scene.position, scene]));
     const directorPlan = requiredRecord(JSON.parse(await readFile(directorPlanPath, "utf8")), "Director plan");
     const routedShots = parseRoutedShots(directorPlan.shots);
+    const modelSelections = optionalStringRecord(parameters.modelSelections, "modelSelections");
+    const freeProviderIds = new Set([
+      ...KNOWN_FREE_ASSET_PROVIDERS,
+      ...optionalStringArray(parameters.freeProviderIds, "freeProviderIds"),
+    ]);
+    const resolutionFailures: RouteResolutionFailure[] = [];
     const generatedRoutes = routedShots.flatMap((route) => {
-      const providerId = route.providerIds.find((candidate) => this.resolveBinding(candidate));
-      const binding = providerId ? this.resolveBinding(providerId) : undefined;
-      if (!providerId || !binding) {
-        const hasLocalFallback = route.providerIds.some((candidate) => !KNOWN_METERED_ASSET_PROVIDERS.has(candidate));
-        const unconfiguredMetered = route.providerIds.find((candidate) => KNOWN_METERED_ASSET_PROVIDERS.has(candidate));
-        if (unconfiguredMetered && !hasLocalFallback) {
-          throw new Error(`AI director selected unconfigured metered provider '${unconfiguredMetered}'.`);
+      let selected: { providerId: string; modelId?: string; binding: ResolvedAssetBinding } | undefined;
+      let hasLocalFallback = false;
+      for (const providerId of route.providerIds) {
+        if (!KNOWN_METERED_ASSET_PROVIDERS.has(providerId)) {
+          if (freeProviderIds.has(providerId)) {
+            hasLocalFallback = true;
+            break;
+          }
+          resolutionFailures.push({
+            scenePosition: route.scenePosition,
+            providerId,
+            reason: `Provider '${providerId}' is not a recognized asset source.`,
+          });
+          continue;
         }
+        const modelId = modelSelections[providerId];
+        try {
+          const binding = this.resolveBinding(providerId, modelId);
+          if (binding) {
+            selected = { providerId, ...(modelId ? { modelId } : {}), binding };
+            break;
+          }
+          resolutionFailures.push({
+            scenePosition: route.scenePosition,
+            providerId,
+            ...(modelId ? { modelId } : {}),
+            reason: `Provider '${providerId}' is not configured.`,
+          });
+        } catch (error) {
+          resolutionFailures.push({
+            scenePosition: route.scenePosition,
+            providerId,
+            ...(modelId ? { modelId } : {}),
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      if (!selected) {
+        const failure = [...resolutionFailures].reverse().find((item) => item.scenePosition === route.scenePosition);
+        if (failure && !hasLocalFallback) throw new Error(failure.reason);
         return [];
       }
       const scene = sceneByPosition.get(route.scenePosition);
       if (!scene) throw new Error(`AI director selected unknown script scene ${route.scenePosition}.`);
-      return [{ route, scene, binding, providerId }];
+      return [{ route, scene, ...selected }];
     });
     if (generatedRoutes.length > maxPaidShots) {
       throw new Error(`AI director selected ${generatedRoutes.length} paid shots, exceeding the limit ${maxPaidShots}.`);
@@ -298,9 +382,10 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     }
 
     const baseline = await this.options.fallback.run(structuredClone(request));
-    if (baseline.status !== "succeeded" || generatedRoutes.length === 0) {
+    if (baseline.status !== "succeeded") {
       return baseline;
     }
+    if (generatedRoutes.length === 0 && resolutionFailures.length === 0) return baseline;
 
     const planPath = requiredString(baseline.output?.assetPlanPath, "assetPlanPath");
     const plan = requiredRecord(JSON.parse(await readFile(planPath, "utf8")), "Asset plan");
@@ -316,6 +401,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         status: "submitted",
         estimatedCostCny: binding.estimatedCnyPerAsset,
         mediaType: binding.mediaType,
+        ...(binding.modelId ? { modelId: binding.modelId } : {}),
       };
       jobs.push(job);
       try {
@@ -353,6 +439,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     }
 
     const generatedScenes = jobs.filter((job) => job.status === "succeeded").length;
+    const routedScenePositions = new Set(generatedRoutes.map((item) => item.scene.position));
+    const configurationFallbackScenes = new Set(
+      resolutionFailures.filter((item) => !routedScenePositions.has(item.scenePosition)).map((item) => item.scenePosition),
+    ).size;
+    const fallbackScenes = jobs.filter((job) => job.status !== "succeeded").length + configurationFallbackScenes;
+    const accountedCostCny = roundMoney(jobs.reduce((sum, job) => sum + job.estimatedCostCny, 0));
     plan.scene_assets = assets;
     plan.generation = {
       providerId: "ai-shot-router-v1",
@@ -360,10 +452,13 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       maxPaidShots,
       attemptedScenes: jobs.length,
       generatedScenes,
-      fallbackScenes: jobs.length - generatedScenes,
+      fallbackScenes,
       estimatedCostCny: estimatedCost,
+      actualCostCny: accountedCostCny,
+      actualCostSource: "configured_rate",
       jobsPath,
       localBaselinePreserved: true,
+      ...(resolutionFailures.length ? { skippedRoutes: resolutionFailures } : {}),
     };
     await writeJsonAtomically(planPath, plan);
     await writeJobs(jobsPath, jobs);
@@ -398,20 +493,42 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         providerId: "ai-shot-router-v1",
         attemptedScenes: jobs.length,
         generatedScenes,
-        fallbackScenes: jobs.length - generatedScenes,
+        fallbackScenes,
         estimatedCostCny: estimatedCost,
+        actualCostCny: accountedCostCny,
+        actualCostSource: "configured_rate",
+        ...actualModelDiagnostics(jobs),
+        ...(resolutionFailures.length ? { skippedRoutes: resolutionFailures } : {}),
       },
     };
   }
 
-  private resolveBinding(providerId: string): ResolvedAssetBinding | undefined {
+  private resolveBinding(providerId: string, modelId?: string): ResolvedAssetBinding | undefined {
     const video = this.adapters.get(providerId);
     if (video) {
+      const effectiveModelId = modelId ?? video.defaultModelId;
+      const estimatedCnyPerAsset = effectiveModelId
+        ? video.modelPrices?.[effectiveModelId]
+        : video.estimatedCnyPerClip;
+      if (estimatedCnyPerAsset === undefined) {
+        throw new Error(`Provider '${providerId}' does not expose model '${effectiveModelId}'.`);
+      }
+      const profile = effectiveModelId ? video.modelProfiles?.[effectiveModelId] : undefined;
+      if (video.modelProfiles && effectiveModelId && !profile) {
+        throw new Error(`Provider '${providerId}' does not expose a runtime profile for model '${effectiveModelId}'.`);
+      }
+      if (profile && !profile.taskTypes.includes("text-to-video")) {
+        throw new Error(`Video model '${effectiveModelId}' does not support text-to-video generation.`);
+      }
       return {
         mediaType: "video",
-        estimatedCnyPerAsset: video.estimatedCnyPerClip,
+        estimatedCnyPerAsset,
+        ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
         generate: async (scene, prompt, onProgress) => {
-          const result = await video.adapter.generate(generationRequest(scene, prompt), onProgress);
+          const result = await video.adapter.generate({
+            ...generationRequest(scene, prompt, profile),
+            ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
+          }, onProgress);
           return { taskId: result.taskId, url: result.videoUrl };
         },
       };
@@ -431,6 +548,15 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
   }
 }
 
+function optionalStringRecord(value: unknown, field: string): Record<string, string> {
+  if (value === undefined) return {};
+  const input = requiredRecord(value, field);
+  return Object.fromEntries(Object.entries(input).map(([key, item]) => {
+    if (typeof item !== "string" || !item.trim()) throw new Error(`${field}.${key} must be a non-empty string.`);
+    return [key, item.trim()];
+  }));
+}
+
 function parseScenes(value: unknown): ScriptScene[] {
   if (!Array.isArray(value)) {
     throw new Error("Script scenes must be an array.");
@@ -446,12 +572,53 @@ function parseScenes(value: unknown): ScriptScene[] {
   });
 }
 
-function generationRequest(scene: ScriptScene, prompt = scene.visualPrompt): VideoGenerationRequest {
+function generationRequest(
+  scene: ScriptScene,
+  prompt = scene.visualPrompt,
+  profile?: VideoGenerationRuntimeProfile,
+): VideoGenerationRequest {
+  const minimum = profile?.minDurationSeconds ?? 4;
+  const maximum = profile?.maxDurationSeconds ?? 15;
+  const resolution = preferredResolution(profile?.resolutions);
   return {
     prompt,
-    durationSeconds: Math.max(4, Math.min(15, Math.round(scene.duration))),
+    durationSeconds: Math.max(minimum, Math.min(maximum, Math.round(scene.duration))),
     ratio: "9:16",
+    ...(resolution ? { resolution } : {}),
+    ...(profile ? { generateAudio: false } : {}),
   };
+}
+
+function preferredResolution(resolutions: string[] | undefined): VideoGenerationRequest["resolution"] | undefined {
+  if (!resolutions) return undefined;
+  const normalized = resolutions.map((value) => value.toLowerCase());
+  return (["720p", "1080p", "480p"] as const).find((value) => normalized.includes(value));
+}
+
+function validateVideoRuntimeProfile(providerId: string, modelId: string, profile: VideoGenerationRuntimeProfile): void {
+  if (!modelId.trim()
+    || !Array.isArray(profile.taskTypes)
+    || profile.taskTypes.length === 0
+    || profile.taskTypes.some((task) => task !== "text-to-video" && task !== "image-to-video")
+    || !Array.isArray(profile.resolutions)
+    || profile.resolutions.length === 0
+    || !Number.isInteger(profile.minDurationSeconds)
+    || !Number.isInteger(profile.maxDurationSeconds)
+    || profile.minDurationSeconds < 2
+    || profile.maxDurationSeconds > 15
+    || profile.minDurationSeconds > profile.maxDurationSeconds
+    || typeof profile.supportsAudio !== "boolean") {
+    throw new Error(`Adapter '${providerId}' has an invalid runtime profile for model '${modelId}'.`);
+  }
+}
+
+function uniqueActualModelIds(jobs: GenerationJob[]): string[] {
+  return [...new Set(jobs.map((job) => job.modelId ?? job.providerId))];
+}
+
+function actualModelDiagnostics(jobs: GenerationJob[]): { actualModelIds?: string[] } {
+  const actualModelIds = uniqueActualModelIds(jobs);
+  return actualModelIds.length ? { actualModelIds } : {};
 }
 
 function parseRoutedShots(value: unknown): RoutedShot[] {

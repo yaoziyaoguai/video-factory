@@ -107,7 +107,7 @@ export class TrendGateway {
       const record = object(item);
       const title = string(record?.title);
       if (!record || !title) return [];
-      const url = string(record.url) ?? string(record.mobileUrl);
+      const url = externalHttpUrl(record.url) ?? externalHttpUrl(record.mobileUrl);
       const heat = finiteNumber(record.hot);
       return [{
         id: signalId("dailyhot", platform, record.id ?? title),
@@ -133,7 +133,7 @@ export class TrendGateway {
       const record = object(item);
       const title = string(record?.title);
       if (!record || !title) return [];
-      const url = string(record.url) ?? string(record.mobileUrl);
+      const url = externalHttpUrl(record.url) ?? externalHttpUrl(record.mobileUrl);
       return [{
         id: signalId("newsnow", platform, record.id ?? title),
         sourceId: "newsnow" as const,
@@ -233,6 +233,17 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 function string(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function externalHttpUrl(value: unknown): string | undefined {
+  const text = string(value);
+  if (!text) return undefined;
+  try {
+    const url = new URL(text);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function finiteNumber(value: unknown): number | undefined {

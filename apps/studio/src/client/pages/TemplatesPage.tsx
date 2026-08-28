@@ -1,6 +1,6 @@
 import { AlertCircle, Check, Copy, LayoutTemplate, RefreshCw, Save, Send } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { StudioTemplate } from "../../shared/api.js";
+import type { StudioProvider, StudioTemplate, StudioTemplateExperimentScorecard } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { TemplateGallery } from "../templates/TemplateGallery.js";
 
@@ -14,6 +14,10 @@ export function TemplatesPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const [experiments, setExperiments] = useState<StudioTemplateExperimentScorecard[]>([]);
+  const [providers, setProviders] = useState<StudioProvider[]>([]);
+  const [providerError, setProviderError] = useState<string>();
+  const [experimentError, setExperimentError] = useState<string>();
 
   const dirty = useMemo(() => Boolean(draft?.status === "draft" && savedDraft !== JSON.stringify(draft)), [draft, savedDraft]);
 
@@ -21,8 +25,16 @@ export function TemplatesPage() {
     setLoading(true);
     setError(undefined);
     try {
-      const catalog = await studioApi.templates();
+      const [catalog, scorecards, providerCatalog] = await Promise.all([studioApi.templates(), studioApi.templateExperiments().catch((caught) => {
+        setExperimentError(errorMessage(caught));
+        return [];
+      }), studioApi.providers().catch((caught) => {
+        setProviderError(errorMessage(caught));
+        return [];
+      })]);
       setTemplates(catalog.templates);
+      setExperiments(scorecards);
+      setProviders(providerCatalog);
       setRevision(catalog.storeRevision);
       const selected = catalog.templates.find((template) => template.id === selectedId) ?? catalog.templates[0];
       if (selected) {
@@ -129,6 +141,16 @@ export function TemplatesPage() {
     }
   }
 
+  function setTemplateModel(providerId: string, modelId: string) {
+    if (!draft || draft.status !== "draft") return;
+    const modelDefaults = { ...(draft.modelDefaults ?? {}) };
+    if (modelId) modelDefaults[providerId] = modelId;
+    else delete modelDefaults[providerId];
+    setDraft({ ...draft, modelDefaults });
+  }
+
+  const modelProviders = providers.filter((provider) => provider.modelProfiles?.length);
+
   return (
     <main className="page template-studio-page">
       <header className="page-header template-page-header">
@@ -139,6 +161,24 @@ export function TemplatesPage() {
       {error ? <div className="page-error" role="alert"><AlertCircle size={18} aria-hidden="true" /><span>{error}</span></div> : null}
       {loading && templates.length === 0 ? <div className="queue-placeholder">正在读取模板目录...</div> : null}
       {templates.length > 0 ? <TemplateGallery templates={templates} selectedId={selectedId} onSelect={select} /> : null}
+      {providerError ? <p className="template-editor-notice is-warning" role="status">模型目录暂时不可用：{providerError}。模板内容仍可查看和编辑。</p> : null}
+
+      <section className="template-experiments" aria-label="模板实验评分">
+        <div className="section-heading"><div><p className="eyebrow">Evidence scorecards</p><h2>模板实验评分</h2></div><span>只统计运行证据，不改写已发布模板</span></div>
+        {experimentError ? <p className="template-editor-notice is-warning">评分读取失败：{experimentError}</p> : null}
+        <div className="template-scorecard-grid">{experiments.map((scorecard) => <article key={scorecard.templateId}>
+          <header><div><strong>{scorecard.templateName}</strong><small>{scorecard.sampleSize} 条样本</small></div><span>{scorecard.metrics.finalApprovalRate === null ? "待样本" : `${scorecard.metrics.finalApprovalRate}% 通过`}</span></header>
+          <dl>
+            <div><dt>叙事完整</dt><dd>{metricLabel(scorecard.metrics.narrativeCompleteness)}</dd></div>
+            <div><dt>视觉匹配</dt><dd>{metricLabel(scorecard.metrics.visualMatch)}</dd></div>
+            <div><dt>声音质量</dt><dd>{metricLabel(scorecard.metrics.soundQuality)}</dd></div>
+            <div><dt>成本效率</dt><dd>{metricLabel(scorecard.metrics.costEfficiency)}</dd></div>
+            <div><dt>人工修订</dt><dd>{scorecard.metrics.manualEditCount} 次</dd></div>
+            <div><dt>钩子清晰</dt><dd>{metricLabel(scorecard.metrics.hookClarity)}</dd></div>
+          </dl>
+          <p>{scorecard.note}</p>
+        </article>)}</div>
+      </section>
 
       {draft ? (
         <section className="template-editor" aria-label="模板编辑器">
@@ -157,6 +197,21 @@ export function TemplatesPage() {
                 <label className="field"><span>声音角色</span><textarea rows={3} value={draft.soundSystem.voiceIntent} disabled={draft.status !== "draft"} onChange={(event) => setDraft({ ...draft, soundSystem: { ...draft.soundSystem, voiceIntent: event.target.value } })} /></label>
                 <label className="field"><span>音乐策略</span><textarea rows={3} value={draft.soundSystem.musicIntent} disabled={draft.status !== "draft"} onChange={(event) => setDraft({ ...draft, soundSystem: { ...draft.soundSystem, musicIntent: event.target.value } })} /></label>
               </div>
+              {modelProviders.length ? <section className="template-model-strategy" aria-label="模板模型策略">
+                <div className="section-heading"><div><h3>模型策略</h3><p>只覆盖本模板需要固定的模型，其余继承总配置。</p></div><span>{Object.keys(draft.modelDefaults ?? {}).length} 项覆盖</span></div>
+                <div>{modelProviders.map((provider) => {
+                  const selectedModelId = draft.modelDefaults?.[provider.id] ?? "";
+                  const selected = provider.modelProfiles?.find((model) => model.id === selectedModelId);
+                  return <label className="template-model-field" key={provider.id}>
+                    <span><strong>{provider.label}</strong><small>{selected ? "模板覆盖" : "继承总配置"}</small></span>
+                    <select aria-label={`${provider.label} 模板模型`} value={selectedModelId} disabled={draft.status !== "draft"} onChange={(event) => setTemplateModel(provider.id, event.target.value)}>
+                      <option value="">继承总配置 · {provider.defaultModelId ?? "自动选择"}</option>
+                      {provider.modelProfiles?.map((model) => <option key={model.id} value={model.id} disabled={!model.available}>{model.label}{model.recommended ? " · 推荐" : ""}{model.available ? "" : " · 当前不可用"}</option>)}
+                    </select>
+                    <small>{selected?.description ?? "创建任务时仍可对本次制作单独覆盖。"}</small>
+                  </label>;
+                })}</div>
+              </section> : null}
             </section>
             <section className="template-story-editor">
               <div className="section-heading"><h3>故事结构</h3><span>{draft.storyStructure.length} 个节拍</span></div>
@@ -190,4 +245,8 @@ export function TemplatesPage() {
 
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
+}
+
+function metricLabel(value: number | null): string {
+  return value === null ? "待采集" : `${value} 分`;
 }

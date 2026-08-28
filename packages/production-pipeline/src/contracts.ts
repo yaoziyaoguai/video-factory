@@ -52,6 +52,22 @@ export interface ProductionEditorialDirection {
   guardrails: string[];
 }
 
+export interface ProductionWorkflowFeatures {
+  assetSemanticRank: boolean;
+  referenceGrammar: boolean;
+}
+
+export type ProductionModelSelectionSource = "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
+
+export interface ProductionReferenceVideo {
+  uploadId: string;
+  label: string;
+  mimeType: "video/mp4" | "video/quicktime" | "video/webm";
+  sizeBytes: number;
+  sha256: string;
+  path: string;
+}
+
 export interface ProductionBrief {
   protocolVersion: typeof BRIEF_PROTOCOL_VERSION;
   title: string;
@@ -63,6 +79,10 @@ export interface ProductionBrief {
   reviewMode: "manual" | "automatic";
   templateSnapshot?: ProductionTemplateSnapshot;
   providers: ProductionProviderBindings;
+  models?: Record<string, string>;
+  modelSelectionSources?: Record<string, ProductionModelSelectionSource>;
+  workflowFeatures?: ProductionWorkflowFeatures;
+  referenceVideo?: ProductionReferenceVideo;
   director?: ProductionDirectorDirection;
   economics: ProductionEconomics;
   voiceDirection: ProductionVoiceDirection;
@@ -80,6 +100,10 @@ export function parseBrief(value: unknown): ProductionBrief {
   }
 
   const providers = requireRecord(value.providers, "providers");
+  const models = parseModelSelections(value.models);
+  const modelSelectionSources = parseModelSelectionSources(value.modelSelectionSources, models);
+  const workflowFeatures = parseWorkflowFeatures(value.workflowFeatures);
+  const referenceVideo = parseReferenceVideo(value.referenceVideo);
   const director = parseDirectorDirection(value.director, providers);
   const economics = parseEconomics(value.economics);
   const voiceDirection = parseVoiceDirection(value.voiceDirection);
@@ -87,6 +111,15 @@ export function parseBrief(value: unknown): ProductionBrief {
   const templateSnapshot = value.templateSnapshot === undefined
     ? undefined
     : parseProductionTemplateSnapshot(value.templateSnapshot);
+  if (workflowFeatures.assetSemanticRank && !director) {
+    throw new Error("workflowFeatures.assetSemanticRank requires an AI director configuration.");
+  }
+  if (workflowFeatures.assetSemanticRank && requireString(providers.assets, "providers.assets") !== "ai-shot-router-v1") {
+    throw new Error("workflowFeatures.assetSemanticRank requires providers.assets 'ai-shot-router-v1'.");
+  }
+  if (workflowFeatures.referenceGrammar && (!director || !referenceVideo)) {
+    throw new Error("workflowFeatures.referenceGrammar requires a reference video and AI director configuration.");
+  }
   const voiceProvider = requireString(providers.voice, "providers.voice");
   const expectedVoiceProvider = voiceProviderForProfile(voiceDirection.profileId);
   if (voiceProvider !== expectedVoiceProvider) {
@@ -121,6 +154,10 @@ export function parseBrief(value: unknown): ProductionBrief {
       technicalReview: requireString(providers.technicalReview, "providers.technicalReview"),
       ...(providers.visualReview === undefined ? {} : { visualReview: requireString(providers.visualReview, "providers.visualReview") }),
     },
+    ...(Object.keys(models).length ? { models } : {}),
+    ...(Object.keys(modelSelectionSources).length ? { modelSelectionSources } : {}),
+    ...(workflowFeatures.assetSemanticRank || workflowFeatures.referenceGrammar ? { workflowFeatures } : {}),
+    ...(referenceVideo ? { referenceVideo } : {}),
     ...(director ? { director } : {}),
     economics,
     voiceDirection,
@@ -128,22 +165,106 @@ export function parseBrief(value: unknown): ProductionBrief {
   };
 }
 
+function parseModelSelectionSources(
+  value: unknown,
+  models: Record<string, string>,
+): Record<string, ProductionModelSelectionSource> {
+  const defaults = Object.fromEntries(Object.keys(models).map((providerId) => [providerId, "run_override" as const]));
+  if (value === undefined) return defaults;
+  const input = requireRecord(value, "modelSelectionSources");
+  const allowed = new Set<ProductionModelSelectionSource>([
+    "system_default",
+    "global_default",
+    "template_default",
+    "run_override",
+    "node_override",
+  ]);
+  const entries = Object.entries(input);
+  if (entries.length > 32) throw new Error("modelSelectionSources must not contain more than 32 entries.");
+  const explicit = Object.fromEntries(entries.map(([providerId, source]) => {
+    if (!(providerId in models)) throw new Error(`modelSelectionSources.${providerId} has no matching model selection.`);
+    if (!allowed.has(source as ProductionModelSelectionSource)) {
+      throw new Error(`modelSelectionSources.${providerId} is invalid.`);
+    }
+    return [providerId, source as ProductionModelSelectionSource];
+  }));
+  return { ...defaults, ...explicit };
+}
+
+function parseWorkflowFeatures(value: unknown): ProductionWorkflowFeatures {
+  if (value === undefined) return { assetSemanticRank: false, referenceGrammar: false };
+  const input = requireRecord(value, "workflowFeatures");
+  if (typeof input.assetSemanticRank !== "boolean" || typeof input.referenceGrammar !== "boolean") {
+    throw new Error("workflowFeatures must contain boolean assetSemanticRank and referenceGrammar values.");
+  }
+  return { assetSemanticRank: input.assetSemanticRank, referenceGrammar: input.referenceGrammar };
+}
+
+function parseReferenceVideo(value: unknown): ProductionReferenceVideo | undefined {
+  if (value === undefined) return undefined;
+  const input = requireRecord(value, "referenceVideo");
+  const mimeType = requireString(input.mimeType, "referenceVideo.mimeType");
+  if (mimeType !== "video/mp4" && mimeType !== "video/quicktime" && mimeType !== "video/webm") {
+    throw new Error("referenceVideo.mimeType is invalid.");
+  }
+  const sizeBytes = boundedNumber(input.sizeBytes, "referenceVideo.sizeBytes", 12, 30 * 1024 * 1024, true);
+  const sha256 = requireString(input.sha256, "referenceVideo.sha256");
+  if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error("referenceVideo.sha256 is invalid.");
+  const filePath = requireString(input.path, "referenceVideo.path");
+  if (!filePath.startsWith("/")) throw new Error("referenceVideo.path must be absolute.");
+  return {
+    uploadId: requireString(input.uploadId, "referenceVideo.uploadId"),
+    label: requireString(input.label, "referenceVideo.label"),
+    mimeType,
+    sizeBytes,
+    sha256,
+    path: filePath,
+  };
+}
+
+function parseModelSelections(value: unknown): Record<string, string> {
+  if (value === undefined) return {};
+  const input = requireRecord(value, "models");
+  const entries = Object.entries(input);
+  if (entries.length > 32) throw new Error("models must not contain more than 32 selections.");
+  return Object.fromEntries(entries.map(([providerId, modelId]) => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(providerId)) {
+      throw new Error(`models provider id '${providerId}' is invalid.`);
+    }
+    const normalized = requireString(modelId, `models.${providerId}`);
+    if (normalized.length > 160 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(normalized)) {
+      throw new Error(`models.${providerId} is invalid.`);
+    }
+    return [providerId, normalized];
+  }));
+}
+
 export function parsePersistedBrief(value: unknown): ProductionBrief {
+  const migrated = migratePersistedReferenceVideo(value);
   try {
-    return parseBrief(value);
+    return parseBrief(migrated);
   } catch (strictError) {
-    if (!isRecord(value) || !isRecord(value.providers) || !isRecord(value.voiceDirection)) throw strictError;
-    const providerId = value.providers.voice;
-    const profileId = value.voiceDirection.profileId;
+    if (!isRecord(migrated) || !isRecord(migrated.providers) || !isRecord(migrated.voiceDirection)) throw strictError;
+    const providerId = migrated.providers.voice;
+    const profileId = migrated.voiceDirection.profileId;
     if (typeof providerId !== "string" || typeof profileId !== "string") throw strictError;
     if (voiceProviderForProfile(profileId) === providerId) throw strictError;
     const compatibleProfileId = persistedVoiceProfileForProvider(providerId);
     if (!compatibleProfileId) throw strictError;
     return parseBrief({
-      ...value,
-      voiceDirection: { ...value.voiceDirection, profileId: compatibleProfileId },
+      ...migrated,
+      voiceDirection: { ...migrated.voiceDirection, profileId: compatibleProfileId },
     });
   }
+}
+
+function migratePersistedReferenceVideo(value: unknown): unknown {
+  if (!isRecord(value) || !isRecord(value.referenceVideo) || value.referenceVideo.sha256 !== undefined) return value;
+  return {
+    ...value,
+    // 历史运行可继续查看；全零哨兵会在重新执行参考分析时拒绝复用，要求用户重新上传。
+    referenceVideo: { ...value.referenceVideo, sha256: "0".repeat(64) },
+  };
 }
 
 function parseEditorialDirection(value: unknown): ProductionEditorialDirection | undefined {

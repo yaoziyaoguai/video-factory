@@ -11,11 +11,12 @@ import {
   Mic2,
   ScanSearch,
   Sparkles,
+  Upload,
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, StudioTemplate } from "../../shared/api.js";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, StudioReferenceVideo, StudioTemplate } from "../../shared/api.js";
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { VoiceStudio } from "./VoiceStudio.js";
@@ -100,8 +101,14 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   const [platform, setPlatform] = useState("douyin");
   const [durationSeconds, setDurationSeconds] = useState(24);
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([]);
+  const [modelSelections, setModelSelections] = useState<Record<string, string>>({});
   const [voiceDirection, setVoiceDirection] = useState<StudioProductionInput["voiceDirection"]>(() => defaultVoiceDirection(providers));
   const [visualReviewEnabled, setVisualReviewEnabled] = useState(false);
+  const [semanticRankEnabled, setSemanticRankEnabled] = useState(true);
+  const [referenceVideo, setReferenceVideo] = useState<StudioReferenceVideo>();
+  const releasedReferenceId = useRef<string | undefined>(undefined);
+  const [referenceUploading, setReferenceUploading] = useState(false);
+  const [referenceError, setReferenceError] = useState<string>();
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
@@ -124,9 +131,19 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   });
   const selectedAssetSources = assetSources.filter((provider) => assetProviderIds.includes(provider.id));
   const selectedMeteredSources = selectedAssetSources.filter((provider) => provider.billing === "metered");
+  const selectedTemplate = templates.find((template) => template.id === selectedTemplateId);
+  const effectiveModelId = (provider: StudioProvider) => modelSelections[provider.id]
+    ?? selectedTemplate?.modelDefaults?.[provider.id]
+    ?? creatorSettings?.modelDefaults?.[provider.id]
+    ?? provider.defaultModelId;
   const visualReviewProvider = providers.find((provider) => {
     return provider.capability === "quality.review.visual" && provider.id === bindings.visualReview && provider.available;
   }) ?? providers.find((provider) => provider.capability === "quality.review.visual" && provider.available);
+  const referenceGrammarProvider = providers.find((provider) => {
+    return provider.id === "codex-reference-grammar-v1" && provider.capability === "reference.grammar" && provider.available;
+  });
+  const semanticRankCompatible = Boolean(bindings.director && bindings.assets === "ai-shot-router-v1");
+  const effectiveSemanticRank = semanticRankCompatible && semanticRankEnabled;
   const meteredSelected = selectedMeteredSources.length > 0 && maxPaidShots > 0;
   const meteredVisualReview = visualReviewEnabled && visualReviewProvider?.billing === "metered"
     ? visualReviewProvider
@@ -140,9 +157,9 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   const visualReviewEstimate = meteredVisualReview?.estimatedCnyPerClip ?? 0;
   const voiceEstimate = meteredVoiceProvider?.estimatedCnyPerClip ?? 0;
   const hasMeteredCalls = meteredSelected || meteredVisualReview !== undefined || meteredVoiceProvider !== undefined;
-  const cheapestMeteredClip = Math.min(...selectedMeteredSources.map((provider) => provider.estimatedCnyPerClip ?? Number.POSITIVE_INFINITY));
-  const minimumBudget = meteredSelected && Number.isFinite(cheapestMeteredClip)
-    ? roundMoney(cheapestMeteredClip * maxPaidShots)
+  const highestMeteredClip = Math.max(...selectedMeteredSources.map((provider) => selectedModelEstimate(provider, effectiveModelId(provider)) ?? Number.NEGATIVE_INFINITY));
+  const minimumBudget = meteredSelected && Number.isFinite(highestMeteredClip)
+    ? roundMoney(highestMeteredClip * maxPaidShots)
     : 0;
   const displayedBudget = meteredSelected ? Math.max(budgetCny, minimumBudget) : 0;
   const displayedTotalEstimate = roundMoney(displayedBudget + visualReviewEstimate + voiceEstimate);
@@ -187,10 +204,16 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     setPlatform(initialValues?.platform ?? creatorSettings?.productionDefaults?.platform ?? "douyin");
     setDurationSeconds(initialValues?.durationSeconds ?? creatorSettings?.productionDefaults?.durationSeconds ?? 24);
     setAssetProviderIds(sourceIds);
+    // 只有用户或入口明确指定的模型才属于本次覆盖。全局/模板默认值由服务端按优先级解析。
+    setModelSelections({ ...(initialValues?.models ?? {}) });
     setVoiceDirection(resolvedVoiceDirection);
     setVisualReviewEnabled(Boolean(initialBindings.visualReview && providers.some((provider) => {
       return provider.id === initialBindings.visualReview && provider.available;
     })));
+    setSemanticRankEnabled(initialValues?.workflowFeatures?.assetSemanticRank ?? Boolean(initialBindings.director));
+    setReferenceVideo(undefined);
+    setReferenceUploading(false);
+    setReferenceError(undefined);
     setActiveKey("assets");
     setAdvancedOpen(false);
     setError(undefined);
@@ -214,6 +237,14 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
       })
       .catch((caught) => setTemplateError(`无法读取模板目录：${caught instanceof Error ? caught.message : String(caught)} 请重试后再开始制作。`));
   }, [creatorSettings, defaults, imageStory, open, providers]);
+
+  useEffect(() => {
+    if (!open || !referenceVideo) return;
+    const uploadId = referenceVideo.uploadId;
+    return () => {
+      if (releasedReferenceId.current !== uploadId) void studioApi.deleteReferenceVideo(uploadId).catch(() => undefined);
+    };
+  }, [open, referenceVideo]);
 
   if (!open) return null;
 
@@ -247,6 +278,35 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     });
   }
 
+  async function uploadReferenceVideo(file?: File) {
+    if (!file) return;
+    setReferenceUploading(true);
+    setReferenceError(undefined);
+    try {
+      setReferenceVideo(await studioApi.uploadReferenceVideo(file));
+    } catch (caught) {
+      setReferenceVideo(undefined);
+      setReferenceError(caught instanceof Error ? caught.message : "参考视频上传失败。");
+    } finally {
+      setReferenceUploading(false);
+    }
+  }
+
+  async function removeReferenceVideo() {
+    if (!referenceVideo) return;
+    setReferenceUploading(true);
+    setReferenceError(undefined);
+    try {
+      await studioApi.deleteReferenceVideo(referenceVideo.uploadId);
+      releasedReferenceId.current = referenceVideo.uploadId;
+      setReferenceVideo(undefined);
+    } catch (caught) {
+      setReferenceError(caught instanceof Error ? caught.message : "参考视频删除失败。");
+    } finally {
+      setReferenceUploading(false);
+    }
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -276,9 +336,17 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
           runOverrides: { durationSeconds, automationLevel: selectedTemplate.automationLevel },
         },
         providers: providersForRun,
+        models: Object.fromEntries(assetProviderIds.flatMap((providerId) => {
+          const modelId = modelSelections[providerId];
+          return modelId ? [[providerId, modelId]] : [];
+        })),
+        workflowFeatures: { assetSemanticRank: effectiveSemanticRank, referenceGrammar: Boolean(referenceVideo) },
+        ...(referenceVideo ? { referenceVideo: { uploadId: referenceVideo.uploadId, label: referenceVideo.label } } : {}),
         director: { profileId: directorProfileId, assetProviderIds },
         economics,
       });
+      if (referenceVideo) releasedReferenceId.current = referenceVideo.uploadId;
+      setReferenceVideo(undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -307,7 +375,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
               : "无按量 API 扣费"}</span>
             <strong>¥{formatMoney(displayedTotalEstimate)}</strong>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭">
+          <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭" aria-label="关闭新建制作">
             <X aria-hidden="true" size={19} />
           </button>
         </header>
@@ -402,6 +470,33 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                   return <div className="director-profile-note"><strong>{profile.inspiration}</strong><span>{profile.summary}</span><small>擅长：{profile.bestFor}</small></div>;
                 })()}
               </div>
+            </section>
+
+            <section className="reference-style-section" aria-labelledby="reference-style-title">
+              <div className="compact-section-heading">
+                <div><span>02B</span><h3 id="reference-style-title">参考镜头语法</h3></div>
+                <small>可选，不复制参考内容</small>
+              </div>
+              <div className={referenceVideo ? "reference-video-control has-file" : "reference-video-control"}>
+                <label className={referenceGrammarProvider ? "reference-video-picker" : "reference-video-picker is-disabled"}>
+                  <input
+                    aria-label="参考视频"
+                    type="file"
+                    accept="video/mp4,video/quicktime,video/webm"
+                    disabled={!referenceGrammarProvider || referenceUploading}
+                    onChange={(event) => {
+                      const file = event.currentTarget.files?.[0];
+                      event.currentTarget.value = "";
+                      void uploadReferenceVideo(file);
+                    }}
+                  />
+                  <Upload aria-hidden="true" size={19} />
+                  <span><strong>{referenceUploading ? "正在安全上传..." : referenceVideo ? referenceVideo.label : "选择 MP4、MOV 或 WebM"}</strong><small>{referenceVideo ? `${formatBytes(referenceVideo.sizeBytes)} · 上传完成` : "不超过 30 MB；未开工上传最多保留 7 天"}</small></span>
+                </label>
+                {referenceVideo ? <button className="icon-button reference-video-remove" type="button" title="删除参考视频" aria-label="删除参考视频" disabled={referenceUploading} onClick={() => void removeReferenceVideo()}><X aria-hidden="true" size={17} /></button> : null}
+              </div>
+              <p className="reference-style-note"><Film aria-hidden="true" size={16} /><span><strong>{referenceGrammarProvider?.label ?? "参考视频分析当前不可用"}</strong>只提炼节奏、构图、运镜、色彩、转场和声音结构；开工后原片作为私密运行输入留档，不进入发布包，分析结果可预览和编辑。</span></p>
+              {referenceError ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />{referenceError}</p> : null}
             </section>
 
             <section className="recipe-section" aria-labelledby="recipe-section-title" data-tour="production-recipes">
@@ -522,6 +617,22 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                     </label>;
                   })}
                 </div>
+                {selectedAssetSources.some((provider) => provider.modelProfiles?.length) ? <div className="asset-model-overrides" aria-label="本次生成模型">
+                  <div><strong>本次模型</strong><small>只覆盖这条制作，总配置不会被修改</small></div>
+                  {selectedAssetSources.filter((provider) => provider.modelProfiles?.length).map((provider) => <label className="field" key={provider.id}>
+                    <span>{provider.label}</span>
+                    <select aria-label={`${provider.label} 本次模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => {
+                      const next = { ...current };
+                      if (event.target.value) next[provider.id] = event.target.value;
+                      else delete next[provider.id];
+                      return next;
+                    })}>
+                      <option value="">继承默认：{effectiveModelId(provider) ?? "自动选择"}</option>
+                      {provider.modelProfiles?.filter((model) => model.available).map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+                    </select>
+                    <small>{provider.modelProfiles?.find((model) => model.id === effectiveModelId(provider))?.description}</small>
+                  </label>)}
+                </div> : null}
               </section> : null}
             </div>
 
@@ -535,6 +646,11 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
             />
 
             <section className="production-guardrails" aria-label="生产门禁">
+              <label className={effectiveSemanticRank ? "visual-review-control is-enabled" : "visual-review-control"}>
+                <input type="checkbox" checked={effectiveSemanticRank} disabled={!semanticRankCompatible} onChange={(event) => setSemanticRankEnabled(event.target.checked)} />
+                <span><Sparkles aria-hidden="true" size={17} /><strong>候选语义选片</strong></span>
+                <small>{semanticRankCompatible ? "先预览图库候选并给出逐镜排序；失败时保留素材源原顺序，下载前仍可人工调整" : "需要先启用 AI 视觉导演与逐镜路由"}</small>
+              </label>
               <label className={visualReviewEnabled ? "visual-review-control is-enabled" : "visual-review-control"}>
                 <input
                   type="checkbox"
@@ -571,7 +687,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
           <footer className="dialog-actions recipe-dialog-actions">
             <div><strong>{RECIPES.find((recipe) => recipe.id === recipeId)?.label}</strong><span>{hasMeteredCalls ? `当前预计 ¥${formatMoney(displayedTotalEstimate)}` : "无按量 API 扣费"}</span></div>
             <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
-            <button className="button button-primary" type="submit" disabled={submitting || !templatesLoaded || missingCapabilities.length > 0} data-tour="production-start">
+            <button className="button button-primary" type="submit" disabled={submitting || referenceUploading || !templatesLoaded || missingCapabilities.length > 0} data-tour="production-start">
               <Check aria-hidden="true" size={17} />
               {submitting ? "正在创建..." : "开始制作"}
             </button>
@@ -618,10 +734,15 @@ function estimatedRecipeBudget(
   assetProviderIds: string[],
   providers: StudioProvider[],
 ): number {
-  const price = Math.min(...providers
+  const price = Math.max(...providers
     .filter((provider) => assetProviderIds.includes(provider.id) && provider.billing === "metered" && provider.estimatedCnyPerClip)
     .map((provider) => provider.estimatedCnyPerClip!));
   return Number.isFinite(price) ? roundMoney(price * recipe.maxPaidShots) : 0;
+}
+
+function selectedModelEstimate(provider: StudioProvider, modelId: string | undefined): number | undefined {
+  if (!modelId) return provider.estimatedCnyPerClip;
+  return provider.modelProfiles?.find((model) => model.id === modelId)?.estimatedCnyPerClip;
 }
 
 function recipeAvailable(recipe: (typeof RECIPES)[number], providers: StudioProvider[]): boolean {
@@ -696,6 +817,12 @@ function roundMoney(value: number): number {
 
 function formatMoney(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
 function providerBillingLabel(provider: StudioProvider): string {

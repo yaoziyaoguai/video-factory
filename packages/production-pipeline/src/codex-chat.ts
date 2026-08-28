@@ -3,7 +3,7 @@ import http from "node:http";
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。
-export const CODEX_TASK_KINDS = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"] as const;
+export const CODEX_TASK_KINDS = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"] as const;
 export type CodexTaskKind = (typeof CODEX_TASK_KINDS)[number];
 
 export interface CodexTaskTrace {

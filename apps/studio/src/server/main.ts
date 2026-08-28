@@ -4,6 +4,8 @@ import { loadEnvFile } from "node:process";
 import fastifyStatic from "@fastify/static";
 import {
   CodexBridgeClient,
+  CodexAssetSemanticRanker,
+  CodexReferenceGrammarAgent,
   CodexPublishCopyWriter,
   CodexScreenwriterAgent,
   CodexVisualReviewAgent,
@@ -53,12 +55,21 @@ const zaiCodexClient = zaiCodexSettings.available
 const directorAgent = codexClient ? new CodexVisualDirectorAgent({ client: codexClient }) : undefined;
 const screenwriterAgent = codexClient ? new CodexScreenwriterAgent({ client: codexClient }) : undefined;
 const publishCopyWriter = codexClient ? new CodexPublishCopyWriter({ client: codexClient }) : undefined;
+const assetSemanticRanker = codexClient ? new CodexAssetSemanticRanker({
+  client: codexClient,
+  modelId: process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default",
+}) : undefined;
 const reviewMedia = new PythonReviewMediaPreprocessor({
   repositoryRoot,
   pythonPath,
   pythonCommand: resolveProductionPython(repositoryRoot, process.env),
   environment: process.env,
 });
+const referenceGrammarAgent = codexClient ? new CodexReferenceGrammarAgent({
+  client: codexClient,
+  media: reviewMedia,
+  modelId: process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default",
+}) : undefined;
 const visualReviewAgents = [
   ...(zaiCodexClient ? [new CodexVisualReviewAgent({
       client: zaiCodexClient,
@@ -84,6 +95,9 @@ const pipeline = new ProductionPipeline({
   ...(screenwriterAgent ? { screenwriterAgent } : {}),
   ...(directorAgent ? { directorAgent } : {}),
   ...(publishCopyWriter ? { publishCopyWriter } : {}),
+  ...(assetSemanticRanker ? { assetSemanticRanker } : {}),
+  ...(referenceGrammarAgent ? { referenceGrammarAgent } : {}),
+  referenceVideoRoot: path.join(workspaceRoot, "uploads", "reference-videos"),
   ...(visualReviewAgents.length > 0 ? { visualReviewAgents } : {}),
   assetProviders: buildDirectorAssetProviders({ environment: process.env }),
   providerRuntimeMetadata: buildProductionProviderRuntimeMetadata(process.env),
@@ -95,8 +109,8 @@ const service = new StudioService({
   workspaceRoot,
   pipeline,
   opportunities,
-  codexAvailability: { available: codexSettings.available, reason: codexSettings.reason },
-  zaiCodexAvailability: { available: zaiCodexSettings.available, reason: zaiCodexSettings.reason },
+  codexAvailability: { available: codexSettings.available, reason: codexSettings.reason, taskKinds: codexSettings.taskKinds },
+  zaiCodexAvailability: { available: zaiCodexSettings.available, reason: zaiCodexSettings.reason, taskKinds: zaiCodexSettings.taskKinds },
   ...(codexClient ? {
     trendAgent: new TrendOpportunityAgent({
       signals: new TrendGateway({ environment: process.env }),

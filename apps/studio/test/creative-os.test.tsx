@@ -755,6 +755,7 @@ describe("Creative OS", () => {
     await user.click(screen.getByRole("button", { name: "保存创作默认" }));
     expect(update).toHaveBeenLastCalledWith({
       defaultRecipeId: "economy-daily",
+      modelDefaults: {},
       productionDefaults: {
         directorProfileId: "documentary-observer",
         reviewMode: "manual",

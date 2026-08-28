@@ -8,6 +8,8 @@ export type {
   ProductionProviderBindings,
   ProductionRecipeId,
   ProductionMasteringPreset,
+  ProductionWorkflowFeatures,
+  ProductionReferenceVideo,
   ProductionVoiceDirection,
 } from "./contracts.js";
 export { DIRECTOR_PLAN_VERSION, VISUAL_DIRECTOR_PROFILES, validateVisualDirectorPlan } from "./visual-director.js";
@@ -30,6 +32,31 @@ export {
   CodexBridgeError,
 } from "./codex-chat.js";
 export type { CodexBridgeClientOptions, CodexTaskExecution, CodexTaskKind, CodexTaskTrace } from "./codex-chat.js";
+export { CodexReferenceGrammarAgent, fallbackShotGrammar, validateShotGrammar } from "./reference-grammar.js";
+export type {
+  CodexReferenceGrammarAgentOptions,
+  ReferenceGrammarAgent,
+  ReferenceGrammarAgentInput,
+  ReferenceGrammarBeat,
+  ReferenceGrammarExecution,
+  ShotGrammar,
+} from "./reference-grammar.js";
+export {
+  CodexAssetSemanticRanker,
+  deterministicAssetRanking,
+  parseAssetCandidateReport,
+  validateAssetSemanticRanking,
+} from "./asset-semantic-ranker.js";
+export type {
+  AssetCandidate,
+  AssetCandidateReport,
+  AssetCandidateScene,
+  AssetRankingCandidate,
+  AssetRankingScene,
+  AssetSemanticRanker,
+  AssetSemanticRanking,
+  CodexAssetSemanticRankerOptions,
+} from "./asset-semantic-ranker.js";
 export { CodexVisualReviewAgent, validateVisualReviewReport } from "./codex-visual-review.js";
 export type { CodexVisualReviewAgentOptions, VisualReviewAgent, VisualReviewAgentInput, VisualReviewExecution, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport } from "./codex-visual-review.js";
 export { CodexVisualDirectorAgent } from "./codex-visual-director.js";

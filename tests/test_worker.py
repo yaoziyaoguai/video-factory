@@ -208,6 +208,135 @@ class WorkerContractTest(unittest.TestCase):
             self.assertTrue(search_assets.call_args_list)
             self.assertTrue(all(call.kwargs["limit"] == 6 for call in search_assets.call_args_list))
 
+    def test_asset_search_returns_preview_candidates_without_downloading_media(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = Path(handle_request(self.valid_request("script.draft", root / "script"))["output"]["scriptPath"])
+            script = json.loads(script_path.read_text(encoding="utf-8"))
+            director_plan_path = root / "director_plan.json"
+            director_plan_path.write_text(json.dumps({
+                "shots": [{
+                    "scenePosition": scene["position"],
+                    "preferredProviderId": "pexels-stock-v1" if scene["position"] == 1 else "local-editorial-v1",
+                    "alternativeProviderIds": ["local-editorial-v1"],
+                    "query": f"scene query {scene['position']}",
+                    "subject": "人物",
+                    "environment": "室内",
+                    "visibleAction": "抬头",
+                    "lighting": "清晨侧逆光",
+                    "generationPrompt": "人物在早餐摊前接过热豆浆",
+                    "temporalBeats": ["先看向摊主", "再接过豆浆"],
+                } for scene in script["scenes"]],
+            }, ensure_ascii=False), encoding="utf-8")
+            request = self.valid_request("asset.search", root / "candidates")
+            request["input"] = {"scriptPath": str(script_path), "directorPlanPath": str(director_plan_path)}
+            request["parameters"] = {"providerId": "asset-candidate-search-v1", "mediaType": "video", "limit": 3}
+            candidate = StockAssetCandidate(
+                provider="pexels", asset_id="candidate-1", media_type="video", width=1080, height=1920,
+                duration=5, preview_url="https://images.pexels.com/preview.jpg",
+                download_url="https://example.invalid/private.mp4?token=secret",
+                source_url="https://www.pexels.com/video/1", creator="Creator", license_note="Pexels license",
+                query="scene query 1", score=100,
+            )
+
+            with patch("video_factory.stock_assets.search_stock_assets", return_value=[candidate]), patch(
+                "video_factory.stock_assets.materialize_candidate",
+            ) as materialize:
+                response = handle_request(request)
+
+            report = json.loads(Path(response["output"]["candidateSearchPath"]).read_text(encoding="utf-8"))
+            inventory = json.loads(Path(response["output"]["candidateInventoryPath"]).read_text(encoding="utf-8"))
+            self.assertEqual(response["status"], "succeeded")
+            self.assertEqual(report["version"], "video-factory/asset-candidates-v1")
+            self.assertEqual(report["scene_candidates"][0]["candidates"][0]["asset_id"], "candidate-1")
+            self.assertEqual(report["scene_candidates"][0]["intent"]["generation_prompt"], "人物在早餐摊前接过热豆浆")
+            self.assertEqual(report["scene_candidates"][0]["intent"]["temporal_beats"], "先看向摊主 | 再接过豆浆")
+            self.assertEqual(report["scene_candidates"][0]["intent"]["lighting"], "清晨侧逆光")
+            self.assertNotIn("download_url", json.dumps(report))
+            self.assertNotIn("secret", json.dumps(report))
+            self.assertEqual(inventory["version"], "video-factory/asset-candidate-inventory-v1")
+            self.assertIn("token=secret", json.dumps(inventory))
+            materialize.assert_not_called()
+
+    def test_ai_router_honors_a_reviewed_candidate_ranking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = Path(handle_request(self.valid_request("script.draft", root / "script"))["output"]["scriptPath"])
+            script = json.loads(script_path.read_text(encoding="utf-8"))
+            director_plan_path = root / "director_plan.json"
+            director_plan_path.write_text(json.dumps({
+                "shots": [{
+                    "scenePosition": scene["position"],
+                    "preferredProviderId": "pexels-stock-v1" if scene["position"] == 1 else "local-editorial-v1",
+                    "alternativeProviderIds": ["local-editorial-v1"],
+                    "query": f"scene query {scene['position']}",
+                } for scene in script["scenes"]],
+            }, ensure_ascii=False), encoding="utf-8")
+            ranking_path = root / "ranking.json"
+            ranking_path.write_text(json.dumps({
+                "version": "video-factory/asset-ranking-v1",
+                "scenes": [{
+                    "scenePosition": 1,
+                    "candidates": [
+                        {"provider": "pexels", "assetId": "candidate-2", "rank": 1},
+                        {"provider": "pexels", "assetId": "candidate-1", "rank": 2},
+                    ],
+                }],
+            }), encoding="utf-8")
+            inventory_path = root / "candidate_inventory.private.json"
+            inventory_path.write_text(json.dumps({
+                "version": "video-factory/asset-candidate-inventory-v1",
+                "scene_candidates": [{
+                    "scene_position": 1,
+                    "candidates": [
+                        {
+                            "provider": "pexels", "provider_id": "pexels-stock-v1", "asset_id": "candidate-1",
+                            "media_type": "video", "width": 1080, "height": 1920, "duration": 5,
+                            "preview_url": "", "download_url": "mock://one", "source_url": "", "creator": "",
+                            "license_note": "", "query": "q", "score": 100,
+                        },
+                        {
+                            "provider": "pexels", "provider_id": "pexels-stock-v1", "asset_id": "candidate-2",
+                            "media_type": "video", "width": 1080, "height": 1920, "duration": 5,
+                            "preview_url": "", "download_url": "mock://two", "source_url": "", "creator": "",
+                            "license_note": "", "query": "q", "score": 90,
+                        },
+                    ],
+                }],
+            }), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "assets")
+            request["input"] = {
+                "scriptPath": str(script_path),
+                "directorPlanPath": str(director_plan_path),
+                "candidateRankingPath": str(ranking_path),
+                "candidateInventoryPath": str(inventory_path),
+            }
+            request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video"}
+            def materialize(_candidate, target):
+                target.write_bytes(b"video")
+                return target
+
+            def materialize_local(scene, query, asset_dir):
+                target = asset_dir / f"scene_{scene.position:02d}_local.png"
+                target.write_bytes(b"image")
+                return SceneAsset(
+                    scene_position=scene.position, provider="local", asset_id=f"local-{scene.position}",
+                    media_type="image", width=1080, height=1920, duration=scene.duration,
+                    local_path=str(target), source_url="local://card", creator="VideoFactory",
+                    license_note="local", query=query,
+                )
+
+            with patch("video_factory.stock_assets.search_stock_assets", side_effect=AssertionError("reviewed candidates must not be searched again")) as search_assets, patch(
+                "video_factory.stock_assets.materialize_candidate", side_effect=materialize
+            ), patch(
+                "video_factory.stock_assets.materialize_local_scene", side_effect=materialize_local
+            ):
+                response = handle_request(request)
+
+            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
+            self.assertEqual(plan["scene_assets"][0]["asset_id"], "candidate-2")
+            search_assets.assert_not_called()
+
     def test_ai_router_prepares_independent_scenes_with_bounded_concurrency(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

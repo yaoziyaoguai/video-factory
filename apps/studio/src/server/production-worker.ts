@@ -34,6 +34,7 @@ export function buildProductionWorker(options: ProductionWorkerOptions): Generat
       ? new SeedanceVideoAdapter({
           apiKey: setting.apiKey,
           model: setting.model,
+          allowedModels: setting.models.map((model) => model.id),
           ...(setting.baseUrl ? { baseUrl: setting.baseUrl } : {}),
         })
       : setting.providerId === "hailuo-video-v1"
@@ -48,7 +49,19 @@ export function buildProductionWorker(options: ProductionWorkerOptions): Generat
           workspaceId: setting.workspaceId,
           ...(setting.baseUrl ? { baseUrl: setting.baseUrl } : {}),
         });
-    return { adapter, estimatedCnyPerClip: setting.estimatedCnyPerClip };
+    return {
+      adapter,
+      estimatedCnyPerClip: setting.estimatedCnyPerClip,
+      defaultModelId: setting.model,
+      modelPrices: Object.fromEntries(setting.models.map((model) => [model.id, model.estimatedCnyPerClip])),
+      modelProfiles: Object.fromEntries(setting.models.map((model) => [model.id, {
+        taskTypes: [...model.taskTypes],
+        resolutions: [...model.resolutions],
+        minDurationSeconds: model.minDurationSeconds,
+        maxDurationSeconds: model.maxDurationSeconds,
+        supportsAudio: model.supportsAudio,
+      }])),
+    };
   });
   const imageAdapters: ImageGenerationAdapterBinding[] = readMeteredImageProviderSettings(options.environment).map((setting) => ({
     adapter: new SeedreamImageAdapter({
@@ -171,6 +184,10 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
     billing: "metered",
     estimatedCostCny: setting.estimatedCnyPerClip,
     maxAttempts: 1,
+    modelProfiles: setting.models.map((model) => ({
+      modelId: model.id,
+      estimatedCostCny: model.estimatedCnyPerClip,
+    })),
   });
   if (environment.MINIMAX_API_KEY) metadata.push({
     id: "minimax-tts-v1",

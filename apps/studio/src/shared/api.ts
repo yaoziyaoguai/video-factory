@@ -72,6 +72,7 @@ export interface StudioCreatorSettings {
   voiceDirection: StudioVoiceDirection;
   defaultRecipeId: StudioProductionRecipeId;
   defaultAssetProviderId?: string;
+  modelDefaults?: Record<string, string>;
   productionDefaults: StudioProductionDefaults;
 }
 
@@ -79,11 +80,29 @@ export interface StudioCreatorSettingsPatch {
   voiceDirection?: StudioVoiceDirection;
   defaultRecipeId?: StudioProductionRecipeId;
   defaultAssetProviderId?: string;
+  modelDefaults?: Record<string, string>;
   productionDefaults?: Partial<StudioProductionDefaults>;
+}
+
+export interface StudioModelProfile {
+  id: string;
+  label: string;
+  providerId: string;
+  providerFamily: string;
+  available: boolean;
+  recommended?: boolean;
+  description: string;
+  taskTypes: Array<"text-to-video" | "image-to-video" | "text-to-image" | "visual-review" | "text">;
+  resolutions?: string[];
+  minDurationSeconds?: number;
+  maxDurationSeconds?: number;
+  supportsAudio?: boolean;
+  estimatedCnyPerClip?: number;
 }
 
 export interface StudioProvider {
   id: string;
+  providerFamily?: string;
   capability: string;
   label: string;
   available: boolean;
@@ -97,6 +116,8 @@ export interface StudioProvider {
   billingUnit?: "clip" | "run";
   docsUrl?: string;
   requirement?: string;
+  defaultModelId?: string;
+  modelProfiles?: StudioModelProfile[];
 }
 
 export interface StudioTrendSource {
@@ -401,8 +422,21 @@ export interface StudioNode {
   inputState?: StudioNodeInputState;
   outputState?: StudioNodeOutputState;
   executionReceipt?: StudioNodeExecutionReceipt;
+  plannedExecution?: StudioNodeExecutionPlan;
   spendPlan?: StudioSpendPlan;
   spendAuthorizationId?: string;
+}
+
+export interface StudioNodeExecutionPlan {
+  providerId: string;
+  providerLabel: string;
+  modelId: string;
+  transport: "unix_socket" | "local_process" | "http_api" | "human";
+  billing: StudioBillingType;
+  configurationSource?: "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
+  parameters?: Record<string, string | number | boolean | string[]>;
+  estimatedCostCny?: number;
+  snapshotSource: "created" | "reconstructed";
 }
 
 export interface StudioNodeInputVersion {
@@ -447,12 +481,16 @@ export interface StudioNodeExecutionReceipt {
   modelId: string;
   transport: "unix_socket" | "local_process" | "http_api" | "human";
   billing: StudioBillingType;
+  configurationSource?: "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
+  parameters?: Record<string, string | number | boolean | string[]>;
   status: "succeeded" | "failed" | "rejected" | "needs_human";
   estimatedCostCny?: number;
   authorizedCostCny?: number;
   actualCostCny?: number;
+  actualCostSource?: "provider_reported" | "configured_rate";
   spendAuthorizationId?: string;
   requestId?: string;
+  actualModelIds?: string[];
   startedAt: string;
   finishedAt: string;
 }
@@ -552,6 +590,51 @@ export interface StudioTemplateMutation {
   template: StudioTemplate;
 }
 
+export interface StudioResourceManifestItem {
+  id: string;
+  runId: string;
+  runTitle: string;
+  category: "visual" | "voice" | "font" | "document" | "other";
+  kind: string;
+  providerId: string;
+  sourceUrl?: string;
+  creator?: string;
+  licenseNote?: string;
+  contentType?: string;
+  sha256?: string;
+  commercialUse: "self_owned" | "provider_terms" | "review_required";
+  attributionRequirement: "not_required" | "provider_terms" | "unknown";
+  reviewStatus: "recorded" | "needs_review";
+}
+
+export interface StudioResourceManifest {
+  generatedAt: string;
+  totalItems: number;
+  needsReviewCount: number;
+  legacyRunsWithoutManifest: number;
+  reconstructedRunCount: number;
+  unreadableManifestCount: number;
+  truncatedRunCount: number;
+  categories: Record<StudioResourceManifestItem["category"], number>;
+  items: StudioResourceManifestItem[];
+}
+
+export interface StudioTemplateExperimentScorecard {
+  templateId: "trend-fact-brief" | "knowledge-explainer" | "photo-story";
+  templateName: string;
+  sampleSize: number;
+  metrics: {
+    hookClarity: number | null;
+    narrativeCompleteness: number | null;
+    visualMatch: number | null;
+    soundQuality: number | null;
+    costEfficiency: number | null;
+    manualEditCount: number;
+    finalApprovalRate: number | null;
+  };
+  note: string;
+}
+
 export type StudioBillingType = "free" | "subscription" | "metered" | "local_compute" | "human";
 
 export interface StudioCostLine {
@@ -569,6 +652,7 @@ export interface StudioCostLine {
   authorizedCostCny?: number;
   spendAuthorizationId?: string;
   actualCostCny?: number;
+  actualCostSource?: "provider_reported" | "configured_rate";
   actualPending: boolean;
   startedAt: string;
   finishedAt?: string;
@@ -637,6 +721,15 @@ export interface StudioProductionInput {
     technicalReview: string;
     visualReview?: string;
   };
+  models?: Record<string, string>;
+  workflowFeatures?: {
+    assetSemanticRank: boolean;
+    referenceGrammar: boolean;
+  };
+  referenceVideo?: {
+    uploadId: string;
+    label: string;
+  };
   director?: {
     profileId: "auto" | "documentary-observer" | "quiet-humanism" | "urban-poetic" | "chromatic-storytelling" | "geometric-control" | "suspense-staging";
     assetProviderIds: string[];
@@ -647,6 +740,15 @@ export interface StudioProductionInput {
     maxPaidShots: number;
     maxCostCny: number;
   };
+}
+
+export interface StudioReferenceVideo {
+  uploadId: string;
+  label: string;
+  mimeType: "video/mp4" | "video/quicktime" | "video/webm";
+  sizeBytes: number;
+  sha256: string;
+  createdAt: string;
 }
 
 export interface StudioDecisionInput {
@@ -771,6 +873,21 @@ export function parseStudioCreatorSettingsPatch(value: unknown): StudioCreatorSe
       throw new StudioInputError("默认画面能力编号格式不正确。");
     }
     patch.defaultAssetProviderId = providerId;
+  }
+  if (input.modelDefaults !== undefined) {
+    const defaults = requiredObject(input.modelDefaults, "默认模型");
+    const entries = Object.entries(defaults);
+    if (entries.length > 32) throw new StudioInputError("默认模型配置不能超过 32 项。");
+    patch.modelDefaults = Object.fromEntries(entries.map(([providerId, modelId]) => {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(providerId)) {
+        throw new StudioInputError("默认模型的 Provider 编号格式不正确。");
+      }
+      const normalizedModelId = requiredTrimmedString(modelId, `Provider ${providerId} 的默认模型`);
+      if (normalizedModelId.length > 160 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(normalizedModelId)) {
+        throw new StudioInputError(`Provider ${providerId} 的默认模型编号格式不正确。`);
+      }
+      return [providerId, normalizedModelId];
+    }));
   }
   if (input.productionDefaults !== undefined) {
     const defaults = requiredObject(input.productionDefaults, "默认生产参数");

@@ -52,11 +52,11 @@ describe("metered video provider settings", () => {
     assert.deepEqual(readMeteredVideoProviderSettings({}), []);
     assert.deepEqual(readMeteredVideoProviderSettings({
       ARK_API_KEY: "seedance-key",
-      SEEDANCE_MODEL_ID: "seedance-model",
+      SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
     }), []);
     assert.deepEqual(readMeteredVideoProviderSettings({
       ARK_API_KEY: "seedance-key",
-      SEEDANCE_MODEL_ID: "seedance-model",
+      SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
       SEEDANCE_ESTIMATED_CNY_PER_CLIP: "0",
     }), []);
     assert.deepEqual(readMeteredVideoProviderSettings({
@@ -68,7 +68,7 @@ describe("metered video provider settings", () => {
   it("normalizes complete Seedance, MiniMax and Wan configurations for the runtime worker", () => {
     const settings = readMeteredVideoProviderSettings({
       ARK_API_KEY: "seedance-key",
-      SEEDANCE_MODEL_ID: "seedance-model",
+      SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
       SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
       SEEDANCE_BASE_URL: "https://seedance.example/api/v3/",
       MINIMAX_API_KEY: "minimax-key",
@@ -103,6 +103,83 @@ describe("metered video provider settings", () => {
         baseUrl: "https://wan.example/",
       },
     ]);
+  });
+
+  it("uses Seedance 2.5 as a configurable Ark default instead of requiring a hard-coded model env", () => {
+    const [setting] = readMeteredVideoProviderSettings({
+      ARK_API_KEY: "seedance-key",
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: "4",
+    });
+
+    assert.equal(setting?.providerId, "seedance-video-v1");
+    assert.equal(setting?.model, "doubao-seedance-2-5-260628");
+    assert.equal(setting?.models.some((model) => model.id === "doubao-seedance-2-5-260628" && model.recommended), true);
+    assert.deepEqual(setting?.models.find((model) => model.id === "doubao-seedance-2-5-260628")?.taskTypes, ["text-to-video"]);
+  });
+
+  it("supports model-specific Seedance estimates and recommends the configured default", () => {
+    const [setting] = readMeteredVideoProviderSettings({
+      ARK_API_KEY: "seedance-key",
+      SEEDANCE_MODEL_ID: "doubao-seedance-1-5-pro-251215",
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: "4",
+      SEEDANCE_MODEL_ESTIMATES_JSON: JSON.stringify({
+        "doubao-seedance-2-5-260628": 5.5,
+        "doubao-seedance-1-5-pro-251215": 2.25,
+      }),
+    });
+
+    assert.equal(setting?.estimatedCnyPerClip, 2.25);
+    assert.equal(setting?.models.find((model) => model.id === "doubao-seedance-2-5-260628")?.estimatedCnyPerClip, 5.5);
+    assert.equal(Boolean(setting?.models.find((model) => model.id === "doubao-seedance-2-5-260628")?.recommended), false);
+    assert.equal(setting?.models.find((model) => model.id === "doubao-seedance-1-5-pro-251215")?.recommended, true);
+    assert.throws(() => readMeteredVideoProviderSettings({
+      ARK_API_KEY: "seedance-key",
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: "4",
+      SEEDANCE_MODEL_ESTIMATES_JSON: "not-json",
+    }), /must be valid JSON/);
+  });
+
+  it("starts safely with the account-verified Seedance 2.0 Mini profile", () => {
+    const [setting] = readMeteredVideoProviderSettings({
+      ARK_API_KEY: "seedance-key",
+      SEEDANCE_MODEL_ID: "doubao-seedance-2-0-mini-260615",
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: "2",
+    });
+
+    const profile = setting?.models.find((model) => model.id === "doubao-seedance-2-0-mini-260615");
+    assert.equal(setting?.model, "doubao-seedance-2-0-mini-260615");
+    assert.deepEqual(profile?.taskTypes, ["text-to-video"]);
+    assert.deepEqual(profile?.resolutions, ["480p", "720p"]);
+    assert.equal(profile?.supportsAudio, false);
+    assert.equal(profile?.recommended, true);
+  });
+
+  it("requires a reviewed runtime profile before an unknown Seedance model can spend money", () => {
+    assert.throws(() => readMeteredVideoProviderSettings({
+      ARK_API_KEY: "seedance-key",
+      SEEDANCE_MODEL_ID: "future-seedance-model",
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: "4",
+    }), /no reviewed runtime profile/);
+
+    const [setting] = readMeteredVideoProviderSettings({
+      ARK_API_KEY: "seedance-key",
+      SEEDANCE_MODEL_ID: "future-seedance-model",
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: "4",
+      SEEDANCE_MODEL_PROFILES_JSON: JSON.stringify([{
+        id: "future-seedance-model",
+        label: "Seedance Future",
+        estimatedCnyPerClip: 2.8,
+        taskTypes: ["text-to-video"],
+        resolutions: ["720p"],
+        minDurationSeconds: 4,
+        maxDurationSeconds: 10,
+        supportsAudio: false,
+      }]),
+    });
+
+    assert.equal(setting?.model, "future-seedance-model");
+    assert.equal(setting?.estimatedCnyPerClip, 2.8);
+    assert.equal(setting?.models.find((model) => model.id === "future-seedance-model")?.recommended, true);
   });
 });
 

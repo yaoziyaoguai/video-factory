@@ -23,6 +23,7 @@ import type {
   StudioProductionRecipeId,
   StudioProvider,
   StudioPublishTarget,
+  StudioResourceManifest,
   StudioTrendService,
   StudioTrendSignal,
   StudioTrendSource,
@@ -53,12 +54,15 @@ export function ResourcesPage() {
   const [signals, setSignals] = useState<StudioTrendSignal[]>([]);
   const [capabilities, setCapabilities] = useState<StudioLocalCapability[]>([]);
   const [publishTargets, setPublishTargets] = useState<StudioPublishTarget[]>([]);
+  const [resourceManifest, setResourceManifest] = useState<StudioResourceManifest>();
   const [providerLoading, setProviderLoading] = useState(true);
   const [trendLoading, setTrendLoading] = useState(true);
   const [providerError, setProviderError] = useState<string>();
+  const [manifestLimit, setManifestLimit] = useState(16);
   const [trendError, setTrendError] = useState<string>();
   const [serviceError, setServiceError] = useState<string>();
   const [publishError, setPublishError] = useState<string>();
+  const [manifestError, setManifestError] = useState<string>();
   const [settingsError, setSettingsError] = useState<string>();
   const [settings, setSettings] = useState<StudioCreatorSettings>();
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -70,6 +74,7 @@ export function ResourcesPage() {
     masteringPreset: "natural",
   });
   const [defaultRecipeId, setDefaultRecipeId] = useState<StudioProductionRecipeId>("economy-daily");
+  const [modelDefaults, setModelDefaults] = useState<Record<string, string>>({});
   const [productionDefaults, setProductionDefaults] = useState<StudioProductionDefaults>(DEFAULT_PRODUCTION_DEFAULTS);
 
   const load = useCallback(async () => {
@@ -79,8 +84,9 @@ export function ResourcesPage() {
     setTrendError(undefined);
     setServiceError(undefined);
     setPublishError(undefined);
+    setManifestError(undefined);
     setSettingsError(undefined);
-    const [providerResult, trendResult, serviceResult, signalResult, capabilityResult, settingsResult, publishResult] = await Promise.allSettled([
+    const [providerResult, trendResult, serviceResult, signalResult, capabilityResult, settingsResult, publishResult, manifestResult] = await Promise.allSettled([
       studioApi.providers(),
       studioApi.trendSources(),
       studioApi.trendServices(),
@@ -88,6 +94,7 @@ export function ResourcesPage() {
       studioApi.localCapabilities(),
       studioApi.settings(),
       studioApi.publishTargets(),
+      studioApi.resourceManifest(),
     ]);
     if (providerResult.status === "fulfilled") setProviders(providerResult.value);
     else setProviderError(errorMessage(providerResult.reason));
@@ -101,6 +108,7 @@ export function ResourcesPage() {
       setSettings(settingsResult.value);
       setVoiceDirection(settingsResult.value.voiceDirection);
       setDefaultRecipeId(settingsResult.value.defaultRecipeId);
+      setModelDefaults(settingsResult.value.modelDefaults ?? {});
       setProductionDefaults(settingsResult.value.productionDefaults ?? DEFAULT_PRODUCTION_DEFAULTS);
     } else {
       setSettings(undefined);
@@ -108,6 +116,8 @@ export function ResourcesPage() {
     }
     if (publishResult.status === "fulfilled") setPublishTargets(publishResult.value);
     else setPublishError(errorMessage(publishResult.reason));
+    if (manifestResult.status === "fulfilled") setResourceManifest(manifestResult.value);
+    else setManifestError(errorMessage(manifestResult.reason));
     setProviderLoading(false);
     setTrendLoading(false);
   }, []);
@@ -122,6 +132,7 @@ export function ResourcesPage() {
       setSettings(updated);
       if (patch.voiceDirection) setVoiceDirection(updated.voiceDirection);
       if (patch.defaultRecipeId) setDefaultRecipeId(updated.defaultRecipeId);
+      if (patch.modelDefaults) setModelDefaults(updated.modelDefaults ?? {});
       if (patch.productionDefaults) setProductionDefaults(updated.productionDefaults);
       setSettingsNotice(successMessage);
     } catch (caught) {
@@ -137,7 +148,9 @@ export function ResourcesPage() {
   const readyServices = services.filter((service) => service.status === "ready").length;
   const voiceHasChanges = settings ? !sameVoiceDirection(settings.voiceDirection, voiceDirection) : false;
   const productionHasChanges = settings
-    ? settings.defaultRecipeId !== defaultRecipeId || !sameProductionDefaults(settings.productionDefaults, productionDefaults)
+    ? settings.defaultRecipeId !== defaultRecipeId
+      || !sameProductionDefaults(settings.productionDefaults, productionDefaults)
+      || !sameStringRecord(settings.modelDefaults, modelDefaults)
     : false;
   const readyFoundation = foundationProviders.filter(isProductionReady).length;
   const usablePublishTargets = publishTargets.filter((target) => target.status === "ready" || target.status === "manual_only").length;
@@ -173,6 +186,7 @@ export function ResourcesPage() {
         <a href="#trend-connections"><RadioTower aria-hidden="true" size={15} />热点信号</a>
         <a href="#voice-casting"><Sparkles aria-hidden="true" size={15} />声音演员</a>
         <a href="#visual-providers"><Film aria-hidden="true" size={15} />画面来源</a>
+        <a href="#resource-manifest"><ListChecks aria-hidden="true" size={15} />资源清单</a>
         <a href="#production-roles"><Clapperboard aria-hidden="true" size={15} />岗位模型</a>
         <a href="#publish-channels"><UploadCloud aria-hidden="true" size={15} />发布渠道</a>
       </nav>
@@ -193,7 +207,7 @@ export function ResourcesPage() {
             <label className="field"><span>默认时长</span><select aria-label="默认视频时长" value={String(productionDefaults.durationSeconds)} onChange={(event) => setProductionDefaults((current) => ({ ...current, durationSeconds: Number(event.target.value) as StudioProductionDefaults["durationSeconds"] }))}><option value="20">20 秒</option><option value="24">24 秒</option><option value="30">30 秒</option><option value="45">45 秒</option></select></label>
           </div>
           <div className="segmented-control configuration-review-mode" aria-label="终审方式"><span>人工终审</span><small>安全门禁，发布前不可跳过</small></div>
-          <div className="configuration-save-row"><span>{productionHasChanges ? "有未保存的创作默认值" : "当前默认值已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !productionHasChanges} onClick={() => void saveDefaults({ defaultRecipeId, productionDefaults }, "创作默认值已保存，将从下一条新制作生效。")}><Save aria-hidden="true" size={16} />{productionHasChanges ? "保存创作默认" : "已保存"}</button></div>
+          <div className="configuration-save-row"><span>{productionHasChanges ? "有未保存的创作默认值" : "当前默认值已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !productionHasChanges} onClick={() => void saveDefaults({ defaultRecipeId, productionDefaults, modelDefaults }, "创作默认值已保存，将从下一条新制作生效。")}><Save aria-hidden="true" size={16} />{productionHasChanges ? "保存创作默认" : "已保存"}</button></div>
         </div>}
       </section>
       {settingsNotice ? <p className="resource-settings-notice" role="status">{settingsNotice}</p> : null}
@@ -250,7 +264,20 @@ export function ResourcesPage() {
         <ResourceHeading eyebrow="画面资源" title="生成与素材模型" meta={`${readyVisual} 项可直接生产`} />
         {providerLoading ? <div className="region-loading">正在读取画面能力...</div> : providerError ? (
           <ResourceError title="画面能力状态未知" message={providerError} retry={load} />
-        ) : <div className="provider-ledger">{visualProviders.map((provider) => <ProviderRow key={provider.id} provider={provider} isDefault={settings?.defaultAssetProviderId === provider.id} canSetDefault={provider.id !== "ai-shot-router-v1"} onSetDefault={(providerId) => void saveDefaults({ defaultAssetProviderId: providerId }, `${provider.label} 已设为默认画面能力。`)} />)}</div>}
+        ) : <div className="provider-ledger">{visualProviders.map((provider) => <ProviderRow
+          key={provider.id}
+          provider={provider}
+          isDefault={settings?.defaultAssetProviderId === provider.id}
+          canSetDefault={provider.id !== "ai-shot-router-v1"}
+          selectedModelId={modelDefaults[provider.id]}
+          onModelChange={(modelId) => setModelDefaults((current) => {
+            const next = { ...current };
+            if (modelId) next[provider.id] = modelId;
+            else delete next[provider.id];
+            return next;
+          })}
+          onSetDefault={(providerId) => void saveDefaults({ defaultAssetProviderId: providerId }, `${provider.label} 已设为默认画面能力。`)}
+        />)}</div>}
       </section>
 
       <section id="production-roles" className="resource-section foundation-registry">
@@ -260,6 +287,33 @@ export function ResourcesPage() {
             {foundationProviders.map((provider) => <FoundationProvider key={provider.id} provider={provider} />)}
           </div>
         )}
+      </section>
+
+      <section id="resource-manifest" className="resource-section resource-manifest-section" data-tour="resource-manifest">
+        <ResourceHeading eyebrow="权利与来源" title="资源追溯清单" meta={resourceManifest ? `${resourceManifest.totalItems} 项资源 · ${resourceManifest.needsReviewCount} 项待复核` : "逐条记录来源、作者与授权状态"} />
+        {manifestError ? <ResourceError title="资源清单读取失败" message={manifestError} retry={load} /> : !resourceManifest ? <div className="region-loading">正在汇总资源清单...</div> : <>
+          <div className="resource-manifest-summary" aria-label="资源分类统计">
+            {(["visual", "voice", "font", "document", "other"] as const).map((category) => <div key={category}><span>{resourceCategoryLabel(category)}</span><strong>{resourceManifest.categories[category]}</strong></div>)}
+            <div className={resourceManifest.needsReviewCount ? "needs-review" : ""}><span>待复核</span><strong>{resourceManifest.needsReviewCount}</strong></div>
+          </div>
+          {resourceManifest.legacyRunsWithoutManifest ? <p className="resource-manifest-legacy">有 {resourceManifest.legacyRunsWithoutManifest} 条旧任务生成于资源清单上线前，不会补写或伪造历史授权信息。</p> : null}
+          {resourceManifest.reconstructedRunCount ? <p className="resource-manifest-legacy" role="status">有 {resourceManifest.reconstructedRunCount} 条发生过付费调用但未完成清单的任务，已从现存产物保守恢复并全部标记为待复核。</p> : null}
+          {resourceManifest.unreadableManifestCount ? <p className="resource-manifest-legacy" role="status">有 {resourceManifest.unreadableManifestCount} 条资源清单损坏或不可信，已隔离；其余任务仍可正常查看。</p> : null}
+          {resourceManifest.truncatedRunCount ? <p className="resource-manifest-legacy" role="status">当前仅汇总最近 500 条制作，另有 {resourceManifest.truncatedRunCount} 条较早记录未进入本页统计。</p> : null}
+          <div className="resource-manifest-ledger" aria-label="资源清单明细">
+            {resourceManifest.items.slice(0, manifestLimit).map((item) => {
+              const sourceUrl = externalResourceUrl(item.sourceUrl);
+              return <article key={`${item.runId}:${item.id}`}>
+                <span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span>
+                <div><strong>{item.creator ?? item.kind}</strong><small>{item.runTitle} · {item.providerId}</small><p>{item.licenseNote ?? "缺少授权说明，需要人工复核。"}</p></div>
+                <span className={item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{item.reviewStatus === "recorded" ? "已记录" : "待复核"}</span>
+                {sourceUrl ? <a href={sourceUrl} target="_blank" rel="noreferrer" title="核验资源来源"><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
+              </article>;
+            })}
+            {resourceManifest.items.length === 0 ? <div className="resource-manifest-empty"><ListChecks aria-hidden="true" size={18} /><span>首条完成制作会在这里生成资源清单。</span></div> : null}
+          </div>
+          {resourceManifest.items.length > manifestLimit ? <button className="button button-secondary" type="button" onClick={() => setManifestLimit((current) => current + 16)}>显示更多资源（还剩 {resourceManifest.items.length - manifestLimit} 项）</button> : null}
+        </>}
       </section>
 
       <section id="publish-channels" className="resource-section publishing-registry" data-tour="configuration-publishing">
@@ -279,18 +333,43 @@ function ResourceHeading({ eyebrow, title, meta }: { eyebrow: string; title: str
   return <div className="section-heading resource-heading"><div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div><span>{meta}</span></div>;
 }
 
+function resourceCategoryLabel(category: StudioResourceManifest["items"][number]["category"]): string {
+  return ({ visual: "画面", voice: "声音", font: "字体", document: "文档", other: "其他" } as const)[category];
+}
+
+function externalResourceUrl(value?: string): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function ResourceError({ title, message, retry }: { title: string; message: string; retry: () => Promise<void> }) {
   return <div className="page-error" role="alert"><AlertCircle aria-hidden="true" size={18} /><span><strong>{title}</strong>{message}</span><button className="icon-button" type="button" onClick={() => void retry()} title="重试"><RefreshCw aria-hidden="true" size={17} /></button></div>;
 }
 
-function ProviderRow({ provider, isDefault, canSetDefault, onSetDefault }: { provider: StudioProvider; isDefault: boolean; canSetDefault: boolean; onSetDefault: (providerId: string) => void }) {
+function ProviderRow({ provider, isDefault, canSetDefault, selectedModelId, onModelChange, onSetDefault }: {
+  provider: StudioProvider;
+  isDefault: boolean;
+  canSetDefault: boolean;
+  selectedModelId: string | undefined;
+  onModelChange: (modelId: string) => void;
+  onSetDefault: (providerId: string) => void;
+}) {
   const ready = isProductionReady(provider);
   const Icon = provider.billing === "free" ? Film : Sparkles;
+  const availableModels = provider.modelProfiles?.filter((model) => model.available) ?? [];
+  const staleSelection = selectedModelId && !availableModels.some((model) => model.id === selectedModelId)
+    ? selectedModelId
+    : undefined;
   return (
     <article className="provider-ledger-row">
       <span className="provider-ledger-icon"><Icon aria-hidden="true" size={18} /></span>
       <div><strong>{provider.label}</strong><small>{provider.description ?? provider.id}</small>{!ready && provider.requirement ? <small className="provider-requirement">{provider.requirement}</small> : null}</div>
-      <span>{(provider.modes ?? []).slice(0, 3).join(" · ")}</span>
+      <span>{availableModels.length || selectedModelId ? <label className="provider-model-select"><small>默认模型</small><select aria-label={`${provider.label} 默认模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(event.target.value)}><option value="">继承服务默认：{provider.defaultModelId ?? "自动选择"}</option>{staleSelection ? <option value={staleSelection} disabled>已失效：{staleSelection}</option> : null}{availableModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}</select></label> : (provider.modes ?? []).slice(0, 3).join(" · ")}</span>
       <strong className={provider.billing === "metered" ? "is-metered" : ""}>{billingLabel(provider.billing)}</strong>
       <span className={ready ? "ledger-state is-ready" : "ledger-state"}>{ready ? "可用" : provider.status === "planned" ? "规划中" : "需要配置"}</span>
       {ready && canSetDefault ? <button className={isDefault ? "provider-default is-active" : "provider-default"} type="button" disabled={isDefault} onClick={() => onSetDefault(provider.id)}>{isDefault ? "制作默认" : "设为默认"}</button> : ready ? <span className="provider-default is-static">系统路由</span> : <span />}
@@ -387,4 +466,8 @@ function sameProductionDefaults(left: StudioProductionDefaults | undefined, righ
     && left.reviewMode === right.reviewMode
     && left.platform === right.platform
     && left.durationSeconds === right.durationSeconds;
+}
+
+function sameStringRecord(left: Record<string, string> | undefined, right: Record<string, string>): boolean {
+  return JSON.stringify(Object.entries(left ?? {}).sort()) === JSON.stringify(Object.entries(right).sort());
 }

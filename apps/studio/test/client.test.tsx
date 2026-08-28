@@ -321,6 +321,176 @@ describe("Studio client", () => {
     expect(onSubmit.mock.calls.at(-1)?.[0].providers).not.toHaveProperty("visualReview");
   });
 
+  it("uploads an optional reference video and enables editable shot-grammar analysis", async () => {
+    const user = userEvent.setup();
+    const upload = vi.spyOn(studioApi, "uploadReferenceVideo").mockResolvedValue({
+      uploadId: "67d86948-5517-4b17-8da1-b0a695159d4d",
+      label: "参考节奏.mp4",
+      mimeType: "video/mp4",
+      sizeBytes: 1_048_576,
+      sha256: "a".repeat(64),
+      createdAt: "2026-08-28T10:00:00.000Z",
+    });
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const providersWithReference: StudioProvider[] = [...providers, {
+      id: "codex-reference-grammar-v1",
+      capability: "reference.grammar",
+      label: "Codex 参考视频分析",
+      available: true,
+      kind: "external",
+      billing: "subscription",
+    }];
+    render(<NewRunDialog open providers={providersWithReference} onClose={() => undefined} onSubmit={onSubmit} />);
+
+    const file = new File([new Uint8Array([0, 0, 0, 12, 102, 116, 121, 112, 105, 115, 111, 109])], "参考节奏.mp4", { type: "video/mp4" });
+    await user.upload(screen.getByLabelText("参考视频"), file);
+
+    expect(upload).toHaveBeenCalledWith(file);
+    expect(await screen.findByText("参考节奏.mp4")).toBeInTheDocument();
+    expect(screen.getByText(/只提炼节奏、构图、运镜/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("视频标题"), "参考镜头语法生成新视频");
+    await user.type(screen.getByLabelText("内容角度"), "借鉴制作语法但不复制内容");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      referenceVideo: { uploadId: "67d86948-5517-4b17-8da1-b0a695159d4d", label: "参考节奏.mp4" },
+      workflowFeatures: { assetSemanticRank: true, referenceGrammar: true },
+    }));
+  });
+
+  it("deletes a removed reference upload instead of only hiding it", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "uploadReferenceVideo").mockResolvedValue({
+      uploadId: "67d86948-5517-4b17-8da1-b0a695159d4d",
+      label: "参考节奏.mp4",
+      mimeType: "video/mp4",
+      sizeBytes: 1_048_576,
+      sha256: "a".repeat(64),
+      createdAt: "2026-08-28T10:00:00.000Z",
+    });
+    const remove = vi.spyOn(studioApi, "deleteReferenceVideo").mockResolvedValue(undefined);
+    const providersWithReference: StudioProvider[] = [...providers, {
+      id: "codex-reference-grammar-v1",
+      capability: "reference.grammar",
+      label: "Codex 参考视频分析",
+      available: true,
+      kind: "external",
+      billing: "subscription",
+    }];
+    render(<NewRunDialog open providers={providersWithReference} onClose={() => undefined} onSubmit={vi.fn()} />);
+
+    const file = new File([new Uint8Array([0, 0, 0, 12, 102, 116, 121, 112, 105, 115, 111, 109])], "参考节奏.mp4", { type: "video/mp4" });
+    await user.upload(screen.getByLabelText("参考视频"), file);
+    await user.click(await screen.findByRole("button", { name: "删除参考视频" }));
+
+    expect(remove).toHaveBeenCalledWith("67d86948-5517-4b17-8da1-b0a695159d4d");
+    expect(screen.queryByText("参考节奏.mp4")).not.toBeInTheDocument();
+  });
+
+  it("clears the file picker after a failed upload so the same file can be retried", async () => {
+    const user = userEvent.setup();
+    const upload = vi.spyOn(studioApi, "uploadReferenceVideo")
+      .mockRejectedValueOnce(new Error("上传链路暂时不可用"))
+      .mockResolvedValueOnce({
+        uploadId: "67d86948-5517-4b17-8da1-b0a695159d4d",
+        label: "参考节奏.mp4",
+        mimeType: "video/mp4",
+        sizeBytes: 12,
+        sha256: "a".repeat(64),
+        createdAt: "2026-08-28T10:00:00.000Z",
+      });
+    upload.mockClear();
+    vi.spyOn(studioApi, "deleteReferenceVideo").mockResolvedValue(undefined);
+    const providersWithReference: StudioProvider[] = [...providers, {
+      id: "codex-reference-grammar-v1",
+      capability: "reference.grammar",
+      label: "Codex 参考视频分析",
+      available: true,
+      kind: "external",
+      billing: "subscription",
+    }];
+    render(<NewRunDialog open providers={providersWithReference} onClose={() => undefined} onSubmit={vi.fn()} />);
+    const picker = screen.getByLabelText("参考视频") as HTMLInputElement;
+    const file = new File([new Uint8Array([0, 0, 0, 12, 102, 116, 121, 112, 105, 115, 111, 109])], "参考节奏.mp4", { type: "video/mp4" });
+
+    await user.upload(picker, file);
+    expect(await screen.findByText(/上传链路暂时不可用/)).toBeInTheDocument();
+    expect(picker.value).toBe("");
+    await user.upload(picker, file);
+
+    expect(upload).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText("参考节奏.mp4")).toBeInTheDocument();
+  });
+
+  it("recalculates the paid-shot budget from the selected model profile", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const providersWithModels: StudioProvider[] = [...providers, {
+      id: "seedance-video-v1",
+      capability: "asset.prepare",
+      label: "火山方舟视频",
+      available: true,
+      kind: "external",
+      billing: "metered",
+      estimatedCnyPerClip: 1,
+      defaultModelId: "economy-model",
+      modelProfiles: [
+        { id: "economy-model", providerId: "seedance-video-v1", providerFamily: "ark-video", label: "经济模型", description: "低成本模型", available: true, taskTypes: ["text-to-video"], estimatedCnyPerClip: 1 },
+        { id: "premium-model", providerId: "seedance-video-v1", providerFamily: "ark-video", label: "精品模型", description: "高质量模型", available: true, taskTypes: ["text-to-video"], estimatedCnyPerClip: 3 },
+      ],
+    }];
+    render(<NewRunDialog open providers={providersWithModels} onClose={() => undefined} onSubmit={onSubmit} />);
+
+    await user.click(screen.getByRole("radio", { name: /效果均衡/ }));
+    await user.click(screen.getByText("高级：逐节点配置"));
+    await user.selectOptions(screen.getByRole("combobox", { name: "火山方舟视频 本次模型" }), "premium-model");
+
+    expect(screen.getByLabelText("预计成本上限")).toHaveValue(3);
+    expect(screen.getByText(/生成最低 ¥3/)).toBeInTheDocument();
+  });
+
+  it("quotes the effective template model before a paid run is submitted", async () => {
+    const premiumTemplate = {
+      ...template("knowledge-explainer", "知识解释"),
+      modelDefaults: { "seedance-video-v1": "premium-model" },
+    };
+    vi.mocked(studioApi.templates).mockResolvedValueOnce({
+      storeRevision: 1,
+      templates: [premiumTemplate, template("photo-story", "照片故事")],
+    });
+    const providersWithModels: StudioProvider[] = [...providers, {
+      id: "seedance-video-v1",
+      capability: "asset.prepare",
+      label: "火山方舟视频",
+      available: true,
+      kind: "external",
+      billing: "metered",
+      estimatedCnyPerClip: 1,
+      defaultModelId: "economy-model",
+      modelProfiles: [
+        { id: "economy-model", providerId: "seedance-video-v1", providerFamily: "ark-video", label: "经济模型", description: "低成本模型", available: true, taskTypes: ["text-to-video"], estimatedCnyPerClip: 1 },
+        { id: "premium-model", providerId: "seedance-video-v1", providerFamily: "ark-video", label: "精品模型", description: "高质量模型", available: true, taskTypes: ["text-to-video"], estimatedCnyPerClip: 3 },
+      ],
+    }];
+    const creatorSettings = {
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
+      defaultRecipeId: "economy-daily" as const,
+      modelDefaults: { "seedance-video-v1": "economy-model" },
+      productionDefaults: { directorProfileId: "auto" as const, reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
+    };
+    const user = userEvent.setup();
+    render(<NewRunDialog open providers={providersWithModels} creatorSettings={creatorSettings} onClose={() => undefined} onSubmit={vi.fn()} />);
+
+    await user.click(await screen.findByRole("radio", { name: /效果均衡/ }));
+    await user.click(screen.getByText("高级：逐节点配置"));
+
+    expect(screen.getByRole("combobox", { name: "火山方舟视频 本次模型" })).toHaveValue("");
+    expect(screen.getByRole("option", { name: "继承默认：premium-model" })).toBeInTheDocument();
+    expect(screen.getByLabelText("预计成本上限")).toHaveValue(3);
+    expect(screen.getByText(/生成最低 ¥3/)).toBeInTheDocument();
+  });
+
   it("shows metered GLM review cost separately from the paid-shot budget", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const providersWithGlmReview: StudioProvider[] = [
@@ -699,7 +869,7 @@ describe("Studio client", () => {
   });
 
   it("shows the director's visual bible and AI-generated per-shot routes", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       resolvedProfileId: "documentary-observer",
       profileRationale: "热点内容需要真实动作与环境证据。",
       visualBible: {
@@ -718,13 +888,28 @@ describe("Studio client", () => {
         rationale: "使用真实街景建立可信度。",
         continuityNote: "保持同一清晨",
       }],
-    }), { status: 200 })));
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
     render(<RunWorkbench
       run={{
         ...runDetail,
+        nodes: runDetail.nodes.map((node) => node.id === "visual-direction" ? {
+          ...node,
+          artifactIds: ["director-plan-current"],
+          outputState: {
+            generatedVersionId: "director-v1",
+            effectiveVersionId: "director-v2",
+            stale: false,
+            versions: [
+              { id: "director-v1", source: "generated", artifactIds: ["director-plan-old"], inputVersionIds: [], createdAt: "2026-08-21T10:00:20.000Z", createdBy: "director", schemaVersion: "1" },
+              { id: "director-v2", source: "human", artifactIds: ["director-plan-current"], inputVersionIds: [], createdAt: "2026-08-21T10:00:30.000Z", createdBy: "owner", schemaVersion: "1" },
+            ],
+          },
+        } : node),
         artifacts: [
           ...runDetail.artifacts,
-          { id: "director-plan", kind: "storyboard", producerNodeId: "visual-direction", createdAt: "2026-08-21T10:00:20.000Z", contentUrl: "/api/director-plan" },
+          { id: "director-plan-old", kind: "storyboard", producerNodeId: "visual-direction", createdAt: "2026-08-21T10:00:20.000Z", contentUrl: "/api/director-plan-old" },
+          { id: "director-plan-current", kind: "storyboard", producerNodeId: "visual-direction", createdAt: "2026-08-21T10:00:30.000Z", contentUrl: "/api/director-plan-current" },
         ],
       }}
       decisionPending={false}
@@ -736,6 +921,7 @@ describe("Studio client", () => {
     expect(within(panel).getByText("先现场后解释")).toBeInTheDocument();
     expect(within(panel).getByText("事实镜头")).toBeInTheDocument();
     expect(within(panel).getByText(/Pexels 图库/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/api/director-plan-current", expect.objectContaining({ signal: expect.any(AbortSignal) }));
     vi.unstubAllGlobals();
   });
 

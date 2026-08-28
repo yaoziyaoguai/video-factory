@@ -97,6 +97,10 @@ def default_asset_search_report_path(workspace: Path, job_id: int) -> Path:
     return workspace / "assets" / f"job-{job_id}" / "asset_candidates.json"
 
 
+def default_asset_candidate_inventory_path(workspace: Path, job_id: int) -> Path:
+    return workspace / "assets" / f"job-{job_id}" / "asset_candidate_inventory.private.json"
+
+
 def search_scene_asset_candidates(
     job_id: int,
     scenes: Iterable[Scene],
@@ -134,6 +138,94 @@ def search_scene_asset_candidates(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return output
+
+
+def search_routed_scene_asset_candidates(
+    job_id: int,
+    scenes: Iterable[Scene],
+    workspace: Path,
+    director_plan: dict,
+    media_type: str = "video",
+    limit: int = 6,
+) -> tuple[Path, Path]:
+    shots = director_plan.get("shots")
+    if not isinstance(shots, list):
+        raise ValueError("Director plan shots must be an array")
+    routes = {int(shot["scenePosition"]): shot for shot in shots if isinstance(shot, dict)}
+    report = {
+        "version": "video-factory/asset-candidates-v1",
+        "job_id": job_id,
+        "provider": "ai-router",
+        "media_type": media_type,
+        "created_at": utc_now(),
+        "scene_candidates": [],
+    }
+    inventory = {
+        "version": "video-factory/asset-candidate-inventory-v1",
+        "job_id": job_id,
+        "created_at": report["created_at"],
+        "scene_candidates": [],
+    }
+    for scene in scenes:
+        route = routes.get(scene.position)
+        if route is None:
+            raise ValueError(f"Director plan is missing scene {scene.position}")
+        preferred_id = required_route_text(route, "preferredProviderId", scene.position)
+        alternatives = route.get("alternativeProviderIds", [])
+        if not isinstance(alternatives, list) or any(not isinstance(item, str) or not item.strip() for item in alternatives):
+            raise ValueError(f"Director plan alternatives are invalid for scene {scene.position}")
+        director_query = required_route_text(route, "query", scene.position)
+        delivery_type = str(route.get("deliveryType") or "").strip()
+        route_media_type = {
+            "stock_image": "image",
+            "generated_image": "image",
+            "stock_video": "video",
+            "generated_video": "video",
+        }.get(delivery_type, media_type)
+        provider_ids = [preferred_id, *[item.strip() for item in alternatives if item.strip() != preferred_id]]
+        public_candidates = []
+        private_candidates = []
+        search_errors = []
+        for provider_id in provider_ids:
+            if is_generative_provider(provider_id) or stock_provider_name(provider_id) == "local":
+                continue
+            provider = stock_provider_name(provider_id)
+            stock_query = resolve_director_stock_query(scene, director_query)
+            try:
+                candidates = search_stock_assets(provider=provider, query=stock_query, media_type=route_media_type, limit=limit)
+            except (RuntimeError, ValueError) as error:
+                search_errors.append({"provider_id": provider_id, "message": str(error)[:500]})
+                continue
+            public_candidates.extend(candidate_to_public_dict(candidate, provider_id=provider_id) for candidate in candidates)
+            private_candidates.extend(candidate_to_private_dict(candidate, provider_id) for candidate in candidates)
+        report["scene_candidates"].append({
+            "scene_position": scene.position,
+            "intent": {
+                "narrative_role": str(route.get("narrativeRole") or ""),
+                "subject": str(route.get("subject") or ""),
+                "environment": str(route.get("environment") or ""),
+                "visible_action": str(route.get("visibleAction") or ""),
+                "shot_size": str(route.get("shotSize") or ""),
+                "camera": str(route.get("camera") or ""),
+                "lighting": str(route.get("lighting") or ""),
+                "generation_prompt": str(route.get("generationPrompt") or ""),
+                "temporal_beats": " | ".join(str(beat) for beat in (route.get("temporalBeats") or []) if str(beat).strip()),
+                "continuity_note": str(route.get("continuityNote") or ""),
+            },
+            "query": director_query,
+            "candidates": public_candidates,
+            "search_errors": search_errors,
+        })
+        inventory["scene_candidates"].append({
+            "scene_position": scene.position,
+            "candidates": private_candidates,
+        })
+    output = default_asset_search_report_path(workspace, job_id)
+    inventory_output = default_asset_candidate_inventory_path(workspace, job_id)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    inventory_output.write_text(json.dumps(inventory, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return output, inventory_output
 
 
 def prepare_scene_assets(
@@ -216,6 +308,8 @@ def prepare_routed_scene_assets(
     director_plan: dict,
     media_type: str = "video",
     limit: int = 6,
+    candidate_ranking: Optional[dict] = None,
+    candidate_inventory: Optional[dict] = None,
 ) -> Path:
     asset_dir = workspace / "assets" / f"job-{job_id}"
     asset_dir.mkdir(parents=True, exist_ok=True)
@@ -224,6 +318,8 @@ def prepare_routed_scene_assets(
     if not isinstance(shots, list):
         raise ValueError("Director plan shots must be an array")
     routes = {int(shot["scenePosition"]): shot for shot in shots if isinstance(shot, dict)}
+    ranking_by_scene = ranking_candidate_ids_by_scene(candidate_ranking)
+    inventory_by_scene = inventory_candidates_by_scene_provider(candidate_inventory)
     claimed_stock_assets: set[tuple[str, str]] = set()
     claim_lock = Lock()
 
@@ -274,7 +370,12 @@ def prepare_routed_scene_assets(
                     actual_provider_id = provider_id
                     break
                 stock_query = resolve_director_stock_query(scene, director_query)
-                candidates = search_stock_assets(provider=provider, query=stock_query, media_type=route_media_type, limit=limit)
+                candidates = (
+                    list(inventory_by_scene.get(scene.position, {}).get(provider_id, []))
+                    if candidate_inventory is not None
+                    else search_stock_assets(provider=provider, query=stock_query, media_type=route_media_type, limit=limit)
+                )
+                candidates = reorder_candidates(candidates, ranking_by_scene.get(scene.position, []))
                 duplicate_options.append((provider_id, candidates))
                 actual_asset = materialize_first_candidate(
                     scene,
@@ -341,6 +442,74 @@ def prepare_routed_scene_assets(
     payload["director_plan_version"] = str(director_plan.get("version") or "video-factory/director-plan-v1")
     plan_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return plan_path
+
+
+def ranking_candidate_ids_by_scene(candidate_ranking: Optional[dict]) -> dict[int, list[tuple[str, str]]]:
+    if candidate_ranking is None:
+        return {}
+    scenes = candidate_ranking.get("scenes")
+    if not isinstance(scenes, list):
+        raise ValueError("Candidate ranking scenes must be an array")
+    result: dict[int, list[tuple[str, str]]] = {}
+    for scene in scenes:
+        if not isinstance(scene, dict) or not isinstance(scene.get("scenePosition"), int):
+            raise ValueError("Candidate ranking scenePosition is invalid")
+        candidates = scene.get("candidates")
+        if not isinstance(candidates, list):
+            raise ValueError("Candidate ranking candidates must be an array")
+        ordered = sorted(candidates, key=lambda item: (
+            0 if isinstance(item, dict) and item.get("locked") is True else 1,
+            int(item.get("rank", 1_000_000)) if isinstance(item, dict) else 1_000_000,
+        ))
+        result[int(scene["scenePosition"])] = [
+            (str(item.get("provider") or ""), str(item.get("assetId") or ""))
+            for item in ordered
+            if isinstance(item, dict) and item.get("provider") and item.get("assetId")
+        ]
+    return result
+
+
+def inventory_candidates_by_scene_provider(candidate_inventory: Optional[dict]) -> dict[int, dict[str, List[StockAssetCandidate]]]:
+    if candidate_inventory is None:
+        return {}
+    if candidate_inventory.get("version") != "video-factory/asset-candidate-inventory-v1":
+        raise ValueError("Candidate inventory version is invalid")
+    scenes = candidate_inventory.get("scene_candidates")
+    if not isinstance(scenes, list):
+        raise ValueError("Candidate inventory scenes must be an array")
+    result: dict[int, dict[str, List[StockAssetCandidate]]] = {}
+    for scene in scenes:
+        if not isinstance(scene, dict) or not isinstance(scene.get("scene_position"), int):
+            raise ValueError("Candidate inventory scene_position is invalid")
+        by_provider: dict[str, List[StockAssetCandidate]] = {}
+        candidates = scene.get("candidates")
+        if not isinstance(candidates, list):
+            raise ValueError("Candidate inventory candidates must be an array")
+        for item in candidates:
+            if not isinstance(item, dict):
+                raise ValueError("Candidate inventory item is invalid")
+            provider_id = item.get("provider_id")
+            if not isinstance(provider_id, str) or not provider_id:
+                raise ValueError("Candidate inventory provider_id is invalid")
+            values = {key: value for key, value in item.items() if key != "provider_id"}
+            try:
+                candidate = StockAssetCandidate(**values)
+            except TypeError as error:
+                raise ValueError("Candidate inventory item is invalid") from error
+            by_provider.setdefault(provider_id, []).append(candidate)
+        result[int(scene["scene_position"])] = by_provider
+    return result
+
+
+def reorder_candidates(
+    candidates: List[StockAssetCandidate],
+    preferred: list[tuple[str, str]],
+) -> List[StockAssetCandidate]:
+    if not preferred:
+        return candidates
+    positions = {candidate_key: index for index, candidate_key in enumerate(preferred)}
+    reviewed = [candidate for candidate in candidates if (candidate.provider, candidate.asset_id) in positions]
+    return sorted(reviewed, key=lambda candidate: positions[(candidate.provider, candidate.asset_id)])
 
 
 def materialize_local_scene(scene: Scene, query: str, asset_dir: Path) -> SceneAsset:
@@ -697,6 +866,10 @@ def candidate_to_public_dict(
         "score": candidate.score,
         "selected": selected,
     }
+
+
+def candidate_to_private_dict(candidate: StockAssetCandidate, provider_id: str) -> dict:
+    return {**asdict(candidate), "provider_id": provider_id}
 
 
 def query_for_scene(scene: Scene) -> str:

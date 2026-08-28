@@ -21,6 +21,7 @@ export const DEFAULT_CREATOR_SETTINGS: StudioCreatorSettings = {
     masteringPreset: "natural",
   },
   defaultRecipeId: "economy-daily",
+  modelDefaults: {},
   productionDefaults: {
     directorProfileId: "auto",
     reviewMode: "manual",
@@ -49,6 +50,7 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
         ...file.settings,
         ...patch,
         ...(patch.voiceDirection ? { voiceDirection: { ...patch.voiceDirection } } : {}),
+        modelDefaults: patch.modelDefaults ? { ...patch.modelDefaults } : { ...file.settings.modelDefaults },
         productionDefaults: {
           ...file.settings.productionDefaults,
           ...patch.productionDefaults,
@@ -74,6 +76,7 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
           ...structuredClone(DEFAULT_CREATOR_SETTINGS),
           ...parsed.settings,
           voiceDirection: { ...DEFAULT_CREATOR_SETTINGS.voiceDirection, ...parsed.settings.voiceDirection },
+          modelDefaults: { ...DEFAULT_CREATOR_SETTINGS.modelDefaults, ...parsed.settings.modelDefaults },
           productionDefaults: {
             ...DEFAULT_CREATOR_SETTINGS.productionDefaults,
             ...parsed.settings.productionDefaults,

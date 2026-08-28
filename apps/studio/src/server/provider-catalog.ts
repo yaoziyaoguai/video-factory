@@ -14,7 +14,9 @@ export interface ProviderRuntime {
   say: boolean;
 }
 
-export type CodexCatalogAvailability = Pick<CodexProviderSettings, "available" | "reason">;
+export type CodexCatalogAvailability = Pick<CodexProviderSettings, "available" | "reason"> & {
+  taskKinds?: readonly string[];
+};
 
 export function buildProviderCatalog(
   runtime: ProviderRuntime,
@@ -33,22 +35,22 @@ export function buildProviderCatalog(
   const miniMaxAvailable = runtime.python && miniMaxSettings !== undefined;
   const wanAvailable = runtime.python && wanSettings !== undefined;
   const codex = codexAvailability ?? probeCodexSynchronously(environment);
-  const codexRequirement = `${resolveCodexSocketPath(environment).requirement}${codex.reason ? ` 当前：${codex.reason}` : ""}`;
+  const codexRequirement = (taskKind: string) => providerTaskRequirement(resolveCodexSocketPath(environment).requirement, codex, taskKind);
   const zaiCodex = zaiCodexAvailability ?? { available: false, reason: "尚未完成独立 broker 协议健康检查。" };
-  const zaiCodexRequirement = `${resolveZaiCodexSocketPath(environment).requirement}${zaiCodex.reason ? ` 当前：${zaiCodex.reason}` : ""}`;
+  const zaiCodexRequirement = providerTaskRequirement(resolveZaiCodexSocketPath(environment).requirement, zaiCodex, "visual-review");
 
   return [
     provider({
       id: "api-topic-editor-v1",
       capability: "topic.intelligence",
       label: "Codex 选题总编",
-      available: codex.available,
+      available: supportsTask(codex, "topic-ideas"),
       kind: "external",
       billing: "subscription",
       description: "通过宿主机 Codex 把实时热点转译为可拍摄、可连载的中文短视频角度；失败时回退到确定性评分。",
       modes: ["热点理解", "选题提案", "结构化输出"],
       latency: "seconds",
-      requirement: codexRequirement,
+      requirement: codexRequirement("topic-ideas"),
     }),
     provider({
       id: "python-template-v1",
@@ -65,31 +67,55 @@ export function buildProviderCatalog(
       id: "codex-screenwriter-v1",
       capability: "script.draft",
       label: "Codex 编剧",
-      available: codex.available,
+      available: supportsTask(codex, "script-draft"),
       kind: "external",
       billing: "subscription",
       description: "按选题角度撰写可拍、可朗读、可核验的分镜脚本；编剧失败时制作明确失败，不回退模板。",
       modes: ["口语旁白", "3-10 场分镜", "逐场画面指令"],
       latency: "seconds",
-      requirement: codexRequirement,
+      requirement: codexRequirement("script-draft"),
     }),
     provider({
       id: "api-visual-director-v1",
       capability: "storyboard.plan",
       label: "Codex 视觉导演",
-      available: codex.available,
+      available: supportsTask(codex, "director-plan"),
       kind: "external",
       billing: "subscription",
       description: "生成视觉圣经，并根据叙事、真实性、连续性和预算逐镜选择素材来源。",
       modes: ["导演角色", "视觉圣经", "逐镜路由"],
       latency: "seconds",
-      requirement: codexRequirement,
+      requirement: codexRequirement("director-plan"),
+    }),
+    provider({
+      id: "codex-reference-grammar-v1",
+      capability: "reference.grammar",
+      label: "Codex 参考视频分析",
+      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && supportsTask(codex, "reference-grammar"),
+      kind: "external",
+      billing: "subscription",
+      description: "安全抽取参考视频关键帧，只提炼节奏、构图、运镜、色彩、转场和声音结构等制作语法。",
+      modes: ["关键帧分析", "镜头语法", "可编辑规则", "订阅能力"],
+      latency: "seconds",
+      requirement: codexRequirement("reference-grammar"),
+    }),
+    provider({
+      id: "codex-asset-ranker-v1",
+      capability: "asset.rank.semantic",
+      label: "Codex 语义选片",
+      available: supportsTask(codex, "asset-rank"),
+      kind: "external",
+      billing: "subscription",
+      description: "在下载前依据逐镜意图重排图库候选；不可用时保留确定性原始排序。",
+      modes: ["候选排序", "逐项理由", "人工锁定", "订阅能力"],
+      latency: "seconds",
+      requirement: codexRequirement("asset-rank"),
     }),
     provider({
       id: "ai-shot-router-v1",
       capability: "asset.prepare",
       label: "AI 逐镜路由",
-      available: runtime.python && codex.available,
+      available: runtime.python && supportsTask(codex, "director-plan"),
       kind: "external",
       description: "执行导演计划；每个镜头可独立调用本地、图库或图片及视频生成能力。",
       modes: ["逐镜决策", "多来源", "预算门禁"],
@@ -148,17 +174,30 @@ export function buildProviderCatalog(
     }),
     provider({
       id: "seedance-video-v1",
+      providerFamily: "ark-video",
       capability: "asset.prepare",
-      label: "Seedance 关键镜头",
+      label: "火山方舟视频",
       available: seedanceAvailable,
       kind: "external",
       billing: "metered",
       status: seedanceAvailable ? "ready" : "needs_config",
-      description: "火山方舟异步视频生成，只用于配方指定的少量关键镜头。",
+      description: "通过同一个火山方舟协议调用可配置的视频模型，只用于预算内的少量关键镜头。",
       modes: ["文生视频", "9:16", "2-15 秒", "无声素材"],
       latency: "minutes",
       ...(seedanceSettings ? { estimatedCnyPerClip: seedanceSettings.estimatedCnyPerClip } : {}),
-      requirement: "需要 ARK_API_KEY、SEEDANCE_MODEL_ID 和 SEEDANCE_ESTIMATED_CNY_PER_CLIP",
+      ...(seedanceSettings ? {
+        defaultModelId: seedanceSettings.model,
+        modelProfiles: seedanceSettings.models.map((model) => ({
+          ...model,
+          providerId: "seedance-video-v1",
+          providerFamily: "ark-video",
+          available: true,
+          description: model.recommended
+            ? "当前推荐的方舟视频模型，适合精品关键镜头与受控小额验证。"
+            : "同一方舟 API 下的可选视频模型，可按项目或节点覆盖默认值。",
+        })),
+      } : {}),
+      requirement: "需要 ARK_API_KEY 和 SEEDANCE_ESTIMATED_CNY_PER_CLIP；模型可在页面配置",
       docsUrl: "https://www.volcengine.com/docs/82379/1520757?lang=zh",
     }),
     provider({
@@ -257,7 +296,7 @@ export function buildProviderCatalog(
       id: "glm-visual-review-v1",
       capability: "quality.review.visual",
       label: "GLM-5.3-Flash 视觉审片",
-      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && zaiCodex.available,
+      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && supportsTask(zaiCodex, "visual-review"),
       kind: "external",
       billing: "metered",
       estimatedCnyPerClip: positiveEstimate(environment.ZAI_VISUAL_REVIEW_ESTIMATED_CNY, 0.1),
@@ -271,25 +310,25 @@ export function buildProviderCatalog(
       id: "codex-visual-review-v1",
       capability: "quality.review.visual",
       label: "Codex 视觉审片",
-      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && codex.available,
+      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && supportsTask(codex, "visual-review"),
       kind: "external",
       billing: "subscription",
       description: "从成片中安全抽取最多 12 张关键帧，由服务器 Codex 检查构图、连续性、节奏、文字可读性与内容安全。",
       modes: ["关键帧审片", "时间码问题", "修改建议", "订阅能力"],
       latency: "seconds",
-      requirement: codexRequirement,
+      requirement: codexRequirement("visual-review"),
     }),
     provider({
       id: "codex-publish-copy-v1",
       capability: "publish.copy",
       label: "Codex 发行编辑",
-      available: codex.available,
+      available: supportsTask(codex, "publish-copy"),
       kind: "external",
       billing: "subscription",
       description: "人工终审通过后为成片生成平台标题、描述与话题标签；不可用时发布包回退使用简报标题并如实标注来源。",
       modes: ["平台标题", "发布描述", "话题标签"],
       latency: "seconds",
-      requirement: codexRequirement,
+      requirement: codexRequirement("publish-copy"),
     }),
   ];
 }
@@ -390,6 +429,23 @@ export function buildTrendSourceCatalog(
       docsUrl: "https://www.oceanengine.com/insight/juliang-suanshu-yidongduan",
     },
   ];
+}
+
+function supportsTask(availability: CodexCatalogAvailability, taskKind: string): boolean {
+  return availability.available
+    && (availability.taskKinds === undefined || availability.taskKinds.includes(taskKind));
+}
+
+function providerTaskRequirement(
+  baseRequirement: string,
+  availability: CodexCatalogAvailability,
+  taskKind: string,
+): string {
+  if (availability.reason) return `${baseRequirement} 当前：${availability.reason}`;
+  if (availability.available && availability.taskKinds !== undefined && !availability.taskKinds.includes(taskKind)) {
+    return `${baseRequirement} 当前 broker 尚未提供 '${taskKind}' 任务能力。`;
+  }
+  return baseRequirement;
 }
 
 function provider(input: Omit<StudioProvider, "status" | "billing"> & Partial<Pick<StudioProvider, "status" | "billing">>): StudioProvider {

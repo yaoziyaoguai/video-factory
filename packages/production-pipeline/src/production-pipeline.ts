@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { copyFile, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseProductionBlueprint } from "@video-factory/template-core";
 import {
@@ -13,6 +14,8 @@ import {
   type NodeOverrideDraft,
   type NodeDefinition,
   type NodeExecutionReceiptDraft,
+  type ExecutionConfigurationSource,
+  type ExecutionParameterValue,
   type NodeExecutionResult,
   type Provider,
   type SpendAuthorizationDraft,
@@ -21,6 +24,13 @@ import {
   type WorkflowRun,
 } from "@video-factory/workflow-core";
 import { validatePublishCopy, type PublishCopy, type PublishCopyWriter } from "./codex-publish-copy.js";
+import {
+  deterministicAssetRanking,
+  parseAssetCandidateReport,
+  validateAssetSemanticRanking,
+  type AssetSemanticRanker,
+} from "./asset-semantic-ranker.js";
+import { fallbackShotGrammar, validateShotGrammar, type ReferenceGrammarAgent, type ReferenceGrammarExecution, type ShotGrammar } from "./reference-grammar.js";
 import type { CodexTaskExecution, CodexTaskTrace } from "./codex-chat.js";
 import { validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput } from "./codex-screenwriter.js";
 import { validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport } from "./codex-visual-review.js";
@@ -48,6 +58,9 @@ export interface ProductionPipelineOptions {
   providerRuntimeMetadata?: ProductionProviderRuntimeMetadata[];
   visualReviewAgent?: VisualReviewAgent;
   visualReviewAgents?: VisualReviewAgent[];
+  assetSemanticRanker?: AssetSemanticRanker;
+  referenceGrammarAgent?: ReferenceGrammarAgent;
+  referenceVideoRoot?: string;
   clock?: () => string;
   idFactory?: (prefix: string) => string;
   executionLeaseHeartbeatMs?: number;
@@ -65,6 +78,7 @@ interface ProviderConfig {
   capability: Capability;
   nodeId: string;
   parameters: Record<string, unknown>;
+  configurationSource: ExecutionConfigurationSource;
   metadata?: ProductionProviderRuntimeMetadata;
 }
 
@@ -86,13 +100,16 @@ export interface ProductionProviderRuntimeMetadata {
   billingUnit?: "clip" | "run";
   estimatedCostCny?: number;
   maxAttempts?: number;
+  modelProfiles?: Array<{ modelId: string; estimatedCostCny: number }>;
 }
 
 function productionNodeIds(brief: ProductionBrief): string[] {
   return [
     "brief",
     "script",
+    ...(brief.workflowFeatures?.referenceGrammar ? ["reference-grammar"] : []),
     ...(brief.director ? ["visual-direction"] : []),
+    ...(brief.workflowFeatures?.assetSemanticRank ? ["asset-candidates", "asset-semantic-rank"] : []),
     "assets",
     "voice",
     "render",
@@ -523,17 +540,36 @@ export class ProductionPipeline {
       ...(brief.providers.script === "codex-screenwriter-v1"
         ? [screenwriterNode(brief, this.options.screenwriterAgent, this.runsRoot)]
         : [workerNode("script", "Draft script", "script.draft", brief.providers.script, ["brief"], ["brief"], () => ({ brief }), "编剧")]),
+      ...(brief.workflowFeatures?.referenceGrammar ? [referenceGrammarNode(brief, this.options, this.runsRoot)] : []),
       ...(brief.director ? [directorNode(brief, this.options, this.runsRoot)] : []),
+      ...(brief.workflowFeatures?.assetSemanticRank ? [
+        workerNode(
+          "asset-candidates",
+          "Discover asset candidates",
+          "asset.search",
+          "asset-candidate-search-v1",
+          ["visual-direction"],
+          ["script", "visual-direction"],
+          (context) => ({
+            scriptPath: outputPath(context, "script", "scriptPath"),
+            directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath"),
+          }),
+          "素材研究员",
+        ),
+        assetSemanticRankNode(brief, this.options, this.runsRoot),
+      ] : []),
       workerNode(
         "assets",
         "Prepare assets",
         "asset.prepare",
         brief.providers.assets,
-        [brief.director ? "visual-direction" : "script"],
-        brief.director ? ["script", "visual-direction"] : ["script"],
+        [brief.workflowFeatures?.assetSemanticRank ? "asset-semantic-rank" : brief.director ? "visual-direction" : "script"],
+        brief.workflowFeatures?.assetSemanticRank ? ["script", "visual-direction", "asset-candidates", "asset-semantic-rank"] : brief.director ? ["script", "visual-direction"] : ["script"],
         (context) => ({
           scriptPath: outputPath(context, "script", "scriptPath"),
           ...(brief.director ? { directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath") } : {}),
+          ...(brief.workflowFeatures?.assetSemanticRank ? { candidateRankingPath: outputPath(context, "asset-semantic-rank", "candidateRankingPath") } : {}),
+          ...(brief.workflowFeatures?.assetSemanticRank ? { candidateInventoryPath: outputPath(context, "asset-candidates", "candidateInventoryPath") } : {}),
         }),
         "素材导演",
       ),
@@ -675,6 +711,24 @@ export class ProductionPipeline {
             parentArtifactIds: scriptParentIds,
           });
           if (copyTraceArtifact) copyArtifacts.push(copyTraceArtifact);
+          const resourceManifestPath = path.join(publishAttempt.directory, "resource_manifest.json");
+          const privateReferenceArtifacts = context.artifacts.filter((artifact) => artifact.kind === "reference_video");
+          const manifestArtifacts = [...currentArtifacts, ...privateReferenceArtifacts];
+          const resourceManifest = await buildResourceManifest(context.runId, manifestArtifacts);
+          const resourceManifestContent = `${JSON.stringify(resourceManifest, null, 2)}\n`;
+          await writeTextAtomically(resourceManifestPath, resourceManifestContent);
+          const resourceManifestArtifact = fileArtifact(
+            "resource_manifest",
+            resourceManifestPath,
+            resourceManifestContent,
+            "application/json",
+            "video-factory/resource-manifest-v1",
+            "publish-package",
+            manifestArtifacts.map((artifact) => artifact.id),
+            "video-factory-ts-v1",
+            "Traceable resource inventory; unknown rights remain explicitly marked for review.",
+            publishAttempt.attempt,
+          );
           const packagePath = path.join(publishAttempt.directory, "publish_package.json");
           const payload = {
             version: "video-factory/publish-package-v1",
@@ -704,13 +758,29 @@ export class ProductionPipeline {
               platformDeclarationRequired: true,
               humanReviewRequiredBeforeUpload: true,
             },
-            artifacts: currentArtifacts,
+            resourceManifest: {
+              version: resourceManifest.version,
+              itemCount: resourceManifest.items.length,
+              needsReviewCount: resourceManifest.items.filter((item) => item.reviewStatus === "needs_review").length,
+            },
+            artifacts: currentArtifacts.map(publishArtifactDescriptor),
           };
           const packageContent = `${JSON.stringify(payload, null, 2)}\n`;
           await writeTextAtomically(packagePath, packageContent);
           return {
             status: "succeeded",
-            output: { publishPackagePath: packagePath },
+            output: { publishPackagePath: packagePath, resourceManifestPath },
+            receipt: copyOutcome.trace
+              ? modelTraceReceipt(copyOutcome.trace, "Codex 发行编辑", "subscription")
+              : {
+                  providerId: "video-factory-publish-package-v1",
+                  providerLabel: "本地发布包",
+                  modelId: "deterministic-copy-fallback-v1",
+                  transport: "local_process",
+                  billing: "free",
+                  configurationSource: "system_default",
+                  parameters: { copySource: copyOutcome.source },
+                },
             artifacts: [
               fileArtifact(
                 "publish_package",
@@ -724,18 +794,24 @@ export class ProductionPipeline {
                 "Generated publish package; platform upload remains a manual action.",
                 publishAttempt.attempt,
               ),
+              resourceManifestArtifact,
               ...copyArtifacts,
             ],
           };
         },
-        validateOverride: (output) => validatePathOutput(output, "publishPackagePath", "publish-package"),
+        validateOverride: (output) => {
+          const value = validatePathOutput(output, "publishPackagePath", "publish-package");
+          return value.resourceManifestPath === undefined
+            ? value
+            : { ...value, resourceManifestPath: requiredOutputString(value, "resourceManifestPath") };
+        },
       },
     ];
 
     return {
       id: "daily-production",
       name: "Daily short-video production",
-      version: brief.providers.visualReview ? "1.2.0" : brief.director ? "1.1.0" : "1.0.0",
+      version: brief.workflowFeatures?.referenceGrammar ? "1.4.0" : brief.workflowFeatures?.assetSemanticRank ? "1.3.0" : brief.providers.visualReview ? "1.2.0" : brief.director ? "1.1.0" : "1.0.0",
       nodes,
     };
   }
@@ -758,6 +834,8 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
   get modelId(): string { return this.config.metadata?.modelId ?? this.id; }
   get transport(): ProductionProviderRuntimeMetadata["transport"] { return this.config.metadata?.transport ?? "local_process"; }
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.config.metadata?.billing ?? "local_compute"; }
+  get configurationSource(): ExecutionConfigurationSource { return this.config.configurationSource; }
+  get parameters(): Record<string, ExecutionParameterValue> { return receiptParameters(this.config.parameters); }
   get estimatedCostCny(): number { return this.config.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number {
     if (this.config.metadata?.billing !== "metered") return 0;
@@ -795,6 +873,9 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
       outputDir,
     });
     await verifyWorkerArtifacts(response, outputDir);
+    if (this.config.capability === "asset.search") {
+      await verifyWorkerPrivateOutputPath(response.output?.candidateInventoryPath, outputDir);
+    }
     return response;
   }
 }
@@ -805,6 +886,8 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   readonly modelId = "codex";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
+  readonly configurationSource = "system_default" as const;
+  readonly parameters = { promptPack: "video-factory/director-v5" };
 
   constructor(private readonly agent: VisualDirectorAgent) {}
 
@@ -825,6 +908,8 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTask
   readonly modelId = "codex";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
+  readonly configurationSource = "system_default" as const;
+  readonly parameters = { promptPack: "video-factory/screenwriter-v4" };
 
   constructor(private readonly agent: ScreenwriterAgent) {}
 
@@ -852,6 +937,8 @@ class VisualReviewProvider implements Provider<VisualReviewAgentInput, VisualRev
   get modelId(): string { return this.agent.modelId; }
   get transport(): ProductionProviderRuntimeMetadata["transport"] { return this.metadata?.transport ?? "unix_socket"; }
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
+  get configurationSource(): ExecutionConfigurationSource { return "system_default"; }
+  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "keyframes", promptPack: "video-factory/visual-review-v3" }; }
   get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxAttempts(): number { return this.metadata?.maxAttempts ?? 1; }
@@ -874,6 +961,7 @@ class UnavailableVisualReviewProvider implements Provider<VisualReviewAgentInput
   get modelId(): string { return this.metadata?.modelId ?? "configured-model"; }
   get transport(): ProductionProviderRuntimeMetadata["transport"] { return this.metadata?.transport ?? "unix_socket"; }
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
+  get configurationSource(): ExecutionConfigurationSource { return "system_default"; }
   get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxAttempts(): number { return this.metadata?.maxAttempts ?? 1; }
@@ -881,6 +969,160 @@ class UnavailableVisualReviewProvider implements Provider<VisualReviewAgentInput
   run(): Promise<VisualReviewExecution> {
     throw new Error(`Visual review provider '${this.id}' is temporarily unavailable; configure it and regenerate this node.`);
   }
+}
+
+function referenceGrammarNode(
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+  runsRoot: string,
+): NodeDefinition {
+  const reference = brief.referenceVideo;
+  const agent = options.referenceGrammarAgent;
+  if (!reference || !agent || !options.referenceVideoRoot) {
+    throw new Error("Reference grammar requires a configured reference-video store and Codex analysis agent.");
+  }
+  return {
+    id: "reference-grammar",
+    label: "Analyze reference grammar",
+    role: "参考视频分析师",
+    capability: "reference.grammar",
+    providerId: agent.id,
+    plannedExecution: {
+      providerId: agent.id,
+      providerLabel: "Codex 参考视频分析",
+      modelId: agent.modelId,
+      transport: "unix_socket",
+      billing: "subscription",
+      configurationSource: "system_default",
+      parameters: { sampleMode: "keyframes", promptPack: "video-factory/reference-grammar-v1" },
+      estimatedCostCny: 0,
+    },
+    mode: "automatic",
+    dependsOn: ["script"],
+    getInput: () => ({ uploadId: reference.uploadId, label: reference.label, sha256: reference.sha256 }),
+    validateInputOverride: (input) => {
+      const value = requireOutputRecord(input, "reference-grammar input");
+      if (requiredOutputString(value, "uploadId") !== reference.uploadId) {
+        throw new Error("Reference video identity cannot be changed inside an existing run.");
+      }
+      if (requiredOutputString(value, "sha256") !== reference.sha256) {
+        throw new Error("Reference video content identity cannot be changed inside an existing run.");
+      }
+      return { uploadId: reference.uploadId, label: requiredOutputString(value, "label"), sha256: reference.sha256 };
+    },
+    execute: async (input, context) => {
+      const request = requireOutputRecord(input, "reference-grammar input");
+      const retainedReference = [...context.artifacts].reverse().find((artifact) => artifact.kind === "reference_video" && artifact.uri);
+      const sourcePath = retainedReference?.uri ?? reference.path;
+      const sourceBoundary = retainedReference
+        ? path.join(runsRoot, context.runId)
+        : options.referenceVideoRoot!;
+      const [sourceRoot, sourceRealPath] = await Promise.all([realpath(sourceBoundary), realpath(sourcePath)]);
+      const relative = path.relative(sourceRoot, sourceRealPath);
+      if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        throw new Error("Reference video is outside the controlled upload directory.");
+      }
+      if (reference.sha256 === "0".repeat(64)) {
+        throw new Error("This historical reference video has no content identity; upload it again before regenerating this node.");
+      }
+      const sourceStats = await stat(sourceRealPath);
+      if (!sourceStats.isFile() || sourceStats.size !== reference.sizeBytes) throw new Error("Reference video size no longer matches its upload record.");
+      await verifyArtifactBytes(sourceRealPath, reference.sha256, reference.sizeBytes);
+      const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "reference-grammar"));
+      const extension = reference.mimeType === "video/webm" ? ".webm" : reference.mimeType === "video/quicktime" ? ".mov" : ".mp4";
+      const copiedVideoPath = path.join(attempt.directory, `reference${extension}`);
+      await copyFile(sourceRealPath, copiedVideoPath);
+      await verifyArtifactBytes(copiedVideoPath, reference.sha256, reference.sizeBytes);
+      let execution: ReferenceGrammarExecution | undefined;
+      let fallbackReason: string | undefined;
+      let grammar: ShotGrammar;
+      try {
+        execution = agent.analyzeDetailed
+          ? await agent.analyzeDetailed({ videoPath: copiedVideoPath, runRoot: attempt.directory, sourceLabel: requiredOutputString(request, "label") })
+          : { output: await agent.analyze({ videoPath: copiedVideoPath, runRoot: attempt.directory, sourceLabel: requiredOutputString(request, "label") }) };
+        const durationMs = execution.inspectedDurationMs ?? execution.output.durationMs;
+        grammar = validateShotGrammar(execution.output, durationMs);
+      } catch (error) {
+        fallbackReason = publicFallbackReason(error);
+        grammar = fallbackShotGrammar(Math.round(brief.durationSeconds * 1_000), fallbackReason);
+      }
+      const grammarPath = path.join(attempt.directory, "shot_grammar.json");
+      const grammarContent = `${JSON.stringify(grammar, null, 2)}\n`;
+      await writeTextAtomically(grammarPath, grammarContent);
+      const parentArtifactIds = context.artifacts
+        .filter((artifact) => artifact.producer?.nodeId === "script")
+        .map((artifact) => artifact.id);
+      const traceArtifact = await persistModelTrace({
+        trace: execution?.trace,
+        attemptDirectory: attempt.directory,
+        nodeId: "reference-grammar",
+        attempt: attempt.attempt,
+        parentArtifactIds,
+      });
+      return {
+        status: "succeeded",
+        output: { referenceGrammarPath: grammarPath, grammar },
+        receipt: {
+          ...(execution?.trace
+            ? modelTraceReceipt(execution.trace, "Codex 参考视频分析", "subscription")
+            : fallbackReason
+              ? {
+                  providerId: "local-reference-grammar-fallback-v1",
+                  providerLabel: "保守参考语法",
+                  modelId: "rules-v1",
+                  transport: "local_process" as const,
+                  billing: "free" as const,
+                  configurationSource: "system_default" as const,
+                  fallbackFromProviderId: agent.id,
+                  fallbackReason,
+                }
+            : {
+                providerId: agent.id,
+                providerLabel: "Codex 参考视频分析",
+                modelId: agent.modelId,
+                transport: "unix_socket" as const,
+                billing: "subscription" as const,
+                configurationSource: "system_default" as const,
+              }),
+          parameters: { sampleMode: "keyframes", promptPack: execution?.trace?.promptVersion ?? "video-factory/reference-grammar-v1" },
+          estimatedCostCny: 0,
+          requestId: context.nextId("reference-grammar"),
+        },
+        artifacts: [
+          await binaryFileArtifact(
+            "reference_video",
+            copiedVideoPath,
+            reference.mimeType,
+            "video-factory/reference-video-v1",
+            "reference-grammar",
+            parentArtifactIds,
+            "creator-upload",
+            "Creator-supplied reference video; retained only as private run input.",
+            attempt.attempt,
+          ),
+          fileArtifact(
+            "shot_grammar",
+            grammarPath,
+            grammarContent,
+            "application/json",
+            "video-factory/shot-grammar-v1",
+            "reference-grammar",
+            parentArtifactIds,
+            fallbackReason ? "local-reference-grammar-fallback-v1" : agent.id,
+            fallbackReason
+              ? "Conservative production grammar used because reference analysis failed; review before reuse."
+              : "Abstract production grammar extracted from a creator-supplied reference; review before reuse.",
+            attempt.attempt,
+          ),
+          ...(traceArtifact ? [traceArtifact] : []),
+        ],
+      };
+    },
+    validateOverride: (output) => {
+      const value = requireOutputRecord(output, "reference-grammar");
+      return { ...value, referenceGrammarPath: requiredOutputString(value, "referenceGrammarPath") };
+    },
+  };
 }
 
 function directorNode(
@@ -898,13 +1140,22 @@ function directorNode(
     capability: "storyboard.plan",
     providerId,
     mode: "automatic",
-    dependsOn: ["script"],
-    getInput: (context) => ({ scriptPath: outputPath(context, "script", "scriptPath") }),
-    validateInputOverride: (input) => ({ scriptPath: requiredOutputString(input, "scriptPath") }),
+    dependsOn: [brief.workflowFeatures?.referenceGrammar ? "reference-grammar" : "script"],
+    getInput: (context) => ({
+      scriptPath: outputPath(context, "script", "scriptPath"),
+      ...(brief.workflowFeatures?.referenceGrammar ? { referenceGrammarPath: outputPath(context, "reference-grammar", "referenceGrammarPath") } : {}),
+    }),
+    validateInputOverride: (input) => ({
+      scriptPath: requiredOutputString(input, "scriptPath"),
+      ...(brief.workflowFeatures?.referenceGrammar ? { referenceGrammarPath: requiredOutputString(input, "referenceGrammarPath") } : {}),
+    }),
     execute: async (input, context) => {
       const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "visual-direction"));
       const scriptPath = requiredOutputString(input, "scriptPath");
       const script = JSON.parse(await readFile(scriptPath, "utf8")) as { scenes?: unknown };
+      const referenceGrammar: ShotGrammar | undefined = brief.workflowFeatures?.referenceGrammar
+        ? await readShotGrammarFile(requiredOutputString(input, "referenceGrammarPath"))
+        : undefined;
       const scenes = parseDirectorScenes(script.scenes);
       const catalog = new Map((options.assetProviders ?? []).map((provider) => [provider.id, provider]));
       const assetProviders = direction.assetProviderIds.map((id) => {
@@ -934,6 +1185,7 @@ function directorNode(
           requestedProfileId: direction.profileId,
           ...(brief.templateSnapshot ? { templateBlueprint: brief.templateSnapshot.resolvedBlueprint } : {}),
           ...(brief.editorial ? { editorial: brief.editorial } : {}),
+          ...(referenceGrammar ? { referenceGrammar } : {}),
         },
         scenes,
         assetProviders,
@@ -955,7 +1207,7 @@ function directorNode(
       const content = `${JSON.stringify(plan, null, 2)}\n`;
       await writeTextAtomically(planPath, content);
       const parentArtifactIds = context.artifacts
-        .filter((artifact) => artifact.producer?.nodeId === "script")
+        .filter((artifact) => artifact.producer && ["script", "reference-grammar"].includes(artifact.producer.nodeId))
         .map((artifact) => artifact.id);
       const traceArtifact = await persistModelTrace({
         trace: execution.trace,
@@ -967,6 +1219,7 @@ function directorNode(
       return {
         status: "succeeded",
         output: { directorPlanPath: planPath },
+        ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, "Codex 视觉导演", "subscription") } : {}),
         artifacts: [fileArtifact(
           "storyboard",
           planPath,
@@ -983,6 +1236,14 @@ function directorNode(
     },
     validateOverride: (output) => validatePathOutput(output, "directorPlanPath", "visual-direction"),
   };
+}
+
+async function readShotGrammarFile(grammarPath: string): Promise<ShotGrammar> {
+  const value = JSON.parse(await readFile(grammarPath, "utf8")) as unknown;
+  const record = requireOutputRecord(value, "shot grammar");
+  const durationMs = record.durationMs;
+  if (!Number.isInteger(durationMs) || Number(durationMs) <= 0) throw new Error("Shot grammar durationMs is invalid.");
+  return validateShotGrammar(value, Number(durationMs));
 }
 
 // codex 编剧节点：输出与 worker 模板同契约的 script.json，下游节点无任何特判。
@@ -1052,6 +1313,7 @@ function screenwriterNode(
       return {
         status: "succeeded",
         output: { scriptPath },
+        ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, "Codex 编剧", "subscription") } : {}),
         artifacts: [fileArtifact(
           "script",
           scriptPath,
@@ -1360,17 +1622,148 @@ function visualReviewNode(
   };
 }
 
+function assetSemanticRankNode(
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+  runsRoot: string,
+): NodeDefinition {
+  const ranker = options.assetSemanticRanker;
+  return {
+    id: "asset-semantic-rank",
+    label: "Rank asset candidates",
+    role: "语义选片师",
+    capability: "asset.rank.semantic",
+    providerId: ranker?.id ?? "deterministic-quality-v1",
+    plannedExecution: ranker ? {
+      providerId: ranker.id,
+      providerLabel: "Codex 语义选片",
+      modelId: ranker.modelId,
+      transport: "unix_socket",
+      billing: "subscription",
+      configurationSource: "system_default",
+      parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v1" },
+      estimatedCostCny: 0,
+    } : {
+      providerId: "deterministic-quality-v1",
+      providerLabel: "确定性质量排序",
+      modelId: "deterministic-quality-v1",
+      transport: "local_process",
+      billing: "free",
+      configurationSource: "system_default",
+      parameters: { rankingMode: "deterministic" },
+      estimatedCostCny: 0,
+    },
+    mode: "automatic",
+    dependsOn: ["asset-candidates"],
+    getInput: (context) => ({ candidateSearchPath: outputPath(context, "asset-candidates", "candidateSearchPath") }),
+    validateInputOverride: (input) => ({ candidateSearchPath: requiredOutputString(input, "candidateSearchPath") }),
+    execute: async (input, context) => {
+      const candidateSearchPath = requiredOutputString(input, "candidateSearchPath");
+      const report = parseAssetCandidateReport(JSON.parse(await readFile(candidateSearchPath, "utf8")));
+      const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "asset-semantic-rank"));
+      let ranking;
+      let trace: CodexTaskTrace | undefined;
+      let fallbackReason: string | undefined;
+      if (ranker) {
+        try {
+          const execution = ranker.rankDetailed
+            ? await ranker.rankDetailed(report)
+            : { output: await ranker.rank(report) };
+          const actualProviderId = execution.trace?.providerId ?? ranker.id;
+          const actualModelId = execution.trace?.modelId ?? ranker.modelId;
+          ranking = validateAssetSemanticRanking({
+            ...execution.output,
+            source: "model",
+            providerId: actualProviderId,
+            modelId: actualModelId,
+          }, report);
+          trace = execution.trace;
+        } catch (error) {
+          fallbackReason = publicFallbackReason(error);
+          ranking = deterministicAssetRanking(
+            report,
+            `语义排序失败，已安全回退：${fallbackReason}`,
+          );
+        }
+      } else {
+        ranking = deterministicAssetRanking(report);
+      }
+      const rankingPath = path.join(attempt.directory, "asset_ranking.json");
+      const content = `${JSON.stringify(ranking, null, 2)}\n`;
+      await writeTextAtomically(rankingPath, content);
+      const parentArtifactIds = context.artifacts
+        .filter((artifact) => artifact.producer?.nodeId === "asset-candidates")
+        .map((artifact) => artifact.id);
+      const traceArtifact = await persistModelTrace({
+        trace,
+        attemptDirectory: attempt.directory,
+        nodeId: "asset-semantic-rank",
+        attempt: attempt.attempt,
+        parentArtifactIds,
+      });
+      return {
+        status: "succeeded",
+        output: { candidateRankingPath: rankingPath, ranking },
+        receipt: {
+          ...(trace
+            ? modelTraceReceipt(trace, "Codex 语义选片", "subscription")
+            : {
+                providerId: ranking.providerId,
+                providerLabel: "确定性质量排序",
+                modelId: ranking.modelId,
+                transport: "local_process" as const,
+                billing: "free" as const,
+                configurationSource: "system_default" as const,
+                ...(ranker && fallbackReason ? { fallbackFromProviderId: ranker.id, fallbackReason } : {}),
+              }),
+          parameters: { rankingMode: ranking.source === "model" ? "visual_semantic" : "deterministic" },
+          estimatedCostCny: 0,
+          requestId: context.nextId("asset-ranking"),
+        },
+        artifacts: [fileArtifact(
+          "asset_ranking",
+          rankingPath,
+          content,
+          "application/json",
+          "video-factory/asset-ranking-v1",
+          "asset-semantic-rank",
+          parentArtifactIds,
+          ranking.providerId,
+          "Candidate ranking only; no source media was downloaded or altered.",
+          attempt.attempt,
+        ), ...(traceArtifact ? [traceArtifact] : [])],
+      };
+    },
+    validateOverride: (output, context) => {
+      const value = requireOutputRecord(output, "asset-semantic-rank");
+      const reportPath = outputPath(context, "asset-candidates", "candidateSearchPath");
+      const report = parseAssetCandidateReport(JSON.parse(readFileSync(reportPath, "utf8")));
+      return {
+        ...value,
+        candidateRankingPath: requiredOutputString(value, "candidateRankingPath"),
+        ranking: validateAssetSemanticRanking(value.ranking, report, { allowLocks: true }),
+      };
+    },
+  };
+}
+
 function providerConfigs(brief: ProductionBrief, options: ProductionPipelineOptions): ProviderConfig[] {
   const runtimeMetadata = new Map((options.providerRuntimeMetadata ?? []).map((item) => [item.id, item]));
   const assetMetadata = resolveAssetRuntimeMetadata(brief, runtimeMetadata, options.assetProviders ?? []);
   return [
     ...(brief.providers.script === "codex-screenwriter-v1"
       ? []
-      : [providerConfig(brief.providers.script, "script.draft", "script", {}, runtimeMetadata.get(brief.providers.script))]),
+      : [providerConfig(brief.providers.script, "script.draft", "script", {}, runtimeMetadata.get(brief.providers.script), modelSourceFor(brief, brief.providers.script))]),
+    ...(brief.workflowFeatures?.assetSemanticRank
+      ? [providerConfig("asset-candidate-search-v1", "asset.search", "asset-candidates")]
+      : []),
     providerConfig(brief.providers.assets, "asset.prepare", "assets", {
       maxPaidShots: brief.economics.maxPaidShots,
       maxCostCny: brief.economics.maxCostCny,
-    }, assetMetadata),
+      modelSelections: { ...(brief.models ?? {}) },
+      freeProviderIds: (brief.director?.assetProviderIds ?? []).filter((providerId) =>
+        options.assetProviders?.some((provider) => provider.id === providerId && provider.billing === "free")),
+    }, assetMetadata, assetConfigurationSource(brief)),
     providerConfig(brief.providers.voice, "voice.synthesize", "voice", {
       profileId: brief.voiceDirection.profileId,
       voice: brief.voiceDirection.profileId.slice(brief.voiceDirection.profileId.indexOf(":") + 1),
@@ -1378,10 +1771,23 @@ function providerConfigs(brief: ProductionBrief, options: ProductionPipelineOpti
       pauseScale: brief.voiceDirection.pauseScale,
       masteringPreset: brief.voiceDirection.masteringPreset,
       maxCostCny: brief.economics.maxCostCny,
-    }, runtimeMetadata.get(brief.providers.voice)),
-    providerConfig(brief.providers.render, "video.render", "render", {}, runtimeMetadata.get(brief.providers.render)),
-    providerConfig(brief.providers.technicalReview, "quality.review", "technical-review", {}, runtimeMetadata.get(brief.providers.technicalReview)),
+    }, runtimeMetadata.get(brief.providers.voice), modelSourceFor(brief, brief.providers.voice)),
+    providerConfig(brief.providers.render, "video.render", "render", {}, runtimeMetadata.get(brief.providers.render), modelSourceFor(brief, brief.providers.render)),
+    providerConfig(brief.providers.technicalReview, "quality.review", "technical-review", {}, runtimeMetadata.get(brief.providers.technicalReview), modelSourceFor(brief, brief.providers.technicalReview)),
   ];
+}
+
+function modelSourceFor(brief: ProductionBrief, providerId: string): ExecutionConfigurationSource {
+  return brief.modelSelectionSources?.[providerId] ?? "system_default";
+}
+
+function assetConfigurationSource(brief: ProductionBrief): ExecutionConfigurationSource {
+  const priority: ExecutionConfigurationSource[] = ["node_override", "run_override", "template_default", "global_default", "system_default"];
+  const sources = [
+    modelSourceFor(brief, brief.providers.assets),
+    ...(brief.director?.assetProviderIds.map((providerId) => modelSourceFor(brief, providerId)) ?? []),
+  ];
+  return priority.find((source) => sources.includes(source)) ?? "system_default";
 }
 
 function resolveAssetRuntimeMetadata(
@@ -1390,14 +1796,16 @@ function resolveAssetRuntimeMetadata(
   catalog: VisualAssetProviderCapability[],
 ): ProductionProviderRuntimeMetadata | undefined {
   const selected = metadata.get(brief.providers.assets);
-  if (brief.providers.assets !== "ai-shot-router-v1" || !brief.director) return selected;
+  if (brief.providers.assets !== "ai-shot-router-v1" || !brief.director) {
+    return selected ? resolveRuntimeModel(selected, brief.models?.[brief.providers.assets]) : selected;
+  }
   const catalogById = new Map(catalog.map((item) => [item.id, item]));
   const meteredIds = brief.director.assetProviderIds.filter((id) =>
     catalogById.get(id)?.billing === "metered" || KNOWN_METERED_WORKER_PROVIDER_IDS.has(id));
   const metered = meteredIds.map((id) => {
     const item = metadata.get(id);
     validateProviderRuntimeMetadata(id, item, true, brief.economics.maxCostCny);
-    return item!;
+    return resolveRuntimeModel(item!, brief.models?.[id]);
   });
   if (!metered.length) return selected;
   const highestUnitCost = Math.max(...metered.map((item) => item.estimatedCostCny ?? 0));
@@ -1412,12 +1820,27 @@ function resolveAssetRuntimeMetadata(
   };
 }
 
+function resolveRuntimeModel(
+  metadata: ProductionProviderRuntimeMetadata,
+  selectedModelId: string | undefined,
+): ProductionProviderRuntimeMetadata {
+  if (!selectedModelId || selectedModelId === metadata.modelId) return metadata;
+  const profile = metadata.modelProfiles?.find((candidate) => candidate.modelId === selectedModelId);
+  if (!profile) throw new Error(`Provider '${metadata.id}' does not expose model '${selectedModelId}'.`);
+  return {
+    ...metadata,
+    modelId: profile.modelId,
+    estimatedCostCny: profile.estimatedCostCny,
+  };
+}
+
 function providerConfig(
   id: string,
   capability: Capability,
   nodeId: string,
   parametersOverride: Record<string, unknown> = {},
   metadata?: ProductionProviderRuntimeMetadata,
+  configurationSource: ExecutionConfigurationSource = "system_default",
 ): ProviderConfig {
   const known: Record<string, Record<string, Record<string, unknown>>> = {
     "script.draft": {
@@ -1432,6 +1855,9 @@ function providerConfig(
       "seedance-video-v1": { provider: "seedance", mediaType: "video" },
       "hailuo-video-v1": { provider: "minimax", mediaType: "video" },
       "wan-video-v1": { provider: "wan", mediaType: "video" },
+    },
+    "asset.search": {
+      "asset-candidate-search-v1": { provider: "ai-router", mediaType: "video", limit: 6 },
     },
     "voice.synthesize": {
       "macos-say-v1": { provider: "macos-say", voice: "Tingting", rate: 190 },
@@ -1456,7 +1882,36 @@ function providerConfig(
     KNOWN_METERED_WORKER_PROVIDER_IDS.has(id),
     parametersOverride.maxCostCny,
   );
-  return { id, capability, nodeId, parameters: { ...parameters, ...parametersOverride }, ...(metadata ? { metadata } : {}) };
+  return { id, capability, nodeId, parameters: { ...parameters, ...parametersOverride }, configurationSource, ...(metadata ? { metadata } : {}) };
+}
+
+function receiptParameters(parameters: Record<string, unknown>): Record<string, ExecutionParameterValue> {
+  const allowed = new Set([
+    "provider",
+    "mediaType",
+    "resolution",
+    "voice",
+    "rate",
+    "pauseScale",
+    "masteringPreset",
+    "expectedWidth",
+    "expectedHeight",
+    "production",
+    "maxPaidShots",
+    "maxAttempts",
+    "limit",
+    "freeProviderIds",
+  ]);
+  const output: Record<string, ExecutionParameterValue> = {};
+  for (const [key, value] of Object.entries(parameters)) {
+    if (!allowed.has(key)) continue;
+    if (typeof value === "string" || typeof value === "boolean") output[key] = value;
+    else if (typeof value === "number" && Number.isFinite(value)) output[key] = value;
+    else if (Array.isArray(value) && value.length <= 32 && value.every((item) => typeof item === "string" && item.length <= 256)) {
+      output[key] = [...value] as string[];
+    }
+  }
+  return output;
 }
 
 function validateProviderRuntimeMetadata(
@@ -1555,12 +2010,28 @@ function workerResponseToNodeResult(
 }
 
 function providerExecutionReceipt(
-  provider: Pick<Provider<any, any>, "id" | "label" | "modelId" | "transport" | "billing" | "estimatedCostCny">,
+  provider: Pick<Provider<any, any>, "id" | "label" | "modelId" | "transport" | "billing" | "configurationSource" | "parameters" | "estimatedCostCny">,
   response: WorkerResponse,
 ): NodeExecutionReceiptDraft {
   const actualCost = response.diagnostics?.actualCostCny;
   if (actualCost !== undefined && (typeof actualCost !== "number" || !Number.isFinite(actualCost) || actualCost < 0)) {
     throw new Error("Worker diagnostics actualCostCny must be a finite non-negative number.");
+  }
+  const actualCostSource = response.diagnostics?.actualCostSource;
+  if (actualCostSource !== undefined && actualCostSource !== "provider_reported" && actualCostSource !== "configured_rate") {
+    throw new Error("Worker diagnostics actualCostSource must identify provider-reported or configured-rate accounting.");
+  }
+  if (actualCostSource !== undefined && actualCost === undefined) {
+    throw new Error("Worker diagnostics actualCostSource requires actualCostCny.");
+  }
+  const actualModelIds = response.diagnostics?.actualModelIds;
+  if (actualModelIds !== undefined && (
+    !Array.isArray(actualModelIds)
+    || actualModelIds.length === 0
+    || actualModelIds.length > 20
+    || actualModelIds.some((modelId) => typeof modelId !== "string" || !modelId.trim() || modelId.length > 160)
+  )) {
+    throw new Error("Worker diagnostics actualModelIds must contain 1 to 20 valid model identifiers.");
   }
   return {
     providerId: provider.id,
@@ -1568,15 +2039,36 @@ function providerExecutionReceipt(
     modelId: provider.modelId ?? "unspecified",
     transport: provider.transport ?? "local_process",
     billing: provider.billing ?? "local_compute",
+    ...(provider.configurationSource ? { configurationSource: provider.configurationSource } : {}),
+    ...(provider.parameters ? { parameters: structuredClone(provider.parameters) } : {}),
     ...(provider.estimatedCostCny !== undefined ? { estimatedCostCny: provider.estimatedCostCny } : {}),
     ...(actualCost !== undefined ? { actualCostCny: actualCost } : {}),
+    ...(actualCostSource !== undefined ? { actualCostSource } : {}),
+    ...(actualModelIds !== undefined ? { actualModelIds: [...actualModelIds] as string[] } : {}),
     requestId: response.commandId,
+  };
+}
+
+function modelTraceReceipt(
+  trace: CodexTaskTrace,
+  providerLabel: string,
+  billing: "subscription" | "metered",
+): NodeExecutionReceiptDraft {
+  return {
+    providerId: trace.providerId,
+    providerLabel,
+    modelId: trace.modelId,
+    transport: "unix_socket",
+    billing,
+    configurationSource: "system_default",
+    parameters: { promptPack: trace.promptVersion },
   };
 }
 
 function validateWorkerNodeOverride(nodeId: string, output: unknown): Record<string, unknown> {
   const requiredFields: Record<string, string[]> = {
     script: ["scriptPath"],
+    "asset-candidates": ["candidateSearchPath", "candidateInventoryPath"],
     assets: ["assetPlanPath"],
     voice: ["voiceoverPlanPath", "trackPath"],
     render: ["videoPath", "renderManifestPath"],
@@ -1597,12 +2089,20 @@ function validateBriefInputOverride(value: unknown, workflowBrief: ProductionBri
   const parsed = parseBrief(value);
   const immutableConfigurationMatches = JSON.stringify({
     providers: parsed.providers,
+    models: parsed.models,
+    modelSelectionSources: parsed.modelSelectionSources,
+    workflowFeatures: parsed.workflowFeatures,
+    referenceVideo: parsed.referenceVideo,
     director: parsed.director,
     economics: parsed.economics,
     voiceDirection: parsed.voiceDirection,
     reviewMode: parsed.reviewMode,
   }) === JSON.stringify({
     providers: workflowBrief.providers,
+    models: workflowBrief.models,
+    modelSelectionSources: workflowBrief.modelSelectionSources,
+    workflowFeatures: workflowBrief.workflowFeatures,
+    referenceVideo: workflowBrief.referenceVideo,
     director: workflowBrief.director,
     economics: workflowBrief.economics,
     voiceDirection: workflowBrief.voiceDirection,
@@ -1747,6 +2247,31 @@ function fileArtifact(
   };
 }
 
+async function binaryFileArtifact(
+  kind: string,
+  uri: string,
+  contentType: string,
+  schemaVersion: string,
+  nodeId: string,
+  parentArtifactIds: string[],
+  providerId: string,
+  licenseNote: string,
+  attempt = 1,
+): Promise<ArtifactDraft> {
+  const content = await readFile(uri);
+  return {
+    kind,
+    uri,
+    sha256: createHash("sha256").update(content).digest("hex"),
+    sizeBytes: content.byteLength,
+    contentType,
+    schemaVersion,
+    parentArtifactIds,
+    producer: { nodeId, attempt },
+    provenance: { providerId, providerVersion: "1", licenseNote },
+  };
+}
+
 async function persistModelTrace(options: {
   trace: CodexTaskTrace | undefined;
   attemptDirectory: string;
@@ -1786,6 +2311,21 @@ async function persistModelTrace(options: {
   return artifact;
 }
 
+function publicFallbackReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return redactAbsolutePaths(message).slice(0, 500);
+}
+
+function redactAbsolutePaths(value: string): string {
+  if (path.isAbsolute(value) || path.win32.isAbsolute(value)) return "[系统托管文件]";
+  return value
+    .replace(
+      /(^|[\s"'`(=])\/(?:Users|home|var|tmp|private|opt|srv|etc|run|root|mnt|Volumes|workspace)(?:\/[^\s"'`<>),;\]}]+)+/g,
+      "$1[系统托管文件]",
+    )
+    .replace(/(^|[\s"'`(=])[A-Za-z]:\\[^\s"'`<>),;\]}]+/g, "$1[系统托管文件]");
+}
+
 async function writeTextAtomically(destination: string, content: string): Promise<void> {
   await mkdir(path.dirname(destination), { recursive: true });
   const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
@@ -1811,7 +2351,12 @@ async function reserveAttemptDirectory(root: string): Promise<{ directory: strin
 function currentArtifactsForPackaging(context: WorkflowContext, brief: ProductionBrief): Artifact[] {
   const nodeOutputs = [
     { nodeId: "script", paths: [outputPath(context, "script", "scriptPath")] },
+    ...(brief.workflowFeatures?.referenceGrammar ? [{ nodeId: "reference-grammar", paths: [outputPath(context, "reference-grammar", "referenceGrammarPath")] }] : []),
     ...(brief.director ? [{ nodeId: "visual-direction", paths: [outputPath(context, "visual-direction", "directorPlanPath")] }] : []),
+    ...(brief.workflowFeatures?.assetSemanticRank ? [
+      { nodeId: "asset-candidates", paths: [outputPath(context, "asset-candidates", "candidateSearchPath")] },
+      { nodeId: "asset-semantic-rank", paths: [outputPath(context, "asset-semantic-rank", "candidateRankingPath")] },
+    ] : []),
     { nodeId: "assets", paths: [outputPath(context, "assets", "assetPlanPath")] },
     { nodeId: "voice", paths: [outputPath(context, "voice", "voiceoverPlanPath"), outputPath(context, "voice", "trackPath")] },
     { nodeId: "render", paths: [outputPath(context, "render", "videoPath"), outputPath(context, "render", "renderManifestPath")] },
@@ -1837,6 +2382,161 @@ function currentArtifactsForPackaging(context: WorkflowContext, brief: Productio
   return selected;
 }
 
+function publishArtifactDescriptor(artifact: Artifact): Record<string, unknown> {
+  const sourceUrl = publishableSourceUrl(artifact.provenance.sourceUrl);
+  return {
+    id: artifact.id,
+    kind: artifact.kind,
+    createdAt: artifact.createdAt,
+    provenance: {
+      ...(artifact.provenance.providerId ? { providerId: artifact.provenance.providerId } : {}),
+      ...(artifact.provenance.providerVersion ? { providerVersion: artifact.provenance.providerVersion } : {}),
+      ...(sourceUrl ? { sourceUrl } : {}),
+      ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
+      ...(artifact.provenance.licenseNote ? { licenseNote: artifact.provenance.licenseNote } : {}),
+      ...(artifact.provenance.promptVersion ? { promptVersion: artifact.provenance.promptVersion } : {}),
+      ...(artifact.provenance.model ? { model: artifact.provenance.model } : {}),
+    },
+    ...(artifact.sha256 ? { sha256: artifact.sha256 } : {}),
+    ...(artifact.sizeBytes === undefined ? {} : { sizeBytes: artifact.sizeBytes }),
+    ...(artifact.contentType ? { contentType: artifact.contentType } : {}),
+    ...(artifact.schemaVersion ? { schemaVersion: artifact.schemaVersion } : {}),
+    ...(artifact.parentArtifactIds ? { parentArtifactIds: [...artifact.parentArtifactIds] } : {}),
+    ...(artifact.producer ? { producer: { ...artifact.producer } } : {}),
+  };
+}
+
+interface ProductionResourceManifestItem {
+  id: string;
+  category: "visual" | "voice" | "font" | "document" | "other";
+  kind: string;
+  providerId: string;
+  sourceUrl?: string;
+  creator?: string;
+  licenseNote?: string;
+  contentType?: string;
+  sha256?: string;
+  commercialUse: "self_owned" | "provider_terms" | "review_required";
+  attributionRequirement: "not_required" | "provider_terms" | "unknown";
+  reviewStatus: "recorded" | "needs_review";
+}
+
+interface ProductionResourceManifest {
+  version: "video-factory/resource-manifest-v1";
+  runId: string;
+  items: ProductionResourceManifestItem[];
+}
+
+async function buildResourceManifest(runId: string, artifacts: Artifact[]): Promise<ProductionResourceManifest> {
+  const items = artifacts.map((artifact): ProductionResourceManifestItem => resourceItemFromArtifact(artifact));
+  const assetPlan = artifacts.find((artifact) => artifact.kind === "asset_plan" && artifact.uri)?.uri;
+  if (assetPlan) items.push(...await assetPlanResourceItems(assetPlan));
+  const renderManifest = artifacts.find((artifact) => artifact.kind === "render_manifest" && artifact.uri)?.uri;
+  if (renderManifest) {
+    const font = await renderFontResourceItem(renderManifest);
+    if (font) items.push(font);
+  }
+  return { version: "video-factory/resource-manifest-v1", runId, items: uniqueResourceItems(items) };
+}
+
+function resourceItemFromArtifact(artifact: Artifact): ProductionResourceManifestItem {
+  const providerId = artifact.provenance.providerId ?? "unknown";
+  const licenseNote = artifact.provenance.licenseNote;
+  const privateReference = artifact.kind === "reference_video" || providerId === "creator-upload";
+  const selfOwned = !privateReference && (providerId.startsWith("video-factory") || providerId === "local-editorial-v1");
+  const sourceUrl = publishableSourceUrl(artifact.provenance.sourceUrl);
+  return {
+    id: `artifact:${artifact.id}`,
+    category: resourceCategory(artifact.kind, artifact.contentType, artifact.producer?.nodeId),
+    kind: artifact.kind,
+    providerId,
+    ...(sourceUrl ? { sourceUrl } : {}),
+    ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
+    ...(licenseNote ? { licenseNote } : {}),
+    ...(artifact.contentType ? { contentType: artifact.contentType } : {}),
+    ...(artifact.sha256 ? { sha256: artifact.sha256 } : {}),
+    commercialUse: selfOwned ? "self_owned" : privateReference ? "review_required" : licenseNote ? "provider_terms" : "review_required",
+    attributionRequirement: selfOwned ? "not_required" : privateReference ? "unknown" : licenseNote ? "provider_terms" : "unknown",
+    reviewStatus: privateReference ? "needs_review" : licenseNote ? "recorded" : "needs_review",
+  };
+}
+
+async function assetPlanResourceItems(assetPlanPath: string): Promise<ProductionResourceManifestItem[]> {
+  const plan = requireOutputRecord(JSON.parse(await readFile(assetPlanPath, "utf8")), "asset plan resource manifest");
+  if (!Array.isArray(plan.scene_assets)) return [];
+  return plan.scene_assets.flatMap((value, index) => {
+    if (!isObjectRecord(value)) return [];
+    const providerId = optionalText(value.provider_id) ?? optionalText(value.provider) ?? "unknown";
+    const sourceUrl = optionalText(value.source_url);
+    const publicSourceUrl = publishableSourceUrl(sourceUrl);
+    const creator = optionalText(value.creator);
+    const licenseNote = optionalText(value.license_note);
+    const selfOwned = providerId === "local" || providerId === "local-editorial-v1" || sourceUrl?.startsWith("local://") === true;
+    return [{
+      id: `scene:${String(value.scene_position ?? value.position ?? index + 1)}:${providerId}`,
+      category: "visual" as const,
+      kind: optionalText(value.asset_type) ?? "scene_asset",
+      providerId,
+      ...(publicSourceUrl ? { sourceUrl: publicSourceUrl } : {}),
+      ...(creator ? { creator } : {}),
+      ...(licenseNote ? { licenseNote } : {}),
+      commercialUse: selfOwned ? "self_owned" as const : licenseNote ? "provider_terms" as const : "review_required" as const,
+      attributionRequirement: selfOwned ? "not_required" as const : licenseNote ? "provider_terms" as const : "unknown" as const,
+      reviewStatus: licenseNote ? "recorded" as const : "needs_review" as const,
+    }];
+  });
+}
+
+function publishableSourceUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+async function renderFontResourceItem(renderManifestPath: string): Promise<ProductionResourceManifestItem | undefined> {
+  const manifest = requireOutputRecord(JSON.parse(await readFile(renderManifestPath, "utf8")), "render manifest resource inventory");
+  const font = isObjectRecord(manifest.font_resource) ? manifest.font_resource : undefined;
+  const family = optionalText(font?.family);
+  if (!family) return undefined;
+  const licenseNote = optionalText(font?.license_note);
+  const licenseVerified = font?.license_verified === true;
+  return {
+    id: `font:${family}`,
+    category: "font",
+    kind: "font",
+    providerId: "system-font",
+    creator: family,
+    ...(licenseNote ? { licenseNote } : {}),
+    commercialUse: licenseVerified ? "provider_terms" : "review_required",
+    attributionRequirement: licenseVerified ? "provider_terms" : "unknown",
+    reviewStatus: licenseVerified ? "recorded" : "needs_review",
+  };
+}
+
+function resourceCategory(kind: string, contentType?: string, producerNodeId?: string): ProductionResourceManifestItem["category"] {
+  if (producerNodeId === "voice" || kind === "voiceover" || contentType?.startsWith("audio/")) return "voice";
+  if (kind === "media_asset" || kind === "render" || contentType?.startsWith("video/") || contentType?.startsWith("image/")) return "visual";
+  if (contentType === "application/json" || kind.endsWith("_plan") || kind.endsWith("_report")) return "document";
+  return "other";
+}
+
+function uniqueResourceItems(items: ProductionResourceManifestItem[]): ProductionResourceManifestItem[] {
+  return [...new Map(items.map((item) => [item.id, item])).values()];
+}
+
+function optionalText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 async function verifyWorkerArtifacts(response: WorkerResponse, outputDir: string): Promise<void> {
   for (const artifact of response.artifacts) {
     const [root, artifactPath] = await Promise.all([realpath(outputDir), realpath(artifact.uri)]);
@@ -1845,6 +2545,16 @@ async function verifyWorkerArtifacts(response: WorkerResponse, outputDir: string
       throw new Error(`Worker artifact '${artifact.uri}' is outside attempt directory '${root}'.`);
     }
     await verifyArtifactBytes(artifactPath, artifact.sha256, artifact.sizeBytes);
+  }
+}
+
+async function verifyWorkerPrivateOutputPath(value: unknown, outputDir: string): Promise<void> {
+  if (typeof value !== "string" || !value) throw new Error("Asset search did not produce a private candidate inventory.");
+  const resolvedRoot = await realpath(outputDir);
+  const resolvedPath = await realpath(value);
+  const relative = path.relative(resolvedRoot, resolvedPath);
+  if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`Worker private output path '${value}' is outside attempt directory '${resolvedRoot}'.`);
   }
 }
 

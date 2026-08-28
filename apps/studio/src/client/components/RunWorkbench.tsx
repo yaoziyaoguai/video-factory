@@ -1,6 +1,6 @@
 import { AlertTriangle, Check, Download, FileJson, RotateCcw, Send, X, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
+import type { StudioArtifact, StudioCostRunDetail, StudioDecisionInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { platformLabel, providerLabel } from "../presentation.js";
@@ -29,7 +29,8 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
   const rejectDialogRef = useDialogFocus<HTMLElement>(rejecting, () => setRejecting(false), decisionPending);
   const approveDialogRef = useDialogFocus<HTMLElement>(approving, () => setApproving(false), decisionPending);
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
-  const directorPlan = run.artifacts.find((artifact) => artifact.kind === "storyboard" && artifact.contentUrl);
+  const directorPlan = currentNodeArtifact(run, "visual-direction", (artifact) =>
+    artifact.kind === "storyboard" && Boolean(artifact.contentUrl));
   const artifactGroups = groupArtifacts(run);
 
   useEffect(() => {
@@ -201,6 +202,24 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
       ) : null}
     </main>
   );
+}
+
+function currentNodeArtifact(
+  run: StudioRunDetail,
+  nodeId: string,
+  matches: (artifact: StudioArtifact) => boolean,
+): StudioArtifact | undefined {
+  const node = run.nodes.find((candidate) => candidate.id === nodeId);
+  const effectiveVersion = node?.outputState?.versions.find(
+    (version) => version.id === node.outputState?.effectiveVersionId,
+  );
+  const artifactIds = effectiveVersion?.artifactIds ?? node?.artifactIds ?? [];
+  for (const artifactId of [...artifactIds].reverse()) {
+    const artifact = run.artifacts.find((candidate) => candidate.id === artifactId);
+    if (artifact && matches(artifact)) return artifact;
+  }
+  return [...run.artifacts].reverse().find((artifact) =>
+    artifact.producerNodeId === nodeId && matches(artifact));
 }
 
 function runStateMessage(run: StudioRunDetail): string {

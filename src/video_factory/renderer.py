@@ -31,6 +31,7 @@ def write_render_manifest(
     script = json.loads(script_path.read_text(encoding="utf-8"))
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "render_manifest.json"
+    font_path = find_font_file()
     payload = {
         "job_id": job_id,
         "resolution": resolution,
@@ -47,6 +48,7 @@ def write_render_manifest(
             "implicit_metadata": "AI-generated or AI-assisted content; creator=VideoFactory",
             "platform_declaration_required": True,
         },
+        "font_resource": font_resource(font_path),
         "output_file": str(output_dir / "final.mp4"),
         "slides": [
             {
@@ -64,6 +66,17 @@ def write_render_manifest(
         encoding="utf-8",
     )
     return manifest_path
+
+
+def font_resource(font_path: Optional[Path]) -> dict:
+    if font_path is None:
+        return {"family": "Pillow default", "license_verified": False, "license_note": "Fallback font; verify the Pillow distribution terms before publishing."}
+    name = font_path.name
+    if "NotoSansCJK" in name:
+        return {"family": "Noto Sans CJK", "license_verified": False, "license_note": "SIL Open Font License 1.1; verify attribution and redistribution requirements."}
+    if "DejaVuSans" in name:
+        return {"family": "DejaVu Sans", "license_verified": False, "license_note": "DejaVu Fonts license; verify redistribution requirements."}
+    return {"family": name, "license_verified": False, "license_note": "System font used for rendering; verify platform and redistribution rights."}
 
 
 def attach_asset_plan(manifest_path: Path, asset_plan: Optional[dict]) -> None:

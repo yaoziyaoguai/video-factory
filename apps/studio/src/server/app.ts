@@ -29,6 +29,8 @@ import {
   type StudioOpportunityInput,
   type StudioOpportunityStatus,
   type StudioProvider,
+  type StudioResourceManifest,
+  type StudioReferenceVideo,
   type StudioPublishBatch,
   type StudioPublishInput,
   type StudioPublishReadiness,
@@ -51,6 +53,7 @@ import {
   type StudioTemplateCatalog,
   type StudioTemplateCloneInput,
   type StudioTemplateMutation,
+  type StudioTemplateExperimentScorecard,
   type StudioNodeInputOverrideInput,
   type StudioNodeOverrideInput,
   type StudioSpendAuthorizationInput,
@@ -65,6 +68,8 @@ export interface StudioServicePort {
   getCreatorSettings(): Promise<StudioCreatorSettings>;
   updateCreatorSettings(input: StudioCreatorSettingsPatch): Promise<StudioCreatorSettings>;
   listTemplates(): Promise<StudioTemplateCatalog>;
+  templateExperiments(): Promise<StudioTemplateExperimentScorecard[]>;
+  resourceManifest(): Promise<StudioResourceManifest>;
   getTemplate(id: string, version?: number): Promise<StudioTemplate | undefined>;
   cloneTemplate(input: StudioTemplateCloneInput): Promise<StudioTemplateMutation>;
   saveTemplateDraft(input: StudioTemplate, expectedRevision: number): Promise<StudioTemplateMutation>;
@@ -87,6 +92,8 @@ export interface StudioServicePort {
   costDashboard(): Promise<StudioCostDashboard>;
   runCostDetail(runId: string): Promise<StudioCostRunDetail | undefined>;
   startRun(input: unknown, idempotencyKey?: string): Promise<StartRunResponse>;
+  uploadReferenceVideo?(input: { label: string; mimeType: string; bytes: Buffer }): Promise<StudioReferenceVideo>;
+  deleteReferenceVideo?(uploadId: string): Promise<void>;
   decide(runId: string, input: StudioDecisionInput, actor: string): Promise<StudioRunDetail>;
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
@@ -110,6 +117,9 @@ const SAFE_ROUTE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance {
   const app = Fastify({ logger: options.logger ?? false });
   const auth = options.auth ? new StudioAuthenticator(options.auth) : undefined;
+  for (const contentType of ["application/octet-stream", "video/mp4", "video/quicktime", "video/webm"]) {
+    app.addContentTypeParser(contentType, { parseAs: "buffer", bodyLimit: 30 * 1024 * 1024 }, (_request, body, done) => done(null, body));
+  }
 
   app.get("/api/auth/session", async (request) => {
     if (!auth) return { enabled: false, authenticated: true };
@@ -157,6 +167,8 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     return options.service.updateCreatorSettings(parseStudioCreatorSettingsPatch(request.body));
   });
   app.get("/api/templates", async () => options.service.listTemplates());
+  app.get("/api/template-experiments", async () => options.service.templateExperiments());
+  app.get("/api/resource-manifest", async () => options.service.resourceManifest());
   app.get<{ Params: { templateId: string }; Querystring: { version?: string } }>("/api/templates/:templateId", async (request, reply) => {
     requireSafeRouteId(request.params.templateId, "模板编号");
     const version = request.query.version === undefined ? undefined : Number(request.query.version);
@@ -215,6 +227,27 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   app.get("/api/opportunities", async () => options.service.listOpportunities());
   app.get("/api/runs", async () => options.service.listRuns());
   app.get("/api/costs", async () => options.service.costDashboard());
+
+  app.post<{ Body: Buffer }>("/api/reference-videos", async (request, reply) => {
+    if (!options.service.uploadReferenceVideo) throw new StudioInputError("当前环境没有启用参考视频上传。");
+    if (!Buffer.isBuffer(request.body) || request.body.length === 0) throw new StudioInputError("参考视频内容为空。");
+    const encodedLabel = request.headers["x-video-factory-filename"];
+    if (typeof encodedLabel !== "string") throw new StudioInputError("参考视频缺少文件名。");
+    let label: string;
+    try {
+      label = decodeURIComponent(encodedLabel);
+    } catch {
+      throw new StudioInputError("参考视频文件名编码不正确。");
+    }
+    const mimeType = String(request.headers["content-type"] ?? "").split(";", 1)[0] ?? "";
+    return reply.code(201).send(await options.service.uploadReferenceVideo({ label, mimeType, bytes: request.body }));
+  });
+  app.delete<{ Params: { uploadId: string } }>("/api/reference-videos/:uploadId", async (request, reply) => {
+    requireSafeRouteId(request.params.uploadId, "参考视频编号");
+    if (!options.service.deleteReferenceVideo) throw new StudioInputError("当前环境没有启用参考视频删除。");
+    await options.service.deleteReferenceVideo(request.params.uploadId);
+    return reply.code(204).send();
+  });
 
   app.post("/api/voices/preview", async (request, reply) => {
     const input = parseStudioVoicePreviewInput(request.body);
@@ -405,6 +438,12 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   );
 
   app.setErrorHandler((error, _request, reply) => {
+    const statusCode = typeof error === "object" && error !== null && "statusCode" in error ? error.statusCode : undefined;
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+    if (statusCode === 413 || code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+      void reply.code(413).send({ error: "参考视频不能超过 30 MB。" });
+      return;
+    }
     if (error instanceof StudioInputError) {
       void reply.code(400).send({ error: error.message });
       return;

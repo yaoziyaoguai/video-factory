@@ -31,10 +31,16 @@ export interface CodexProviderSettings {
   available: boolean;
   requirement: string;
   reason: string;
+  taskKinds: string[];
 }
 
 export interface CodexProviderSettingsOptions {
-  socketProbe?: (socketPath: string) => Promise<CodexSocketStatus>;
+  socketProbe?: (socketPath: string) => Promise<CodexSocketStatus | CodexSocketProbeResult>;
+}
+
+interface CodexSocketProbeResult {
+  status: CodexSocketStatus;
+  taskKinds: string[];
 }
 
 interface CodexHealthIdentity {
@@ -73,7 +79,7 @@ export async function readCodexProviderSettings(
     profileId: "openai",
     providerId: "openai",
     modelId: environment.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default",
-    taskKinds: ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"],
+    taskKinds: ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"],
   }, options);
 }
 
@@ -95,7 +101,11 @@ async function readProviderSettings(
   options: CodexProviderSettingsOptions,
 ): Promise<CodexProviderSettings> {
   const probe = options.socketProbe ?? ((socketPath) => probeCodexSocket(socketPath, expectedIdentity));
-  const status = await probe(resolution.socketPath);
+  const rawResult = await probe(resolution.socketPath);
+  const result = typeof rawResult === "string"
+    ? { status: rawResult, taskKinds: rawResult === "ready" ? [...(expectedIdentity?.taskKinds ?? [])] : [] }
+    : rawResult;
+  const status = result.status;
   const available = status === "ready";
   return {
     socketPath: resolution.socketPath,
@@ -103,26 +113,27 @@ async function readProviderSettings(
     available,
     requirement: resolution.requirement,
     reason: available ? "" : codexUnavailableReason(status, resolution.socketPath),
+    taskKinds: available ? [...result.taskKinds] : [],
   };
 }
 
 async function probeCodexSocket(
   socketPath: string,
   expectedIdentity?: CodexHealthIdentity,
-): Promise<CodexSocketStatus> {
+): Promise<CodexSocketProbeResult> {
   let stats: Stats;
   try {
     stats = await stat(socketPath);
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EACCES" || (error as NodeJS.ErrnoException).code === "EPERM"
-      ? "inaccessible"
-      : "missing";
+      ? { status: "inaccessible", taskKinds: [] }
+      : { status: "missing", taskKinds: [] };
   }
-  if (!stats.isSocket()) return "not_a_socket";
+  if (!stats.isSocket()) return { status: "not_a_socket", taskKinds: [] };
   try {
     await access(socketPath, constants.W_OK);
   } catch {
-    return "inaccessible";
+    return { status: "inaccessible", taskKinds: [] };
   }
   return probeCodexHealth(socketPath, expectedIdentity);
 }
@@ -139,13 +150,13 @@ function codexUnavailableReason(status: CodexSocketStatus, socketPath: string): 
 function probeCodexHealth(
   socketPath: string,
   expectedIdentity?: CodexHealthIdentity,
-): Promise<CodexSocketStatus> {
+): Promise<CodexSocketProbeResult> {
   return new Promise((resolve) => {
     let settled = false;
-    const settle = (status: CodexSocketStatus): void => {
+    const settle = (status: CodexSocketStatus, taskKinds: string[] = []): void => {
       if (settled) return;
       settled = true;
-      resolve(status);
+      resolve({ status, taskKinds });
     };
     const request = http.request({
       socketPath,
@@ -178,7 +189,12 @@ function probeCodexHealth(
             settle("protocol_mismatch");
             return;
           }
-          settle(expectedIdentity && !matchesIdentity(body, expectedIdentity) ? "identity_mismatch" : "ready");
+          if (!Array.isArray(body.taskKinds) || body.taskKinds.some((value) => typeof value !== "string" || !value.trim())) {
+            settle("protocol_mismatch");
+            return;
+          }
+          const taskKinds = [...new Set(body.taskKinds as string[])];
+          settle(expectedIdentity && !matchesIdentity(body, expectedIdentity) ? "identity_mismatch" : "ready", taskKinds);
         } catch {
           settle("protocol_mismatch");
         }
@@ -194,12 +210,7 @@ function probeCodexHealth(
 }
 
 function matchesIdentity(body: Record<string, unknown>, expected: CodexHealthIdentity): boolean {
-  if (
-    body.profileId !== expected.profileId
-    || body.providerId !== expected.providerId
-    || body.modelId !== expected.modelId
-    || !Array.isArray(body.taskKinds)
-  ) return false;
-  const actualKinds = new Set(body.taskKinds.filter((value): value is string => typeof value === "string"));
-  return expected.taskKinds.every((value) => actualKinds.has(value));
+  return body.profileId === expected.profileId
+    && body.providerId === expected.providerId
+    && body.modelId === expected.modelId;
 }

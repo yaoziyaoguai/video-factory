@@ -1,9 +1,10 @@
 import { AlertTriangle, Check, ChevronDown, CircleDollarSign, FilePenLine, Save, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { StudioArtifact, StudioBillingType, StudioNode, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunStatus, StudioSpendAuthorizationInput } from "../../shared/api.js";
+import type { StudioArtifact, StudioBillingType, StudioNode, StudioNodeExecutionReceipt, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunStatus, StudioSpendAuthorizationInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { providerLabel } from "../presentation.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
+import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
 
 interface NodeWorkspaceProps {
   node: StudioNode;
@@ -23,6 +24,8 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
   const [editing, setEditing] = useState(false);
   const [editingInput, setEditingInput] = useState(false);
   const [editingDocument, setEditingDocument] = useState(false);
+  const [outputEditorMode, setOutputEditorMode] = useState<"form" | "json">("form");
+  const [inputEditorMode, setInputEditorMode] = useState<"form" | "json">("form");
   const [authorizing, setAuthorizing] = useState(false);
   const [draft, setDraft] = useState(() => pretty(node.output ?? effectiveOutput(node) ?? {}));
   const [inputDraft, setInputDraft] = useState(() => pretty(effectiveInput(node) ?? {}));
@@ -39,6 +42,7 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
   const terminalDialogRef = useDialogFocus<HTMLElement>(terminalOverride !== undefined, () => setTerminalOverride(undefined), busy);
   const terminalInputDialogRef = useDialogFocus<HTMLElement>(terminalInputOverride !== undefined, () => setTerminalInputOverride(undefined), busy);
   const receipt = node.executionReceipt;
+  const execution = receipt ?? node.plannedExecution;
   const effectiveVersion = node.outputState?.versions.find((version) => version.id === node.outputState?.effectiveVersionId);
   const effectiveInputVersion = node.inputState?.versions.find((version) => version.id === node.inputState?.effectiveVersionId);
   const editableArtifact = useMemo(
@@ -61,11 +65,11 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
   const canEdit = (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
   const canEditInput = effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
-  const provenance = useMemo(() => receipt
-    ? `${providerLabel(receipt.providerId) ?? receipt.providerLabel} · ${receipt.modelId}`
+  const provenance = useMemo(() => execution
+    ? `${providerLabel(execution.providerId) ?? execution.providerLabel} · ${execution.modelId}`
     : node.spendPlan
       ? `${providerLabel(node.spendPlan.providerId) ?? node.spendPlan.providerId} · ${node.spendPlan.modelId}`
-      : "尚未执行", [node.spendPlan, receipt]);
+      : "尚未规划", [execution, node.spendPlan]);
 
   useEffect(() => {
     if (!editing) setDraft(pretty(documentPreview ?? node.output ?? effectiveOutput(node) ?? {}));
@@ -137,6 +141,7 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
     const usesDocument = Boolean(editableArtifact && documentPreview !== undefined);
     setEditingDocument(usesDocument);
     setDraft(pretty(usesDocument ? documentPreview : node.output ?? effectiveOutput(node) ?? {}));
+    setOutputEditorMode("form");
     setEditing(true);
   }
 
@@ -192,7 +197,11 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
   }
 
   return (
-    <details className={`node-workspace is-${node.status}`} open={node.status === "awaiting_spend_approval" || node.status === "approval_invalidated"}>
+    <details
+      className={`node-workspace is-${node.status}`}
+      open={node.status === "awaiting_spend_approval" || node.status === "approval_invalidated"}
+      onToggle={(event) => revealExpandedWorkspace(event.currentTarget)}
+    >
       <summary>
         <span className="node-workspace-state">{node.status === "succeeded" ? <Check aria-hidden="true" size={14} /> : <span />}</span>
         <span className="node-workspace-title"><strong>{node.label}</strong><small>{node.role ?? "生产角色"}</small></span>
@@ -223,7 +232,7 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
 
         {activeTab === "input" ? <section className="node-output-preview" role="tabpanel">
           <header><div><strong>本次实际输入</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 上游已变化，需复核" : ""}</small></div>{canEditInput && !editingInput ? <button className="button button-ghost" type="button" onClick={() => setEditingInput(true)}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
-          {editingInput ? <textarea aria-label={`${node.label}输入内容`} value={inputDraft} onChange={(event) => setInputDraft(event.target.value)} rows={12} spellCheck={false} /> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
+          {editingInput ? <><EditorMode value={inputEditorMode} onChange={setInputEditorMode} />{inputEditorMode === "form" ? <NodeStructuredEditor nodeId={`${node.id}-input`} value={safeParse(inputDraft)} onChange={(value) => setInputDraft(pretty(value))} /> : <textarea aria-label={`${node.label}输入内容 JSON`} value={inputDraft} onChange={(event) => setInputDraft(event.target.value)} rows={12} spellCheck={false} />}</> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
           {editingInput ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => setEditingInput(false)}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveInputOverride()}><Save aria-hidden="true" size={15} />保存为人工输入版本</button></footer> : null}
           {!editingInput ? <details className="node-technical-output"><summary>查看完整输入 JSON</summary><pre>{pretty(effectiveInput(node) ?? {})}</pre></details> : null}
           {effectiveInputVersion ? <p className="node-version-note">有效输入版本 {shortId(effectiveInputVersion.id)} · 上游 {effectiveInputVersion.upstreamVersionIds.length} 个版本{effectiveInputVersion.source === "reconstructed" ? " · 历史记录未保存原始输入，本值由当前上游产物推断" : ""}</p> : <p className="node-document-state">节点开始执行后会记录实际输入。</p>}
@@ -233,10 +242,16 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
           <header><div><strong>{node.role ?? "生产角色"}</strong><small>本节点实际使用的能力与模型</small></div></header>
           <div className="node-evidence-row">
             <span><b>角色</b>{node.role ?? "生产角色"}</span>
-            <span><b>Provider / API</b>{receipt?.providerId ?? node.spendPlan?.providerId ?? "待选择"}</span>
-            <span><b>模型</b>{receipt?.modelId ?? node.spendPlan?.modelId ?? "待执行"}</span>
-            <span><b>计费</b>{billingLabel(receipt?.billing, receipt?.estimatedCostCny)}</span>
+            <span><b>Provider / API</b>{execution?.providerId ?? node.spendPlan?.providerId ?? "待选择"}</span>
+            <span><b>模型</b>{execution?.modelId ?? node.spendPlan?.modelId ?? "待执行"}</span>
+            {receipt?.actualModelIds?.length ? <span><b>实际调用模型</b>{receipt.actualModelIds.join("、")}</span> : null}
+            <span><b>配置来源</b>{configurationSourceLabel(execution?.configurationSource, Boolean(receipt))}</span>
+            <span><b>计费</b>{billingLabel(execution?.billing, execution?.estimatedCostCny)}</span>
           </div>
+          {!receipt && node.plannedExecution ? <p className="node-version-note">{node.plannedExecution.snapshotSource === "reconstructed"
+            ? "这是旧任务兼容重建的执行计划，可能与历史创建时配置不同；节点已有真实凭证时以凭证为准。"
+            : "这是创建任务时保存的执行计划；节点完成后会由真实执行凭证覆盖。"}</p> : null}
+          {execution?.parameters && Object.keys(execution.parameters).length ? <details className="node-technical-output"><summary>{receipt ? "查看本次实际参数" : "查看计划参数"}</summary><pre>{pretty(execution.parameters)}</pre></details> : null}
         </section> : null}
 
         {activeTab === "prompt" ? <section className="node-output-preview" role="tabpanel">
@@ -254,7 +269,7 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
 
         {activeTab === "output" ? <section className="node-output-preview" role="tabpanel">
           <header><div><strong>角色交付</strong><small>{effectiveVersion?.source === "human" ? "人工修改版本" : editableArtifact ? "可编辑结构化交付" : "自动生成版本"}</small></div>{canEdit && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑</button> : null}</header>
-          {editing ? <textarea aria-label={`${node.label}交付内容`} value={draft} onChange={(event) => setDraft(event.target.value)} rows={12} spellCheck={false} /> : documentLoading ? <p className="node-document-state">正在读取结构化交付...</p> : documentError ? <p className="node-workspace-error" role="alert">结构化交付读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
+          {editing ? <><EditorMode value={outputEditorMode} onChange={setOutputEditorMode} />{outputEditorMode === "form" ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} onChange={(value) => setDraft(pretty(value))} /> : <textarea aria-label={`${node.label}交付内容 JSON`} value={draft} onChange={(event) => setDraft(event.target.value)} rows={12} spellCheck={false} />}</> : documentLoading ? <p className="node-document-state">正在读取结构化交付...</p> : documentError ? <p className="node-workspace-error" role="alert">结构化交付读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
           {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => setEditing(false)}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
           {!editing && !documentLoading && !documentError ? <details className="node-technical-output"><summary>查看完整交付 JSON</summary><pre>{pretty(documentPreview ?? node.output ?? effectiveOutput(node) ?? {})}</pre></details> : null}
           {editableArtifact ? <details className="node-technical-output"><summary>查看节点执行记录</summary><pre>{pretty(node.output ?? effectiveOutput(node) ?? {})}</pre></details> : null}
@@ -266,7 +281,7 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
             <span><b>输入版本</b>{shortId(node.inputState?.effectiveVersionId) ?? "尚无"}</span>
             <span><b>输出版本</b>{shortId(node.outputState?.effectiveVersionId) ?? "尚无"}</span>
             <span><b>请求编号</b>{receipt?.requestId ?? "未提供"}</span>
-            <span><b>费用</b>{receipt?.actualCostCny !== undefined ? `实付 ¥${receipt.actualCostCny.toFixed(2)}` : receipt?.authorizedCostCny !== undefined ? `已授权 ¥${receipt.authorizedCostCny.toFixed(2)}` : billingLabel(receipt?.billing, receipt?.estimatedCostCny)}</span>
+            <span><b>费用</b>{receipt?.actualCostCny !== undefined ? `${receipt.actualCostSource === "configured_rate" ? "按配置单价核算" : "账单实付"} ¥${receipt.actualCostCny.toFixed(2)}` : receipt?.authorizedCostCny !== undefined ? `已授权 ¥${receipt.authorizedCostCny.toFixed(2)}` : billingLabel(receipt?.billing, receipt?.estimatedCostCny)}</span>
           </div>
           <details className="node-technical-output"><summary>查看执行凭证 JSON</summary><pre>{pretty({ receipt, spendPlan: node.spendPlan, spendAuthorizationId: node.spendAuthorizationId, qualityGateResults: node.qualityGateResults })}</pre></details>
         </section> : null}
@@ -310,9 +325,34 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
   );
 }
 
+function revealExpandedWorkspace(workspace: HTMLDetailsElement): void {
+  if (
+    !workspace.open
+    || typeof window === "undefined"
+    || typeof window.matchMedia !== "function"
+    || !window.matchMedia("(max-width: 700px)").matches
+  ) return;
+  window.requestAnimationFrame(() => workspace.scrollIntoView({ block: "start" }));
+}
+
+function EditorMode({ value, onChange }: { value: "form" | "json"; onChange: (value: "form" | "json") => void }) {
+  return <div className="node-editor-mode" role="group" aria-label="编辑方式"><button type="button" aria-pressed={value === "form"} className={value === "form" ? "is-active" : undefined} onClick={() => onChange("form")}>表单</button><button type="button" aria-pressed={value === "json"} className={value === "json" ? "is-active" : undefined} onClick={() => onChange("json")}>JSON 专家</button></div>;
+}
+
+function safeParse(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 const EDITABLE_ARTIFACT_KIND: Record<string, string> = {
   script: "script",
+  "reference-grammar": "shot_grammar",
   "visual-direction": "storyboard",
+  "asset-candidates": "asset_candidates",
+  "asset-semantic-rank": "asset_ranking",
   assets: "asset_plan",
   voice: "voiceover_plan",
   render: "render_manifest",
@@ -370,4 +410,13 @@ function billingLabel(billing: StudioBillingType | undefined, estimated?: number
   if (billing === "local_compute") return "本地计算";
   if (billing === "human") return "人工";
   return "免费 / 待统计";
+}
+
+function configurationSourceLabel(source: StudioNodeExecutionReceipt["configurationSource"], hasReceipt: boolean): string {
+  if (source === "node_override") return "节点人工覆盖";
+  if (source === "run_override") return "本次制作覆盖";
+  if (source === "template_default") return "模板默认";
+  if (source === "global_default") return "全局默认";
+  if (source === "system_default") return "系统默认";
+  return hasReceipt ? "历史凭证未记录" : "待执行";
 }

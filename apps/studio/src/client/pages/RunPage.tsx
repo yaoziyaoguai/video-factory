@@ -19,7 +19,6 @@ export function RunPage() {
   const [restarting, setRestarting] = useState(false);
   const [restartProviders, setRestartProviders] = useState<StudioProvider[]>([]);
   const [restartSettings, setRestartSettings] = useState<StudioCreatorSettings>();
-  const [restartRequestId, setRestartRequestId] = useState("");
   const [costDetail, setCostDetail] = useState<StudioCostRunDetail>();
   const [costError, setCostError] = useState<string>();
   const [nodeMutationPending, setNodeMutationPending] = useState(false);
@@ -89,7 +88,6 @@ export function RunPage() {
       const [providers, settings] = await Promise.all([studioApi.providers(), studioApi.settings()]);
       setRestartProviders(providers);
       setRestartSettings(settings);
-      setRestartRequestId(crypto.randomUUID());
       setRestarting(true);
     } catch (caught) {
       setError(`无法读取重新制作所需配置：${caught instanceof Error ? caught.message : String(caught)}`);
@@ -97,7 +95,7 @@ export function RunPage() {
   }
 
   async function restartProduction(input: StudioProductionInput) {
-    const result = await studioApi.start(input, restartRequestId);
+    const result = await studioApi.start(input);
     setRestarting(false);
     navigate(`/projects/${result.runId}`);
   }

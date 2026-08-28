@@ -227,7 +227,7 @@ describe("CodexBrokerServer routes", () => {
       assert.equal(report.profileId, "openai");
       assert.equal(report.providerId, "openai");
       assert.equal(report.modelId, "codex-default");
-      assert.deepEqual(report.taskKinds, ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"]);
+      assert.deepEqual(report.taskKinds, ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"]);
       assert.equal(report.active, 0);
       assert.equal(report.queued, 0);
       assert.equal(report.capacity, 1);

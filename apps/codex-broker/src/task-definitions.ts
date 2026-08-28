@@ -3,6 +3,8 @@ export const BROKER_TASK_KINDS = [
   "director-plan",
   "script-draft",
   "publish-copy",
+  "asset-rank",
+  "reference-grammar",
   "visual-review",
 ] as const;
 export type BrokerTaskKind = (typeof BROKER_TASK_KINDS)[number];
@@ -65,6 +67,7 @@ const DIRECTOR_PLAN_DIRECTIVE = [
   "evidence 镜头不得选择 AI 生成 Provider；不确定时优先真实素材并降低 confidence。",
   "输入含 editorial 时，其 guardrails 是硬约束；produce_image_story 不得把具体事件改造成生成式现场或当事人表演。",
   "输入含 templateBlueprint 时，它是生产合同：视觉圣经必须落实 visualSystem 和 soundSystem，逐镜方案必须对应 storyStructure、shotSlots、qualityRules 与 costPolicy。",
+  "输入含 referenceGrammar 时，只吸收其节奏、构图、运镜、色彩、转场和声音结构等抽象规则；不得复制参考视频中的人物身份、品牌、对白、事实和独特情节。",
   "当付费镜头上限小于场景数时，其余镜头必须选择输入中的免费 Provider；绝不能把每个场景都指向付费 Provider。",
   "requestedProfileId 为 auto 时，根据题材选择最合适的非 auto 导演角色。",
   "只输出 JSON 对象，不要输出解释文字或 Markdown。",
@@ -86,6 +89,21 @@ const VISUAL_REVIEW_DIRECTIVE = [
   "只要存在 critical、任一评分低于 60、或任一场景的核心成功条件未确认，就不得 recommendation=approve。",
   "每条 finding 必须绑定输入范围内的 timecodeMs，并给出可执行的修改建议。",
   "recommendation 只能是 approve、revise 或 reject；只输出 JSON 对象，不要输出解释文字或 Markdown。",
+].join("\n");
+
+const ASSET_RANK_DIRECTIVE = [
+  "你是短视频制作流程里的语义选片师。输入是导演镜头意图、图库候选元数据，以及部分候选的严格映射缩略图；只负责重排候选，不得新增、删除或替换候选。",
+  "优先判断主体、环境、可见动作、景别、构图与连续性是否匹配；分辨率和竖屏适配只作为基础质量因素，不能替代语义匹配。",
+  "有缩略图时必须结合 imageIndex 映射观察实际画面；没有缩略图时必须降低 semanticScore，并在 rationale 中明确不确定性，不得根据 URL、作者名或素材 ID 臆测画面。",
+  "同一镜头的候选必须得到从 1 开始且不重复的 rank；originalRank、provider 和 assetId 必须原样保留。",
+  "locked 固定输出 false，后续只有人工编辑才能锁定候选。只输出 JSON 对象。",
+].join("\n");
+
+const REFERENCE_GRAMMAR_DIRECTIVE = [
+  "你是参考视频分析师。按时间顺序观察附带关键帧，只提炼可复用的制作语法，不复刻人物身份、对白、故事事实、品牌、受保护角色或独特美术资产。",
+  "重点分析节拍、叙事功能、景别、构图、主体运动、运镜、光线、色彩、转场和声音在结构中的作用。静帧无法确认连续动作或真实音轨时必须降低 confidence。",
+  "beats 必须覆盖已观察到的主要结构，按时间递增且不得重叠；reusableRules 写抽象规则，avoidCopying 明确哪些具体内容不能照搬。",
+  "只输出 JSON 对象，不要输出参考视频的下载方法或侵权建议。",
 ].join("\n");
 
 const PLATFORM_NOTES: Record<string, string> = {
@@ -164,6 +182,34 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
       examples: [
         "正例：预期拉帘但关键帧里窗帘位置和照度都未变化，应在对应 timecode 标记意图未兑现并建议重生成该镜头。",
       ],
+    };
+  }
+  if (kind === "asset-rank") {
+    return {
+      version: "video-factory/asset-rank-v1",
+      directive: ASSET_RANK_DIRECTIVE,
+      task: "依据逐镜意图重排现有图库候选，并给出可审计的逐项理由。",
+      outputRules: [
+        "version 必须固定为 video-factory/asset-ranking-v1，source 必须是 model。",
+        "scenes 必须覆盖输入中的每个场景；每个 candidates 必须完整保留输入候选，不得新增或删除。",
+        "semanticScore 必须是 0 到 100 的整数；信息不足时不得给出高置信分数。",
+      ],
+      examples: [
+        "正例：候选只有尺寸和来源、没有可判断主体的描述时，保留原始顺序并明确‘缺少可见内容证据’。",
+      ],
+    };
+  }
+  if (kind === "reference-grammar") {
+    return {
+      version: "video-factory/reference-grammar-v1",
+      directive: REFERENCE_GRAMMAR_DIRECTIVE,
+      task: "从参考视频关键帧中提炼结构化、可编辑、可复用的镜头制作语法。",
+      outputRules: [
+        "version 必须固定为 video-factory/shot-grammar-v1；durationMs 必须等于输入时长。",
+        "beats 每项必须完整包含 startMs、endMs、narrativeFunction、shotSize、composition、cameraMovement、subjectMovement、lighting、color、transitionIn、soundRole。",
+        "confidence 必须是 0 到 1；静帧无法证明的声音和连续运动不得高置信断言。",
+      ],
+      examples: ["正例：提炼‘每 2 秒由中景切到动作特写’；反例：要求复制同一人物、对白、品牌与具体剧情。"],
     };
   }
   return {
@@ -382,11 +428,93 @@ const VISUAL_REVIEW_OUTPUT_SCHEMA = {
   },
 } as const;
 
+const ASSET_RANK_OUTPUT_SCHEMA = {
+  type: "object",
+  required: ["version", "source", "providerId", "modelId", "summary", "scenes"],
+  additionalProperties: false,
+  properties: {
+    version: { type: "string", const: "video-factory/asset-ranking-v1" },
+    source: { type: "string", const: "model" },
+    providerId: { type: "string", minLength: 1, maxLength: 128 },
+    modelId: { type: "string", minLength: 1, maxLength: 160 },
+    summary: { type: "string", minLength: 1, maxLength: 1_000 },
+    scenes: {
+      type: "array",
+      maxItems: 24,
+      items: {
+        type: "object",
+        required: ["scenePosition", "summary", "candidates"],
+        additionalProperties: false,
+        properties: {
+          scenePosition: { type: "integer", minimum: 1 },
+          summary: { type: "string", maxLength: 500 },
+          candidates: {
+            type: "array",
+            maxItems: 24,
+            items: {
+              type: "object",
+              required: ["provider", "assetId", "originalRank", "rank", "semanticScore", "rationale", "locked"],
+              additionalProperties: false,
+              properties: {
+                provider: { type: "string", minLength: 1, maxLength: 64 },
+                assetId: { type: "string", minLength: 1, maxLength: 160 },
+                originalRank: { type: "integer", minimum: 1 },
+                rank: { type: "integer", minimum: 1 },
+                semanticScore: { type: "integer", minimum: 0, maximum: 100 },
+                rationale: { type: "string", minLength: 1, maxLength: 500 },
+                locked: { type: "boolean", const: false },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+const REFERENCE_GRAMMAR_OUTPUT_SCHEMA = {
+  type: "object",
+  required: ["version", "summary", "durationMs", "pacing", "composition", "camera", "color", "transitions", "sound", "beats", "reusableRules", "avoidCopying", "confidence"],
+  additionalProperties: false,
+  properties: {
+    version: { type: "string", const: "video-factory/shot-grammar-v1" },
+    summary: { type: "string", minLength: 1, maxLength: 1_000 },
+    durationMs: { type: "integer", minimum: 1 },
+    pacing: { type: "string", minLength: 1, maxLength: 1_000 },
+    composition: { type: "string", minLength: 1, maxLength: 1_000 },
+    camera: { type: "string", minLength: 1, maxLength: 1_000 },
+    color: { type: "string", minLength: 1, maxLength: 1_000 },
+    transitions: { type: "string", minLength: 1, maxLength: 1_000 },
+    sound: { type: "string", minLength: 1, maxLength: 1_000 },
+    beats: {
+      type: "array", minItems: 1, maxItems: 24,
+      items: {
+        type: "object",
+        required: ["startMs", "endMs", "narrativeFunction", "shotSize", "composition", "cameraMovement", "subjectMovement", "lighting", "color", "transitionIn", "soundRole"],
+        additionalProperties: false,
+        properties: {
+          startMs: { type: "integer", minimum: 0 }, endMs: { type: "integer", minimum: 1 },
+          narrativeFunction: { type: "string", minLength: 1 }, shotSize: { type: "string", minLength: 1 },
+          composition: { type: "string", minLength: 1 }, cameraMovement: { type: "string", minLength: 1 },
+          subjectMovement: { type: "string", minLength: 1 }, lighting: { type: "string", minLength: 1 },
+          color: { type: "string", minLength: 1 }, transitionIn: { type: "string", minLength: 1 },
+          soundRole: { type: "string", minLength: 1 },
+        },
+      },
+    },
+    reusableRules: { type: "array", minItems: 1, maxItems: 12, items: { type: "string", minLength: 1 } },
+    avoidCopying: { type: "array", minItems: 1, maxItems: 12, items: { type: "string", minLength: 1 } },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+  },
+} as const;
+
 export function outputSchemaFor(kind: BrokerTaskKind): Record<string, unknown> {
   if (kind === "topic-ideas") return TOPIC_IDEAS_OUTPUT_SCHEMA;
   if (kind === "script-draft") return SCRIPT_DRAFT_OUTPUT_SCHEMA;
   if (kind === "publish-copy") return PUBLISH_COPY_OUTPUT_SCHEMA;
   if (kind === "visual-review") return VISUAL_REVIEW_OUTPUT_SCHEMA;
+  if (kind === "asset-rank") return ASSET_RANK_OUTPUT_SCHEMA;
+  if (kind === "reference-grammar") return REFERENCE_GRAMMAR_OUTPUT_SCHEMA;
   return DIRECTOR_PLAN_OUTPUT_SCHEMA;
 }
 

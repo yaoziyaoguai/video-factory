@@ -6,7 +6,10 @@ interface NodeDeliveryPreviewProps {
 const PRIMARY_FIELDS: Record<string, string[]> = {
   brief: ["title", "angle", "audience", "durationSeconds", "platform", "reviewMode"],
   script: ["title", "hook", "structure", "duration_target", "disclosure_required", "platform_notes"],
+  "reference-grammar": ["summary", "durationMs", "pacing", "composition", "camera", "color", "transitions", "sound", "confidence"],
   "visual-direction": ["resolvedProfileId", "profileRationale", "requestedProfileId"],
+  "asset-candidates": ["provider", "media_type", "created_at"],
+  "asset-semantic-rank": ["source", "providerId", "modelId", "summary", "fallbackReason"],
   assets: ["job_id", "created_at", "director_plan_version"],
   voice: ["voice", "rate", "duration", "direction", "provider"],
   render: ["rendered", "duration_target", "resolution", "visual_quality", "requires_ffmpeg"],
@@ -18,7 +21,10 @@ const PRIMARY_FIELDS: Record<string, string[]> = {
 
 const COLLECTION_FIELDS: Record<string, string[]> = {
   script: ["scenes", "quality_checks", "hashtags"],
+  "reference-grammar": ["beats", "reusableRules", "avoidCopying"],
   "visual-direction": ["shots"],
+  "asset-candidates": ["scene_candidates"],
+  "asset-semantic-rank": ["scenes"],
   assets: ["scene_assets", "director_routing"],
   voice: ["scenes"],
   render: ["slides"],
@@ -69,6 +75,24 @@ const FIELD_LABELS: Record<string, string> = {
   video_path: "检查对象",
   recommendation: "审片结论",
   confidence: "置信度",
+  pacing: "节奏",
+  composition: "构图",
+  camera: "运镜",
+  color: "色彩",
+  transitions: "转场",
+  sound: "声音结构",
+  beats: "时间段语法",
+  reusableRules: "可复用规则",
+  avoidCopying: "禁止复制",
+  startMs: "开始时间",
+  endMs: "结束时间",
+  narrativeFunction: "叙事功能",
+  shotSize: "景别",
+  cameraMovement: "镜头运动",
+  subjectMovement: "主体运动",
+  lighting: "光线",
+  transitionIn: "入场转场",
+  soundRole: "声音作用",
   summary: "审片摘要",
   runId: "制作编号",
   scenes: "分镜",
@@ -94,6 +118,13 @@ const FIELD_LABELS: Record<string, string> = {
   scene_assets: "逐镜素材",
   director_routing: "导演路由",
   candidate_shortlist: "候选素材",
+  scene_candidates: "逐镜候选",
+  semanticScore: "语义匹配分",
+  originalRank: "原始名次",
+  rank: "当前名次",
+  rationale: "排序理由",
+  locked: "人工锁定",
+  fallbackReason: "回退原因",
   quality_checks: "脚本自检",
   hashtags: "建议话题",
   slides: "画面页",
@@ -110,25 +141,55 @@ const FIELD_LABELS: Record<string, string> = {
   copy: "发布文案",
   approval: "审片批准",
   aigc: "AI 内容标识",
+  brief: "内容简报",
+  script: "脚本交付",
+  scriptPath: "脚本交付",
+  directorPlanPath: "导演方案",
+  candidateSearchPath: "候选素材清单",
+  candidateRankingPath: "语义排序结果",
+  assetPlanPath: "素材方案",
+  renderManifestPath: "渲染清单",
 };
 
 export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps) {
   const record = asRecord(value);
   if (!record) return <p className="node-document-state">该节点暂时没有结构化交付。</p>;
-  const assetRoutes = nodeId === "assets" && Array.isArray(record.director_routing)
+  const inputPreview = nodeId.endsWith("-input");
+  const viewId = inputPreview ? nodeId.slice(0, -"-input".length) : nodeId;
+  const assetRoutes = viewId === "assets" && Array.isArray(record.director_routing)
     ? record.director_routing
     : [];
+  const candidateScenes = viewId === "asset-candidates" && Array.isArray(record.scene_candidates)
+    ? record.scene_candidates
+    : [];
+  const rankingScenes = viewId === "asset-semantic-rank" && Array.isArray(record.scenes)
+    ? record.scenes
+    : [];
 
-  const primary = (PRIMARY_FIELDS[nodeId] ?? Object.keys(record))
+  const primary = uniqueKeys([
+    ...(PRIMARY_FIELDS[viewId] ?? Object.keys(record)),
+    ...(inputPreview ? Object.keys(record).filter((key) => isScalar(record[key])) : []),
+  ])
     .filter((key) => isScalar(record[key]));
-  const nested = (NESTED_FIELDS[nodeId] ?? [])
+  const nestedKeys = uniqueKeys([
+    ...(NESTED_FIELDS[viewId] ?? []),
+    ...(inputPreview ? Object.keys(record).filter((key) => asRecord(record[key]) !== undefined) : []),
+  ]);
+  const collectionKeys = uniqueKeys([
+    ...(COLLECTION_FIELDS[viewId] ?? []),
+    ...(inputPreview ? Object.keys(record).filter((key) => Array.isArray(record[key])) : []),
+  ]);
+  const nested = nestedKeys
     .map((key) => ({ key, value: asRecord(record[key]) }))
     .filter((entry): entry is { key: string; value: Record<string, unknown> } => entry.value !== undefined);
-  const collections = (COLLECTION_FIELDS[nodeId] ?? [])
+  const collections = collectionKeys
     .map((key) => ({ key, value: Array.isArray(record[key]) ? record[key] : [] }))
-    .filter((entry) => entry.value.length > 0 && !(nodeId === "assets" && entry.key === "director_routing"));
+    .filter((entry) => entry.value.length > 0
+      && !(viewId === "assets" && entry.key === "director_routing")
+      && !(viewId === "asset-candidates" && entry.key === "scene_candidates")
+      && !(viewId === "asset-semantic-rank" && entry.key === "scenes"));
 
-  if (!primary.length && !nested.length && !collections.length && !assetRoutes.length) {
+  if (!primary.length && !nested.length && !collections.length && !assetRoutes.length && !candidateScenes.length && !rankingScenes.length) {
     return <p className="node-document-state">交付已生成，可在下方查看完整 JSON。</p>;
   }
 
@@ -144,12 +205,50 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
         ))}</dl>
       </section>)}
       {assetRoutes.length ? <AssetRoutingPreview routes={assetRoutes} /> : null}
+      {candidateScenes.length ? <AssetCandidateScenePreview scenes={candidateScenes} /> : null}
+      {rankingScenes.length ? <AssetRankingPreview scenes={rankingScenes} /> : null}
       {collections.map((entry) => <section className="node-preview-section" key={entry.key}>
         <h4>{fieldLabel(entry.key)}<span>{entry.value.length}</span></h4>
         <div className="node-preview-items">{entry.value.slice(0, 8).map((item, index) => <PreviewItem index={index} item={item} key={index} />)}</div>
       </section>)}
     </div>
   );
+}
+
+function AssetCandidateScenePreview({ scenes }: { scenes: unknown[] }) {
+  return <section className="node-preview-section asset-routing-preview">
+    <h4>下载前候选素材<span>{scenes.length}</span></h4>
+    <div className="asset-routing-list">{scenes.slice(0, 12).map((item, index) => {
+      const scene = asRecord(item);
+      if (!scene) return null;
+      const candidates = Array.isArray(scene.candidates) ? scene.candidates : [];
+      return <article className="asset-routing-scene" key={index}>
+        <header><div><strong>镜头 {formatScalar(scene.scene_position ?? index + 1)}</strong><small>{formatScalar(scene.query)}</small></div><span>{candidates.length} 个候选</span></header>
+        <div className="asset-candidate-strip">{candidates.slice(0, 6).map((candidate, candidateIndex) => <AssetCandidate candidate={candidate} index={candidateIndex} key={candidateIndex} />)}</div>
+      </article>;
+    })}</div>
+  </section>;
+}
+
+function AssetRankingPreview({ scenes }: { scenes: unknown[] }) {
+  return <section className="node-preview-section asset-ranking-preview">
+    <h4>逐镜语义排序<span>{scenes.length}</span></h4>
+    <div className="node-preview-items">{scenes.slice(0, 12).map((item, index) => {
+      const scene = asRecord(item);
+      const candidates = scene && Array.isArray(scene.candidates) ? [...scene.candidates].sort((left, right) => {
+        const a = asRecord(left)?.rank;
+        const b = asRecord(right)?.rank;
+        return (typeof a === "number" ? a : 999) - (typeof b === "number" ? b : 999);
+      }) : [];
+      return <article key={index}>
+        <span>{String(scene?.scenePosition ?? index + 1).padStart(2, "0")}</span>
+        <div><strong>{formatScalar(scene?.summary)}</strong>{candidates.slice(0, 6).map((candidate, candidateIndex) => {
+          const row = asRecord(candidate);
+          return row ? <p key={candidateIndex}><b>#{formatScalar(row.rank)} · {formatScalar(row.provider)}</b>{formatScalar(row.assetId)} · {formatScalar(row.semanticScore)} 分 · {formatScalar(row.rationale)}{row.locked === true ? " · 已锁定" : ""}</p> : null;
+        })}</div>
+      </article>;
+    })}</div>
+  </section>;
 }
 
 function AssetRoutingPreview({ routes }: { routes: unknown[] }) {
@@ -239,9 +338,14 @@ function safeCandidateUrl(value: unknown): string | undefined {
   }
 }
 
+function uniqueKeys(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
 function formatScalar(value: unknown, key?: string): string {
   if (typeof value === "boolean") return value ? "是" : "否";
   if (value === null || value === undefined || value === "") return "未填写";
+  if (typeof value === "string" && key && /(?:Path|_path)$/.test(key)) return "已连接上游产物";
   if ((key === "durationSeconds" || key === "duration_target" || key === "duration") && typeof value === "number") return `${value} 秒`;
   if (key === "confidence" && typeof value === "number") return `${Math.round(value * 100)}%`;
   return String(value);

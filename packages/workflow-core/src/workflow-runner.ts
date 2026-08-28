@@ -9,6 +9,7 @@ import type {
   NodeDefinition,
   NodeExecutionReceipt,
   NodeExecutionReceiptDraft,
+  NodeExecutionPlan,
   NodeExecutionReceiptStatus,
   NodeExecutionResult,
   NodeInputOverrideDraft,
@@ -45,18 +46,42 @@ export interface WorkflowRunnerOptions {
 }
 
 class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitialInput> {
-  private activeSpendAuthorization: Readonly<SpendAuthorization> | undefined;
+  readonly #providers: ProviderRegistry;
+  readonly #publicContext: WorkflowContext<TInitialInput>;
+  #activeSpendAuthorization: Readonly<SpendAuthorization> | undefined;
+  #activeMeteredAttempts = 0;
 
   constructor(
     readonly runId: string,
     readonly workflowId: string,
     readonly initialInput: TInitialInput,
-    private readonly providers: ProviderRegistry,
+    providers: ProviderRegistry,
     readonly now: () => string,
     readonly nextId: (prefix: string) => string,
     readonly artifacts: Artifact[] = [],
     readonly outputs: Map<string, unknown> = new Map<string, unknown>(),
-  ) {}
+  ) {
+    this.#providers = providers;
+    const context = this;
+    this.#publicContext = Object.freeze({
+      get runId() { return context.runId; },
+      get workflowId() { return context.workflowId; },
+      get initialInput() { return context.initialInput; },
+      get artifacts() { return context.artifacts; },
+      get outputs() { return context.outputs; },
+      get spendAuthorization() { return context.spendAuthorization; },
+      now: () => context.now(),
+      nextId: (prefix: string) => context.nextId(prefix),
+      addArtifact: <TData = unknown>(draft: ArtifactDraft<TData>) => context.addArtifact(draft),
+      findArtifacts: (kind?: ArtifactKind) => context.findArtifacts(kind),
+      resolveProvider: <TInput = unknown, TOutput = unknown>(selector: ProviderSelector) =>
+        context.resolveProvider<TInput, TOutput>(selector),
+    });
+  }
+
+  publicContext(): WorkflowContext<TInitialInput> {
+    return this.#publicContext;
+  }
 
   addArtifact<TData = unknown>(draft: ArtifactDraft<TData>): Artifact<TData> {
     const artifact: Artifact<TData> = {
@@ -100,36 +125,70 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
   }
 
   resolveProvider<TInput = unknown, TOutput = unknown>(selector: ProviderSelector): Provider<TInput, TOutput> {
-    const provider = this.providers.resolve<TInput, TOutput>(selector);
+    const provider = this.#providers.resolve<TInput, TOutput>(selector);
+    const safeContext = this.publicContext();
     if (provider.billing === "metered") {
       validateMeteredProvider(provider);
-      if (!this.activeSpendAuthorization || !authorizationMatchesProvider(this.activeSpendAuthorization, provider)) {
+      if (!this.#activeSpendAuthorization || !authorizationMatchesProvider(this.#activeSpendAuthorization, provider)) {
         throw new Error(`Metered provider '${provider.id}' is outside the active spend authorization.`);
       }
+      return bindProvider(provider, async (input) => {
+          if (!this.#activeSpendAuthorization || !authorizationMatchesProvider(this.#activeSpendAuthorization, provider)) {
+            throw new Error(`Metered provider '${provider.id}' is outside the active spend authorization.`);
+          }
+          if (this.#activeMeteredAttempts >= this.#activeSpendAuthorization.maxAttempts) {
+            throw new Error(`Metered provider '${provider.id}' exceeded the authorized attempt limit.`);
+          }
+          this.#activeMeteredAttempts += 1;
+          return provider.run(input, safeContext);
+        });
     }
-    return provider;
+    return bindProvider(provider, (input) => provider.run(input, safeContext));
   }
 
   resolveProviderForNode<TInput = unknown, TOutput = unknown>(selector: ProviderSelector): Provider<TInput, TOutput> {
-    return this.providers.resolve<TInput, TOutput>(selector);
+    return this.#providers.resolve<TInput, TOutput>(selector);
   }
 
   get spendAuthorization(): Readonly<SpendAuthorization> | undefined {
-    return this.activeSpendAuthorization;
+    return this.#activeSpendAuthorization;
   }
 
   async withSpendAuthorization<T>(
     authorization: Readonly<SpendAuthorization> | undefined,
     execute: () => Promise<T>,
   ): Promise<T> {
-    const previous = this.activeSpendAuthorization;
-    this.activeSpendAuthorization = authorization;
+    const previous = this.#activeSpendAuthorization;
+    const previousAttempts = this.#activeMeteredAttempts;
+    this.#activeSpendAuthorization = authorization;
+    this.#activeMeteredAttempts = 0;
     try {
       return await execute();
     } finally {
-      this.activeSpendAuthorization = previous;
+      this.#activeSpendAuthorization = previous;
+      this.#activeMeteredAttempts = previousAttempts;
     }
   }
+}
+
+function bindProvider<TInput, TOutput>(
+  provider: Provider<TInput, TOutput>,
+  run: Provider<TInput, TOutput>["run"],
+): Provider<TInput, TOutput> {
+  return {
+    id: provider.id,
+    capability: provider.capability,
+    run,
+    ...(provider.label !== undefined ? { label: provider.label } : {}),
+    ...(provider.modelId !== undefined ? { modelId: provider.modelId } : {}),
+    ...(provider.transport !== undefined ? { transport: provider.transport } : {}),
+    ...(provider.billing !== undefined ? { billing: provider.billing } : {}),
+    ...(provider.configurationSource !== undefined ? { configurationSource: provider.configurationSource } : {}),
+    ...(provider.parameters !== undefined ? { parameters: cloneExecutionParameters(provider.parameters) } : {}),
+    ...(provider.estimatedCostCny !== undefined ? { estimatedCostCny: provider.estimatedCostCny } : {}),
+    ...(provider.maxCostCny !== undefined ? { maxCostCny: provider.maxCostCny } : {}),
+    ...(provider.maxAttempts !== undefined ? { maxAttempts: provider.maxAttempts } : {}),
+  };
 }
 
 export class WorkflowRunner {
@@ -166,6 +225,7 @@ export class WorkflowRunner {
       initialInput,
       startedAt: this.clock(),
       nodeRuns: [],
+      executionPlan: createExecutionPlan(definition, context, "created"),
       artifacts: context.artifacts,
       interventions: [],
       decisions: [],
@@ -203,7 +263,8 @@ export class WorkflowRunner {
       run.artifacts,
       outputs,
     );
-    normalizeLegacyVersionStates(definition, run, context);
+    run.executionPlan ??= createExecutionPlan(definition, context as InMemoryWorkflowContext<unknown>, "reconstructed");
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
     return run;
   }
 
@@ -257,7 +318,7 @@ export class WorkflowRunner {
       run.artifacts,
       outputs,
     );
-    normalizeLegacyVersionStates(definition, run, context);
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
 
     await this.checkpoint?.(run);
     return this.continueRun(definition, run, context);
@@ -308,7 +369,7 @@ export class WorkflowRunner {
       run.artifacts,
       outputs,
     );
-    normalizeLegacyVersionStates(definition, run, context);
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
     const outputState = nodeRun.outputState ?? createLegacyOutputState(node, nodeRun, run.nodeRuns);
     if (override.expectedVersionId && override.expectedVersionId !== outputState.effectiveVersionId) {
       throw new NodeVersionConflictError(node.id, override.expectedVersionId, outputState.effectiveVersionId);
@@ -316,7 +377,7 @@ export class WorkflowRunner {
     const validatedOutput = override.output === undefined
       ? undefined
       : node.validateOverride
-        ? node.validateOverride(override.output, context)
+        ? node.validateOverride(override.output, context.publicContext())
         : override.output;
     assertManualVersionSize(validatedOutput, `${node.id} output`);
     const previousVersion = outputState.versions.find((candidate) => candidate.id === outputState.effectiveVersionId);
@@ -443,7 +504,7 @@ export class WorkflowRunner {
       run.artifacts,
       outputs,
     );
-    normalizeLegacyVersionStates(definition, run, context);
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
     const previousInputState = nodeRun.inputState;
     if (!previousInputState) throw new Error(`Node '${node.id}' has no editable input version.`);
     if (override.expectedVersionId && override.expectedVersionId !== previousInputState.effectiveVersionId) {
@@ -451,7 +512,7 @@ export class WorkflowRunner {
     }
     assertManualVersionSize(override.input, `${node.id} input`);
     const validatedInput = node.validateInputOverride
-      ? node.validateInputOverride(override.input, context)
+      ? node.validateInputOverride(override.input, context.publicContext())
       : override.input;
     assertManualVersionSize(validatedInput, `${node.id} input`);
     const previousInput = previousInputState.versions.find(
@@ -555,7 +616,7 @@ export class WorkflowRunner {
       run.artifacts,
       outputs,
     );
-    normalizeLegacyVersionStates(definition, run, context);
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
     const provider = resolveNodeProvider(node, context);
     const inputVersionIds = executionInputVersionIds(node, waitingNode, run.nodeRuns);
     if (!provider || provider.billing !== "metered") {
@@ -641,7 +702,7 @@ export class WorkflowRunner {
       run.artifacts,
       outputs,
     );
-    normalizeLegacyVersionStates(definition, run, context);
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
     run.revision += 1;
     run.status = "running";
     delete run.finishedAt;
@@ -678,7 +739,7 @@ export class WorkflowRunner {
         context.outputs.set(node.id, nodeRun.output);
       }
       if (nodeRun.executionReceipt) {
-        (run.executionReceipts ??= []).push({ ...nodeRun.executionReceipt });
+        (run.executionReceipts ??= []).push(cloneExecutionReceipt(nodeRun.executionReceipt));
       }
       if (nodeRun.intervention) {
         run.interventions.push(nodeRun.intervention);
@@ -725,8 +786,9 @@ export class WorkflowRunner {
     let receiptDraft = inlineReceiptDraft(node);
     let authorization: SpendAuthorization | undefined;
     try {
-      const derivedInput = node.getInput ? node.getInput(context) : (context.initialInput as TInput);
-      const input = resolveEffectiveNodeInput(node, nodeRun, derivedInput, upstreamVersionIds, context);
+      const publicContext = context.publicContext();
+      const derivedInput = node.getInput ? node.getInput(publicContext) : (context.initialInput as TInput);
+      const input = resolveEffectiveNodeInput(node, nodeRun, derivedInput, upstreamVersionIds, publicContext);
       const inputVersionIds = executionInputVersionIdsFromUpstream(nodeRun, upstreamVersionIds);
       const provider = resolveNodeProvider(node, context);
       if (provider) {
@@ -802,7 +864,7 @@ export class WorkflowRunner {
         return nodeRun;
       }
 
-      const gateResult = await evaluateQualityGates(node, context, result.output as TOutput);
+      const gateResult = await evaluateQualityGates(node, publicContext, result.output as TOutput);
       nodeRun.qualityGateResults = gateResult.results;
       if (gateResult.status !== "succeeded") {
         nodeRun.status = gateResult.status;
@@ -875,7 +937,7 @@ function cloneWorkflowRun<TInitialInput>(run: WorkflowRun<TInitialInput>): Workf
         clone.intervention = { ...nodeRun.intervention };
       }
       if (nodeRun.executionReceipt) {
-        clone.executionReceipt = { ...nodeRun.executionReceipt };
+        clone.executionReceipt = cloneExecutionReceipt(nodeRun.executionReceipt);
       }
       if (nodeRun.spendPlan) {
         clone.spendPlan = {
@@ -912,7 +974,11 @@ function cloneWorkflowRun<TInitialInput>(run: WorkflowRun<TInitialInput>): Workf
     })),
     interventions: run.interventions.map((intervention) => ({ ...intervention })),
     decisions: run.decisions.map((decision) => ({ ...decision })),
-    ...(run.executionReceipts ? { executionReceipts: run.executionReceipts.map((receipt) => ({ ...receipt })) } : {}),
+    ...(run.executionReceipts ? { executionReceipts: run.executionReceipts.map(cloneExecutionReceipt) } : {}),
+    ...(run.executionPlan ? { executionPlan: run.executionPlan.map((plan) => ({
+      ...plan,
+      ...(plan.parameters ? { parameters: cloneExecutionParameters(plan.parameters) } : {}),
+    })) } : {}),
     ...(run.spendAuthorizations
       ? {
           spendAuthorizations: run.spendAuthorizations.map((authorization) => ({
@@ -932,11 +998,12 @@ function createIncrementingIdFactory(): (prefix: string) => string {
 async function executeNode<TInput, TOutput>(
   node: NodeDefinition<TInput, TOutput>,
   input: TInput,
-  context: WorkflowContext,
+  context: InMemoryWorkflowContext<unknown>,
   resolvedProvider?: Provider<TInput, TOutput>,
 ): Promise<{ result: NodeExecutionResult<TOutput>; receipt: NodeExecutionReceiptDraft }> {
+  const publicContext = context.publicContext();
   if (node.execute) {
-    const result = await node.execute(input, context);
+    const result = await node.execute(input, publicContext);
     return {
       result,
       receipt: result.receipt
@@ -946,11 +1013,15 @@ async function executeNode<TInput, TOutput>(
     };
   }
 
-  const provider = resolvedProvider ?? resolveNodeProvider(node, context);
-  if (!provider) {
+  const providerSnapshot = resolvedProvider ?? resolveNodeProvider(node, context);
+  if (!providerSnapshot) {
     throw new Error(`Node '${node.id}' has no provider.`);
   }
-  const output = await provider.run(input, context);
+  const provider = context.resolveProvider<TInput, TOutput>({
+    capability: node.capability,
+    providerId: providerSnapshot.id,
+  });
+  const output = await provider.run(input, publicContext);
   return {
     result: { status: "succeeded", output },
     receipt: providerReceiptDraft(provider),
@@ -958,7 +1029,7 @@ async function executeNode<TInput, TOutput>(
 }
 
 function providerReceiptDraft(
-  provider: Pick<Provider, "id" | "label" | "modelId" | "transport" | "billing" | "estimatedCostCny">,
+  provider: Pick<Provider, "id" | "label" | "modelId" | "transport" | "billing" | "configurationSource" | "parameters" | "estimatedCostCny">,
 ): NodeExecutionReceiptDraft {
   return {
     providerId: provider.id,
@@ -966,8 +1037,37 @@ function providerReceiptDraft(
     modelId: provider.modelId ?? "unspecified",
     transport: provider.transport ?? "local_process",
     billing: provider.billing ?? "local_compute",
+    ...(provider.configurationSource ? { configurationSource: provider.configurationSource } : {}),
+    ...(provider.parameters ? { parameters: cloneExecutionParameters(provider.parameters) } : {}),
     ...(provider.estimatedCostCny !== undefined ? { estimatedCostCny: provider.estimatedCostCny } : {}),
   };
+}
+
+function createExecutionPlan(
+  definition: WorkflowDefinition,
+  context: InMemoryWorkflowContext<unknown>,
+  snapshotSource: NodeExecutionPlan["snapshotSource"],
+): NodeExecutionPlan[] {
+  return definition.nodes.map((node) => {
+    const provider = resolveNodeProvider(node, context);
+    const draft = provider
+      ? providerReceiptDraft(provider)
+      : node.plannedExecution ?? inlineReceiptDraft(node);
+    return {
+      nodeId: node.id,
+      snapshotSource,
+      ...(node.role ? { role: node.role } : {}),
+      capability: node.capability,
+      providerId: draft.providerId,
+      providerLabel: draft.providerLabel,
+      modelId: draft.modelId,
+      transport: draft.transport,
+      billing: draft.billing,
+      ...(draft.configurationSource ? { configurationSource: draft.configurationSource } : {}),
+      ...(draft.parameters ? { parameters: cloneExecutionParameters(draft.parameters) } : {}),
+      ...(draft.estimatedCostCny !== undefined ? { estimatedCostCny: draft.estimatedCostCny } : {}),
+    };
+  });
 }
 
 function resolveNodeProvider<TInput, TOutput>(
@@ -1052,6 +1152,8 @@ function createExecutionReceipt(
 ): NodeExecutionReceipt {
   return {
     ...draft,
+    ...(draft.parameters ? { parameters: cloneExecutionParameters(draft.parameters) } : {}),
+    ...(draft.actualModelIds ? { actualModelIds: [...draft.actualModelIds] } : {}),
     nodeId: node.id,
     ...(node.role ? { role: node.role } : {}),
     capability: node.capability,
@@ -1074,7 +1176,28 @@ function inlineReceiptDraft(node: Pick<NodeDefinition, "id" | "label" | "provide
     modelId: "inline",
     transport: node.mode === "manual" ? "human" : "local_process",
     billing: node.mode === "manual" ? "human" : "local_compute",
+    configurationSource: "system_default",
   };
+}
+
+function cloneExecutionParameters(
+  parameters: NonNullable<Provider["parameters"]>,
+): NonNullable<NodeExecutionReceiptDraft["parameters"]> {
+  const entries = Object.entries(parameters);
+  if (entries.length > 32) throw new Error("Provider execution parameters exceed the receipt boundary.");
+  return Object.fromEntries(entries.map(([key, value]) => {
+    if (!/^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(key)) throw new Error(`Provider execution parameter '${key}' is invalid.`);
+    if (Array.isArray(value)) {
+      if (value.length > 32 || value.some((item) => typeof item !== "string" || item.length > 256)) {
+        throw new Error(`Provider execution parameter '${key}' exceeds the receipt boundary.`);
+      }
+      return [key, [...value]];
+    }
+    if (typeof value === "string" && value.length <= 512) return [key, value];
+    if (typeof value === "number" && Number.isFinite(value)) return [key, value];
+    if (typeof value === "boolean") return [key, value];
+    throw new Error(`Provider execution parameter '${key}' is invalid.`);
+  }));
 }
 
 function validateMeteredProvider(
@@ -1138,6 +1261,14 @@ function validateReceiptCosts(
   receipt: NodeExecutionReceiptDraft,
   authorization: SpendAuthorization | undefined,
 ): void {
+  if (receipt.actualModelIds !== undefined && (
+    !Array.isArray(receipt.actualModelIds)
+    || receipt.actualModelIds.length === 0
+    || receipt.actualModelIds.length > 20
+    || receipt.actualModelIds.some((modelId) => typeof modelId !== "string" || !modelId.trim() || modelId.length > 160)
+  )) {
+    throw new Error("Execution receipt actualModelIds must contain 1 to 20 valid model identifiers.");
+  }
   if (receipt.billing === "metered" && !authorization) {
     throw new Error(`Metered receipt for provider '${receipt.providerId}' has no active spend authorization.`);
   }
@@ -1153,6 +1284,12 @@ function validateReceiptCosts(
   }
   if (receipt.actualCostCny !== undefined && !isFiniteNonNegative(receipt.actualCostCny)) {
     throw new Error("Execution receipt actualCostCny must be a finite non-negative number.");
+  }
+  if (receipt.actualCostSource !== undefined && receipt.actualCostSource !== "provider_reported" && receipt.actualCostSource !== "configured_rate") {
+    throw new Error("Execution receipt actualCostSource must identify provider-reported or configured-rate accounting.");
+  }
+  if (receipt.actualCostSource !== undefined && receipt.actualCostCny === undefined) {
+    throw new Error("Execution receipt actualCostSource requires actualCostCny.");
   }
   if (authorization && receipt.actualCostCny !== undefined && receipt.actualCostCny > authorization.maxCostCny) {
     throw new Error(`Execution cost exceeded the authorized maximum for provider '${authorization.providerId}'.`);
@@ -1215,13 +1352,45 @@ function isFileReferenceKey(key: string): boolean {
 
 function sanitizeFailureReceiptDraft(receipt: NodeExecutionReceiptDraft): NodeExecutionReceiptDraft {
   const sanitized = { ...receipt };
+  if (sanitized.parameters) {
+    try {
+      sanitized.parameters = cloneExecutionParameters(sanitized.parameters);
+    } catch {
+      delete sanitized.parameters;
+    }
+  }
+  if (sanitized.actualModelIds !== undefined) {
+    if (
+      !Array.isArray(sanitized.actualModelIds)
+      || sanitized.actualModelIds.length === 0
+      || sanitized.actualModelIds.length > 20
+      || sanitized.actualModelIds.some((modelId) => typeof modelId !== "string" || !modelId.trim() || modelId.length > 160)
+    ) {
+      delete sanitized.actualModelIds;
+    } else {
+      sanitized.actualModelIds = [...sanitized.actualModelIds];
+    }
+  }
   if (sanitized.estimatedCostCny !== undefined && !isFiniteNonNegative(sanitized.estimatedCostCny)) {
     delete sanitized.estimatedCostCny;
   }
   if (sanitized.actualCostCny !== undefined && !isFiniteNonNegative(sanitized.actualCostCny)) {
     delete sanitized.actualCostCny;
+    delete sanitized.actualCostSource;
   }
+  if (sanitized.actualCostSource !== undefined && sanitized.actualCostSource !== "provider_reported" && sanitized.actualCostSource !== "configured_rate") {
+    delete sanitized.actualCostSource;
+  }
+  if (sanitized.actualCostCny === undefined) delete sanitized.actualCostSource;
   return sanitized;
+}
+
+function cloneExecutionReceipt(receipt: NodeExecutionReceipt): NodeExecutionReceipt {
+  return {
+    ...receipt,
+    ...(receipt.parameters ? { parameters: cloneExecutionParameters(receipt.parameters) } : {}),
+    ...(receipt.actualModelIds ? { actualModelIds: [...receipt.actualModelIds] } : {}),
+  };
 }
 
 function isFinitePositive(value: unknown): value is number {

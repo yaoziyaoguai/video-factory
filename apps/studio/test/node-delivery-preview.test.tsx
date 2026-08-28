@@ -69,4 +69,17 @@ describe("NodeDeliveryPreview", () => {
     expect(screen.getByText(/本次任务没有保存可公开预览的候选素材/)).toBeInTheDocument();
     expect(screen.queryByText(/采用本地编辑画面/)).not.toBeInTheDocument();
   });
+
+  it("renders nested node inputs as readable production context instead of only JSON", () => {
+    render(<NodeDeliveryPreview nodeId="script-input" value={{
+      brief: { title: "人工智能如何改变创作", audience: "短视频创作者", durationSeconds: 24 },
+      scriptPath: "/private/runs/run-1/script.json",
+    }} />);
+
+    expect(screen.getByRole("heading", { name: "内容简报" })).toBeInTheDocument();
+    expect(screen.getByText("人工智能如何改变创作")).toBeInTheDocument();
+    expect(screen.getByText("短视频创作者")).toBeInTheDocument();
+    expect(screen.getByText("已连接上游产物")).toBeInTheDocument();
+    expect(screen.queryByText(/private\/runs/)).not.toBeInTheDocument();
+  });
 });

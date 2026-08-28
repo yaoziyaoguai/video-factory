@@ -67,6 +67,7 @@ export interface ProductionTemplateInput {
   qualityRules: QualityRuleTemplate[];
   capabilityRequirements: CapabilityRequirement[];
   costPolicy: TemplateCostPolicy;
+  modelDefaults?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 }
@@ -99,6 +100,7 @@ export interface ProductionTemplateSnapshot {
   templateVersion: number;
   resolvedAt: string;
   resolvedBlueprint: ProductionBlueprint;
+  modelDefaults?: Record<string, string>;
   sourceLayers: TemplateLayerReceipt[];
   fieldSources: Record<string, TemplateLayer>;
 }

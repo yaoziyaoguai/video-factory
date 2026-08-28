@@ -63,6 +63,8 @@ describe("broker-owned task definitions", () => {
       "director-plan",
       "script-draft",
       "publish-copy",
+      "asset-rank",
+      "reference-grammar",
       "visual-review",
     ]);
 
@@ -70,6 +72,8 @@ describe("broker-owned task definitions", () => {
     assert.match(taskPromptFor("director-plan").directive, /导演不是素材配方/);
     assert.match(taskPromptFor("script-draft").directive, /短视频平台的创意编剧/);
     assert.match(taskPromptFor("publish-copy", "douyin").directive, /抖音/);
+    assert.match(taskPromptFor("asset-rank").directive, /语义选片师/);
+    assert.match(taskPromptFor("reference-grammar").directive, /参考视频分析师/);
     assert.match(taskPromptFor("visual-review").directive, /视觉审片/);
     assert.match(
       taskPromptFor("visual-review").outputRules.join("\n"),
@@ -118,6 +122,8 @@ describe("broker-owned task definitions", () => {
       ["director-plan", ["version", "requestedProfileId", "resolvedProfileId", "profileRationale", "visualBible", "shots"]],
       ["script-draft", ["viewerPromise", "narrativeArc", "scenes"]],
       ["publish-copy", ["title", "description", "hashtags"]],
+      ["asset-rank", ["version", "source", "providerId", "modelId", "summary", "scenes"]],
+      ["reference-grammar", ["version", "summary", "durationMs", "pacing", "composition", "camera", "color", "transitions", "sound", "beats", "reusableRules", "avoidCopying", "confidence"]],
       ["visual-review", ["version", "summary", "scores", "findings", "confidence", "recommendation"]],
     ] as const);
 

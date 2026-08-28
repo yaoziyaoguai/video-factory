@@ -10,6 +10,20 @@ const draft = template("my-series", "我的系列", "draft", false);
 
 beforeEach(() => {
   vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 3, templates: [draft, published] });
+  vi.spyOn(studioApi, "templateExperiments").mockResolvedValue([]);
+  vi.spyOn(studioApi, "providers").mockResolvedValue([{
+    id: "ark-seedance-video-v1",
+    providerFamily: "ark",
+    capability: "asset.generate.video",
+    label: "火山方舟视频生成",
+    available: true,
+    kind: "external",
+    defaultModelId: "seedance-2-5-pro",
+    modelProfiles: [
+      { id: "seedance-2-5-pro", label: "Seedance 2.5 Pro", providerId: "ark-seedance-video-v1", providerFamily: "ark", available: true, recommended: true, description: "高质量默认", taskTypes: ["text-to-video"] },
+      { id: "seedance-2-0-lite", label: "Seedance 2.0 Lite", providerId: "ark-seedance-video-v1", providerFamily: "ark", available: true, description: "经济测试", taskTypes: ["text-to-video"] },
+    ],
+  }]);
   vi.spyOn(studioApi, "saveTemplateDraft").mockImplementation(async (value) => ({ storeRevision: 4, template: value }));
   vi.spyOn(studioApi, "publishTemplate").mockResolvedValue({ storeRevision: 5, template: { ...draft, status: "published" } });
 });
@@ -46,6 +60,21 @@ describe("TemplatesPage", () => {
     await user.click(screen.getByRole("button", { name: "创建可编辑副本" }));
 
     expect(clone).toHaveBeenCalledWith(expect.objectContaining({ newId: "knowledge-explainer-copy-12345678" }));
+  });
+
+  it("stores a template model override without hard-coding it into the provider", async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(studioApi, "saveTemplateDraft");
+    render(<TemplatesPage />);
+
+    await screen.findByRole("heading", { name: "知识解释" });
+    await user.click(screen.getByRole("radio", { name: /我的系列/ }));
+    await user.selectOptions(screen.getByLabelText("火山方舟视频生成 模板模型"), "seedance-2-0-lite");
+    await user.click(screen.getByRole("button", { name: "保存草稿" }));
+
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      modelDefaults: { "ark-seedance-video-v1": "seedance-2-0-lite" },
+    }), 3);
   });
 });
 

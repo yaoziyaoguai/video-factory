@@ -56,7 +56,6 @@ export function TodayPage() {
   const adoptedSectionRef = useRef<HTMLElement>(null);
   const trendLoadingRef = useRef(false);
   const lastTrendRefreshAtRef = useRef(0);
-  const productionRequestIdRef = useRef<string | undefined>(undefined);
 
   const loadTrendInbox = useCallback(async (forceRefresh = false) => {
     if (trendLoadingRef.current) return;
@@ -190,9 +189,7 @@ export function TodayPage() {
   }
 
   async function startProduction(input: StudioProductionInput) {
-    const requestId = productionRequestIdRef.current ?? crypto.randomUUID();
-    productionRequestIdRef.current = requestId;
-    const result = await studioApi.start(input, requestId);
+    const result = await studioApi.start(input);
     if (selected && (selected.status === "draft" || selected.status === "shortlisted")) {
       try {
         const approved = await studioApi.updateOpportunityStatus(selected.id, "approved");
@@ -202,7 +199,6 @@ export function TodayPage() {
       }
     }
     setJourneyStep(2);
-    productionRequestIdRef.current = undefined;
     setProductionDialogOpen(false);
     navigate(`/projects/${result.runId}`);
   }
@@ -213,7 +209,6 @@ export function TodayPage() {
   }
 
   function openProductionDialog() {
-    productionRequestIdRef.current = crypto.randomUUID();
     setProductionDialogOpen(true);
   }
 

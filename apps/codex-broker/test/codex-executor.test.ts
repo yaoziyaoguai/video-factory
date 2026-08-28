@@ -160,6 +160,30 @@ function visualReviewRequest(
   };
 }
 
+function assetRankRequest(jpeg = jpegOfSize(8)): { protocolVersion: string; kind: string; payload: Record<string, unknown> } {
+  return {
+    protocolVersion: "video-factory/codex-bridge-v2",
+    kind: "asset-rank",
+    payload: {
+      version: "video-factory/asset-candidates-v1",
+      scenes: [{ scenePosition: 1, candidates: [{ provider: "pexels", assetId: "asset-1" }] }],
+      thumbnails: [{
+        scenePosition: 1,
+        provider: "pexels",
+        assetId: "asset-1",
+        sha256: createHash("sha256").update(jpeg).digest("hex"),
+        jpegBase64: jpeg.toString("base64"),
+      }],
+    },
+  };
+}
+
+it("rejects a null asset-rank thumbnail list instead of treating it as empty", () => {
+  const request = assetRankRequest();
+  request.payload.thumbnails = null;
+  assert.throws(() => parseTaskRequest(request), /thumbnails must be an array/);
+});
+
 function jpegOfSize(size: number): Buffer {
   assert.ok(size >= 5);
   const jpeg = Buffer.alloc(size);
@@ -202,6 +226,19 @@ function assertTerminal(error: unknown, pattern: RegExp): boolean {
 }
 
 describe("parseTaskRequest", () => {
+  it("accepts mapped asset thumbnails and rejects a mismatched digest", async () => {
+    const task = parseTaskRequest(assetRankRequest(), codexExecutorProfileFor("openai").identity);
+    assert.equal(task.kind, "asset-rank");
+    if (task.kind !== "asset-rank") throw new Error("expected asset-rank task");
+    assert.deepEqual(
+      task.payload.thumbnails.map((thumbnail) => [thumbnail.scenePosition, thumbnail.provider, thumbnail.assetId]),
+      [[1, "pexels", "asset-1"]],
+    );
+    const invalid = assetRankRequest();
+    ((invalid.payload.thumbnails as Array<Record<string, unknown>>)[0]!).sha256 = "0".repeat(64);
+    await assert.rejects(async () => parseTaskRequest(invalid), (error: unknown) => assertTerminal(error, /does not match/));
+  });
+
   it("accepts a bounded visual-review frame and retains decoded JPEG bytes", () => {
     const task = parseTaskRequest(visualReviewRequest(), codexExecutorProfileFor("openai").identity);
     assert.equal(task.kind, "visual-review");
@@ -370,7 +407,7 @@ describe("buildCodexExecCommand", () => {
       profileId: "openai",
       providerId: "openai",
       modelId: "gpt-5.3-codex",
-      taskKinds: ["topic-ideas", "director-plan", "script-draft", "publish-copy", "visual-review"],
+      taskKinds: ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"],
     });
 
     const zai = codexExecutorProfileFor("zai");

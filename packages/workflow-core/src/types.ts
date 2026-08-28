@@ -40,6 +40,8 @@ export type ExecutionTransport = "unix_socket" | "local_process" | "http_api" | 
 export type BillingType = "subscription" | "metered" | "free" | "local_compute" | "human";
 
 export type NodeExecutionReceiptStatus = "succeeded" | "failed" | "rejected" | "needs_human";
+export type ExecutionConfigurationSource = "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
+export type ExecutionParameterValue = string | number | boolean | string[];
 
 export type ArtifactKind =
   | "topic_signal"
@@ -158,11 +160,15 @@ export interface NodeExecutionReceiptDraft {
   modelId: string;
   transport: ExecutionTransport;
   billing: BillingType;
+  configurationSource?: ExecutionConfigurationSource;
+  parameters?: Record<string, ExecutionParameterValue>;
   estimatedCostCny?: number;
   actualCostCny?: number;
+  actualCostSource?: "provider_reported" | "configured_rate";
   requestId?: string;
   fallbackFromProviderId?: string;
   fallbackReason?: string;
+  actualModelIds?: string[];
 }
 
 export interface NodeExecutionReceipt extends NodeExecutionReceiptDraft {
@@ -174,6 +180,13 @@ export interface NodeExecutionReceipt extends NodeExecutionReceiptDraft {
   authorizedCostCny?: number;
   startedAt: string;
   finishedAt: string;
+}
+
+export interface NodeExecutionPlan extends NodeExecutionReceiptDraft {
+  nodeId: string;
+  role?: string;
+  capability: Capability;
+  snapshotSource: "created" | "reconstructed";
 }
 
 export type NodeOutputSource = "generated" | "human";
@@ -273,6 +286,8 @@ export interface Provider<TInput = unknown, TOutput = unknown> {
   capability: Capability;
   transport?: ExecutionTransport;
   billing?: BillingType;
+  configurationSource?: ExecutionConfigurationSource;
+  parameters?: Record<string, ExecutionParameterValue>;
   estimatedCostCny?: number;
   maxCostCny?: number;
   maxAttempts?: number;
@@ -304,6 +319,7 @@ export interface NodeDefinition<TInput = unknown, TOutput = unknown> {
   mode: NodeMode;
   dependsOn?: string[];
   providerId?: string;
+  plannedExecution?: NodeExecutionReceiptDraft;
   getInput?: (context: WorkflowContext) => TInput;
   execute?: (input: TInput, context: WorkflowContext) => Promise<NodeExecutionResult<TOutput>> | NodeExecutionResult<TOutput>;
   validateInputOverride?: (input: unknown, context: WorkflowContext) => TInput;
@@ -346,6 +362,7 @@ export interface WorkflowRun<TInitialInput = unknown> {
   startedAt: string;
   finishedAt?: string;
   nodeRuns: NodeRun[];
+  executionPlan?: NodeExecutionPlan[];
   artifacts: Artifact[];
   interventions: HumanIntervention[];
   decisions: HumanDecision[];

@@ -7,6 +7,7 @@ import {
   topicCandidateArtifact,
   type NodeDefinition,
   type Provider,
+  type WorkflowContext,
   type WorkflowDefinition,
 } from "../src/index.js";
 
@@ -279,6 +280,7 @@ describe("WorkflowRunner", () => {
       capability: "quality.review",
       transport: "http_api",
       billing: "subscription",
+      parameters: { reviewModes: ["frames", "timeline"] },
       run: () => ({ approved: true }),
     });
     const definition: WorkflowDefinition = {
@@ -304,6 +306,18 @@ describe("WorkflowRunner", () => {
     const nodeRun = run.nodeRuns[0];
 
     assert.ok(nodeRun);
+    assert.deepEqual(run.executionPlan, [{
+      nodeId: "review",
+      role: "总导演",
+      capability: "quality.review",
+      providerId: "review-model",
+      providerLabel: "Review Model",
+      modelId: "review-v2",
+      transport: "http_api",
+      billing: "subscription",
+      parameters: { reviewModes: ["frames", "timeline"] },
+      snapshotSource: "created",
+    }]);
     assert.deepEqual(nodeRun.executionReceipt, {
       nodeId: "review",
       role: "总导演",
@@ -313,11 +327,15 @@ describe("WorkflowRunner", () => {
       modelId: "review-v2",
       transport: "http_api",
       billing: "subscription",
+      parameters: { reviewModes: ["frames", "timeline"] },
       status: "succeeded",
       startedAt: clock(),
       finishedAt: clock(),
     });
     assert.equal("credentials" in nodeRun.executionReceipt, false);
+    const resumed = await new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry }).hydrateLegacyVersionStates(definition, run);
+    (resumed.nodeRuns[0]!.executionReceipt!.parameters!.reviewModes as string[]).push("mutated");
+    assert.deepEqual(run.nodeRuns[0]!.executionReceipt!.parameters!.reviewModes, ["frames", "timeline"]);
     const inputVersionId = nodeRun.inputState?.effectiveVersionId;
     const outputVersionId = nodeRun.outputState?.effectiveVersionId;
     assert.ok(inputVersionId);
@@ -341,6 +359,46 @@ describe("WorkflowRunner", () => {
         },
       ],
     });
+  });
+
+  it("snapshots custom receipt arrays independently from node results and receipt history", async () => {
+    const mutableParameters = ["/private/input.mp4"];
+    const mutableModelIds = ["review-v1"];
+    const definition: WorkflowDefinition = {
+      id: "custom-receipt-snapshot",
+      name: "Custom receipt snapshot",
+      version: "1.0.0",
+      nodes: [{
+        id: "review",
+        label: "Review",
+        capability: "quality.review",
+        mode: "automatic",
+        getInput: () => ({}),
+        execute: async () => ({
+          output: { approved: true },
+          receipt: {
+            providerId: "custom-review",
+            providerLabel: "Custom review",
+            modelId: "review-v1",
+            transport: "http_api",
+            billing: "subscription",
+            parameters: { sourcePaths: mutableParameters },
+            actualModelIds: mutableModelIds,
+          },
+        }),
+      }],
+    };
+
+    const run = await new WorkflowRunner({ clock, idFactory: deterministicIds() }).run(definition, {});
+    mutableParameters.push("mutated");
+    mutableModelIds.push("mutated-model");
+
+    assert.deepEqual(run.nodeRuns[0]?.executionReceipt?.parameters?.sourcePaths, ["/private/input.mp4"]);
+    assert.deepEqual(run.nodeRuns[0]?.executionReceipt?.actualModelIds, ["review-v1"]);
+    assert.deepEqual(run.executionReceipts?.[0]?.parameters?.sourcePaths, ["/private/input.mp4"]);
+    assert.deepEqual(run.executionReceipts?.[0]?.actualModelIds, ["review-v1"]);
+    assert.notEqual(run.executionReceipts?.[0]?.parameters?.sourcePaths, run.nodeRuns[0]?.executionReceipt?.parameters?.sourcePaths);
+    assert.notEqual(run.executionReceipts?.[0]?.actualModelIds, run.nodeRuns[0]?.executionReceipt?.actualModelIds);
   });
 
   it("keeps failed execution receipts and validates reported actual cost", async () => {
@@ -431,6 +489,7 @@ describe("WorkflowRunner", () => {
               billing: "metered",
               estimatedCostCny: 0.5,
               actualCostCny,
+              actualModelIds: ["asset-specialist-v2"],
             },
           }),
         }],
@@ -453,6 +512,7 @@ describe("WorkflowRunner", () => {
 
     const withinLimit = await execute(0.75);
     assert.equal(withinLimit.run.status, "succeeded");
+    assert.deepEqual(withinLimit.run.nodeRuns[0]?.executionReceipt?.actualModelIds, ["asset-specialist-v2"]);
     assert.equal(withinLimit.run.nodeRuns[0]?.executionReceipt?.actualCostCny, 0.75);
     assert.equal(withinLimit.run.nodeRuns[0]?.executionReceipt?.status, "succeeded");
     assert.equal(withinLimit.run.nodeRuns[0]?.executionReceipt?.authorizedCostCny, 1);
@@ -472,6 +532,107 @@ describe("WorkflowRunner", () => {
     assert.equal(invalidCost.run.status, "failed");
     assert.equal(invalidCost.run.nodeRuns[0]?.executionReceipt?.actualCostCny, undefined);
     assert.match(invalidCost.run.nodeRuns[0]?.error ?? "", /actualCostCny must be a finite non-negative number/);
+  });
+
+  it("enforces the authorized attempt limit inside a custom metered node", async () => {
+    let calls = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "paid-assets",
+      label: "Paid assets",
+      modelId: "assets-v1",
+      capability: "asset.prepare",
+      transport: "http_api",
+      billing: "metered",
+      estimatedCostCny: 0.5,
+      maxCostCny: 1,
+      maxAttempts: 1,
+      run: () => {
+        calls += 1;
+        return { ok: true };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "bounded-provider-attempts",
+      name: "Bounded provider attempts",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "paid-assets",
+        mode: "automatic",
+        execute: async (input, context) => {
+          const provider = context.resolveProvider({ capability: "asset.prepare", providerId: "paid-assets" });
+          await provider.run(input, context);
+          await provider.run(input, context);
+          return { output: { ok: true } };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ providers: registry });
+    const paused = await runner.run(definition, {});
+    const plan = paused.nodeRuns[0]?.spendPlan;
+    assert.ok(plan);
+
+    const failed = await runner.authorizeSpend(definition, paused, {
+      nodeId: plan.nodeId,
+      inputVersionIds: plan.inputVersionIds,
+      providerId: plan.providerId,
+      modelId: plan.modelId,
+      maxCostCny: plan.maxCostCny,
+      maxAttempts: plan.maxAttempts,
+      approvedBy: "producer",
+    });
+
+    assert.equal(calls, 1);
+    assert.equal(failed.status, "failed");
+    assert.match(failed.nodeRuns[0]?.error ?? "", /authorized attempt limit/);
+  });
+
+  it("does not expose the internal provider registry to custom nodes", async () => {
+    let calls = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "paid-assets",
+      modelId: "assets-v1",
+      capability: "asset.prepare",
+      billing: "metered",
+      estimatedCostCny: 0.5,
+      maxCostCny: 1,
+      maxAttempts: 1,
+      run: () => {
+        calls += 1;
+        return { ok: true };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "context-facade",
+      name: "Context facade",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        mode: "automatic",
+        execute: (_input, context) => {
+          const runtime = context as WorkflowContext & {
+            providers?: ProviderRegistry;
+            resolveProviderForNode?: (selector: { capability: "asset.prepare"; providerId: string }) => Provider;
+            withSpendAuthorization?: (authorization: unknown, execute: () => Promise<unknown>) => Promise<unknown>;
+          };
+          assert.equal(runtime.providers, undefined);
+          assert.equal(runtime.resolveProviderForNode, undefined);
+          assert.equal(runtime.withSpendAuthorization, undefined);
+          return { output: { ok: true } };
+        },
+      }],
+    };
+
+    const run = await new WorkflowRunner({ providers: registry }).run(definition, {});
+
+    assert.equal(run.status, "succeeded");
+    assert.equal(calls, 0);
   });
 
   it("rejects non-finite metered limits before invoking the provider", async () => {

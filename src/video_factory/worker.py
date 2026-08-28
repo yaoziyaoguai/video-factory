@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 from .domain import Scene
 from .script_service import draft_script_from_values, draft_to_dict
-from .stock_assets import prepare_routed_scene_assets, prepare_scene_assets
+from .stock_assets import prepare_routed_scene_assets, prepare_scene_assets, search_routed_scene_asset_candidates
 from .technical_review import review_video
 from .voiceover import synthesize_voiceover_plan
 from .renderer import render_job_manifest
@@ -19,6 +19,7 @@ WORKER_PROTOCOL_VERSION = "video-factory/worker-v1"
 BRIEF_PROTOCOL_VERSION = "video-factory/brief-v1"
 SUPPORTED_CAPABILITIES = {
     "script.draft",
+    "asset.search",
     "asset.prepare",
     "voice.synthesize",
     "video.render",
@@ -58,6 +59,8 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     if capability == "asset.prepare":
         return prepare_assets(request, output_dir, started_at)
+    if capability == "asset.search":
+        return search_assets(request, output_dir, started_at)
     if capability == "voice.synthesize":
         return synthesize_voice(request, output_dir, started_at)
     if capability == "video.render":
@@ -118,6 +121,16 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
     if provider == "ai-router":
         director_plan_path = require_existing_path(request["input"], "directorPlanPath")
         director_plan = json.loads(director_plan_path.read_text(encoding="utf-8"))
+        ranking_path_value = request["input"].get("candidateRankingPath")
+        candidate_ranking = None
+        if ranking_path_value is not None:
+            ranking_path = require_existing_path(request["input"], "candidateRankingPath")
+            candidate_ranking = json.loads(ranking_path.read_text(encoding="utf-8"))
+        inventory_path_value = request["input"].get("candidateInventoryPath")
+        candidate_inventory = None
+        if inventory_path_value is not None:
+            inventory_path = require_existing_path(request["input"], "candidateInventoryPath")
+            candidate_inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
         plan_path = prepare_routed_scene_assets(
             job_id=1,
             scenes=scenes,
@@ -125,6 +138,8 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             director_plan=director_plan,
             media_type=str(parameters.get("mediaType", "video")),
             limit=int(parameters.get("limit", 6)),
+            candidate_ranking=candidate_ranking,
+            candidate_inventory=candidate_inventory,
         )
     else:
         plan_path = prepare_scene_assets(
@@ -145,6 +160,48 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
     return success_response(
         request,
         output={"assetPlanPath": str(plan_path)},
+        artifacts=[artifact],
+        started_at=started_at,
+    )
+
+
+def search_assets(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
+    script_path = require_existing_path(request["input"], "scriptPath")
+    director_plan_path = require_existing_path(request["input"], "directorPlanPath")
+    script = json.loads(script_path.read_text(encoding="utf-8"))
+    director_plan = json.loads(director_plan_path.read_text(encoding="utf-8"))
+    scenes = [
+        Scene(
+            position=int(scene["position"]),
+            narration=str(scene["narration"]),
+            duration=float(scene["duration"]),
+            visual_strategy=str(scene["visual_strategy"]),
+            visual_prompt=str(scene["visual_prompt"]),
+            search_terms=[str(term) for term in scene.get("search_terms", [])],
+        )
+        for scene in script.get("scenes", [])
+    ]
+    if not scenes:
+        raise WorkerProtocolError("asset.search requires a script with scenes")
+    parameters = request.get("parameters", {})
+    report_path, inventory_path = search_routed_scene_asset_candidates(
+        job_id=1,
+        scenes=scenes,
+        workspace=output_dir,
+        director_plan=director_plan,
+        media_type=str(parameters.get("mediaType", "video")),
+        limit=int(parameters.get("limit", 6)),
+    )
+    artifact = describe_artifact(
+        path=report_path,
+        kind="asset_candidates",
+        content_type="application/json",
+        request=request,
+        license_note="Preview-only candidate metadata; no media was downloaded by this node.",
+    )
+    return success_response(
+        request,
+        output={"candidateSearchPath": str(report_path), "candidateInventoryPath": str(inventory_path)},
         artifacts=[artifact],
         started_at=started_at,
     )
