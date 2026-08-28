@@ -61,6 +61,8 @@ interface GenerationJob {
   taskId?: string;
   status: VideoGenerationProgress["status"];
   estimatedCostCny: number;
+  actualCostCny?: number;
+  actualCostSource?: "configured_rate";
   mediaType: "image" | "video";
   modelId?: string;
   videoUrl?: string;
@@ -218,10 +220,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           scene,
           scene.visualPrompt,
           async (progress) => {
-            applyProgress(job, progress);
+            applyProgress(job, progress, binding.estimatedCnyPerAsset);
             await writeJobs(jobsPath, jobs);
           },
         );
+        applyAcceptedTask(job, generated.taskId, binding.estimatedCnyPerAsset);
+        await writeJobs(jobsPath, jobs);
         const media = await downloadGeneratedAsset(
           this.fetch,
           generated.url,
@@ -249,7 +253,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
 
     const generatedScenes = jobs.filter((job) => job.status === "succeeded").length;
     const fallbackScenes = jobs.length - generatedScenes;
-    const accountedCostCny = roundMoney(jobs.reduce((sum, job) => sum + job.estimatedCostCny, 0));
+    const accountedCostCny = configuredCost(jobs);
     plan.scene_assets = assets;
     plan.generation = {
       providerId,
@@ -260,6 +264,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       estimatedCostCny: roundMoney(jobs.length * binding.estimatedCnyPerAsset),
       actualCostCny: accountedCostCny,
       actualCostSource: "configured_rate",
+      ...meteredJobDiagnostics(jobs),
+      ...actualModelDiagnostics(jobs),
       jobsPath,
       localBaselinePreserved: true,
     };
@@ -279,7 +285,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       "application/json",
       providerId,
       request,
-      "External task IDs and temporary result URLs retained for audit.",
+      "External task IDs and validated successful result URLs retained for audit.",
     );
     return {
       ...baseline,
@@ -300,6 +306,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         estimatedCostCny: roundMoney(jobs.length * binding.estimatedCnyPerAsset),
         actualCostCny: accountedCostCny,
         actualCostSource: "configured_rate",
+        ...meteredJobDiagnostics(jobs),
         ...actualModelDiagnostics(jobs),
       },
     };
@@ -385,7 +392,23 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     if (baseline.status !== "succeeded") {
       return baseline;
     }
-    if (generatedRoutes.length === 0 && resolutionFailures.length === 0) return baseline;
+    if (generatedRoutes.length === 0 && resolutionFailures.length === 0) {
+      return {
+        ...baseline,
+        diagnostics: {
+          ...(baseline.diagnostics ?? {}),
+          providerId: "ai-shot-router-v1",
+          attemptedScenes: 0,
+          generatedScenes: 0,
+          fallbackScenes: 0,
+          estimatedCostCny: 0,
+          actualCostCny: 0,
+          actualCostSource: "configured_rate",
+          meteredAttemptCount: 0,
+          meteredFailedAttemptCount: 0,
+        },
+      };
+    }
 
     const planPath = requiredString(baseline.output?.assetPlanPath, "assetPlanPath");
     const plan = requiredRecord(JSON.parse(await readFile(planPath, "utf8")), "Asset plan");
@@ -409,10 +432,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           scene,
           compileGenerationPrompt(providerId, route, scene),
           async (progress) => {
-            applyProgress(job, progress);
+            applyProgress(job, progress, binding.estimatedCnyPerAsset);
             await writeJobs(jobsPath, jobs);
           },
         );
+        applyAcceptedTask(job, generated.taskId, binding.estimatedCnyPerAsset);
+        await writeJobs(jobsPath, jobs);
         const media = await downloadGeneratedAsset(
           this.fetch,
           generated.url,
@@ -444,7 +469,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       resolutionFailures.filter((item) => !routedScenePositions.has(item.scenePosition)).map((item) => item.scenePosition),
     ).size;
     const fallbackScenes = jobs.filter((job) => job.status !== "succeeded").length + configurationFallbackScenes;
-    const accountedCostCny = roundMoney(jobs.reduce((sum, job) => sum + job.estimatedCostCny, 0));
+    const accountedCostCny = configuredCost(jobs);
     plan.scene_assets = assets;
     plan.generation = {
       providerId: "ai-shot-router-v1",
@@ -456,6 +481,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       estimatedCostCny: estimatedCost,
       actualCostCny: accountedCostCny,
       actualCostSource: "configured_rate",
+      ...meteredJobDiagnostics(jobs),
+      ...actualModelDiagnostics(jobs),
       jobsPath,
       localBaselinePreserved: true,
       ...(resolutionFailures.length ? { skippedRoutes: resolutionFailures } : {}),
@@ -497,6 +524,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         estimatedCostCny: estimatedCost,
         actualCostCny: accountedCostCny,
         actualCostSource: "configured_rate",
+        ...meteredJobDiagnostics(jobs),
         ...actualModelDiagnostics(jobs),
         ...(resolutionFailures.length ? { skippedRoutes: resolutionFailures } : {}),
       },
@@ -613,12 +641,39 @@ function validateVideoRuntimeProfile(providerId: string, modelId: string, profil
 }
 
 function uniqueActualModelIds(jobs: GenerationJob[]): string[] {
-  return [...new Set(jobs.map((job) => job.modelId ?? job.providerId))];
+  return [...new Set(
+    jobs
+      .filter((job) => Boolean(job.taskId?.trim()))
+      .map((job) => job.modelId ?? job.providerId),
+  )];
 }
 
 function actualModelDiagnostics(jobs: GenerationJob[]): { actualModelIds?: string[] } {
   const actualModelIds = uniqueActualModelIds(jobs);
   return actualModelIds.length ? { actualModelIds } : {};
+}
+
+function applyAcceptedTask(job: GenerationJob, taskId: string, costCny: number): void {
+  job.taskId = taskId;
+  if (taskId.trim()) {
+    job.actualCostCny = roundMoney(costCny);
+    job.actualCostSource = "configured_rate";
+  }
+}
+
+function configuredCost(jobs: GenerationJob[]): number {
+  return roundMoney(jobs.reduce((sum, job) => sum + (job.actualCostCny ?? 0), 0));
+}
+
+function meteredJobDiagnostics(jobs: GenerationJob[]): {
+  meteredAttemptCount: number;
+  meteredFailedAttemptCount: number;
+} {
+  const submittedJobs = jobs.filter((job) => Boolean(job.taskId?.trim()));
+  return {
+    meteredAttemptCount: submittedJobs.length,
+    meteredFailedAttemptCount: submittedJobs.filter((job) => job.status === "failed").length,
+  };
 }
 
 function parseRoutedShots(value: unknown): RoutedShot[] {
@@ -722,12 +777,18 @@ function optionalStringArray(value: unknown, label: string): string[] {
   return value.map((entry, index) => requiredString(entry, `${label}[${index}]`));
 }
 
-function applyProgress(job: GenerationJob, progress: VideoGenerationProgress | ImageGenerationProgress): void {
+function applyProgress(
+  job: GenerationJob,
+  progress: VideoGenerationProgress | ImageGenerationProgress,
+  configuredCostCny: number,
+): void {
   job.taskId = progress.taskId;
   job.status = progress.status;
-  if ("videoUrl" in progress && progress.videoUrl) job.videoUrl = progress.videoUrl;
-  if ("imageUrl" in progress && progress.imageUrl) job.imageUrl = progress.imageUrl;
   if (progress.error) job.error = progress.error;
+  if (progress.taskId.trim()) {
+    job.actualCostCny = roundMoney(configuredCostCny);
+    job.actualCostSource = "configured_rate";
+  }
 }
 
 function applySucceeded(job: GenerationJob, taskId: string, url: string): void {

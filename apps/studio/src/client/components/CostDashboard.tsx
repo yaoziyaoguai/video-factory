@@ -14,7 +14,7 @@ export function CostDashboard({ dashboard }: { dashboard: StudioCostDashboard })
       </div>
       <div className="cost-run-table">
         <header><strong>视频明细</strong><span>{dashboard.runs.length} 条制作</span></header>
-        {dashboard.runs.length ? dashboard.runs.map((run) => <Link to={`/projects/${run.runId}`} key={run.runId}><span><strong>{run.title}</strong><small>{run.totals.meteredCalls} 次付费调用 · {run.totals.actualPendingCount} 笔待回填</small></span><b>{actualCostLabel(run.totals)}</b></Link>) : <p>产生制作调用后，这里会按视频汇总。</p>}
+        {dashboard.runs.length ? dashboard.runs.map((run) => <Link to={`/projects/${run.runId}`} key={run.runId}><span><strong>{run.title}</strong><small>{run.totals.meteredCalls} 次计费任务 · {run.totals.failedMeteredCalls} 次失败 · {run.totals.actualPendingCount} 笔待回填</small></span><b>{actualCostLabel(run.totals)}</b></Link>) : <p>产生制作调用后，这里会按视频汇总。</p>}
       </div>
     </section>
   );
@@ -26,7 +26,7 @@ export function RunCostDetailPanel({ detail }: { detail: StudioCostRunDetail }) 
       <header className="section-heading"><div><p className="eyebrow">本片成本</p><h2 id="run-cost-title">调用与消费明细</h2></div><ReceiptText aria-hidden="true" size={19} /></header>
       <CostMetrics totals={detail.totals} compact />
       <div className="cost-line-list">
-        {detail.lines.length ? detail.lines.map((line) => <article key={line.id}><span><strong>{line.role ? `${line.role} · ` : ""}{line.nodeId}</strong><small>{line.providerId} · {line.modelId}</small></span><span><small>{line.status === "failed" ? "调用失败" : line.actualCostSource === "configured_rate" ? "按配置单价核算" : line.actualCostSource === "provider_reported" ? "供应商账单回填" : line.billing === "metered" ? "按量付费" : line.billing === "subscription" ? "订阅额度" : "免费/本地"}</small><b>{line.actualPending ? `待回填 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
+        {detail.lines.length ? detail.lines.map((line) => <article key={line.id}><span><strong>{line.role ? `${line.role} · ` : ""}{line.nodeId}</strong><small>{line.providerId} · {line.modelId}</small></span><span><small>{costLineLabel(line)}</small><b>{line.actualPending ? `待回填 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
       </div>
     </section>
   );
@@ -54,4 +54,16 @@ function actualCostLabel(totals: StudioCostTotals): string {
   return totals.actualPendingCount > 0
     ? `¥${totals.actualCostCny.toFixed(2)} 已回填 + ${totals.actualPendingCount} 笔待回填`
     : `¥${totals.actualCostCny.toFixed(2)}`;
+}
+
+function costLineLabel(line: StudioCostRunDetail["lines"][number]): string {
+  if ((line.meteredFailedAttemptCount ?? 0) > 0) {
+    return `${line.meteredFailedAttemptCount} / ${line.meteredAttemptCount ?? 1} 次计费任务失败`;
+  }
+  if (line.status === "failed") return "调用失败";
+  if (line.actualCostSource === "configured_rate") return "按配置单价核算";
+  if (line.actualCostSource === "provider_reported") return "供应商账单回填";
+  if (line.billing === "metered") return "按量付费";
+  if (line.billing === "subscription") return "订阅额度";
+  return "免费/本地";
 }

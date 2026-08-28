@@ -134,6 +134,33 @@ describe("CostStudio", () => {
     assert.equal(detail?.totals.failedMeteredCalls, 1);
   });
 
+  it("counts nested metered attempts even when the asset node succeeds through a free fallback", async () => {
+    const studio = new CostStudio(async () => ([{
+      id: "run-fallback",
+      executionReceipts: [{
+        id: "asset-router",
+        nodeId: "assets",
+        providerId: "ai-shot-router-v1",
+        modelId: "seedance",
+        billing: "metered",
+        status: "succeeded",
+        startedAt: "2026-08-28T11:00:00.000Z",
+        estimatedCostCny: 8,
+        actualCostCny: 8,
+        actualCostSource: "configured_rate",
+        meteredAttemptCount: 1,
+        meteredFailedAttemptCount: 1,
+      }],
+      spendAuthorizations: [],
+    }]));
+
+    const detail = await studio.runDetail("run-fallback");
+    assert.equal(detail?.totals.actualCostCny, 8);
+    assert.equal(detail?.totals.meteredCalls, 1);
+    assert.equal(detail?.totals.failedMeteredCalls, 1);
+    assert.equal(detail?.lines[0]?.meteredFailedAttemptCount, 1);
+  });
+
   it("does not infer a historical receipt failure from the node's latest status", async () => {
     const studio = new CostStudio(async () => ([{
       id: "run-5",

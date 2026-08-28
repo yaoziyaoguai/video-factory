@@ -165,6 +165,8 @@ export interface NodeExecutionReceiptDraft {
   estimatedCostCny?: number;
   actualCostCny?: number;
   actualCostSource?: "provider_reported" | "configured_rate";
+  meteredAttemptCount?: number;
+  meteredFailedAttemptCount?: number;
   requestId?: string;
   fallbackFromProviderId?: string;
   fallbackReason?: string;

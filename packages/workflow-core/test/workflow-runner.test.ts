@@ -401,6 +401,72 @@ describe("WorkflowRunner", () => {
     assert.notEqual(run.executionReceipts?.[0]?.actualModelIds, run.nodeRuns[0]?.executionReceipt?.actualModelIds);
   });
 
+  it("persists valid nested metered counts and rejects impossible failure totals", async () => {
+    async function execute(meteredAttemptCount: number, meteredFailedAttemptCount: number) {
+      const registry = new ProviderRegistry();
+      registry.register({
+        id: "asset-router",
+        label: "Asset router",
+        modelId: "router-v1",
+        capability: "asset.prepare",
+        transport: "local_process",
+        billing: "metered",
+        estimatedCostCny: 0.5,
+        maxCostCny: 1,
+        maxAttempts: 1,
+        run: () => ({ fallback: true }),
+      });
+      const definition: WorkflowDefinition = {
+        id: "nested-metered-counts",
+        name: "Nested metered counts",
+        version: "1.0.0",
+        nodes: [{
+          id: "assets",
+          label: "Assets",
+          capability: "asset.prepare",
+          providerId: "asset-router",
+          mode: "automatic",
+          execute: async (input, context) => ({
+            output: await context.resolveProvider({ capability: "asset.prepare", providerId: "asset-router" }).run(input, context),
+            receipt: {
+              providerId: "asset-router",
+              providerLabel: "Asset router",
+              modelId: "router-v1",
+              transport: "local_process",
+              billing: "metered",
+              estimatedCostCny: 0.5,
+              actualCostCny: 0,
+              actualCostSource: "configured_rate",
+              meteredAttemptCount,
+              meteredFailedAttemptCount,
+            },
+          }),
+        }],
+      };
+      const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+      const paused = await runner.run(definition, {});
+      const plan = paused.nodeRuns[0]?.spendPlan;
+      assert.ok(plan);
+      return runner.authorizeSpend(definition, paused, {
+        nodeId: plan.nodeId,
+        inputVersionIds: plan.inputVersionIds,
+        providerId: plan.providerId,
+        modelId: plan.modelId,
+        maxCostCny: plan.maxCostCny,
+        maxAttempts: plan.maxAttempts,
+        approvedBy: "producer",
+      });
+    }
+
+    const valid = await execute(2, 1);
+    assert.equal(valid.nodeRuns[0]?.executionReceipt?.meteredAttemptCount, 2);
+    assert.equal(valid.nodeRuns[0]?.executionReceipt?.meteredFailedAttemptCount, 1);
+
+    const invalid = await execute(1, 2);
+    assert.equal(invalid.status, "failed");
+    assert.match(invalid.nodeRuns[0]?.error ?? "", /failed metered attempts cannot exceed total metered attempts/);
+  });
+
   it("keeps failed execution receipts and validates reported actual cost", async () => {
     const registry = new ProviderRegistry();
     registry.register({

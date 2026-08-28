@@ -69,6 +69,8 @@ describe("GenerativeAssetWorkerClient", () => {
       taskId: "task-1",
       status: "succeeded",
       estimatedCostCny: 3.5,
+      actualCostCny: 3.5,
+      actualCostSource: "configured_rate",
       mediaType: "video",
       videoUrl: "https://example.com/generated.mp4",
     });
@@ -245,7 +247,49 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(response.diagnostics?.fallbackScenes, 1);
     assert.equal(response.diagnostics?.actualCostCny, 3.5);
     assert.equal(response.diagnostics?.actualCostSource, "configured_rate");
+    assert.equal(response.diagnostics?.meteredAttemptCount, 1);
+    assert.equal(response.diagnostics?.meteredFailedAttemptCount, 1);
+    assert.equal(jobs.jobs[0].actualCostCny, 3.5);
+    assert.equal(jobs.jobs[0].actualCostSource, "configured_rate");
+    assert.equal(plan.generation.actualCostCny, 3.5);
+    assert.equal(plan.generation.meteredAttemptCount, 1);
+    assert.equal(plan.generation.meteredFailedAttemptCount, 1);
     assert.equal(response.artifacts.some((artifact) => artifact.kind === "media_asset"), false);
+  });
+
+  it("does not count a provider rejection before task submission as a metered attempt", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "宣纸上的水墨山峰" },
+    ] }));
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 8,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => {
+            throw new Error("model has not been activated");
+          },
+        },
+      }],
+    });
+
+    const response = await subject.run(workerRequest(scriptPath, outputDir, 1, 8));
+    const plan = JSON.parse(await readFile(String(response.output?.assetPlanPath), "utf8"));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.equal(jobs.jobs[0].taskId, undefined);
+    assert.equal(jobs.jobs[0].status, "failed");
+    assert.equal(response.diagnostics?.actualCostCny, 0);
+    assert.equal(response.diagnostics?.meteredAttemptCount, 0);
+    assert.equal(response.diagnostics?.meteredFailedAttemptCount, 0);
+    assert.equal(response.diagnostics?.actualModelIds, undefined);
+    assert.equal(plan.generation.meteredAttemptCount, 0);
+    assert.equal(plan.generation.meteredFailedAttemptCount, 0);
+    assert.equal(plan.generation.actualModelIds, undefined);
   });
 
   it("executes the AI director route instead of deriving a fixed material mix from the recipe", async () => {
@@ -327,6 +371,9 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(plan.generation.estimatedCostCny, 3.5);
     assert.equal(plan.generation.actualCostCny, 3.5);
     assert.equal(plan.generation.actualCostSource, "configured_rate");
+    assert.equal(plan.generation.meteredAttemptCount, 1);
+    assert.equal(plan.generation.meteredFailedAttemptCount, 0);
+    assert.deepEqual(plan.generation.actualModelIds, ["seedance-video-v1"]);
   });
 
   it("uses server adapter prices to reject an AI route that exceeds its budget", async () => {
@@ -552,6 +599,11 @@ describe("GenerativeAssetWorkerClient", () => {
 
     assert.equal(response.status, "succeeded");
     assert.equal(response.output?.generationJobsPath, undefined);
+    assert.equal(response.diagnostics?.estimatedCostCny, 0);
+    assert.equal(response.diagnostics?.actualCostCny, 0);
+    assert.equal(response.diagnostics?.meteredAttemptCount, 0);
+    assert.equal(response.diagnostics?.meteredFailedAttemptCount, 0);
+    assert.equal(response.diagnostics?.actualModelIds, undefined);
   });
 
   it("blocks private media URLs before any download request", async () => {
@@ -577,11 +629,17 @@ describe("GenerativeAssetWorkerClient", () => {
       },
     });
 
-    await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const response = await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
     const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
 
     assert.equal(downloads, 0);
     assert.match(jobs.jobs[0].error, /private or unsafe/);
+    assert.equal(jobs.jobs[0].videoUrl, undefined);
+    assert.equal(jobs.jobs[0].imageUrl, undefined);
+    assert.equal(jobs.jobs[0].actualCostCny, 1);
+    assert.equal(response.diagnostics?.actualCostCny, 1);
+    assert.equal(response.diagnostics?.meteredAttemptCount, 1);
+    assert.equal(response.diagnostics?.meteredFailedAttemptCount, 1);
   });
 
   it("stops streaming generated media as soon as the byte limit is exceeded", async () => {

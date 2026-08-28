@@ -887,7 +887,7 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
   readonly configurationSource = "system_default" as const;
-  readonly parameters = { promptPack: "video-factory/director-v5" };
+  readonly parameters = { promptPack: "video-factory/director-v6" };
 
   constructor(private readonly agent: VisualDirectorAgent) {}
 
@@ -2024,6 +2024,11 @@ function providerExecutionReceipt(
   if (actualCostSource !== undefined && actualCost === undefined) {
     throw new Error("Worker diagnostics actualCostSource requires actualCostCny.");
   }
+  const meteredAttemptCount = optionalNonNegativeInteger(response.diagnostics?.meteredAttemptCount, "meteredAttemptCount");
+  const meteredFailedAttemptCount = optionalNonNegativeInteger(response.diagnostics?.meteredFailedAttemptCount, "meteredFailedAttemptCount");
+  if ((meteredFailedAttemptCount ?? 0) > (meteredAttemptCount ?? 0)) {
+    throw new Error("Worker diagnostics failed metered attempts cannot exceed total metered attempts.");
+  }
   const actualModelIds = response.diagnostics?.actualModelIds;
   if (actualModelIds !== undefined && (
     !Array.isArray(actualModelIds)
@@ -2044,9 +2049,19 @@ function providerExecutionReceipt(
     ...(provider.estimatedCostCny !== undefined ? { estimatedCostCny: provider.estimatedCostCny } : {}),
     ...(actualCost !== undefined ? { actualCostCny: actualCost } : {}),
     ...(actualCostSource !== undefined ? { actualCostSource } : {}),
+    ...(meteredAttemptCount !== undefined ? { meteredAttemptCount } : {}),
+    ...(meteredFailedAttemptCount !== undefined ? { meteredFailedAttemptCount } : {}),
     ...(actualModelIds !== undefined ? { actualModelIds: [...actualModelIds] as string[] } : {}),
     requestId: response.commandId,
   };
+}
+
+function optionalNonNegativeInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value) || Number(value) < 0) {
+    throw new Error(`Worker diagnostics ${field} must be a non-negative integer.`);
+  }
+  return Number(value);
 }
 
 function modelTraceReceipt(

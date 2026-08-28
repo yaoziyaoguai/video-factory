@@ -19,3 +19,5 @@ tmp/
 *.egg-info/
 .gstack/
 .local/
+.ua/
+graphify-out/

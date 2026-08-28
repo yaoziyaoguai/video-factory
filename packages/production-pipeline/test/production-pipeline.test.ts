@@ -674,6 +674,10 @@ describe("ProductionPipeline", () => {
     ]);
     const assetCall = worker.calls.find((call) => call.capability === "asset.prepare");
     assert.equal((assetCall?.input as Record<string, unknown>).directorPlanPath, directorArtifact.uri);
+    assert.equal(
+      run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.parameters?.promptPack,
+      "video-factory/director-v6",
+    );
     assert.deepEqual(directorInput?.brief.templateBlueprint, templateSnapshot.resolvedBlueprint);
     assert.equal(directorInput?.scenes[0]?.onScreenText, "早餐第一步");
     assert.equal(directorInput?.scenes[0]?.soundCue, "摊位环境声");

@@ -488,6 +488,8 @@ export interface StudioNodeExecutionReceipt {
   authorizedCostCny?: number;
   actualCostCny?: number;
   actualCostSource?: "provider_reported" | "configured_rate";
+  meteredAttemptCount?: number;
+  meteredFailedAttemptCount?: number;
   spendAuthorizationId?: string;
   requestId?: string;
   actualModelIds?: string[];
@@ -653,6 +655,8 @@ export interface StudioCostLine {
   spendAuthorizationId?: string;
   actualCostCny?: number;
   actualCostSource?: "provider_reported" | "configured_rate";
+  meteredAttemptCount?: number;
+  meteredFailedAttemptCount?: number;
   actualPending: boolean;
   startedAt: string;
   finishedAt?: string;

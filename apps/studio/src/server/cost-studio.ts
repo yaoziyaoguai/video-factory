@@ -70,6 +70,12 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       ? receipt.actualCostSource
       : undefined;
     const status = receipt.status === "failed" ? "failed" : receipt.status === "succeeded" ? "succeeded" : "unknown";
+    const meteredAttemptCount = billing === "metered"
+      ? nonNegativeInteger(receipt.meteredAttemptCount) ?? 1
+      : undefined;
+    const meteredFailedAttemptCount = billing === "metered"
+      ? Math.min(nonNegativeInteger(receipt.meteredFailedAttemptCount) ?? (status === "failed" ? 1 : 0), meteredAttemptCount ?? 0)
+      : undefined;
     const estimatedCostCny = nonNegativeNumber(receipt.estimatedCostCny) ?? 0;
     const authorizedCostCny = nonNegativeNumber(receipt.authorizedCostCny)
       ?? (isRecord(authorization) ? nonNegativeNumber(authorization.maxCostCny) : undefined)
@@ -94,6 +100,8 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       ...(spendAuthorizationId ? { spendAuthorizationId } : {}),
       ...(actualCost !== undefined ? { actualCostCny: actualCost } : {}),
       ...(actualCostSource !== undefined ? { actualCostSource } : {}),
+      ...(meteredAttemptCount !== undefined ? { meteredAttemptCount } : {}),
+      ...(meteredFailedAttemptCount !== undefined ? { meteredFailedAttemptCount } : {}),
       actualPending: billing === "metered" && actualCost === undefined,
       startedAt,
       ...(text(receipt.finishedAt) ? { finishedAt: text(receipt.finishedAt) } : {}),
@@ -121,10 +129,10 @@ function totals(lines: StudioCostLine[]): StudioCostTotals {
     authorizedCostCny: uniqueAuthorizedCost(lines),
     actualCostCny: money(sum(lines, (line) => line.actualCostCny ?? 0)),
     actualPendingCount: lines.filter((line) => line.actualPending).length,
-    meteredCalls: lines.filter((line) => line.billing === "metered").length,
+    meteredCalls: sum(lines, (line) => line.billing === "metered" ? line.meteredAttemptCount ?? 1 : 0),
     subscriptionCalls: lines.filter((line) => line.billing === "subscription").length,
     freeCalls: lines.filter((line) => line.billing === "free" || line.billing === "local_compute").length,
-    failedMeteredCalls: lines.filter((line) => line.billing === "metered" && line.status === "failed").length,
+    failedMeteredCalls: sum(lines, (line) => line.billing === "metered" ? line.meteredFailedAttemptCount ?? (line.status === "failed" ? 1 : 0) : 0),
   };
 }
 
@@ -134,7 +142,7 @@ function group(lines: StudioCostLine[], key: (line: StudioCostLine) => string): 
   return [...groups.entries()].map(([id, items]) => ({
     id,
     label: id,
-    calls: items.length,
+    calls: sum(items, (item) => item.billing === "metered" ? item.meteredAttemptCount ?? 1 : 1),
     estimatedCostCny: money(sum(items, (item) => item.estimatedCostCny)),
     actualCostCny: money(sum(items, (item) => item.actualCostCny ?? 0)),
     actualPendingCount: items.filter((item) => item.actualPending).length,
@@ -171,6 +179,10 @@ function runTitle(value: unknown): string {
 
 function billingType(value: unknown): StudioBillingType {
   return value === "subscription" || value === "metered" || value === "local_compute" || value === "human" ? value : "free";
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return Number.isInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
 }
 
 function nonNegativeNumber(value: unknown): number | undefined {

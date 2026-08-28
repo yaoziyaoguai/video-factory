@@ -1291,6 +1291,15 @@ function validateReceiptCosts(
   if (receipt.actualCostSource !== undefined && receipt.actualCostCny === undefined) {
     throw new Error("Execution receipt actualCostSource requires actualCostCny.");
   }
+  if (receipt.meteredAttemptCount !== undefined && !isNonNegativeInteger(receipt.meteredAttemptCount)) {
+    throw new Error("Execution receipt meteredAttemptCount must be a non-negative integer.");
+  }
+  if (receipt.meteredFailedAttemptCount !== undefined && !isNonNegativeInteger(receipt.meteredFailedAttemptCount)) {
+    throw new Error("Execution receipt meteredFailedAttemptCount must be a non-negative integer.");
+  }
+  if ((receipt.meteredFailedAttemptCount ?? 0) > (receipt.meteredAttemptCount ?? 0)) {
+    throw new Error("Execution receipt failed metered attempts cannot exceed total metered attempts.");
+  }
   if (authorization && receipt.actualCostCny !== undefined && receipt.actualCostCny > authorization.maxCostCny) {
     throw new Error(`Execution cost exceeded the authorized maximum for provider '${authorization.providerId}'.`);
   }
@@ -1382,6 +1391,16 @@ function sanitizeFailureReceiptDraft(receipt: NodeExecutionReceiptDraft): NodeEx
     delete sanitized.actualCostSource;
   }
   if (sanitized.actualCostCny === undefined) delete sanitized.actualCostSource;
+  if (sanitized.meteredAttemptCount !== undefined && !isNonNegativeInteger(sanitized.meteredAttemptCount)) {
+    delete sanitized.meteredAttemptCount;
+    delete sanitized.meteredFailedAttemptCount;
+  }
+  if (sanitized.meteredFailedAttemptCount !== undefined && (
+    !isNonNegativeInteger(sanitized.meteredFailedAttemptCount)
+    || sanitized.meteredFailedAttemptCount > (sanitized.meteredAttemptCount ?? 0)
+  )) {
+    delete sanitized.meteredFailedAttemptCount;
+  }
   return sanitized;
 }
 
@@ -1399,6 +1418,10 @@ function isFinitePositive(value: unknown): value is number {
 
 function isFiniteNonNegative(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 0;
 }
 
 function createGeneratedOutputState<TOutput>(

@@ -98,7 +98,7 @@ describe("node production workspaces", () => {
         transport: "unix_socket",
         billing: "subscription",
         configurationSource: "template_default",
-        parameters: { promptPack: "video-factory/director-v5" },
+        parameters: { promptPack: "video-factory/director-v6" },
         estimatedCostCny: 0,
         snapshotSource: "created",
       },
@@ -111,7 +111,29 @@ describe("node production workspaces", () => {
     expect(screen.getByText("模板默认")).toBeInTheDocument();
     expect(screen.getByText(/创建任务时保存的执行计划/)).toBeInTheDocument();
     await userEvent.click(screen.getByText("查看计划参数"));
-    expect(screen.getByText(/director-v5/)).toBeInTheDocument();
+    expect(screen.getByText(/director-v6/)).toBeInTheDocument();
+  });
+
+  it("keeps failed metered task cost pending until an actual amount is reported", async () => {
+    const node: StudioNode = {
+      ...succeededNode,
+      executionReceipt: {
+        ...succeededNode.executionReceipt!,
+        providerId: "seedance-video-v1",
+        providerLabel: "Seedance",
+        modelId: "seedance-2.5",
+        billing: "metered",
+        estimatedCostCny: 8,
+        meteredAttemptCount: 1,
+        meteredFailedAttemptCount: 1,
+      },
+    };
+    render(<NodeWorkspace node={node} runStatus="stale" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "执行证据" }));
+
+    expect(screen.getByText(/1 \/ 1 次计费任务失败 · 费用待回填（预估 ¥8.00）/)).toBeInTheDocument();
+    expect(screen.queryByText(/核算 ¥0.00/)).not.toBeInTheDocument();
   });
 
   it("shows the effective node input and saves a human input version", async () => {

@@ -281,7 +281,7 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
             <span><b>输入版本</b>{shortId(node.inputState?.effectiveVersionId) ?? "尚无"}</span>
             <span><b>输出版本</b>{shortId(node.outputState?.effectiveVersionId) ?? "尚无"}</span>
             <span><b>请求编号</b>{receipt?.requestId ?? "未提供"}</span>
-            <span><b>费用</b>{receipt?.actualCostCny !== undefined ? `${receipt.actualCostSource === "configured_rate" ? "按配置单价核算" : "账单实付"} ¥${receipt.actualCostCny.toFixed(2)}` : receipt?.authorizedCostCny !== undefined ? `已授权 ¥${receipt.authorizedCostCny.toFixed(2)}` : billingLabel(receipt?.billing, receipt?.estimatedCostCny)}</span>
+            <span><b>费用</b>{receiptCostLabel(receipt)}</span>
           </div>
           <details className="node-technical-output"><summary>查看执行凭证 JSON</summary><pre>{pretty({ receipt, spendPlan: node.spendPlan, spendAuthorizationId: node.spendAuthorizationId, qualityGateResults: node.qualityGateResults })}</pre></details>
         </section> : null}
@@ -410,6 +410,26 @@ function billingLabel(billing: StudioBillingType | undefined, estimated?: number
   if (billing === "local_compute") return "本地计算";
   if (billing === "human") return "人工";
   return "免费 / 待统计";
+}
+
+function receiptCostLabel(receipt: StudioNodeExecutionReceipt | undefined): string {
+  if (!receipt) return billingLabel(undefined);
+  if (receipt.meteredFailedAttemptCount) {
+    const failure = `${receipt.meteredFailedAttemptCount} / ${receipt.meteredAttemptCount ?? 1} 次计费任务失败`;
+    if (receipt.actualCostCny === undefined) {
+      return receipt.estimatedCostCny === undefined
+        ? `${failure} · 费用待回填`
+        : `${failure} · 费用待回填（预估 ¥${receipt.estimatedCostCny.toFixed(2)}）`;
+    }
+    const source = receipt.actualCostSource === "provider_reported" ? "供应商账单" : "按配置单价核算";
+    return `${failure} · ${source} ¥${receipt.actualCostCny.toFixed(2)}`;
+  }
+  if (receipt.actualCostCny !== undefined) {
+    const source = receipt.actualCostSource === "configured_rate" ? "按配置单价核算" : "账单实付";
+    return `${source} ¥${receipt.actualCostCny.toFixed(2)}`;
+  }
+  if (receipt.authorizedCostCny !== undefined) return `已授权 ¥${receipt.authorizedCostCny.toFixed(2)}`;
+  return billingLabel(receipt.billing, receipt.estimatedCostCny);
 }
 
 function configurationSourceLabel(source: StudioNodeExecutionReceipt["configurationSource"], hasReceipt: boolean): string {
