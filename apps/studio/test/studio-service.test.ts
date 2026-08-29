@@ -127,6 +127,7 @@ class FakePipeline implements StudioPipelinePort {
   lastOverride?: NodeOverrideDraft;
   lastInputOverride?: NodeInputOverrideDraft;
   lastAuthorization?: SpendAuthorizationDraft;
+  lastRetriedNodeId?: string;
   dispatchCount = 0;
   lastInput?: unknown;
   dispatchGate?: Promise<void>;
@@ -197,6 +198,11 @@ class FakePipeline implements StudioPipelinePort {
   }
 
   async resumeStale(_runId: string): Promise<WorkflowRun<ProductionBrief>> {
+    return this.run;
+  }
+
+  async retryFailedNode(_runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>> {
+    this.lastRetriedNodeId = nodeId;
     return this.run;
   }
 }

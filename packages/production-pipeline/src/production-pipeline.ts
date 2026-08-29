@@ -429,6 +429,19 @@ export class ProductionPipeline {
     });
   }
 
+  async retryFailedNode(runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>> {
+    return this.runPersistedTransition(runId, async (previous, checkpoint) => {
+      const brief = parsePersistedBrief(previous.initialInput);
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+      });
+      return runner.retryFailedNode(this.createWorkflow(brief), withPersistedBrief(previous, brief), nodeId);
+    });
+  }
+
   private async runPersistedTransition(
     runId: string,
     transition: (

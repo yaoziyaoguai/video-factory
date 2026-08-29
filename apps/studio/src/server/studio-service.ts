@@ -349,6 +349,9 @@ export class StudioService {
     return this.production.authorizeSpend(runId, nodeId, input, approvedBy);
   }
   resumeStale(runId: string): Promise<StudioRunDetail> { return this.production.resumeStale(runId); }
+  retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail> {
+    return this.production.retryFailedNode(runId, nodeId);
+  }
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void {
     return this.production.subscribe(runId, listener);
   }

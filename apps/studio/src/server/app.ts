@@ -102,6 +102,7 @@ export interface StudioServicePort {
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
   authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy: string): Promise<StudioRunDetail>;
   resumeStale(runId: string): Promise<StudioRunDetail>;
+  retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail>;
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void;
   resolveArtifact(runId: string, artifactId: string): Promise<StudioArtifactResource | undefined>;
   listPublishTargets(): Promise<StudioPublishTarget[]>;
@@ -356,6 +357,12 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/regenerate-stale", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     return options.service.resumeStale(request.params.runId);
+  });
+
+  app.post<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/retry", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.nodeId, "节点编号");
+    return options.service.retryFailedNode(request.params.runId, request.params.nodeId);
   });
 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/decisions", async (request) => {

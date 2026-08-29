@@ -180,6 +180,10 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/regenerate-stale`,
     { method: "POST" },
   ),
+  retryFailedNode: (runId: string, nodeId: string) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/retry`,
+    { method: "POST" },
+  ),
   start: startProduction,
   decide: (runId: string, input: StudioDecisionInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/decisions`,

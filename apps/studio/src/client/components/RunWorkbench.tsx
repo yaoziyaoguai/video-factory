@@ -19,9 +19,10 @@ interface RunWorkbenchProps {
   onOverrideNodeInput?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
   onAuthorizeSpend?: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
   onRegenerateStale?: () => Promise<void>;
+  onRetryFailedNode?: (nodeId: string) => Promise<void>;
 }
 
-export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, onOverrideNode, onOverrideNodeInput, onAuthorizeSpend, onRegenerateStale }: RunWorkbenchProps) {
+export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, onOverrideNode, onOverrideNodeInput, onAuthorizeSpend, onRegenerateStale, onRetryFailedNode }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
@@ -131,6 +132,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
               <h2>当前状态</h2>
               <p>{runStateMessage(run)}</p>
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />多平台发布</button> : null}
+              {run.status === "failed" && onRetryFailedNode && failedNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(failedNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />重试失败步骤</button> : null}
               {(run.status === "failed" || run.status === "rejected") && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
               {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />按人工版本继续生成</button> : null}
             </section>
@@ -194,6 +196,10 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
 
 function isTerminalStatus(status: StudioRunDetail["status"]): boolean {
   return status === "succeeded" || status === "failed" || status === "rejected";
+}
+
+function failedNodeId(run: StudioRunDetail): string | undefined {
+  return run.nodes.find((node) => node.status === "failed")?.id;
 }
 
 function runningNodeLabel(run: StudioRunDetail): string {

@@ -710,6 +710,61 @@ export class WorkflowRunner {
     return this.continueRun(definition, run, context);
   }
 
+  async retryFailedNode<TInitialInput>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+    nodeId: string,
+  ): Promise<WorkflowRun<TInitialInput>> {
+    validateWorkflowDefinition(definition);
+    if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
+      throw new Error("Workflow definition does not match the persisted run.");
+    }
+    if (previousRun.status !== "failed") {
+      throw new Error(`Run '${previousRun.id}' is not failed.`);
+    }
+    const failedNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId);
+    if (!failedNode || failedNode.status !== "failed" || !definition.nodes.some((node) => node.id === nodeId)) {
+      throw new Error(`Node '${nodeId}' is not the failed node.`);
+    }
+
+    const run = cloneWorkflowRun(previousRun);
+    const retryNode = run.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId)!;
+    retryNode.status = "pending";
+    retryNode.artifactIds = [];
+    retryNode.qualityGateResults = [];
+    delete retryNode.output;
+    delete retryNode.finishedAt;
+    delete retryNode.error;
+    delete retryNode.intervention;
+    delete retryNode.executionReceipt;
+    delete retryNode.spendPlan;
+    delete retryNode.spendAuthorizationId;
+    if (retryNode.outputState) retryNode.outputState.stale = true;
+
+    const outputs = new Map<string, unknown>();
+    for (const nodeRun of run.nodeRuns) {
+      if (nodeRun.status === "succeeded" && nodeRun.output !== undefined) {
+        outputs.set(nodeRun.nodeId, nodeRun.output);
+      }
+    }
+    const context = new InMemoryWorkflowContext(
+      run.id,
+      definition.id,
+      run.initialInput,
+      this.providers,
+      this.clock,
+      this.idFactory,
+      run.artifacts,
+      outputs,
+    );
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
+    run.revision += 1;
+    run.status = "running";
+    delete run.finishedAt;
+    await this.checkpoint?.(run);
+    return this.continueRun(definition, run, context);
+  }
+
   private async continueRun<TInitialInput>(
     definition: WorkflowDefinition,
     run: WorkflowRun<TInitialInput>,
@@ -726,6 +781,7 @@ export class WorkflowRunner {
         context as InMemoryWorkflowContext<unknown>,
         inputVersionIdsForNode(node, run.nodeRuns),
         run.spendAuthorizations ?? [],
+        new Set((run.executionReceipts ?? []).flatMap((receipt) => receipt.spendAuthorizationId ? [receipt.spendAuthorizationId] : [])),
         existingNodeRun,
         async (runningNode) => {
           if (!existingNodeRun) {
@@ -767,6 +823,7 @@ export class WorkflowRunner {
     context: InMemoryWorkflowContext<unknown>,
     upstreamVersionIds: string[],
     spendAuthorizations: readonly SpendAuthorization[],
+    consumedSpendAuthorizationIds: ReadonlySet<string>,
     existingNodeRun: NodeRun<TOutput> | undefined,
     onStarted: (nodeRun: NodeRun<TOutput>) => Promise<void> | void,
   ): Promise<NodeRun<TOutput>> {
@@ -801,7 +858,8 @@ export class WorkflowRunner {
         if (!spendPlanMatchesExecution(spendPlan, node, provider, inputVersionIds)) {
           throw new Error(`Spend plan for node '${node.id}' no longer matches its metered provider.`);
         }
-        authorization = spendAuthorizations.find((candidate) => authorizationMatchesPlan(candidate, spendPlan));
+        authorization = spendAuthorizations.find((candidate) =>
+          !consumedSpendAuthorizationIds.has(candidate.id) && authorizationMatchesPlan(candidate, spendPlan));
         if (!authorization) {
           nodeRun.status = "awaiting_spend_approval";
           return nodeRun;

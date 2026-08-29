@@ -139,6 +139,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     applyNodeInputOverride: async () => runDetail("stale"),
     authorizeSpend: async () => runDetail("running"),
     resumeStale: async () => runDetail("running"),
+    retryFailedNode: async () => runDetail("running"),
     subscribe: () => () => undefined,
     resolveArtifact: async () => undefined,
     publishReadiness: async (runId) => ({
@@ -277,6 +278,7 @@ describe("Studio API", () => {
       applyNodeInputOverride: async (_runId, nodeId, input, actor) => { calls.push(`input:${nodeId}:${String((input.input as { title?: string }).title)}:${actor}`); return runDetail("stale"); },
       authorizeSpend: async (_runId, nodeId, input, approvedBy) => { calls.push(`spend:${nodeId}:${input.modelId}:${approvedBy}`); return runDetail("running"); },
       resumeStale: async () => { calls.push("regenerate"); return runDetail("running"); },
+      retryFailedNode: async (_runId, nodeId) => { calls.push(`retry:${nodeId}`); return runDetail("running"); },
     });
     const app = buildStudioApp({ service });
 
@@ -285,6 +287,7 @@ describe("Studio API", () => {
     const inputOverride = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/input-override", payload: { actor: "forged", input: { title: "人工题目" } } });
     const spend = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/assets/spend-authorizations", payload: { inputVersionIds: ["version-1"], providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02", maxCostCny: 3, maxAttempts: 1, approvedBy: "owner" } });
     const regenerate = await app.inject({ method: "POST", url: "/api/runs/run-1/regenerate-stale" });
+    const retry = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/voice/retry" });
 
     assert.equal(costs.statusCode, 200);
     assert.equal(costs.json().totals.actualPendingCount, 1);
@@ -292,7 +295,8 @@ describe("Studio API", () => {
     assert.equal(inputOverride.statusCode, 200);
     assert.equal(spend.statusCode, 200);
     assert.equal(regenerate.statusCode, 200);
-    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "spend:assets:MiniMax-Hailuo-02:studio-owner", "regenerate"]);
+    assert.equal(retry.statusCode, 200);
+    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "spend:assets:MiniMax-Hailuo-02:studio-owner", "regenerate", "retry:voice"]);
     await app.close();
   });
 

@@ -516,6 +516,70 @@ describe("WorkflowRunner", () => {
     assert.match(failed.nodeRuns[0]?.error ?? "", /provider unavailable/);
   });
 
+  it("retries only the failed node and requires a fresh authorization for metered work", async () => {
+    let calls = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "paid-voice",
+      label: "Paid voice",
+      modelId: "voice-v1",
+      capability: "voice.synthesize",
+      transport: "http_api",
+      billing: "metered",
+      estimatedCostCny: 0.5,
+      maxCostCny: 0.5,
+      maxAttempts: 1,
+      run: () => {
+        calls += 1;
+        if (calls === 1) throw new Error("connection reset");
+        return { audio: "voice.mp3" };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "retry-failed-node",
+      name: "Retry failed node",
+      version: "1.0.0",
+      nodes: [
+        { id: "script", label: "Script", capability: "script.draft", mode: "automatic", execute: () => ({ output: { text: "keep me" } }) },
+        { id: "voice", label: "Voice", capability: "voice.synthesize", providerId: "paid-voice", mode: "automatic", dependsOn: ["script"] },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+    const firstPause = await runner.run(definition, {});
+    const firstPlan = firstPause.nodeRuns.find((node) => node.nodeId === "voice")?.spendPlan;
+    assert.ok(firstPlan);
+    const failed = await runner.authorizeSpend(definition, firstPause, {
+      nodeId: firstPlan.nodeId,
+      inputVersionIds: firstPlan.inputVersionIds,
+      providerId: firstPlan.providerId,
+      modelId: firstPlan.modelId,
+      maxCostCny: firstPlan.maxCostCny,
+      maxAttempts: firstPlan.maxAttempts,
+      approvedBy: "producer",
+    });
+
+    const retried = await runner.retryFailedNode(definition, failed, "voice");
+    const secondPlan = retried.nodeRuns.find((node) => node.nodeId === "voice")?.spendPlan;
+    assert.equal(retried.status, "awaiting_spend_approval");
+    assert.equal(retried.nodeRuns.find((node) => node.nodeId === "script")?.outputState?.versions.length, 1);
+    assert.equal(retried.executionReceipts?.filter((receipt) => receipt.nodeId === "voice").length, 1);
+    assert.equal(calls, 1);
+    assert.ok(secondPlan);
+
+    const completed = await runner.authorizeSpend(definition, retried, {
+      nodeId: secondPlan.nodeId,
+      inputVersionIds: secondPlan.inputVersionIds,
+      providerId: secondPlan.providerId,
+      modelId: secondPlan.modelId,
+      maxCostCny: secondPlan.maxCostCny,
+      maxAttempts: secondPlan.maxAttempts,
+      approvedBy: "producer",
+    });
+    assert.equal(completed.status, "succeeded");
+    assert.equal(calls, 2);
+    assert.equal(completed.executionReceipts?.filter((receipt) => receipt.nodeId === "voice").length, 2);
+  });
+
   it("records actual cost and fails the node when reported spending exceeds authorization", async () => {
     async function execute(actualCostCny: number) {
       let calls = 0;

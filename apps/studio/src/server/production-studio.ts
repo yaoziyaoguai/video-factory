@@ -47,6 +47,7 @@ export interface StudioPipelinePort {
   applyNodeInputOverride(runId: string, override: NodeInputOverrideDraft): Promise<WorkflowRun<ProductionBrief>>;
   authorizeSpend(runId: string, authorization: SpendAuthorizationDraft): Promise<WorkflowRun<ProductionBrief>>;
   resumeStale(runId: string): Promise<WorkflowRun<ProductionBrief>>;
+  retryFailedNode(runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>>;
 }
 
 export interface ProductionStudioOptions {
@@ -524,6 +525,24 @@ export class ProductionStudio {
     if (current.status !== "stale") throw new StudioConflictError("这条制作当前没有需要重新生成的旧结果。");
     try {
       const updated = await this.options.pipeline.resumeStale(runId);
+      const detail = toRunDetail(updated);
+      this.publish(detail);
+      return detail;
+    } catch (error) {
+      if (error instanceof StaleRunRevisionError || (error instanceof Error && /locked by another writer/.test(error.message))) {
+        throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
+      }
+      throw error;
+    }
+  }
+
+  async retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail> {
+    const current = await this.loadRequiredRun(runId);
+    if (current.status !== "failed" || current.nodeRuns.find((node) => node.nodeId === nodeId)?.status !== "failed") {
+      throw new StudioConflictError("这个节点当前不能重试，请刷新页面检查最新状态。");
+    }
+    try {
+      const updated = await this.options.pipeline.retryFailedNode(runId, nodeId);
       const detail = toRunDetail(updated);
       this.publish(detail);
       return detail;

@@ -1081,14 +1081,18 @@ describe("Studio client", () => {
   it("offers a recoverable route after a failed production", async () => {
     const user = userEvent.setup();
     const onRestart = vi.fn();
+    const onRetryFailedNode = vi.fn().mockResolvedValue(undefined);
     const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
     render(<RunWorkbench
-      run={{ ...withoutIntervention, status: "failed" }}
+      run={{ ...withoutIntervention, status: "failed", nodes: withoutIntervention.nodes.map((node, index) => index === 0 ? { ...node, status: "failed" } : node) }}
       decisionPending={false}
       onDecision={async () => undefined}
       onRestart={onRestart}
+      onRetryFailedNode={onRetryFailedNode}
     />);
 
+    await user.click(screen.getByRole("button", { name: "重试失败步骤" }));
+    expect(onRetryFailedNode).toHaveBeenCalledWith(withoutIntervention.nodes[0]?.id);
     await user.click(screen.getByRole("button", { name: "调整方案后重新制作" }));
 
     expect(onRestart).toHaveBeenCalledOnce();
