@@ -123,6 +123,7 @@ export class StudioService {
     });
     this.trends = new TrendStudio({
       repositoryRoot,
+      cachePath: path.join(options.workspaceRoot, "trends", "candidate-cache.json"),
       environment,
       now,
       ...(options.trendGateway ? { trendGateway: options.trendGateway } : {}),

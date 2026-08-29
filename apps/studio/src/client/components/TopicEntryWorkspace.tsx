@@ -4,7 +4,6 @@ import {
   BookOpenText,
   Clock3,
   FileInput,
-  Flame,
   LibraryBig,
   PenLine,
   Plus,
@@ -47,7 +46,7 @@ interface TopicEntryWorkspaceProps {
 const CATEGORY_ORDER = Object.keys(TOPIC_CATEGORY_LABELS) as StudioTopicCategory[];
 
 export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
-  const [mode, setMode] = useState<EntryMode>(props.initialMode ?? "trend");
+  const mode = props.initialMode ?? "trend";
   const [category, setCategory] = useState<StudioTopicCategory | "all">("all");
   const [platform, setPlatform] = useState("all");
   const [verdict, setVerdict] = useState<StudioEditorialVerdict | "all">("all");
@@ -87,10 +86,6 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   }, [mode, props.initialSelectedId, selectedSeriesId]);
 
   useEffect(() => {
-    if (props.initialMode) setMode(props.initialMode);
-  }, [props.initialMode]);
-
-  useEffect(() => {
     const initialSeriesId = props.initialSelectedId
       ? props.inbox?.items.find((item) => item.id === props.initialSelectedId)?.seriesId
       : undefined;
@@ -102,20 +97,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   }, [props.inbox?.items, props.initialSelectedId, props.series, selectedSeriesId]);
 
   return (
-    <section className="topic-entry-workspace" data-tour="topic-inbox" aria-labelledby="topic-entry-title">
-      <header className="topic-entry-header">
-        <div>
-          <p className="eyebrow">选题台</p>
-          <h2 id="topic-entry-title">从哪里开始这条内容</h2>
-        </div>
-        <span>{props.inbox?.facets.total ?? 0} 条待判断候选</span>
-      </header>
-      <div className="topic-entry-tabs" role="tablist" aria-label="选题入口">
-        <EntryTab active={mode === "trend"} icon={<Flame aria-hidden="true" size={17} />} label="热点机会" note="从实时信号找角度" onClick={() => setMode("trend")} />
-        <EntryTab active={mode === "series"} icon={<LibraryBig aria-hidden="true" size={17} />} label="系列选题" note="继续长期内容栏目" onClick={() => setMode("series")} />
-        <EntryTab active={mode === "custom"} icon={<PenLine aria-hidden="true" size={17} />} label="自定义创作" note="从自己的观察出发" onClick={() => setMode("custom")} />
-      </div>
-
+    <section className="topic-entry-workspace" data-tour="topic-inbox" aria-label={mode === "trend" ? "热点选题" : mode === "series" ? "系列选题" : "自定义创作"}>
       {mode === "custom" ? <CustomEntry onManual={props.onManual} onImport={props.onImport} /> : (
         <div className="candidate-inbox">
           <header className="candidate-inbox-heading">
@@ -126,7 +108,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             </div>
             {mode === "trend" ? (
               <div className="trend-refresh-status" aria-label="热点更新状态">
-                <span><i aria-hidden="true" />{modeLoading ? "正在更新" : "自动更新"}</span>
+                <span><i aria-hidden="true" />{modeLoading ? (modeItems.length > 0 ? "正在更新，当前仍可使用" : "正在读取") : "每日缓存"}</span>
                 <small>{trendStatusText(props.trendMeta)}</small>
                 <button className="icon-button" type="button" aria-label="立即刷新热点" title="立即刷新热点" disabled={modeLoading} onClick={props.onRefreshTrends}><RefreshCw aria-hidden="true" size={16} /></button>
               </div>
@@ -138,7 +120,8 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             ) : null}
           </header>
 
-          {modeError ? (
+          {modeError && modeItems.length > 0 ? <div className="candidate-cache-warning" role="status"><AlertCircle aria-hidden="true" size={17} /><span>本次更新失败，继续展示上次缓存：{modeError}</span></div> : null}
+          {modeError && modeItems.length === 0 ? (
             <div className="candidate-error" role="alert"><AlertCircle aria-hidden="true" size={20} /><div><strong>{mode === "trend" ? "热点候选暂时不可用" : "系列候选暂时不可用"}</strong><span>{modeError}</span></div><button className="button button-secondary" type="button" onClick={() => props.onRetry(candidateMode)}><RefreshCw aria-hidden="true" size={15} />重试</button></div>
           ) : modeLoading && modeItems.length === 0 ? (
             <div className="candidate-loading"><RadioTower aria-hidden="true" size={24} /><div><h2>{mode === "trend" ? "正在生成今日提案" : "正在读取系列选题"}</h2><p>{mode === "trend" ? "Codex 正在阅读热点并形成提案，通常需要 1–3 分钟；系列和自定义创作仍可立即使用。" : "系列策划通常几秒内就会出现。"}</p></div>{mode === "trend" ? <button className="button button-secondary" type="button" onClick={props.onManual}>录入自己的选题</button> : null}</div>
@@ -193,10 +176,6 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
       />
     </section>
   );
-}
-
-function EntryTab({ active, icon, label, note, onClick }: { active: boolean; icon: React.ReactNode; label: string; note: string; onClick: () => void }) {
-  return <button type="button" role="tab" aria-selected={active} onClick={onClick}>{icon}<span><strong>{label}</strong><small>{note}</small></span></button>;
 }
 
 function CandidateDetail({ item, adopting, disabled, onAdopt }: { item: StudioCandidateInboxItem; adopting: boolean; disabled: boolean; onAdopt: () => Promise<void> }) {

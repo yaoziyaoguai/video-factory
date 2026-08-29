@@ -29,6 +29,21 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
   const approveDialogRef = useDialogFocus<HTMLElement>(approving, () => setApproving(false), decisionPending);
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
   const creatorNodes = run.nodes.filter((node) => isCreatorFacingNode(node.id) && nodeHasCreatorContent(node, run));
+  const activeSpendNode = creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
+  const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id);
+  const showReviewSurface = Boolean(video?.contentUrl || run.activeIntervention || isTerminalStatus(run.status));
+
+  const renderNodeWorkspace = (node: StudioRunDetail["nodes"][number]) => <NodeWorkspace
+    key={node.id}
+    node={node}
+    nodes={run.nodes}
+    runStatus={run.status}
+    artifacts={run.artifacts.filter((artifact) => node.artifactIds.includes(artifact.id))}
+    busy={nodeMutationPending}
+    onOverride={onOverrideNode ?? (async () => undefined)}
+    onInputOverride={onOverrideNodeInput ?? (async () => undefined)}
+    onAuthorize={onAuthorizeSpend ?? (async () => undefined)}
+  />;
 
   useEffect(() => {
     if (!run.activeIntervention) {
@@ -58,7 +73,19 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
         ))}
       </section>
 
-      <div className="review-layout">
+      {activeSpendNode ? <section className="current-production-action" aria-labelledby="current-production-action-title">
+        <header>
+          <div><p className="eyebrow">当前需要处理</p><h2 id="current-production-action-title">现在需要你：确认{activeSpendNode.label}</h2></div>
+          <StatusBadge status={run.status} />
+        </header>
+        <p>{activeSpendNode.role ?? "当前角色"}完成后，系统会继续推进后续节点。请先检查它收到的内容、实际使用的模型和费用上限。</p>
+        {renderNodeWorkspace(activeSpendNode)}
+      </section> : !showReviewSurface ? <section className="current-production-action is-running" aria-live="polite">
+        <header><div><p className="eyebrow">自动制作中</p><h2>{runningNodeLabel(run)}</h2></div><StatusBadge status={run.status} /></header>
+        <p>{runStateMessage(run)}</p>
+      </section> : null}
+
+      {showReviewSurface ? <div className="review-layout">
         <section className="video-stage" aria-labelledby="preview-title" data-tour="run-preview">
           <div className="section-heading stage-heading">
             <div><p className="eyebrow">最终画面</p><h2 id="preview-title">成片预览</h2></div>
@@ -110,22 +137,12 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
           )}
 
         </aside>
-      </div>
+      </div> : null}
 
-      {creatorNodes.length ? <section className="role-workspaces" aria-labelledby="role-workspaces-title">
-        <header className="section-heading"><div><p className="eyebrow">创作内容</p><h2 id="role-workspaces-title">逐项预览与修改</h2><p>这里只呈现会影响作品、并且适合人工调整的内容。路径、版本和运行参数不会占用你的注意力。</p></div><span>{creatorNodes.length} 项</span></header>
+      {remainingCreatorNodes.length ? <section className="role-workspaces" aria-labelledby="role-workspaces-title">
+        <header className="section-heading"><div><p className="eyebrow">创作内容</p><h2 id="role-workspaces-title">逐项预览与修改</h2><p>这里只呈现会影响作品、并且适合人工调整的内容。路径、版本和运行参数不会占用你的注意力。</p></div><span>{remainingCreatorNodes.length} 项</span></header>
         <div className="node-workspace-list">
-          {creatorNodes.map((node) => <NodeWorkspace
-            key={node.id}
-            node={node}
-            nodes={run.nodes}
-            runStatus={run.status}
-            artifacts={run.artifacts.filter((artifact) => node.artifactIds.includes(artifact.id))}
-            busy={nodeMutationPending}
-            onOverride={onOverrideNode ?? (async () => undefined)}
-            onInputOverride={onOverrideNodeInput ?? (async () => undefined)}
-            onAuthorize={onAuthorizeSpend ?? (async () => undefined)}
-          />)}
+          {remainingCreatorNodes.map(renderNodeWorkspace)}
         </div>
       </section> : null}
 
@@ -173,6 +190,17 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
       ) : null}
     </main>
   );
+}
+
+function isTerminalStatus(status: StudioRunDetail["status"]): boolean {
+  return status === "succeeded" || status === "failed" || status === "rejected";
+}
+
+function runningNodeLabel(run: StudioRunDetail): string {
+  const current = run.nodes.find((node) => node.id === run.currentNodeId)
+    ?? run.nodes.find((node) => node.status === "running")
+    ?? run.nodes.find((node) => node.status === "pending");
+  return current ? `${current.role ?? "制作角色"}正在处理${current.label}` : "系统正在推进制作";
 }
 
 function runStateMessage(run: StudioRunDetail): string {

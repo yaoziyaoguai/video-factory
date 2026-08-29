@@ -1,6 +1,6 @@
-import { AlertCircle, CheckCircle2, Plus, RadioTower, RefreshCw } from "lucide-react";
+import { AlertCircle, ArrowLeft, CheckCircle2, RadioTower, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import type {
   StudioCandidateInbox,
   StudioCandidateInboxItem,
@@ -22,8 +22,6 @@ import { OpportunityRail } from "../components/OpportunityRail.js";
 import { ProductionStrip } from "../components/ProductionStrip.js";
 import { SeriesDialog } from "../components/SeriesDialog.js";
 import { TopicEntryWorkspace } from "../components/TopicEntryWorkspace.js";
-
-const TREND_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 export function TodayPage() {
   const navigate = useNavigate();
@@ -54,11 +52,9 @@ export function TodayPage() {
   const [seriesError, setSeriesError] = useState<string>();
   const [candidateActionError, setCandidateActionError] = useState<string>();
   const [adoptingCandidateId, setAdoptingCandidateId] = useState<string>();
-  const [journeyStep, setJourneyStep] = useState<0 | 1 | 2>(0);
   const [nextStepNotice, setNextStepNotice] = useState<string>();
   const adoptedSectionRef = useRef<HTMLElement>(null);
   const trendLoadingRef = useRef(false);
-  const lastTrendRefreshAtRef = useRef(0);
 
   const loadTrendInbox = useCallback(async (forceRefresh = false) => {
     if (trendLoadingRef.current) return;
@@ -68,7 +64,6 @@ export function TodayPage() {
     try {
       if (forceRefresh) await studioApi.refreshTrendCandidates();
       setTrendInbox(onlyOrigin(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }), "trend"));
-      lastTrendRefreshAtRef.current = Date.now();
     } catch (caught) {
       setTrendError(errorMessage(caught));
     } finally {
@@ -123,28 +118,10 @@ export function TodayPage() {
 
   useEffect(() => {
     void load();
-    void loadTrendInbox();
-    void loadSeriesWorkspace();
-  }, [load, loadSeriesWorkspace, loadTrendInbox]);
-  useEffect(() => {
-    const timer = window.setInterval(() => void loadTrendInbox(true), TREND_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [loadTrendInbox]);
-  useEffect(() => {
-    const refreshWhenStale = () => {
-      if (Date.now() - lastTrendRefreshAtRef.current >= TREND_REFRESH_INTERVAL_MS) void loadTrendInbox(true);
-    };
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") refreshWhenStale();
-    };
-    window.addEventListener("focus", refreshWhenStale);
-    document.addEventListener("visibilitychange", refreshWhenVisible);
-    return () => {
-      window.removeEventListener("focus", refreshWhenStale);
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
-    };
-  }, [loadTrendInbox]);
-  const inbox = useMemo(() => mergeInboxes(trendInbox, seriesInbox), [seriesInbox, trendInbox]);
+    if (entryMode === "trend") void loadTrendInbox();
+    if (entryMode === "series") void loadSeriesWorkspace();
+  }, [entryMode, load, loadSeriesWorkspace, loadTrendInbox]);
+  const inbox = entryMode === "trend" ? trendInbox : entryMode === "series" ? seriesInbox : undefined;
   const trendMeta = useMemo(() => buildTrendMeta(trendInbox), [trendInbox]);
   const selected = useMemo(() => opportunities.find((item) => item.id === selectedId) ?? opportunities[0], [opportunities, selectedId]);
   const dailyStatus = `${inbox?.facets.total ?? 0} 条候选 · ${opportunities.length} 条制作机会 · ${runs.filter((run) => run.status === "succeeded").length} 条已完成`;
@@ -170,7 +147,6 @@ export function TodayPage() {
       } : current;
       if (candidate.origin === "trend") setTrendInbox(updateInbox);
       else setSeriesInbox(updateInbox);
-      setJourneyStep(1);
       setNextStepNotice("已采用。下一步：检查证据与镜头计划，再开始制作。");
       window.requestAnimationFrame(() => {
         adoptedSectionRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
@@ -201,7 +177,6 @@ export function TodayPage() {
         setCandidateActionError(`制作已创建，但机会状态同步失败：${errorMessage(caught)}`);
       }
     }
-    setJourneyStep(2);
     setProductionDialogOpen(false);
     navigate(`/projects/${result.runId}`);
   }
@@ -218,18 +193,12 @@ export function TodayPage() {
   return (
     <main className="today-page">
       <header className="today-header">
-        <div><p className="eyebrow">今日创作</p><h1>今天做哪一条？</h1><p>{dailyStatus}</p></div>
-        <button className="button button-secondary" type="button" onClick={() => openOpportunityDialog("manual")}><Plus aria-hidden="true" size={17} />自定义创作</button>
+        <div><p className="eyebrow">{entryCopy(entryMode).eyebrow}</p><h1>{entryCopy(entryMode).title}</h1><p>{dailyStatus}</p></div>
+        <Link className="button button-secondary" to="/"><ArrowLeft aria-hidden="true" size={17} />更换创作入口</Link>
       </header>
       {runsLoading ? <div className="region-loading">正在读取生产状态...</div> : runsError ? (
         <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={18} />生产状态读取失败：{runsError}</div>
       ) : <ProductionStrip runs={runs} />}
-      <section className="daily-path" aria-label="今天做一条视频">
-        <div className={journeyStep > 0 ? "daily-path-step is-complete" : "daily-path-step is-current"}><span>01</span><div><strong>选择选题</strong><small>热点、系列或自己的观察</small></div></div>
-        <div className={journeyStep > 1 ? "daily-path-step is-complete" : journeyStep === 1 ? "daily-path-step is-current" : "daily-path-step"}><span>02</span><div><strong>确认内容</strong><small>核验证据、钩子与制作配方</small></div></div>
-        <div className={journeyStep === 2 ? "daily-path-step is-current" : "daily-path-step"}><span>03</span><div><strong>生成与审片</strong><small>看完成片，再决定批准或打回</small></div></div>
-      </section>
-
       <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} {...(inbox ? { inbox } : {})} series={series} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onCreateSeries={() => setSeriesDialogOpen(true)} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
       {candidateActionError ? <div className="inline-error topic-action-error" role="alert"><AlertCircle aria-hidden="true" size={18} />{candidateActionError}</div> : null}
       {nextStepNotice ? <div className="next-step-notice" role="status"><CheckCircle2 aria-hidden="true" size={18} /><strong>{nextStepNotice}</strong><button type="button" onClick={() => setNextStepNotice(undefined)} aria-label="关闭下一步提示">知道了</button></div> : null}
@@ -240,7 +209,7 @@ export function TodayPage() {
           <div className="source-error-state" role="alert"><AlertCircle aria-hidden="true" size={22} /><div><p className="eyebrow">制作机会不可用</p><h2>机会读取失败</h2><p>{opportunitiesError}</p></div><button className="button button-secondary" type="button" onClick={() => void load()}><RefreshCw aria-hidden="true" size={16} />重试</button></div>
         ) : selected ? (
           <div className="director-workspace">
-            <OpportunityRail opportunities={opportunities} selectedId={selected.id} onSelect={(id) => { setSelectedId(id); setJourneyStep(1); }} onCreate={() => openOpportunityDialog("manual")} />
+            <OpportunityRail opportunities={opportunities} selectedId={selected.id} onSelect={setSelectedId} onCreate={() => openOpportunityDialog("manual")} />
             <OpportunityFocus key={selected.id} opportunity={selected} />
             <DirectorPanel opportunity={selected} providers={providers} {...(providersLoading || providersError ? { providerError: providersLoading ? "正在读取能力状态..." : `能力状态读取失败：${providersError}` } : {})} onProduce={openProductionDialog} />
           </div>
@@ -277,13 +246,6 @@ function onlyOrigin(inbox: StudioCandidateInbox, origin: StudioCandidateInboxIte
   return { ...inbox, items, facets: buildInboxFacets(items) };
 }
 
-function mergeInboxes(...inboxes: Array<StudioCandidateInbox | undefined>): StudioCandidateInbox | undefined {
-  const present = inboxes.filter((item): item is StudioCandidateInbox => Boolean(item));
-  if (present.length === 0) return undefined;
-  const items = [...new Map(present.flatMap((item) => item.items).map((item) => [item.id, item])).values()];
-  return { items, facets: buildInboxFacets(items), generatedAt: present.map((item) => item.generatedAt).sort().at(-1)! };
-}
-
 function buildInboxFacets(items: StudioCandidateInboxItem[]): StudioCandidateInbox["facets"] {
   const facets: StudioCandidateInbox["facets"] = { total: items.length, origins: {}, categories: {}, platforms: {}, verdicts: {} };
   for (const item of items) {
@@ -293,6 +255,12 @@ function buildInboxFacets(items: StudioCandidateInboxItem[]): StudioCandidateInb
     facets.verdicts[item.editorialDecision.verdict] = (facets.verdicts[item.editorialDecision.verdict] ?? 0) + 1;
   }
   return facets;
+}
+
+function entryCopy(mode: "trend" | "series" | "custom"): { eyebrow: string; title: string } {
+  if (mode === "series") return { eyebrow: "系列策划", title: "继续你的内容系列" };
+  if (mode === "custom") return { eyebrow: "自由创作", title: "从你的想法开始" };
+  return { eyebrow: "热点选题", title: "挑一条真正值得做的热点" };
 }
 
 function buildTrendMeta(inbox: StudioCandidateInbox | undefined) {

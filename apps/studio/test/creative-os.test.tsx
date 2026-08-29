@@ -12,6 +12,7 @@ import { ProductionStrip } from "../src/client/components/ProductionStrip.js";
 import { ExperimentsPage } from "../src/client/pages/ExperimentsPage.js";
 import { ProductionPage } from "../src/client/pages/ProductionPage.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
+import { HomePage } from "../src/client/pages/HomePage.js";
 import { TodayPage } from "../src/client/pages/TodayPage.js";
 import type { StudioCandidateInboxItem, StudioOpportunity, StudioProvider, StudioRunSummary, StudioTemplate, StudioTrendSource } from "../src/shared/api.js";
 
@@ -179,8 +180,7 @@ describe("Creative OS", () => {
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
   });
 
-  it("refreshes stale trends when the creator returns to the page", async () => {
-    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+  it("does not force-refresh trends when the creator returns to the page", async () => {
     const candidates = [candidate(1, "technology")];
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
@@ -191,10 +191,32 @@ describe("Creative OS", () => {
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await screen.findByRole("button", { name: /查看候选提案/ });
-    clock.mockReturnValue(5 * 60 * 1_000 + 2_000);
     window.dispatchEvent(new Event("focus"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(refresh).not.toHaveBeenCalled();
+  });
 
-    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+  it("keeps source selection on the home page instead of asking twice", async () => {
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([candidate(1, "technology")]));
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "热点候选收件箱" })).toBeInTheDocument();
+    expect(screen.queryByRole("tablist", { name: "选题入口" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "今天做一条视频" })).not.toBeInTheDocument();
+  });
+
+  it("uses the home page only as a source launcher without screening candidates again", async () => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    const candidateInbox = vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([candidate(1, "technology")]));
+    render(<MemoryRouter><HomePage /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "你今天从哪里出发？" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "先替你筛到三条" })).not.toBeInTheDocument();
+    expect(candidateInbox).not.toHaveBeenCalled();
   });
 
   it("creates a durable series from the peer series entry mode", async () => {
@@ -220,10 +242,9 @@ describe("Creative OS", () => {
       createdAt: "2026-08-24T09:00:00.000Z",
       updatedAt: "2026-08-24T09:00:00.000Z",
     });
-    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics?mode=series"]}><TodayPage /></MemoryRouter>);
 
-    await user.click(await screen.findByRole("tab", { name: /系列选题/ }));
-    await user.click(screen.getByRole("button", { name: "创建第一个系列" }));
+    await user.click(await screen.findByRole("button", { name: "新建系列" }));
     await user.type(screen.getByLabelText("系列名称"), "AI 下班实验室");
     await user.type(screen.getByLabelText("系列承诺"), "每集验证一个普通人真能用上的 AI 方法。");
     await user.type(screen.getByLabelText("目标受众"), "普通上班族");
@@ -411,7 +432,7 @@ describe("Creative OS", () => {
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     expect(await screen.findByRole("heading", { name: "正在生成今日提案" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "今天做一条视频" })).toHaveTextContent("选择选题");
+    expect(screen.queryByRole("region", { name: "今天做一条视频" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "录入自己的选题" }));
     expect(screen.getByRole("dialog", { name: "录入机会" })).toBeInTheDocument();
   });
@@ -439,9 +460,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockImplementation((query) => query?.origins?.includes("trend")
       ? new Promise(() => undefined)
       : Promise.resolve(inbox([seriesCandidate])));
-    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
-
-    await user.click(await screen.findByRole("tab", { name: /系列选题/ }));
+    render(<MemoryRouter initialEntries={["/topics?mode=series"]}><TodayPage /></MemoryRouter>);
 
     expect(await screen.findByRole("button", { name: /查看候选提案 20/ })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "正在生成今日提案" })).not.toBeInTheDocument();

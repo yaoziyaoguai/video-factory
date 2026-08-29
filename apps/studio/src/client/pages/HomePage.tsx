@@ -1,30 +1,22 @@
 import { ArrowRight, Flame, Lightbulb, ListVideo, Play, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import type { StudioCandidateInbox, StudioRunSummary } from "../../shared/api.js";
+import type { StudioRunSummary } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { StatusBadge } from "../components/StatusBadge.js";
 
 export function HomePage() {
   const navigate = useNavigate();
   const [runs, setRuns] = useState<StudioRunSummary[]>([]);
-  const [inbox, setInbox] = useState<StudioCandidateInbox>();
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
 
   const load = useCallback(async () => {
-    setLoading(true);
     setError(undefined);
-    const [runsResult, inboxResult] = await Promise.allSettled([
-      studioApi.runs(),
-      studioApi.candidateInbox({ verdicts: ["produce_video", "produce_image_story"], limit: 12 }),
-    ]);
-    if (runsResult.status === "fulfilled") setRuns(runsResult.value);
-    if (inboxResult.status === "fulfilled") setInbox(inboxResult.value);
-    if (runsResult.status === "rejected" && inboxResult.status === "rejected") {
+    try {
+      setRuns(await studioApi.runs());
+    } catch {
       setError("创作台暂时没有连接到制作服务。");
     }
-    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -34,9 +26,6 @@ export function HomePage() {
   const currentRun = useMemo(() => runs.find(needsAttention)
     ?? runs.find((run) => run.status === "running" || run.status === "pending")
     ?? runs[0], [runs]);
-  const recommendations = useMemo(() => (inbox?.items ?? [])
-    .filter((item) => item.editorialDecision.verdict !== "skip")
-    .slice(0, 3), [inbox]);
 
   return (
     <main className="home-page">
@@ -86,23 +75,6 @@ export function HomePage() {
             <Plus aria-hidden="true" size={18} />
           </button>
         </div>
-      </section>
-
-      <section className="home-recommendations" aria-labelledby="recommendations-title">
-        <header>
-          <div><p className="eyebrow">今日推荐</p><h2 id="recommendations-title">先替你筛到三条</h2></div>
-          <Link to="/topics">进入完整选题中心<ArrowRight aria-hidden="true" size={15} /></Link>
-        </header>
-        {loading && !inbox ? <p className="home-loading">正在读取最新候选...</p> : recommendations.length ? (
-          <div className="home-recommendation-list">
-            {recommendations.map((item, index) => <Link to={`/topics?${item.origin === "series" ? "mode=series&" : ""}candidate=${encodeURIComponent(item.id)}`} key={item.id}>
-              <span>{String(index + 1).padStart(2, "0")}</span>
-              <div><strong>{item.title}</strong><small>{item.hook}</small></div>
-              <b>{item.origin === "series" ? "系列下一集" : item.category}</b>
-              <ArrowRight aria-hidden="true" size={16} />
-            </Link>)}
-          </div>
-        ) : <div className="home-empty-recommendations"><p>暂时没有可用的实时推荐。</p><Link to="/topics">检查热点源</Link></div>}
       </section>
     </main>
   );

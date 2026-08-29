@@ -895,6 +895,46 @@ describe("Studio client", () => {
     expect(onDecision).toHaveBeenCalledWith({ action: "approve" });
   });
 
+  it("puts the current paid node and its confirmation action above unfinished output", async () => {
+    const { activeIntervention: _activeIntervention, videoArtifactId: _videoArtifactId, ...base } = runDetail;
+    const paidRun: StudioRunDetail = {
+      ...base,
+      status: "awaiting_spend_approval",
+      nextAction: "confirm_spend",
+      currentNodeId: "voice",
+      artifacts: [],
+      nodes: [
+        { id: "brief", label: "内容简报", role: "制片人", status: "succeeded", artifactIds: [], qualityGateResults: [], output: { title: runDetail.title } },
+        {
+          id: "voice",
+          label: "配音",
+          role: "声音导演",
+          status: "awaiting_spend_approval",
+          artifactIds: [],
+          qualityGateResults: [],
+          spendPlan: {
+            id: "voice-plan",
+            inputVersionIds: [],
+            providerId: "minimax-speech-v1",
+            modelId: "speech-02-hd",
+            estimatedCostCny: 0.3,
+            maxCostCny: 0.5,
+            maxAttempts: 1,
+            createdAt: "2026-08-29T00:00:00.000Z",
+          },
+        },
+        { id: "render", label: "渲染", role: "剪辑师", status: "pending", artifactIds: [], qualityGateResults: [] },
+      ],
+    };
+
+    render(<RunWorkbench run={paidRun} decisionPending={false} onDecision={async () => undefined} onAuthorizeSpend={async () => undefined} />);
+
+    expect(screen.getByRole("heading", { name: "现在需要你：确认配音" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "检查并确认" })).toBeInTheDocument();
+    expect(screen.getByText(/声音导演完成后，系统会继续推进后续节点/)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "成片预览" })).not.toBeInTheDocument();
+  });
+
   it("shows the director's visual bible and AI-generated per-shot routes", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
