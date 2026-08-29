@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from urllib.error import HTTPError, URLError
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -30,6 +30,7 @@ ASSET_DOWNLOAD_ATTEMPTS = 2
 ASSET_PREPARE_WORKERS = 3
 NETWORK_RETRY_DELAY_SECONDS = 0.25
 ASSET_REDIRECT_LIMIT = 5
+MIN_MODEL_SEMANTIC_SCORE = 40
 UNSAFE_IPV6_NETWORKS = (
     ipaddress.ip_network("64:ff9b::/96"),
     ipaddress.ip_network("64:ff9b:1::/48"),
@@ -97,6 +98,15 @@ PROVIDER_LICENSE_NOTE = {
 
 class MissingProviderKey(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class RankedCandidatePreference:
+    provider: str
+    asset_id: str
+    semantic_score: int
+    locked: bool
+    enforce_score: bool
 
 
 def default_asset_plan_path(workspace: Path, job_id: int) -> Path:
@@ -366,6 +376,7 @@ def prepare_routed_scene_assets(
         actual_provider_id = None
         generation_pending = is_generative_provider(preferred_id)
         errors = []
+        materialization_notes: list[str] = []
         duplicate_options: list[tuple[str, List[StockAssetCandidate]]] = []
 
         for provider_id in provider_ids:
@@ -393,6 +404,7 @@ def prepare_routed_scene_assets(
                     asset_dir,
                     claim=claim_candidate,
                     release=release_candidate,
+                    failures=materialization_notes,
                 )
                 if actual_asset is not None:
                     actual_provider_id = provider_id
@@ -403,7 +415,12 @@ def prepare_routed_scene_assets(
 
         if actual_asset is None:
             for provider_id, candidates in duplicate_options:
-                actual_asset = materialize_first_candidate(scene, candidates, asset_dir)
+                actual_asset = materialize_first_candidate(
+                    scene,
+                    candidates,
+                    asset_dir,
+                    failures=materialization_notes,
+                )
                 if actual_asset is not None:
                     actual_provider_id = provider_id
                     break
@@ -427,7 +444,7 @@ def prepare_routed_scene_assets(
                     ),
                 ))
 
-        return actual_asset, {
+        routing_record = {
             "scene_position": scene.position,
             "preferred_provider_id": preferred_id,
             "actual_provider_id": actual_provider_id,
@@ -440,6 +457,9 @@ def prepare_routed_scene_assets(
             "rationale": str(route.get("rationale") or ""),
             "candidate_shortlist": candidate_shortlist,
         }
+        if materialization_notes:
+            routing_record["materialization_notes"] = list(dict.fromkeys(materialization_notes))
+        return actual_asset, routing_record
 
     with ThreadPoolExecutor(max_workers=min(ASSET_PREPARE_WORKERS, max(1, len(scene_list)))) as executor:
         prepared = list(executor.map(prepare_scene, scene_list))
@@ -454,13 +474,14 @@ def prepare_routed_scene_assets(
     return plan_path
 
 
-def ranking_candidate_ids_by_scene(candidate_ranking: Optional[dict]) -> dict[int, list[tuple[str, str]]]:
+def ranking_candidate_ids_by_scene(candidate_ranking: Optional[dict]) -> dict[int, list[RankedCandidatePreference]]:
     if candidate_ranking is None:
         return {}
     scenes = candidate_ranking.get("scenes")
     if not isinstance(scenes, list):
         raise ValueError("Candidate ranking scenes must be an array")
-    result: dict[int, list[tuple[str, str]]] = {}
+    result: dict[int, list[RankedCandidatePreference]] = {}
+    enforce_score = candidate_ranking.get("source") == "model"
     for scene in scenes:
         if not isinstance(scene, dict) or not isinstance(scene.get("scenePosition"), int):
             raise ValueError("Candidate ranking scenePosition is invalid")
@@ -472,7 +493,13 @@ def ranking_candidate_ids_by_scene(candidate_ranking: Optional[dict]) -> dict[in
             int(item.get("rank", 1_000_000)) if isinstance(item, dict) else 1_000_000,
         ))
         result[int(scene["scenePosition"])] = [
-            (str(item.get("provider") or ""), str(item.get("assetId") or ""))
+            RankedCandidatePreference(
+                provider=str(item.get("provider") or ""),
+                asset_id=str(item.get("assetId") or ""),
+                semantic_score=int(item.get("semanticScore", 0)),
+                locked=item.get("locked") is True,
+                enforce_score=enforce_score,
+            )
             for item in ordered
             if isinstance(item, dict) and item.get("provider") and item.get("assetId")
         ]
@@ -513,11 +540,15 @@ def inventory_candidates_by_scene_provider(candidate_inventory: Optional[dict]) 
 
 def reorder_candidates(
     candidates: List[StockAssetCandidate],
-    preferred: list[tuple[str, str]],
+    preferred: list[RankedCandidatePreference],
 ) -> List[StockAssetCandidate]:
     if not preferred:
         return candidates
-    positions = {candidate_key: index for index, candidate_key in enumerate(preferred)}
+    accepted = [
+        item for item in preferred
+        if item.locked or not item.enforce_score or item.semantic_score >= MIN_MODEL_SEMANTIC_SCORE
+    ]
+    positions = {(item.provider, item.asset_id): index for index, item in enumerate(accepted)}
     reviewed = [candidate for candidate in candidates if (candidate.provider, candidate.asset_id) in positions]
     return sorted(reviewed, key=lambda candidate: positions[(candidate.provider, candidate.asset_id)])
 
@@ -546,15 +577,18 @@ def materialize_first_candidate(
     asset_dir: Path,
     claim: Optional[Callable[[StockAssetCandidate], bool]] = None,
     release: Optional[Callable[[StockAssetCandidate], None]] = None,
+    failures: Optional[list[str]] = None,
 ) -> Optional[SceneAsset]:
     for candidate in candidates:
         if claim is not None and not claim(candidate):
             continue
         try:
             actual_path = materialize_candidate(candidate, asset_dir / local_filename(scene.position, candidate))
-        except RuntimeError:
+        except RuntimeError as error:
             if release is not None:
                 release(candidate)
+            if failures is not None:
+                failures.append(f"{candidate.provider}:{candidate.asset_id}: {error}")
             continue
         return SceneAsset(
             scene_position=scene.position,

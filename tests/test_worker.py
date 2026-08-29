@@ -338,6 +338,135 @@ class WorkerContractTest(unittest.TestCase):
             self.assertEqual(plan["scene_assets"][0]["asset_id"], "candidate-2")
             search_assets.assert_not_called()
 
+    def test_ai_router_records_failed_candidate_materialization_before_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = Path(handle_request(self.valid_request("script.draft", root / "script"))["output"]["scriptPath"])
+            script = json.loads(script_path.read_text(encoding="utf-8"))
+            director_plan_path = root / "director_plan.json"
+            director_plan_path.write_text(json.dumps({
+                "shots": [{
+                    "scenePosition": scene["position"],
+                    "preferredProviderId": "pexels-stock-v1" if scene["position"] == 1 else "local-editorial-v1",
+                    "alternativeProviderIds": ["local-editorial-v1"],
+                    "query": f"scene query {scene['position']}",
+                } for scene in script["scenes"]],
+            }), encoding="utf-8")
+            ranking_path = root / "ranking.json"
+            ranking_path.write_text(json.dumps({
+                "version": "video-factory/asset-ranking-v1",
+                "source": "model",
+                "scenes": [{
+                    "scenePosition": 1,
+                    "candidates": [{
+                        "provider": "pexels", "assetId": "best", "rank": 1,
+                        "semanticScore": 88, "locked": False,
+                    }],
+                }],
+            }), encoding="utf-8")
+            inventory_path = root / "candidate_inventory.private.json"
+            inventory_path.write_text(json.dumps({
+                "version": "video-factory/asset-candidate-inventory-v1",
+                "scene_candidates": [{
+                    "scene_position": 1,
+                    "candidates": [{
+                        "provider": "pexels", "provider_id": "pexels-stock-v1", "asset_id": "best",
+                        "media_type": "video", "width": 1080, "height": 1920, "duration": 5,
+                        "preview_url": "", "download_url": "mock://best", "source_url": "",
+                        "creator": "", "license_note": "", "query": "q", "score": 90,
+                    }],
+                }],
+            }), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "assets")
+            request["input"] = {
+                "scriptPath": str(script_path),
+                "directorPlanPath": str(director_plan_path),
+                "candidateRankingPath": str(ranking_path),
+                "candidateInventoryPath": str(inventory_path),
+            }
+            request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video"}
+
+            with patch("video_factory.stock_assets.materialize_candidate", side_effect=RuntimeError("download timed out")):
+                response = handle_request(request)
+
+            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
+            route = plan["director_routing"][0]
+            self.assertEqual(plan["scene_assets"][0]["provider"], "local")
+            self.assertIn("pexels:best", route["materialization_notes"][0])
+            self.assertIn("download timed out", route["materialization_notes"][0])
+
+    def test_ai_router_rejects_low_semantic_fallbacks_but_keeps_human_locks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = Path(handle_request(self.valid_request("script.draft", root / "script"))["output"]["scriptPath"])
+            script = json.loads(script_path.read_text(encoding="utf-8"))
+            director_plan_path = root / "director_plan.json"
+            director_plan_path.write_text(json.dumps({
+                "shots": [{
+                    "scenePosition": scene["position"],
+                    "preferredProviderId": "pexels-stock-v1" if scene["position"] in {1, 2} else "local-editorial-v1",
+                    "alternativeProviderIds": ["local-editorial-v1"],
+                    "query": f"scene query {scene['position']}",
+                } for scene in script["scenes"]],
+            }, ensure_ascii=False), encoding="utf-8")
+            ranking_path = root / "ranking.json"
+            ranking_path.write_text(json.dumps({
+                "version": "video-factory/asset-ranking-v1",
+                "source": "model",
+                "scenes": [
+                    {
+                        "scenePosition": 1,
+                        "candidates": [{
+                            "provider": "pexels", "assetId": "low-score", "rank": 1,
+                            "semanticScore": 20, "locked": False,
+                        }],
+                    },
+                    {
+                        "scenePosition": 2,
+                        "candidates": [{
+                            "provider": "pexels", "assetId": "human-choice", "rank": 1,
+                            "semanticScore": 20, "locked": True,
+                        }],
+                    },
+                ],
+            }), encoding="utf-8")
+            inventory_path = root / "candidate_inventory.private.json"
+            inventory_path.write_text(json.dumps({
+                "version": "video-factory/asset-candidate-inventory-v1",
+                "scene_candidates": [
+                    {
+                        "scene_position": position,
+                        "candidates": [{
+                            "provider": "pexels", "provider_id": "pexels-stock-v1", "asset_id": asset_id,
+                            "media_type": "video", "width": 1080, "height": 1920, "duration": 5,
+                            "preview_url": "", "download_url": f"mock://{asset_id}", "source_url": "",
+                            "creator": "", "license_note": "", "query": "q", "score": 90,
+                        }],
+                    }
+                    for position, asset_id in ((1, "low-score"), (2, "human-choice"))
+                ],
+            }), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "assets")
+            request["input"] = {
+                "scriptPath": str(script_path),
+                "directorPlanPath": str(director_plan_path),
+                "candidateRankingPath": str(ranking_path),
+                "candidateInventoryPath": str(inventory_path),
+            }
+            request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video"}
+
+            def materialize(candidate, target):
+                target.write_bytes(b"video")
+                return target
+
+            with patch("video_factory.stock_assets.materialize_candidate", side_effect=materialize):
+                response = handle_request(request)
+
+            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
+            assets = {item["scene_position"]: item for item in plan["scene_assets"]}
+            self.assertEqual(assets[1]["provider"], "local")
+            self.assertEqual(assets[2]["asset_id"], "human-choice")
+
     def test_ai_router_prepares_independent_scenes_with_bounded_concurrency(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

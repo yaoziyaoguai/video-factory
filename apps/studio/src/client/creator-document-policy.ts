@@ -92,6 +92,7 @@ const CREATOR_NESTED_FIELDS = new Set([
   "lighting",
   "locked",
   "mastering_preset",
+  "materialization_notes",
   "message",
   "narration",
   "narrativeApproach",

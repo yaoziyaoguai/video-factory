@@ -356,10 +356,16 @@ def render_scene_clip(
     asset_path = Path(str(asset["local_path"]))
     clip_path = clips_dir / f"scene_{scene['position']:02d}.mp4"
     if asset["media_type"] == "video":
-        input_args = ["-stream_loop", "-1", "-t", f"{duration:.3f}", "-i", str(asset_path)]
+        if is_generated_video_asset(asset):
+            source_duration = probe_media_duration(asset_path)
+            input_args = ["-i", str(asset_path)]
+            timing_filter = f",setpts={duration / source_duration:.6f}*PTS"
+        else:
+            input_args = ["-stream_loop", "-1", "-t", f"{duration:.3f}", "-i", str(asset_path)]
+            timing_filter = ""
         background_filter = (
             f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},setsar=1"
+            f"crop={width}:{height},setsar=1{timing_filter}"
         )
     elif asset["media_type"] == "image":
         input_args = [
@@ -419,6 +425,38 @@ def render_scene_clip(
     ]
     subprocess.run(command, check=True, capture_output=True, text=True)
     return clip_path, command
+
+
+def is_generated_video_asset(asset: dict) -> bool:
+    return str(asset.get("provider") or "") in {
+        "seedance-video-v1",
+        "wan-video-v1",
+        "kling-video-v1",
+        "hailuo-video-v1",
+        "vidu-video-v1",
+    }
+
+
+def probe_media_duration(path: Path) -> float:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    duration = float(result.stdout.strip())
+    if duration <= 0:
+        raise RuntimeError(f"Generated video has an invalid duration: {path}")
+    return duration
 
 
 def write_scene_frames(manifest: dict, frames_dir: Path, width: int, height: int) -> list[tuple[Path, float]]:

@@ -95,6 +95,35 @@ class VisualRenderingTest(unittest.TestCase):
         self.assertIn("enable='lt(t,2.85)'", image_filter)
         self.assertNotIn("zoompan", video_command[video_command.index("-filter_complex") + 1])
 
+    def test_generated_video_clips_fit_the_complete_source_motion_into_the_scene(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene = {"position": 1, "duration": 3.0}
+
+            def fake_run(command, check, capture_output, text):
+                self.assertTrue(check)
+                if command[0] == "ffprobe":
+                    return subprocess.CompletedProcess(command, 0, "5.875\n", "")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch("video_factory.renderer.subprocess.run", side_effect=fake_run):
+                _, command = render_scene_clip(
+                    scene,
+                    {
+                        "provider": "hailuo-video-v1",
+                        "media_type": "video",
+                        "local_path": str(root / "generated.mp4"),
+                    },
+                    root / "caption.png",
+                    root,
+                    1080,
+                    1920,
+                )
+
+        video_filter = command[command.index("-filter_complex") + 1]
+        self.assertNotIn("-stream_loop", command)
+        self.assertIn("setpts=0.510638*PTS", video_filter)
+
 
 if __name__ == "__main__":
     unittest.main()
