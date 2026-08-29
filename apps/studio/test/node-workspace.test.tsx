@@ -66,15 +66,12 @@ describe("node production workspaces", () => {
     const onOverride = vi.fn(async () => undefined);
     render(<NodeWorkspace node={succeededNode} runStatus="stale" artifacts={[]} busy={false} onOverride={onOverride} onInputOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "角色与模型" }));
-    expect(screen.getByText("codex-screenwriter-v1")).toBeInTheDocument();
-    expect(screen.getByText("codex", { selector: "span" })).toBeInTheDocument();
-    expect(screen.getByText("codex-runtime-actual")).toBeInTheDocument();
-    expect(screen.getByText("模板默认")).toBeInTheDocument();
-    await userEvent.click(screen.getByText("查看本次实际参数"));
-    expect(screen.getByText(/screenwriter-v4/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("tab", { name: "输出" }));
-    await userEvent.click(screen.getByRole("button", { name: "编辑" }));
+    expect(screen.getByText(/本次使用 Codex 编剧 · codex/)).toBeInTheDocument();
+    expect(screen.queryByText("codex-screenwriter-v1")).not.toBeInTheDocument();
+    expect(screen.queryByText("codex-runtime-actual")).not.toBeInTheDocument();
+    expect(screen.queryByText("模板默认")).not.toBeInTheDocument();
+    expect(screen.queryByText(/screenwriter-v4/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
     fireEvent.change(screen.getByRole("textbox", { name: "开场钩子" }), { target: { value: "人工钩子" } });
     await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
 
@@ -106,15 +103,12 @@ describe("node production workspaces", () => {
     render(<NodeWorkspace node={pendingNode} runStatus="running" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     expect(screen.getByText(/Codex 视觉导演 · gpt-5.4/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("tab", { name: "角色与模型" }));
-    expect(screen.getByText("api-visual-director-v1")).toBeInTheDocument();
-    expect(screen.getByText("模板默认")).toBeInTheDocument();
-    expect(screen.getByText(/创建任务时保存的执行计划/)).toBeInTheDocument();
-    await userEvent.click(screen.getByText("查看计划参数"));
-    expect(screen.getByText(/director-v6/)).toBeInTheDocument();
+    expect(screen.queryByText("api-visual-director-v1")).not.toBeInTheDocument();
+    expect(screen.queryByText("模板默认")).not.toBeInTheDocument();
+    expect(screen.queryByText(/director-v6/)).not.toBeInTheDocument();
   });
 
-  it("keeps failed metered task cost pending until an actual amount is reported", async () => {
+  it("keeps billing internals out of the creative editor", () => {
     const node: StudioNode = {
       ...succeededNode,
       executionReceipt: {
@@ -130,9 +124,9 @@ describe("node production workspaces", () => {
     };
     render(<NodeWorkspace node={node} runStatus="stale" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "执行证据" }));
-
-    expect(screen.getByText(/1 \/ 1 次计费任务失败 · 费用待回填（预估 ¥8.00）/)).toBeInTheDocument();
+    expect(screen.getByText(/本次使用 Seedance 视频生成 · seedance-2.5/)).toBeInTheDocument();
+    expect(screen.queryByText(/1 \/ 1 次计费任务失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/预估 ¥8.00/)).not.toBeInTheDocument();
     expect(screen.queryByText(/核算 ¥0.00/)).not.toBeInTheDocument();
   });
 
@@ -148,11 +142,11 @@ describe("node production workspaces", () => {
       onAuthorize={async () => undefined}
     />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "输入" }));
+    await userEvent.click(screen.getByText("调整这个角色收到的内容"));
     expect(screen.getAllByText(/旧题目/).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("button", { name: "编辑输入" }));
     fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "人工题目" } });
-    await userEvent.click(screen.getByRole("button", { name: "保存为人工输入版本" }));
+    await userEvent.click(screen.getByRole("button", { name: "保存人工输入" }));
 
     expect(onInputOverride).toHaveBeenCalledWith("script", {
       input: { brief: { title: "人工题目" } },
@@ -185,20 +179,51 @@ describe("node production workspaces", () => {
       onAuthorize={async () => undefined}
     />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "输入" }));
+    await userEvent.click(screen.getByText("调整这个角色收到的内容"));
     expect(screen.getByText("历史任务推断输入")).toBeInTheDocument();
-    expect(screen.getByText(/历史记录未保存原始输入/)).toBeInTheDocument();
+    expect(screen.getByText(/旧任务没有保存当时的原始输入/)).toBeInTheDocument();
   });
 
-  it("shows the immutable prompt pack, provider, model, and exact prompt for the effective version", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+  it("does not offer an input editor when a legacy node only saved technical paths", () => {
+    render(<NodeWorkspace
+      node={{
+        ...succeededNode,
+        inputState: {
+          effectiveVersionId: "legacy-path-input",
+          stale: false,
+          versions: [{
+            id: "legacy-path-input",
+            source: "reconstructed",
+            value: { scriptPath: "/private/runs/run-1/script.json" },
+            upstreamVersionIds: [],
+            createdAt: "2026-08-27T00:00:00.000Z",
+            createdBy: "legacy-reconstruction:script",
+            schemaVersion: "1",
+          }],
+        },
+      }}
+      runStatus="stale"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onInputOverride={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    expect(screen.queryByText("调整这个角色收到的内容")).not.toBeInTheDocument();
+    expect(screen.queryByText(/private\/runs/)).not.toBeInTheDocument();
+  });
+
+  it("does not fetch or expose the immutable model trace in the creator workspace", () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       version: "video-factory/model-trace-v1",
       taskKind: "script-draft",
       promptVersion: "video-factory/screenwriter-v2",
       providerId: "openai",
       modelId: "gpt-5.4",
       prompt: "Prompt Pack: video-factory/screenwriter-v2\n实际发送内容",
-    }), { status: 200, headers: { "content-type": "application/json" } })));
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
     const node: StudioNode = {
       ...succeededNode,
       artifactIds: ["trace-current"],
@@ -227,12 +252,10 @@ describe("node production workspaces", () => {
       onAuthorize={async () => undefined}
     />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "实际 Prompt" }));
-
-    expect(await screen.findByText("video-factory/screenwriter-v2")).toBeInTheDocument();
-    expect(screen.getByText("openai")).toBeInTheDocument();
-    expect(screen.getByText("gpt-5.4")).toBeInTheDocument();
-    expect(screen.getByText(/实际发送内容/)).toBeInTheDocument();
+    expect(screen.getByText(/本次使用 Codex 编剧 · codex/)).toBeInTheDocument();
+    expect(screen.queryByText(/video-factory\/screenwriter-v2/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/实际发送内容/)).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("binds a spend confirmation to the visible plan", async () => {
@@ -314,11 +337,9 @@ describe("node production workspaces", () => {
     />);
 
     expect((await screen.findAllByText(/旧脚本/)).length).toBeGreaterThan(0);
-    await userEvent.click(screen.getByRole("button", { name: "编辑" }));
-    await userEvent.click(screen.getByRole("button", { name: "JSON 专家" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "脚本交付内容 JSON" }), {
-      target: { value: "{\"title\":\"人工脚本\",\"scenes\":[{\"narration\":\"人工旁白\"}]}" },
-    });
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "人工脚本" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "旁白" }), { target: { value: "人工旁白" } });
     await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
 
     expect(onOverride).toHaveBeenCalledWith("script", {
@@ -331,7 +352,7 @@ describe("node production workspaces", () => {
 
   it("loads the artifact attached to the effective version when older attempts are also present", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify({
-      source: String(input).includes("current") ? "current" : "old",
+      hook: String(input).includes("current") ? "current" : "old",
     }), { status: 200, headers: { "content-type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
     const node: StudioNode = {
@@ -372,7 +393,7 @@ describe("node production workspaces", () => {
     const onOverride = vi.fn(async () => undefined);
     render(<NodeWorkspace node={succeededNode} runStatus="succeeded" artifacts={[]} busy={false} onOverride={onOverride} onAuthorize={async () => undefined} />);
 
-    await userEvent.click(screen.getByRole("button", { name: "编辑" }));
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
     await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
     expect(screen.getByRole("dialog", { name: /创建已结束制作的人工修订版/ })).toBeInTheDocument();
     expect(onOverride).not.toHaveBeenCalled();
@@ -395,7 +416,7 @@ describe("node production workspaces", () => {
     />);
 
     expect(screen.getByRole("alert")).toHaveTextContent("后续成片不会继续采用它");
-    expect(screen.getByText("暂不可打开 · 尚无文件地址").closest("span")).toHaveAttribute("aria-disabled", "true");
+    expect(screen.queryByText("暂不可打开 · 尚无文件地址")).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /script/ })).not.toBeInTheDocument();
   });
 
@@ -409,7 +430,7 @@ describe("node production workspaces", () => {
       onAuthorize={async () => undefined}
     />);
 
-    expect(screen.queryByRole("button", { name: "编辑" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
   });
 
   it("renders aggregate cost and links each video to its detail page", () => {
@@ -425,6 +446,6 @@ describe("node production workspaces", () => {
     expect(screen.getByRole("heading", { name: "每一分钱都能追到节点" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /付费成片/ })).toHaveAttribute("href", "/projects/run-1");
     expect(screen.getAllByText("¥3.00").length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/1 笔待回填/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/1 笔待核对/).length).toBeGreaterThan(0);
   });
 });

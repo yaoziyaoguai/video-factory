@@ -124,4 +124,17 @@ describe("FileRunStore", () => {
 
     assert.deepEqual(runs.map((run) => run.id), ["run-newer", "run-older"]);
   });
+
+  it("removes a run and all files stored below it", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-run-store-"));
+    const store = new pipeline.FileRunStore(root);
+    await store.create(waitingRun());
+    await mkdir(path.join(root, "run-20260821", "nodes", "render"), { recursive: true });
+    await writeFile(path.join(root, "run-20260821", "nodes", "render", "final.mp4"), "video", "utf8");
+
+    await store.remove("run-20260821");
+
+    await assert.rejects(() => store.load("run-20260821"), { code: "ENOENT" });
+    assert.deepEqual(await store.list(), []);
+  });
 });

@@ -10,6 +10,7 @@ import "./styles.css";
 import "./studio-v3.css";
 import "./creator-tour.css";
 import "./auth.css";
+import "./studio-polish.css";
 
 const root = document.getElementById("root");
 if (!root) {

@@ -103,6 +103,28 @@ describe("ZaiVisualReviewExecutor", () => {
     assert.doesNotMatch(result.trace?.prompt ?? "", /base64|test-only-zai-key/i);
   });
 
+  it("uses the configured visual-review model in both the request and trace", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    const executor = new ZaiVisualReviewExecutor({
+      env: {
+        ZAI_BIGMODEL_API_KEY: API_KEY,
+        ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3-flash-preview",
+      },
+      fetchFn: async (_input, init) => {
+        capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(validReport()) } }],
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+
+    const result = await executor.runTask(visualReviewTask());
+
+    assert.equal(capturedBody?.model, "glm-5.3-flash-preview");
+    assert.equal(result.trace?.modelId, "glm-5.3-flash-preview");
+    assert.equal(executor.identity.modelId, "glm-5.3-flash-preview");
+  });
+
   it("rejects non-visual work before any network request", async () => {
     let calls = 0;
     const executor = new ZaiVisualReviewExecutor({

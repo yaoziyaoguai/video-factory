@@ -1,22 +1,25 @@
+import { creatorContainerViewId, creatorViewId, isCreatorNestedField, isCreatorTopLevelField } from "../creator-document-policy.js";
+import { humanizeCreativeText, platformLabel, providerLabel } from "../presentation.js";
+
 interface NodeDeliveryPreviewProps {
   nodeId: string;
   value: unknown;
 }
 
 const PRIMARY_FIELDS: Record<string, string[]> = {
-  brief: ["title", "angle", "audience", "durationSeconds", "platform", "reviewMode"],
+  brief: ["title", "angle", "audience"],
   script: ["title", "hook", "structure", "duration_target", "disclosure_required", "platform_notes"],
   "reference-grammar": ["summary", "durationMs", "pacing", "composition", "camera", "color", "transitions", "sound", "confidence"],
   "visual-direction": ["resolvedProfileId", "profileRationale", "requestedProfileId"],
-  "asset-candidates": ["provider", "media_type", "created_at"],
-  "asset-semantic-rank": ["source", "providerId", "modelId", "summary", "fallbackReason"],
-  assets: ["job_id", "created_at", "director_plan_version"],
-  voice: ["voice", "rate", "duration", "direction", "provider"],
-  render: ["rendered", "duration_target", "resolution", "visual_quality", "requires_ffmpeg"],
-  "technical-review": ["status", "video_path"],
+  "asset-candidates": [],
+  "asset-semantic-rank": ["summary", "fallbackReason"],
+  assets: [],
+  voice: ["voice", "rate", "duration", "direction"],
+  render: ["duration_target", "resolution", "visual_quality"],
+  "technical-review": ["status"],
   "visual-review": ["recommendation", "confidence", "summary"],
   "final-review": ["recommendation", "confidence", "summary"],
-  "publish-package": ["title", "platform", "runId"],
+  "publish-package": ["title", "platform"],
 };
 
 const COLLECTION_FIELDS: Record<string, string[]> = {
@@ -25,7 +28,7 @@ const COLLECTION_FIELDS: Record<string, string[]> = {
   "visual-direction": ["shots"],
   "asset-candidates": ["scene_candidates"],
   "asset-semantic-rank": ["scenes"],
-  assets: ["scene_assets", "director_routing"],
+  assets: ["director_routing"],
   voice: ["scenes"],
   render: ["slides"],
   "technical-review": ["checks"],
@@ -35,9 +38,10 @@ const COLLECTION_FIELDS: Record<string, string[]> = {
 };
 
 const NESTED_FIELDS: Record<string, string[]> = {
-  brief: ["economics", "director", "voiceDirection"],
+  brief: [],
+  script: ["platform_notes"],
   "visual-direction": ["visualBible"],
-  voice: ["mastering"],
+  voice: ["direction"],
   "technical-review": ["audio"],
   "visual-review": ["scores"],
   "final-review": ["scores"],
@@ -66,6 +70,8 @@ const FIELD_LABELS: Record<string, string> = {
   voice: "声音演员",
   rate: "语速",
   direction: "表演指示",
+  pause_scale: "停顿强度",
+  mastering_preset: "声音质感",
   provider: "声音能力",
   rendered: "渲染完成",
   resolution: "画面尺寸",
@@ -81,6 +87,9 @@ const FIELD_LABELS: Record<string, string> = {
   color: "色彩",
   transitions: "转场",
   sound: "声音结构",
+  narrativeApproach: "叙事方法",
+  continuity: "连续性",
+  continuityNote: "连续性说明",
   beats: "时间段语法",
   reusableRules: "可复用规则",
   avoidCopying: "禁止复制",
@@ -98,6 +107,7 @@ const FIELD_LABELS: Record<string, string> = {
   scenes: "分镜",
   position: "序号",
   narration: "旁白",
+  search_terms: "检索词",
   subtitle: "字幕",
   on_screen_text: "屏幕文字",
   visual: "画面",
@@ -110,10 +120,23 @@ const FIELD_LABELS: Record<string, string> = {
   asset_type: "素材类型",
   query: "检索词",
   prompt: "生成提示",
+  generationPrompt: "生成提示词",
   passed: "是否通过",
   severity: "严重程度",
   message: "说明",
   score: "得分",
+  legibility: "文字可读性",
+  safety: "内容安全",
+  narrativeRole: "镜头任务",
+  authenticityPolicy: "真实度要求",
+  scenePosition: "镜头序号",
+  scene_position: "镜头序号",
+  preferredProviderId: "首选画面能力",
+  subject: "主体",
+  description: "问题说明",
+  suggestion: "修改建议",
+  category: "问题类型",
+  timecodeMs: "发生时间",
   shots: "镜头计划",
   scene_assets: "逐镜素材",
   director_routing: "导演路由",
@@ -124,6 +147,13 @@ const FIELD_LABELS: Record<string, string> = {
   rank: "当前名次",
   rationale: "排序理由",
   locked: "人工锁定",
+  selected: "当前采用",
+  visible_action: "可见动作",
+  sound_cue: "声音提示",
+  success_criteria: "成功条件",
+  failure_conditions: "失败条件",
+  viewerPromise: "观众承诺",
+  narrativeArc: "叙事弧线",
   fallbackReason: "回退原因",
   quality_checks: "脚本自检",
   hashtags: "建议话题",
@@ -155,7 +185,7 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
   const record = asRecord(value);
   if (!record) return <p className="node-document-state">该节点暂时没有结构化交付。</p>;
   const inputPreview = nodeId.endsWith("-input");
-  const viewId = inputPreview ? nodeId.slice(0, -"-input".length) : nodeId;
+  const viewId = creatorViewId(nodeId);
   const assetRoutes = viewId === "assets" && Array.isArray(record.director_routing)
     ? record.director_routing
     : [];
@@ -167,30 +197,33 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
     : [];
 
   const primary = uniqueKeys([
-    ...(PRIMARY_FIELDS[viewId] ?? Object.keys(record)),
-    ...(inputPreview ? Object.keys(record).filter((key) => isScalar(record[key])) : []),
+    ...(PRIMARY_FIELDS[viewId] ?? []),
+    ...(inputPreview ? Object.keys(record).filter((key) => isCreatorTopLevelField(nodeId, key, record[key]) && isScalar(record[key])) : []),
   ])
-    .filter((key) => isScalar(record[key]));
+    .filter((key) => isCreatorTopLevelField(nodeId, key, record[key]))
+    .filter((key) => hasDisplayScalar(record[key]));
   const nestedKeys = uniqueKeys([
     ...(NESTED_FIELDS[viewId] ?? []),
-    ...(inputPreview ? Object.keys(record).filter((key) => asRecord(record[key]) !== undefined) : []),
+    ...(inputPreview ? Object.keys(record).filter((key) => isCreatorTopLevelField(nodeId, key, record[key]) && asRecord(record[key]) !== undefined) : []),
   ]);
   const collectionKeys = uniqueKeys([
     ...(COLLECTION_FIELDS[viewId] ?? []),
-    ...(inputPreview ? Object.keys(record).filter((key) => Array.isArray(record[key])) : []),
+    ...(inputPreview ? Object.keys(record).filter((key) => isCreatorTopLevelField(nodeId, key, record[key]) && Array.isArray(record[key])) : []),
   ]);
   const nested = nestedKeys
+    .filter((key) => isCreatorTopLevelField(nodeId, key, record[key]))
     .map((key) => ({ key, value: asRecord(record[key]) }))
-    .filter((entry): entry is { key: string; value: Record<string, unknown> } => entry.value !== undefined);
+    .filter((entry): entry is { key: string; value: Record<string, unknown> } => entry.value !== undefined && Object.values(entry.value).some(hasDisplayValue));
   const collections = collectionKeys
-    .map((key) => ({ key, value: Array.isArray(record[key]) ? record[key] : [] }))
+    .filter((key) => isCreatorTopLevelField(nodeId, key, record[key]))
+    .map((key) => ({ key, value: Array.isArray(record[key]) ? record[key].filter(hasCreatorCollectionItem) : [] }))
     .filter((entry) => entry.value.length > 0
       && !(viewId === "assets" && entry.key === "director_routing")
       && !(viewId === "asset-candidates" && entry.key === "scene_candidates")
       && !(viewId === "asset-semantic-rank" && entry.key === "scenes"));
 
   if (!primary.length && !nested.length && !collections.length && !assetRoutes.length && !candidateScenes.length && !rankingScenes.length) {
-    return <p className="node-document-state">交付已生成，可在下方查看完整 JSON。</p>;
+    return <p className="node-document-state">这个节点没有需要人工查看或修改的创作内容。</p>;
   }
 
   return (
@@ -200,7 +233,10 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
       ))}</dl> : null}
       {nested.map((entry) => <section className="node-preview-section" key={entry.key}>
         <h4>{fieldLabel(entry.key)}</h4>
-        <dl className="node-preview-facts">{Object.entries(entry.value).filter(([, item]) => isScalar(item)).map(([key, item]) => (
+        <dl className="node-preview-facts">{Object.entries(entry.value).filter(([key, item]) => {
+          const nestedViewId = creatorContainerViewId(entry.key);
+          return (nestedViewId ? isCreatorTopLevelField(nestedViewId, key, item) : isCreatorNestedField(key)) && hasDisplayScalar(item);
+        }).map(([key, item]) => (
           <div key={key}><dt>{fieldLabel(key)}</dt><dd>{formatScalar(item, key)}</dd></div>
         ))}</dl>
       </section>)}
@@ -209,7 +245,7 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
       {rankingScenes.length ? <AssetRankingPreview scenes={rankingScenes} /> : null}
       {collections.map((entry) => <section className="node-preview-section" key={entry.key}>
         <h4>{fieldLabel(entry.key)}<span>{entry.value.length}</span></h4>
-        <div className="node-preview-items">{entry.value.slice(0, 8).map((item, index) => <PreviewItem index={index} item={item} key={index} />)}</div>
+        <div className="node-preview-items">{entry.value.slice(0, entry.key === "findings" ? 20 : 8).map((item, index) => <PreviewItem collectionKey={entry.key} index={index} item={item} key={index} />)}</div>
       </section>)}
     </div>
   );
@@ -244,7 +280,7 @@ function AssetRankingPreview({ scenes }: { scenes: unknown[] }) {
         <span>{String(scene?.scenePosition ?? index + 1).padStart(2, "0")}</span>
         <div><strong>{formatScalar(scene?.summary)}</strong>{candidates.slice(0, 6).map((candidate, candidateIndex) => {
           const row = asRecord(candidate);
-          return row ? <p key={candidateIndex}><b>#{formatScalar(row.rank)} · {formatScalar(row.provider)}</b>{formatScalar(row.assetId)} · {formatScalar(row.semanticScore)} 分 · {formatScalar(row.rationale)}{row.locked === true ? " · 已锁定" : ""}</p> : null;
+          return row ? <p key={candidateIndex}><b>#{formatScalar(row.rank)} · {formatScalar(row.provider, "provider")}</b>{formatScalar(row.semanticScore)} 分 · {formatScalar(row.rationale)}{row.locked === true ? " · 已锁定" : ""}</p> : null;
         })}</div>
       </article>;
     })}</div>
@@ -262,7 +298,7 @@ function AssetRoutingPreview({ routes }: { routes: unknown[] }) {
       return <article className="asset-routing-scene" key={`${scene}-${index}`}>
         <header>
           <div><strong>镜头 {scene}</strong><small>{formatScalar(route.query)}</small></div>
-          <span>{formatScalar(route.actual_provider_id ?? route.actual_provider)}</span>
+          <span>{formatScalar(route.actual_provider_id ?? route.actual_provider, "provider")}</span>
         </header>
         {isScalar(route.rationale) && route.rationale ? <p>{formatScalar(route.rationale)}</p> : null}
         {candidates.length ? <div className="asset-candidate-strip">{candidates.slice(0, 6).map((candidate, candidateIndex) => (
@@ -295,7 +331,7 @@ function AssetCandidate({ candidate, index }: { candidate: unknown; index: numbe
       {selected ? <b>当前采用</b> : null}
     </div>
     <figcaption>
-      <strong>{formatScalar(record.provider_id ?? record.provider)}</strong>
+      <strong>{formatScalar(record.provider_id ?? record.provider, "provider")}</strong>
       <small>{dimensions}{typeof record.duration === "number" && record.duration > 0 ? ` · ${record.duration} 秒` : ""}</small>
       {isScalar(record.creator) && record.creator ? <small>作者：{formatScalar(record.creator)}</small> : null}
       {isScalar(record.license_note) ? <small className="asset-license">{formatScalar(record.license_note)}</small> : null}
@@ -304,15 +340,22 @@ function AssetCandidate({ candidate, index }: { candidate: unknown; index: numbe
   </figure>;
 }
 
-function PreviewItem({ item, index }: { item: unknown; index: number }) {
+function PreviewItem({ collectionKey, item, index }: { collectionKey: string; item: unknown; index: number }) {
   const record = asRecord(item);
   if (!record) return <article><strong>{String(index + 1).padStart(2, "0")}</strong><p>{formatScalar(item)}</p></article>;
-  const titleKey = ["title", "purpose", "label", "name", "scene_id", "shotId", "id", "check", "dimension"].find((key) => isScalar(record[key]));
-  const facts = Object.entries(record).filter(([key, value]) => key !== titleKey && isScalar(value)).slice(0, 5);
+  const titleKey = ["title", "purpose", "label", "name", "check", "timecodeMs"].find((key) => isScalar(record[key]));
+  const facts = Object.entries(record).filter(([key, value]) => key !== titleKey && isCreatorNestedField(key) && hasDisplayScalar(value)).slice(0, 5);
   return <article>
     <span>{String(index + 1).padStart(2, "0")}</span>
-    <div><strong>{titleKey ? formatScalar(record[titleKey], titleKey) : `第 ${index + 1} 项`}</strong>{facts.map(([key, value]) => <p key={key}><b>{fieldLabel(key)}</b>{formatScalar(value, key)}</p>)}</div>
+    <div><strong>{titleKey ? formatScalar(record[titleKey], titleKey) : collectionItemTitle(collectionKey, index)}</strong>{facts.map(([key, value]) => <p key={key}><b>{fieldLabel(key)}</b>{formatScalar(value, key)}</p>)}</div>
   </article>;
+}
+
+function collectionItemTitle(collectionKey: string, index: number): string {
+  if (collectionKey === "shots") return `镜头 ${index + 1}`;
+  if (collectionKey === "scenes") return `分镜 ${index + 1}`;
+  if (collectionKey === "findings") return `问题 ${index + 1}`;
+  return `第 ${index + 1} 项`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -321,6 +364,23 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function isScalar(value: unknown): boolean {
   return value === null || ["string", "number", "boolean"].includes(typeof value);
+}
+
+function hasDisplayScalar(value: unknown): boolean {
+  return isScalar(value) && value !== null && value !== undefined && value !== "";
+}
+
+function hasDisplayValue(value: unknown): boolean {
+  if (hasDisplayScalar(value)) return true;
+  if (Array.isArray(value)) return value.some(hasDisplayValue);
+  const record = asRecord(value);
+  return record ? Object.values(record).some(hasDisplayValue) : false;
+}
+
+function hasCreatorCollectionItem(value: unknown): boolean {
+  if (hasDisplayScalar(value)) return true;
+  const record = asRecord(value);
+  return record ? Object.entries(record).some(([key, item]) => isCreatorNestedField(key) && hasDisplayValue(item)) : false;
 }
 
 function safeCandidateUrl(value: unknown): string | undefined {
@@ -345,10 +405,58 @@ function uniqueKeys(values: string[]): string[] {
 function formatScalar(value: unknown, key?: string): string {
   if (typeof value === "boolean") return value ? "是" : "否";
   if (value === null || value === undefined || value === "") return "未填写";
+  if (key === "platform" && typeof value === "string") return platformLabel(value);
+  if ((key === "provider" || key === "provider_id" || key === "preferredProviderId") && typeof value === "string") return providerLabel(value) ?? value;
+  if (key === "reviewMode" && value === "manual") return "人工终审";
+  if (key === "recommendation" && typeof value === "string") return ({ approve: "通过", revise: "修改后再审", reject: "不通过" } as Record<string, string>)[value] ?? value;
+  if (key === "severity" && typeof value === "string") return ({ info: "提示", low: "轻微", medium: "需关注", warning: "需修改", high: "高风险", critical: "严重" } as Record<string, string>)[value] ?? value;
+  if (key === "category" && typeof value === "string") return ({ pacing: "节奏", composition: "构图", continuity: "连续性", legibility: "文字可读性", safety: "内容安全", other: "其他" } as Record<string, string>)[value] ?? value;
+  if (key === "visual_strategy" && typeof value === "string") return ({ stock: "实拍视频素材", image: "图片素材", local: "本地编辑画面", generated: "AI 生成画面", screen: "屏幕录制", creator: "创作者素材" } as Record<string, string>)[value] ?? value;
+  if (key === "authenticityPolicy" && typeof value === "string") return ({ evidence: "事实镜头", illustrative: "说明镜头", expressive: "表现镜头" } as Record<string, string>)[value] ?? value;
+  if (key === "mastering_preset" && typeof value === "string") return ({ natural: "自然", intimate: "亲近", social: "社交清晰" } as Record<string, string>)[value] ?? value;
+  if ((key === "requestedProfileId" || key === "resolvedProfileId") && typeof value === "string") return directorProfileLabel(value);
+  if (key === "narrativeRole" && typeof value === "string") return humanizeNarrativeRole(value);
   if (typeof value === "string" && key && /(?:Path|_path)$/.test(key)) return "已连接上游产物";
+  if (typeof value === "string") return humanizeCreativeText(({
+    measured: "舒缓克制",
+    medium: "适中",
+    fast: "明快",
+    slow: "舒缓",
+  } as Record<string, string>)[value] ?? value);
   if ((key === "durationSeconds" || key === "duration_target" || key === "duration") && typeof value === "number") return `${value} 秒`;
+  if (key === "rate" && typeof value === "number") return `${value} 字/分钟`;
+  if (key === "timecodeMs" && typeof value === "number") return formatTimecode(value);
   if (key === "confidence" && typeof value === "number") return `${Math.round(value * 100)}%`;
   return String(value);
+}
+
+function formatTimecode(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function humanizeNarrativeRole(value: string): string {
+  const replacements: Array<[RegExp, string]> = [
+    [/^question\s*\/\s*shot-question\s*[：:]?\s*/i, "提问钩子："],
+    [/^model\s*\/\s*shot-model\s*[：:]?\s*/i, "原理说明："],
+    [/^example\s*\/\s*shot-example\s*[：:]?\s*/i, "实例验证："],
+    [/^takeaway\s*\/\s*shot-takeaway\s*[：:]?\s*/i, "结论行动："],
+  ];
+  return replacements.reduce((result, [pattern, replacement]) => result.replace(pattern, replacement), value);
+}
+
+function directorProfileLabel(value: string): string {
+  return ({
+    auto: "自动匹配",
+    "documentary-observer": "纪实观察",
+    "quiet-humanism": "静默人文",
+    "urban-poetic": "都市诗意",
+    "chromatic-storytelling": "色彩叙事",
+    "geometric-control": "几何秩序",
+    "suspense-staging": "悬念调度",
+  } as Record<string, string>)[value] ?? value;
 }
 
 function fieldLabel(key: string): string {

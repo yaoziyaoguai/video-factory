@@ -17,7 +17,7 @@ const EXPERIMENT_TEMPLATES = [
 interface StoredManifest {
   version: "video-factory/resource-manifest-v1";
   runId: string;
-  items: Array<Omit<StudioResourceManifestItem, "runId" | "runTitle">>;
+  items: Array<Omit<StudioResourceManifestItem, "runId" | "runTitle" | "contentUrl">>;
 }
 
 export class ResourceGovernanceStudio {
@@ -45,7 +45,12 @@ export class ResourceGovernanceStudio {
       }
       try {
         const manifest = await this.readManifest(artifact.uri, run.id);
-        items.push(...manifest.items.map((item) => ({ ...item, runId: run.id, runTitle: run.initialInput.title })));
+        items.push(...manifest.items.map((item) => ({
+          ...item,
+          runId: run.id,
+          runTitle: run.initialInput.title,
+          ...resourceContentUrl(run, item.id),
+        })));
       } catch {
         unreadableManifestCount += 1;
         if (hasMeteredExecution(run)) {
@@ -162,7 +167,17 @@ function reconstructManifestItems(run: WorkflowRun<ProductionBrief>): StudioReso
       commercialUse: "review_required" as const,
       attributionRequirement: "unknown" as const,
       reviewStatus: "needs_review" as const,
+      ...resourceContentUrl(run, `artifact:${artifact.id}`),
     }));
+}
+
+function resourceContentUrl(run: WorkflowRun<ProductionBrief>, itemId: string): { contentUrl?: string } {
+  if (!itemId.startsWith("artifact:")) return {};
+  const artifactId = itemId.slice("artifact:".length);
+  const artifact = run.artifacts.find((candidate) => candidate.id === artifactId);
+  if (!artifact?.uri || artifact.kind === "reference_video" || artifact.kind === "candidate_inventory_private") return {};
+  if (!artifact.contentType?.startsWith("video/") && !artifact.contentType?.startsWith("image/") && !artifact.contentType?.startsWith("audio/")) return {};
+  return { contentUrl: `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}/content` };
 }
 
 function reconstructedCategory(

@@ -35,6 +35,7 @@ import type {
   StudioTemplate,
   StudioTemplateCatalog,
   StudioTemplateCloneInput,
+  StudioTemplateCreateInput,
   StudioTemplateMutation,
   StudioTemplateExperimentScorecard,
   StudioProductionInput,
@@ -201,6 +202,9 @@ export class StudioService {
   cloneTemplate(input: StudioTemplateCloneInput): Promise<StudioTemplateMutation> {
     return this.templateMutation(() => this.templates.clone(input));
   }
+  createTemplate(input: StudioTemplateCreateInput): Promise<StudioTemplateMutation> {
+    return this.templateMutation(() => this.templates.create(input));
+  }
   async saveTemplateDraft(input: StudioTemplate, expectedRevision: number): Promise<StudioTemplateMutation> {
     const { builtIn: _builtIn, ...template } = input;
     const current = await this.templates.get(template.id);
@@ -235,6 +239,7 @@ export class StudioService {
 
   listRuns(): Promise<StudioRunSummary[]> { return this.production.list(); }
   getRun(runId: string): Promise<StudioRunDetail | undefined> { return this.production.get(runId); }
+  deleteRun(runId: string): Promise<void> { return this.production.remove(runId); }
   costDashboard(): Promise<StudioCostDashboard> { return this.costs.dashboard(); }
   runCostDetail(runId: string): Promise<StudioCostRunDetail | undefined> { return this.costs.runDetail(runId); }
   async uploadReferenceVideo(input: { label: string; mimeType: string; bytes: Buffer }): Promise<StudioReferenceVideo> {

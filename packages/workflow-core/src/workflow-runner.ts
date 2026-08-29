@@ -814,11 +814,11 @@ export class WorkflowRunner {
         () => executeNode(node, input, context, provider),
       );
       const result = execution.result;
-      receiptDraft = execution.receipt;
       const executionFinishedAt = context.now();
 
       const status = result.status ?? "succeeded";
       validateNodeResultStatus(node.id, status, result);
+      receiptDraft = execution.receipt;
       validateReceiptCosts(receiptDraft, authorization);
 
       for (const draft of result.artifacts ?? []) {
@@ -832,7 +832,7 @@ export class WorkflowRunner {
 
       nodeRun.executionReceipt = createExecutionReceipt(
         node,
-        execution.receipt,
+        receiptDraft,
         nodeRun.startedAt,
         executionFinishedAt,
         status,

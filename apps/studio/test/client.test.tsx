@@ -79,7 +79,7 @@ const runDetail: StudioRunDetail = {
   nicheSlug: "life-avoidance",
   reviewMode: "manual",
   nodes: [
-    { id: "brief", label: "需求校验", role: "制片人", status: "succeeded", artifactIds: [], qualityGateResults: [] },
+    { id: "brief", label: "需求校验", role: "制片人", status: "succeeded", artifactIds: [], qualityGateResults: [], output: { title: "做决定前，先避开这 3 个坑", angle: "低风险、可收藏的生活清单", audience: "有决策压力的普通上班族" } },
     { id: "visual-direction", label: "导演方案", role: "导演", status: "succeeded", artifactIds: [], qualityGateResults: [] },
     { id: "final-review", label: "人工终审", role: "总导演", status: "needs_human", artifactIds: [], qualityGateResults: [] },
     { id: "publish-package", label: "发布包", role: "制片人", status: "pending", artifactIds: [], qualityGateResults: [] },
@@ -190,6 +190,25 @@ describe("Studio client", () => {
     expect(screen.getAllByRole("link", { name: /进入审片/ })[0]).toHaveAttribute("href", "/projects/run-1");
     await user.click(screen.getByRole("button", { name: "筛选：待你处理" }));
     expect(screen.queryByText("已经完成的内容")).not.toBeInTheDocument();
+  });
+
+  it("asks for confirmation before deleting a completed production record", async () => {
+    const user = userEvent.setup();
+    const completed = { ...runSummary, id: "run-2", title: "已经完成的内容", status: "succeeded" as const };
+    const onDelete = vi.fn().mockResolvedValue(undefined);
+    render(
+      <MemoryRouter>
+        <ProductionQueue runs={[runSummary, completed]} loading={false} onCreate={() => undefined} onDelete={onDelete} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole("button", { name: `删除制作记录：${runSummary.title}` })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "删除制作记录：已经完成的内容" }));
+    expect(screen.getByRole("dialog", { name: /确定删除/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() => expect(onDelete).toHaveBeenCalledWith(completed));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("creates a valid local production brief without exposing unavailable providers", async () => {
@@ -476,6 +495,7 @@ describe("Studio client", () => {
     const creatorSettings = {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
       defaultRecipeId: "economy-daily" as const,
+      topicStrategy: { customInstruction: "优先可拍题材。" },
       modelDefaults: { "seedance-video-v1": "economy-model" },
       productionDefaults: { directorProfileId: "auto" as const, reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
     };
@@ -609,6 +629,7 @@ describe("Studio client", () => {
       creatorSettings={{
         voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
         defaultRecipeId: "economy-daily",
+        topicStrategy: { customInstruction: "优先可拍题材。" },
         productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
       onClose={() => undefined}
@@ -762,6 +783,7 @@ describe("Studio client", () => {
       creatorSettings={{
         voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
         defaultRecipeId: "free-stock",
+        topicStrategy: { customInstruction: "优先可拍题材。" },
         defaultAssetProviderId: "pexels-stock-v1",
         productionDefaults: { directorProfileId: "documentary-observer", reviewMode: "manual", platform: "bilibili", durationSeconds: 30 },
       }}
@@ -799,6 +821,7 @@ describe("Studio client", () => {
       creatorSettings={{
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         defaultRecipeId: "economy-daily",
+        topicStrategy: { customInstruction: "优先可拍题材。" },
         defaultAssetProviderId: "ai-shot-router-v1",
         productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
@@ -853,13 +876,17 @@ describe("Studio client", () => {
     const onDecision = vi.fn().mockResolvedValue(undefined);
     render(<RunWorkbench run={runDetail} decisionPending={false} onDecision={onDecision} />);
 
-    expect(screen.getByTitle("成片预览")).toHaveAttribute("src", "/api/video");
+    expect(screen.getByTitle("成片预览")).toHaveAttribute("src", "/api/video#t=0.1");
+    const preview = screen.getByRole("region", { name: "成片预览" });
+    const workspaces = screen.getByRole("region", { name: "逐项预览与修改" });
+    expect(preview.compareDocumentPosition(workspaces) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByText("总导演 · 人工终审")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /人工终审/ })).not.toBeInTheDocument();
     expect(screen.getByText("导演 · 导演方案")).toBeInTheDocument();
     expect(screen.getByText("请完整观看成片，确认内容和节奏。")).toBeInTheDocument();
-    const artifacts = within(screen.getByLabelText("生产产物"));
-    expect(artifacts.getByRole("heading", { name: /脚本生成/ })).toBeInTheDocument();
-    expect(artifacts.getByRole("heading", { name: /视频渲染/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "下载成片" })).toHaveAttribute("download");
+    expect(screen.queryByText(/技术文件与运行证据/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /脚本技术文件/ })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "批准进入发布包" }));
 
     expect(screen.getByRole("dialog", { name: "确认批准成片" })).toBeInTheDocument();
@@ -869,6 +896,7 @@ describe("Studio client", () => {
   });
 
   it("shows the director's visual bible and AI-generated per-shot routes", async () => {
+    const user = userEvent.setup();
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       resolvedProfileId: "documentary-observer",
       profileRationale: "热点内容需要真实动作与环境证据。",
@@ -908,16 +936,18 @@ describe("Studio client", () => {
         } : node),
         artifacts: [
           ...runDetail.artifacts,
-          { id: "director-plan-old", kind: "storyboard", producerNodeId: "visual-direction", createdAt: "2026-08-21T10:00:20.000Z", contentUrl: "/api/director-plan-old" },
-          { id: "director-plan-current", kind: "storyboard", producerNodeId: "visual-direction", createdAt: "2026-08-21T10:00:30.000Z", contentUrl: "/api/director-plan-current" },
+          { id: "director-plan-old", kind: "storyboard", producerNodeId: "visual-direction", createdAt: "2026-08-21T10:00:20.000Z", contentType: "application/json", contentUrl: "/api/director-plan-old" },
+          { id: "director-plan-current", kind: "storyboard", producerNodeId: "visual-direction", createdAt: "2026-08-21T10:00:30.000Z", contentType: "application/json", contentUrl: "/api/director-plan-current" },
         ],
       }}
       decisionPending={false}
       onDecision={async () => undefined}
     />);
 
-    const panel = await screen.findByLabelText("导演方案");
-    expect(within(panel).getByText("纪实观察")).toBeInTheDocument();
+    const panel = [...document.querySelectorAll<HTMLElement>(".node-workspace")].find((element) => element.textContent?.includes("导演方案"));
+    if (!panel) throw new Error("导演方案节点不存在");
+    await user.click(within(panel).getByText("导演方案"));
+    expect(await within(panel).findByText("纪实观察")).toBeInTheDocument();
     expect(within(panel).getByText("先现场后解释")).toBeInTheDocument();
     expect(within(panel).getByText("事实镜头")).toBeInTheDocument();
     expect(within(panel).getByText(/Pexels 图库/)).toBeInTheDocument();

@@ -1,8 +1,9 @@
 import { AlertTriangle, Check, ChevronDown, CircleDollarSign, FilePenLine, Save, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { StudioArtifact, StudioBillingType, StudioNode, StudioNodeExecutionReceipt, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunStatus, StudioSpendAuthorizationInput } from "../../shared/api.js";
+import type { StudioArtifact, StudioNode, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunStatus, StudioSpendAuthorizationInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { providerLabel } from "../presentation.js";
+import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
 
@@ -17,15 +18,10 @@ interface NodeWorkspaceProps {
   onAuthorize: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
 }
 
-type NodeWorkspaceTab = "input" | "role" | "prompt" | "output" | "evidence";
-
 export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy, onOverride, onInputOverride = async () => undefined, onAuthorize }: NodeWorkspaceProps) {
-  const [activeTab, setActiveTab] = useState<NodeWorkspaceTab>("output");
   const [editing, setEditing] = useState(false);
   const [editingInput, setEditingInput] = useState(false);
   const [editingDocument, setEditingDocument] = useState(false);
-  const [outputEditorMode, setOutputEditorMode] = useState<"form" | "json">("form");
-  const [inputEditorMode, setInputEditorMode] = useState<"form" | "json">("form");
   const [authorizing, setAuthorizing] = useState(false);
   const [draft, setDraft] = useState(() => pretty(node.output ?? effectiveOutput(node) ?? {}));
   const [inputDraft, setInputDraft] = useState(() => pretty(effectiveInput(node) ?? {}));
@@ -33,9 +29,6 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
   const [documentPreview, setDocumentPreview] = useState<unknown>();
   const [documentLoading, setDocumentLoading] = useState(false);
   const [documentError, setDocumentError] = useState<string>();
-  const [modelTrace, setModelTrace] = useState<Record<string, unknown>>();
-  const [modelTraceLoading, setModelTraceLoading] = useState(false);
-  const [modelTraceError, setModelTraceError] = useState<string>();
   const [terminalOverride, setTerminalOverride] = useState<StudioNodeOverrideInput>();
   const [terminalInputOverride, setTerminalInputOverride] = useState<StudioNodeInputOverrideInput>();
   const spendDialogRef = useDialogFocus<HTMLElement>(authorizing, () => setAuthorizing(false), busy);
@@ -47,10 +40,6 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
   const effectiveInputVersion = node.inputState?.versions.find((version) => version.id === node.inputState?.effectiveVersionId);
   const editableArtifact = useMemo(
     () => selectEditableArtifact(node.id, artifacts, effectiveVersion?.artifactIds),
-    [artifacts, effectiveVersion?.artifactIds, node.id],
-  );
-  const modelTraceArtifact = useMemo(
-    () => selectModelTraceArtifact(node.id, artifacts, effectiveVersion?.artifactIds),
     [artifacts, effectiveVersion?.artifactIds, node.id],
   );
   const spendInputs = useMemo(() => node.spendPlan?.inputVersionIds.map((versionId) => {
@@ -65,11 +54,11 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
   const canEdit = (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
   const canEditInput = effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
-  const provenance = useMemo(() => execution
-    ? `${providerLabel(execution.providerId) ?? execution.providerLabel} · ${execution.modelId}`
-    : node.spendPlan
-      ? `${providerLabel(node.spendPlan.providerId) ?? node.spendPlan.providerId} · ${node.spendPlan.modelId}`
-      : "尚未规划", [execution, node.spendPlan]);
+  const capability = useMemo(() => creatorCapabilityLabel(execution, node.spendPlan), [execution, node.spendPlan]);
+  const assetProviderIds = useMemo(() => configuredAssetProviderIds(nodes), [nodes]);
+  const deliveryValue = documentPreview ?? node.output ?? effectiveOutput(node);
+  const hasDelivery = hasCreatorDocumentContent(node.id, deliveryValue);
+  const hasEditableInput = node.id !== "brief" && hasCreatorDocumentContent(`${node.id}-input`, effectiveInput(node));
 
   useEffect(() => {
     if (!editing) setDraft(pretty(documentPreview ?? node.output ?? effectiveOutput(node) ?? {}));
@@ -106,42 +95,10 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
     return () => controller.abort();
   }, [editableArtifact?.contentUrl]);
 
-  useEffect(() => {
-    if (!modelTraceArtifact?.contentUrl) {
-      setModelTrace(undefined);
-      setModelTraceError(undefined);
-      setModelTraceLoading(false);
-      return;
-    }
-    const controller = new AbortController();
-    setModelTraceLoading(true);
-    setModelTraceError(undefined);
-    void fetch(modelTraceArtifact.contentUrl, {
-      headers: { accept: "application/json" },
-      signal: controller.signal,
-    }).then(async (response) => {
-      if (!response.ok) throw new Error(`读取失败（HTTP ${response.status}）`);
-      const content = await response.json() as unknown;
-      if (typeof content !== "object" || content === null || Array.isArray(content)) {
-        throw new Error("执行痕迹格式不正确");
-      }
-      return content as Record<string, unknown>;
-    }).then((content) => {
-      setModelTrace(content);
-      setModelTraceLoading(false);
-    }).catch((caught: unknown) => {
-      if (controller.signal.aborted) return;
-      setModelTraceError(caught instanceof Error ? caught.message : "读取失败");
-      setModelTraceLoading(false);
-    });
-    return () => controller.abort();
-  }, [modelTraceArtifact?.contentUrl]);
-
   function beginEditing() {
     const usesDocument = Boolean(editableArtifact && documentPreview !== undefined);
     setEditingDocument(usesDocument);
     setDraft(pretty(usesDocument ? documentPreview : node.output ?? effectiveOutput(node) ?? {}));
-    setOutputEditorMode("form");
     setEditing(true);
   }
 
@@ -199,27 +156,20 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
   return (
     <details
       className={`node-workspace is-${node.status}`}
+      name="creator-workspaces"
+      aria-label={`${node.label} · ${node.role ?? "生产角色"}`}
       open={node.status === "awaiting_spend_approval" || node.status === "approval_invalidated"}
       onToggle={(event) => revealExpandedWorkspace(event.currentTarget)}
     >
       <summary>
         <span className="node-workspace-state">{node.status === "succeeded" ? <Check aria-hidden="true" size={14} /> : <span />}</span>
         <span className="node-workspace-title"><strong>{node.label}</strong><small>{node.role ?? "生产角色"}</small></span>
-        <span className="node-workspace-provenance">{provenance}</span>
+        {capability ? <span className="node-workspace-provenance">{capability}</span> : <span />}
         {node.outputState?.stale ? <span className="node-stale-label"><AlertTriangle aria-hidden="true" size={14} />旧结果</span> : null}
         <ChevronDown className="node-workspace-chevron" aria-hidden="true" size={17} />
       </summary>
       <div className="node-workspace-body">
         {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />此节点结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成。</p> : null}
-        <div className="node-workspace-tabs" role="tablist" aria-label={`${node.label}工作区`}>
-          {([
-            ["input", "输入"],
-            ["role", "角色与模型"],
-            ["prompt", "实际 Prompt"],
-            ["output", "输出"],
-            ["evidence", "执行证据"],
-          ] as const).map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={activeTab === id} onClick={() => setActiveTab(id)}>{label}</button>)}
-        </div>
 
         {node.spendPlan ? (
           <section className="spend-gate" aria-label={`${node.label}费用确认`}>
@@ -230,67 +180,22 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
           </section>
         ) : null}
 
-        {activeTab === "input" ? <section className="node-output-preview" role="tabpanel">
-          <header><div><strong>本次实际输入</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 上游已变化，需复核" : ""}</small></div>{canEditInput && !editingInput ? <button className="button button-ghost" type="button" onClick={() => setEditingInput(true)}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
-          {editingInput ? <><EditorMode value={inputEditorMode} onChange={setInputEditorMode} />{inputEditorMode === "form" ? <NodeStructuredEditor nodeId={`${node.id}-input`} value={safeParse(inputDraft)} onChange={(value) => setInputDraft(pretty(value))} /> : <textarea aria-label={`${node.label}输入内容 JSON`} value={inputDraft} onChange={(event) => setInputDraft(event.target.value)} rows={12} spellCheck={false} />}</> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
-          {editingInput ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => setEditingInput(false)}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveInputOverride()}><Save aria-hidden="true" size={15} />保存为人工输入版本</button></footer> : null}
-          {!editingInput ? <details className="node-technical-output"><summary>查看完整输入 JSON</summary><pre>{pretty(effectiveInput(node) ?? {})}</pre></details> : null}
-          {effectiveInputVersion ? <p className="node-version-note">有效输入版本 {shortId(effectiveInputVersion.id)} · 上游 {effectiveInputVersion.upstreamVersionIds.length} 个版本{effectiveInputVersion.source === "reconstructed" ? " · 历史记录未保存原始输入，本值由当前上游产物推断" : ""}</p> : <p className="node-document-state">节点开始执行后会记录实际输入。</p>}
-        </section> : null}
-
-        {activeTab === "role" ? <section className="node-output-preview" role="tabpanel">
-          <header><div><strong>{node.role ?? "生产角色"}</strong><small>本节点实际使用的能力与模型</small></div></header>
-          <div className="node-evidence-row">
-            <span><b>角色</b>{node.role ?? "生产角色"}</span>
-            <span><b>Provider / API</b>{execution?.providerId ?? node.spendPlan?.providerId ?? "待选择"}</span>
-            <span><b>模型</b>{execution?.modelId ?? node.spendPlan?.modelId ?? "待执行"}</span>
-            {receipt?.actualModelIds?.length ? <span><b>实际调用模型</b>{receipt.actualModelIds.join("、")}</span> : null}
-            <span><b>配置来源</b>{configurationSourceLabel(execution?.configurationSource, Boolean(receipt))}</span>
-            <span><b>计费</b>{billingLabel(execution?.billing, execution?.estimatedCostCny)}</span>
-          </div>
-          {!receipt && node.plannedExecution ? <p className="node-version-note">{node.plannedExecution.snapshotSource === "reconstructed"
-            ? "这是旧任务兼容重建的执行计划，可能与历史创建时配置不同；节点已有真实凭证时以凭证为准。"
-            : "这是创建任务时保存的执行计划；节点完成后会由真实执行凭证覆盖。"}</p> : null}
-          {execution?.parameters && Object.keys(execution.parameters).length ? <details className="node-technical-output"><summary>{receipt ? "查看本次实际参数" : "查看计划参数"}</summary><pre>{pretty(execution.parameters)}</pre></details> : null}
-        </section> : null}
-
-        {activeTab === "prompt" ? <section className="node-output-preview" role="tabpanel">
-          <header><div><strong>模型实际收到的 Prompt</strong><small>只读执行痕迹，不随人工修改被覆盖</small></div></header>
-          {modelTraceLoading ? <p className="node-document-state">正在读取模型执行痕迹...</p> : modelTraceError ? <p className="node-workspace-error" role="alert">执行痕迹读取失败：{modelTraceError}</p> : modelTrace ? <>
-            <div className="node-evidence-row">
-              <span><b>Prompt Pack</b>{traceText(modelTrace.promptVersion)}</span>
-              <span><b>任务</b>{traceText(modelTrace.taskKind)}</span>
-              <span><b>Provider / API</b>{traceText(modelTrace.providerId)}</span>
-              <span><b>模型</b>{traceText(modelTrace.modelId)}</span>
-            </div>
-            <pre className="node-actual-prompt">{traceText(modelTrace.prompt)}</pre>
-          </> : <p className="node-document-state">此历史节点尚未记录 Prompt；重新执行模型节点后会在这里留下不可变痕迹。</p>}
-        </section> : null}
-
-        {activeTab === "output" ? <section className="node-output-preview" role="tabpanel">
-          <header><div><strong>角色交付</strong><small>{effectiveVersion?.source === "human" ? "人工修改版本" : editableArtifact ? "可编辑结构化交付" : "自动生成版本"}</small></div>{canEdit && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑</button> : null}</header>
-          {editing ? <><EditorMode value={outputEditorMode} onChange={setOutputEditorMode} />{outputEditorMode === "form" ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} onChange={(value) => setDraft(pretty(value))} /> : <textarea aria-label={`${node.label}交付内容 JSON`} value={draft} onChange={(event) => setDraft(event.target.value)} rows={12} spellCheck={false} />}</> : documentLoading ? <p className="node-document-state">正在读取结构化交付...</p> : documentError ? <p className="node-workspace-error" role="alert">结构化交付读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
+        <section className="node-output-preview node-creator-delivery">
+          <header><div><strong>{node.role ?? "生产角色"}的交付</strong><small>{effectiveVersion?.source === "human" ? "已采用你的修改" : hasDelivery ? "自动生成，可按需修改" : node.status === "pending" ? "等待上游完成" : "本节点没有需要人工阅读的内容"}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
+          {editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} onChange={(value) => setDraft(pretty(value))} /> : documentLoading ? <p className="node-document-state">正在读取结构化交付...</p> : documentError ? <p className="node-workspace-error" role="alert">结构化交付读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
           {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => setEditing(false)}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
-          {!editing && !documentLoading && !documentError ? <details className="node-technical-output"><summary>查看完整交付 JSON</summary><pre>{pretty(documentPreview ?? node.output ?? effectiveOutput(node) ?? {})}</pre></details> : null}
-          {editableArtifact ? <details className="node-technical-output"><summary>查看节点执行记录</summary><pre>{pretty(node.output ?? effectiveOutput(node) ?? {})}</pre></details> : null}
-        </section> : null}
+        </section>
 
-        {activeTab === "evidence" ? <section className="node-output-preview" role="tabpanel">
-          <header><div><strong>不可变执行证据</strong><small>费用、请求和版本链只读</small></div></header>
-          <div className="node-evidence-row">
-            <span><b>输入版本</b>{shortId(node.inputState?.effectiveVersionId) ?? "尚无"}</span>
-            <span><b>输出版本</b>{shortId(node.outputState?.effectiveVersionId) ?? "尚无"}</span>
-            <span><b>请求编号</b>{receipt?.requestId ?? "未提供"}</span>
-            <span><b>费用</b>{receiptCostLabel(receipt)}</span>
-          </div>
-          <details className="node-technical-output"><summary>查看执行凭证 JSON</summary><pre>{pretty({ receipt, spendPlan: node.spendPlan, spendAuthorizationId: node.spendAuthorizationId, qualityGateResults: node.qualityGateResults })}</pre></details>
-        </section> : null}
+        {canEditInput && hasEditableInput ? <details className="node-input-adjustment">
+          <summary><FilePenLine aria-hidden="true" size={15} />调整这个角色收到的内容</summary>
+          <section className="node-output-preview">
+            <header><div><strong>上游输入</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 上游已变化，需复核" : ""}</small></div>{!editingInput ? <button className="button button-ghost" type="button" onClick={() => setEditingInput(true)}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
+            {effectiveInputVersion?.source === "reconstructed" ? <p className="node-version-note">旧任务没有保存当时的原始输入；这里展示的是按当前上游内容推断出的可编辑版本。</p> : null}
+            {editingInput ? <NodeStructuredEditor nodeId={`${node.id}-input`} value={safeParse(inputDraft)} assetProviderIds={assetProviderIds} onChange={(value) => setInputDraft(pretty(value))} /> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
+            {editingInput ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => setEditingInput(false)}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveInputOverride()}><Save aria-hidden="true" size={15} />保存人工输入</button></footer> : null}
+          </section>
+        </details> : null}
 
-        {artifacts.length ? <div className="node-artifact-links">{artifacts.map((artifact) => artifact.contentUrl ? (
-          <a href={artifact.contentUrl} key={artifact.id}>{artifact.kind}<small>{artifact.providerId ?? artifact.schemaVersion ?? "产物"}</small></a>
-        ) : (
-          <span className="node-artifact-unavailable" aria-disabled="true" title="该产物没有可读取的文件地址" key={artifact.id}>{artifact.kind}<small>暂不可打开 · 尚无文件地址</small></span>
-        ))}</div> : null}
         {error ? <p className="node-workspace-error" role="alert">{error}</p> : null}
       </div>
 
@@ -335,10 +240,6 @@ function revealExpandedWorkspace(workspace: HTMLDetailsElement): void {
   window.requestAnimationFrame(() => workspace.scrollIntoView({ block: "start" }));
 }
 
-function EditorMode({ value, onChange }: { value: "form" | "json"; onChange: (value: "form" | "json") => void }) {
-  return <div className="node-editor-mode" role="group" aria-label="编辑方式"><button type="button" aria-pressed={value === "form"} className={value === "form" ? "is-active" : undefined} onClick={() => onChange("form")}>表单</button><button type="button" aria-pressed={value === "json"} className={value === "json" ? "is-active" : undefined} onClick={() => onChange("json")}>JSON 专家</button></div>;
-}
-
 function safeParse(value: string): unknown {
   try {
     return JSON.parse(value) as unknown;
@@ -368,14 +269,6 @@ function selectEditableArtifact(nodeId: string, artifacts: StudioArtifact[], eff
   return candidates.find((artifact) => effectiveArtifactIds?.includes(artifact.id)) ?? candidates[0];
 }
 
-function selectModelTraceArtifact(nodeId: string, artifacts: StudioArtifact[], effectiveArtifactIds?: string[]): StudioArtifact | undefined {
-  const candidates = artifacts.filter((artifact) => artifact.kind === "model_trace"
-    && artifact.producerNodeId === nodeId
-    && artifact.contentType === "application/json"
-    && artifact.contentUrl);
-  return candidates.find((artifact) => effectiveArtifactIds?.includes(artifact.id)) ?? candidates[0];
-}
-
 function effectiveOutput(node: StudioNode): unknown {
   const state = node.outputState;
   return state?.versions.find((version) => version.id === state.effectiveVersionId)?.output;
@@ -386,12 +279,30 @@ function effectiveInput(node: StudioNode): unknown {
   return state?.versions.find((version) => version.id === state.effectiveVersionId)?.value;
 }
 
+function configuredAssetProviderIds(nodes: StudioNode[]): string[] {
+  const briefNode = nodes.find((candidate) => candidate.id === "brief");
+  const brief = asRecord(briefNode ? effectiveOutput(briefNode) ?? briefNode.output : undefined);
+  const director = asRecord(brief?.director);
+  return Array.isArray(director?.assetProviderIds)
+    ? director.assetProviderIds.filter((value): value is string => typeof value === "string")
+    : [];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
 function pretty(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-function traceText(value: unknown): string {
-  return typeof value === "string" && value.trim() ? value : "未记录";
+function hasMeaningfulValue(value: unknown): boolean {
+  if (value === null || value === undefined || value === "") return false;
+  if (Array.isArray(value)) return value.some(hasMeaningfulValue);
+  if (typeof value === "object") return Object.values(value as Record<string, unknown>).some(hasMeaningfulValue);
+  return true;
 }
 
 function inputSourceLabel(source: "derived" | "human" | "reconstructed" | undefined): string {
@@ -404,39 +315,12 @@ function shortId(value: string | undefined): string | undefined {
   return value && value.length > 14 ? `${value.slice(0, 6)}…${value.slice(-5)}` : value;
 }
 
-function billingLabel(billing: StudioBillingType | undefined, estimated?: number): string {
-  if (billing === "metered") return estimated === undefined ? "按量付费" : `预计 ¥${estimated.toFixed(2)}`;
-  if (billing === "subscription") return "订阅额度";
-  if (billing === "local_compute") return "本地计算";
-  if (billing === "human") return "人工";
-  return "免费 / 待统计";
-}
-
-function receiptCostLabel(receipt: StudioNodeExecutionReceipt | undefined): string {
-  if (!receipt) return billingLabel(undefined);
-  if (receipt.meteredFailedAttemptCount) {
-    const failure = `${receipt.meteredFailedAttemptCount} / ${receipt.meteredAttemptCount ?? 1} 次计费任务失败`;
-    if (receipt.actualCostCny === undefined) {
-      return receipt.estimatedCostCny === undefined
-        ? `${failure} · 费用待回填`
-        : `${failure} · 费用待回填（预估 ¥${receipt.estimatedCostCny.toFixed(2)}）`;
-    }
-    const source = receipt.actualCostSource === "provider_reported" ? "供应商账单" : "按配置单价核算";
-    return `${failure} · ${source} ¥${receipt.actualCostCny.toFixed(2)}`;
-  }
-  if (receipt.actualCostCny !== undefined) {
-    const source = receipt.actualCostSource === "configured_rate" ? "按配置单价核算" : "账单实付";
-    return `${source} ¥${receipt.actualCostCny.toFixed(2)}`;
-  }
-  if (receipt.authorizedCostCny !== undefined) return `已授权 ¥${receipt.authorizedCostCny.toFixed(2)}`;
-  return billingLabel(receipt.billing, receipt.estimatedCostCny);
-}
-
-function configurationSourceLabel(source: StudioNodeExecutionReceipt["configurationSource"], hasReceipt: boolean): string {
-  if (source === "node_override") return "节点人工覆盖";
-  if (source === "run_override") return "本次制作覆盖";
-  if (source === "template_default") return "模板默认";
-  if (source === "global_default") return "全局默认";
-  if (source === "system_default") return "系统默认";
-  return hasReceipt ? "历史凭证未记录" : "待执行";
+function creatorCapabilityLabel(
+  execution: StudioNode["executionReceipt"] | StudioNode["plannedExecution"] | undefined,
+  spendPlan: StudioNode["spendPlan"],
+): string | undefined {
+  const providerId = execution?.providerId ?? spendPlan?.providerId;
+  const modelId = execution?.modelId ?? spendPlan?.modelId;
+  if (!providerId || !modelId || providerId.startsWith("inline:") || modelId === "inline") return undefined;
+  return `本次使用 ${providerLabel(providerId) ?? execution?.providerLabel ?? providerId} · ${modelId}`;
 }

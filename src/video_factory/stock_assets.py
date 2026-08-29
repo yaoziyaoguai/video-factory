@@ -1,6 +1,10 @@
+import ipaddress
+import http.client
 import json
 import os
 import re
+import socket
+import ssl
 import time
 import urllib.parse
 import urllib.request
@@ -25,6 +29,12 @@ PROVIDER_REQUEST_ATTEMPTS = 3
 ASSET_DOWNLOAD_ATTEMPTS = 2
 ASSET_PREPARE_WORKERS = 3
 NETWORK_RETRY_DELAY_SECONDS = 0.25
+ASSET_REDIRECT_LIMIT = 5
+UNSAFE_IPV6_NETWORKS = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+    ipaddress.ip_network("fec0::/10"),
+)
 
 TOPIC_SHOT_QUERIES = (
     (("下班", "上班", "职场", "工作", "加班"), (
@@ -951,14 +961,21 @@ def fetch_json(request: urllib.request.Request, opener: Optional[Callable] = Non
     raise AssertionError("Provider request retry loop exited unexpectedly")
 
 
-def materialize_candidate(candidate: StockAssetCandidate, local_path: Path) -> Path:
+def materialize_candidate(
+    candidate: StockAssetCandidate,
+    local_path: Path,
+    opener: Optional[Callable] = None,
+) -> Path:
     local_path.parent.mkdir(parents=True, exist_ok=True)
     if candidate.download_url.startswith("mock://"):
         return write_mock_image(candidate, local_path)
+    validate_asset_download_url(candidate.download_url)
     request = urllib.request.Request(candidate.download_url, headers=download_headers(candidate.source_url))
+    active_opener = opener or open_asset_request
     for attempt in range(1, ASSET_DOWNLOAD_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with active_opener(request, timeout=60) as response:
+                validate_asset_content_type(candidate.media_type, response.headers.get("Content-Type"))
                 content_length = int(response.headers.get("Content-Length") or 0)
                 if content_length > MAX_ASSET_DOWNLOAD_BYTES:
                     raise RuntimeError(
@@ -979,6 +996,144 @@ def materialize_candidate(candidate: StockAssetCandidate, local_path: Path) -> P
                 ) from error
             time.sleep(NETWORK_RETRY_DELAY_SECONDS * attempt)
     raise AssertionError("Asset download retry loop exited unexpectedly")
+
+
+def validate_asset_download_url(value: str) -> str:
+    return resolve_asset_download_target(value)[0]
+
+
+def resolve_asset_download_target(value: str) -> tuple[str, tuple[str, ...]]:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except ValueError as error:
+        raise RuntimeError("Asset download URL is invalid.") from error
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise RuntimeError("Asset download URL must use HTTP or HTTPS.")
+    if parsed.username or parsed.password or not parsed.hostname:
+        raise RuntimeError("Asset download URL points to a private or unsafe network destination.")
+    host = parsed.hostname.rstrip(".").lower()
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        raise RuntimeError("Asset download URL points to a private or unsafe network destination.")
+    try:
+        resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as error:
+        raise RuntimeError("Asset download URL hostname could not be resolved.") from error
+    addresses = {str(entry[4][0]).split("%", 1)[0] for entry in resolved if entry[4]}
+    if not addresses or any(not is_public_ip_address(address) for address in addresses):
+        raise RuntimeError("Asset download URL points to a private or unsafe network destination.")
+    return parsed.geturl(), tuple(sorted(addresses))
+
+
+def is_public_ip_address(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    if isinstance(address, ipaddress.IPv6Address) and any(address in network for network in UNSAFE_IPV6_NETWORKS):
+        return False
+    return address.is_global
+
+
+def open_asset_request(request: urllib.request.Request, timeout: float):
+    current_url = request.full_url
+    headers = dict(request.header_items())
+    for redirect_count in range(ASSET_REDIRECT_LIMIT + 1):
+        validated_url, addresses = resolve_asset_download_target(current_url)
+        response = open_pinned_asset_response(validated_url, addresses, headers, timeout)
+        if response.status not in {301, 302, 303, 307, 308}:
+            if response.status >= 400:
+                status = response.status
+                reason = response.reason
+                response_headers = response.headers
+                response.close()
+                raise HTTPError(validated_url, status, reason, response_headers, None)
+            return response
+        location = response.headers.get("Location")
+        response.close()
+        if not location:
+            raise RuntimeError("Asset redirect did not include a location.")
+        if redirect_count == ASSET_REDIRECT_LIMIT:
+            raise RuntimeError("Asset download exceeded the redirect limit.")
+        current_url = urllib.parse.urljoin(validated_url, location)
+    raise AssertionError("Asset redirect loop exited unexpectedly")
+
+
+def open_pinned_asset_response(
+    value: str,
+    addresses: tuple[str, ...],
+    headers: dict,
+    timeout: float,
+):
+    parsed = urllib.parse.urlsplit(value)
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    last_error = None
+    for address in addresses:
+        connection = None
+        raw_socket = None
+        try:
+            if parsed.scheme.lower() == "https":
+                context = ssl.create_default_context()
+                connection = http.client.HTTPSConnection(host, port, timeout=timeout, context=context)
+                raw_socket = socket.create_connection((address, port), timeout=timeout)
+                connection.sock = context.wrap_socket(raw_socket, server_hostname=host)
+            else:
+                connection = http.client.HTTPConnection(host, port, timeout=timeout)
+                connection.sock = socket.create_connection((address, port), timeout=timeout)
+            connection.request("GET", path, headers=headers)
+            return PinnedAssetResponse(connection, connection.getresponse())
+        except (OSError, ssl.SSLError, http.client.HTTPException) as error:
+            last_error = error
+            if connection is not None:
+                connection.close()
+            elif raw_socket is not None:
+                raw_socket.close()
+    raise URLError(last_error or f"Unable to connect to {host}")
+
+
+class PinnedAssetResponse:
+    def __init__(self, connection, response):
+        self._connection = connection
+        self._response = response
+        self.status = response.status
+        self.reason = response.reason
+        self.headers = response.headers
+
+    def read(self, *args, **kwargs):
+        return self._response.read(*args, **kwargs)
+
+    def read1(self, *args, **kwargs):
+        read1 = getattr(self._response, "read1", self._response.read)
+        return read1(*args, **kwargs)
+
+    def close(self):
+        try:
+            self._response.close()
+        finally:
+            self._connection.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+
+def validate_asset_content_type(media_type: str, value: Optional[str]) -> str:
+    content_type = (value or "").split(";", 1)[0].strip().lower()
+    valid = content_type in {"application/octet-stream", "binary/octet-stream"}
+    if media_type == "video":
+        valid = valid or content_type.startswith("video/") or content_type in {"application/mp4", "audio/mp4"}
+    elif media_type == "image":
+        valid = valid or content_type.startswith("image/")
+    if not valid:
+        displayed = content_type or "missing"
+        raise RuntimeError(f"Asset download returned unsupported content type '{displayed}'.")
+    return content_type
 
 
 def write_response_body(

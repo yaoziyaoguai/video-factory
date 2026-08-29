@@ -130,6 +130,7 @@ class FakePipeline implements StudioPipelinePort {
   dispatchCount = 0;
   lastInput?: unknown;
   dispatchGate?: Promise<void>;
+  removedRunId?: string;
 
   constructor(run: WorkflowRun<ProductionBrief>) {
     this.run = run;
@@ -137,6 +138,10 @@ class FakePipeline implements StudioPipelinePort {
 
   async list(): Promise<WorkflowRun<ProductionBrief>[]> {
     return [this.run];
+  }
+
+  async remove(runId: string): Promise<void> {
+    this.removedRunId = runId;
   }
 
   async show(runId: string): Promise<WorkflowRun<ProductionBrief>> {
@@ -222,6 +227,19 @@ const opportunityInput: StudioOpportunityInput = {
 };
 
 describe("StudioService", () => {
+  it("deletes only terminal production records", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(() => service.deleteRun("run-1"), /仍在运行或等待确认/);
+    assert.equal(pipeline.removedRunId, undefined);
+
+    pipeline.run = { ...pipeline.run, status: "succeeded" };
+    await service.deleteRun("run-1");
+    assert.equal(pipeline.removedRunId, "run-1");
+  });
+
   it("maps persisted runs to queue and detail DTOs", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));

@@ -40,9 +40,12 @@ describe("production provider runtime metadata", () => {
       MINIMAX_API_KEY: "test-only-key",
       MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP: "0.5",
       ZAI_VISUAL_REVIEW_ESTIMATED_CNY: "0.1",
+      ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3-flash-preview",
     });
 
-    assert.equal(metadata.find((item) => item.id === "glm-visual-review-v1")?.billingUnit, "run");
+    const glm = metadata.find((item) => item.id === "glm-visual-review-v1");
+    assert.equal(glm?.billingUnit, "run");
+    assert.equal(glm?.modelId, "glm-5.3-flash-preview");
     assert.equal(metadata.find((item) => item.id === "minimax-tts-v1")?.billingUnit, "run");
   });
 });

@@ -28,6 +28,8 @@ import { CandidateVerificationDialog } from "./CandidateVerificationDialog.js";
 type EntryMode = StudioCandidateOrigin | "custom";
 
 interface TopicEntryWorkspaceProps {
+  initialMode?: EntryMode;
+  initialSelectedId?: string;
   inbox?: StudioCandidateInbox;
   series: StudioSeries[];
   loading: Partial<Record<StudioCandidateOrigin, boolean>>;
@@ -45,11 +47,11 @@ interface TopicEntryWorkspaceProps {
 const CATEGORY_ORDER = Object.keys(TOPIC_CATEGORY_LABELS) as StudioTopicCategory[];
 
 export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
-  const [mode, setMode] = useState<EntryMode>("trend");
+  const [mode, setMode] = useState<EntryMode>(props.initialMode ?? "trend");
   const [category, setCategory] = useState<StudioTopicCategory | "all">("all");
   const [platform, setPlatform] = useState("all");
   const [verdict, setVerdict] = useState<StudioEditorialVerdict | "all">("all");
-  const [selectedId, setSelectedId] = useState<string>();
+  const [selectedId, setSelectedId] = useState(props.initialSelectedId ?? "");
   const [selectedSeriesId, setSelectedSeriesId] = useState<string>();
   const [verificationCandidate, setVerificationCandidate] = useState<StudioCandidateInboxItem>();
 
@@ -81,15 +83,23 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
     setCategory("all");
     setPlatform("all");
     setVerdict("all");
-    setSelectedId(undefined);
-  }, [mode, selectedSeriesId]);
+    setSelectedId(props.initialSelectedId ?? "");
+  }, [mode, props.initialSelectedId, selectedSeriesId]);
 
   useEffect(() => {
-    if (!selectedSeriesId && props.series[0]) setSelectedSeriesId(props.series[0].id);
+    if (props.initialMode) setMode(props.initialMode);
+  }, [props.initialMode]);
+
+  useEffect(() => {
+    const initialSeriesId = props.initialSelectedId
+      ? props.inbox?.items.find((item) => item.id === props.initialSelectedId)?.seriesId
+      : undefined;
+    if (!selectedSeriesId && initialSeriesId) setSelectedSeriesId(initialSeriesId);
+    else if (!selectedSeriesId && props.series[0]) setSelectedSeriesId(props.series[0].id);
     if (selectedSeriesId && !props.series.some((item) => item.id === selectedSeriesId)) {
       setSelectedSeriesId(props.series[0]?.id);
     }
-  }, [props.series, selectedSeriesId]);
+  }, [props.inbox?.items, props.initialSelectedId, props.series, selectedSeriesId]);
 
   return (
     <section className="topic-entry-workspace" data-tour="topic-inbox" aria-labelledby="topic-entry-title">
@@ -160,7 +170,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                       <button key={item.id} type="button" className={`candidate-row${selected?.id === item.id ? " is-active" : ""}`} aria-label={`查看${item.title}`} onClick={() => setSelectedId(item.id)}>
                         <span className="candidate-number">{String(index + 1).padStart(2, "0")}</span>
                         <span className="candidate-row-copy"><small>{TOPIC_CATEGORY_LABELS[item.category]} · {platformLabel(item.platform)} · {editorialVerdictLabel(item.editorialDecision.verdict)}</small><strong>{item.title}</strong><span>{item.hook}</span></span>
-                        <span className="candidate-score">{item.score.final}</span>
+                        <span className="candidate-score"><small>制作潜力</small>{Math.round(item.score.final)}</span>
                       </button>
                     ))}
                   </div>
@@ -194,7 +204,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt }: { item: StudioCa
   const blocked = item.verification.status === "blocked" || skipped;
   return (
     <article className="candidate-detail" aria-labelledby="candidate-detail-title">
-      <header><span>{item.origin === "series" ? `${item.seriesName} · 第 ${item.episodeNumber} 集` : `${TOPIC_CATEGORY_LABELS[item.category]}观察`}</span><strong aria-label={`候选评分 ${item.score.final}`}>{item.score.final}</strong></header>
+      <header><span>{item.origin === "series" ? `${item.seriesName} · 第 ${item.episodeNumber} 集` : `${TOPIC_CATEGORY_LABELS[item.category]}观察`}</span><strong aria-label={`制作潜力 ${Math.round(item.score.final)} 分`}><small>制作潜力</small>{Math.round(item.score.final)}</strong></header>
       <h3 id="candidate-detail-title">{item.title}</h3>
       <blockquote>{item.hook}</blockquote>
       <p>{item.rationale}</p>

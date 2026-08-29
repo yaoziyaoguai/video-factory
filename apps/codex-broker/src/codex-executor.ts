@@ -17,7 +17,7 @@ export type { BrokerTaskKind } from "./task-definitions.js";
 
 const OPENAI_TASK_KINDS = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"] as const;
 const ZAI_TASK_KINDS = ["visual-review"] as const;
-const ZAI_MODEL_ID = "glm-5.3-flash";
+export const DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID = "glm-5.3-flash";
 
 export type CodexExecutorProfileId = "openai" | "zai";
 
@@ -36,6 +36,7 @@ export interface CodexExecutorProfile {
 export function codexExecutorProfileFor(
   profileId: CodexExecutorProfileId,
   openaiModel?: string,
+  zaiModel = DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID,
 ): CodexExecutorProfile {
   if (profileId === "openai") {
     return {
@@ -52,7 +53,7 @@ export function codexExecutorProfileFor(
     identity: {
       profileId,
       providerId: "zai-bigmodel-api",
-      modelId: ZAI_MODEL_ID,
+      modelId: zaiModel,
       taskKinds: [...ZAI_TASK_KINDS],
     },
   };
@@ -83,6 +84,7 @@ export class CodexExecutorError extends Error {
 
 export interface TopicIdeasPayload {
   signals: unknown[];
+  strategy?: string;
 }
 
 export interface DirectorPlanPayload {
@@ -246,11 +248,14 @@ export function parseTaskRequest(
 export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): ValidatedTask {
   const record = requireRecord(value, "payload");
   if (kind === "topic-ideas") {
-    assertExactKeys(record, ["signals"], "payload");
+    assertExactKeys(record, ["signals", "strategy"], "payload");
+    const strategy = record.strategy === undefined ? undefined : requiredText(record.strategy, "payload.strategy");
+    if (strategy && strategy.length > 2_000) throw new CodexExecutorError("payload.strategy exceeds 2000 characters.", false);
     return {
       kind,
       payload: {
         signals: arrayValue(record.signals, "payload.signals"),
+        ...(strategy ? { strategy } : {}),
       },
     };
   }
@@ -553,7 +558,7 @@ export function buildTaskPrompt(
 ): string {
   let data: Record<string, unknown>;
   if (task.kind === "topic-ideas") {
-    data = { signals: task.payload.signals };
+    data = { signals: task.payload.signals, ...(task.payload.strategy ? { creatorStrategy: task.payload.strategy } : {}) };
   } else if (task.kind === "script-draft") {
     data = { brief: task.payload.brief };
   } else if (task.kind === "publish-copy") {

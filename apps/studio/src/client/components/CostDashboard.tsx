@@ -14,30 +14,55 @@ export function CostDashboard({ dashboard }: { dashboard: StudioCostDashboard })
       </div>
       <div className="cost-run-table">
         <header><strong>视频明细</strong><span>{dashboard.runs.length} 条制作</span></header>
-        {dashboard.runs.length ? dashboard.runs.map((run) => <Link to={`/projects/${run.runId}`} key={run.runId}><span><strong>{run.title}</strong><small>{run.totals.meteredCalls} 次计费任务 · {run.totals.failedMeteredCalls} 次失败 · {run.totals.actualPendingCount} 笔待回填</small></span><b>{actualCostLabel(run.totals)}</b></Link>) : <p>产生制作调用后，这里会按视频汇总。</p>}
+        {dashboard.runs.length ? dashboard.runs.map((run) => <Link to={`/projects/${run.runId}`} key={run.runId}><span><strong>{run.title}</strong><small>{run.totals.meteredCalls} 次已确认计费调用 · {run.totals.failedMeteredCalls} 次明确失败 · {run.totals.actualPendingCount} 笔待核对</small></span><b>{actualCostLabel(run.totals)}</b></Link>) : <p>产生制作调用后，这里会按视频汇总。</p>}
       </div>
     </section>
   );
 }
 
 export function RunCostDetailPanel({ detail }: { detail: StudioCostRunDetail }) {
+  const lines = groupCostLines(detail.lines);
   return (
     <section className="run-cost-detail" aria-labelledby="run-cost-title">
-      <header className="section-heading"><div><p className="eyebrow">本片成本</p><h2 id="run-cost-title">调用与消费明细</h2></div><ReceiptText aria-hidden="true" size={19} /></header>
+      <header className="section-heading"><div><p className="eyebrow">本片成本</p><h2 id="run-cost-title">消费概览</h2></div><ReceiptText aria-hidden="true" size={19} /></header>
       <CostMetrics totals={detail.totals} compact />
-      <div className="cost-line-list">
-        {detail.lines.length ? detail.lines.map((line) => <article key={line.id}><span><strong>{line.role ? `${line.role} · ` : ""}{line.nodeId}</strong><small>{line.providerId} · {line.modelId}</small></span><span><small>{costLineLabel(line)}</small><b>{line.actualPending ? `待回填 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
-      </div>
+      <details className="cost-call-details">
+        <summary><span><strong>逐角色消费明细</strong><small>查看本片使用了哪些能力</small></span><b>{lines.length} 项</b></summary>
+        <div className="cost-line-list">
+          {lines.length ? lines.map((line) => <article key={line.id}><span><strong>{line.role ?? runNodeLabel(line.nodeId)}</strong><small>{capabilityLabel(line)}</small></span><span><small>{line.callCount > 1 ? `${line.callCount} 次执行 · ` : ""}{costLineLabel(line)}</small><b>{line.actualPending ? `待核对 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
+        </div>
+      </details>
     </section>
   );
+}
+
+type GroupedCostLine = StudioCostRunDetail["lines"][number] & { callCount: number };
+
+function groupCostLines(lines: StudioCostRunDetail["lines"]): GroupedCostLine[] {
+  const grouped = new Map<string, GroupedCostLine>();
+  for (const line of lines) {
+    const key = [line.role ?? line.nodeId, line.providerId, line.modelId, line.billing, line.status, line.actualPending, line.actualCostSource].join("|");
+    const current = grouped.get(key);
+    if (!current) {
+      grouped.set(key, { ...line, callCount: 1 });
+      continue;
+    }
+    current.callCount += 1;
+    current.estimatedCostCny += line.estimatedCostCny;
+    current.authorizedCostCny = (current.authorizedCostCny ?? 0) + (line.authorizedCostCny ?? 0);
+    current.actualCostCny = (current.actualCostCny ?? 0) + (line.actualCostCny ?? 0);
+    current.meteredAttemptCount = (current.meteredAttemptCount ?? 0) + (line.meteredAttemptCount ?? 0);
+    current.meteredFailedAttemptCount = (current.meteredFailedAttemptCount ?? 0) + (line.meteredFailedAttemptCount ?? 0);
+  }
+  return [...grouped.values()];
 }
 
 function CostMetrics({ totals, compact = false }: { totals: StudioCostTotals; compact?: boolean }) {
   return <div className={compact ? "cost-metrics is-compact" : "cost-metrics"}>
     <article><CircleDollarSign aria-hidden="true" size={17} /><span>已核算消费</span><strong>{actualCostLabel(totals)}</strong></article>
     <article><Gauge aria-hidden="true" size={17} /><span>授权上限</span><strong>¥{totals.authorizedCostCny.toFixed(2)}</strong></article>
-    <article><Clock3 aria-hidden="true" size={17} /><span>待回填</span><strong>{totals.actualPendingCount}</strong></article>
-    <article><RotateCcw aria-hidden="true" size={17} /><span>付费失败</span><strong>{totals.failedMeteredCalls}</strong></article>
+    <article><Clock3 aria-hidden="true" size={17} /><span>待核对记录</span><strong>{totals.actualPendingCount}</strong></article>
+    <article><RotateCcw aria-hidden="true" size={17} /><span>明确失败调用</span><strong>{totals.failedMeteredCalls}</strong></article>
   </div>;
 }
 
@@ -46,19 +71,27 @@ function CostRanking({ title, groups, kind }: { title: string; groups: StudioCos
   return <section className="cost-ranking"><header><strong>{title}</strong><span>{groups.length} 项</span></header>{groups.length ? groups.map((group) => {
     const amount = group.actualCostCny || group.estimatedCostCny;
     const label = kind === "provider" ? providerLabel(group.id) ?? group.label : runNodeLabel(group.id);
-    return <div key={group.id}><span><b>{label}</b><small>{group.id} · {group.calls} 次</small></span><i><span style={{ width: `${Math.max(4, amount / max * 100)}%` }} /></i><strong>{group.actualPendingCount > 0 ? `¥${group.actualCostCny.toFixed(2)} + ${group.actualPendingCount} 笔待回填` : `¥${group.actualCostCny.toFixed(2)}`}</strong></div>;
+    return <div key={group.id}><span><b>{label}</b><small>{group.calls} 次已确认</small></span><i><span style={{ width: `${Math.max(4, amount / max * 100)}%` }} /></i><strong>{group.actualPendingCount > 0 ? `¥${group.actualCostCny.toFixed(2)} + ${group.actualPendingCount} 笔待核对` : `¥${group.actualCostCny.toFixed(2)}`}</strong></div>;
   }) : <p>暂无调用数据</p>}</section>;
+}
+
+function capabilityLabel(line: StudioCostRunDetail["lines"][number]): string {
+  const provider = providerLabel(line.providerId) ?? "自动制作能力";
+  if (!line.modelId || line.modelId === "inline" || line.modelId === line.providerId) return provider;
+  return `${provider} · ${line.modelId}`;
 }
 
 function actualCostLabel(totals: StudioCostTotals): string {
   return totals.actualPendingCount > 0
-    ? `¥${totals.actualCostCny.toFixed(2)} 已回填 + ${totals.actualPendingCount} 笔待回填`
+    ? `¥${totals.actualCostCny.toFixed(2)} 已核算 + ${totals.actualPendingCount} 笔待核对`
     : `¥${totals.actualCostCny.toFixed(2)}`;
 }
 
 function costLineLabel(line: StudioCostRunDetail["lines"][number]): string {
   if ((line.meteredFailedAttemptCount ?? 0) > 0) {
-    return `${line.meteredFailedAttemptCount} / ${line.meteredAttemptCount ?? 1} 次计费任务失败`;
+    return line.meteredAttemptCount === undefined
+      ? `${line.meteredFailedAttemptCount} 次计费调用明确失败`
+      : `${line.meteredFailedAttemptCount} / ${line.meteredAttemptCount} 次计费调用失败`;
   }
   if (line.status === "failed") return "调用失败";
   if (line.actualCostSource === "configured_rate") return "按配置单价核算";

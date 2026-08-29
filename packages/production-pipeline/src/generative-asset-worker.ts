@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { readFile, rename, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import path from "node:path";
+import { Readable } from "node:stream";
 import type { WorkerArtifactDescriptor, WorkerResponse } from "./python-worker-client.js";
 import type {
   VideoGenerationAdapter,
@@ -39,13 +43,22 @@ export interface ImageGenerationAdapterBinding {
 }
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+type ResolveHost = (hostname: string) => Promise<readonly string[]>;
+
+interface ValidatedMediaTarget {
+  url: string;
+  hostname: string;
+  addresses: readonly string[];
+}
 
 export interface GenerativeAssetWorkerClientOptions {
   fallback: WorkerClient;
   adapters: VideoGenerationAdapterBinding[];
   imageAdapters?: ImageGenerationAdapterBinding[];
   fetch?: FetchLike;
+  resolveHost?: ResolveHost;
   maxDownloadBytes?: number;
+  downloadTimeoutMs?: number;
 }
 
 interface ScriptScene {
@@ -119,8 +132,10 @@ const KNOWN_FREE_ASSET_PROVIDERS = new Set([
 export class GenerativeAssetWorkerClient implements WorkerClient {
   private readonly adapters = new Map<string, VideoGenerationAdapterBinding>();
   private readonly imageAdapters = new Map<string, ImageGenerationAdapterBinding>();
-  private readonly fetch: FetchLike;
+  private readonly fetch: FetchLike | undefined;
+  private readonly resolveHost: ResolveHost;
   private readonly maxDownloadBytes: number;
+  private readonly downloadTimeoutMs: number;
 
   constructor(private readonly options: GenerativeAssetWorkerClientOptions) {
     for (const binding of options.adapters) {
@@ -152,8 +167,13 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       }
       this.imageAdapters.set(binding.adapter.providerId, binding);
     }
-    this.fetch = options.fetch ?? fetch;
+    this.fetch = options.fetch;
+    this.resolveHost = options.resolveHost ?? resolveMediaHostname;
     this.maxDownloadBytes = options.maxDownloadBytes ?? 200 * 1024 * 1024;
+    this.downloadTimeoutMs = options.downloadTimeoutMs ?? 60_000;
+    if (!Number.isInteger(this.downloadTimeoutMs) || this.downloadTimeoutMs <= 0) {
+      throw new Error("downloadTimeoutMs must be a positive integer.");
+    }
   }
 
   async run(request: Record<string, unknown>): Promise<WorkerResponse> {
@@ -232,6 +252,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           path.join(outputDir, `scene_${String(scene.position).padStart(2, "0")}_${providerId}`),
           binding.mediaType,
           this.maxDownloadBytes,
+          this.resolveHost,
+          this.downloadTimeoutMs,
         );
         applySucceeded(job, generated.taskId, generated.url);
         await writeJobs(jobsPath, jobs);
@@ -444,6 +466,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           path.join(outputDir, `scene_${String(scene.position).padStart(2, "0")}_${providerId}`),
           binding.mediaType,
           this.maxDownloadBytes,
+          this.resolveHost,
+          this.downloadTimeoutMs,
         );
         applySucceeded(job, generated.taskId, generated.url);
         await writeJobs(jobsPath, jobs);
@@ -830,42 +854,64 @@ function replaceSceneAsset(
 }
 
 async function downloadGeneratedAsset(
-  fetcher: FetchLike,
+  fetcher: FetchLike | undefined,
   url: string,
   destinationStem: string,
   mediaType: "image" | "video",
   maxBytes: number,
+  resolveHost: ResolveHost,
+  timeoutMs: number,
 ): Promise<{ path: string; contentType: string }> {
-  let currentUrl = validatedMediaUrl(url);
-  let response: Response | undefined;
-  for (let redirects = 0; redirects <= 5; redirects += 1) {
-    response = await fetcher(currentUrl, { redirect: "manual" });
-    if (![301, 302, 303, 307, 308].includes(response.status)) break;
-    const location = response.headers.get("location");
-    if (!location) throw new Error(`Generated ${mediaType} redirect did not include a location.`);
-    if (redirects === 5) throw new Error(`Generated ${mediaType} download exceeded the redirect limit.`);
-    currentUrl = validatedMediaUrl(new URL(location, currentUrl).toString());
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let currentTarget = await validatedMediaTarget(url, resolveHost);
+    let response: Response | undefined;
+    for (let redirects = 0; redirects <= 5; redirects += 1) {
+      response = fetcher
+        ? await fetcher(currentTarget.url, { redirect: "manual", signal: controller.signal })
+        : await fetchPinnedMedia(currentTarget, controller.signal);
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get("location");
+      await response.body?.cancel();
+      if (!location) throw new Error(`Generated ${mediaType} redirect did not include a location.`);
+      if (redirects === 5) throw new Error(`Generated ${mediaType} download exceeded the redirect limit.`);
+      currentTarget = await validatedMediaTarget(new URL(location, currentTarget.url).toString(), resolveHost);
+    }
+    if (!response) throw new Error(`Generated ${mediaType} download did not return a response.`);
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`Generated ${mediaType} download failed with status ${response.status}.`);
+    }
+    const contentLength = Number(response.headers.get("content-length") ?? "0");
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      await response.body?.cancel();
+      throw new Error(`Generated ${mediaType} exceeds the ${maxBytes}-byte download limit.`);
+    }
+    const rawContentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    let contentType: string;
+    try {
+      contentType = validatedMediaContentType(mediaType, rawContentType);
+    } catch (error) {
+      await response.body?.cancel();
+      throw error;
+    }
+    const bytes = await readLimitedBody(response, mediaType, maxBytes);
+    const extension = mediaType === "video" ? "mp4" : imageExtension(contentType);
+    const destination = `${destinationStem}.${extension}`;
+    const temporary = `${destination}.partial`;
+    await writeFile(temporary, bytes);
+    await rename(temporary, destination);
+    return { path: destination, contentType };
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error(`Generated ${mediaType} download timed out after ${timeoutMs}ms.`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  if (!response) throw new Error(`Generated ${mediaType} download did not return a response.`);
-  if (!response.ok) {
-    throw new Error(`Generated ${mediaType} download failed with status ${response.status}.`);
-  }
-  const contentLength = Number(response.headers.get("content-length") ?? "0");
-  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new Error(`Generated ${mediaType} exceeds the ${maxBytes}-byte download limit.`);
-  }
-  const bytes = await readLimitedBody(response, mediaType, maxBytes);
-  const rawContentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-  const contentType = validatedMediaContentType(mediaType, rawContentType);
-  const extension = mediaType === "video" ? "mp4" : imageExtension(contentType);
-  const destination = `${destinationStem}.${extension}`;
-  const temporary = `${destination}.partial`;
-  await writeFile(temporary, bytes);
-  await rename(temporary, destination);
-  return { path: destination, contentType };
 }
 
-function validatedMediaUrl(value: string): string {
+async function validatedMediaTarget(value: string, resolveHost: ResolveHost): Promise<ValidatedMediaTarget> {
   let url: URL;
   try {
     url = new URL(value);
@@ -878,29 +924,112 @@ function validatedMediaUrl(value: string): string {
   if (url.username || url.password || isBlockedMediaHost(url.hostname)) {
     throw new Error("Generated media URL points to a private or unsafe network destination.");
   }
-  return url.toString();
+  const hostname = normalizedHost(url.hostname);
+  let addresses: readonly string[] = [hostname];
+  if (isIP(hostname) === 0) {
+    try {
+      addresses = await resolveHost(hostname);
+    } catch {
+      throw new Error("Generated media URL hostname could not be resolved.");
+    }
+  }
+  addresses = [...new Set(addresses.map(normalizedHost))];
+  if (addresses.length === 0 || addresses.some((address) => isIP(address) === 0 || isBlockedMediaHost(address))) {
+    throw new Error("Generated media URL points to a private or unsafe network destination.");
+  }
+  return { url: url.toString(), hostname, addresses };
+}
+
+async function fetchPinnedMedia(target: ValidatedMediaTarget, signal: AbortSignal): Promise<Response> {
+  let lastError: unknown;
+  for (const address of target.addresses) {
+    try {
+      return await fetchPinnedAddress(target, address, signal);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`Generated media host '${target.hostname}' could not be reached.`);
+}
+
+function fetchPinnedAddress(target: ValidatedMediaTarget, address: string, signal: AbortSignal): Promise<Response> {
+  const url = new URL(target.url);
+  const secure = url.protocol === "https:";
+  const request = secure ? httpsRequest : httpRequest;
+  return new Promise<Response>((resolve, reject) => {
+    const outgoing = request({
+      protocol: url.protocol,
+      hostname: address,
+      port: url.port || (secure ? 443 : 80),
+      method: "GET",
+      path: `${url.pathname}${url.search}`,
+      headers: { Host: url.host, Accept: "*/*" },
+      ...(secure ? { servername: target.hostname } : {}),
+      signal,
+    }, (incoming) => {
+      const status = incoming.statusCode ?? 500;
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(incoming.headers)) {
+        if (Array.isArray(value)) value.forEach((entry) => headers.append(name, entry));
+        else if (value !== undefined) headers.set(name, value);
+      }
+      const body = [204, 205, 304].includes(status)
+        ? null
+        : Readable.toWeb(incoming) as ReadableStream<Uint8Array>;
+      resolve(new Response(body, { status, headers }));
+    });
+    outgoing.once("error", reject);
+    outgoing.end();
+  });
 }
 
 function isBlockedMediaHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const host = normalizedHost(hostname);
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return true;
   if (isIP(host) === 4) {
-    const [first, second] = host.split(".").map(Number);
-    return first === 0
-      || first === 10
-      || first === 127
-      || first! >= 224
-      || first === 169 && second === 254
-      || first === 172 && second! >= 16 && second! <= 31
-      || first === 192 && (second === 0 || second === 168)
-      || first === 198 && (second === 18 || second === 19)
-      || first === 100 && second! >= 64 && second! <= 127;
+    return isBlockedIpv4(host);
   }
   if (isIP(host) === 6) {
+    const mapped = mappedIpv4Address(host);
+    if (mapped) return isBlockedIpv4(mapped);
     return host === "::" || host === "::1" || host.startsWith("fc") || host.startsWith("fd")
-      || /^fe[89ab]/.test(host) || host.startsWith("::ffff:127.") || host.startsWith("::ffff:10.");
+      || /^fe[89ab]/.test(host) || /^fe[c-f]/.test(host) || host.startsWith("ff") || host.startsWith("2001:db8:")
+      || host === "100::" || host.startsWith("100::") || host.startsWith("64:ff9b:");
   }
   return false;
+}
+
+function normalizedHost(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+}
+
+function isBlockedIpv4(host: string): boolean {
+  const [first, second, third] = host.split(".").map(Number);
+  return first === 0
+    || first === 10
+    || first === 127
+    || first! >= 224
+    || first === 169 && second === 254
+    || first === 172 && second! >= 16 && second! <= 31
+    || first === 192 && (second === 0 || second === 168 || second === 88 && third === 99)
+    || first === 198 && (second === 18 || second === 19 || second === 51 && third === 100)
+    || first === 203 && second === 0 && third === 113
+    || first === 100 && second! >= 64 && second! <= 127;
+}
+
+function mappedIpv4Address(host: string): string | undefined {
+  const dotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(host)?.[1];
+  if (dotted && isIP(dotted) === 4) return dotted;
+  const hexadecimal = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  if (!hexadecimal) return undefined;
+  const high = Number.parseInt(hexadecimal[1]!, 16);
+  const low = Number.parseInt(hexadecimal[2]!, 16);
+  return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+}
+
+async function resolveMediaHostname(hostname: string): Promise<readonly string[]> {
+  return (await lookup(hostname, { all: true, verbatim: true })).map((entry) => entry.address);
 }
 
 async function readLimitedBody(response: Response, mediaType: "image" | "video", maxBytes: number): Promise<Buffer> {
@@ -923,7 +1052,7 @@ async function readLimitedBody(response: Response, mediaType: "image" | "video",
 
 function validatedMediaContentType(mediaType: "image" | "video", value: string | undefined): string {
   if (mediaType === "video") {
-    if (value && value !== "video/mp4" && value !== "application/octet-stream") {
+    if (value && !["video/mp4", "application/mp4", "audio/mp4", "application/octet-stream"].includes(value)) {
       throw new Error(`Generated video returned unsupported content type '${value}'.`);
     }
     return "video/mp4";

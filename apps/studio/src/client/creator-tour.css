@@ -3,17 +3,17 @@
   max-width: min(340px, calc(100vw - 28px));
   padding: 0;
   overflow: hidden;
-  color: #f4f3ed;
-  background: #191c22;
-  border: 1px solid #3a3e47;
-  border-top: 4px solid #ef5b3f;
+  color: #20232c;
+  background: #ffffff;
+  border: 1px solid #d9dde3;
+  border-top: 4px solid #6d57cf;
   border-radius: 8px;
-  box-shadow: 0 24px 64px rgb(0 0 0 / 34%);
+  box-shadow: 0 26px 70px rgb(30 34 44 / 22%);
 }
 
 .video-factory-tour .driver-popover-title {
-  padding: 19px 20px 0;
-  color: #ffffff;
+  padding: 19px 52px 0 20px;
+  color: #20232c;
   font-family: "Noto Serif SC Variable", "Songti SC", serif;
   font-size: 19px;
   font-weight: 720;
@@ -22,7 +22,7 @@
 
 .video-factory-tour .driver-popover-description {
   padding: 9px 20px 18px;
-  color: #bfc4ce;
+  color: #69717f;
   font-size: 13px;
   line-height: 1.75;
 }
@@ -32,12 +32,12 @@
   align-items: center;
   gap: 8px;
   padding: 10px 12px 10px 20px;
-  background: #22262e;
-  border-top: 1px solid #353a44;
+  background: #f7f8fa;
+  border-top: 1px solid #e2e5e9;
 }
 
 .video-factory-tour .driver-popover-progress-text {
-  color: #8f96a3;
+  color: #858c97;
   font-family: "Manrope Variable", sans-serif;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -48,31 +48,31 @@
 }
 
 .video-factory-tour .tour-end-button {
-  min-height: 32px;
+  min-height: 44px;
   margin: 0 0 0 auto;
   padding: 0 4px;
-  color: #aeb4bf;
+  color: #727985;
   background: transparent;
   border: 0;
   font-family: inherit;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   cursor: pointer;
 }
 
 .video-factory-tour .tour-end-button:hover {
-  color: #ffffff;
+  color: #4f3ca4;
 }
 
 .video-factory-tour button.driver-popover-prev-btn,
 .video-factory-tour button.driver-popover-next-btn {
-  min-height: 34px;
+  min-height: 44px;
   margin: 0;
   padding: 0 12px;
-  color: #eef0f5;
+  color: #4f5662;
   text-shadow: none;
-  background: #313640;
-  border: 1px solid #454b57;
+  background: #ffffff;
+  border: 1px solid #d6dae0;
   border-radius: 6px;
   font-family: inherit;
   font-size: 12px;
@@ -81,8 +81,8 @@
 
 .video-factory-tour button.driver-popover-next-btn {
   color: #ffffff;
-  background: #2e5ee8;
-  border-color: #2e5ee8;
+  background: #6652c5;
+  border-color: #6652c5;
 }
 
 .video-factory-tour button.driver-popover-prev-btn:hover,
@@ -93,24 +93,24 @@
 .video-factory-tour .driver-popover-close-btn {
   top: 9px;
   right: 9px;
-  width: 32px;
-  height: 32px;
-  color: #9da4b0;
+  width: 44px;
+  height: 44px;
+  color: #7b828e;
   font-size: 21px;
 }
 
 .video-factory-tour .driver-popover-close-btn:hover {
-  color: #ffffff;
+  color: #302765;
 }
 
-.video-factory-tour.driver-popover-arrow-side-left .driver-popover-arrow { border-left-color: #191c22; }
-.video-factory-tour.driver-popover-arrow-side-right .driver-popover-arrow { border-right-color: #191c22; }
-.video-factory-tour.driver-popover-arrow-side-top .driver-popover-arrow { border-top-color: #191c22; }
-.video-factory-tour.driver-popover-arrow-side-bottom .driver-popover-arrow { border-bottom-color: #191c22; }
+.video-factory-tour.driver-popover-arrow-side-left .driver-popover-arrow { border-left-color: #ffffff; }
+.video-factory-tour.driver-popover-arrow-side-right .driver-popover-arrow { border-right-color: #ffffff; }
+.video-factory-tour.driver-popover-arrow-side-top .driver-popover-arrow { border-top-color: #ffffff; }
+.video-factory-tour.driver-popover-arrow-side-bottom .driver-popover-arrow { border-bottom-color: #ffffff; }
 
 @media (max-width: 700px) {
   .driver-popover.video-factory-tour { width: min(326px, calc(100vw - 20px)); }
-  .video-factory-tour .driver-popover-title { padding: 17px 17px 0; font-size: 17px; }
+  .video-factory-tour .driver-popover-title { padding: 17px 50px 0 17px; font-size: 17px; }
   .video-factory-tour .driver-popover-description { padding: 8px 17px 15px; line-height: 1.65; }
   .video-factory-tour .driver-popover-footer { flex-wrap: wrap; padding-left: 17px; }
   .video-factory-tour .driver-popover-progress-text { flex: 1 0 auto; }

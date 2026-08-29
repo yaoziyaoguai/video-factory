@@ -1,10 +1,9 @@
-import { AlertTriangle, Check, Download, FileJson, RotateCcw, Send, X, XCircle } from "lucide-react";
+import { AlertTriangle, Check, Download, RotateCcw, Send, X, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { StudioArtifact, StudioCostRunDetail, StudioDecisionInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { platformLabel, providerLabel } from "../presentation.js";
-import { DirectorPlanPanel } from "./DirectorPlanPanel.js";
+import { platformLabel } from "../presentation.js";
 import { NodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 
@@ -29,9 +28,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
   const rejectDialogRef = useDialogFocus<HTMLElement>(rejecting, () => setRejecting(false), decisionPending);
   const approveDialogRef = useDialogFocus<HTMLElement>(approving, () => setApproving(false), decisionPending);
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
-  const directorPlan = currentNodeArtifact(run, "visual-direction", (artifact) =>
-    artifact.kind === "storyboard" && Boolean(artifact.contentUrl));
-  const artifactGroups = groupArtifacts(run);
+  const creatorNodes = run.nodes.filter((node) => isCreatorFacingNode(node.id) && nodeHasCreatorContent(node, run));
 
   useEffect(() => {
     if (!run.activeIntervention) {
@@ -61,27 +58,10 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
         ))}
       </section>
 
-      <section className="role-workspaces" aria-labelledby="role-workspaces-title">
-        <header className="section-heading"><div><p className="eyebrow">逐节点审阅</p><h2 id="role-workspaces-title">角色工作台</h2><p>展开节点查看模型、API、版本与交付；人工修改会成为有效版本，并自动标记后续结果过期。</p></div><span>{run.nodes.filter((node) => node.status === "succeeded").length}/{run.nodes.length}</span></header>
-        <div className="node-workspace-list">
-          {run.nodes.map((node) => <NodeWorkspace
-            key={node.id}
-            node={node}
-            nodes={run.nodes}
-            runStatus={run.status}
-            artifacts={run.artifacts.filter((artifact) => node.artifactIds.includes(artifact.id))}
-            busy={nodeMutationPending}
-            onOverride={onOverrideNode ?? (async () => undefined)}
-            onInputOverride={onOverrideNodeInput ?? (async () => undefined)}
-            onAuthorize={onAuthorizeSpend ?? (async () => undefined)}
-          />)}
-        </div>
-      </section>
-
       <div className="review-layout">
         <section className="video-stage" aria-labelledby="preview-title" data-tour="run-preview">
           <div className="section-heading stage-heading">
-            <h2 id="preview-title">成片预览</h2>
+            <div><p className="eyebrow">最终画面</p><h2 id="preview-title">成片预览</h2></div>
             {video?.contentUrl ? (
               <a className="icon-button" href={video.contentUrl} download title="下载成片">
                 <Download aria-hidden="true" size={18} />
@@ -90,7 +70,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
           </div>
           <div className="video-frame">
             {video?.contentUrl ? (
-              <video title="成片预览" src={video.contentUrl} controls playsInline preload="metadata" />
+              <video title="成片预览" src={`${video.contentUrl}#t=0.1`} controls playsInline preload="auto" />
             ) : (
               <div className="video-unavailable">视频将在渲染完成后出现在这里</div>
             )}
@@ -132,33 +112,24 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
         </aside>
       </div>
 
-      {directorPlan?.contentUrl ? <DirectorPlanPanel contentUrl={directorPlan.contentUrl} /> : null}
-      {costDetail ? <RunCostDetailPanel detail={costDetail} /> : null}
-
-      <section className="detail-section run-artifact-section" aria-label="生产产物" data-tour="run-artifacts">
-        <div className="section-heading"><h2>质量与产物</h2><span>{run.artifacts.length} 项</span></div>
-        <div className="artifact-groups">
-          {artifactGroups.map((group) => (
-            <section className="artifact-group" key={group.nodeId}>
-              <h3>{group.label}<span>{group.artifacts.length}</span></h3>
-              <div className="artifact-list">
-                {group.artifacts.map((artifact) => artifact.contentUrl ? (
-                  <a className="artifact-row" href={artifact.contentUrl} key={artifact.id}>
-                    <FileJson aria-hidden="true" size={17} />
-                    <span><strong>{artifactLabel(artifact.kind, artifact.producerNodeId)}</strong><small>{providerLabel(artifact.providerId) ?? artifact.schemaVersion ?? artifact.kind}</small></span>
-                    <Download aria-hidden="true" size={15} />
-                  </a>
-                ) : (
-                  <div className="artifact-row" aria-disabled="true" title="该产物没有可读取的文件地址" key={artifact.id}>
-                    <FileJson aria-hidden="true" size={17} />
-                    <span><strong>{artifactLabel(artifact.kind, artifact.producerNodeId)}</strong><small>暂不可打开 · 尚无文件地址</small></span>
-                  </div>
-                ))}
-              </div>
-            </section>
-          ))}
+      {creatorNodes.length ? <section className="role-workspaces" aria-labelledby="role-workspaces-title">
+        <header className="section-heading"><div><p className="eyebrow">创作内容</p><h2 id="role-workspaces-title">逐项预览与修改</h2><p>这里只呈现会影响作品、并且适合人工调整的内容。路径、版本和运行参数不会占用你的注意力。</p></div><span>{creatorNodes.length} 项</span></header>
+        <div className="node-workspace-list">
+          {creatorNodes.map((node) => <NodeWorkspace
+            key={node.id}
+            node={node}
+            nodes={run.nodes}
+            runStatus={run.status}
+            artifacts={run.artifacts.filter((artifact) => node.artifactIds.includes(artifact.id))}
+            busy={nodeMutationPending}
+            onOverride={onOverrideNode ?? (async () => undefined)}
+            onInputOverride={onOverrideNodeInput ?? (async () => undefined)}
+            onAuthorize={onAuthorizeSpend ?? (async () => undefined)}
+          />)}
         </div>
-      </section>
+      </section> : null}
+
+      {costDetail ? <RunCostDetailPanel detail={costDetail} /> : null}
 
       {rejecting ? (
         <div className="dialog-backdrop" role="presentation">
@@ -204,24 +175,6 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
   );
 }
 
-function currentNodeArtifact(
-  run: StudioRunDetail,
-  nodeId: string,
-  matches: (artifact: StudioArtifact) => boolean,
-): StudioArtifact | undefined {
-  const node = run.nodes.find((candidate) => candidate.id === nodeId);
-  const effectiveVersion = node?.outputState?.versions.find(
-    (version) => version.id === node.outputState?.effectiveVersionId,
-  );
-  const artifactIds = effectiveVersion?.artifactIds ?? node?.artifactIds ?? [];
-  for (const artifactId of [...artifactIds].reverse()) {
-    const artifact = run.artifacts.find((candidate) => candidate.id === artifactId);
-    if (artifact && matches(artifact)) return artifact;
-  }
-  return [...run.artifacts].reverse().find((artifact) =>
-    artifact.producerNodeId === nodeId && matches(artifact));
-}
-
 function runStateMessage(run: StudioRunDetail): string {
   if (run.status === "succeeded") {
     return "制作已完成，发布包可以下载使用。";
@@ -243,52 +196,33 @@ function runStateMessage(run: StudioRunDetail): string {
   return "制作正在自动执行，详情页会实时更新；连接中断时会明确提示。";
 }
 
-function artifactLabel(kind: string, producerNodeId?: string): string {
-  if (kind === "review_report" && producerNodeId === "visual-review") return "视觉审片报告";
-  const labels: Record<string, string> = {
-    production_brief: "生产需求",
-    script: "脚本",
-    storyboard: "导演方案",
-    asset_plan: "画面计划",
-    voiceover: "配音文件",
-    voiceover_plan: "配音计划",
-    render: "成片",
-    render_manifest: "渲染清单",
-    review_report: "机器质检报告",
-    technical_review: "机器质检报告",
-    media_asset: "生成画面",
-    generation_jobs: "生成任务记录",
-    publish_package: "发布包",
-  };
-  return labels[kind] ?? kind;
+const CREATOR_NODE_IDS = new Set([
+  "brief",
+  "script",
+  "reference-grammar",
+  "visual-direction",
+  "assets",
+  "voice",
+  "visual-review",
+  "publish-package",
+]);
+
+function isCreatorFacingNode(nodeId: string): boolean {
+  return CREATOR_NODE_IDS.has(nodeId);
 }
 
-function groupArtifacts(run: StudioRunDetail) {
-  const labels: Record<string, string> = {
-    workflow: "工作流",
-    brief: "需求校验",
-    script: "脚本生成",
-    "visual-direction": "导演方案",
-    assets: "画面准备",
-    voice: "配音合成",
-    render: "视频渲染",
-    "technical-review": "机器质检",
-    "final-review": "人工终审",
-    "publish-package": "发布文案与发布包",
-  };
-  const grouped = new Map<string, StudioRunDetail["artifacts"]>();
-  for (const artifact of run.artifacts) {
-    const key = artifact.producerNodeId ?? "workflow";
-    grouped.set(key, [...(grouped.get(key) ?? []), artifact]);
-  }
-  const nodeOrder = new Map(run.nodes.map((node, index) => [node.id, index]));
-  return [...grouped.entries()]
-    .sort(([left], [right]) => (nodeOrder.get(left) ?? 99) - (nodeOrder.get(right) ?? 99))
-    .map(([nodeId, artifacts]) => ({
-      nodeId,
-      label: run.nodes.find((node) => node.id === nodeId)?.label ?? labels[nodeId] ?? nodeId,
-      artifacts,
-    }));
+function nodeHasCreatorContent(node: StudioRunDetail["nodes"][number], run: StudioRunDetail): boolean {
+  if (["awaiting_spend_approval", "approval_invalidated", "needs_human", "stale", "failed", "rejected"].includes(node.status)) return true;
+  if (hasContent(node.output)) return true;
+  if (node.outputState?.versions.some((version) => hasContent(version.output) || version.artifactIds.length > 0)) return true;
+  return node.artifactIds.some((artifactId) => run.artifacts.some((artifact) => artifact.id === artifactId && Boolean(artifact.contentUrl)));
+}
+
+function hasContent(value: unknown): boolean {
+  if (value === null || value === undefined || value === "") return false;
+  if (Array.isArray(value)) return value.some(hasContent);
+  if (typeof value === "object") return Object.values(value as Record<string, unknown>).some(hasContent);
+  return true;
 }
 
 function safeRunError(message?: string): string {

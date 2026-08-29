@@ -149,7 +149,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
     vi.spyOn(studioApi, "series").mockResolvedValue([]);
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox(candidates));
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     expect(await screen.findByRole("heading", { name: "热点候选收件箱" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(8);
@@ -168,7 +168,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "series").mockResolvedValue([]);
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox(candidates));
     const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockResolvedValue([]);
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await screen.findAllByRole("button", { name: /查看候选提案/ });
     await waitFor(() => expect(screen.getByText(/2 个平台 · 2 条/)).toBeInTheDocument());
@@ -188,7 +188,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "series").mockResolvedValue([]);
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox(candidates));
     const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockResolvedValue([]);
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await screen.findByRole("button", { name: /查看候选提案/ });
     clock.mockReturnValue(5 * 60 * 1_000 + 2_000);
@@ -220,7 +220,7 @@ describe("Creative OS", () => {
       createdAt: "2026-08-24T09:00:00.000Z",
       updatedAt: "2026-08-24T09:00:00.000Z",
     });
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await user.click(await screen.findByRole("tab", { name: /系列选题/ }));
     await user.click(screen.getByRole("button", { name: "创建第一个系列" }));
@@ -244,10 +244,42 @@ describe("Creative OS", () => {
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
     const navigation = within(screen.getByRole("navigation", { name: "主导航" }));
-    expect(navigation.getByRole("link", { name: /今日机会/ })).toHaveAttribute("href", "/");
+    expect(navigation.getByRole("link", { name: /创作台/ })).toHaveAttribute("href", "/");
     expect(navigation.getByRole("link", { name: /制作记录/ })).toHaveAttribute("href", "/projects");
+    expect(navigation.getByRole("link", { name: /素材库/ })).toHaveAttribute("href", "/assets");
+    expect(navigation.getByRole("link", { name: /模板工坊/ })).toHaveAttribute("href", "/templates");
     expect(navigation.getByRole("link", { name: /总配置/ })).toHaveAttribute("href", "/resources");
     expect(navigation.getByRole("link", { name: /制作复盘/ })).toHaveAttribute("href", "/experiments");
+  });
+
+  it("searches real production records from the global command surface", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
+    vi.spyOn(studioApi, "runs").mockResolvedValue([{ ...runningRun, title: "窗边一杯水的六秒光影" }]);
+    render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
+
+    await user.click(screen.getByRole("button", { name: "搜索项目、模板或功能" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目、模板或功能" }), "窗边一杯水");
+
+    expect(await screen.findByRole("link", { name: /窗边一杯水的六秒光影/ })).toHaveAttribute("href", "/projects/run-1");
+  });
+
+  it("closes global search with Escape, clears it, and restores focus", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
+
+    const trigger = screen.getByRole("button", { name: "搜索项目、模板或功能" });
+    await user.click(trigger);
+    const search = screen.getByRole("textbox", { name: "搜索项目、模板或功能" });
+    await user.type(search, "模板");
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    await user.click(trigger);
+    expect(screen.getByRole("textbox", { name: "搜索项目、模板或功能" })).toHaveValue("");
   });
 
   it("keeps opportunity selection, evidence, and production action in one workspace", async () => {
@@ -281,9 +313,10 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "settings").mockResolvedValue({
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "economy-daily",
+      topicStrategy: { customInstruction: "优先可拍题材。" },
       productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 45 },
     });
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await user.click(await screen.findByRole("button", { name: "新建制作" }));
 
@@ -306,7 +339,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "opportunities").mockRejectedValue(new Error("trend adapter timeout"));
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
     vi.spyOn(studioApi, "runs").mockResolvedValue([runningRun]);
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "机会读取失败" })).toBeInTheDocument());
     expect(screen.getByText(runningRun.title)).toBeInTheDocument();
@@ -354,7 +387,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
     vi.spyOn(studioApi, "series").mockResolvedValue([]);
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "趋势源尚未配置" })).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "手动录入" })).toBeInTheDocument();
@@ -375,7 +408,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
     vi.spyOn(studioApi, "series").mockResolvedValue([]);
     vi.spyOn(studioApi, "candidateInbox").mockReturnValue(new Promise(() => undefined));
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     expect(await screen.findByRole("heading", { name: "正在生成今日提案" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "今天做一条视频" })).toHaveTextContent("选择选题");
@@ -406,7 +439,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockImplementation((query) => query?.origins?.includes("trend")
       ? new Promise(() => undefined)
       : Promise.resolve(inbox([seriesCandidate])));
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await user.click(await screen.findByRole("tab", { name: /系列选题/ }));
 
@@ -445,7 +478,7 @@ describe("Creative OS", () => {
     };
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([proposal]));
     const adopt = vi.spyOn(studioApi, "adoptCandidate").mockResolvedValue({ ...opportunity, id: "trend-1", title: "下班后的 AI 时间账本" });
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "热点候选收件箱" });
     expect(screen.getAllByText("下班后的 AI 时间账本").length).toBeGreaterThan(0);
@@ -480,7 +513,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "series").mockResolvedValue([]);
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([reviewCandidate, blockedCandidate]));
     const adopt = vi.spyOn(studioApi, "adoptCandidate").mockResolvedValue({ ...opportunity, id: reviewCandidate.id });
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     expect(await screen.findByText("1 条证据 · 1 个独立源（需 1 个）")).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: `采用候选 ${reviewCandidate.title}` }));
@@ -525,7 +558,7 @@ describe("Creative OS", () => {
     };
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([proposal]));
     vi.spyOn(studioApi, "adoptCandidate").mockRejectedValue(new Error("选题保存失败"));
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await user.click(await screen.findByRole("button", { name: "采用候选 一个待核验的热点角度" }));
 
@@ -546,7 +579,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 0, templates: [knowledgeTemplate()] });
     const start = vi.spyOn(studioApi, "start").mockRejectedValue(new Error("制作创建失败"));
     const updateStatus = vi.spyOn(studioApi, "updateOpportunityStatus");
-    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await user.click(await screen.findByRole("button", { name: "新建制作" }));
     await user.click(screen.getByRole("button", { name: "开始制作" }));
@@ -723,6 +756,7 @@ describe("Creative OS", () => {
     const initialSettings = {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
       defaultRecipeId: "economy-daily" as const,
+      topicStrategy: { customInstruction: "优先可拍题材。" },
       productionDefaults: { directorProfileId: "auto" as const, reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
     };
     vi.spyOn(studioApi, "providers").mockResolvedValue(readyProviders);

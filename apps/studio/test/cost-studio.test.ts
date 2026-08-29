@@ -14,7 +14,7 @@ describe("CostStudio", () => {
       ],
       executionReceipts: [
         { id: "receipt-1", nodeId: "script", capability: "script.draft", providerId: "openai-codex", modelId: "codex", billing: "subscription", status: "succeeded", startedAt: "2026-08-27T10:00:00.000Z", finishedAt: "2026-08-27T10:00:02.000Z", estimatedCostCny: 0 },
-        { id: "receipt-2", nodeId: "assets", capability: "asset.generate.video", providerId: "minimax-video", modelId: "MiniMax-Hailuo", billing: "metered", status: "succeeded", spendAuthorizationId: "spend-1", startedAt: "2026-08-27T10:01:00.000Z", finishedAt: "2026-08-27T10:03:00.000Z", estimatedCostCny: 5, actualCostCny: 4.2, actualCostSource: "configured_rate" },
+        { id: "receipt-2", nodeId: "assets", capability: "asset.generate.video", providerId: "minimax-video", modelId: "MiniMax-Hailuo", billing: "metered", status: "succeeded", spendAuthorizationId: "spend-1", startedAt: "2026-08-27T10:01:00.000Z", finishedAt: "2026-08-27T10:03:00.000Z", estimatedCostCny: 5, actualCostCny: 4.2, actualCostSource: "configured_rate", meteredAttemptCount: 1, meteredFailedAttemptCount: 0 },
         { id: "receipt-3", nodeId: "render", capability: "video.render", providerId: "python-ffmpeg-v1", modelId: "ffmpeg", billing: "free", status: "succeeded", startedAt: "2026-08-27T10:04:00.000Z", finishedAt: "2026-08-27T10:04:10.000Z", estimatedCostCny: 0 },
       ],
       spendAuthorizations: [
@@ -53,11 +53,31 @@ describe("CostStudio", () => {
     const dashboard = await studio.dashboard();
     assert.equal(dashboard.totals.actualCostCny, 0);
     assert.equal(dashboard.totals.actualPendingCount, 1);
-    assert.equal(dashboard.totals.failedMeteredCalls, 1);
+    assert.equal(dashboard.totals.meteredCalls, 0);
+    assert.equal(dashboard.totals.failedMeteredCalls, 0);
+  });
+
+  it("infers legacy metered attempts only from accepted-request evidence", async () => {
+    const studio = new CostStudio(async () => ([{
+      id: "run-legacy-evidence",
+      executionReceipts: [
+        { id: "actual-cost", nodeId: "image", providerId: "provider-a", modelId: "image-a", billing: "metered", status: "succeeded", startedAt: "2026-08-27T11:01:00.000Z", estimatedCostCny: 1, actualCostCny: 0.8 },
+        { id: "accepted-request", nodeId: "video", providerId: "provider-b", modelId: "video-b", billing: "metered", status: "unknown", requestId: "request-123", startedAt: "2026-08-27T11:02:00.000Z", estimatedCostCny: 3 },
+        { id: "estimate-only", nodeId: "voice", providerId: "provider-c", modelId: "voice-c", billing: "metered", status: "succeeded", startedAt: "2026-08-27T11:03:00.000Z", estimatedCostCny: 0.2 },
+      ],
+      spendAuthorizations: [],
+    }]));
+
+    const detail = await studio.runDetail("run-legacy-evidence");
+
+    assert.equal(detail?.totals.meteredCalls, 2);
+    assert.equal(detail?.totals.actualCostCny, 0.8);
+    assert.equal(detail?.totals.actualPendingCount, 2);
+    assert.equal(detail?.lines.find((line) => line.id === "estimate-only")?.meteredAttemptCount, undefined);
   });
 
   it("keeps historical retries while deduplicating the current node receipt", async () => {
-    const first = { nodeId: "assets", capability: "asset.prepare", providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo", billing: "metered", startedAt: "2026-08-27T11:00:00.000Z", estimatedCostCny: 3 };
+    const first = { nodeId: "assets", capability: "asset.prepare", providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo", billing: "metered", startedAt: "2026-08-27T11:00:00.000Z", estimatedCostCny: 3, meteredAttemptCount: 1, meteredFailedAttemptCount: 0 };
     const second = { ...first, startedAt: "2026-08-27T11:05:00.000Z" };
     const studio = new CostStudio(async () => ([{
       id: "run-3",
@@ -91,7 +111,7 @@ describe("CostStudio", () => {
 
     const detail = await studio.runDetail("run-human-revision");
     assert.equal(detail?.totals.authorizedCostCny, 2.1);
-    assert.equal(detail?.totals.meteredCalls, 1);
+    assert.equal(detail?.totals.meteredCalls, 0);
   });
 
   it("prefers the immutable receipt authorization over mutable run state", async () => {
@@ -122,8 +142,8 @@ describe("CostStudio", () => {
       id: "run-4",
       nodeRuns: [{ nodeId: "assets", role: "素材导演", status: "failed" }],
       executionReceipts: [
-        { id: "attempt-1", nodeId: "assets", providerId: "minimax", modelId: "video", billing: "metered", status: "succeeded", spendAuthorizationId: "authorization-1", startedAt: "2026-08-27T12:00:00.000Z", estimatedCostCny: 2, actualCostCny: 1.8 },
-        { id: "attempt-2", nodeId: "assets", providerId: "minimax", modelId: "video", billing: "metered", status: "failed", spendAuthorizationId: "authorization-1", startedAt: "2026-08-27T12:01:00.000Z", estimatedCostCny: 2 },
+        { id: "attempt-1", nodeId: "assets", providerId: "minimax", modelId: "video", billing: "metered", status: "succeeded", spendAuthorizationId: "authorization-1", startedAt: "2026-08-27T12:00:00.000Z", estimatedCostCny: 2, actualCostCny: 1.8, meteredAttemptCount: 1, meteredFailedAttemptCount: 0 },
+        { id: "attempt-2", nodeId: "assets", providerId: "minimax", modelId: "video", billing: "metered", status: "failed", spendAuthorizationId: "authorization-1", startedAt: "2026-08-27T12:01:00.000Z", estimatedCostCny: 2, meteredAttemptCount: 1, meteredFailedAttemptCount: 1 },
       ],
       spendAuthorizations: [{ id: "authorization-1", nodeId: "assets", providerId: "minimax", modelId: "video", maxCostCny: 5 }],
     }]));

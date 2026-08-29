@@ -1,5 +1,6 @@
 import {
   CodexExecutorError,
+  DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID,
   buildTaskPrompt,
   codexExecutorProfileFor,
   type BrokerTaskExecutor,
@@ -15,7 +16,6 @@ import {
 } from "./task-definitions.js";
 
 const ZAI_CHAT_COMPLETIONS_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-const ZAI_MODEL_ID = "glm-5.3-flash";
 const DEFAULT_TIMEOUT_MS = 285_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES = 16 * 1024;
@@ -29,7 +29,7 @@ export interface ZaiVisualReviewExecutorOptions {
 }
 
 export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
-  readonly identity: CodexExecutorIdentity = codexExecutorProfileFor("zai").identity;
+  readonly identity: CodexExecutorIdentity;
   private readonly apiKey: string;
   private readonly fetchFn: typeof fetch;
   private readonly effort: string;
@@ -37,6 +37,8 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
 
   constructor(options: ZaiVisualReviewExecutorOptions = {}) {
     const environment = options.env ?? process.env;
+    const modelId = environment.ZAI_VISUAL_REVIEW_MODEL_ID?.trim() || DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID;
+    this.identity = codexExecutorProfileFor("zai", undefined, modelId).identity;
     this.apiKey = environment.ZAI_BIGMODEL_API_KEY?.trim() ?? "";
     if (!this.apiKey) throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
     this.fetchFn = options.fetchFn ?? fetch;
@@ -76,7 +78,7 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          model: ZAI_MODEL_ID,
+          model: this.identity.modelId,
           messages: [{
             role: "user",
             content: [

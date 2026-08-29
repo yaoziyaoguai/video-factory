@@ -32,6 +32,7 @@ import type {
   StudioTemplate,
   StudioTemplateCatalog,
   StudioTemplateCloneInput,
+  StudioTemplateCreateInput,
   StudioTemplateMutation,
   StudioTemplateExperimentScorecard,
   StudioNodeOverrideInput,
@@ -126,6 +127,11 @@ export const studioApi = {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   }),
+  createTemplate: (input: StudioTemplateCreateInput) => requestJson<StudioTemplateMutation>("/api/templates", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  }),
   saveTemplateDraft: (template: StudioTemplate, expectedRevision: number) => requestJson<StudioTemplateMutation>(
     `/api/templates/${encodeURIComponent(template.id)}/draft`,
     {
@@ -143,6 +149,7 @@ export const studioApi = {
     },
   ),
   runs: () => requestJson<StudioRunSummary[]>("/api/runs"),
+  deleteRun: (runId: string) => requestEmpty(`/api/runs/${encodeURIComponent(runId)}`, { method: "DELETE" }),
   costs: () => requestJson<StudioCostDashboard>("/api/costs"),
   runCosts: (runId: string) => requestJson<StudioCostRunDetail>(`/api/runs/${encodeURIComponent(runId)}/costs`),
   run: (runId: string) => requestJson<StudioRunDetail>(`/api/runs/${encodeURIComponent(runId)}`),

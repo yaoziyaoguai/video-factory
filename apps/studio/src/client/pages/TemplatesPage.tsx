@@ -1,4 +1,4 @@
-import { AlertCircle, Check, Copy, LayoutTemplate, RefreshCw, Save, Send } from "lucide-react";
+import { AlertCircle, Check, Copy, LayoutTemplate, Plus, RefreshCw, Save, Send, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { StudioProvider, StudioTemplate, StudioTemplateExperimentScorecard } from "../../shared/api.js";
 import { studioApi } from "../api.js";
@@ -18,6 +18,9 @@ export function TemplatesPage() {
   const [providers, setProviders] = useState<StudioProvider[]>([]);
   const [providerError, setProviderError] = useState<string>();
   const [experimentError, setExperimentError] = useState<string>();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createName, setCreateName] = useState("");
+  const [createDescription, setCreateDescription] = useState("");
 
   const dirty = useMemo(() => Boolean(draft?.status === "draft" && savedDraft !== JSON.stringify(draft)), [draft, savedDraft]);
 
@@ -100,6 +103,33 @@ export function TemplatesPage() {
     }
   }
 
+  async function createTemplate() {
+    if (!createName.trim()) return;
+    setSaving(true);
+    setNotice(undefined);
+    try {
+      const result = await studioApi.createTemplate({
+        id: `custom-${crypto.randomUUID().slice(0, 12)}`,
+        name: createName.trim(),
+        ...(createDescription.trim() ? { description: createDescription.trim() } : {}),
+        expectedRevision: revision,
+      });
+      setRevision(result.storeRevision);
+      setTemplates((current) => [result.template, ...current]);
+      setSelectedId(result.template.id);
+      setDraft(result.template);
+      setSavedDraft(JSON.stringify(result.template));
+      setCreateName("");
+      setCreateDescription("");
+      setCreateOpen(false);
+      setNotice("空白模板已经建立。先调整故事结构与视听方向，再保存或发布。");
+    } catch (caught) {
+      setNotice(`创建失败：${errorMessage(caught)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function saveDraft() {
     if (!draft || draft.status !== "draft") return;
     setSaving(true);
@@ -154,8 +184,11 @@ export function TemplatesPage() {
   return (
     <main className="page template-studio-page">
       <header className="page-header template-page-header">
-        <div><p className="eyebrow">Production grammar</p><h1>模板工坊</h1><p className="page-summary">把经过验证的叙事、镜头与质量规则沉淀成下一次可以直接使用的制作语法。</p></div>
-        <button className="icon-button" type="button" onClick={refreshTemplates} disabled={loading} title="刷新模板"><RefreshCw size={18} aria-hidden="true" /></button>
+        <div><p className="eyebrow">制作语法</p><h1>模板工坊</h1><p className="page-summary">把经过验证的叙事、镜头与质量规则沉淀成下一次可以直接使用的制作语法。</p></div>
+        <div className="template-header-actions">
+          <button className="icon-button" type="button" onClick={refreshTemplates} disabled={loading} title="刷新模板"><RefreshCw size={18} aria-hidden="true" /></button>
+          <button className="button button-primary" type="button" onClick={() => { if (confirmDiscard()) setCreateOpen(true); }}><Plus size={17} aria-hidden="true" />新建空白模板</button>
+        </div>
       </header>
 
       {error ? <div className="page-error" role="alert"><AlertCircle size={18} aria-hidden="true" /><span>{error}</span></div> : null}
@@ -164,7 +197,7 @@ export function TemplatesPage() {
       {providerError ? <p className="template-editor-notice is-warning" role="status">模型目录暂时不可用：{providerError}。模板内容仍可查看和编辑。</p> : null}
 
       <section className="template-experiments" aria-label="模板实验评分">
-        <div className="section-heading"><div><p className="eyebrow">Evidence scorecards</p><h2>模板实验评分</h2></div><span>只统计运行证据，不改写已发布模板</span></div>
+        <div className="section-heading"><div><p className="eyebrow">运行证据</p><h2>模板实验评分</h2></div><span>只统计运行证据，不改写已发布模板</span></div>
         {experimentError ? <p className="template-editor-notice is-warning">评分读取失败：{experimentError}</p> : null}
         <div className="template-scorecard-grid">{experiments.map((scorecard) => <article key={scorecard.templateId}>
           <header><div><strong>{scorecard.templateName}</strong><small>{scorecard.sampleSize} 条样本</small></div><span>{scorecard.metrics.finalApprovalRate === null ? "待样本" : `${scorecard.metrics.finalApprovalRate}% 通过`}</span></header>
@@ -239,6 +272,17 @@ export function TemplatesPage() {
           </footer>
         </section>
       ) : null}
+      {createOpen ? <div className="dialog-backdrop" role="presentation">
+        <section className="reject-dialog create-template-dialog" role="dialog" aria-modal="true" aria-labelledby="create-template-title">
+          <header className="dialog-header"><div><p className="eyebrow">新制作语法</p><h2 id="create-template-title">创建空白模板</h2></div><button className="icon-button" type="button" aria-label="关闭" disabled={saving} onClick={() => setCreateOpen(false)}><X size={18} aria-hidden="true" /></button></header>
+          <div className="create-template-fields">
+            <label className="field"><span>模板名称</span><input autoFocus value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="例如：城市人物微纪录" /></label>
+            <label className="field"><span>适用说明</span><textarea rows={3} value={createDescription} onChange={(event) => setCreateDescription(event.target.value)} placeholder="适合什么题材、观众和表达目标" /></label>
+            <p>系统只创建一份可运行的三段式草稿，不调用模型，也不会产生费用。</p>
+          </div>
+          <footer className="dialog-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => setCreateOpen(false)}>取消</button><button className="button button-primary" type="button" disabled={saving || !createName.trim()} onClick={() => void createTemplate()}>{saving ? "正在创建..." : "创建并编辑"}</button></footer>
+        </section>
+      </div> : null}
     </main>
   );
 }

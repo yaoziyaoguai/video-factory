@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { studioApi } from "../src/client/api.js";
@@ -9,6 +9,7 @@ const published = template("knowledge-explainer", "知识解释", "published", t
 const draft = template("my-series", "我的系列", "draft", false);
 
 beforeEach(() => {
+  vi.clearAllMocks();
   vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 3, templates: [draft, published] });
   vi.spyOn(studioApi, "templateExperiments").mockResolvedValue([]);
   vi.spyOn(studioApi, "providers").mockResolvedValue([{
@@ -25,10 +26,35 @@ beforeEach(() => {
     ],
   }]);
   vi.spyOn(studioApi, "saveTemplateDraft").mockImplementation(async (value) => ({ storeRevision: 4, template: value }));
+  vi.spyOn(studioApi, "createTemplate").mockImplementation(async (input) => ({
+    storeRevision: 4,
+    template: { ...draft, id: input.id, name: input.name, description: input.description ?? "默认说明" },
+  }));
   vi.spyOn(studioApi, "publishTemplate").mockResolvedValue({ storeRevision: 5, template: { ...draft, status: "published" } });
 });
 
 describe("TemplatesPage", () => {
+  it("creates a new editable template from a minimal blank grammar", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(crypto, "randomUUID").mockReturnValue("12345678-1234-4123-8123-123456789abc");
+    render(<TemplatesPage />);
+
+    await screen.findByRole("heading", { name: "知识解释" });
+    await user.click(screen.getByRole("button", { name: "新建空白模板" }));
+    const dialog = screen.getByRole("dialog", { name: "创建空白模板" });
+    await user.type(within(dialog).getByLabelText("模板名称"), "城市人物微纪录");
+    await user.type(within(dialog).getByLabelText("适用说明"), "面向城市青年的人物观察");
+    await user.click(within(dialog).getByRole("button", { name: "创建并编辑" }));
+
+    expect(studioApi.createTemplate).toHaveBeenCalledWith({
+      id: "custom-12345678-123",
+      name: "城市人物微纪录",
+      description: "面向城市青年的人物观察",
+      expectedRevision: 3,
+    });
+    expect(await screen.findByDisplayValue("城市人物微纪录")).toBeInTheDocument();
+  });
+
   it("protects unsaved changes when selecting another template or refreshing", async () => {
     const user = userEvent.setup();
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);

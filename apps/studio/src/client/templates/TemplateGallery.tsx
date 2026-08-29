@@ -22,8 +22,8 @@ export function TemplateGallery({ templates, selectedId, onSelect }: TemplateGal
             onClick={() => onSelect(template)}
           >
             <span className={`template-art template-art-${template.category}`} aria-hidden="true">
-              <Film size={19} />
-              <i>{String(template.storyStructure.length).padStart(2, "0")}</i>
+              <img alt="" src={templateFrame(template.category)} />
+              <span><Film size={15} /><i>{String(template.storyStructure.length).padStart(2, "0")}</i></span>
             </span>
             <span className="template-card-copy">
               <span className="template-card-title"><strong>{template.name}</strong>{selected ? <Check size={15} aria-hidden="true" /> : null}</span>
@@ -40,6 +40,12 @@ export function TemplateGallery({ templates, selectedId, onSelect }: TemplateGal
       })}
     </div>
   );
+}
+
+function templateFrame(category: StudioTemplate["category"]): string {
+  if (category === "photo" || category === "knowledge") return "/media/studio-frame-1.jpg";
+  if (category === "trend" || category === "comparison") return "/media/studio-frame-2.jpg";
+  return "/media/studio-frame-3.jpg";
 }
 
 function automationLabel(value: StudioTemplate["automationLevel"]): string {

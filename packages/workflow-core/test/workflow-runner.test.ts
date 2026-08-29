@@ -1367,6 +1367,56 @@ describe("WorkflowRunner", () => {
     assert.equal(completed.nodeRuns[0]?.executionReceipt?.billing, "metered");
   });
 
+  it("does not fabricate actual usage when a successful metered provider omits it", async () => {
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "paid-review-without-usage",
+      label: "Paid review without usage",
+      modelId: "review-v2",
+      capability: "quality.review",
+      transport: "http_api",
+      billing: "metered",
+      estimatedCostCny: 0.6,
+      maxCostCny: 1,
+      maxAttempts: 1,
+      run: () => ({ approved: true }),
+    });
+    const definition: WorkflowDefinition = {
+      id: "metered-receipt-fallback",
+      name: "Metered receipt fallback",
+      version: "1.0.0",
+      nodes: [{
+        id: "review",
+        label: "Review",
+        capability: "quality.review",
+        mode: "automatic",
+        providerId: "paid-review-without-usage",
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+    const paused = await runner.run(definition, {});
+    const plan = paused.nodeRuns[0]?.spendPlan;
+    assert.ok(plan);
+
+    const completed = await runner.authorizeSpend(definition, paused, {
+      nodeId: plan.nodeId,
+      inputVersionIds: plan.inputVersionIds,
+      providerId: plan.providerId,
+      modelId: plan.modelId,
+      maxCostCny: plan.maxCostCny,
+      maxAttempts: plan.maxAttempts,
+      approvedBy: "producer",
+    });
+
+    const receipt = completed.nodeRuns[0]?.executionReceipt;
+    assert.equal(receipt?.estimatedCostCny, 0.6);
+    assert.equal(receipt?.actualCostCny, undefined);
+    assert.equal(receipt?.actualCostSource, undefined);
+    assert.equal(receipt?.meteredAttemptCount, undefined);
+    assert.equal(receipt?.meteredFailedAttemptCount, undefined);
+    assert.equal(receipt?.actualModelIds, undefined);
+  });
+
   it("invalidates spend approval when any bound execution scope changes", async () => {
     async function setup() {
       let paidCalls = 0;

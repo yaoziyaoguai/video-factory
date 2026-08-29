@@ -1,5 +1,5 @@
-import { ArrowRight, Clapperboard, Film, Plus, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { ArrowRight, Clapperboard, Film, Plus, Search, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
 import { StatusBadge } from "./StatusBadge.js";
@@ -11,11 +11,16 @@ interface ProductionQueueProps {
   error?: string;
   onRetry?: () => void;
   onCreate: () => void;
+  onDelete?: (run: StudioRunSummary) => Promise<void>;
 }
 
-export function ProductionQueue({ runs, loading, error, onRetry, onCreate }: ProductionQueueProps) {
+export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onDelete }: ProductionQueueProps) {
   const [filter, setFilter] = useState<"all" | "active" | "review" | "done">("all");
   const [query, setQuery] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<StudioRunSummary>();
+  const [deleteError, setDeleteError] = useState<string>();
+  const [deleting, setDeleting] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(12);
   const visibleRuns = useMemo(() => runs.filter((run) => {
     const needsAction = run.status === "needs_human"
       || run.status === "awaiting_spend_approval"
@@ -27,6 +32,7 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate }: Pro
       || (filter === "done" && (run.status === "succeeded" || run.status === "failed" || run.status === "rejected"));
     return matchesFilter && run.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
   }), [filter, query, runs]);
+  const displayedRuns = visibleRuns.slice(0, visibleCount);
   const activeCount = runs.filter((run) => run.status === "pending" || run.status === "running").length;
   const reviewCount = runs.filter((run) => run.status === "needs_human"
     || run.status === "awaiting_spend_approval"
@@ -34,6 +40,8 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate }: Pro
     || run.status === "stale").length;
   const finishedCount = runs.filter((run) => run.status === "succeeded").length;
   const rejectedCount = runs.filter((run) => run.status === "rejected" || run.status === "failed").length;
+
+  useEffect(() => setVisibleCount(12), [filter, query]);
 
   return (
     <main className="page queue-page">
@@ -58,7 +66,7 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate }: Pro
         </div>
         <div className="project-archive-heading">
           <div><p className="eyebrow">历史记录</p><h2 id="today-heading">制作记录</h2></div>
-          <span>显示 {visibleRuns.length} 条，共 {runs.length} 条</span>
+          <span>显示 {Math.min(visibleRuns.length, visibleCount)} 条，共 {runs.length} 条</span>
         </div>
         <div className="project-controls" aria-label="制作记录工具" data-tour="project-controls">
           <div className="project-filters" role="group" aria-label="制作筛选">
@@ -96,7 +104,7 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate }: Pro
           <div className="queue-placeholder">没有符合当前筛选条件的制作记录</div>
         ) : (
           <div className="production-archive" role="list" aria-label="视频制作记录">
-            {visibleRuns.map((run, index) => (
+            {displayedRuns.map((run, index) => (
               <article className="project-folio" role="listitem" key={run.id} {...(index === 0 ? { "data-tour": "project-item" } : {})}>
                 <div className={`project-preview is-${run.status}`}>
                   {run.videoContentUrl ? (
@@ -117,18 +125,60 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate }: Pro
                   <h3>{run.title}</h3>
                   <div className="project-folio-state"><StatusBadge status={run.status} /><span>{runNodeLabel(run.currentNodeId)}</span></div>
                   <RunProgress currentNodeId={run.currentNodeId} status={run.status} />
-                  <Link className="project-folio-action" to={`/projects/${run.id}`} aria-label={runAction(run) ? `${actionLabel(runAction(run)!)}：${run.title}` : `查看制作：${run.title}`}>
-                    {runAction(run) ? actionLabel(runAction(run)!) : run.status === "succeeded" ? "查看成片" : "打开制作记录"}
-                    <ArrowRight aria-hidden="true" size={16} />
-                  </Link>
+                  <div className="project-folio-actions">
+                    <Link className="project-folio-action" to={`/projects/${run.id}`} aria-label={runAction(run) ? `${actionLabel(runAction(run)!)}：${run.title}` : `查看制作：${run.title}`}>
+                      {runAction(run) ? actionLabel(runAction(run)!) : run.status === "succeeded" ? "查看成片" : "打开制作记录"}
+                      <ArrowRight aria-hidden="true" size={16} />
+                    </Link>
+                    {onDelete && isTerminal(run) ? (
+                      <button className="icon-button project-delete" type="button" title="删除制作记录" aria-label={`删除制作记录：${run.title}`} onClick={() => { setDeleteError(undefined); setDeleteTarget(run); }}>
+                        <Trash2 aria-hidden="true" size={16} />
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               </article>
             ))}
           </div>
         )}
+        {displayedRuns.length < visibleRuns.length ? <button className="project-load-more" type="button" onClick={() => setVisibleCount((count) => count + 12)}>再显示 {Math.min(12, visibleRuns.length - displayedRuns.length)} 条</button> : null}
       </section>
+      {deleteTarget ? (
+        <div className="dialog-backdrop" role="presentation">
+          <section className="reject-dialog delete-run-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-run-title">
+            <header className="dialog-header">
+              <div><p className="eyebrow">删除制作记录</p><h2 id="delete-run-title">确定删除“{deleteTarget.title}”吗？</h2></div>
+              <button className="icon-button" type="button" aria-label="关闭" disabled={deleting} onClick={() => setDeleteTarget(undefined)}><X aria-hidden="true" size={18} /></button>
+            </header>
+            <p className="delete-run-warning">脚本、素材记录、成片和费用明细会一起删除，无法恢复。</p>
+            {deleteError ? <p className="form-error" role="alert">{deleteError}</p> : null}
+            <footer className="dialog-actions">
+              <button className="button button-secondary" type="button" disabled={deleting} onClick={() => setDeleteTarget(undefined)}>保留记录</button>
+              <button className="button button-danger" type="button" disabled={deleting} onClick={() => void confirmDelete()}>{deleting ? "正在删除..." : "确认删除"}</button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
+
+  async function confirmDelete(): Promise<void> {
+    if (!deleteTarget || !onDelete) return;
+    setDeleting(true);
+    setDeleteError(undefined);
+    try {
+      await onDelete(deleteTarget);
+      setDeleteTarget(undefined);
+    } catch (caught) {
+      setDeleteError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setDeleting(false);
+    }
+  }
+}
+
+function isTerminal(run: StudioRunSummary): boolean {
+  return run.status === "succeeded" || run.status === "failed" || run.status === "rejected";
 }
 
 function actionLabel(action: NonNullable<StudioRunSummary["nextAction"]>): string {

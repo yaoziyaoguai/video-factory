@@ -276,6 +276,21 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.equal(worker.requests.length, 0);
   });
 
+  it("keeps a historical codex run readable when that provider is no longer configured", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-history-"));
+    const worker = new RecordingWorker();
+    const { agent } = stubAgent(() => scriptDraft);
+    const writer = new ProductionPipeline({ workspaceRoot, worker, screenwriterAgent: agent });
+    const completed = await writer.start(brief);
+
+    const observer = new ProductionPipeline({ workspaceRoot, worker });
+    const historical = await observer.show(completed.id);
+
+    assert.equal(historical.id, completed.id);
+    assert.equal(historical.status, "succeeded");
+    assert.equal(historical.nodeRuns.find((node) => node.nodeId === "script")?.status, "succeeded");
+  });
+
   it("fails the run without template substitution when the agent throws", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-"));
     const worker = new RecordingWorker();

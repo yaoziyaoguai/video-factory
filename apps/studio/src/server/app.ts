@@ -52,6 +52,7 @@ import {
   type StudioTemplate,
   type StudioTemplateCatalog,
   type StudioTemplateCloneInput,
+  type StudioTemplateCreateInput,
   type StudioTemplateMutation,
   type StudioTemplateExperimentScorecard,
   type StudioNodeInputOverrideInput,
@@ -72,6 +73,7 @@ export interface StudioServicePort {
   resourceManifest(): Promise<StudioResourceManifest>;
   getTemplate(id: string, version?: number): Promise<StudioTemplate | undefined>;
   cloneTemplate(input: StudioTemplateCloneInput): Promise<StudioTemplateMutation>;
+  createTemplate(input: StudioTemplateCreateInput): Promise<StudioTemplateMutation>;
   saveTemplateDraft(input: StudioTemplate, expectedRevision: number): Promise<StudioTemplateMutation>;
   publishTemplate(id: string, expectedRevision: number): Promise<StudioTemplateMutation>;
   listTrendSources(): Promise<StudioTrendSource[]>;
@@ -89,6 +91,7 @@ export interface StudioServicePort {
   updateOpportunityStatus(opportunityId: string, status: StudioOpportunityStatus): Promise<StudioOpportunity>;
   listRuns(): Promise<StudioRunSummary[]>;
   getRun(runId: string): Promise<StudioRunDetail | undefined>;
+  deleteRun(runId: string): Promise<void>;
   costDashboard(): Promise<StudioCostDashboard>;
   runCostDetail(runId: string): Promise<StudioCostRunDetail | undefined>;
   startRun(input: unknown, idempotencyKey?: string): Promise<StartRunResponse>;
@@ -179,6 +182,9 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   });
   app.post("/api/templates/clone", async (request, reply) => {
     return reply.code(201).send(await options.service.cloneTemplate(parseTemplateCloneInput(request.body)));
+  });
+  app.post("/api/templates", async (request, reply) => {
+    return reply.code(201).send(await options.service.createTemplate(parseTemplateCreateInput(request.body)));
   });
   app.put<{ Params: { templateId: string } }>("/api/templates/:templateId/draft", async (request) => {
     requireSafeRouteId(request.params.templateId, "模板编号");
@@ -300,6 +306,12 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       return reply.code(404).send({ error: "没有找到这条制作记录。" });
     }
     return run;
+  });
+
+  app.delete<{ Params: { runId: string } }>("/api/runs/:runId", async (request, reply) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    await options.service.deleteRun(request.params.runId);
+    return reply.code(204).send();
   });
 
   app.get<{ Params: { runId: string } }>("/api/runs/:runId/costs", async (request, reply) => {
@@ -531,6 +543,19 @@ function parseTemplateCloneInput(value: unknown): StudioTemplateCloneInput {
     sourceId,
     newId,
     name,
+    expectedRevision: requireNonNegativeInteger(input.expectedRevision, "expectedRevision"),
+  };
+}
+
+function parseTemplateCreateInput(value: unknown): StudioTemplateCreateInput {
+  const input = requireRecord(value, "模板请求");
+  const id = requireText(input.id, "id");
+  if (!/^[a-z0-9][a-z0-9-]{1,63}$/.test(id)) throw new StudioInputError("模板编号必须使用小写字母、数字和连字符。");
+  const description = input.description === undefined ? undefined : requireText(input.description, "description");
+  return {
+    id,
+    name: requireText(input.name, "name"),
+    ...(description ? { description } : {}),
     expectedRevision: requireNonNegativeInteger(input.expectedRevision, "expectedRevision"),
   };
 }

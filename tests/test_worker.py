@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -51,7 +52,7 @@ class WorkerContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             request = self.valid_request("script.draft", Path(tmp) / "script")
             result = subprocess.run(
-                ["python3", "-m", "video_factory.worker"],
+                [sys.executable, "-m", "video_factory.worker"],
                 input=json.dumps(request, ensure_ascii=False),
                 check=True,
                 capture_output=True,
@@ -77,7 +78,7 @@ class WorkerContractTest(unittest.TestCase):
             }
 
             result = subprocess.run(
-                ["python3", "-m", "video_factory.worker"],
+                [sys.executable, "-m", "video_factory.worker"],
                 input=json.dumps(request, ensure_ascii=False),
                 check=False,
                 capture_output=True,

@@ -81,6 +81,17 @@ export class JsonTemplateStore {
     });
   }
 
+  async create(input: ProductionTemplateInput, expectedRevision: number): Promise<TemplateMutationResult> {
+    return this.mutate(expectedRevision, (state) => {
+      if (this.builtInIds.has(input.id) || state.templates.some((template) => template.id === input.id)) {
+        throw new Error(`Template '${input.id}' already exists.`);
+      }
+      const draft = parseProductionTemplate({ ...clone(input), status: "draft" });
+      state.templates.unshift(clone(draft));
+      return draft;
+    });
+  }
+
   async saveDraft(input: ProductionTemplateInput, expectedRevision: number): Promise<TemplateMutationResult> {
     if (this.builtInIds.has(input.id)) throw new Error("A built-in template cannot be edited in place; clone it first.");
     return this.mutate(expectedRevision, (state) => {

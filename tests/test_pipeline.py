@@ -22,6 +22,7 @@ from video_factory.stock_assets import (
     media_file_score,
     normalize_pexels_videos,
     normalize_pixabay_videos,
+    open_asset_request,
     prepare_scene_assets,
     query_for_scene,
     resolve_director_stock_query,
@@ -35,6 +36,24 @@ def run_cli(args):
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         return main(args)
+
+
+def stock_candidate(download_url):
+    return StockAssetCandidate(
+        provider="pexels",
+        asset_id="security-test",
+        media_type="video",
+        width=1080,
+        height=1920,
+        duration=5,
+        preview_url="https://example.invalid/preview.jpg",
+        download_url=download_url,
+        source_url="https://example.invalid/source",
+        creator="test",
+        license_note="test",
+        query="test",
+        score=1,
+    )
 
 
 class PipelineTest(unittest.TestCase):
@@ -745,7 +764,7 @@ class PipelineTest(unittest.TestCase):
         attempts = 0
 
         class FakeResponse:
-            headers = {}
+            headers = {"Content-Type": "video/mp4"}
 
             def __enter__(self):
                 return self
@@ -780,16 +799,150 @@ class PipelineTest(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp, \
-             patch("video_factory.stock_assets.urllib.request.urlopen", side_effect=urlopen), \
+             patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]), \
              patch("video_factory.stock_assets.time.sleep") as sleep:
             output = Path(tmp) / "asset.mp4"
-            materialize_candidate(candidate, output)
+            materialize_candidate(candidate, output, opener=urlopen)
 
             self.assertTrue(output.exists())
             self.assertEqual(output.stat().st_size, 0)
 
         self.assertEqual(attempts, 2)
         sleep.assert_called_once()
+
+    def test_stock_download_rejects_non_http_urls_before_reading_local_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "private.txt"
+            source.write_text("must not be copied", encoding="utf-8")
+            output = root / "asset.mp4"
+
+            with self.assertRaisesRegex(RuntimeError, "HTTP or HTTPS"):
+                materialize_candidate(stock_candidate(source.as_uri()), output)
+
+            self.assertFalse(output.exists())
+
+    def test_stock_download_rejects_ipv4_mapped_private_addresses_before_fetch(self):
+        called = False
+
+        def urlopen(_request, timeout):
+            nonlocal called
+            called = True
+            raise AssertionError(f"unsafe fetch used timeout={timeout}")
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("video_factory.stock_assets.urllib.request.urlopen", side_effect=urlopen):
+            with self.assertRaisesRegex(RuntimeError, "private or unsafe"):
+                materialize_candidate(
+                    stock_candidate("http://[::ffff:192.168.1.1]/private.mp4"),
+                    Path(tmp) / "asset.mp4",
+                )
+
+        self.assertFalse(called)
+
+    def test_stock_download_rejects_nat64_addresses_before_fetch(self):
+        called = False
+
+        def urlopen(_request, timeout):
+            nonlocal called
+            called = True
+            raise AssertionError(f"unsafe fetch used timeout={timeout}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "private or unsafe"):
+                materialize_candidate(
+                    stock_candidate("http://[64:ff9b::c0a8:101]/private.mp4"),
+                    Path(tmp) / "asset.mp4",
+                    opener=urlopen,
+                )
+
+        self.assertFalse(called)
+
+    def test_stock_download_rejects_hostnames_resolving_to_private_addresses(self):
+        called = False
+
+        def urlopen(_request, timeout):
+            nonlocal called
+            called = True
+            raise AssertionError(f"unsafe fetch used timeout={timeout}")
+
+        private_result = [(2, 1, 6, "", ("100.100.100.200", 443))]
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("socket.getaddrinfo", return_value=private_result), \
+             patch("video_factory.stock_assets.urllib.request.urlopen", side_effect=urlopen):
+            with self.assertRaisesRegex(RuntimeError, "private or unsafe"):
+                materialize_candidate(
+                    stock_candidate("https://media.example/private.mp4"),
+                    Path(tmp) / "asset.mp4",
+                )
+
+        self.assertFalse(called)
+
+    def test_stock_download_rejects_non_media_content(self):
+        class FakeResponse:
+            headers = {"Content-Type": "text/html"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
+            with self.assertRaisesRegex(RuntimeError, "unsupported content type"):
+                materialize_candidate(
+                    stock_candidate("https://media.example/not-a-video.mp4"),
+                    Path(tmp) / "asset.mp4",
+                    opener=lambda _request, timeout: FakeResponse(),
+                )
+
+    def test_stock_download_accepts_application_mp4_content_type(self):
+        class FakeResponse:
+            headers = {"Content-Type": "application/mp4"}
+
+            def read(self, _size):
+                return b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
+            output = Path(tmp) / "asset.mp4"
+            materialize_candidate(
+                stock_candidate("https://media.example/video.mp4"),
+                output,
+                opener=lambda _request, timeout: FakeResponse(),
+            )
+
+            self.assertTrue(output.exists())
+
+    def test_stock_download_revalidates_redirect_destinations(self):
+        class RedirectResponse:
+            status = 302
+            reason = "Found"
+            headers = {"Location": "http://127.0.0.1/private.mp4"}
+
+            def close(self):
+                return None
+
+        def resolve(host, port, **_kwargs):
+            address = "127.0.0.1" if host == "127.0.0.1" else "93.184.216.34"
+            return [(2, 1, 6, "", (address, port))]
+
+        with patch("socket.getaddrinfo", side_effect=resolve), \
+             patch("video_factory.stock_assets.open_pinned_asset_response", return_value=RedirectResponse()) as open_response:
+            with self.assertRaisesRegex(RuntimeError, "private or unsafe"):
+                open_asset_request(
+                    urllib.request.Request("https://media.example/public.mp4"),
+                    timeout=60,
+                )
+
+        open_response.assert_called_once()
 
     def test_stock_asset_download_headers_accept_media(self):
         headers = download_headers("https://www.pexels.com/video/example/")
