@@ -11,6 +11,7 @@ function jsonResponse(value: unknown, status = 200): Response {
 
 describe("TrendGateway", () => {
   it("reports local services from real health evidence", async () => {
+    const plainTextResponses: Response[] = [];
     const fetcher: typeof fetch = async (input) => {
       const url = String(input);
       if (url.includes(":6688/douyin")) {
@@ -20,10 +21,14 @@ describe("TrendGateway", () => {
         return jsonResponse({ status: "success", items: [{ title: "微博热点" }] });
       }
       if (url.includes(":1200/")) {
-        return new Response("RSSHub is running", { status: 200 });
+        const response = new Response("RSSHub is running", { status: 200 });
+        plainTextResponses.push(response);
+        return response;
       }
       if (url.includes(":8080/")) {
-        return new Response("TrendRadar", { status: 200 });
+        const response = new Response("TrendRadar", { status: 200 });
+        plainTextResponses.push(response);
+        return response;
       }
       throw new Error(`unexpected URL ${url}`);
     };
@@ -37,6 +42,25 @@ describe("TrendGateway", () => {
     assert.equal(services[2]?.itemCount, 1);
     assert.equal(services[0]?.lastCheckedAt, "2026-08-24T08:00:00.000Z");
     assert.equal(services[0]?.baseUrl, "http://127.0.0.1:8080");
+    assert.equal(plainTextResponses.every((response) => response.bodyUsed), true);
+  });
+
+  it("drains unsuccessful upstream responses before returning or throwing", async () => {
+    const responses: Response[] = [];
+    const gateway = new TrendGateway({
+      fetcher: async () => {
+        const response = new Response("temporarily unavailable", { status: 503 });
+        responses.push(response);
+        return response;
+      },
+    });
+
+    const services = await gateway.listServices();
+    const signals = await gateway.listSignals({ platforms: ["douyin"], limit: 10 });
+
+    assert.equal(services.every((service) => service.status === "degraded"), true);
+    assert.deepEqual(signals, []);
+    assert.equal(responses.every((response) => response.bodyUsed), true);
   });
 
   it("falls back to valid local URLs when environment values are blank", async () => {

@@ -63,6 +63,7 @@ export class TrendGateway {
       try {
         const response = await this.request(new URL(definition.healthPath, definition.baseUrl));
         if (!response.ok) {
+          await drainResponse(response);
           return statusFrom(definition, "degraded", lastCheckedAt, `HTTP ${response.status}`);
         }
         const itemCount = await responseItemCount(response);
@@ -99,7 +100,10 @@ export class TrendGateway {
 
   private async readDailyHot(definition: ServiceDefinition, platform: string): Promise<StudioTrendSignal[]> {
     const response = await this.request(new URL(`/${platform}`, definition.baseUrl));
-    if (!response.ok) throw new Error(`DailyHot ${platform}: HTTP ${response.status}`);
+    if (!response.ok) {
+      await drainResponse(response);
+      throw new Error(`DailyHot ${platform}: HTTP ${response.status}`);
+    }
     const body = await response.json() as Record<string, unknown>;
     if (body.code !== undefined && Number(body.code) !== 200) return [];
     const collectedAt = timestamp(body.updateTime, this.now());
@@ -126,7 +130,10 @@ export class TrendGateway {
     const url = new URL("/api/s", definition.baseUrl);
     url.searchParams.set("id", platform);
     const response = await this.request(url);
-    if (!response.ok) throw new Error(`NewsNow ${platform}: HTTP ${response.status}`);
+    if (!response.ok) {
+      await drainResponse(response);
+      throw new Error(`NewsNow ${platform}: HTTP ${response.status}`);
+    }
     const body = await response.json() as Record<string, unknown>;
     const collectedAt = timestamp(body.updatedTime, this.now());
     return array(body.items).flatMap((item, index) => {
@@ -200,10 +207,18 @@ function browserVisibleBaseUrl(value: string): boolean {
 
 async function responseItemCount(response: Response): Promise<number | undefined> {
   const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.includes("json")) return undefined;
+  if (!contentType.includes("json")) {
+    await drainResponse(response);
+    return undefined;
+  }
   const body = await response.json() as Record<string, unknown>;
   const items = Array.isArray(body.data) ? body.data : Array.isArray(body.items) ? body.items : undefined;
   return items?.length;
+}
+
+async function drainResponse(response: Response): Promise<void> {
+  // Node 22 的 Undici 在连接结束时不能安全保留暂停中的响应体；健康检查也必须完整消费响应。
+  await response.arrayBuffer();
 }
 
 function timestamp(value: unknown, fallback: Date): string {
