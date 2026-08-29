@@ -27,6 +27,13 @@ describe("brokerRuntimeConfigFromEnv", () => {
     assert.equal(zai.workspaceRoot, "/var/lib/video-factory-zai-codex/workspace");
     assert.equal(zai.effort, "max");
     assert.doesNotMatch(JSON.stringify(zai), new RegExp(fakeSecret));
+
+    const customZai = brokerRuntimeConfigFromEnv({
+      VIDEO_FACTORY_CODEX_PROFILE: "zai",
+      ZAI_BIGMODEL_API_KEY: fakeSecret,
+      ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3-flash-preview",
+    });
+    assert.equal(customZai.profile.identity.modelId, "glm-5.3-flash-preview");
   });
 
   it("rejects unknown profiles and a ZAI profile without its environment key", async () => {

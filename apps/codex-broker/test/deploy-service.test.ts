@@ -61,7 +61,7 @@ describe("ZAI systemd service sample", () => {
 
     assert.match(executor, /https:\/\/open\.bigmodel\.cn\/api\/paas\/v4\/chat\/completions/);
     assert.doesNotMatch(executor, /\/api\/coding\/paas\/v4/);
-    assert.match(executor, /model: ZAI_MODEL_ID/);
+    assert.match(executor, /model: this\.identity\.modelId/);
     assert.match(executor, /type: "image_url"/);
     assert.match(executor, /response_format: \{ type: "json_object" \}/);
   });

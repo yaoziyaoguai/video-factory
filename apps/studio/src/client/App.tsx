@@ -2,6 +2,8 @@ import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import { AuthGate } from "./components/AuthGate.js";
 import { AppShell } from "./components/AppShell.js";
 import { ExperimentsPage } from "./pages/ExperimentsPage.js";
+import { AssetsPage } from "./pages/AssetsPage.js";
+import { HomePage } from "./pages/HomePage.js";
 import { ProjectsPage } from "./pages/ProjectsPage.js";
 import { ResourcesPage } from "./pages/ResourcesPage.js";
 import { RunPage } from "./pages/RunPage.js";
@@ -23,9 +25,11 @@ export function App() {
 function StudioRoutes() {
   return (
     <Routes>
-      <Route path="/" element={<TodayPage />} />
+      <Route path="/" element={<HomePage />} />
+      <Route path="/topics" element={<TodayPage />} />
       <Route path="/projects" element={<ProjectsPage />} />
       <Route path="/projects/:runId" element={<RunPage />} />
+      <Route path="/assets" element={<AssetsPage />} />
       <Route path="/templates" element={<TemplatesPage />} />
       <Route path="/resources" element={<ResourcesPage />} />
       <Route path="/experiments" element={<ExperimentsPage />} />

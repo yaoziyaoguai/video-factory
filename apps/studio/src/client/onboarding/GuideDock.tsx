@@ -57,7 +57,7 @@ export function GuideDock({ open, pathname, onOpenChange, onStartFullTour, onSta
       {open ? (
         <section ref={panelRef} id="creator-guide-panel" className="guide-dock-panel" role="dialog" aria-modal="true" aria-label="创作向导" onKeyDown={handleDialogKeyDown}>
           <header>
-            <span><Sparkles aria-hidden="true" size={15} />CREATOR ROUTE</span>
+            <span><Sparkles aria-hidden="true" size={15} />创作路线</span>
             <button type="button" onClick={() => onOpenChange(false)} aria-label="收起创作向导" title="收起">
               <X aria-hidden="true" size={18} />
             </button>
@@ -79,7 +79,7 @@ export function GuideDock({ open, pathname, onOpenChange, onStartFullTour, onSta
               讲解当前页面<ArrowRight aria-hidden="true" size={16} />
             </button>
           </div>
-          <p className="guide-dock-note">导览中可随时点击“提前结束”。这个入口会一直留在右下角。</p>
+          <p className="guide-dock-note">导览中可随时提前结束，也可以从页面上的问号入口再次打开。</p>
         </section>
       ) : null}
       <button

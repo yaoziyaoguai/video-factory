@@ -6,6 +6,7 @@ import type {
   StudioTrendSignal,
   StudioTrendSignalQuery,
   StudioTopicCategory,
+  StudioTopicStrategy,
 } from "../shared/api.js";
 import { planVisualDirection } from "../shared/visual-plan.js";
 import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
@@ -29,13 +30,14 @@ export interface TrendModelIdea {
 
 export interface TrendIdeaModel {
   id: string;
-  generate(signals: StudioTrendSignal[]): Promise<TrendModelIdea[]>;
+  generate(signals: StudioTrendSignal[], strategy?: StudioTopicStrategy): Promise<TrendModelIdea[]>;
 }
 
 export interface TrendOpportunityAgentOptions {
   signals: TrendSignalPort;
   model?: TrendIdeaModel;
   now?: () => Date;
+  strategy?: () => Promise<StudioTopicStrategy>;
 }
 
 const TREND_CANDIDATE_LIMIT = 60;
@@ -51,9 +53,10 @@ export class TrendOpportunityAgent {
     const signals = await this.options.signals.listSignals({ limit: 160 });
     const signalGroups = groupEquivalentSignals(signals);
     const primarySignals = signalGroups.map((group) => group[0]!);
+    const strategy = await this.options.strategy?.().catch(() => undefined);
     if (this.options.model) {
       try {
-        const ideas = await generateModelIdeas(this.options.model, primarySignals);
+        const ideas = await generateModelIdeas(this.options.model, primarySignals, strategy);
         const modelCandidates = new Map<string, StudioTrendCandidate>();
         for (const idea of ideas) {
           const group = signalGroups.find((items) => items[0]?.id === idea.signalId);
@@ -183,13 +186,13 @@ export class TrendOpportunityAgent {
   }
 }
 
-async function generateModelIdeas(model: TrendIdeaModel, signals: StudioTrendSignal[]): Promise<TrendModelIdea[]> {
+async function generateModelIdeas(model: TrendIdeaModel, signals: StudioTrendSignal[], strategy?: StudioTopicStrategy): Promise<TrendModelIdea[]> {
   try {
-    const ideas = await model.generate(signals.slice(0, 24));
-    return ideas.length > 0 ? ideas : model.generate(signals.slice(0, 12));
+    const ideas = await model.generate(signals.slice(0, 24), strategy);
+    return ideas.length > 0 ? ideas : model.generate(signals.slice(0, 12), strategy);
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error;
-    return model.generate(signals.slice(0, 12));
+    return model.generate(signals.slice(0, 12), strategy);
   }
 }
 
@@ -202,7 +205,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
     this.client = client;
   }
 
-  async generate(signals: StudioTrendSignal[]): Promise<TrendModelIdea[]> {
+  async generate(signals: StudioTrendSignal[], strategy?: StudioTopicStrategy): Promise<TrendModelIdea[]> {
     const parsed = await this.client.runTask("topic-ideas", {
       signals: signals.map((item) => ({
         id: item.id,
@@ -211,6 +214,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         title: item.title,
         heat: item.heat ?? null,
       })),
+      ...(strategy?.customInstruction ? { strategy: strategy.customInstruction } : {}),
     }) as { ideas?: unknown[] };
     return (parsed.ideas ?? []).flatMap(parseModelIdea);
   }

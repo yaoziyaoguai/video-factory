@@ -12,6 +12,8 @@ import {
   type WorkerResponse,
 } from "../src/index.js";
 
+const resolvePublicHost = async (): Promise<string[]> => ["93.184.216.34"];
+
 describe("GenerativeAssetWorkerClient", () => {
   it("keeps a local baseline and replaces only budgeted key shots", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
@@ -46,6 +48,7 @@ describe("GenerativeAssetWorkerClient", () => {
     const subject = new GenerativeAssetWorkerClient({
       fallback,
       adapters: [{ adapter, estimatedCnyPerClip: 3.5 }],
+      resolveHost: resolvePublicHost,
       fetch: async () => new Response("generated-video-bytes", {
         headers: { "content-type": "video/mp4" },
       }),
@@ -140,6 +143,7 @@ describe("GenerativeAssetWorkerClient", () => {
           },
         },
       }],
+      resolveHost: resolvePublicHost,
       fetch: async () => new Response("model-video", { headers: { "content-type": "video/mp4" } }),
     });
     const request = workerRequest(scriptPath, outputDir, 1, 3);
@@ -203,6 +207,7 @@ describe("GenerativeAssetWorkerClient", () => {
           },
         },
       }],
+      resolveHost: resolvePublicHost,
       fetch: async () => new Response("short-video", { headers: { "content-type": "video/mp4" } }),
     });
 
@@ -351,6 +356,7 @@ describe("GenerativeAssetWorkerClient", () => {
           },
         },
       }],
+      resolveHost: resolvePublicHost,
       fetch: async () => new Response("routed-video", { headers: { "content-type": "video/mp4" } }),
     });
 
@@ -443,6 +449,7 @@ describe("GenerativeAssetWorkerClient", () => {
       fallback: new LocalAssetWorker(),
       adapters: [{ adapter: videoAdapter, estimatedCnyPerClip: 3.5 }],
       imageAdapters: [{ adapter: imageAdapter, estimatedCnyPerImage: 0.25 }],
+      resolveHost: resolvePublicHost,
       fetch: async (input) => new Response(
         String(input).endsWith(".png") ? "generated-image" : "generated-video",
         { headers: { "content-type": String(input).endsWith(".png") ? "image/png" : "video/mp4" } },
@@ -494,6 +501,7 @@ describe("GenerativeAssetWorkerClient", () => {
           },
         },
       }],
+      resolveHost: resolvePublicHost,
       fetch: async () => new Response("alternative-video", { headers: { "content-type": "video/mp4" } }),
     });
 
@@ -642,6 +650,275 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(response.diagnostics?.meteredFailedAttemptCount, 1);
   });
 
+  it("blocks IPv4-mapped private IPv6 media URLs before any download request", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "映射私网测试" },
+    ] }));
+    let downloads = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({
+            providerId: "seedance-video-v1",
+            taskId: "mapped-private-task",
+            videoUrl: "http://[::ffff:192.168.1.1]/private.mp4",
+          }),
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => {
+        downloads += 1;
+        return new Response("must-not-download");
+      },
+    });
+
+    await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.equal(downloads, 0);
+    assert.match(jobs.jobs[0].error, /private or unsafe/);
+  });
+
+  it("blocks NAT64 media URLs before any download request", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "NAT64 私网测试" },
+    ] }));
+    let downloads = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({
+            providerId: "seedance-video-v1",
+            taskId: "nat64-private-task",
+            videoUrl: "http://[64:ff9b::c0a8:101]/private.mp4",
+          }),
+        },
+      }],
+      fetch: async () => {
+        downloads += 1;
+        return new Response("must-not-download");
+      },
+    });
+
+    await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.equal(downloads, 0);
+    assert.match(jobs.jobs[0].error, /private or unsafe/);
+  });
+
+  it("blocks reserved documentation ranges returned by DNS", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "保留地址测试" },
+    ] }));
+    let fetched = false;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({ providerId: "seedance-video-v1", taskId: "reserved-task", videoUrl: "https://media.example/generated.mp4" }),
+        },
+      }],
+      resolveHost: async () => ["198.51.100.20"],
+      fetch: async () => {
+        fetched = true;
+        return new Response("must not fetch");
+      },
+    });
+
+    await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.equal(fetched, false);
+    assert.match(jobs.jobs[0].error, /private or unsafe network destination/);
+  });
+
+  it("blocks media hostnames that resolve to private addresses before downloading", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "DNS 私网测试" },
+    ] }));
+    let downloads = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({
+            providerId: "seedance-video-v1",
+            taskId: "dns-private-task",
+            videoUrl: "https://media.example/private.mp4",
+          }),
+        },
+      }],
+      resolveHost: async () => ["100.100.100.200"],
+      fetch: async () => {
+        downloads += 1;
+        return new Response("must-not-download");
+      },
+    });
+
+    await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.equal(downloads, 0);
+    assert.match(jobs.jobs[0].error, /private or unsafe/);
+  });
+
+  it("revalidates every generated-media redirect before following it", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "重定向测试" },
+    ] }));
+    let requests = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({
+            providerId: "seedance-video-v1",
+            taskId: "redirect-task",
+            videoUrl: "https://media.example/public.mp4",
+          }),
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => {
+        requests += 1;
+        return new Response(null, { status: 302, headers: { location: "http://127.0.0.1/private.mp4" } });
+      },
+    });
+
+    await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.equal(requests, 1);
+    assert.match(jobs.jobs[0].error, /private or unsafe/);
+  });
+
+  it("stops a generated-media download when the overall timeout expires", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "超时测试" },
+    ] }));
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({
+            providerId: "seedance-video-v1",
+            taskId: "timeout-task",
+            videoUrl: "https://media.example/slow.mp4",
+          }),
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      downloadTimeoutMs: 10,
+      fetch: (_input, init) => new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) {
+          reject(new Error("missing abort signal"));
+          return;
+        }
+        signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }),
+    });
+
+    await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.match(jobs.jobs[0].error, /timed out after 10ms/);
+  });
+
+  it("rejects non-media responses before consuming their body", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "MIME 测试" },
+    ] }));
+    let bodyCancelled = false;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({
+            providerId: "seedance-video-v1",
+            taskId: "html-task",
+            videoUrl: "https://media.example/not-video.mp4",
+          }),
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response(new ReadableStream({
+        cancel: () => { bodyCancelled = true; },
+      }), { headers: { "content-type": "text/html" } }),
+    });
+
+    await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.equal(bodyCancelled, true);
+    assert.match(jobs.jobs[0].error, /unsupported content type 'text\/html'/);
+  });
+
+  it("accepts provider MP4 MIME aliases", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "MIME 测试" },
+    ] }));
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({ providerId: "seedance-video-v1", taskId: "mime-task", videoUrl: "https://example.com/mime.mp4" }),
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("mp4", { headers: { "content-type": "application/mp4" } }),
+    });
+
+    const response = await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.equal(response.status, "succeeded");
+    assert.equal(jobs.jobs[0].status, "succeeded");
+  });
+
   it("stops streaming generated media as soon as the byte limit is exceeded", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
     const scriptPath = path.join(root, "script.json");
@@ -658,6 +935,7 @@ describe("GenerativeAssetWorkerClient", () => {
           generate: async () => ({ providerId: "seedance-video-v1", taskId: "large-task", videoUrl: "https://example.com/large.mp4" }),
         },
       }],
+      resolveHost: resolvePublicHost,
       maxDownloadBytes: 5,
       fetch: async () => new Response("123456789", { headers: { "content-type": "video/mp4" } }),
     });

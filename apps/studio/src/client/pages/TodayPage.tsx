@@ -1,6 +1,6 @@
 import { AlertCircle, CheckCircle2, Plus, RadioTower, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import type {
   StudioCandidateInbox,
   StudioCandidateInboxItem,
@@ -27,6 +27,9 @@ const TREND_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 export function TodayPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const entryMode = searchParams.get("mode") === "series" ? "series" : searchParams.get("mode") === "manual" ? "custom" : "trend";
+  const initialCandidateId = searchParams.get("candidate") ?? undefined;
   const [opportunities, setOpportunities] = useState<StudioOpportunity[]>([]);
   const [providers, setProviders] = useState<StudioProvider[]>([]);
   const [runs, setRuns] = useState<StudioRunSummary[]>([]);
@@ -227,7 +230,7 @@ export function TodayPage() {
         <div className={journeyStep === 2 ? "daily-path-step is-current" : "daily-path-step"}><span>03</span><div><strong>生成与审片</strong><small>看完成片，再决定批准或打回</small></div></div>
       </section>
 
-      <TopicEntryWorkspace {...(inbox ? { inbox } : {})} series={series} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onCreateSeries={() => setSeriesDialogOpen(true)} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
+      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} {...(inbox ? { inbox } : {})} series={series} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onCreateSeries={() => setSeriesDialogOpen(true)} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
       {candidateActionError ? <div className="inline-error topic-action-error" role="alert"><AlertCircle aria-hidden="true" size={18} />{candidateActionError}</div> : null}
       {nextStepNotice ? <div className="next-step-notice" role="status"><CheckCircle2 aria-hidden="true" size={18} /><strong>{nextStepNotice}</strong><button type="button" onClick={() => setNextStepNotice(undefined)} aria-label="关闭下一步提示">知道了</button></div> : null}
 

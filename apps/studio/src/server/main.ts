@@ -14,7 +14,12 @@ import {
 } from "@video-factory/production-pipeline";
 import { buildStudioApp } from "./app.js";
 import { readStudioAuthEnvironment } from "./auth.js";
-import { readCodexProviderSettings, readZaiCodexProviderSettings } from "./codex-provider-settings.js";
+import {
+  readCodexProviderSettings,
+  readZaiCodexProviderSettings,
+  resolveZaiVisualReviewModelId,
+} from "./codex-provider-settings.js";
+import { JsonCreatorSettingsStore } from "./creator-settings-store.js";
 import { JsonOpportunityStore } from "./opportunity-store.js";
 import {
   buildDirectorAssetProviders,
@@ -35,6 +40,7 @@ delete process.env.ZAI_API_KEY;
 const workspaceRoot = path.resolve(
   process.env.VIDEO_FACTORY_WORKSPACE ?? path.join(repositoryRoot, "workspace", "factory"),
 );
+const creatorSettings = new JsonCreatorSettingsStore(path.join(workspaceRoot, "settings", "creator-settings.json"));
 const pythonPath = process.env.PYTHONPATH
   ? `${path.join(repositoryRoot, "src")}${path.delimiter}${process.env.PYTHONPATH}`
   : path.join(repositoryRoot, "src");
@@ -75,7 +81,7 @@ const visualReviewAgents = [
       client: zaiCodexClient,
       media: reviewMedia,
       providerId: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      modelId: resolveZaiVisualReviewModelId(process.env),
     })] : []),
   ...(codexClient ? [new CodexVisualReviewAgent({
       client: codexClient,
@@ -115,8 +121,10 @@ const service = new StudioService({
     trendAgent: new TrendOpportunityAgent({
       signals: new TrendGateway({ environment: process.env }),
       model: new CodexTopicIdeaModel(codexClient),
+      strategy: async () => (await creatorSettings.get()).topicStrategy,
     }),
   } : {}),
+  creatorSettings,
 });
 const development = process.env.STUDIO_DEV === "1";
 const auth = readStudioAuthEnvironment(process.env, { required: !development, secureCookie: !development });

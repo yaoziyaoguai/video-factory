@@ -164,6 +164,13 @@ describe("readZaiCodexProviderSettings", () => {
       const wrongModel = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
       assert.equal(wrongModel.available, false);
       assert.match(wrongModel.reason, /模型身份或任务权限/);
+
+      identity = { ...identity, modelId: "glm-5.3-flash-preview" };
+      const configuredModel = await readZaiCodexProviderSettings({
+        VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath,
+        ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3-flash-preview",
+      });
+      assert.equal(configuredModel.available, true);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(directory, { recursive: true, force: true });
@@ -193,7 +200,29 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.equal(providers.find((provider) => provider.id === "codex-screenwriter-v1")?.available, true);
     const director = providers.find((provider) => provider.id === "api-visual-director-v1");
     assert.equal(director?.available, false);
+    assert.equal(director?.modelProfiles?.[0]?.available, false);
+    assert.equal(providers.find((provider) => provider.id === "codex-screenwriter-v1")?.modelProfiles?.[0]?.available, true);
     assert.match(director?.requirement ?? "", /director-plan/);
+  });
+
+  it("keeps configured metered models unavailable when the production runtime is missing", () => {
+    const providers = buildProviderCatalog(
+      { python: false, ffmpeg: false, ffprobe: false, say: false },
+      {
+        ARK_API_KEY: "test-ark-key",
+        SEEDANCE_ESTIMATED_CNY_PER_CLIP: "2",
+        MINIMAX_API_KEY: "test-minimax-key",
+        MINIMAX_VIDEO_MODEL_ID: "MiniMax-Hailuo-02",
+        MINIMAX_ESTIMATED_CNY_PER_CLIP: "1",
+      },
+      { available: false, reason: "not running" },
+    );
+
+    for (const providerId of ["seedream-image-v1", "seedance-video-v1", "hailuo-video-v1", "minimax-tts-v1"]) {
+      const provider = providers.find((candidate) => candidate.id === providerId);
+      assert.equal(provider?.available, false);
+      assert.equal(provider?.modelProfiles?.every((model) => model.available === false), true);
+    }
   });
 
   it("does not advertise an unprobed socket as compatible", () => {
@@ -236,5 +265,34 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.equal(glm?.capability, "quality.review.visual");
     assert.match(glm?.description ?? "", /GLM-5\.3-Flash/);
     assert.doesNotMatch(glm?.description ?? "", /Coding Plan/);
+  });
+
+  it("shows the configured GLM visual-review model instead of a hard-coded model", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      { ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3-flash-preview" },
+      { available: true, reason: "" },
+      { available: true, reason: "", taskKinds: ["visual-review"] },
+    );
+    const glm = providers.find((provider) => provider.id === "glm-visual-review-v1");
+
+    assert.equal(glm?.defaultModelId, "glm-5.3-flash-preview");
+    assert.equal(glm?.modelProfiles?.[0]?.id, "glm-5.3-flash-preview");
+  });
+
+  it("keeps digital-human generation separate from ordinary Ark video models", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      { ARK_API_KEY: "configured-ark-key" },
+      { available: true, reason: "" },
+    );
+    const digitalHuman = providers.find((provider) => provider.id === "volcengine-omnihuman-v1");
+
+    assert.equal(digitalHuman?.available, false);
+    assert.equal(digitalHuman?.status, "planned");
+    assert.equal(digitalHuman?.capability, "avatar.generate");
+    assert.deepEqual(digitalHuman?.modelProfiles?.[0]?.taskTypes, ["digital-human"]);
+    assert.match(digitalHuman?.requirement ?? "", /AK\/SK/);
+    assert.match(digitalHuman?.requirement ?? "", /ARK_API_KEY 不能替代/);
   });
 });

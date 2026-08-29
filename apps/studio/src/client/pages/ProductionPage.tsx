@@ -39,6 +39,11 @@ export function ProductionPage() {
     navigate(`/projects/${result.runId}`);
   }
 
+  async function remove(run: StudioRunSummary) {
+    await studioApi.deleteRun(run.id);
+    setRuns((current) => current.filter((item) => item.id !== run.id));
+  }
+
   return (
     <>
       {providersError ? (
@@ -48,7 +53,7 @@ export function ProductionPage() {
           <button className="icon-button" type="button" onClick={() => void load()} title="重试"><RefreshCw aria-hidden="true" size={17} /></button>
         </div>
       ) : null}
-      <ProductionQueue runs={runs} loading={runsLoading} {...(runsError ? { error: runsError } : {})} onRetry={() => void load()} onCreate={() => setDialogOpen(true)} />
+      <ProductionQueue runs={runs} loading={runsLoading} {...(runsError ? { error: runsError } : {})} onRetry={() => void load()} onCreate={() => setDialogOpen(true)} onDelete={remove} />
       <NewRunDialog open={dialogOpen} providers={providersLoading ? [] : providers} {...(creatorSettings ? { creatorSettings } : {})} onClose={() => setDialogOpen(false)} onSubmit={start} />
     </>
   );

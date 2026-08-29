@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { buildStudioApp, type StudioServicePort } from "../src/server/app.js";
+import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
 import type { StudioOpportunity, StudioRunDetail } from "../src/shared/api.js";
 
 function runDetail(status: StudioRunDetail["status"] = "needs_human"): StudioRunDetail {
@@ -66,6 +67,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "economy-daily",
       productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      topicStrategy: { customInstruction: "优先可拍、可核验、可连载的题材。" },
     }),
     updateCreatorSettings: async (input) => ({
       voiceDirection: input.voiceDirection ?? { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
@@ -76,12 +78,14 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
         platform: input.productionDefaults?.platform ?? "douyin",
         durationSeconds: input.productionDefaults?.durationSeconds ?? 24,
       },
+      topicStrategy: input.topicStrategy ?? { customInstruction: "优先可拍、可核验、可连载的题材。" },
       ...(input.defaultAssetProviderId ? { defaultAssetProviderId: input.defaultAssetProviderId } : {}),
     }),
     listTemplates: async () => ({ storeRevision: 0, templates: [] }),
     templateExperiments: async () => [],
     resourceManifest: async () => ({ generatedAt: "2026-08-28T10:00:00.000Z", totalItems: 0, needsReviewCount: 0, legacyRunsWithoutManifest: 0, reconstructedRunCount: 0, unreadableManifestCount: 0, truncatedRunCount: 0, categories: { visual: 0, voice: 0, font: 0, document: 0, other: 0 }, items: [] }),
     getTemplate: async () => undefined,
+    createTemplate: async () => { throw new Error("not configured"); },
     cloneTemplate: async () => { throw new Error("not configured"); },
     saveTemplateDraft: async () => { throw new Error("not configured"); },
     publishTemplate: async () => { throw new Error("not configured"); },
@@ -128,6 +132,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     getRun: async (runId) => runId === "run-1"
       ? runDetail()
       : undefined,
+    deleteRun: async () => undefined,
     startRun: async () => ({ runId: "run-2", status: "running" }),
     decide: async (_runId, input) => runDetail(input.action === "approve" ? "succeeded" : "rejected"),
     applyNodeOverride: async () => runDetail("stale"),
@@ -155,6 +160,33 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
 }
 
 describe("Studio API", () => {
+  it("deletes a terminal production record through the API", async () => {
+    const deleted: string[] = [];
+    const app = buildStudioApp({ service: fakeService({ deleteRun: async (runId) => { deleted.push(runId); } }) });
+
+    const response = await app.inject({ method: "DELETE", url: "/api/runs/run-1" });
+
+    assert.equal(response.statusCode, 204);
+    assert.deepEqual(deleted, ["run-1"]);
+    await app.close();
+  });
+
+  it("creates a user template through validated input", async () => {
+    const calls: unknown[] = [];
+    const app = buildStudioApp({ service: fakeService({
+      createTemplate: async (input) => {
+        calls.push(input);
+        return { storeRevision: 1, template: { ...BUILTIN_TEMPLATES[0]!, id: input.id, name: input.name, status: "draft", builtIn: false } };
+      },
+    }) });
+
+    const response = await app.inject({ method: "POST", url: "/api/templates", payload: { id: "city-portrait", name: "城市人物", expectedRevision: 0 } });
+
+    assert.equal(response.statusCode, 201);
+    assert.deepEqual(calls, [{ id: "city-portrait", name: "城市人物", expectedRevision: 0 }]);
+    await app.close();
+  });
+
   it("accepts bounded reference-video bytes without exposing a server path", async () => {
     const calls: Array<{ label: string; mimeType: string; bytes: Buffer }> = [];
     const app = buildStudioApp({ service: fakeService({
@@ -467,6 +499,7 @@ describe("Studio API", () => {
             platform: input.productionDefaults?.platform ?? "douyin",
             durationSeconds: input.productionDefaults?.durationSeconds ?? 24,
           },
+          topicStrategy: input.topicStrategy ?? { customInstruction: "优先可拍、可核验、可连载的题材。" },
         };
       },
     }) });

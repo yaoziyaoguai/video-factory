@@ -14,6 +14,7 @@ import {
 } from "@video-factory/production-pipeline";
 import { readMeteredVideoProviderSettings } from "./video-provider-settings.js";
 import { readMeteredImageProviderSettings } from "./image-provider-settings.js";
+import { resolveZaiVisualReviewModelId } from "./codex-provider-settings.js";
 import { buildStudioChildEnvironment } from "./studio-child-environment.js";
 
 export interface ProductionWorkerOptions {
@@ -146,6 +147,7 @@ export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOption
 }
 
 export function buildProductionProviderRuntimeMetadata(environment: NodeJS.ProcessEnv): ProductionProviderRuntimeMetadata[] {
+  const zaiVisualReviewModelId = resolveZaiVisualReviewModelId(environment);
   const metadata: ProductionProviderRuntimeMetadata[] = [
     { id: "python-template-v1", label: "模板脚本", modelId: "rules-v1", transport: "local_process", billing: "free" },
     { id: "ai-shot-router-v1", label: "AI 逐镜路由", modelId: "router-v1", transport: "local_process", billing: "free" },
@@ -158,8 +160,8 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
     { id: "python-technical-review-v1", label: "本地机器质检", modelId: "ffprobe", transport: "local_process", billing: "local_compute" },
     {
       id: "glm-visual-review-v1",
-      label: "GLM-5.3-Flash 视觉审片",
-      modelId: "glm-5.3-flash",
+      label: `${zaiVisualReviewModelId === "glm-5.3-flash" ? "GLM-5.3-Flash" : zaiVisualReviewModelId} 视觉审片`,
+      modelId: zaiVisualReviewModelId,
       transport: "unix_socket",
       billing: "metered",
       billingUnit: "run",

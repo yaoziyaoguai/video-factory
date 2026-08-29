@@ -75,7 +75,7 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated(session: StudioAuthSe
       <section className="auth-panel" aria-labelledby="auth-title">
         <div className="auth-brand"><span className="auth-mark"><Clapperboard aria-hidden="true" size={20} /></span><strong>VideoFactory</strong></div>
         <div className="auth-copy">
-          <span className="auth-eyebrow">PRIVATE CREATOR STUDIO</span>
+          <span className="auth-eyebrow">私人影像创作工作室</span>
           <h1 id="auth-title">回到创作现场</h1>
           <p>你的选题、分镜与制作记录都在这里。</p>
         </div>

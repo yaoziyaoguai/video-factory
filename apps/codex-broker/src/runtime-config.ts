@@ -20,6 +20,7 @@ export interface BrokerRuntimeConfig {
 export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntimeConfig {
   const profileId = readProfileId(env);
   const configuredModel = optionalText(env, "VIDEO_FACTORY_CODEX_MODEL");
+  const configuredZaiModel = optionalText(env, "ZAI_VISUAL_REVIEW_MODEL_ID");
   if (profileId === "zai" && configuredModel !== undefined) {
     throw new Error("VIDEO_FACTORY_CODEX_MODEL cannot override the zai profile model.");
   }
@@ -32,7 +33,7 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
   }
 
   return {
-    profile: codexExecutorProfileFor(profileId, configuredModel),
+    profile: codexExecutorProfileFor(profileId, configuredModel, configuredZaiModel),
     socketPath: optionalText(env, "VIDEO_FACTORY_CODEX_SOCKET_PATH") ?? defaultSocketPath(profileId),
     workspaceRoot: optionalText(env, "VIDEO_FACTORY_CODEX_WORKSPACE_ROOT") ?? defaultWorkspaceRoot(profileId),
     codexBin: optionalText(env, "CODEX_BIN") ?? "codex",

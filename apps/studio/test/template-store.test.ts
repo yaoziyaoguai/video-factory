@@ -7,6 +7,25 @@ import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
 import { JsonTemplateStore, TemplateRevisionConflictError } from "../src/server/template-store.js";
 
 describe("JsonTemplateStore", () => {
+  it("creates a new draft without cloning a built-in template", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-templates-"));
+    const store = new JsonTemplateStore(path.join(root, "templates.json"), BUILTIN_TEMPLATES);
+    const timestamp = "2026-08-29T10:00:00.000Z";
+
+    const created = await store.create({
+      ...structuredClone(BUILTIN_TEMPLATES[0]!),
+      id: "original-format",
+      name: "原创栏目",
+      status: "draft",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }, 0);
+
+    assert.equal(created.storeRevision, 1);
+    assert.equal(created.template.id, "original-format");
+    assert.equal(created.template.status, "draft");
+  });
+
   it("clones a built-in to an editable draft and publishes an immutable version", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-templates-"));
     const file = path.join(root, "templates.json");

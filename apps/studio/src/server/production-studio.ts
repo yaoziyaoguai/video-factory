@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NodeVersionConflictError } from "@video-factory/workflow-core";
 import type { ArtifactDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
@@ -33,6 +33,7 @@ const MANAGED_FILE_PLACEHOLDER = "[系统托管文件]";
 
 export interface StudioPipelinePort {
   list(): Promise<WorkflowRun<ProductionBrief>[]>;
+  remove(runId: string): Promise<void>;
   loadPersisted(runId: string): Promise<WorkflowRun<ProductionBrief>>;
   show(runId: string): Promise<WorkflowRun<ProductionBrief>>;
   dispatch(input: unknown, listener?: ProductionRunListener): Promise<DispatchedProductionRun>;
@@ -104,6 +105,38 @@ export class ProductionStudio {
       if (hasCode(error, "ENOENT")) return undefined;
       throw error;
     }
+  }
+
+  async remove(runId: string): Promise<void> {
+    const current = await this.loadRequiredRun(runId);
+    if (!isTerminalRun(current.status)) {
+      throw new StudioConflictError("这条制作仍在运行或等待确认，结束流程后才能删除。");
+    }
+    await this.options.pipeline.remove(runId);
+    this.listeners.delete(runId);
+    await this.removeStartRecordsForRun(runId);
+  }
+
+  private async removeStartRecordsForRun(runId: string): Promise<void> {
+    const directory = path.join(this.options.workspaceRoot, "idempotency", "production-start");
+    let entries: string[];
+    try {
+      entries = await readdir(directory);
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) return;
+      throw error;
+    }
+    await Promise.all(entries.map(async (entry) => {
+      const recordPath = path.join(directory, entry);
+      try {
+        const record = await readStartRecord(recordPath);
+        if (record.state === "completed" && record.response?.runId === runId) {
+          await rm(recordPath, { force: true });
+        }
+      } catch {
+        // 旧记录损坏不应阻止用户删除已经结束的制作。
+      }
+    }));
   }
 
   async replayStart(input: unknown, idempotencyKey?: string): Promise<StartRunResponse | undefined> {

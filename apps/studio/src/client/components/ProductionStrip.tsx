@@ -19,16 +19,23 @@ export function ProductionStrip({ runs }: { runs: StudioRunSummary[] }) {
   const needsAction = needsReview || needsSpend || needsRegenerate;
   const label = needsSpend ? "待确认费用" : needsRegenerate ? "待确认重生成" : needsReview ? "等你审片" : "正在制作";
   return (
-    <aside className={`production-strip ${needsAction ? "production-strip-review" : ""}`} aria-label="当前生产">
-      <span className="production-strip-icon">
-        {needsSpend
-          ? <CircleDollarSign aria-hidden="true" size={17} />
-          : needsRegenerate
-            ? <RotateCcw aria-hidden="true" size={17} />
-            : needsReview
-              ? <CircleCheck aria-hidden="true" size={17} />
-              : <LoaderCircle aria-hidden="true" size={17} />}
-      </span>
+    <aside className={`production-strip ${needsAction ? "production-strip-review" : ""} ${activeRun.videoContentUrl ? "has-preview" : ""}`} aria-label="当前生产">
+      {activeRun.videoContentUrl ? (
+        <span className="production-strip-preview" aria-hidden="true">
+          <video muted playsInline preload="metadata" src={activeRun.videoContentUrl} tabIndex={-1} />
+          <i>{activeRun.durationSeconds}s</i>
+        </span>
+      ) : (
+        <span className="production-strip-icon">
+          {needsSpend
+            ? <CircleDollarSign aria-hidden="true" size={17} />
+            : needsRegenerate
+              ? <RotateCcw aria-hidden="true" size={17} />
+              : needsReview
+                ? <CircleCheck aria-hidden="true" size={17} />
+                : <LoaderCircle aria-hidden="true" size={17} />}
+        </span>
+      )}
       <div>
         <span>{label}</span>
         <strong>{activeRun.title}</strong>

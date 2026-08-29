@@ -60,6 +60,13 @@ export class FileRunStore {
     );
   }
 
+  async remove(runId: string): Promise<void> {
+    await this.withLock(runId, async () => {
+      await this.load(runId);
+      await rm(this.runDirectory(runId), { recursive: true });
+    });
+  }
+
   async save(run: WorkflowRun, expectedRevision: number): Promise<void> {
     await this.withLock(run.id, async () => {
       const current = await this.load(run.id);

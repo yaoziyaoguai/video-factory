@@ -2,6 +2,7 @@ import type { StudioProvider, StudioTrendService, StudioTrendSource } from "../s
 import {
   resolveCodexSocketPath,
   resolveZaiCodexSocketPath,
+  resolveZaiVisualReviewModelId,
   type CodexProviderSettings,
 } from "./codex-provider-settings.js";
 import { readMeteredVideoProviderSettings } from "./video-provider-settings.js";
@@ -34,10 +35,27 @@ export function buildProviderCatalog(
   const seedreamAvailable = runtime.python && seedreamSettings !== undefined;
   const miniMaxAvailable = runtime.python && miniMaxSettings !== undefined;
   const wanAvailable = runtime.python && wanSettings !== undefined;
+  const miniMaxTtsAvailable = runtime.python && runtime.ffmpeg && Boolean(environment.MINIMAX_API_KEY);
   const codex = codexAvailability ?? probeCodexSynchronously(environment);
+  const codexModelId = environment.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
+  const codexModels = [textModelProfile(codexModelId, "Codex 云端模型", "codex-broker", "openai", codex.available, "服务器 Codex broker 当前实际使用的模型；切换需要更新运行时配置并重启 broker。")];
+  const codexProfiles = (
+    providerId: string,
+    taskKind: string,
+    taskType: "text" | "visual-review" = "text",
+    runtimeAvailable = true,
+  ) => codexModels.map((model) => ({
+    ...model,
+    providerId,
+    available: runtimeAvailable && supportsTask(codex, taskKind),
+    taskTypes: [taskType],
+  }));
   const codexRequirement = (taskKind: string) => providerTaskRequirement(resolveCodexSocketPath(environment).requirement, codex, taskKind);
   const zaiCodex = zaiCodexAvailability ?? { available: false, reason: "尚未完成独立 broker 协议健康检查。" };
   const zaiCodexRequirement = providerTaskRequirement(resolveZaiCodexSocketPath(environment).requirement, zaiCodex, "visual-review");
+  const zaiModelId = resolveZaiVisualReviewModelId(environment);
+  const zaiModelLabel = zaiModelId === "glm-5.3-flash" ? "GLM-5.3-Flash" : zaiModelId;
+  const zaiVisualReviewAvailable = runtime.python && runtime.ffmpeg && runtime.ffprobe && supportsTask(zaiCodex, "visual-review");
 
   return [
     provider({
@@ -50,6 +68,8 @@ export function buildProviderCatalog(
       description: "通过宿主机 Codex 把实时热点转译为可拍摄、可连载的中文短视频角度；失败时回退到确定性评分。",
       modes: ["热点理解", "选题提案", "结构化输出"],
       latency: "seconds",
+      defaultModelId: codexModelId,
+      modelProfiles: codexProfiles("api-topic-editor-v1", "topic-ideas"),
       requirement: codexRequirement("topic-ideas"),
     }),
     provider({
@@ -73,6 +93,8 @@ export function buildProviderCatalog(
       description: "按选题角度撰写可拍、可朗读、可核验的分镜脚本；编剧失败时制作明确失败，不回退模板。",
       modes: ["口语旁白", "3-10 场分镜", "逐场画面指令"],
       latency: "seconds",
+      defaultModelId: codexModelId,
+      modelProfiles: codexProfiles("codex-screenwriter-v1", "script-draft"),
       requirement: codexRequirement("script-draft"),
     }),
     provider({
@@ -85,6 +107,8 @@ export function buildProviderCatalog(
       description: "生成视觉圣经，并根据叙事、真实性、连续性和预算逐镜选择素材来源。",
       modes: ["导演角色", "视觉圣经", "逐镜路由"],
       latency: "seconds",
+      defaultModelId: codexModelId,
+      modelProfiles: codexProfiles("api-visual-director-v1", "director-plan"),
       requirement: codexRequirement("director-plan"),
     }),
     provider({
@@ -97,6 +121,13 @@ export function buildProviderCatalog(
       description: "安全抽取参考视频关键帧，只提炼节奏、构图、运镜、色彩、转场和声音结构等制作语法。",
       modes: ["关键帧分析", "镜头语法", "可编辑规则", "订阅能力"],
       latency: "seconds",
+      defaultModelId: codexModelId,
+      modelProfiles: codexProfiles(
+        "codex-reference-grammar-v1",
+        "reference-grammar",
+        "text",
+        runtime.python && runtime.ffmpeg && runtime.ffprobe,
+      ),
       requirement: codexRequirement("reference-grammar"),
     }),
     provider({
@@ -109,6 +140,8 @@ export function buildProviderCatalog(
       description: "在下载前依据逐镜意图重排图库候选；不可用时保留确定性原始排序。",
       modes: ["候选排序", "逐项理由", "人工锁定", "订阅能力"],
       latency: "seconds",
+      defaultModelId: codexModelId,
+      modelProfiles: codexProfiles("codex-asset-ranker-v1", "asset-rank"),
       requirement: codexRequirement("asset-rank"),
     }),
     provider({
@@ -169,6 +202,20 @@ export function buildProviderCatalog(
       modes: ["文生图", "9:16", "单张关键画面"],
       latency: "seconds",
       ...(seedreamSettings ? { estimatedCnyPerClip: seedreamSettings.estimatedCnyPerImage } : {}),
+      ...(seedreamSettings ? {
+        defaultModelId: seedreamSettings.model,
+        modelProfiles: [{
+          id: seedreamSettings.model,
+          label: "Seedream 关键画面",
+          providerId: "seedream-image-v1",
+          providerFamily: "ark-image",
+          available: seedreamAvailable,
+          recommended: true,
+          description: "当前火山方舟关键画面模型，按单张图片估算费用。",
+          taskTypes: ["text-to-image" as const],
+          estimatedCnyPerClip: seedreamSettings.estimatedCnyPerImage,
+        }],
+      } : {}),
       requirement: "需要 ARK_API_KEY；模型与单图估价可用保守默认值覆盖",
       docsUrl: "https://api.volcengine.com/api-docs/view?action=ImageGenerations&serviceCode=ark&version=2024-01-01",
     }),
@@ -191,7 +238,7 @@ export function buildProviderCatalog(
           ...model,
           providerId: "seedance-video-v1",
           providerFamily: "ark-video",
-          available: true,
+          available: seedanceAvailable,
           description: model.recommended
             ? "当前推荐的方舟视频模型，适合精品关键镜头与受控小额验证。"
             : "同一方舟 API 下的可选视频模型，可按项目或节点覆盖默认值。",
@@ -212,6 +259,16 @@ export function buildProviderCatalog(
       modes: ["文生视频", "768P", "6 秒", "成片裁切为 9:16"],
       latency: "minutes",
       ...(miniMaxSettings ? { estimatedCnyPerClip: miniMaxSettings.estimatedCnyPerClip } : {}),
+      ...(miniMaxSettings ? {
+        defaultModelId: miniMaxSettings.model,
+        modelProfiles: miniMaxSettings.models.map((model) => ({
+          ...model,
+          providerId: "hailuo-video-v1",
+          providerFamily: "minimax-video",
+          available: miniMaxAvailable,
+          description: "当前 MiniMax 海螺视频模型，适合预算内的少量表现镜头。",
+        })),
+      } : {}),
       requirement: "需要 MINIMAX_API_KEY、MINIMAX_VIDEO_MODEL_ID 和 MINIMAX_ESTIMATED_CNY_PER_CLIP",
       docsUrl: "https://platform.minimaxi.com/docs/api-reference/video-generation-t2v",
     }),
@@ -227,6 +284,16 @@ export function buildProviderCatalog(
       modes: ["文生视频", "9:16", "720P", "2-15 秒"],
       latency: "minutes",
       ...(wanSettings ? { estimatedCnyPerClip: wanSettings.estimatedCnyPerClip } : {}),
+      ...(wanSettings ? {
+        defaultModelId: wanSettings.model,
+        modelProfiles: wanSettings.models.map((model) => ({
+          ...model,
+          providerId: "wan-video-v1",
+          providerFamily: "dashscope-video",
+          available: wanAvailable,
+          description: "当前阿里云 Model Studio 视频模型，按镜头调用。",
+        })),
+      } : {}),
       requirement: "需要 DASHSCOPE_API_KEY、DASHSCOPE_WORKSPACE_ID、WAN_MODEL_ID 和 WAN_ESTIMATED_CNY_PER_CLIP",
       docsUrl: "https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference",
     }),
@@ -236,15 +303,17 @@ export function buildProviderCatalog(
       id: "minimax-tts-v1",
       capability: "voice.synthesize",
       label: "MiniMax 中文声音演员",
-      available: runtime.python && runtime.ffmpeg && Boolean(environment.MINIMAX_API_KEY),
+      available: miniMaxTtsAvailable,
       kind: "external",
       billing: "metered",
-      status: runtime.python && runtime.ffmpeg && Boolean(environment.MINIMAX_API_KEY) ? "ready" : "needs_config",
+      status: miniMaxTtsAvailable ? "ready" : "needs_config",
       description: "使用 speech-2.8-turbo 合成自然中文旁白，逐场缓存后再由 FFmpeg 做响度与节奏统一。",
       modes: ["普通话", "多角色", "情绪与语速", "云端生成"],
       latency: "seconds",
       estimatedCnyPerClip: positiveEstimate(environment.MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP, 0.5),
       billingUnit: "run",
+      defaultModelId: environment.MINIMAX_TTS_MODEL_ID?.trim() || "speech-2.8-turbo",
+      modelProfiles: [textModelProfile(environment.MINIMAX_TTS_MODEL_ID?.trim() || "speech-2.8-turbo", "MiniMax Speech 2.8 Turbo", "minimax-tts-v1", "minimax", miniMaxTtsAvailable, "云端中文配音模型；费用按一条视频的旁白保守估算。", positiveEstimate(environment.MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP, 0.5))],
       requirement: "需要 MINIMAX_API_KEY，可选 MINIMAX_TTS_MODEL_ID",
       docsUrl: "https://platform.minimaxi.com/docs/api-reference/speech-t2a-http",
     }),
@@ -269,6 +338,31 @@ export function buildProviderCatalog(
       modes: ["测试"],
       latency: "instant",
       requirement: "仅用于测试",
+    }),
+    provider({
+      id: "volcengine-omnihuman-v1",
+      capability: "avatar.generate",
+      label: "OmniHuman 数字人表演",
+      available: false,
+      kind: "external",
+      status: "planned",
+      billing: "metered",
+      description: "把已确认的人物图片和最终旁白合成为口型、表情与动作同步的数字人口播片段；它属于配音后的独立表演节点，不与普通文生视频模型混用。",
+      modes: ["单图加音频", "口型同步", "真人与动漫形象", "异步生成"],
+      latency: "minutes",
+      defaultModelId: "omnihuman-1.5",
+      modelProfiles: [{
+        id: "omnihuman-1.5",
+        label: "OmniHuman 1.5",
+        providerId: "volcengine-omnihuman-v1",
+        providerFamily: "volcengine-cv",
+        available: false,
+        recommended: true,
+        description: "火山视觉内容生成服务的单图音频驱动模型；接入后只在用户选择数字人口播模板时启用。",
+        taskTypes: ["digital-human"],
+      }],
+      requirement: "需要火山引擎 CV 服务 AK/SK、OmniHuman 权限和可供服务端拉取的图片/音频临时地址；现有 ARK_API_KEY 不能替代这些条件",
+      docsUrl: "https://api.volcengine.com/api-docs/?serviceCode=cv&version=2024-06-06",
     }),
     provider({
       id: "python-ffmpeg-v1",
@@ -296,14 +390,26 @@ export function buildProviderCatalog(
       id: "glm-visual-review-v1",
       capability: "quality.review.visual",
       label: "GLM-5.3-Flash 视觉审片",
-      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && supportsTask(zaiCodex, "visual-review"),
+      available: zaiVisualReviewAvailable,
       kind: "external",
       billing: "metered",
       estimatedCnyPerClip: positiveEstimate(environment.ZAI_VISUAL_REVIEW_ESTIMATED_CNY, 0.1),
       billingUnit: "run",
-      description: "从成片中抽取带时间码的关键帧，通过普通 BigModel API 调用 GLM-5.3-Flash，检查构图、连续性、节奏、文字可读性与内容安全。",
+      description: `从成片中抽取带时间码的关键帧，通过普通 BigModel API 调用 ${zaiModelLabel}，检查构图、连续性、节奏、文字可读性与内容安全。`,
       modes: ["原生多模态", "关键帧审片", "时间码问题", "按量 API"],
       latency: "seconds",
+      defaultModelId: zaiModelId,
+      modelProfiles: [{
+        id: zaiModelId,
+        label: zaiModelLabel,
+        providerId: "glm-visual-review-v1",
+        providerFamily: "zai-bigmodel",
+        available: zaiVisualReviewAvailable,
+        recommended: true,
+        description: "抽取成片关键帧后执行多模态视觉审片，按单条成片估算费用。",
+        taskTypes: ["visual-review"],
+        estimatedCnyPerClip: positiveEstimate(environment.ZAI_VISUAL_REVIEW_ESTIMATED_CNY, 0.1),
+      }],
       requirement: zaiCodexRequirement,
     }),
     provider({
@@ -316,6 +422,13 @@ export function buildProviderCatalog(
       description: "从成片中安全抽取最多 12 张关键帧，由服务器 Codex 检查构图、连续性、节奏、文字可读性与内容安全。",
       modes: ["关键帧审片", "时间码问题", "修改建议", "订阅能力"],
       latency: "seconds",
+      defaultModelId: codexModelId,
+      modelProfiles: codexProfiles(
+        "codex-visual-review-v1",
+        "visual-review",
+        "visual-review",
+        runtime.python && runtime.ffmpeg && runtime.ffprobe,
+      ),
       requirement: codexRequirement("visual-review"),
     }),
     provider({
@@ -328,6 +441,8 @@ export function buildProviderCatalog(
       description: "人工终审通过后为成片生成平台标题、描述与话题标签；不可用时发布包回退使用简报标题并如实标注来源。",
       modes: ["平台标题", "发布描述", "话题标签"],
       latency: "seconds",
+      defaultModelId: codexModelId,
+      modelProfiles: codexProfiles("codex-publish-copy-v1", "publish-copy"),
       requirement: codexRequirement("publish-copy"),
     }),
   ];
@@ -464,6 +579,28 @@ function provider(input: Omit<StudioProvider, "status" | "billing"> & Partial<Pi
 function positiveEstimate(value: string | undefined, fallback: number): number {
   const parsed = value?.trim() ? Number(value) : fallback;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function textModelProfile(
+  id: string,
+  label: string,
+  providerId: string,
+  providerFamily: string,
+  available: boolean,
+  description: string,
+  estimatedCnyPerClip?: number,
+): NonNullable<StudioProvider["modelProfiles"]>[number] {
+  return {
+    id,
+    label,
+    providerId,
+    providerFamily,
+    available,
+    recommended: true,
+    description,
+    taskTypes: ["text"],
+    ...(estimatedCnyPerClip !== undefined ? { estimatedCnyPerClip } : {}),
+  };
 }
 
 // 同步调用无法核对 /health 协议，必须保守地报告不可用；生产启动路径会注入异步健康探测结果。

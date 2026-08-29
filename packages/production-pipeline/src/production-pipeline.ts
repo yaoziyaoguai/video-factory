@@ -216,7 +216,11 @@ export class ProductionPipeline {
     const run = await this.store.load<ProductionBrief>(runId);
     const brief = parsePersistedBrief(run.initialInput);
     return new WorkflowRunner({ clock: this.clock, idFactory: this.idFactory })
-      .hydrateLegacyVersionStates(this.createWorkflow(brief), withPersistedBrief(run, brief), { allowVersionMismatch: true });
+      .hydrateLegacyVersionStates(
+        this.createWorkflow(brief, undefined, { allowUnavailableProviders: true }),
+        withPersistedBrief(run, brief),
+        { allowVersionMismatch: true },
+      );
   }
 
   async loadPersisted(runId: string): Promise<WorkflowRun<ProductionBrief>> {
@@ -225,6 +229,10 @@ export class ProductionPipeline {
 
   async list(): Promise<WorkflowRun<ProductionBrief>[]> {
     return this.store.list<ProductionBrief>();
+  }
+
+  async remove(runId: string): Promise<void> {
+    await this.store.remove(runId);
   }
 
   async recoverInterruptedRuns(options: { leaseStaleAfterMs?: number } = {}): Promise<number> {
@@ -484,6 +492,7 @@ export class ProductionPipeline {
   private createWorkflow(
     brief: ProductionBrief,
     approvalDecision?: HumanDecisionDraft,
+    options: { allowUnavailableProviders?: boolean } = {},
   ): WorkflowDefinition {
     const workerNode = (
       id: string,
@@ -538,7 +547,7 @@ export class ProductionPipeline {
         validateOverride: (output) => validateBriefInputOverride(output, brief),
       },
       ...(brief.providers.script === "codex-screenwriter-v1"
-        ? [screenwriterNode(brief, this.options.screenwriterAgent, this.runsRoot)]
+        ? [screenwriterNode(brief, this.options.screenwriterAgent, this.runsRoot, options.allowUnavailableProviders === true)]
         : [workerNode("script", "Draft script", "script.draft", brief.providers.script, ["brief"], ["brief"], () => ({ brief }), "编剧")]),
       ...(brief.workflowFeatures?.referenceGrammar ? [referenceGrammarNode(brief, this.options, this.runsRoot)] : []),
       ...(brief.director ? [directorNode(brief, this.options, this.runsRoot)] : []),
@@ -1253,9 +1262,10 @@ function screenwriterNode(
   brief: ProductionBrief,
   agent: ScreenwriterAgent | undefined,
   runsRoot: string,
+  allowUnavailableProvider = false,
 ): NodeDefinition {
   const providerId = brief.providers.script;
-  if (providerId !== "codex-screenwriter-v1" || !agent) {
+  if (providerId !== "codex-screenwriter-v1" || (!agent && !allowUnavailableProvider)) {
     throw new Error(`Script provider '${providerId}' is not configured.`);
   }
   return {

@@ -28,6 +28,9 @@ export const DEFAULT_CREATOR_SETTINGS: StudioCreatorSettings = {
     platform: "douyin",
     durationSeconds: 24,
   },
+  topicStrategy: {
+    customInstruction: "优先选择与普通人生活直接相关、能用可靠画面表达、具备明确反差或实用价值、可以发展成系列的题材。高热度但缺少可验证事实、可用画面或独特角度时，应降低推荐或明确放弃。",
+  },
 };
 
 export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
@@ -56,6 +59,9 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
           ...patch.productionDefaults,
           reviewMode: "manual",
         },
+        topicStrategy: patch.topicStrategy
+          ? { ...patch.topicStrategy }
+          : { ...file.settings.topicStrategy },
       };
       await this.write({ version: 1, settings });
       return structuredClone(settings);
@@ -81,6 +87,10 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
             ...DEFAULT_CREATOR_SETTINGS.productionDefaults,
             ...parsed.settings.productionDefaults,
             reviewMode: "manual",
+          },
+          topicStrategy: {
+            ...DEFAULT_CREATOR_SETTINGS.topicStrategy,
+            ...parsed.settings.topicStrategy,
           },
         },
       };

@@ -46,6 +46,7 @@ const RECIPE_OPTIONS: Array<{ id: StudioProductionRecipeId; label: string }> = [
   { id: "keyshot-ai", label: "效果均衡" },
   { id: "cinematic-ai", label: "精品上限" },
 ];
+const DEFAULT_TOPIC_INSTRUCTION = "优先选择与普通人生活直接相关、能用可靠画面表达、具备明确反差或实用价值、可以发展成系列的题材。高热度但缺少可验证事实、可用画面或独特角度时，应降低推荐或明确放弃。";
 
 export function ResourcesPage() {
   const [providers, setProviders] = useState<StudioProvider[]>([]);
@@ -76,6 +77,7 @@ export function ResourcesPage() {
   const [defaultRecipeId, setDefaultRecipeId] = useState<StudioProductionRecipeId>("economy-daily");
   const [modelDefaults, setModelDefaults] = useState<Record<string, string>>({});
   const [productionDefaults, setProductionDefaults] = useState<StudioProductionDefaults>(DEFAULT_PRODUCTION_DEFAULTS);
+  const [topicInstruction, setTopicInstruction] = useState(DEFAULT_TOPIC_INSTRUCTION);
 
   const load = useCallback(async () => {
     setProviderLoading(true);
@@ -110,6 +112,7 @@ export function ResourcesPage() {
       setDefaultRecipeId(settingsResult.value.defaultRecipeId);
       setModelDefaults(settingsResult.value.modelDefaults ?? {});
       setProductionDefaults(settingsResult.value.productionDefaults ?? DEFAULT_PRODUCTION_DEFAULTS);
+      setTopicInstruction(settingsResult.value.topicStrategy?.customInstruction ?? DEFAULT_TOPIC_INSTRUCTION);
     } else {
       setSettings(undefined);
       setSettingsError(errorMessage(settingsResult.reason));
@@ -134,6 +137,7 @@ export function ResourcesPage() {
       if (patch.defaultRecipeId) setDefaultRecipeId(updated.defaultRecipeId);
       if (patch.modelDefaults) setModelDefaults(updated.modelDefaults ?? {});
       if (patch.productionDefaults) setProductionDefaults(updated.productionDefaults);
+      if (patch.topicStrategy) setTopicInstruction(updated.topicStrategy.customInstruction);
       setSettingsNotice(successMessage);
     } catch (caught) {
       setSettingsNotice(`保存失败：${errorMessage(caught)}`);
@@ -152,6 +156,8 @@ export function ResourcesPage() {
       || !sameProductionDefaults(settings.productionDefaults, productionDefaults)
       || !sameStringRecord(settings.modelDefaults, modelDefaults)
     : false;
+  const modelHasChanges = settings ? !sameStringRecord(settings.modelDefaults, modelDefaults) : false;
+  const topicHasChanges = settings ? (settings.topicStrategy?.customInstruction ?? DEFAULT_TOPIC_INSTRUCTION) !== topicInstruction.trim() : false;
   const readyFoundation = foundationProviders.filter(isProductionReady).length;
   const usablePublishTargets = publishTargets.filter((target) => target.status === "ready" || target.status === "manual_only").length;
 
@@ -159,7 +165,7 @@ export function ResourcesPage() {
     <main className="page resources-page">
       <header className="page-header resources-header">
         <div>
-          <p className="eyebrow">VideoFactory Control Room</p>
+          <p className="eyebrow">创作控制室</p>
           <h1>总配置</h1>
           <p className="page-summary">为下一条视频确定默认创作方式，并检查热点、模型、声音、画面和发布出口是否真正可用。</p>
         </div>
@@ -183,6 +189,7 @@ export function ResourcesPage() {
 
       <nav className="configuration-index" aria-label="配置分区">
         <a href="#creation-defaults"><SlidersHorizontal aria-hidden="true" size={15} />创作默认</a>
+        <a href="#topic-strategy"><Sparkles aria-hidden="true" size={15} />选题策略</a>
         <a href="#trend-connections"><RadioTower aria-hidden="true" size={15} />热点信号</a>
         <a href="#voice-casting"><Sparkles aria-hidden="true" size={15} />声音演员</a>
         <a href="#visual-providers"><Film aria-hidden="true" size={15} />画面来源</a>
@@ -211,6 +218,17 @@ export function ResourcesPage() {
         </div>}
       </section>
       {settingsNotice ? <p className="resource-settings-notice" role="status">{settingsNotice}</p> : null}
+
+      <section id="topic-strategy" className="resource-section topic-strategy-config" data-tour="topic-strategy">
+        <ResourceHeading eyebrow="总编规则" title="选题策略" meta="热度只是信号，最终排序看能不能做成一条值得看的视频" />
+        <div className="topic-rubric" aria-label="选题评分标准">
+          {[['受众相关', '18%', '是否与明确人群的真实处境相关'], ['系列价值', '18%', '能否连续生产而不是一次性追热'], ['可拍性', '14%', '是否有可靠素材和可见动作'], ['成本效率', '14%', '在预算内能否达到及格线'], ['差异化', '14%', '是否提供通稿之外的新角度'], ['商业价值', '12%', '是否具备长期转化或合作空间'], ['合规安全', '10%', '事实、公共事件与平台风险']].map(([label, weight, detail]) => <article key={label}><span>{weight}</span><strong>{label}</strong><small>{detail}</small></article>)}
+        </div>
+        <div className="topic-instruction-editor">
+          <label className="field"><span>给选题总编的补充偏好</span><textarea aria-label="选题总编补充偏好" rows={5} maxLength={2000} value={topicInstruction} onChange={(event) => setTopicInstruction(event.target.value)} /><small>这段文字参与 Codex 选题排序，但不能覆盖事实核验、合规规则和结构化输出要求。</small></label>
+          <div className="configuration-save-row"><span>{topicHasChanges ? "有未保存的选题偏好" : "选题偏好已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !topicHasChanges || !topicInstruction.trim()} onClick={() => void saveDefaults({ topicStrategy: { customInstruction: topicInstruction.trim() } }, "选题总编偏好已保存，下一次刷新候选时生效。") }><Save aria-hidden="true" size={16} />{topicHasChanges ? "保存选题策略" : "已保存"}</button></div>
+        </div>
+      </section>
 
       <section id="trend-connections" className="resource-section signal-desk" data-tour="resource-trends">
         <ResourceHeading eyebrow="信号台" title="热点接入" meta="最近一次采集 · 来源可追溯" />
@@ -284,9 +302,20 @@ export function ResourcesPage() {
         <ResourceHeading eyebrow="岗位与模型" title="生产角色" meta="总编、编剧、导演、渲染、质检与发行编辑" />
         {providerLoading ? <div className="region-loading">正在读取生产底座...</div> : providerError ? null : (
           <div className="foundation-grid" aria-label="制作能力列表">
-            {foundationProviders.map((provider) => <FoundationProvider key={provider.id} provider={provider} />)}
+            {foundationProviders.map((provider) => <FoundationProvider
+              key={provider.id}
+              provider={provider}
+              selectedModelId={modelDefaults[provider.id]}
+              onModelChange={(modelId) => setModelDefaults((current) => {
+                const next = { ...current };
+                if (modelId) next[provider.id] = modelId;
+                else delete next[provider.id];
+                return next;
+              })}
+            />)}
           </div>
         )}
+        {settings ? <div className="configuration-save-row foundation-save-row"><span>{modelHasChanges ? "有未保存的岗位模型调整" : "岗位模型配置已同步"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !modelHasChanges} onClick={() => void saveDefaults({ modelDefaults }, "岗位模型默认值已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{modelHasChanges ? "保存模型配置" : "已保存"}</button></div> : null}
       </section>
 
       <section id="resource-manifest" className="resource-section resource-manifest-section" data-tour="resource-manifest">
@@ -384,9 +413,30 @@ function billingLabel(billing: StudioProvider["billing"]): string {
   return "免费";
 }
 
-function FoundationProvider({ provider }: { provider: StudioProvider }) {
+function FoundationProvider({ provider, selectedModelId, onModelChange }: {
+  provider: StudioProvider;
+  selectedModelId: string | undefined;
+  onModelChange: (modelId: string) => void;
+}) {
   const ready = isProductionReady(provider);
-  return <article className="foundation-provider"><span className={ready ? "foundation-state is-ready" : "foundation-state"}>{ready ? <Check aria-hidden="true" size={15} /> : <CircleMinus aria-hidden="true" size={15} />}</span><div><strong>{provider.label}</strong><span className="foundation-description">{provider.description ?? capabilityLabel(provider.capability)}</span></div><span>{capabilityLabel(provider.capability)}</span><small>{provider.kind === "test" ? "仅测试" : providerReadinessLabel(provider, ready)}</small></article>;
+  const models = provider.modelProfiles?.filter((model) => model.available) ?? [];
+  const activeModelId = selectedModelId ?? provider.defaultModelId;
+  const activeModel = provider.modelProfiles?.find((model) => model.id === activeModelId);
+  const estimate = activeModel?.estimatedCnyPerClip ?? provider.estimatedCnyPerClip;
+  return <article className="foundation-provider">
+    <span className={ready ? "foundation-state is-ready" : "foundation-state"}>{ready ? <Check aria-hidden="true" size={15} /> : <CircleMinus aria-hidden="true" size={15} />}</span>
+    <div><strong>{provider.label}</strong><span className="foundation-description">{provider.description ?? capabilityLabel(provider.capability)}</span></div>
+    <span>{capabilityLabel(provider.capability)}</span>
+    <div className="foundation-model-control">
+      {models.length > 1 ? <label><small>默认模型</small><select aria-label={`${provider.label} 默认模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(event.target.value)}><option value="">服务默认：{provider.defaultModelId ?? "自动"}</option>{models.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}</select></label> : <span><small>当前模型</small><strong>{activeModel?.label ?? provider.defaultModelId ?? "无需模型"}</strong></span>}
+      <small>{billingLabel(provider.billing)}{estimate !== undefined ? ` · 估算 ¥${formatCost(estimate)}/${provider.billingUnit === "run" ? "条" : "次"}` : ""}</small>
+    </div>
+    <small>{provider.kind === "test" ? "仅测试" : providerReadinessLabel(provider, ready)}</small>
+  </article>;
+}
+
+function formatCost(value: number): string {
+  return value < 1 ? value.toFixed(2) : value.toFixed(1);
 }
 
 function providerReadinessLabel(provider: StudioProvider, ready: boolean): string {

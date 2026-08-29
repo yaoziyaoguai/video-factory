@@ -79,7 +79,82 @@ describe("NodeDeliveryPreview", () => {
     expect(screen.getByRole("heading", { name: "内容简报" })).toBeInTheDocument();
     expect(screen.getByText("人工智能如何改变创作")).toBeInTheDocument();
     expect(screen.getByText("短视频创作者")).toBeInTheDocument();
-    expect(screen.getByText("已连接上游产物")).toBeInTheDocument();
+    expect(screen.queryByText("已连接上游产物")).not.toBeInTheDocument();
     expect(screen.queryByText(/private\/runs/)).not.toBeInTheDocument();
+  });
+
+  it("does not show system configuration as a creator-facing brief", () => {
+    render(<NodeDeliveryPreview nodeId="brief" value={{
+      title: "一杯水",
+      angle: "只移动光",
+      audience: "生活美学创作者",
+      nicheSlug: "ordinary-life",
+      durationSeconds: 24,
+      platform: "douyin",
+      reviewMode: "manual",
+    }} />);
+
+    expect(screen.getByText("一杯水")).toBeInTheDocument();
+    expect(screen.queryByText("ordinary-life")).not.toBeInTheDocument();
+    expect(screen.queryByText("douyin")).not.toBeInTheDocument();
+    expect(screen.queryByText("manual")).not.toBeInTheDocument();
+  });
+
+  it("translates production enums into creator language", () => {
+    render(<NodeDeliveryPreview nodeId="script" value={{
+      scenes: [{ narration: "开场", visual_strategy: "stock" }],
+    }} />);
+
+    expect(screen.getByText("实拍视频素材")).toBeInTheDocument();
+    expect(screen.getByText("分镜 1")).toBeInTheDocument();
+    expect(screen.queryByText("stock")).not.toBeInTheDocument();
+  });
+
+  it("hides rendered asset metadata and translates internal creative terms", () => {
+    const { container } = render(<NodeDeliveryPreview nodeId="assets" value={{
+      scene_assets: [{ scene_position: 1, media_type: "video", width: 720, height: 1280 }],
+      director_routing: [{
+        scene_position: 1,
+        actual_provider: "local",
+        rationale: "shot-question 使用 asset.generate.video，其他镜头交给本地 Provider。",
+      }],
+    }} />);
+
+    expect(screen.getByText(/提问镜头\s*使用 AI 视频生成/)).toBeInTheDocument();
+    expect(screen.getByText(/本地编辑能力/)).toBeInTheDocument();
+    expect(container).not.toHaveTextContent("media type");
+    expect(container).not.toHaveTextContent("720");
+    expect(container).not.toHaveTextContent("1280");
+  });
+
+  it("presents visual review findings as editorial notes instead of raw diagnostics", () => {
+    const { container } = render(<NodeDeliveryPreview nodeId="visual-review" value={{
+      scores: { legibility: 84, safety: 100 },
+      findings: [{ timecodeMs: 6000, category: "continuity", severity: "warning", description: "转场闪白" }],
+    }} />);
+
+    expect(screen.getByText("文字可读性")).toBeInTheDocument();
+    expect(screen.getByText("内容安全")).toBeInTheDocument();
+    expect(screen.getByText("00:06")).toBeInTheDocument();
+    expect(screen.getByText("连续性")).toBeInTheDocument();
+    expect(screen.getByText("需修改")).toBeInTheDocument();
+    expect(container).not.toHaveTextContent("timecodeMs");
+    expect(container).not.toHaveTextContent("legibility");
+  });
+
+  it("hides empty and technical-only collection items while keeping all review findings", () => {
+    const findings = Array.from({ length: 10 }, (_, index) => ({
+      description: `审片意见 ${index + 1}`,
+      severity: index === 8 ? "high" : "low",
+    }));
+    const { container } = render(<NodeDeliveryPreview nodeId="visual-review" value={{
+      findings: [{ codec_name: "h264" }, ...findings, { description: "" }],
+    }} />);
+
+    expect(screen.getByText("审片意见 10")).toBeInTheDocument();
+    expect(screen.getByText("高风险")).toBeInTheDocument();
+    expect(screen.getAllByText("10").length).toBeGreaterThan(0);
+    expect(container).not.toHaveTextContent("h264");
+    expect(container).not.toHaveTextContent("codec name");
   });
 });

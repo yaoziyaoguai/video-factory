@@ -69,6 +69,10 @@ export function resolveZaiCodexSocketPath(environment: NodeJS.ProcessEnv): Codex
   };
 }
 
+export function resolveZaiVisualReviewModelId(environment: NodeJS.ProcessEnv): string {
+  return environment.ZAI_VISUAL_REVIEW_MODEL_ID?.trim() || "glm-5.3-flash";
+}
+
 // 异步层：先验证文件类型与权限，再通过 Unix socket 请求 /health 并核对协议版本。
 export async function readCodexProviderSettings(
   environment: NodeJS.ProcessEnv,
@@ -87,10 +91,11 @@ export async function readZaiCodexProviderSettings(
   environment: NodeJS.ProcessEnv,
   options: CodexProviderSettingsOptions = {},
 ): Promise<CodexProviderSettings> {
+  const modelId = resolveZaiVisualReviewModelId(environment);
   return readProviderSettings(resolveZaiCodexSocketPath(environment), {
     profileId: "zai",
     providerId: "zai-bigmodel-api",
-    modelId: "glm-5.3-flash",
+    modelId,
     taskKinds: ["visual-review"],
   }, options);
 }

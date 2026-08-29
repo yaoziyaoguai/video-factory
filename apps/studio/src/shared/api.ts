@@ -74,6 +74,11 @@ export interface StudioCreatorSettings {
   defaultAssetProviderId?: string;
   modelDefaults?: Record<string, string>;
   productionDefaults: StudioProductionDefaults;
+  topicStrategy: StudioTopicStrategy;
+}
+
+export interface StudioTopicStrategy {
+  customInstruction: string;
 }
 
 export interface StudioCreatorSettingsPatch {
@@ -82,6 +87,7 @@ export interface StudioCreatorSettingsPatch {
   defaultAssetProviderId?: string;
   modelDefaults?: Record<string, string>;
   productionDefaults?: Partial<StudioProductionDefaults>;
+  topicStrategy?: StudioTopicStrategy;
 }
 
 export interface StudioModelProfile {
@@ -92,7 +98,7 @@ export interface StudioModelProfile {
   available: boolean;
   recommended?: boolean;
   description: string;
-  taskTypes: Array<"text-to-video" | "image-to-video" | "text-to-image" | "visual-review" | "text">;
+  taskTypes: Array<"text-to-video" | "image-to-video" | "text-to-image" | "visual-review" | "digital-human" | "text">;
   resolutions?: string[];
   minDurationSeconds?: number;
   maxDurationSeconds?: number;
@@ -587,6 +593,13 @@ export interface StudioTemplateCloneInput {
   expectedRevision: number;
 }
 
+export interface StudioTemplateCreateInput {
+  id: string;
+  name: string;
+  description?: string;
+  expectedRevision: number;
+}
+
 export interface StudioTemplateMutation {
   storeRevision: number;
   template: StudioTemplate;
@@ -600,6 +613,7 @@ export interface StudioResourceManifestItem {
   kind: string;
   providerId: string;
   sourceUrl?: string;
+  contentUrl?: string;
   creator?: string;
   licenseNote?: string;
   contentType?: string;
@@ -931,6 +945,12 @@ export function parseStudioCreatorSettingsPatch(value: unknown): StudioCreatorSe
       productionDefaults.durationSeconds = durationSeconds;
     }
     patch.productionDefaults = productionDefaults;
+  }
+  if (input.topicStrategy !== undefined) {
+    const strategy = requiredObject(input.topicStrategy, "选题策略");
+    const customInstruction = requiredTrimmedString(strategy.customInstruction, "选题总编补充指令");
+    if (customInstruction.length > 2_000) throw new StudioInputError("选题总编补充指令不能超过 2000 个字符。");
+    patch.topicStrategy = { customInstruction };
   }
   return patch;
 }
