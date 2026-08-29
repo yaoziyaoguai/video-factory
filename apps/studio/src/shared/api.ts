@@ -520,6 +520,7 @@ export interface StudioNodeOverrideInput {
     artifactId: string;
     content: unknown;
   };
+  authorizedRunFiles?: string[];
   confirmTerminalEdit?: boolean;
 }
 

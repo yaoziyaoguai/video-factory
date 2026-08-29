@@ -1161,6 +1161,82 @@ describe("StudioService", () => {
     assert.equal(pipeline.lastOverride, undefined);
   });
 
+  it("authorizes audited run-local media when an asset document replaces a file", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const runRoot = path.join(workspaceRoot, "runs", "run-1");
+    const assetPlanPath = path.join(runRoot, "nodes", "assets", "attempt-1", "asset-plan.json");
+    const originalPath = path.join(runRoot, "nodes", "assets", "attempt-1", "original.mp4");
+    const replacementPath = path.join(runRoot, "curated", "replacement.mp4");
+    const plan = {
+      scene_assets: [{
+        scene_position: 1,
+        provider: "pexels",
+        asset_id: "original",
+        media_type: "video",
+        width: 720,
+        height: 1280,
+        duration: 3,
+        local_path: originalPath,
+        source_url: "https://example.com/original",
+        creator: "Original creator",
+        license_note: "Original license",
+        query: "original",
+      }],
+    };
+    await mkdir(path.dirname(assetPlanPath), { recursive: true });
+    await mkdir(path.dirname(replacementPath), { recursive: true });
+    await writeFile(assetPlanPath, JSON.stringify(plan), "utf8");
+    await writeFile(originalPath, "original-video", "utf8");
+    await writeFile(replacementPath, "replacement-video", "utf8");
+
+    const run = waitingRun(workspaceRoot);
+    run.nodeRuns.unshift({
+      nodeId: "assets",
+      status: "succeeded",
+      output: { assetPlanPath },
+      artifactIds: ["artifact-asset-plan"],
+      qualityGateResults: [],
+    });
+    run.artifacts.push({
+      id: "artifact-asset-plan",
+      kind: "asset_plan",
+      uri: assetPlanPath,
+      createdAt: "2026-08-21T10:00:00.000Z",
+      contentType: "application/json",
+      producer: { nodeId: "assets", attempt: 1 },
+      provenance: { providerId: "asset-worker", providerVersion: "1" },
+    });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+    const edited = structuredClone(plan);
+    edited.scene_assets[0]!.local_path = replacementPath;
+    edited.scene_assets[0]!.asset_id = "human-replacement";
+
+    await service.applyNodeOverride("run-1", "assets", {
+      document: { artifactId: "artifact-asset-plan", content: edited },
+      authorizedRunFiles: [replacementPath],
+    }, "trusted-owner");
+
+    const replacementArtifact = pipeline.lastOverride?.artifacts?.find((artifact) => artifact.uri === replacementPath);
+    assert.equal(replacementArtifact?.kind, "human_media_revision");
+    assert.equal(replacementArtifact?.contentType, "video/mp4");
+    assert.equal(replacementArtifact?.provenance?.providerId, "human-editor");
+    assert.equal(replacementArtifact?.sizeBytes, Buffer.byteLength("replacement-video"));
+    assert.equal((await readFile((pipeline.lastOverride?.output as { assetPlanPath: string }).assetPlanPath, "utf8")).includes(replacementPath), true);
+
+    const outsidePath = path.join(workspaceRoot, "outside.mp4");
+    await writeFile(outsidePath, "outside-video", "utf8");
+    const forged = structuredClone(plan);
+    forged.scene_assets[0]!.local_path = outsidePath;
+    await assert.rejects(
+      () => service.applyNodeOverride("run-1", "assets", {
+        document: { artifactId: "artifact-asset-plan", content: forged },
+        authorizedRunFiles: [outsidePath],
+      }, "trusted-owner"),
+      /当前制作目录/,
+    );
+  });
+
   it("resolves only artifacts contained by the selected run directory", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const run = waitingRun(workspaceRoot);

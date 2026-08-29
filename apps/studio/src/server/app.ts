@@ -604,9 +604,17 @@ function parseNodeOverrideInput(value: unknown): StudioNodeOverrideInput {
       content: candidate.content,
     };
   }
+  let authorizedRunFiles: string[] | undefined;
+  if (input.authorizedRunFiles !== undefined) {
+    if (!Array.isArray(input.authorizedRunFiles) || input.authorizedRunFiles.some((item) => typeof item !== "string" || !item.trim())) {
+      throw new StudioInputError("人工替换文件清单格式不正确。");
+    }
+    authorizedRunFiles = [...new Set(input.authorizedRunFiles.map((item) => item.trim()))];
+  }
   return {
     ...(input.output !== undefined ? { output: input.output } : {}),
     ...(document ? { document } : {}),
+    ...(authorizedRunFiles ? { authorizedRunFiles } : {}),
     ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
   };
 }

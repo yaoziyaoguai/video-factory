@@ -307,6 +307,7 @@ export class ProductionStudio {
         nodeArtifactIds: node.artifactIds,
         runArtifacts: current.artifacts,
         document: input.document,
+        authorizedRunFiles: input.authorizedRunFiles ?? [],
       });
       overrideOutput = prepared.output;
       overrideArtifacts = prepared.artifacts;
@@ -392,6 +393,7 @@ export class ProductionStudio {
     nodeArtifactIds: string[];
     runArtifacts: WorkflowRun<ProductionBrief>["artifacts"];
     document: NonNullable<StudioNodeOverrideInput["document"]>;
+    authorizedRunFiles: string[];
   }): Promise<{ output: Record<string, unknown>; artifacts: ArtifactDraft[]; cleanupPaths: string[] }> {
     const contract = EDITABLE_DOCUMENTS[options.nodeId];
     if (!contract) throw new StudioInputError(`节点“${options.nodeId}”没有可编辑的结构化产物。`);
@@ -415,11 +417,22 @@ export class ProductionStudio {
     } catch {
       throw new StudioInputError("当前结构化产物无法读取，请先重新生成该节点。");
     }
+    const mediaArtifacts = await prepareAuthorizedRunFileArtifacts({
+      nodeId: options.nodeId,
+      actor: options.actor,
+      runRoot,
+      referenceDocument,
+      nextDocument: options.document.content,
+      authorizedRunFiles: options.authorizedRunFiles,
+      parentArtifactId: artifact.id,
+      attempt: artifact.producer?.attempt ?? 1,
+    });
     validateNodeOverrideOutput({
       output: options.document.content,
       reference: referenceDocument,
       nodeId: `${options.nodeId} 结构化交付`,
       runRoot,
+      allowPathChanges: mediaArtifacts.length > 0,
     });
 
     const revisionId = randomUUID();
@@ -461,7 +474,7 @@ export class ProductionStudio {
           creator: options.actor,
           licenseNote: "Human-edited derivative retained as an immutable revision.",
         },
-      }, ...(privateRevision ? [{
+      }, ...mediaArtifacts, ...(privateRevision ? [{
         kind: "candidate_inventory_private",
         uri: privateRevision.destination,
         sha256: createHash("sha256").update(privateRevision.content).digest("hex"),
@@ -1149,6 +1162,94 @@ async function assertContainedFile(runRoot: string, candidate: string): Promise<
     throw new StudioInputError("所选产物不属于当前制作目录。");
   }
   if (!(await stat(resolvedCandidate)).isFile()) throw new StudioInputError("所选产物不是可编辑文件。");
+}
+
+async function prepareAuthorizedRunFileArtifacts(options: {
+  nodeId: string;
+  actor: string;
+  runRoot: string;
+  referenceDocument: unknown;
+  nextDocument: unknown;
+  authorizedRunFiles: string[];
+  parentArtifactId: string;
+  attempt: number;
+}): Promise<ArtifactDraft[]> {
+  if (options.authorizedRunFiles.length === 0) return [];
+  if (options.nodeId !== "assets") {
+    throw new StudioInputError("只有逐镜素材节点可以登记人工替换媒体。");
+  }
+  const authorized = new Set(options.authorizedRunFiles.map((candidate) => path.resolve(candidate)));
+  const previous = collectManagedFileReferences(options.referenceDocument);
+  const next = collectManagedFileReferences(options.nextDocument);
+  const changed = new Set<string>();
+  for (const [field, nextPath] of next) {
+    if (previous.get(field) !== nextPath) changed.add(path.resolve(nextPath));
+  }
+  if (changed.size === 0) throw new StudioInputError("人工替换文件清单没有对应到任何已修改的素材路径。");
+  for (const candidate of changed) {
+    if (!authorized.has(candidate)) throw new StudioInputError("每个改指的素材文件都必须登记为人工替换文件。");
+  }
+  for (const candidate of authorized) {
+    if (!changed.has(candidate)) throw new StudioInputError("人工替换文件必须被当前素材计划引用。");
+    await assertContainedFile(options.runRoot, candidate);
+  }
+  return Promise.all([...authorized].map(async (candidate) => {
+    const content = await readFile(candidate);
+    return {
+      kind: "human_media_revision",
+      uri: candidate,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      sizeBytes: content.byteLength,
+      contentType: mediaContentType(candidate),
+      schemaVersion: "video-factory/human-media-revision-v1",
+      parentArtifactIds: [options.parentArtifactId],
+      producer: { nodeId: options.nodeId, attempt: options.attempt },
+      provenance: {
+        providerId: "human-editor",
+        providerVersion: "1",
+        creator: options.actor,
+        licenseNote: "Human-selected media retained with immutable bytes and run-local provenance.",
+      },
+    } satisfies ArtifactDraft;
+  }));
+}
+
+function collectManagedFileReferences(value: unknown, field = "output", result = new Map<string, string>()): Map<string, string> {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectManagedFileReferences(item, `${field}[${index}]`, result));
+    return result;
+  }
+  if (!isRecord(value)) return result;
+  for (const [key, child] of Object.entries(value)) {
+    const childField = `${field}.${key}`;
+    if (isManagedFileReferenceKey(key) && typeof child === "string" && child) result.set(childField, child);
+    else collectManagedFileReferences(child, childField, result);
+  }
+  return result;
+}
+
+function isManagedFileReferenceKey(key: string): boolean {
+  return key === "uri"
+    || key.endsWith("Path")
+    || key.endsWith("Root")
+    || key.endsWith("_path")
+    || key.endsWith("_root")
+    || key.endsWith("_file");
+}
+
+function mediaContentType(candidate: string): string {
+  switch (path.extname(candidate).toLowerCase()) {
+    case ".mp4": return "video/mp4";
+    case ".mov": return "video/quicktime";
+    case ".webm": return "video/webm";
+    case ".png": return "image/png";
+    case ".jpg":
+    case ".jpeg": return "image/jpeg";
+    case ".webp": return "image/webp";
+    case ".wav": return "audio/wav";
+    case ".mp3": return "audio/mpeg";
+    default: return "application/octet-stream";
+  }
 }
 
 async function writePrivateTextAtomically(destination: string, content: string): Promise<void> {
