@@ -142,6 +142,18 @@ describe("NodeDeliveryPreview", () => {
     expect(container).not.toHaveTextContent("legibility");
   });
 
+  it("shows the canon facts a creator is approving at final review", () => {
+    render(<NodeDeliveryPreview nodeId="final-review" value={{
+      review: { recommendation: "approve", summary: "画面与叙事可以定版。" },
+      canonFacts: ["本集已经完成一次可复现的真实验证。"],
+    }} />);
+
+    expect(screen.getByRole("heading", { name: "本轮审片结论" })).toBeInTheDocument();
+    expect(screen.getByText("画面与叙事可以定版。")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /拟写入系列正史的事实/ })).toBeInTheDocument();
+    expect(screen.getByText("本集已经完成一次可复现的真实验证。")).toBeInTheDocument();
+  });
+
   it("hides empty and technical-only collection items while keeping all review findings", () => {
     const findings = Array.from({ length: 10 }, (_, index) => ({
       description: `审片意见 ${index + 1}`,

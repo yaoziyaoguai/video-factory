@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { NodeVersionConflictError } from "@video-factory/workflow-core";
 import type { ArtifactDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
 import type { ProductionTemplateSnapshot } from "@video-factory/template-core";
 import {
   parseBrief,
+  RunLockedError,
   StaleRunRevisionError,
   type DispatchedProductionRun,
   type ProductionBrief,
@@ -28,6 +30,7 @@ import {
 } from "../shared/api.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 import { validateNodeOverrideOutput } from "./node-output-validator.js";
+import type { RunArchiveRepository } from "./run-archive-store.js";
 
 const MANAGED_FILE_PLACEHOLDER = "[系统托管文件]";
 
@@ -48,6 +51,7 @@ export interface StudioPipelinePort {
   authorizeSpend(runId: string, authorization: SpendAuthorizationDraft): Promise<WorkflowRun<ProductionBrief>>;
   resumeStale(runId: string): Promise<WorkflowRun<ProductionBrief>>;
   retryFailedNode(runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>>;
+  withRunMaintenanceLease<T>(runIds: string[], action: () => Promise<T>): Promise<T>;
 }
 
 export interface ProductionStudioOptions {
@@ -55,7 +59,16 @@ export interface ProductionStudioOptions {
   pipeline: StudioPipelinePort;
   listProviders: () => Promise<StudioProvider[]>;
   maxRunCostCny?: number;
+  archiveStore: RunArchiveRepository;
+  now?: () => Date;
   resolveTemplateSnapshot?: (input: unknown, brief: ProductionBrief) => Promise<ProductionTemplateSnapshot>;
+}
+
+export class ProductionStartDispatchedError extends Error {
+  constructor(readonly runId: string, readonly persistenceError: unknown) {
+    super("制作任务已经启动，但请求记录暂时无法落盘；系统将保留该任务并等待自动恢复，不能重复启动。");
+    this.name = "ProductionStartDispatchedError";
+  }
 }
 
 const WORKFLOW_NODES: Array<{ id: string; label: string; role: string }> = [
@@ -96,24 +109,80 @@ export class ProductionStudio {
   constructor(private readonly options: ProductionStudioOptions) {}
 
   async list(): Promise<StudioRunSummary[]> {
-    return (await this.options.pipeline.list()).map(toRunSummary);
+    const [runs, archived] = await Promise.all([
+      this.options.pipeline.list(),
+      this.options.archiveStore.list(),
+    ]);
+    return runs.map((run) => withArchiveState(toRunSummary(run), archived[run.id]));
   }
 
   async get(runId: string): Promise<StudioRunDetail | undefined> {
     try {
-      return toRunDetail(await this.options.pipeline.show(runId));
+      const [run, archived] = await Promise.all([
+        this.options.pipeline.show(runId),
+        this.options.archiveStore.list(),
+      ]);
+      return withArchiveState(toRunDetail(run), archived[run.id]);
     } catch (error) {
       if (hasCode(error, "ENOENT")) return undefined;
       throw error;
     }
   }
 
-  async remove(runId: string): Promise<void> {
-    const current = await this.loadRequiredRun(runId);
-    if (!isTerminalRun(current.status)) {
-      throw new StudioConflictError("这条制作仍在运行或等待确认，结束流程后才能删除。");
+  async archive(runIds: string[]): Promise<void> {
+    const uniqueIds = [...new Set(runIds)];
+    try {
+      await this.options.pipeline.withRunMaintenanceLease(uniqueIds, async () => {
+        const runs = await Promise.all(uniqueIds.map((runId) => this.loadRequiredRun(runId)));
+        const active = runs.find((run) => !isTerminalRun(run.status));
+        if (active) {
+          throw new StudioConflictError(`“${active.initialInput.title}”仍在运行或等待确认，结束流程后才能归档。`);
+        }
+        await this.options.archiveStore.archive(uniqueIds, (this.options.now ?? (() => new Date()))().toISOString());
+      });
+    } catch (error) {
+      if (error instanceof RunLockedError) {
+        throw new StudioConflictError("所选制作仍在执行或正在变更，请等待当前操作结束后再归档。");
+      }
+      throw error;
     }
-    await this.options.pipeline.remove(runId);
+  }
+
+  async restore(runIds: string[]): Promise<void> {
+    const uniqueIds = [...new Set(runIds)];
+    try {
+      await this.options.pipeline.withRunMaintenanceLease(uniqueIds, async () => {
+        await Promise.all(uniqueIds.map((runId) => this.loadRequiredRun(runId)));
+        await this.options.archiveStore.restore(uniqueIds);
+      });
+    } catch (error) {
+      if (error instanceof RunLockedError) {
+        throw new StudioConflictError("所选制作正在执行或变更，请等待当前操作结束后再恢复。");
+      }
+      throw error;
+    }
+  }
+
+  async remove(runId: string): Promise<void> {
+    try {
+      await this.options.pipeline.withRunMaintenanceLease([runId], async () => {
+        const current = await this.loadRequiredRun(runId);
+        if (!isTerminalRun(current.status)) {
+          throw new StudioConflictError("这条制作仍在运行或等待确认，结束流程后才能删除。");
+        }
+        const archived = await this.options.archiveStore.list();
+        if (!archived[runId]) {
+          throw new StudioConflictError("请先归档这条制作，再从归档记录中永久删除。");
+        }
+        await this.options.pipeline.remove(runId);
+        await this.options.archiveStore.restore([runId]);
+      });
+    } catch (error) {
+      if (error instanceof RunLockedError) {
+        throw new StudioConflictError("这条制作仍在执行或正在变更，请等待当前操作结束后再删除。");
+      }
+      throw error;
+    }
     this.listeners.delete(runId);
     await this.removeStartRecordsForRun(runId);
   }
@@ -162,7 +231,16 @@ export class ProductionStudio {
     if (previous.digest !== digest) {
       throw new StudioConflictError("这个制作请求编号已被另一组参数使用，请重新打开制作方案。");
     }
-    if (previous.state === "completed" && previous.response) return previous.response;
+    if (previous.state === "completed" && previous.response) {
+      try {
+        await this.options.pipeline.show(previous.response.runId);
+        return previous.response;
+      } catch (error) {
+        if (!hasCode(error, "ENOENT")) throw error;
+        await rm(recordPath, { force: true });
+        return undefined;
+      }
+    }
     throw new StudioConflictError("相同制作请求仍在处理中，请稍后查看制作记录，不会重复扣费。");
   }
 
@@ -244,7 +322,11 @@ export class ProductionStudio {
       await rm(recordPath, { force: true });
       throw error;
     }
-    await writeStartRecord(recordPath, { version: 1, state: "completed", digest, response });
+    try {
+      await writeStartRecord(recordPath, { version: 1, state: "completed", digest, response });
+    } catch (error) {
+      throw new ProductionStartDispatchedError(response.runId, error);
+    }
     return response;
   }
 
@@ -417,36 +499,44 @@ export class ProductionStudio {
     } catch {
       throw new StudioInputError("当前结构化产物无法读取，请先重新生成该节点。");
     }
-    const mediaArtifacts = await prepareAuthorizedRunFileArtifacts({
+    const requestedDocument = options.nodeId === "publish-package"
+      ? editablePublishPackageDocument(referenceDocument, options.document.content)
+      : options.document.content;
+    validateNodeOverrideOutput({
+      output: requestedDocument,
+      reference: referenceDocument,
+      nodeId: `${options.nodeId} 结构化交付`,
+      runRoot,
+      allowPathChanges: options.authorizedRunFiles.length > 0,
+    });
+    const mediaRevision = await prepareAuthorizedRunFileArtifacts({
       nodeId: options.nodeId,
       actor: options.actor,
       runRoot,
       referenceDocument,
-      nextDocument: options.document.content,
+      nextDocument: requestedDocument,
       authorizedRunFiles: options.authorizedRunFiles,
+      runArtifacts: options.runArtifacts,
       parentArtifactId: artifact.id,
       attempt: artifact.producer?.attempt ?? 1,
     });
-    validateNodeOverrideOutput({
-      output: options.document.content,
-      reference: referenceDocument,
-      nodeId: `${options.nodeId} 结构化交付`,
-      runRoot,
-      allowPathChanges: mediaArtifacts.length > 0,
-    });
 
     const revisionId = randomUUID();
-    const content = `${JSON.stringify(options.document.content, null, 2)}\n`;
+    const content = `${JSON.stringify(mediaRevision.document, null, 2)}\n`;
     const destination = path.join(runRoot, "nodes", options.nodeId, "human-revisions", `${revisionId}.json`);
     const output = structuredClone(options.reference);
     output[contract.pathField] = destination;
     const privateRevision = options.nodeId === "asset-candidates"
-      ? await prepareCandidateInventoryRevision(runRoot, options.reference, options.document.content, revisionId)
+      ? await prepareCandidateInventoryRevision(runRoot, options.reference, mediaRevision.document, revisionId)
       : undefined;
     if (privateRevision) output.candidateInventoryPath = privateRevision.destination;
-    if (contract.embeddedField) output[contract.embeddedField] = structuredClone(options.document.content);
-    if (options.nodeId === "technical-review" && isRecord(options.document.content)) {
-      output.passed = options.document.content.status === "passed";
+    if (contract.embeddedField) output[contract.embeddedField] = structuredClone(mediaRevision.document);
+    if (options.nodeId === "script" && isRecord(mediaRevision.document)
+      && ("canonFacts" in options.reference || "canonFacts" in mediaRevision.document)) {
+      output.canonFacts = boundedStringArray(mediaRevision.document.canonFacts, 8);
+    }
+    if (options.nodeId === "technical-review" && isRecord(mediaRevision.document)) {
+      output.passed = mediaRevision.document.status === "passed";
     }
     const cleanupPaths = [destination, ...(privateRevision ? [privateRevision.destination] : [])];
     try {
@@ -474,7 +564,7 @@ export class ProductionStudio {
           creator: options.actor,
           licenseNote: "Human-edited derivative retained as an immutable revision.",
         },
-      }, ...mediaArtifacts, ...(privateRevision ? [{
+      }, ...mediaRevision.artifacts, ...(privateRevision ? [{
         kind: "candidate_inventory_private",
         uri: privateRevision.destination,
         sha256: createHash("sha256").update(privateRevision.content).digest("hex"),
@@ -714,6 +804,11 @@ export class ProductionStudio {
   }
 }
 
+function withArchiveState<T extends StudioRunSummary>(run: T, archivedAt?: string): T {
+  if (!archivedAt) return run;
+  return { ...run, archivedAt };
+}
+
 async function prepareCandidateInventoryRevision(
   runRoot: string,
   reference: Record<string, unknown>,
@@ -920,6 +1015,17 @@ function toRunSummary(run: WorkflowRun<ProductionBrief>): StudioRunSummary {
           ? { nextAction: "regenerate" as const }
           : {}),
     ...(videoArtifact?.uri ? { videoContentUrl: `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(videoArtifact.id)}/content` } : {}),
+    ...(run.initialInput.creationContext ? {
+      creationOrigin: run.initialInput.creationContext.origin,
+      opportunityId: run.initialInput.creationContext.opportunityId,
+    } : {}),
+    ...(run.initialInput.seriesContext ? {
+      seriesId: run.initialInput.seriesContext.seriesId,
+      episodeNumber: run.initialInput.seriesContext.episodeNumber,
+      ...(run.initialInput.seriesContext.productionReservationId
+        ? { productionReservationId: run.initialInput.seriesContext.productionReservationId }
+        : {}),
+    } : {}),
   };
 }
 
@@ -968,6 +1074,8 @@ function toRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
       ...(node?.startedAt ? { startedAt: node.startedAt } : {}),
       ...(node?.finishedAt ? { finishedAt: node.finishedAt } : {}),
       ...(node?.error ? { error: redactManagedPathText(node.error) } : {}),
+      ...(node?.interrupted ? { interrupted: true } : {}),
+      ...(node?.outcomeUncertain ? { outcomeUncertain: true } : {}),
       artifactIds: [...(node?.artifactIds ?? [])],
       qualityGateResults: (node?.qualityGateResults ?? []).map((result) => ({
         gateId: result.gateId,
@@ -1110,7 +1218,7 @@ function isTerminalRun(status: WorkflowRun<ProductionBrief>["status"]): boolean 
 }
 
 function isPrivateArtifactKind(kind: string): boolean {
-  return kind === "reference_video" || kind === "candidate_inventory_private";
+  return kind === "reference_video" || kind === "candidate_inventory_private" || kind === "generation_jobs";
 }
 
 function redactManagedFileReferences(value: unknown): unknown {
@@ -1164,6 +1272,81 @@ async function assertContainedFile(runRoot: string, candidate: string): Promise<
   if (!(await stat(resolvedCandidate)).isFile()) throw new StudioInputError("所选产物不是可编辑文件。");
 }
 
+function editablePublishPackageDocument(reference: unknown, requested: unknown): unknown {
+  if (!isRecord(reference) || !isRecord(requested) || !isRecord(reference.copy) || !isRecord(requested.copy)) {
+    throw new StudioInputError("发布文案必须是完整的结构化交付。");
+  }
+  const protectedReference = structuredClone(reference);
+  const protectedRequested = structuredClone(requested);
+  delete protectedReference.title;
+  delete protectedRequested.title;
+  for (const key of ["title", "description", "hashtags"]) {
+    delete (protectedReference.copy as Record<string, unknown>)[key];
+    delete (protectedRequested.copy as Record<string, unknown>)[key];
+  }
+  if (!isDeepStrictEqual(protectedRequested, protectedReference)) {
+    throw new StudioInputError("发布包的授权、产物、审批和 AI 标识由系统托管，只能修改标题、描述与话题标签。");
+  }
+  const title = requiredEditableText(requested.title, "发布标题", 80);
+  const copyTitle = requiredEditableText(requested.copy.title, "文案标题", 80);
+  const description = requiredEditableText(requested.copy.description, "发布描述", 2_000);
+  if (title !== copyTitle) throw new StudioInputError("发布标题与文案标题必须保持一致。");
+  if (!Array.isArray(requested.copy.hashtags) || requested.copy.hashtags.length > 12) {
+    throw new StudioInputError("话题标签必须是最多 12 项的文字列表。");
+  }
+  const hashtags = requested.copy.hashtags.map((value, index) => requiredEditableText(value, `话题标签 ${index + 1}`, 40));
+  const result = structuredClone(reference);
+  result.title = title;
+  (result.copy as Record<string, unknown>).title = copyTitle;
+  (result.copy as Record<string, unknown>).description = description;
+  (result.copy as Record<string, unknown>).hashtags = hashtags;
+  return result;
+}
+
+function requiredEditableText(value: unknown, label: string, maximum: number): string {
+  if (typeof value !== "string" || !value.trim() || value.trim().length > maximum) {
+    throw new StudioInputError(`${label}必须是 1 到 ${maximum} 个字符。`);
+  }
+  return value.trim();
+}
+
+function rewriteArtifactBackedMediaProvenance(
+  value: unknown,
+  artifacts: WorkflowRun<ProductionBrief>["artifacts"],
+): unknown {
+  if (!isRecord(value) || !Array.isArray(value.scene_assets)) return structuredClone(value);
+  const document = structuredClone(value) as Record<string, unknown>;
+  document.scene_assets = value.scene_assets.map((item: unknown) => {
+    if (!isRecord(item) || typeof item.local_path !== "string") return structuredClone(item);
+    const localPath = item.local_path;
+    const artifact = artifacts.find((candidate) => candidate.uri
+      && path.resolve(candidate.uri) === path.resolve(localPath)
+      && (candidate.kind === "media_asset" || candidate.kind === "human_media_revision"));
+    const rewritten = { ...item };
+    if (!artifact) {
+      rewritten.provider = "unverified";
+      rewritten.provider_id = "unverified-media";
+      rewritten.license_note = "未找到不可变素材来源记录：发布前必须人工核验。";
+      rewritten.rights_status = "review_required";
+      delete rewritten.source_url;
+      delete rewritten.creator;
+      return rewritten;
+    }
+    const providerId = artifact.provenance.providerId ?? "unknown";
+    rewritten.provider = providerId;
+    rewritten.provider_id = providerId;
+    rewritten.rights_status = artifact.kind === "human_media_revision" ? "review_required" : "artifact_recorded";
+    if (artifact.provenance.creator) rewritten.creator = artifact.provenance.creator;
+    else delete rewritten.creator;
+    if (artifact.provenance.licenseNote) rewritten.license_note = artifact.provenance.licenseNote;
+    else delete rewritten.license_note;
+    if (artifact.provenance.sourceUrl) rewritten.source_url = artifact.provenance.sourceUrl;
+    else delete rewritten.source_url;
+    return rewritten;
+  });
+  return document;
+}
+
 async function prepareAuthorizedRunFileArtifacts(options: {
   nodeId: string;
   actor: string;
@@ -1171,16 +1354,20 @@ async function prepareAuthorizedRunFileArtifacts(options: {
   referenceDocument: unknown;
   nextDocument: unknown;
   authorizedRunFiles: string[];
+  runArtifacts: WorkflowRun<ProductionBrief>["artifacts"];
   parentArtifactId: string;
   attempt: number;
-}): Promise<ArtifactDraft[]> {
-  if (options.authorizedRunFiles.length === 0) return [];
+}): Promise<{ document: unknown; artifacts: ArtifactDraft[] }> {
+  const artifactBackedDocument = rewriteArtifactBackedMediaProvenance(options.nextDocument, options.runArtifacts);
+  if (options.authorizedRunFiles.length === 0) {
+    return { document: artifactBackedDocument, artifacts: [] };
+  }
   if (options.nodeId !== "assets") {
     throw new StudioInputError("只有逐镜素材节点可以登记人工替换媒体。");
   }
   const authorized = new Set(options.authorizedRunFiles.map((candidate) => path.resolve(candidate)));
   const previous = collectManagedFileReferences(options.referenceDocument);
-  const next = collectManagedFileReferences(options.nextDocument);
+  const next = collectManagedFileReferences(artifactBackedDocument);
   const changed = new Set<string>();
   for (const [field, nextPath] of next) {
     if (previous.get(field) !== nextPath) changed.add(path.resolve(nextPath));
@@ -1193,7 +1380,8 @@ async function prepareAuthorizedRunFileArtifacts(options: {
     if (!changed.has(candidate)) throw new StudioInputError("人工替换文件必须被当前素材计划引用。");
     await assertContainedFile(options.runRoot, candidate);
   }
-  return Promise.all([...authorized].map(async (candidate) => {
+  const document = rewriteHumanMediaProvenance(artifactBackedDocument, changed, options.actor);
+  const artifacts = await Promise.all([...authorized].map(async (candidate) => {
     const content = await readFile(candidate);
     return {
       kind: "human_media_revision",
@@ -1208,10 +1396,39 @@ async function prepareAuthorizedRunFileArtifacts(options: {
         providerId: "human-editor",
         providerVersion: "1",
         creator: options.actor,
-        licenseNote: "Human-selected media retained with immutable bytes and run-local provenance.",
+        licenseNote: "Human-selected replacement; usage rights require manual verification before publishing.",
+        notes: "rights-status:review_required",
       },
     } satisfies ArtifactDraft;
   }));
+  return { document, artifacts };
+}
+
+function rewriteHumanMediaProvenance(value: unknown, changedPaths: Set<string>, actor: string): unknown {
+  if (!isRecord(value) || !Array.isArray(value.scene_assets)) {
+    throw new StudioInputError("人工替换素材必须出现在素材计划的 scene_assets 中。");
+  }
+  const matched = new Set<string>();
+  const sceneAssets = value.scene_assets;
+  const document = structuredClone(value) as Record<string, unknown>;
+  document.scene_assets = sceneAssets.map((item: unknown) => {
+    if (!isRecord(item) || typeof item.local_path !== "string") return item;
+    const resolved = path.resolve(item.local_path);
+    if (!changedPaths.has(resolved)) return item;
+    matched.add(resolved);
+    const rewritten = { ...item };
+    rewritten.provider = "human";
+    rewritten.provider_id = "human-editor";
+    rewritten.creator = actor;
+    rewritten.license_note = "人工替换素材：发布前必须人工确认版权、肖像与商用范围。";
+    rewritten.rights_status = "review_required";
+    delete rewritten.source_url;
+    return rewritten;
+  });
+  if (matched.size !== changedPaths.size) {
+    throw new StudioInputError("人工替换文件必须逐镜登记，不能借用原素材的来源与授权信息。");
+  }
+  return document;
 }
 
 function collectManagedFileReferences(value: unknown, field = "output", result = new Map<string, string>()): Map<string, string> {
@@ -1250,6 +1467,19 @@ function mediaContentType(candidate: string): string {
     case ".mp3": return "audio/mpeg";
     default: return "application/octet-stream";
   }
+}
+
+function boundedStringArray(value: unknown, maxItems: number): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > maxItems) {
+    throw new StudioInputError(`正史事实最多允许 ${maxItems} 条。`);
+  }
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || !entry.trim() || entry.length > 240) {
+      throw new StudioInputError(`第 ${index + 1} 条正史事实必须是 240 字以内的非空文本。`);
+    }
+    return entry.trim();
+  });
 }
 
 async function writePrivateTextAtomically(destination: string, content: string): Promise<void> {

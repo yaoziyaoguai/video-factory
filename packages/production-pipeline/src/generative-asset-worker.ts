@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
@@ -222,8 +222,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const plan = requiredRecord(JSON.parse(await readFile(planPath, "utf8")), "Asset plan");
     const assets = Array.isArray(plan.scene_assets) ? plan.scene_assets : [];
     const jobsPath = path.join(outputDir, "generation_jobs.json");
+    const operationId = requiredString(request.commandId, "commandId");
+    const ledgerPath = scenes.length > 0 ? generationLedgerPath(outputDir, operationId) : undefined;
     const jobs: GenerationJob[] = [];
     const mediaArtifacts: WorkerArtifactDescriptor[] = [];
+
+    if (ledgerPath) await claimGenerationOperation(ledgerPath, operationId);
 
     for (const scene of scenes) {
       const job: GenerationJob = {
@@ -241,11 +245,11 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           scene.visualPrompt,
           async (progress) => {
             applyProgress(job, progress, binding.estimatedCnyPerAsset);
-            await writeJobs(jobsPath, jobs);
+            await writeJobs(jobsPath, jobs, ledgerPath, operationId);
           },
         );
         applyAcceptedTask(job, generated.taskId, binding.estimatedCnyPerAsset);
-        await writeJobs(jobsPath, jobs);
+        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
         const media = await downloadGeneratedAsset(
           this.fetch,
           generated.url,
@@ -256,8 +260,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           this.downloadTimeoutMs,
         );
         applySucceeded(job, generated.taskId, generated.url);
-        await writeJobs(jobsPath, jobs);
-        replaceSceneAsset(assets, scene, generated.taskId, generated.url, media.path, providerId, binding.mediaType);
+        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
+        replaceSceneAsset(assets, scene, generated.taskId, media.path, providerId, binding.mediaType);
         mediaArtifacts.push(await describeFile(
           media.path,
           "media_asset",
@@ -269,7 +273,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       } catch (error) {
         job.status = "failed";
         job.error = error instanceof Error ? error.message : String(error);
-        await writeJobs(jobsPath, jobs);
+        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
       }
     }
 
@@ -292,7 +296,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       localBaselinePreserved: true,
     };
     await writeJsonAtomically(planPath, plan);
-    await writeJobs(jobsPath, jobs);
+    await writeJobs(jobsPath, jobs, ledgerPath, operationId, true);
     const planArtifact = await describeFile(
       planPath,
       "asset_plan",
@@ -436,8 +440,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const plan = requiredRecord(JSON.parse(await readFile(planPath, "utf8")), "Asset plan");
     const assets = Array.isArray(plan.scene_assets) ? plan.scene_assets : [];
     const jobsPath = path.join(outputDir, "generation_jobs.json");
+    const operationId = requiredString(request.commandId, "commandId");
+    const ledgerPath = generatedRoutes.length > 0 ? generationLedgerPath(outputDir, operationId) : undefined;
     const jobs: GenerationJob[] = [];
     const mediaArtifacts: WorkerArtifactDescriptor[] = [];
+
+    if (ledgerPath) await claimGenerationOperation(ledgerPath, operationId);
 
     for (const { route, scene, binding, providerId } of generatedRoutes) {
       const job: GenerationJob = {
@@ -455,11 +463,11 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           compileGenerationPrompt(providerId, route, scene),
           async (progress) => {
             applyProgress(job, progress, binding.estimatedCnyPerAsset);
-            await writeJobs(jobsPath, jobs);
+            await writeJobs(jobsPath, jobs, ledgerPath, operationId);
           },
         );
         applyAcceptedTask(job, generated.taskId, binding.estimatedCnyPerAsset);
-        await writeJobs(jobsPath, jobs);
+        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
         const media = await downloadGeneratedAsset(
           this.fetch,
           generated.url,
@@ -470,8 +478,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           this.downloadTimeoutMs,
         );
         applySucceeded(job, generated.taskId, generated.url);
-        await writeJobs(jobsPath, jobs);
-        replaceSceneAsset(assets, scene, generated.taskId, generated.url, media.path, providerId, binding.mediaType);
+        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
+        replaceSceneAsset(assets, scene, generated.taskId, media.path, providerId, binding.mediaType);
         mediaArtifacts.push(await describeFile(
           media.path,
           "media_asset",
@@ -483,7 +491,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       } catch (error) {
         job.status = "failed";
         job.error = error instanceof Error ? error.message : String(error);
-        await writeJobs(jobsPath, jobs);
+        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
       }
     }
 
@@ -512,7 +520,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       ...(resolutionFailures.length ? { skippedRoutes: resolutionFailures } : {}),
     };
     await writeJsonAtomically(planPath, plan);
-    await writeJobs(jobsPath, jobs);
+    await writeJobs(jobsPath, jobs, ledgerPath, operationId, true);
     const planArtifact = await describeFile(
       planPath,
       "asset_plan",
@@ -826,7 +834,6 @@ function replaceSceneAsset(
   assets: unknown[],
   scene: ScriptScene,
   taskId: string,
-  videoUrl: string,
   clipPath: string,
   providerId: string,
   mediaType: "image" | "video",
@@ -840,7 +847,6 @@ function replaceSceneAsset(
     height: mediaType === "video" ? 1280 : 2560,
     duration: scene.duration,
     local_path: clipPath,
-    source_url: videoUrl,
     creator: providerId,
     license_note: `AI-generated ${mediaType}; provider terms and AIGC disclosure apply.`,
     query: scene.visualPrompt,
@@ -1073,8 +1079,43 @@ function imageExtension(contentType: string): string {
   return "png";
 }
 
-async function writeJobs(pathname: string, jobs: GenerationJob[]): Promise<void> {
+async function writeJobs(
+  pathname: string,
+  jobs: GenerationJob[],
+  ledgerPath?: string,
+  operationId?: string,
+  completed = false,
+): Promise<void> {
   await writeJsonAtomically(pathname, { version: "video-factory/generation-jobs-v1", jobs });
+  if (ledgerPath && operationId) {
+    await writeJsonAtomically(ledgerPath, {
+      version: "video-factory/generation-operation-v1",
+      operationId,
+      completed,
+      jobs,
+    });
+  }
+}
+
+function generationLedgerPath(outputDir: string, operationId: string): string {
+  return path.join(path.dirname(outputDir), ".generation-operations", `${createHash("sha256").update(operationId).digest("hex")}.json`);
+}
+
+async function claimGenerationOperation(ledgerPath: string, operationId: string): Promise<void> {
+  await mkdir(path.dirname(ledgerPath), { recursive: true });
+  try {
+    await writeFile(ledgerPath, `${JSON.stringify({
+      version: "video-factory/generation-operation-v1",
+      operationId,
+      completed: false,
+      jobs: [],
+    }, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error("This paid generation operation was already started. Its provider outcome must be reconciled before any new paid attempt; the system will not resubmit it automatically.");
+    }
+    throw error;
+  }
 }
 
 async function writeJsonAtomically(pathname: string, value: unknown): Promise<void> {

@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import {
   ProductionPipeline,
+  RoleAgentLoopError,
   type ReferenceGrammarAgentInput,
   type ProductionBrief,
   type VisualDirectorAgentInput,
@@ -81,7 +82,7 @@ describe("ProductionPipeline reference grammar", () => {
     const referenceSha256 = createHash("sha256").update("reference-video").digest("hex");
     let grammarInput: ReferenceGrammarAgentInput | undefined;
     let directorInput: VisualDirectorAgentInput | undefined;
-    let failAnalysis = false;
+    let analysisFailure: "none" | "ordinary" | "audit" = "none";
     const subject = new ProductionPipeline({
       workspaceRoot,
       worker: new ReferenceWorker(),
@@ -90,7 +91,8 @@ describe("ProductionPipeline reference grammar", () => {
         id: "codex-reference-grammar-v1",
         modelId: "codex-default",
         analyze: async (input) => {
-          if (failAnalysis) throw new Error(`multimodal service unavailable at ${sourcePath}`);
+          if (analysisFailure === "ordinary") throw new Error(`multimodal service unavailable at ${sourcePath}`);
+          if (analysisFailure === "audit") throw exhaustedReferenceAudit();
           grammarInput = input;
           return {
             version: "video-factory/shot-grammar-v1",
@@ -202,7 +204,7 @@ describe("ProductionPipeline reference grammar", () => {
     assert.equal(grammarInput?.sourceLabel, "人工复核后的参考节奏.mp4");
     assert.match(grammarInput?.videoPath ?? "", /nodes\/reference-grammar\/attempt-2\/reference\.mp4$/);
 
-    failAnalysis = true;
+    analysisFailure = "ordinary";
     await mkdir(path.dirname(sourcePath), { recursive: true });
     await writeFile(sourcePath, "reference-video");
     const degraded = await subject.start({ ...brief, title: "参考分析降级任务" });
@@ -218,5 +220,26 @@ describe("ProductionPipeline reference grammar", () => {
     const grammarArtifact = degraded.artifacts.find((artifact) => artifact.kind === "shot_grammar");
     assert.ok(grammarArtifact?.uri);
     assert.equal((await readFile(grammarArtifact.uri, "utf8")).includes(sourcePath), false);
+
+    analysisFailure = "audit";
+    const blocked = await subject.start({ ...brief, title: "参考分析审计失败任务" });
+    const blockedNode = blocked.nodeRuns.find((node) => node.nodeId === "reference-grammar");
+    assert.equal(blocked.status, "failed");
+    assert.equal(blockedNode?.status, "failed");
+    assert.match(blockedNode?.error ?? "", /三轮参考分析审计仍未通过/);
+    assert.equal(blocked.artifacts.some((artifact) => artifact.kind === "shot_grammar"), false);
   });
 });
+
+function exhaustedReferenceAudit(): RoleAgentLoopError {
+  return new RoleAgentLoopError("三轮参考分析审计仍未通过", {
+    version: "video-factory/agent-loop-v1",
+    role: "参考视频分析师",
+    contractVersion: "fixture-v1",
+    criteria: ["只提炼可复用镜头语法"],
+    status: "failed",
+    maxIterations: 3,
+    modelCallCount: 6,
+    iterations: [],
+  });
+}

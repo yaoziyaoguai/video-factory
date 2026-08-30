@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { CodexBridgeClient } from "@video-factory/production-pipeline";
+import path from "node:path";
+import {
+  CodexBridgeClient,
+  fileRoleAgentLoopCheckpoint,
+  roleAgentCheckpointKey,
+  runRoleAgentLoop,
+} from "@video-factory/production-pipeline";
 import { scoreTopicCandidate } from "@video-factory/workflow-core";
 import type {
   StudioTrendCandidate,
@@ -10,6 +16,8 @@ import type {
 } from "../shared/api.js";
 import { planVisualDirection } from "../shared/visual-plan.js";
 import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
+
+const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v2|role-audit-v1|topic-ideas-validator-v1";
 
 export interface TrendSignalPort {
   listSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
@@ -201,12 +209,16 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
   readonly id = "api-topic-editor-v1";
   private readonly client: CodexBridgeClient;
 
-  constructor(client: CodexBridgeClient) {
+  constructor(
+    client: CodexBridgeClient,
+    private readonly maxReviewIterations = 3,
+    private readonly checkpointDirectory?: string,
+  ) {
     this.client = client;
   }
 
   async generate(signals: StudioTrendSignal[], strategy?: StudioTopicStrategy): Promise<TrendModelIdea[]> {
-    const parsed = await this.client.runTask("topic-ideas", {
+    const request = {
       signals: signals.map((item) => ({
         id: item.id,
         platform: item.platform,
@@ -215,9 +227,47 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         heat: item.heat ?? null,
       })),
       ...(strategy?.customInstruction ? { strategy: strategy.customInstruction } : {}),
-    }) as { ideas?: unknown[] };
-    return (parsed.ideas ?? []).flatMap(parseModelIdea);
+    };
+    const execution = await runRoleAgentLoop<{ ideas: TrendModelIdea[] }>({
+      role: "选题总编",
+      contractVersion: TOPIC_EDITOR_AGENT_CONTRACT_VERSION,
+      criteria: [
+        "每个选题都可追溯到一个输入热点，不增加原信号没有的事实、数字、引语或因果",
+        "角度对普通观众有明确收益，且不是对热搜标题的简单改写",
+        "视觉可表现性、证据可得性、制作成本、合规风险和系列潜力得到实际权衡",
+        "钩子能在两秒内建立具体问题或反差，但不夸张、不消费灾害伤亡或政治突发",
+      ],
+      maxIterations: this.maxReviewIterations,
+      produce: (revision, { requestId }) => this.client.runTaskDetailed("topic-ideas", {
+        ...request,
+        ...(revision ? { revision } : {}),
+      }, requestId),
+      audit: ({ role, iteration, criteria, candidate, requestId }) => this.client.runTaskDetailed("role-audit", {
+        role,
+        iteration,
+        criteria,
+        context: request,
+        candidate,
+      }, requestId),
+      validate: parseTopicIdeasOutput,
+      ...(this.checkpointDirectory ? {
+        checkpoint: fileRoleAgentLoopCheckpoint(
+          path.join(this.checkpointDirectory, `${roleAgentCheckpointKey({ request, contractVersion: TOPIC_EDITOR_AGENT_CONTRACT_VERSION })}.json`),
+          roleAgentCheckpointKey({ request, contractVersion: TOPIC_EDITOR_AGENT_CONTRACT_VERSION }),
+        ),
+      } : {}),
+    });
+    return execution.output.ideas;
   }
+}
+
+function parseTopicIdeasOutput(value: unknown): { ideas: TrendModelIdea[] } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Topic ideas output must be an object.");
+  const ideas = (value as { ideas?: unknown }).ideas;
+  if (!Array.isArray(ideas) || ideas.length < 1 || ideas.length > 8) throw new Error("Topic ideas output must contain 1 to 8 ideas.");
+  const parsed = ideas.flatMap(parseModelIdea);
+  if (parsed.length !== ideas.length) throw new Error("Topic ideas output contains an invalid idea.");
+  return { ideas: parsed };
 }
 
 function parseModelIdea(value: unknown): TrendModelIdea[] {

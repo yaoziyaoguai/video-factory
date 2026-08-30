@@ -1,4 +1,5 @@
 import { CodexBrokerServer } from "./broker-server.js";
+import path from "node:path";
 import { createBrokerExecutor } from "./executor-factory.js";
 import { brokerRuntimeConfigFromEnv } from "./runtime-config.js";
 
@@ -11,6 +12,7 @@ try {
     executor: createBrokerExecutor(config, process.env),
     concurrency: config.concurrency,
     maxBacklog: config.maxBacklog,
+    idempotencyDirectory: path.join(config.workspaceRoot, ".video-factory", "codex-idempotency", config.profile.identity.profileId),
   });
   await server.start();
   process.stdout.write(

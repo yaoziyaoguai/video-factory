@@ -8,6 +8,7 @@ import {
   parseStudioCandidateAdoptionInput,
   parseStudioCreatorSettingsPatch,
   parseStudioSeriesInput,
+  parseStudioSeriesEpisodePlanInput,
   parseStudioOpportunityInput,
   parseStudioOpportunityStatusInput,
   parseStudioDecisionInput,
@@ -46,6 +47,7 @@ import {
   type StudioRunSummary,
   type StudioSeries,
   type StudioSeriesInput,
+  type StudioSeriesEpisodePlanInput,
   type StudioTopicCategory,
   type StudioCandidateOrigin,
   type StudioEditorialVerdict,
@@ -85,12 +87,16 @@ export interface StudioServicePort {
   adoptCandidate(candidateId: string, input: StudioCandidateAdoptionInput): Promise<StudioOpportunity>;
   listSeries(): Promise<StudioSeries[]>;
   createSeries(input: StudioSeriesInput): Promise<StudioSeries>;
-  listOpportunities(): Promise<StudioOpportunity[]>;
+  updateSeriesEpisodePlan(seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput): Promise<StudioSeries>;
+  linkLegacySeriesRun(seriesId: string, episodeNumber: number, runId: string): Promise<StudioSeries>;
+  listOpportunities(origin?: "trend" | "series" | "manual"): Promise<StudioOpportunity[]>;
   getOpportunity(opportunityId: string): Promise<StudioOpportunity | undefined>;
   createOpportunity(input: StudioOpportunityInput): Promise<StudioOpportunity>;
   updateOpportunityStatus(opportunityId: string, status: StudioOpportunityStatus): Promise<StudioOpportunity>;
-  listRuns(): Promise<StudioRunSummary[]>;
+  listRuns(origin?: "trend" | "series" | "manual"): Promise<StudioRunSummary[]>;
   getRun(runId: string): Promise<StudioRunDetail | undefined>;
+  archiveRuns(runIds: string[]): Promise<void>;
+  restoreRuns(runIds: string[]): Promise<void>;
   deleteRun(runId: string): Promise<void>;
   costDashboard(): Promise<StudioCostDashboard>;
   runCostDetail(runId: string): Promise<StudioCostRunDetail | undefined>;
@@ -231,8 +237,36 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   app.post("/api/series", async (request, reply) => {
     return reply.code(201).send(await options.service.createSeries(parseStudioSeriesInput(request.body)));
   });
-  app.get("/api/opportunities", async () => options.service.listOpportunities());
-  app.get("/api/runs", async () => options.service.listRuns());
+  app.patch<{ Params: { seriesId: string; episodeNumber: string } }>(
+    "/api/series/:seriesId/episodes/:episodeNumber",
+    async (request) => {
+      requireSafeRouteId(request.params.seriesId, "系列编号");
+      const episodeNumber = Number(request.params.episodeNumber);
+      if (!Number.isSafeInteger(episodeNumber) || episodeNumber <= 0) throw new StudioInputError("单集编号必须是正整数。");
+      return options.service.updateSeriesEpisodePlan(
+        request.params.seriesId,
+        episodeNumber,
+        parseStudioSeriesEpisodePlanInput(request.body),
+      );
+    },
+  );
+  app.post<{ Params: { seriesId: string; episodeNumber: string }; Body: { runId?: unknown } }>(
+    "/api/series/:seriesId/episodes/:episodeNumber/legacy-run",
+    async (request) => {
+      requireSafeRouteId(request.params.seriesId, "系列编号");
+      const episodeNumber = Number(request.params.episodeNumber);
+      if (!Number.isSafeInteger(episodeNumber) || episodeNumber <= 0) throw new StudioInputError("单集编号必须是正整数。");
+      if (typeof request.body?.runId !== "string") throw new StudioInputError("请选择一条历史制作记录。");
+      requireSafeRouteId(request.body.runId, "制作记录编号");
+      return options.service.linkLegacySeriesRun(request.params.seriesId, episodeNumber, request.body.runId);
+    },
+  );
+  app.get<{ Querystring: { origin?: string } }>("/api/opportunities", async (request) => {
+    return options.service.listOpportunities(parseCreationOrigin(request.query.origin));
+  });
+  app.get<{ Querystring: { origin?: string } }>("/api/runs", async (request) => {
+    return options.service.listRuns(parseCreationOrigin(request.query.origin));
+  });
   app.get("/api/costs", async () => options.service.costDashboard());
 
   app.post<{ Body: Buffer }>("/api/reference-videos", async (request, reply) => {
@@ -298,6 +332,16 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     }
     const response = await options.service.startRun(request.body, idempotencyKey);
     return reply.code(202).send(response);
+  });
+
+  app.post("/api/runs/archive", async (request, reply) => {
+    await options.service.archiveRuns(parseRunBatchInput(request.body));
+    return reply.code(204).send();
+  });
+
+  app.post("/api/runs/restore", async (request, reply) => {
+    await options.service.restoreRuns(parseRunBatchInput(request.body));
+    return reply.code(204).send();
   });
 
   app.get<{ Params: { runId: string } }>("/api/runs/:runId", async (request, reply) => {
@@ -653,6 +697,23 @@ function requireNonNegativeNumber(value: unknown, field: string): number {
 function requirePositiveInteger(value: unknown, field: string): number {
   if (!Number.isInteger(value) || Number(value) <= 0) throw new StudioInputError(`${field} 必须是正整数。`);
   return Number(value);
+}
+
+function parseRunBatchInput(value: unknown): string[] {
+  const input = requireRecord(value, "制作记录整理请求");
+  if (!Array.isArray(input.runIds) || input.runIds.length === 0 || input.runIds.length > 100) {
+    throw new StudioInputError("制作记录清单必须包含 1 到 100 条记录。");
+  }
+  if (input.runIds.some((runId) => typeof runId !== "string" || !SAFE_ROUTE_ID.test(runId))) {
+    throw new StudioInputError("制作记录编号格式不正确。");
+  }
+  return [...new Set(input.runIds as string[])];
+}
+
+function parseCreationOrigin(value: string | undefined): "trend" | "series" | "manual" | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (value === "trend" || value === "series" || value === "manual") return value;
+  throw new StudioInputError("创作入口不正确。");
 }
 
 function isTerminal(status: StudioRunDetail["status"]): boolean {

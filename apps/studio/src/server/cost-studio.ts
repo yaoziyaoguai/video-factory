@@ -80,6 +80,10 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
     const meteredFailedAttemptCount = billing === "metered" && reportedFailedAttemptCount !== undefined
       ? Math.min(reportedFailedAttemptCount, meteredAttemptCount ?? reportedFailedAttemptCount)
       : undefined;
+    const parameters = isRecord(receipt.parameters) ? receipt.parameters : undefined;
+    const subscriptionCallCount = billing === "subscription"
+      ? nonNegativeInteger(parameters?.modelCallCount) ?? 1
+      : undefined;
     const estimatedCostCny = nonNegativeNumber(receipt.estimatedCostCny) ?? 0;
     const authorizedCostCny = nonNegativeNumber(receipt.authorizedCostCny)
       ?? (isRecord(authorization) ? nonNegativeNumber(authorization.maxCostCny) : undefined)
@@ -106,6 +110,7 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       ...(actualCostSource !== undefined ? { actualCostSource } : {}),
       ...(meteredAttemptCount !== undefined ? { meteredAttemptCount } : {}),
       ...(meteredFailedAttemptCount !== undefined ? { meteredFailedAttemptCount } : {}),
+      ...(subscriptionCallCount !== undefined ? { subscriptionCallCount } : {}),
       actualPending: billing === "metered" && actualCost === undefined,
       startedAt,
       ...(text(receipt.finishedAt) ? { finishedAt: text(receipt.finishedAt) } : {}),
@@ -134,7 +139,7 @@ function totals(lines: StudioCostLine[]): StudioCostTotals {
     actualCostCny: money(sum(lines, (line) => line.actualCostCny ?? 0)),
     actualPendingCount: lines.filter((line) => line.actualPending).length,
     meteredCalls: sum(lines, (line) => line.billing === "metered" ? line.meteredAttemptCount ?? 0 : 0),
-    subscriptionCalls: lines.filter((line) => line.billing === "subscription").length,
+    subscriptionCalls: sum(lines, (line) => line.billing === "subscription" ? line.subscriptionCallCount ?? 1 : 0),
     freeCalls: lines.filter((line) => line.billing === "free" || line.billing === "local_compute").length,
     failedMeteredCalls: sum(lines, (line) => line.billing === "metered" ? line.meteredFailedAttemptCount ?? 0 : 0),
   };
@@ -146,7 +151,11 @@ function group(lines: StudioCostLine[], key: (line: StudioCostLine) => string): 
   return [...groups.entries()].map(([id, items]) => ({
     id,
     label: id,
-    calls: sum(items, (item) => item.billing === "metered" ? item.meteredAttemptCount ?? 0 : 1),
+    calls: sum(items, (item) => item.billing === "metered"
+      ? item.meteredAttemptCount ?? 0
+      : item.billing === "subscription"
+        ? item.subscriptionCallCount ?? 1
+        : 1),
     estimatedCostCny: money(sum(items, (item) => item.estimatedCostCny)),
     actualCostCny: money(sum(items, (item) => item.actualCostCny ?? 0)),
     actualPendingCount: items.filter((item) => item.actualPending).length,

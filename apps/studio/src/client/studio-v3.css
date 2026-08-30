@@ -517,6 +517,60 @@ body { background: var(--canvas); }
 .studio-v3 .platform-filter select { min-height: 32px; background-color: #ffffff; }
 
 .studio-v3 .candidate-inbox-body { display: grid; min-width: 0; grid-template-columns: minmax(420px, 1.12fr) minmax(340px, .88fr); background: #ffffff; }
+.studio-v3 .series-roadmap { min-width: 0; background: #f5f5f1; }
+.studio-v3 .series-season-summary { display: grid; grid-template-columns: minmax(240px, .72fr) minmax(420px, 1.28fr); gap: 28px; padding: 20px 22px; color: #f5f4ef; background: #252b27; border-top: 1px solid #424942; }
+.studio-v3 .series-season-summary > div > span { color: #ff9d87; font-size: 12px; font-weight: 820; }
+.studio-v3 .series-season-summary > div > strong { display: block; margin-top: 4px; font-family: "Noto Serif SC Variable", "Songti SC", serif; font-size: 20px; }
+.studio-v3 .series-season-summary > div > p { margin: 7px 0 0; color: #b7beb7; font-size: 13px; line-height: 1.65; }
+.studio-v3 .series-season-summary dl { display: grid; margin: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.studio-v3 .series-season-summary dl > div { padding: 10px 11px; background: #303732; border: 1px solid #454d46; border-radius: 5px; }
+.studio-v3 .series-season-summary dt { color: #aeb6af; font-size: 11px; font-weight: 800; }
+.studio-v3 .series-season-summary dd { margin: 5px 0 0; color: #edf0ed; font-size: 12px; line-height: 1.55; }
+.studio-v3 .series-roadmap-body { display: grid; grid-template-columns: minmax(410px, 1fr) minmax(390px, 1fr); min-width: 0; background: #ffffff; }
+.studio-v3 .series-episode-list { max-height: 660px; margin: 0; padding: 0; overflow-y: auto; border-right: 1px solid var(--line); list-style: none; }
+.studio-v3 .series-episode-list button { display: grid; width: 100%; min-height: 104px; grid-template-columns: 46px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 13px 15px; color: var(--ink); text-align: left; background: #ffffff; border: 0; border-bottom: 1px solid #e5e6df; cursor: pointer; }
+.studio-v3 .series-episode-list button:hover { background: #f8f8f5; }
+.studio-v3 .series-episode-list button.is-active { background: #eef2ff; box-shadow: inset 4px 0 0 var(--blue); }
+.studio-v3 .series-episode-list button.is-locked { color: #727770; background: #fafaf7; }
+.studio-v3 .series-episode-index { color: #747a72; font-family: "Manrope Variable", sans-serif; font-size: 12px; font-weight: 820; }
+.studio-v3 .series-episode-copy { display: grid; min-width: 0; gap: 4px; }
+.studio-v3 .series-episode-copy small { color: var(--accent); font-size: 11px; font-weight: 800; }
+.studio-v3 .series-episode-copy strong { overflow: hidden; font-family: "Noto Serif SC Variable", "Songti SC", serif; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.studio-v3 .series-episode-copy > span { overflow: hidden; color: #777c75; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.studio-v3 .series-episode-status { display: inline-flex; min-height: 28px; align-items: center; gap: 4px; padding: 0 8px; color: #58605a; background: #eef0eb; border-radius: 4px; font-size: 11px; font-weight: 780; white-space: nowrap; }
+.studio-v3 .series-episode-status.is-ready, .studio-v3 .series-episode-status.is-published { color: #176846; background: #e4f6ed; }
+.studio-v3 .series-episode-detail { display: flex; min-width: 0; min-height: 560px; flex-direction: column; padding: 24px 25px; background: #f0efe9; }
+.studio-v3 .series-episode-detail > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--accent); font-size: 12px; font-weight: 800; }
+.studio-v3 .series-episode-detail > header strong { padding: 5px 7px; color: #424942; background: #ffffff; border: 1px solid #d8d9d2; border-radius: 4px; }
+.studio-v3 .series-episode-detail h3 { margin: 18px 0 0; font-family: "Noto Serif SC Variable", "Songti SC", serif; font-size: 23px; line-height: 1.45; }
+.studio-v3 .series-viewer-promise { margin: 11px 0 0; color: #697069; font-size: 13px; line-height: 1.7; }
+.studio-v3 .series-continuity-grid { display: grid; gap: 7px; margin-top: 18px; }
+.studio-v3 .series-continuity-grid section { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 10px; padding: 10px 11px; background: rgb(255 255 255 / 76%); border: 1px solid #d9dad3; border-radius: 5px; }
+.studio-v3 .series-continuity-grid span { color: var(--accent); font-size: 11px; font-weight: 800; }
+.studio-v3 .series-continuity-grid p { margin: 0; color: #525952; font-size: 13px; line-height: 1.6; }
+.studio-v3 .series-agent-route { margin-top: 14px; padding: 12px; background: #242a26; border-radius: 6px; }
+.studio-v3 .series-agent-route > div { display: flex; align-items: center; gap: 9px; color: #f1f3ef; }
+.studio-v3 .series-agent-route > div > span { display: grid; gap: 2px; }
+.studio-v3 .series-agent-route strong { font-size: 12px; }
+.studio-v3 .series-agent-route small, .studio-v3 .series-agent-route > p { color: #c0c7c0; font-size: 11px; line-height: 1.55; }
+.studio-v3 .series-agent-route dl { display: grid; margin: 10px 0 0; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.studio-v3 .series-agent-route dl > div { min-width: 0; padding: 7px 8px; background: #303732; border: 1px solid #414942; border-radius: 4px; }
+.studio-v3 .series-agent-route dt { color: #aeb7af; font-size: 11px; font-weight: 800; }
+.studio-v3 .series-agent-route dd { margin: 3px 0 0; overflow-wrap: anywhere; color: #eef1ed; font-size: 11px; line-height: 1.45; }
+.studio-v3 .series-agent-route > p { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid #414842; }
+.studio-v3 .series-episode-actions { display: grid; grid-template-columns: minmax(0, .7fr) minmax(0, 1.3fr); gap: 8px; margin-top: auto; }
+.studio-v3 .series-episode-actions .button { width: 100%; }
+.studio-v3 .series-lock-note, .studio-v3 .series-progress-note { display: flex; align-items: center; gap: 7px; margin: auto 0 0; padding: 10px 11px; color: #725519; background: #fff5d9; border: 1px solid #ead598; border-radius: 5px; font-size: 12px; line-height: 1.55; }
+.studio-v3 .series-progress-note { color: #35604d; background: #eaf6ef; border-color: #bbddc9; }
+.studio-v3 .series-legacy-recovery { display: grid; gap: 10px; margin-top: auto; padding: 13px; background: #fff7e4; border: 1px solid #e7cf95; border-radius: 6px; }
+.studio-v3 .series-legacy-recovery > p { margin: 0; color: #624b1c; font-size: 12px; line-height: 1.6; }
+.studio-v3 .series-legacy-recovery label { display: grid; gap: 6px; }
+.studio-v3 .series-legacy-recovery label > span { color: #655531; font-size: 12px; font-weight: 760; }
+.studio-v3 .series-legacy-recovery select { width: 100%; min-height: 40px; background: #ffffff; }
+.studio-v3 .series-legacy-recovery > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.studio-v3 .series-legacy-recovery small { color: #75684a; font-size: 11px; }
+.studio-v3 .series-legacy-recovery small.is-error { color: #a22c25; }
+.studio-v3 .series-legacy-show-all { width: max-content; padding: 0; color: #3f5e9d; background: transparent; border: 0; font: inherit; font-size: 11px; font-weight: 750; text-decoration: underline; cursor: pointer; }
 .studio-v3 .candidate-list { min-width: 0; max-height: 610px; overflow-y: auto; border-right: 1px solid var(--line); }
 .studio-v3 .candidate-row { display: grid; width: 100%; min-width: 0; min-height: 98px; grid-template-columns: 34px minmax(0, 1fr) 42px; align-items: center; gap: 10px; padding: 13px 15px; color: var(--ink); text-align: left; background: #ffffff; border: 0; border-bottom: 1px solid #e7e8e2; cursor: pointer; }
 .studio-v3 .candidate-row:hover { background: #f7f7f3; }
@@ -577,14 +631,30 @@ body { background: var(--canvas); }
 .studio-v3 .adopted-opportunities > header { display: flex; min-height: 68px; align-items: end; justify-content: space-between; gap: 20px; padding: 0 2px 12px; }
 .studio-v3 .adopted-opportunities > header h2 { margin: 3px 0 0; font-family: "Noto Serif SC Variable", "Songti SC", serif; font-size: 22px; }
 .studio-v3 .adopted-opportunities > header > span { color: #777b74; font-size: 10px; font-weight: 760; }
+.studio-v3 .series-production-selector { display: grid; min-width: min(420px, 52vw); gap: 5px; }
+.studio-v3 .series-production-selector > span { color: #737870; font-size: 11px; font-weight: 780; }
+.studio-v3 .series-production-selector select { width: 100%; min-height: 38px; background: #ffffff; }
+.studio-v3 .series-production-workspace { display: grid; min-height: 690px; grid-template-columns: minmax(0, 1fr) 300px; gap: 12px; }
+.studio-v3 .series-production-workspace > .opportunity-focus,
+.studio-v3 .series-production-workspace > .director-panel { min-width: 0; }
 .studio-v3 .awaiting-adoption { min-height: 90px; justify-content: flex-start; background: transparent; border-block: 1px dashed #cfd1ca; }
 .studio-v3 .topic-action-error { margin: -18px 0 20px; }
 .studio-v3 .series-dialog { width: min(760px, 100%); }
+.studio-v3 .series-episode-dialog { width: min(780px, 100%); max-height: calc(100dvh - 36px); overflow-y: auto; }
+.studio-v3 .series-episode-dialog .dialog-header > div > p:last-child { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
+.studio-v3 .series-episode-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.studio-v3 .series-edit-notice { display: flex; align-items: flex-start; gap: 9px; margin: 0; padding: 10px 11px; color: #585f58; background: #eef2ff; border: 1px solid #cdd7f4; border-radius: 5px; font-size: 10px; line-height: 1.6; }
+.studio-v3 .series-edit-notice svg { flex: 0 0 auto; margin-top: 2px; color: var(--blue); }
 .studio-v3 .series-dialog .dialog-header > div > p:last-child { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
 .studio-v3 .series-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 @media (max-width: 1100px) {
+  .studio-v3 .series-production-workspace { min-height: 0; grid-template-columns: 1fr; }
+  .studio-v3 .series-production-workspace > .director-panel { position: static; }
   .studio-v3 .candidate-inbox-body { grid-template-columns: 1fr; }
+  .studio-v3 .series-roadmap-body { grid-template-columns: 1fr; }
+  .studio-v3 .series-season-summary { grid-template-columns: 1fr; }
+  .studio-v3 .series-episode-list { max-height: 390px; border-right: 0; border-bottom: 1px solid var(--line); }
   .studio-v3 .candidate-list { max-height: 430px; border-right: 0; border-bottom: 1px solid var(--line); }
   .studio-v3 .candidate-detail { min-height: 430px; }
   .studio-v3 .custom-entry { grid-template-columns: 1fr; }
@@ -607,6 +677,16 @@ body { background: var(--canvas); }
   .studio-v3 .series-controls label { min-width: 0; flex: 1; }
   .studio-v3 .series-controls .button { width: 40px; min-width: 40px; padding: 0; overflow: hidden; gap: 0; color: transparent; font-size: 0; }
   .studio-v3 .series-controls .button svg { color: #ffffff; }
+  .studio-v3 .series-season-summary { gap: 15px; padding: 16px 13px; }
+  .studio-v3 .series-season-summary dl { grid-template-columns: 1fr; }
+  .studio-v3 .series-roadmap-body { display: flex; flex-direction: column; }
+  .studio-v3 .series-episode-detail { order: -1; }
+  .studio-v3 .series-episode-list { max-height: none; overflow: visible; }
+  .studio-v3 .series-episode-list button { min-height: 94px; grid-template-columns: 36px minmax(0, 1fr); padding: 11px 10px; }
+  .studio-v3 .series-episode-status { grid-column: 2; width: max-content; }
+  .studio-v3 .series-episode-detail { min-height: 520px; padding: 18px 14px; }
+  .studio-v3 .series-episode-actions, .studio-v3 .series-episode-form { grid-template-columns: 1fr; }
+  .studio-v3 .series-continuity-grid section { grid-template-columns: 1fr; gap: 4px; }
   .studio-v3 .candidate-filters { align-items: flex-end; padding: 7px; }
   .studio-v3 .verdict-filter { flex-wrap: nowrap; overflow-x: auto; }
   .studio-v3 .verdict-filter button { flex: 0 0 auto; }
@@ -625,6 +705,9 @@ body { background: var(--canvas); }
   .studio-v3 .custom-entry-action { min-height: 72px; }
   .studio-v3 .adopted-opportunities { margin-top: 20px; }
   .studio-v3 .adopted-opportunities > header h2 { font-size: 18px; }
+  .studio-v3 .adopted-opportunities > header { align-items: stretch; flex-direction: column; }
+  .studio-v3 .series-production-selector { width: 100%; min-width: 0; }
+  .studio-v3 .series-production-workspace { gap: 10px; }
   .studio-v3 .series-form { grid-template-columns: 1fr; }
 }
 

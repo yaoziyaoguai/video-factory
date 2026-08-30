@@ -192,23 +192,55 @@ describe("Studio client", () => {
     expect(screen.queryByText("已经完成的内容")).not.toBeInTheDocument();
   });
 
-  it("asks for confirmation before deleting a completed production record", async () => {
+  it("archives completed records and keeps permanent deletion inside the archive", async () => {
     const user = userEvent.setup();
     const completed = { ...runSummary, id: "run-2", title: "已经完成的内容", status: "succeeded" as const };
+    const archived = { ...completed, archivedAt: "2026-08-30T08:00:00.000Z" };
+    const onArchive = vi.fn().mockResolvedValue(undefined);
+    const onRestore = vi.fn().mockResolvedValue(undefined);
     const onDelete = vi.fn().mockResolvedValue(undefined);
-    render(
+    const { rerender } = render(
       <MemoryRouter>
-        <ProductionQueue runs={[runSummary, completed]} loading={false} onCreate={() => undefined} onDelete={onDelete} />
+        <ProductionQueue runs={[runSummary, completed]} loading={false} onCreate={() => undefined} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} />
       </MemoryRouter>,
     );
 
-    expect(screen.queryByRole("button", { name: `删除制作记录：${runSummary.title}` })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "删除制作记录：已经完成的内容" }));
-    expect(screen.getByRole("dialog", { name: /确定删除/ })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "确认删除" }));
+    expect(screen.queryByRole("button", { name: /永久删除制作记录/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "归档制作记录：已经完成的内容" }));
+    await waitFor(() => expect(onArchive).toHaveBeenCalledWith([completed]));
 
-    await waitFor(() => expect(onDelete).toHaveBeenCalledWith(completed));
+    rerender(
+      <MemoryRouter>
+        <ProductionQueue runs={[runSummary, archived]} loading={false} onCreate={() => undefined} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} />
+      </MemoryRouter>,
+    );
+    await user.click(screen.getByRole("button", { name: /归档 1/ }));
+    await user.click(screen.getByRole("button", { name: "恢复制作记录：已经完成的内容" }));
+    await waitFor(() => expect(onRestore).toHaveBeenCalledWith([archived]));
+    await user.click(screen.getByRole("button", { name: "永久删除制作记录：已经完成的内容" }));
+    expect(screen.getByRole("dialog", { name: /确定删除/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "永久删除" }));
+
+    await waitFor(() => expect(onDelete).toHaveBeenCalledWith(archived));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("bulk archives selected terminal records", async () => {
+    const user = userEvent.setup();
+    const first = { ...runSummary, id: "run-2", title: "成片一", status: "succeeded" as const };
+    const second = { ...runSummary, id: "run-3", title: "成片二", status: "failed" as const };
+    const onArchive = vi.fn().mockResolvedValue(undefined);
+    render(
+      <MemoryRouter>
+        <ProductionQueue runs={[runSummary, first, second]} loading={false} onCreate={() => undefined} onArchive={onArchive} />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: "选择制作记录：成片一" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择制作记录：成片二" }));
+    await user.click(screen.getByRole("button", { name: "批量归档" }));
+
+    await waitFor(() => expect(onArchive).toHaveBeenCalledWith([first, second]));
   });
 
   it("creates a valid local production brief without exposing unavailable providers", async () => {
@@ -1096,5 +1128,26 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("button", { name: "调整方案后重新制作" }));
 
     expect(onRestart).toHaveBeenCalledOnce();
+  });
+
+  it("blocks retry and restart while a paid provider outcome is uncertain", () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    render(<RunWorkbench
+      run={{
+        ...withoutIntervention,
+        status: "failed",
+        nodes: withoutIntervention.nodes.map((node, index) => index === 0
+          ? { ...node, status: "failed", outcomeUncertain: true }
+          : node),
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onRestart={vi.fn()}
+      onRetryFailedNode={vi.fn()}
+    />);
+
+    expect(screen.getByText(/先在 Provider 控制台核对任务与账单/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "调整方案后重新制作" })).not.toBeInTheDocument();
   });
 });

@@ -330,6 +330,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
         platform,
         reviewMode: "manual",
         ...(editorial ? { editorial } : {}),
+        ...(initialValues?.seriesContext ? { seriesContext: initialValues.seriesContext } : {}),
+        ...(initialValues?.creationContext ? { creationContext: initialValues.creationContext } : {}),
         voiceDirection,
         template: {
           templateId: selectedTemplateId,

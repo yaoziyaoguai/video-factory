@@ -94,6 +94,27 @@ describe("CodexVisualReviewAgent", () => {
     assert.equal(agent.modelId, "codex-default");
   });
 
+  it("uses a stable broker request id for an interrupted visual review operation", async () => {
+    const requestIds: Array<string | undefined> = [];
+    const agent = new CodexVisualReviewAgent({
+      media: { prepare: async () => media },
+      client: {
+        runTask: async () => report,
+        runTaskDetailed: async (_kind, _payload, requestId) => {
+          requestIds.push(requestId);
+          return { output: report };
+        },
+      },
+    });
+
+    const first = await agent.reviewDetailed({ videoPath: "/run/final.mp4", runRoot: "/run", requestId: "persisted-operation" });
+    const second = await agent.reviewDetailed({ videoPath: "/run/final.mp4", runRoot: "/run", requestId: "persisted-operation" });
+
+    assert.match(first.requestId ?? "", /^visual-[a-f0-9]{64}$/);
+    assert.equal(first.requestId, second.requestId);
+    assert.deepEqual(requestIds, [first.requestId, first.requestId]);
+  });
+
   it("forwards the render manifest to media preprocessing", async () => {
     const runRoot = await mkdtemp(path.join(tmpdir(), "video-factory-review-forward-"));
     const renderManifestPath = path.join(runRoot, "render", "render_manifest.json");

@@ -84,9 +84,10 @@ export class TrendStudio {
     try {
       const values = await loading;
       const cachedAt = this.options.now().toISOString();
+      await this.persistCache({ schemaVersion: 1, cachedAt, values });
+      // 只有持久化生命周期结束后才发布新缓存，避免调用方看到新值时后台仍在改文件。
       this.candidateCache = { expiresAt: Date.parse(cachedAt) + (this.options.cacheTtlMs ?? DAILY_CACHE_TTL_MS), values };
       this.nextAutomaticRefreshAt = 0;
-      await this.persistCache({ schemaVersion: 1, cachedAt, values });
       return values;
     } finally {
       if (this.candidateLoading === loading) {

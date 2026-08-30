@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -32,6 +33,11 @@ const completedRun: StudioRunDetail = {
 
 const loadPublishPackage = async () => ({
   aigc: { explicitLabelChecked: true, implicitMetadataWritten: true },
+  resourceManifest: { needsReviewCount: 0 },
+  artifacts: [
+    { id: "video", kind: "render", provenance: { licenseNote: "Owner-generated render." } },
+    { id: "asset-1", kind: "media_asset", provenance: { licenseNote: "Provider terms recorded." } },
+  ],
 });
 
 function confirmedInput(requestId = "publish-request-1") {
@@ -85,6 +91,90 @@ describe("PublishingStudio", () => {
 
     assert.equal(readiness.ready, false);
     assert.match(readiness.checks.find((check) => check.id === "approval")?.detail ?? "", /人工批准/);
+  });
+
+  it("blocks a human replacement that still carries the previous stock license", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
+    const subject = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => completedRun,
+      loadPublishPackage: async () => ({
+        aigc: { explicitLabelChecked: true, implicitMetadataWritten: true },
+        resourceManifest: { needsReviewCount: 1 },
+        artifacts: [{
+          kind: "human_media_revision",
+          provenance: { providerId: "human-editor", licenseNote: "Human-selected replacement; usage rights require manual verification before publishing." },
+        }],
+      }),
+      publishers: [],
+    });
+
+    const readiness = await subject.readiness("run-1");
+
+    assert.equal(readiness.ready, false);
+    assert.match(readiness.checks.find((check) => check.id === "rights")?.detail ?? "", /人工替换素材.*确认版权/);
+  });
+
+  it("blocks resources that have a note but are still marked for rights review", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
+    const subject = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => completedRun,
+      loadPublishPackage: async () => ({
+        aigc: { explicitLabelChecked: true, implicitMetadataWritten: true },
+        resourceManifest: { needsReviewCount: 2 },
+        artifacts: [{
+          kind: "media_asset",
+          provenance: { licenseNote: "Asset rights require review." },
+        }],
+      }),
+      publishers: [],
+    });
+
+    const readiness = await subject.readiness("run-1");
+
+    assert.equal(readiness.ready, false);
+    assert.match(readiness.checks.find((check) => check.id === "rights")?.detail ?? "", /2 项.*待授权复核/);
+  });
+
+  it("fails closed when a legacy publish package has no artifact snapshot", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
+    const subject = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => completedRun,
+      loadPublishPackage: async () => ({
+        aigc: { explicitLabelChecked: true, implicitMetadataWritten: true },
+        resourceManifest: { needsReviewCount: 0 },
+      }),
+      publishers: [],
+    });
+
+    const readiness = await subject.readiness("run-1");
+
+    assert.equal(readiness.ready, false);
+    assert.match(readiness.checks.find((check) => check.id === "rights")?.detail ?? "", /缺少素材快照/);
+  });
+
+  it("blocks a publish package that points at an older render revision", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
+    const subject = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => completedRun,
+      loadPublishPackage: async () => ({
+        aigc: { explicitLabelChecked: true, implicitMetadataWritten: true },
+        resourceManifest: { needsReviewCount: 0 },
+        artifacts: [
+          { id: "old-video", kind: "render", provenance: { licenseNote: "Owner-generated render." } },
+          { id: "asset-1", kind: "media_asset", provenance: { licenseNote: "Provider terms recorded." } },
+        ],
+      }),
+      publishers: [],
+    });
+
+    const readiness = await subject.readiness("run-1");
+
+    assert.equal(readiness.ready, false);
+    assert.match(readiness.checks.find((check) => check.id === "video-binding")?.detail ?? "", /当前成片版本/);
   });
 
   it("dispatches ready platforms once and reuses the persisted result for the same request ID", async () => {
@@ -169,5 +259,110 @@ describe("PublishingStudio", () => {
     release();
 
     assert.deepEqual(await second, await first);
+  });
+
+  it("rejects reuse of a request ID with different platform data", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
+    const subject = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => completedRun,
+      loadPublishPackage,
+      targets: [
+        { id: "douyin", label: "抖音", mode: "export_package", status: "manual_only" },
+        { id: "kuaishou", label: "快手", mode: "export_package", status: "manual_only" },
+      ],
+    });
+    const requestId = "publish-request-bound";
+
+    await subject.publish("run-1", { ...confirmedInput(requestId), platformIds: ["douyin"] });
+
+    await assert.rejects(
+      () => subject.publish("run-1", { ...confirmedInput(requestId), platformIds: ["kuaishou"] }),
+      /已经绑定/,
+    );
+  });
+
+  it("rejects an old publish request after the approved run revision changes", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
+    let currentRun = completedRun;
+    const subject = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => currentRun,
+      loadPublishPackage,
+      targets: [{ id: "douyin", label: "抖音", mode: "export_package", status: "manual_only" }],
+    });
+    const input = { ...confirmedInput("publish-request-version-bound"), platformIds: ["douyin"] as const };
+
+    await subject.publish("run-1", input);
+    currentRun = { ...completedRun, revision: completedRun.revision + 1 };
+
+    await assert.rejects(() => subject.publish("run-1", input), /已经绑定/);
+  });
+
+  it("never replays a platform call whose prior process outcome is uncertain", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
+    const input = { ...confirmedInput("publish-request-uncertain"), platformIds: ["douyin"] as const };
+    const requestDigest = createHash("sha256").update(JSON.stringify({
+      runId: "run-1",
+      platformIds: input.platformIds,
+      confirmations: input.confirmations,
+      revision: completedRun.revision,
+      videoArtifactId: completedRun.videoArtifactId,
+      publishPackageArtifactId: completedRun.publishPackageArtifactId,
+    })).digest("hex");
+    const directory = path.join(workspaceRoot, "runs", "run-1", "publishing");
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, `${input.requestId}.journal.json`), JSON.stringify({
+      version: "video-factory/publish-journal-v1",
+      runId: "run-1",
+      requestId: input.requestId,
+      requestDigest,
+      state: "running",
+      createdAt: "2026-08-25T00:02:00.000Z",
+      deliveries: [],
+      inProgressPlatformId: "douyin",
+    }));
+    let calls = 0;
+    const subject = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => completedRun,
+      loadPublishPackage,
+      publishers: [{
+        target: { id: "douyin", label: "抖音", mode: "official_api", status: "ready" },
+        publish: async () => { calls += 1; return { externalId: "unexpected", reviewStatus: "processing" }; },
+      }],
+    });
+
+    await assert.rejects(() => subject.publish("run-1", input), /结果不确定.*不会自动重投/);
+    assert.equal(calls, 0);
+  });
+
+  it("holds the run maintenance lease for the entire external publish batch", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
+    const events: string[] = [];
+    const subject = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => completedRun,
+      loadPublishPackage,
+      withRunLease: async (runId, action) => {
+        events.push(`lease:${runId}:start`);
+        try {
+          return await action();
+        } finally {
+          events.push(`lease:${runId}:end`);
+        }
+      },
+      publishers: [{
+        target: { id: "douyin", label: "抖音", mode: "official_api", status: "ready" },
+        publish: async () => {
+          events.push("publish");
+          return { externalId: "douyin-item", reviewStatus: "processing" };
+        },
+      }],
+    });
+
+    await subject.publish("run-1", { ...confirmedInput("publish-with-lease"), platformIds: ["douyin"] });
+
+    assert.deepEqual(events, ["lease:run-1:start", "publish", "lease:run-1:end"]);
   });
 });

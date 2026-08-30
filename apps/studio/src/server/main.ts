@@ -28,6 +28,7 @@ import {
   resolveProductionPython,
 } from "./production-worker.js";
 import { PythonReviewMediaPreprocessor } from "./review-media-preprocessor.js";
+import { CodexSeriesPlanningAgent } from "./series-planning-agent.js";
 import { StudioService } from "./studio-service.js";
 import { TrendGateway } from "./trend-gateway.js";
 import { CodexTopicIdeaModel, TrendOpportunityAgent } from "./trend-opportunity-agent.js";
@@ -118,9 +119,18 @@ const service = new StudioService({
   codexAvailability: { available: codexSettings.available, reason: codexSettings.reason, taskKinds: codexSettings.taskKinds },
   zaiCodexAvailability: { available: zaiCodexSettings.available, reason: zaiCodexSettings.reason, taskKinds: zaiCodexSettings.taskKinds },
   ...(codexClient ? {
+    seriesPlanningAgent: new CodexSeriesPlanningAgent(
+      codexClient,
+      3,
+      path.join(workspaceRoot, "checkpoints", "series-showrunner"),
+    ),
     trendAgent: new TrendOpportunityAgent({
       signals: new TrendGateway({ environment: process.env }),
-      model: new CodexTopicIdeaModel(codexClient),
+      model: new CodexTopicIdeaModel(
+        codexClient,
+        3,
+        path.join(workspaceRoot, "checkpoints", "topic-editor"),
+      ),
       strategy: async () => (await creatorSettings.get()).topicStrategy,
     }),
   } : {}),

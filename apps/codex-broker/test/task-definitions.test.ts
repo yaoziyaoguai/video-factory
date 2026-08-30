@@ -60,21 +60,25 @@ describe("broker-owned task definitions", () => {
     assert.equal(CODEX_BRIDGE_PROTOCOL_VERSION, "video-factory/codex-bridge-v2");
     assert.deepEqual(BROKER_TASK_KINDS, [
       "topic-ideas",
+      "series-roadmap",
       "director-plan",
       "script-draft",
       "publish-copy",
       "asset-rank",
       "reference-grammar",
       "visual-review",
+      "role-audit",
     ]);
 
     assert.match(taskPromptFor("topic-ideas").directive, /中文短视频选题总编/);
+    assert.match(taskPromptFor("series-roadmap").directive, /系列总编兼 showrunner/);
     assert.match(taskPromptFor("director-plan").directive, /导演不是素材配方/);
     assert.match(taskPromptFor("script-draft").directive, /短视频平台的创意编剧/);
     assert.match(taskPromptFor("publish-copy", "douyin").directive, /抖音/);
     assert.match(taskPromptFor("asset-rank").directive, /语义选片师/);
     assert.match(taskPromptFor("reference-grammar").directive, /参考视频分析师/);
     assert.match(taskPromptFor("visual-review").directive, /视觉审片/);
+    assert.match(taskPromptFor("role-audit").directive, /独立于生产角色的红队审计 Agent/);
     assert.match(
       taskPromptFor("visual-review").outputRules.join("\n"),
       /version 必须固定为 video-factory\/visual-review-v1/,
@@ -95,7 +99,7 @@ describe("broker-owned task definitions", () => {
     assert.equal(topic.version, "video-factory/topic-editor-v2");
     assert.equal(script.version, "video-factory/screenwriter-v4");
     assert.equal(director.version, "video-factory/director-v6");
-    assert.equal(review.version, "video-factory/visual-review-v3");
+    assert.equal(review.version, "video-factory/visual-review-v4");
     assert.match(topic.directive, /值得做视频/);
     assert.match(script.directive, /观众承诺/);
     assert.match(script.directive, /5 到 24/);
@@ -112,6 +116,10 @@ describe("broker-owned task definitions", () => {
     assert.match(director.directive, /onScreenText.*soundCue/);
     assert.match(review.directive, /脚本.*导演意图/);
     assert.match(review.directive, /逐场核对/);
+    assert.match(review.directive, /scene_triplets.*opening.*middle.*closing/);
+    assert.match(review.directive, /hook_and_scene_midpoints.*scene_change_keyframes/);
+    assert.match(review.directive, /稀疏证据/);
+    assert.match(review.directive, /不得仅因此自动给出 revise/);
     assert.ok(script.examples.some((example) => /反例/.test(example)));
     assert.ok(director.examples.some((example) => /\[0s-2s\]/.test(example)));
   });
@@ -119,12 +127,14 @@ describe("broker-owned task definitions", () => {
   it("owns a strict output schema for every allowed task kind", () => {
     const requiredByKind = new Map([
       ["topic-ideas", ["ideas"]],
+      ["series-roadmap", ["episodes"]],
       ["director-plan", ["version", "requestedProfileId", "resolvedProfileId", "profileRationale", "visualBible", "shots"]],
       ["script-draft", ["viewerPromise", "narrativeArc", "scenes"]],
       ["publish-copy", ["title", "description", "hashtags"]],
       ["asset-rank", ["version", "source", "providerId", "modelId", "summary", "scenes"]],
       ["reference-grammar", ["version", "summary", "durationMs", "pacing", "composition", "camera", "color", "transitions", "sound", "beats", "reusableRules", "avoidCopying", "confidence"]],
       ["visual-review", ["version", "summary", "scores", "findings", "confidence", "recommendation"]],
+      ["role-audit", ["version", "verdict", "score", "summary", "issues", "repairInstructions"]],
     ] as const);
 
     for (const kind of BROKER_TASK_KINDS) {
@@ -264,5 +274,21 @@ describe("broker-owned task definitions", () => {
     assert.equal(typeof outputValidationErrorFor("topic-ideas", {
       ideas: [{ ...valid.ideas[0], monetization: 101 }],
     }), "string");
+  });
+
+  it("requires a contiguous, strictly structured series roadmap", () => {
+    const episode = {
+      episodeNumber: 3,
+      pillar: "真实实验",
+      title: "验证一个真实任务",
+      viewerPromise: "得到一个可执行结论",
+      hook: "先看真实结果。",
+      payoff: "完成实验并给出结论。",
+      fromPrevious: ["承接已定版结论"],
+      toNext: ["留下成本问题"],
+    };
+    assert.equal(outputValidationErrorFor("series-roadmap", { episodes: [episode, { ...episode, episodeNumber: 4, title: "核算成本" }] }), undefined);
+    assert.match(outputValidationErrorFor("series-roadmap", { episodes: [episode, { ...episode, episodeNumber: 5, title: "核算成本" }] }) ?? "", /contiguous/);
+    assert.equal(typeof outputValidationErrorFor("series-roadmap", { episodes: [{ ...episode, canon: "planned fact" }] }), "string");
   });
 });

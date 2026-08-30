@@ -1,4 +1,4 @@
-export { BRIEF_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION, parseBrief, parsePersistedBrief } from "./contracts.js";
+export { BRIEF_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION, parseBrief, parsePersistedBrief, parseProductionSeriesContext } from "./contracts.js";
 export type {
   ProductionBrief,
   ProductionDirectorDirection,
@@ -10,6 +10,7 @@ export type {
   ProductionMasteringPreset,
   ProductionWorkflowFeatures,
   ProductionReferenceVideo,
+  ProductionSeriesContext,
   ProductionVoiceDirection,
 } from "./contracts.js";
 export { DIRECTOR_PLAN_VERSION, VISUAL_DIRECTOR_PROFILES, validateVisualDirectorPlan } from "./visual-director.js";
@@ -32,6 +33,10 @@ export {
   CodexBridgeError,
 } from "./codex-chat.js";
 export type { CodexBridgeClientOptions, CodexTaskExecution, CodexTaskKind, CodexTaskTrace } from "./codex-chat.js";
+export type { AgentLoopTrace, AgentLoopIterationTrace, RoleAudit, RoleAuditIssue } from "./codex-chat.js";
+export { RoleAgentLoopError, runRoleAgentLoop, validateRoleAudit } from "./role-agent-loop.js";
+export { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
+export type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 export { CodexReferenceGrammarAgent, fallbackShotGrammar, validateShotGrammar } from "./reference-grammar.js";
 export type {
   CodexReferenceGrammarAgentOptions,

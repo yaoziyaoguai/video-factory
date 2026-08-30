@@ -57,6 +57,29 @@ describe("CostStudio", () => {
     assert.equal(dashboard.totals.failedMeteredCalls, 0);
   });
 
+  it("counts every producer and auditor call in an agent loop", async () => {
+    const studio = new CostStudio(async () => ([{
+      id: "run-agent-loop",
+      executionReceipts: [{
+        id: "script-loop",
+        nodeId: "script",
+        providerId: "openai-codex",
+        modelId: "gpt-5.6-sol",
+        billing: "subscription",
+        status: "succeeded",
+        startedAt: "2026-08-27T11:00:00.000Z",
+        parameters: { agentLoopIterations: 3, modelCallCount: 6 },
+      }],
+      spendAuthorizations: [],
+    }]));
+
+    const detail = await studio.runDetail("run-agent-loop");
+
+    assert.equal(detail?.totals.subscriptionCalls, 6);
+    assert.equal(detail?.lines[0]?.subscriptionCallCount, 6);
+    assert.equal((await studio.dashboard()).byProvider[0]?.calls, 6);
+  });
+
   it("infers legacy metered attempts only from accepted-request evidence", async () => {
     const studio = new CostStudio(async () => ([{
       id: "run-legacy-evidence",

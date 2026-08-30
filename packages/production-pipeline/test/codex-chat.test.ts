@@ -82,10 +82,11 @@ describe("CodexBridgeClient", () => {
       assert.equal(bridge.requests[0]?.url, "/v1/tasks");
       assert.deepEqual(
         Object.keys(bridge.requests[0]!.body).sort(),
-        ["kind", "payload", "protocolVersion"],
+        ["kind", "payload", "protocolVersion", "requestId"],
       );
       assert.equal(bridge.requests[0]?.body.protocolVersion, CODEX_BRIDGE_PROTOCOL_VERSION);
       assert.equal(bridge.requests[0]?.body.kind, "director-plan");
+      assert.equal(typeof bridge.requests[0]?.body.requestId, "string");
       assert.deepEqual(bridge.requests[0]?.body.payload, { scenes: [{ position: 1 }] });
     } finally {
       await bridge.close();

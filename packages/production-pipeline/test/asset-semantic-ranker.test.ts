@@ -4,6 +4,8 @@ import {
   CodexAssetSemanticRanker,
   deterministicAssetRanking,
   parseAssetCandidateReport,
+  type CodexTaskExecution,
+  type CodexTaskKind,
   validateAssetSemanticRanking,
 } from "../src/index.js";
 
@@ -21,6 +23,55 @@ const rawReport = {
 };
 
 describe("asset semantic ranking", () => {
+  it("repairs a semantic ranking after independent contract audit", async () => {
+    const report = parseAssetCandidateReport(rawReport);
+    const calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
+    let rankAttempt = 0;
+    const client = {
+      runTask: async () => deterministicAssetRanking(report),
+      runTaskDetailed: async (kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> => {
+        calls.push({ kind, payload });
+        if (kind === "asset-rank") {
+          rankAttempt += 1;
+          const ranking = deterministicAssetRanking(report);
+          ranking.source = "model";
+          ranking.providerId = "codex-asset-ranker-v1";
+          ranking.modelId = "codex-default";
+          ranking.scenes[0]!.candidates[0]!.rationale = rankAttempt === 1
+            ? "这个素材 ID 看起来更合适。"
+            : "缩略图显示蒸汽动作清楚，且竖屏主体完整。";
+          return { output: ranking };
+        }
+        return { output: {
+          version: "video-factory/role-audit-v1",
+          verdict: rankAttempt === 1 ? "repair" : "pass",
+          score: rankAttempt === 1 ? 55 : 90,
+          summary: rankAttempt === 1 ? "首选理由依赖素材 ID 臆测。" : "排序理由诚实反映证据边界。",
+          issues: rankAttempt === 1 ? [{
+            severity: "blocking",
+            criterion: "不得根据素材 ID 臆测",
+            evidence: "理由写明‘素材 ID 看起来更合适’。",
+            repairInstruction: "删除 ID 推断并明确缩略图证据缺失。",
+          }] : [],
+          repairInstructions: rankAttempt === 1 ? ["按可见证据重写理由。"] : [],
+        } };
+      },
+    };
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x00, 0xff, 0xd9]);
+    const ranker = new CodexAssetSemanticRanker({ client, fetchThumbnail: async () => jpeg, maxReviewIterations: 2 });
+
+    const execution = await ranker.rankDetailed(report);
+
+    assert.equal(execution.agentLoop?.iterations.length, 2);
+    assert.match(execution.output.scenes[0]!.candidates[0]!.rationale, /缩略图/);
+    assert.deepEqual(calls.map((call) => call.kind), ["asset-rank", "role-audit", "asset-rank", "role-audit"]);
+    assert.equal("revision" in (calls[2]!.payload as Record<string, unknown>), true);
+    const auditImages = (calls[1]!.payload as { images: Array<Record<string, unknown>> }).images;
+    assert.equal(auditImages.length, 2);
+    assert.deepEqual(auditImages.map((image) => [image.imageIndex, image.provider, image.assetId]), [[1, "pexels", "first"], [2, "pixabay", "second"]]);
+    assert.equal(typeof auditImages[0]?.jpegBase64, "string");
+  });
+
   it("parses bounded public candidate metadata and never requires download URLs", () => {
     const report = parseAssetCandidateReport(rawReport);
     assert.equal(report.scenes[0]?.candidates[0]?.assetId, "first");

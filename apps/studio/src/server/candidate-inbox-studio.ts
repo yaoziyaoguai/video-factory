@@ -61,16 +61,27 @@ export class CandidateInboxStudio {
     return { items: filtered.slice(0, limit), facets, generatedAt: this.now().toISOString() };
   }
 
-  async adopt(candidateId: string, adoptionInput: StudioCandidateAdoptionInput = {}): Promise<StudioOpportunity> {
-    const origins = candidateId.startsWith("series-") ? ["series" as const] : ["trend" as const];
-    const candidate = (await this.list({ origins, limit: 200 })).items.find((item) => item.id === candidateId)
-      ?? (origins[0] === "trend" ? this.recentTrendCandidate(candidateId) : undefined);
+  async adopt(candidateId: string, adoptionInput: StudioCandidateAdoptionInput): Promise<StudioOpportunity> {
+    const requestedOrigins = [adoptionInput.origin];
+    const matches = (await this.list({ origins: requestedOrigins, limit: 200 })).items.filter((item) => item.id === candidateId);
+    const rememberedTrend = requestedOrigins.includes("trend") ? this.recentTrendCandidate(candidateId) : undefined;
+    const candidates = rememberedTrend && !matches.some((item) => item.origin === "trend")
+      ? [...matches, rememberedTrend]
+      : matches;
+    if (candidates.length > 1) throw new StudioConflictError("候选编号同时出现在多个入口，请从原入口重新采用。");
+    const candidate = candidates[0];
     if (!candidate) throw new StudioNotFoundError("这条候选已被采用或已经失效，请刷新候选收件箱。");
+    if (candidate.origin !== adoptionInput.origin) {
+      throw new StudioConflictError("候选来源与当前创作入口不一致，请刷新后重试。");
+    }
     if (candidate.verification.status === "blocked") {
       throw new StudioConflictError(candidate.verification.reasons[0] ?? "这条候选尚未达到可采用的证据标准。");
     }
     if (candidate.editorialDecision.verdict === "skip") {
       throw new StudioConflictError(candidate.editorialDecision.reasons[0] ?? "这条候选当前不值得进入生产。");
+    }
+    if (candidate.seriesSequence?.status === "blocked") {
+      throw new StudioConflictError(`请先完成第 ${candidate.seriesSequence.blockedByEpisodeNumber} 集，再推进当前单集。`);
     }
     if (candidate.verification.status === "review_required" && !adoptionInput.verificationConfirmed) {
       throw new StudioConflictError("请先查看原始证据并确认核验，再采用这条候选。");
@@ -97,11 +108,15 @@ export class CandidateInboxStudio {
       ...(candidate.seriesName ? { seriesName: candidate.seriesName } : {}),
       ...(candidate.episodeNumber ? { episodeNumber: candidate.episodeNumber } : {}),
     };
-    const opportunity = await this.options.opportunities.create(input);
-    this.recentTrendCandidates.delete(candidateId);
     if (candidate.origin === "series" && candidate.seriesId && candidate.episodeNumber) {
       await this.options.series.advanceEpisode(candidate.seriesId, candidate.episodeNumber);
     }
+    const existing = (await this.options.opportunities.list()).find((item) => item.id === candidate.id);
+    if (existing && existing.origin !== candidate.origin) {
+      throw new StudioConflictError("候选编号已被另一个创作入口使用，请刷新后重新选择。");
+    }
+    const opportunity = existing ?? await this.options.opportunities.create(input);
+    this.recentTrendCandidates.delete(candidateId);
     return opportunity;
   }
 

@@ -51,10 +51,14 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
     return { versionId, label: inputOwner ? `${owner?.label ?? "节点"}输入` : owner?.label ?? "上游交付", role: owner?.role ?? "生产角色", source };
   }) ?? [], [node.spendPlan?.inputVersionIds, nodes]);
   const hasStructuredOutput = node.output !== undefined || effectiveOutput(node) !== undefined;
-  const canEdit = (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
-  const canEditInput = effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
+  const readOnlyReview = READ_ONLY_REVIEW_NODE_IDS.has(node.id);
+  const canEdit = !readOnlyReview && (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
+  const canEditInput = !readOnlyReview && effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
-  const capability = useMemo(() => creatorCapabilityLabel(execution, node.spendPlan), [execution, node.spendPlan]);
+  const fallbackReason = useMemo(() => agentFallbackReason(execution), [execution]);
+  const capability = useMemo(() => fallbackReason
+    ? `审计失败，已规则回退 · ${fallbackReason}`
+    : creatorCapabilityLabel(execution, node.spendPlan), [execution, fallbackReason, node.spendPlan]);
   const assetProviderIds = useMemo(() => configuredAssetProviderIds(nodes), [nodes]);
   const deliveryValue = documentPreview ?? node.output ?? effectiveOutput(node);
   const hasDelivery = hasCreatorDocumentContent(node.id, deliveryValue);
@@ -169,6 +173,7 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
         <ChevronDown className="node-workspace-chevron" aria-hidden="true" size={17} />
       </summary>
       <div className="node-workspace-body">
+        {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>审计失败，已规则回退</strong>：{fallbackReason}</span></p> : null}
         {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />此节点结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成。</p> : null}
 
         {node.spendPlan ? (
@@ -181,7 +186,7 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
         ) : null}
 
         <section className="node-output-preview node-creator-delivery">
-          <header><div><strong>{node.role ?? "生产角色"}的交付</strong><small>{effectiveVersion?.source === "human" ? "已采用你的修改" : hasDelivery ? "自动生成，可按需修改" : node.status === "pending" ? "等待上游完成" : "本节点没有需要人工阅读的内容"}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
+          <header><div><strong>{node.role ?? "生产角色"}的交付</strong><small>{readOnlyReview ? "技术结果只读；需要调整时请修改上游内容后重跑" : effectiveVersion?.source === "human" ? "已采用你的修改" : hasDelivery ? "自动生成，可按需修改" : node.status === "pending" ? "等待上游完成" : "本节点没有需要人工阅读的内容"}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
           {editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} onChange={(value) => setDraft(pretty(value))} /> : documentLoading ? <p className="node-document-state">正在读取结构化交付...</p> : documentError ? <p className="node-workspace-error" role="alert">结构化交付读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
           {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => setEditing(false)}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
         </section>
@@ -262,6 +267,8 @@ const EDITABLE_ARTIFACT_KIND: Record<string, string> = {
   "publish-package": "publish_package",
 };
 
+const READ_ONLY_REVIEW_NODE_IDS = new Set(["render", "technical-review", "final-review"]);
+
 function selectEditableArtifact(nodeId: string, artifacts: StudioArtifact[], effectiveArtifactIds?: string[]): StudioArtifact | undefined {
   const kind = EDITABLE_ARTIFACT_KIND[nodeId];
   if (!kind) return undefined;
@@ -322,5 +329,24 @@ function creatorCapabilityLabel(
   const providerId = execution?.providerId ?? spendPlan?.providerId;
   const modelId = execution?.modelId ?? spendPlan?.modelId;
   if (!providerId || !modelId || providerId.startsWith("inline:") || modelId === "inline") return undefined;
-  return `本次使用 ${providerLabel(providerId) ?? execution?.providerLabel ?? providerId} · ${modelId}`;
+  const reasoningEffort = execution?.parameters?.reasoningEffort;
+  const loopIterations = execution?.parameters?.agentLoopIterations;
+  const auditEffort = execution?.parameters?.auditReasoningEffort;
+  return [
+    `本次使用 ${providerLabel(providerId) ?? execution?.providerLabel ?? providerId} · ${modelId}`,
+    typeof reasoningEffort === "string" ? `推理 ${reasoningEffort}` : undefined,
+    typeof loopIterations === "number" ? `生产 Agent → 独立审计 Agent · ${loopIterations}/3 轮` : undefined,
+    typeof auditEffort === "string" ? `审计推理 ${auditEffort}` : undefined,
+  ].filter(Boolean).join(" · ");
+}
+
+function agentFallbackReason(
+  execution: StudioNode["executionReceipt"] | StudioNode["plannedExecution"] | undefined,
+): string | undefined {
+  const parameterReason = execution?.parameters?.fallbackReason;
+  const receiptReason = execution?.fallbackReason;
+  const reason = typeof parameterReason === "string" ? parameterReason : receiptReason;
+  if (typeof reason !== "string" || !reason.trim()) return undefined;
+  if (execution?.parameters?.agentLoop !== "failed" && receiptReason === undefined) return undefined;
+  return reason.trim();
 }

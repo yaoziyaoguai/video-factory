@@ -516,7 +516,7 @@ describe("WorkflowRunner", () => {
     assert.match(failed.nodeRuns[0]?.error ?? "", /provider unavailable/);
   });
 
-  it("retries only the failed node and requires a fresh authorization for metered work", async () => {
+  it("fails closed after an authorized metered call has an uncertain outcome", async () => {
     let calls = 0;
     const registry = new ProviderRegistry();
     registry.register({
@@ -531,8 +531,7 @@ describe("WorkflowRunner", () => {
       maxAttempts: 1,
       run: () => {
         calls += 1;
-        if (calls === 1) throw new Error("connection reset");
-        return { audio: "voice.mp3" };
+        throw new Error("connection reset");
       },
     });
     const definition: WorkflowDefinition = {
@@ -557,27 +556,69 @@ describe("WorkflowRunner", () => {
       maxAttempts: firstPlan.maxAttempts,
       approvedBy: "producer",
     });
-
-    const retried = await runner.retryFailedNode(definition, failed, "voice");
-    const secondPlan = retried.nodeRuns.find((node) => node.nodeId === "voice")?.spendPlan;
-    assert.equal(retried.status, "awaiting_spend_approval");
-    assert.equal(retried.nodeRuns.find((node) => node.nodeId === "script")?.outputState?.versions.length, 1);
-    assert.equal(retried.executionReceipts?.filter((receipt) => receipt.nodeId === "voice").length, 1);
+    const failedNode = failed.nodeRuns.find((node) => node.nodeId === "voice");
+    assert.equal(failedNode?.outcomeUncertain, true);
+    assert.ok(failedNode?.operationRequestId);
+    await assert.rejects(() => runner.retryFailedNode(definition, failed, "voice"), /uncertain paid-provider outcome/);
+    await assert.rejects(() => runner.retryFailedNode(definition, failed, "voice"), /uncertain paid-provider outcome/);
+    const staleAfterUpstreamEdit = {
+      ...failed,
+      status: "stale" as const,
+      nodeRuns: failed.nodeRuns.map((nodeRun) => nodeRun.nodeId === "voice"
+        ? { ...nodeRun, status: "stale" as const }
+        : nodeRun),
+    };
+    await assert.rejects(() => runner.resumeStale(definition, staleAfterUpstreamEdit), /uncertain paid-provider outcome/);
     assert.equal(calls, 1);
-    assert.ok(secondPlan);
+  });
 
-    const completed = await runner.authorizeSpend(definition, retried, {
-      nodeId: secondPlan.nodeId,
-      inputVersionIds: secondPlan.inputVersionIds,
-      providerId: secondPlan.providerId,
-      modelId: secondPlan.modelId,
-      maxCostCny: secondPlan.maxCostCny,
-      maxAttempts: secondPlan.maxAttempts,
-      approvedBy: "producer",
+  it("reuses the persisted external operation id when retrying an interrupted node", async () => {
+    const observed: Array<string | undefined> = [];
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "idempotent-provider",
+      capability: "voice.synthesize",
+      run: (_input, context) => {
+        observed.push(context.operationRequestId);
+        return { audio: "voice.mp3" };
+      },
     });
-    assert.equal(completed.status, "succeeded");
-    assert.equal(calls, 2);
-    assert.equal(completed.executionReceipts?.filter((receipt) => receipt.nodeId === "voice").length, 2);
+    const definition: WorkflowDefinition = {
+      id: "retry-interrupted-node",
+      name: "Retry interrupted node",
+      version: "1.0.0",
+      nodes: [{ id: "voice", label: "Voice", capability: "voice.synthesize", providerId: "idempotent-provider", mode: "automatic" }],
+    };
+    const interrupted = {
+      id: "run-interrupted",
+      revision: 1,
+      workflowId: definition.id,
+      workflowVersion: definition.version,
+      status: "failed" as const,
+      initialInput: {},
+      startedAt: "2026-08-30T00:00:00.000Z",
+      finishedAt: "2026-08-30T00:01:00.000Z",
+      nodeRuns: [{
+        nodeId: "voice",
+        status: "failed" as const,
+        startedAt: "2026-08-30T00:00:00.000Z",
+        finishedAt: "2026-08-30T00:01:00.000Z",
+        operationRequestId: "persisted-operation-id",
+        interrupted: true,
+        artifactIds: [],
+        qualityGateResults: [],
+        error: "interrupted",
+      }],
+      artifacts: [],
+      interventions: [],
+      decisions: [],
+    };
+
+    const retried = await new WorkflowRunner({ providers: registry }).retryFailedNode(definition, interrupted, "voice");
+
+    assert.equal(retried.status, "succeeded");
+    assert.deepEqual(observed, ["persisted-operation-id"]);
+    assert.equal(retried.nodeRuns[0]?.interrupted, undefined);
   });
 
   it("records actual cost and fails the node when reported spending exceeds authorization", async () => {
@@ -1084,6 +1125,87 @@ describe("WorkflowRunner", () => {
     ]);
     assert.equal(regenerated.nodeRuns.find((node) => node.nodeId === "unrelated")?.outputState?.versions.length, 1);
     assert.equal(regenerated.executionReceipts?.length, 8);
+  });
+
+  it("cannot mark a run succeeded by overriding one leaf while another node is stale", async () => {
+    const definition: WorkflowDefinition = {
+      id: "independent-stale-leaf",
+      name: "Independent stale leaf",
+      version: "1.0.0",
+      nodes: [{
+        id: "left",
+        label: "Left",
+        capability: "left",
+        mode: "automatic",
+        getInput: () => ({ value: "left" }),
+        execute: (input) => ({ output: input }),
+      }, {
+        id: "right",
+        label: "Right",
+        capability: "right",
+        mode: "automatic",
+        getInput: () => ({ value: "right" }),
+        execute: (input) => ({ output: input }),
+      }],
+    };
+    const runner = new WorkflowRunner();
+    const generated = await runner.run(definition, {});
+    const oneStale = runner.applyNodeInputOverride(definition, generated, {
+      nodeId: "right",
+      actor: "editor",
+      input: { value: "human right" },
+      allowTerminalEdit: true,
+    });
+    const stillStale = runner.applyNodeOverride(definition, oneStale, {
+      nodeId: "left",
+      actor: "editor",
+      output: { value: "human left" },
+    });
+
+    assert.equal(stillStale.status, "stale");
+    assert.equal(stillStale.nodeRuns.find((node) => node.nodeId === "right")?.status, "stale");
+  });
+
+  it("requires explicit review before replacing a stale human output", async () => {
+    const definition: WorkflowDefinition = {
+      id: "stale-human-output",
+      name: "Stale human output",
+      version: "1.0.0",
+      nodes: [{
+        id: "source",
+        label: "Source",
+        capability: "source",
+        mode: "automatic",
+        execute: () => ({ output: { value: "one" } }),
+      }, {
+        id: "script",
+        label: "Script",
+        capability: "script",
+        mode: "automatic",
+        dependsOn: ["source"],
+        getInput: (context) => context.outputs.get("source"),
+        execute: (input) => ({ output: input }),
+      }],
+    };
+    const runner = new WorkflowRunner();
+    const generated = await runner.run(definition, {});
+    const humanScript = runner.applyNodeOverride(definition, generated, {
+      nodeId: "script",
+      actor: "editor",
+      output: { value: "human script" },
+      allowTerminalEdit: true,
+    });
+    const sourceChanged = runner.applyNodeOverride(definition, humanScript, {
+      nodeId: "source",
+      actor: "editor",
+      output: { value: "two" },
+      allowTerminalEdit: true,
+    });
+
+    await assert.rejects(
+      () => runner.resumeStale(definition, sourceChanged),
+      /stale human output.*reviewed.*discarded/i,
+    );
   });
 
   it("persists node inputs as versions and reruns from the effective human input", async () => {

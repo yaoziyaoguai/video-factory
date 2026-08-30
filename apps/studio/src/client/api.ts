@@ -25,6 +25,7 @@ import type {
   StudioRunSummary,
   StudioSeries,
   StudioSeriesInput,
+  StudioSeriesEpisodePlanInput,
   StudioTrendSource,
   StudioTrendService,
   StudioTrendSignal,
@@ -92,7 +93,7 @@ export const studioApi = {
     const suffix = query.size > 0 ? `?${query}` : "";
     return requestJson<StudioCandidateInbox>(`/api/candidate-inbox${suffix}`);
   },
-  adoptCandidate: (candidateId: string, input: StudioCandidateAdoptionInput = {}) => requestJson<StudioOpportunity>(
+  adoptCandidate: (candidateId: string, input: StudioCandidateAdoptionInput) => requestJson<StudioOpportunity>(
     `/api/candidate-inbox/${encodeURIComponent(candidateId)}/adopt`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
@@ -102,7 +103,15 @@ export const studioApi = {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   }),
-  opportunities: () => requestJson<StudioOpportunity[]>("/api/opportunities"),
+  updateSeriesEpisodePlan: (seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput) => requestJson<StudioSeries>(
+    `/api/series/${encodeURIComponent(seriesId)}/episodes/${episodeNumber}`,
+    { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  linkLegacySeriesRun: (seriesId: string, episodeNumber: number, runId: string) => requestJson<StudioSeries>(
+    `/api/series/${encodeURIComponent(seriesId)}/episodes/${episodeNumber}/legacy-run`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runId }) },
+  ),
+  opportunities: (origin?: "trend" | "series" | "manual") => requestJson<StudioOpportunity[]>(scopedCollectionPath("/api/opportunities", origin)),
   createOpportunity: (input: StudioOpportunityInput) => requestJson<StudioOpportunity>("/api/opportunities", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -148,7 +157,17 @@ export const studioApi = {
       body: JSON.stringify({ expectedRevision }),
     },
   ),
-  runs: () => requestJson<StudioRunSummary[]>("/api/runs"),
+  runs: (origin?: "trend" | "series" | "manual") => requestJson<StudioRunSummary[]>(scopedCollectionPath("/api/runs", origin)),
+  archiveRuns: (runIds: string[]) => requestEmpty("/api/runs/archive", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ runIds }),
+  }),
+  restoreRuns: (runIds: string[]) => requestEmpty("/api/runs/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ runIds }),
+  }),
   deleteRun: (runId: string) => requestEmpty(`/api/runs/${encodeURIComponent(runId)}`, { method: "DELETE" }),
   costs: () => requestJson<StudioCostDashboard>("/api/costs"),
   runCosts: (runId: string) => requestJson<StudioCostRunDetail>(`/api/runs/${encodeURIComponent(runId)}/costs`),
@@ -245,6 +264,10 @@ export function subscribeToRun(
   events.addEventListener("run", receive as EventListener);
   if (onDisconnect) events.addEventListener("error", onDisconnect);
   return () => events.close();
+}
+
+function scopedCollectionPath(base: string, origin?: "trend" | "series" | "manual"): string {
+  return origin ? `${base}?origin=${encodeURIComponent(origin)}` : base;
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {

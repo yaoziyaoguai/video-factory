@@ -2,35 +2,44 @@ import {
   AlertCircle,
   ArrowRight,
   BookOpenText,
+  CheckCircle2,
+  Clapperboard,
   Clock3,
   FileInput,
   LibraryBig,
+  LockKeyhole,
   PenLine,
+  PencilLine,
   Plus,
   RadioTower,
   RefreshCw,
   ShieldAlert,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   StudioCandidateInbox,
   StudioCandidateInboxItem,
   StudioCandidateOrigin,
   StudioEditorialVerdict,
+  StudioRunSummary,
   StudioSeries,
+  StudioSeriesEpisodePlanInput,
   StudioTopicCategory,
 } from "../../shared/api.js";
 import { platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
 import { CandidateVerificationDialog } from "./CandidateVerificationDialog.js";
+import { SeriesEpisodeDialog } from "./SeriesEpisodeDialog.js";
 
 type EntryMode = StudioCandidateOrigin | "custom";
 
 interface TopicEntryWorkspaceProps {
   initialMode?: EntryMode;
   initialSelectedId?: string;
+  selectedSeriesId: string | undefined;
   inbox?: StudioCandidateInbox;
   series: StudioSeries[];
+  historicalRuns: StudioRunSummary[];
   loading: Partial<Record<StudioCandidateOrigin, boolean>>;
   error?: Partial<Record<StudioCandidateOrigin, string>>;
   adoptingId?: string;
@@ -39,6 +48,11 @@ interface TopicEntryWorkspaceProps {
   onRefreshTrends: () => void;
   onAdopt: (candidate: StudioCandidateInboxItem, verificationConfirmed?: boolean) => Promise<void>;
   onCreateSeries: () => void;
+  onSelectSeries: (seriesId: string) => void;
+  onUpdateSeriesEpisode: (seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput) => Promise<void>;
+  onLinkLegacyRun: (seriesId: string, episodeNumber: number, runId: string) => Promise<void>;
+  onRescanSeries: () => Promise<void>;
+  onViewProductionRecords: () => void;
   onManual: () => void;
   onImport: () => void;
 }
@@ -51,12 +65,11 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const [platform, setPlatform] = useState("all");
   const [verdict, setVerdict] = useState<StudioEditorialVerdict | "all">("all");
   const [selectedId, setSelectedId] = useState(props.initialSelectedId ?? "");
-  const [selectedSeriesId, setSelectedSeriesId] = useState<string>();
   const [verificationCandidate, setVerificationCandidate] = useState<StudioCandidateInboxItem>();
 
   const modeItems = useMemo(() => (props.inbox?.items ?? []).filter((item) => item.origin === mode), [mode, props.inbox]);
-  const seriesItems = mode === "series" && selectedSeriesId
-    ? modeItems.filter((item) => item.seriesId === selectedSeriesId)
+  const seriesItems = mode === "series" && props.selectedSeriesId
+    ? modeItems.filter((item) => item.seriesId === props.selectedSeriesId)
     : modeItems;
   const categoryCounts = countCategories(seriesItems);
   const verdictCounts = countVerdicts(seriesItems);
@@ -66,6 +79,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
     .filter((item) => platform === "all" || item.platform === platform)
     .filter((item) => verdict === "all" || item.editorialDecision.verdict === verdict);
   const selected = visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0];
+  const selectedSeries = props.series.find((item) => item.id === props.selectedSeriesId) ?? props.series[0];
   const candidateMode = mode === "trend" || mode === "series" ? mode : "trend";
   const modeLoading = props.loading[candidateMode] === true;
   const modeError = props.error?.[candidateMode];
@@ -83,18 +97,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
     setPlatform("all");
     setVerdict("all");
     setSelectedId(props.initialSelectedId ?? "");
-  }, [mode, props.initialSelectedId, selectedSeriesId]);
-
-  useEffect(() => {
-    const initialSeriesId = props.initialSelectedId
-      ? props.inbox?.items.find((item) => item.id === props.initialSelectedId)?.seriesId
-      : undefined;
-    if (!selectedSeriesId && initialSeriesId) setSelectedSeriesId(initialSeriesId);
-    else if (!selectedSeriesId && props.series[0]) setSelectedSeriesId(props.series[0].id);
-    if (selectedSeriesId && !props.series.some((item) => item.id === selectedSeriesId)) {
-      setSelectedSeriesId(props.series[0]?.id);
-    }
-  }, [props.inbox?.items, props.initialSelectedId, props.series, selectedSeriesId]);
+  }, [mode, props.initialSelectedId, props.selectedSeriesId]);
 
   return (
     <section className="topic-entry-workspace" data-tour="topic-inbox" aria-label={mode === "trend" ? "热点选题" : mode === "series" ? "系列选题" : "自定义创作"}>
@@ -114,7 +117,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
               </div>
             ) : mode === "series" ? (
               <div className="series-controls">
-                {props.series.length > 0 ? <label><span>当前系列</span><select aria-label="选择系列" value={selectedSeriesId ?? ""} onChange={(event) => setSelectedSeriesId(event.target.value)}>{props.series.map((item) => <option key={item.id} value={item.id}>{item.name} · 下一集 {String(item.nextEpisodeNumber).padStart(2, "0")}</option>)}</select></label> : null}
+                {props.series.length > 0 ? <label><span>当前系列</span><select aria-label="选择系列" value={props.selectedSeriesId ?? ""} onChange={(event) => props.onSelectSeries(event.target.value)}>{props.series.map((item) => <option key={item.id} value={item.id}>{item.name} · 下一集 {String(item.nextEpisodeNumber).padStart(2, "0")}</option>)}</select></label> : null}
                 <button className="button button-secondary" type="button" onClick={props.onCreateSeries}><Plus aria-hidden="true" size={16} />新建系列</button>
               </div>
             ) : null}
@@ -129,6 +132,20 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             <div className="series-empty"><LibraryBig aria-hidden="true" size={28} /><div><h3>先创建一个可持续的系列</h3><p>定义受众、栏目承诺和内容支柱后，系统会给出连续编号的下一集候选。</p></div><button className="button button-primary" type="button" onClick={props.onCreateSeries}>创建第一个系列</button></div>
           ) : mode === "trend" && modeItems.length === 0 ? (
             <div className="series-empty"><RadioTower aria-hidden="true" size={28} /><div><h3>趋势源尚未配置</h3><p>连接趋势采集器，或先录入你已经确认来源的研究结果。</p></div><button className="button button-primary" type="button" onClick={props.onManual}>手动录入</button><button className="button button-secondary" type="button" onClick={props.onImport}>导入 JSON</button></div>
+          ) : mode === "series" && selectedSeries ? (
+            <SeriesRoadmap
+              series={selectedSeries}
+              candidates={seriesItems}
+              historicalRuns={props.historicalRuns}
+              selectedId={selectedId}
+              {...(props.adoptingId ? { adoptingId: props.adoptingId } : {})}
+              onSelect={setSelectedId}
+              onAdopt={adopt}
+              onUpdate={props.onUpdateSeriesEpisode}
+              onLinkLegacyRun={props.onLinkLegacyRun}
+              onRescan={props.onRescanSeries}
+              onViewProductionRecords={props.onViewProductionRecords}
+            />
           ) : (
             <>
               <div className="candidate-filters" aria-label="候选筛选">
@@ -176,6 +193,245 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
       />
     </section>
   );
+}
+
+function SeriesRoadmap({
+  series,
+  candidates,
+  historicalRuns,
+  selectedId,
+  adoptingId,
+  onSelect,
+  onAdopt,
+  onUpdate,
+  onLinkLegacyRun,
+  onRescan,
+  onViewProductionRecords,
+}: {
+  series: StudioSeries;
+  candidates: StudioCandidateInboxItem[];
+  historicalRuns: StudioRunSummary[];
+  selectedId: string;
+  adoptingId?: string;
+  onSelect: (id: string) => void;
+  onAdopt: (candidate: StudioCandidateInboxItem) => Promise<void>;
+  onUpdate: (seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput) => Promise<void>;
+  onLinkLegacyRun: (seriesId: string, episodeNumber: number, runId: string) => Promise<void>;
+  onRescan: () => Promise<void>;
+  onViewProductionRecords: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [legacyRunId, setLegacyRunId] = useState("");
+  const [showAllLegacyRuns, setShowAllLegacyRuns] = useState(false);
+  const [legacyPending, setLegacyPending] = useState(false);
+  const [legacyError, setLegacyError] = useState<string>();
+  const detailRef = useRef<HTMLElement>(null);
+  const episodes = [...series.episodes].sort((left, right) => left.episodeNumber - right.episodeNumber);
+  const selectedEpisode = episodes.find((episode) => episode.id === selectedId) ?? episodes[0];
+  const selectedCandidate = selectedEpisode
+    ? candidates.find((candidate) => candidate.id === selectedEpisode.id)
+    : undefined;
+  const blockedBy = selectedCandidate?.seriesSequence?.blockedByEpisodeNumber;
+  const mayAdopt = selectedEpisode?.status === "planned"
+    && selectedCandidate?.seriesSequence?.status === "ready";
+  const linkedRunIds = new Set(series.episodes.flatMap((episode) => episode.runId ? [episode.runId] : []));
+  const allLegacyCandidates = historicalRuns.filter((run) => run.status === "succeeded" && !linkedRunIds.has(run.id));
+  const likelyLegacyCandidates = selectedEpisode
+    ? allLegacyCandidates.filter((run) => likelyHistoricalMatch(run, series, selectedEpisode))
+    : [];
+  const legacyCandidates = showAllLegacyRuns ? allLegacyCandidates : likelyLegacyCandidates;
+
+  function selectEpisode(episodeId: string) {
+    onSelect(episodeId);
+    if (typeof window === "undefined" || !window.matchMedia?.("(max-width: 700px)").matches) return;
+    window.requestAnimationFrame(() => detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
+
+  async function linkLegacyRun() {
+    if (!selectedEpisode || !legacyRunId) return;
+    setLegacyPending(true);
+    setLegacyError(undefined);
+    try {
+      await onLinkLegacyRun(series.id, selectedEpisode.episodeNumber, legacyRunId);
+      setLegacyRunId("");
+    } catch (error) {
+      setLegacyError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLegacyPending(false);
+    }
+  }
+
+  return (
+    <div className="series-roadmap">
+      <section className="series-season-summary" aria-label="本季策划摘要">
+          <div><span>第 {series.currentSeason.number} 季 · {seasonPlanLabel(series)}</span><strong>{series.currentSeason.title}</strong><p>{series.currentSeason.arc}</p></div>
+        <dl>
+          <div><dt>栏目承诺</dt><dd>{series.premise}</dd></div>
+          <div><dt>已定版内容</dt><dd>第 {series.canon.revision} 版 · {series.canon.facts.length} 条后续可依赖事实</dd></div>
+          <div><dt>固定规则</dt><dd>{series.bible.rules.slice(0, 2).join("；")}</dd></div>
+        </dl>
+      </section>
+
+      <div className="series-roadmap-body">
+        <ol className="series-episode-list" aria-label="本季单集路线图">
+          {episodes.map((episode) => {
+            const candidate = candidates.find((item) => item.id === episode.id);
+            const locked = candidate?.seriesSequence?.status === "blocked";
+            return (
+              <li key={episode.id}>
+                <button type="button" className={`${selectedEpisode?.id === episode.id ? "is-active" : ""}${locked ? " is-locked" : ""}`} onClick={() => selectEpisode(episode.id)}>
+                  <span className="series-episode-index">E{String(episode.episodeNumber).padStart(2, "0")}</span>
+                  <span className="series-episode-copy"><small>{episode.pillar}</small><strong>{seriesEpisodeTitle(episode)}</strong><span>{episode.viewerPromise}</span></span>
+                  <span className={`series-episode-status is-${episode.status}`}>{locked ? <LockKeyhole aria-hidden="true" size={13} /> : episode.status === "ready" || episode.status === "published" ? <CheckCircle2 aria-hidden="true" size={13} /> : <Clapperboard aria-hidden="true" size={13} />}{seriesEpisodeStatusLabel(episode, locked)}</span>
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+
+        {selectedEpisode ? (
+          <article ref={detailRef} className="series-episode-detail">
+            <header><span>第 {selectedEpisode.episodeNumber} 集 · {selectedEpisode.arc}</span><strong>{seriesEpisodeStatusLabel(selectedEpisode, Boolean(blockedBy))}</strong></header>
+            <h3>{seriesEpisodeTitle(selectedEpisode)}</h3>
+            <p className="series-viewer-promise">{selectedEpisode.viewerPromise}</p>
+            <div className="series-continuity-grid">
+              <section><span>前集定版交接</span><p>{(selectedEpisode.continuity.inheritedFromPrevious ?? []).join("；") || "暂无前集定版交接。"}</p></section>
+              <section><span>本集承接要求</span><p>{selectedEpisode.continuity.fromPrevious.join("；") || "没有额外创作约束。"}</p></section>
+              <section><span>本集兑现</span><p>{seriesEpisodePayoff(selectedEpisode)}</p></section>
+              <section><span>留给下一集</span><p>{selectedEpisode.continuity.toNext.join("；")}</p></section>
+            </div>
+            <section className="series-agent-route" aria-label="本集智能制作与审计流程">
+              <div><Sparkles aria-hidden="true" size={16} /><span><strong>路线图策划记录</strong><small>{selectedEpisode.planning.role} · {selectedEpisode.planning.auditRole}</small></span></div>
+              <dl>
+                <div><dt>生成</dt><dd>{planningSourceLabel(selectedEpisode.planning)}</dd></div>
+                <div><dt>审计</dt><dd>{planningAuditLabel(selectedEpisode.planning)}</dd></div>
+                <div><dt>推理</dt><dd>{planningReasoningLabel(selectedEpisode.planning)}</dd></div>
+              </dl>
+              {selectedEpisode.planning.auditSummary ? <p><strong>审计结论：</strong>{selectedEpisode.planning.auditSummary}{selectedEpisode.planning.auditScore !== undefined ? `（${selectedEpisode.planning.auditScore} 分）` : ""}</p> : null}
+              {selectedEpisode.planning.fallbackReason ? <p>{selectedEpisode.planning.fallbackReason}</p> : null}
+            </section>
+            {blockedBy ? <p className="series-lock-note"><LockKeyhole aria-hidden="true" size={15} />第 {blockedBy} 集尚未定版；完成审片后，本集会自动继承最新已确认内容再解锁。</p> : null}
+            {selectedEpisode.status === "planned" ? (
+              <div className="series-episode-actions">
+                <button className="button button-secondary" type="button" disabled={adoptingId !== undefined} onClick={() => setEditing(true)}><PencilLine aria-hidden="true" size={16} />编辑路线图</button>
+                <button className="button button-primary" type="button" disabled={!mayAdopt || adoptingId !== undefined} onClick={() => selectedCandidate && void onAdopt(selectedCandidate)}>{adoptingId === selectedEpisode.id ? "正在采用..." : blockedBy ? `完成第 ${blockedBy} 集后解锁` : "采用本集并进入制作"}<ArrowRight aria-hidden="true" size={16} /></button>
+              </div>
+            ) : isMigrationPendingEpisode(selectedEpisode) ? (
+              <section className="series-legacy-recovery" aria-label="恢复历史单集">
+                <p>{seriesEpisodeProgressNote(selectedEpisode)}</p>
+                <label><span>选择对应的已完成成片</span><select value={legacyRunId} onChange={(event) => setLegacyRunId(event.target.value)}><option value="">请选择历史制作记录</option>{legacyCandidates.map((run) => <option key={run.id} value={run.id}>{run.title} · {new Date(run.startedAt).toLocaleDateString("zh-CN")}</option>)}</select></label>
+                <div><button className="button button-secondary" type="button" disabled={legacyPending} onClick={() => void onRescan()}><RefreshCw aria-hidden="true" size={15} />重新扫描</button><button className="button button-ghost" type="button" onClick={onViewProductionRecords}>查看制作记录</button><button className="button button-primary" type="button" disabled={!legacyRunId || legacyPending} onClick={() => void linkLegacyRun()}>{legacyPending ? "正在关联..." : "确认关联并解锁"}</button></div>
+                {!showAllLegacyRuns && likelyLegacyCandidates.length === 0 && allLegacyCandidates.length > 0 ? <button className="series-legacy-show-all" type="button" onClick={() => setShowAllLegacyRuns(true)}>没有找到高可信匹配，显示全部已完成记录</button> : null}
+                {showAllLegacyRuns ? <small>现在显示全部已完成记录。请只选择你确认属于这一集的成片，系统不会根据标题自行猜测。</small> : null}
+                {allLegacyCandidates.length === 0 ? <small>当前没有可关联的已完成成片。可以先查看制作记录，确认旧任务是否仍在。</small> : null}
+                {legacyError ? <small className="is-error" role="alert">{legacyError}</small> : null}
+              </section>
+            ) : <p className="series-progress-note">{seriesEpisodeProgressNote(selectedEpisode)}</p>}
+            <SeriesEpisodeDialog
+              key={`${selectedEpisode.id}-${series.revision}`}
+              open={editing}
+              series={series}
+              episode={selectedEpisode}
+              onClose={() => setEditing(false)}
+              onSubmit={async (input) => {
+                await onUpdate(series.id, selectedEpisode.episodeNumber, input);
+                setEditing(false);
+              }}
+            />
+          </article>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function planningAuditLabel(planning: StudioSeries["episodes"][number]["planning"]): string {
+  if (planning.auditStatus === "passed") return `独立审计 ${planning.auditIterations}/3 轮通过`;
+  if (planning.auditStatus === "stale") return "已定版内容更新 · 采用时先重审";
+  if (planning.auditStatus === "human_override") return "人工修订 · 待后续审计";
+  return "规则保底";
+}
+
+function planningSourceLabel(planning: StudioSeries["episodes"][number]["planning"]): string {
+  if (planning.source === "human") return "人工 / 手工编辑";
+  if (planning.source === "rules") return "规则策划 / 确定性保底";
+  return `${planning.providerId} / ${planning.modelId}`;
+}
+
+function planningReasoningLabel(planning: StudioSeries["episodes"][number]["planning"]): string {
+  if (planning.source === "human") return "人工决定";
+  if (planning.source === "rules") return "固定规则";
+  return planning.reasoningEffort ?? "由 Provider 决定";
+}
+
+function seriesEpisodeStatusLabel(episode: StudioSeries["episodes"][number], locked = false): string {
+  if (locked) return "等待前集";
+  if (isMigrationPendingEpisode(episode)) return "待关联旧记录";
+  return {
+    planned: "待采用",
+    selected: "已采用",
+    in_production: "制作中",
+    ready: "已定版",
+    published: "已发布",
+    paused: "已暂停",
+  }[episode.status];
+}
+
+function seriesEpisodeProgressNote(episode: StudioSeries["episodes"][number]): string {
+  if (isMigrationPendingEpisode(episode)) return "这是迁移前采用的单集。你可以重新扫描，或人工选择对应的旧成片；确认前系统不会重复生产。";
+  return {
+    planned: "本集仍在路线图中。",
+    selected: "本集已进入制作区，可以继续确认配方并启动生产。",
+    in_production: "本集正在由各角色 Agent 生产与独立审计。",
+    ready: "本集已通过审片并成为后续可依赖的定版内容，可以推进下一集。",
+    published: "本集已经完成外部分发。",
+    paused: "本集已经暂停，不会继续进入生产。",
+  }[episode.status];
+}
+
+function seasonPlanLabel(series: StudioSeries): string {
+  const cadence = {
+    weekly: "每周 1 集",
+    biweekly: "每两周 1 集",
+    monthly: "每月 1 集",
+    flexible: "灵活更新",
+  }[series.currentSeason.releaseCadence ?? "weekly"];
+  const target = series.currentSeason.targetEpisodeCount ?? 12;
+  const completed = series.episodes.filter((episode) => episode.status === "ready" || episode.status === "published").length;
+  return `${series.currentSeason.planningPeriod ?? "本季"} · ${cadence} · ${completed}/${target} 已定版`;
+}
+
+function isMigrationPendingEpisode(episode: StudioSeries["episodes"][number]): boolean {
+  return episode.status === "paused" && !episode.runId && episode.planning.providerId === "series-store-migration-v2";
+}
+
+function seriesEpisodeTitle(episode: StudioSeries["episodes"][number]): string {
+  return isMigrationPendingEpisode(episode)
+    ? `第 ${episode.episodeNumber} 集 · 历史成片待恢复`
+    : episode.title;
+}
+
+function seriesEpisodePayoff(episode: StudioSeries["episodes"][number]): string {
+  return isMigrationPendingEpisode(episode)
+    ? "确认对应的历史成片后，恢复本集定版状态并解锁下一集。"
+    : episode.payoff;
+}
+
+function likelyHistoricalMatch(
+  run: StudioRunSummary,
+  series: StudioSeries,
+  episode: StudioSeries["episodes"][number],
+): boolean {
+  if (run.opportunityId && [episode.id, episode.opportunityId].includes(run.opportunityId)) return true;
+  const normalizedRunTitle = normalizeMatchText(run.title);
+  const normalizedSeriesName = normalizeMatchText(series.name);
+  const normalizedEpisodeTitle = normalizeMatchText(episode.title.replace(/历史已采用单集/g, ""));
+  return (normalizedSeriesName.length >= 4 && normalizedRunTitle.includes(normalizedSeriesName))
+    || (normalizedEpisodeTitle.length >= 6 && normalizedRunTitle.includes(normalizedEpisodeTitle));
+}
+
+function normalizeMatchText(value: string): string {
+  return value.toLocaleLowerCase("zh-CN").replace(/[\s\p{P}\p{S}]+/gu, "");
 }
 
 function CandidateDetail({ item, adopting, disabled, onAdopt }: { item: StudioCandidateInboxItem; adopting: boolean; disabled: boolean; onAdopt: () => Promise<void> }) {

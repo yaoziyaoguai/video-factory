@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   CodexBridgeClient,
   CodexScreenwriterAgent,
+  type CodexTaskExecution,
   type CodexTaskKind,
   type ScreenwriterAgentInput,
   validateScriptDraft,
@@ -18,6 +19,31 @@ class CapturingCodexClient extends CodexBridgeClient {
   async runTask(kind: CodexTaskKind, payload: unknown): Promise<unknown> {
     this.calls.push({ kind, payload });
     return this.respond();
+  }
+}
+
+class SequencedCodexClient extends CodexBridgeClient {
+  readonly calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
+
+  constructor(private readonly responses: unknown[]) {
+    super({ socketPath: "/nonexistent/vf-codex.sock", sleep: async () => {} });
+  }
+
+  async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
+    this.calls.push({ kind, payload });
+    const output = this.responses.shift();
+    if (output === undefined) throw new Error("missing sequenced response");
+    return {
+      output,
+      trace: {
+        taskKind: kind,
+        promptVersion: `test/${kind}`,
+        prompt: `prompt:${kind}`,
+        providerId: "openai",
+        modelId: "gpt-5.6-sol",
+        reasoningEffort: kind === "role-audit" ? "max" : "high",
+      },
+    };
   }
 }
 
@@ -51,6 +77,77 @@ function validDraft(): { scenes: Array<Record<string, unknown>> } {
 }
 
 describe("CodexScreenwriterAgent", () => {
+  it("runs an independent critic and repairs the draft before exposing it downstream", async () => {
+    const first = validDraft();
+    const repaired = validDraft();
+    repaired.scenes[0]!.narration = "别眨眼，先看结果。";
+    const repairAudit = {
+      version: "video-factory/role-audit-v1",
+      verdict: "repair",
+      score: 68,
+      summary: "开头不够具体。",
+      issues: [{ severity: "blocking", criterion: "前两秒钩子", evidence: "首句只有说明", repairInstruction: "先展示具体结果" }],
+      repairInstructions: ["重写第一镜旁白并保持事实边界"],
+    };
+    const passAudit = {
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 91,
+      summary: "合同可执行。",
+      issues: [],
+      repairInstructions: [],
+    };
+    const client = new SequencedCodexClient([first, repairAudit, repaired, passAudit]);
+    const agent = new CodexScreenwriterAgent({ client, maxReviewIterations: 2 });
+
+    const execution = await agent.draftDetailed(screenwriterInput());
+
+    assert.equal(execution.output.scenes[0]?.narration, "别眨眼，先看结果。");
+    assert.deepEqual(client.calls.map((call) => call.kind), ["script-draft", "role-audit", "script-draft", "role-audit"]);
+    const repairPayload = client.calls[2]!.payload as Record<string, unknown>;
+    assert.deepEqual(repairPayload.revision, { candidate: first, audit: repairAudit });
+    assert.equal(execution.agentLoop?.status, "passed");
+    assert.equal(execution.agentLoop?.iterations.length, 2);
+    assert.equal(execution.agentLoop?.iterations[0]?.audit.verdict, "repair");
+    assert.equal(execution.agentLoop?.iterations[1]?.audit.verdict, "pass");
+  });
+
+  it("allows three audit and repair rounds by default", async () => {
+    const repairAudit = {
+      version: "video-factory/role-audit-v1",
+      verdict: "repair",
+      score: 70,
+      summary: "仍需修订。",
+      issues: [{ severity: "blocking", criterion: "镜头动作", evidence: "动作不够具体", repairInstruction: "补充可见动作" }],
+      repairInstructions: ["补充可见动作"],
+    };
+    const passAudit = {
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 92,
+      summary: "第三轮达到交付标准。",
+      issues: [],
+      repairInstructions: [],
+    };
+    const first = validDraft();
+    const second = validDraft();
+    second.scenes[0]!.narration = "先展示第一个具体动作。";
+    const third = validDraft();
+    third.scenes[0]!.narration = "先展示结果，再完成第一个具体动作。";
+    const client = new SequencedCodexClient([
+      first, repairAudit,
+      second, repairAudit,
+      third, passAudit,
+    ]);
+    const agent = new CodexScreenwriterAgent({ client });
+
+    const execution = await agent.draftDetailed(screenwriterInput());
+
+    assert.equal(execution.agentLoop?.iterations.length, 3);
+    assert.equal(execution.agentLoop?.iterations[2]?.audit.verdict, "pass");
+    assert.equal(client.calls.length, 6);
+  });
+
   it("sends the script-draft payload and returns the validated draft", async () => {
     const codexClient = new CapturingCodexClient(() => validDraft());
     const agent = new CodexScreenwriterAgent({ client: codexClient });
@@ -87,6 +184,18 @@ describe("CodexScreenwriterAgent", () => {
       /target durationSeconds must be an integer between 20 and 180/,
     );
     assert.deepEqual(validateScriptDraft(validDraft(), { durationSeconds: 24 }), validDraft());
+  });
+
+  it("requires explicit canon facts for a series script", () => {
+    assert.throws(
+      () => validateScriptDraft(validDraft(), { durationSeconds: 24, requireCanonFacts: true }),
+      /between 1 and 8 canonFacts/,
+    );
+    const draft = { ...validDraft(), canonFacts: ["本集已经验证：先记录问题再选择工具。"] };
+    assert.deepEqual(
+      validateScriptDraft(draft, { durationSeconds: 24, requireCanonFacts: true }),
+      draft,
+    );
   });
 
   it("preserves the v2 viewer promise and inspectable shot intent", () => {

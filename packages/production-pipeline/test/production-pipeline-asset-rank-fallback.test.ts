@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { deterministicAssetRanking, ProductionPipeline, type ProductionBrief, type WorkerResponse } from "../src/index.js";
+import { deterministicAssetRanking, ProductionPipeline, RoleAgentLoopError, type ProductionBrief, type WorkerResponse } from "../src/index.js";
 
 class CandidateWorker {
   async run(request: Record<string, unknown>): Promise<WorkerResponse> {
@@ -41,13 +41,17 @@ class CandidateWorker {
 describe("ProductionPipeline semantic ranking fallback", () => {
   it("records the failed model and reason in the immutable execution receipt", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rank-fallback-"));
+    let auditFailure = false;
     const pipeline = new ProductionPipeline({
       workspaceRoot,
       worker: new CandidateWorker(),
       assetSemanticRanker: {
         id: "codex-asset-ranker-v1",
         modelId: "codex-default",
-        rank: async () => { throw new Error("thumbnail model unavailable at /workspace/video-factory/private/codex.sock"); },
+        rank: async () => {
+          if (auditFailure) throw exhaustedRankingAudit();
+          throw new Error("thumbnail model unavailable at /workspace/video-factory/private/codex.sock");
+        },
       },
       directorAgent: {
         id: "api-visual-director-v1",
@@ -108,6 +112,14 @@ describe("ProductionPipeline semantic ranking fallback", () => {
     const rankingArtifact = run.artifacts.find((artifact) => artifact.kind === "asset_ranking");
     assert.ok(rankingArtifact?.uri);
     assert.equal((await readFile(rankingArtifact.uri, "utf8")).includes(workspaceRoot), false);
+
+    auditFailure = true;
+    const blocked = await pipeline.start({ ...brief, title: "审计失败的语义选片" });
+    const blockedRanking = blocked.nodeRuns.find((node) => node.nodeId === "asset-semantic-rank");
+    assert.equal(blocked.status, "failed");
+    assert.equal(blockedRanking?.status, "failed");
+    assert.match(blockedRanking?.error ?? "", /三轮语义选片审计仍未通过/);
+    assert.equal(blocked.artifacts.some((artifact) => artifact.kind === "asset_ranking"), false);
   });
 
   it("records the model that actually executed instead of the configured broker alias", async () => {
@@ -188,6 +200,19 @@ function semanticBrief(title: string): ProductionBrief {
     economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
     voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
   };
+}
+
+function exhaustedRankingAudit(): RoleAgentLoopError {
+  return new RoleAgentLoopError("三轮语义选片审计仍未通过", {
+    version: "video-factory/agent-loop-v1",
+    role: "语义选片师",
+    contractVersion: "fixture-v1",
+    criteria: ["候选素材必须与画面意图一致"],
+    status: "failed",
+    maxIterations: 3,
+    modelCallCount: 6,
+    iterations: [],
+  });
 }
 
 function response(

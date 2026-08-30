@@ -14,10 +14,11 @@ import { ProductionPage } from "../src/client/pages/ProductionPage.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
 import { HomePage } from "../src/client/pages/HomePage.js";
 import { TodayPage } from "../src/client/pages/TodayPage.js";
-import type { StudioCandidateInboxItem, StudioOpportunity, StudioProvider, StudioRunSummary, StudioTemplate, StudioTrendSource } from "../src/shared/api.js";
+import type { StudioCandidateInboxItem, StudioOpportunity, StudioProvider, StudioRunSummary, StudioSeries, StudioTemplate, StudioTrendSource } from "../src/shared/api.js";
 
 const opportunity: StudioOpportunity = {
   id: "opportunity-1",
+  origin: "trend",
   title: "下班后什么都不想做，是懒还是耗竭？",
   platform: "douyin",
   track: "ordinary-life",
@@ -88,6 +89,7 @@ const runningRun: StudioRunSummary = {
   durationSeconds: 24,
   startedAt: "2026-08-22T10:00:00.000Z",
   currentNodeId: "assets",
+  creationOrigin: "trend",
 };
 
 function candidate(index: number, category: StudioCandidateInboxItem["category"]): StudioCandidateInboxItem {
@@ -238,6 +240,11 @@ describe("Creative OS", () => {
       tone: "克制、具体、有结论",
       visualStyle: "真实桌面操作与生活空镜",
       status: "active",
+      revision: 1,
+      currentSeason: { number: 1, title: "第一季", arc: "验证普通人能用的 AI 方法" },
+      bible: { rules: ["保持真实验证"], recurringElements: [], forbiddenChanges: [] },
+      canon: { revision: 0, facts: [] },
+      episodes: [],
       nextEpisodeNumber: 1,
       createdAt: "2026-08-24T09:00:00.000Z",
       updatedAt: "2026-08-24T09:00:00.000Z",
@@ -449,21 +456,121 @@ describe("Creative OS", () => {
       seriesName: "下班观察室",
       episodeNumber: 1,
     };
-    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    const secondSeriesCandidate: StudioCandidateInboxItem = {
+      ...candidate(21, "education"),
+      id: "series-series-2-episode-001",
+      title: "第二个系列的第一集",
+      origin: "series",
+      freshness: "evergreen",
+      providerId: "series-planner-v1",
+      seriesId: "series-2",
+      seriesName: "长期学习档案",
+      episodeNumber: 1,
+    };
+    const opportunities = vi.spyOn(studioApi, "opportunities").mockResolvedValue([{
+      ...opportunity,
+      id: "series-opportunity-1",
+      origin: "series",
+      title: seriesCandidate.title,
+      seriesId: "series-1",
+      episodeNumber: 1,
+    }]);
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
-    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
-    vi.spyOn(studioApi, "series").mockResolvedValue([{
+    const runs = vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    const seriesRecord: StudioSeries = {
       id: "series-1", name: "下班观察室", premise: "回答真实难题", audience: "上班族", platform: "douyin",
       category: "lifestyle", track: "after-work", pillars: ["问题", "复盘"], tone: "具体", visualStyle: "生活实拍",
+      revision: 1, currentSeason: { number: 1, title: "第一季", arc: "回答真实难题" },
+      bible: { rules: ["保持真实"], recurringElements: [], forbiddenChanges: [] }, canon: { revision: 0, facts: [] }, episodes: [{
+        id: seriesCandidate.id,
+        seriesId: "series-1",
+        episodeNumber: 1,
+        seasonNumber: 1,
+        arc: "回答真实难题",
+        pillar: "问题",
+        title: seriesCandidate.title,
+        viewerPromise: seriesCandidate.painPoint,
+        hook: seriesCandidate.hook,
+        payoff: "回答一个真实难题",
+        canonBaseRevision: 0,
+        status: "planned",
+        continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: ["留下下一集问题"], canonChecks: ["保持真实"] },
+        planning: { source: "agent", role: "系列总编", auditRole: "独立红队审计 Agent", auditStatus: "passed", auditIterations: 2, auditScore: 91, auditSummary: "路线图有独立价值并形成递进。", providerId: "openai", modelId: "codex-default", promptVersion: "video-factory/series-showrunner-v1", reasoningEffort: "max" },
+        createdAt: "2026-08-24T09:00:00.000Z",
+        updatedAt: "2026-08-24T09:00:00.000Z",
+      }],
       status: "active", nextEpisodeNumber: 1, createdAt: "2026-08-24T09:00:00.000Z", updatedAt: "2026-08-24T09:00:00.000Z",
-    }]);
+    };
+    const secondSeriesRecord: StudioSeries = {
+      ...seriesRecord,
+      id: "series-2",
+      name: "长期学习档案",
+      track: "learning-journal",
+      episodes: [{
+        ...seriesRecord.episodes[0]!,
+        id: secondSeriesCandidate.id,
+        seriesId: "series-2",
+        title: secondSeriesCandidate.title,
+      }],
+    };
+    vi.spyOn(studioApi, "series").mockResolvedValue([seriesRecord, secondSeriesRecord]);
+    const updateEpisode = vi.spyOn(studioApi, "updateSeriesEpisodePlan").mockImplementation(async (_seriesId, _episodeNumber, input) => ({
+      ...seriesRecord,
+      revision: 2,
+      episodes: seriesRecord.episodes.map((episode) => ({
+        ...episode,
+        ...input,
+        continuity: { ...episode.continuity, fromPrevious: input.fromPrevious, toNext: input.toNext },
+        planning: {
+          source: "human" as const,
+          role: "主创手工改写",
+          auditRole: "后续制作节点独立审计",
+          auditStatus: "human_override" as const,
+          auditIterations: 0,
+          providerId: "human",
+          modelId: "manual",
+          promptVersion: "video-factory/series-episode-edit-v1",
+        },
+      })),
+    }));
     vi.spyOn(studioApi, "candidateInbox").mockImplementation((query) => query?.origins?.includes("trend")
       ? new Promise(() => undefined)
-      : Promise.resolve(inbox([seriesCandidate])));
+      : Promise.resolve(inbox([seriesCandidate, secondSeriesCandidate])));
     render(<MemoryRouter initialEntries={["/topics?mode=series"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("button", { name: /查看候选提案 20/ })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "本季策划摘要" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /E01.*候选提案 20/ })).toBeInTheDocument();
+    expect(screen.getByText("openai / codex-default")).toBeInTheDocument();
+    expect(screen.getByText("独立审计 2/3 轮通过")).toBeInTheDocument();
+    expect(screen.getByText(/路线图有独立价值并形成递进.*91 分/)).toBeInTheDocument();
+    expect(screen.getByText("max")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "编辑路线图" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "本集制作准备" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "选择待制作单集" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "候选机会" })).not.toBeInTheDocument();
+    expect(opportunities).toHaveBeenCalledWith("series");
+    expect(runs).toHaveBeenCalledWith(undefined);
     expect(screen.queryByRole("heading", { name: "正在生成今日提案" })).not.toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("选择系列"), "series-2");
+    expect(screen.getByRole("button", { name: /E01.*第二个系列的第一集/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /E01.*候选提案 20/ })).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("选择系列"), "series-1");
+
+    await user.click(screen.getByRole("button", { name: "编辑路线图" }));
+    const dialog = screen.getByRole("dialog", { name: "编辑第 1 集" });
+    const title = within(dialog).getByLabelText("单集标题");
+    await user.clear(title);
+    await user.type(title, "人工确定的第一集");
+    await user.click(within(dialog).getByRole("button", { name: "保存人工版本" }));
+    await waitFor(() => expect(updateEpisode).toHaveBeenCalledWith("series-1", 1, expect.objectContaining({
+      expectedRevision: 1,
+      title: "人工确定的第一集",
+    })));
+    expect(await screen.findByText(/第 1 集路线图已保存为人工版本/)).toBeInTheDocument();
+    expect(screen.getByText("人工 / 手工编辑")).toBeInTheDocument();
+    expect(screen.getByText("人工决定")).toBeInTheDocument();
+    expect(screen.queryByText(/审计结论：/)).not.toBeInTheDocument();
   });
 
   it("turns local agent candidates into editable opportunities with one explicit action", async () => {
@@ -504,7 +611,7 @@ describe("Creative OS", () => {
     expect(screen.getAllByText("Codex 选题总编").length).toBeGreaterThan(0);
     await user.click(screen.getByRole("button", { name: "采用候选 下班后的 AI 时间账本" }));
 
-    expect(adopt).toHaveBeenCalledWith("trend-1", {});
+    expect(adopt).toHaveBeenCalledWith("trend-1", { origin: "trend" });
     expect(screen.getByRole("heading", { name: "下班后的 AI 时间账本" })).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("下一步：检查证据与镜头计划");
   });
@@ -539,7 +646,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("dialog", { name: "采用前核验证据" })).toBeInTheDocument();
     await user.click(screen.getByRole("checkbox", { name: /我已打开原始来源/ }));
     await user.click(screen.getByRole("button", { name: "确认核验并采用" }));
-    expect(adopt).toHaveBeenCalledWith(reviewCandidate.id, { verificationConfirmed: true });
+    expect(adopt).toHaveBeenCalledWith(reviewCandidate.id, { origin: "trend", verificationConfirmed: true });
 
     await user.click(screen.getByRole("button", { name: `查看${blockedCandidate.title}` }));
     expect(screen.getByRole("button", { name: `采用候选 ${blockedCandidate.title}` })).toBeDisabled();

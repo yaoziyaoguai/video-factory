@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CodexBridgeClient, type CodexTaskKind } from "../src/codex-chat.js";
+import { CodexBridgeClient, type CodexTaskExecution, type CodexTaskKind } from "../src/codex-chat.js";
 import { CodexVisualDirectorAgent } from "../src/codex-visual-director.js";
 import type { VisualDirectorAgentInput } from "../src/visual-director.js";
 
@@ -101,6 +101,40 @@ function validPlan(): Record<string, unknown> {
 }
 
 describe("CodexVisualDirectorAgent", () => {
+  it("requires an independent role audit before returning a detailed plan", async () => {
+    const calls: CodexTaskKind[] = [];
+    const client = new class extends CodexBridgeClient {
+      constructor() { super({ socketPath: "/nonexistent/vf-codex.sock" }); }
+      async runTaskDetailed(kind: CodexTaskKind): Promise<CodexTaskExecution> {
+        calls.push(kind);
+        return {
+          output: kind === "director-plan" ? validPlan() : {
+            version: "video-factory/role-audit-v1",
+            verdict: "pass",
+            score: 94,
+            summary: "逐镜方案可执行。",
+            issues: [],
+            repairInstructions: [],
+          },
+          trace: {
+            taskKind: kind,
+            promptVersion: `test/${kind}`,
+            prompt: `prompt:${kind}`,
+            providerId: "openai",
+            modelId: "gpt-5.6-sol",
+            reasoningEffort: kind === "role-audit" ? "max" : "high",
+          },
+        };
+      }
+    }();
+    const agent = new CodexVisualDirectorAgent({ client, maxReviewIterations: 2 });
+
+    const execution = await agent.planDetailed(directorInput());
+
+    assert.equal(execution.agentLoop?.status, "passed");
+    assert.deepEqual(calls, ["director-plan", "role-audit"]);
+  });
+
   it("sends the director-plan payload and returns the validated plan", async () => {
     const codexClient = new CapturingCodexClient(() => validPlan());
     const agent = new CodexVisualDirectorAgent({ client: codexClient });

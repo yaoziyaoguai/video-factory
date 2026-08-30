@@ -44,6 +44,23 @@ export function ProductionPage() {
     setRuns((current) => current.filter((item) => item.id !== run.id));
   }
 
+  async function archive(targets: StudioRunSummary[]) {
+    await studioApi.archiveRuns(targets.map((run) => run.id));
+    const archivedAt = new Date().toISOString();
+    const ids = new Set(targets.map((run) => run.id));
+    setRuns((current) => current.map((run) => ids.has(run.id) ? { ...run, archivedAt } : run));
+  }
+
+  async function restore(targets: StudioRunSummary[]) {
+    await studioApi.restoreRuns(targets.map((run) => run.id));
+    const ids = new Set(targets.map((run) => run.id));
+    setRuns((current) => current.map((run) => {
+      if (!ids.has(run.id)) return run;
+      const { archivedAt: _archivedAt, ...restored } = run;
+      return restored;
+    }));
+  }
+
   return (
     <>
       {providersError ? (
@@ -53,7 +70,7 @@ export function ProductionPage() {
           <button className="icon-button" type="button" onClick={() => void load()} title="重试"><RefreshCw aria-hidden="true" size={17} /></button>
         </div>
       ) : null}
-      <ProductionQueue runs={runs} loading={runsLoading} {...(runsError ? { error: runsError } : {})} onRetry={() => void load()} onCreate={() => setDialogOpen(true)} onDelete={remove} />
+      <ProductionQueue runs={runs} loading={runsLoading} {...(runsError ? { error: runsError } : {})} onRetry={() => void load()} onCreate={() => setDialogOpen(true)} onArchive={archive} onRestore={restore} onDelete={remove} />
       <NewRunDialog open={dialogOpen} providers={providersLoading ? [] : providers} {...(creatorSettings ? { creatorSettings } : {})} onClose={() => setDialogOpen(false)} onSubmit={start} />
     </>
   );

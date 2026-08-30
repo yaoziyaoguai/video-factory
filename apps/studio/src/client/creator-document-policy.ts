@@ -1,6 +1,6 @@
 const TOP_LEVEL_FIELDS: Record<string, ReadonlySet<string>> = {
   brief: new Set(["title", "angle", "audience"]),
-  script: new Set(["title", "hook", "structure", "duration_target", "disclosure_required", "platform_notes", "quality_checks", "hashtags", "scenes"]),
+  script: new Set(["title", "hook", "structure", "duration_target", "disclosure_required", "platform_notes", "quality_checks", "hashtags", "canonFacts", "scenes"]),
   "reference-grammar": new Set(["summary", "pacing", "composition", "camera", "color", "transitions", "sound", "confidence", "beats", "reusableRules", "avoidCopying"]),
   "visual-direction": new Set(["requestedProfileId", "resolvedProfileId", "profileRationale", "visualBible", "shots"]),
   "asset-candidates": new Set(["scene_candidates"]),
@@ -8,6 +8,7 @@ const TOP_LEVEL_FIELDS: Record<string, ReadonlySet<string>> = {
   assets: new Set(["director_routing"]),
   voice: new Set(["voice", "rate", "direction", "duration", "scenes"]),
   "visual-review": new Set(["summary", "scores", "findings", "confidence", "recommendation"]),
+  "final-review": new Set(["review", "canonFacts"]),
   "publish-package": new Set(["title", "copy"]),
 };
 
@@ -75,6 +76,7 @@ const CREATOR_NESTED_FIELDS = new Set([
   "color",
   "composition",
   "confidence",
+  "canonFacts",
   "continuity",
   "continuityNote",
   "description",
@@ -127,6 +129,7 @@ const CREATOR_NESTED_FIELDS = new Set([
   "soundRole",
   "scores",
   "structure",
+  "status",
   "subject",
   "subjectMovement",
   "subtitle",

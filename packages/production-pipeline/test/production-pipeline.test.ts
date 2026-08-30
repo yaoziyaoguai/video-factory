@@ -1001,6 +1001,46 @@ describe("ProductionPipeline", () => {
     assert.match(persisted.nodeRuns.at(-1)?.error ?? "", /应用重启/);
   });
 
+  it("locks an interrupted authorized paid node until its provider outcome is reconciled", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-paid-interrupted-"));
+    const runRoot = path.join(workspaceRoot, "runs", "run-paid-interrupted");
+    await mkdir(runRoot, { recursive: true });
+    await writeFile(path.join(runRoot, "run.json"), `${JSON.stringify({
+      id: "run-paid-interrupted",
+      revision: 0,
+      workflowId: "daily-production",
+      workflowVersion: "1.0.0",
+      status: "running",
+      initialInput: brief,
+      startedAt: "2026-08-24T08:00:00.000Z",
+      nodeRuns: [{
+        nodeId: "assets",
+        status: "running",
+        startedAt: "2026-08-24T08:00:00.000Z",
+        operationRequestId: "paid-operation-1",
+        spendAuthorizationId: "authorization-1",
+        artifactIds: [],
+        qualityGateResults: [],
+      }],
+      artifacts: [],
+      interventions: [],
+      decisions: [],
+    }, null, 2)}\n`, "utf8");
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      clock: () => "2026-08-24T09:00:00.000Z",
+    });
+
+    assert.equal(await subject.recoverInterruptedRuns(), 1);
+    const recovered = JSON.parse(await readFile(path.join(runRoot, "run.json"), "utf8")) as {
+      nodeRuns: Array<{ interrupted?: boolean; outcomeUncertain?: boolean; operationRequestId?: string }>;
+    };
+    assert.equal(recovered.nodeRuns[0]?.interrupted, true);
+    assert.equal(recovered.nodeRuns[0]?.outcomeUncertain, true);
+    assert.equal(recovered.nodeRuns[0]?.operationRequestId, "paid-operation-1");
+  });
+
   it("does not recover a run owned by a live execution lease", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
     let enteredResolve!: () => void;
@@ -1369,5 +1409,80 @@ describe("ProductionPipeline", () => {
     assert.equal(failed.status, "failed");
     assert.match(failed.nodeRuns.at(-1)?.error ?? "", /sha256 does not match/);
     assert.equal((await subject.show(waiting.id)).status, "failed");
+  });
+
+  it("indexes prepared scene media with reusable production metadata", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-asset-index-"));
+    class IndexedAssetWorker extends FakeWorker {
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const response = await super.run(request);
+        if (request.capability !== "asset.prepare") return response;
+        const outputDir = String(request.outputDir);
+        const mediaPath = path.join(outputDir, "scene_01.mp4");
+        const media = Buffer.from("scene-video");
+        await writeFile(mediaPath, media);
+        const planPath = String(response.output?.assetPlanPath);
+        const plan = JSON.stringify({
+          scene_assets: [{
+            scene_position: 1,
+            provider: "pexels",
+            asset_id: "42",
+            media_type: "video",
+            width: 1080,
+            height: 1920,
+            duration: 5,
+            local_path: mediaPath,
+            source_url: "https://www.pexels.com/video/42",
+            creator: "Fixture Creator",
+            license_note: "Pexels provider terms apply.",
+            query: "night office close up",
+          }],
+        });
+        await writeFile(planPath, plan);
+        response.artifacts[0] = {
+          ...response.artifacts[0]!,
+          kind: "asset_plan",
+          sha256: createHash("sha256").update(plan).digest("hex"),
+          sizeBytes: Buffer.byteLength(plan),
+          contentType: "application/json",
+        };
+        response.artifacts.push({
+          kind: "media_asset",
+          uri: mediaPath,
+          sha256: createHash("sha256").update(media).digest("hex"),
+          sizeBytes: media.length,
+          contentType: "video/mp4",
+          provenance: {
+            providerId: "pexels-stock-v1",
+            producerNodeId: String(request.nodeRunId),
+            attempt: Number(request.attempt),
+            licenseNote: "Pexels provider terms apply.",
+            sourceUrl: "https://www.pexels.com/video/42",
+            creator: "Fixture Creator",
+          },
+        });
+        return response;
+      }
+    }
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new IndexedAssetWorker() });
+    const waiting = await subject.start(brief);
+    const finished = await subject.decide(waiting.id, {
+      interventionId: waiting.interventions.at(-1)!.id,
+      action: "approve",
+      actor: "director",
+    });
+    const manifestArtifact = finished.artifacts.find((artifact) => artifact.kind === "resource_manifest");
+    assert.ok(manifestArtifact?.uri);
+    const manifest = JSON.parse(await readFile(manifestArtifact.uri, "utf8")) as { items: Array<Record<string, unknown>> };
+    const scene = manifest.items.find((item) => item.id === "scene:1:pexels-stock-v1");
+
+    assert.equal(scene?.providerId, "pexels-stock-v1");
+    assert.equal(scene?.contentType, "video/mp4");
+    assert.equal(scene?.width, 1080);
+    assert.equal(scene?.height, 1920);
+    assert.equal(scene?.durationSeconds, 5);
+    assert.equal(scene?.query, "night office close up");
+    assert.equal(scene?.selectedInFinal, true);
+    assert.equal(manifest.items.filter((item) => item.sha256 === scene?.sha256).length, 1);
   });
 });

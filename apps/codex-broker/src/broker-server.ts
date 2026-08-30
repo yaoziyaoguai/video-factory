@@ -1,5 +1,7 @@
 import http from "node:http";
-import { chmod, stat, unlink } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import path from "node:path";
 import {
   CODEX_BRIDGE_PROTOCOL_VERSION,
   CodexExecutorError,
@@ -12,7 +14,7 @@ import {
 const DEFAULT_SOCKET_MODE = 0o660;
 const DEFAULT_CONCURRENCY = 1;
 const DEFAULT_MAX_BACKLOG = 20;
-// 6 MiB JPEG 解码预算经 base64 后是 8 MiB；额外空间仅容纳固定 JSON 元数据。
+// 5 MiB JPEG 解码预算经 base64 后约 6.7 MiB；额外空间容纳固定 JSON 元数据与审片上下文。
 const DEFAULT_MAX_BODY_BYTES = 9 * 1024 * 1024;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const DEFAULT_RETRY_AFTER_SECONDS = 5;
@@ -20,7 +22,7 @@ const STALE_PROBE_TIMEOUT_MS = 500;
 
 export type TaskOutcome =
   | { ok: true; output: string; trace?: CodexTaskTrace }
-  | { ok: false; status: 400 | 413 | 422 | 503 | 500; message: string };
+  | { ok: false; status: 400 | 409 | 413 | 422 | 503 | 500; message: string };
 
 interface QueuedTask {
   task: ValidatedTask;
@@ -127,6 +129,7 @@ export interface CodexBrokerServerOptions {
   maxBacklog?: number;
   maxBodyBytes?: number;
   shutdownTimeoutMs?: number;
+  idempotencyDirectory?: string;
   now?: () => Date;
 }
 
@@ -139,6 +142,7 @@ export class CodexBrokerServer {
   private readonly shutdownTimeoutMs: number;
   private listening = false;
   private closePromise: Promise<void> | undefined;
+  private readonly idempotentTasks = new Map<string, { digest: string; outcome: Promise<TaskOutcome> }>();
 
   constructor(private readonly options: CodexBrokerServerOptions) {
     this.concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
@@ -256,13 +260,27 @@ export class CodexBrokerServer {
       this.sendJson(response, 400, { error: message });
       return;
     }
-    const submission = this.queue.submit(task);
-    const cancelIfDisconnected = (): void => {
-      if (!response.writableEnded) submission.cancel();
-    };
-    response.once("close", cancelIfDisconnected);
-    const outcome = await submission.outcome;
-    response.off("close", cancelIfDisconnected);
+    const requestId = taskRequestId(parsed);
+    if (!requestId) {
+      this.sendJson(response, 400, { error: "Codex task requestId is required." });
+      return;
+    }
+    const digest = createHash("sha256").update(JSON.stringify({
+      identity: this.options.executor.identity,
+      task,
+    })).digest("hex");
+    let outcome: TaskOutcome;
+    if (this.options.idempotencyDirectory) {
+      outcome = await this.submitIdempotent(requestId, digest, task);
+    } else {
+      const submission = this.queue.submit(task);
+      const cancelIfDisconnected = (): void => {
+        if (!response.writableEnded) submission.cancel();
+      };
+      response.once("close", cancelIfDisconnected);
+      outcome = await submission.outcome;
+      response.off("close", cancelIfDisconnected);
+    }
     if (outcome.ok) {
       this.sendJson(response, 200, {
         ok: true,
@@ -277,6 +295,50 @@ export class CodexBrokerServer {
       { error: outcome.message },
       outcome.status === 503 ? DEFAULT_RETRY_AFTER_SECONDS : undefined,
     );
+  }
+
+  private submitIdempotent(requestId: string, digest: string, task: ValidatedTask): Promise<TaskOutcome> {
+    const active = this.idempotentTasks.get(requestId);
+    if (active) {
+      return active.digest === digest
+        ? active.outcome
+        : Promise.resolve({ ok: false, status: 409, message: "Codex requestId is already bound to different task data." });
+    }
+    const outcome = this.runIdempotent(requestId, digest, task).finally(() => {
+      const current = this.idempotentTasks.get(requestId);
+      if (current?.outcome === outcome) this.idempotentTasks.delete(requestId);
+    });
+    this.idempotentTasks.set(requestId, { digest, outcome });
+    return outcome;
+  }
+
+  private async runIdempotent(requestId: string, digest: string, task: ValidatedTask): Promise<TaskOutcome> {
+    if (!this.options.idempotencyDirectory) return this.queue.submit(task).outcome;
+    await mkdir(this.options.idempotencyDirectory, { recursive: true });
+    const recordPath = path.join(
+      this.options.idempotencyDirectory,
+      `${createHash("sha256").update(requestId).digest("hex")}.json`,
+    );
+    const previous = await readIdempotencyRecord(recordPath);
+    if (previous) {
+      if (previous.requestId !== requestId || previous.digest !== digest) {
+        return { ok: false, status: 409, message: "Codex requestId is already bound to different task data." };
+      }
+      if (previous.state === "completed") return previous.outcome;
+      return {
+        ok: false,
+        status: 409,
+        message: "A previously accepted Codex task has an uncertain outcome. It will not be replayed automatically; inspect the broker task record first.",
+      };
+    }
+    await writeIdempotencyRecord(recordPath, { version: 1, requestId, digest, state: "accepted" });
+    const outcome = await this.queue.submit(task).outcome;
+    if (!outcome.ok && outcome.status === 503) {
+      await rm(recordPath, { force: true });
+      return outcome;
+    }
+    await writeIdempotencyRecord(recordPath, { version: 1, requestId, digest, state: "completed", outcome });
+    return outcome;
   }
 
   // 超限时丢弃式排干剩余字节，保证客户端总能收到 413 而不是连接重置。
@@ -317,6 +379,45 @@ export class CodexBrokerServer {
       ...(retryAfterSeconds !== undefined ? { "retry-after": String(retryAfterSeconds) } : {}),
     });
     response.end(serialized);
+  }
+}
+
+type IdempotencyRecord =
+  | { version: 1; requestId: string; digest: string; state: "accepted" }
+  | { version: 1; requestId: string; digest: string; state: "completed"; outcome: TaskOutcome };
+
+function taskRequestId(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const requestId = (value as { requestId?: unknown }).requestId;
+  return typeof requestId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestId)
+    ? requestId
+    : undefined;
+}
+
+async function readIdempotencyRecord(recordPath: string): Promise<IdempotencyRecord | undefined> {
+  try {
+    const value = JSON.parse(await readFile(recordPath, "utf8")) as Partial<IdempotencyRecord>;
+    if (value.version !== 1 || typeof value.requestId !== "string" || typeof value.digest !== "string") {
+      throw new Error("Codex idempotency record is invalid.");
+    }
+    if (value.state === "accepted") return value as Extract<IdempotencyRecord, { state: "accepted" }>;
+    if (value.state === "completed" && value.outcome && typeof value.outcome === "object") {
+      return value as Extract<IdempotencyRecord, { state: "completed" }>;
+    }
+    throw new Error("Codex idempotency record is invalid.");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function writeIdempotencyRecord(recordPath: string, record: IdempotencyRecord): Promise<void> {
+  const temporaryPath = `${recordPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    await rename(temporaryPath, recordPath);
+  } finally {
+    await rm(temporaryPath, { force: true });
   }
 }
 

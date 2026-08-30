@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -16,7 +16,8 @@ import {
   type StudioPipelinePort,
 } from "../src/server/studio-service.js";
 import { JsonOpportunityStore } from "../src/server/opportunity-store.js";
-import type { StudioOpportunityInput } from "../src/shared/api.js";
+import { JsonRunArchiveStore } from "../src/server/run-archive-store.js";
+import type { StudioOpportunityInput, StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
 
 const brief: ProductionBrief = {
   protocolVersion: "video-factory/brief-v1",
@@ -132,6 +133,7 @@ class FakePipeline implements StudioPipelinePort {
   lastInput?: unknown;
   dispatchGate?: Promise<void>;
   removedRunId?: string;
+  maintenanceLeaseCalls: string[][] = [];
 
   constructor(run: WorkflowRun<ProductionBrief>) {
     this.run = run;
@@ -143,6 +145,11 @@ class FakePipeline implements StudioPipelinePort {
 
   async remove(runId: string): Promise<void> {
     this.removedRunId = runId;
+  }
+
+  async withRunMaintenanceLease<T>(runIds: string[], action: () => Promise<T>): Promise<T> {
+    this.maintenanceLeaseCalls.push([...runIds]);
+    return action();
   }
 
   async show(runId: string): Promise<WorkflowRun<ProductionBrief>> {
@@ -233,7 +240,46 @@ const opportunityInput: StudioOpportunityInput = {
 };
 
 describe("StudioService", () => {
-  it("deletes only terminal production records", async () => {
+  it("archives only terminal runs and can restore them without touching production files", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      now: () => new Date("2026-08-30T08:00:00.000Z"),
+    });
+
+    await assert.rejects(() => service.archiveRuns(["run-1"]), /仍在运行或等待确认/);
+    pipeline.run = { ...pipeline.run, status: "succeeded" };
+    await service.archiveRuns(["run-1"]);
+    assert.equal((await service.listRuns())[0]?.archivedAt, "2026-08-30T08:00:00.000Z");
+    assert.equal(pipeline.removedRunId, undefined);
+
+    await service.restoreRuns(["run-1"]);
+    assert.equal((await service.listRuns())[0]?.archivedAt, undefined);
+    assert.equal((await service.getRun("run-1"))?.archivedAt, undefined);
+  });
+
+  it("serializes archive updates across independent service instances", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-run-archive-lock-"));
+    const archivePath = path.join(workspaceRoot, "archive", "runs.json");
+    const first = new JsonRunArchiveStore(archivePath);
+    const second = new JsonRunArchiveStore(archivePath);
+
+    await Promise.all([
+      first.archive(["run-a"], "2026-08-30T08:00:00.000Z"),
+      second.archive(["run-b"], "2026-08-30T08:01:00.000Z"),
+    ]);
+
+    assert.deepEqual(await new JsonRunArchiveStore(archivePath).list(), {
+      "run-a": "2026-08-30T08:00:00.000Z",
+      "run-b": "2026-08-30T08:01:00.000Z",
+    });
+  });
+
+  it("deletes only archived terminal production records", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
@@ -242,8 +288,11 @@ describe("StudioService", () => {
     assert.equal(pipeline.removedRunId, undefined);
 
     pipeline.run = { ...pipeline.run, status: "succeeded" };
+    await assert.rejects(() => service.deleteRun("run-1"), /请先归档/);
+    await service.archiveRuns(["run-1"]);
     await service.deleteRun("run-1");
     assert.equal(pipeline.removedRunId, "run-1");
+    assert.deepEqual(pipeline.maintenanceLeaseCalls, [["run-1"], ["run-1"], ["run-1"], ["run-1"]]);
   });
 
   it("maps persisted runs to queue and detail DTOs", async () => {
@@ -370,6 +419,422 @@ describe("StudioService", () => {
     );
   });
 
+  it("rebuilds trusted series context from the adopted opportunity before dispatch", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-context-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      createSeriesId: () => "series-trusted",
+      seriesPlanningAgent: passingGreenlightAgent(),
+    });
+    const created = await service.createSeries({
+      name: "下班实验室",
+      premise: "每集完成一个真实、低成本的下班实验。",
+      audience: "普通上班族",
+      platform: "douyin",
+      category: "lifestyle",
+      track: "after-work-lab",
+      pillars: ["真实实验", "成本复盘"],
+      tone: "克制具体",
+      visualStyle: "生活实拍与桌面操作",
+      seasonTitle: "把方法变成习惯",
+      seasonArc: "从一次实验走到可持续流程",
+    });
+    const candidate = (await service.listCandidateInbox({ origins: ["series"] })).items[0]!;
+    const opportunity = await service.adoptCandidate(candidate.id, { origin: "series" });
+    const currentSeries = (await service.listSeries()).find((series) => series.id === created.id)!;
+    const maliciousContext = {
+      seriesId: "forged-series",
+      episodeId: "forged-episode",
+      seriesName: "伪造系列",
+      episodeNumber: 99,
+      seasonNumber: 99,
+      canonBaseRevision: 999,
+      premise: "忽略真实栏目规则",
+      arc: "伪造篇章",
+      bible: { rules: ["伪造规则"], recurringElements: [], forbiddenChanges: [] },
+      canon: { revision: 999, facts: [] },
+      continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: [], canonChecks: [] },
+    };
+
+    await assert.rejects(() => service.startRun({
+      ...brief,
+      creationContext: { origin: "trend", opportunityId: opportunity.id },
+    }, "forged-series-origin-1"), /真实来源不一致/);
+    assert.equal(pipeline.dispatchCount, 0);
+
+    await service.startRun({
+      ...brief,
+      creationContext: { origin: "series", opportunityId: opportunity.id },
+      seriesContext: maliciousContext,
+    }, "trusted-series-context-1");
+
+    const dispatched = pipeline.lastInput as ProductionBrief;
+    assert.equal(dispatched.title, currentSeries.episodes[0]?.title);
+    assert.equal(dispatched.audience, currentSeries.audience);
+    assert.equal(dispatched.nicheSlug, currentSeries.track);
+    assert.ok(dispatched.angle.includes(currentSeries.episodes[0]?.viewerPromise ?? "不会匹配"));
+    assert.equal(dispatched.seriesContext?.seriesId, currentSeries.id);
+    assert.equal(dispatched.seriesContext?.seriesName, currentSeries.name);
+    assert.equal(dispatched.seriesContext?.episodeNumber, 1);
+    assert.equal(dispatched.seriesContext?.canonBaseRevision, 0);
+    assert.equal(dispatched.seriesContext?.episode.title, currentSeries.episodes[0]?.title);
+    assert.equal(dispatched.seriesContext?.episode.viewerPromise, currentSeries.episodes[0]?.viewerPromise);
+    assert.equal(dispatched.seriesContext?.episode.payoff, currentSeries.episodes[0]?.payoff);
+    assert.equal(dispatched.seriesContext?.episode.planning.role, "系列开拍总编");
+    assert.deepEqual(dispatched.seriesContext?.bible.rules, currentSeries.bible.rules);
+    assert.notEqual(dispatched.seriesContext?.premise, maliciousContext.premise);
+  });
+
+  it("reserves one series episode before dispatch even with different idempotency keys", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-reservation-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    let releaseDispatch!: () => void;
+    pipeline.dispatchGate = new Promise<void>((resolve) => { releaseDispatch = resolve; });
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      createSeriesId: () => "series-reserved",
+      seriesPlanningAgent: passingGreenlightAgent(),
+    });
+    await service.createSeries({
+      name: "下班实验室",
+      premise: "每集完成一个真实、低成本的下班实验。",
+      audience: "普通上班族",
+      platform: "douyin",
+      category: "lifestyle",
+      track: "after-work-lab",
+      pillars: ["真实实验", "成本复盘"],
+      tone: "克制具体",
+      visualStyle: "生活实拍与桌面操作",
+      seasonTitle: "把方法变成习惯",
+      seasonArc: "从一次实验走到可持续流程",
+    });
+    const candidate = (await service.listCandidateInbox({ origins: ["series"] })).items[0]!;
+    const opportunity = await service.adoptCandidate(candidate.id, { origin: "series" });
+    const input = { ...brief, creationContext: { origin: "series" as const, opportunityId: opportunity.id } };
+
+    const first = service.startRun(input, "series-reservation-a");
+    while (pipeline.dispatchCount === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+    await assert.rejects(
+      () => service.startRun(input, "series-reservation-b"),
+      /其他制作占用|已经进入制作/,
+    );
+    assert.equal(pipeline.dispatchCount, 1);
+    releaseDispatch();
+    assert.deepEqual(await first, { runId: "run-1", status: "running" });
+    assert.match((pipeline.lastInput as ProductionBrief).seriesContext?.productionReservationId ?? "", /^series-run-/);
+  });
+
+  it("replays a completed series start before running greenlight planning again", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-replay-before-greenlight-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    let reviews = 0;
+    const firstAgent = passingGreenlightAgent();
+    const firstService = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      createSeriesId: () => "series-replay",
+      seriesPlanningAgent: {
+        ...firstAgent,
+        reviewEpisode: async (...args: Parameters<typeof firstAgent.reviewEpisode>) => {
+          reviews += 1;
+          return firstAgent.reviewEpisode(...args);
+        },
+      },
+    });
+    await firstService.createSeries({
+      name: "下班实验室", premise: "每集完成一个真实实验。", audience: "普通上班族", platform: "douyin",
+      category: "lifestyle", track: "after-work-lab", pillars: ["真实实验"], tone: "克制具体",
+      visualStyle: "生活实拍", seasonTitle: "第一季", seasonArc: "建立稳定流程",
+    });
+    const candidate = (await firstService.listCandidateInbox({ origins: ["series"] })).items[0]!;
+    const opportunity = await firstService.adoptCandidate(candidate.id, { origin: "series" });
+    const input = { ...brief, creationContext: { origin: "series" as const, opportunityId: opportunity.id } };
+    const first = await firstService.startRun(input, "series-replay-key");
+
+    const restarted = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      seriesPlanningAgent: {
+        generate: async () => { throw new Error("replay must not plan"); },
+        reviewEpisode: async () => { throw new Error("replay must not greenlight"); },
+      },
+    });
+    assert.deepEqual(await restarted.startRun(input, "series-replay-key"), first);
+    assert.equal(reviews, 1);
+    assert.equal(pipeline.dispatchCount, 1);
+  });
+
+  it("recovers one legacy series run by its unique adopted opportunity", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-legacy-run-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      createSeriesId: () => "series-legacy-run",
+      seriesPlanningAgent: passingGreenlightAgent(),
+    });
+    await service.createSeries({
+      name: "长期实验", premise: "每集沉淀一个长期结论。", audience: "普通上班族", platform: "douyin",
+      category: "lifestyle", track: "long-running-lab", pillars: ["长期验证"], tone: "克制",
+      visualStyle: "纪实", seasonTitle: "第一季", seasonArc: "逐步建立结论",
+    });
+    const candidate = (await service.listCandidateInbox({ origins: ["series"] })).items[0]!;
+    const opportunity = await service.adoptCandidate(candidate.id, { origin: "series" });
+    pipeline.run = {
+      ...pipeline.run,
+      status: "running",
+      initialInput: {
+        ...brief,
+        creationContext: { opportunityId: opportunity.id } as ProductionBrief["creationContext"],
+      },
+    };
+
+    const series = (await service.listSeries())[0]!;
+    assert.equal(series.episodes[0]?.runId, "run-1");
+    assert.equal(series.episodes[0]?.status, "in_production");
+  });
+
+  it("keeps a creator-linked legacy success across repeated service reconciliation", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-manual-legacy-link-"));
+    const seriesRoot = path.join(workspaceRoot, "series");
+    await mkdir(seriesRoot, { recursive: true });
+    await writeFile(path.join(seriesRoot, "series.json"), `${JSON.stringify({
+      version: 1,
+      series: [{
+        id: "series-manual-legacy",
+        name: "长期档案",
+        premise: "逐集沉淀长期结论。",
+        audience: "普通上班族",
+        platform: "douyin",
+        category: "lifestyle",
+        track: "long-running-archive",
+        pillars: ["长期验证"],
+        tone: "克制",
+        visualStyle: "纪实",
+        status: "active",
+        nextEpisodeNumber: 2,
+        createdAt: "2026-08-24T08:00:00.000Z",
+        updatedAt: "2026-08-24T08:00:00.000Z",
+      }],
+    })}\n`, "utf8");
+    const completed = waitingRun(workspaceRoot);
+    completed.status = "succeeded";
+    const pipeline = new FakePipeline(completed);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const migrated = (await service.listSeries())[0]!;
+    assert.equal(migrated.episodes[0]?.status, "paused");
+    await service.linkLegacySeriesRun(migrated.id, 1, completed.id);
+    const firstRead = (await service.listSeries())[0]!;
+    const secondRead = (await service.listSeries())[0]!;
+
+    assert.equal(firstRead.episodes[0]?.status, "ready");
+    assert.equal(secondRead.episodes[0]?.runId, completed.id);
+    assert.deepEqual(secondRead.canon.facts, []);
+  });
+
+  it("builds series canon from the effective immutable script artifact and invalidates stale output", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-effective-canon-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      createSeriesId: () => "series-canon",
+      seriesPlanningAgent: passingGreenlightAgent(),
+    });
+    await service.createSeries({
+      name: "下班实验室",
+      premise: "每集完成一个真实、低成本的下班实验。",
+      audience: "普通上班族",
+      platform: "douyin",
+      category: "lifestyle",
+      track: "after-work-lab",
+      pillars: ["真实实验", "成本复盘"],
+      tone: "克制具体",
+      visualStyle: "生活实拍与桌面操作",
+      seasonTitle: "把方法变成习惯",
+      seasonArc: "从一次实验走到可持续流程",
+    });
+    const candidate = (await service.listCandidateInbox({ origins: ["series"] })).items[0]!;
+    const opportunity = await service.adoptCandidate(candidate.id, { origin: "series" });
+    await service.startRun({
+      ...brief,
+      creationContext: { origin: "series", opportunityId: opportunity.id },
+    }, "series-canon-run");
+
+    const scriptPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "attempt-1", "script.json");
+    await mkdir(path.dirname(scriptPath), { recursive: true });
+    await writeFile(scriptPath, `${JSON.stringify({
+      viewerPromise: "完成一次真实实验",
+      narrativeArc: "从尝试推进到可复用方法",
+      canonFacts: ["已经完成一次低成本实验。", "记录步骤后可以复现实验结果。"],
+      scenes: [{ narration: "下一集继续验证长期效果。" }],
+    })}\n`, "utf8");
+    pipeline.run = {
+      ...pipeline.run,
+      revision: 7,
+      status: "succeeded",
+      initialInput: pipeline.lastInput as ProductionBrief,
+      nodeRuns: [{
+        nodeId: "brief",
+        status: "succeeded",
+        artifactIds: [],
+        qualityGateResults: [],
+      }, {
+        nodeId: "script",
+        status: "succeeded",
+        artifactIds: ["artifact-script"],
+        qualityGateResults: [],
+        output: { scriptPath, canonFacts: ["已经完成一次低成本实验。", "记录步骤后可以复现实验结果。"] },
+        outputState: {
+          nodeId: "script",
+          generatedVersionId: "script-v1",
+          effectiveVersionId: "script-v1",
+          stale: false,
+          versions: [{
+            id: "script-v1",
+            nodeId: "script",
+            source: "generated",
+            artifactIds: ["artifact-script"],
+            inputVersionIds: [],
+            output: { scriptPath, canonFacts: ["已经完成一次低成本实验。", "记录步骤后可以复现实验结果。"] },
+            createdAt: "2026-08-30T09:00:00.000Z",
+            createdBy: "codex-screenwriter-v1",
+            schemaVersion: "video-factory/script-draft-v1",
+          }],
+        },
+      }, {
+        nodeId: "assets",
+        status: "succeeded",
+        artifactIds: [],
+        qualityGateResults: [],
+      }, {
+        nodeId: "voice",
+        status: "succeeded",
+        artifactIds: [],
+        qualityGateResults: [],
+      }, pipeline.run.nodeRuns.find((node) => node.nodeId === "render")!, {
+        nodeId: "technical-review",
+        status: "succeeded",
+        artifactIds: [],
+        qualityGateResults: [],
+      }, ...pipeline.run.nodeRuns.filter((node) => node.nodeId === "final-review").map((node) => node.nodeId === "final-review"
+        ? {
+            ...node,
+            status: "succeeded" as const,
+            intervention: undefined,
+            output: {
+              review: {},
+              canonFacts: ["未经脚本确认的事实。"],
+            },
+            outputState: {
+              nodeId: "final-review",
+              generatedVersionId: "final-review-v1",
+              effectiveVersionId: "final-review-v1",
+              stale: false,
+              versions: [{
+                id: "final-review-v1",
+                nodeId: "final-review",
+                source: "generated" as const,
+                artifactIds: [],
+                inputVersionIds: ["script-v1"],
+                output: {
+                  review: {},
+                  canonFacts: ["未经脚本确认的事实。"],
+                },
+                createdAt: "2026-08-30T09:00:00.000Z",
+                createdBy: "final-review",
+                schemaVersion: "1",
+              }],
+            },
+          }
+        : node)],
+      artifacts: [{
+        id: "artifact-script",
+        kind: "script",
+        uri: scriptPath,
+        createdAt: "2026-08-30T09:00:00.000Z",
+        contentType: "application/json",
+        producer: { nodeId: "script", attempt: 1 },
+        provenance: { providerId: "codex-screenwriter-v1" },
+      }, ...pipeline.run.artifacts],
+    };
+
+    const blocked = (await service.listSeries())[0]!;
+    assert.equal(blocked.episodes[0]?.status, "in_production");
+    assert.equal(blocked.canon.facts.length, 0);
+    const finalReview = pipeline.run.nodeRuns.find((node) => node.nodeId === "final-review")!;
+    const approvedCanonFacts = ["已经完成一次低成本实验。", "记录步骤后可以复现实验结果。"];
+    finalReview.output = { review: {}, canonFacts: approvedCanonFacts };
+    finalReview.outputState!.versions[0]!.output = { review: {}, canonFacts: approvedCanonFacts };
+    await service.archiveRuns(["run-1"]);
+    await assert.rejects(
+      () => service.deleteRun("run-1"),
+      /Canon 的来源/,
+    );
+
+    const ready = (await service.listSeries())[0]!;
+    assert.equal(ready.episodes[0]?.status, "ready");
+    assert.deepEqual(ready.canon.facts.map((fact) => fact.statement), [
+      "已经完成一次低成本实验。",
+      "记录步骤后可以复现实验结果。",
+    ]);
+    assert.equal(ready.canon.facts.some((fact) => fact.statement.includes("下一集")), false);
+    assert.deepEqual(ready.canon.facts[0]?.sourceOutputVersionIds, ["script-v1", "final-review-v1"]);
+
+    pipeline.run.nodeRuns.find((node) => node.nodeId === "script")!.outputState!.stale = true;
+    const invalidated = (await service.listSeries())[0]!;
+    assert.equal(invalidated.episodes[0]?.status, "in_production");
+    assert.equal(invalidated.canon.facts.length, 0);
+  });
+
+  it("rejects series context on a non-series production", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-non-series-context-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(() => service.startRun({
+      ...brief,
+      creationContext: { origin: "manual", opportunityId: "opportunity-manual" },
+      seriesContext: { forged: true },
+    }), /只有系列制作可以携带系列上下文/);
+    assert.equal(pipeline.dispatchCount, 0);
+  });
+
+  it("rejects public attempts to forge trend or series opportunities", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-forged-opportunity-"));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(waitingRun(workspaceRoot)),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+
+    assert.throws(
+      () => service.createOpportunity({ ...opportunityInput, origin: "series", seriesId: "fake-series", episodeNumber: 1 }),
+      /不能由通用表单伪造来源/,
+    );
+    assert.throws(
+      () => service.createOpportunity({ ...opportunityInput, origin: "trend" }),
+      /不能由通用表单伪造来源/,
+    );
+  });
+
   it("enforces manual review and a server-side hard budget before dispatch", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -403,6 +868,116 @@ describe("StudioService", () => {
       () => restartedService.startRun({ ...brief, title: "不同参数" }, "production-request-1"),
       /另一组参数/,
     );
+  });
+
+  it("retains a series reservation when dispatch succeeds but the completion record cannot be written", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-dispatched-idempotency-failure-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    let releaseDispatch!: () => void;
+    pipeline.dispatchGate = new Promise<void>((resolve) => { releaseDispatch = resolve; });
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      createSeriesId: () => "series-write-failure",
+      seriesPlanningAgent: passingGreenlightAgent(),
+    });
+    await service.createSeries({
+      name: "下班实验室", premise: "每集完成一个真实实验。", audience: "普通上班族", platform: "douyin",
+      category: "lifestyle", track: "after-work-lab", pillars: ["真实实验"], tone: "克制具体",
+      visualStyle: "生活实拍", seasonTitle: "第一季", seasonArc: "建立稳定流程",
+    });
+    const candidate = (await service.listCandidateInbox({ origins: ["series"] })).items[0]!;
+    const opportunity = await service.adoptCandidate(candidate.id, { origin: "series" });
+    const input = { ...brief, creationContext: { origin: "series" as const, opportunityId: opportunity.id } };
+    const start = service.startRun(input, "series-write-failure-key");
+    while (pipeline.dispatchCount === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+    const idempotencyDirectory = path.join(workspaceRoot, "idempotency", "production-start");
+    await chmod(idempotencyDirectory, 0o500);
+    releaseDispatch();
+    try {
+      await assert.rejects(() => start, /已经启动.*不能重复启动/);
+    } finally {
+      await chmod(idempotencyDirectory, 0o700);
+    }
+    pipeline.run = { ...pipeline.run, initialInput: pipeline.lastInput as ProductionBrief };
+
+    await assert.rejects(() => service.startRun(input, "series-write-failure-new-key"), /已经进入制作|其他制作占用/);
+    assert.equal(pipeline.dispatchCount, 1);
+    assert.equal((await service.listSeries())[0]?.episodes[0]?.runId, "run-1");
+  });
+
+  it("blocks a second paid-provider call while the failed outcome is uncertain", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-uncertain-paid-retry-"));
+    const run = waitingRun(workspaceRoot);
+    run.status = "failed";
+    run.nodeRuns[0] = {
+      ...run.nodeRuns[0]!,
+      status: "failed",
+      outcomeUncertain: true,
+      error: "provider response was lost",
+    };
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(
+      () => service.retryFailedNode("run-1", "render"),
+      /Provider 控制台核对任务和账单/,
+    );
+    assert.equal(pipeline.lastRetriedNodeId, undefined);
+  });
+
+  it("reconciles an ordinary failed series attempt before starting its replacement", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-restart-reconcile-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      createSeriesId: () => "series-restart",
+      seriesPlanningAgent: passingGreenlightAgent(),
+    });
+    await service.createSeries({
+      name: "长期实验", premise: "每集完成一个真实实验。", audience: "普通上班族", platform: "douyin",
+      category: "lifestyle", track: "long-lab-restart", pillars: ["真实实验"], tone: "克制",
+      visualStyle: "纪实", seasonTitle: "第一季", seasonArc: "逐步建立结论",
+    });
+    const candidate = (await service.listCandidateInbox({ origins: ["series"] })).items[0]!;
+    const opportunity = await service.adoptCandidate(candidate.id, { origin: "series" });
+    const input = { ...brief, creationContext: { origin: "series" as const, opportunityId: opportunity.id } };
+    await service.startRun(input, "series-restart-first");
+    pipeline.run = {
+      ...pipeline.run,
+      revision: 1,
+      status: "failed",
+      initialInput: pipeline.lastInput as ProductionBrief,
+      nodeRuns: pipeline.run.nodeRuns.map((node, index) => index === 0
+        ? { ...node, status: "failed" as const, error: "明确失败" }
+        : node),
+    };
+
+    await service.startRun(input, "series-restart-second");
+
+    assert.equal(pipeline.dispatchCount, 2);
+    const reconciled = (await service.listSeries())[0]?.episodes[0];
+    assert.equal(reconciled?.runId, undefined);
+    assert.ok(reconciled?.attemptRunIds?.includes("run-1"));
+  });
+
+  it("keeps legacy records visible in the manual entry without leaking them into trend or series", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-legacy-origin-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+    await service.createOpportunity(opportunityInput);
+
+    assert.equal((await service.listOpportunities("manual")).length, 1);
+    assert.equal((await service.listOpportunities("trend")).length, 0);
+    assert.equal((await service.listOpportunities("series")).length, 0);
+    assert.equal((await service.listRuns("manual")).length, 1);
+    assert.equal((await service.listRuns("trend")).length, 0);
+    assert.equal((await service.listRuns("series")).length, 0);
   });
 
   it("rejects an empty idempotent start as user input instead of failing while hashing it", async () => {
@@ -1221,8 +1796,18 @@ describe("StudioService", () => {
     assert.equal(replacementArtifact?.kind, "human_media_revision");
     assert.equal(replacementArtifact?.contentType, "video/mp4");
     assert.equal(replacementArtifact?.provenance?.providerId, "human-editor");
+    assert.match(replacementArtifact?.provenance?.licenseNote ?? "", /manual verification/);
     assert.equal(replacementArtifact?.sizeBytes, Buffer.byteLength("replacement-video"));
-    assert.equal((await readFile((pipeline.lastOverride?.output as { assetPlanPath: string }).assetPlanPath, "utf8")).includes(replacementPath), true);
+    const savedPlan = JSON.parse(await readFile((pipeline.lastOverride?.output as { assetPlanPath: string }).assetPlanPath, "utf8")) as typeof plan & {
+      scene_assets: Array<typeof plan.scene_assets[number] & { provider_id?: string; rights_status?: string }>;
+    };
+    assert.equal(savedPlan.scene_assets[0]?.local_path, replacementPath);
+    assert.equal(savedPlan.scene_assets[0]?.provider, "human");
+    assert.equal(savedPlan.scene_assets[0]?.provider_id, "human-editor");
+    assert.equal(savedPlan.scene_assets[0]?.creator, "trusted-owner");
+    assert.equal(savedPlan.scene_assets[0]?.source_url, undefined);
+    assert.equal(savedPlan.scene_assets[0]?.rights_status, "review_required");
+    assert.match(savedPlan.scene_assets[0]?.license_note ?? "", /发布前/);
 
     const outsidePath = path.join(workspaceRoot, "outside.mp4");
     await writeFile(outsidePath, "outside-video", "utf8");
@@ -1235,6 +1820,107 @@ describe("StudioService", () => {
       }, "trusted-owner"),
       /当前制作目录/,
     );
+  });
+
+  it("keeps publish compliance fields immutable while allowing copy edits", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const packagePath = path.join(workspaceRoot, "runs", "run-1", "publish", "publish-package.json");
+    const publishPackage = {
+      version: "video-factory/publish-package-v1",
+      title: "旧标题",
+      copy: { source: "model", title: "旧标题", description: "旧描述", hashtags: ["旧话题"] },
+      approval: { status: "approved", actor: "director" },
+      aigc: { explicitLabelChecked: true, implicitMetadataWritten: true },
+      resourceManifest: { needsReviewCount: 2 },
+      artifacts: [{ kind: "human_media_revision", provenance: { licenseNote: "待核验" } }],
+    };
+    await mkdir(path.dirname(packagePath), { recursive: true });
+    await writeFile(packagePath, JSON.stringify(publishPackage), "utf8");
+    const run = waitingRun(workspaceRoot);
+    run.nodeRuns.push({
+      nodeId: "publish-package",
+      status: "succeeded",
+      output: { publishPackagePath: packagePath },
+      artifactIds: ["artifact-package"],
+      qualityGateResults: [],
+    });
+    run.artifacts.push({
+      id: "artifact-package",
+      kind: "publish_package",
+      uri: packagePath,
+      createdAt: "2026-08-21T10:00:00.000Z",
+      contentType: "application/json",
+      producer: { nodeId: "publish-package", attempt: 1 },
+      provenance: { providerId: "video-factory-ts-v1", providerVersion: "1" },
+    });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+    const forged = structuredClone(publishPackage);
+    forged.resourceManifest.needsReviewCount = 0;
+    forged.artifacts[0]!.kind = "media_asset";
+
+    await assert.rejects(
+      () => service.applyNodeOverride("run-1", "publish-package", {
+        document: { artifactId: "artifact-package", content: forged },
+      }, "trusted-owner"),
+      /由系统托管/,
+    );
+
+    const edited = structuredClone(publishPackage);
+    edited.title = "新标题";
+    edited.copy.title = "新标题";
+    edited.copy.description = "新描述";
+    edited.copy.hashtags = ["新话题"];
+    await service.applyNodeOverride("run-1", "publish-package", {
+      document: { artifactId: "artifact-package", content: edited },
+    }, "trusted-owner");
+    const saved = JSON.parse(await readFile((pipeline.lastOverride?.output as { publishPackagePath: string }).publishPackagePath, "utf8")) as typeof publishPackage;
+    assert.equal(saved.title, "新标题");
+    assert.equal(saved.resourceManifest.needsReviewCount, 2);
+    assert.equal(saved.artifacts[0]?.kind, "human_media_revision");
+  });
+
+  it("derives unchanged asset provenance from the immutable media artifact", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const runRoot = path.join(workspaceRoot, "runs", "run-1");
+    const assetPlanPath = path.join(runRoot, "nodes", "assets", "asset-plan.json");
+    const mediaPath = path.join(runRoot, "nodes", "assets", "clip.mp4");
+    const plan = { scene_assets: [{
+      scene_position: 1,
+      local_path: mediaPath,
+      provider: "pexels",
+      provider_id: "pexels-stock-v1",
+      source_url: "https://www.pexels.com/video/1",
+      creator: "Real creator",
+      license_note: "Pexels terms",
+    }] };
+    await mkdir(path.dirname(assetPlanPath), { recursive: true });
+    await writeFile(assetPlanPath, JSON.stringify(plan), "utf8");
+    await writeFile(mediaPath, "video", "utf8");
+    const run = waitingRun(workspaceRoot);
+    run.nodeRuns.unshift({ nodeId: "assets", status: "succeeded", output: { assetPlanPath }, artifactIds: ["plan", "media"], qualityGateResults: [] });
+    run.artifacts.push(
+      { id: "plan", kind: "asset_plan", uri: assetPlanPath, createdAt: "2026-08-21T10:00:00.000Z", contentType: "application/json", producer: { nodeId: "assets", attempt: 1 }, provenance: { providerId: "asset-worker" } },
+      { id: "media", kind: "media_asset", uri: mediaPath, createdAt: "2026-08-21T10:00:00.000Z", contentType: "video/mp4", producer: { nodeId: "assets", attempt: 1 }, provenance: { providerId: "pexels-stock-v1", sourceUrl: "https://www.pexels.com/video/1", creator: "Real creator", licenseNote: "Pexels terms" } },
+    );
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+    const forged = structuredClone(plan);
+    forged.scene_assets[0]!.provider = "local";
+    forged.scene_assets[0]!.provider_id = "local";
+    forged.scene_assets[0]!.source_url = "local://owned";
+    forged.scene_assets[0]!.creator = "attacker";
+    forged.scene_assets[0]!.license_note = "self owned";
+
+    await service.applyNodeOverride("run-1", "assets", {
+      document: { artifactId: "plan", content: forged },
+    }, "trusted-owner");
+
+    const saved = JSON.parse(await readFile((pipeline.lastOverride?.output as { assetPlanPath: string }).assetPlanPath, "utf8")) as typeof plan;
+    assert.equal(saved.scene_assets[0]?.provider_id, "pexels-stock-v1");
+    assert.equal(saved.scene_assets[0]?.source_url, "https://www.pexels.com/video/1");
+    assert.equal(saved.scene_assets[0]?.creator, "Real creator");
+    assert.equal(saved.scene_assets[0]?.license_note, "Pexels terms");
   });
 
   it("resolves only artifacts contained by the selected run directory", async () => {
@@ -1489,3 +2175,31 @@ describe("StudioService", () => {
     assert.equal(approved.status, "approved");
   });
 });
+
+function passingGreenlightAgent() {
+  return {
+    generate: async () => { throw new Error("Use the editable rule fallback for the initial roadmap."); },
+    reviewEpisode: async (_series: StudioSeries, episode: StudioSeriesEpisode) => ({
+      draft: {
+        episodeNumber: episode.episodeNumber,
+        pillar: episode.pillar,
+        title: episode.title,
+        viewerPromise: episode.viewerPromise,
+        hook: episode.hook,
+        payoff: episode.payoff,
+        fromPrevious: [...episode.continuity.fromPrevious],
+        toNext: [...episode.continuity.toNext],
+      },
+      planning: {
+        source: episode.planning.source === "human" ? "human" as const : "agent" as const,
+        role: "系列开拍总编",
+        auditRole: "独立红队审计 Agent",
+        auditStatus: "passed" as const,
+        auditIterations: 1,
+        providerId: "codex-series-planner-v1",
+        modelId: "codex-default",
+        promptVersion: "video-factory/series-greenlight-v1",
+      },
+    }),
+  };
+}

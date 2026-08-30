@@ -1,5 +1,7 @@
 import { CodexBridgeClient, type CodexTaskExecution } from "./codex-chat.js";
 import type { ProductionBlueprint } from "@video-factory/template-core";
+import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
+import type { ProductionSeriesContext } from "./contracts.js";
 
 export type ScriptVisualStrategy = "stock" | "image" | "generated" | "local";
 
@@ -22,6 +24,7 @@ export interface ScriptScene {
 export interface ScriptDraft {
   viewerPromise?: string;
   narrativeArc?: string;
+  canonFacts?: string[];
   scenes: ScriptScene[];
 }
 
@@ -39,7 +42,9 @@ export interface ScreenwriterAgentInput {
       reasons: string[];
       guardrails: string[];
     };
+    seriesContext?: ProductionSeriesContext;
   };
+  agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
 }
 
 export interface ScreenwriterAgent {
@@ -55,18 +60,22 @@ export interface CodexScreenwriterAgentOptions {
   maxAttempts?: number;
   retryDelayMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
+  maxReviewIterations?: number;
 }
 
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_SCREENWRITER_TIMEOUT_MS = 660_000;
 const DEFAULT_SCREENWRITER_MAX_ATTEMPTS = 2;
+export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v4|role-audit-v1|script-validator-v1";
 
 // id 固定为 codex-screenwriter-v1：brief.providers.script 持久化该 id，registry 按 id 匹配 provider。
 export class CodexScreenwriterAgent implements ScreenwriterAgent {
   readonly id = "codex-screenwriter-v1";
   private readonly client: CodexBridgeClient;
+  private readonly maxReviewIterations: number;
 
   constructor(options: CodexScreenwriterAgentOptions) {
+    this.maxReviewIterations = options.maxReviewIterations ?? 3;
     if (options.client) {
       this.client = options.client;
     } else {
@@ -87,16 +96,43 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
   async draft(input: ScreenwriterAgentInput): Promise<ScriptDraft> {
     validateScreenwriterTarget(input);
     const rawDraft = await this.client.runTask("script-draft", { brief: input.brief });
-    return validateScriptDraft(rawDraft, { durationSeconds: input.brief.durationSeconds });
+    return validateScriptDraft(rawDraft, {
+      durationSeconds: input.brief.durationSeconds,
+      requireCanonFacts: Boolean(input.brief.seriesContext),
+    });
   }
 
   async draftDetailed(input: ScreenwriterAgentInput): Promise<CodexTaskExecution<ScriptDraft>> {
     validateScreenwriterTarget(input);
-    const execution = await this.client.runTaskDetailed("script-draft", { brief: input.brief });
-    return {
-      output: validateScriptDraft(execution.output, { durationSeconds: input.brief.durationSeconds }),
-      ...(execution.trace ? { trace: execution.trace } : {}),
-    };
+    return runRoleAgentLoop({
+      role: "编剧",
+      contractVersion: SCREENWRITER_AGENT_CONTRACT_VERSION,
+      criteria: [
+        "前两秒建立具体钩子，前六秒兑现一部分观众承诺",
+        "每镜头只有一个可见动作，成功与失败条件可由下游验收",
+        "旁白时长、镜头时长、屏幕文字和声音提示彼此一致",
+        "事实、素材可得性、平台与模板约束均未被虚构或绕过",
+        "系列单集遵守系列圣经、已内部定版 canon 与前后集连续性，并在本集形成独立兑现",
+        "系列单集的 canonFacts 只记录本集已经明确建立且可供后集引用的事实，不得包含预告、计划、悬念、问题或尚待验证的结论",
+      ],
+      maxIterations: this.maxReviewIterations,
+      produce: (revision, { requestId }) => this.client.runTaskDetailed("script-draft", {
+        brief: input.brief,
+        ...(revision ? { revision } : {}),
+      }, requestId),
+      audit: ({ role, iteration, criteria, candidate, requestId }) => this.client.runTaskDetailed("role-audit", {
+        role,
+        iteration,
+        criteria,
+        context: { brief: input.brief },
+        candidate,
+      }, requestId),
+      validate: (value) => validateScriptDraft(value, {
+        durationSeconds: input.brief.durationSeconds,
+        requireCanonFacts: Boolean(input.brief.seriesContext),
+      }),
+      ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
+    });
   }
 }
 
@@ -108,7 +144,7 @@ function validateScreenwriterTarget(input: ScreenwriterAgentInput): void {
     }
 }
 
-export function validateScriptDraft(value: unknown, options: { durationSeconds: number }): ScriptDraft {
+export function validateScriptDraft(value: unknown, options: { durationSeconds: number; requireCanonFacts?: boolean }): ScriptDraft {
   if (!Number.isInteger(options.durationSeconds)
     || options.durationSeconds < 20
     || options.durationSeconds > 180) {
@@ -165,6 +201,10 @@ export function validateScriptDraft(value: unknown, options: { durationSeconds: 
       `Script draft total duration ${total}s is outside 0.6-1.4x of the ${options.durationSeconds}s target.`,
     );
   }
+  const canonFacts = optionalStringArray(input.canonFacts, "canonFacts");
+  if (options.requireCanonFacts && (!canonFacts || canonFacts.length < 1 || canonFacts.length > 8)) {
+    throw new Error("Series script drafts must contain between 1 and 8 canonFacts.");
+  }
   return {
     ...(optionalText(input.viewerPromise, "viewerPromise") !== undefined
       ? { viewerPromise: optionalText(input.viewerPromise, "viewerPromise")! }
@@ -172,6 +212,7 @@ export function validateScriptDraft(value: unknown, options: { durationSeconds: 
     ...(optionalText(input.narrativeArc, "narrativeArc") !== undefined
       ? { narrativeArc: optionalText(input.narrativeArc, "narrativeArc")! }
       : {}),
+    ...(canonFacts ? { canonFacts } : {}),
     scenes,
   };
 }

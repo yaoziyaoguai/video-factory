@@ -12,8 +12,10 @@ describe("brokerRuntimeConfigFromEnv", () => {
       profileId: "openai",
       providerId: "openai",
       modelId: "codex-default",
-      taskKinds: ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"],
+      taskKinds: ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
     });
+    assert.equal(openai.effort, "high");
+    assert.equal(openai.auditEffort, "max");
 
     const fakeSecret = "test-only-secret-not-for-a-real-request";
     const zai = brokerRuntimeConfigFromEnv({

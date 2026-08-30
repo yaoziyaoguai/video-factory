@@ -63,6 +63,7 @@ describe("GenerativeAssetWorkerClient", () => {
     const plan = JSON.parse(await readFile(String(response.output?.assetPlanPath), "utf8"));
     assert.equal(plan.scene_assets[0].provider, "seedance-video-v1");
     assert.equal(plan.scene_assets[0].asset_id, "task-1");
+    assert.equal(Object.hasOwn(plan.scene_assets[0], "source_url"), false);
     assert.equal(plan.scene_assets[1].provider, "local");
     assert.equal(await readFile(plan.scene_assets[0].local_path, "utf8"), "generated-video-bytes");
     const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
@@ -79,6 +80,48 @@ describe("GenerativeAssetWorkerClient", () => {
     });
     assert.equal(response.artifacts.some((artifact) => artifact.kind === "generation_jobs"), true);
     assert.equal(response.artifacts.some((artifact) => artifact.kind === "media_asset"), true);
+  });
+
+  it("does not resubmit the same paid operation after an interrupted worker attempt", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "跨重启幂等测试" },
+    ] }));
+    let providerCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => {
+            providerCalls += 1;
+            return {
+              providerId: "seedance-video-v1",
+              taskId: `paid-task-${providerCalls}`,
+              videoUrl: "https://example.com/generated.mp4",
+            };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("video", { headers: { "content-type": "video/mp4" } }),
+    });
+
+    await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 2));
+    await assert.rejects(
+      () => subject.run(workerRequest(scriptPath, path.join(root, "attempt-2"), 1, 2)),
+      /already started/,
+    );
+    assert.equal(providerCalls, 1);
+
+    await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-3"), 1, 2),
+      commandId: "command-2",
+      attempt: 2,
+    });
+    assert.equal(providerCalls, 2);
   });
 
   it("refuses a generation request before external calls when its estimate exceeds the budget", async () => {

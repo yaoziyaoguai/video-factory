@@ -2,9 +2,11 @@ import {
   PRODUCTION_DIRECTOR_PROFILE_IDS,
   type ProductionDirectorProfileId,
   type ProductionEconomics,
+  type ProductionSeriesContext,
 } from "./contracts.js";
 import type { ProductionBlueprint } from "@video-factory/template-core";
 import type { CodexTaskExecution } from "./codex-chat.js";
+import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { ShotGrammar } from "./reference-grammar.js";
 
 export const DIRECTOR_PLAN_VERSION = "video-factory/director-plan-v1" as const;
@@ -171,6 +173,7 @@ export interface VisualDirectorAgentInput {
       guardrails: string[];
     };
     referenceGrammar?: ShotGrammar;
+    seriesContext?: ProductionSeriesContext;
   };
   scenes: Array<{
     position: number;
@@ -196,6 +199,7 @@ export interface VisualDirectorAgentInput {
     estimatedCnyPerClip: number;
   }>;
   economics: ProductionEconomics;
+  agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
 }
 
 export interface VisualAssetProviderCapability {

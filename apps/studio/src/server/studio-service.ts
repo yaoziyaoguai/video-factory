@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -27,6 +28,7 @@ import type {
   StudioRunSummary,
   StudioSeries,
   StudioSeriesInput,
+  StudioSeriesEpisodePlanInput,
   StudioTrendCandidate,
   StudioTrendService,
   StudioTrendSignal,
@@ -46,6 +48,7 @@ import type {
   StudioVoiceProfile,
 } from "../shared/api.js";
 import { StudioInputError } from "../shared/api.js";
+import { RunLockedError } from "@video-factory/production-pipeline";
 import { CapabilityStudio } from "./capability-studio.js";
 import { CandidateInboxStudio } from "./candidate-inbox-studio.js";
 import { CostStudio } from "./cost-studio.js";
@@ -53,13 +56,15 @@ import { JsonCreatorSettingsStore, type CreatorSettingsRepository } from "./crea
 import type { LocalCapabilityService } from "./local-capabilities.js";
 import { OpportunityStudio } from "./opportunity-studio.js";
 import { JsonOpportunityStore, type StudioOpportunityRepository } from "./opportunity-store.js";
-import { ProductionStudio, type StudioPipelinePort } from "./production-studio.js";
+import { ProductionStartDispatchedError, ProductionStudio, type StudioPipelinePort } from "./production-studio.js";
 import { ReferenceVideoStore } from "./reference-video-store.js";
 import { ResourceGovernanceStudio } from "./resource-governance-studio.js";
+import { JsonRunArchiveStore, type RunArchiveRepository } from "./run-archive-store.js";
 import type { CodexCatalogAvailability } from "./provider-catalog.js";
 import { buildPublishTargetCatalog, PublishingStudio, type PlatformPublisher } from "./publishing-studio.js";
 import { SeriesStudio } from "./series-studio.js";
-import { JsonSeriesStore, type StudioSeriesRepository } from "./series-store.js";
+import type { SeriesPlanningAgent } from "./series-planning-agent.js";
+import { JsonSeriesStore, type SeriesRunSnapshot, type StudioSeriesRepository } from "./series-store.js";
 import { TrendGateway } from "./trend-gateway.js";
 import { TrendOpportunityAgent } from "./trend-opportunity-agent.js";
 import { TrendStudio } from "./trend-studio.js";
@@ -68,7 +73,7 @@ import { JsonTemplateStore, TemplateRevisionConflictError } from "./template-sto
 import { TemplateStudio } from "./template-studio.js";
 
 export { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
-import { StudioConflictError } from "./studio-errors.js";
+import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 export type { StudioPipelinePort } from "./production-studio.js";
 
 export interface StudioServiceOptions {
@@ -86,8 +91,10 @@ export interface StudioServiceOptions {
   trendGateway?: Pick<TrendGateway, "listServices" | "listSignals">;
   trendAgent?: Pick<TrendOpportunityAgent, "listCandidates">;
   series?: StudioSeriesRepository;
+  seriesPlanningAgent?: SeriesPlanningAgent;
   createSeriesId?: () => string;
   creatorSettings?: CreatorSettingsRepository;
+  runArchive?: RunArchiveRepository;
   publishers?: PlatformPublisher[];
 }
 
@@ -139,6 +146,7 @@ export class StudioService {
       series: options.series ?? new JsonSeriesStore(path.join(options.workspaceRoot, "series", "series.json")),
       now,
       ...(options.createSeriesId ? { createId: options.createSeriesId } : {}),
+      ...(options.seriesPlanningAgent ? { planningAgent: options.seriesPlanningAgent } : {}),
     });
     this.candidateInbox = new CandidateInboxStudio({
       trends: this.trends,
@@ -155,6 +163,8 @@ export class StudioService {
       pipeline: options.pipeline,
       listProviders: () => this.capabilities.listProviders(),
       maxRunCostCny: positiveNumber(environment.VIDEO_FACTORY_MAX_RUN_COST_CNY, 20),
+      archiveStore: options.runArchive ?? new JsonRunArchiveStore(path.join(options.workspaceRoot, "archive", "runs.json")),
+      now,
       resolveTemplateSnapshot: async (input, brief) => {
         const rawTemplate = isRecord(input) ? input.template : undefined;
         return this.templates.resolveForRun({
@@ -172,6 +182,16 @@ export class StudioService {
         const resource = await this.production.resolveArtifact(run.id, run.publishPackageArtifactId);
         if (!resource) return undefined;
         return JSON.parse(await readFile(resource.path, "utf8")) as unknown;
+      },
+      withRunLease: async (runId, action) => {
+        try {
+          return await options.pipeline.withRunMaintenanceLease([runId], action);
+        } catch (error) {
+          if (error instanceof RunLockedError || (error instanceof Error && /locked by another writer/.test(error.message))) {
+            throw new StudioConflictError("这条制作正在执行、编辑或归档，请等待当前操作结束后再发布。");
+          }
+          throw error;
+        }
       },
       targets: buildPublishTargetCatalog(),
       ...(options.publishers ? { publishers: options.publishers } : {}),
@@ -228,19 +248,65 @@ export class StudioService {
     return this.candidateInbox.adopt(candidateId, input);
   }
 
-  listSeries(): Promise<StudioSeries[]> { return this.series.list(); }
+  async listSeries(): Promise<StudioSeries[]> {
+    await this.reconcileSeriesRuns();
+    return this.series.list();
+  }
   createSeries(input: StudioSeriesInput): Promise<StudioSeries> { return this.series.create(input); }
+  updateSeriesEpisodePlan(seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput): Promise<StudioSeries> {
+    return this.series.updateEpisodePlan(seriesId, episodeNumber, input);
+  }
+  async linkLegacySeriesRun(seriesId: string, episodeNumber: number, runId: string): Promise<StudioSeries> {
+    const run = await this.production.get(runId);
+    if (!run) throw new StudioNotFoundError("没有找到这条历史制作记录。");
+    if (run.seriesId && run.seriesId !== seriesId) {
+      throw new StudioConflictError("这条制作记录已经属于另一个系列。");
+    }
+    const linked = await this.series.linkLegacyRun(seriesId, episodeNumber, {
+      id: run.id,
+      status: run.status,
+      revision: run.revision,
+      ...(run.seriesId ? { seriesId: run.seriesId } : {}),
+      ...(run.episodeNumber ? { episodeNumber: run.episodeNumber } : {}),
+      ...(run.opportunityId ? { opportunityId: run.opportunityId } : {}),
+      ...(run.productionReservationId ? { productionReservationId: run.productionReservationId } : {}),
+    });
+    await this.reconcileSeriesRuns();
+    return (await this.series.list()).find((item) => item.id === linked.id) ?? linked;
+  }
 
-  listOpportunities(): Promise<StudioOpportunity[]> { return this.opportunities.list(); }
+  async listOpportunities(origin?: "trend" | "series" | "manual"): Promise<StudioOpportunity[]> {
+    const opportunities = await this.opportunities.list();
+    return origin
+      ? opportunities.filter((item) => origin === "manual" ? item.origin === "manual" || item.origin === undefined : item.origin === origin)
+      : opportunities;
+  }
   getOpportunity(opportunityId: string): Promise<StudioOpportunity | undefined> { return this.opportunities.get(opportunityId); }
-  createOpportunity(input: StudioOpportunityInput): Promise<StudioOpportunity> { return this.opportunities.create(input); }
+  createOpportunity(input: StudioOpportunityInput): Promise<StudioOpportunity> {
+    if (input.origin === "series" || input.origin === "trend") {
+      throw new StudioInputError("热点与系列机会只能从对应候选入口采用，不能由通用表单伪造来源。");
+    }
+    return this.opportunities.create(input);
+  }
   updateOpportunityStatus(opportunityId: string, status: StudioOpportunityStatus): Promise<StudioOpportunity> {
     return this.opportunities.updateStatus(opportunityId, status);
   }
 
-  listRuns(): Promise<StudioRunSummary[]> { return this.production.list(); }
+  async listRuns(origin?: "trend" | "series" | "manual"): Promise<StudioRunSummary[]> {
+    const runs = await this.production.list();
+    return origin
+      ? runs.filter((item) => origin === "manual" ? item.creationOrigin === "manual" || item.creationOrigin === undefined : item.creationOrigin === origin)
+      : runs;
+  }
   getRun(runId: string): Promise<StudioRunDetail | undefined> { return this.production.get(runId); }
-  deleteRun(runId: string): Promise<void> { return this.production.remove(runId); }
+  archiveRuns(runIds: string[]): Promise<void> { return this.production.archive(runIds); }
+  restoreRuns(runIds: string[]): Promise<void> { return this.production.restore(runIds); }
+  async deleteRun(runId: string): Promise<void> {
+    await this.reconcileSeriesRuns();
+    await this.series.assertRunDeletable(runId);
+    await this.production.remove(runId);
+    await this.reconcileSeriesRuns();
+  }
   costDashboard(): Promise<StudioCostDashboard> { return this.costs.dashboard(); }
   runCostDetail(runId: string): Promise<StudioCostRunDetail | undefined> { return this.costs.runDetail(runId); }
   async uploadReferenceVideo(input: { label: string; mimeType: string; bytes: Buffer }): Promise<StudioReferenceVideo> {
@@ -258,34 +324,105 @@ export class StudioService {
     }
   }
   async startRun(input: unknown, idempotencyKey?: string): Promise<StartRunResponse> {
-    const configuredInput = await this.withCreatorModelDefaults(input);
     const replay = await this.production.replayStart(input, idempotencyKey);
-    if (replay) return replay;
-    if (!isRecord(configuredInput) || !isRecord(configuredInput.referenceVideo)) {
-      return this.production.start(configuredInput, idempotencyKey, input);
+    if (replay) {
+      const existing = await this.production.get(replay.runId);
+      if (existing?.creationOrigin === "series" || existing?.seriesId) await this.reconcileSeriesRuns();
+      return replay;
     }
-    let reference;
+    const configuredInput = await this.withCreatorModelDefaults(input);
+    if (isRecord(configuredInput) && isRecord(configuredInput.creationContext)
+      && configuredInput.creationContext.origin === "series") {
+      await this.reconcileSeriesRuns();
+    }
+    const seriesContext = await this.resolveSeriesProductionContext(configuredInput);
+    const opportunityId = seriesContext && isRecord(configuredInput) && isRecord(configuredInput.creationContext)
+      ? String(configuredInput.creationContext.opportunityId ?? "")
+      : undefined;
+    const reservationId = seriesContext ? `series-run-${randomUUID()}` : undefined;
+    const trustedInput = seriesContext && reservationId && isRecord(configuredInput)
+      ? {
+          ...configuredInput,
+          title: seriesContext.episode.title,
+          angle: `${seriesContext.episode.hook}\n本集必须兑现：${seriesContext.episode.viewerPromise}\n结尾交付：${seriesContext.episode.payoff}`,
+          audience: seriesContext.audience,
+          nicheSlug: seriesContext.track,
+          platform: seriesContext.platform,
+          seriesContext: { ...seriesContext, productionReservationId: reservationId },
+        }
+      : configuredInput;
+    if (seriesContext && reservationId && opportunityId) {
+      await this.series.reserveRun(seriesContext, opportunityId, reservationId);
+    }
+    let dispatchedRunId: string | undefined;
     try {
-      reference = await this.referenceVideos.resolve(String(configuredInput.referenceVideo.uploadId ?? ""));
+      let started: StartRunResponse;
+      if (!isRecord(trustedInput) || !isRecord(trustedInput.referenceVideo)) {
+        started = await this.production.start(trustedInput, idempotencyKey, input);
+      } else {
+        let reference;
+        try {
+          reference = await this.referenceVideos.resolve(String(trustedInput.referenceVideo.uploadId ?? ""));
+        } catch (error) {
+          const message = error instanceof Error && error.message.startsWith("参考视频")
+            ? error.message
+            : "参考视频不存在或已经失效。";
+          throw new StudioInputError(message);
+        }
+        started = await this.production.start({
+          ...trustedInput,
+          referenceVideo: {
+            uploadId: reference.uploadId,
+            label: reference.label,
+            mimeType: reference.mimeType,
+            sizeBytes: reference.sizeBytes,
+            sha256: reference.sha256,
+            path: reference.path,
+          },
+        }, idempotencyKey, input);
+        this.removeReferenceUploadAfterPersistence(started.runId, reference.uploadId);
+      }
+      dispatchedRunId = started.runId;
+      if (seriesContext && reservationId) {
+        await this.series.confirmRunReservation(seriesContext, reservationId, started.runId);
+      }
+      return started;
     } catch (error) {
-      const message = error instanceof Error && error.message.startsWith("参考视频")
-        ? error.message
-        : "参考视频不存在或已经失效。";
-      throw new StudioInputError(message);
+      if (error instanceof ProductionStartDispatchedError) dispatchedRunId = error.runId;
+      if (seriesContext && reservationId) {
+        if (dispatchedRunId) {
+          // 已经产生真实任务时保留生产位，并通过可信 run 元数据恢复绑定，避免重复扣费。
+          await this.reconcileSeriesRuns().catch(() => undefined);
+        } else {
+          await this.series.releaseRunReservation(seriesContext, reservationId);
+        }
+      }
+      throw error;
     }
-    const started = await this.production.start({
-      ...configuredInput,
-      referenceVideo: {
-        uploadId: reference.uploadId,
-        label: reference.label,
-        mimeType: reference.mimeType,
-        sizeBytes: reference.sizeBytes,
-        sha256: reference.sha256,
-        path: reference.path,
-      },
-    }, idempotencyKey, input);
-    this.removeReferenceUploadAfterPersistence(started.runId, reference.uploadId);
-    return started;
+  }
+
+  private async resolveSeriesProductionContext(input: unknown) {
+    if (!isRecord(input)) return undefined;
+    const creation = isRecord(input.creationContext) ? input.creationContext : undefined;
+    if (creation?.origin !== "series" && input.seriesContext !== undefined) {
+      throw new StudioInputError("只有系列制作可以携带系列上下文。");
+    }
+    const opportunityId = typeof creation?.opportunityId === "string" ? creation.opportunityId : "";
+    const opportunity = opportunityId ? await this.opportunities.get(opportunityId) : undefined;
+    if (creation) {
+      if (!opportunity) throw new StudioInputError("没有找到与这次制作对应的机会，请返回入口重新选择。");
+      const expectedOrigin = opportunity.origin ?? "manual";
+      if (creation.origin !== expectedOrigin) {
+        throw new StudioInputError("制作入口与机会的真实来源不一致，请返回对应入口重新开始。");
+      }
+    }
+    if (creation?.origin !== "series") {
+      return undefined;
+    }
+    if (!opportunity || opportunity.origin !== "series" || !opportunity.seriesId || !opportunity.episodeNumber) {
+      throw new StudioInputError("没有找到与这次制作对应的系列单集，请返回系列路线图重新采用。");
+    }
+    return this.series.productionContextFor(opportunity.seriesId, opportunity.episodeNumber);
   }
 
   private removeReferenceUploadAfterPersistence(runId: string, uploadId: string): void {
@@ -340,17 +477,32 @@ export class StudioService {
     return this.production.decide(runId, input, actor);
   }
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor = "studio-owner"): Promise<StudioRunDetail> {
-    return this.production.applyNodeOverride(runId, nodeId, input, actor);
+    return this.withSeriesRunEditLease(runId, async () => this.production.applyNodeOverride(runId, nodeId, input, actor));
   }
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor = "studio-owner"): Promise<StudioRunDetail> {
-    return this.production.applyNodeInputOverride(runId, nodeId, input, actor);
+    return this.withSeriesRunEditLease(runId, async () => this.production.applyNodeInputOverride(runId, nodeId, input, actor));
   }
   authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.authorizeSpend(runId, nodeId, input, approvedBy);
   }
   resumeStale(runId: string): Promise<StudioRunDetail> { return this.production.resumeStale(runId); }
-  retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail> {
-    return this.production.retryFailedNode(runId, nodeId);
+  async retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail> {
+    const current = await this.production.get(runId);
+    if (!current) throw new StudioNotFoundError("没有找到这条制作记录。");
+    if (current.nodes.find((node) => node.id === nodeId)?.outcomeUncertain) {
+      throw new StudioConflictError("付费服务可能已经受理这次请求。请先在 Provider 控制台核对任务和账单，系统不会自动再次扣费。");
+    }
+    if (current.seriesId && current.episodeNumber) {
+      await this.series.resumeRun(current.seriesId, current.episodeNumber, runId);
+    }
+    try {
+      const updated = await this.production.retryFailedNode(runId, nodeId);
+      if (current.seriesId) await this.reconcileSeriesRuns();
+      return updated;
+    } catch (error) {
+      if (current.seriesId) await this.reconcileSeriesRuns().catch(() => undefined);
+      throw error;
+    }
   }
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void {
     return this.production.subscribe(runId, listener);
@@ -360,8 +512,90 @@ export class StudioService {
   }
   publishReadiness(runId: string): Promise<StudioPublishReadiness> { return this.publishing.readiness(runId); }
   async listPublishTargets(): Promise<StudioPublishTarget[]> { return this.publishing.listTargets(); }
-  publish(runId: string, input: StudioPublishInput): Promise<StudioPublishBatch> {
-    return this.publishing.publish(runId, input);
+  async publish(runId: string, input: StudioPublishInput): Promise<StudioPublishBatch> {
+    const batch = await this.publishing.publish(runId, input);
+    if (batch.deliveries.some((delivery) => delivery.status === "submitted")) {
+      await this.reconcileSeriesRuns();
+      await this.series.markRunPublished(runId);
+    }
+    return batch;
+  }
+
+  private async withSeriesRunEditLease(
+    runId: string,
+    operation: () => Promise<StudioRunDetail>,
+  ): Promise<StudioRunDetail> {
+    const leaseId = `edit-${randomUUID()}`;
+    await this.series.acquireRunEditLease(runId, leaseId);
+    try {
+      const updated = await operation();
+      if (updated.seriesId) await this.reconcileSeriesRuns();
+      return updated;
+    } finally {
+      await this.series.releaseRunEditLease(runId, leaseId);
+    }
+  }
+
+  private async reconcileSeriesRuns(): Promise<void> {
+    const series = await this.series.list();
+    const episodesByOpportunity = new Map<string, Array<{ seriesId: string; episodeNumber: number; opportunityId: string }>>();
+    for (const item of series) {
+      for (const episode of item.episodes) {
+        for (const opportunityId of new Set([episode.opportunityId, episode.id].filter((value): value is string => Boolean(value)))) {
+          const matches = episodesByOpportunity.get(opportunityId) ?? [];
+          matches.push({ seriesId: item.id, episodeNumber: episode.episodeNumber, opportunityId });
+          episodesByOpportunity.set(opportunityId, matches);
+        }
+      }
+    }
+    const episodesByRun = new Map<string, Array<{ seriesId: string; episodeNumber: number; opportunityId?: string }>>();
+    for (const item of series) {
+      for (const episode of item.episodes) {
+        if (!episode.runId) continue;
+        const matches = episodesByRun.get(episode.runId) ?? [];
+        matches.push({
+          seriesId: item.id,
+          episodeNumber: episode.episodeNumber,
+          ...(episode.opportunityId ? { opportunityId: episode.opportunityId } : {}),
+        });
+        episodesByRun.set(episode.runId, matches);
+      }
+    }
+    const summaries: Array<{ summary: StudioRunSummary; seriesId?: string; episodeNumber?: number; opportunityId?: string }> = [];
+    for (const summary of await this.production.list()) {
+      if (summary.creationOrigin === "series" || summary.seriesId) {
+        summaries.push({ summary, ...(summary.seriesId ? { seriesId: summary.seriesId } : {}), ...(summary.episodeNumber ? { episodeNumber: summary.episodeNumber } : {}), ...(summary.opportunityId ? { opportunityId: summary.opportunityId } : {}) });
+        continue;
+      }
+      const linkedMatches = episodesByRun.get(summary.id) ?? [];
+      if (linkedMatches.length === 1) {
+        summaries.push({ summary, ...linkedMatches[0]! });
+        continue;
+      }
+      const matches = summary.opportunityId ? episodesByOpportunity.get(summary.opportunityId) ?? [] : [];
+      if (matches.length === 1) summaries.push({ summary, ...matches[0]! });
+    }
+    const snapshots: SeriesRunSnapshot[] = await Promise.all(summaries.map(async ({ summary, seriesId, episodeNumber, opportunityId }) => {
+      const detail = await this.production.get(summary.id);
+      const canonProposal = detail
+        ? await canonProposalForRun(detail, (artifactId) => this.production.resolveArtifact(detail.id, artifactId))
+        : undefined;
+      const outcomeUncertain = detail?.status === "failed" && detail.nodes.some((node) => node.status === "failed"
+        && (node.outcomeUncertain === true || (node.interrupted === true
+          && (node.executionReceipt?.billing === "metered" || node.plannedExecution?.billing === "metered"))));
+      return {
+        id: summary.id,
+        status: detail?.status ?? summary.status,
+        revision: detail?.revision ?? 0,
+        ...(seriesId ? { seriesId } : {}),
+        ...(episodeNumber ? { episodeNumber } : {}),
+        ...(opportunityId ? { opportunityId } : {}),
+        ...(summary.productionReservationId ? { productionReservationId: summary.productionReservationId } : {}),
+        ...(outcomeUncertain ? { outcomeUncertain: true } : {}),
+        ...(canonProposal ? { canonProposal } : {}),
+      };
+    }));
+    await this.series.reconcileRuns(snapshots);
   }
 
   private async templateMutation(operation: () => Promise<StudioTemplateMutation>): Promise<StudioTemplateMutation> {
@@ -377,6 +611,67 @@ export class StudioService {
       throw error;
     }
   }
+}
+
+async function canonProposalForRun(
+  run: StudioRunDetail,
+  resolveArtifact: (artifactId: string) => Promise<StudioArtifactResource | undefined>,
+): Promise<{
+  memorySummary: string;
+  statements: string[];
+  sourceOutputVersionIds: string[];
+} | undefined> {
+  if (run.status !== "succeeded" || !run.seriesId || !run.episodeNumber) return undefined;
+  const finalReviewIndex = run.nodes.findIndex((node) => node.id === "final-review");
+  if (finalReviewIndex < 0 || run.nodes.slice(0, finalReviewIndex + 1).some((node) => node.status !== "succeeded"
+    || node.inputState?.stale === true
+    || node.outputState?.stale === true)) return undefined;
+  const finalReviewNode = run.nodes.find((node) => node.id === "final-review");
+  if (finalReviewNode?.status !== "succeeded" || finalReviewNode.outputState?.stale) return undefined;
+  const effectiveFinalReview = finalReviewNode.outputState?.versions.find(
+    (version) => version.id === finalReviewNode.outputState?.effectiveVersionId,
+  )?.output;
+  const scriptNode = run.nodes.find((node) => node.id === "script");
+  const effectiveScript = scriptNode?.outputState?.versions.find(
+    (version) => version.id === scriptNode.outputState?.effectiveVersionId,
+  );
+  if (!effectiveScript || scriptNode?.outputState?.stale) return undefined;
+  const scriptArtifact = effectiveScript.artifactIds
+    .map((artifactId) => run.artifacts.find((artifact) => artifact.id === artifactId))
+    .find((artifact) => artifact?.kind === "script" && artifact.contentType === "application/json");
+  if (!scriptArtifact) return undefined;
+  const resource = await resolveArtifact(scriptArtifact.id).catch(() => undefined);
+  if (!resource) return undefined;
+  let script: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(await readFile(resource.path, "utf8"));
+    if (!isRecord(parsed)) return undefined;
+    script = parsed;
+  } catch {
+    return undefined;
+  }
+  const statements = Array.isArray(script.canonFacts)
+    ? [...new Set(script.canonFacts.map(boundedCanonText).filter((value): value is string => Boolean(value)))].slice(0, 8)
+    : [];
+  const approvedStatements = isRecord(effectiveFinalReview) && Array.isArray(effectiveFinalReview.canonFacts)
+    ? [...new Set(effectiveFinalReview.canonFacts.map(boundedCanonText).filter((value): value is string => Boolean(value)))].slice(0, 8)
+    : [];
+  const sourceOutputVersionIds = [effectiveScript.id, ...run.nodes
+    .filter((node) => node.id === "script" || node.id === "render" || node.id === "visual-review" || node.id === "final-review")
+    .map((node) => node.outputState?.effectiveVersionId)
+    .filter((value): value is string => Boolean(value))];
+  if (statements.length === 0 || JSON.stringify(approvedStatements) !== JSON.stringify(statements)) return undefined;
+  return {
+    memorySummary: `第 ${run.episodeNumber} 集内部定版事实：${statements.join("；")}`,
+    statements,
+    sourceOutputVersionIds: [...new Set(sourceOutputVersionIds)],
+  };
+}
+
+function boundedCanonText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized ? [...normalized].slice(0, 240).join("") : undefined;
 }
 
 function isTemplateInputError(message: string): boolean {

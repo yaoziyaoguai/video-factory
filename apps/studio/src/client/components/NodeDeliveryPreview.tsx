@@ -18,12 +18,12 @@ const PRIMARY_FIELDS: Record<string, string[]> = {
   render: ["duration_target", "resolution", "visual_quality"],
   "technical-review": ["status"],
   "visual-review": ["recommendation", "confidence", "summary"],
-  "final-review": ["recommendation", "confidence", "summary"],
+  "final-review": [],
   "publish-package": ["title", "platform"],
 };
 
 const COLLECTION_FIELDS: Record<string, string[]> = {
-  script: ["scenes", "quality_checks", "hashtags"],
+  script: ["canonFacts", "scenes", "quality_checks", "hashtags"],
   "reference-grammar": ["beats", "reusableRules", "avoidCopying"],
   "visual-direction": ["shots"],
   "asset-candidates": ["scene_candidates"],
@@ -33,7 +33,7 @@ const COLLECTION_FIELDS: Record<string, string[]> = {
   render: ["slides"],
   "technical-review": ["checks"],
   "visual-review": ["findings"],
-  "final-review": ["findings"],
+  "final-review": ["canonFacts"],
   "publish-package": ["artifacts"],
 };
 
@@ -44,7 +44,7 @@ const NESTED_FIELDS: Record<string, string[]> = {
   voice: ["direction"],
   "technical-review": ["audio"],
   "visual-review": ["scores"],
-  "final-review": ["scores"],
+  "final-review": ["review"],
   "publish-package": ["copy", "approval", "aigc"],
 };
 
@@ -154,6 +154,8 @@ const FIELD_LABELS: Record<string, string> = {
   failure_conditions: "失败条件",
   viewerPromise: "观众承诺",
   narrativeArc: "叙事弧线",
+  canonFacts: "拟写入系列正史的事实",
+  review: "本轮审片结论",
   fallbackReason: "回退原因",
   quality_checks: "脚本自检",
   hashtags: "建议话题",

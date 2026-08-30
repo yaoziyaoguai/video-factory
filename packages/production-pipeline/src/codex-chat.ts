@@ -1,9 +1,10 @@
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。
-export const CODEX_TASK_KINDS = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"] as const;
+export const CODEX_TASK_KINDS = ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"] as const;
 export type CodexTaskKind = (typeof CODEX_TASK_KINDS)[number];
 
 export interface CodexTaskTrace {
@@ -12,11 +13,57 @@ export interface CodexTaskTrace {
   prompt: string;
   providerId: string;
   modelId: string;
+  reasoningEffort?: string;
+}
+
+export interface RoleAuditIssue {
+  severity: "advisory" | "blocking";
+  criterion: string;
+  evidence: string;
+  repairInstruction: string;
+}
+
+export interface RoleAudit {
+  version: "video-factory/role-audit-v1";
+  verdict: "pass" | "repair";
+  score: number;
+  summary: string;
+  issues: RoleAuditIssue[];
+  repairInstructions: string[];
+}
+
+export interface AgentLoopIterationTrace {
+  iteration: number;
+  candidate: unknown;
+  candidateHash: string;
+  candidateTrace?: CodexTaskTrace;
+  auditTrace?: CodexTaskTrace;
+  audit: RoleAudit;
+}
+
+export interface AgentLoopPendingCandidateTrace {
+  iteration: number;
+  candidate: unknown;
+  candidateHash: string;
+  candidateTrace?: CodexTaskTrace;
+}
+
+export interface AgentLoopTrace {
+  version: "video-factory/agent-loop-v1";
+  role: string;
+  contractVersion: string;
+  criteria: string[];
+  status: "passed" | "failed";
+  maxIterations: number;
+  modelCallCount?: number;
+  iterations: AgentLoopIterationTrace[];
+  pendingCandidate?: AgentLoopPendingCandidateTrace;
 }
 
 export interface CodexTaskExecution<TOutput = unknown> {
   output: TOutput;
   trace?: CodexTaskTrace;
+  agentLoop?: AgentLoopTrace;
 }
 
 const TASK_PATH = "/v1/tasks";
@@ -64,15 +111,18 @@ export class CodexBridgeClient {
 
   // 至多执行一次：仅连接层 ENOENT/ECONNREFUSED 与 HTTP 503（队列拒绝，未受理）按指数退避有界重试；
   // 超时与执行期失败直接上抛，绝不重放已受理的任务。
-  async runTask(kind: CodexTaskKind, payload: unknown): Promise<unknown> {
-    return (await this.runTaskDetailed(kind, payload)).output;
+  async runTask(kind: CodexTaskKind, payload: unknown, requestId?: string): Promise<unknown> {
+    return (await this.runTaskDetailed(kind, payload, requestId)).output;
   }
 
-  async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
+  async runTaskDetailed(kind: CodexTaskKind, payload: unknown, requestId: string = randomUUID()): Promise<CodexTaskExecution> {
     if (!isCodexTaskKind(kind)) {
       throw new CodexBridgeError(`Unsupported codex task kind '${String(kind)}'.`, false);
     }
-    const body = JSON.stringify({ protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION, kind, payload });
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestId)) {
+      throw new CodexBridgeError("Codex bridge requestId is invalid.", false);
+    }
+    const body = JSON.stringify({ protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION, requestId, kind, payload });
     let lastError: CodexBridgeError | undefined;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       try {
@@ -177,6 +227,9 @@ function parseTrace(value: unknown): CodexTaskTrace {
     prompt: trace.prompt,
     providerId: trace.providerId,
     modelId: trace.modelId,
+    ...(typeof trace.reasoningEffort === "string" && trace.reasoningEffort
+      ? { reasoningEffort: trace.reasoningEffort }
+      : {}),
   };
 }
 

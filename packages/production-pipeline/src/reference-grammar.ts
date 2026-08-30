@@ -1,5 +1,6 @@
 import type { CodexBridgeClient, CodexTaskExecution } from "./codex-chat.js";
 import type { VisualReviewMediaPayload, VisualReviewMediaPreprocessor } from "./codex-visual-review.js";
+import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
 export interface ReferenceGrammarBeat {
   startMs: number;
@@ -36,6 +37,7 @@ export interface ReferenceGrammarAgentInput {
   videoPath: string;
   runRoot: string;
   sourceLabel: string;
+  agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
 }
 
 export interface ReferenceGrammarExecution extends CodexTaskExecution<ShotGrammar> {
@@ -50,11 +52,14 @@ export interface ReferenceGrammarAgent {
 }
 
 export interface CodexReferenceGrammarAgentOptions {
-  client: Pick<CodexBridgeClient, "runTask">;
+  client: Pick<CodexBridgeClient, "runTask"> & Partial<Pick<CodexBridgeClient, "runTaskDetailed">>;
   media: VisualReviewMediaPreprocessor;
   providerId?: string;
   modelId?: string;
+  maxReviewIterations?: number;
 }
+
+export const REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION = "reference-grammar-v1|role-audit-v1|shot-grammar-validator-v1";
 
 export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
   readonly id: string;
@@ -72,15 +77,57 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
 
   async analyzeDetailed(input: ReferenceGrammarAgentInput): Promise<ReferenceGrammarExecution> {
     const payload = await this.payload(input);
-    const client = this.options.client as Pick<CodexBridgeClient, "runTask" | "runTaskDetailed">;
+    const client = this.options.client;
     if (typeof client.runTaskDetailed !== "function") {
       return { output: validateShotGrammar(await client.runTask("reference-grammar", payload), payload.durationMs), inspectedDurationMs: payload.durationMs };
     }
-    const execution = await client.runTaskDetailed("reference-grammar", payload);
+    const execution = await runRoleAgentLoop<ShotGrammar>({
+      role: "参考片分析师",
+      contractVersion: REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION,
+      criteria: [
+        "节拍时间有序、互不重叠，并覆盖被观察视频的主要叙事结构",
+        "静帧不能证明的连续运动和声音被明确降置信，而不是写成确定事实",
+        "只提炼节奏、构图、运镜、色彩、转场与声音功能等抽象语法",
+        "avoidCopying 明确排除人物身份、对白、品牌、独特情节和标志性资产",
+      ],
+      maxIterations: this.options.maxReviewIterations ?? 3,
+      produce: (revision, { requestId }) => client.runTaskDetailed!("reference-grammar", {
+        ...payload,
+        ...(revision ? { revision } : {}),
+      }, requestId),
+      audit: ({ role, iteration, criteria, candidate, requestId }) => client.runTaskDetailed!("role-audit", {
+        role,
+        iteration,
+        criteria,
+        context: {
+          durationMs: payload.durationMs,
+          sourceLabel: payload.sourceLabel,
+          frames: payload.frames.map((frame, index) => ({
+            imageIndex: index + 1,
+            timecodeMs: frame.timecodeMs,
+            sha256: frame.sha256,
+            ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
+            ...(frame.phase ? { phase: frame.phase } : {}),
+          })),
+        },
+        candidate,
+        images: payload.frames.map((frame, index) => ({
+          imageIndex: index + 1,
+          timecodeMs: frame.timecodeMs,
+          sha256: frame.sha256,
+          jpegBase64: frame.jpegBase64,
+          ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
+          ...(frame.phase ? { phase: frame.phase } : {}),
+        })),
+      }, requestId),
+      validate: (value) => validateShotGrammar(value, payload.durationMs),
+      ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
+    });
     return {
-      output: validateShotGrammar(execution.output, payload.durationMs),
+      output: execution.output,
       inspectedDurationMs: payload.durationMs,
       ...(execution.trace ? { trace: execution.trace } : {}),
+      ...(execution.agentLoop ? { agentLoop: execution.agentLoop } : {}),
     };
   }
 

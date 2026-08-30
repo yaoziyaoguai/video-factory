@@ -115,6 +115,12 @@ class WorkerContractTest(unittest.TestCase):
             self.assertEqual({item["provider"] for item in plan["scene_assets"]}, {"local"})
             self.assertTrue(all(Path(item["local_path"]).exists() for item in plan["scene_assets"]))
             self.assertTrue(all(item["license_note"] for item in plan["scene_assets"]))
+            media_artifacts = [item for item in response["artifacts"] if item["kind"] == "media_asset"]
+            self.assertEqual(len(media_artifacts), 5)
+            self.assertTrue(all(item["contentType"] == "image/png" for item in media_artifacts))
+            self.assertTrue(all(item["provenance"]["providerId"] == "local-editorial-v1" for item in media_artifacts))
+            self.assertTrue(all(item["provenance"]["sourceUrl"] == "local://video-factory/card" for item in media_artifacts))
+            self.assertTrue(all(item["provenance"]["creator"] == "VideoFactory" for item in media_artifacts))
 
     def test_ai_router_materializes_each_scene_from_the_director_plan(self):
         with tempfile.TemporaryDirectory() as tmp:

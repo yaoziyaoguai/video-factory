@@ -49,6 +49,7 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
   readonly #providers: ProviderRegistry;
   readonly #publicContext: WorkflowContext<TInitialInput>;
   #activeSpendAuthorization: Readonly<SpendAuthorization> | undefined;
+  #activeOperationRequestId: string | undefined;
   #activeMeteredAttempts = 0;
 
   constructor(
@@ -70,6 +71,7 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
       get artifacts() { return context.artifacts; },
       get outputs() { return context.outputs; },
       get spendAuthorization() { return context.spendAuthorization; },
+      get operationRequestId() { return context.operationRequestId; },
       now: () => context.now(),
       nextId: (prefix: string) => context.nextId(prefix),
       addArtifact: <TData = unknown>(draft: ArtifactDraft<TData>) => context.addArtifact(draft),
@@ -154,18 +156,26 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
     return this.#activeSpendAuthorization;
   }
 
+  get operationRequestId(): string | undefined {
+    return this.#activeOperationRequestId;
+  }
+
   async withSpendAuthorization<T>(
     authorization: Readonly<SpendAuthorization> | undefined,
+    operationRequestId: string,
     execute: () => Promise<T>,
   ): Promise<T> {
     const previous = this.#activeSpendAuthorization;
+    const previousOperationRequestId = this.#activeOperationRequestId;
     const previousAttempts = this.#activeMeteredAttempts;
     this.#activeSpendAuthorization = authorization;
+    this.#activeOperationRequestId = operationRequestId;
     this.#activeMeteredAttempts = 0;
     try {
       return await execute();
     } finally {
       this.#activeSpendAuthorization = previous;
+      this.#activeOperationRequestId = previousOperationRequestId;
       this.#activeMeteredAttempts = previousAttempts;
     }
   }
@@ -436,6 +446,8 @@ export class WorkflowRunner {
       delete descendant.intervention;
       delete descendant.spendPlan;
       delete descendant.spendAuthorizationId;
+      delete descendant.operationRequestId;
+      delete descendant.interrupted;
       if (descendant.outputState) {
         descendant.outputState.stale = true;
       }
@@ -450,7 +462,10 @@ export class WorkflowRunner {
       .filter((authorization) => !invalidatedNodeIds.has(authorization.nodeId));
 
     run.revision += 1;
-    if (descendants.size > 0) {
+    const hasStaleNode = run.nodeRuns.some((candidate) => candidate.status === "stale"
+      || candidate.inputState?.stale === true
+      || candidate.outputState?.stale === true);
+    if (hasStaleNode) {
       run.status = "stale";
       delete run.finishedAt;
     } else {
@@ -546,6 +561,8 @@ export class WorkflowRunner {
     delete nodeRun.intervention;
     delete nodeRun.spendPlan;
     delete nodeRun.spendAuthorizationId;
+    delete nodeRun.operationRequestId;
+    delete nodeRun.interrupted;
     if (nodeRun.outputState) nodeRun.outputState.stale = true;
 
     const descendants = descendantNodeIds(definition.nodes, node.id);
@@ -555,6 +572,8 @@ export class WorkflowRunner {
       delete descendant.intervention;
       delete descendant.spendPlan;
       delete descendant.spendAuthorizationId;
+      delete descendant.operationRequestId;
+      delete descendant.interrupted;
       if (descendant.outputState) descendant.outputState.stale = true;
       if (descendant.inputState) descendant.inputState.stale = true;
     }
@@ -663,8 +682,22 @@ export class WorkflowRunner {
     if (previousRun.status !== "stale") {
       throw new Error(`Run '${previousRun.id}' has no stale nodes to regenerate.`);
     }
+    const uncertainNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.status === "stale" && nodeRun.outcomeUncertain);
+    if (uncertainNode) {
+      throw new Error(`Node '${uncertainNode.nodeId}' has an uncertain paid-provider outcome and cannot be regenerated before reconciliation.`);
+    }
     const run = cloneWorkflowRun(previousRun);
     for (const nodeRun of run.nodeRuns) {
+      if (nodeRun.status === "stale" && nodeRun.outputState?.stale) {
+        const effectiveOutput = nodeRun.outputState.versions.find(
+          (version) => version.id === nodeRun.outputState?.effectiveVersionId,
+        );
+        if (effectiveOutput?.source === "human") {
+          throw new Error(
+            `Node '${nodeRun.nodeId}' has a stale human output that must be reviewed and saved again or explicitly discarded before regeneration.`,
+          );
+        }
+      }
       if (nodeRun.status !== "stale" || !nodeRun.inputState?.stale) continue;
       const effectiveInput = nodeRun.inputState.versions.find(
         (version) => version.id === nodeRun.inputState?.effectiveVersionId,
@@ -688,6 +721,8 @@ export class WorkflowRunner {
         delete nodeRun.executionReceipt;
         delete nodeRun.spendPlan;
         delete nodeRun.spendAuthorizationId;
+        delete nodeRun.operationRequestId;
+        delete nodeRun.interrupted;
       } else if (nodeRun.status === "succeeded" && nodeRun.output !== undefined) {
         outputs.set(nodeRun.nodeId, nodeRun.output);
       }
@@ -726,10 +761,14 @@ export class WorkflowRunner {
     if (!failedNode || failedNode.status !== "failed" || !definition.nodes.some((node) => node.id === nodeId)) {
       throw new Error(`Node '${nodeId}' is not the failed node.`);
     }
+    if (failedNode.outcomeUncertain) {
+      throw new Error(`Node '${nodeId}' has an uncertain paid-provider outcome and cannot be retried before reconciliation.`);
+    }
 
     const run = cloneWorkflowRun(previousRun);
     const retryNode = run.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId)!;
     retryNode.status = "pending";
+    const preserveInterruptedOperation = retryNode.interrupted === true;
     retryNode.artifactIds = [];
     retryNode.qualityGateResults = [];
     delete retryNode.output;
@@ -739,6 +778,8 @@ export class WorkflowRunner {
     delete retryNode.executionReceipt;
     delete retryNode.spendPlan;
     delete retryNode.spendAuthorizationId;
+    delete retryNode.interrupted;
+    if (!preserveInterruptedOperation) delete retryNode.operationRequestId;
     if (retryNode.outputState) retryNode.outputState.stale = true;
 
     const outputs = new Map<string, unknown>();
@@ -837,6 +878,8 @@ export class WorkflowRunner {
     };
     nodeRun.status = "running";
     nodeRun.startedAt = context.now();
+    nodeRun.operationRequestId ??= context.nextId(`${context.runId}-${node.id}-operation`);
+    delete nodeRun.interrupted;
 
     await onStarted(nodeRun);
 
@@ -869,6 +912,7 @@ export class WorkflowRunner {
 
       const execution = await context.withSpendAuthorization(
         authorization,
+        nodeRun.operationRequestId,
         () => executeNode(node, input, context, provider),
       );
       const result = execution.result;
@@ -940,6 +984,7 @@ export class WorkflowRunner {
       nodeRun.status = "failed";
       nodeRun.error = error instanceof Error ? error.message : String(error);
       nodeRun.finishedAt = context.now();
+      if (authorization) nodeRun.outcomeUncertain = true;
       if (!nodeRun.executionReceipt) {
         nodeRun.executionReceipt = createExecutionReceipt(
           node,

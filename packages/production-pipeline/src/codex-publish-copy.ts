@@ -1,10 +1,13 @@
 import { CodexBridgeClient, type CodexTaskExecution } from "./codex-chat.js";
+import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
 export interface PublishCopy {
   title: string;
   description: string;
   hashtags: string[];
 }
+
+export const PUBLISH_COPY_AGENT_CONTRACT_VERSION = "publish-editor-v1|role-audit-v1|publish-copy-validator-v1";
 
 export interface PublishCopyInput {
   platform: string;
@@ -15,6 +18,7 @@ export interface PublishCopyInput {
     nicheSlug: string;
   };
   narrations: string[];
+  agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
 }
 
 // 接口层返回 unknown：pipeline 侧后续对接时须独立做 validatePublishCopy 硬校验。
@@ -31,6 +35,7 @@ export interface CodexPublishCopyWriterOptions {
   maxAttempts?: number;
   retryDelayMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
+  maxReviewIterations?: number;
 }
 
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
@@ -41,8 +46,10 @@ const DEFAULT_PUBLISH_COPY_MAX_ATTEMPTS = 2;
 export class CodexPublishCopyWriter implements PublishCopyWriter {
   readonly id = "codex-publish-copy-v1";
   private readonly client: CodexBridgeClient;
+  private readonly maxReviewIterations: number;
 
   constructor(options: CodexPublishCopyWriterOptions) {
+    this.maxReviewIterations = options.maxReviewIterations ?? 3;
     if (options.client) {
       this.client = options.client;
     } else {
@@ -72,15 +79,35 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
 
   async writeDetailed(input: PublishCopyInput): Promise<CodexTaskExecution<PublishCopy>> {
     validatePublishCopyInput(input);
-    const execution = await this.client.runTaskDetailed("publish-copy", {
+    const request = {
       platform: input.platform,
       brief: input.brief,
       narrations: input.narrations,
-    });
-    return {
-      output: validatePublishCopy(execution.output),
-      ...(execution.trace ? { trace: execution.trace } : {}),
     };
+    return runRoleAgentLoop({
+      role: "发行编辑",
+      contractVersion: PUBLISH_COPY_AGENT_CONTRACT_VERSION,
+      criteria: [
+        "标题与描述只使用脚本已经表达的事实和价值，不制造额外承诺",
+        "标题、描述与话题标签符合目标平台语气和长度约束",
+        "开头信息具体、有辨识度，不使用空泛、夸张或误导性表达",
+        "话题标签覆盖内容主题与目标受众，且没有重复、空白或无关热词",
+      ],
+      maxIterations: this.maxReviewIterations,
+      produce: (revision, { requestId }) => this.client.runTaskDetailed("publish-copy", {
+        ...request,
+        ...(revision ? { revision } : {}),
+      }, requestId),
+      audit: ({ role, iteration, criteria, candidate, requestId }) => this.client.runTaskDetailed("role-audit", {
+        role,
+        iteration,
+        criteria,
+        context: request,
+        candidate,
+      }, requestId),
+      validate: validatePublishCopy,
+      ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
+    });
   }
 }
 

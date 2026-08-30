@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CodexBridgeClient, type CodexTaskKind } from "@video-factory/production-pipeline";
+import { CodexBridgeClient, type CodexTaskExecution, type CodexTaskKind } from "@video-factory/production-pipeline";
 import {
   CodexTopicIdeaModel,
   TrendOpportunityAgent,
@@ -41,6 +41,21 @@ class CapturingCodexClient extends CodexBridgeClient {
     this.calls.push({ kind, payload });
     return this.respond();
   }
+
+  async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
+    this.calls.push({ kind, payload });
+    if (kind === "role-audit") {
+      return { output: {
+        version: "video-factory/role-audit-v1",
+        verdict: "pass",
+        score: 92,
+        summary: "候选有来源、观众价值与可执行角度。",
+        issues: [],
+        repairInstructions: [],
+      } };
+    }
+    return { output: this.respond() };
+  }
 }
 
 describe("TrendOpportunityAgent", () => {
@@ -65,8 +80,9 @@ describe("TrendOpportunityAgent", () => {
 
     assert.equal(model.id, "api-topic-editor-v1");
     assert.equal(ideas[0]?.title, "下班后的 AI 时间账本");
-    assert.equal(codexClient.calls.length, 1);
+    assert.equal(codexClient.calls.length, 2);
     assert.equal(codexClient.calls[0]?.kind, "topic-ideas");
+    assert.equal(codexClient.calls[1]?.kind, "role-audit");
     const payload = codexClient.calls[0]!.payload as Record<string, unknown>;
     assert.equal("directive" in payload, false);
     assert.deepEqual(Object.keys(payload), ["signals"]);

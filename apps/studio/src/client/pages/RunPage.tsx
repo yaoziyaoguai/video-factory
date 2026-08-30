@@ -213,6 +213,9 @@ export function RunPage() {
           platform: run.platform,
           durationSeconds: run.durationSeconds,
           reviewMode: "manual",
+          ...(run.creationOrigin && run.opportunityId ? {
+            creationContext: { origin: run.creationOrigin, opportunityId: run.opportunityId },
+          } : {}),
         }}
         onClose={() => setRestarting(false)}
         onSubmit={restartProduction}

@@ -16,9 +16,10 @@ from PIL import Image, ImageDraw, ImageOps
 
 
 MANIFEST_VERSION = "video-factory/review-media-v1"
-MAX_FRAMES = 12
-MAX_FRAME_BYTES = 512 * 1024
-MAX_TOTAL_FRAME_BYTES = 6 * 1024 * 1024
+MAX_FRAMES = 24
+MAX_SCENE_CHANGE_FRAMES = 12
+MAX_FRAME_BYTES = 256 * 1024
+MAX_TOTAL_FRAME_BYTES = 5 * 1024 * 1024
 FRAME_MAX_WIDTH = 640
 FRAME_MAX_HEIGHT = 1280
 SCENE_CHANGE_THRESHOLD = 0.30
@@ -48,16 +49,28 @@ def prepare_review_media(
 
     probe = _probe_video(video)
     duration_ms = max(1, int(round(float(probe["duration"]) * 1000)))
+    scene_count = None
     if render_manifest_path is not None:
         render_manifest = _resolve_run_file(render_manifest_path, root)
-        timestamps = _select_render_timeline_timestamps(
+        slide_durations = _read_slide_durations(render_manifest)
+        scene_count = len(slide_durations)
+        samples = _select_render_timeline_samples(
             duration_ms,
-            _read_slide_durations(render_manifest),
+            slide_durations,
             max_frames,
         )
     else:
         scene_changes = _detect_scene_changes(video, duration_ms)
-        timestamps = _select_timestamps(duration_ms, scene_changes, max_frames)
+        timestamps = _select_timestamps(
+            duration_ms,
+            scene_changes,
+            min(max_frames, MAX_SCENE_CHANGE_FRAMES),
+        )
+        samples = [
+            {"timestampMs": timestamp, "phase": "keyframe"}
+            for timestamp in timestamps
+        ]
+    timestamps = [sample["timestampMs"] for sample in samples]
 
     output_dir = root / "review_media"
     _assert_confined(output_dir, root, "review media output")
@@ -70,7 +83,8 @@ def prepare_review_media(
         frame_entries = []
         total_frame_bytes = 0
         frame_paths = []
-        for index, timestamp_ms in enumerate(timestamps):
+        for index, sample in enumerate(samples):
+            timestamp_ms = sample["timestampMs"]
             filename = f"frame-{index:02d}-{timestamp_ms:09d}ms.jpg"
             frame_path = frames_dir / filename
             _extract_frame(video, timestamp_ms, frame_path)
@@ -82,19 +96,21 @@ def prepare_review_media(
             if total_frame_bytes > MAX_TOTAL_FRAME_BYTES:
                 raise RuntimeError(f"review frames exceed {MAX_TOTAL_FRAME_BYTES} bytes in total")
             frame_paths.append(frame_path)
-            frame_entries.append(
-                _image_entry(
-                    frame_path,
-                    f"review_media/frames/{filename}",
-                    timestamp_ms=timestamp_ms,
-                )
+            entry = _image_entry(
+                frame_path,
+                f"review_media/frames/{filename}",
+                timestamp_ms=timestamp_ms,
             )
+            entry.update({key: value for key, value in sample.items() if key != "timestampMs"})
+            frame_entries.append(entry)
 
         contact_sheet_path = stage / "contact_sheet.jpg"
         _write_contact_sheet(frame_paths, timestamps, contact_sheet_path)
+        sampling = _sampling_metadata(samples, scene_count, render_manifest_path is not None)
         manifest = {
             "version": MANIFEST_VERSION,
             "durationMs": duration_ms,
+            "sampling": sampling,
             "frames": frame_entries,
             "contactSheet": _image_entry(
                 contact_sheet_path,
@@ -111,6 +127,28 @@ def prepare_review_media(
         shutil.rmtree(stage, ignore_errors=True)
         raise
     return output_dir / "review_media_manifest.json"
+
+
+def _sampling_metadata(samples: List[dict], scene_count: Optional[int], has_render_manifest: bool) -> dict:
+    if not has_render_manifest:
+        return {"mode": "scene_change_keyframes"}
+    covered = sorted({sample["scenePosition"] for sample in samples if isinstance(sample.get("scenePosition"), int)})
+    missing = [position for position in range(1, (scene_count or 0) + 1) if position not in covered]
+    phases_by_scene = {
+        position: {sample.get("phase") for sample in samples if sample.get("scenePosition") == position}
+        for position in range(1, (scene_count or 0) + 1)
+    }
+    complete_triplets = bool(scene_count) and all(
+        phases_by_scene[position] == {"opening", "middle", "closing"}
+        and sum(1 for sample in samples if sample.get("scenePosition") == position) == 3
+        for position in range(1, scene_count + 1)
+    )
+    return {
+        "mode": "scene_triplets" if complete_triplets else "hook_and_scene_midpoints",
+        "sceneCount": scene_count,
+        "coveredScenePositions": covered,
+        "missingScenePositions": missing,
+    }
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -269,23 +307,58 @@ def _select_render_timeline_timestamps(
     slide_durations: Iterable[float],
     max_frames: int,
 ) -> List[int]:
+    return [
+        sample["timestampMs"]
+        for sample in _select_render_timeline_samples(duration_ms, slide_durations, max_frames)
+    ]
+
+
+def _select_render_timeline_samples(
+    duration_ms: int,
+    slide_durations: Iterable[float],
+    max_frames: int,
+) -> List[dict]:
     """Sample stable scene interiors instead of transition boundaries."""
     durations_ms = [float(duration) * 1000 for duration in slide_durations]
     total_timeline_ms = sum(durations_ms)
     if total_timeline_ms <= 0:
         raise ValueError("render manifest does not contain reviewable slides")
     timeline_scale = duration_ms / total_timeline_ms
+    end_margin_ms = min(SAMPLE_END_MARGIN_MS, max(1, duration_ms // 2))
+    last_reviewable_ms = max(0, duration_ms - end_margin_ms)
     cursor_ms = 0.0
-    midpoints = []
+    scene_ranges = []
     for source_slide_ms in durations_ms:
         slide_ms = source_slide_ms * timeline_scale
-        midpoint = int(round(cursor_ms + slide_ms / 2))
-        midpoints.append(min(duration_ms - 1, max(0, midpoint)))
+        scene_ranges.append((cursor_ms, slide_ms))
         cursor_ms += slide_ms
 
-    first_screen = min(duration_ms - 1, 250)
+    # 每镜头三帧是可审计的状态证据：起始、中段、结束。只有预算不足时才退回
+    # 首屏 + 镜头中点，避免为了凑三帧而完全丢掉后续镜头。
+    if max_frames >= len(scene_ranges) * 3:
+        samples = [
+            {
+                "timestampMs": min(last_reviewable_ms, max(0, int(round(start_ms + slide_ms * phase)))),
+                "scenePosition": scene_index + 1,
+                "phase": phase_name,
+            }
+            for scene_index, (start_ms, slide_ms) in enumerate(scene_ranges)
+            for phase, phase_name in ((0.15, "opening"), (0.5, "middle"), (0.85, "closing"))
+        ]
+        return _unique_samples(samples)
+
+    midpoints = [
+        {
+            "timestampMs": min(last_reviewable_ms, max(0, int(round(start_ms + slide_ms / 2)))),
+            "scenePosition": scene_index + 1,
+            "phase": "midpoint",
+        }
+        for scene_index, (start_ms, slide_ms) in enumerate(scene_ranges)
+    ]
+
+    first_screen = min(last_reviewable_ms, 250)
     if max_frames == 1:
-        return [first_screen]
+        return [{"timestampMs": first_screen, "scenePosition": 1, "phase": "hook"}]
     desired_midpoints = min(len(midpoints), max_frames - 1)
     if len(midpoints) > desired_midpoints:
         if desired_midpoints == 1:
@@ -296,8 +369,18 @@ def _select_render_timeline_timestamps(
                 for index in range(desired_midpoints)
             ]
 
-    selected = [first_screen, *[midpoint for midpoint in midpoints if midpoint != first_screen]]
-    return sorted(set(selected))
+    selected = [
+        {"timestampMs": first_screen, "scenePosition": 1, "phase": "hook"},
+        *[midpoint for midpoint in midpoints if midpoint["timestampMs"] != first_screen],
+    ]
+    return _unique_samples(selected)
+
+
+def _unique_samples(samples: Iterable[dict]) -> List[dict]:
+    by_timestamp = {}
+    for sample in samples:
+        by_timestamp.setdefault(sample["timestampMs"], sample)
+    return [by_timestamp[timestamp] for timestamp in sorted(by_timestamp)]
 
 
 def _nearest_available_timestamp(target: int, selected: List[int], duration_ms: int) -> int:

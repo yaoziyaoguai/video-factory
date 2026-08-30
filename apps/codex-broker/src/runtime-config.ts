@@ -12,6 +12,7 @@ export interface BrokerRuntimeConfig {
   workspaceRoot: string;
   codexBin: string;
   effort: string;
+  auditEffort: string;
   timeoutMs: number;
   concurrency: number;
   maxBacklog: number;
@@ -31,6 +32,10 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
   if (!ALLOWED_EFFORTS.has(effort)) {
     throw new Error("VIDEO_FACTORY_CODEX_EFFORT must be one of low|medium|high|xhigh|max.");
   }
+  const auditEffort = optionalText(env, "VIDEO_FACTORY_CODEX_AUDIT_EFFORT") ?? "max";
+  if (!ALLOWED_EFFORTS.has(auditEffort)) {
+    throw new Error("VIDEO_FACTORY_CODEX_AUDIT_EFFORT must be one of low|medium|high|xhigh|max.");
+  }
 
   return {
     profile: codexExecutorProfileFor(profileId, configuredModel, configuredZaiModel),
@@ -38,6 +43,7 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
     workspaceRoot: optionalText(env, "VIDEO_FACTORY_CODEX_WORKSPACE_ROOT") ?? defaultWorkspaceRoot(profileId),
     codexBin: optionalText(env, "CODEX_BIN") ?? "codex",
     effort,
+    auditEffort,
     timeoutMs: readInteger(env, "VIDEO_FACTORY_CODEX_TIMEOUT_MS", 300_000, 1_000, 3_600_000),
     concurrency: readInteger(env, "VIDEO_FACTORY_CODEX_CONCURRENCY", 1, 1, 8),
     maxBacklog: readInteger(env, "VIDEO_FACTORY_CODEX_MAX_BACKLOG", 20, 1, 1_000),

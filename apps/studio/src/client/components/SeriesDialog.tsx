@@ -35,6 +35,12 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
         pillars: [valueOr(data, "pillar1", "真实问题拆解"), valueOr(data, "pillar2", "方法与结果复盘")],
         tone: valueOr(data, "tone", "克制、具体、有结论"),
         visualStyle: valueOr(data, "visualStyle", "真实操作、人物反应与环境细节"),
+        seasonTitle: valueOr(data, "seasonTitle", "第一季"),
+        seasonArc: valueOr(data, "seasonArc", required(data, "premise")),
+        planningPeriod: valueOr(data, "planningPeriod", currentQuarterLabel()),
+        releaseCadence: valueOr(data, "releaseCadence", "weekly"),
+        targetEpisodeCount: positiveInteger(data, "targetEpisodeCount", 12),
+        continuityRules: lines(data, "continuityRules"),
       }));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -57,14 +63,20 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
           <label className="field field-wide"><span>系列承诺</span><textarea name="premise" required rows={3} placeholder="每一集稳定为观众解决什么问题" /></label>
           <label className="field"><span>目标受众</span><input name="audience" required placeholder="最想持续服务的那群人" /></label>
           <details className="series-advanced field-wide">
-            <summary><SlidersHorizontal aria-hidden="true" size={16} /><span><strong>更多设置</strong><small>平台、分类、内容支柱与视觉方向</small></span></summary>
+            <summary><SlidersHorizontal aria-hidden="true" size={16} /><span><strong>更多设置</strong><small>本季篇章、连续性、内容支柱与视觉方向</small></span></summary>
             <div className="series-advanced-grid">
+              <label className="field"><span>本季名称</span><input name="seasonTitle" defaultValue="第一季" /></label>
+              <label className="field"><span>本季主线</span><input name="seasonArc" placeholder="这一季最终要带观众走到哪里" /></label>
+              <label className="field"><span>计划周期</span><input name="planningPeriod" defaultValue={currentQuarterLabel()} placeholder="例如：2026 Q3" /></label>
+              <label className="field"><span>更新频率</span><select name="releaseCadence" defaultValue="weekly"><option value="weekly">每周 1 集</option><option value="biweekly">每两周 1 集</option><option value="monthly">每月 1 集</option><option value="flexible">灵活更新</option></select></label>
+              <label className="field"><span>本季目标集数</span><input name="targetEpisodeCount" type="number" min="1" max="100" defaultValue="12" /></label>
               <label className="field"><span>首发平台</span><select name="platform" defaultValue="douyin"><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option><option value="bilibili">哔哩哔哩</option><option value="shipinhao">视频号</option></select></label>
               <label className="field"><span>内容分类</span><select name="category" defaultValue=""><option value="">自动判断</option><option value="technology">科技</option><option value="lifestyle">生活</option><option value="finance-career">财经职场</option><option value="society">社会</option><option value="health-sports">健康体育</option><option value="education">教育</option><option value="entertainment">文娱</option><option value="local-culture">华人地方</option><option value="food">美食</option><option value="travel">文旅出行</option><option value="gaming">游戏电竞</option><option value="automotive">汽车</option><option value="fashion-beauty">时尚美妆</option><option value="parenting">亲子家庭</option><option value="agriculture-rural">三农乡村</option></select></label>
               <label className="field"><span>表达语气</span><input name="tone" defaultValue="克制、具体、有结论" /></label>
               <label className="field"><span>内容支柱 1</span><input name="pillar1" defaultValue="真实问题拆解" /></label>
               <label className="field"><span>内容支柱 2</span><input name="pillar2" defaultValue="方法与结果复盘" /></label>
               <label className="field field-wide"><span>视觉方向</span><input name="visualStyle" defaultValue="真实操作、人物反应与环境细节" /></label>
+              <label className="field field-wide"><span>连续性规则</span><textarea name="continuityRules" rows={3} placeholder={'每行一条，例如：每集必须承接上一集结论\n固定片头只保留 2 秒'} /></label>
             </div>
           </details>
           {error ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
@@ -87,6 +99,23 @@ function required(data: FormData, key: string): string {
 function valueOr(data: FormData, key: string, fallback: string): string {
   const value = data.get(key);
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function lines(data: FormData, key: string): string[] {
+  const value = data.get(key);
+  return typeof value === "string"
+    ? value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
+    : [];
+}
+
+function positiveInteger(data: FormData, key: string, fallback: number): number {
+  const value = Number(data.get(key));
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+function currentQuarterLabel(): string {
+  const now = new Date();
+  return `${now.getFullYear()} Q${Math.floor(now.getMonth() / 3) + 1}`;
 }
 
 function inferSeriesCategory(value: string): StudioSeriesInput["category"] {

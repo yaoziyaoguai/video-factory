@@ -167,10 +167,16 @@ describe("series API contracts", () => {
       pillars: [" 真实任务实验 ", "成本与时间复盘"],
       tone: "克制、具体",
       visualStyle: "真实桌面操作与生活空镜",
+      planningPeriod: "2026 Q3",
+      releaseCadence: "weekly",
+      targetEpisodeCount: 12,
     });
 
     assert.equal(parsed.name, "AI 下班实验室");
     assert.deepEqual(parsed.pillars, ["真实任务实验", "成本与时间复盘"]);
+    assert.equal(parsed.planningPeriod, "2026 Q3");
+    assert.equal(parsed.releaseCadence, "weekly");
+    assert.equal(parsed.targetEpisodeCount, 12);
   });
 
   it("requires at least two content pillars and a stable track slug", () => {
@@ -187,6 +193,8 @@ describe("series API contracts", () => {
     };
     assert.throws(() => parseStudioSeriesInput({ ...base, pillars: ["只有一个"] }), /至少需要两个内容支柱/);
     assert.throws(() => parseStudioSeriesInput({ ...base, track: "AI 下班" }), /系列标识/);
+    assert.throws(() => parseStudioSeriesInput({ ...base, releaseCadence: "daily" }), /更新频率/);
+    assert.throws(() => parseStudioSeriesInput({ ...base, targetEpisodeCount: 101 }), /最多支持 100 集/);
   });
 });
 

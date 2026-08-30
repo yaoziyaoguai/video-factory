@@ -36,6 +36,42 @@ const brief = {
   },
 } as const;
 
+const seriesContext = {
+  seriesId: "series-1",
+  episodeId: "episode-1",
+  seriesName: "下班实验室",
+  seriesRevision: 1,
+  episodeNumber: 1,
+  seasonNumber: 1,
+  canonBaseRevision: 0,
+  premise: "每集完成一个可复现的真实实验。",
+  audience: "普通上班族",
+  platform: "douyin",
+  track: "after-work-lab",
+  arc: "从一次实验走到可持续流程",
+  episode: {
+    updatedAt: "2026-08-30T00:00:00.000Z",
+    pillar: "真实实验",
+    title: "第一集",
+    viewerPromise: "完成一次低成本验证",
+    hook: "先展示最容易失败的一步",
+    payoff: "给出可复现的结论",
+    planning: {
+      source: "agent",
+      role: "系列开拍总编",
+      auditRole: "独立红队审计 Agent",
+      auditStatus: "passed",
+      auditIterations: 2,
+      providerId: "openai",
+      modelId: "codex",
+      promptVersion: "video-factory/series-greenlight-v1",
+    },
+  },
+  bible: { rules: ["结论必须来自本集实际内容"], recurringElements: [], forbiddenChanges: [] },
+  canon: { revision: 0, facts: [] },
+  continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: ["下一集复核边界"], canonChecks: [] },
+} as const;
+
 const scriptDraft: ScriptDraft = {
   scenes: [
     {
@@ -88,6 +124,8 @@ const templateSnapshot = {
 class RecordingWorker {
   readonly requests: Array<{ capability: string; input: Record<string, unknown> }> = [];
 
+  constructor(private readonly scriptDocument: Record<string, unknown> = { capability: "script.draft" }) {}
+
   async run(request: Record<string, unknown>): Promise<WorkerResponse> {
     const capability = String(request.capability);
     const outputDir = String(request.outputDir);
@@ -108,7 +146,7 @@ class RecordingWorker {
     };
     const output = outputs[capability];
     assert.ok(output, `Unexpected fake capability: ${capability}`);
-    const content = JSON.stringify({ capability });
+    const content = JSON.stringify(capability === "script.draft" ? this.scriptDocument : { capability });
     const primaryPath = String(Object.values(output)[0]);
     await writeFile(primaryPath, content, "utf8");
     return {
@@ -118,7 +156,7 @@ class RecordingWorker {
       output,
       artifacts: [
         {
-          kind: capability.replace(".", "_"),
+          kind: capability === "script.draft" ? "script" : capability.replace(".", "_"),
           uri: primaryPath,
           sha256: createHash("sha256").update(content).digest("hex"),
           sizeBytes: Buffer.byteLength(content),
@@ -152,6 +190,53 @@ function stubAgent(
 }
 
 describe("ProductionPipeline codex screenwriter", () => {
+  it("refuses to form a series Internal Master when a generic script has no canon facts", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-generic-script-"));
+    const worker = new RecordingWorker();
+    const run = await new ProductionPipeline({ workspaceRoot, worker }).start({
+      ...brief,
+      providers: { ...brief.providers, script: "python-template-v1" },
+      seriesContext,
+    });
+
+    assert.equal(run.status, "failed");
+    assert.equal(run.nodeRuns.at(-1)?.nodeId, "script");
+    assert.match(run.nodeRuns.at(-1)?.error ?? "", /进入素材、配音和渲染前必须确认 1 到 8 条.*定版事实/);
+    assert.deepEqual(worker.requests.map((request) => request.capability), ["script.draft"]);
+  });
+
+  it("reads series canon facts from the verified generic script artifact", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-generic-canon-"));
+    const canonFacts = ["本集已经确认一条可供后集依赖的事实。"];
+    const worker = new RecordingWorker({ scenes: scriptDraft.scenes, canonFacts });
+    const run = await new ProductionPipeline({ workspaceRoot, worker }).start({
+      ...brief,
+      providers: { ...brief.providers, script: "python-template-v1" },
+      seriesContext,
+    });
+
+    assert.equal(run.status, "succeeded");
+    assert.deepEqual((run.nodeRuns.find((node) => node.nodeId === "script")?.output as { canonFacts?: string[] }).canonFacts, canonFacts);
+    assert.deepEqual((run.nodeRuns.find((node) => node.nodeId === "final-review")?.output as { canonFacts?: string[] }).canonFacts, canonFacts);
+  });
+
+  it("carries script canon facts into the final-review contract", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-canon-review-"));
+    const worker = new RecordingWorker();
+    const canonFacts = ["本集已经完成一次可复现的真实验证。"];
+    const { agent } = stubAgent(() => ({ ...scriptDraft, canonFacts }));
+    const run = await new ProductionPipeline({ workspaceRoot, worker, screenwriterAgent: agent }).start(brief);
+
+    const scriptNode = run.nodeRuns.find((node) => node.nodeId === "script");
+    const finalReview = run.nodeRuns.find((node) => node.nodeId === "final-review");
+    assert.deepEqual((scriptNode?.output as { canonFacts?: string[] }).canonFacts, canonFacts);
+    assert.deepEqual((finalReview?.output as { canonFacts?: string[] }).canonFacts, canonFacts);
+    assert.deepEqual(
+      (finalReview?.inputState?.versions.at(-1)?.value as { canonFacts?: string[] }).canonFacts,
+      canonFacts,
+    );
+  });
+
   it("persists the exact model prompt as an immutable artifact on the generated output version", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-trace-"));
     const worker = new RecordingWorker();
@@ -166,6 +251,36 @@ describe("ProductionPipeline codex screenwriter", () => {
           prompt: "Prompt Pack: video-factory/screenwriter-v2\nactual prompt",
           providerId: "openai",
           modelId: "gpt-5.4",
+          reasoningEffort: "high",
+        },
+        agentLoop: {
+          version: "video-factory/agent-loop-v1",
+          role: "编剧",
+          contractVersion: "screenwriter-v4|role-audit-v1|script-validator-v1",
+          criteria: ["标题具体"],
+          status: "passed",
+          maxIterations: 2,
+          iterations: [{
+            iteration: 1,
+            candidate: scriptDraft,
+            candidateHash: "a".repeat(64),
+            audit: {
+              version: "video-factory/role-audit-v1",
+              verdict: "pass",
+              score: 93,
+              summary: "可执行。",
+              issues: [],
+              repairInstructions: [],
+            },
+            auditTrace: {
+              taskKind: "role-audit",
+              promptVersion: "video-factory/role-audit-v1",
+              prompt: "independent audit prompt",
+              providerId: "openai",
+              modelId: "gpt-5.6-sol",
+              reasoningEffort: "max",
+            },
+          }],
         },
       }),
     };
@@ -184,9 +299,18 @@ describe("ProductionPipeline codex screenwriter", () => {
       promptVersion: "video-factory/screenwriter-v2",
       providerId: "openai",
       modelId: "gpt-5.4",
+      reasoningEffort: "high",
       prompt: "Prompt Pack: video-factory/screenwriter-v2\nactual prompt",
     });
+    const loopArtifact = run.artifacts.find((artifact) => artifact.kind === "agent_loop_trace");
+    assert.ok(loopArtifact?.uri);
+    const loopTrace = JSON.parse(await readFile(loopArtifact.uri, "utf8")) as Record<string, unknown>;
+    assert.equal(loopTrace.status, "passed");
+    assert.equal((loopTrace.iterations as Array<{ auditor?: { reasoningEffort?: string } }>)[0]?.auditor?.reasoningEffort, "max");
     const scriptNode = run.nodeRuns.find((node) => node.nodeId === "script");
+    assert.equal(scriptNode?.executionReceipt?.parameters?.agentLoopIterations, 1);
+    assert.equal(scriptNode?.executionReceipt?.parameters?.auditReasoningEffort, "max");
+    assert.equal(scriptNode?.executionReceipt?.parameters?.modelCallCount, 2);
     const generatedVersion = scriptNode?.outputState?.versions.find((version) => version.source === "generated");
     assert.ok(generatedVersion?.artifactIds.includes(traceArtifact.id));
   });

@@ -55,6 +55,7 @@ interface BrokerSpec {
   shutdownTimeoutMs?: number;
   now?: () => Date;
   profile?: CodexExecutorProfile;
+  durableIdempotency?: boolean;
 }
 
 async function startBroker(spec: BrokerSpec = {}): Promise<BrokerHandle> {
@@ -71,6 +72,7 @@ async function startBroker(spec: BrokerSpec = {}): Promise<BrokerHandle> {
     ...(spec.maxBodyBytes !== undefined ? { maxBodyBytes: spec.maxBodyBytes } : {}),
     ...(spec.shutdownTimeoutMs !== undefined ? { shutdownTimeoutMs: spec.shutdownTimeoutMs } : {}),
     ...(spec.now !== undefined ? { now: spec.now } : {}),
+    ...(spec.durableIdempotency ? { idempotencyDirectory: path.join(directory, "idempotency") } : {}),
   });
   await server.start();
   return {
@@ -159,6 +161,7 @@ async function waitFor(condition: () => boolean | Promise<boolean>): Promise<voi
 function topicTaskBody(label: string): string {
   return JSON.stringify({
     protocolVersion: "video-factory/codex-bridge-v2",
+    requestId: `topic-${label.replace(/[^A-Za-z0-9._:-]/g, "-")}`,
     kind: "topic-ideas",
     payload: {
       signals: [{ id: "signal-1", platform: "douyin", rank: 1, title: `热点 ${label}` }],
@@ -169,6 +172,7 @@ function topicTaskBody(label: string): string {
 function scriptTaskBody(label: string): string {
   return JSON.stringify({
     protocolVersion: "video-factory/codex-bridge-v2",
+    requestId: `script-${label.replace(/[^A-Za-z0-9._:-]/g, "-")}`,
     kind: "script-draft",
     payload: {
       brief: {
@@ -184,7 +188,7 @@ function scriptTaskBody(label: string): string {
 }
 
 function visualReviewTaskBody(): string {
-  const jpeg = Buffer.alloc(512 * 1024);
+  const jpeg = Buffer.alloc(256 * 1024);
   jpeg[0] = 0xff;
   jpeg[1] = 0xd8;
   jpeg[2] = 0xff;
@@ -193,6 +197,7 @@ function visualReviewTaskBody(): string {
   const sha256 = createHash("sha256").update(jpeg).digest("hex");
   return JSON.stringify({
     protocolVersion: "video-factory/codex-bridge-v2",
+    requestId: "visual-review-fixture",
     kind: "visual-review",
     payload: {
       durationMs: 1_000,
@@ -227,7 +232,7 @@ describe("CodexBrokerServer routes", () => {
       assert.equal(report.profileId, "openai");
       assert.equal(report.providerId, "openai");
       assert.equal(report.modelId, "codex-default");
-      assert.deepEqual(report.taskKinds, ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"]);
+      assert.deepEqual(report.taskKinds, ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"]);
       assert.equal(report.active, 0);
       assert.equal(report.queued, 0);
       assert.equal(report.capacity, 1);
@@ -277,6 +282,41 @@ describe("CodexBrokerServer routes", () => {
 });
 
 describe("CodexBrokerServer POST /v1/tasks", () => {
+  it("coalesces and durably replays an accepted request without rerunning the model", async () => {
+    let calls = 0;
+    const release = new Deferred<void>();
+    const broker = await startBroker({
+      durableIdempotency: true,
+      script: async () => {
+        calls += 1;
+        await release.promise;
+        return { output: "{\"ideas\":[]}" };
+      },
+    });
+    try {
+      const body = topicTaskBody("durable");
+      const first = brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
+      const second = brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
+      await waitFor(() => calls === 1);
+      release.resolve();
+      assert.equal((await first).status, 200);
+      assert.equal((await second).status, 200);
+      assert.equal((await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body })).status, 200);
+      assert.equal(calls, 1);
+
+      const changed = JSON.parse(body) as { payload: { signals: Array<{ title: string }> } };
+      changed.payload.signals[0]!.title = "不同任务";
+      assert.equal((await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: JSON.stringify(changed),
+      })).status, 409);
+      assert.equal(calls, 1);
+    } finally {
+      await broker.close();
+    }
+  });
+
   it("accepts bounded visual-review requests on both OpenAI and ZAI profiles", async () => {
     const zai = await startBroker({
       profile: codexExecutorProfileFor("zai"),

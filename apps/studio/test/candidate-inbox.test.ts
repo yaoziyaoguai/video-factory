@@ -8,6 +8,7 @@ import { OpportunityStudio } from "../src/server/opportunity-studio.js";
 import { JsonOpportunityStore } from "../src/server/opportunity-store.js";
 import { SeriesStudio } from "../src/server/series-studio.js";
 import { JsonSeriesStore } from "../src/server/series-store.js";
+import type { StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
 
 const trendCandidate = {
   id: "trend-1",
@@ -74,6 +75,39 @@ describe("CandidateInboxStudio", () => {
     assert.equal(trendCalls, 0);
   });
 
+  it("keeps a rule roadmap editable but blocks adoption while the independent audit Agent is unavailable", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-unaudited-"));
+    const opportunities = new OpportunityStudio({
+      opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
+    });
+    const series = new SeriesStudio({
+      series: new JsonSeriesStore(path.join(root, "series.json")),
+      createId: () => "series-unaudited",
+    });
+    await series.create({
+      name: "长期观察室",
+      premise: "逐集验证一个长期命题。",
+      audience: "希望持续追更的观众",
+      platform: "douyin",
+      category: "knowledge",
+      track: "long-running-observer",
+      pillars: ["阶段验证", "长期复盘"],
+      tone: "克制",
+      visualStyle: "纪实",
+    });
+    const inbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [] },
+      series,
+      opportunities,
+    });
+    const [candidate] = (await inbox.list({ origins: ["series"] })).items;
+
+    await assert.rejects(
+      () => inbox.adopt(candidate!.id, { origin: "series" }),
+      /审计 Agent 当前不可用/,
+    );
+  });
+
   it("blocks a high-risk trend backed by one source and requires confirmation for review candidates", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-verified-inbox-"));
     const opportunities = new OpportunityStudio({
@@ -103,9 +137,9 @@ describe("CandidateInboxStudio", () => {
     assert.equal(listed.items.find((item) => item.id === highRisk.id)?.editorialDecision.verdict, "skip");
     assert.equal(listed.items.find((item) => item.id === review.id)?.verification.status, "review_required");
     assert.equal(listed.items.find((item) => item.id === review.id)?.editorialDecision.verdict, "produce_image_story");
-    await assert.rejects(() => inbox.adopt(highRisk.id, { verificationConfirmed: true }), /至少需要 2 个独立来源/);
-    await assert.rejects(() => inbox.adopt(review.id, {}), /确认核验/);
-    const adopted = await inbox.adopt(review.id, { verificationConfirmed: true });
+    await assert.rejects(() => inbox.adopt(highRisk.id, { origin: "trend", verificationConfirmed: true }), /至少需要 2 个独立来源/);
+    await assert.rejects(() => inbox.adopt(review.id, { origin: "trend" }), /确认核验/);
+    const adopted = await inbox.adopt(review.id, { origin: "trend", verificationConfirmed: true });
     assert.equal(adopted.verification?.status, "verified");
   });
 
@@ -164,10 +198,65 @@ describe("CandidateInboxStudio", () => {
     const [visibleCandidate] = (await inbox.list({ origins: ["trend"] })).items;
     currentCandidates = [{ ...trendCandidate, id: "trend-after-refresh", title: "刷新后的另一条候选" }];
 
-    const adopted = await inbox.adopt(visibleCandidate!.id);
+    const adopted = await inbox.adopt(visibleCandidate!.id, { origin: "trend" });
 
     assert.equal(adopted.id, trendCandidate.id);
-    await assert.rejects(() => inbox.adopt(visibleCandidate!.id), /已被采用|已经失效/);
+    await assert.rejects(() => inbox.adopt(visibleCandidate!.id, { origin: "trend" }), /已被采用|已经失效/);
+  });
+
+  it("uses the explicit origin instead of guessing from a candidate id prefix", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-candidate-origin-"));
+    const opportunities = new OpportunityStudio({
+      opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
+    });
+    const series = new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) });
+    const prefixedTrend = { ...trendCandidate, id: "series-breaking-news" };
+    const inbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [prefixedTrend] },
+      series,
+      opportunities,
+    });
+
+    const adopted = await inbox.adopt(prefixedTrend.id, { origin: "trend" });
+
+    assert.equal(adopted.origin, "trend");
+    assert.equal(adopted.id, prefixedTrend.id);
+  });
+
+  it("fails closed when a remembered trend id belongs to a series opportunity", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-candidate-origin-collision-"));
+    const opportunities = new OpportunityStudio({
+      opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
+    });
+    const series = new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) });
+    const inbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [trendCandidate] },
+      series,
+      opportunities,
+    });
+    await inbox.list({ origins: ["trend"] });
+    const { final: _final, ...scores } = trendCandidate.score;
+    await opportunities.create({
+      candidateId: trendCandidate.id,
+      origin: "series",
+      category: "technology",
+      title: trendCandidate.title,
+      platform: trendCandidate.platform,
+      track: trendCandidate.track,
+      audience: trendCandidate.audience,
+      painPoint: trendCandidate.painPoint,
+      hook: trendCandidate.hook,
+      evidence: trendCandidate.evidence,
+      scores,
+      seriesId: "series-collision",
+      seriesName: "碰撞系列",
+      episodeNumber: 1,
+    });
+
+    await assert.rejects(
+      () => inbox.adopt(trendCandidate.id, { origin: "trend" }),
+      /另一个创作入口/,
+    );
   });
 
   it("combines classified trend and series candidates, filters facets, and adopts exactly once", async () => {
@@ -181,6 +270,7 @@ describe("CandidateInboxStudio", () => {
       series: new JsonSeriesStore(path.join(root, "series.json")),
       now,
       createId: () => "series-1",
+      planningAgent: passingGreenlightAgent(),
     });
     await series.create({
       name: "AI 下班实验室",
@@ -212,13 +302,48 @@ describe("CandidateInboxStudio", () => {
     assert.equal(filtered.items[0]?.editorialDecision.verdict, "produce_video");
 
     const seriesCandidate = all.items.find((item) => item.origin === "series")!;
-    const adopted = await inbox.adopt(seriesCandidate.id);
+    const adopted = await inbox.adopt(seriesCandidate.id, { origin: "series" });
 
     assert.equal(adopted.id, seriesCandidate.id);
     assert.equal(adopted.origin, "series");
     assert.equal(adopted.editorialDecision?.verdict, "produce_video");
     assert.equal(adopted.seriesId, "series-1");
     assert.equal((await series.list())[0]?.nextEpisodeNumber, 2);
-    assert.equal((await inbox.list({})).items.some((item) => item.id === seriesCandidate.id), false);
+    const remaining = await inbox.list({ origins: ["series"] });
+    assert.equal(remaining.items.some((item) => item.id === seriesCandidate.id), false);
+    assert.equal(remaining.items.length, 6);
+    assert.deepEqual(
+      remaining.items.map((item) => item.episodeNumber).sort((left, right) => (left ?? 0) - (right ?? 0)),
+      [2, 3, 4, 5, 6, 7],
+    );
+    assert.equal(remaining.items.find((item) => item.episodeNumber === 7)?.seriesSequence?.status, "blocked");
   });
 });
+
+function passingGreenlightAgent() {
+  return {
+    generate: async () => { throw new Error("Use the editable rule fallback for the initial roadmap."); },
+    reviewEpisode: async (_series: StudioSeries, episode: StudioSeriesEpisode) => ({
+      draft: {
+        episodeNumber: episode.episodeNumber,
+        pillar: episode.pillar,
+        title: episode.title,
+        viewerPromise: episode.viewerPromise,
+        hook: episode.hook,
+        payoff: episode.payoff,
+        fromPrevious: [...episode.continuity.fromPrevious],
+        toNext: [...episode.continuity.toNext],
+      },
+      planning: {
+        source: episode.planning.source === "human" ? "human" as const : "agent" as const,
+        role: "系列开拍总编",
+        auditRole: "独立红队审计 Agent",
+        auditStatus: "passed" as const,
+        auditIterations: 1,
+        providerId: "codex-series-planner-v1",
+        modelId: "codex-default",
+        promptVersion: "video-factory/series-greenlight-v1",
+      },
+    }),
+  };
+}

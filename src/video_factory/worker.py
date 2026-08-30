@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import mimetypes
 import sys
 import time
 from pathlib import Path
@@ -150,17 +151,36 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             media_type=str(parameters.get("mediaType", "video")),
             limit=int(parameters.get("limit", 6)),
         )
-    artifact = describe_artifact(
+    plan_artifact = describe_artifact(
         path=plan_path,
         kind="asset_plan",
         content_type="application/json",
         request=request,
         license_note="License snapshot is stored per scene asset in this plan.",
     )
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    media_artifacts = []
+    for scene_asset in plan.get("scene_assets", []):
+        if not isinstance(scene_asset, dict):
+            continue
+        media_path = Path(str(scene_asset.get("local_path", "")))
+        if not media_path.is_file():
+            raise WorkerProtocolError(f"Prepared scene asset is missing: {media_path}")
+        provider_id = scene_asset_provider_id(scene_asset)
+        media_artifacts.append(describe_artifact(
+            path=media_path,
+            kind="media_asset",
+            content_type=media_content_type(media_path),
+            request=request,
+            license_note=str(scene_asset.get("license_note") or "Asset rights require review."),
+            provider_id=provider_id,
+            source_url=optional_string(scene_asset.get("source_url")),
+            creator=optional_string(scene_asset.get("creator")),
+        ))
     return success_response(
         request,
         output={"assetPlanPath": str(plan_path)},
-        artifacts=[artifact],
+        artifacts=[plan_artifact, *media_artifacts],
         started_at=started_at,
     )
 
@@ -355,6 +375,9 @@ def describe_artifact(
     content_type: str,
     request: Dict[str, Any],
     license_note: str,
+    provider_id: str | None = None,
+    source_url: str | None = None,
+    creator: str | None = None,
 ) -> Dict[str, Any]:
     content = path.read_bytes()
     return {
@@ -364,12 +387,36 @@ def describe_artifact(
         "sizeBytes": len(content),
         "contentType": content_type,
         "provenance": {
-            "providerId": str(request.get("parameters", {}).get("providerId", "unknown")),
+            "providerId": provider_id or str(request.get("parameters", {}).get("providerId", "unknown")),
             "producerNodeId": request["nodeRunId"],
             "attempt": request["attempt"],
             "licenseNote": license_note,
+            **({"sourceUrl": source_url} if source_url else {}),
+            **({"creator": creator} if creator else {}),
         },
     }
+
+
+def scene_asset_provider_id(scene_asset: Dict[str, Any]) -> str:
+    explicit = optional_string(scene_asset.get("provider_id"))
+    if explicit:
+        return explicit
+    provider = str(scene_asset.get("provider") or "unknown")
+    return {
+        "local": "local-editorial-v1",
+        "pexels": "pexels-stock-v1",
+        "pixabay": "pixabay-stock-v1",
+        "mock": "mock-stock-v1",
+    }.get(provider, provider)
+
+
+def media_content_type(path: Path) -> str:
+    guessed, _ = mimetypes.guess_type(path.name)
+    return guessed or "application/octet-stream"
+
+
+def optional_string(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def success_response(

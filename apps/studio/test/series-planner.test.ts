@@ -15,24 +15,33 @@ const series: SeriesRecord = {
   tone: "克制、具体、有结论",
   visualStyle: "真实桌面操作与生活空镜",
   status: "active",
-  nextEpisodeNumber: 4,
+  revision: 1,
+  currentSeason: { number: 1, title: "第一季", arc: "从工具尝鲜走到稳定工作流" },
+  bible: { rules: ["必须验证真实任务"], recurringElements: ["桌面操作"], forbiddenChanges: ["不得虚构结果"] },
+  canon: { revision: 0, facts: [] },
+  episodes: [],
+  nextEpisodeNumber: 1,
   createdAt: "2026-08-24T08:00:00.000Z",
   updatedAt: "2026-08-24T08:00:00.000Z",
 };
 
 describe("SeriesPlanner", () => {
-  it("turns a durable series promise into numbered, production-ready candidates", () => {
-    const candidates = new SeriesPlanner({ now: () => new Date("2026-08-24T09:00:00.000Z") })
-      .plan(series, 4);
+  it("materializes an ordered episode roadmap before projecting candidates", () => {
+    const planner = new SeriesPlanner({ now: () => new Date("2026-08-24T09:00:00.000Z") });
+    const episodes = planner.planEpisodes(series, 4);
+    const candidates = planner.plan({ ...series, episodes }, 4);
 
-    assert.equal(candidates.length, 4);
-    assert.deepEqual(candidates.map((item) => item.episodeNumber), [4, 5, 6, 7]);
-    assert.equal(candidates[0]?.origin, "series");
-    assert.equal(candidates[0]?.category, "technology");
-    assert.equal(candidates[0]?.seriesId, "series-1");
-    assert.match(candidates[0]?.title ?? "", /AI 下班实验室 04/);
-    assert.equal(candidates.every((item) => item.evidence[0]?.source === "series-plan"), true);
+    assert.deepEqual(episodes.map((item) => item.episodeNumber), [1, 2, 3, 4]);
+    assert.equal(episodes[1]?.previousEpisodeId, episodes[0]?.id);
+    assert.equal(episodes.every((item) => item.canonBaseRevision === 0), true);
+    assert.equal(episodes.every((item) => item.planning.source === "rules"), true);
+    assert.equal(candidates[0]?.seriesSequence?.status, "ready");
+    assert.deepEqual(candidates.slice(1).map((item) => item.seriesSequence), [
+      { status: "blocked", blockedByEpisodeNumber: 1 },
+      { status: "blocked", blockedByEpisodeNumber: 1 },
+      { status: "blocked", blockedByEpisodeNumber: 1 },
+    ]);
+    assert.equal(candidates[0]?.providerId, "series-roadmap-v2");
     assert.match(candidates[0]?.visualPlan?.strategy ?? "", /真实桌面操作与生活空镜/);
-    assert.equal(candidates[0]?.visualPlan?.beats.length, 3);
   });
 });

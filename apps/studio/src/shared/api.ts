@@ -249,6 +249,10 @@ export interface StudioCandidateInboxItem extends StudioTrendCandidate {
   seriesId?: string;
   seriesName?: string;
   episodeNumber?: number;
+  seriesSequence?: {
+    status: "ready" | "blocked";
+    blockedByEpisodeNumber?: number;
+  };
 }
 
 export interface StudioCandidateInboxQuery {
@@ -274,6 +278,116 @@ export interface StudioCandidateInbox {
 }
 
 export type StudioSeriesStatus = "active" | "paused";
+export type StudioSeriesEpisodeStatus = "planned" | "selected" | "in_production" | "ready" | "published" | "paused";
+
+export interface StudioSeriesBible {
+  rules: string[];
+  recurringElements: string[];
+  forbiddenChanges: string[];
+}
+
+export interface StudioSeriesCanonFact {
+  id: string;
+  statement: string;
+  sourceEpisodeId: string;
+  sourceRunId?: string;
+  sourceRunRevision?: number;
+  sourceOutputVersionIds?: string[];
+  acceptedAt: string;
+}
+
+export interface StudioSeriesCanonLedger {
+  revision: number;
+  facts: StudioSeriesCanonFact[];
+}
+
+export interface StudioSeriesEpisodeContinuity {
+  inheritedFromPrevious: string[];
+  fromPrevious: string[];
+  toNext: string[];
+  canonChecks: string[];
+  memorySummary?: string;
+}
+
+export interface StudioSeriesEpisodePlanning {
+  source: "agent" | "rules" | "human";
+  role: string;
+  auditRole: string;
+  auditStatus: "passed" | "fallback" | "human_override" | "stale";
+  auditIterations: number;
+  auditScore?: number;
+  auditSummary?: string;
+  providerId: string;
+  modelId: string;
+  promptVersion: string;
+  reasoningEffort?: string;
+  fallbackReason?: string;
+}
+
+export interface StudioSeriesEpisode {
+  id: string;
+  seriesId: string;
+  episodeNumber: number;
+  seasonNumber: number;
+  arc: string;
+  pillar: string;
+  title: string;
+  viewerPromise: string;
+  hook: string;
+  payoff: string;
+  previousEpisodeId?: string;
+  canonBaseRevision: number;
+  status: StudioSeriesEpisodeStatus;
+  opportunityId?: string;
+  runId?: string;
+  runReservation?: {
+    id: string;
+    opportunityId: string;
+    createdAt: string;
+  };
+  editLease?: {
+    id: string;
+    createdAt: string;
+  };
+  lastObservedRun?: {
+    id: string;
+    revision: number;
+  };
+  attemptRunIds?: string[];
+  continuity: StudioSeriesEpisodeContinuity;
+  planning: StudioSeriesEpisodePlanning;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt?: string;
+}
+
+export interface StudioSeriesProductionContext {
+  seriesId: string;
+  episodeId: string;
+  seriesName: string;
+  seriesRevision: number;
+  episodeNumber: number;
+  seasonNumber: number;
+  canonBaseRevision: number;
+  premise: string;
+  audience: string;
+  platform: string;
+  track: string;
+  arc: string;
+  episode: {
+    updatedAt: string;
+    pillar: string;
+    title: string;
+    viewerPromise: string;
+    hook: string;
+    payoff: string;
+    planning: StudioSeriesEpisodePlanning;
+  };
+  bible: StudioSeriesBible;
+  canon: StudioSeriesCanonLedger;
+  continuity: StudioSeriesEpisodeContinuity;
+  productionReservationId?: string;
+}
 
 export interface StudioSeries {
   id: string;
@@ -287,6 +401,18 @@ export interface StudioSeries {
   tone: string;
   visualStyle: string;
   status: StudioSeriesStatus;
+  revision: number;
+  currentSeason: {
+    number: number;
+    title: string;
+    arc: string;
+    planningPeriod?: string;
+    releaseCadence?: "weekly" | "biweekly" | "monthly" | "flexible";
+    targetEpisodeCount?: number;
+  };
+  bible: StudioSeriesBible;
+  canon: StudioSeriesCanonLedger;
+  episodes: StudioSeriesEpisode[];
   nextEpisodeNumber: number;
   createdAt: string;
   updatedAt: string;
@@ -302,6 +428,23 @@ export interface StudioSeriesInput {
   pillars: string[];
   tone: string;
   visualStyle: string;
+  seasonTitle?: string;
+  seasonArc?: string;
+  planningPeriod?: string;
+  releaseCadence?: "weekly" | "biweekly" | "monthly" | "flexible";
+  targetEpisodeCount?: number;
+  continuityRules?: string[];
+}
+
+export interface StudioSeriesEpisodePlanInput {
+  expectedRevision: number;
+  pillar: string;
+  title: string;
+  viewerPromise: string;
+  hook: string;
+  payoff: string;
+  fromPrevious: string[];
+  toNext: string[];
 }
 
 export type StudioOpportunityStatus = "draft" | "shortlisted" | "approved" | "rejected" | "tested";
@@ -376,6 +519,7 @@ export interface StudioOpportunityInput {
 }
 
 export interface StudioCandidateAdoptionInput {
+  origin: StudioCandidateOrigin;
   verificationConfirmed?: boolean;
 }
 
@@ -394,6 +538,16 @@ export interface StudioRunSummary {
   currentNodeId: string;
   nextAction?: "review" | "confirm_spend" | "regenerate";
   videoContentUrl?: string;
+  archivedAt?: string;
+  creationOrigin?: "trend" | "series" | "manual";
+  opportunityId?: string;
+  seriesId?: string;
+  episodeNumber?: number;
+  productionReservationId?: string;
+}
+
+export interface StudioRunArchiveInput {
+  runIds: string[];
 }
 
 export interface StudioRunDetail extends StudioRunSummary {
@@ -418,6 +572,8 @@ export interface StudioNode {
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  interrupted?: boolean;
+  outcomeUncertain?: boolean;
   artifactIds: string[];
   qualityGateResults: Array<{
     gateId: string;
@@ -441,6 +597,7 @@ export interface StudioNodeExecutionPlan {
   billing: StudioBillingType;
   configurationSource?: "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
   parameters?: Record<string, string | number | boolean | string[]>;
+  fallbackReason?: string;
   estimatedCostCny?: number;
   snapshotSource: "created" | "reconstructed";
 }
@@ -489,6 +646,7 @@ export interface StudioNodeExecutionReceipt {
   billing: StudioBillingType;
   configurationSource?: "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
   parameters?: Record<string, string | number | boolean | string[]>;
+  fallbackReason?: string;
   status: "succeeded" | "failed" | "rejected" | "needs_human";
   estimatedCostCny?: number;
   authorizedCostCny?: number;
@@ -622,6 +780,75 @@ export interface StudioResourceManifestItem {
   commercialUse: "self_owned" | "provider_terms" | "review_required";
   attributionRequirement: "not_required" | "provider_terms" | "unknown";
   reviewStatus: "recorded" | "needs_review";
+  scenePosition?: number;
+  width?: number;
+  height?: number;
+  durationSeconds?: number;
+  query?: string;
+  semanticTags?: string[];
+  selectedInFinal?: boolean;
+}
+
+export type StudioAssetMediaKind = "video" | "image" | "audio" | "document" | "font" | "other";
+export type StudioAssetOrigin = "stock" | "ai_generated" | "local_generated" | "creator_upload" | "final_render" | "voice_synthesis" | "production_document" | "system";
+export type StudioAssetReuseStatus = "ready" | "review_required" | "private" | "not_reusable";
+
+export interface StudioIndexedAssetUsage {
+  runId: string;
+  runTitle: string;
+  itemId: string;
+  providerId: string;
+  commercialUse: StudioResourceManifestItem["commercialUse"];
+  attributionRequirement: StudioResourceManifestItem["attributionRequirement"];
+  reviewStatus: StudioResourceManifestItem["reviewStatus"];
+  sourceUrl?: string;
+  creator?: string;
+  licenseNote?: string;
+  scenePosition?: number;
+  selectedInFinal?: boolean;
+}
+
+export interface StudioIndexedAsset {
+  key: string;
+  mediaKind: StudioAssetMediaKind;
+  origin: StudioAssetOrigin;
+  reuseStatus: StudioAssetReuseStatus;
+  category: StudioResourceManifestItem["category"];
+  kind: string;
+  providerId: string;
+  sourceUrl?: string;
+  contentUrl?: string;
+  creator?: string;
+  licenseNote?: string;
+  contentType?: string;
+  sha256?: string;
+  width?: number;
+  height?: number;
+  durationSeconds?: number;
+  aspectRatio?: string;
+  query?: string;
+  tags: string[];
+  commercialUse: StudioResourceManifestItem["commercialUse"];
+  attributionRequirement: StudioResourceManifestItem["attributionRequirement"];
+  reviewStatus: StudioResourceManifestItem["reviewStatus"];
+  provenanceConflict?: boolean;
+  useCount: number;
+  usages: StudioIndexedAssetUsage[];
+}
+
+export interface StudioAssetIndex {
+  version: "video-factory/asset-index-v1";
+  totalAssets: number;
+  duplicateUses: number;
+  reusableCount: number;
+  needsReviewCount: number;
+  facets: {
+    mediaKinds: Partial<Record<StudioAssetMediaKind, number>>;
+    origins: Partial<Record<StudioAssetOrigin, number>>;
+    providers: Record<string, number>;
+    reuseStatuses: Partial<Record<StudioAssetReuseStatus, number>>;
+  };
+  assets: StudioIndexedAsset[];
 }
 
 export interface StudioResourceManifest {
@@ -632,8 +859,10 @@ export interface StudioResourceManifest {
   reconstructedRunCount: number;
   unreadableManifestCount: number;
   truncatedRunCount: number;
+  truncatedItemCount: number;
   categories: Record<StudioResourceManifestItem["category"], number>;
   items: StudioResourceManifestItem[];
+  assetIndex: StudioAssetIndex;
 }
 
 export interface StudioTemplateExperimentScorecard {
@@ -672,6 +901,7 @@ export interface StudioCostLine {
   actualCostSource?: "provider_reported" | "configured_rate";
   meteredAttemptCount?: number;
   meteredFailedAttemptCount?: number;
+  subscriptionCallCount?: number;
   actualPending: boolean;
   startedAt: string;
   finishedAt?: string;
@@ -729,6 +959,11 @@ export interface StudioProductionInput {
     verdict: "produce_video" | "produce_image_story";
     reasons: string[];
     guardrails: string[];
+  };
+  seriesContext?: StudioSeriesProductionContext;
+  creationContext?: {
+    origin: "trend" | "series" | "manual";
+    opportunityId: string;
   };
   voiceDirection: StudioVoiceDirection;
   providers: {
@@ -957,12 +1192,17 @@ export function parseStudioCreatorSettingsPatch(value: unknown): StudioCreatorSe
 }
 
 export function parseStudioCandidateAdoptionInput(value: unknown): StudioCandidateAdoptionInput {
-  if (value === undefined || value === null) return {};
   const input = requiredObject(value, "候选采用参数");
+  if (input.origin !== "trend" && input.origin !== "series") {
+    throw new StudioInputError("候选来源必须是热点或系列。");
+  }
   if (input.verificationConfirmed !== undefined && typeof input.verificationConfirmed !== "boolean") {
     throw new StudioInputError("核验确认必须是布尔值。");
   }
-  return input.verificationConfirmed === true ? { verificationConfirmed: true } : {};
+  return {
+    origin: input.origin,
+    ...(input.verificationConfirmed === true ? { verificationConfirmed: true } : {}),
+  };
 }
 
 export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
@@ -1171,6 +1411,21 @@ export function parseStudioSeriesInput(value: unknown): StudioSeriesInput {
   const pillars = input.pillars.map((pillar, index) => requiredTrimmedString(pillar, `第 ${index + 1} 个内容支柱`));
   if (pillars.length < 2) throw new StudioInputError("系列至少需要两个内容支柱。");
   if (pillars.length > 8) throw new StudioInputError("系列最多支持八个内容支柱。");
+  const continuityRules = input.continuityRules === undefined
+    ? undefined
+    : optionalBoundedStringArray(input.continuityRules, "连续性规则", 8);
+  const releaseCadence = input.releaseCadence === undefined
+    ? undefined
+    : requiredTrimmedString(input.releaseCadence, "更新频率");
+  if (releaseCadence !== undefined && !["weekly", "biweekly", "monthly", "flexible"].includes(releaseCadence)) {
+    throw new StudioInputError("更新频率无效。");
+  }
+  const targetEpisodeCount = input.targetEpisodeCount === undefined
+    ? undefined
+    : positiveInteger(input.targetEpisodeCount, "目标集数");
+  if (targetEpisodeCount !== undefined && targetEpisodeCount > 100) {
+    throw new StudioInputError("目标集数最多支持 100 集。");
+  }
   return {
     name: requiredTrimmedString(input.name, "系列名称"),
     premise: requiredTrimmedString(input.premise, "系列承诺"),
@@ -1181,7 +1436,33 @@ export function parseStudioSeriesInput(value: unknown): StudioSeriesInput {
     pillars,
     tone: requiredTrimmedString(input.tone, "表达语气"),
     visualStyle: requiredTrimmedString(input.visualStyle, "视觉方向"),
+    ...(input.seasonTitle === undefined ? {} : { seasonTitle: requiredTrimmedString(input.seasonTitle, "本季名称") }),
+    ...(input.seasonArc === undefined ? {} : { seasonArc: requiredTrimmedString(input.seasonArc, "本季篇章") }),
+    ...(input.planningPeriod === undefined ? {} : { planningPeriod: requiredTrimmedString(input.planningPeriod, "计划周期") }),
+    ...(releaseCadence ? { releaseCadence: releaseCadence as NonNullable<StudioSeriesInput["releaseCadence"]> } : {}),
+    ...(targetEpisodeCount ? { targetEpisodeCount } : {}),
+    ...(continuityRules ? { continuityRules } : {}),
   };
+}
+
+export function parseStudioSeriesEpisodePlanInput(value: unknown): StudioSeriesEpisodePlanInput {
+  const input = requiredObject(value, "单集路线图");
+  return {
+    expectedRevision: positiveInteger(input.expectedRevision, "系列版本"),
+    pillar: requiredTrimmedString(input.pillar, "内容支柱"),
+    title: requiredTrimmedString(input.title, "单集标题"),
+    viewerPromise: requiredTrimmedString(input.viewerPromise, "观众收获"),
+    hook: requiredTrimmedString(input.hook, "开场钩子"),
+    payoff: requiredTrimmedString(input.payoff, "本集兑现"),
+    fromPrevious: optionalBoundedStringArray(input.fromPrevious, "承接上一集", 8),
+    toNext: optionalBoundedStringArray(input.toNext, "留给下一集", 8),
+  };
+}
+
+function optionalBoundedStringArray(value: unknown, label: string, maximum: number): string[] {
+  if (!Array.isArray(value)) throw new StudioInputError(`${label}格式不正确。`);
+  if (value.length > maximum) throw new StudioInputError(`${label}最多支持 ${maximum} 项。`);
+  return value.map((entry, index) => requiredTrimmedString(entry, `${label}第 ${index + 1} 项`));
 }
 
 export function parseStudioOpportunityStatusInput(value: unknown): StudioOpportunityStatusInput {

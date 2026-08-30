@@ -105,6 +105,22 @@ describe("NodeStructuredEditor", () => {
     expect(onChange).toHaveBeenCalledWith({ scenes: [{ narration: "开场", visual_strategy: "generated" }] });
   });
 
+  it("uses creator-facing labels for nested platform and shot fields", () => {
+    render(<NodeStructuredEditor
+      nodeId="script"
+      value={{
+        platform_notes: { platform: "douyin", audience: "普通创作者" },
+        scenes: [{ position: 1, narration: "开场" }],
+      }}
+      onChange={vi.fn()}
+    />);
+
+    expect(screen.getByRole("combobox", { name: "发布平台" })).toHaveDisplayValue("抖音");
+    expect(screen.getByRole("spinbutton", { name: "镜头序号" })).toHaveValue(1);
+    expect(screen.queryByText("platform")).not.toBeInTheDocument();
+    expect(screen.queryByText("position")).not.toBeInTheDocument();
+  });
+
   it("uses creator language for director fields and production shorthand", () => {
     const { container } = render(<NodeStructuredEditor
       nodeId="visual-direction"

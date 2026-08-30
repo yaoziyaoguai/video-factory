@@ -83,7 +83,27 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     }),
     listTemplates: async () => ({ storeRevision: 0, templates: [] }),
     templateExperiments: async () => [],
-    resourceManifest: async () => ({ generatedAt: "2026-08-28T10:00:00.000Z", totalItems: 0, needsReviewCount: 0, legacyRunsWithoutManifest: 0, reconstructedRunCount: 0, unreadableManifestCount: 0, truncatedRunCount: 0, categories: { visual: 0, voice: 0, font: 0, document: 0, other: 0 }, items: [] }),
+    resourceManifest: async () => ({
+      generatedAt: "2026-08-28T10:00:00.000Z",
+      totalItems: 0,
+      needsReviewCount: 0,
+      legacyRunsWithoutManifest: 0,
+      reconstructedRunCount: 0,
+      unreadableManifestCount: 0,
+      truncatedRunCount: 0,
+      truncatedItemCount: 0,
+      categories: { visual: 0, voice: 0, font: 0, document: 0, other: 0 },
+      assetIndex: {
+        version: "video-factory/asset-index-v1",
+        totalAssets: 0,
+        duplicateUses: 0,
+        reusableCount: 0,
+        needsReviewCount: 0,
+        facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} },
+        assets: [],
+      },
+      items: [],
+    }),
     getTemplate: async () => undefined,
     createTemplate: async () => { throw new Error("not configured"); },
     cloneTemplate: async () => { throw new Error("not configured"); },
@@ -105,6 +125,12 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     },
     listSeries: async () => [],
     createSeries: async () => {
+      throw new Error("not configured");
+    },
+    updateSeriesEpisodePlan: async () => {
+      throw new Error("not configured");
+    },
+    linkLegacySeriesRun: async () => {
       throw new Error("not configured");
     },
     listOpportunities: async () => [],
@@ -132,6 +158,8 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     getRun: async (runId) => runId === "run-1"
       ? runDetail()
       : undefined,
+    archiveRuns: async () => undefined,
+    restoreRuns: async () => undefined,
     deleteRun: async () => undefined,
     startRun: async () => ({ runId: "run-2", status: "running" }),
     decide: async (_runId, input) => runDetail(input.action === "approve" ? "succeeded" : "rejected"),
@@ -161,6 +189,53 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
 }
 
 describe("Studio API", () => {
+  it("scopes opportunities and runs by a validated creation origin", async () => {
+    const opportunityOrigins: Array<string | undefined> = [];
+    const runOrigins: Array<string | undefined> = [];
+    const app = buildStudioApp({ service: fakeService({
+      listOpportunities: async (origin) => {
+        opportunityOrigins.push(origin);
+        return [];
+      },
+      listRuns: async (origin) => {
+        runOrigins.push(origin);
+        return [];
+      },
+    }) });
+
+    const opportunities = await app.inject({ method: "GET", url: "/api/opportunities?origin=series" });
+    const runs = await app.inject({ method: "GET", url: "/api/runs?origin=trend" });
+    const invalid = await app.inject({ method: "GET", url: "/api/runs?origin=unknown" });
+
+    assert.equal(opportunities.statusCode, 200);
+    assert.equal(runs.statusCode, 200);
+    assert.equal(invalid.statusCode, 400);
+    assert.deepEqual(opportunityOrigins, ["series"]);
+    assert.deepEqual(runOrigins, ["trend"]);
+    assert.match(invalid.json().error, /创作入口/);
+    await app.close();
+  });
+
+  it("archives and restores production records in batches", async () => {
+    const archived: string[][] = [];
+    const restored: string[][] = [];
+    const app = buildStudioApp({ service: fakeService({
+      archiveRuns: async (runIds) => { archived.push(runIds); },
+      restoreRuns: async (runIds) => { restored.push(runIds); },
+    }) });
+
+    const archive = await app.inject({ method: "POST", url: "/api/runs/archive", payload: { runIds: ["run-1", "run-2", "run-1"] } });
+    const restore = await app.inject({ method: "POST", url: "/api/runs/restore", payload: { runIds: ["run-2"] } });
+    const invalid = await app.inject({ method: "POST", url: "/api/runs/archive", payload: { runIds: [] } });
+
+    assert.equal(archive.statusCode, 204);
+    assert.equal(restore.statusCode, 204);
+    assert.equal(invalid.statusCode, 400);
+    assert.deepEqual(archived, [["run-1", "run-2"]]);
+    assert.deepEqual(restored, [["run-2"]]);
+    await app.close();
+  });
+
   it("deletes a terminal production record through the API", async () => {
     const deleted: string[] = [];
     const app = buildStudioApp({ service: fakeService({ deleteRun: async (runId) => { deleted.push(runId); } }) });
@@ -563,17 +638,59 @@ describe("Studio API", () => {
       id: "series-1",
       ...input,
       status: "active",
+      revision: 1,
+      currentSeason: { number: 1, title: "第一季", arc: input.premise },
+      bible: { rules: [input.premise], recurringElements: [], forbiddenChanges: [] },
+      canon: { revision: 0, facts: [] },
+      episodes: [],
       nextEpisodeNumber: 1,
       createdAt: "2026-08-24T09:00:00.000Z",
       updatedAt: "2026-08-24T09:00:00.000Z",
     });
+    let episodePlanInput: unknown;
+    let linkedLegacyInput: unknown;
+    service.updateSeriesEpisodePlan = async (seriesId, episodeNumber, input) => {
+      episodePlanInput = { seriesId, episodeNumber, input };
+      return {
+        ...(await service.createSeries({
+          name: "AI 下班实验室",
+          premise: "每集验证一个普通人真能用上的 AI 方法。",
+          audience: "普通上班族",
+          platform: "douyin",
+          category: "technology",
+          track: "ai-after-work",
+          pillars: ["真实任务实验", "成本与时间复盘"],
+          tone: "克制、具体",
+          visualStyle: "真实桌面操作与生活空镜",
+        })),
+        revision: input.expectedRevision + 1,
+      };
+    };
+    service.linkLegacySeriesRun = async (seriesId, episodeNumber, runId) => {
+      linkedLegacyInput = { seriesId, episodeNumber, runId };
+      return service.createSeries({
+        name: "AI 下班实验室",
+        premise: "每集验证一个普通人真能用上的 AI 方法。",
+        audience: "普通上班族",
+        platform: "douyin",
+        category: "technology",
+        track: "ai-after-work",
+        pillars: ["真实任务实验", "成本与时间复盘"],
+        tone: "克制、具体",
+        visualStyle: "真实桌面操作与生活空镜",
+      });
+    };
     const app = buildStudioApp({ service });
 
     const inbox = await app.inject({
       method: "GET",
       url: "/api/candidate-inbox?origins=trend&categories=technology&platforms=douyin&limit=12",
     });
-    const adopted = await app.inject({ method: "POST", url: "/api/candidate-inbox/trend-1/adopt" });
+    const adopted = await app.inject({
+      method: "POST",
+      url: "/api/candidate-inbox/trend-1/adopt",
+      payload: { origin: "trend" },
+    });
     const listedSeries = await app.inject({ method: "GET", url: "/api/series" });
     const createdSeries = await app.inject({
       method: "POST",
@@ -590,6 +707,25 @@ describe("Studio API", () => {
         visualStyle: "真实桌面操作与生活空镜",
       },
     });
+    const updatedEpisode = await app.inject({
+      method: "PATCH",
+      url: "/api/series/series-1/episodes/2",
+      payload: {
+        expectedRevision: 3,
+        pillar: "真实任务实验",
+        title: "一条人工改写的单集",
+        viewerPromise: "看到真实结论",
+        hook: "先看结果",
+        payoff: "完成验证",
+        fromPrevious: ["承接上一集"],
+        toNext: ["留下下一题"],
+      },
+    });
+    const linkedLegacy = await app.inject({
+      method: "POST",
+      url: "/api/series/series-1/episodes/1/legacy-run",
+      payload: { runId: "run-old-1" },
+    });
 
     assert.equal(inbox.statusCode, 200);
     assert.deepEqual(receivedQuery, {
@@ -603,6 +739,23 @@ describe("Studio API", () => {
     assert.equal(listedSeries.statusCode, 200);
     assert.equal(createdSeries.statusCode, 201);
     assert.equal(createdSeries.json().track, "ai-after-work");
+    assert.equal(updatedEpisode.statusCode, 200);
+    assert.equal(linkedLegacy.statusCode, 200);
+    assert.deepEqual(linkedLegacyInput, { seriesId: "series-1", episodeNumber: 1, runId: "run-old-1" });
+    assert.deepEqual(episodePlanInput, {
+      seriesId: "series-1",
+      episodeNumber: 2,
+      input: {
+        expectedRevision: 3,
+        pillar: "真实任务实验",
+        title: "一条人工改写的单集",
+        viewerPromise: "看到真实结论",
+        hook: "先看结果",
+        payoff: "完成验证",
+        fromPrevious: ["承接上一集"],
+        toNext: ["留下下一题"],
+      },
+    });
     await app.close();
   });
 

@@ -6,12 +6,14 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import { PythonReviewMediaPreprocessor } from "../src/server/review-media-preprocessor.js";
 
-const MAX_FRAME_BYTES = 512 * 1024;
+const MAX_FRAME_BYTES = 256 * 1024;
 
 interface FrameDescriptor {
   path: string;
   timestampMs: number;
   sha256: string;
+  scenePosition?: number;
+  phase?: "opening" | "middle" | "closing" | "hook" | "midpoint" | "keyframe";
 }
 
 interface Harness {
@@ -48,8 +50,61 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
           "--run-root",
           harness.runRoot,
           "--max-frames",
-          "12",
+          "24",
         ],
+      );
+    } finally {
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves the manifest's actual sparse sampling mode and frame mapping", async () => {
+    const harness = await createHarness();
+    try {
+      const jpeg = makeJpeg(64);
+      await writeFrame(harness, "review_media/frame.jpg", jpeg);
+      await writeManifest(
+        harness,
+        [{ ...frame("review_media/frame.jpg", 250, jpeg), scenePosition: 1, phase: "hook" }],
+        1_000,
+        { mode: "hook_and_scene_midpoints", sceneCount: 9 },
+      );
+
+      const result = await harness.preprocessor.prepare({ videoPath: harness.videoPath, runRoot: harness.runRoot });
+
+      assert.deepEqual(result.sampling, {
+        mode: "hook_and_scene_midpoints",
+        sceneCount: 9,
+        coveredScenePositions: [1],
+        missingScenePositions: [2, 3, 4, 5, 6, 7, 8, 9],
+      });
+      assert.equal(result.frames[0]?.scenePosition, 1);
+      assert.equal(result.frames[0]?.phase, "hook");
+    } finally {
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a manifest that claims scene triplets without three phases for every scene", async () => {
+    const harness = await createHarness();
+    try {
+      const first = makeJpeg(64);
+      const second = makeJpeg(65);
+      await writeFrame(harness, "review_media/opening.jpg", first);
+      await writeFrame(harness, "review_media/middle.jpg", second);
+      await writeManifest(
+        harness,
+        [
+          { ...frame("review_media/opening.jpg", 100, first), scenePosition: 1, phase: "opening" },
+          { ...frame("review_media/middle.jpg", 500, second), scenePosition: 1, phase: "middle" },
+        ],
+        1_000,
+        { mode: "scene_triplets", sceneCount: 1 },
+      );
+
+      await assert.rejects(
+        () => harness.preprocessor.prepare({ videoPath: harness.videoPath, runRoot: harness.runRoot }),
+        /incomplete for scene 1/,
       );
     } finally {
       await rm(harness.root, { recursive: true, force: true });
@@ -128,7 +183,7 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
       const harness = await createHarness();
       try {
         const frames: FrameDescriptor[] = [];
-        const count = kind === "single" ? 1 : 12;
+        const count = kind === "single" ? 1 : 20;
         for (let index = 0; index < count; index += 1) {
           const size = kind === "single" || index === count - 1
             ? MAX_FRAME_BYTES + 1
@@ -237,10 +292,15 @@ function createPreprocessor(harness: Harness, manifestPath: string, commandPath?
   });
 }
 
-async function writeManifest(harness: Harness, frames: FrameDescriptor[], durationMs = 1_000): Promise<void> {
+async function writeManifest(
+  harness: Harness,
+  frames: FrameDescriptor[],
+  durationMs = 1_000,
+  sampling?: { mode: string; sceneCount?: number },
+): Promise<void> {
   await writeFile(
     harness.manifestPath,
-    JSON.stringify({ version: "video-factory/review-media-v1", durationMs, frames }),
+    JSON.stringify({ version: "video-factory/review-media-v1", durationMs, ...(sampling ? { sampling } : {}), frames }),
   );
 }
 

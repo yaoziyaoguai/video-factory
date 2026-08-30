@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { CodexBridgeClient, CodexTaskExecution } from "./codex-chat.js";
@@ -6,11 +7,19 @@ export interface VisualReviewFramePayload {
   timecodeMs: number;
   sha256: string;
   jpegBase64: string;
+  scenePosition?: number;
+  phase?: "opening" | "middle" | "closing" | "hook" | "midpoint" | "keyframe";
 }
 
 export interface VisualReviewMediaPayload {
   durationMs: number;
   frames: VisualReviewFramePayload[];
+  sampling?: {
+    mode: "scene_triplets" | "hook_and_scene_midpoints" | "scene_change_keyframes";
+    sceneCount?: number;
+    coveredScenePositions?: number[];
+    missingScenePositions?: number[];
+  };
   reviewContext?: Record<string, unknown>;
 }
 
@@ -20,6 +29,7 @@ export interface VisualReviewAgentInput {
   scriptPath?: string;
   directorPlanPath?: string;
   renderManifestPath?: string;
+  requestId?: string;
 }
 
 export interface VisualReviewMediaPreprocessor {
@@ -31,7 +41,9 @@ export interface VisualReviewMediaPreprocessor {
 }
 
 export type VisualReviewExecution = CodexTaskExecution<VisualReviewReport> & {
+  requestId?: string;
   inspectedDurationMs?: number;
+  sampling?: VisualReviewMediaPayload["sampling"];
 };
 
 export interface VisualReviewFinding {
@@ -59,7 +71,7 @@ export interface VisualReviewAgent {
 }
 
 export interface CodexVisualReviewAgentOptions {
-  client: Pick<CodexBridgeClient, "runTask">;
+  client: Pick<CodexBridgeClient, "runTask"> & Partial<Pick<CodexBridgeClient, "runTaskDetailed">>;
   media: VisualReviewMediaPreprocessor;
   providerId?: string;
   modelId?: string;
@@ -75,43 +87,72 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
   }
 
   async review(input: VisualReviewAgentInput): Promise<VisualReviewReport> {
-    const payload = await this.preparePayload(input);
-    return validateVisualReviewReport(await this.options.client.runTask("visual-review", payload), payload.durationMs);
+    const { payload } = await this.preparePayload(input);
+    return validateVisualReviewReport(
+      await this.options.client.runTask("visual-review", payload, normalizedRequestId(input.requestId)),
+      payload.durationMs,
+    );
   }
 
   async reviewDetailed(input: VisualReviewAgentInput): Promise<VisualReviewExecution> {
-    const payload = await this.preparePayload(input);
+    const { payload, sampling } = await this.preparePayload(input);
     const client = this.options.client as Pick<CodexBridgeClient, "runTask" | "runTaskDetailed">;
+    const requestId = normalizedRequestId(input.requestId);
     if (typeof client.runTaskDetailed !== "function") {
       return {
-        output: validateVisualReviewReport(await client.runTask("visual-review", payload), payload.durationMs),
+        output: validateVisualReviewReport(await client.runTask("visual-review", payload, requestId), payload.durationMs),
+        ...(requestId ? { requestId } : {}),
         inspectedDurationMs: payload.durationMs,
+        ...(sampling ? { sampling } : {}),
       };
     }
-    const execution = await client.runTaskDetailed("visual-review", payload);
+    const execution = await client.runTaskDetailed("visual-review", payload, requestId);
     return {
       output: validateVisualReviewReport(execution.output, payload.durationMs),
+      ...(requestId ? { requestId } : {}),
       inspectedDurationMs: payload.durationMs,
+      ...(sampling ? { sampling } : {}),
       ...(execution.trace ? { trace: execution.trace } : {}),
     };
   }
 
-  private async preparePayload(input: VisualReviewAgentInput): Promise<VisualReviewMediaPayload> {
+  private async preparePayload(input: VisualReviewAgentInput): Promise<{
+    payload: VisualReviewMediaPayload;
+    sampling?: VisualReviewMediaPayload["sampling"];
+  }> {
     const media = await this.options.media.prepare(input);
-    const reviewContext = await buildReviewContext(input);
-    return { ...media, ...(reviewContext ? { reviewContext } : {}) };
+    const { sampling, ...boundedMedia } = media;
+    const reviewContext = await buildReviewContext(input, sampling);
+    return {
+      payload: { ...boundedMedia, ...(reviewContext ? { reviewContext } : {}) },
+      ...(sampling ? { sampling } : {}),
+    };
   }
 }
 
-async function buildReviewContext(input: VisualReviewAgentInput): Promise<Record<string, unknown> | undefined> {
+function normalizedRequestId(value: string | undefined): string | undefined {
+  return value ? `visual-${createHash("sha256").update(value).digest("hex")}` : undefined;
+}
+
+async function buildReviewContext(
+  input: VisualReviewAgentInput,
+  sampling?: VisualReviewMediaPayload["sampling"],
+): Promise<Record<string, unknown> | undefined> {
   const entries = await Promise.all([
     input.scriptPath ? readRunJson(input.runRoot, input.scriptPath, "script") : undefined,
     input.directorPlanPath ? readRunJson(input.runRoot, input.directorPlanPath, "director plan") : undefined,
     input.renderManifestPath ? readRunJson(input.runRoot, input.renderManifestPath, "render manifest") : undefined,
   ]);
   const [script, directorPlan, renderManifest] = entries;
-  if (!script && !directorPlan && !renderManifest) return undefined;
+  if (!script && !directorPlan && !renderManifest && !sampling) return undefined;
   const context = {
+    ...(sampling ? { sampling: {
+      ...sampling,
+      phases: sampling.mode === "scene_triplets" ? ["opening", "middle", "closing"] : sampling.mode === "hook_and_scene_midpoints" ? ["hook", "midpoint"] : ["keyframe"],
+      evidenceBoundary: sampling.mode === "scene_triplets"
+        ? "Triplets can show state progression; audio and frame-to-frame smoothness are reviewed separately."
+        : "Sparse samples do not prove per-scene state progression, audio, or frame-to-frame smoothness.",
+    } } : {}),
     ...(script ? { script: compactScript(script) } : {}),
     ...(directorPlan ? { directorPlan: compactDirectorPlan(directorPlan) } : {}),
     ...(renderManifest ? { renderManifest: compactRenderManifest(renderManifest) } : {}),

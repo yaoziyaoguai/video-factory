@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import {
   ProductionPipeline,
+  RoleAgentLoopError,
   type PublishCopyInput,
   type PublishCopyWriter,
   type ScreenwriterAgent,
@@ -228,6 +229,26 @@ describe("ProductionPipeline publish copy", () => {
     assert.equal(payload.title, brief.title);
   });
 
+  it("fails closed when the configured publishing agent exhausts its independent audit", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publish-audit-failure-"));
+    const worker = new RecordingWorker();
+    const writer: PublishCopyWriter = {
+      id: "codex-publish-copy-v1",
+      write: async () => publishCopy,
+      writeDetailed: async () => { throw exhaustedAgentError("发行编辑"); },
+    };
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker, screenwriterAgent: screenwriter, publishCopyWriter: writer });
+
+    const run = await pipeline.start(brief);
+    const node = run.nodeRuns.find((candidate) => candidate.nodeId === "publish-package");
+
+    assert.equal(run.status, "failed");
+    assert.equal(node?.status, "failed");
+    assert.match(node?.error ?? "", /三轮审计仍未通过/);
+    assert.equal(run.artifacts.some((artifact) => artifact.kind === "publish_package"), false);
+    assert.equal(run.artifacts.some((artifact) => artifact.kind === "agent_loop_trace"), true);
+  });
+
   it("invokes the writer only after manual approval without rerunning media nodes", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publish-copy-"));
     const worker = new RecordingWorker();
@@ -269,3 +290,16 @@ describe("ProductionPipeline publish copy", () => {
     assert.equal(payload.title, publishCopy.title);
   });
 });
+
+function exhaustedAgentError(role: string): RoleAgentLoopError {
+  return new RoleAgentLoopError("三轮审计仍未通过", {
+    version: "video-factory/agent-loop-v1",
+    role,
+    contractVersion: "fixture-v1",
+    criteria: ["必须通过独立审计"],
+    status: "failed",
+    maxIterations: 3,
+    modelCallCount: 6,
+    iterations: [],
+  });
+}

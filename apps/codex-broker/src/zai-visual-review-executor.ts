@@ -134,6 +134,7 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
           prompt,
           providerId: this.identity.providerId,
           modelId: this.identity.modelId,
+          reasoningEffort: this.effort,
         },
       };
     } catch (error) {

@@ -334,6 +334,9 @@ export interface NodeRun<TOutput = unknown> {
   role?: string;
   status: NodeStatus;
   startedAt: string;
+  operationRequestId?: string;
+  interrupted?: boolean;
+  outcomeUncertain?: boolean;
   finishedAt?: string;
   output?: TOutput;
   artifactIds: string[];
@@ -379,6 +382,7 @@ export interface WorkflowContext<TInitialInput = unknown> {
   artifacts: readonly Artifact[];
   outputs: ReadonlyMap<string, unknown>;
   readonly spendAuthorization: Readonly<SpendAuthorization> | undefined;
+  readonly operationRequestId: string | undefined;
   now: () => string;
   nextId: (prefix: string) => string;
   addArtifact: <TData = unknown>(draft: ArtifactDraft<TData>) => Artifact<TData>;

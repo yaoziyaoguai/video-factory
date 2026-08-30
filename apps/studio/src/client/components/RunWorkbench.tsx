@@ -29,7 +29,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
   const rejectDialogRef = useDialogFocus<HTMLElement>(rejecting, () => setRejecting(false), decisionPending);
   const approveDialogRef = useDialogFocus<HTMLElement>(approving, () => setApproving(false), decisionPending);
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
-  const creatorNodes = run.nodes.filter((node) => isCreatorFacingNode(node.id) && nodeHasCreatorContent(node, run));
+  const creatorNodes = run.nodes.filter((node) => nodeHasCreatorContent(node, run));
   const activeSpendNode = creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
   const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id);
   const showReviewSurface = Boolean(video?.contentUrl || run.activeIntervention || isTerminalStatus(run.status));
@@ -132,8 +132,8 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
               <h2>当前状态</h2>
               <p>{runStateMessage(run)}</p>
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />多平台发布</button> : null}
-              {run.status === "failed" && onRetryFailedNode && failedNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(failedNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />重试失败步骤</button> : null}
-              {(run.status === "failed" || run.status === "rejected") && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
+              {run.status === "failed" && !hasUncertainPaidOutcome(run) && onRetryFailedNode && failedNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(failedNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />重试失败步骤</button> : null}
+              {(run.status === "failed" || run.status === "rejected") && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
               {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />按人工版本继续生成</button> : null}
             </section>
           )}
@@ -202,6 +202,10 @@ function failedNodeId(run: StudioRunDetail): string | undefined {
   return run.nodes.find((node) => node.status === "failed")?.id;
 }
 
+function hasUncertainPaidOutcome(run: StudioRunDetail): boolean {
+  return run.nodes.some((node) => node.outcomeUncertain === true);
+}
+
 function runningNodeLabel(run: StudioRunDetail): string {
   const current = run.nodes.find((node) => node.id === run.currentNodeId)
     ?? run.nodes.find((node) => node.status === "running")
@@ -222,27 +226,15 @@ function runStateMessage(run: StudioRunDetail): string {
       ?? "成片未通过机器质检，请查看质检报告后重新发起制作。";
   }
   if (run.status === "failed") {
+    if (hasUncertainPaidOutcome(run)) {
+      return "付费服务可能已经受理请求，但结果尚未确认。系统已停止重试和重新制作，请先在 Provider 控制台核对任务与账单。";
+    }
     return safeRunError(run.nodes.find((node) => node.status === "failed")?.error);
   }
   if (run.status === "awaiting_spend_approval") return "即将进入付费节点，请先检查前序交付、模型和费用上限。";
   if (run.status === "approval_invalidated") return "输入、模型或预算发生了变化，之前的费用确认已失效，请重新检查。";
   if (run.status === "stale") return "上游内容已被人工修改，后续旧结果不会继续使用，需要重新生成。";
   return "制作正在自动执行，详情页会实时更新；连接中断时会明确提示。";
-}
-
-const CREATOR_NODE_IDS = new Set([
-  "brief",
-  "script",
-  "reference-grammar",
-  "visual-direction",
-  "assets",
-  "voice",
-  "visual-review",
-  "publish-package",
-]);
-
-function isCreatorFacingNode(nodeId: string): boolean {
-  return CREATOR_NODE_IDS.has(nodeId);
 }
 
 function nodeHasCreatorContent(node: StudioRunDetail["nodes"][number], run: StudioRunDetail): boolean {

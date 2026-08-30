@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   CodexBridgeClient,
   CodexPublishCopyWriter,
+  type CodexTaskExecution,
   type CodexTaskKind,
   type PublishCopyInput,
 } from "../src/index.js";
@@ -43,6 +44,42 @@ function rawCopy(overrides: Record<string, unknown> = {}): Record<string, unknow
 }
 
 describe("CodexPublishCopyWriter", () => {
+  it("repairs publish copy after an independent audit before returning detailed output", async () => {
+    const calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
+    let publishAttempt = 0;
+    const client = new class extends CodexBridgeClient {
+      constructor() { super({ socketPath: "/nonexistent/vf-codex.sock" }); }
+      async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
+        calls.push({ kind, payload });
+        if (kind === "publish-copy") {
+          publishAttempt += 1;
+          return { output: rawCopy({ title: publishAttempt === 1 ? "震惊所有人" : "下班后先少做一个决定" }) };
+        }
+        return { output: {
+          version: "video-factory/role-audit-v1",
+          verdict: publishAttempt === 1 ? "repair" : "pass",
+          score: publishAttempt === 1 ? 58 : 91,
+          summary: publishAttempt === 1 ? "标题夸张且没有传达内容价值。" : "文案与脚本和平台约束一致。",
+          issues: publishAttempt === 1 ? [{
+            severity: "blocking",
+            criterion: "不制造额外承诺",
+            evidence: "标题使用了‘震惊所有人’。",
+            repairInstruction: "改为脚本中关于减少决策消耗的具体收益。",
+          }] : [],
+          repairInstructions: publishAttempt === 1 ? ["改写标题，明确减少决策消耗。"] : [],
+        } };
+      }
+    }();
+    const writer = new CodexPublishCopyWriter({ client, maxReviewIterations: 2 });
+
+    const execution = await writer.writeDetailed(publishInput());
+
+    assert.equal(execution.output.title, "下班后先少做一个决定");
+    assert.equal(execution.agentLoop?.iterations.length, 2);
+    assert.deepEqual(calls.map((call) => call.kind), ["publish-copy", "role-audit", "publish-copy", "role-audit"]);
+    assert.equal("revision" in (calls[2]!.payload as Record<string, unknown>), true);
+  });
+
   it("sends only publish-copy task data and normalizes output", async () => {
     const codexClient = new CapturingCodexClient(() => rawCopy());
     const writer = new CodexPublishCopyWriter({ client: codexClient });

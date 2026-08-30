@@ -68,6 +68,68 @@ export interface ProductionReferenceVideo {
   path: string;
 }
 
+export interface ProductionSeriesContext {
+  seriesId: string;
+  episodeId: string;
+  seriesName: string;
+  seriesRevision: number;
+  episodeNumber: number;
+  seasonNumber: number;
+  canonBaseRevision: number;
+  productionReservationId?: string;
+  premise: string;
+  audience: string;
+  platform: string;
+  track: string;
+  arc: string;
+  episode: {
+    updatedAt: string;
+    pillar: string;
+    title: string;
+    viewerPromise: string;
+    hook: string;
+    payoff: string;
+    planning: {
+      source: "agent" | "rules" | "human";
+      role: string;
+      auditRole: string;
+      auditStatus: "passed" | "fallback" | "human_override";
+      auditIterations: number;
+      auditScore?: number;
+      auditSummary?: string;
+      providerId: string;
+      modelId: string;
+      promptVersion: string;
+      reasoningEffort?: string;
+      fallbackReason?: string;
+    };
+  };
+  bible: {
+    rules: string[];
+    recurringElements: string[];
+    forbiddenChanges: string[];
+  };
+  canon: {
+    revision: number;
+    facts: Array<{
+      id: string;
+      statement: string;
+      sourceEpisodeId: string;
+      sourceRunId?: string;
+      sourceRunRevision?: number;
+      sourceOutputVersionIds?: string[];
+      acceptedAt: string;
+    }>;
+  };
+  continuity: {
+    inheritedFromPrevious: string[];
+    fromPrevious: string[];
+    toNext: string[];
+    canonChecks: string[];
+    memorySummary?: string;
+  };
+}
+
 export interface ProductionBrief {
   protocolVersion: typeof BRIEF_PROTOCOL_VERSION;
   title: string;
@@ -87,6 +149,11 @@ export interface ProductionBrief {
   economics: ProductionEconomics;
   voiceDirection: ProductionVoiceDirection;
   editorial?: ProductionEditorialDirection;
+  seriesContext?: ProductionSeriesContext;
+  creationContext?: {
+    origin: "trend" | "series" | "manual";
+    opportunityId: string;
+  };
 }
 
 export function parseBrief(value: unknown): ProductionBrief {
@@ -108,6 +175,8 @@ export function parseBrief(value: unknown): ProductionBrief {
   const economics = parseEconomics(value.economics);
   const voiceDirection = parseVoiceDirection(value.voiceDirection);
   const editorial = parseEditorialDirection(value.editorial);
+  const seriesContext = parseProductionSeriesContext(value.seriesContext);
+  const creationContext = parseCreationContext(value.creationContext);
   const templateSnapshot = value.templateSnapshot === undefined
     ? undefined
     : parseProductionTemplateSnapshot(value.templateSnapshot);
@@ -162,7 +231,142 @@ export function parseBrief(value: unknown): ProductionBrief {
     economics,
     voiceDirection,
     ...(editorial ? { editorial } : {}),
+    ...(seriesContext ? { seriesContext } : {}),
+    ...(creationContext ? { creationContext } : {}),
   };
+}
+
+function parseCreationContext(value: unknown): ProductionBrief["creationContext"] {
+  if (value === undefined) return undefined;
+  const input = requireRecord(value, "creationContext");
+  if (input.origin !== "trend" && input.origin !== "series" && input.origin !== "manual") {
+    throw new Error("creationContext.origin is invalid.");
+  }
+  return {
+    origin: input.origin,
+    opportunityId: requireString(input.opportunityId, "creationContext.opportunityId"),
+  };
+}
+
+export function parseProductionSeriesContext(value: unknown): ProductionSeriesContext | undefined {
+  if (value === undefined) return undefined;
+  const input = requireRecord(value, "seriesContext");
+  const bible = requireRecord(input.bible, "seriesContext.bible");
+  const canon = requireRecord(input.canon, "seriesContext.canon");
+  const continuity = requireRecord(input.continuity, "seriesContext.continuity");
+  const episode = requireRecord(input.episode, "seriesContext.episode");
+  const planning = requireRecord(episode.planning, "seriesContext.episode.planning");
+  const seriesRevision = boundedNumber(input.seriesRevision, "seriesContext.seriesRevision", 1, 100_000, true);
+  const episodeNumber = boundedNumber(input.episodeNumber, "seriesContext.episodeNumber", 1, 10_000, true);
+  const seasonNumber = boundedNumber(input.seasonNumber, "seriesContext.seasonNumber", 1, 1_000, true);
+  const canonBaseRevision = boundedNumber(input.canonBaseRevision, "seriesContext.canonBaseRevision", 0, 100_000, true);
+  const canonRevision = boundedNumber(canon.revision, "seriesContext.canon.revision", 0, 100_000, true);
+  if (canonBaseRevision !== canonRevision) {
+    throw new Error("seriesContext.canonBaseRevision must match the current canon revision before production starts.");
+  }
+  const memorySummary = continuity.memorySummary === undefined
+    ? undefined
+    : requireString(continuity.memorySummary, "seriesContext.continuity.memorySummary");
+  return {
+    seriesId: requireString(input.seriesId, "seriesContext.seriesId"),
+    episodeId: requireString(input.episodeId, "seriesContext.episodeId"),
+    seriesName: requireString(input.seriesName, "seriesContext.seriesName"),
+    seriesRevision,
+    episodeNumber,
+    seasonNumber,
+    canonBaseRevision,
+    ...(input.productionReservationId === undefined
+      ? {}
+      : { productionReservationId: requireString(input.productionReservationId, "seriesContext.productionReservationId") }),
+    premise: requireString(input.premise, "seriesContext.premise"),
+    audience: requireString(input.audience, "seriesContext.audience"),
+    platform: requireString(input.platform, "seriesContext.platform"),
+    track: requireString(input.track, "seriesContext.track"),
+    arc: requireString(input.arc, "seriesContext.arc"),
+    episode: {
+      updatedAt: requireIsoTimestamp(episode.updatedAt, "seriesContext.episode.updatedAt"),
+      pillar: requireString(episode.pillar, "seriesContext.episode.pillar"),
+      title: requireString(episode.title, "seriesContext.episode.title"),
+      viewerPromise: requireString(episode.viewerPromise, "seriesContext.episode.viewerPromise"),
+      hook: requireString(episode.hook, "seriesContext.episode.hook"),
+      payoff: requireString(episode.payoff, "seriesContext.episode.payoff"),
+      planning: parseSeriesEpisodePlanning(planning),
+    },
+    bible: {
+      rules: boundedStringList(bible.rules, "seriesContext.bible.rules", 20),
+      recurringElements: boundedStringList(bible.recurringElements, "seriesContext.bible.recurringElements", 20),
+      forbiddenChanges: boundedStringList(bible.forbiddenChanges, "seriesContext.bible.forbiddenChanges", 20),
+    },
+    canon: {
+      revision: canonRevision,
+      facts: parseCanonFacts(canon.facts),
+    },
+    continuity: {
+      inheritedFromPrevious: boundedStringList(
+        continuity.inheritedFromPrevious,
+        "seriesContext.continuity.inheritedFromPrevious",
+        20,
+      ),
+      fromPrevious: boundedStringList(continuity.fromPrevious, "seriesContext.continuity.fromPrevious", 20),
+      toNext: boundedStringList(continuity.toNext, "seriesContext.continuity.toNext", 20),
+      canonChecks: boundedStringList(continuity.canonChecks, "seriesContext.continuity.canonChecks", 20),
+      ...(memorySummary ? { memorySummary } : {}),
+    },
+  };
+}
+
+function parseCanonFacts(value: unknown): ProductionSeriesContext["canon"]["facts"] {
+  if (!Array.isArray(value) || value.length > 200) {
+    throw new Error("seriesContext.canon.facts must be an array with at most 200 entries.");
+  }
+  return value.map((entry, index) => {
+    const fact = requireRecord(entry, `seriesContext.canon.facts[${index}]`);
+    const acceptedAt = requireString(fact.acceptedAt, `seriesContext.canon.facts[${index}].acceptedAt`);
+    if (!Number.isFinite(Date.parse(acceptedAt))) {
+      throw new Error(`seriesContext.canon.facts[${index}].acceptedAt must be an ISO timestamp.`);
+    }
+    const sourceOutputVersionIds = fact.sourceOutputVersionIds === undefined
+      ? undefined
+      : boundedStringList(fact.sourceOutputVersionIds, `seriesContext.canon.facts[${index}].sourceOutputVersionIds`, 20);
+    return {
+      id: requireString(fact.id, `seriesContext.canon.facts[${index}].id`),
+      statement: requireString(fact.statement, `seriesContext.canon.facts[${index}].statement`),
+      sourceEpisodeId: requireString(fact.sourceEpisodeId, `seriesContext.canon.facts[${index}].sourceEpisodeId`),
+      ...(fact.sourceRunId === undefined ? {} : { sourceRunId: requireString(fact.sourceRunId, `seriesContext.canon.facts[${index}].sourceRunId`) }),
+      ...(fact.sourceRunRevision === undefined ? {} : { sourceRunRevision: boundedNumber(fact.sourceRunRevision, `seriesContext.canon.facts[${index}].sourceRunRevision`, 0, 1_000_000, true) }),
+      ...(sourceOutputVersionIds ? { sourceOutputVersionIds } : {}),
+      acceptedAt,
+    };
+  });
+}
+
+function parseSeriesEpisodePlanning(value: Record<string, unknown>): ProductionSeriesContext["episode"]["planning"] {
+  if (value.source !== "agent" && value.source !== "rules" && value.source !== "human") {
+    throw new Error("seriesContext.episode.planning.source is invalid.");
+  }
+  if (value.auditStatus !== "passed" && value.auditStatus !== "fallback" && value.auditStatus !== "human_override") {
+    throw new Error("seriesContext.episode.planning.auditStatus is invalid.");
+  }
+  return {
+    source: value.source,
+    role: requireString(value.role, "seriesContext.episode.planning.role"),
+    auditRole: requireString(value.auditRole, "seriesContext.episode.planning.auditRole"),
+    auditStatus: value.auditStatus,
+    auditIterations: boundedNumber(value.auditIterations, "seriesContext.episode.planning.auditIterations", 0, 3, true),
+    ...(value.auditScore === undefined ? {} : { auditScore: boundedNumber(value.auditScore, "seriesContext.episode.planning.auditScore", 0, 100, true) }),
+    ...(value.auditSummary === undefined ? {} : { auditSummary: requireString(value.auditSummary, "seriesContext.episode.planning.auditSummary") }),
+    providerId: requireString(value.providerId, "seriesContext.episode.planning.providerId"),
+    modelId: requireString(value.modelId, "seriesContext.episode.planning.modelId"),
+    promptVersion: requireString(value.promptVersion, "seriesContext.episode.planning.promptVersion"),
+    ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: requireString(value.reasoningEffort, "seriesContext.episode.planning.reasoningEffort") }),
+    ...(value.fallbackReason === undefined ? {} : { fallbackReason: requireString(value.fallbackReason, "seriesContext.episode.planning.fallbackReason") }),
+  };
+}
+
+function requireIsoTimestamp(value: unknown, label: string): string {
+  const timestamp = requireString(value, label);
+  if (!Number.isFinite(Date.parse(timestamp))) throw new Error(`${label} must be an ISO timestamp.`);
+  return timestamp;
 }
 
 function parseModelSelectionSources(
@@ -391,6 +595,13 @@ function requireString(value: unknown, field: string): string {
 
 function requireStringArray(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.length === 0) throw new Error(`${field} must be a non-empty string array.`);
+  return value.map((item, index) => requireString(item, `${field}[${index}]`));
+}
+
+function boundedStringList(value: unknown, field: string, maximum: number): string[] {
+  if (!Array.isArray(value) || value.length > maximum) {
+    throw new Error(`${field} must be a string array with at most ${maximum} entries.`);
+  }
   return value.map((item, index) => requireString(item, `${field}[${index}]`));
 }
 

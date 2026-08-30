@@ -80,6 +80,47 @@ describe("node production workspaces", () => {
     });
   });
 
+  it("discloses a failed agent audit and its public rule fallback reason", () => {
+    const fallbackReason = "模型连续三轮未通过审计，已采用确定性脚本规则。";
+    const node: StudioNode = {
+      ...succeededNode,
+      executionReceipt: {
+        ...succeededNode.executionReceipt!,
+        parameters: {
+          ...succeededNode.executionReceipt!.parameters,
+          agentLoop: "failed",
+          agentLoopIterations: 3,
+          fallbackReason,
+        },
+      },
+    };
+    const { container } = render(<NodeWorkspace node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+
+    const summary = container.querySelector("summary");
+    expect(summary).toHaveTextContent("审计失败，已规则回退");
+    expect(summary).toHaveTextContent(fallbackReason);
+    expect(summary).not.toHaveTextContent("自审 3 轮");
+    expect(screen.getByRole("alert")).toHaveTextContent(`审计失败，已规则回退：${fallbackReason}`);
+  });
+
+  it("discloses a receipt-level fallback reason when loop parameters were replaced", () => {
+    const fallbackReason = "视觉模型不可用，已使用保守参考语法。";
+    const node: StudioNode = {
+      ...succeededNode,
+      executionReceipt: {
+        ...succeededNode.executionReceipt!,
+        parameters: { sampleMode: "keyframes" },
+        fallbackReason,
+      },
+    };
+    const { container } = render(<NodeWorkspace node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+
+    const summary = container.querySelector("summary");
+    expect(summary).toHaveTextContent("审计失败，已规则回退");
+    expect(summary).toHaveTextContent(fallbackReason);
+    expect(screen.getByRole("alert")).toHaveTextContent(`审计失败，已规则回退：${fallbackReason}`);
+  });
+
   it("shows the immutable planned provider and model before a node executes", async () => {
     const pendingNode: StudioNode = {
       id: "visual-direction",

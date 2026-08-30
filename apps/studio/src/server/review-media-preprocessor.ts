@@ -7,8 +7,9 @@ import type { VisualReviewMediaPayload, VisualReviewMediaPreprocessor } from "@v
 import { buildStudioChildEnvironment } from "./studio-child-environment.js";
 
 const execFile = promisify(execFileCallback);
-const MAX_FRAME_BYTES = 512 * 1024;
-const MAX_TOTAL_BYTES = 6 * 1024 * 1024;
+const MAX_REVIEW_FRAMES = 24;
+const MAX_FRAME_BYTES = 256 * 1024;
+const MAX_TOTAL_BYTES = 5 * 1024 * 1024;
 
 export interface PythonReviewMediaPreprocessorOptions {
   repositoryRoot: string;
@@ -29,7 +30,7 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
       "-m", "video_factory.review_media",
       "--video", input.videoPath,
       "--run-root", input.runRoot,
-      "--max-frames", "12",
+      "--max-frames", String(MAX_REVIEW_FRAMES),
       ...(input.renderManifestPath ? ["--render-manifest", input.renderManifestPath] : []),
     ];
     let stdout: string;
@@ -51,7 +52,7 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
     if (manifest.version !== "video-factory/review-media-v1" || !Number.isInteger(manifest.durationMs) || Number(manifest.durationMs) <= 0) {
       throw new Error("Review media manifest metadata is invalid.");
     }
-    if (!Array.isArray(manifest.frames) || manifest.frames.length < 1 || manifest.frames.length > 12) {
+    if (!Array.isArray(manifest.frames) || manifest.frames.length < 1 || manifest.frames.length > MAX_REVIEW_FRAMES) {
       throw new Error("Review media manifest frame count is invalid.");
     }
     let totalBytes = 0;
@@ -71,10 +72,65 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
       totalBytes += jpeg.length;
       if (jpeg.length > MAX_FRAME_BYTES || totalBytes > MAX_TOTAL_BYTES || !isJpeg(jpeg)) throw new Error("Review frame bytes exceed the safe visual-review boundary.");
       if (createHash("sha256").update(jpeg).digest("hex") !== sha256) throw new Error("Review frame SHA-256 does not match its manifest.");
-      frames.push({ timecodeMs: Number(timecodeMs), sha256, jpegBase64: jpeg.toString("base64") });
+      const scenePosition = frame.scenePosition;
+      const phase = frame.phase;
+      if (scenePosition !== undefined && (!Number.isInteger(scenePosition) || Number(scenePosition) < 1)) throw new Error("Review frame scene mapping is invalid.");
+      if (phase !== undefined && !["opening", "middle", "closing", "hook", "midpoint", "keyframe"].includes(String(phase))) throw new Error("Review frame phase is invalid.");
+      frames.push({
+        timecodeMs: Number(timecodeMs),
+        sha256,
+        jpegBase64: jpeg.toString("base64"),
+        ...(scenePosition !== undefined ? { scenePosition: Number(scenePosition) } : {}),
+        ...(phase !== undefined ? { phase: phase as "opening" | "middle" | "closing" | "hook" | "midpoint" | "keyframe" } : {}),
+      });
     }
-    return { durationMs: Number(manifest.durationMs), frames };
+    const sampling = parseSampling(manifest.sampling, frames);
+    return { durationMs: Number(manifest.durationMs), frames, ...(sampling ? { sampling } : {}) };
   }
+}
+
+function parseSampling(
+  value: unknown,
+  frames: VisualReviewMediaPayload["frames"],
+): VisualReviewMediaPayload["sampling"] | undefined {
+  if (value === undefined) return undefined;
+  const sampling = parseRecord(value, "review media sampling");
+  if (!["scene_triplets", "hook_and_scene_midpoints", "scene_change_keyframes"].includes(String(sampling.mode))) {
+    throw new Error("Review media sampling mode is invalid.");
+  }
+  if (sampling.sceneCount !== undefined && (!Number.isInteger(sampling.sceneCount) || Number(sampling.sceneCount) < 1)) {
+    throw new Error("Review media sampling sceneCount is invalid.");
+  }
+  const mode = sampling.mode as "scene_triplets" | "hook_and_scene_midpoints" | "scene_change_keyframes";
+  const sceneCount = sampling.sceneCount === undefined ? undefined : Number(sampling.sceneCount);
+  if (mode === "scene_triplets" && sceneCount === undefined) {
+    throw new Error("Scene-triplet sampling requires sceneCount.");
+  }
+  const coveredScenePositions = [...new Set(frames.flatMap((frame) => frame.scenePosition === undefined ? [] : [frame.scenePosition]))]
+    .sort((left, right) => left - right);
+  if (sceneCount !== undefined && coveredScenePositions.some((position) => position > sceneCount)) {
+    throw new Error("Review frame scene mapping exceeds sampling sceneCount.");
+  }
+  const missingScenePositions = sceneCount === undefined
+    ? []
+    : Array.from({ length: sceneCount }, (_, index) => index + 1).filter((position) => !coveredScenePositions.includes(position));
+  if (mode === "scene_triplets") {
+    const requiredPhases = ["opening", "middle", "closing"] as const;
+    for (let position = 1; position <= sceneCount!; position += 1) {
+      const phases = frames.filter((frame) => frame.scenePosition === position).map((frame) => frame.phase);
+      if (phases.length !== 3 || new Set(phases).size !== 3 || !requiredPhases.every((phase) => phases.includes(phase))) {
+        throw new Error(`Scene-triplet sampling is incomplete for scene ${position}.`);
+      }
+    }
+  }
+  return {
+    mode,
+    ...(sceneCount !== undefined ? {
+      sceneCount,
+      coveredScenePositions,
+      missingScenePositions,
+    } : {}),
+  };
 }
 
 function parseRecord(value: unknown, label: string): Record<string, unknown> {

@@ -41,10 +41,11 @@ flowchart LR
     B --> C[宿主机 Codex 选题总编]
     C --> D[分类 / 风险 / 事实收敛]
     D --> E[热点候选]
-    V[(series.json)] --> W[SeriesPlanner 下一集]
-    X[自定义观察 / JSON] --> F{统一候选收件箱}
+    V[(Series Bible + Canon)] --> W[系列总编 Agent + 独立审计]
+    W --> WW[有序 Episode Roadmap]
+    X[自定义观察 / JSON] --> F{当前入口候选}
     E --> F
-    W --> F
+    WW --> F
     F --> G{可信度闸门}
     G -->|常规风险且来源达标| H[三拍视觉计划 + 分数解释]
     G -->|中风险| I{人工确认}
@@ -86,10 +87,10 @@ TrendRadar 自带 11 个中文平台榜单与静态报告，当前关闭其内�
 
 ### 2. 选择热点、系列或自定义创作
 
-进入“今日机会”后有三个并列入口：
+首页提供三个创作入口。选择后进入对应的独立工作区，不会再次要求选择入口，也不会混入其他入口的机会或制作记录：
 
 - 热点机会：阅读全部 Agent 提案，按内容分类、平台、时效和风险筛选，核验原始证据后采用。
-- 系列选题：创建包含长期承诺、受众、内容支柱、语气和视觉方向的系列；系统持续生成带集数的下一集候选。
+- 系列选题：创建 Series Bible 和本季篇章；系列总编 Agent 经独立红队审计后生成有顺序的 Episode Roadmap。尚未采用的单集可以人工修订，保存时保留版本冲突保护与人工溯源；采用前，系列开拍总编会用最新 Canon 独立重审，只有通过后才进入制作。页面把系统写入的“正史交接”和创作者填写的“本集承接要求”分开显示，前者变化不会覆盖后者。
 - 自定义创作：手动填写自己的观察，或导入其他研究/Agent 产生的严格 JSON。
 
 热点候选在采用前会经过可信度闸门：
@@ -100,7 +101,7 @@ TrendRadar 自带 11 个中文平台榜单与静态报告，当前关闭其内�
 
 每张候选卡会解释总分的主要贡献项和风险扣分，并给出开场、展开、收束三拍视觉计划。素材来源只是建议，可在正式 Brief 中替换为本地素材、素材库、编辑卡片或已配置的生成式视觉 Provider。
 
-三个入口采用后都会进入同一个制作机会区。任何正式机会必须包含：
+三个入口采用后共享同一套生产引擎，但机会区、制作记录和 API 集合仍按入口隔离。任何正式机会必须包含：
 
 - 标题、平台、系列 slug、受众、痛点和开场 hook。
 - 至少一条证据：来源、平台、关键词和 0-100 信号强度；建议提供证据 URL 和采集时间。
@@ -195,7 +196,7 @@ flowchart TB
     API --> Pipeline
 ```
 
-`JsonOpportunityStore`、`JsonSeriesStore` 与 `JsonCreatorSettingsStore` 使用写队列和同目录临时文件原子 rename。`CandidateInboxStudio` 负责热点/系列候选的统一分面、过滤、可信度闸门、采用和去重；`SeriesPlanner` 是可替换策划端口。`ProductionPipeline` 使用 revision/CAS、artifact 路径边界、大小与 SHA-256 校验。这些存储边界均可在后续替换为数据库实现，而不改变 UI API。
+`JsonOpportunityStore` 与 `JsonCreatorSettingsStore` 使用写队列和同目录临时文件原子 rename；`JsonSeriesStore` 额外使用跨进程排他文件锁，保护当前单机 ECS 上的 revision/CAS。它不是分布式锁，多实例部署前必须把 repository 换成带事务与唯一约束的数据库实现。`CandidateInboxStudio` 负责各入口候选的查询、采用和去重，采用请求显式携带 origin；服务端 Opportunity/Run API 仍按 origin 隔离。`CodexSeriesPlanningAgent` 负责整季策划、采用前最新 Canon Greenlight 和各自的独立审计，`SeriesPlanner` 负责稳定编号、连续性和规则保底。系列单集在 dispatch 前预约唯一生产位；上游改稿持有 edit lease，下游预约不能与其穿插；未找到匹配 run 的孤立预约只会在 15 分钟后回收，失败会回到已采用状态。Internal Master 只从最终脚本的结构化 `canonFacts` 写入 Canon，并保留 run 与 effective output version 来源；旧版本变 stale 时会撤回并重新锁住后集。`ProductionPipeline` 使用 revision/CAS、artifact 路径边界、大小与 SHA-256 校验。这些存储边界均可在后续替换，而不改变 UI API。
 
 ## 能力矩阵
 
@@ -203,10 +204,10 @@ flowchart TB
 | --- | --- | --- |
 | 中文热点底座 | 部分实现 | 4 套服务可自托管并独立报告健康；统一信号网关当前读取 DailyHotApi 与 NewsNow |
 | Codex 选题总编 | 已实现 | 宿主机 Codex bridge；结构化输出；失败时明确标记 heuristic fallback |
-| 候选收件箱 | 已实现 | 热点/系列统一查询；分类、平台、时效、风险分面；渐进加载；采用后去重 |
+| 候选工作区 | 已实现 | 首页选择入口后独立查询；热点分类分面；系列路线图；采用后去重；Opportunity/Run 服务端按 origin 隔离 |
 | 事实与风险闸门 | 已实现 | 中风险显式确认；高风险要求 2 条独立 URL 来源；敏感公共事件只使用来源可支撑的陈述 |
 | 视觉导演计划 | 已实现 | 每个候选给出开场、展开、收束三拍；素材策略可在 Brief 中替换 |
-| 系列与集数策划 | 已实现 | 系列原子持久化；内容支柱；连续集数候选；采用后推进下一集 |
+| 系列与集数策划 | 已实现 | Series Bible、季篇章、Episode Roadmap、结构化 Canon Ledger；整季策划与单集 Greenlight 均独立审计最多 3 轮；正史交接和人工承接分离；内部定版后解锁下一集 |
 | 机会录入与排序 | 已实现 | Agent 入池、手动或 JSON；证据必填；workflow-core 计算分数 |
 | 机会状态 | 已实现 | `draft -> shortlisted/approved/rejected -> tested` 受状态机约束 |
 | Production Brief | 已实现 | 从机会预填但必须人工确认 |
@@ -237,6 +238,7 @@ flowchart TB
 - `POST /api/candidate-inbox/:candidateId/adopt`
 - `GET /api/series`
 - `POST /api/series`
+- `PATCH /api/series/:seriesId/episodes/:episodeNumber`
 - `GET /api/opportunities`
 - `POST /api/opportunities`
 - `GET /api/opportunities/:opportunityId`

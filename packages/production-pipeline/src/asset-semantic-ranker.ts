@@ -1,4 +1,5 @@
 import type { CodexBridgeClient, CodexTaskExecution } from "./codex-chat.js";
+import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
 export interface AssetCandidate {
   provider: string;
@@ -58,14 +59,15 @@ export interface AssetSemanticRanker {
   readonly id: string;
   readonly modelId: string;
   rank(report: AssetCandidateReport): Promise<AssetSemanticRanking>;
-  rankDetailed?(report: AssetCandidateReport): Promise<CodexTaskExecution<AssetSemanticRanking>>;
+  rankDetailed?(report: AssetCandidateReport, checkpoint?: RoleAgentLoopCheckpoint): Promise<CodexTaskExecution<AssetSemanticRanking>>;
 }
 
 export interface CodexAssetSemanticRankerOptions {
-  client: Pick<CodexBridgeClient, "runTask">;
+  client: Pick<CodexBridgeClient, "runTask"> & Partial<Pick<CodexBridgeClient, "runTaskDetailed">>;
   providerId?: string;
   modelId?: string;
   fetchThumbnail?: (url: string) => Promise<Buffer | undefined>;
+  maxReviewIterations?: number;
 }
 
 interface AssetRankThumbnail {
@@ -79,6 +81,7 @@ interface AssetRankThumbnail {
 const MAX_RANK_THUMBNAILS = 12;
 const MAX_THUMBNAIL_BYTES = 512 * 1024;
 const THUMBNAIL_HOSTS = new Set(["images.pexels.com", "cdn.pixabay.com"]);
+export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v1|role-audit-v1|asset-ranking-validator-v1";
 
 export class CodexAssetSemanticRanker implements AssetSemanticRanker {
   readonly id: string;
@@ -94,14 +97,42 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
     return validateAssetSemanticRanking(await this.options.client.runTask("asset-rank", payload), report);
   }
 
-  async rankDetailed(report: AssetCandidateReport): Promise<CodexTaskExecution<AssetSemanticRanking>> {
-    const client = this.options.client as Pick<CodexBridgeClient, "runTask" | "runTaskDetailed">;
+  async rankDetailed(report: AssetCandidateReport, checkpoint?: RoleAgentLoopCheckpoint): Promise<CodexTaskExecution<AssetSemanticRanking>> {
+    const client = this.options.client;
     if (typeof client.runTaskDetailed !== "function") return { output: await this.rank(report) };
-    const execution = await client.runTaskDetailed("asset-rank", await this.rankPayload(report));
-    return {
-      output: validateAssetSemanticRanking(execution.output, report),
-      ...(execution.trace ? { trace: execution.trace } : {}),
-    };
+    const payload = await this.rankPayload(report);
+    return runRoleAgentLoop({
+      role: "语义选片师",
+      contractVersion: ASSET_RANK_AGENT_CONTRACT_VERSION,
+      criteria: [
+        "逐镜候选完整保留，排名和原始排名均连续且没有重复",
+        "排序理由引用可见证据或明确承认证据不足，不根据 URL、作者或素材 ID 臆测",
+        "主体、环境、动作、景别、构图与连续性优先于单纯分辨率和素材源质量分",
+        "没有把候选锁定，也没有新增、删除或替换候选素材",
+      ],
+      maxIterations: this.options.maxReviewIterations ?? 3,
+      produce: (revision, { requestId }) => client.runTaskDetailed!("asset-rank", {
+        ...payload,
+        ...(revision ? { revision } : {}),
+      }, requestId),
+      audit: ({ role, iteration, criteria, candidate, requestId }) => client.runTaskDetailed!("role-audit", {
+        role,
+        iteration,
+        criteria,
+        context: { version: report.version, scenes: report.scenes },
+        candidate,
+        images: payload.thumbnails.map((thumbnail, index) => ({
+          imageIndex: index + 1,
+          scenePosition: thumbnail.scenePosition,
+          provider: thumbnail.provider,
+          assetId: thumbnail.assetId,
+          sha256: thumbnail.sha256,
+          jpegBase64: thumbnail.jpegBase64,
+        })),
+      }, requestId),
+      validate: (value) => validateAssetSemanticRanking(value, report),
+      ...(checkpoint ? { checkpoint } : {}),
+    });
   }
 
   private async rankPayload(report: AssetCandidateReport): Promise<AssetCandidateReport & { thumbnails: AssetRankThumbnail[] }> {

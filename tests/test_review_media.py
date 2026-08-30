@@ -37,15 +37,17 @@ class ReviewMediaTest(unittest.TestCase):
                 (run_root / "review_media" / "review_media_manifest.json").resolve(),
             )
             self.assertEqual(manifest["version"], "video-factory/review-media-v1")
+            self.assertEqual(manifest["sampling"], {"mode": "scene_change_keyframes"})
             self.assertGreater(manifest["durationMs"], 0)
             self.assertGreaterEqual(len(manifest["frames"]), 3)
-            self.assertLessEqual(len(manifest["frames"]), 12)
+            self.assertLessEqual(len(manifest["frames"]), 24)
             self.assertNotIn(str(run_root), first_manifest_bytes.decode("utf-8"))
 
             timestamps = [frame["timestampMs"] for frame in manifest["frames"]]
             self.assertEqual(timestamps, sorted(set(timestamps)))
             for frame in manifest["frames"]:
-                self.assertEqual(set(frame), {"path", "timestampMs", "sha256", "width", "height"})
+                self.assertEqual(set(frame), {"path", "timestampMs", "sha256", "width", "height", "phase"})
+                self.assertEqual(frame["phase"], "keyframe")
                 assert_manifest_image(run_root, frame)
                 self.assertLessEqual((run_root / frame["path"]).stat().st_size, MAX_FRAME_BYTES)
             self.assertLessEqual(
@@ -125,6 +127,14 @@ class ReviewMediaTest(unittest.TestCase):
                 [frame["timestampMs"] for frame in manifest["frames"]],
                 [250, 500, 1500, 2500],
             )
+            self.assertEqual(manifest["sampling"], {
+                "mode": "hook_and_scene_midpoints",
+                "sceneCount": 3,
+                "coveredScenePositions": [1, 2, 3],
+                "missingScenePositions": [],
+            })
+            self.assertEqual([frame["phase"] for frame in manifest["frames"]], ["hook", "midpoint", "midpoint", "midpoint"])
+            self.assertEqual([frame["scenePosition"] for frame in manifest["frames"]], [1, 1, 2, 3])
 
     def test_scales_render_timeline_to_the_probed_video_duration(self):
         self.assertEqual(
@@ -135,6 +145,41 @@ class ReviewMediaTest(unittest.TestCase):
             _select_render_timeline_timestamps(12_000, [2, 2, 2], 1),
             [250],
         )
+
+    def test_uses_start_middle_end_context_for_every_scene_when_budget_allows(self):
+        timestamps = _select_render_timeline_timestamps(24_000, [3] * 8, 24)
+
+        self.assertEqual(len(timestamps), 24)
+        self.assertEqual(timestamps[:3], [450, 1500, 2550])
+        self.assertEqual(timestamps[-3:], [21450, 22500, 23550])
+
+    def test_manifest_labels_true_triplets_instead_of_claiming_sparse_samples_are_triplets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "run-1"
+            video_path = run_root / "render" / "final.mp4"
+            render_manifest_path = run_root / "render" / "render_manifest.json"
+            make_test_video(video_path)
+            render_manifest_path.write_text(
+                json.dumps({"slides": [{"duration": 1}, {"duration": 1}, {"duration": 1}]}),
+                encoding="utf-8",
+            )
+
+            manifest_path = prepare_review_media(
+                video_path=video_path,
+                run_root=run_root,
+                max_frames=9,
+                render_manifest_path=render_manifest_path,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(manifest["sampling"], {
+                "mode": "scene_triplets",
+                "sceneCount": 3,
+                "coveredScenePositions": [1, 2, 3],
+                "missingScenePositions": [],
+            })
+            self.assertEqual([frame["phase"] for frame in manifest["frames"][:3]], ["opening", "middle", "closing"])
+            self.assertEqual([frame["scenePosition"] for frame in manifest["frames"]], [1, 1, 1, 2, 2, 2, 3, 3, 3])
 
     def test_long_render_timeline_keeps_the_hook_and_scene_range(self):
         timestamps = _select_render_timeline_timestamps(30_000, [1] * 30, 12)

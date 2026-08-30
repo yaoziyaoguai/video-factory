@@ -21,6 +21,8 @@ export interface WorkerArtifactDescriptor {
     producerNodeId: string;
     attempt: number;
     licenseNote: string;
+    sourceUrl?: string;
+    creator?: string;
   };
 }
 
@@ -214,8 +216,16 @@ function parseArtifactDescriptor(value: unknown, index: number): WorkerArtifactD
       producerNodeId: provenance.producerNodeId,
       attempt: Number(provenance.attempt),
       licenseNote: provenance.licenseNote,
+      ...(optionalArtifactText(provenance.sourceUrl, `${prefix} provenance sourceUrl`) ? { sourceUrl: optionalArtifactText(provenance.sourceUrl, `${prefix} provenance sourceUrl`)! } : {}),
+      ...(optionalArtifactText(provenance.creator, `${prefix} provenance creator`) ? { creator: optionalArtifactText(provenance.creator, `${prefix} provenance creator`)! } : {}),
     },
   };
+}
+
+function optionalArtifactText(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || !value.trim() || value.length > 2_048) throw new Error(`${label} must be a non-empty string.`);
+  return value.trim();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

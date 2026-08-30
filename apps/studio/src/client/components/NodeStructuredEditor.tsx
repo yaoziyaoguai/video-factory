@@ -26,6 +26,8 @@ const LABELS: Record<string, string> = {
   structure: "叙事结构",
   disclosure_required: "需要 AI 标识",
   platform_notes: "平台提示",
+  platform: "发布平台",
+  position: "镜头序号",
   quality_checks: "脚本自检",
   hashtags: "建议话题",
   query: "素材检索词",

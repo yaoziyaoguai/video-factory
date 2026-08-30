@@ -45,6 +45,64 @@ describe("ProductionBrief", () => {
     });
   });
 
+  it("preserves the formally approved previous-episode handoff in series context", () => {
+    const parsed = pipeline.parseBrief({
+      ...validBrief,
+      seriesContext: {
+        seriesId: "series-1",
+        episodeId: "episode-2",
+        seriesName: "下班实验室",
+        seriesRevision: 4,
+        episodeNumber: 2,
+        seasonNumber: 1,
+        canonBaseRevision: 1,
+        premise: "每集验证一个真实方法。",
+        audience: "普通上班族",
+        platform: "douyin",
+        track: "after-work",
+        arc: "从尝试走向稳定流程",
+        episode: {
+          updatedAt: "2026-08-30T00:00:00.000Z",
+          pillar: "真实验证",
+          title: "第二集",
+          viewerPromise: "复核上一集的方法",
+          hook: "先看失败结果",
+          payoff: "给出适用边界",
+          planning: {
+            source: "agent",
+            role: "系列总编",
+            auditRole: "独立红队审计 Agent",
+            auditStatus: "passed",
+            auditIterations: 2,
+            providerId: "openai",
+            modelId: "codex",
+            promptVersion: "series-v1",
+          },
+        },
+        bible: { rules: ["必须真实验证"], recurringElements: [], forbiddenChanges: [] },
+        canon: {
+          revision: 1,
+          facts: [{
+            id: "fact-1",
+            statement: "第一集已验证方法 A。",
+            sourceEpisodeId: "episode-1",
+            acceptedAt: "2026-08-29T00:00:00.000Z",
+          }],
+        },
+        continuity: {
+          inheritedFromPrevious: ["第一集正式交接：方法 A 只适合单人任务。"],
+          fromPrevious: ["复核方法 A"],
+          toNext: ["下一集验证多人任务"],
+          canonChecks: ["不得把多人结果写成已验证"],
+        },
+      },
+    });
+
+    assert.deepEqual(parsed.seriesContext?.continuity.inheritedFromPrevious, [
+      "第一集正式交接：方法 A 只适合单人任务。",
+    ]);
+  });
+
   it("preserves bounded per-provider model selections without treating a model as a provider", () => {
     const parsed = pipeline.parseBrief({
       ...validBrief,
