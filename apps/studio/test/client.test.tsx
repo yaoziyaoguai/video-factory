@@ -419,6 +419,35 @@ describe("Studio client", () => {
     expect(onSubmit.mock.calls.at(-1)?.[0].providers).not.toHaveProperty("visualReview");
   });
 
+  it("keeps the production dialog open while toggling workflow gates", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const providersWithVisualReview: StudioProvider[] = [
+      ...providers,
+      {
+        id: "codex-visual-review-v1",
+        capability: "quality.review.visual",
+        label: "Codex 视觉审片",
+        available: true,
+        kind: "external",
+        billing: "subscription",
+      },
+    ];
+    render(<NewRunDialog open providers={providersWithVisualReview} onClose={onClose} onSubmit={async () => undefined} />);
+
+    await user.click(screen.getByText("高级：逐节点配置"));
+    const semanticRank = screen.getByRole("checkbox", { name: /候选语义选片/ });
+    const visualReview = screen.getByRole("checkbox", { name: /视觉审片/ });
+
+    await user.click(semanticRank);
+    await user.click(visualReview);
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(semanticRank).not.toBeChecked();
+    expect(visualReview).not.toBeChecked();
+  });
+
   it("uploads an optional reference video and enables editable shot-grammar analysis", async () => {
     const user = userEvent.setup();
     const upload = vi.spyOn(studioApi, "uploadReferenceVideo").mockResolvedValue({

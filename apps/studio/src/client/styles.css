@@ -421,10 +421,10 @@ a { color: inherit; }
 .fallback-line span { font-weight: 800; }
 .fallback-line strong { color: #565b57; font-weight: 650; }
 .production-guardrails { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding-top: 18px; }
-.visual-review-control { min-width: 0; display: grid; align-content: center; gap: 5px; padding: 11px 12px; color: var(--muted); background: var(--paper-soft); border: 1px solid var(--line); border-radius: 7px; cursor: pointer; }
+.visual-review-control { position: relative; min-width: 0; display: grid; align-content: center; gap: 5px; padding: 11px 38px 11px 12px; color: var(--muted); background: var(--paper-soft); border: 1px solid var(--line); border-radius: 7px; cursor: pointer; }
 .visual-review-control:has(input:disabled) { cursor: not-allowed; opacity: 0.72; }
 .visual-review-control.is-enabled { color: var(--ink); background: #eef2ff; border-color: #bcc8f5; }
-.visual-review-control > input { position: absolute; opacity: 0; pointer-events: none; }
+.visual-review-control > input { position: absolute; inset: 11px 12px auto auto; width: 16px; height: 16px; margin: 0; accent-color: var(--blue); cursor: pointer; }
 .visual-review-control > span { display: flex; align-items: center; gap: 7px; font-size: 13px; }
 .visual-review-control > span svg { color: var(--blue); }
 .visual-review-control > small { overflow-wrap: anywhere; font-size: 11px; line-height: 1.45; }

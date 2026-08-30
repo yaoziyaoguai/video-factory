@@ -1,4 +1,4 @@
-import { ChartNoAxesCombined, CircleHelp, Clapperboard, Images, Layers3, LayoutTemplate, LogOut, Radar, Search, Settings2, Sparkles, X } from "lucide-react";
+import { ChartNoAxesCombined, ChevronDown, CircleHelp, Clapperboard, Images, Layers3, LayoutTemplate, LogOut, Radar, Search, Settings2, Sparkles, UserRound, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
@@ -106,7 +106,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
             <span className={`health-dot ${healthy === false ? "health-down" : ""}`} />
             <span>{healthy === undefined ? "检查服务" : healthy ? "制作服务就绪" : "服务需要检查"}</span>
           </div>
-          {onLogout ? <button className="studio-logout" type="button" onClick={() => void onLogout()} title="退出登录"><LogOut aria-hidden="true" size={16} /><span>{username ?? "退出登录"}</span></button> : null}
+          {onLogout ? <AccountMenu username={username ?? "当前账号"} onLogout={onLogout} /> : null}
         </div>
       </aside>
       <header className="studio-topbar">
@@ -129,7 +129,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
           <button className="tour-help-button" type="button" onClick={openSearch} title="搜索" aria-label="搜索"><Search aria-hidden="true" size={19} /></button>
           <span className={`health-dot ${healthy === false ? "health-down" : ""}`} title={healthy ? "制作服务就绪" : "运行环境状态"} />
           <button className="tour-help-button" type="button" onClick={() => setGuideOpen(true)} title="打开创作向导" aria-label="打开创作向导"><CircleHelp aria-hidden="true" size={19} /></button>
-          {onLogout ? <button className="tour-help-button" type="button" onClick={() => void onLogout()} title="退出登录" aria-label="退出登录"><LogOut aria-hidden="true" size={18} /></button> : null}
+          {onLogout ? <AccountMenu compact username={username ?? "当前账号"} onLogout={onLogout} /> : null}
         </div>
       </header>
       <div id="main-content" className="content-shell" tabIndex={-1}>{children}</div>
@@ -176,6 +176,56 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
               {!matchingRuns.length && !matchingDestinations.length ? <div className="studio-search-empty">没有匹配结果。换一个更短的关键词试试。</div> : null}
             </div>
           </section>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AccountMenu({ username, onLogout, compact = false }: { username: string; onLogout(): Promise<void>; compact?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [pending, setPending] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [open]);
+
+  const logout = async () => {
+    setPending(true);
+    try {
+      await onLogout();
+    } finally {
+      setPending(false);
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div className={compact ? "studio-account studio-account-compact" : "studio-account"}>
+      <button
+        className={compact ? "tour-help-button studio-account-trigger" : "studio-account-trigger"}
+        type="button"
+        aria-label={`账号菜单：${username}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <UserRound aria-hidden="true" size={compact ? 18 : 16} />
+        {!compact ? <span>{username}</span> : null}
+        {!compact ? <ChevronDown aria-hidden="true" size={14} /> : null}
+      </button>
+      {open ? (
+        <div className="studio-account-popover" role="menu" aria-label="账号菜单">
+          <div className="studio-account-identity"><small>当前账号</small><strong>{username}</strong></div>
+          <button type="button" role="menuitem" onClick={() => void logout()} disabled={pending}>
+            <LogOut aria-hidden="true" size={16} />
+            <span>{pending ? "正在退出..." : "退出登录"}</span>
+          </button>
         </div>
       ) : null}
     </div>

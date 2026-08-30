@@ -283,9 +283,20 @@ body:has(.studio-v3) {
 .tour-help-button { font-size: 12px; }
 .studio-status { color: #8492aa; border-top-color: #1d2e49; font-size: 11px; }
 .studio-sidebar .tour-help-button,
-.studio-sidebar .studio-logout { color: #8492aa; }
+.studio-sidebar .studio-account-trigger { color: #8492aa; }
 .studio-sidebar .tour-help-button:hover,
-.studio-sidebar .studio-logout:hover { color: var(--ink); background: #11213a; border-color: #293d5f; }
+.studio-sidebar .studio-account-trigger:hover { color: var(--ink); background: #11213a; border-color: #293d5f; }
+.studio-account { position: relative; min-width: 0; }
+.studio-account-trigger { width: 100%; min-height: 38px; display: flex; align-items: center; gap: 8px; padding: 8px 10px; color: inherit; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
+.studio-account-trigger > span { overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; }
+.studio-account-popover { position: absolute; inset: auto 0 calc(100% + 8px); z-index: 80; min-width: 210px; padding: 8px; color: #262a33; background: #ffffff; border: 1px solid #dfe3e8; border-radius: 7px; box-shadow: 0 18px 44px rgb(25 31 41 / 18%); }
+.studio-account-identity { display: grid; gap: 3px; padding: 8px 9px 10px; border-bottom: 1px solid #eceef1; }
+.studio-account-identity small { color: #858b96; font-size: 10px; }
+.studio-account-identity strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.studio-account-popover [role="menuitem"] { width: 100%; min-height: 36px; display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 0 9px; color: #a33e37; text-align: left; background: transparent; border: 0; border-radius: 5px; cursor: pointer; }
+.studio-account-popover [role="menuitem"]:hover { background: #fff1ef; }
+.studio-account-popover [role="menuitem"]:disabled { cursor: wait; opacity: 0.65; }
+.studio-account-compact .studio-account-popover { inset: calc(100% + 8px) 0 auto auto; }
 
 .studio-topbar {
   position: fixed;
@@ -1753,7 +1764,7 @@ body:has(.studio-v3) {
 .studio-sidebar .brand small,
 .studio-sidebar .primary-nav a,
 .studio-sidebar .tour-help-button,
-.studio-sidebar .studio-logout,
+.studio-sidebar .studio-account-trigger,
 .studio-status { color: #9b9ead; }
 
 .sidebar-pulse {

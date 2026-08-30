@@ -294,6 +294,27 @@ describe("Creative OS", () => {
     expect(navigation.getByRole("link", { name: /制作复盘/ })).toHaveAttribute("href", "/experiments");
   });
 
+  it("opens an account menu before signing out", async () => {
+    const user = userEvent.setup();
+    const onLogout = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
+    render(
+      <MemoryRouter>
+        <AppShell username="creator@example.com" onLogout={onLogout}><div>content</div></AppShell>
+      </MemoryRouter>,
+    );
+
+    const accountTriggers = screen.getAllByRole("button", { name: /账号菜单/ });
+    await user.click(accountTriggers[0]!);
+
+    expect(onLogout).not.toHaveBeenCalled();
+    expect(screen.getByRole("menu", { name: "账号菜单" })).toBeInTheDocument();
+    expect(screen.getByText("creator@example.com", { selector: ".studio-account-identity strong" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("menuitem", { name: "退出登录" }));
+    expect(onLogout).toHaveBeenCalledOnce();
+  });
+
   it("searches real production records from the global command surface", async () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
