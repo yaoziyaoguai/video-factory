@@ -35,7 +35,7 @@ import { REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION, fallbackShotGrammar, validate
 import type { AgentLoopTrace, CodexTaskExecution, CodexTaskTrace } from "./codex-chat.js";
 import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
 import { RoleAgentLoopError } from "./role-agent-loop.js";
-import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput } from "./codex-screenwriter.js";
+import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
 import { validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport } from "./codex-visual-review.js";
 import { parseBrief, parsePersistedBrief, parseProductionSeriesContext, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
@@ -1464,6 +1464,20 @@ function screenwriterNode(
         }, context);
       } catch (error) {
         if (error instanceof RoleAgentLoopError) {
+          const rejectedDraft = lastAgentLoopCandidate(error, (value) => validateScriptDraft(value, {
+            durationSeconds: request.brief.durationSeconds,
+            requireCanonFacts: Boolean(request.brief.seriesContext),
+          }));
+          const preserved = rejectedDraft
+            ? await persistRejectedScriptDraft({
+                draft: rejectedDraft,
+                brief: request.brief,
+                attemptDirectory: attempt.directory,
+                attempt: attempt.attempt,
+                parentArtifactIds,
+                providerId,
+              })
+            : undefined;
           return failedAgentLoopNodeResult({
             error,
             attemptDirectory: attempt.directory,
@@ -1472,6 +1486,7 @@ function screenwriterNode(
             parentArtifactIds,
             provider,
             providerLabel: "Codex 编剧",
+            ...(preserved ? { output: preserved.output, additionalArtifacts: [preserved.artifact] } : {}),
           });
         }
         throw error;
@@ -1482,27 +1497,7 @@ function screenwriterNode(
         requireCanonFacts: Boolean(requestedBrief.seriesContext),
       });
       const scriptPath = path.join(attempt.directory, "script.json");
-      const script = {
-        title: requestedBrief.title,
-        ...(draft.viewerPromise ? { viewerPromise: draft.viewerPromise } : {}),
-        ...(draft.narrativeArc ? { narrativeArc: draft.narrativeArc } : {}),
-        ...(draft.canonFacts ? { canonFacts: draft.canonFacts } : {}),
-        hook: draft.scenes[0]!.narration,
-        duration_target: requestedBrief.durationSeconds,
-        disclosure_required: true,
-        niche_slug: requestedBrief.nicheSlug,
-        structure: "AI 编剧短视频结构",
-        quality_checks: requestedBrief.editorial?.guardrails.length
-          ? requestedBrief.editorial.guardrails
-          : ["核验事实与数据", "人工审片后再发布"],
-        platform_notes: {
-          platform: requestedBrief.platform,
-          audience: requestedBrief.audience,
-          angle: requestedBrief.angle,
-        },
-        hashtags: [],
-        scenes: draft.scenes,
-      };
+      const script = scriptDocument(requestedBrief, draft);
       const content = `${JSON.stringify(script, null, 2)}\n`;
       await writeTextAtomically(scriptPath, content);
       const traceArtifact = await persistModelTrace({
@@ -1538,6 +1533,68 @@ function screenwriterNode(
       };
     },
     validateOverride: (output) => validateScriptNodeOutput(output),
+  };
+}
+
+function scriptDocument(brief: ScreenwriterAgentInput["brief"], draft: ScriptDraft): Record<string, unknown> {
+  return {
+    title: brief.title,
+    ...(draft.viewerPromise ? { viewerPromise: draft.viewerPromise } : {}),
+    ...(draft.narrativeArc ? { narrativeArc: draft.narrativeArc } : {}),
+    ...(draft.canonFacts ? { canonFacts: draft.canonFacts } : {}),
+    hook: draft.scenes[0]!.narration,
+    duration_target: brief.durationSeconds,
+    disclosure_required: true,
+    niche_slug: brief.nicheSlug,
+    structure: "AI 编剧短视频结构",
+    quality_checks: brief.editorial?.guardrails.length
+      ? brief.editorial.guardrails
+      : ["核验事实与数据", "人工审片后再发布"],
+    platform_notes: {
+      platform: brief.platform,
+      audience: brief.audience,
+      angle: brief.angle,
+    },
+    hashtags: [],
+    scenes: draft.scenes,
+  };
+}
+
+function lastAgentLoopCandidate<T>(error: RoleAgentLoopError, validate: (value: unknown) => T): T | undefined {
+  const raw = error.agentLoop.iterations.at(-1)?.candidate ?? error.agentLoop.pendingCandidate?.candidate;
+  if (raw === undefined) return undefined;
+  try {
+    return validate(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+async function persistRejectedScriptDraft(options: {
+  draft: ScriptDraft;
+  brief: ScreenwriterAgentInput["brief"];
+  attemptDirectory: string;
+  attempt: number;
+  parentArtifactIds: string[];
+  providerId: string;
+}): Promise<{ output: Record<string, unknown>; artifact: ArtifactDraft }> {
+  const scriptPath = path.join(options.attemptDirectory, "rejected-script.json");
+  const content = `${JSON.stringify(scriptDocument(options.brief, options.draft), null, 2)}\n`;
+  await writeTextAtomically(scriptPath, content);
+  return {
+    output: { scriptPath, canonFacts: options.draft.canonFacts ?? [] },
+    artifact: fileArtifact(
+      "script",
+      scriptPath,
+      content,
+      "application/json",
+      "video-factory/script-draft-v1",
+      "script",
+      options.parentArtifactIds,
+      options.providerId,
+      "Unapproved AI draft preserved for human review and editing.",
+      options.attempt,
+    ),
   };
 }
 
@@ -2644,6 +2701,8 @@ async function failedAgentLoopNodeResult(options: {
   parentArtifactIds: string[];
   provider: Pick<Provider, "id" | "modelId" | "transport" | "billing" | "configurationSource" | "parameters">;
   providerLabel: string;
+  output?: Record<string, unknown>;
+  additionalArtifacts?: ArtifactDraft[];
 }): Promise<NodeExecutionResult<Record<string, unknown>>> {
   const traceArtifact = await persistModelTrace({
     trace: options.error.lastTrace,
@@ -2678,8 +2737,13 @@ async function failedAgentLoopNodeResult(options: {
   return {
     status: "failed",
     error: options.error.message,
+    ...(options.output ? { output: options.output } : {}),
     receipt,
-    artifacts: [traceArtifact, loopArtifact].filter((artifact): artifact is ArtifactDraft => Boolean(artifact)),
+    artifacts: [
+      ...(options.additionalArtifacts ?? []),
+      traceArtifact,
+      loopArtifact,
+    ].filter((artifact): artifact is ArtifactDraft => Boolean(artifact)),
   };
 }
 

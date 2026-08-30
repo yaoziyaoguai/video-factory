@@ -99,6 +99,9 @@ describe("broker-owned task definitions", () => {
     assert.match(taskPromptFor("reference-grammar").directive, /参考视频分析师/);
     assert.match(taskPromptFor("visual-review").directive, /视觉审片/);
     assert.match(taskPromptFor("role-audit").directive, /独立于生产角色的红队审计 Agent/);
+    assert.match(taskPromptFor("role-audit").directive, /不得发明输入中不存在的验收要求/);
+    assert.match(taskPromptFor("role-audit").directive, /不得把下游节点尚未产出的证据/);
+    assert.match(taskPromptFor("role-audit").directive, /上一轮审计/);
     assert.match(
       taskPromptFor("visual-review").outputRules.join("\n"),
       /version 必须固定为 video-factory\/visual-review-v1/,

@@ -1,4 +1,4 @@
-import { LoaderCircle, Mic2, Play, Volume2 } from "lucide-react";
+import { LoaderCircle, Mic2, Minus, Play, Plus, Volume2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { StudioVoiceDirection, StudioVoiceProfile } from "../../shared/api.js";
 import { studioApi } from "../api.js";
@@ -146,14 +146,22 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
           </div>
 
           <div className="voice-direction">
-            <label className="voice-slider">
+            <div className="voice-slider">
               <span><strong>语速</strong><output>{direction.rate} 字/分</output></span>
-              <input aria-label="语速" type="range" min="120" max="260" step="5" value={direction.rate} onChange={(event) => update({ ...direction, rate: Number(event.target.value) }, selected)} />
-            </label>
-            <label className="voice-slider">
+              <div className="voice-slider-control">
+                <button type="button" aria-label="降低语速" disabled={direction.rate <= 120} onClick={() => update({ ...direction, rate: Math.max(120, direction.rate - 5) }, selected)}><Minus aria-hidden="true" size={14} /></button>
+                <input aria-label="语速" type="range" min="120" max="260" step="5" value={direction.rate} onChange={(event) => update({ ...direction, rate: Number(event.target.value) }, selected)} />
+                <button type="button" aria-label="增加语速" disabled={direction.rate >= 260} onClick={() => update({ ...direction, rate: Math.min(260, direction.rate + 5) }, selected)}><Plus aria-hidden="true" size={14} /></button>
+              </div>
+            </div>
+            <div className="voice-slider">
               <span><strong>停顿</strong><output>{direction.pauseScale.toFixed(1)}×</output></span>
-              <input aria-label="停顿" type="range" min="0.5" max="2" step="0.1" value={direction.pauseScale} onChange={(event) => update({ ...direction, pauseScale: Number(event.target.value) }, selected)} />
-            </label>
+              <div className="voice-slider-control">
+                <button type="button" aria-label="减少停顿" disabled={direction.pauseScale <= 0.5} onClick={() => update({ ...direction, pauseScale: Math.max(0.5, Number((direction.pauseScale - 0.1).toFixed(1))) }, selected)}><Minus aria-hidden="true" size={14} /></button>
+                <input aria-label="停顿" type="range" min="0.5" max="2" step="0.1" value={direction.pauseScale} onChange={(event) => update({ ...direction, pauseScale: Number(event.target.value) }, selected)} />
+                <button type="button" aria-label="增加停顿" disabled={direction.pauseScale >= 2} onClick={() => update({ ...direction, pauseScale: Math.min(2, Number((direction.pauseScale + 0.1).toFixed(1))) }, selected)}><Plus aria-hidden="true" size={14} /></button>
+              </div>
+            </div>
             <fieldset className="segmented-control mastering-control">
               <legend>声音质感</legend>
               <label><input type="radio" name="mastering" checked={direction.masteringPreset === "natural"} onChange={() => update({ ...direction, masteringPreset: "natural" }, selected)} /><span>自然</span></label>

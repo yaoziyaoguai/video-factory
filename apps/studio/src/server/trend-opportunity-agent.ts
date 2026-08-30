@@ -242,12 +242,21 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         ...request,
         ...(revision ? { revision } : {}),
       }, requestId),
-      audit: ({ role, iteration, criteria, candidate, requestId }) => this.client.runTaskDetailed("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
-        context: request,
+        context: {
+          roleScope: {
+            owns: ["ideas.signalId", "ideas.track", "ideas.title", "ideas.hook", "ideas.rationale", "ideas scores"],
+            doesNotOwn: ["热点原始事实", "新闻核验结果", "脚本与成片"],
+          },
+          upstreamFacts: request,
+          currentRoleContract: { maxIdeas: 8, everyIdeaMustReferenceOneSignal: true, scoresAreIntegersFromZeroToOneHundred: true },
+          downstreamBoundary: "只提出可生产的原创角度；不得补写热点中不存在的事实，也不得要求脚本或成片已经生成。",
+        },
         candidate,
+        ...(previousAudit ? { previousAudit } : {}),
       }, requestId),
       validate: parseTopicIdeasOutput,
       ...(this.checkpointDirectory ? {

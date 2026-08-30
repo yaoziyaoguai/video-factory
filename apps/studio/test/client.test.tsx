@@ -163,6 +163,11 @@ describe("Studio client", () => {
 
     fireEvent.change(screen.getByRole("slider", { name: "语速" }), { target: { value: "205" } });
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ rate: 205 }), "macos-say-v1");
+
+    await user.click(screen.getByRole("button", { name: "降低语速" }));
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ rate: 200 }), "macos-say-v1");
+    await user.click(screen.getByRole("button", { name: "增加停顿" }));
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ pauseScale: 1.1 }), "macos-say-v1");
   });
 
   it("starts with a concise voice shortlist and exposes every system voice through filters", async () => {

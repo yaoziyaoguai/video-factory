@@ -669,6 +669,19 @@ export interface StudioNode {
   plannedExecution?: StudioNodeExecutionPlan;
   spendPlan?: StudioSpendPlan;
   spendAuthorizationId?: string;
+  agentLoopProgress?: StudioAgentLoopProgress;
+}
+
+export interface StudioAgentLoopProgress {
+  iteration: number;
+  maxIterations: number;
+  completedIterations: number;
+  phase: "producing" | "auditing" | "repairing" | "passed" | "exhausted";
+  latestAudit?: {
+    verdict: "pass" | "repair";
+    score: number;
+    summary: string;
+  };
 }
 
 export interface StudioNodeExecutionPlan {

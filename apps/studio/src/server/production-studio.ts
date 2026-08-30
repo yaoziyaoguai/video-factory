@@ -18,6 +18,7 @@ import {
   type StartRunResponse,
   type StudioArtifact,
   type StudioArtifactResource,
+  type StudioAgentLoopProgress,
   type StudioDecision,
   type StudioDecisionInput,
   type StudioIntervention,
@@ -127,7 +128,8 @@ export class ProductionStudio {
         this.options.pipeline.list(),
       ]);
       this.historicalNodeDurations = collectNodeDurationHistory(historyRuns);
-      return withArchiveState(this.toDetail(run), archived[run.id]);
+      const detail = withArchiveState(this.toDetail(run), archived[run.id]);
+      return await withAgentLoopProgress(detail, this.options.workspaceRoot);
     } catch (error) {
       if (hasCode(error, "ENOENT")) return undefined;
       throw error;
@@ -817,6 +819,88 @@ export class ProductionStudio {
   private publish(run: StudioRunDetail): void {
     for (const listener of this.listeners.get(run.id) ?? []) listener(structuredClone(run));
   }
+}
+
+async function withAgentLoopProgress(detail: StudioRunDetail, workspaceRoot: string): Promise<StudioRunDetail> {
+  const nodes = await Promise.all(detail.nodes.map(async (node) => {
+    const progress = await loadAgentLoopProgress(workspaceRoot, detail.id, node.id);
+    return progress ? { ...node, agentLoopProgress: progress } : node;
+  }));
+  const active = nodes.find((node) => node.id === detail.currentAction?.nodeId)
+    ?? nodes.find((node) => node.status === "running");
+  const actionLabel = active?.agentLoopProgress ? agentLoopActionLabel(active.role ?? "生产角色", active.agentLoopProgress) : undefined;
+  return {
+    ...detail,
+    nodes,
+    ...(detail.currentAction && actionLabel ? { currentAction: { ...detail.currentAction, label: actionLabel } } : {}),
+  };
+}
+
+export async function loadAgentLoopProgress(
+  workspaceRoot: string,
+  runId: string,
+  nodeId: string,
+): Promise<StudioAgentLoopProgress | undefined> {
+  const directory = path.join(workspaceRoot, "runs", runId, "nodes", nodeId, "agent-loop-checkpoints");
+  try {
+    const files = (await readdir(directory)).filter((name) => name.endsWith(".json"));
+    const candidates = await Promise.all(files.map(async (name) => {
+      const filePath = path.join(directory, name);
+      return { filePath, modifiedAt: (await stat(filePath)).mtimeMs };
+    }));
+    const latest = candidates.sort((left, right) => right.modifiedAt - left.modifiedAt)[0];
+    if (!latest) return undefined;
+    return parseAgentLoopProgress(JSON.parse(await readFile(latest.filePath, "utf8")) as unknown);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return undefined;
+    return undefined;
+  }
+}
+
+function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undefined {
+  if (!isRecord(value) || value.version !== "video-factory/agent-loop-checkpoint-v3") return undefined;
+  const maxIterations = Number(value.maxIterations);
+  const completed = Array.isArray(value.completed) ? value.completed : [];
+  const status = value.status;
+  if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 3) return undefined;
+  if (status !== "running" && status !== "passed" && status !== "exhausted") return undefined;
+  const pending = isRecord(value.pendingCandidate) ? Number(value.pendingCandidate.iteration) : undefined;
+  const iteration = Number.isInteger(pending)
+    ? Math.min(maxIterations, Math.max(1, Number(pending)))
+    : Math.min(maxIterations, Math.max(1, completed.length + (status === "running" ? 1 : 0)));
+  const latest = completed.at(-1);
+  const audit = isRecord(latest) && isRecord(latest.audit) ? latest.audit : undefined;
+  const verdict = audit?.verdict === "pass" || audit?.verdict === "repair" ? audit.verdict : undefined;
+  const score = Number(audit?.score);
+  const summary = typeof audit?.summary === "string" ? redactManagedPathText(audit.summary) : undefined;
+  const latestAudit: StudioAgentLoopProgress["latestAudit"] = verdict && Number.isInteger(score) && score >= 0 && score <= 100 && summary
+    ? { verdict, score, summary }
+    : undefined;
+  const phase: StudioAgentLoopProgress["phase"] = status === "passed"
+    ? "passed"
+    : status === "exhausted"
+      ? "exhausted"
+      : pending !== undefined
+        ? "auditing"
+        : completed.length > 0
+          ? "repairing"
+          : "producing";
+  return {
+    iteration,
+    maxIterations,
+    completedIterations: completed.length,
+    phase,
+    ...(latestAudit ? { latestAudit } : {}),
+  };
+}
+
+function agentLoopActionLabel(role: string, progress: StudioAgentLoopProgress): string {
+  const prefix = `${role} Agent 第 ${progress.iteration}/${progress.maxIterations} 轮`;
+  if (progress.phase === "auditing") return `${prefix}：独立审计正在检查`;
+  if (progress.phase === "repairing") return `${prefix}：按上一轮审计修订`;
+  if (progress.phase === "passed") return `${prefix}：独立审计已通过`;
+  if (progress.phase === "exhausted") return `${prefix}：三轮审计未通过`;
+  return `${prefix}：正在生成候选交付`;
 }
 
 function withArchiveState<T extends StudioRunSummary>(run: T, archivedAt?: string): T {

@@ -103,6 +103,24 @@ describe("node production workspaces", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(`审计失败，已规则回退：${fallbackReason}`);
   });
 
+  it("shows the live agent-loop round, phase, and latest audit summary", () => {
+    const node = {
+      ...succeededNode,
+      status: "running" as const,
+      agentLoopProgress: {
+        iteration: 2,
+        maxIterations: 3,
+        phase: "auditing" as const,
+        completedIterations: 1,
+        latestAudit: { verdict: "repair" as const, score: 68, summary: "开场钩子仍需具体。" },
+      },
+    };
+    render(<NodeWorkspace node={node} runStatus="running" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+
+    expect(screen.getByText("第 2 / 3 轮 · 独立审计中")).toBeInTheDocument();
+    expect(screen.getByText("上一轮 68 分：开场钩子仍需具体。")).toBeInTheDocument();
+  });
+
   it("discloses a receipt-level fallback reason when loop parameters were replaced", () => {
     const fallbackReason = "视觉模型不可用，已使用保守参考语法。";
     const node: StudioNode = {

@@ -80,10 +80,10 @@ describe("CodexReferenceGrammarAgent", () => {
     assert.equal(execution.agentLoop?.iterations.length, 2);
     assert.deepEqual(calls.map((call) => call.kind), ["reference-grammar", "role-audit", "reference-grammar", "role-audit"]);
     assert.equal("revision" in (calls[2]!.payload as Record<string, unknown>), true);
-    const auditPayload = calls[1]!.payload as { images: Array<Record<string, unknown>>; context: { frames: Array<Record<string, unknown>> } };
+    const auditPayload = calls[1]!.payload as { images: Array<Record<string, unknown>>; context: { upstreamFacts: { frames: Array<Record<string, unknown>> } } };
     assert.equal(auditPayload.images.length, 1);
     assert.equal(auditPayload.images[0]?.imageIndex, 1);
     assert.equal(typeof auditPayload.images[0]?.jpegBase64, "string");
-    assert.equal(auditPayload.context.frames[0]?.imageIndex, 1);
+    assert.equal(auditPayload.context.upstreamFacts.frames[0]?.imageIndex, 1);
   });
 });

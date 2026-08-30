@@ -186,6 +186,27 @@ describe("role agent loop audit boundary", () => {
     assert.notEqual(requestIds[0], requestIds[1]);
   });
 
+  it("carries the previous audit into the next review so the standard cannot move between rounds", async () => {
+    const previousAudits: Array<unknown> = [];
+    let produced = 0;
+    const firstAudit = repairingAudit();
+    const result = await runRoleAgentLoop<{ title: string }>({
+      role: "编剧",
+      contractVersion: "screenwriter-v1",
+      criteria: ["标题具体"],
+      maxIterations: 2,
+      produce: async () => ({ output: { title: `候选 ${++produced}` } }),
+      audit: async ({ previousAudit }) => {
+        previousAudits.push(previousAudit);
+        return { output: previousAudit ? passingAudit() : firstAudit };
+      },
+      validate: titleCandidate,
+    });
+
+    assert.deepEqual(result.output, { title: "候选 2" });
+    assert.deepEqual(previousAudits, [undefined, firstAudit]);
+  });
+
   it("audits an existing human candidate before asking the producer to repair it", async () => {
     let produceCalls = 0;
     let auditCalls = 0;

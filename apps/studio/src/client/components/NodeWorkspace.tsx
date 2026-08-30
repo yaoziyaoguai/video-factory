@@ -190,6 +190,10 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
         <ChevronDown className="node-workspace-chevron" aria-hidden="true" size={17} />
       </summary>
       <div className="node-workspace-body">
+        {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
+          <strong>{agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
+          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{node.agentLoopProgress.latestAudit.summary}</span> : <span>正在建立本轮候选，完成后由独立 Agent 审计。</span>}
+        </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>审计失败，已规则回退</strong>：{fallbackReason}</span></p> : null}
         {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />此节点结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成。</p> : null}
 
@@ -251,6 +255,19 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
       </div> : null}
     </details>
   );
+}
+
+function agentLoopPhaseLabel(progress: NonNullable<StudioNode["agentLoopProgress"]>): string {
+  const phase = progress.phase === "auditing"
+    ? "独立审计中"
+    : progress.phase === "repairing"
+      ? "按审计意见修订中"
+      : progress.phase === "passed"
+        ? "独立审计已通过"
+        : progress.phase === "exhausted"
+          ? "三轮审计未通过"
+          : "生产 Agent 生成中";
+  return `第 ${progress.iteration} / ${progress.maxIterations} 轮 · ${phase}`;
 }
 
 function revealExpandedWorkspace(workspace: HTMLDetailsElement): void {

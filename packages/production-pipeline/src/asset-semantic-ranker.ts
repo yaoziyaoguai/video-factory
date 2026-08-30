@@ -115,12 +115,21 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
         ...payload,
         ...(revision ? { revision } : {}),
       }, requestId),
-      audit: ({ role, iteration, criteria, candidate, requestId }) => client.runTaskDetailed!("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => client.runTaskDetailed!("role-audit", {
         role,
         iteration,
         criteria,
-        context: { version: report.version, scenes: report.scenes },
+        context: {
+          roleScope: {
+            owns: ["候选排序", "semanticScore", "rationale"],
+            doesNotOwn: ["新增候选", "删除候选", "下载素材", "锁定人工选择"],
+          },
+          upstreamFacts: { version: report.version, scenes: report.scenes },
+          currentRoleContract: { preserveEveryCandidate: true, ranksStartAtOneAndAreUnique: true, lockedMustRemainFalse: true },
+          downstreamBoundary: "只排序已有候选；不得要求尚未下载的原文件或后续成片作为当前节点通过证据。",
+        },
         candidate,
+        ...(previousAudit ? { previousAudit } : {}),
         images: payload.thumbnails.map((thumbnail, index) => ({
           imageIndex: index + 1,
           scenePosition: thumbnail.scenePosition,

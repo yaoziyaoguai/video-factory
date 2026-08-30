@@ -77,12 +77,21 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         ...request,
         ...(revision ? { revision } : {}),
       }, requestId),
-      audit: ({ role, iteration, criteria, candidate, requestId }) => this.client.runTaskDetailed("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
-        context: request,
+        context: {
+          roleScope: {
+            owns: ["episodes title", "viewerPromise", "hook", "payoff", "pillar", "fromPrevious", "toNext"],
+            doesNotOwn: ["Series Bible", "已定版 Canon", "已完成前集事实", "单集脚本与成片"],
+          },
+          upstreamFacts: request,
+          currentRoleContract: { episodeCount: count, firstEpisodeNumber: startEpisodeNumber, contiguousEpisodeNumbers: true },
+          downstreamBoundary: "只规划有顺序的系列路线图；不得修改既有正史，也不得要求未来单集脚本或成片已经存在。",
+        },
         candidate,
+        ...(previousAudit ? { previousAudit } : {}),
       }, requestId),
       validate: (value) => parseSeriesRoadmapOutput(value, series.pillars, startEpisodeNumber, count),
       ...(this.checkpointDirectory ? {
@@ -140,12 +149,21 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         ...request,
         ...(revision ? { revision } : {}),
       }, requestId),
-      audit: ({ role, iteration, criteria, candidate, requestId }) => this.client.runTaskDetailed("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
-        context: request,
+        context: {
+          roleScope: {
+            owns: ["targetEpisode 中除 fromPrevious 外的规划字段"],
+            doesNotOwn: ["Series Bible", "已定版 Canon", "fromPrevious", "单集脚本与成片"],
+          },
+          upstreamFacts: request,
+          currentRoleContract: { episodeCount: 1, episodeNumber: episode.episodeNumber, preserveFromPreviousExactly: true },
+          downstreamBoundary: "只做本集开拍前绿灯审计；不得修改创作者确认的承接要求，也不得要求脚本或成片已生成。",
+        },
         candidate,
+        ...(previousAudit ? { previousAudit } : {}),
       }, requestId),
       validate: (value) => parseSeriesRoadmapOutput(value, series.pillars, episode.episodeNumber, 1),
       ...(this.checkpointDirectory ? {

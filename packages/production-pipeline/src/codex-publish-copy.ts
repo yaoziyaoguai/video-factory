@@ -98,12 +98,21 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
         ...request,
         ...(revision ? { revision } : {}),
       }, requestId),
-      audit: ({ role, iteration, criteria, candidate, requestId }) => this.client.runTaskDetailed("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
-        context: request,
+        context: {
+          roleScope: {
+            owns: ["title", "description", "hashtags"],
+            doesNotOwn: ["脚本事实", "画面内容", "平台实际发布结果"],
+          },
+          upstreamFacts: request,
+          currentRoleContract: { titleMaxCharacters: 30, descriptionMaxCharacters: 100, hashtagCount: { min: 1, max: 5 }, hashtagMaxCharacters: 16 },
+          downstreamBoundary: "只交付发布文案，不得改写脚本事实，也不得把尚未发布的数据作为通过条件。",
+        },
         candidate,
+        ...(previousAudit ? { previousAudit } : {}),
       }, requestId),
       validate: validatePublishCopy,
       ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),

@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import {
   ProductionPipeline,
+  RoleAgentLoopError,
   type ScreenwriterAgent,
   type ScreenwriterAgentInput,
   type ScriptDraft,
@@ -202,6 +203,49 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.notEqual(first.id, second.id);
     assert.equal(inputs.length, 2);
     assert.notEqual(inputs[0]?.agentLoopCheckpoint?.key, inputs[1]?.agentLoopCheckpoint?.key);
+  });
+
+  it("preserves the last rejected script draft as an editable artifact", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-rejected-draft-"));
+    const rejectedDraft = { ...scriptDraft, viewerPromise: "仍可由人工修订的最后草稿" };
+    const agent: ScreenwriterAgent = {
+      id: "codex-screenwriter-v1",
+      draft: async () => rejectedDraft,
+      draftDetailed: async () => {
+        throw new RoleAgentLoopError("三轮审计仍未通过", {
+          version: "video-factory/agent-loop-v1",
+          role: "编剧",
+          contractVersion: "screenwriter-v4|role-audit-v1|script-validator-v1",
+          criteria: ["前两秒建立具体钩子"],
+          status: "failed",
+          maxIterations: 3,
+          modelCallCount: 6,
+          iterations: [{
+            iteration: 3,
+            candidate: rejectedDraft,
+            candidateHash: "a".repeat(64),
+            audit: {
+              version: "video-factory/role-audit-v1",
+              verdict: "repair",
+              score: 70,
+              summary: "仍需人工判断。",
+              issues: [{ severity: "blocking", criterion: "钩子", evidence: "开场偏慢", repairInstruction: "人工重写开场" }],
+              repairInstructions: ["人工重写开场"],
+            },
+          }],
+        });
+      },
+    };
+
+    const run = await new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent }).start(brief);
+    const scriptNode = run.nodeRuns.find((node) => node.nodeId === "script");
+    const scriptArtifact = run.artifacts.find((artifact) => artifact.kind === "script");
+
+    assert.equal(run.status, "failed");
+    assert.equal(scriptNode?.status, "failed");
+    assert.ok(scriptArtifact?.uri);
+    assert.equal((scriptNode?.output as { scriptPath?: string })?.scriptPath, scriptArtifact.uri);
+    assert.equal(JSON.parse(await readFile(scriptArtifact.uri, "utf8")).viewerPromise, "仍可由人工修订的最后草稿");
   });
 
   it("refuses to form a series Internal Master when a generic script has no canon facts", async () => {

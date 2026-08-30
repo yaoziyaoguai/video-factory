@@ -110,6 +110,21 @@ describe("CodexScreenwriterAgent", () => {
     assert.equal(execution.agentLoop?.iterations.length, 2);
     assert.equal(execution.agentLoop?.iterations[0]?.audit.verdict, "repair");
     assert.equal(execution.agentLoop?.iterations[1]?.audit.verdict, "pass");
+
+    const firstAuditPayload = client.calls[1]!.payload as Record<string, unknown>;
+    const auditContext = firstAuditPayload.context as Record<string, unknown>;
+    assert.equal("brief" in auditContext, false);
+    assert.deepEqual(auditContext.roleScope, {
+      owns: ["viewerPromise", "narrativeArc", "canonFacts", "scenes"],
+      doesNotOwn: ["素材实际命中", "画面生成结果", "配音成品", "渲染与终审结果"],
+    });
+    assert.deepEqual(auditContext.upstreamFacts, {
+      title: "下班后别急着做这 3 件事",
+      angle: "用三条具体动作减少下班后的决策消耗",
+      audience: "普通上班族",
+      nicheSlug: "life-avoidance",
+    });
+    assert.deepEqual((client.calls[3]!.payload as Record<string, unknown>).previousAudit, repairAudit);
   });
 
   it("allows three audit and repair rounds by default", async () => {

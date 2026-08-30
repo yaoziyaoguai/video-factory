@@ -17,6 +17,7 @@ import {
 } from "../src/server/studio-service.js";
 import { JsonOpportunityStore } from "../src/server/opportunity-store.js";
 import { JsonRunArchiveStore } from "../src/server/run-archive-store.js";
+import { loadAgentLoopProgress } from "../src/server/production-studio.js";
 import type { StudioOpportunityInput, StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
 
 const brief: ProductionBrief = {
@@ -240,6 +241,30 @@ const opportunityInput: StudioOpportunityInput = {
 };
 
 describe("StudioService", () => {
+  it("reads a safe live agent-loop summary from the latest node checkpoint", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-agent-progress-"));
+    const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "agent-loop-checkpoints");
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "progress.json"), JSON.stringify({
+      version: "video-factory/agent-loop-checkpoint-v3",
+      maxIterations: 3,
+      status: "running",
+      completed: [{
+        iteration: 1,
+        audit: { verdict: "repair", score: 68, summary: "开场钩子仍需具体。" },
+      }],
+      pendingCandidate: { iteration: 2, candidate: { secretPrompt: "不应出现在进度接口" } },
+    }), "utf8");
+
+    assert.deepEqual(await loadAgentLoopProgress(workspaceRoot, "run-1", "script"), {
+      iteration: 2,
+      maxIterations: 3,
+      completedIterations: 1,
+      phase: "auditing",
+      latestAudit: { verdict: "repair", score: 68, summary: "开场钩子仍需具体。" },
+    });
+  });
+
   it("archives only terminal runs and can restore them without touching production files", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));

@@ -95,22 +95,31 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
         ...payload,
         ...(revision ? { revision } : {}),
       }, requestId),
-      audit: ({ role, iteration, criteria, candidate, requestId }) => client.runTaskDetailed!("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => client.runTaskDetailed!("role-audit", {
         role,
         iteration,
         criteria,
         context: {
-          durationMs: payload.durationMs,
-          sourceLabel: payload.sourceLabel,
-          frames: payload.frames.map((frame, index) => ({
-            imageIndex: index + 1,
-            timecodeMs: frame.timecodeMs,
-            sha256: frame.sha256,
-            ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
-            ...(frame.phase ? { phase: frame.phase } : {}),
-          })),
+          roleScope: {
+            owns: ["summary", "pacing", "composition", "camera", "color", "transitions", "sound", "beats", "reusableRules", "avoidCopying", "confidence"],
+            doesNotOwn: ["新视频脚本", "新视频镜头方案", "参考视频版权结论"],
+          },
+          upstreamFacts: {
+            durationMs: payload.durationMs,
+            sourceLabel: payload.sourceLabel,
+            frames: payload.frames.map((frame, index) => ({
+              imageIndex: index + 1,
+              timecodeMs: frame.timecodeMs,
+              sha256: frame.sha256,
+              ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
+              ...(frame.phase ? { phase: frame.phase } : {}),
+            })),
+          },
+          currentRoleContract: { evidenceType: "sampled_keyframes", continuousMotionAndAudioAreNotProven: true },
+          downstreamBoundary: "只提炼抽象制作语法，不得复刻人物、对白、品牌、独特情节或要求后续画面已经生成。",
         },
         candidate,
+        ...(previousAudit ? { previousAudit } : {}),
         images: payload.frames.map((frame, index) => ({
           imageIndex: index + 1,
           timecodeMs: frame.timecodeMs,

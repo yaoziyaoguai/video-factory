@@ -79,12 +79,28 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
         ...basePayload,
         ...(revision ? { revision } : {}),
       }, requestId),
-      audit: ({ role, iteration, criteria, candidate, requestId }) => this.client.runTaskDetailed("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
-        context: basePayload,
+        context: {
+          roleScope: {
+            owns: ["requestedProfileId", "resolvedProfileId", "profileRationale", "visualBible", "shots"],
+            doesNotOwn: ["素材实际下载结果", "生成模型最终画面", "配音成品", "渲染与审片结果"],
+          },
+          upstreamFacts: {
+            brief: directorInput.brief,
+            scenes: directorInput.scenes,
+          },
+          currentRoleContract: {
+            directorProfiles: VISUAL_DIRECTOR_PROFILES,
+            assetProviders: directorInput.assetProviders,
+            economics: directorInput.economics,
+          },
+          downstreamBoundary: "审查镜头计划是否能被已声明 Provider 执行；不得要求当前节点提供尚未生成或下载的真实画面。",
+        },
         candidate,
+        ...(previousAudit ? { previousAudit } : {}),
       }, requestId),
       validate: (value) => validateVisualDirectorPlan(value, validationFor(input)),
       ...(agentLoopCheckpoint ? { checkpoint: agentLoopCheckpoint } : {}),

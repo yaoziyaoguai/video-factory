@@ -13,7 +13,14 @@ export interface RoleAgentLoopOptions<TOutput> {
   maxIterations: number;
   initialCandidate?: TOutput;
   produce(revision: { candidate: TOutput; audit: RoleAudit } | undefined, operation: { requestId: string }): Promise<CodexTaskExecution<unknown>>;
-  audit(input: { role: string; iteration: number; criteria: string[]; candidate: TOutput; requestId: string }): Promise<CodexTaskExecution<unknown>>;
+  audit(input: {
+    role: string;
+    iteration: number;
+    criteria: string[];
+    candidate: TOutput;
+    previousAudit?: RoleAudit;
+    requestId: string;
+  }): Promise<CodexTaskExecution<unknown>>;
   validate(value: unknown): TOutput;
   checkpoint?: RoleAgentLoopCheckpoint;
 }
@@ -149,6 +156,7 @@ export async function runRoleAgentLoop<TOutput>(
           iteration,
           criteria: options.criteria,
           candidate,
+          ...(revision?.audit ? { previousAudit: revision.audit } : {}),
           requestId,
         }));
       audit = validateRoleAudit(auditExecution.output);

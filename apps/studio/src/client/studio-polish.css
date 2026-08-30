@@ -1636,6 +1636,12 @@ body:has(.studio-v3) {
 .studio-v3 .voice-card.is-selected { background: rgb(54 103 164 / 24%); box-shadow: inset 0 -2px 0 var(--blue); }
 .studio-v3 .voice-preview-button { color: #aab6c9; background: rgb(255 255 255 / 4%); border-color: var(--line-strong); }
 .studio-v3 .voice-audio-placeholder { border-top-color: var(--line-strong); }
+.studio-v3 .voice-slider-control button { color: var(--ink); background: rgb(255 255 255 / 5%); border-color: var(--line-strong); }
+.studio-v3 .voice-slider-control button:hover:not(:disabled) { color: #ffffff; background: rgb(155 131 255 / 18%); border-color: #8069dc; }
+.studio-v3 .agent-loop-progress { color: #81e2c1; background: rgb(37 126 99 / 13%); border-left-color: #48c498; }
+.studio-v3 .agent-loop-progress span { color: #aab5c7; }
+.studio-v3 .agent-loop-progress.is-auditing { color: #c1b5ff; background: rgb(128 105 220 / 14%); border-left-color: #9b83ff; }
+.studio-v3 .agent-loop-progress.is-exhausted { color: #ffaa9d; background: rgb(192 74 60 / 14%); border-left-color: #e56b5a; }
 
 .studio-v3 .resource-settings-notice {
   color: #7be0bc;

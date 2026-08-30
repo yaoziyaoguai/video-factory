@@ -120,12 +120,13 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
         brief: input.brief,
         ...(revision ? { revision } : {}),
       }, requestId),
-      audit: ({ role, iteration, criteria, candidate, requestId }) => this.client.runTaskDetailed("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
-        context: { brief: input.brief },
+        context: screenwriterAuditContext(input.brief),
         candidate,
+        ...(previousAudit ? { previousAudit } : {}),
       }, requestId),
       validate: (value) => validateScriptDraft(value, {
         durationSeconds: input.brief.durationSeconds,
@@ -134,6 +135,66 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
       ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
     });
   }
+}
+
+function screenwriterAuditContext(brief: ScreenwriterAgentInput["brief"]): Record<string, unknown> {
+  const template = brief.templateBlueprint;
+  const series = brief.seriesContext;
+  return {
+    roleScope: {
+      owns: ["viewerPromise", "narrativeArc", "canonFacts", "scenes"],
+      doesNotOwn: ["素材实际命中", "画面生成结果", "配音成品", "渲染与终审结果"],
+    },
+    upstreamFacts: {
+      title: brief.title,
+      angle: brief.angle,
+      audience: brief.audience,
+      nicheSlug: brief.nicheSlug,
+      ...(brief.editorial ? { editorial: brief.editorial } : {}),
+    },
+    currentRoleContract: {
+      platform: brief.platform,
+      durationSeconds: brief.durationSeconds,
+      sceneCount: { min: 3, max: 24 },
+      acceptedSceneDurationTotal: {
+        minSeconds: brief.durationSeconds * 0.6,
+        maxSeconds: brief.durationSeconds * 1.4,
+      },
+      requiredSceneFields: ["position", "narration", "duration", "visual_strategy", "visual_prompt", "search_terms"],
+      ...(template ? {
+        template: {
+          automationLevel: template.automationLevel,
+          storyStructure: template.storyStructure.map(({ id, purpose, required }) => ({ id, purpose, required })),
+          shotSlots: template.shotSlots.map(({ id, beatId, purpose, durationSeconds, allowedCapabilities }) => ({
+            id,
+            beatId,
+            purpose,
+            durationSeconds,
+            allowedCapabilities,
+          })),
+          qualityRules: template.qualityRules.map(({ label, dimension, required, threshold }) => ({ label, dimension, required, threshold })),
+        },
+      } : {}),
+    },
+    downstreamBoundary: "只审查脚本是否给下游提供可执行意图；不得要求尚未执行的素材、配音、渲染或审片结果作为当前节点通过证据。",
+    ...(series ? {
+      seriesContinuity: {
+        seriesName: series.seriesName,
+        episodeNumber: series.episodeNumber,
+        premise: series.premise,
+        arc: series.arc,
+        episode: {
+          pillar: series.episode.pillar,
+          viewerPromise: series.episode.viewerPromise,
+          hook: series.episode.hook,
+          payoff: series.episode.payoff,
+        },
+        bible: series.bible,
+        acceptedCanonFacts: series.canon.facts.map(({ statement }) => statement),
+        continuity: series.continuity,
+      },
+    } : {}),
+  };
 }
 
 function validateScreenwriterTarget(input: ScreenwriterAgentInput): void {
