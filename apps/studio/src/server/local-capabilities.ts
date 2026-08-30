@@ -247,7 +247,8 @@ async function requestMiniMaxPreview(
 ): Promise<Buffer> {
   const apiKey = environment.MINIMAX_API_KEY;
   if (!apiKey) throw new Error("MINIMAX_API_KEY is required for MiniMax voice preview.");
-  const baseUrl = (environment.MINIMAX_TTS_BASE_URL ?? "https://api.minimaxi.com/v1").replace(/\/$/, "");
+  const configuredBaseUrl = environment.MINIMAX_TTS_BASE_URL?.trim();
+  const baseUrl = (configuredBaseUrl || "https://api.minimaxi.com/v1").replace(/\/$/, "");
   const response = await fetcher(`${baseUrl}/t2a_v2`, {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },

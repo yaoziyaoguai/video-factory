@@ -118,6 +118,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     initialValues?.editorial?.verdict === "produce_image_story" ? "photo-story" : "knowledge-explainer",
   );
   const [templateError, setTemplateError] = useState<string>();
+  const initializedForOpen = useRef(false);
+  const initializationRevision = useRef(0);
   const dialogRef = useDialogFocus<HTMLElement>(open, onClose, submitting);
   const activeCapability = CAPABILITIES.find((item) => item.key === activeKey) ?? CAPABILITIES[1]!;
   const editorial = initialValues?.editorial;
@@ -175,7 +177,14 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   });
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      initializedForOpen.current = false;
+      initializationRevision.current += 1;
+      return;
+    }
+    if (initializedForOpen.current) return;
+    initializedForOpen.current = true;
+    const revision = ++initializationRevision.current;
     const initialVoiceDirection = initialValues?.voiceDirection ?? creatorSettings?.voiceDirection ?? defaultVoiceDirection(providers);
     const requestedVoiceProvider = providerForVoiceProfile(initialVoiceDirection.profileId);
     const readyVoiceProvider = providers.find((provider) => {
@@ -224,6 +233,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     setTemplatesLoaded(false);
     void studioApi.templates()
       .then((catalog) => {
+        if (initializationRevision.current !== revision) return;
         const published = catalog.templates.filter((template) => template.status === "published");
         if (published.length === 0) throw new Error("模板目录中没有已发布模板。");
         setTemplates(published);
@@ -235,8 +245,12 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
         }
         setTemplatesLoaded(true);
       })
-      .catch((caught) => setTemplateError(`无法读取模板目录：${caught instanceof Error ? caught.message : String(caught)} 请重试后再开始制作。`));
-  }, [creatorSettings, defaults, imageStory, open, providers]);
+      .catch((caught) => {
+        if (initializationRevision.current === revision) {
+          setTemplateError(`无法读取模板目录：${caught instanceof Error ? caught.message : String(caught)} 请重试后再开始制作。`);
+        }
+      });
+  }, [creatorSettings, defaults, imageStory, initialValues, open, providers]);
 
   useEffect(() => {
     if (!open || !referenceVideo) return;

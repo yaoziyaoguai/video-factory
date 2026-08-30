@@ -319,6 +319,39 @@ describe("Studio client", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled());
   });
 
+  it("preserves in-progress edits when provider and creator settings refresh in the background", async () => {
+    const user = userEvent.setup();
+    const creatorSettings = {
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
+      defaultRecipeId: "economy-daily" as const,
+      topicStrategy: { customInstruction: "优先可拍题材。" },
+      modelDefaults: {},
+      productionDefaults: { directorProfileId: "auto" as const, reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
+    };
+    const { rerender } = render(
+      <NewRunDialog open providers={providers} creatorSettings={creatorSettings} onClose={() => undefined} onSubmit={async () => undefined} />,
+    );
+
+    await user.type(screen.getByLabelText("视频标题"), "后台刷新不能清空这段编辑");
+    await user.click(screen.getByText("高级：逐节点配置"));
+    const voiceStage = screen.getByRole("button", { name: /配音声音导演/ });
+    await user.click(voiceStage);
+    expect(voiceStage).toHaveAttribute("aria-pressed", "true");
+
+    rerender(
+      <NewRunDialog
+        open
+        providers={providers.map((provider) => ({ ...provider }))}
+        creatorSettings={{ ...creatorSettings, modelDefaults: {} }}
+        onClose={() => undefined}
+        onSubmit={async () => undefined}
+      />,
+    );
+
+    expect(screen.getByLabelText("视频标题")).toHaveValue("后台刷新不能清空这段编辑");
+    expect(screen.getByRole("button", { name: /配音声音导演/ })).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("blocks production when the published template catalog cannot be loaded", async () => {
     vi.mocked(studioApi.templates).mockRejectedValueOnce(new Error("模板服务离线"));
     const onSubmit = vi.fn(async () => undefined);

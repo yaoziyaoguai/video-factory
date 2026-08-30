@@ -92,14 +92,20 @@ describe("local capability discovery", () => {
 
   it("previews a MiniMax actor through the server and masters the cached audio", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-minimax-preview-"));
+    let requestUrl = "";
     let requestBody: Record<string, unknown> | undefined;
     const service = new LocalCapabilityService({
       repositoryRoot: "/repo",
       workspaceRoot,
-      environment: { MINIMAX_API_KEY: "server-only", MINIMAX_TTS_MODEL_ID: "speech-2.8-turbo" },
+      environment: {
+        MINIMAX_API_KEY: "server-only",
+        MINIMAX_TTS_BASE_URL: "   ",
+        MINIMAX_TTS_MODEL_ID: "speech-2.8-turbo",
+      },
       commandAvailable: async () => false,
       pathExists: async () => false,
-      fetcher: async (_url, init) => {
+      fetcher: async (url, init) => {
+        requestUrl = String(url);
         requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(JSON.stringify({
           data: { audio: Buffer.from("fake-mp3").toString("hex"), status: 2 },
@@ -121,6 +127,7 @@ describe("local capability discovery", () => {
     });
 
     assert.equal(resource?.contentType, "audio/mp4");
+    assert.equal(requestUrl, "https://api.minimaxi.com/v1/t2a_v2");
     assert.equal(requestBody?.model, "speech-2.8-turbo");
     assert.equal((requestBody?.voice_setting as { voice_id?: string }).voice_id, "Chinese (Mandarin)_News_Anchor");
     assert.match(String(requestBody?.text), /\n\n/);

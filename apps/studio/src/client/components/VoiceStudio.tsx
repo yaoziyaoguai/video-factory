@@ -115,30 +115,32 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
             <fieldset className="voice-cast">
               <legend className="sr-only">旁白音色</legend>
               {filteredVoices.map((voice) => (
-                <label key={voice.id} className={direction.profileId === voice.id ? "voice-card is-selected" : "voice-card"}>
-                  <input
-                    type="radio"
-                    name="voice-profile"
-                    value={voice.id}
-                    checked={direction.profileId === voice.id}
-                    onChange={() => update({ ...direction, profileId: voice.id }, voice)}
-                  />
-                  <span className="voice-card-mark"><Mic2 aria-hidden="true" size={17} /></span>
-                  <span className="voice-card-copy">
-                    <strong>{voice.label}</strong>
-                    <small>{voice.description ?? (voice.engine === "macos" ? voice.locale : "云端声音演员")}</small>
-                  </span>
+                <div key={voice.id} className={direction.profileId === voice.id ? "voice-card is-selected" : "voice-card"}>
+                  <label className="voice-card-choice">
+                    <input
+                      type="radio"
+                      name="voice-profile"
+                      value={voice.id}
+                      checked={direction.profileId === voice.id}
+                      onChange={() => update({ ...direction, profileId: voice.id }, voice)}
+                    />
+                    <span className="voice-card-mark"><Mic2 aria-hidden="true" size={17} /></span>
+                    <span className="voice-card-copy">
+                      <strong>{voice.label}</strong>
+                      <small>{voice.description ?? (voice.engine === "macos" ? voice.locale : "云端声音演员")}</small>
+                    </span>
+                  </label>
                   <button
                     className="icon-button voice-preview-button"
                     type="button"
                     title={`试听 ${voice.label}`}
                     aria-label={`试听 ${voice.label}`}
                     disabled={previewing !== undefined}
-                    onClick={(event) => { event.preventDefault(); void preview(voice); }}
+                    onClick={() => void preview(voice)}
                   >
                     {previewing === voice.id ? <LoaderCircle className="spin" aria-hidden="true" size={16} /> : <Play aria-hidden="true" size={16} />}
                   </button>
-                </label>
+                </div>
               ))}
             </fieldset>
           </div>

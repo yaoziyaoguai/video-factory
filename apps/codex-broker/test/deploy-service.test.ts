@@ -129,6 +129,20 @@ describe("production deployment transaction", () => {
     assert.doesNotMatch(script, /ln -sfn "\$node_bin" "\$broker_root\/bin\/node"/);
   });
 
+  it("pins a verified production model while preserving operator overrides", async () => {
+    const script = await readFile(
+      path.join(repositoryRoot, "scripts", "setup-codex-broker-host.sh"),
+      "utf8",
+    );
+
+    assert.match(script, /default_codex_model=gpt-5\.6-sol/);
+    assert.match(script, /VIDEO_FACTORY_CODEX_MODEL:-\$existing_codex_model/);
+    assert.match(script, /VIDEO_FACTORY_CODEX_EFFORT:-\$existing_codex_effort/);
+    assert.match(script, /VIDEO_FACTORY_CODEX_AUDIT_EFFORT:-\$existing_codex_audit_effort/);
+    assert.match(script, /printf 'VIDEO_FACTORY_CODEX_MODEL=%s\\n'/);
+    assert.match(script, /printf 'VIDEO_FACTORY_CODEX_AUDIT_EFFORT=%s\\n'/);
+  });
+
   it("rolls back the app and every configured broker after any mutating-step failure", async () => {
     const script = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
 
