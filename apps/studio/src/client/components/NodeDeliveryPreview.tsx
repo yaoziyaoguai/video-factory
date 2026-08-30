@@ -417,6 +417,7 @@ function formatScalar(value: unknown, key?: string): string {
   if (key === "authenticityPolicy" && typeof value === "string") return ({ evidence: "事实镜头", illustrative: "说明镜头", expressive: "表现镜头" } as Record<string, string>)[value] ?? value;
   if (key === "mastering_preset" && typeof value === "string") return ({ natural: "自然", intimate: "亲近", social: "社交清晰" } as Record<string, string>)[value] ?? value;
   if ((key === "requestedProfileId" || key === "resolvedProfileId") && typeof value === "string") return directorProfileLabel(value);
+  if (key === "voice" && typeof value === "string") return voiceProfileLabel(value);
   if (key === "narrativeRole" && typeof value === "string") return humanizeNarrativeRole(value);
   if (typeof value === "string" && key && /(?:Path|_path)$/.test(key)) return "已连接上游产物";
   if (typeof value === "string") return humanizeCreativeText(({
@@ -459,6 +460,18 @@ function directorProfileLabel(value: string): string {
     "geometric-control": "几何秩序",
     "suspense-staging": "悬念调度",
   } as Record<string, string>)[value] ?? value;
+}
+
+function voiceProfileLabel(value: string): string {
+  const labels = {
+    "minimax:female-chengshu": "成熟女声",
+    "minimax:female-tianmei": "甜美女声",
+    "minimax:male-qn-qingse": "青年男声",
+    "minimax:male-qn-jingying": "精英男声",
+    "macos:Tingting": "Tingting 中文女声",
+    "kokoro:zf_xiaobei": "小北女声",
+  } as Record<string, string>;
+  return labels[value] ?? labels[`minimax:${value}`] ?? labels[`kokoro:${value}`] ?? labels[`macos:${value}`] ?? humanizeCreativeText(value);
 }
 
 function fieldLabel(key: string): string {

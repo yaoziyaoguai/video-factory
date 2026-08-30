@@ -12,25 +12,25 @@ describe("AssetsPage", () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
       generatedAt: "2026-08-29T08:00:00.000Z",
-      totalItems: 2,
+      totalItems: 3,
       needsReviewCount: 1,
       legacyRunsWithoutManifest: 0,
       reconstructedRunCount: 0,
       unreadableManifestCount: 0,
       truncatedRunCount: 0,
       truncatedItemCount: 0,
-      categories: { visual: 1, voice: 1, font: 0, document: 0, other: 0 },
+      categories: { visual: 1, voice: 1, font: 0, document: 1, other: 0 },
       assetIndex: {
         version: "video-factory/asset-index-v1",
-        totalAssets: 2,
+        totalAssets: 3,
         duplicateUses: 1,
         reusableCount: 1,
         needsReviewCount: 0,
         facets: {
-          mediaKinds: { video: 1, audio: 1 },
-          origins: { stock: 1, voice_synthesis: 1 },
-          providers: { "pexels-stock-v1": 1, "minimax-tts-v1": 1 },
-          reuseStatuses: { ready: 1, not_reusable: 1 },
+          mediaKinds: { video: 1, audio: 1, document: 1 },
+          origins: { stock: 1, voice_synthesis: 1, production_document: 1 },
+          providers: { "pexels-stock-v1": 1, "minimax-tts-v1": 1, "codex-screenwriter-v1": 1 },
+          reuseStatuses: { ready: 1, not_reusable: 2 },
         },
         assets: [
           {
@@ -100,6 +100,21 @@ describe("AssetsPage", () => {
               reviewStatus: "recorded",
             }],
           },
+          {
+            key: "sha256:orphan-document",
+            mediaKind: "document",
+            origin: "production_document",
+            reuseStatus: "not_reusable",
+            category: "document",
+            kind: "script",
+            providerId: "codex-screenwriter-v1",
+            tags: ["未归属"],
+            commercialUse: "self_owned",
+            attributionRequirement: "not_required",
+            reviewStatus: "recorded",
+            useCount: 0,
+            usages: [],
+          },
         ],
       },
       items: [
@@ -132,13 +147,20 @@ describe("AssetsPage", () => {
 
     render(<MemoryRouter><AssetsPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "窗边一杯水 · 镜头 1" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "夜晚书房" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 3, name: "清晨饮水 · 镜头 2" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 1" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "夜晚书房" })).toBeInTheDocument();
     expect(screen.getByLabelText("窗边一杯水 · 镜头 1 预览")).toHaveAttribute("src", "/api/runs/run-1/artifacts/render/content#t=0.1");
+    expect(screen.getByText("镜头 2")).toBeInTheDocument();
+    expect(screen.getAllByText("作品素材包 · 1 项")).toHaveLength(4);
+    expect(screen.getByRole("heading", { level: 2, name: "未归属项目" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "按资产" }));
+    expect(screen.queryByText("作品素材包 · 1 项")).not.toBeInTheDocument();
     expect(screen.getByText("已用于 2 个镜头")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /声音/ }));
-    expect(await screen.findByRole("heading", { name: "夜晚书房" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "窗边一杯水 · 镜头 1" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 3, name: "夜晚书房" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 1" })).not.toBeInTheDocument();
   });
 });

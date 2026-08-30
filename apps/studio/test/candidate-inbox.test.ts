@@ -41,6 +41,39 @@ const trendCandidate = {
 };
 
 describe("CandidateInboxStudio", () => {
+  it("persists a new series before any external planning Agent call", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-durable-create-"));
+    let reviewCalls = 0;
+    const series = new SeriesStudio({
+      series: new JsonSeriesStore(path.join(root, "series.json")),
+      createId: () => "series-durable",
+      planningAgent: {
+        reviewEpisode: async () => {
+          reviewCalls += 1;
+          throw new Error("create must not wait for external planning");
+        },
+      },
+    });
+
+    const created = await series.create({
+      name: "长期创作实验室",
+      premise: "逐集沉淀一套长期可复用的方法。",
+      audience: "持续追更的创作者",
+      platform: "bilibili",
+      category: "education",
+      track: "long-running-creator-lab",
+      pillars: ["方法验证", "阶段复盘"],
+      tone: "克制具体",
+      visualStyle: "纪实观察",
+    });
+
+    assert.equal(reviewCalls, 0);
+    assert.equal(created.episodes.length, 6);
+    assert.equal(created.episodes.every((episode) => episode.planning.auditStatus === "fallback"), true);
+    assert.match(created.episodes[0]?.planning.fallbackReason ?? "", /开拍 Agent/);
+    assert.equal((await series.list())[0]?.id, created.id);
+  });
+
   it("loads a series-only inbox without waiting for the trend model", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-series-inbox-"));
     let trendCalls = 0;

@@ -1263,6 +1263,27 @@ describe("Studio client", () => {
     expect(screen.getByText("技术诊断")).toBeInTheDocument();
   });
 
+  it("shows an explicit regenerate action instead of pretending a stale run is active", async () => {
+    const regenerate = vi.fn(async () => undefined);
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    const { videoArtifactId: _videoArtifactId, ...withoutVideo } = withoutIntervention;
+    render(<RunWorkbench
+      run={{
+        ...withoutVideo,
+        status: "stale",
+        artifacts: withoutIntervention.artifacts.filter((artifact) => artifact.id !== withoutIntervention.videoArtifactId),
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onRegenerateStale={regenerate}
+    />);
+
+    expect(screen.queryByText("自动制作中")).not.toBeInTheDocument();
+    expect(screen.getByText(/上游内容已被人工修改/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "按人工版本继续生成" }));
+    expect(regenerate).toHaveBeenCalledOnce();
+  });
+
   it("does not offer a blind retry when the failure requires configuration repair", () => {
     const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
     render(<RunWorkbench

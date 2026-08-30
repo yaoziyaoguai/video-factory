@@ -286,7 +286,7 @@ export function ResourcesPage() {
           key={provider.id}
           provider={provider}
           isDefault={settings?.defaultAssetProviderId === provider.id}
-          canSetDefault={provider.id !== "ai-shot-router-v1"}
+          canSetDefault
           selectedModelId={modelDefaults[provider.id]}
           onModelChange={(modelId) => setModelDefaults((current) => {
             const next = { ...current };
@@ -394,14 +394,16 @@ function ProviderRow({ provider, isDefault, canSetDefault, selectedModelId, onMo
   const staleSelection = selectedModelId && !availableModels.some((model) => model.id === selectedModelId)
     ? selectedModelId
     : undefined;
+  const activeModel = provider.modelProfiles?.find((model) => model.id === (selectedModelId ?? provider.defaultModelId));
+  const estimate = activeModel?.estimatedCnyPerClip ?? provider.estimatedCnyPerClip;
   return (
     <article className="provider-ledger-row">
       <span className="provider-ledger-icon"><Icon aria-hidden="true" size={18} /></span>
       <div><strong>{provider.label}</strong><small>{provider.description ?? provider.id}</small>{!ready && provider.requirement ? <small className="provider-requirement">{provider.requirement}</small> : null}</div>
       <span>{availableModels.length || selectedModelId ? <label className="provider-model-select"><small>默认模型</small><select aria-label={`${provider.label} 默认模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(event.target.value)}><option value="">继承服务默认：{provider.defaultModelId ?? "自动选择"}</option>{staleSelection ? <option value={staleSelection} disabled>已失效：{staleSelection}</option> : null}{availableModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}</select></label> : (provider.modes ?? []).slice(0, 3).join(" · ")}</span>
-      <strong className={provider.billing === "metered" ? "is-metered" : ""}>{billingLabel(provider.billing)}</strong>
+      <strong className={provider.billing === "metered" ? "is-metered" : ""}>{billingLabel(provider.billing)}{estimate !== undefined ? ` · 约 ¥${formatCost(estimate)}/${provider.billingUnit === "run" ? "条" : "镜头"}` : ""}</strong>
       <span className={ready ? "ledger-state is-ready" : "ledger-state"}>{providerReadinessLabel(provider, ready)}</span>
-      {ready && canSetDefault ? <button className={isDefault ? "provider-default is-active" : "provider-default"} type="button" disabled={isDefault} onClick={() => onSetDefault(provider.id)}>{isDefault ? "制作默认" : "设为默认"}</button> : ready ? <span className="provider-default is-static">系统路由</span> : <span />}
+      {ready && canSetDefault ? <button className={isDefault ? "provider-default is-active" : "provider-default"} type="button" disabled={isDefault} onClick={() => onSetDefault(provider.id)}>{isDefault ? "制作默认" : "设为默认"}</button> : <span />}
       {provider.docsUrl ? <a href={provider.docsUrl} target="_blank" rel="noreferrer" title={`${provider.label} 文档`}><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
     </article>
   );

@@ -13,6 +13,11 @@ describe("topic taxonomy", () => {
     assert.equal(classifyTopicCategory("新生家长进校铺床引发讨论", "daily-observer"), "education");
     assert.equal(classifyTopicCategory("以军空袭叙利亚后局势如何变化", "breaking-news"), "society");
     assert.equal(classifyTopicCategory("全国政协副主席陈武逝世", "daily-observer"), "society");
+    assert.equal(classifyTopicCategory("朱忠明任上海市政府党组书记", "daily-observer"), "society");
+    assert.equal(classifyTopicCategory("日本援12国装备牵制中国", "daily-observer"), "society");
+    assert.equal(classifyTopicCategory("烽火职业联赛秋季赛开赛", "daily-observer"), "gaming");
+    assert.equal(classifyTopicCategory("CBA职业联赛新赛季赛程公布", "daily-observer"), "health-sports");
+    assert.equal(classifyTopicCategory("中学任命新团委书记并调整社团安排", "daily-observer"), "education");
   });
 
   it("marks sensitive claims for review without treating every current topic as high risk", () => {

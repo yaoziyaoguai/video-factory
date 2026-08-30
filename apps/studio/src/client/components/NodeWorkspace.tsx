@@ -42,6 +42,23 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
     () => selectEditableArtifact(node.id, artifacts, effectiveVersion?.artifactIds),
     [artifacts, effectiveVersion?.artifactIds, node.id],
   );
+  const audioArtifact = useMemo(
+    () => {
+      if (node.id !== "voice") return undefined;
+      const candidates = artifacts.filter((artifact) => artifact.contentUrl
+        && artifact.contentType?.startsWith("audio/")
+        && (artifact.producerNodeId === "voice" || artifact.kind === "voiceover"))
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      const effectiveIds = effectiveVersion?.artifactIds ?? [];
+      return candidates.filter((artifact) => effectiveIds.includes(artifact.id)).at(-1) ?? candidates.at(-1);
+    },
+    [artifacts, effectiveVersion?.artifactIds, node.id],
+  );
+  const audioIsCurrent = Boolean(audioArtifact
+    && runStatus !== "stale"
+    && (effectiveVersion?.artifactIds?.length
+      ? effectiveVersion.artifactIds.includes(audioArtifact.id)
+      : effectiveVersion?.source !== "human"));
   const spendInputs = useMemo(() => node.spendPlan?.inputVersionIds.map((versionId) => {
     const inputOwner = nodes.find((candidate) => candidate.inputState?.versions.some((version) => version.id === versionId));
     const outputOwner = nodes.find((candidate) => candidate.outputState?.versions.some((version) => version.id === versionId));
@@ -188,6 +205,7 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
         <section className="node-output-preview node-creator-delivery">
           <header><div><strong>{node.role ?? "生产角色"}的交付</strong><small>{readOnlyReview ? "技术结果只读；需要调整时请修改上游内容后重跑" : effectiveVersion?.source === "human" ? "已采用你的修改" : hasDelivery ? "自动生成，可按需修改" : node.status === "pending" ? "等待上游完成" : "本节点没有需要人工阅读的内容"}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
           {editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} onChange={(value) => setDraft(pretty(value))} /> : documentLoading ? <p className="node-document-state">正在读取结构化交付...</p> : documentError ? <p className="node-workspace-error" role="alert">结构化交付读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
+          {audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioIsCurrent ? "实际配音试听" : "上次生成的配音"}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? "实际配音试听" : "上次生成的配音试听"} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
           {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => setEditing(false)}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
         </section>
 

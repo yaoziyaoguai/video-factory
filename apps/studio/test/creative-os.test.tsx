@@ -924,8 +924,8 @@ describe("Creative OS", () => {
     expect(update).toHaveBeenLastCalledWith({ defaultAssetProviderId: "pexels-stock-v1" });
     const routerRow = screen.getByText("AI 逐镜路由").closest("article");
     expect(routerRow).not.toBeNull();
-    expect(within(routerRow!).queryByRole("button", { name: "设为默认" })).not.toBeInTheDocument();
-    expect(within(routerRow!).getByText("系统路由")).toBeInTheDocument();
+    await user.click(within(routerRow!).getByRole("button", { name: "设为默认" }));
+    expect(update).toHaveBeenLastCalledWith({ defaultAssetProviderId: "ai-shot-router-v1" });
 
     await user.selectOptions(screen.getByRole("combobox", { name: "默认导演角色" }), "documentary-observer");
     await user.selectOptions(screen.getByRole("combobox", { name: "默认目标平台" }), "bilibili");

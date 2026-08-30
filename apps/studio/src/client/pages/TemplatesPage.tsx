@@ -21,6 +21,7 @@ export function TemplatesPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createDescription, setCreateDescription] = useState("");
+  const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
 
   const dirty = useMemo(() => Boolean(draft?.status === "draft" && savedDraft !== JSON.stringify(draft)), [draft, savedDraft]);
 
@@ -263,7 +264,7 @@ export function TemplatesPage() {
             {draft.status === "draft" ? (
               <>
                 <button className="button button-secondary" type="button" disabled={saving} onClick={() => void saveDraft()}><Save size={16} aria-hidden="true" />保存草稿</button>
-                <button className="button button-primary" type="button" disabled={saving} onClick={() => void publishDraft()}><Send size={16} aria-hidden="true" />发布新版本</button>
+                <button className="button button-primary" type="button" disabled={saving} onClick={() => setPublishConfirmOpen(true)}><Send size={16} aria-hidden="true" />发布新版本</button>
               </>
             ) : (
               <button className="button button-primary" type="button" disabled={saving} onClick={() => void cloneSelected()}><Copy size={16} aria-hidden="true" />创建可编辑副本</button>
@@ -281,6 +282,13 @@ export function TemplatesPage() {
             <p>系统只创建一份可运行的三段式草稿，不调用模型，也不会产生费用。</p>
           </div>
           <footer className="dialog-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => setCreateOpen(false)}>取消</button><button className="button button-primary" type="button" disabled={saving || !createName.trim()} onClick={() => void createTemplate()}>{saving ? "正在创建..." : "创建并编辑"}</button></footer>
+        </section>
+      </div> : null}
+      {publishConfirmOpen && draft?.status === "draft" ? <div className="dialog-backdrop" role="presentation">
+        <section className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="publish-template-title">
+          <header className="dialog-header"><div><p className="eyebrow">模板发布</p><h2 id="publish-template-title">确认发布“{draft.name}”</h2></div><button className="icon-button" type="button" aria-label="关闭" disabled={saving} onClick={() => setPublishConfirmOpen(false)}><X size={18} aria-hidden="true" /></button></header>
+          <p>发布后，这一版会出现在新制作的模板选择中；已有项目仍使用各自保存的运行快照。{dirty ? "当前未保存修改会先保存，再一起发布。" : ""}</p>
+          <footer className="dialog-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => setPublishConfirmOpen(false)}>返回检查</button><button className="button button-primary" type="button" disabled={saving} onClick={() => { setPublishConfirmOpen(false); void publishDraft(); }}><Send size={16} aria-hidden="true" />确认发布</button></footer>
         </section>
       </div> : null}
     </main>

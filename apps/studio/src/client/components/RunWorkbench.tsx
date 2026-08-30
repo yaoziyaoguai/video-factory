@@ -33,7 +33,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
   const creatorNodes = run.nodes.filter((node) => nodeHasCreatorContent(node, run));
   const activeSpendNode = creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
   const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id);
-  const showReviewSurface = Boolean(video?.contentUrl || run.activeIntervention || isTerminalStatus(run.status));
+  const showReviewSurface = Boolean(video?.contentUrl || run.activeIntervention || isStoppedStatus(run.status));
 
   const renderNodeWorkspace = (node: StudioRunDetail["nodes"][number]) => <NodeWorkspace
     key={node.id}
@@ -238,8 +238,8 @@ function ProductionProgress({ run }: { run: StudioRunDetail }) {
   </section>;
 }
 
-function isTerminalStatus(status: StudioRunDetail["status"]): boolean {
-  return status === "succeeded" || status === "failed" || status === "rejected";
+function isStoppedStatus(status: StudioRunDetail["status"]): boolean {
+  return status === "succeeded" || status === "failed" || status === "rejected" || status === "stale";
 }
 
 function failedNodeId(run: StudioRunDetail): string | undefined {

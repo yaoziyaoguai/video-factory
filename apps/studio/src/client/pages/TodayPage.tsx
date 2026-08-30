@@ -358,7 +358,7 @@ function matchesEntryOrigin(
 ): boolean {
   if (mode === "trend") return origin === "trend";
   if (mode === "series") return origin === "series";
-  return origin === undefined || origin === "manual";
+  return origin === "manual";
 }
 
 function errorMessage(value: unknown): string {

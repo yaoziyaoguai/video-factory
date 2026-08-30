@@ -19,7 +19,7 @@ import {
 export interface SeriesStudioOptions {
   series: StudioSeriesRepository;
   planner?: Pick<SeriesPlanner, "plan" | "planEpisodes">;
-  planningAgent?: SeriesPlanningAgent;
+  planningAgent?: Pick<SeriesPlanningAgent, "reviewEpisode">;
   now?: () => Date;
   createId?: () => string;
 }
@@ -72,7 +72,9 @@ export class SeriesStudio {
         createdAt: timestamp,
         updatedAt: timestamp,
       };
-      record.episodes = await this.planEpisodes(record, Math.min(6, record.currentSeason.targetEpisodeCount ?? 12));
+      // 先持久化可编辑路线图，避免外部 Agent 的排队或断线阻塞系列创建。
+      // 真正开拍前仍由 greenlightEpisode 执行最多三轮独立 Agent 审计。
+      record.episodes = this.ruleEpisodes(record, Math.min(6, record.currentSeason.targetEpisodeCount ?? 12));
       return await this.options.series.create(record);
     } catch (error) {
       if (error instanceof SeriesStoreConflictError) throw new StudioConflictError(error.message);
@@ -355,7 +357,7 @@ export class SeriesStudio {
       return await this.options.series.appendPlannedEpisodes(
         series.id,
         series.revision,
-        await this.planEpisodes(series, missing),
+        this.ruleEpisodes(series, missing),
         timestamp,
       );
     } catch (error) {
@@ -366,24 +368,18 @@ export class SeriesStudio {
     }
   }
 
-  private async planEpisodes(series: StudioSeries, count: number) {
-    if (!this.options.planningAgent) return this.planner.planEpisodes(series, count);
-    try {
-      const result = await this.options.planningAgent.generate(series, count);
-      return this.planner.planEpisodes(series, count, result.drafts, result.planning);
-    } catch {
-      return this.planner.planEpisodes(series, count, undefined, {
-        source: "rules",
-        role: "系列总编",
-        auditRole: "规则校验",
-        auditStatus: "fallback",
-        auditIterations: 0,
-        providerId: "series-roadmap-v2",
-        modelId: "deterministic",
-        promptVersion: "video-factory/series-rules-v2",
-        fallbackReason: "系列策划 Agent 暂不可用，已使用规则方案并保留人工编辑入口。",
-      });
-    }
+  private ruleEpisodes(series: StudioSeries, count: number) {
+    return this.planner.planEpisodes(series, count, undefined, {
+      source: "rules",
+      role: "系列总编",
+      auditRole: "开拍前独立红队审计 Agent",
+      auditStatus: "fallback",
+      auditIterations: 0,
+      providerId: "series-roadmap-v2",
+      modelId: "deterministic",
+      promptVersion: "video-factory/series-rules-v2",
+      fallbackReason: "已先保存可编辑路线图；采用单集前会由系列开拍 Agent 基于最新正史完成独立审计。",
+    });
   }
 }
 

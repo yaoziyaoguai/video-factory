@@ -459,6 +459,15 @@ body:has(.studio-v3) {
 .studio-v3 .asset-library-filters button:hover { color: var(--ink); background: #132239; }
 .studio-v3 .asset-library-filters button[aria-pressed="true"] { color: #eaf8f4; background: #15382f; border-color: #286854; }
 .studio-v3 .asset-library-filters button span { min-width: 18px; padding: 2px 5px; color: #aeb8ce; background: #1d2c47; border-radius: 7px; font-size: 9px; text-align: center; }
+.studio-v3 .asset-library-view { display: inline-flex; width: fit-content; padding: 3px; background: #071325; border: 1px solid #263957; border-radius: 7px; }
+.studio-v3 .asset-library-view button { min-height: 30px; padding: 0 12px; color: #aeb9cc; background: transparent; border: 0; border-radius: 5px; font-size: 10px; font-weight: 750; cursor: pointer; }
+.studio-v3 .asset-library-view button[aria-pressed="true"] { color: #eaf8f4; background: #15382f; box-shadow: 0 1px 4px rgb(0 0 0 / 24%); }
+.studio-v3 .node-audio-preview { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 360px); align-items: center; gap: 14px; margin-top: 14px; padding: 12px; background: #0b192c; border: 1px solid #233754; border-radius: 7px; }
+.studio-v3 .node-audio-preview > div { display: grid; gap: 3px; }
+.studio-v3 .node-audio-preview strong { font-size: 11px; }
+.studio-v3 .node-audio-preview small { color: #aeb9cc; font-size: 9px; line-height: 1.55; }
+.studio-v3 .node-audio-preview audio { width: 100%; }
+.studio-v3 .node-audio-preview.is-stale { background: #2b2418; border-color: #6f5730; }
 .studio-v3 .asset-library-refiners { display: grid; grid-template-columns: minmax(132px, .55fr) minmax(160px, .7fr) minmax(240px, 1.4fr); gap: 8px; }
 .studio-v3 .asset-library-refiners select,
 .studio-v3 .asset-library-search { width: 100%; min-height: 38px; color: #9eabc0; background: #071325; border: 1px solid #263957; border-radius: 6px; }
@@ -467,6 +476,12 @@ body:has(.studio-v3) {
 .studio-v3 .asset-library-search input { width: 100%; color: var(--ink); background: transparent; border: 0; outline: 0; font-size: 11px; }
 .studio-v3 .asset-library-search input::placeholder { color: #65758f; }
 .studio-v3 .asset-library-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.studio-v3 .asset-work-groups { display: grid; gap: 30px; }
+.studio-v3 .asset-work-group { display: grid; gap: 12px; }
+.studio-v3 .asset-work-group > header { display: flex; align-items: end; justify-content: space-between; gap: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.studio-v3 .asset-work-group > header small { color: var(--muted); font-size: 9px; font-weight: 750; }
+.studio-v3 .asset-work-group > header h2 { margin: 3px 0 0; font-size: 16px; }
+.studio-v3 .asset-work-group > header a { color: var(--muted); font-size: 10px; font-weight: 750; text-decoration: none; }
 .studio-v3 .asset-card { min-width: 0; overflow: hidden; background: #0c192c; border: 1px solid #20334f; border-radius: 8px; box-shadow: 0 12px 32px rgb(0 0 0 / 18%); transition: border-color 190ms ease, transform 190ms cubic-bezier(.2, .75, .2, 1), box-shadow 190ms ease; animation: studio-surface-enter 360ms cubic-bezier(.22, .8, .24, 1) backwards; }
 .studio-v3 .asset-card:hover { border-color: #3a5d71; box-shadow: 0 20px 48px rgb(0 0 0 / 28%); transform: translateY(-3px); }
 .studio-v3 .asset-card-preview { position: relative; min-height: 210px; aspect-ratio: 16 / 10; display: grid; align-content: center; justify-items: center; gap: 8px; overflow: hidden; color: #8f9db5; background: #06101f; border-bottom: 1px solid var(--line); font-size: 10px; }
@@ -484,7 +499,7 @@ body:has(.studio-v3) {
 .studio-v3 .asset-card-copy header b.reuse-ready { color: #68d1b2; }
 .studio-v3 .asset-card-copy header b.reuse-review_required { color: #e8b25d; }
 .studio-v3 .asset-card-copy header b.reuse-private { color: #e59aa5; }
-.studio-v3 .asset-card-copy h2 { display: -webkit-box; overflow: hidden; margin: 13px 0 5px; font-family: "Noto Sans SC Variable", "PingFang SC", sans-serif; font-size: 14px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.studio-v3 .asset-card-copy h3 { display: -webkit-box; overflow: hidden; margin: 13px 0 5px; font-family: "Noto Sans SC Variable", "PingFang SC", sans-serif; font-size: 14px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .studio-v3 .asset-provider { overflow: hidden; margin: 0; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .studio-v3 .asset-metadata { display: flex; flex-wrap: wrap; gap: 5px; margin: 12px 0 0; padding: 0; list-style: none; }
 .studio-v3 .asset-metadata li { padding: 3px 6px; color: #b4c0d1; background: #13233a; border-radius: 4px; font-size: 9px; }

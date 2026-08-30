@@ -102,6 +102,20 @@ describe("TemplatesPage", () => {
       modelDefaults: { "ark-seedance-video-v1": "seedance-2-0-lite" },
     }), 3);
   });
+
+  it("requires an explicit confirmation before publishing a template", async () => {
+    const user = userEvent.setup();
+    render(<TemplatesPage />);
+
+    await screen.findByRole("heading", { name: "知识解释" });
+    await user.click(screen.getByRole("radio", { name: /我的系列/ }));
+    await user.click(screen.getByRole("button", { name: "发布新版本" }));
+
+    expect(studioApi.publishTemplate).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("dialog", { name: "确认发布“我的系列”" });
+    await user.click(within(dialog).getByRole("button", { name: "确认发布" }));
+    expect(studioApi.publishTemplate).toHaveBeenCalledWith("my-series", 3);
+  });
 });
 
 function template(id: string, name: string, status: StudioTemplate["status"], builtIn: boolean): StudioTemplate {

@@ -187,8 +187,13 @@ describe("CodexScreenwriterAgent", () => {
   });
 
   it("requires explicit canon facts for a series script", () => {
+    const standaloneDraft = { ...validDraft(), canonFacts: [] };
+    assert.deepEqual(
+      validateScriptDraft(standaloneDraft, { durationSeconds: 24 }),
+      standaloneDraft,
+    );
     assert.throws(
-      () => validateScriptDraft(validDraft(), { durationSeconds: 24, requireCanonFacts: true }),
+      () => validateScriptDraft(standaloneDraft, { durationSeconds: 24, requireCanonFacts: true }),
       /between 1 and 8 canonFacts/,
     );
     const draft = { ...validDraft(), canonFacts: ["本集已经验证：先记录问题再选择工具。"] };

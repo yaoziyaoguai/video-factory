@@ -194,6 +194,64 @@ describe("node production workspaces", () => {
     });
   });
 
+  it("previews the actual synthesized audio in the voice delivery", () => {
+    render(<NodeWorkspace
+      node={{ ...succeededNode, id: "voice", label: "配音", role: "声音导演", output: { voice: "female-chengshu", rate: 185 } }}
+      runStatus="succeeded"
+      artifacts={[
+        {
+          id: "voice-audio",
+          kind: "voiceover",
+          createdAt: "2026-08-27T00:00:00.000Z",
+          contentType: "audio/mpeg",
+          contentUrl: "/api/runs/run-1/artifacts/voice-audio/content",
+          producerNodeId: "voice",
+        },
+        {
+          id: "background-music",
+          kind: "music",
+          createdAt: "2026-08-27T00:00:01.000Z",
+          contentType: "audio/mpeg",
+          contentUrl: "/api/runs/run-1/artifacts/background-music/content",
+          producerNodeId: "render",
+        },
+      ]}
+      busy={false}
+      onOverride={async () => undefined}
+      onInputOverride={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    expect(screen.getByText("成熟女声")).toBeInTheDocument();
+    expect(screen.getByLabelText("实际配音试听")).toHaveAttribute("src", "/api/runs/run-1/artifacts/voice-audio/content");
+  });
+
+  it("labels an existing voice artifact as outdated after a human edit", () => {
+    const generated = succeededNode.outputState!.versions[0]!;
+    render(<NodeWorkspace
+      node={{
+        ...succeededNode,
+        id: "voice",
+        label: "配音",
+        role: "声音导演",
+        outputState: {
+          ...succeededNode.outputState!,
+          effectiveVersionId: "voice-human",
+          versions: [generated, { ...generated, id: "voice-human", source: "human", artifactIds: [], createdBy: "human:editor" }],
+        },
+      }}
+      runStatus="stale"
+      artifacts={[{ id: "voice-audio", kind: "voiceover", createdAt: "2026-08-27T00:00:00.000Z", contentType: "audio/mpeg", contentUrl: "/voice.mp3", producerNodeId: "voice" }]}
+      busy={false}
+      onOverride={async () => undefined}
+      onInputOverride={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    expect(screen.getByLabelText("上次生成的配音试听")).toHaveAttribute("src", "/voice.mp3");
+    expect(screen.getByText(/当前文字已修改/)).toBeInTheDocument();
+  });
+
   it("labels reconstructed legacy input without presenting it as original execution evidence", async () => {
     render(<NodeWorkspace
       node={{

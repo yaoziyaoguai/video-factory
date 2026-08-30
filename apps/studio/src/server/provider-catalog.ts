@@ -38,8 +38,9 @@ export function buildProviderCatalog(
   const wanAvailable = runtime.python && wanSettings !== undefined;
   const miniMaxTtsAvailable = runtime.python && runtime.ffmpeg && Boolean(environment.MINIMAX_API_KEY);
   const codex = codexAvailability ?? probeCodexSynchronously(environment);
-  const codexModelId = codex.modelId?.trim() || environment.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
-  const codexModels = [textModelProfile(codexModelId, "Codex 云端模型", "codex-broker", "openai", codex.available, "服务器 Codex broker 当前实际使用的模型；切换需要更新运行时配置并重启 broker。")];
+  const reportedCodexModelId = codex.modelId?.trim() || environment.VIDEO_FACTORY_CODEX_MODEL?.trim();
+  const codexModelId = reportedCodexModelId || "codex-default";
+  const codexModels = [textModelProfile(codexModelId, reportedCodexModelId || "由 Codex 运行时决定", "codex-broker", "openai", codex.available, reportedCodexModelId ? "服务器 Codex broker 当前实际使用的模型；切换需要更新运行时配置并重启 broker。" : "Codex broker 尚未报告具体模型；首次调用后会记录实际模型。")];
   const codexProfiles = (
     providerId: string,
     taskKind: string,

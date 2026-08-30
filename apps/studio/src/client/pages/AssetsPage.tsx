@@ -17,6 +17,7 @@ import type {
   StudioAssetOrigin,
   StudioAssetReuseStatus,
   StudioIndexedAsset,
+  StudioIndexedAssetUsage,
   StudioResourceManifest,
 } from "../../shared/api.js";
 import { studioApi } from "../api.js";
@@ -32,6 +33,7 @@ export function AssetsPage() {
   const [origin, setOrigin] = useState<"all" | StudioAssetOrigin>("all");
   const [provider, setProvider] = useState("all");
   const [query, setQuery] = useState("");
+  const [view, setView] = useState<"work" | "asset">("work");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -78,6 +80,7 @@ export function AssetsPage() {
     setProvider("all");
     setQuery("");
   };
+  const workGroups = useMemo(() => groupAssetsByWork(assets), [assets]);
 
   return (
     <main className="page asset-library-page">
@@ -98,6 +101,10 @@ export function AssetsPage() {
       {manifest?.truncatedItemCount ? <p className="resource-note">明细列表只展示前 500 条；上方索引与筛选仍覆盖全部 {manifest.totalItems} 条素材记录。</p> : null}
 
       <section className="asset-library-controls" aria-label="素材筛选">
+        <div className="asset-library-view" role="group" aria-label="素材组织方式">
+          <button type="button" aria-pressed={view === "work"} onClick={() => setView("work")}>按作品</button>
+          <button type="button" aria-pressed={view === "asset"} onClick={() => setView("asset")}>按资产</button>
+        </div>
         <div className="asset-library-filters">
           {FILTERS.map((item) => <button key={item.id} type="button" aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}<span>{assetCount(manifest, item.id)}</span></button>)}
         </div>
@@ -112,36 +119,59 @@ export function AssetsPage() {
       {loading && !manifest ? <div className="asset-library-empty">正在建立素材索引...</div> : null}
       {!loading && manifest && assets.length === 0 ? <div className="asset-library-empty"><FolderOpen aria-hidden="true" size={28} /><strong>这个范围里还没有素材</strong><span>{hasFilters ? "可以清除筛选，查看完整素材档案。" : "完成一次真实制作后，镜头会自动归档到这里。"}</span>{hasFilters ? <button className="button button-secondary" type="button" onClick={clearFilters}>清除筛选</button> : null}</div> : null}
 
-      {assets.length ? <section className="asset-library-grid" aria-live="polite">
+      {assets.length && view === "asset" ? <section className="asset-library-grid" aria-live="polite">
         {assets.map((asset) => <AssetCard asset={asset} key={asset.key} />)}
+      </section> : null}
+      {assets.length && view === "work" ? <section className="asset-work-groups" aria-live="polite">
+        {workGroups.map((group) => <section className="asset-work-group" key={group.key} aria-labelledby={`asset-work-${group.key}`}>
+          <header><div><small>作品素材包 · {group.items.length} 项</small><h2 id={`asset-work-${group.key}`}>{group.runTitle}</h2></div>{group.runId ? <Link to={`/projects/${group.runId}`}>打开制作</Link> : null}</header>
+          <div className="asset-library-grid">{group.items.map(({ asset, usage }) => <AssetCard asset={asset} usage={usage} grouped key={`${asset.key}:${usage?.itemId ?? "unassigned"}`} />)}</div>
+        </section>)}
       </section> : null}
     </main>
   );
 }
 
-function AssetCard({ asset }: { asset: StudioIndexedAsset }) {
-  const usage = asset.usages.at(-1)!;
+function groupAssetsByWork(assets: StudioIndexedAsset[]): Array<{ key: string; runId?: string; runTitle: string; items: Array<{ asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage }> }> {
+  const groups = new Map<string, { key: string; runId?: string; runTitle: string; items: Array<{ asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage }> }>();
+  for (const asset of assets) {
+    if (!asset.usages.length) {
+      const group = groups.get("unassigned") ?? { key: "unassigned", runTitle: "未归属项目", items: [] };
+      group.items.push({ asset });
+      groups.set("unassigned", group);
+    }
+    for (const usage of asset.usages) {
+      const group = groups.get(usage.runId) ?? { key: usage.runId, runId: usage.runId, runTitle: usage.runTitle, items: [] };
+      group.items.push({ asset, usage });
+      groups.set(usage.runId, group);
+    }
+  }
+  return [...groups.values()];
+}
+
+function AssetCard({ asset, usage, grouped = false }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; grouped?: boolean }) {
+  const resolvedUsage = usage ?? asset.usages.at(-1);
   const metadata = assetMetadata(asset);
   return <article className="asset-card">
-    <AssetPreview asset={asset} />
+    <AssetPreview asset={asset} usage={resolvedUsage} />
     <div className="asset-card-copy">
       <header><span>{originLabel(asset.origin)} · {mediaKindLabel(asset.mediaKind)}</span><b className={`reuse-${asset.reuseStatus}`}>{reuseStatusLabel(asset.reuseStatus)}</b></header>
-      <h2>{assetTitle(asset)}</h2>
+      <h3>{assetTitle(asset, resolvedUsage)}</h3>
       <p className="asset-provider">{providerLabel(asset.providerId) ?? asset.providerId}{asset.creator ? ` · ${asset.creator}` : ""}</p>
       {metadata.length ? <ul className="asset-metadata" aria-label="素材规格">{metadata.map((item) => <li key={item}>{item}</li>)}</ul> : null}
       {asset.tags.length ? <div className="asset-tags">{asset.tags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
       <footer>
-        <span>{asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : usage.scenePosition ? `镜头 ${usage.scenePosition}` : "已归档"}</span>
-        <div><Link to={`/projects/${usage.runId}`}>查看作品</Link>{asset.sourceUrl ? <a href={asset.sourceUrl} target="_blank" rel="noreferrer" aria-label="查看素材原始来源"><ExternalLink aria-hidden="true" size={14} /></a> : null}</div>
+        <span>{grouped ? (resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已归档" : "未归属") : asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已归档" : "未归属"}</span>
+        <div>{resolvedUsage ? <Link to={`/projects/${resolvedUsage.runId}`}>查看作品</Link> : null}{asset.sourceUrl ? <a href={asset.sourceUrl} target="_blank" rel="noreferrer" aria-label="查看素材原始来源"><ExternalLink aria-hidden="true" size={14} /></a> : null}</div>
       </footer>
     </div>
   </article>;
 }
 
-function AssetPreview({ asset }: { asset: StudioIndexedAsset }) {
-  if (asset.contentUrl && asset.mediaKind === "video") return <div className="asset-card-preview"><video aria-label={`${assetTitle(asset)} 预览`} src={`${asset.contentUrl}#t=0.1`} muted controls playsInline preload="metadata" /></div>;
-  if (asset.contentUrl && asset.mediaKind === "image") return <div className="asset-card-preview"><img src={asset.contentUrl} alt={`${assetTitle(asset)} 素材`} loading="lazy" /></div>;
-  if (asset.contentUrl && asset.mediaKind === "audio") return <div className="asset-card-preview is-audio"><Music2 aria-hidden="true" size={28} /><audio aria-label={`${assetTitle(asset)} 试听`} src={asset.contentUrl} controls preload="none" /></div>;
+function AssetPreview({ asset, usage = asset.usages.at(-1) }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined }) {
+  if (asset.contentUrl && asset.mediaKind === "video") return <div className="asset-card-preview"><video aria-label={`${assetTitle(asset, usage)} 预览`} src={`${asset.contentUrl}#t=0.1`} muted controls playsInline preload="metadata" /></div>;
+  if (asset.contentUrl && asset.mediaKind === "image") return <div className="asset-card-preview"><img src={asset.contentUrl} alt={`${assetTitle(asset, usage)} 素材`} loading="lazy" /></div>;
+  if (asset.contentUrl && asset.mediaKind === "audio") return <div className="asset-card-preview is-audio"><Music2 aria-hidden="true" size={28} /><audio aria-label={`${assetTitle(asset, usage)} 试听`} src={asset.contentUrl} controls preload="none" /></div>;
   const Icon = asset.mediaKind === "video" ? Film : asset.mediaKind === "image" ? ImageIcon : asset.mediaKind === "audio" ? Music2 : asset.mediaKind === "document" ? FileText : Database;
   return <div className={`asset-card-preview is-${asset.mediaKind}`}><Icon aria-hidden="true" size={28} /><span>{mediaKindLabel(asset.mediaKind)}</span></div>;
 }
@@ -164,9 +194,8 @@ function assetCount(manifest: StudioResourceManifest | undefined, filter: AssetF
   return manifest.assetIndex.facets.mediaKinds[filter] ?? 0;
 }
 
-function assetTitle(asset: StudioIndexedAsset): string {
+function assetTitle(asset: StudioIndexedAsset, usage = asset.usages.at(-1)): string {
   if (asset.query) return asset.query;
-  const usage = asset.usages.at(-1);
   if (!usage) return mediaKindLabel(asset.mediaKind);
   return usage.scenePosition ? `${usage.runTitle} · 镜头 ${usage.scenePosition}` : usage.runTitle;
 }

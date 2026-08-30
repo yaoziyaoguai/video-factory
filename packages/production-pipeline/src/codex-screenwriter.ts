@@ -201,7 +201,7 @@ export function validateScriptDraft(value: unknown, options: { durationSeconds: 
       `Script draft total duration ${total}s is outside 0.6-1.4x of the ${options.durationSeconds}s target.`,
     );
   }
-  const canonFacts = optionalStringArray(input.canonFacts, "canonFacts");
+  const canonFacts = optionalStringArray(input.canonFacts, "canonFacts", 0);
   if (options.requireCanonFacts && (!canonFacts || canonFacts.length < 1 || canonFacts.length > 8)) {
     throw new Error("Series script drafts must contain between 1 and 8 canonFacts.");
   }
@@ -239,10 +239,10 @@ function optionalString(value: unknown, field: string): string | undefined {
   return value.trim();
 }
 
-function optionalStringArray(value: unknown, field: string): string[] | undefined {
+function optionalStringArray(value: unknown, field: string, minimum = 1): string[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length < 1 || value.length > 8) {
-    throw new Error(`${field} must be an array of 1 to 8 strings.`);
+  if (!Array.isArray(value) || value.length < minimum || value.length > 8) {
+    throw new Error(`${field} must be an array of ${minimum} to 8 strings.`);
   }
   return value.map((entry, index) => text(entry, `${field}[${index}]`));
 }
