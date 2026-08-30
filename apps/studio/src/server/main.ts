@@ -51,6 +51,8 @@ const [codexSettings, zaiCodexSettings] = await Promise.all([
   readCodexProviderSettings(process.env),
   readZaiCodexProviderSettings(process.env),
 ]);
+const codexModelId = codexSettings.modelId || process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
+const zaiVisualReviewModelId = zaiCodexSettings.modelId || resolveZaiVisualReviewModelId(process.env);
 // 单并发 broker 中，660s 覆盖一个在途后台任务和本次 285s 执行；
 // 生产任务会插队尚未开始的热点任务，客户端仍不重放已受理任务。
 const codexClient = codexSettings.available
@@ -64,7 +66,7 @@ const screenwriterAgent = codexClient ? new CodexScreenwriterAgent({ client: cod
 const publishCopyWriter = codexClient ? new CodexPublishCopyWriter({ client: codexClient }) : undefined;
 const assetSemanticRanker = codexClient ? new CodexAssetSemanticRanker({
   client: codexClient,
-  modelId: process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default",
+  modelId: codexModelId,
 }) : undefined;
 const reviewMedia = new PythonReviewMediaPreprocessor({
   repositoryRoot,
@@ -75,14 +77,14 @@ const reviewMedia = new PythonReviewMediaPreprocessor({
 const referenceGrammarAgent = codexClient ? new CodexReferenceGrammarAgent({
   client: codexClient,
   media: reviewMedia,
-  modelId: process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default",
+  modelId: codexModelId,
 }) : undefined;
 const visualReviewAgents = [
   ...(zaiCodexClient ? [new CodexVisualReviewAgent({
       client: zaiCodexClient,
       media: reviewMedia,
       providerId: "glm-visual-review-v1",
-      modelId: resolveZaiVisualReviewModelId(process.env),
+      modelId: zaiVisualReviewModelId,
     })] : []),
   ...(codexClient ? [new CodexVisualReviewAgent({
       client: codexClient,
@@ -93,7 +95,7 @@ const visualReviewAgents = [
         environment: process.env,
       }),
       providerId: "codex-visual-review-v1",
-      modelId: process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default",
+      modelId: codexModelId,
     })] : []),
 ];
 const pipeline = new ProductionPipeline({
@@ -116,8 +118,8 @@ const service = new StudioService({
   workspaceRoot,
   pipeline,
   opportunities,
-  codexAvailability: { available: codexSettings.available, reason: codexSettings.reason, taskKinds: codexSettings.taskKinds },
-  zaiCodexAvailability: { available: zaiCodexSettings.available, reason: zaiCodexSettings.reason, taskKinds: zaiCodexSettings.taskKinds },
+  codexAvailability: { available: codexSettings.available, reason: codexSettings.reason, taskKinds: codexSettings.taskKinds, modelId: codexSettings.modelId },
+  zaiCodexAvailability: { available: zaiCodexSettings.available, reason: zaiCodexSettings.reason, taskKinds: zaiCodexSettings.taskKinds, modelId: zaiCodexSettings.modelId },
   ...(codexClient ? {
     seriesPlanningAgent: new CodexSeriesPlanningAgent(
       codexClient,

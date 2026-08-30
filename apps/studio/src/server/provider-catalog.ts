@@ -17,6 +17,7 @@ export interface ProviderRuntime {
 
 export type CodexCatalogAvailability = Pick<CodexProviderSettings, "available" | "reason"> & {
   taskKinds?: readonly string[];
+  modelId?: string;
 };
 
 export function buildProviderCatalog(
@@ -37,7 +38,7 @@ export function buildProviderCatalog(
   const wanAvailable = runtime.python && wanSettings !== undefined;
   const miniMaxTtsAvailable = runtime.python && runtime.ffmpeg && Boolean(environment.MINIMAX_API_KEY);
   const codex = codexAvailability ?? probeCodexSynchronously(environment);
-  const codexModelId = environment.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
+  const codexModelId = codex.modelId?.trim() || environment.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
   const codexModels = [textModelProfile(codexModelId, "Codex 云端模型", "codex-broker", "openai", codex.available, "服务器 Codex broker 当前实际使用的模型；切换需要更新运行时配置并重启 broker。")];
   const codexProfiles = (
     providerId: string,
@@ -53,7 +54,7 @@ export function buildProviderCatalog(
   const codexRequirement = (taskKind: string) => providerTaskRequirement(resolveCodexSocketPath(environment).requirement, codex, taskKind);
   const zaiCodex = zaiCodexAvailability ?? { available: false, reason: "尚未完成独立 broker 协议健康检查。" };
   const zaiCodexRequirement = providerTaskRequirement(resolveZaiCodexSocketPath(environment).requirement, zaiCodex, "visual-review");
-  const zaiModelId = resolveZaiVisualReviewModelId(environment);
+  const zaiModelId = zaiCodex.modelId?.trim() || resolveZaiVisualReviewModelId(environment);
   const zaiModelLabel = zaiModelId === "glm-5.3-flash" ? "GLM-5.3-Flash" : zaiModelId;
   const zaiVisualReviewAvailable = runtime.python && runtime.ffmpeg && runtime.ffprobe && supportsTask(zaiCodex, "visual-review");
 

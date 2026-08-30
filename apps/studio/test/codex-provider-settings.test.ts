@@ -49,6 +49,7 @@ describe("readCodexProviderSettings", () => {
     assert.equal(settings.socketPath, "/tmp/vf/ready.sock");
     assert.equal(settings.configured, true);
     assert.equal(settings.available, true);
+    assert.equal(settings.modelId, "");
     assert.equal(settings.reason, "");
     assert.ok(settings.taskKinds.includes("reference-grammar"));
   });
@@ -94,6 +95,7 @@ describe("readCodexProviderSettings", () => {
     const directory = await mkdtemp(path.join(tmpdir(), "vf-codex-settings-"));
     const socketPath = path.join(directory, "worker.sock");
     let protocolVersion = "video-factory/codex-bridge-v2";
+    let modelId = "gpt-5.6-sol";
     let taskKinds = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"];
     const server = http.createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
@@ -101,7 +103,7 @@ describe("readCodexProviderSettings", () => {
         protocolVersion,
         profileId: "openai",
         providerId: "openai",
-        modelId: "codex-default",
+        modelId,
         taskKinds,
       }));
     });
@@ -116,7 +118,15 @@ describe("readCodexProviderSettings", () => {
     try {
       const ready = await readCodexProviderSettings({ VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath });
       assert.equal(ready.available, true);
+      assert.equal(ready.modelId, "gpt-5.6-sol");
       assert.ok(ready.taskKinds.includes("visual-review"));
+
+      const explicitlyMismatched = await readCodexProviderSettings({
+        VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath,
+        VIDEO_FACTORY_CODEX_MODEL: "gpt-5.6-terra",
+      });
+      assert.equal(explicitlyMismatched.available, false);
+      assert.equal(explicitlyMismatched.modelId, "gpt-5.6-sol");
 
       taskKinds = ["topic-ideas", "script-draft"];
       const partial = await readCodexProviderSettings({ VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath });
@@ -203,6 +213,18 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.equal(director?.modelProfiles?.[0]?.available, false);
     assert.equal(providers.find((provider) => provider.id === "codex-screenwriter-v1")?.modelProfiles?.[0]?.available, true);
     assert.match(director?.requirement ?? "", /director-plan/);
+  });
+
+  it("shows the model actually reported by the OpenAI broker", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      { available: true, reason: "", modelId: "gpt-5.6-sol", taskKinds: ["script-draft"] },
+    );
+
+    const screenwriter = providers.find((provider) => provider.id === "codex-screenwriter-v1");
+    assert.equal(screenwriter?.defaultModelId, "gpt-5.6-sol");
+    assert.equal(screenwriter?.modelProfiles?.[0]?.id, "gpt-5.6-sol");
   });
 
   it("keeps configured metered models unavailable when the production runtime is missing", () => {
