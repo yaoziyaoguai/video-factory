@@ -6,6 +6,7 @@ environment_file="${VIDEO_FACTORY_ENV_FILE:-$repository_root/.env.docker.prod}"
 public_health_url="${PUBLIC_HEALTH_URL:-}"
 container="video_factory_prod"
 broker_service=vf-codex-broker
+broker_unit=/etc/systemd/system/vf-codex-broker.service
 zai_broker_service=vf-zai-codex-broker
 broker_root=/opt/video-factory/codex-broker
 broker_user=vf-codex
@@ -82,6 +83,11 @@ if [[ -n "$previous_image" ]]; then
 fi
 
 previous_broker_release="$(readlink "$broker_root/current" 2>/dev/null || true)"
+previous_broker_unit_backup="$(mktemp)"
+candidate_broker_release=""
+if [[ -f "$broker_unit" ]]; then
+  cp -a "$broker_unit" "$previous_broker_unit_backup"
+fi
 
 wait_for_health() {
   local attempts="$1" count
@@ -108,6 +114,16 @@ wait_for_broker_health() {
     sleep 2
   done
   return 1
+}
+
+install_broker_unit_from_release() {
+  local release="$1" source="$1/deploy/vf-codex-broker.service"
+  if [[ ! -f "$source" ]]; then
+    echo "Broker release is missing its systemd unit: $source" >&2
+    return 1
+  fi
+  install -m 0644 "$source" "$broker_unit" || return 1
+  systemctl daemon-reload || return 1
 }
 
 restart_brokers() {
@@ -140,6 +156,15 @@ rollback_broker() {
   esac
   echo "Restoring the previous codex broker release."
   if ! ln -sfn "$previous_broker_release" "$broker_root/current"; then
+    return 1
+  fi
+  if [[ -f "$previous_broker_release/deploy/vf-codex-broker.service" ]]; then
+    install_broker_unit_from_release "$previous_broker_release" || return 1
+  elif [[ -s "$previous_broker_unit_backup" ]]; then
+    install -m 0644 "$previous_broker_unit_backup" "$broker_unit" || return 1
+    systemctl daemon-reload || return 1
+  else
+    echo "No previous broker unit is available for rollback." >&2
     return 1
   fi
   restart_brokers
@@ -182,22 +207,34 @@ rollback_on_exit() {
       echo "Rollback did not fully recover every component; operator intervention is required." >&2
     fi
   fi
+  rm -f "$previous_broker_unit_backup"
   exit "$status"
 }
 
 trap rollback_on_exit EXIT
 
 # 从候选镜像原子提取 broker 制品：容器只创建、绝不启动；失败时显式清理临时容器与 staging。
-install_broker_release() {
+stage_broker_release() {
   local image_id staging release_dir
-  image_id="$(docker create video-factory:candidate)"
-  staging="$(mktemp -d)"
+  image_id="$(docker create video-factory:candidate)" || return 1
+  if ! staging="$(mktemp -d)"; then
+    docker rm "$image_id" >/dev/null 2>&1 || true
+    return 1
+  fi
   if ! docker cp "$image_id:/app/apps/codex-broker" "$staging/broker" >/dev/null; then
     docker rm "$image_id" >/dev/null 2>&1 || true
     rm -rf "$staging"
     return 1
   fi
-  docker rm "$image_id" >/dev/null
+  if ! docker rm "$image_id" >/dev/null; then
+    rm -rf "$staging"
+    return 1
+  fi
+  if [[ ! -f "$staging/broker/dist/main.js" || ! -f "$staging/broker/deploy/vf-codex-broker.service" ]]; then
+    echo "Candidate image does not contain a complete broker release." >&2
+    rm -rf "$staging"
+    return 1
+  fi
   release_dir="$broker_root/releases/$(date -u +%Y%m%dT%H%M%SZ)"
   case "$release_dir" in
     "$broker_root/releases/"*) rm -rf "$release_dir" ;;
@@ -211,19 +248,26 @@ install_broker_release() {
     return 1
   fi
   rm -rf "$staging"
-  chown -R vf-codex:vf-bridge "$release_dir"
-  chmod -R a+rX "$release_dir"
-  ln -sfn "$release_dir" "$broker_root/current"
+  chown -R vf-codex:vf-bridge "$release_dir" || return 1
+  chmod -R a+rX "$release_dir" || return 1
+  candidate_broker_release="$release_dir"
 }
 
 "${compose[@]}" build app
 
-if ! install_broker_release; then
+if ! stage_broker_release; then
   echo "Failed to extract the codex broker release from the candidate image." >&2
   exit 1
 fi
-# release 指针已切换；从这里开始失败才需要回滚应用和 broker。
+# 候选 release 已完整校验；只有从这里切换指针后，失败才需要回滚应用和 broker。
 deployment_mutated=1
+if ! ln -sfn "$candidate_broker_release" "$broker_root/current"; then
+  exit 1
+fi
+
+if ! install_broker_unit_from_release "$broker_root/current"; then
+  exit 1
+fi
 
 if ! restart_brokers; then
   systemctl --no-pager --lines=60 status "$broker_service" || true

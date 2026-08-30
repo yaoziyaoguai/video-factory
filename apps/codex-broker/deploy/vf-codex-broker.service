@@ -16,8 +16,8 @@ Environment=PATH=/opt/video-factory/codex-broker/bin:/home/vf-codex/.local/node2
 EnvironmentFile=/etc/video-factory/codex-broker.env
 Environment=VIDEO_FACTORY_CODEX_SOCKET_PATH=/run/video-factory-codex/worker.sock
 Environment=VIDEO_FACTORY_CODEX_WORKSPACE_ROOT=/var/lib/video-factory-codex/workspace
-# 285s 任务 deadline < 容器侧 330s 客户端 deadline：broker 先终止 codex，客户端拿到终态错误且不重放。
-Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=285000
+# max 审计允许 10 分钟；容器侧覆盖一次排队和完整执行，确保 broker 先返回明确终态且客户端不重放。
+Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=600000
 ExecStart=/opt/video-factory/codex-broker/bin/node /opt/video-factory/codex-broker/current/dist/main.js
 RuntimeDirectory=video-factory-codex
 RuntimeDirectoryMode=0750

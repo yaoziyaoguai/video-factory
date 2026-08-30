@@ -30,6 +30,8 @@ import type {
   StudioSeriesInput,
   StudioSeriesEpisodePlanInput,
   StudioTrendCandidate,
+  StudioTrendRefreshReceipt,
+  StudioTrendRefreshStatus,
   StudioTrendService,
   StudioTrendSignal,
   StudioTrendSignalQuery,
@@ -240,7 +242,12 @@ export class StudioService {
   listTrendServices(): Promise<StudioTrendService[]> { return this.trends.listServices(); }
   listTrendSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]> { return this.trends.listSignals(input); }
   listTrendCandidates(): Promise<StudioTrendCandidate[]> { return this.trends.listCandidates(); }
-  refreshTrendCandidates(): Promise<StudioTrendCandidate[]> { return this.trends.listCandidates({ forceRefresh: true }); }
+  refreshTrendCandidates(): Promise<StudioTrendRefreshReceipt> { return this.trends.requestCandidateRefresh(); }
+  async trendCandidateRefreshStatus(refreshId: string): Promise<StudioTrendRefreshStatus> {
+    const status = this.trends.candidateRefreshStatus(refreshId);
+    if (!status) throw new StudioNotFoundError("没有找到这次热点更新任务。");
+    return status;
+  }
   listCandidateInbox(input: StudioCandidateInboxQuery): Promise<StudioCandidateInbox> {
     return this.candidateInbox.list(input);
   }

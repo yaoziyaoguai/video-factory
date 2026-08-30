@@ -30,6 +30,8 @@ import type {
   StudioTrendService,
   StudioTrendSignal,
   StudioTrendCandidate,
+  StudioTrendRefreshReceipt,
+  StudioTrendRefreshStatus,
   StudioTemplate,
   StudioTemplateCatalog,
   StudioTemplateCloneInput,
@@ -82,7 +84,10 @@ export const studioApi = {
     return requestJson<StudioTrendSignal[]>(`/api/trend-signals?${query}`);
   },
   trendCandidates: () => requestJson<StudioTrendCandidate[]>("/api/trend-candidates"),
-  refreshTrendCandidates: () => requestJson<StudioTrendCandidate[]>("/api/trend-candidates/refresh", { method: "POST" }),
+  refreshTrendCandidates: () => requestJson<StudioTrendRefreshReceipt>("/api/trend-candidates/refresh", { method: "POST" }),
+  trendCandidateRefreshStatus: (refreshId: string) => requestJson<StudioTrendRefreshStatus>(
+    `/api/trend-candidates/refresh/${encodeURIComponent(refreshId)}`,
+  ),
   candidateInbox: (input: StudioCandidateInboxQuery = {}) => {
     const query = new URLSearchParams();
     if (input.origins?.length) query.set("origins", input.origins.join(","));

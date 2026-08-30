@@ -1084,11 +1084,12 @@ function toRunDetail(
     const safePlannedExecution = plannedExecution
       ? redactManagedFileReferences(plannedExecution) as NonNullable<StudioNode["plannedExecution"]>
       : undefined;
+    const effectiveExecution = safeExecutionReceipt ?? safePlannedExecution;
     return {
       id,
       label,
       role: node?.role ?? role,
-      actionLabel: nodeActionLabel(id),
+      actionLabel: nodeActionLabel(id, effectiveExecution?.providerId),
       status: node?.status ?? "pending",
       ...(node?.startedAt ? { startedAt: node.startedAt } : {}),
       ...(node?.finishedAt ? { finishedAt: node.finishedAt } : {}),

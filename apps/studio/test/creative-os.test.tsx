@@ -170,7 +170,10 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
     vi.spyOn(studioApi, "series").mockResolvedValue([]);
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox(candidates));
-    const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockResolvedValue([]);
+    const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockResolvedValue({ refreshId: "refresh-1", status: "started", requestedAt: "2026-08-30T10:00:00.000Z" });
+    vi.spyOn(studioApi, "trendCandidateRefreshStatus").mockResolvedValue({
+      refreshId: "refresh-1", state: "running", requestedAt: "2026-08-30T10:00:00.000Z",
+    });
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await screen.findAllByRole("button", { name: /查看候选提案/ });
@@ -180,6 +183,8 @@ describe("Creative OS", () => {
 
     await user.click(screen.getByRole("button", { name: "立即刷新热点" }));
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/后台更新已开始/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "立即刷新热点" })).toBeEnabled();
   });
 
   it("does not force-refresh trends when the creator returns to the page", async () => {
@@ -189,7 +194,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
     vi.spyOn(studioApi, "series").mockResolvedValue([]);
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox(candidates));
-    const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockResolvedValue([]);
+    const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockResolvedValue({ refreshId: "refresh-1", status: "started", requestedAt: "2026-08-30T10:00:00.000Z" });
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await screen.findByRole("button", { name: /查看候选提案/ });

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -6,6 +7,8 @@ import type {
   StudioTrendSignal,
   StudioTrendSignalQuery,
   StudioTrendSource,
+  StudioTrendRefreshReceipt,
+  StudioTrendRefreshStatus,
 } from "../shared/api.js";
 import { buildTrendSourceCatalog } from "./provider-catalog.js";
 import { TrendGateway } from "./trend-gateway.js";
@@ -19,6 +22,7 @@ export interface TrendStudioOptions {
   cacheTtlMs?: number;
   trendGateway?: Pick<TrendGateway, "listServices" | "listSignals">;
   trendAgent?: Pick<TrendOpportunityAgent, "listCandidates">;
+  createRefreshId?: () => string;
 }
 
 export interface TrendCandidateReadOptions {
@@ -34,6 +38,8 @@ export class TrendStudio {
   private queuedRefresh: Promise<StudioTrendCandidate[]> | undefined;
   private cacheHydration: Promise<void> | undefined;
   private nextAutomaticRefreshAt = 0;
+  private readonly candidateRefreshes = new Map<string, StudioTrendRefreshStatus>();
+  private activeRefreshId: string | undefined;
 
   constructor(private readonly options: TrendStudioOptions) {
     this.gateway = options.trendGateway ?? new TrendGateway({ environment: options.environment });
@@ -75,6 +81,60 @@ export class TrendStudio {
       }
     }
     return this.startCandidateLoad(Boolean(options.forceRefresh));
+  }
+
+  async requestCandidateRefresh(): Promise<StudioTrendRefreshReceipt> {
+    if (this.options.cachePath) await this.hydrateCache();
+    const active = this.activeRefreshId ? this.candidateRefreshes.get(this.activeRefreshId) : undefined;
+    if (active?.state === "running") {
+      return { refreshId: active.refreshId, status: "already_running", requestedAt: active.requestedAt };
+    }
+
+    const requestedAt = this.options.now().toISOString();
+    const refreshId = (this.options.createRefreshId ?? randomUUID)();
+    const status: StudioTrendRefreshStatus = { refreshId, state: "running", requestedAt };
+    this.recordRefresh(status);
+    this.activeRefreshId = refreshId;
+
+    // 手动刷新如果撞上自动刷新，只跟踪并复用当前任务，不再追加第二套昂贵 Agent Loop。
+    const alreadyRunning = Boolean(this.candidateLoading || this.queuedRefresh);
+    const loading = this.candidateLoading ?? this.queuedRefresh ?? this.startCandidateLoad(true);
+    void loading.then((values) => {
+      this.finishRefresh(refreshId, { state: "succeeded", candidateCount: values.length });
+    }).catch(() => {
+      this.finishRefresh(refreshId, {
+        state: "failed",
+        error: "热点来源或选题 Agent 暂时不可用，请稍后手动重试。",
+      });
+    });
+    return { refreshId, status: alreadyRunning ? "already_running" : "started", requestedAt };
+  }
+
+  candidateRefreshStatus(refreshId: string): StudioTrendRefreshStatus | undefined {
+    return this.candidateRefreshes.get(refreshId);
+  }
+
+  private finishRefresh(
+    refreshId: string,
+    result: Pick<StudioTrendRefreshStatus, "state" | "candidateCount" | "error">,
+  ): void {
+    const current = this.candidateRefreshes.get(refreshId);
+    if (!current || current.state !== "running") return;
+    this.candidateRefreshes.set(refreshId, {
+      ...current,
+      ...result,
+      finishedAt: this.options.now().toISOString(),
+    });
+    if (this.activeRefreshId === refreshId) this.activeRefreshId = undefined;
+  }
+
+  private recordRefresh(status: StudioTrendRefreshStatus): void {
+    this.candidateRefreshes.set(status.refreshId, status);
+    while (this.candidateRefreshes.size > 20) {
+      const oldest = this.candidateRefreshes.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.candidateRefreshes.delete(oldest);
+    }
   }
 
   private async startCandidateLoad(forceRefresh: boolean): Promise<StudioTrendCandidate[]> {

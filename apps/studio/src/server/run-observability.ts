@@ -20,7 +20,7 @@ const PHASES: Array<{ id: StudioRunPhaseId; label: string; nodeIds: string[] }> 
 
 const NODE_ACTIONS: Record<string, string> = {
   brief: "正在核对题目、观众与生产约束",
-  script: "正在打磨开场钩子、信息节奏与收束",
+  script: "编剧与独立审计 Agent 正在迭代脚本，最多 3 轮",
   "reference-grammar": "正在提炼参考片的节奏、构图与镜头运动",
   "visual-direction": "正在统一叙事节奏、镜头语法与视觉规则",
   "asset-candidates": "正在检索并整理可用素材候选",
@@ -54,7 +54,8 @@ export interface StudioRunObservability {
   resultAvailability: StudioRunResultAvailability;
 }
 
-export function nodeActionLabel(nodeId: string): string {
+export function nodeActionLabel(nodeId: string, providerId?: string): string {
+  if (nodeId === "script" && providerId !== "codex-screenwriter-v1") return "编剧正在生成结构化脚本";
   return NODE_ACTIONS[nodeId] ?? "正在完成当前节点的创作交付";
 }
 
@@ -85,7 +86,10 @@ export function buildRunObservability(input: BuildRunObservabilityInput): Studio
   const currentAction = activeNode ? {
     nodeId: activeNode.id,
     role: activeNode.role ?? "制作角色",
-    label: activeNode.actionLabel ?? nodeActionLabel(activeNode.id),
+    label: activeNode.actionLabel ?? nodeActionLabel(
+      activeNode.id,
+      (activeNode.executionReceipt ?? activeNode.plannedExecution)?.providerId,
+    ),
   } : undefined;
   const failure = input.status === "failed"
     ? buildFailure(input.nodes, input.videoAvailable)

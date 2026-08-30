@@ -114,7 +114,14 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     listTrendServices: async () => [],
     listTrendSignals: async () => [],
     listTrendCandidates: async () => [],
-    refreshTrendCandidates: async () => [],
+    refreshTrendCandidates: async () => ({ refreshId: "refresh-1", status: "started", requestedAt: "2026-08-30T10:00:00.000Z" }),
+    trendCandidateRefreshStatus: async () => ({
+      refreshId: "refresh-1",
+      state: "succeeded",
+      requestedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:00:10.000Z",
+      candidateCount: 8,
+    }),
     listCandidateInbox: async () => ({
       items: [],
       facets: { total: 0, origins: {}, categories: {}, platforms: {}, verdicts: {} },
@@ -843,7 +850,10 @@ describe("Studio API", () => {
           novelty: 84, monetization: 72, seriesPotential: 88, complianceRisk: 12, final: 86,
         },
       }]),
-      refreshTrendCandidates: async () => { refreshCalls += 1; return []; },
+      refreshTrendCandidates: async () => {
+        refreshCalls += 1;
+        return { refreshId: "refresh-1", status: "started", requestedAt: "2026-08-30T10:00:00.000Z" };
+      },
     }) });
 
     const response = await app.inject({ method: "GET", url: "/api/trend-candidates" });
@@ -852,8 +862,21 @@ describe("Studio API", () => {
     assert.equal(response.statusCode, 200);
     assert.equal(response.json()[0].providerId, "api-topic-editor-v1");
     assert.equal(response.json()[0].evidence[0].source, "dailyhot");
-    assert.equal(refreshed.statusCode, 200);
+    assert.equal(refreshed.statusCode, 202);
+    assert.equal(refreshed.json().status, "started");
+    assert.equal(refreshed.json().refreshId, "refresh-1");
     assert.equal(refreshCalls, 1);
+    await app.close();
+  });
+
+  it("reports the terminal state of a background trend refresh", async () => {
+    const app = buildStudioApp({ service: fakeService() });
+
+    const response = await app.inject({ method: "GET", url: "/api/trend-candidates/refresh/refresh-1" });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().state, "succeeded");
+    assert.equal(response.json().candidateCount, 8);
     await app.close();
   });
 

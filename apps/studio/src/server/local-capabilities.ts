@@ -44,6 +44,8 @@ export interface LocalCapabilityServiceOptions {
   fetcher?: typeof fetch;
 }
 
+export class StudioVoicePreviewUnavailableError extends Error {}
+
 export class LocalCapabilityService {
   private readonly environment: NodeJS.ProcessEnv;
   private readonly commandAvailable: (command: string) => Promise<boolean>;
@@ -249,7 +251,7 @@ async function requestMiniMaxPreview(
   if (!apiKey) throw new Error("MINIMAX_API_KEY is required for MiniMax voice preview.");
   const configuredBaseUrl = environment.MINIMAX_TTS_BASE_URL?.trim();
   const baseUrl = (configuredBaseUrl || "https://api.minimaxi.com/v1").replace(/\/$/, "");
-  const response = await fetcher(`${baseUrl}/t2a_v2`, {
+  const request: RequestInit = {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
@@ -262,14 +264,38 @@ async function requestMiniMaxPreview(
       output_format: "hex",
       subtitle_enable: false,
     }),
-    signal: AbortSignal.timeout(90_000),
-  });
+  };
+  let response: Response | undefined;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      response = await fetcher(`${baseUrl}/t2a_v2`, { ...request, signal: AbortSignal.timeout(90_000) });
+      break;
+    } catch (error) {
+      if (!isConnectionSetupFailure(error)) throw error;
+      if (attempt === 3) {
+        throw new StudioVoicePreviewUnavailableError("MiniMax 声音服务连接超时，请稍后再试。", { cause: error });
+      }
+    }
+  }
+  if (!response) throw new StudioVoicePreviewUnavailableError("MiniMax 声音服务暂时不可用，请稍后再试。");
   if (!response.ok) throw new Error(`MiniMax voice preview failed with HTTP ${response.status}.`);
   const result = await response.json() as { data?: { audio?: unknown }; base_resp?: { status_code?: unknown; status_msg?: unknown } };
   if (result.base_resp?.status_code !== 0 || typeof result.data?.audio !== "string" || !result.data.audio) {
     throw new Error(`MiniMax voice preview failed: ${String(result.base_resp?.status_msg ?? "no audio returned")}`);
   }
   return Buffer.from(result.data.audio, "hex");
+}
+
+function isConnectionSetupFailure(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+    const code = "code" in current ? String(current.code) : "";
+    const message = current instanceof Error ? current.message : "";
+    if (["UND_ERR_CONNECT_TIMEOUT", "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH"].includes(code)) return true;
+    if (/Connect Timeout Error|attempted addresses/i.test(message)) return true;
+    current = "cause" in current ? current.cause : undefined;
+  }
+  return false;
 }
 
 function minimaxDirectedText(text: string, pauseScale: number): string {

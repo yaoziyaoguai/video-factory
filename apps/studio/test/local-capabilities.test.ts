@@ -175,6 +175,75 @@ describe("local capability discovery", () => {
     assert.equal(renderCount, 1);
   });
 
+  it("retries a MiniMax connection setup timeout", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-minimax-preview-"));
+    let requestCount = 0;
+    const service = new LocalCapabilityService({
+      repositoryRoot: "/repo",
+      workspaceRoot,
+      environment: { MINIMAX_API_KEY: "server-only", VIDEO_FACTORY_MAX_CLOUD_VOICE_PREVIEWS_PER_HOUR: "1" },
+      commandAvailable: async () => false,
+      pathExists: async () => false,
+      fetcher: async () => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          throw new TypeError("fetch failed", { cause: Object.assign(new Error("Connect Timeout Error"), { code: "UND_ERR_CONNECT_TIMEOUT" }) });
+        }
+        return new Response(JSON.stringify({
+          data: { audio: Buffer.from("fake-mp3").toString("hex") },
+          base_resp: { status_code: 0, status_msg: "success" },
+        }), { status: 200 });
+      },
+      runCommand: async (command, args) => {
+        if (command === "ffmpeg") await writeFile(args.at(-1)!, "mastered-audio");
+        return { stdout: "", stderr: "" };
+      },
+    });
+    const input = {
+      profileId: "minimax:Chinese (Mandarin)_News_Anchor",
+      text: "连接失败后安全重试。",
+      rate: 190,
+      pauseScale: 1,
+      masteringPreset: "natural" as const,
+    };
+
+    await service.preview(input);
+
+    assert.equal(requestCount, 2);
+  });
+
+  it("counts a failed cloud preview so retry cannot bypass the hourly spend guard", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-minimax-preview-"));
+    let requestCount = 0;
+    const service = new LocalCapabilityService({
+      repositoryRoot: "/repo",
+      workspaceRoot,
+      environment: { MINIMAX_API_KEY: "server-only", VIDEO_FACTORY_MAX_CLOUD_VOICE_PREVIEWS_PER_HOUR: "1" },
+      commandAvailable: async () => false,
+      pathExists: async () => false,
+      fetcher: async () => {
+        requestCount += 1;
+        return new Response(JSON.stringify({
+          data: { audio: Buffer.from("fake-mp3").toString("hex") },
+          base_resp: { status_code: 0, status_msg: "success" },
+        }), { status: 200 });
+      },
+      runCommand: async () => { throw new Error("ffmpeg failed after provider response"); },
+    });
+    const input = {
+      profileId: "minimax:Chinese (Mandarin)_News_Anchor",
+      text: "同一段试听再次尝试。",
+      rate: 190,
+      pauseScale: 1,
+      masteringPreset: "natural" as const,
+    };
+
+    await assert.rejects(() => service.preview(input), /ffmpeg failed/);
+    await assert.rejects(() => service.preview(input), /每小时 1 次/);
+
+    assert.equal(requestCount, 1);
+  });
+
   it("persists an hourly cloud preview limit across distinct texts", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-minimax-preview-"));
     let requests = 0;

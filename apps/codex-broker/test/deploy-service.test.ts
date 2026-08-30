@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 const brokerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = path.resolve(brokerRoot, "../..");
+const execFileAsync = promisify(execFile);
 
 describe("ZAI systemd service sample", () => {
   it("isolates runtime state and enforces a 0600 sensitive environment file", async () => {
@@ -78,6 +82,63 @@ describe("ZAI systemd service sample", () => {
 });
 
 describe("production deployment transaction", () => {
+  it("packages and validates the matching broker unit before switching each release", async () => {
+    const [service, deploy, dockerfile, studioMain] = await Promise.all([
+      readFile(path.join(brokerRoot, "deploy", "vf-codex-broker.service"), "utf8"),
+      readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8"),
+      readFile(path.join(repositoryRoot, "docker", "Dockerfile"), "utf8"),
+      readFile(path.join(repositoryRoot, "apps", "studio", "src", "server", "main.ts"), "utf8"),
+    ]);
+
+    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=600000$/m);
+    assert.match(studioMain, /timeoutMs: 1_260_000/);
+    assert.match(dockerfile, /^COPY apps\/codex-broker\/deploy apps\/codex-broker\/deploy$/m);
+    assert.match(deploy, /Candidate image does not contain a complete broker release/);
+    const validationPosition = deploy.indexOf('! -f "$staging/broker/dist/main.js"');
+    const switchPosition = deploy.indexOf('ln -sfn "$candidate_broker_release" "$broker_root/current"');
+    assert.ok(validationPosition >= 0 && switchPosition > validationPosition);
+    assert.match(deploy, /install_broker_unit_from_release\(\)/);
+    assert.match(deploy, /install -m 0644 "\$source" "\$broker_unit" \|\| return 1/);
+    assert.match(deploy, /systemctl daemon-reload \|\| return 1/);
+    assert.match(deploy, /install_broker_unit_from_release "\$broker_root\/current"/);
+    assert.match(deploy, /previous_broker_unit_backup/);
+    assert.match(deploy, /chown -R vf-codex:vf-bridge "\$release_dir" \|\| return 1/);
+    assert.match(deploy, /chmod -R a\+rX "\$release_dir" \|\| return 1/);
+    assert.match(deploy, /image_id="\$\(docker create video-factory:candidate\)" \|\| return 1/);
+    assert.match(deploy, /if ! staging="\$\(mktemp -d\)"; then/);
+    assert.match(deploy, /if ! docker rm "\$image_id" >\/dev\/null; then/);
+  });
+
+  it("propagates a broker unit installation failure from conditional deployment calls", async () => {
+    const deploy = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
+    const installFunction = deploy.match(/install_broker_unit_from_release\(\) \{[\s\S]*?\n\}/)?.[0];
+    assert.ok(installFunction);
+    const directory = await mkdtemp(path.join(tmpdir(), "video-factory-deploy-unit-"));
+    const release = path.join(directory, "release");
+    await mkdir(path.join(release, "deploy"), { recursive: true });
+    await writeFile(path.join(release, "deploy", "vf-codex-broker.service"), "[Unit]\n", "utf8");
+
+    try {
+      const script = `
+set -Eeuo pipefail
+broker_unit=${JSON.stringify(path.join(directory, "installed.service"))}
+install() { return 23; }
+systemctl() { return 0; }
+${installFunction}
+if install_broker_unit_from_release ${JSON.stringify(release)}; then
+  exit 0
+fi
+exit 42
+`;
+      await assert.rejects(
+        () => execFileAsync("bash", ["-c", script]),
+        (error: NodeJS.ErrnoException) => Number(error.code) === 42,
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("checks Codex upstream reachability before mutating the production release", async () => {
     const script = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
 
@@ -154,6 +215,8 @@ describe("production deployment transaction", () => {
     assert.match(script, /systemctl restart "\$broker_service"/);
     assert.match(script, /systemctl restart "\$zai_broker_service"/);
     assert.match(script, /return "\$failed"\n\}/);
+    assert.match(script, /install -m 0644 "\$previous_broker_unit_backup" "\$broker_unit" \|\| return 1/);
+    assert.match(script, /systemctl daemon-reload \|\| return 1/);
   });
 
   it("never changes ownership or mode of an existing disabled-ZAI runtime directory", async () => {

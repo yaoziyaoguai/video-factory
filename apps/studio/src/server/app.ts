@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { parseProductionTemplate } from "@video-factory/template-core";
 import { StudioAuthenticator, type StudioAuthOptions } from "./auth.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-service.js";
+import { StudioVoicePreviewUnavailableError } from "./local-capabilities.js";
 import {
   StudioInputError,
   parseStudioCandidateAdoptionInput,
@@ -43,6 +44,8 @@ import {
   type StudioTrendSignal,
   type StudioTrendSignalQuery,
   type StudioTrendCandidate,
+  type StudioTrendRefreshReceipt,
+  type StudioTrendRefreshStatus,
   type StudioRunDetail,
   type StudioRunSummary,
   type StudioSeries,
@@ -82,7 +85,8 @@ export interface StudioServicePort {
   listTrendServices(): Promise<StudioTrendService[]>;
   listTrendSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
   listTrendCandidates(): Promise<StudioTrendCandidate[]>;
-  refreshTrendCandidates(): Promise<StudioTrendCandidate[]>;
+  refreshTrendCandidates(): Promise<StudioTrendRefreshReceipt>;
+  trendCandidateRefreshStatus(refreshId: string): Promise<StudioTrendRefreshStatus>;
   listCandidateInbox(input: StudioCandidateInboxQuery): Promise<StudioCandidateInbox>;
   adoptCandidate(candidateId: string, input: StudioCandidateAdoptionInput): Promise<StudioOpportunity>;
   listSeries(): Promise<StudioSeries[]>;
@@ -221,7 +225,13 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     });
   });
   app.get("/api/trend-candidates", async () => options.service.listTrendCandidates());
-  app.post("/api/trend-candidates/refresh", async () => options.service.refreshTrendCandidates());
+  app.post("/api/trend-candidates/refresh", async (_request, reply) => {
+    return reply.code(202).send(await options.service.refreshTrendCandidates());
+  });
+  app.get<{ Params: { refreshId: string } }>("/api/trend-candidates/refresh/:refreshId", async (request) => {
+    requireSafeRouteId(request.params.refreshId, "热点更新编号");
+    return options.service.trendCandidateRefreshStatus(request.params.refreshId);
+  });
   app.get<{ Querystring: { origins?: string; categories?: string; platforms?: string; verdicts?: string; limit?: string } }>(
     "/api/candidate-inbox",
     async (request) => options.service.listCandidateInbox(parseCandidateInboxQuery(request.query)),
@@ -531,6 +541,10 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     }
     if (error instanceof StudioConflictError) {
       void reply.code(409).send({ error: error.message });
+      return;
+    }
+    if (error instanceof StudioVoicePreviewUnavailableError) {
+      void reply.code(503).send({ error: error.message });
       return;
     }
     app.log.error(error);

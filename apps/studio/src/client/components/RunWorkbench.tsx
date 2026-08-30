@@ -254,6 +254,12 @@ function runningNodeLabel(run: StudioRunDetail): string {
   const current = run.nodes.find((node) => node.id === run.currentNodeId)
     ?? run.nodes.find((node) => node.status === "running")
     ?? run.nodes.find((node) => node.status === "pending");
+  if (current?.id === "script") {
+    const providerId = (current.executionReceipt ?? current.plannedExecution)?.providerId;
+    return providerId === "codex-screenwriter-v1"
+      ? "编剧与独立审计 Agent 正在迭代脚本"
+      : "编剧正在生成结构化脚本";
+  }
   return current ? `${current.role ?? "制作角色"}正在处理${current.label}` : "系统正在推进制作";
 }
 

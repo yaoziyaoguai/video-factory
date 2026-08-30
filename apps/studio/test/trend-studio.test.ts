@@ -7,6 +7,61 @@ import type { StudioTrendCandidate } from "../src/shared/api.js";
 import { TrendStudio } from "../src/server/trend-studio.js";
 
 describe("TrendStudio", () => {
+  it("reuses an in-flight refresh and exposes success without starting a second Agent run", async () => {
+    let resolveRefresh: ((value: StudioTrendCandidate[]) => void) | undefined;
+    let calls = 0;
+    const studio = new TrendStudio({
+      repositoryRoot: "/repo",
+      environment: {},
+      now: () => new Date("2026-08-30T12:00:00.000Z"),
+      createRefreshId: () => "refresh-1",
+      trendGateway: { listServices: async () => [], listSignals: async () => [] },
+      trendAgent: { listCandidates: () => {
+        calls += 1;
+        return new Promise((resolve) => { resolveRefresh = resolve; });
+      } },
+    });
+
+    const first = await studio.requestCandidateRefresh();
+    const second = await studio.requestCandidateRefresh();
+    assert.deepEqual(first, { refreshId: "refresh-1", status: "started", requestedAt: "2026-08-30T12:00:00.000Z" });
+    assert.deepEqual(second, { refreshId: "refresh-1", status: "already_running", requestedAt: "2026-08-30T12:00:00.000Z" });
+    assert.equal(calls, 1);
+    assert.equal(studio.candidateRefreshStatus("refresh-1")?.state, "running");
+
+    resolveRefresh!([]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(studio.candidateRefreshStatus("refresh-1"), {
+      refreshId: "refresh-1",
+      state: "succeeded",
+      requestedAt: "2026-08-30T12:00:00.000Z",
+      finishedAt: "2026-08-30T12:00:00.000Z",
+      candidateCount: 0,
+    });
+  });
+
+  it("reports a terminal error for a failed background refresh", async () => {
+    const studio = new TrendStudio({
+      repositoryRoot: "/repo",
+      environment: {},
+      now: () => new Date("2026-08-30T12:00:00.000Z"),
+      createRefreshId: () => "refresh-failed",
+      trendGateway: { listServices: async () => [], listSignals: async () => [] },
+      trendAgent: { listCandidates: async () => { throw new Error("upstream unavailable"); } },
+    });
+
+    await studio.requestCandidateRefresh();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(studio.candidateRefreshStatus("refresh-failed"), {
+      refreshId: "refresh-failed",
+      state: "failed",
+      requestedAt: "2026-08-30T12:00:00.000Z",
+      finishedAt: "2026-08-30T12:00:00.000Z",
+      error: "热点来源或选题 Agent 暂时不可用，请稍后手动重试。",
+    });
+  });
+
   it("queues an explicit refresh behind an ordinary in-flight read", async () => {
     const resolvers: Array<(value: StudioTrendCandidate[]) => void> = [];
     let calls = 0;

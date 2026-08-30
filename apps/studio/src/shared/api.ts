@@ -239,6 +239,21 @@ export interface StudioTrendCandidate {
   editorialDecision?: StudioEditorialDecision;
 }
 
+export interface StudioTrendRefreshReceipt {
+  refreshId: string;
+  status: "started" | "already_running";
+  requestedAt: string;
+}
+
+export interface StudioTrendRefreshStatus {
+  refreshId: string;
+  state: "running" | "succeeded" | "failed";
+  requestedAt: string;
+  finishedAt?: string;
+  candidateCount?: number;
+  error?: string;
+}
+
 export interface StudioCandidateInboxItem extends StudioTrendCandidate {
   origin: StudioCandidateOrigin;
   category: StudioTopicCategory;

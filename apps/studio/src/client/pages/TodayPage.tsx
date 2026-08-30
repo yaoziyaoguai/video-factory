@@ -57,6 +57,48 @@ export function TodayPage() {
   const [nextStepNotice, setNextStepNotice] = useState<string>();
   const adoptedSectionRef = useRef<HTMLElement>(null);
   const trendLoadingRef = useRef(false);
+  const trendRefreshPollRef = useRef<number | undefined>(undefined);
+
+  const updateTrendInbox = useCallback((next: StudioCandidateInbox) => {
+    const scoped = onlyOrigin(next, "trend");
+    setTrendInbox(scoped);
+    return scoped;
+  }, []);
+
+  const scheduleTrendRefreshPoll = useCallback((refreshId: string) => {
+    if (trendRefreshPollRef.current !== undefined) window.clearTimeout(trendRefreshPollRef.current);
+    const poll = async (attempt: number, consecutiveFailures = 0) => {
+      let nextFailures = 0;
+      try {
+        const status = await studioApi.trendCandidateRefreshStatus(refreshId);
+        if (status.state === "succeeded") {
+          updateTrendInbox(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }));
+          setNextStepNotice(`热点候选已更新完成，共生成 ${status.candidateCount ?? 0} 条候选。`);
+          return;
+        }
+        if (status.state === "failed") {
+          setNextStepNotice(status.error ?? "热点更新失败，请稍后手动重试。");
+          return;
+        }
+      } catch {
+        nextFailures = consecutiveFailures + 1;
+        if (nextFailures >= 3) {
+          setNextStepNotice("暂时无法确认热点更新状态，当前缓存仍可使用；请稍后再试。");
+          return;
+        }
+      }
+      if (attempt >= 39) {
+        setNextStepNotice("热点更新仍未完成，当前缓存可以继续使用；稍后可再次查看或手动刷新。");
+        return;
+      }
+      trendRefreshPollRef.current = window.setTimeout(() => void poll(attempt + 1, nextFailures), 15_000);
+    };
+    trendRefreshPollRef.current = window.setTimeout(() => void poll(0), 15_000);
+  }, [updateTrendInbox]);
+
+  useEffect(() => () => {
+    if (trendRefreshPollRef.current !== undefined) window.clearTimeout(trendRefreshPollRef.current);
+  }, []);
 
   const loadTrendInbox = useCallback(async (forceRefresh = false) => {
     if (trendLoadingRef.current) return;
@@ -64,15 +106,21 @@ export function TodayPage() {
     setTrendLoading(true);
     setTrendError(undefined);
     try {
-      if (forceRefresh) await studioApi.refreshTrendCandidates();
-      setTrendInbox(onlyOrigin(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }), "trend"));
+      if (forceRefresh) {
+        const receipt = await studioApi.refreshTrendCandidates();
+        setNextStepNotice(receipt.status === "already_running"
+          ? "热点后台更新已在进行，当前缓存仍可继续选择。"
+          : "热点后台更新已开始，当前缓存仍可继续选择。");
+        scheduleTrendRefreshPoll(receipt.refreshId);
+      }
+      updateTrendInbox(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }));
     } catch (caught) {
       setTrendError(errorMessage(caught));
     } finally {
       trendLoadingRef.current = false;
       setTrendLoading(false);
     }
-  }, []);
+  }, [scheduleTrendRefreshPoll, updateTrendInbox]);
 
   const loadSeriesWorkspace = useCallback(async () => {
     setSeriesLoading(true);

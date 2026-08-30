@@ -320,6 +320,46 @@ describe("StudioService", () => {
     assert.equal(detail?.artifacts[0]?.contentUrl, "/api/runs/run-1/artifacts/artifact-video/content");
   });
 
+  it("describes a template script honestly instead of claiming an Agent audit loop", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const run = waitingRun(workspaceRoot);
+    run.status = "running";
+    delete run.finishedAt;
+    run.nodeRuns = [{
+      nodeId: "script",
+      role: "编剧",
+      status: "running",
+      startedAt: "2026-08-21T10:00:10.000Z",
+      artifactIds: [],
+      qualityGateResults: [],
+    }];
+    run.executionPlan = [{
+      nodeId: "script",
+      role: "编剧",
+      capability: "script.draft",
+      providerId: "python-template-v1",
+      providerLabel: "模板编剧",
+      modelId: "python-template-v1",
+      transport: "local_process",
+      billing: "free",
+      configurationSource: "template_default",
+      parameters: {},
+      estimatedCostCny: 0,
+    }];
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(run),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      now: () => new Date("2026-08-21T10:00:20.000Z"),
+    });
+
+    const detail = await service.getRun("run-1");
+
+    assert.equal(detail?.nodes.find((node) => node.id === "script")?.actionLabel, "编剧正在生成结构化脚本");
+    assert.equal(detail?.currentAction?.label, "编剧正在生成结构化脚本");
+  });
+
   it("maps the effective render and publish-package versions instead of historical artifacts", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const run = waitingRun(workspaceRoot);
@@ -2209,8 +2249,18 @@ describe("StudioService", () => {
     assert.deepEqual(await service.listTrendCandidates(), [candidate]);
     assert.equal(calls, 1);
 
-    assert.deepEqual(await service.refreshTrendCandidates(), [candidate]);
+    const refresh = await service.refreshTrendCandidates();
+    assert.equal(refresh.status, "started");
+    assert.equal(refresh.requestedAt, "2026-08-24T00:01:00.000Z");
+    assert.match(refresh.refreshId, /^[0-9a-f-]{36}$/);
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(calls, 2);
+    let refreshState = (await service.trendCandidateRefreshStatus(refresh.refreshId)).state;
+    for (let attempt = 0; attempt < 20 && refreshState === "running"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      refreshState = (await service.trendCandidateRefreshStatus(refresh.refreshId)).state;
+    }
+    assert.equal(refreshState, "succeeded");
   });
 
   it("scores, persists, loads, and updates real opportunity candidates", async () => {

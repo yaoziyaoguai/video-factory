@@ -61,6 +61,7 @@ COPY --from=builder /app/apps/studio/dist apps/studio/dist
 # 仅供宿主机部署脚本 docker cp 提取到 systemd 服务；容器内的 app 不启动 broker。
 COPY apps/codex-broker/package.json apps/codex-broker/package.json
 COPY --from=builder /app/apps/codex-broker/dist apps/codex-broker/dist
+COPY apps/codex-broker/deploy apps/codex-broker/deploy
 
 RUN addgroup --system --gid 1001 video-factory \
     && adduser --system --uid 1001 --ingroup video-factory --home /app video-factory \

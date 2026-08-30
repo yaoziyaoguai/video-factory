@@ -58,6 +58,52 @@ describe("run observability", () => {
     });
   });
 
+  it("describes the script node as a producer and independent-auditor loop", () => {
+    const result = buildRunObservability({
+      status: "running",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      now: "2026-08-30T10:01:00.000Z",
+      nodes: [node("script", "脚本", "running", {
+        role: "编剧",
+        plannedExecution: {
+          providerId: "codex-screenwriter-v1",
+          providerLabel: "Codex 编剧",
+          modelId: "gpt-5.6-sol",
+          transport: "unix_socket",
+          billing: "subscription",
+          snapshotSource: "created",
+        },
+      })],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.currentAction?.label).toBe("编剧与独立审计 Agent 正在迭代脚本，最多 3 轮");
+  });
+
+  it("does not claim an Agent audit for the local template script provider", () => {
+    const result = buildRunObservability({
+      status: "running",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      now: "2026-08-30T10:01:00.000Z",
+      nodes: [node("script", "脚本", "running", {
+        role: "编剧",
+        plannedExecution: {
+          providerId: "python-template-v1",
+          providerLabel: "模板脚本",
+          modelId: "rule-template",
+          transport: "local_process",
+          billing: "free",
+          snapshotSource: "created",
+        },
+      })],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.currentAction?.label).toBe("编剧正在生成结构化脚本");
+  });
+
   it("only exposes an ETA range when every remaining node has enough historical evidence", () => {
     const result = buildRunObservability({
       status: "running",

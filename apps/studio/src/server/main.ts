@@ -53,13 +53,13 @@ const [codexSettings, zaiCodexSettings] = await Promise.all([
 ]);
 const codexModelId = codexSettings.modelId || process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
 const zaiVisualReviewModelId = zaiCodexSettings.modelId || resolveZaiVisualReviewModelId(process.env);
-// 单并发 broker 中，660s 覆盖一个在途后台任务和本次 285s 执行；
+// 单并发 broker 中，21 分钟覆盖一个 10 分钟在途任务、一个完整执行和传输余量；
 // 生产任务会插队尚未开始的热点任务，客户端仍不重放已受理任务。
 const codexClient = codexSettings.available
-  ? new CodexBridgeClient({ socketPath: codexSettings.socketPath, timeoutMs: 660_000 })
+  ? new CodexBridgeClient({ socketPath: codexSettings.socketPath, timeoutMs: 1_260_000 })
   : undefined;
 const zaiCodexClient = zaiCodexSettings.available
-  ? new CodexBridgeClient({ socketPath: zaiCodexSettings.socketPath, timeoutMs: 660_000 })
+  ? new CodexBridgeClient({ socketPath: zaiCodexSettings.socketPath, timeoutMs: 1_260_000 })
   : undefined;
 const directorAgent = codexClient ? new CodexVisualDirectorAgent({ client: codexClient }) : undefined;
 const screenwriterAgent = codexClient ? new CodexScreenwriterAgent({ client: codexClient }) : undefined;
