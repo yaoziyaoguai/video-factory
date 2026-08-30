@@ -429,6 +429,7 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     requireSafeRouteId(request.params.runId, "制作编号");
     let buffered: StudioRunDetail | undefined;
     let closed = false;
+    let heartbeatTimer: NodeJS.Timeout | undefined;
     let send = (run: StudioRunDetail): void => {
       buffered = run;
     };
@@ -452,6 +453,7 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
         return;
       }
       closed = true;
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
       unsubscribe();
       if (!reply.raw.writableEnded) {
         reply.raw.end();
@@ -469,6 +471,14 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
 
     request.raw.on("close", close);
     send(buffered ?? current!);
+    if (!closed) {
+      const sendHeartbeat = (): void => {
+        if (!closed) reply.raw.write(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString() })}\n\n`);
+      };
+      sendHeartbeat();
+      heartbeatTimer = setInterval(sendHeartbeat, 10_000);
+      heartbeatTimer.unref();
+    }
     return reply;
   });
 

@@ -26,6 +26,15 @@ export function HomePage() {
   const currentRun = useMemo(() => runs.find(needsAttention)
     ?? runs.find((run) => run.status === "running" || run.status === "pending")
     ?? runs[0], [runs]);
+  const overview = useMemo(() => {
+    const current = runs.filter((run) => !run.archivedAt);
+    return {
+      attention: current.filter(needsAttention).length,
+      active: current.filter((run) => run.status === "running" || run.status === "pending").length,
+      completed: current.filter((run) => run.status === "succeeded").length,
+      adjustment: current.filter((run) => run.status === "failed" || run.status === "rejected").length,
+    };
+  }, [runs]);
 
   return (
     <main className="home-page">
@@ -39,6 +48,13 @@ export function HomePage() {
       </header>
 
       {error ? <div className="home-error" role="alert"><span>{error}</span><button className="button button-secondary" type="button" onClick={() => void load()}><RefreshCw aria-hidden="true" size={16} />重新连接</button></div> : null}
+
+      {runs.length ? <section className="home-production-overview" aria-label="制作概况">
+        <span><small>待你处理</small><strong>{overview.attention}</strong></span>
+        <span><small>自动制作</small><strong>{overview.active}</strong></span>
+        <span><small>已完成</small><strong>{overview.completed}</strong></span>
+        <span><small>需调整</small><strong>{overview.adjustment}</strong></span>
+      </section> : null}
 
       {currentRun ? (
         <section className="home-continuation" aria-labelledby="continue-title">

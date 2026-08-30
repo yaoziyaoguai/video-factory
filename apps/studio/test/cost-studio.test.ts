@@ -57,6 +57,45 @@ describe("CostStudio", () => {
     assert.equal(dashboard.totals.failedMeteredCalls, 0);
   });
 
+  it("keeps an interrupted authorized provider request visible while its actual cost is unknown", async () => {
+    const studio = new CostStudio(async () => ([{
+      id: "run-uncertain-paid",
+      initialInput: { title: "中断的付费生成" },
+      nodeRuns: [{
+        nodeId: "assets",
+        role: "素材导演",
+        status: "failed",
+        startedAt: "2026-08-27T11:00:00.000Z",
+        outcomeUncertain: true,
+        operationRequestId: "provider-operation-1",
+        spendAuthorizationId: "authorization-uncertain",
+        spendPlan: {
+          providerId: "minimax-video",
+          modelId: "MiniMax-Hailuo",
+          estimatedCostCny: 2.4,
+        },
+      }],
+      executionReceipts: [],
+      spendAuthorizations: [{
+        id: "authorization-uncertain",
+        nodeId: "assets",
+        providerId: "minimax-video",
+        modelId: "MiniMax-Hailuo",
+        maxCostCny: 3,
+      }],
+    }]));
+
+    const detail = await studio.runDetail("run-uncertain-paid");
+
+    assert.equal(detail?.lines.length, 1);
+    assert.equal(detail?.totals.authorizedCostCny, 3);
+    assert.equal(detail?.totals.actualCostCny, 0);
+    assert.equal(detail?.totals.actualPendingCount, 1);
+    assert.equal(detail?.totals.meteredCalls, 1);
+    assert.equal(detail?.lines[0]?.status, "unknown");
+    assert.equal(detail?.lines[0]?.actualPending, true);
+  });
+
   it("counts every producer and auditor call in an agent loop", async () => {
     const studio = new CostStudio(async () => ([{
       id: "run-agent-loop",

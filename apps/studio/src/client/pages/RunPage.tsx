@@ -7,6 +7,10 @@ import { NewRunDialog } from "../components/NewRunDialog.js";
 import { RunWorkbench } from "../components/RunWorkbench.js";
 import { MultiPlatformPublishDialog } from "../components/MultiPlatformPublishDialog.js";
 
+export function preferRunSnapshot(current: StudioRunDetail | undefined, next: StudioRunDetail): StudioRunDetail {
+  return !current || next.revision >= current.revision ? next : current;
+}
+
 export function RunPage() {
   const { runId = "" } = useParams();
   const navigate = useNavigate();
@@ -15,6 +19,7 @@ export function RunPage() {
   const [decisionPending, setDecisionPending] = useState(false);
   const [error, setError] = useState<string>();
   const [connectionWarning, setConnectionWarning] = useState<string>();
+  const [connectionHeartbeatAt, setConnectionHeartbeatAt] = useState<string>();
   const [publishing, setPublishing] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [restartProviders, setRestartProviders] = useState<StudioProvider[]>([]);
@@ -23,6 +28,29 @@ export function RunPage() {
   const [costError, setCostError] = useState<string>();
   const [nodeMutationPending, setNodeMutationPending] = useState(false);
   const costRefreshTimer = useRef<number | undefined>(undefined);
+  const snapshotRefreshPending = useRef(false);
+
+  const refreshCosts = useCallback(async () => {
+    try {
+      setCostDetail(await studioApi.runCosts(runId));
+      setCostError(undefined);
+    } catch (caught) {
+      setCostError(`成本明细读取失败：${caught instanceof Error ? caught.message : String(caught)}`);
+    }
+  }, [runId]);
+
+  const refreshRunSnapshot = useCallback(async () => {
+    if (snapshotRefreshPending.current) return;
+    snapshotRefreshPending.current = true;
+    try {
+      const nextRun = await studioApi.run(runId);
+      setRun((current) => preferRunSnapshot(current, nextRun));
+    } catch {
+      // SSE 的断线提示负责告知连接问题；心跳补偿读取不重复制造错误横幅。
+    } finally {
+      snapshotRefreshPending.current = false;
+    }
+  }, [runId]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -53,7 +81,8 @@ export function RunPage() {
     return subscribeToRun(
       runId,
       (nextRun) => {
-        setRun(nextRun);
+        setRun((current) => preferRunSnapshot(current, nextRun));
+        setConnectionHeartbeatAt(new Date().toISOString());
         if (costRefreshTimer.current === undefined) {
           costRefreshTimer.current = window.setTimeout(() => {
             costRefreshTimer.current = undefined;
@@ -63,8 +92,13 @@ export function RunPage() {
         setConnectionWarning(undefined);
       },
       () => setConnectionWarning("实时连接暂时中断，正在自动重连。你也可以刷新页面读取最新进度。"),
+      (at) => {
+        setConnectionHeartbeatAt(at);
+        setConnectionWarning(undefined);
+        void refreshRunSnapshot();
+      },
     );
-  }, [runId, run !== undefined, isTerminal(run?.status)]);
+  }, [runId, run !== undefined, isTerminal(run?.status), refreshRunSnapshot]);
 
   useEffect(() => () => {
     if (costRefreshTimer.current !== undefined) window.clearTimeout(costRefreshTimer.current);
@@ -74,7 +108,8 @@ export function RunPage() {
     setDecisionPending(true);
     setError(undefined);
     try {
-      setRun(await studioApi.decide(runId, input));
+      const nextRun = await withMutationProgress(() => studioApi.decide(runId, input));
+      setRun((current) => preferRunSnapshot(current, nextRun));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -104,7 +139,8 @@ export function RunPage() {
     setNodeMutationPending(true);
     setError(undefined);
     try {
-      setRun(await studioApi.overrideNode(runId, nodeId, input));
+      const nextRun = await studioApi.overrideNode(runId, nodeId, input);
+      setRun((current) => preferRunSnapshot(current, nextRun));
       await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -118,7 +154,8 @@ export function RunPage() {
     setNodeMutationPending(true);
     setError(undefined);
     try {
-      setRun(await studioApi.overrideNodeInput(runId, nodeId, input));
+      const nextRun = await studioApi.overrideNodeInput(runId, nodeId, input);
+      setRun((current) => preferRunSnapshot(current, nextRun));
       await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -132,7 +169,8 @@ export function RunPage() {
     setNodeMutationPending(true);
     setError(undefined);
     try {
-      setRun(await studioApi.authorizeSpend(runId, nodeId, input));
+      const nextRun = await withMutationProgress(() => studioApi.authorizeSpend(runId, nodeId, input));
+      setRun((current) => preferRunSnapshot(current, nextRun));
       await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -146,7 +184,8 @@ export function RunPage() {
     setNodeMutationPending(true);
     setError(undefined);
     try {
-      setRun(await studioApi.regenerateStale(runId));
+      const nextRun = await withMutationProgress(() => studioApi.regenerateStale(runId));
+      setRun((current) => preferRunSnapshot(current, nextRun));
       await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -160,7 +199,8 @@ export function RunPage() {
     setNodeMutationPending(true);
     setError(undefined);
     try {
-      setRun(await studioApi.retryFailedNode(runId, nodeId));
+      const nextRun = await withMutationProgress(() => studioApi.retryFailedNode(runId, nodeId));
+      setRun((current) => preferRunSnapshot(current, nextRun));
       setConnectionWarning(undefined);
       await refreshCosts();
     } catch (caught) {
@@ -171,12 +211,15 @@ export function RunPage() {
     }
   }
 
-  async function refreshCosts() {
+  async function withMutationProgress(operation: () => Promise<StudioRunDetail>): Promise<StudioRunDetail> {
+    const poll = window.setInterval(() => {
+      void refreshRunSnapshot();
+      void refreshCosts();
+    }, 750);
     try {
-      setCostDetail(await studioApi.runCosts(runId));
-      setCostError(undefined);
-    } catch (caught) {
-      setCostError(`成本明细读取失败：${caught instanceof Error ? caught.message : String(caught)}`);
+      return await operation();
+    } finally {
+      window.clearInterval(poll);
     }
   }
 
@@ -199,7 +242,7 @@ export function RunPage() {
       {connectionWarning && !isTerminal(run.status) ? <div className="inline-error" role="status"><AlertCircle aria-hidden="true" size={16} />{connectionWarning}</div> : null}
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
       {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
-      <RunWorkbench run={run} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} nodeMutationPending={nodeMutationPending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onAuthorizeSpend={authorizeSpend} onRegenerateStale={regenerateStale} onRetryFailedNode={retryFailedNode} />
+      <RunWorkbench run={run} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onAuthorizeSpend={authorizeSpend} onRegenerateStale={regenerateStale} onRetryFailedNode={retryFailedNode} />
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
       <NewRunDialog
         open={restarting}

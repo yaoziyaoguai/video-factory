@@ -395,6 +395,73 @@ describe("StudioService", () => {
     assert.equal(detail?.publishPackageArtifactId, "artifact-package-current");
   });
 
+  it("does not expose a stale render or publish package as the current result", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const run = waitingRun(workspaceRoot);
+    run.status = "stale";
+    run.nodeRuns[0]!.status = "stale";
+    run.nodeRuns[0]!.outputState = {
+      generatedVersionId: "render-v1",
+      effectiveVersionId: "render-v1",
+      stale: true,
+      versions: [{
+        id: "render-v1",
+        nodeId: "render",
+        source: "generated",
+        artifactIds: ["artifact-video"],
+        inputVersionIds: [],
+        createdAt: "2026-08-21T10:00:50.000Z",
+        createdBy: "python-ffmpeg-v1",
+        schemaVersion: "1",
+      }],
+    };
+    run.nodeRuns.push({
+      nodeId: "publish-package",
+      status: "stale",
+      startedAt: "2026-08-21T10:01:10.000Z",
+      artifactIds: ["artifact-package-old"],
+      qualityGateResults: [],
+      outputState: {
+        generatedVersionId: "package-v1",
+        effectiveVersionId: "package-v1",
+        stale: true,
+        versions: [{
+          id: "package-v1",
+          nodeId: "publish-package",
+          source: "generated",
+          artifactIds: ["artifact-package-old"],
+          inputVersionIds: [],
+          createdAt: "2026-08-21T10:01:10.000Z",
+          createdBy: "codex-publish-copy-v1",
+          schemaVersion: "1",
+        }],
+      },
+    });
+    run.artifacts.push({
+      id: "artifact-package-old",
+      kind: "publish_package",
+      uri: path.join(workspaceRoot, "runs", "run-1", "publish", "publish_package.json"),
+      createdAt: "2026-08-21T10:01:10.000Z",
+      contentType: "application/json",
+      producer: { nodeId: "publish-package", attempt: 1 },
+      provenance: { providerId: "codex-publish-copy-v1" },
+    });
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(run),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+
+    const [summary] = await service.listRuns();
+    const detail = await service.getRun("run-1");
+
+    assert.equal(summary?.videoContentUrl, undefined);
+    assert.equal(detail?.videoArtifactId, undefined);
+    assert.equal(detail?.publishPackageArtifactId, undefined);
+    assert.equal(detail?.resultAvailability?.kind, "none");
+  });
+
   it("dispatches valid available providers and publishes snapshots", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));

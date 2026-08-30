@@ -45,8 +45,11 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       ? [{ ...value.executionReceipt, nodeId: value.nodeId, spendAuthorizationId: value.spendAuthorizationId }]
       : [])
     : [];
+  const uncertainReceipts = Array.isArray(run.nodeRuns)
+    ? run.nodeRuns.flatMap((value) => uncertainReceipt(value, authorizations))
+    : [];
   const receipts = mergeReceipts(
-    nestedReceipts,
+    [...nestedReceipts, ...uncertainReceipts],
     Array.isArray(run.executionReceipts) ? run.executionReceipts : [],
   );
   const lines = receipts.flatMap((value, index): StudioCostLine[] => {
@@ -117,6 +120,34 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
     }];
   }).sort((left, right) => left.startedAt.localeCompare(right.startedAt));
   return { runId: run.id, title, totals: totals(lines), lines };
+}
+
+function uncertainReceipt(value: unknown, authorizations: unknown[]): Record<string, unknown>[] {
+  if (!isRecord(value) || value.outcomeUncertain !== true || isRecord(value.executionReceipt)) return [];
+  const authorizationId = text(value.spendAuthorizationId);
+  const authorization = authorizations.find((candidate) => isRecord(candidate) && candidate.id === authorizationId);
+  if (!authorizationId || !isRecord(authorization)) return [];
+  const plan = isRecord(value.spendPlan) ? value.spendPlan : undefined;
+  const startedAt = text(value.startedAt) || text(authorization.approvedAt);
+  const nodeId = text(value.nodeId);
+  const providerId = text(authorization.providerId) || text(plan?.providerId);
+  const modelId = text(authorization.modelId) || text(plan?.modelId);
+  if (!startedAt || !nodeId || !providerId || !modelId) return [];
+  return [{
+    id: `uncertain:${authorizationId}:${text(value.operationRequestId) || startedAt}`,
+    nodeId,
+    providerId,
+    modelId,
+    capability: "unknown",
+    billing: "metered",
+    status: "unknown",
+    spendAuthorizationId: authorizationId,
+    authorizedCostCny: nonNegativeNumber(authorization.maxCostCny),
+    estimatedCostCny: nonNegativeNumber(plan?.estimatedCostCny) ?? 0,
+    meteredAttemptCount: 1,
+    ...(text(value.operationRequestId) ? { requestId: text(value.operationRequestId) } : {}),
+    startedAt,
+  }];
 }
 
 function mergeReceipts(current: unknown[], history: unknown[]): unknown[] {

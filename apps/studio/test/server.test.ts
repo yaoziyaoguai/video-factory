@@ -1032,6 +1032,7 @@ describe("Studio API", () => {
     assert.equal(response.statusCode, 200);
     assert.match(response.headers["content-type"] ?? "", /text\/event-stream/);
     assert.match(response.body, /event: run/);
+    assert.match(response.body, /event: heartbeat/);
     assert.match(response.body, /"status":"running"/);
     assert.match(response.body, /"status":"succeeded"/);
     assert.equal(unsubscribed, true);

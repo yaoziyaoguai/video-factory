@@ -256,12 +256,23 @@ export function subscribeToRun(
   runId: string,
   onRun: (run: StudioRunDetail) => void,
   onDisconnect?: () => void,
+  onHeartbeat?: (at: string) => void,
 ): () => void {
   const events = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
   const receive = (event: MessageEvent<string>) => {
     onRun(JSON.parse(event.data) as StudioRunDetail);
   };
   events.addEventListener("run", receive as EventListener);
+  if (onHeartbeat) {
+    events.addEventListener("heartbeat", ((event: MessageEvent<string>) => {
+      try {
+        const payload = JSON.parse(event.data) as { at?: unknown };
+        if (typeof payload.at === "string") onHeartbeat(payload.at);
+      } catch {
+        // 心跳仅用于连接提示；畸形事件不应中断制作页的实时更新。
+      }
+    }) as EventListener);
+  }
   if (onDisconnect) events.addEventListener("error", onDisconnect);
   return () => events.close();
 }

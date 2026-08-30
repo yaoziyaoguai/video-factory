@@ -546,6 +546,67 @@ export interface StudioRunSummary {
   productionReservationId?: string;
 }
 
+export type StudioRunPhaseId = "planning" | "assets" | "composition" | "review" | "delivery";
+export type StudioRunPhaseStatus = "pending" | "running" | "completed" | "attention" | "failed";
+
+export interface StudioRunPhase {
+  id: StudioRunPhaseId;
+  label: string;
+  status: StudioRunPhaseStatus;
+  nodeIds: string[];
+  completedNodes: number;
+  totalNodes: number;
+}
+
+export interface StudioRunEtaRange {
+  lowSeconds: number;
+  highSeconds: number;
+  sampleSize: number;
+}
+
+export interface StudioRunProgress {
+  completedNodes: number;
+  totalNodes: number;
+  percentage: number;
+  elapsedSeconds: number;
+  lastUpdatedAt: string;
+  eta?: StudioRunEtaRange;
+  etaUnavailableReason?: "insufficient_history" | "waiting_for_human" | "future_human_gate" | "not_running";
+}
+
+export interface StudioRunCurrentAction {
+  nodeId: string;
+  role: string;
+  label: string;
+}
+
+export type StudioRunFailureCategory =
+  | "provider_capacity"
+  | "provider_timeout"
+  | "configuration"
+  | "content_policy"
+  | "infrastructure"
+  | "node_failure";
+
+export interface StudioRunFailure {
+  nodeId: string;
+  nodeLabel: string;
+  category: StudioRunFailureCategory;
+  summary: string;
+  impact: string;
+  retryable: boolean;
+  recoveryActions: string[];
+  savedNodeCount: number;
+  technicalDetail?: string;
+}
+
+export interface StudioRunResultAvailability {
+  kind: "none" | "draft_video" | "reviewed_video" | "publish_package";
+  usable: boolean;
+  label: string;
+  detail: string;
+}
+
 export interface StudioRunArchiveInput {
   runIds: string[];
 }
@@ -559,6 +620,11 @@ export interface StudioRunDetail extends StudioRunSummary {
   nodes: StudioNode[];
   artifacts: StudioArtifact[];
   decisions: StudioDecision[];
+  phases?: StudioRunPhase[];
+  progress?: StudioRunProgress;
+  currentAction?: StudioRunCurrentAction;
+  failure?: StudioRunFailure;
+  resultAvailability?: StudioRunResultAvailability;
   activeIntervention?: StudioIntervention;
   videoArtifactId?: string;
   publishPackageArtifactId?: string;
@@ -568,6 +634,7 @@ export interface StudioNode {
   id: string;
   label: string;
   role?: string;
+  actionLabel?: string;
   status: StudioRunStatus | "skipped";
   startedAt?: string;
   finishedAt?: string;

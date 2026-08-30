@@ -31,6 +31,7 @@ import {
 import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 import { validateNodeOverrideOutput } from "./node-output-validator.js";
 import type { RunArchiveRepository } from "./run-archive-store.js";
+import { buildRunObservability, nodeActionLabel } from "./run-observability.js";
 
 const MANAGED_FILE_PLACEHOLDER = "[系统托管文件]";
 
@@ -105,6 +106,7 @@ export class ProductionStudio {
   private readonly listeners = new Map<string, Set<(run: StudioRunDetail) => void>>();
   private readonly completions = new Set<Promise<void>>();
   private readonly startsInFlight = new Map<string, { digest: string; operation: Promise<StartRunResponse> }>();
+  private historicalNodeDurations: Record<string, number[]> = {};
 
   constructor(private readonly options: ProductionStudioOptions) {}
 
@@ -113,16 +115,19 @@ export class ProductionStudio {
       this.options.pipeline.list(),
       this.options.archiveStore.list(),
     ]);
+    this.historicalNodeDurations = collectNodeDurationHistory(runs);
     return runs.map((run) => withArchiveState(toRunSummary(run), archived[run.id]));
   }
 
   async get(runId: string): Promise<StudioRunDetail | undefined> {
     try {
-      const [run, archived] = await Promise.all([
+      const [run, archived, historyRuns] = await Promise.all([
         this.options.pipeline.show(runId),
         this.options.archiveStore.list(),
+        this.options.pipeline.list(),
       ]);
-      return withArchiveState(toRunDetail(run), archived[run.id]);
+      this.historicalNodeDurations = collectNodeDurationHistory(historyRuns);
+      return withArchiveState(this.toDetail(run), archived[run.id]);
     } catch (error) {
       if (hasCode(error, "ENOENT")) return undefined;
       throw error;
@@ -282,7 +287,10 @@ export class ProductionStudio {
   }
 
   private async dispatchBrief(brief: ProductionBrief): Promise<StartRunResponse> {
-    const dispatched = await this.options.pipeline.dispatch(brief, (run) => this.publish(toRunDetail(run)));
+    if (Object.keys(this.historicalNodeDurations).length === 0) {
+      this.historicalNodeDurations = collectNodeDurationHistory(await this.options.pipeline.list());
+    }
+    const dispatched = await this.options.pipeline.dispatch(brief, (run) => this.publish(this.toDetail(run)));
     const tracked: Promise<void> = dispatched.completion
       .then(() => undefined)
       .catch(async () => {
@@ -292,6 +300,13 @@ export class ProductionStudio {
       .finally(() => this.completions.delete(tracked));
     this.completions.add(tracked);
     return { runId: dispatched.runId, status: "running" };
+  }
+
+  private toDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
+    return toRunDetail(run, {
+      now: (this.options.now ?? (() => new Date()))().toISOString(),
+      historicalNodeDurations: this.historicalNodeDurations,
+    });
   }
 
   private async startIdempotently(brief: ProductionBrief, idempotencyKey: string, digest: string): Promise<StartRunResponse> {
@@ -350,7 +365,7 @@ export class ProductionStudio {
       }
       throw error;
     }
-    const detail = toRunDetail(updated);
+    const detail = this.toDetail(updated);
     this.publish(detail);
     return detail;
   }
@@ -414,7 +429,7 @@ export class ProductionStudio {
         schemaVersion: effectiveVersion?.schemaVersion ?? "1",
       });
       persisted = true;
-      const detail = toRunDetail(updated);
+      const detail = this.toDetail(updated);
       this.publish(detail);
       return detail;
     } catch (error) {
@@ -456,7 +471,7 @@ export class ProductionStudio {
         ...(effectiveInputVersion ? { expectedVersionId: effectiveInputVersion.id } : {}),
         allowTerminalEdit: isTerminalRun(current.status) && input.confirmTerminalEdit === true,
       });
-      const detail = toRunDetail(updated);
+      const detail = this.toDetail(updated);
       this.publish(detail);
       return detail;
     } catch (error) {
@@ -612,7 +627,7 @@ export class ProductionStudio {
         maxAttempts: plan.maxAttempts,
         approvedBy,
       });
-      const detail = toRunDetail(updated);
+      const detail = this.toDetail(updated);
       this.publish(detail);
       return detail;
     } catch (error) {
@@ -628,7 +643,7 @@ export class ProductionStudio {
     if (current.status !== "stale") throw new StudioConflictError("这条制作当前没有需要重新生成的旧结果。");
     try {
       const updated = await this.options.pipeline.resumeStale(runId);
-      const detail = toRunDetail(updated);
+      const detail = this.toDetail(updated);
       this.publish(detail);
       return detail;
     } catch (error) {
@@ -646,7 +661,7 @@ export class ProductionStudio {
     }
     try {
       const updated = await this.options.pipeline.retryFailedNode(runId, nodeId);
-      const detail = toRunDetail(updated);
+      const detail = this.toDetail(updated);
       this.publish(detail);
       return detail;
     } catch (error) {
@@ -996,8 +1011,8 @@ function toRunSummary(run: WorkflowRun<ProductionBrief>): StudioRunSummary {
   const currentNodeId = run.nodeRuns.at(-1)?.nodeId ?? "brief";
   const videoArtifact = effectiveNodeArtifact(run, "render", (artifact) =>
     artifact.kind === "render" && artifact.contentType === "video/mp4")
-    ?? [...run.artifacts].reverse().find((artifact) =>
-      artifact.producer?.nodeId === "render" && artifact.contentType === "video/mp4");
+    ?? legacyNodeArtifact(run, "render", (artifact) =>
+      artifact.contentType === "video/mp4");
   return {
     id: run.id,
     title: run.initialInput.title,
@@ -1029,7 +1044,10 @@ function toRunSummary(run: WorkflowRun<ProductionBrief>): StudioRunSummary {
   };
 }
 
-function toRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
+function toRunDetail(
+  run: WorkflowRun<ProductionBrief>,
+  options: { now: string; historicalNodeDurations: Record<string, number[]> },
+): StudioRunDetail {
   const artifacts = run.artifacts.map((artifact): StudioArtifact => ({
     id: artifact.id,
     kind: artifact.kind,
@@ -1070,6 +1088,7 @@ function toRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
       id,
       label,
       role: node?.role ?? role,
+      actionLabel: nodeActionLabel(id),
       status: node?.status ?? "pending",
       ...(node?.startedAt ? { startedAt: node.startedAt } : {}),
       ...(node?.finishedAt ? { finishedAt: node.finishedAt } : {}),
@@ -1144,11 +1163,21 @@ function toRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
   }));
   const videoArtifactId = effectiveNodeArtifact(run, "render", (artifact) =>
     artifact.kind === "render" && artifact.contentType === "video/mp4")?.id
-    ?? [...run.artifacts].reverse().find((artifact) =>
-      artifact.producer?.nodeId === "render" && artifact.contentType === "video/mp4")?.id;
+    ?? legacyNodeArtifact(run, "render", (artifact) => artifact.contentType === "video/mp4")?.id;
   const publishPackageArtifactId = effectiveNodeArtifact(run, "publish-package", (artifact) =>
     artifact.kind === "publish_package")?.id
-    ?? [...run.artifacts].reverse().find((artifact) => artifact.kind === "publish_package")?.id;
+    ?? legacyNodeArtifact(run, "publish-package", (artifact) => artifact.kind === "publish_package")?.id;
+  const observability = buildRunObservability({
+    status: run.status,
+    startedAt: run.startedAt,
+    ...(run.finishedAt ? { finishedAt: run.finishedAt } : {}),
+    now: options.now,
+    nodes,
+    historicalNodeDurations: options.historicalNodeDurations,
+    manualReview: run.initialInput.reviewMode === "manual",
+    videoAvailable: Boolean(videoArtifactId),
+    publishPackageAvailable: Boolean(publishPackageArtifactId),
+  });
   return {
     ...toRunSummary(run),
     revision: run.revision,
@@ -1159,10 +1188,27 @@ function toRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
     nodes,
     artifacts,
     decisions,
+    ...observability,
     ...(activeIntervention ? { activeIntervention } : {}),
     ...(videoArtifactId ? { videoArtifactId } : {}),
     ...(publishPackageArtifactId ? { publishPackageArtifactId } : {}),
   };
+}
+
+function collectNodeDurationHistory(runs: WorkflowRun<ProductionBrief>[]): Record<string, number[]> {
+  const durations: Record<string, number[]> = {};
+  const chronological = [...runs].sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt));
+  for (const run of chronological) {
+    for (const node of run.nodeRuns) {
+      if (!node.finishedAt || !node.startedAt || node.status !== "succeeded") continue;
+      const seconds = Math.round((Date.parse(node.finishedAt) - Date.parse(node.startedAt)) / 1_000);
+      if (!Number.isFinite(seconds) || seconds <= 0) continue;
+      const values = durations[node.nodeId] ?? [];
+      values.push(seconds);
+      durations[node.nodeId] = values.slice(-20);
+    }
+  }
+  return durations;
 }
 
 function effectiveNodeArtifact(
@@ -1171,6 +1217,7 @@ function effectiveNodeArtifact(
   matches: (artifact: WorkflowRun<ProductionBrief>["artifacts"][number]) => boolean,
 ): WorkflowRun<ProductionBrief>["artifacts"][number] | undefined {
   const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+  if (node?.status === "stale" || node?.outputState?.stale === true) return undefined;
   const effectiveVersion = node?.outputState?.versions.find(
     (version) => version.id === node.outputState?.effectiveVersionId,
   );
@@ -1180,6 +1227,15 @@ function effectiveNodeArtifact(
     if (artifact && matches(artifact)) return artifact;
   }
   return undefined;
+}
+
+function legacyNodeArtifact(
+  run: WorkflowRun<ProductionBrief>,
+  nodeId: string,
+  matches: (artifact: WorkflowRun<ProductionBrief>["artifacts"][number]) => boolean,
+): WorkflowRun<ProductionBrief>["artifacts"][number] | undefined {
+  if (run.status === "stale" || run.nodeRuns.some((node) => node.nodeId === nodeId)) return undefined;
+  return [...run.artifacts].reverse().find((artifact) => artifact.producer?.nodeId === nodeId && matches(artifact));
 }
 
 function parseBriefWithInputError(value: unknown): ProductionBrief {

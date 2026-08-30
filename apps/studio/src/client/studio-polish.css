@@ -27,6 +27,155 @@
   --shadow-raised: 0 26px 72px rgb(0 0 0 / 34%);
 }
 
+/* 制作可观测性：以阶段和当前动作组织信息，避免把内部节点平铺给创作者。 */
+.studio-v3 .production-progress {
+  margin: 18px 0 22px;
+  padding: 17px 20px 19px;
+  color: #26303d;
+  background: #ffffff;
+  border: 1px solid #dde2e8;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgb(31 38 49 / 6%);
+}
+
+.studio-v3 .production-progress > header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.studio-v3 .production-progress > header > div { display: grid; gap: 3px; }
+.studio-v3 .production-progress > header .eyebrow { margin: 0; color: #6d57cf; }
+.studio-v3 .production-progress > header strong { font-size: 13px; }
+.studio-v3 .production-progress > header > span { color: #6d57cf; font-size: 20px; font-weight: 760; }
+
+.studio-v3 .production-progress-bar {
+  height: 3px;
+  margin: 12px 0 17px;
+  overflow: hidden;
+  background: #eceef2;
+  border-radius: 3px;
+}
+
+.studio-v3 .production-progress-bar > span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #6854c7 0%, #4c7dd9 56%, #2e9d82 100%);
+  border-radius: inherit;
+  transition: width 420ms cubic-bezier(.2, .75, .25, 1);
+}
+
+.studio-v3 .production-phases {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0;
+}
+
+.studio-v3 .production-phase {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding-right: 18px;
+}
+
+.studio-v3 .production-phase:not(:last-child)::after {
+  position: absolute;
+  z-index: 0;
+  top: 14px;
+  right: 4px;
+  width: 10px;
+  height: 1px;
+  background: #d9dde4;
+  content: "";
+}
+
+.studio-v3 .production-phase-index {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  color: #858c96;
+  background: #f0f2f5;
+  border: 1px solid #e0e4e9;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.studio-v3 .production-phase > div { display: grid; min-width: 0; gap: 2px; }
+.studio-v3 .production-phase strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.studio-v3 .production-phase small { color: #8a919b; font-size: 10px; }
+.studio-v3 .production-phase.is-completed .production-phase-index { color: #ffffff; background: #278d72; border-color: #278d72; }
+.studio-v3 .production-phase.is-running .production-phase-index { color: #ffffff; background: #6d57cf; border-color: #6d57cf; box-shadow: 0 0 0 5px rgb(109 87 207 / 10%); }
+.studio-v3 .production-phase.is-attention .production-phase-index { color: #6f4e08; background: #f5ce6b; border-color: #e1b84f; }
+.studio-v3 .production-phase.is-failed .production-phase-index { color: #ffffff; background: #c95852; border-color: #c95852; }
+
+.studio-v3 .run-live-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  padding-top: 2px;
+  color: #666e79;
+  font-size: 11px;
+}
+
+.studio-v3 .run-live-metrics > span { display: inline-flex; align-items: center; gap: 6px; }
+.studio-v3 .run-live-metrics svg { color: #6d57cf; }
+.studio-v3 .run-live-metrics strong { color: #2f3742; }
+.studio-v3 .run-connection-live i { width: 6px; height: 6px; background: #2c9a7d; border-radius: 50%; box-shadow: 0 0 0 4px rgb(44 154 125 / 10%); }
+.studio-v3 .current-production-action > .run-active-provider { margin-top: -6px; color: #6f7580; font-size: 10px; }
+
+.studio-v3 .run-state-panel.has-failure { display: grid; gap: 11px; }
+.studio-v3 .run-state-panel.has-failure > .eyebrow { margin: 0; color: #bd4f48; }
+.studio-v3 .run-state-panel.has-failure h2 { font-size: 18px; }
+.studio-v3 .run-state-panel .run-failure-summary { margin: 0; color: #4c515a; font-size: 12px; font-weight: 650; line-height: 1.65; }
+.studio-v3 .run-failure-impact { display: grid; gap: 4px; padding: 11px 12px; background: #f2f7f4; border-left: 3px solid #2f987d; }
+.studio-v3 .run-failure-impact strong { color: #27715f; font-size: 11px; }
+.studio-v3 .run-failure-impact span { color: #5e6b67; font-size: 11px; line-height: 1.55; }
+.studio-v3 .run-saved-work { margin: 0; color: #69717d; font-size: 10px; }
+.studio-v3 .run-recovery-list { display: grid; gap: 5px; margin: 0; padding-left: 18px; color: #525966; font-size: 11px; line-height: 1.55; }
+.studio-v3 .run-technical-diagnosis { color: #727986; font-size: 10px; }
+.studio-v3 .run-technical-diagnosis summary { width: fit-content; cursor: pointer; font-weight: 700; }
+.studio-v3 .run-technical-diagnosis code { display: block; margin-top: 7px; padding: 9px; overflow-wrap: anywhere; color: #69707b; background: #f3f4f6; border-radius: 4px; line-height: 1.55; }
+
+.studio-v3 .home-production-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 26px 0 14px;
+  padding: 10px 0;
+  border-block: 1px solid #e2e5ea;
+}
+
+.studio-v3 .home-production-overview > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 4px 18px;
+  border-right: 1px solid #e6e8ec;
+}
+
+.studio-v3 .home-production-overview > span:last-child { border-right: 0; }
+.studio-v3 .home-production-overview small { color: #767d88; font-size: 10px; }
+.studio-v3 .home-production-overview strong { color: #303744; font-size: 17px; }
+
+@media (max-width: 760px) {
+  .studio-v3 .production-progress { margin-inline: -12px; padding: 15px 12px 16px; border-inline: 0; border-radius: 0; }
+  .studio-v3 .production-phases { overflow-x: auto; grid-template-columns: repeat(5, minmax(128px, 1fr)); padding: 4px 2px 5px; }
+  .studio-v3 .production-phase { padding-right: 16px; }
+  .studio-v3 .run-live-metrics { display: grid; gap: 7px; }
+  .studio-v3 .home-production-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .studio-v3 .home-production-overview > span:nth-child(2) { border-right: 0; }
+  .studio-v3 .home-production-overview > span:nth-child(-n + 2) { padding-bottom: 10px; border-bottom: 1px solid #e6e8ec; }
+}
+
 body:has(.studio-v3) {
   color: var(--ink);
   background: var(--canvas);

@@ -212,13 +212,22 @@ describe("Creative OS", () => {
   });
 
   it("uses the home page only as a source launcher without screening candidates again", async () => {
-    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([
+      { ...runningRun, id: "run-attention", status: "needs_human", nextAction: "review" },
+      runningRun,
+      { ...runningRun, id: "run-done", status: "succeeded" },
+      { ...runningRun, id: "run-failed", status: "failed" },
+    ]);
     const candidateInbox = vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([candidate(1, "technology")]));
     render(<MemoryRouter><HomePage /></MemoryRouter>);
 
     expect(await screen.findByRole("heading", { name: "你今天从哪里出发？" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "先替你筛到三条" })).not.toBeInTheDocument();
     expect(candidateInbox).not.toHaveBeenCalled();
+    expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("待你处理1");
+    expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("自动制作1");
+    expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("已完成1");
+    expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("需调整1");
   });
 
   it("creates a durable series from the peer series entry mode", async () => {

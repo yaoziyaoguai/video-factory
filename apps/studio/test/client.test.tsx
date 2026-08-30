@@ -8,6 +8,7 @@ import { studioApi, subscribeToRun } from "../src/client/api.js";
 import { ProductionQueue } from "../src/client/components/ProductionQueue.js";
 import { RunWorkbench } from "../src/client/components/RunWorkbench.js";
 import { MultiPlatformPublishDialog } from "../src/client/components/MultiPlatformPublishDialog.js";
+import { preferRunSnapshot } from "../src/client/pages/RunPage.js";
 import type { StudioProvider, StudioRunDetail, StudioRunSummary, StudioTemplate } from "../src/shared/api.js";
 
 const runSummary: StudioRunSummary = {
@@ -100,6 +101,16 @@ const runDetail: StudioRunDetail = {
 };
 
 describe("Studio client", () => {
+  it("never lets an older polled snapshot overwrite newer run progress", () => {
+    const newer = { ...runDetail, revision: 9, status: "succeeded" as const };
+    const older = { ...runDetail, revision: 8, status: "running" as const };
+    const sameRevision = { ...runDetail, revision: 9, status: "needs_human" as const };
+
+    expect(preferRunSnapshot(newer, older)).toBe(newer);
+    expect(preferRunSnapshot(newer, sameRevision)).toBe(sameRevision);
+    expect(preferRunSnapshot(undefined, older)).toBe(older);
+  });
+
   it("reports a dropped run event stream while leaving EventSource reconnection active", () => {
     const listeners = new Map<string, EventListener>();
     const close = vi.fn();
@@ -109,8 +120,11 @@ describe("Studio client", () => {
     }
     vi.stubGlobal("EventSource", FakeEventSource);
     const disconnected = vi.fn();
+    const heartbeat = vi.fn();
 
-    const unsubscribe = subscribeToRun("run-1", vi.fn(), disconnected);
+    const unsubscribe = subscribeToRun("run-1", vi.fn(), disconnected, heartbeat);
+    listeners.get("heartbeat")?.(new MessageEvent("heartbeat", { data: JSON.stringify({ at: "2026-08-30T10:00:00.000Z" }) }));
+    expect(heartbeat).toHaveBeenCalledWith("2026-08-30T10:00:00.000Z");
     listeners.get("error")?.(new Event("error"));
 
     expect(disconnected).toHaveBeenCalledOnce();
@@ -1128,6 +1142,121 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("button", { name: "调整方案后重新制作" }));
 
     expect(onRestart).toHaveBeenCalledOnce();
+  });
+
+  it("shows five production phases, truthful progress, current role action, and model provenance", () => {
+    const { activeIntervention: _activeIntervention, videoArtifactId: _videoArtifactId, ...withoutReview } = runDetail;
+    render(<RunWorkbench
+      run={{
+        ...withoutReview,
+        status: "running",
+        currentNodeId: "visual-direction",
+        phases: [
+          { id: "planning", label: "策划定稿", status: "running", nodeIds: ["brief", "visual-direction"], completedNodes: 1, totalNodes: 2 },
+          { id: "assets", label: "素材筹备", status: "pending", nodeIds: [], completedNodes: 0, totalNodes: 0 },
+          { id: "composition", label: "声音与剪辑", status: "pending", nodeIds: [], completedNodes: 0, totalNodes: 0 },
+          { id: "review", label: "审片质检", status: "pending", nodeIds: [], completedNodes: 0, totalNodes: 0 },
+          { id: "delivery", label: "交付发布", status: "pending", nodeIds: [], completedNodes: 0, totalNodes: 0 },
+        ],
+        progress: {
+          completedNodes: 1,
+          totalNodes: 4,
+          percentage: 25,
+          elapsedSeconds: 42,
+          lastUpdatedAt: "2026-08-30T10:00:42.000Z",
+          etaUnavailableReason: "insufficient_history",
+        },
+        currentAction: { nodeId: "visual-direction", role: "导演", label: "正在统一叙事节奏、镜头语法与视觉规则" },
+        resultAvailability: { kind: "none", usable: false, label: "尚未生成成片", detail: "当前仍在前期制作。" },
+        nodes: withoutReview.nodes.map((node) => node.id === "visual-direction" ? {
+          ...node,
+          status: "running",
+          plannedExecution: {
+            providerId: "glm-director",
+            providerLabel: "智谱视觉导演",
+            modelId: "glm-5.3-flash",
+            transport: "http_api",
+            billing: "subscription",
+            snapshotSource: "created",
+          },
+        } : node),
+        artifacts: [],
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      connectionHeartbeatAt="2026-08-30T10:00:43.000Z"
+    />);
+
+    expect(screen.getByRole("region", { name: "制作进度" })).toBeInTheDocument();
+    expect(screen.getAllByText("策划定稿").length).toBeGreaterThan(0);
+    expect(screen.getByText("1 / 4 个节点完成")).toBeInTheDocument();
+    expect(screen.getByText("正在统一叙事节奏、镜头语法与视觉规则")).toBeInTheDocument();
+    expect(screen.getByText(/样本不足.*不提供虚假 ETA/)).toBeInTheDocument();
+    expect(screen.getByText(/智谱视觉导演.*glm-5.3-flash/)).toBeInTheDocument();
+    expect(screen.getByText("云端连接刚刚确认")).toBeInTheDocument();
+  });
+
+  it("explains a failed node without hiding its impact or preserved output", () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    render(<RunWorkbench
+      run={{
+        ...withoutIntervention,
+        status: "failed",
+        failure: {
+          nodeId: "voice",
+          nodeLabel: "配音",
+          category: "provider_capacity",
+          summary: "MiniMax Speech 当前请求过多，配音没有生成完成",
+          impact: "脚本与导演方案已保留；渲染尚未开始。",
+          retryable: true,
+          recoveryActions: ["稍后重试配音", "连续失败时切换同类声音服务"],
+          savedNodeCount: 4,
+          technicalDetail: "HTTP 429 rate limit exceeded",
+        },
+        resultAvailability: { kind: "none", usable: false, label: "尚未生成成片", detail: "渲染尚未完成。" },
+        nodes: withoutIntervention.nodes.map((node, index) => index === 0 ? { ...node, id: "voice", label: "配音", status: "failed" } : node),
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onRetryFailedNode={async () => undefined}
+    />);
+
+    expect(screen.getByRole("heading", { name: "配音没有完成" })).toBeInTheDocument();
+    expect(screen.getByText("MiniMax Speech 当前请求过多，配音没有生成完成")).toBeInTheDocument();
+    expect(screen.getByText(/脚本与导演方案已保留/)).toBeInTheDocument();
+    expect(screen.getByText("稍后重试配音")).toBeInTheDocument();
+    expect(screen.getByText("已保留 4 个前序节点")).toBeInTheDocument();
+    expect(screen.getByText("HTTP 429 rate limit exceeded")).not.toBeVisible();
+    expect(screen.getByText("技术诊断")).toBeInTheDocument();
+  });
+
+  it("does not offer a blind retry when the failure requires configuration repair", () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    render(<RunWorkbench
+      run={{
+        ...withoutIntervention,
+        status: "failed",
+        failure: {
+          nodeId: "voice",
+          nodeLabel: "配音",
+          category: "configuration",
+          summary: "MiniMax Speech 的账号、密钥或权限配置不可用",
+          impact: "脚本与导演方案已保留；渲染尚未开始。",
+          retryable: false,
+          recoveryActions: ["到总配置检查对应服务的密钥与权限"],
+          savedNodeCount: 4,
+          technicalDetail: "HTTP 401 unauthorized",
+        },
+        nodes: withoutIntervention.nodes.map((node, index) => index === 0 ? { ...node, id: "voice", label: "配音", status: "failed" } : node),
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onRetryFailedNode={vi.fn()}
+      onRestart={vi.fn()}
+    />);
+
+    expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "调整方案后重新制作" })).toBeInTheDocument();
   });
 
   it("blocks retry and restart while a paid provider outcome is uncertain", () => {

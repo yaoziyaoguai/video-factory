@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Download, RotateCcw, Send, X, XCircle } from "lucide-react";
+import { Activity, AlertTriangle, Check, Clock3, Download, RotateCcw, Send, X, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
@@ -20,9 +20,10 @@ interface RunWorkbenchProps {
   onAuthorizeSpend?: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
   onRegenerateStale?: () => Promise<void>;
   onRetryFailedNode?: (nodeId: string) => Promise<void>;
+  connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, onOverrideNode, onOverrideNodeInput, onAuthorizeSpend, onRegenerateStale, onRetryFailedNode }: RunWorkbenchProps) {
+export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, onOverrideNode, onOverrideNodeInput, onAuthorizeSpend, onRegenerateStale, onRetryFailedNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
@@ -65,14 +66,16 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
         <StatusBadge status={run.status} />
       </header>
 
-      <section className="workflow-track" aria-label="生产工作流" data-tour="run-workflow">
-        {run.nodes.map((node, index) => (
-          <div className={`workflow-node node-${node.status}`} key={node.id}>
-            <span className="node-index">{node.status === "succeeded" ? <Check aria-hidden="true" size={13} /> : index + 1}</span>
-            <span>{node.role ? `${node.role} · ${node.label}` : node.label}</span>
-          </div>
-        ))}
-      </section>
+      {run.phases && run.progress ? <ProductionProgress run={run} /> : (
+        <section className="workflow-track" aria-label="生产工作流" data-tour="run-workflow">
+          {run.nodes.map((node, index) => (
+            <div className={`workflow-node node-${node.status}`} key={node.id}>
+              <span className="node-index">{node.status === "succeeded" ? <Check aria-hidden="true" size={13} /> : index + 1}</span>
+              <span>{node.role ? `${node.role} · ${node.label}` : node.label}</span>
+            </div>
+          ))}
+        </section>
+      )}
 
       {activeSpendNode ? <section className="current-production-action" aria-labelledby="current-production-action-title">
         <header>
@@ -83,7 +86,16 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
         {renderNodeWorkspace(activeSpendNode)}
       </section> : !showReviewSurface ? <section className="current-production-action is-running" aria-live="polite">
         <header><div><p className="eyebrow">自动制作中</p><h2>{runningNodeLabel(run)}</h2></div><StatusBadge status={run.status} /></header>
-        <p>{runStateMessage(run)}</p>
+        <p>{run.currentAction?.label ?? runStateMessage(run)}</p>
+        {run.progress ? <div className="run-live-metrics">
+          <span><Activity aria-hidden="true" size={15} /><strong>{run.progress.completedNodes} / {run.progress.totalNodes}</strong> 个节点完成</span>
+          <span><Clock3 aria-hidden="true" size={15} />已运行 <strong>{formatDuration(run.progress.elapsedSeconds)}</strong></span>
+          <span>{etaLabel(run.progress)}</span>
+          <span>节点状态更新于 {formatClock(run.progress.lastUpdatedAt)}</span>
+          {costDetail ? <span>成本 <strong>¥{costDetail.totals.actualCostCny.toFixed(2)}</strong>{costDetail.totals.actualPendingCount ? ` · ${costDetail.totals.actualPendingCount} 笔待回写` : ""}</span> : null}
+          {connectionHeartbeatAt ? <span className="run-connection-live"><i aria-hidden="true" />云端连接刚刚确认</span> : null}
+        </div> : null}
+        {activeNodeModel(run) ? <p className="run-active-provider">当前能力：{activeNodeModel(run)}</p> : null}
       </section> : null}
 
       {showReviewSurface ? <div className="review-layout">
@@ -128,11 +140,26 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
               </div>
             </section>
           ) : (
-            <section className="run-state-panel">
-              <h2>当前状态</h2>
-              <p>{runStateMessage(run)}</p>
+            <section className={`run-state-panel${run.failure ? " has-failure" : ""}`}>
+              {run.failure ? <>
+                <p className="eyebrow">停在 {run.failure.nodeLabel}</p>
+                <h2>{run.failure.nodeLabel}没有完成</h2>
+                <p className="run-failure-summary">{run.failure.summary}</p>
+                <div className="run-failure-impact">
+                  <strong>{run.resultAvailability?.label ?? "前序结果已保留"}</strong>
+                  <span>{run.failure.impact}</span>
+                </div>
+                <p className="run-saved-work">已保留 {run.failure.savedNodeCount} 个前序节点</p>
+                <ul className="run-recovery-list">
+                  {run.failure.recoveryActions.map((action) => <li key={action}>{action}</li>)}
+                </ul>
+                {run.failure.technicalDetail ? <details className="run-technical-diagnosis"><summary>技术诊断</summary><code>{run.failure.technicalDetail}</code></details> : null}
+              </> : <>
+                <h2>当前状态</h2>
+                <p>{runStateMessage(run)}</p>
+              </>}
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />多平台发布</button> : null}
-              {run.status === "failed" && !hasUncertainPaidOutcome(run) && onRetryFailedNode && failedNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(failedNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />重试失败步骤</button> : null}
+              {run.status === "failed" && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && failedNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(failedNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />重试失败步骤</button> : null}
               {(run.status === "failed" || run.status === "rejected") && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
               {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />按人工版本继续生成</button> : null}
             </section>
@@ -194,6 +221,23 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
   );
 }
 
+function ProductionProgress({ run }: { run: StudioRunDetail }) {
+  if (!run.progress || !run.phases) return null;
+  return <section className="production-progress" aria-label="制作进度" data-tour="run-workflow">
+    <header>
+      <div><p className="eyebrow">制作进度</p><strong>{run.progress.completedNodes} / {run.progress.totalNodes} 个节点完成</strong></div>
+      <span>{run.progress.percentage}%</span>
+    </header>
+    <div className="production-progress-bar" aria-hidden="true"><span style={{ width: `${run.progress.percentage}%` }} /></div>
+    <div className="production-phases">
+      {run.phases.map((phase, index) => <article className={`production-phase is-${phase.status}`} key={phase.id}>
+        <span className="production-phase-index">{phase.status === "completed" ? <Check aria-hidden="true" size={13} /> : index + 1}</span>
+        <div><strong>{phase.label}</strong><small>{phase.completedNodes}/{phase.totalNodes} 节点</small></div>
+      </article>)}
+    </div>
+  </section>;
+}
+
 function isTerminalStatus(status: StudioRunDetail["status"]): boolean {
   return status === "succeeded" || status === "failed" || status === "rejected";
 }
@@ -211,6 +255,38 @@ function runningNodeLabel(run: StudioRunDetail): string {
     ?? run.nodes.find((node) => node.status === "running")
     ?? run.nodes.find((node) => node.status === "pending");
   return current ? `${current.role ?? "制作角色"}正在处理${current.label}` : "系统正在推进制作";
+}
+
+function activeNodeModel(run: StudioRunDetail): string | undefined {
+  const current = run.nodes.find((node) => node.id === run.currentAction?.nodeId)
+    ?? run.nodes.find((node) => node.status === "running");
+  const execution = current?.executionReceipt ?? current?.plannedExecution;
+  return execution ? `${execution.providerLabel} · ${execution.modelId}` : undefined;
+}
+
+function etaLabel(progress: NonNullable<StudioRunDetail["progress"]>): string {
+  if (progress.eta) return `预计还需 ${formatDuration(progress.eta.lowSeconds)}–${formatDuration(progress.eta.highSeconds)}`;
+  if (progress.etaUnavailableReason === "waiting_for_human") return "等待你的确认，不计算 ETA";
+  if (progress.etaUnavailableReason === "future_human_gate") return "后续有人工或费用确认，暂不估算整条耗时";
+  if (progress.etaUnavailableReason === "insufficient_history") return "历史样本不足，暂不提供虚假 ETA";
+  return "当前流程已停止计时";
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes} 分 ${remainder} 秒` : `${minutes} 分钟`;
+}
+
+function formatClock(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "刚刚" : new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
 }
 
 function runStateMessage(run: StudioRunDetail): string {
