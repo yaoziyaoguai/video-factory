@@ -190,6 +190,20 @@ function stubAgent(
 }
 
 describe("ProductionPipeline codex screenwriter", () => {
+  it("scopes identical agent loops to their production run", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-run-scope-"));
+    const worker = new RecordingWorker();
+    const { agent, inputs } = stubAgent(() => scriptDraft);
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker, screenwriterAgent: agent });
+
+    const first = await pipeline.start(brief);
+    const second = await pipeline.start(brief);
+
+    assert.notEqual(first.id, second.id);
+    assert.equal(inputs.length, 2);
+    assert.notEqual(inputs[0]?.agentLoopCheckpoint?.key, inputs[1]?.agentLoopCheckpoint?.key);
+  });
+
   it("refuses to form a series Internal Master when a generic script has no canon facts", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-generic-script-"));
     const worker = new RecordingWorker();
