@@ -55,6 +55,26 @@ function validDirectorPlan() {
   };
 }
 
+function assertStrictObjectRequirements(schema: unknown, path: string): void {
+  if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return;
+  const record = schema as Record<string, unknown>;
+  if (record.type === "object") {
+    const properties = typeof record.properties === "object" && record.properties !== null && !Array.isArray(record.properties)
+      ? record.properties as Record<string, unknown>
+      : {};
+    const required = Array.isArray(record.required) ? record.required : [];
+    assert.deepEqual(
+      [...required].sort(),
+      Object.keys(properties).sort(),
+      `${path} must require every declared property for strict structured outputs`,
+    );
+    for (const [key, child] of Object.entries(properties)) {
+      assertStrictObjectRequirements(child, `${path}.${key}`);
+    }
+  }
+  if (record.type === "array") assertStrictObjectRequirements(record.items, `${path}[]`);
+}
+
 describe("broker-owned task definitions", () => {
   it("pins protocol v2 and owns prompts for every allowed task kind", () => {
     assert.equal(CODEX_BRIDGE_PROTOCOL_VERSION, "video-factory/codex-bridge-v2");
@@ -129,7 +149,7 @@ describe("broker-owned task definitions", () => {
       ["topic-ideas", ["ideas"]],
       ["series-roadmap", ["episodes"]],
       ["director-plan", ["version", "requestedProfileId", "resolvedProfileId", "profileRationale", "visualBible", "shots"]],
-      ["script-draft", ["viewerPromise", "narrativeArc", "scenes"]],
+      ["script-draft", ["viewerPromise", "narrativeArc", "canonFacts", "scenes"]],
       ["publish-copy", ["title", "description", "hashtags"]],
       ["asset-rank", ["version", "source", "providerId", "modelId", "summary", "scenes"]],
       ["reference-grammar", ["version", "summary", "durationMs", "pacing", "composition", "camera", "color", "transitions", "sound", "beats", "reusableRules", "avoidCopying", "confidence"]],
@@ -144,6 +164,12 @@ describe("broker-owned task definitions", () => {
     }
   });
 
+  it("keeps every response schema compatible with strict OpenAI structured outputs", () => {
+    for (const kind of BROKER_TASK_KINDS) {
+      assertStrictObjectRequirements(outputSchemaFor(kind), kind);
+    }
+  });
+
   it("requires inspectable shot intent instead of accepting generic scene prose", () => {
     const scriptSchema = outputSchemaFor("script-draft") as {
       required: string[];
@@ -153,7 +179,7 @@ describe("broker-owned task definitions", () => {
       properties: { shots: { items: { required: string[] } } };
     };
 
-    assert.deepEqual(scriptSchema.required, ["viewerPromise", "narrativeArc", "scenes"]);
+    assert.deepEqual(scriptSchema.required, ["viewerPromise", "narrativeArc", "canonFacts", "scenes"]);
     assert.ok(scriptSchema.properties.scenes.items.required.includes("visible_action"));
     assert.ok(scriptSchema.properties.scenes.items.required.includes("success_criteria"));
     assert.ok(scriptSchema.properties.scenes.items.required.includes("failure_conditions"));
@@ -241,6 +267,7 @@ describe("broker-owned task definitions", () => {
     assert.match(outputValidationErrorFor("script-draft", {
       viewerPromise: "给出一个可执行判断",
       narrativeArc: "问题、例子、结论",
+      canonFacts: [],
       scenes: Array.from({ length: 5 }, (_, index) => ({
         ...scene,
         position: index === 3 ? 5 : index + 1,

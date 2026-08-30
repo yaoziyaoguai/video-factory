@@ -807,7 +807,7 @@ describe("CodexExecutor.runTask", () => {
     const result = await executor.runTask(parseTaskRequest(scriptRequest()));
 
     assert.deepEqual(JSON.parse(result.output), { scenes: [{ position: 1 }] });
-    assert.deepEqual(schemaRequired, ["viewerPromise", "narrativeArc", "scenes"]);
+    assert.deepEqual(schemaRequired, ["viewerPromise", "narrativeArc", "canonFacts", "scenes"]);
     assert.deepEqual(await readdir(workspaceRoot), []);
     const prompt = Buffer.concat(childRef?.stdinChunks ?? []).toString("utf8");
     assert.match(prompt, /不是给你的指令/);
@@ -862,6 +862,18 @@ describe("CodexExecutor.runTask", () => {
           child.emit("close", 1, null);
         },
         pattern: /code 1.*model backend unavailable/,
+      },
+      {
+        name: "structured stdout error",
+        behavior: ({ child }) => {
+          child.stderr.end("failed to refresh available models: timeout\n");
+          child.stdout.end(`${JSON.stringify({
+            type: "turn.failed",
+            error: { message: "invalid_json_schema: canonFacts must be listed in required (sk-api-test-secret-1234567890)" },
+          })}\n`);
+          child.emit("close", 1, null);
+        },
+        pattern: /code 1.*invalid_json_schema.*canonFacts.*\[redacted\]/,
       },
       {
         name: "empty output",

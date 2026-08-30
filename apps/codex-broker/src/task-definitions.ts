@@ -192,7 +192,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
       task: "为目标时长撰写可直接投产的分镜脚本。",
       outputRules: [
         "scenes.position 从 1 开始连续编号。",
-        "顶层必须包含 viewerPromise、narrativeArc 和 scenes；系列单集还必须包含 canonFacts。",
+        "顶层必须包含 viewerPromise、narrativeArc、canonFacts 和 scenes；非系列内容的 canonFacts 输出空数组，系列单集输出 1-8 条已经建立的事实。",
         "每个场景必须包含 position、purpose、narration、duration、visual_strategy、visual_prompt、visible_action、on_screen_text、sound_cue、success_criteria、failure_conditions、search_terms。",
         "duration 单位是秒，所有场景时长之和需在目标时长的 0.6 到 1.4 倍之间。",
       ],
@@ -433,14 +433,14 @@ const DIRECTOR_PLAN_OUTPUT_SCHEMA = {
 
 const SCRIPT_DRAFT_OUTPUT_SCHEMA = {
   type: "object",
-  required: ["viewerPromise", "narrativeArc", "scenes"],
+  required: ["viewerPromise", "narrativeArc", "canonFacts", "scenes"],
   additionalProperties: false,
   properties: {
     viewerPromise: { type: "string", minLength: 1, maxLength: 200 },
     narrativeArc: { type: "string", minLength: 1, maxLength: 500 },
     canonFacts: {
       type: "array",
-      minItems: 1,
+      minItems: 0,
       maxItems: 8,
       items: { type: "string", minLength: 1, maxLength: 240 },
     },
