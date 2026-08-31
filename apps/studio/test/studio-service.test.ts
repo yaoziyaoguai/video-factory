@@ -2505,7 +2505,7 @@ function passingGreenlightAgent() {
       planning: {
         source: episode.planning.source === "human" ? "human" as const : "agent" as const,
         role: "系列开拍总编",
-        auditRole: "独立红队审计 Agent",
+        auditRole: "独立质量审计 Agent",
         auditStatus: "passed" as const,
         auditIterations: 1,
         providerId: "codex-series-planner-v1",

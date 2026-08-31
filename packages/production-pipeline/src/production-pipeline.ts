@@ -2100,7 +2100,7 @@ function visualReviewNode(
             ...(execution.agentLoop ? {
               agentLoop: execution.agentLoop.status,
               agentLoopIterations: execution.agentLoop.iterations.length,
-              auditReasoningEffort: execution.agentLoop.iterations.at(-1)?.auditTrace?.reasoningEffort ?? "max",
+              auditReasoningEffort: execution.agentLoop.iterations.at(-1)?.auditTrace?.reasoningEffort ?? "xhigh",
               modelCallCount: execution.agentLoop.modelCallCount ?? execution.agentLoop.iterations.length * 2,
               producerModelCallCount: execution.agentLoop.producerModelCallCount ?? execution.agentLoop.iterations.length,
               auditModelCallCount: execution.agentLoop.auditModelCallCount ?? execution.agentLoop.iterations.length,
@@ -2722,7 +2722,7 @@ function modelTraceReceipt(
       ...(loop ? {
         agentLoop: loop.status,
         agentLoopIterations: loop.iterations.length,
-        auditReasoningEffort: loop.iterations.at(-1)?.auditTrace?.reasoningEffort ?? "max",
+        auditReasoningEffort: loop.iterations.at(-1)?.auditTrace?.reasoningEffort ?? "xhigh",
         modelCallCount: Math.max(1, loop.modelCallCount ?? loop.iterations.length * 2 + (loop.pendingCandidate ? 1 : 0)),
         producerModelCallCount: loop.producerModelCallCount ?? loop.iterations.length + (loop.pendingCandidate ? 1 : 0),
         auditModelCallCount: loop.auditModelCallCount ?? loop.iterations.length,

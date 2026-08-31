@@ -163,7 +163,7 @@ describe("ProductionPipeline semantic ranking fallback", () => {
                   prompt: "fixture audit",
                   providerId: "openai-codex-subscription",
                   modelId: "gpt-5.6-sol",
-                  reasoningEffort: "max",
+                  reasoningEffort: "xhigh",
                 },
                 audit: {
                   version: "video-factory/role-audit-v1",
@@ -219,7 +219,7 @@ describe("ProductionPipeline semantic ranking fallback", () => {
     assert.equal(node?.executionReceipt?.modelId, "gpt-5.4-mini");
     assert.equal(node?.executionReceipt?.parameters?.agentLoop, "passed");
     assert.equal(node?.executionReceipt?.parameters?.agentLoopIterations, 1);
-    assert.equal(node?.executionReceipt?.parameters?.auditReasoningEffort, "max");
+    assert.equal(node?.executionReceipt?.parameters?.auditReasoningEffort, "xhigh");
     assert.equal(node?.executionReceipt?.parameters?.rankingMode, "visual_semantic");
   });
 });

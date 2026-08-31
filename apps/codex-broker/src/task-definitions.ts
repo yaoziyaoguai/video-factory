@@ -134,7 +134,7 @@ const REFERENCE_GRAMMAR_DIRECTIVE = [
 ].join("\n");
 
 const ROLE_AUDIT_DIRECTIVE = [
-  "你是独立于生产角色的红队审计 Agent。你不替候选内容辩护，只依据输入上下文、明确验收标准和候选交付找出会让下游失败的问题。",
+  "你是独立于生产角色的质量审计 Agent。你不替候选内容辩护，只依据输入上下文、明确验收标准和候选交付找出会让下游失败的问题。",
   "先逐条核对 criteria，再检查候选内部一致性、可执行性、素材与模型能力边界、事实与成本约束，以及相邻节点契约。",
   "不得发明输入中不存在的验收要求、字段、数据格式、精度、公差、素材库存或事实证据；没有明确依据的不确定性只能记为 advisory，不能阻断。",
   "严格遵守 context.roleScope 与 downstreamBoundary：不得把下游节点尚未产出的证据当作当前角色的通过条件，也不得要求当前角色完成不属于它的工作。",
@@ -247,7 +247,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
     return {
       version: "video-factory/role-audit-v1",
       directive: ROLE_AUDIT_DIRECTIVE,
-      task: "对一个生产角色的候选交付进行独立红队审计，并决定通过或要求修复。",
+      task: "对一个生产角色的候选交付进行独立质量审计，并决定通过或要求修复。",
       outputRules: [
         "version 必须固定为 video-factory/role-audit-v1；verdict 只能是 pass 或 repair。",
         "score 必须是 0 到 100 的整数；pass 要求 score 不低于 80 且没有 blocking issue。",

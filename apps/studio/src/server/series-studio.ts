@@ -372,7 +372,7 @@ export class SeriesStudio {
     return this.planner.planEpisodes(series, count, undefined, {
       source: "rules",
       role: "系列总编",
-      auditRole: "开拍前独立红队审计 Agent",
+      auditRole: "开拍前独立质量审计 Agent",
       auditStatus: "fallback",
       auditIterations: 0,
       providerId: "series-roadmap-v2",

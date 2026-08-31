@@ -245,7 +245,7 @@ describe("JsonSeriesStore", () => {
       ...editedEpisode.planning,
       auditStatus: "passed",
       auditIterations: 1,
-      auditRole: "独立红队审计 Agent",
+      auditRole: "独立质量审计 Agent",
     }, "2026-08-24T08:45:00.000Z");
     assert.equal(greenlit.episodes[0]?.planning.source, "human");
     await store.adoptEpisode("series-1", 1, "2026-08-24T09:00:00.000Z");

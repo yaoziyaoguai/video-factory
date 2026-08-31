@@ -60,7 +60,7 @@ const providers: StudioProvider[] = [
   { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" },
   { id: "python-ffmpeg-v1", capability: "video.render", label: "FFmpeg 渲染", available: true, kind: "local" },
   { id: "python-technical-review-v1", capability: "quality.review", label: "技术审片", available: true, kind: "local" },
-  { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立红队审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
+  { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立质量审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
 ];
 
 const trendSources: StudioTrendSource[] = [
@@ -623,7 +623,7 @@ describe("Creative OS", () => {
       canonBaseRevision: 0,
       status: "planned",
       continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: ["留下下一集问题"], canonChecks: ["保持真实"] },
-      planning: { source: "agent", role: "系列总编", auditRole: "独立红队审计 Agent", auditStatus: "passed", auditIterations: 2, auditScore: 91, auditSummary: "路线图有独立价值并形成递进。", providerId: "openai", modelId: "codex-default", promptVersion: "video-factory/series-showrunner-v1", reasoningEffort: "max" },
+      planning: { source: "agent", role: "系列总编", auditRole: "独立质量审计 Agent", auditStatus: "passed", auditIterations: 2, auditScore: 91, auditSummary: "路线图有独立价值并形成递进。", providerId: "openai", modelId: "codex-default", promptVersion: "video-factory/series-showrunner-v1", reasoningEffort: "xhigh" },
       createdAt: "2026-08-24T09:00:00.000Z",
       updatedAt: "2026-08-24T09:00:00.000Z",
     };
@@ -691,7 +691,7 @@ describe("Creative OS", () => {
     expect(screen.getByText("openai / codex-default")).toBeInTheDocument();
     expect(screen.getByText("独立审计 2/3 轮通过")).toBeInTheDocument();
     expect(screen.getByText(/路线图有独立价值并形成递进.*91 分/)).toBeInTheDocument();
-    expect(screen.getByText("max")).toBeInTheDocument();
+    expect(screen.getByText("xhigh")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "编辑路线图" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "本集制作准备" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "选择待制作单集" })).toBeInTheDocument();
@@ -1141,7 +1141,7 @@ describe("Creative OS", () => {
           { id: "gpt-5.6-sol", providerId: "codex-screenwriter-v1", providerFamily: "openai", label: "GPT-5.6 Sol", description: "高质量创作", available: true, recommended: true, taskTypes: ["text"] },
         ],
       },
-      { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立红队审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol", modes: ["独立会话", "max 推理", "最多三轮"] },
+      { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立质量审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol", modes: ["独立会话", "xhigh 推理", "最多三轮"] },
     ];
     const initialSettings = {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
@@ -1196,8 +1196,8 @@ describe("Creative OS", () => {
     expect(screen.queryByRole("combobox", { name: "配音执行默认能力" })).not.toBeInTheDocument();
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧默认能力" }), "codex-screenwriter-v1");
     await user.selectOptions(screen.getByRole("combobox", { name: "Codex 编剧默认模型" }), "gpt-5.6-sol");
-    expect(screen.getByText("独立红队审计")).toBeInTheDocument();
-    expect(screen.getByText(/max.*最多三轮/)).toBeInTheDocument();
+    expect(screen.getByText("独立质量审计")).toBeInTheDocument();
+    expect(screen.getByText(/xhigh.*最多三轮/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));
 
     expect(update).toHaveBeenLastCalledWith(expect.objectContaining({

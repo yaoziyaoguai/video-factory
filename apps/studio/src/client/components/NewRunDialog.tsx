@@ -187,7 +187,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   });
   const missingProductionRoles = [
     ...missingCapabilities.map((item) => item.label),
-    ...(roleAuditProvider ? [] : ["独立红队审计"]),
+    ...(roleAuditProvider ? [] : ["独立质量审计"]),
   ];
 
   useEffect(() => {
@@ -600,15 +600,19 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                       </select>
                     </label> : <p>{item.key === "voice" ? "音色与语速在下方声音导演中调整。" : selected?.description ?? item.description}</p>}
                     <small className="production-role-billing">{selected
-                      ? `${providerBillingLabel(selected)} · ${effectiveModelId(selected) ?? "不使用模型"}`
+                      ? item.key === "assets"
+                        ? maxPaidShots > 0
+                          ? `路由决策免费 · 最多 ${maxPaidShots} 个生成镜头按模型计费`
+                          : "路由决策免费 · 当前配方不调用付费生成"
+                        : `${providerBillingLabel(selected)} · ${effectiveModelId(selected) ?? "不使用模型"}`
                       : "尚未配置可执行能力"}</small>
                   </article>;
                 })}
               </div>
               <div className={roleAuditProvider ? "production-auditor" : "production-auditor is-unavailable"}>
                 <span><ScanSearch aria-hidden="true" size={18} /></span>
-                <div><strong>{roleAuditProvider?.label ?? "独立红队审计未接通"}</strong><small>与生产角色隔离，逐节点检查上下文、输出合同和下游边界。</small></div>
-                <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "运行时模型"} · max 推理 · 最多三轮` : "开工前请先恢复 Codex 审计能力"}</em>
+                <div><strong>{roleAuditProvider?.label ?? "独立质量审计未接通"}</strong><small>与生产角色隔离，逐节点检查上下文、输出合同和下游边界。</small></div>
+                <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "运行时模型"} · xhigh 推理 · 最多三轮` : "开工前请先恢复 Codex 审计能力"}</em>
               </div>
             </section>
 

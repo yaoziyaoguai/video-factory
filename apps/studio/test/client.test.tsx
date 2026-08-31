@@ -31,7 +31,7 @@ const providers: StudioProvider[] = [
   { id: "macos-say-v1", capability: "voice.synthesize", label: "macOS 系统配音", available: true, kind: "local" },
   { id: "python-ffmpeg-v1", capability: "video.render", label: "FFmpeg 竖屏渲染", available: true, kind: "local" },
   { id: "python-technical-review-v1", capability: "quality.review", label: "本地技术审片", available: true, kind: "local" },
-  { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立红队审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
+  { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立质量审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
 ];
 
 function template(id: string, name: string): StudioTemplate {
@@ -385,7 +385,7 @@ describe("Studio client", () => {
       onSubmit={async () => undefined}
     />);
 
-    expect(screen.getByText(/缺少正式生产能力：独立红队审计/)).toBeInTheDocument();
+    expect(screen.getByText(/缺少正式生产能力：独立质量审计/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
   });
 
@@ -425,8 +425,8 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("heading", { name: "开工前确认制作团队" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "编剧能力" })).toHaveValue("codex-screenwriter-v1");
-    expect(screen.getByText(/独立红队审计/)).toBeInTheDocument();
-    expect(screen.getByText(/max.*最多三轮/)).toBeInTheDocument();
+    expect(screen.getByText(/独立质量审计/)).toBeInTheDocument();
+    expect(screen.getByText(/xhigh.*最多三轮/)).toBeInTheDocument();
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "gpt-5.6-sol");
     await user.type(screen.getByLabelText("视频标题"), "角色配置必须在开工前确认");
     await user.type(screen.getByLabelText("内容角度"), "验证编剧模型覆盖真实进入生产单");

@@ -68,7 +68,7 @@ class RepairingClient extends CodexBridgeClient {
         prompt: "series",
         providerId: "openai",
         modelId: "gpt-5.4",
-        reasoningEffort: "max",
+        reasoningEffort: "xhigh",
       },
     };
   }
@@ -86,7 +86,7 @@ describe("CodexSeriesPlanningAgent", () => {
     assert.equal(result.planning.auditScore, 91);
     assert.equal(result.planning.auditSummary, "路线图有独立价值并形成递进。");
     assert.equal(result.planning.modelId, "gpt-5.4");
-    assert.equal(result.planning.reasoningEffort, "max");
+    assert.equal(result.planning.reasoningEffort, "xhigh");
     const repairPayload = client.calls[2]?.payload as { revision?: unknown };
     assert.ok(repairPayload.revision);
   });
@@ -123,7 +123,7 @@ describe("CodexSeriesPlanningAgent", () => {
             prompt: "audit",
             providerId: "openai",
             modelId: "gpt-5.6-sol",
-            reasoningEffort: "max",
+            reasoningEffort: "xhigh",
           },
         };
       }

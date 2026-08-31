@@ -5,7 +5,7 @@ import {
 } from "./codex-executor.js";
 
 const ALLOWED_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
-const DEFAULT_PRODUCTION_MODEL = "gpt-5.6-terra";
+const DEFAULT_PRODUCTION_MODEL = "gpt-5.6-sol";
 const DEFAULT_DEEP_REVIEW_MODEL = "gpt-5.6-sol";
 
 export interface BrokerRuntimeConfig {
@@ -37,11 +37,11 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
   if (profileId === "zai" && optionalText(env, "ZAI_BIGMODEL_API_KEY") === undefined) {
     throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
   }
-  const effort = optionalText(env, "VIDEO_FACTORY_CODEX_EFFORT") ?? "high";
+  const effort = optionalText(env, "VIDEO_FACTORY_CODEX_EFFORT") ?? "xhigh";
   if (!ALLOWED_EFFORTS.has(effort)) {
     throw new Error("VIDEO_FACTORY_CODEX_EFFORT must be one of low|medium|high|xhigh|max.");
   }
-  const auditEffort = optionalText(env, "VIDEO_FACTORY_CODEX_AUDIT_EFFORT") ?? "max";
+  const auditEffort = optionalText(env, "VIDEO_FACTORY_CODEX_AUDIT_EFFORT") ?? "xhigh";
   if (!ALLOWED_EFFORTS.has(auditEffort)) {
     throw new Error("VIDEO_FACTORY_CODEX_AUDIT_EFFORT must be one of low|medium|high|xhigh|max.");
   }

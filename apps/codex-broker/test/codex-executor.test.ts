@@ -613,15 +613,15 @@ describe("role audit continuation contract", () => {
 });
 
 describe("CodexExecutor.runTask", () => {
-  it("uses max reasoning for independent audits while retaining the production effort elsewhere", async () => {
+  it("uses xhigh reasoning and the Sol model for independent quality audits", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
     let receivedArgs: readonly string[] = [];
     const executor = new CodexExecutor({
       workspaceRoot,
-      model: "gpt-5.6-terra",
+      model: "gpt-5.6-sol",
       auditModel: "gpt-5.6-sol",
-      effort: "high",
-      auditEffort: "max",
+      effort: "xhigh",
+      auditEffort: "xhigh",
       spawnFn: fakeSpawn(async ({ child, lastMessagePath, args }) => {
         receivedArgs = args;
         await writeFile(lastMessagePath, JSON.stringify({
@@ -640,11 +640,11 @@ describe("CodexExecutor.runTask", () => {
 
     const result = await executor.runTask(parseTaskRequest(roleAuditRequest()));
 
-    assert.ok(flagValues(receivedArgs, "--config").includes("model_reasoning_effort=max"));
+    assert.ok(flagValues(receivedArgs, "--config").includes("model_reasoning_effort=xhigh"));
     assert.deepEqual(flagValues(receivedArgs, "--model"), ["gpt-5.6-sol"]);
     assert.equal(result.trace?.modelId, "gpt-5.6-sol");
-    assert.equal(result.trace?.reasoningEffort, "max");
-    assert.equal(executor.identity.taskModels?.["director-plan"], "gpt-5.6-terra");
+    assert.equal(result.trace?.reasoningEffort, "xhigh");
+    assert.equal(executor.identity.taskModels?.["director-plan"], "gpt-5.6-sol");
     assert.equal(executor.identity.taskModels?.["role-audit"], "gpt-5.6-sol");
     assert.deepEqual(await readdir(workspaceRoot), []);
   });
@@ -654,10 +654,10 @@ describe("CodexExecutor.runTask", () => {
     let receivedArgs: readonly string[] = [];
     const executor = new CodexExecutor({
       workspaceRoot,
-      model: "gpt-5.6-terra",
+      model: "gpt-5.6-sol",
       auditModel: "gpt-5.6-sol",
-      effort: "high",
-      auditEffort: "max",
+      effort: "xhigh",
+      auditEffort: "xhigh",
       spawnFn: fakeSpawn(async ({ child, lastMessagePath, args }) => {
         receivedArgs = args;
         await writeFile(lastMessagePath, JSON.stringify({ ok: true }), "utf8");
@@ -669,18 +669,18 @@ describe("CodexExecutor.runTask", () => {
 
     const result = await executor.runTask(parseTaskRequest(directorRequest()));
 
-    assert.deepEqual(flagValues(receivedArgs, "--model"), ["gpt-5.6-terra"]);
-    assert.ok(flagValues(receivedArgs, "--config").includes("model_reasoning_effort=high"));
-    assert.equal(result.trace?.modelId, "gpt-5.6-terra");
+    assert.deepEqual(flagValues(receivedArgs, "--model"), ["gpt-5.6-sol"]);
+    assert.ok(flagValues(receivedArgs, "--config").includes("model_reasoning_effort=xhigh"));
+    assert.equal(result.trace?.modelId, "gpt-5.6-sol");
   });
 
-  it("uses max reasoning and the broker-owned schema for series planning", async () => {
+  it("uses xhigh reasoning and the broker-owned schema for series planning", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-broker-"));
     let receivedArgs: readonly string[] = [];
     const executor = new CodexExecutor({
       workspaceRoot,
-      effort: "high",
-      auditEffort: "max",
+      effort: "xhigh",
+      auditEffort: "xhigh",
       spawnFn: fakeSpawn(async ({ child, lastMessagePath, args }) => {
         receivedArgs = args;
         await writeFile(lastMessagePath, JSON.stringify({ episodes: [{
@@ -701,10 +701,10 @@ describe("CodexExecutor.runTask", () => {
 
     const result = await executor.runTask(parseTaskRequest(seriesRoadmapRequest()));
 
-    assert.ok(flagValues(receivedArgs, "--config").includes("model_reasoning_effort=max"));
+    assert.ok(flagValues(receivedArgs, "--config").includes("model_reasoning_effort=xhigh"));
     assert.equal(result.trace?.taskKind, "series-roadmap");
     assert.equal(result.trace?.promptVersion, "video-factory/series-showrunner-v1");
-    assert.equal(result.trace?.reasoningEffort, "max");
+    assert.equal(result.trace?.reasoningEffort, "xhigh");
     assert.deepEqual(await readdir(workspaceRoot), []);
   });
 
@@ -716,7 +716,7 @@ describe("CodexExecutor.runTask", () => {
     let imageBytes: Buffer | undefined;
     const executor = new CodexExecutor({
       workspaceRoot,
-      auditEffort: "max",
+      auditEffort: "xhigh",
       spawnFn: (command, args, options) => {
         receivedArgs = [...args];
         return fakeSpawn(async ({ child, lastMessagePath }) => {

@@ -60,7 +60,7 @@ const seriesContext = {
     planning: {
       source: "agent",
       role: "系列开拍总编",
-      auditRole: "独立红队审计 Agent",
+      auditRole: "独立质量审计 Agent",
       auditStatus: "passed",
       auditIterations: 2,
       providerId: "openai",
@@ -336,7 +336,7 @@ describe("ProductionPipeline codex screenwriter", () => {
               prompt: "independent audit prompt",
               providerId: "openai",
               modelId: "gpt-5.6-sol",
-              reasoningEffort: "max",
+              reasoningEffort: "xhigh",
             },
           }],
         },
@@ -364,10 +364,10 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.ok(loopArtifact?.uri);
     const loopTrace = JSON.parse(await readFile(loopArtifact.uri, "utf8")) as Record<string, unknown>;
     assert.equal(loopTrace.status, "passed");
-    assert.equal((loopTrace.iterations as Array<{ auditor?: { reasoningEffort?: string } }>)[0]?.auditor?.reasoningEffort, "max");
+    assert.equal((loopTrace.iterations as Array<{ auditor?: { reasoningEffort?: string } }>)[0]?.auditor?.reasoningEffort, "xhigh");
     const scriptNode = run.nodeRuns.find((node) => node.nodeId === "script");
     assert.equal(scriptNode?.executionReceipt?.parameters?.agentLoopIterations, 1);
-    assert.equal(scriptNode?.executionReceipt?.parameters?.auditReasoningEffort, "max");
+    assert.equal(scriptNode?.executionReceipt?.parameters?.auditReasoningEffort, "xhigh");
     assert.equal(scriptNode?.executionReceipt?.parameters?.modelCallCount, 2);
     const generatedVersion = scriptNode?.outputState?.versions.find((version) => version.source === "generated");
     assert.ok(generatedVersion?.artifactIds.includes(traceArtifact.id));

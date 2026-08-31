@@ -77,7 +77,7 @@ export function buildProviderCatalog(
   const zaiVisualReviewRequirement = !zaiVisualProducerAvailable
     ? zaiCodexRequirement
     : !independentAuditAvailable
-      ? `GLM 审片意见必须经过独立 Codex Agent 红队复核。${codexRequirement("role-audit")}`
+      ? `GLM 审片意见必须经过独立 Codex Agent 质量复核。${codexRequirement("role-audit")}`
       : zaiCodexRequirement;
 
   return [
@@ -485,12 +485,12 @@ export function buildProviderCatalog(
     provider({
       id: "codex-role-auditor-v1",
       capability: "role.audit",
-      label: "Codex 独立红队审计",
+      label: "Codex 独立质量审计",
       available: supportsTask(codex, "role-audit"),
       kind: "external",
       billing: "subscription",
       description: "与生产角色隔离，逐条核对上下文、角色合同和下游边界；发现阻断问题时要求原角色修订。",
-      modes: ["独立会话", "max 推理", "最多三轮", "阻断门禁"],
+      modes: ["独立会话", "xhigh 推理", "最多三轮", "阻断门禁"],
       latency: "seconds",
       defaultModelId: modelForTask("role-audit"),
       modelProfiles: codexProfiles("codex-role-auditor-v1", "role-audit"),

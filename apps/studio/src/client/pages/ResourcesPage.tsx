@@ -76,7 +76,7 @@ const AUTOMATIC_AGENT_ROLES = [
   { label: "参考片分析师", capability: "reference.grammar" },
   { label: "语义选片师", capability: "asset.rank.semantic" },
   { label: "发行编辑", capability: "publish.copy" },
-  { label: "独立红队审计", capability: "role.audit" },
+  { label: "独立质量审计", capability: "role.audit" },
 ] as const;
 
 export function ResourcesPage() {

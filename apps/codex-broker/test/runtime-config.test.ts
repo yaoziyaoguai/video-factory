@@ -11,13 +11,13 @@ describe("brokerRuntimeConfigFromEnv", () => {
     assert.deepEqual(openai.profile.identity, {
       profileId: "openai",
       providerId: "openai",
-      modelId: "gpt-5.6-terra",
+      modelId: "gpt-5.6-sol",
       taskKinds: ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
     });
-    assert.equal(openai.profile.model, "gpt-5.6-terra");
+    assert.equal(openai.profile.model, "gpt-5.6-sol");
     assert.equal(openai.auditModel, "gpt-5.6-sol");
-    assert.equal(openai.effort, "high");
-    assert.equal(openai.auditEffort, "max");
+    assert.equal(openai.effort, "xhigh");
+    assert.equal(openai.auditEffort, "xhigh");
 
     const fakeSecret = "test-only-secret-not-for-a-real-request";
     const zai = brokerRuntimeConfigFromEnv({

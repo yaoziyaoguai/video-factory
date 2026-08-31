@@ -71,7 +71,7 @@ describe("ProductionBrief", () => {
           planning: {
             source: "agent",
             role: "系列总编",
-            auditRole: "独立红队审计 Agent",
+            auditRole: "独立质量审计 Agent",
             auditStatus: "passed",
             auditIterations: 2,
             providerId: "openai",

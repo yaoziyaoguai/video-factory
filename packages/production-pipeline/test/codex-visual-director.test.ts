@@ -122,7 +122,7 @@ describe("CodexVisualDirectorAgent", () => {
             prompt: `prompt:${kind}`,
             providerId: "openai",
             modelId: "gpt-5.6-sol",
-            reasoningEffort: kind === "role-audit" ? "max" : "high",
+            reasoningEffort: "xhigh",
           },
         };
       }
