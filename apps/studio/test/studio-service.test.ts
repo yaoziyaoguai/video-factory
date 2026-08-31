@@ -130,9 +130,11 @@ class FakePipeline implements StudioPipelinePort {
   lastInputOverride?: NodeInputOverrideDraft;
   lastAuthorization?: SpendAuthorizationDraft;
   lastRetriedNodeId?: string;
+  pauseRequestedValue = false;
   dispatchCount = 0;
   lastInput?: unknown;
   dispatchGate?: Promise<void>;
+  retryCompletion?: Promise<WorkflowRun<ProductionBrief>>;
   removedRunId?: string;
   maintenanceLeaseCalls: string[][] = [];
 
@@ -205,6 +207,20 @@ class FakePipeline implements StudioPipelinePort {
     return this.run;
   }
 
+  async requestPause(_runId: string): Promise<void> {
+    this.pauseRequestedValue = true;
+  }
+
+  async pauseRequested(_runId: string): Promise<boolean> {
+    return this.pauseRequestedValue;
+  }
+
+  async resumePaused(_runId: string): Promise<WorkflowRun<ProductionBrief>> {
+    this.pauseRequestedValue = false;
+    this.run = { ...this.run, status: "running" };
+    return this.run;
+  }
+
   async resumeStale(_runId: string): Promise<WorkflowRun<ProductionBrief>> {
     return this.run;
   }
@@ -212,6 +228,26 @@ class FakePipeline implements StudioPipelinePort {
   async retryFailedNode(_runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>> {
     this.lastRetriedNodeId = nodeId;
     return this.run;
+  }
+
+  async dispatchRetryFailedNode(
+    _runId: string,
+    nodeId: string,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    this.lastRetriedNodeId = nodeId;
+    this.run = {
+      ...this.run,
+      revision: this.run.revision + 1,
+      status: "running",
+      nodeRuns: this.run.nodeRuns.map((node) => {
+        if (node.nodeId !== nodeId) return node;
+        const { error: _error, finishedAt: _finishedAt, ...active } = node;
+        return { ...active, status: "running" };
+      }),
+    };
+    await listener?.(this.run);
+    return { runId: this.run.id, completion: this.retryCompletion ?? Promise.resolve(this.run) };
   }
 }
 
@@ -262,6 +298,56 @@ describe("StudioService", () => {
       completedIterations: 1,
       phase: "auditing",
       latestAudit: { verdict: "repair", score: 68, summary: "开场钩子仍需具体。" },
+    });
+  });
+
+  it("reads v4 progress without exposing persistent role-session handles", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-agent-progress-v4-"));
+    const directory = path.join(workspaceRoot, "runs", "run-v4", "nodes", "script", "agent-loop-checkpoints");
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "progress.json"), JSON.stringify({
+      version: "video-factory/agent-loop-checkpoint-v4",
+      maxIterations: 3,
+      status: "running",
+      completed: [],
+      pendingCandidate: { iteration: 1, candidate: { secretPrompt: "不应出现在进度接口" } },
+      sessions: { produce: { key: "private-session-key", handle: `vfs_${"p".repeat(32)}` } },
+    }), "utf8");
+
+    assert.deepEqual(await loadAgentLoopProgress(workspaceRoot, "run-v4", "script"), {
+      iteration: 1,
+      maxIterations: 3,
+      completedIterations: 0,
+      phase: "auditing",
+    });
+  });
+
+  it("reads v6 progress while a repaired candidate is being regenerated", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-agent-progress-v6-"));
+    const directory = path.join(workspaceRoot, "runs", "run-v6", "nodes", "visual-direction", "agent-loop-checkpoints");
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "progress.json"), JSON.stringify({
+      version: "video-factory/agent-loop-checkpoint-v6",
+      maxIterations: 3,
+      status: "running",
+      completed: [{
+        iteration: 1,
+        audit: { verdict: "repair", score: 62, summary: "镜头状态变化需要补齐。" },
+      }],
+      validationFailure: {
+        iteration: 2,
+        invalidCandidateHash: "private-hash",
+        validationError: "private validation detail",
+      },
+      sessions: { produce: { key: "private-session-key", handle: `vfs_${"p".repeat(32)}` } },
+    }), "utf8");
+
+    assert.deepEqual(await loadAgentLoopProgress(workspaceRoot, "run-v6", "visual-direction"), {
+      iteration: 2,
+      maxIterations: 3,
+      completedIterations: 1,
+      phase: "repairing",
+      latestAudit: { verdict: "repair", score: 62, summary: "镜头状态变化需要补齐。" },
     });
   });
 
@@ -342,6 +428,19 @@ describe("StudioService", () => {
     assert.equal(detail?.nodes.at(-1)?.status, "pending");
     assert.equal(detail?.activeIntervention?.id, "intervention-1");
     assert.equal(detail?.videoArtifactId, "artifact-video");
+
+    pipeline.run = {
+      ...pipeline.run,
+      status: "running",
+      nodeRuns: [...pipeline.run.nodeRuns, {
+        nodeId: "publish-package",
+        status: "running",
+        startedAt: "2026-08-21T10:02:00.000Z",
+        artifactIds: [],
+        qualityGateResults: [],
+      }],
+    };
+    assert.equal((await service.listRuns())[0]?.currentNodeId, "publish-package");
     assert.equal(detail?.artifacts[0]?.contentUrl, "/api/runs/run-1/artifacts/artifact-video/content");
   });
 
@@ -1060,6 +1159,25 @@ describe("StudioService", () => {
     assert.equal(pipeline.lastRetriedNodeId, undefined);
   });
 
+  it("returns a running snapshot after retry dispatch without waiting for the long model task", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-background-retry-"));
+    const run = waitingRun(workspaceRoot);
+    const failedNodeId = run.nodeRuns[0]!.nodeId;
+    run.status = "failed";
+    run.nodeRuns[0] = { ...run.nodeRuns[0]!, status: "failed", error: "temporary model failure" };
+    const pipeline = new FakePipeline(run);
+    let completeRetry!: (run: WorkflowRun<ProductionBrief>) => void;
+    pipeline.retryCompletion = new Promise((resolve) => { completeRetry = resolve; });
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const response = await service.retryFailedNode(run.id, failedNodeId);
+
+    assert.equal(response.status, "running");
+    assert.equal(response.nodes.find((node) => node.id === failedNodeId)?.status, "running");
+    assert.equal(pipeline.lastRetriedNodeId, failedNodeId);
+    completeRetry(pipeline.run);
+  });
+
   it("reconciles an ordinary failed series attempt before starting its replacement", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-restart-reconcile-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -1167,6 +1285,36 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
+  it("inherits a missing production role and its model from creator defaults", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-role-default-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      codexAvailability: {
+        available: true,
+        reason: "",
+        modelId: "gpt-5.6-sol",
+        taskKinds: ["script-draft"],
+      },
+    });
+    await service.updateCreatorSettings({
+      roleProviderDefaults: { script: "codex-screenwriter-v1" },
+      modelDefaults: { "codex-screenwriter-v1": "gpt-5.6-sol" },
+    });
+    const providers = { ...brief.providers } as Record<string, string>;
+    delete providers.script;
+
+    await service.startRun({ ...brief, providers });
+
+    const dispatched = pipeline.lastInput as ProductionBrief;
+    assert.equal(dispatched.providers.script, "codex-screenwriter-v1");
+    assert.equal(dispatched.models?.["codex-screenwriter-v1"], "gpt-5.6-sol");
+    assert.equal(dispatched.modelSelectionSources?.["codex-screenwriter-v1"], "global_default");
+  });
+
   it("replays a referenced start after the persisted node safely releases its temporary upload", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-reference-idempotency-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -1266,6 +1414,7 @@ describe("StudioService", () => {
       pipeline,
       commandAvailable: allCommandsAvailable,
       environment: {},
+      codexAvailability: { available: true, reason: "" },
       zaiCodexAvailability: { available: true, reason: "" },
     });
 
@@ -1291,6 +1440,7 @@ describe("StudioService", () => {
       pipeline,
       commandAvailable: allCommandsAvailable,
       environment: { VIDEO_FACTORY_MAX_RUN_COST_CNY: "0.05" },
+      codexAvailability: { available: true, reason: "" },
       zaiCodexAvailability: { available: true, reason: "" },
     });
 
@@ -1517,6 +1667,13 @@ describe("StudioService", () => {
     await service.applyNodeOverride(
       "run-1",
       "script",
+      { output: { hook: "旧钩子", scenes: [{ narration: "旧旁白" }] } },
+      "trusted-owner",
+    );
+    assert.equal(pipeline.lastOverride, undefined);
+    await service.applyNodeOverride(
+      "run-1",
+      "script",
       { output: { hook: "新钩子", scenes: [{ narration: "新旁白" }] } },
       "trusted-owner",
     );
@@ -1639,6 +1796,14 @@ describe("StudioService", () => {
     });
     const pipeline = new FakePipeline(run);
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await service.applyNodeOverride("run-1", "script", {
+      document: {
+        artifactId: "artifact-script",
+        content: { title: "旧脚本", scenes: [{ narration: "旧旁白" }] },
+      },
+    }, "trusted-owner");
+    assert.equal(pipeline.lastOverride, undefined);
 
     await service.applyNodeOverride("run-1", "script", {
       document: {
@@ -1814,6 +1979,11 @@ describe("StudioService", () => {
     assert.equal(candidateNode?.executionReceipt?.parameters?.inputPath, "[系统托管文件]");
     assert.match(String(candidateNode?.executionReceipt?.parameters?.notes?.[0]), /\[系统托管文件\]/);
     assert.equal(candidateNode?.plannedExecution?.parameters?.inputPath, "[系统托管文件]");
+
+    await service.applyNodeInputOverride("run-1", "assets", {
+      input: { candidateInventoryPath: "[系统托管文件]", selectedAssetIds: ["one"] },
+    }, "trusted-owner");
+    assert.equal(pipeline.lastInputOverride, undefined);
 
     await service.applyNodeInputOverride("run-1", "assets", {
       input: { candidateInventoryPath: "[系统托管文件]", selectedAssetIds: ["two"] },

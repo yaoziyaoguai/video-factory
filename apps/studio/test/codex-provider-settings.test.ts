@@ -95,8 +95,13 @@ describe("readCodexProviderSettings", () => {
     const directory = await mkdtemp(path.join(tmpdir(), "vf-codex-settings-"));
     const socketPath = path.join(directory, "worker.sock");
     let protocolVersion = "video-factory/codex-bridge-v2";
-    let modelId = "gpt-5.6-sol";
-    let taskKinds = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"];
+    let modelId = "gpt-5.6-terra";
+    let taskModels: Record<string, string> = {
+      "director-plan": "gpt-5.6-terra",
+      "role-audit": "gpt-5.6-sol",
+      "visual-review": "gpt-5.6-sol",
+    };
+    let taskKinds = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"];
     const server = http.createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
@@ -104,6 +109,7 @@ describe("readCodexProviderSettings", () => {
         profileId: "openai",
         providerId: "openai",
         modelId,
+        taskModels,
         taskKinds,
       }));
     });
@@ -118,17 +124,19 @@ describe("readCodexProviderSettings", () => {
     try {
       const ready = await readCodexProviderSettings({ VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath });
       assert.equal(ready.available, true);
-      assert.equal(ready.modelId, "gpt-5.6-sol");
+      assert.equal(ready.modelId, "gpt-5.6-terra");
+      assert.deepEqual(ready.taskModels, taskModels);
       assert.ok(ready.taskKinds.includes("visual-review"));
 
       const explicitlyMismatched = await readCodexProviderSettings({
         VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath,
-        VIDEO_FACTORY_CODEX_MODEL: "gpt-5.6-terra",
+        VIDEO_FACTORY_CODEX_MODEL: "gpt-5.6-luna",
       });
       assert.equal(explicitlyMismatched.available, false);
-      assert.equal(explicitlyMismatched.modelId, "gpt-5.6-sol");
+      assert.equal(explicitlyMismatched.modelId, "gpt-5.6-terra");
 
       taskKinds = ["topic-ideas", "script-draft"];
+      taskModels = {};
       const partial = await readCodexProviderSettings({ VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath });
       assert.equal(partial.available, true);
       assert.deepEqual(partial.taskKinds, taskKinds);
@@ -213,6 +221,23 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.equal(director?.modelProfiles?.[0]?.available, false);
     assert.equal(providers.find((provider) => provider.id === "codex-screenwriter-v1")?.modelProfiles?.[0]?.available, true);
     assert.match(director?.requirement ?? "", /director-plan/);
+    const showrunner = providers.find((provider) => provider.id === "codex-series-showrunner-v1");
+    const auditor = providers.find((provider) => provider.id === "codex-role-auditor-v1");
+    assert.equal(showrunner?.available, false);
+    assert.equal(auditor?.available, false);
+    assert.match(showrunner?.requirement ?? "", /series-roadmap/);
+    assert.match(auditor?.requirement ?? "", /role-audit/);
+  });
+
+  it("advertises series planning and independent audit only when the broker declares both tasks", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      { available: true, reason: "", taskKinds: ["series-roadmap", "role-audit"] },
+    );
+
+    assert.equal(providers.find((provider) => provider.id === "codex-series-showrunner-v1")?.available, true);
+    assert.equal(providers.find((provider) => provider.id === "codex-role-auditor-v1")?.available, true);
   });
 
   it("shows the model actually reported by the OpenAI broker", () => {
@@ -225,6 +250,26 @@ describe("buildProviderCatalog codex fallback", () => {
     const screenwriter = providers.find((provider) => provider.id === "codex-screenwriter-v1");
     assert.equal(screenwriter?.defaultModelId, "gpt-5.6-sol");
     assert.equal(screenwriter?.modelProfiles?.[0]?.id, "gpt-5.6-sol");
+  });
+
+  it("shows the role-specific production and audit models reported by the broker", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      {
+        available: true,
+        reason: "",
+        modelId: "gpt-5.6-terra",
+        taskKinds: ["director-plan", "role-audit"],
+        taskModels: {
+          "director-plan": "gpt-5.6-terra",
+          "role-audit": "gpt-5.6-sol",
+        },
+      },
+    );
+
+    assert.equal(providers.find((provider) => provider.id === "api-visual-director-v1")?.defaultModelId, "gpt-5.6-terra");
+    assert.equal(providers.find((provider) => provider.id === "codex-role-auditor-v1")?.defaultModelId, "gpt-5.6-sol");
   });
 
   it("keeps configured metered models unavailable when the production runtime is missing", () => {
@@ -287,6 +332,21 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.equal(glm?.capability, "quality.review.visual");
     assert.match(glm?.description ?? "", /GLM-5\.3-Flash/);
     assert.doesNotMatch(glm?.description ?? "", /Coding Plan/);
+  });
+
+  it("does not advertise GLM visual review without an independent Codex role auditor", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      { available: true, reason: "", taskKinds: ["visual-review"] },
+      { available: true, reason: "", taskKinds: ["visual-review"] },
+    );
+    const glm = providers.find((provider) => provider.id === "glm-visual-review-v1");
+
+    assert.equal(glm?.available, false);
+    assert.equal(glm?.modelProfiles?.[0]?.available, false);
+    assert.match(glm?.requirement ?? "", /role-audit/);
+    assert.match(glm?.requirement ?? "", /独立 Codex Agent/);
   });
 
   it("shows the configured GLM visual-review model instead of a hard-coded model", () => {

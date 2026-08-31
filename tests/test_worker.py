@@ -323,7 +323,7 @@ class WorkerContractTest(unittest.TestCase):
                 target.write_bytes(b"video")
                 return target
 
-            def materialize_local(scene, query, asset_dir):
+            def materialize_local(scene, query, asset_dir, _director_shot=None):
                 target = asset_dir / f"scene_{scene.position:02d}_local.png"
                 target.write_bytes(b"image")
                 return SceneAsset(
@@ -400,6 +400,73 @@ class WorkerContractTest(unittest.TestCase):
             self.assertEqual(plan["scene_assets"][0]["provider"], "local")
             self.assertIn("pexels:best", route["materialization_notes"][0])
             self.assertIn("download timed out", route["materialization_notes"][0])
+
+    def test_ai_router_falls_back_to_local_when_reviewed_stock_has_no_usable_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = Path(handle_request(self.valid_request("script.draft", root / "script"))["output"]["scriptPath"])
+            script = json.loads(script_path.read_text(encoding="utf-8"))
+            director_plan_path = root / "director_plan.json"
+            director_plan_path.write_text(json.dumps({
+                "shots": [{
+                    "scenePosition": scene["position"],
+                    "preferredProviderId": "pexels-stock-v1" if scene["position"] == 1 else "local-editorial-v1",
+                    "alternativeProviderIds": ["pixabay-stock-v1"] if scene["position"] == 1 else [],
+                    "query": f"scene query {scene['position']}",
+                } for scene in script["scenes"]],
+            }, ensure_ascii=False), encoding="utf-8")
+            ranking_path = root / "ranking.json"
+            ranking_path.write_text(json.dumps({
+                "version": "video-factory/asset-ranking-v1",
+                "source": "model",
+                "scenes": [{
+                    "scenePosition": 1,
+                    "candidates": [
+                        {"provider": "pexels", "assetId": "weak-pexels", "rank": 1, "semanticScore": 20, "locked": False},
+                        {"provider": "pixabay", "assetId": "weak-pixabay", "rank": 2, "semanticScore": 18, "locked": False},
+                    ],
+                }],
+            }), encoding="utf-8")
+            inventory_path = root / "candidate_inventory.private.json"
+            inventory_path.write_text(json.dumps({
+                "version": "video-factory/asset-candidate-inventory-v1",
+                "scene_candidates": [{
+                    "scene_position": 1,
+                    "candidates": [{
+                        "provider": provider,
+                        "provider_id": f"{provider}-stock-v1",
+                        "asset_id": f"weak-{provider}",
+                        "media_type": "video",
+                        "width": 1080,
+                        "height": 1920,
+                        "duration": 5,
+                        "preview_url": "",
+                        "download_url": f"mock://weak-{provider}",
+                        "source_url": "",
+                        "creator": "",
+                        "license_note": "",
+                        "query": "q",
+                        "score": 80,
+                    } for provider in ("pexels", "pixabay")],
+                }],
+            }), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "assets")
+            request["input"] = {
+                "scriptPath": str(script_path),
+                "directorPlanPath": str(director_plan_path),
+                "candidateRankingPath": str(ranking_path),
+                "candidateInventoryPath": str(inventory_path),
+            }
+            request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video"}
+
+            response = handle_request(request)
+
+            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
+            route = plan["director_routing"][0]
+            self.assertEqual(plan["scene_assets"][0]["provider"], "local")
+            self.assertEqual(route["actual_provider_id"], "local-editorial-v1")
+            self.assertTrue(route["fallback_used"])
+            self.assertIn("semantic review", route["materialization_notes"][0])
 
     def test_ai_router_rejects_low_semantic_fallbacks_but_keeps_human_locks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -501,7 +568,7 @@ class WorkerContractTest(unittest.TestCase):
             state = {"active": 0, "peak": 0}
             lock = threading.Lock()
 
-            def materialize(scene, query, asset_dir):
+            def materialize(scene, query, asset_dir, _director_shot=None):
                 with lock:
                     state["active"] += 1
                     state["peak"] = max(state["peak"], state["active"])
@@ -637,6 +704,12 @@ class WorkerContractTest(unittest.TestCase):
                 "pauseScale": 1.3,
                 "masteringPreset": "social",
             }
+            request["input"].update({
+                "voice": "manual-tone",
+                "rate": 164,
+                "pause_scale": 1.1,
+                "mastering_preset": "intimate",
+            })
 
             response = handle_request(request)
 
@@ -650,12 +723,12 @@ class WorkerContractTest(unittest.TestCase):
             self.assertTrue(all(scene["duration"] >= scene["speech_duration"] for scene in plan["scenes"]))
             self.assertEqual(plan["version"], "video-factory/voiceover-plan-v2")
             self.assertEqual(plan["direction"], {
-                "profile_id": "tone:test-tone",
-                "rate": 176,
-                "pause_scale": 1.3,
-                "mastering_preset": "social",
+                "profile_id": "tone:manual-tone",
+                "rate": 164,
+                "pause_scale": 1.1,
+                "mastering_preset": "intimate",
             })
-            self.assertEqual(plan["mastering"]["target_lufs"], -14)
+            self.assertEqual(plan["mastering"]["target_lufs"], -17)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_kokoro_provider_requires_a_verified_isolated_runtime(self):

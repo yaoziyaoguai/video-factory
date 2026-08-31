@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { creatorContainerViewId, isCreatorNestedField, isCreatorTopLevelField } from "../creator-document-policy.js";
+import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
+import { creatorContainerViewId, creatorViewId, isCreatorNestedField, isCreatorTopLevelField } from "../creator-document-policy.js";
 import { humanizeCreativeText, providerLabel } from "../presentation.js";
 
 interface NodeStructuredEditorProps {
@@ -10,6 +11,10 @@ interface NodeStructuredEditorProps {
 }
 
 const LABELS: Record<string, string> = {
+  brief: "内容简报",
+  script: "脚本",
+  visualDirection: "导演方案",
+  directorPlan: "导演方案",
   title: "标题",
   angle: "切入角度",
   audience: "目标观众",
@@ -28,6 +33,7 @@ const LABELS: Record<string, string> = {
   platform_notes: "平台提示",
   platform: "发布平台",
   position: "镜头序号",
+  purpose: "镜头目的",
   quality_checks: "脚本自检",
   hashtags: "建议话题",
   query: "素材检索词",
@@ -185,16 +191,24 @@ function StructuredField({ nodeId, fieldKey, value, assetProviderIds, path, dept
       const child = asRecord(item);
       if (!child) return hasEditableValue(item) ? { index, item, fields: [] as Array<[string, unknown]> } : undefined;
       const fields = Object.entries(child).filter(([childKey, childValue]) => hasEditableValue(childValue) && isCreatorNestedField(childKey));
-      return fields.length ? { index, item, fields } : undefined;
+      const hasContent = Object.entries(child).some(([childKey, childValue]) => hasMeaningfulValue(childValue) && isCreatorNestedField(childKey));
+      return fields.length && hasContent ? { index, item, fields } : undefined;
     }).filter((item): item is { index: number; item: unknown; fields: Array<[string, unknown]> } => item !== undefined);
     if (!visibleItems.length) return null;
+    const canCurateCandidates = creatorViewId(nodeId) === "asset-candidates" && fieldKey === "candidates";
     return <section className="node-editor-collection"><header><strong>{label(fieldKey)}</strong><span>{visibleItems.length} 项</span></header>{visibleItems.map(({ index, item, fields }, visibleIndex) => {
       if (!fields.length) return <p key={index}>{String(item)}</p>;
-      if (fieldKey === "findings") return <details className="node-editor-finding" key={index} name="node-editor-findings" open={visibleIndex === 0}>
-        <summary><span className="node-editor-index">{String(index + 1).padStart(2, "0")}</span><span><strong>{findingTitle(item, index)}</strong><small>{findingSummary(item)}</small></span></summary>
-        <div>{fields.map(([childKey, childValue]) => <StructuredField key={childKey} nodeId={nodeId} fieldKey={childKey} value={childValue} assetProviderIds={assetProviderIds} path={[...path, index, childKey]} depth={depth + 1} onChange={onChange} />)}</div>
+      return <details className={fieldKey === "findings" ? "node-editor-finding" : "node-editor-collection-item"} key={index} name={`node-editor-${fieldKey}`} open={visibleIndex === 0}>
+        <summary><span className="node-editor-index">{String(index + 1).padStart(2, "0")}</span><span><strong>{fieldKey === "findings" ? findingTitle(item, index) : collectionItemTitle(fieldKey, item, index)}</strong><small>{fieldKey === "findings" ? findingSummary(item) : collectionItemSummary(item)}</small></span></summary>
+        <div>
+          {canCurateCandidates ? <div className="node-editor-item-actions" aria-label={`候选素材 ${index + 1} 排序操作`}>
+            <button type="button" title="向上移动" aria-label={`上移候选素材 ${index + 1}`} disabled={index === 0} onClick={() => onChange(path, moveArrayItem(value, index, index - 1))}><ArrowUp aria-hidden="true" size={15} /></button>
+            <button type="button" title="向下移动" aria-label={`下移候选素材 ${index + 1}`} disabled={index === value.length - 1} onClick={() => onChange(path, moveArrayItem(value, index, index + 1))}><ArrowDown aria-hidden="true" size={15} /></button>
+            <button type="button" title="移出候选池" aria-label={`移出候选素材 ${index + 1}`} onClick={() => onChange(path, value.filter((_, candidateIndex) => candidateIndex !== index))}><Trash2 aria-hidden="true" size={15} /></button>
+          </div> : null}
+          {fields.map(([childKey, childValue]) => <StructuredField key={childKey} nodeId={nodeId} fieldKey={childKey} value={childValue} assetProviderIds={assetProviderIds} path={[...path, index, childKey]} depth={depth + 1} onChange={onChange} />)}
+        </div>
       </details>;
-      return <article key={index}><span className="node-editor-index">{String(index + 1).padStart(2, "0")}</span><div>{fields.map(([childKey, childValue]) => <StructuredField key={childKey} nodeId={nodeId} fieldKey={childKey} value={childValue} assetProviderIds={assetProviderIds} path={[...path, index, childKey]} depth={depth + 1} onChange={onChange} />)}</div></article>;
     })}</section>;
   }
   const nested = asRecord(value);
@@ -222,7 +236,7 @@ function StructuredField({ nodeId, fieldKey, value, assetProviderIds, path, dept
       : [{ value: stringValue, label: fieldKey === "preferredProviderId" ? providerLabel(stringValue) ?? stringValue : stringValue }, ...options];
     return <label className="node-editor-field"><span>{label(fieldKey)}</span><select value={stringValue} onChange={(event) => onChange(path, event.target.value)}>{choices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>;
   }
-  const multiline = typeof value === "string" && (value.length > 72 || /(prompt|narration|summary|description|rationale|note|hook|angle)/i.test(fieldKey));
+  const multiline = typeof value === "string" && (value.length > 72 || /(prompt|narration|summary|description|suggestion|rationale|note|hook|angle)/i.test(fieldKey));
   return <label className={multiline ? "node-editor-field node-editor-field-wide" : "node-editor-field"}><span>{label(fieldKey)}</span>{multiline
     ? <textarea rows={3} value={formatEditableScalar(value)} onChange={(event) => onChange(path, event.target.value)} />
     : typeof value === "number"
@@ -286,6 +300,14 @@ function updateAtPath(source: Record<string, unknown>, path: Array<string | numb
   return clone;
 }
 
+function moveArrayItem<T>(items: T[], from: number, to: number): T[] {
+  if (from === to || from < 0 || to < 0 || from >= items.length || to >= items.length) return items;
+  const next = [...items];
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item!);
+  return next;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
@@ -299,10 +321,34 @@ function formatEditableScalar(value: unknown): string {
 }
 
 function hasEditableValue(value: unknown): boolean {
-  if (value === null || value === undefined || value === "") return false;
+  // 已存在的创作文本即使被清空也必须继续显示，否则用户无法把内容改回来。
+  if (typeof value === "string") return true;
+  if (value === null || value === undefined) return false;
   if (Array.isArray(value)) return value.some(hasEditableValue);
   const record = asRecord(value);
   return record ? Object.values(record).some(hasEditableValue) : true;
+}
+
+function hasMeaningfulValue(value: unknown): boolean {
+  if (value === null || value === undefined || value === "") return false;
+  if (Array.isArray(value)) return value.some(hasMeaningfulValue);
+  const record = asRecord(value);
+  return record ? Object.values(record).some(hasMeaningfulValue) : true;
+}
+
+function collectionItemTitle(fieldKey: string, _value: unknown, index: number): string {
+  if (fieldKey === "scenes") return `分镜 ${String(index + 1).padStart(2, "0")}`;
+  if (fieldKey === "shots") return `镜头计划 ${String(index + 1).padStart(2, "0")}`;
+  if (fieldKey === "candidates") return `候选素材 ${String(index + 1).padStart(2, "0")}`;
+  return `${label(fieldKey)} ${String(index + 1).padStart(2, "0")}`;
+}
+
+function collectionItemSummary(value: unknown): string {
+  const record = asRecord(value);
+  if (!record) return "点开查看和修改";
+  const summary = [record.purpose, record.narrativeRole, record.narration, record.query, record.rationale, record.description]
+    .find((candidate): candidate is string => typeof candidate === "string" && Boolean(candidate.trim())) ?? "点开查看和修改";
+  return summary.length > 64 ? `${summary.slice(0, 64)}…` : humanizeCreativeText(summary);
 }
 
 function findingTitle(value: unknown, index: number): string {

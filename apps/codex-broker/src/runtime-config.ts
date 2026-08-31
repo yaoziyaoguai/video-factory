@@ -5,6 +5,8 @@ import {
 } from "./codex-executor.js";
 
 const ALLOWED_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const DEFAULT_PRODUCTION_MODEL = "gpt-5.6-terra";
+const DEFAULT_DEEP_REVIEW_MODEL = "gpt-5.6-sol";
 
 export interface BrokerRuntimeConfig {
   profile: CodexExecutorProfile;
@@ -12,6 +14,7 @@ export interface BrokerRuntimeConfig {
   workspaceRoot: string;
   codexBin: string;
   effort: string;
+  auditModel?: string;
   auditEffort: string;
   timeoutMs: number;
   concurrency: number;
@@ -20,10 +23,16 @@ export interface BrokerRuntimeConfig {
 
 export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntimeConfig {
   const profileId = readProfileId(env);
-  const configuredModel = optionalText(env, "VIDEO_FACTORY_CODEX_MODEL");
+  const configuredModel = optionalText(env, "VIDEO_FACTORY_CODEX_MODEL")
+    ?? (profileId === "openai" ? DEFAULT_PRODUCTION_MODEL : undefined);
+  const configuredAuditModel = optionalText(env, "VIDEO_FACTORY_CODEX_AUDIT_MODEL")
+    ?? (profileId === "openai" ? DEFAULT_DEEP_REVIEW_MODEL : undefined);
   const configuredZaiModel = optionalText(env, "ZAI_VISUAL_REVIEW_MODEL_ID");
   if (profileId === "zai" && configuredModel !== undefined) {
     throw new Error("VIDEO_FACTORY_CODEX_MODEL cannot override the zai profile model.");
+  }
+  if (profileId === "zai" && optionalText(env, "VIDEO_FACTORY_CODEX_AUDIT_MODEL") !== undefined) {
+    throw new Error("VIDEO_FACTORY_CODEX_AUDIT_MODEL cannot override the zai profile model.");
   }
   if (profileId === "zai" && optionalText(env, "ZAI_BIGMODEL_API_KEY") === undefined) {
     throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
@@ -43,6 +52,7 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
     workspaceRoot: optionalText(env, "VIDEO_FACTORY_CODEX_WORKSPACE_ROOT") ?? defaultWorkspaceRoot(profileId),
     codexBin: optionalText(env, "CODEX_BIN") ?? "codex",
     effort,
+    ...(configuredAuditModel ? { auditModel: configuredAuditModel } : {}),
     auditEffort,
     timeoutMs: readInteger(env, "VIDEO_FACTORY_CODEX_TIMEOUT_MS", 300_000, 1_000, 3_600_000),
     concurrency: readInteger(env, "VIDEO_FACTORY_CODEX_CONCURRENCY", 1, 1, 8),

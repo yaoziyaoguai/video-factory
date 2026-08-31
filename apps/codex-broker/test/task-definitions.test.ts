@@ -102,6 +102,8 @@ describe("broker-owned task definitions", () => {
     assert.match(taskPromptFor("role-audit").directive, /不得发明输入中不存在的验收要求/);
     assert.match(taskPromptFor("role-audit").directive, /不得把下游节点尚未产出的证据/);
     assert.match(taskPromptFor("role-audit").directive, /上一轮审计/);
+    assert.match(taskPromptFor("role-audit").directive, /不得要求新增或配置输入中不存在的 Provider/);
+    assert.match(taskPromptFor("director-plan").directive, /不得要求新增一个输入中不存在的 Provider/);
     assert.match(
       taskPromptFor("visual-review").outputRules.join("\n"),
       /version 必须固定为 video-factory\/visual-review-v1/,
@@ -121,8 +123,9 @@ describe("broker-owned task definitions", () => {
 
     assert.equal(topic.version, "video-factory/topic-editor-v2");
     assert.equal(script.version, "video-factory/screenwriter-v4");
-    assert.equal(director.version, "video-factory/director-v6");
-    assert.equal(review.version, "video-factory/visual-review-v4");
+    assert.equal(director.version, "video-factory/director-v8");
+    assert.equal(review.version, "video-factory/visual-review-v5");
+    assert.match(review.outputRules.join("\n"), /不得为了通过审计而美化评分/);
     assert.match(topic.directive, /值得做视频/);
     assert.match(script.directive, /观众承诺/);
     assert.match(script.directive, /5 到 24/);
@@ -137,6 +140,8 @@ describe("broker-owned task definitions", () => {
     assert.match(director.directive, /图库是检索而不是生成/);
     assert.match(director.directive, /3 到 8 个具体英文概念/);
     assert.match(director.directive, /onScreenText.*soundCue/);
+    assert.match(director.outputRules.join("\n"), /不要逐字复述脚本/);
+    assert.match(director.outputRules.join("\n"), /每个标量字段最多一句/);
     assert.match(review.directive, /脚本.*导演意图/);
     assert.match(review.directive, /逐场核对/);
     assert.match(review.directive, /scene_triplets.*opening.*middle.*closing/);

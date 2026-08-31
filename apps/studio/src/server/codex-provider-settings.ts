@@ -33,6 +33,7 @@ export interface CodexProviderSettings {
   requirement: string;
   reason: string;
   taskKinds: string[];
+  taskModels?: Record<string, string>;
 }
 
 export interface CodexProviderSettingsOptions {
@@ -43,6 +44,7 @@ interface CodexSocketProbeResult {
   status: CodexSocketStatus;
   taskKinds: string[];
   modelId?: string;
+  taskModels?: Record<string, string>;
 }
 
 interface CodexHealthIdentity {
@@ -50,6 +52,7 @@ interface CodexHealthIdentity {
   providerId: string;
   modelId?: string;
   taskKinds: readonly string[];
+  taskModels?: Record<string, string>;
 }
 
 // 同步层：只解析 env 与默认路径，供 provider catalog 等同步调用方使用。
@@ -86,7 +89,7 @@ export async function readCodexProviderSettings(
     profileId: "openai",
     providerId: "openai",
     ...(configuredModelId ? { modelId: configuredModelId } : {}),
-    taskKinds: ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review"],
+    taskKinds: ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
   }, options);
 }
 
@@ -115,6 +118,7 @@ async function readProviderSettings(
         status: rawResult,
         taskKinds: rawResult === "ready" ? [...(expectedIdentity?.taskKinds ?? [])] : [],
         ...(expectedIdentity?.modelId ? { modelId: expectedIdentity.modelId } : {}),
+        ...(expectedIdentity?.taskModels ? { taskModels: expectedIdentity.taskModels } : {}),
       }
     : rawResult;
   const status = result.status;
@@ -127,6 +131,7 @@ async function readProviderSettings(
     requirement: resolution.requirement,
     reason: available ? "" : codexUnavailableReason(status, resolution.socketPath),
     taskKinds: available ? [...result.taskKinds] : [],
+    ...(available && result.taskModels ? { taskModels: result.taskModels } : {}),
   };
 }
 
@@ -166,10 +171,20 @@ function probeCodexHealth(
 ): Promise<CodexSocketProbeResult> {
   return new Promise((resolve) => {
     let settled = false;
-    const settle = (status: CodexSocketStatus, taskKinds: string[] = [], modelId?: string): void => {
+    const settle = (
+      status: CodexSocketStatus,
+      taskKinds: string[] = [],
+      modelId?: string,
+      taskModels?: Record<string, string>,
+    ): void => {
       if (settled) return;
       settled = true;
-      resolve({ status, taskKinds, ...(modelId ? { modelId } : {}) });
+      resolve({
+        status,
+        taskKinds,
+        ...(modelId ? { modelId } : {}),
+        ...(taskModels ? { taskModels } : {}),
+      });
     };
     const request = http.request({
       socketPath,
@@ -211,10 +226,16 @@ function probeCodexHealth(
             return;
           }
           const taskKinds = [...new Set(body.taskKinds as string[])];
+          const taskModels = parseTaskModels(body.taskModels, taskKinds);
+          if (body.taskModels !== undefined && taskModels === undefined) {
+            settle("protocol_mismatch");
+            return;
+          }
           settle(
             expectedIdentity && !matchesIdentity(body, expectedIdentity) ? "identity_mismatch" : "ready",
             taskKinds,
             body.modelId.trim(),
+            taskModels,
           );
         } catch {
           settle("protocol_mismatch");
@@ -228,6 +249,17 @@ function probeCodexHealth(
     request.on("error", () => settle("unreachable"));
     request.end();
   });
+}
+
+function parseTaskModels(value: unknown, taskKinds: readonly string[]): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const result: Record<string, string> = {};
+  for (const [taskKind, modelId] of Object.entries(value)) {
+    if (!taskKinds.includes(taskKind) || typeof modelId !== "string" || !modelId.trim()) return undefined;
+    result[taskKind] = modelId.trim();
+  }
+  return result;
 }
 
 function matchesIdentity(body: Record<string, unknown>, expected: CodexHealthIdentity): boolean {

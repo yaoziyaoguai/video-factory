@@ -1,7 +1,23 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { StudioCreatorSettings, StudioCreatorSettingsPatch } from "../shared/api.js";
+import type {
+  StudioCreatorSettings,
+  StudioCreatorSettingsPatch,
+  StudioProductionRoleBindingKey,
+  StudioRoleProviderDefaults,
+} from "../shared/api.js";
+
+const PRODUCTION_ROLE_KEYS = new Set<StudioProductionRoleBindingKey>([
+  "script",
+  "director",
+  "assets",
+  "voice",
+  "render",
+  "technicalReview",
+  "visualReview",
+]);
+const PROVIDER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export interface CreatorSettingsRepository {
   get(): Promise<StudioCreatorSettings>;
@@ -21,6 +37,7 @@ export const DEFAULT_CREATOR_SETTINGS: StudioCreatorSettings = {
     masteringPreset: "natural",
   },
   defaultRecipeId: "economy-daily",
+  roleProviderDefaults: {},
   modelDefaults: {},
   productionDefaults: {
     directorProfileId: "auto",
@@ -53,6 +70,9 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
         ...file.settings,
         ...patch,
         ...(patch.voiceDirection ? { voiceDirection: { ...patch.voiceDirection } } : {}),
+        roleProviderDefaults: patch.roleProviderDefaults
+          ? { ...patch.roleProviderDefaults }
+          : { ...file.settings.roleProviderDefaults },
         modelDefaults: patch.modelDefaults ? { ...patch.modelDefaults } : { ...file.settings.modelDefaults },
         productionDefaults: {
           ...file.settings.productionDefaults,
@@ -82,6 +102,7 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
           ...structuredClone(DEFAULT_CREATOR_SETTINGS),
           ...parsed.settings,
           voiceDirection: { ...DEFAULT_CREATOR_SETTINGS.voiceDirection, ...parsed.settings.voiceDirection },
+          roleProviderDefaults: sanitizeRoleProviderDefaults(parsed.settings.roleProviderDefaults),
           modelDefaults: { ...DEFAULT_CREATOR_SETTINGS.modelDefaults, ...parsed.settings.modelDefaults },
           productionDefaults: {
             ...DEFAULT_CREATOR_SETTINGS.productionDefaults,
@@ -110,6 +131,18 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
       await rm(temporaryPath, { force: true });
     }
   }
+}
+
+function sanitizeRoleProviderDefaults(value: unknown): StudioRoleProviderDefaults {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const sanitized: StudioRoleProviderDefaults = {};
+  for (const [role, providerId] of Object.entries(value)) {
+    if (!PRODUCTION_ROLE_KEYS.has(role as StudioProductionRoleBindingKey) || typeof providerId !== "string") continue;
+    const normalized = providerId.trim();
+    if (!PROVIDER_ID_PATTERN.test(normalized)) continue;
+    sanitized[role as StudioProductionRoleBindingKey] = normalized;
+  }
+  return sanitized;
 }
 
 function hasCode(error: unknown, code: string): boolean {

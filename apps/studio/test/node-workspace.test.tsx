@@ -1,9 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StudioCostDashboard as CostDto, StudioNode } from "../src/shared/api.js";
-import { CostDashboard } from "../src/client/components/CostDashboard.js";
+import { CostDashboard, RunCostDetailPanel } from "../src/client/components/CostDashboard.js";
 import { NodeWorkspace } from "../src/client/components/NodeWorkspace.js";
 
 const succeededNode: StudioNode = {
@@ -80,6 +80,38 @@ describe("node production workspaces", () => {
     });
   });
 
+  it("blocks an empty brief title before sending an override request", async () => {
+    const onOverride = vi.fn(async () => undefined);
+    const briefNode: StudioNode = {
+      ...succeededNode,
+      id: "brief",
+      label: "内容简报",
+      role: "制片人",
+      output: { title: "原题", angle: "原角度", audience: "原观众" },
+      outputState: {
+        ...succeededNode.outputState!,
+        effectiveVersionId: "brief-generated",
+        generatedVersionId: "brief-generated",
+        versions: [{
+          ...succeededNode.outputState!.versions[0]!,
+          id: "brief-generated",
+          output: { title: "原题", angle: "原角度", audience: "原观众" },
+        }],
+      },
+    };
+    render(<NodeWorkspace node={briefNode} runStatus="paused" artifacts={[]} busy={false} onOverride={onOverride} onAuthorize={async () => undefined} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    await userEvent.clear(screen.getByRole("textbox", { name: "标题" }));
+    expect(screen.getByRole("textbox", { name: "标题" })).toHaveValue("");
+    await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("标题不能为空");
+    expect(onOverride).not.toHaveBeenCalled();
+    await userEvent.type(screen.getByRole("textbox", { name: "标题" }), "修正后的题目");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("discloses a failed agent audit and its public rule fallback reason", () => {
     const fallbackReason = "模型连续三轮未通过审计，已采用确定性脚本规则。";
     const node: StudioNode = {
@@ -119,6 +151,83 @@ describe("node production workspaces", () => {
 
     expect(screen.getByText("第 2 / 3 轮 · 独立审计中")).toBeInTheDocument();
     expect(screen.getByText("上一轮 68 分：开场钩子仍需具体。")).toBeInTheDocument();
+  });
+
+  it("keeps the role workspace open while live run data rerenders", async () => {
+    const props = {
+      node: succeededNode,
+      runStatus: "stale" as const,
+      artifacts: [],
+      busy: false,
+      onOverride: async () => undefined,
+      onAuthorize: async () => undefined,
+    };
+    const { container, rerender } = render(<NodeWorkspace {...props} />);
+    const workspace = container.querySelector<HTMLDetailsElement>("#node-workspace-script")!;
+
+    await userEvent.click(workspace.querySelector("summary")!);
+    expect(workspace).toHaveAttribute("open");
+    rerender(<NodeWorkspace {...props} node={{ ...succeededNode }} />);
+
+    expect(workspace).toHaveAttribute("open");
+  });
+
+  it("requests a cooperative pause before editing a completed upstream node", async () => {
+    const onRequestPause = vi.fn(async () => undefined);
+    render(<NodeWorkspace
+      node={succeededNode}
+      runStatus="running"
+      artifacts={[]}
+      busy={true}
+      pauseBusy={false}
+      onRequestPause={onRequestPause}
+      onOverride={async () => undefined}
+      onInputOverride={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    expect(screen.queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "暂停后修改" }));
+    expect(onRequestPause).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows editing after the workflow has safely paused between nodes", async () => {
+    const onOverride = vi.fn(async () => undefined);
+    render(<NodeWorkspace
+      node={succeededNode}
+      runStatus="paused"
+      artifacts={[]}
+      busy={false}
+      onOverride={onOverride}
+      onInputOverride={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    expect(screen.getByText(/制作已暂停，可以修改/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "开场钩子" }), { target: { value: "暂停后人工钩子" } });
+    await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+    expect(onOverride).toHaveBeenCalledWith("script", { output: { hook: "暂停后人工钩子" } });
+  });
+
+  it("blocks an invalid upstream brief before sending an input override", async () => {
+    const onInputOverride = vi.fn(async () => undefined);
+    render(<NodeWorkspace
+      node={succeededNode}
+      runStatus="stale"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onInputOverride={onInputOverride}
+      onAuthorize={async () => undefined}
+    />);
+
+    await userEvent.click(screen.getByText("查看和调整这个角色收到的内容"));
+    await userEvent.click(screen.getByRole("button", { name: "编辑输入" }));
+    await userEvent.clear(screen.getByRole("textbox", { name: "标题" }));
+    await userEvent.click(screen.getByRole("button", { name: "保存人工输入" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("内容简报：标题不能为空");
+    expect(onInputOverride).not.toHaveBeenCalled();
   });
 
   it("discloses a receipt-level fallback reason when loop parameters were replaced", () => {
@@ -201,7 +310,7 @@ describe("node production workspaces", () => {
       onAuthorize={async () => undefined}
     />);
 
-    await userEvent.click(screen.getByText("调整这个角色收到的内容"));
+    await userEvent.click(screen.getByText("查看和调整这个角色收到的内容"));
     expect(screen.getAllByText(/旧题目/).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("button", { name: "编辑输入" }));
     fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "人工题目" } });
@@ -242,6 +351,134 @@ describe("node production workspaces", () => {
 
     expect(screen.getByText("成熟女声")).toBeInTheDocument();
     expect(screen.getByLabelText("实际配音试听")).toHaveAttribute("src", "/api/runs/run-1/artifacts/voice-audio/content");
+  });
+
+  it("edits voice instructions as node input instead of pretending generated audio metadata is editable", async () => {
+    const onInputOverride = vi.fn(async () => undefined);
+    render(<NodeWorkspace
+      node={{
+        ...succeededNode,
+        id: "voice",
+        label: "配音",
+        role: "声音导演",
+        output: {
+          voice: "Tingting",
+          rate: 185,
+          direction: { rate: 185, pause_scale: 1, mastering_preset: "natural" },
+        },
+        inputState: {
+          effectiveVersionId: "voice-input-generated",
+          stale: false,
+          versions: [{
+            id: "voice-input-generated",
+            source: "derived",
+            value: {
+              scriptPath: "/managed/script.json",
+              voice: "Tingting",
+              rate: 185,
+              pause_scale: 1,
+              mastering_preset: "natural",
+            },
+            upstreamVersionIds: ["script-v1", "assets-v1"],
+            createdAt: "2026-08-27T00:00:00.000Z",
+            createdBy: "workflow:voice",
+            schemaVersion: "voice-input-v1",
+          }],
+        },
+      }}
+      runStatus="stale"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onInputOverride={onInputOverride}
+      onAuthorize={async () => undefined}
+    />);
+
+    expect(screen.queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByText("查看和调整这个角色收到的内容"));
+    await userEvent.click(screen.getByRole("button", { name: "编辑输入" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "语速（字/分钟）" }), { target: { value: "170" } });
+    fireEvent.blur(screen.getByRole("spinbutton", { name: "语速（字/分钟）" }));
+    await userEvent.click(screen.getByRole("button", { name: "保存人工输入" }));
+
+    expect(onInputOverride).toHaveBeenCalledWith("voice", {
+      input: {
+        scriptPath: "/managed/script.json",
+        voice: "Tingting",
+        rate: 170,
+        pause_scale: 1,
+        mastering_preset: "natural",
+      },
+    });
+  });
+
+  it("keeps materialized scene assets read-only until a real replacement is supplied", () => {
+    render(<NodeWorkspace
+      node={{
+        ...succeededNode,
+        id: "assets",
+        label: "画面",
+        role: "素材导演",
+        output: { director_routing: [{ scene_position: 1, query: "窗边水杯", rationale: "首镜建立氛围" }] },
+      }}
+      runStatus="stale"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    expect(screen.queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
+    expect(screen.getByText(/修改上方导演方案中的逐镜来源或提示/)).toBeInTheDocument();
+  });
+
+  it("previews every materialized scene image and video instead of only showing routing text", () => {
+    const { container } = render(<NodeWorkspace
+      node={{
+        ...succeededNode,
+        id: "assets",
+        label: "画面",
+        role: "素材导演",
+        artifactIds: ["scene-1", "scene-2"],
+        output: { director_routing: [{ scene_position: 1, query: "窗边水杯", rationale: "首镜建立氛围" }] },
+      }}
+      runStatus="stale"
+      artifacts={[
+        { id: "scene-1", kind: "media_asset", createdAt: "2026-08-27T00:00:00.000Z", contentType: "image/png", contentUrl: "/scene-1.png", producerNodeId: "assets", providerId: "local-editorial-v1" },
+        { id: "scene-2", kind: "media_asset", createdAt: "2026-08-27T00:00:01.000Z", contentType: "video/mp4", contentUrl: "/scene-2.mp4", producerNodeId: "assets", providerId: "hailuo-video-v1" },
+      ]}
+      busy={false}
+      onOverride={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    expect(screen.getByRole("img", { name: "镜头 1 画面预览" })).toHaveAttribute("src", "/scene-1.png");
+    expect(container.querySelector('video[aria-label="镜头 2 画面预览"]')).toHaveAttribute("src", "/scene-2.mp4");
+    expect(screen.getByText("本地编辑画面")).toBeInTheDocument();
+    expect(screen.getByText("MiniMax 海螺视频生成")).toBeInTheDocument();
+  });
+
+  it("uses a multiline editor for every visual-review suggestion", async () => {
+    render(<NodeWorkspace
+      node={{
+        ...succeededNode,
+        id: "visual-review",
+        label: "视觉审片",
+        role: "视觉审片员",
+        output: {
+          summary: "需要调整",
+          findings: [{ category: "pacing", severity: "warning", description: "转场过亮", suggestion: "移除闪白" }],
+        },
+      }}
+      runStatus="stale"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    expect(screen.getByRole("textbox", { name: "修改建议" }).tagName).toBe("TEXTAREA");
   });
 
   it("labels an existing voice artifact as outdated after a human edit", () => {
@@ -296,15 +533,17 @@ describe("node production workspaces", () => {
       onAuthorize={async () => undefined}
     />);
 
-    await userEvent.click(screen.getByText("调整这个角色收到的内容"));
+    await userEvent.click(screen.getByText("查看和调整这个角色收到的内容"));
     expect(screen.getByText("历史任务推断输入")).toBeInTheDocument();
     expect(screen.getByText(/旧任务没有保存当时的原始输入/)).toBeInTheDocument();
   });
 
-  it("does not offer an input editor when a legacy node only saved technical paths", () => {
-    render(<NodeWorkspace
-      node={{
+  it("links a technical-path input back to the editable upstream role without exposing the path", async () => {
+    const directorNode: StudioNode = {
         ...succeededNode,
+        id: "visual-direction",
+        label: "导演方案",
+        role: "导演",
         inputState: {
           effectiveVersionId: "legacy-path-input",
           stale: false,
@@ -318,17 +557,29 @@ describe("node production workspaces", () => {
             schemaVersion: "1",
           }],
         },
-      }}
+      };
+    const nodes = [succeededNode, directorNode];
+    const { container } = render(<>
+      <NodeWorkspace node={succeededNode} nodes={nodes} runStatus="stale" artifacts={[]} busy={false} onOverride={async () => undefined} onInputOverride={async () => undefined} onAuthorize={async () => undefined} />
+      <NodeWorkspace
+      node={directorNode}
+      nodes={nodes}
       runStatus="stale"
       artifacts={[]}
       busy={false}
       onOverride={async () => undefined}
       onInputOverride={async () => undefined}
       onAuthorize={async () => undefined}
-    />);
+    /></>);
 
-    expect(screen.queryByText("调整这个角色收到的内容")).not.toBeInTheDocument();
-    expect(screen.queryByText(/private\/runs/)).not.toBeInTheDocument();
+    const directorWorkspace = container.querySelector<HTMLElement>("#node-workspace-visual-direction")!;
+    await userEvent.click(within(directorWorkspace).getByText("查看和调整这个角色收到的内容"));
+    expect(within(directorWorkspace).getByText("编剧 · 脚本")).toBeInTheDocument();
+    expect(within(directorWorkspace).getByText("自动版本")).toBeInTheDocument();
+    expect(within(directorWorkspace).queryByRole("button", { name: "编辑输入" })).not.toBeInTheDocument();
+    expect(within(directorWorkspace).queryByText(/private\/runs/)).not.toBeInTheDocument();
+    await userEvent.click(within(directorWorkspace).getByRole("button", { name: "查看与修改 编剧 · 脚本" }));
+    expect(container.querySelector("#node-workspace-script")).toHaveAttribute("open");
   });
 
   it("does not fetch or expose the immutable model trace in the creator workspace", () => {
@@ -384,6 +635,19 @@ describe("node production workspaces", () => {
       status: "awaiting_spend_approval",
       artifactIds: [],
       qualityGateResults: [],
+      inputState: {
+        effectiveVersionId: "assets-input-v1",
+        stale: false,
+        versions: [{
+          id: "assets-input-v1",
+          source: "derived",
+          value: { directorPlan: { shots: [{ position: 1, generationPrompt: "窗边水杯" }] } },
+          upstreamVersionIds: ["script-v2"],
+          createdAt: "2026-08-27T00:00:00.000Z",
+          createdBy: "workflow-runner",
+          schemaVersion: "assets-input-v1",
+        }],
+      },
       spendPlan: {
         id: "plan-1",
         inputVersionIds: ["script-v2"],
@@ -415,9 +679,15 @@ describe("node production workspaces", () => {
     };
     render(<NodeWorkspace node={paidNode} nodes={[scriptNode, paidNode]} runStatus="awaiting_spend_approval" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={onAuthorize} />);
 
+    const inputReview = screen.getByText("查看和调整这个角色收到的内容").closest("details");
+    const spendGate = screen.getByRole("button", { name: "检查并确认" }).closest("section");
+    expect(inputReview).toHaveAttribute("open");
+    expect(inputReview?.compareDocumentPosition(spendGate!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+
     await userEvent.click(screen.getByRole("button", { name: "检查并确认" }));
-    expect(screen.getByText("编剧 · 脚本")).toBeInTheDocument();
-    expect(screen.getByText("人工版本")).toBeInTheDocument();
+    const dialog = screen.getByRole("dialog", { name: "确认本次费用" });
+    expect(within(dialog).getByText("编剧 · 脚本")).toBeInTheDocument();
+    expect(within(dialog).getByText("人工版本")).toBeInTheDocument();
     expect(screen.getAllByText(/MiniMax-Hailuo-02/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/最高 ¥3.00/).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("button", { name: "确认并执行" }));
@@ -564,5 +834,42 @@ describe("node production workspaces", () => {
     expect(screen.getByRole("link", { name: /付费成片/ })).toHaveAttribute("href", "/projects/run-1");
     expect(screen.getAllByText("¥3.00").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/1 笔待核对/).length).toBeGreaterThan(0);
+  });
+
+  it("distinguishes subscription retries from failed metered calls", async () => {
+    render(<RunCostDetailPanel detail={{
+      runId: "run-1",
+      title: "订阅模型重试",
+      totals: {
+        estimatedCostCny: 0,
+        authorizedCostCny: 0,
+        actualCostCny: 0,
+        actualPendingCount: 0,
+        meteredCalls: 0,
+        subscriptionCalls: 2,
+        freeCalls: 0,
+        failedMeteredCalls: 0,
+      },
+      lines: [{
+        id: "receipt-1",
+        runId: "run-1",
+        runTitle: "订阅模型重试",
+        nodeId: "visual-direction",
+        role: "导演",
+        capability: "storyboard.plan",
+        providerId: "openai",
+        modelId: "gpt-5.6-terra",
+        billing: "subscription",
+        status: "failed",
+        estimatedCostCny: 0,
+        subscriptionCallCount: 2,
+        actualPending: false,
+        startedAt: "2026-08-27T00:00:00.000Z",
+      }],
+    }} />);
+
+    expect(screen.getByText("按量调用失败")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("逐角色消费明细"));
+    expect(screen.getByText("订阅任务失败 · 不产生按量费用")).toBeInTheDocument();
   });
 });

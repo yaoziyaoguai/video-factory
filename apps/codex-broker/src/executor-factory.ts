@@ -27,6 +27,7 @@ export function createBrokerExecutor(
     codexBin: config.codexBin,
     profile: config.profile,
     effort: config.effort,
+    ...(config.auditModel ? { auditModel: config.auditModel } : {}),
     auditEffort: config.auditEffort,
     timeoutMs: config.timeoutMs,
   });

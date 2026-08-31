@@ -7,6 +7,7 @@ export type StudioRunStatus =
   | "failed"
   | "needs_human"
   | "rejected"
+  | "paused"
   | "stale"
   | "awaiting_spend_approval"
   | "approval_invalidated";
@@ -68,10 +69,22 @@ export interface StudioProductionDefaults {
   durationSeconds: 20 | 24 | 30 | 45;
 }
 
+export type StudioProductionRoleBindingKey =
+  | "script"
+  | "director"
+  | "assets"
+  | "voice"
+  | "render"
+  | "technicalReview"
+  | "visualReview";
+
+export type StudioRoleProviderDefaults = Partial<Record<StudioProductionRoleBindingKey, string>>;
+
 export interface StudioCreatorSettings {
   voiceDirection: StudioVoiceDirection;
   defaultRecipeId: StudioProductionRecipeId;
   defaultAssetProviderId?: string;
+  roleProviderDefaults?: StudioRoleProviderDefaults;
   modelDefaults?: Record<string, string>;
   productionDefaults: StudioProductionDefaults;
   topicStrategy: StudioTopicStrategy;
@@ -85,6 +98,7 @@ export interface StudioCreatorSettingsPatch {
   voiceDirection?: StudioVoiceDirection;
   defaultRecipeId?: StudioProductionRecipeId;
   defaultAssetProviderId?: string;
+  roleProviderDefaults?: StudioRoleProviderDefaults;
   modelDefaults?: Record<string, string>;
   productionDefaults?: Partial<StudioProductionDefaults>;
   topicStrategy?: StudioTopicStrategy;
@@ -584,6 +598,7 @@ export interface StudioRunProgress {
   totalNodes: number;
   percentage: number;
   elapsedSeconds: number;
+  currentNodeElapsedSeconds?: number;
   lastUpdatedAt: string;
   eta?: StudioRunEtaRange;
   etaUnavailableReason?: "insufficient_history" | "waiting_for_human" | "future_human_gate" | "not_running";
@@ -643,6 +658,7 @@ export interface StudioRunDetail extends StudioRunSummary {
   activeIntervention?: StudioIntervention;
   videoArtifactId?: string;
   publishPackageArtifactId?: string;
+  pauseRequested?: boolean;
 }
 
 export interface StudioNode {
@@ -1222,6 +1238,28 @@ export function parseStudioCreatorSettingsPatch(value: unknown): StudioCreatorSe
       throw new StudioInputError("默认画面能力编号格式不正确。");
     }
     patch.defaultAssetProviderId = providerId;
+  }
+  if (input.roleProviderDefaults !== undefined) {
+    const defaults = requiredObject(input.roleProviderDefaults, "生产角色默认能力");
+    const allowed = new Set<StudioProductionRoleBindingKey>([
+      "script",
+      "director",
+      "assets",
+      "voice",
+      "render",
+      "technicalReview",
+      "visualReview",
+    ]);
+    patch.roleProviderDefaults = Object.fromEntries(Object.entries(defaults).map(([role, providerId]) => {
+      if (!allowed.has(role as StudioProductionRoleBindingKey)) {
+        throw new StudioInputError(`未知的生产角色“${role}”。`);
+      }
+      const normalizedProviderId = requiredTrimmedString(providerId, `${role} 的默认能力`);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(normalizedProviderId)) {
+        throw new StudioInputError(`${role} 的默认能力编号格式不正确。`);
+      }
+      return [role, normalizedProviderId];
+    })) as StudioRoleProviderDefaults;
   }
   if (input.modelDefaults !== undefined) {
     const defaults = requiredObject(input.modelDefaults, "默认模型");

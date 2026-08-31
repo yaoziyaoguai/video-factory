@@ -105,6 +105,25 @@ describe("NodeStructuredEditor", () => {
     expect(onChange).toHaveBeenCalledWith({ scenes: [{ narration: "开场", visual_strategy: "generated" }] });
   });
 
+  it("collapses long scene collections and keeps creative language in their summaries", () => {
+    const { container } = render(<NodeStructuredEditor
+      nodeId="script"
+      value={{ scenes: [
+        { purpose: "建立冲突", narration: "第一句", visual_strategy: "stock" },
+        { purpose: "给出答案", narration: "第二句", visual_strategy: "local" },
+      ] }}
+      onChange={vi.fn()}
+    />);
+
+    const items = container.querySelectorAll(".node-editor-collection-item");
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveAttribute("open");
+    expect(items[1]).not.toHaveAttribute("open");
+    expect(screen.getByText("分镜 01")).toBeInTheDocument();
+    expect(screen.getByText("建立冲突")).toBeInTheDocument();
+    expect(screen.queryByText("purpose")).not.toBeInTheDocument();
+  });
+
   it("uses creator-facing labels for nested platform and shot fields", () => {
     render(<NodeStructuredEditor
       nodeId="script"
@@ -119,6 +138,17 @@ describe("NodeStructuredEditor", () => {
     expect(screen.getByRole("spinbutton", { name: "镜头序号" })).toHaveValue(1);
     expect(screen.queryByText("platform")).not.toBeInTheDocument();
     expect(screen.queryByText("position")).not.toBeInTheDocument();
+  });
+
+  it("names upstream creative documents without exposing schema keys", () => {
+    render(<NodeStructuredEditor
+      nodeId="script-input"
+      value={{ brief: { title: "一杯水", angle: "日常观察", audience: "普通观众" } }}
+      onChange={vi.fn()}
+    />);
+
+    expect(screen.getByText("内容简报")).toBeInTheDocument();
+    expect(screen.queryByText("brief")).not.toBeInTheDocument();
   });
 
   it("uses creator language for director fields and production shorthand", () => {
@@ -162,6 +192,68 @@ describe("NodeStructuredEditor", () => {
     expect(screen.queryByDisplayValue("video")).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue("720")).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue("1280")).not.toBeInTheDocument();
+  });
+
+  it("lets creators curate candidate order without exposing machine ranking internals", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<NodeStructuredEditor
+      nodeId="asset-candidates"
+      value={{
+        scene_candidates: [{
+          query: "创作者操作鼠标",
+          candidates: [
+            { query: "候选一", score: 2084600, selected: false },
+            { query: "候选二", score: 91, selected: true },
+          ],
+        }],
+      }}
+      onChange={onChange}
+    />);
+
+    expect(screen.queryByText("score")).not.toBeInTheDocument();
+    expect(screen.queryByText("selected")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("2084600")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "下移候选素材 1" }));
+    expect(onChange).toHaveBeenCalledWith({
+      scene_candidates: [{
+        query: "创作者操作鼠标",
+        candidates: [
+          { query: "候选二", score: 91, selected: true },
+          { query: "候选一", score: 2084600, selected: false },
+        ],
+      }],
+    });
+    onChange.mockClear();
+    await user.click(screen.getByRole("button", { name: "移出候选素材 1" }));
+    expect(onChange).toHaveBeenCalledWith({
+      scene_candidates: [{
+        query: "创作者操作鼠标",
+        candidates: [{ query: "候选二", score: 91, selected: true }],
+      }],
+    });
+  });
+
+  it("does not keep a removed collection row visible through a recycled array index", async () => {
+    const user = userEvent.setup();
+    const initial = {
+      scene_candidates: [{
+        query: "创作者操作鼠标",
+        candidates: [
+          { query: "应当移除的候选" },
+          { query: "" },
+        ],
+      }],
+    };
+    const onChange = vi.fn();
+    const { rerender } = render(<NodeStructuredEditor nodeId="asset-candidates" value={initial} onChange={onChange} />);
+
+    await user.click(screen.getByRole("button", { name: "移出候选素材 1" }));
+    const next = { scene_candidates: [{ query: "创作者操作鼠标", candidates: [{ query: "" }] }] };
+    rerender(<NodeStructuredEditor nodeId="asset-candidates" value={next} onChange={onChange} />);
+
+    expect(screen.queryByDisplayValue("应当移除的候选")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /移出候选素材/ })).not.toBeInTheDocument();
   });
 
   it("uses editorial choices for visual review findings and keeps timestamps read-only", () => {

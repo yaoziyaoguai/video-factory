@@ -43,6 +43,7 @@ import type {
   StudioTemplateMutation,
   StudioTemplateExperimentScorecard,
   StudioProductionInput,
+  StudioProductionRoleBindingKey,
   StudioNodeInputOverrideInput,
   StudioNodeOverrideInput,
   StudioSpendAuthorizationInput,
@@ -73,6 +74,16 @@ import { TrendStudio } from "./trend-studio.js";
 import { BUILTIN_TEMPLATES } from "./template-catalog.js";
 import { JsonTemplateStore, TemplateRevisionConflictError } from "./template-store.js";
 import { TemplateStudio } from "./template-studio.js";
+
+const ROLE_CAPABILITIES: Record<StudioProductionRoleBindingKey, string> = {
+  script: "script.draft",
+  director: "storyboard.plan",
+  assets: "asset.prepare",
+  voice: "voice.synthesize",
+  render: "video.render",
+  technicalReview: "quality.review",
+  visualReview: "quality.review.visual",
+};
 
 export { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
@@ -216,6 +227,7 @@ export class StudioService {
   async updateCreatorSettings(input: StudioCreatorSettingsPatch): Promise<StudioCreatorSettings> {
     const current = await this.creatorSettings.get();
     await this.validateModelDefaults(input.modelDefaults, current.modelDefaults);
+    await this.validateRoleProviderDefaults(input.roleProviderDefaults, current.roleProviderDefaults);
     return this.creatorSettings.update(input);
   }
   listTemplates(): Promise<StudioTemplateCatalog> { return this.templates.list(); }
@@ -337,7 +349,7 @@ export class StudioService {
       if (existing?.creationOrigin === "series" || existing?.seriesId) await this.reconcileSeriesRuns();
       return replay;
     }
-    const configuredInput = await this.withCreatorModelDefaults(input);
+    const configuredInput = await this.withCreatorDefaults(input);
     if (isRecord(configuredInput) && isRecord(configuredInput.creationContext)
       && configuredInput.creationContext.origin === "series") {
       await this.reconcileSeriesRuns();
@@ -445,15 +457,27 @@ export class StudioService {
     void this.production.get(runId).then(inspect).catch(() => undefined);
   }
 
-  private async withCreatorModelDefaults(input: unknown): Promise<unknown> {
+  private async withCreatorDefaults(input: unknown): Promise<unknown> {
     if (!isRecord(input)) return input;
     const settings = await this.creatorSettings.get();
+    if (input.providers !== undefined && !isRecord(input.providers)) return input;
+    const explicitProviders = isRecord(input.providers) ? input.providers : {};
+    const inheritedRoles: StudioCreatorSettings["roleProviderDefaults"] = {};
+    const providers = { ...explicitProviders };
+    for (const [role, providerId] of Object.entries(settings.roleProviderDefaults ?? {}) as Array<[StudioProductionRoleBindingKey, string]>) {
+      const explicit = explicitProviders[role];
+      if (typeof explicit === "string" && explicit.trim()) continue;
+      providers[role] = providerId;
+      inheritedRoles[role] = providerId;
+    }
+    await this.validateRoleProviderDefaults(inheritedRoles, {});
+    const roleConfiguredInput = Object.keys(providers).length ? { ...input, providers } : input;
     if (input.models !== undefined && (
       !isRecord(input.models)
       || Object.values(input.models).some((modelId) => typeof modelId !== "string")
-    )) return input;
+    )) return roleConfiguredInput;
     const explicitModels = (input.models as Record<string, string> | undefined) ?? {};
-    const selected = selectedModelProviderIds(input);
+    const selected = selectedModelProviderIds(roleConfiguredInput);
     const inherited = Object.fromEntries(Object.entries(settings.modelDefaults ?? {}).filter(([providerId]) => selected.has(providerId)));
     const models = { ...inherited, ...explicitModels };
     const modelSelectionSources = Object.fromEntries(Object.keys(models).map((providerId) => [
@@ -461,7 +485,7 @@ export class StudioService {
       providerId in explicitModels ? "run_override" : "global_default",
     ]));
     return {
-      ...input,
+      ...roleConfiguredInput,
       ...(Object.keys(models).length ? { models, modelSelectionSources } : {}),
     };
   }
@@ -480,6 +504,25 @@ export class StudioService {
       if (!model.available) throw new StudioInputError(`模型“${modelId}”当前不可用，不能保存为默认值。`);
     }
   }
+
+  private async validateRoleProviderDefaults(
+    roleDefaults: StudioCreatorSettingsPatch["roleProviderDefaults"],
+    existingDefaults: StudioCreatorSettings["roleProviderDefaults"],
+  ): Promise<void> {
+    if (!roleDefaults) return;
+    const providers = new Map((await this.capabilities.listProviders()).map((provider) => [provider.id, provider]));
+    for (const [role, providerId] of Object.entries(roleDefaults) as Array<[StudioProductionRoleBindingKey, string]>) {
+      if (existingDefaults?.[role] === providerId) continue;
+      const provider = providers.get(providerId);
+      if (!provider) throw new StudioInputError(`生产角色“${role}”选择了不存在的能力“${providerId}”。`);
+      if (provider.capability !== ROLE_CAPABILITIES[role]) {
+        throw new StudioInputError(`能力“${providerId}”不能承担生产角色“${role}”。`);
+      }
+      if (!provider.available || provider.kind === "test") {
+        throw new StudioInputError(`能力“${providerId}”当前不可用于正式生产。`);
+      }
+    }
+  }
   decide(runId: string, input: StudioDecisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.decide(runId, input, actor);
   }
@@ -492,6 +535,8 @@ export class StudioService {
   authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.authorizeSpend(runId, nodeId, input, approvedBy);
   }
+  requestPause(runId: string): Promise<StudioRunDetail> { return this.production.requestPause(runId); }
+  resumePaused(runId: string): Promise<StudioRunDetail> { return this.production.resumePaused(runId); }
   resumeStale(runId: string): Promise<StudioRunDetail> { return this.production.resumeStale(runId); }
   async retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail> {
     const current = await this.production.get(runId);

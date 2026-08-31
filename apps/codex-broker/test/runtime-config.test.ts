@@ -11,9 +11,11 @@ describe("brokerRuntimeConfigFromEnv", () => {
     assert.deepEqual(openai.profile.identity, {
       profileId: "openai",
       providerId: "openai",
-      modelId: "codex-default",
+      modelId: "gpt-5.6-terra",
       taskKinds: ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
     });
+    assert.equal(openai.profile.model, "gpt-5.6-terra");
+    assert.equal(openai.auditModel, "gpt-5.6-sol");
     assert.equal(openai.effort, "high");
     assert.equal(openai.auditEffort, "max");
 
@@ -36,6 +38,16 @@ describe("brokerRuntimeConfigFromEnv", () => {
       ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3-flash-preview",
     });
     assert.equal(customZai.profile.identity.modelId, "glm-5.3-flash-preview");
+  });
+
+  it("allows the host to configure production and deep-review models independently", () => {
+    const config = brokerRuntimeConfigFromEnv({
+      VIDEO_FACTORY_CODEX_MODEL: "gpt-5.6-luna",
+      VIDEO_FACTORY_CODEX_AUDIT_MODEL: "gpt-5.6-sol",
+    });
+
+    assert.equal(config.profile.model, "gpt-5.6-luna");
+    assert.equal(config.auditModel, "gpt-5.6-sol");
   });
 
   it("rejects unknown profiles and a ZAI profile without its environment key", async () => {

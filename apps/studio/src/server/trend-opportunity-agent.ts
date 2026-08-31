@@ -238,11 +238,11 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         "钩子能在两秒内建立具体问题或反差，但不夸张、不消费灾害伤亡或政治突发",
       ],
       maxIterations: this.maxReviewIterations,
-      produce: (revision, { requestId }) => this.client.runTaskDetailed("topic-ideas", {
+      produce: (revision, { requestId, session }) => this.client.runTaskDetailed("topic-ideas", {
         ...request,
         ...(revision ? { revision } : {}),
-      }, requestId),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => this.client.runTaskDetailed("role-audit", {
+      }, requestId, session),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
@@ -257,7 +257,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         },
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
-      }, requestId),
+      }, requestId, session),
       validate: parseTopicIdeasOutput,
       ...(this.checkpointDirectory ? {
         checkpoint: fileRoleAgentLoopCheckpoint(

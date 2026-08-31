@@ -235,7 +235,7 @@ function AccountMenu({ username, onLogout, compact = false }: { username: string
 const SEARCH_DESTINATIONS = [
   { to: "/", label: "创作台", description: "继续作品或开始新视频", keywords: "首页 工作台", icon: Radar },
   { to: "/topics", label: "选题中心", description: "热点、系列与自主选题", keywords: "新闻 趋势 灵感", icon: Sparkles },
-  { to: "/projects", label: "制作记录", description: "查看、继续或删除制作", keywords: "项目 视频 成片", icon: Layers3 },
+  { to: "/projects", label: "制作记录", description: "查看、继续、归档或恢复制作", keywords: "项目 视频 成片", icon: Layers3 },
   { to: "/assets", label: "素材库", description: "检索画面、声音与授权记录", keywords: "媒体 资产 来源", icon: Images },
   { to: "/templates", label: "模板工坊", description: "选择或创建视频模板", keywords: "栏目 风格", icon: LayoutTemplate },
   { to: "/resources", label: "总配置", description: "模型、素材、成本与平台", keywords: "API 方舟 MiniMax Codex", icon: Settings2 },

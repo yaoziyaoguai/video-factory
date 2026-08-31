@@ -131,16 +131,52 @@ describe("ProductionPipeline semantic ranking fallback", () => {
         id: "codex-asset-ranker-v1",
         modelId: "codex-default",
         rank: async (report) => deterministicAssetRanking(report),
-        rankDetailed: async (report) => ({
-          output: deterministicAssetRanking(report),
-          trace: {
+        rankDetailed: async (report) => {
+          const output = deterministicAssetRanking(report);
+          const trace = {
             taskKind: "asset-rank",
             promptVersion: "video-factory/asset-rank-v1",
             prompt: "fixture",
             providerId: "openai-codex-subscription",
             modelId: "gpt-5.4-mini",
-          },
-        }),
+            reasoningEffort: "high",
+          } as const;
+          return {
+            output,
+            trace,
+            agentLoop: {
+              version: "video-factory/agent-loop-v1",
+              role: "语义选片师",
+              contractVersion: "fixture-v1",
+              criteria: ["候选顺序与画面证据一致"],
+              status: "passed",
+              maxIterations: 3,
+              modelCallCount: 2,
+              iterations: [{
+                iteration: 1,
+                candidate: output,
+                candidateHash: "a".repeat(64),
+                candidateTrace: trace,
+                auditTrace: {
+                  taskKind: "role-audit",
+                  promptVersion: "video-factory/role-audit-v1",
+                  prompt: "fixture audit",
+                  providerId: "openai-codex-subscription",
+                  modelId: "gpt-5.6-sol",
+                  reasoningEffort: "max",
+                },
+                audit: {
+                  version: "video-factory/role-audit-v1",
+                  verdict: "pass",
+                  score: 96,
+                  summary: "排序已核验。",
+                  issues: [],
+                  repairInstructions: [],
+                },
+              }],
+            },
+          };
+        },
       },
       directorAgent: {
         id: "api-visual-director-v1",
@@ -181,6 +217,10 @@ describe("ProductionPipeline semantic ranking fallback", () => {
     assert.equal(ranking.providerId, "openai-codex-subscription");
     assert.equal(ranking.modelId, "gpt-5.4-mini");
     assert.equal(node?.executionReceipt?.modelId, "gpt-5.4-mini");
+    assert.equal(node?.executionReceipt?.parameters?.agentLoop, "passed");
+    assert.equal(node?.executionReceipt?.parameters?.agentLoopIterations, 1);
+    assert.equal(node?.executionReceipt?.parameters?.auditReasoningEffort, "max");
+    assert.equal(node?.executionReceipt?.parameters?.rankingMode, "visual_semantic");
   });
 });
 

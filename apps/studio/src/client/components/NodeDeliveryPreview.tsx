@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { creatorContainerViewId, creatorViewId, isCreatorNestedField, isCreatorTopLevelField } from "../creator-document-policy.js";
 import { humanizeCreativeText, platformLabel, providerLabel } from "../presentation.js";
 
@@ -245,18 +246,28 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
       {assetRoutes.length ? <AssetRoutingPreview routes={assetRoutes} /> : null}
       {candidateScenes.length ? <AssetCandidateScenePreview scenes={candidateScenes} /> : null}
       {rankingScenes.length ? <AssetRankingPreview scenes={rankingScenes} /> : null}
-      {collections.map((entry) => <section className="node-preview-section" key={entry.key}>
-        <h4>{fieldLabel(entry.key)}<span>{entry.value.length}</span></h4>
-        <div className="node-preview-items">{entry.value.slice(0, entry.key === "findings" ? 20 : 8).map((item, index) => <PreviewItem collectionKey={entry.key} index={index} item={item} key={index} />)}</div>
-      </section>)}
+      {collections.map((entry) => <CollectionPreview collectionKey={entry.key} items={entry.value} key={entry.key} />)}
     </div>
   );
 }
 
+function CollectionPreview({ collectionKey, items }: { collectionKey: string; items: unknown[] }) {
+  const initialCount = collectionKey === "findings" ? 20 : 8;
+  const { expanded, hiddenCount, setExpanded, visibleItems } = useExpandedItems(items, initialCount);
+  const label = fieldLabel(collectionKey);
+
+  return <section className="node-preview-section">
+    <h4>{label}<span>{items.length}</span></h4>
+    <div className="node-preview-items">{visibleItems.map((item, index) => <PreviewItem collectionKey={collectionKey} index={index} item={item} key={index} />)}</div>
+    <PreviewExpandButton expanded={expanded} hiddenCount={hiddenCount} initialCount={initialCount} label={label} totalCount={items.length} onToggle={() => setExpanded((current) => !current)} />
+  </section>;
+}
+
 function AssetCandidateScenePreview({ scenes }: { scenes: unknown[] }) {
+  const { expanded, hiddenCount, setExpanded, visibleItems } = useExpandedItems(scenes, 12);
   return <section className="node-preview-section asset-routing-preview">
     <h4>下载前候选素材<span>{scenes.length}</span></h4>
-    <div className="asset-routing-list">{scenes.slice(0, 12).map((item, index) => {
+    <div className="asset-routing-list">{visibleItems.map((item, index) => {
       const scene = asRecord(item);
       if (!scene) return null;
       const candidates = Array.isArray(scene.candidates) ? scene.candidates : [];
@@ -265,13 +276,15 @@ function AssetCandidateScenePreview({ scenes }: { scenes: unknown[] }) {
         <div className="asset-candidate-strip">{candidates.slice(0, 6).map((candidate, candidateIndex) => <AssetCandidate candidate={candidate} index={candidateIndex} key={candidateIndex} />)}</div>
       </article>;
     })}</div>
+    <PreviewExpandButton expanded={expanded} hiddenCount={hiddenCount} initialCount={12} label="候选镜头" totalCount={scenes.length} onToggle={() => setExpanded((current) => !current)} />
   </section>;
 }
 
 function AssetRankingPreview({ scenes }: { scenes: unknown[] }) {
+  const { expanded, hiddenCount, setExpanded, visibleItems } = useExpandedItems(scenes, 12);
   return <section className="node-preview-section asset-ranking-preview">
     <h4>逐镜语义排序<span>{scenes.length}</span></h4>
-    <div className="node-preview-items">{scenes.slice(0, 12).map((item, index) => {
+    <div className="node-preview-items">{visibleItems.map((item, index) => {
       const scene = asRecord(item);
       const candidates = scene && Array.isArray(scene.candidates) ? [...scene.candidates].sort((left, right) => {
         const a = asRecord(left)?.rank;
@@ -286,13 +299,15 @@ function AssetRankingPreview({ scenes }: { scenes: unknown[] }) {
         })}</div>
       </article>;
     })}</div>
+    <PreviewExpandButton expanded={expanded} hiddenCount={hiddenCount} initialCount={12} label="语义排序" totalCount={scenes.length} onToggle={() => setExpanded((current) => !current)} />
   </section>;
 }
 
 function AssetRoutingPreview({ routes }: { routes: unknown[] }) {
+  const { expanded, hiddenCount, setExpanded, visibleItems } = useExpandedItems(routes, 12);
   return <section className="node-preview-section asset-routing-preview">
     <h4>导演选材与备选素材<span>{routes.length}</span></h4>
-    <div className="asset-routing-list">{routes.slice(0, 12).map((item, index) => {
+    <div className="asset-routing-list">{visibleItems.map((item, index) => {
       const route = asRecord(item);
       if (!route) return null;
       const candidates = Array.isArray(route.candidate_shortlist) ? route.candidate_shortlist : [];
@@ -308,7 +323,40 @@ function AssetRoutingPreview({ routes }: { routes: unknown[] }) {
         ))}</div> : <div className="asset-candidate-empty">{emptyCandidateMessage(route)}</div>}
       </article>;
     })}</div>
+    <PreviewExpandButton expanded={expanded} hiddenCount={hiddenCount} initialCount={12} label="选材镜头" totalCount={routes.length} onToggle={() => setExpanded((current) => !current)} />
   </section>;
+}
+
+function useExpandedItems<T>(items: T[], initialCount: number) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleItems = expanded ? items : items.slice(0, initialCount);
+  return {
+    expanded,
+    hiddenCount: items.length - visibleItems.length,
+    setExpanded,
+    visibleItems,
+  };
+}
+
+function PreviewExpandButton({
+  expanded,
+  hiddenCount,
+  initialCount,
+  label,
+  onToggle,
+  totalCount,
+}: {
+  expanded: boolean;
+  hiddenCount: number;
+  initialCount: number;
+  label: string;
+  onToggle: () => void;
+  totalCount: number;
+}) {
+  if (totalCount <= initialCount) return null;
+  return <button aria-expanded={expanded} className="node-preview-expand" type="button" onClick={onToggle}>
+    {expanded ? `收起${label}` : `展开其余 ${hiddenCount} 个${label}`}
+  </button>;
 }
 
 function emptyCandidateMessage(route: Record<string, unknown>): string {

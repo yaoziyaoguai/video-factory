@@ -43,6 +43,7 @@ export interface WorkflowRunnerOptions {
   clock?: () => string;
   idFactory?: (prefix: string) => string;
   checkpoint?: <TInitialInput>(run: WorkflowRun<TInitialInput>) => Promise<void> | void;
+  shouldPause?: <TInitialInput>(run: WorkflowRun<TInitialInput>) => Promise<boolean> | boolean;
 }
 
 class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitialInput> {
@@ -51,6 +52,7 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
   #activeSpendAuthorization: Readonly<SpendAuthorization> | undefined;
   #activeOperationRequestId: string | undefined;
   #activeMeteredAttempts = 0;
+  #activeMeteredAttemptObserver: ((attemptCount: number) => void) | undefined;
 
   constructor(
     readonly runId: string,
@@ -142,6 +144,7 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
             throw new Error(`Metered provider '${provider.id}' exceeded the authorized attempt limit.`);
           }
           this.#activeMeteredAttempts += 1;
+          this.#activeMeteredAttemptObserver?.(this.#activeMeteredAttempts);
           return provider.run(input, safeContext);
         });
     }
@@ -164,19 +167,23 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
     authorization: Readonly<SpendAuthorization> | undefined,
     operationRequestId: string,
     execute: () => Promise<T>,
+    onMeteredAttempt?: (attemptCount: number) => void,
   ): Promise<T> {
     const previous = this.#activeSpendAuthorization;
     const previousOperationRequestId = this.#activeOperationRequestId;
     const previousAttempts = this.#activeMeteredAttempts;
+    const previousAttemptObserver = this.#activeMeteredAttemptObserver;
     this.#activeSpendAuthorization = authorization;
     this.#activeOperationRequestId = operationRequestId;
     this.#activeMeteredAttempts = 0;
+    this.#activeMeteredAttemptObserver = onMeteredAttempt;
     try {
       return await execute();
     } finally {
       this.#activeSpendAuthorization = previous;
       this.#activeOperationRequestId = previousOperationRequestId;
       this.#activeMeteredAttempts = previousAttempts;
+      this.#activeMeteredAttemptObserver = previousAttemptObserver;
     }
   }
 }
@@ -206,12 +213,14 @@ export class WorkflowRunner {
   private readonly clock: () => string;
   private readonly idFactory: (prefix: string) => string;
   private readonly checkpoint?: WorkflowRunnerOptions["checkpoint"];
+  private readonly shouldPause?: WorkflowRunnerOptions["shouldPause"];
 
   constructor(options: WorkflowRunnerOptions = {}) {
     this.providers = options.providers ?? new ProviderRegistry();
     this.clock = options.clock ?? (() => new Date().toISOString());
     this.idFactory = options.idFactory ?? createIncrementingIdFactory();
     this.checkpoint = options.checkpoint;
+    this.shouldPause = options.shouldPause;
   }
 
   async run<TInitialInput>(definition: WorkflowDefinition, initialInput: TInitialInput): Promise<WorkflowRun<TInitialInput>> {
@@ -745,6 +754,42 @@ export class WorkflowRunner {
     return this.continueRun(definition, run, context);
   }
 
+  async resumePaused<TInitialInput>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+  ): Promise<WorkflowRun<TInitialInput>> {
+    validateWorkflowDefinition(definition);
+    if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
+      throw new Error("Workflow definition does not match the persisted run.");
+    }
+    if (previousRun.status !== "paused") {
+      throw new Error(`Run '${previousRun.id}' is not paused.`);
+    }
+    const run = cloneWorkflowRun(previousRun);
+    const outputs = new Map<string, unknown>();
+    for (const nodeRun of run.nodeRuns) {
+      if (nodeRun.status === "succeeded" && nodeRun.output !== undefined) {
+        outputs.set(nodeRun.nodeId, nodeRun.output);
+      }
+    }
+    const context = new InMemoryWorkflowContext(
+      run.id,
+      definition.id,
+      run.initialInput,
+      this.providers,
+      this.clock,
+      this.idFactory,
+      run.artifacts,
+      outputs,
+    );
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
+    run.revision += 1;
+    run.status = "running";
+    delete run.finishedAt;
+    await this.checkpoint?.(run);
+    return this.continueRun(definition, run, context);
+  }
+
   async retryFailedNode<TInitialInput>(
     definition: WorkflowDefinition,
     previousRun: WorkflowRun<TInitialInput>,
@@ -811,6 +856,13 @@ export class WorkflowRunner {
     run: WorkflowRun<TInitialInput>,
     context: InMemoryWorkflowContext<TInitialInput>,
   ): Promise<WorkflowRun<TInitialInput>> {
+    if (run.nodeRuns.length > 0) {
+      run.executionPlan = refreshMutableExecutionPlan(
+        definition,
+        run,
+        context as InMemoryWorkflowContext<unknown>,
+      );
+    }
     for (const node of orderNodes(definition.nodes)) {
       const existingNodeRun = run.nodeRuns.find((nodeRun) => nodeRun.nodeId === node.id);
       if (existingNodeRun && existingNodeRun.status !== "pending") {
@@ -851,6 +903,12 @@ export class WorkflowRunner {
       }
 
       await this.checkpoint?.(run);
+      if (await this.shouldPause?.(run)) {
+        run.status = "paused";
+        delete run.finishedAt;
+        await this.checkpoint?.(run);
+        return run;
+      }
     }
 
     run.status = "succeeded";
@@ -885,6 +943,7 @@ export class WorkflowRunner {
 
     let receiptDraft = inlineReceiptDraft(node);
     let authorization: SpendAuthorization | undefined;
+    let meteredAttemptCount = 0;
     try {
       const publicContext = context.publicContext();
       const derivedInput = node.getInput ? node.getInput(publicContext) : (context.initialInput as TInput);
@@ -914,6 +973,7 @@ export class WorkflowRunner {
         authorization,
         nodeRun.operationRequestId,
         () => executeNode(node, input, context, provider),
+        (attemptCount) => { meteredAttemptCount = attemptCount; },
       );
       const result = execution.result;
       const executionFinishedAt = context.now();
@@ -984,7 +1044,7 @@ export class WorkflowRunner {
       nodeRun.status = "failed";
       nodeRun.error = error instanceof Error ? error.message : String(error);
       nodeRun.finishedAt = context.now();
-      if (authorization) nodeRun.outcomeUncertain = true;
+      if (authorization && meteredAttemptCount > 0) nodeRun.outcomeUncertain = true;
       if (!nodeRun.executionReceipt) {
         nodeRun.executionReceipt = createExecutionReceipt(
           node,
@@ -1170,6 +1230,27 @@ function createExecutionPlan(
       ...(draft.parameters ? { parameters: cloneExecutionParameters(draft.parameters) } : {}),
       ...(draft.estimatedCostCny !== undefined ? { estimatedCostCny: draft.estimatedCostCny } : {}),
     };
+  });
+}
+
+function refreshMutableExecutionPlan(
+  definition: WorkflowDefinition,
+  run: WorkflowRun,
+  context: InMemoryWorkflowContext<unknown>,
+): NodeExecutionPlan[] {
+  const previousPlans = new Map((run.executionPlan ?? []).map((plan) => [plan.nodeId, plan]));
+  const immutableNodeIds = new Set(
+    run.nodeRuns
+      .filter((nodeRun) => nodeRun.executionReceipt !== undefined
+        || ["succeeded", "rejected", "needs_human", "running"].includes(nodeRun.status))
+      .map((nodeRun) => nodeRun.nodeId),
+  );
+
+  return createExecutionPlan(definition, context, "reconstructed").map((currentPlan) => {
+    const previousPlan = previousPlans.get(currentPlan.nodeId);
+    return previousPlan && immutableNodeIds.has(currentPlan.nodeId)
+      ? previousPlan
+      : currentPlan;
   });
 }
 

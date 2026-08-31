@@ -31,6 +31,7 @@ const providers: StudioProvider[] = [
   { id: "macos-say-v1", capability: "voice.synthesize", label: "macOS 系统配音", available: true, kind: "local" },
   { id: "python-ffmpeg-v1", capability: "video.render", label: "FFmpeg 竖屏渲染", available: true, kind: "local" },
   { id: "python-technical-review-v1", capability: "quality.review", label: "本地技术审片", available: true, kind: "local" },
+  { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立红队审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
 ];
 
 function template(id: string, name: string): StudioTemplate {
@@ -322,6 +323,120 @@ describe("Studio client", () => {
     rerender(<NewRunDialog open={false} providers={providers} onClose={onClose} onSubmit={onSubmit} />);
     rerender(<NewRunDialog open providers={providers} onClose={onClose} onSubmit={onSubmit} />);
     await waitFor(() => expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled());
+  });
+
+  it("starts production only from the explicit start control", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
+
+    await user.type(screen.getByLabelText("视频标题"), "避免下拉选择误触开工");
+    await user.type(screen.getByLabelText("内容角度"), "所有配置完成后再明确开始制作");
+    await user.type(screen.getByLabelText("目标受众"), "内容创作者");
+    const startButton = await screen.findByRole("button", { name: "开始制作" });
+    const form = startButton.closest("form");
+    expect(form).not.toBeNull();
+
+    fireEvent.submit(form!);
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await user.click(startButton);
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to an available role provider when a saved binding is no longer usable", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const providersWithRetiredScript: StudioProvider[] = [
+      ...providers,
+      { id: "retired-script-v1", capability: "script.draft", label: "已停用编剧", available: false, kind: "external" },
+    ];
+    render(<NewRunDialog
+      open
+      providers={providersWithRetiredScript}
+      initialValues={{ providers: {
+        script: "retired-script-v1",
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+        voice: "macos-say-v1",
+        render: "python-ffmpeg-v1",
+        technicalReview: "python-technical-review-v1",
+      } }}
+      onClose={() => undefined}
+      onSubmit={onSubmit}
+    />);
+
+    expect(screen.getByRole("combobox", { name: "编剧能力" })).toHaveValue("python-template-v1");
+    await user.type(screen.getByLabelText("视频标题"), "失效配置必须安全回退");
+    await user.type(screen.getByLabelText("内容角度"), "不能显示一个能力却提交另一个能力");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      providers: expect.objectContaining({ script: "python-template-v1" }),
+    }));
+  });
+
+  it("blocks production when the independent role auditor is unavailable", () => {
+    render(<NewRunDialog
+      open
+      providers={providers.filter((provider) => provider.id !== "codex-role-auditor-v1")}
+      onClose={() => undefined}
+      onSubmit={async () => undefined}
+    />);
+
+    expect(screen.getByText(/缺少正式生产能力：独立红队审计/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+  });
+
+  it("shows the production team before dispatch and preserves a non-asset role model override", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const providersWithAgents: StudioProvider[] = [
+      ...providers,
+      {
+        id: "codex-screenwriter-v1",
+        capability: "script.draft",
+        label: "Codex 编剧",
+        available: true,
+        kind: "external",
+        billing: "subscription",
+        defaultModelId: "gpt-5.6-terra",
+        modelProfiles: [
+          { id: "gpt-5.6-terra", providerId: "codex-screenwriter-v1", providerFamily: "openai", label: "GPT-5.6 Terra", description: "日常创作", available: true, taskTypes: ["text"] },
+          { id: "gpt-5.6-sol", providerId: "codex-screenwriter-v1", providerFamily: "openai", label: "GPT-5.6 Sol", description: "高质量创作", available: true, recommended: true, taskTypes: ["text"] },
+        ],
+      },
+    ];
+    render(<NewRunDialog
+      open
+      providers={providersWithAgents}
+      creatorSettings={{
+        voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+        defaultRecipeId: "economy-daily",
+        roleProviderDefaults: { script: "codex-screenwriter-v1" },
+        modelDefaults: { "codex-screenwriter-v1": "gpt-5.6-terra" },
+        topicStrategy: { customInstruction: "优先可拍题材。" },
+        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      }}
+      onClose={() => undefined}
+      onSubmit={onSubmit}
+    />);
+
+    expect(screen.getByRole("heading", { name: "开工前确认制作团队" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "编剧能力" })).toHaveValue("codex-screenwriter-v1");
+    expect(screen.getByText(/独立红队审计/)).toBeInTheDocument();
+    expect(screen.getByText(/max.*最多三轮/)).toBeInTheDocument();
+    await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "gpt-5.6-sol");
+    await user.type(screen.getByLabelText("视频标题"), "角色配置必须在开工前确认");
+    await user.type(screen.getByLabelText("内容角度"), "验证编剧模型覆盖真实进入生产单");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      providers: expect.objectContaining({ script: "codex-screenwriter-v1" }),
+      models: expect.objectContaining({ "codex-screenwriter-v1": "gpt-5.6-sol" }),
+    }));
   });
 
   it("preserves in-progress edits when provider and creator settings refresh in the background", async () => {
@@ -925,6 +1040,45 @@ describe("Studio client", () => {
     }));
   });
 
+  it("does not carry a metered default asset into a free recipe", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const configuredProviders: StudioProvider[] = [...providers, {
+      id: "seedance-video-v1",
+      capability: "asset.prepare",
+      label: "火山方舟视频",
+      available: true,
+      kind: "external",
+      billing: "metered",
+      estimatedCnyPerClip: 5,
+    }];
+    render(<NewRunDialog
+      open
+      providers={configuredProviders}
+      creatorSettings={{
+        voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+        defaultRecipeId: "economy-daily",
+        topicStrategy: { customInstruction: "优先可拍题材。" },
+        defaultAssetProviderId: "seedance-video-v1",
+        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      }}
+      onClose={() => undefined}
+      onSubmit={onSubmit}
+    />);
+
+    await user.type(screen.getByLabelText("视频标题"), "免费配方不能夹带付费素材");
+    await user.type(screen.getByLabelText("内容角度"), "配置优先级必须与成本承诺一致");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      economics: expect.objectContaining({ allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 }),
+      director: expect.objectContaining({
+        assetProviderIds: expect.not.arrayContaining(["seedance-video-v1"]),
+      }),
+    }));
+  });
+
   it("never treats the shot router itself as a director asset source", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
@@ -994,6 +1148,7 @@ describe("Studio client", () => {
     const workspaces = screen.getByRole("region", { name: "逐项预览与修改" });
     expect(preview.compareDocumentPosition(workspaces) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByText("总导演 · 人工终审")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "人工终审 · 总导演" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /人工终审/ })).not.toBeInTheDocument();
     expect(screen.getByText("导演 · 导演方案")).toBeInTheDocument();
     expect(screen.getByText("请完整观看成片，确认内容和节奏。")).toBeInTheDocument();
@@ -1006,6 +1161,98 @@ describe("Studio client", () => {
     expect(onDecision).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "确认批准并生成发布包" }));
     expect(onDecision).toHaveBeenCalledWith({ action: "approve" });
+  });
+
+  it("makes the visual review recommendation the default final-review decision", async () => {
+    const user = userEvent.setup();
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const run: StudioRunDetail = {
+      ...runDetail,
+      nodes: [
+        ...runDetail.nodes.filter((node) => node.id !== "final-review"),
+        {
+          id: "visual-review",
+          label: "视觉审片",
+          role: "视觉审片员",
+          status: "succeeded",
+          artifactIds: [],
+          qualityGateResults: [],
+          output: { report: {
+            recommendation: "revise",
+            confidence: 0.87,
+            summary: "画面语义与导演方案不一致，需要修改后再审。",
+            scores: { composition: 65, continuity: 41, pacing: 54, legibility: 62, safety: 84 },
+            findings: [{ severity: "major", message: "开场缺少关键动作。" }],
+          } },
+        },
+        runDetail.nodes.find((node) => node.id === "final-review")!,
+      ],
+    };
+
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+
+    expect(screen.getByText("Agent 建议修改后再审")).toBeInTheDocument();
+    expect(screen.getByText("请完整观看成片，确认内容和节奏。")).toBeInTheDocument();
+    expect(screen.getAllByText("画面语义与导演方案不一致，需要修改后再审。").length).toBeGreaterThan(0);
+    expect(screen.getByText((_, element) => element?.textContent === "连续性 41")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "按审片建议打回" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "仍要批准" }));
+    const dialog = screen.getByRole("dialog", { name: "确认覆盖审片建议" });
+    const reason = within(dialog).getByLabelText("覆盖原因");
+    const approve = within(dialog).getByRole("button", { name: "确认覆盖建议并生成发布包" });
+    expect(approve).toBeDisabled();
+    await user.type(reason, "已逐帧复核，当前版本符合本次发布要求");
+    expect(approve).toBeEnabled();
+    await user.click(approve);
+    expect(onDecision).toHaveBeenCalledWith({ action: "approve", note: "覆盖视觉审片建议：已逐帧复核，当前版本符合本次发布要求" });
+  });
+
+  it("keeps technical execution nodes out of the editable creative deliverables", () => {
+    const run: StudioRunDetail = {
+      ...runDetail,
+      nodes: [
+        ...runDetail.nodes,
+        { id: "render", label: "渲染", role: "剪辑师", status: "succeeded", artifactIds: [], qualityGateResults: [], output: { duration_target: 30 } },
+        { id: "technical-review", label: "机器质检", role: "技术质检", status: "succeeded", artifactIds: [], qualityGateResults: [], output: { status: "passed" } },
+      ],
+    };
+
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
+
+    const workspaces = screen.getByRole("region", { name: "逐项预览与修改" });
+    expect(within(workspaces).queryByRole("group", { name: "渲染 · 剪辑师" })).not.toBeInTheDocument();
+    expect(within(workspaces).queryByRole("group", { name: "机器质检 · 技术质检" })).not.toBeInTheDocument();
+    expect(within(workspaces).queryByRole("group", { name: "人工终审 · 总导演" })).not.toBeInTheDocument();
+  });
+
+  it("keeps generated scene media available after the asset plan is manually revised", async () => {
+    const user = userEvent.setup();
+    const run: StudioRunDetail = {
+      ...runDetail,
+      nodes: [
+        ...runDetail.nodes,
+        {
+          id: "assets",
+          label: "画面",
+          role: "素材导演",
+          status: "succeeded",
+          artifactIds: ["asset-plan-human"],
+          qualityGateResults: [],
+          output: { director_routing: [{ scene_position: 1, query: "窗边水杯" }] },
+        },
+      ],
+      artifacts: [
+        ...runDetail.artifacts,
+        { id: "asset-plan-human", kind: "asset_plan", producerNodeId: "assets", providerId: "human-editor", createdAt: "2026-08-21T10:00:40.000Z", contentType: "application/json", contentUrl: "/api/asset-plan" },
+        { id: "scene-video", kind: "media_asset", producerNodeId: "assets", providerId: "hailuo-video-v1", createdAt: "2026-08-21T10:00:20.000Z", contentType: "video/mp4", contentUrl: "/api/scene-video" },
+      ],
+    };
+
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
+    await user.click(screen.getByText("画面").closest("summary")!);
+
+    expect(document.querySelector('video[aria-label="镜头 1 画面预览"]')).toHaveAttribute("src", "/api/scene-video");
   });
 
   it("puts the current paid node and its confirmation action above unfinished output", async () => {
@@ -1230,6 +1477,7 @@ describe("Studio client", () => {
           totalNodes: 4,
           percentage: 25,
           elapsedSeconds: 42,
+          currentNodeElapsedSeconds: 7,
           lastUpdatedAt: "2026-08-30T10:00:42.000Z",
           etaUnavailableReason: "insufficient_history",
         },
@@ -1257,10 +1505,41 @@ describe("Studio client", () => {
     expect(screen.getByRole("region", { name: "制作进度" })).toBeInTheDocument();
     expect(screen.getAllByText("策划定稿").length).toBeGreaterThan(0);
     expect(screen.getByText("1 / 4 个节点完成")).toBeInTheDocument();
+    expect(screen.getByText("7 秒")).toBeInTheDocument();
+    expect(screen.getByText("当前步骤")).toBeInTheDocument();
     expect(screen.getByText("正在统一叙事节奏、镜头语法与视觉规则")).toBeInTheDocument();
     expect(screen.getByText(/样本不足.*不提供虚假 ETA/)).toBeInTheDocument();
     expect(screen.getByText(/智谱视觉导演.*glm-5.3-flash/)).toBeInTheDocument();
-    expect(screen.getByText("云端连接刚刚确认")).toBeInTheDocument();
+    expect(screen.getByText("制作服务连接刚刚确认")).toBeInTheDocument();
+  });
+
+  it("uses the observable active node instead of a stale summary node", () => {
+    const { activeIntervention: _activeIntervention, videoArtifactId: _videoArtifactId, ...withoutReview } = runDetail;
+    render(<RunWorkbench
+      run={{
+        ...withoutReview,
+        status: "running",
+        currentNodeId: "final-review",
+        progress: {
+          completedNodes: 2,
+          totalNodes: 4,
+          percentage: 50,
+          elapsedSeconds: 60,
+          currentNodeElapsedSeconds: 20,
+          lastUpdatedAt: "2026-08-31T10:00:20.000Z",
+          etaUnavailableReason: "insufficient_history",
+        },
+        currentAction: { nodeId: "visual-direction", role: "导演", label: "正在统一叙事节奏、镜头语法与视觉规则" },
+        nodes: withoutReview.nodes.map((node) => node.id === "visual-direction" ? { ...node, status: "running" } : node),
+        artifacts: [],
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+    />);
+
+    expect(screen.getByRole("heading", { name: "导演正在处理导演方案" })).toBeInTheDocument();
+    expect(screen.getByText("20 秒")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /人工终审/ })).not.toBeInTheDocument();
   });
 
   it("explains a failed node without hiding its impact or preserved output", () => {

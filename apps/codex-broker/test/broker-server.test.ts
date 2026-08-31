@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import http from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -10,6 +10,7 @@ import {
   CodexExecutor,
   CodexExecutorError,
   codexExecutorProfileFor,
+  parseTaskRequest,
   type CodexExecutionOptions,
   type CodexExecutionResult,
   type CodexExecutorProfile,
@@ -42,6 +43,7 @@ class Deferred<T> {
 }
 
 interface BrokerHandle {
+  directory: string;
   socketPath: string;
   server: CodexBrokerServer;
   close(): Promise<void>;
@@ -56,6 +58,7 @@ interface BrokerSpec {
   now?: () => Date;
   profile?: CodexExecutorProfile;
   durableIdempotency?: boolean;
+  durableSessions?: boolean;
 }
 
 async function startBroker(spec: BrokerSpec = {}): Promise<BrokerHandle> {
@@ -73,9 +76,11 @@ async function startBroker(spec: BrokerSpec = {}): Promise<BrokerHandle> {
     ...(spec.shutdownTimeoutMs !== undefined ? { shutdownTimeoutMs: spec.shutdownTimeoutMs } : {}),
     ...(spec.now !== undefined ? { now: spec.now } : {}),
     ...(spec.durableIdempotency ? { idempotencyDirectory: path.join(directory, "idempotency") } : {}),
+    ...(spec.durableSessions ? { sessionDirectory: path.join(directory, "sessions") } : {}),
   });
   await server.start();
   return {
+    directory,
     socketPath,
     server,
     close: async () => {
@@ -317,6 +322,274 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
     }
   });
 
+  it("keeps real Codex thread ids host-side and rejects cross-role session reuse", async () => {
+    const threadId = "019c0000-0000-7000-8000-000000000001";
+    const receivedSessionIds: Array<string | undefined> = [];
+    const broker = await startBroker({
+      durableSessions: true,
+      script: (_task, options) => {
+        receivedSessionIds.push(options?.sessionId);
+        return { output: "{\"ideas\":[]}", sessionId: options?.sessionId ?? threadId };
+      },
+    });
+    try {
+      const firstBody = JSON.parse(topicTaskBody("session-first")) as Record<string, unknown>;
+      firstBody.sessionKey = "run-1:topic-editor:produce";
+      const first = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: JSON.stringify(firstBody),
+      });
+      assert.equal(first.status, 200);
+      const firstEnvelope = JSON.parse(first.body) as { sessionHandle?: string; sessionId?: string };
+      assert.match(firstEnvelope.sessionHandle ?? "", /^vfs_/);
+      assert.equal(firstEnvelope.sessionId, undefined);
+
+      const secondBody = { ...firstBody,
+        requestId: "topic-session-second",
+        sessionHandle: firstEnvelope.sessionHandle,
+      };
+      const second = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: JSON.stringify(secondBody),
+      });
+      assert.equal(second.status, 200);
+      assert.deepEqual(receivedSessionIds, [undefined, threadId]);
+
+      const crossed = { ...secondBody, requestId: "topic-session-crossed", sessionKey: "run-2:other-role:audit" };
+      const rejected = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: JSON.stringify(crossed),
+      });
+      assert.equal(rejected.status, 409);
+      assert.equal(receivedSessionIds.length, 2);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("rebuilds a missing session registry entry from the atomic completed task record", async () => {
+    const threadId = "019c0000-0000-7000-8000-000000000021";
+    const handle = `vfs_${"r".repeat(32)}`;
+    let calls = 0;
+    const broker = await startBroker({
+      durableIdempotency: true,
+      durableSessions: true,
+      script: (_task, options) => {
+        calls += 1;
+        assert.equal(options?.sessionId, threadId);
+        return { output: "{\"ideas\":[]}", sessionId: threadId };
+      },
+    });
+    try {
+      const body = JSON.parse(topicTaskBody("atomic-session-recovery")) as Record<string, unknown>;
+      body.sessionKey = "run-atomic:topic-editor:produce";
+      const task = parseTaskRequest(body, codexExecutorProfileFor("openai").identity);
+      const digest = createHash("sha256").update(JSON.stringify({
+        identity: codexExecutorProfileFor("openai").identity,
+        task,
+        session: { key: body.sessionKey },
+      })).digest("hex");
+      const idempotencyDirectory = path.join(broker.directory, "idempotency");
+      await mkdir(idempotencyDirectory, { recursive: true });
+      await writeFile(
+        path.join(idempotencyDirectory, `${createHash("sha256").update(String(body.requestId)).digest("hex")}.json`),
+        `${JSON.stringify({
+          version: 2,
+          requestId: body.requestId,
+          digest,
+          state: "completed",
+          outcome: { ok: true, output: "{\"ideas\":[]}", sessionHandle: handle },
+          sessionRecord: {
+            version: 1,
+            handle,
+            key: body.sessionKey,
+            taskKind: "topic-ideas",
+            threadId,
+          },
+        })}\n`,
+        "utf8",
+      );
+
+      const recovered = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: JSON.stringify(body),
+      });
+      assert.equal(recovered.status, 200);
+      assert.equal(JSON.parse(recovered.body).sessionHandle, handle);
+      assert.equal(calls, 0);
+
+      const resumed = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: JSON.stringify({ ...body, requestId: "atomic-session-resume", sessionHandle: handle }),
+      });
+      assert.equal(resumed.status, 200);
+      assert.equal(calls, 1);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("serializes different requests that resume the same role session", async () => {
+    const threadId = "019c0000-0000-7000-8000-000000000031";
+    const releaseFirst = new Deferred<void>();
+    let resumeCalls = 0;
+    const broker = await startBroker({
+      durableSessions: true,
+      concurrency: 2,
+      script: async (_task, options) => {
+        if (options?.sessionId) {
+          resumeCalls += 1;
+          if (resumeCalls === 1) await releaseFirst.promise;
+        }
+        return { output: "{\"ideas\":[]}", sessionId: options?.sessionId ?? threadId };
+      },
+    });
+    try {
+      const firstBody = JSON.parse(topicTaskBody("session-lock-create")) as Record<string, unknown>;
+      firstBody.sessionKey = "run-lock:topic-editor:produce";
+      const created = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body: JSON.stringify(firstBody) });
+      const handle = JSON.parse(created.body).sessionHandle as string;
+      const firstResume = brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: JSON.stringify({ ...firstBody, requestId: "session-lock-a", sessionHandle: handle }),
+      });
+      await waitFor(() => resumeCalls === 1);
+      const secondResume = brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: JSON.stringify({ ...firstBody, requestId: "session-lock-b", sessionHandle: handle }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.equal(resumeCalls, 1);
+      releaseFirst.resolve();
+      assert.equal((await firstResume).status, 200);
+      assert.equal((await secondResume).status, 200);
+      assert.equal(resumeCalls, 2);
+    } finally {
+      releaseFirst.resolve();
+      await broker.close();
+    }
+  });
+
+  it("rejects a resumed command that reports a different Codex thread", async () => {
+    const firstThread = "019c0000-0000-7000-8000-000000000041";
+    const wrongThread = "019c0000-0000-7000-8000-000000000042";
+    const broker = await startBroker({
+      durableSessions: true,
+      script: (_task, options) => ({
+        output: "{\"ideas\":[]}",
+        sessionId: options?.sessionId ? wrongThread : firstThread,
+      }),
+    });
+    try {
+      const body = JSON.parse(topicTaskBody("session-rebind-create")) as Record<string, unknown>;
+      body.sessionKey = "run-rebind:topic-editor:produce";
+      const created = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body: JSON.stringify(body) });
+      const handle = JSON.parse(created.body).sessionHandle as string;
+      const rejected = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: JSON.stringify({ ...body, requestId: "session-rebind-resume", sessionHandle: handle }),
+      });
+      assert.equal(rejected.status, 422);
+      assert.match(JSON.parse(rejected.body).error, /different role session/);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("fails closed instead of silently replaying a pre-session result without role continuity", async () => {
+    let calls = 0;
+    const broker = await startBroker({
+      durableIdempotency: true,
+      durableSessions: true,
+      script: () => {
+        calls += 1;
+        return { output: "{\"ideas\":[]}" };
+      },
+    });
+    try {
+      const body = JSON.parse(topicTaskBody("legacy-session-replay")) as Record<string, unknown>;
+      body.sessionKey = "legacy-run:topic-editor:produce";
+      const task = parseTaskRequest(body, codexExecutorProfileFor("openai").identity);
+      const digest = createHash("sha256").update(JSON.stringify({
+        identity: codexExecutorProfileFor("openai").identity,
+        task,
+      })).digest("hex");
+      const idempotencyDirectory = path.join(broker.directory, "idempotency");
+      await mkdir(idempotencyDirectory, { recursive: true });
+      await writeFile(
+        path.join(idempotencyDirectory, `${createHash("sha256").update(String(body.requestId)).digest("hex")}.json`),
+        `${JSON.stringify({
+          version: 1,
+          requestId: body.requestId,
+          digest,
+          state: "completed",
+          outcome: { ok: true, output: "{\"ideas\":[]}" },
+        })}\n`,
+        "utf8",
+      );
+
+      const response = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: JSON.stringify(body),
+      });
+      assert.equal(response.status, 409);
+      assert.equal(calls, 0);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("fails closed when a requested role session cannot be persisted", async () => {
+    const missingRegistry = await startBroker({
+      script: () => ({ output: "{\"ideas\":[]}", sessionId: "019c0000-0000-7000-8000-000000000001" }),
+    });
+    const missingThread = await startBroker({ durableSessions: true });
+    const invalidThread = await startBroker({
+      durableSessions: true,
+      script: () => ({ output: "{\"ideas\":[]}", sessionId: "not-a-codex-thread" }),
+    });
+    const request = (label: string): string => {
+      const body = JSON.parse(topicTaskBody(label)) as Record<string, unknown>;
+      body.sessionKey = `run-1:${label}:produce`;
+      return JSON.stringify(body);
+    };
+    try {
+      const noRegistry = await brokerRequest(missingRegistry.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: request("missing-registry"),
+      });
+      assert.equal(noRegistry.status, 409);
+
+      const noThread = await brokerRequest(missingThread.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: request("missing-thread"),
+      });
+      assert.equal(noThread.status, 422);
+
+      const badThread = await brokerRequest(invalidThread.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: request("invalid-thread"),
+      });
+      assert.equal(badThread.status, 422);
+    } finally {
+      await missingRegistry.close();
+      await missingThread.close();
+      await invalidThread.close();
+    }
+  });
+
   it("accepts bounded visual-review requests on both OpenAI and ZAI profiles", async () => {
     const zai = await startBroker({
       profile: codexExecutorProfileFor("zai"),
@@ -402,6 +675,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
         call += 1;
         if (call === 1) throw new CodexExecutorError("codex timed out after 1ms.", true);
         if (call === 2) throw new CodexExecutorError("Codex output is not valid JSON.", false);
+        if (call === 3) throw new CodexExecutorError("Authorization: Bearer eyJhbGciOi-secret OPENAI_API_KEY=plain-secret", false);
         throw new Error("unexpected executor crash");
       },
     });
@@ -419,7 +693,14 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       });
       assert.equal(terminal.status, 422);
       assert.equal(terminal.headers["retry-after"], undefined);
-      assert.match(JSON.parse(terminal.body).error, /not valid JSON/);
+      assert.match(JSON.parse(terminal.body).error, /invalid JSON/);
+
+      const credentialDiagnostic = await brokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body: topicTaskBody("credential-diagnostic"),
+      });
+      assert.equal(credentialDiagnostic.status, 422);
+      assert.doesNotMatch(credentialDiagnostic.body, /Bearer|eyJhbGci|OPENAI_API_KEY|plain-secret/);
+      assert.match(JSON.parse(credentialDiagnostic.body).error, /host-only broker log/);
 
       const unknown = await brokerRequest(broker.socketPath, {
         method: "POST", path: "/v1/tasks", body: topicTaskBody("unknown"),
@@ -429,7 +710,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       assert.doesNotMatch(unknown.body, /SECRET-PAYLOAD-MARKER/);
 
       const report = await healthReport(broker.socketPath);
-      assert.equal(report.failed, 3);
+      assert.equal(report.failed, 4);
       assert.equal(report.completed, 0);
     } finally {
       await broker.close();

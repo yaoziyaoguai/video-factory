@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { CodexBridgeClient, CodexTaskExecution } from "./codex-chat.js";
+import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
+
+export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v5|role-audit-v1|visual-review-validator-v1";
 
 export interface VisualReviewFramePayload {
   timecodeMs: number;
@@ -30,6 +33,7 @@ export interface VisualReviewAgentInput {
   directorPlanPath?: string;
   renderManifestPath?: string;
   requestId?: string;
+  agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
 }
 
 export interface VisualReviewMediaPreprocessor {
@@ -72,31 +76,33 @@ export interface VisualReviewAgent {
 
 export interface CodexVisualReviewAgentOptions {
   client: Pick<CodexBridgeClient, "runTask"> & Partial<Pick<CodexBridgeClient, "runTaskDetailed">>;
+  auditClient?: Pick<CodexBridgeClient, "runTaskDetailed">;
   media: VisualReviewMediaPreprocessor;
   providerId?: string;
   modelId?: string;
+  maxReviewIterations?: number;
+  producerSessionMode?: "stateful" | "stateless";
+  maxProducerCalls?: number;
 }
 
 export class CodexVisualReviewAgent implements VisualReviewAgent {
   readonly id: string;
   readonly modelId: string;
+  private readonly maxReviewIterations: number;
 
   constructor(private readonly options: CodexVisualReviewAgentOptions) {
     this.id = options.providerId ?? "codex-visual-review-v1";
     this.modelId = options.modelId ?? "codex-default";
+    this.maxReviewIterations = options.maxReviewIterations ?? 3;
   }
 
   async review(input: VisualReviewAgentInput): Promise<VisualReviewReport> {
-    const { payload } = await this.preparePayload(input);
-    return validateVisualReviewReport(
-      await this.options.client.runTask("visual-review", payload, normalizedRequestId(input.requestId)),
-      payload.durationMs,
-    );
+    return (await this.reviewDetailed(input)).output;
   }
 
   async reviewDetailed(input: VisualReviewAgentInput): Promise<VisualReviewExecution> {
     const { payload, sampling } = await this.preparePayload(input);
-    const client = this.options.client as Pick<CodexBridgeClient, "runTask" | "runTaskDetailed">;
+    const client = this.options.client;
     const requestId = normalizedRequestId(input.requestId);
     if (typeof client.runTaskDetailed !== "function") {
       return {
@@ -106,13 +112,53 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
         ...(sampling ? { sampling } : {}),
       };
     }
-    const execution = await client.runTaskDetailed("visual-review", payload, requestId);
+    const runProducerTask = client.runTaskDetailed.bind(client);
+    const runAuditTask = this.options.auditClient
+      ? this.options.auditClient.runTaskDetailed.bind(this.options.auditClient)
+      : runProducerTask;
+    const checkpoint = input.agentLoopCheckpoint ?? requestScopedCheckpoint(requestId);
+    const execution = await runRoleAgentLoop<VisualReviewReport>({
+      role: "视觉审片员",
+      contractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+      criteria: [
+        "每条问题必须由对应时间码的画面证据支持，不得把稀疏关键帧看不到的声音或连续运动当作已证事实",
+        "逐项核对脚本可见动作、导演成功条件、镜头时长与渲染清单，不得只凭整体观感打分",
+        "构图、连续性、节奏、可读性和安全五项评分必须与 findings 的严重程度及 recommendation 自洽",
+        "抽样覆盖不足、缺帧或上下文缺失必须降低 confidence 并明确证据边界，不得虚构画面细节",
+        "审片报告只判断当前成片并给出可执行修复建议；不得擅自改写脚本、导演方案或掩盖需要人工终审的问题",
+      ],
+      maxIterations: this.maxReviewIterations,
+      ...(this.options.maxProducerCalls ? { maxPhaseAttempts: { produce: this.options.maxProducerCalls } } : {}),
+      produce: (revision, operation) => runProducerTask("visual-review", {
+        ...payload,
+        ...(revision ? { revision } : {}),
+      }, operation.requestId, this.options.producerSessionMode === "stateless" ? undefined : operation.session),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId: auditRequestId, session }) => runAuditTask("role-audit", {
+        role,
+        iteration,
+        criteria,
+        context: visualReviewAuditContext(payload),
+        candidate,
+        ...(previousAudit ? { previousAudit } : {}),
+        images: payload.frames.map((frame, index) => ({
+          imageIndex: index + 1,
+          sha256: frame.sha256,
+          jpegBase64: frame.jpegBase64,
+          ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
+          ...(frame.timecodeMs !== undefined ? { timecodeMs: frame.timecodeMs } : {}),
+          ...(frame.phase ? { phase: frame.phase } : {}),
+        })),
+      }, auditRequestId, session),
+      validate: (value) => validateVisualReviewReport(value, payload.durationMs),
+      ...(checkpoint ? { checkpoint } : {}),
+    });
     return {
-      output: validateVisualReviewReport(execution.output, payload.durationMs),
+      output: execution.output,
       ...(requestId ? { requestId } : {}),
       inspectedDurationMs: payload.durationMs,
       ...(sampling ? { sampling } : {}),
       ...(execution.trace ? { trace: execution.trace } : {}),
+      ...(execution.agentLoop ? { agentLoop: execution.agentLoop } : {}),
     };
   }
 
@@ -128,6 +174,30 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
       ...(sampling ? { sampling } : {}),
     };
   }
+}
+
+function requestScopedCheckpoint(requestId: string | undefined): RoleAgentLoopCheckpoint | undefined {
+  if (!requestId) return undefined;
+  return {
+    key: requestId,
+    load: async () => undefined,
+    save: async () => undefined,
+  };
+}
+
+function visualReviewAuditContext(payload: VisualReviewMediaPayload): Record<string, unknown> {
+  return {
+    roleScope: {
+      owns: ["summary", "scores", "findings", "confidence", "recommendation"],
+      doesNotOwn: ["脚本内容", "导演方案", "素材选择", "配音", "渲染产物"],
+    },
+    evidence: {
+      durationMs: payload.durationMs,
+      frames: payload.frames.map(({ jpegBase64: _jpegBase64, ...frame }) => frame),
+      ...(payload.reviewContext ? { reviewContext: payload.reviewContext } : {}),
+    },
+    downstreamBoundary: "独立审计只验证审片报告是否忠于成片证据；即使成片应返修，准确给出 revise 或 reject 的报告仍可通过本角色审计。",
+  };
 }
 
 function normalizedRequestId(value: string | undefined): string | undefined {

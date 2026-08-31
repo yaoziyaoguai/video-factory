@@ -173,6 +173,8 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     applyNodeOverride: async () => runDetail("stale"),
     applyNodeInputOverride: async () => runDetail("stale"),
     authorizeSpend: async () => runDetail("running"),
+    requestPause: async () => ({ ...runDetail("running"), pauseRequested: true }),
+    resumePaused: async () => runDetail("running"),
     resumeStale: async () => runDetail("running"),
     retryFailedNode: async () => runDetail("running"),
     subscribe: () => () => undefined,
@@ -359,6 +361,8 @@ describe("Studio API", () => {
       applyNodeOverride: async (_runId, nodeId, input, actor) => { calls.push(`override:${nodeId}:${String((input.output as { hook?: string }).hook)}:${actor}`); return runDetail("stale"); },
       applyNodeInputOverride: async (_runId, nodeId, input, actor) => { calls.push(`input:${nodeId}:${String((input.input as { title?: string }).title)}:${actor}`); return runDetail("stale"); },
       authorizeSpend: async (_runId, nodeId, input, approvedBy) => { calls.push(`spend:${nodeId}:${input.modelId}:${approvedBy}`); return runDetail("running"); },
+      requestPause: async () => { calls.push("pause"); return { ...runDetail("running"), pauseRequested: true }; },
+      resumePaused: async () => { calls.push("resume"); return runDetail("running"); },
       resumeStale: async () => { calls.push("regenerate"); return runDetail("running"); },
       retryFailedNode: async (_runId, nodeId) => { calls.push(`retry:${nodeId}`); return runDetail("running"); },
     });
@@ -368,6 +372,8 @@ describe("Studio API", () => {
     const override = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/override", payload: { actor: "editor", output: { hook: "人工钩子" } } });
     const inputOverride = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/input-override", payload: { actor: "forged", input: { title: "人工题目" } } });
     const spend = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/assets/spend-authorizations", payload: { inputVersionIds: ["version-1"], providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02", maxCostCny: 3, maxAttempts: 1, approvedBy: "owner" } });
+    const pause = await app.inject({ method: "POST", url: "/api/runs/run-1/pause" });
+    const resume = await app.inject({ method: "POST", url: "/api/runs/run-1/resume" });
     const regenerate = await app.inject({ method: "POST", url: "/api/runs/run-1/regenerate-stale" });
     const retry = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/voice/retry" });
 
@@ -376,9 +382,12 @@ describe("Studio API", () => {
     assert.equal(override.statusCode, 200);
     assert.equal(inputOverride.statusCode, 200);
     assert.equal(spend.statusCode, 200);
+    assert.equal(pause.statusCode, 200);
+    assert.equal(pause.json().pauseRequested, true);
+    assert.equal(resume.statusCode, 200);
     assert.equal(regenerate.statusCode, 200);
     assert.equal(retry.statusCode, 200);
-    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "spend:assets:MiniMax-Hailuo-02:studio-owner", "regenerate", "retry:voice"]);
+    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "spend:assets:MiniMax-Hailuo-02:studio-owner", "pause", "resume", "regenerate", "retry:voice"]);
     await app.close();
   });
 

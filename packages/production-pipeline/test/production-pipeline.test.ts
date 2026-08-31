@@ -134,15 +134,31 @@ describe("ProductionPipeline", () => {
         {
           id: "glm-visual-review-v1",
           modelId: "glm-5.3-flash",
-          review: async (input) => {
+          review: async () => { throw new Error("Detailed review must be used."); },
+          reviewDetailed: async (input) => {
             reviewCalls.push(input);
-            return {
+            const output: pipeline.VisualReviewReport = {
               version: "video-factory/visual-review-v1",
               summary: "画面可进入人工终审。",
               scores: { composition: 80, continuity: 80, pacing: 80, legibility: 80, safety: 95 },
               findings: [],
               confidence: 0.8,
               recommendation: "approve",
+            };
+            return {
+              output,
+              agentLoop: {
+                version: "video-factory/agent-loop-v1",
+                role: "视觉审片员",
+                contractVersion: "visual-review-test-v1",
+                criteria: ["忠于画面证据"],
+                status: "passed",
+                maxIterations: 3,
+                modelCallCount: 3,
+                producerModelCallCount: 2,
+                auditModelCallCount: 1,
+                iterations: [],
+              },
             };
           },
         },
@@ -158,7 +174,8 @@ describe("ProductionPipeline", () => {
     assert.equal(reviewCalls.length, 0);
     assert.ok(plan);
     assert.equal(plan.estimatedCostCny, 0.1);
-    assert.equal(plan.maxAttempts, 1);
+    assert.equal(plan.maxAttempts, 3);
+    assert.equal(plan.maxCostCny, 0.3);
 
     const waiting = await subject.authorizeSpend(paused.id, {
       nodeId: plan.nodeId,
@@ -177,6 +194,8 @@ describe("ProductionPipeline", () => {
     assert.match(reviewCalls[0]!.renderManifestPath ?? "", /render_manifest\.json$/);
     assert.ok(waiting.nodeRuns.some((node) => node.nodeId === "visual-review" && node.status === "succeeded"));
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "glm-5.3-flash");
+    assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.meteredAttemptCount, 2);
+    assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.estimatedCostCny, 0.2);
     assert.ok(waiting.artifacts.some((artifact) => artifact.kind === "review_report" && artifact.provenance.providerId === "glm-visual-review-v1"));
   });
 
@@ -576,6 +595,7 @@ describe("ProductionPipeline", () => {
     let directorInput: pipeline.VisualDirectorAgentInput | undefined;
     const directorAgent: pipeline.VisualDirectorAgent = {
       id: "api-visual-director-v1",
+      modelId: "gpt-5.6-terra",
       plan: async (input) => {
         directorInput = input;
         return ({
@@ -676,7 +696,11 @@ describe("ProductionPipeline", () => {
     assert.equal((assetCall?.input as Record<string, unknown>).directorPlanPath, directorArtifact.uri);
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/director-v6",
+      "video-factory/director-v8",
+    );
+    assert.equal(
+      run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.modelId,
+      "gpt-5.6-terra",
     );
     assert.deepEqual(directorInput?.brief.templateBlueprint, templateSnapshot.resolvedBlueprint);
     assert.equal(directorInput?.scenes[0]?.onScreenText, "早餐第一步");
@@ -703,6 +727,50 @@ describe("ProductionPipeline", () => {
     assert.equal(parameters.provider, "kokoro");
     assert.equal(parameters.voice, "zf_001");
     assert.equal(parameters.profileId, "kokoro:zf_001");
+  });
+
+  it("re-synthesizes voice with a human-edited node input", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
+    const worker = new FakeWorker();
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+    const waiting = await subject.start(brief);
+    const voiceNode = waiting.nodeRuns.find((node) => node.nodeId === "voice");
+    const originalInput = voiceNode?.inputState?.versions.find(
+      (version) => version.id === voiceNode.inputState?.effectiveVersionId,
+    )?.value as Record<string, unknown> | undefined;
+    assert.ok(originalInput);
+    assert.equal(originalInput.voice, "Sandy (中文（中国大陆）)");
+    assert.equal(originalInput.rate, 178);
+
+    const stale = await subject.applyNodeInputOverride(waiting.id, {
+      nodeId: "voice",
+      actor: "producer",
+      input: {
+        ...originalInput,
+        voice: "Tingting",
+        rate: 166,
+        pause_scale: 1.1,
+        mastering_preset: "social",
+      },
+    });
+    assert.equal(stale.status, "stale");
+    assert.equal(stale.nodeRuns.find((node) => node.nodeId === "voice")?.status, "stale");
+
+    const rerun = await subject.resumeStale(waiting.id);
+    const voiceCalls = worker.calls.filter((call) => call.capability === "voice.synthesize");
+    assert.equal(voiceCalls.length, 2);
+    assert.deepEqual(voiceCalls.at(-1)?.input, {
+      scriptPath: originalInput.scriptPath,
+      voice: "Tingting",
+      rate: 166,
+      pause_scale: 1.1,
+      mastering_preset: "social",
+    });
+    const receipt = rerun.nodeRuns.find((node) => node.nodeId === "voice")?.executionReceipt;
+    assert.equal(receipt?.parameters?.voice, "Tingting");
+    assert.equal(receipt?.parameters?.rate, 166);
+    assert.equal(receipt?.parameters?.pauseScale, 1.1);
+    assert.equal(receipt?.parameters?.masteringPreset, "social");
   });
 
   it("routes a MiniMax actor through cloud speech synthesis", async () => {
@@ -960,6 +1028,48 @@ describe("ProductionPipeline", () => {
     assert.equal(snapshots.at(-1)?.status, "needs_human");
   });
 
+  it("dispatches a failed-node retry after its running checkpoint instead of holding the web request", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-retry-"));
+    let enteredResolve!: () => void;
+    let releaseResolve!: () => void;
+    const entered = new Promise<void>((resolve) => { enteredResolve = resolve; });
+    const release = new Promise<void>((resolve) => { releaseResolve = resolve; });
+    class RetriableWorker extends FakeWorker {
+      failScript = true;
+      blockRetry = false;
+
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        if (request.capability === "script.draft" && this.failScript) {
+          this.failScript = false;
+          throw new Error("temporary script failure");
+        }
+        if (request.capability === "script.draft" && this.blockRetry) {
+          enteredResolve();
+          await release;
+        }
+        return super.run(request);
+      }
+    }
+    const worker = new RetriableWorker();
+    let nextId = 1;
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      idFactory: (prefix) => prefix === "run" ? "run-retry-web" : `${prefix}-${nextId++}`,
+    });
+    const failed = await subject.start(brief);
+    assert.equal(failed.status, "failed");
+    worker.blockRetry = true;
+
+    const dispatched = await subject.dispatchRetryFailedNode(failed.id, "script");
+
+    assert.equal(dispatched.runId, failed.id);
+    assert.equal((await subject.show(failed.id)).status, "running");
+    await entered;
+    releaseResolve();
+    assert.equal((await dispatched.completion).status, "needs_human");
+  });
+
   it("marks persisted running work as interrupted when a new process starts", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
     const runRoot = path.join(workspaceRoot, "runs", "run-interrupted");
@@ -1116,6 +1226,67 @@ describe("ProductionPipeline", () => {
       releaseResolve();
     }
     await dispatched.completion;
+  });
+
+  it("honors a pause request after the active node and resumes from the next node", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
+    let enteredResolve!: () => void;
+    let releaseResolve!: () => void;
+    const entered = new Promise<void>((resolve) => { enteredResolve = resolve; });
+    const release = new Promise<void>((resolve) => { releaseResolve = resolve; });
+    class BlockingWorker extends FakeWorker {
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        if (request.capability === "script.draft") {
+          enteredResolve();
+          await release;
+        }
+        return super.run(request);
+      }
+    }
+    const worker = new BlockingWorker();
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+    const dispatched = await subject.dispatch(brief);
+    await entered;
+
+    await subject.requestPause(dispatched.runId);
+    releaseResolve();
+    const paused = await dispatched.completion;
+
+    assert.equal(paused.status, "paused");
+    assert.deepEqual(paused.nodeRuns.map((node) => node.nodeId), ["brief", "script"]);
+    assert.equal(worker.calls.filter((call) => call.capability === "script.draft").length, 1);
+
+    const completed = await subject.resumePaused(dispatched.runId);
+    assert.equal(completed.status, "needs_human");
+    assert.equal(worker.calls.filter((call) => call.capability === "script.draft").length, 1);
+  });
+
+  it("clears a pause request when the active node reaches a different terminal state", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
+    let enteredResolve!: () => void;
+    let releaseResolve!: () => void;
+    const entered = new Promise<void>((resolve) => { enteredResolve = resolve; });
+    const release = new Promise<void>((resolve) => { releaseResolve = resolve; });
+    class BlockingRejectedWorker extends FakeWorker {
+      constructor() { super("script.draft"); }
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        if (request.capability === "script.draft") {
+          enteredResolve();
+          await release;
+        }
+        return super.run(request);
+      }
+    }
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new BlockingRejectedWorker() });
+    const dispatched = await subject.dispatch(brief);
+    await entered;
+
+    await subject.requestPause(dispatched.runId);
+    releaseResolve();
+    const rejected = await dispatched.completion;
+
+    assert.equal(rejected.status, "rejected");
+    assert.equal(await subject.pauseRequested(dispatched.runId), false);
   });
 
   it("marks the director node as interrupted when a directed run stops after scripting", async () => {

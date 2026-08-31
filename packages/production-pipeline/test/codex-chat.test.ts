@@ -130,6 +130,50 @@ describe("CodexBridgeClient", () => {
     }
   });
 
+  it("sends an opaque role session and returns the broker-owned continuation handle", async () => {
+    const handle = `vfs_${"s".repeat(32)}`;
+    const bridge = await startBridge((request, response) => {
+      assert.equal(request.body.sessionKey, "run-1:script:produce");
+      assert.equal(request.body.sessionHandle, handle);
+      respondWithJson(response, 200, {
+        ok: true,
+        output: "{\"scenes\":[]}",
+        sessionHandle: handle,
+      });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
+      const result = await client.runTaskDetailed(
+        "script-draft",
+        { brief: {} },
+        "request-1",
+        { key: "run-1:script:produce", handle },
+      );
+
+      assert.deepEqual(result.session, { key: "run-1:script:produce", handle });
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("rejects real Codex UUIDs at the opaque session boundary", async () => {
+    const bridge = await startBridge((_request, response) => {
+      respondWithJson(response, 200, { ok: true, output: "{}" });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
+      await assert.rejects(() => client.runTaskDetailed(
+        "script-draft",
+        { brief: {} },
+        "uuid-boundary",
+        { key: "run-1:script:produce", handle: "019c0000-0000-7000-8000-000000000001" },
+      ), /session handle is invalid/);
+      assert.equal(bridge.requests.length, 0);
+    } finally {
+      await bridge.close();
+    }
+  });
+
   it("aborts on timeout and never replays the task", async () => {
     const bridge = await startBridge((_request, _response) => {
       // 挂起不响应，模拟 broker 无应答。
@@ -235,6 +279,36 @@ describe("CodexBridgeClient", () => {
         assert.match(error.message, /HTTP 400/);
         return true;
       });
+      assert.equal(bridge.requests.length, 1);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("marks an unknown role session as safely unaccepted without retrying it in the client", async () => {
+    const bridge = await startBridge((_request, response) => {
+      respondWithJson(response, 409, {
+        error: "Codex role session is unknown or belongs to a different production role.",
+      });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, maxAttempts: 3, sleep: async () => {} });
+
+      await assert.rejects(
+        () => client.runTaskDetailed(
+          "script-draft",
+          { brief: {} },
+          "lost-role-session",
+          { key: "run-1:script:produce", handle: `vfs_${"s".repeat(32)}` },
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof CodexBridgeError);
+          assert.equal(error.transient, false);
+          assert.equal(error.stage, "not_accepted");
+          assert.equal(error.statusCode, 409);
+          return true;
+        },
+      );
       assert.equal(bridge.requests.length, 1);
     } finally {
       await bridge.close();

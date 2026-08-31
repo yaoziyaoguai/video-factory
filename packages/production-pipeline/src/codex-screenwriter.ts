@@ -49,6 +49,7 @@ export interface ScreenwriterAgentInput {
 
 export interface ScreenwriterAgent {
   id: string;
+  modelId?: string;
   draft(input: ScreenwriterAgentInput): Promise<unknown>;
   draftDetailed?(input: ScreenwriterAgentInput): Promise<CodexTaskExecution<unknown>>;
 }
@@ -61,6 +62,7 @@ export interface CodexScreenwriterAgentOptions {
   retryDelayMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   maxReviewIterations?: number;
+  modelId?: string;
 }
 
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
@@ -71,10 +73,12 @@ export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v4|role-audit-v
 // id 固定为 codex-screenwriter-v1：brief.providers.script 持久化该 id，registry 按 id 匹配 provider。
 export class CodexScreenwriterAgent implements ScreenwriterAgent {
   readonly id = "codex-screenwriter-v1";
+  readonly modelId: string;
   private readonly client: CodexBridgeClient;
   private readonly maxReviewIterations: number;
 
   constructor(options: CodexScreenwriterAgentOptions) {
+    this.modelId = options.modelId?.trim() || "codex-default";
     this.maxReviewIterations = options.maxReviewIterations ?? 3;
     if (options.client) {
       this.client = options.client;
@@ -116,18 +120,18 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
         "系列单集的 canonFacts 只记录本集已经明确建立且可供后集引用的事实，不得包含预告、计划、悬念、问题或尚待验证的结论",
       ],
       maxIterations: this.maxReviewIterations,
-      produce: (revision, { requestId }) => this.client.runTaskDetailed("script-draft", {
+      produce: (revision, { requestId, session }) => this.client.runTaskDetailed("script-draft", {
         brief: input.brief,
         ...(revision ? { revision } : {}),
-      }, requestId),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => this.client.runTaskDetailed("role-audit", {
+      }, requestId, session),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
         context: screenwriterAuditContext(input.brief),
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
-      }, requestId),
+      }, requestId, session),
       validate: (value) => validateScriptDraft(value, {
         durationSeconds: input.brief.durationSeconds,
         requireCanonFacts: Boolean(input.brief.seriesContext),

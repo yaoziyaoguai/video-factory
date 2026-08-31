@@ -9,6 +9,7 @@ import { OpportunityFocus } from "../src/client/components/OpportunityFocus.js";
 import { OpportunityDialog } from "../src/client/components/OpportunityDialog.js";
 import { OpportunityRail } from "../src/client/components/OpportunityRail.js";
 import { ProductionStrip } from "../src/client/components/ProductionStrip.js";
+import { SeriesDialog } from "../src/client/components/SeriesDialog.js";
 import { ExperimentsPage } from "../src/client/pages/ExperimentsPage.js";
 import { ProductionPage } from "../src/client/pages/ProductionPage.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
@@ -59,6 +60,7 @@ const providers: StudioProvider[] = [
   { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" },
   { id: "python-ffmpeg-v1", capability: "video.render", label: "FFmpeg 渲染", available: true, kind: "local" },
   { id: "python-technical-review-v1", capability: "quality.review", label: "技术审片", available: true, kind: "local" },
+  { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立红队审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
 ];
 
 const trendSources: StudioTrendSource[] = [
@@ -144,6 +146,56 @@ afterEach(() => {
 });
 
 describe("Creative OS", () => {
+  it("treats both manual and custom query aliases as the isolated custom creation entry", async () => {
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+
+    const { unmount } = render(<MemoryRouter initialEntries={["/topics?mode=custom"]}><TodayPage /></MemoryRouter>);
+    expect(await screen.findByRole("heading", { name: "自定义创作" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "热点候选收件箱" })).not.toBeInTheDocument();
+    unmount();
+
+    render(<MemoryRouter initialEntries={["/topics?mode=manual"]}><TodayPage /></MemoryRouter>);
+    expect(await screen.findByRole("heading", { name: "自定义创作" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "热点候选收件箱" })).not.toBeInTheDocument();
+  });
+
+  it("keeps already-produced opportunities out of every entry's pending-production area", async () => {
+    const pending = { ...opportunity, id: "manual-pending", origin: "manual" as const, title: "仍待制作的自定义选题" };
+    const produced = { ...pending, id: "manual-produced", status: "approved" as const, title: "已经投产的自定义选题" };
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([produced, pending]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+
+    render(<MemoryRouter initialEntries={["/topics?mode=custom"]}><TodayPage /></MemoryRouter>);
+
+    const pendingHeading = await screen.findByRole("heading", { name: "待制作机会" });
+    expect(screen.getByRole("heading", { name: pending.title })).toBeInTheDocument();
+    expect(screen.queryByText(produced.title)).not.toBeInTheDocument();
+    expect(pendingHeading.closest("header")?.querySelector(":scope > span")).toHaveTextContent("1 条");
+  });
+
+  it("uses an existing run as a fallback guard against duplicate production", async () => {
+    const pending = { ...opportunity, id: "trend-with-run", title: "状态同步失败但已创建制作" };
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([pending]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([{ ...runningRun, opportunityId: pending.id }]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "待制作机会" })).toBeInTheDocument();
+    expect(screen.queryByText(pending.title)).not.toBeInTheDocument();
+    expect(screen.getByText(/已投产内容请到制作记录继续/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看制作记录" })).toHaveAttribute("href", "/projects");
+  });
+
   it("keeps all agent candidates visible beside persisted opportunities and filters by category", async () => {
     const user = userEvent.setup();
     const candidates = Array.from({ length: 8 }, (_, index) => candidate(index + 1, index < 5 ? "technology" : "society"));
@@ -185,6 +237,32 @@ describe("Creative OS", () => {
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
     expect(await screen.findByText(/后台更新已开始/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "立即刷新热点" })).toBeEnabled();
+  });
+
+  it("distinguishes collected trend signals from candidates still waiting for a decision", async () => {
+    const user = userEvent.setup();
+    const collected = [candidate(1, "technology"), candidate(2, "society")];
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox")
+      .mockResolvedValueOnce(inbox(collected))
+      .mockResolvedValue(inbox([collected[0]!]));
+    vi.spyOn(studioApi, "refreshTrendCandidates").mockResolvedValue({ refreshId: "refresh-1", status: "started", requestedAt: "2026-08-30T10:00:00.000Z" });
+    vi.spyOn(studioApi, "trendCandidateRefreshStatus").mockResolvedValue({
+      refreshId: "refresh-1",
+      state: "succeeded",
+      requestedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:00:01.000Z",
+      candidateCount: 2,
+    });
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    await screen.findAllByRole("button", { name: /查看候选提案/ });
+    await user.click(screen.getByRole("button", { name: "立即刷新热点" }));
+
+    expect(await screen.findByText("本次采集 2 条，其中 1 条已进入制作区；当前有 1 条待判断。", {}, { timeout: 4_000 })).toBeInTheDocument();
   });
 
   it("does not force-refresh trends when the creator returns to the page", async () => {
@@ -366,6 +444,18 @@ describe("Creative OS", () => {
     expect(onProduce).toHaveBeenCalledOnce();
   });
 
+  it("describes topic intelligence according to the selected creation origin", () => {
+    const topicProviders: StudioProvider[] = [
+      ...providers,
+      { id: "api-topic-editor-v1", capability: "topic.intelligence", label: "Codex 选题总编", available: true, kind: "external" },
+    ];
+    const { rerender } = render(<MemoryRouter><DirectorPanel opportunity={{ ...opportunity, origin: "manual" }} providers={topicProviders} onProduce={() => undefined} /></MemoryRouter>);
+    expect(screen.getByText("自定义命题复核、机会评分与证据门禁由 Codex 执行")).toBeInTheDocument();
+
+    rerender(<MemoryRouter><DirectorPanel opportunity={{ ...opportunity, origin: "series" }} providers={topicProviders} onProduce={() => undefined} /></MemoryRouter>);
+    expect(screen.getByText("系列选题、连续性检查与开拍审计由 Codex 执行")).toBeInTheDocument();
+  });
+
   it("carries the configured default duration into an adopted opportunity", async () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([opportunity]);
@@ -406,7 +496,7 @@ describe("Creative OS", () => {
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "机会读取失败" })).toBeInTheDocument());
     expect(screen.getByText(runningRun.title)).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "趋势源尚未配置" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "当前没有可用热点候选" })).not.toBeInTheDocument();
   });
 
   it("does not turn failed resource or analytics requests into fake empty metrics", async () => {
@@ -452,10 +542,10 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "趋势源尚未配置" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "当前没有可用热点候选" })).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "手动录入" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "导入 JSON" })).toBeInTheDocument();
-    expect(screen.getByText(/趋势采集器/)).toBeInTheDocument();
+    expect(screen.getByText(/上游暂时离线/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "导入 JSON" }));
     expect(screen.getByRole("tab", { name: "JSON 导入" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("textbox", { name: /机会数据/ })).toHaveFocus();
@@ -504,35 +594,58 @@ describe("Creative OS", () => {
     };
     const opportunities = vi.spyOn(studioApi, "opportunities").mockResolvedValue([{
       ...opportunity,
-      id: "series-opportunity-1",
+      id: "series-series-1-episode-002",
       origin: "series",
-      title: seriesCandidate.title,
+      title: "已采用、尚未开工的第二集",
       seriesId: "series-1",
-      episodeNumber: 1,
+      episodeNumber: 2,
+    }, {
+      ...opportunity,
+      id: "series-opportunity-finished",
+      origin: "series",
+      title: "历史成片不应再次制作",
+      seriesId: "series-1",
+      episodeNumber: 3,
     }]);
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
     const runs = vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    const firstEpisode: StudioSeries["episodes"][number] = {
+      id: seriesCandidate.id,
+      seriesId: "series-1",
+      episodeNumber: 1,
+      seasonNumber: 1,
+      arc: "回答真实难题",
+      pillar: "问题",
+      title: seriesCandidate.title,
+      viewerPromise: seriesCandidate.painPoint,
+      hook: seriesCandidate.hook,
+      payoff: "回答一个真实难题",
+      canonBaseRevision: 0,
+      status: "planned",
+      continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: ["留下下一集问题"], canonChecks: ["保持真实"] },
+      planning: { source: "agent", role: "系列总编", auditRole: "独立红队审计 Agent", auditStatus: "passed", auditIterations: 2, auditScore: 91, auditSummary: "路线图有独立价值并形成递进。", providerId: "openai", modelId: "codex-default", promptVersion: "video-factory/series-showrunner-v1", reasoningEffort: "max" },
+      createdAt: "2026-08-24T09:00:00.000Z",
+      updatedAt: "2026-08-24T09:00:00.000Z",
+    };
     const seriesRecord: StudioSeries = {
       id: "series-1", name: "下班观察室", premise: "回答真实难题", audience: "上班族", platform: "douyin",
       category: "lifestyle", track: "after-work", pillars: ["问题", "复盘"], tone: "具体", visualStyle: "生活实拍",
       revision: 1, currentSeason: { number: 1, title: "第一季", arc: "回答真实难题" },
-      bible: { rules: ["保持真实"], recurringElements: [], forbiddenChanges: [] }, canon: { revision: 0, facts: [] }, episodes: [{
-        id: seriesCandidate.id,
-        seriesId: "series-1",
-        episodeNumber: 1,
-        seasonNumber: 1,
-        arc: "回答真实难题",
-        pillar: "问题",
-        title: seriesCandidate.title,
-        viewerPromise: seriesCandidate.painPoint,
-        hook: seriesCandidate.hook,
-        payoff: "回答一个真实难题",
-        canonBaseRevision: 0,
-        status: "planned",
-        continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: ["留下下一集问题"], canonChecks: ["保持真实"] },
-        planning: { source: "agent", role: "系列总编", auditRole: "独立红队审计 Agent", auditStatus: "passed", auditIterations: 2, auditScore: 91, auditSummary: "路线图有独立价值并形成递进。", providerId: "openai", modelId: "codex-default", promptVersion: "video-factory/series-showrunner-v1", reasoningEffort: "max" },
-        createdAt: "2026-08-24T09:00:00.000Z",
-        updatedAt: "2026-08-24T09:00:00.000Z",
+      bible: { rules: ["保持真实"], recurringElements: [], forbiddenChanges: [] }, canon: { revision: 0, facts: [] }, episodes: [firstEpisode, {
+        ...firstEpisode,
+        id: "series-series-1-episode-002",
+        episodeNumber: 2,
+        title: "已采用、尚未开工的第二集",
+        status: "selected",
+        opportunityId: "series-series-1-episode-002",
+      }, {
+        ...firstEpisode,
+        id: "series-series-1-episode-003",
+        episodeNumber: 3,
+        title: "历史成片不应再次制作",
+        status: "ready",
+        opportunityId: "series-opportunity-finished",
+        runId: "run-finished",
       }],
       status: "active", nextEpisodeNumber: 1, createdAt: "2026-08-24T09:00:00.000Z", updatedAt: "2026-08-24T09:00:00.000Z",
     };
@@ -582,6 +695,8 @@ describe("Creative OS", () => {
     expect(screen.getByRole("button", { name: "编辑路线图" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "本集制作准备" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "选择待制作单集" })).toBeInTheDocument();
+    expect(within(screen.getByRole("combobox", { name: "选择待制作单集" })).getAllByRole("option")).toHaveLength(1);
+    expect(screen.queryByRole("option", { name: /历史成片不应再次制作/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "候选机会" })).not.toBeInTheDocument();
     expect(opportunities).toHaveBeenCalledWith("series");
     expect(runs).toHaveBeenCalledWith(undefined);
@@ -806,6 +921,45 @@ describe("Creative OS", () => {
     await user.click(screen.getByRole("button", { name: "保存机会" }));
 
     expect(screen.getByRole("alert")).toHaveTextContent("JSON 格式不正确");
+
+    fireEvent.change(screen.getByRole("textbox", { name: /机会数据/ }), { target: { value: "{}" } });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("clears JSON errors when returning to manual entry", async () => {
+    const user = userEvent.setup();
+    render(<OpportunityDialog open onClose={() => undefined} onSubmit={async () => undefined} />);
+
+    await user.click(screen.getByRole("tab", { name: "JSON 导入" }));
+    fireEvent.change(screen.getByRole("textbox", { name: /机会数据/ }), { target: { value: "{" } });
+    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("JSON 格式不正确");
+
+    await user.click(screen.getByRole("tab", { name: "手动录入" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("内容系列")).not.toBeInTheDocument();
+  });
+
+  it("shows visible Chinese validation instead of relying on a browser bubble", async () => {
+    const user = userEvent.setup();
+    render(<OpportunityDialog open onClose={() => undefined} onSubmit={async () => undefined} />);
+
+    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("标题不能为空");
+
+    await user.type(screen.getByLabelText("选题标题"), "继续填写选题");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("names the missing series field when creation is incomplete", async () => {
+    const user = userEvent.setup();
+    render(<SeriesDialog open onClose={() => undefined} onSubmit={async () => undefined} />);
+
+    await user.click(screen.getByRole("button", { name: "创建系列" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("请填写系列名称");
+
+    await user.type(screen.getByLabelText("系列名称"), "继续填写系列");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("imports a structured opportunity without inventing missing fields", async () => {
@@ -896,14 +1050,15 @@ describe("Creative OS", () => {
     }]);
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "生成与素材模型" })).toBeInTheDocument());
-    expect(screen.getByText("Seedance 关键镜头")).toBeInTheDocument();
-    expect(screen.getByText("Kling 可灵")).toBeInTheDocument();
+    const assetSection = (await screen.findByRole("heading", { name: "生成与素材模型" })).closest("section");
+    expect(assetSection).not.toBeNull();
+    expect(within(assetSection!).getByText("Seedance 关键镜头")).toBeInTheDocument();
+    expect(within(assetSection!).getByText("Kling 可灵")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "热点接入" })).toBeInTheDocument();
     expect(screen.getByText("抖音官方热点")).toBeInTheDocument();
     expect(screen.getAllByText("按量计费").length).toBeGreaterThan(0);
     expect(screen.getAllByText("需要配置").length).toBeGreaterThan(0);
-    expect(within(screen.getByText("Seedance 关键镜头").closest("article")!).getByText("已配置")).toBeInTheDocument();
+    expect(within(within(assetSection!).getByText("Seedance 关键镜头").closest("article")!).getByText("已配置")).toBeInTheDocument();
     expect(screen.getByLabelText("NewsNow 内部服务已连接")).toBeInTheDocument();
   });
 
@@ -944,11 +1099,13 @@ describe("Creative OS", () => {
     await user.click(await screen.findByRole("button", { name: "设为制作默认" }));
     expect(update).toHaveBeenCalledWith({ voiceDirection: { ...initialSettings.voiceDirection, rate: 190 } });
 
-    const pexelsRow = screen.getByText("Pexels 视频").closest("article");
+    const assetSection = screen.getByRole("heading", { name: "生成与素材模型" }).closest("section");
+    expect(assetSection).not.toBeNull();
+    const pexelsRow = within(assetSection!).getByText("Pexels 视频").closest("article");
     expect(pexelsRow).not.toBeNull();
     await user.click(within(pexelsRow!).getByRole("button", { name: "设为默认" }));
     expect(update).toHaveBeenLastCalledWith({ defaultAssetProviderId: "pexels-stock-v1" });
-    const routerRow = screen.getByText("AI 逐镜路由").closest("article");
+    const routerRow = within(assetSection!).getByText("AI 逐镜路由").closest("article");
     expect(routerRow).not.toBeNull();
     await user.click(within(routerRow!).getByRole("button", { name: "设为默认" }));
     expect(update).toHaveBeenLastCalledWith({ defaultAssetProviderId: "ai-shot-router-v1" });
@@ -958,7 +1115,6 @@ describe("Creative OS", () => {
     await user.click(screen.getByRole("button", { name: "保存创作默认" }));
     expect(update).toHaveBeenLastCalledWith({
       defaultRecipeId: "economy-daily",
-      modelDefaults: {},
       productionDefaults: {
         directorProfileId: "documentary-observer",
         reviewMode: "manual",
@@ -966,6 +1122,88 @@ describe("Creative OS", () => {
         durationSeconds: 24,
       },
     });
+  });
+
+  it("configures providers and models by production role instead of a flat provider registry", async () => {
+    const user = userEvent.setup();
+    const roleProviders: StudioProvider[] = [
+      ...providers.filter((provider) => provider.id !== "codex-role-auditor-v1"),
+      {
+        id: "codex-screenwriter-v1",
+        capability: "script.draft",
+        label: "Codex 编剧",
+        available: true,
+        kind: "external",
+        billing: "subscription",
+        defaultModelId: "gpt-5.6-terra",
+        modelProfiles: [
+          { id: "gpt-5.6-terra", providerId: "codex-screenwriter-v1", providerFamily: "openai", label: "GPT-5.6 Terra", description: "日常创作", available: true, taskTypes: ["text"] },
+          { id: "gpt-5.6-sol", providerId: "codex-screenwriter-v1", providerFamily: "openai", label: "GPT-5.6 Sol", description: "高质量创作", available: true, recommended: true, taskTypes: ["text"] },
+        ],
+      },
+      { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立红队审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol", modes: ["独立会话", "max 推理", "最多三轮"] },
+    ];
+    const initialSettings = {
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
+      defaultRecipeId: "economy-daily" as const,
+      roleProviderDefaults: { script: "python-template-v1" },
+      modelDefaults: {},
+      topicStrategy: { customInstruction: "优先可拍题材。" },
+      productionDefaults: { directorProfileId: "auto" as const, reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
+    };
+    vi.spyOn(studioApi, "providers").mockResolvedValue(roleProviders);
+    vi.spyOn(studioApi, "trendSources").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSignals").mockResolvedValue([]);
+    vi.spyOn(studioApi, "localCapabilities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "settings").mockResolvedValue(initialSettings);
+    vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
+      generatedAt: "2026-08-30T00:00:00.000Z",
+      totalItems: 0,
+      needsReviewCount: 0,
+      legacyRunsWithoutManifest: 0,
+      reconstructedRunCount: 0,
+      unreadableManifestCount: 0,
+      truncatedRunCount: 0,
+      truncatedItemCount: 0,
+      categories: { visual: 0, voice: 0, font: 0, document: 0, other: 0 },
+      items: [],
+      assetIndex: {
+        version: "video-factory/asset-index-v1",
+        totalAssets: 0,
+        duplicateUses: 0,
+        reusableCount: 0,
+        needsReviewCount: 0,
+        facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} },
+        assets: [],
+      },
+    });
+    const update = vi.spyOn(studioApi, "updateSettings").mockImplementation(async (patch) => ({
+      ...initialSettings,
+      ...patch,
+      roleProviderDefaults: patch.roleProviderDefaults ?? initialSettings.roleProviderDefaults,
+      modelDefaults: patch.modelDefaults ?? initialSettings.modelDefaults,
+      productionDefaults: { ...initialSettings.productionDefaults, ...patch.productionDefaults },
+    }));
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "按角色配置生产能力" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "编剧默认能力" })).toHaveValue("python-template-v1");
+    expect(screen.getByRole("link", { name: "去画面来源配置" })).toHaveAttribute("href", "#visual-providers");
+    expect(screen.getByRole("link", { name: "去声音演员表配置" })).toHaveAttribute("href", "#voice-casting");
+    expect(screen.queryByRole("combobox", { name: "画面执行默认能力" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "配音执行默认能力" })).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByRole("combobox", { name: "编剧默认能力" }), "codex-screenwriter-v1");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Codex 编剧默认模型" }), "gpt-5.6-sol");
+    expect(screen.getByText("独立红队审计")).toBeInTheDocument();
+    expect(screen.getByText(/max.*最多三轮/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "保存角色配置" }));
+
+    expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
+      roleProviderDefaults: expect.objectContaining({ script: "codex-screenwriter-v1" }),
+      modelDefaults: expect.objectContaining({ "codex-screenwriter-v1": "gpt-5.6-sol" }),
+    }));
   });
 });
 

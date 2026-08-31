@@ -102,11 +102,11 @@ function validPlan(): Record<string, unknown> {
 
 describe("CodexVisualDirectorAgent", () => {
   it("requires an independent role audit before returning a detailed plan", async () => {
-    const calls: CodexTaskKind[] = [];
+    const calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
     const client = new class extends CodexBridgeClient {
       constructor() { super({ socketPath: "/nonexistent/vf-codex.sock" }); }
-      async runTaskDetailed(kind: CodexTaskKind): Promise<CodexTaskExecution> {
-        calls.push(kind);
+      async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
+        calls.push({ kind, payload });
         return {
           output: kind === "director-plan" ? validPlan() : {
             version: "video-factory/role-audit-v1",
@@ -132,7 +132,36 @@ describe("CodexVisualDirectorAgent", () => {
     const execution = await agent.planDetailed(directorInput());
 
     assert.equal(execution.agentLoop?.status, "passed");
-    assert.deepEqual(calls, ["director-plan", "role-audit"]);
+    assert.deepEqual(calls.map(({ kind }) => kind), ["director-plan", "role-audit"]);
+    const auditPayload = calls[1]!.payload as {
+      context: {
+        upstreamFacts: { scenes: Array<Record<string, unknown>> };
+        currentRoleContract: Record<string, unknown>;
+      };
+    };
+    const contract = auditPayload.context.currentRoleContract;
+    assert.equal("directorProfiles" in contract, false);
+    assert.deepEqual(contract.availableDirectorProfileIds, [
+      "documentary-observer",
+      "quiet-humanism",
+      "urban-poetic",
+      "chromatic-storytelling",
+      "geometric-control",
+      "suspense-staging",
+    ]);
+    assert.equal((contract.selectedDirectorProfile as { id: string }).id, "urban-poetic");
+    assert.deepEqual(Object.keys(auditPayload.context.upstreamFacts.scenes[0]!).sort(), [
+      "duration",
+      "failureConditions",
+      "narration",
+      "onScreenText",
+      "position",
+      "soundCue",
+      "successCriteria",
+      "visibleAction",
+      "visualPrompt",
+      "visualStrategy",
+    ]);
   });
 
   it("sends the director-plan payload and returns the validated plan", async () => {
@@ -180,6 +209,31 @@ describe("CodexVisualDirectorAgent", () => {
     const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => plan) });
 
     await assert.rejects(() => agent.plan(directorInput()), /not in the enabled asset pool/);
+  });
+
+  it("rejects element animation assigned to a static editorial card", async () => {
+    const plan = validPlan();
+    const shot = (plan.shots as Array<Record<string, unknown>>)[0]!;
+    shot.subject = "静态状态卡";
+    shot.visibleAction = "灰色圆点同步变为绿色对勾";
+    shot.temporalBeats = ["[0s-2s] 三项显示灰色圆点", "[2s-5s] 三个圆点同步变为绿色对勾"];
+    shot.generationPrompt = "三行灰色圆点同步变为绿色对勾";
+    shot.rationale = "本地卡片适合清单表达。";
+    const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => plan) });
+
+    await assert.rejects(() => agent.plan(directorInput()), /unsupported element animation/);
+  });
+
+  it("rejects a shot whose rationale admits the selected provider cannot execute it", async () => {
+    const plan = validPlan();
+    const shot = (plan.shots as Array<Record<string, unknown>>)[0]!;
+    shot.visibleAction = "所有元素从首帧完整存在，整张卡片轻微推近";
+    shot.temporalBeats = ["[0s-2s] 全部元素完整存在", "[2s-5s] 整张卡片轻微推近"];
+    shot.generationPrompt = "静态卡片只做整张画面轻微推近";
+    shot.rationale = "当前 Provider 缺少元素动画能力，需补充可执行 Provider 后生产。";
+    const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => plan) });
+
+    await assert.rejects(() => agent.plan(directorInput()), /selected provider cannot execute/);
   });
 
   it("rejects plans that do not cover every scene exactly once", async () => {

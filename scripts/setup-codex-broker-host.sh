@@ -15,7 +15,8 @@ env_file=/etc/video-factory/codex-broker.env
 unit_source="$repository_root/apps/codex-broker/deploy/vf-codex-broker.service"
 unit_target=/etc/systemd/system/vf-codex-broker.service
 service=vf-codex-broker
-default_codex_model=gpt-5.6-sol
+default_codex_model=gpt-5.6-terra
+default_codex_audit_model=gpt-5.6-sol
 default_codex_effort=high
 default_codex_audit_effort=max
 
@@ -98,19 +99,23 @@ mv -f "$shared_node_tmp" "$broker_root/bin/node"
 trap - EXIT
 install -d -m 0755 "$(dirname "$env_file")"
 existing_codex_model="$(awk -F= '$1 == "VIDEO_FACTORY_CODEX_MODEL" { sub(/^[^=]*=/, ""); print; exit }' "$env_file" 2>/dev/null || true)"
+existing_codex_audit_model="$(awk -F= '$1 == "VIDEO_FACTORY_CODEX_AUDIT_MODEL" { sub(/^[^=]*=/, ""); print; exit }' "$env_file" 2>/dev/null || true)"
 existing_codex_effort="$(awk -F= '$1 == "VIDEO_FACTORY_CODEX_EFFORT" { sub(/^[^=]*=/, ""); print; exit }' "$env_file" 2>/dev/null || true)"
 existing_codex_audit_effort="$(awk -F= '$1 == "VIDEO_FACTORY_CODEX_AUDIT_EFFORT" { sub(/^[^=]*=/, ""); print; exit }' "$env_file" 2>/dev/null || true)"
 codex_model="${VIDEO_FACTORY_CODEX_MODEL:-$existing_codex_model}"
+codex_audit_model="${VIDEO_FACTORY_CODEX_AUDIT_MODEL:-$existing_codex_audit_model}"
 codex_effort="${VIDEO_FACTORY_CODEX_EFFORT:-$existing_codex_effort}"
 codex_audit_effort="${VIDEO_FACTORY_CODEX_AUDIT_EFFORT:-$existing_codex_audit_effort}"
 codex_model="${codex_model:-$default_codex_model}"
+codex_audit_model="${codex_audit_model:-$default_codex_audit_model}"
 codex_effort="${codex_effort:-$default_codex_effort}"
 codex_audit_effort="${codex_audit_effort:-$default_codex_audit_effort}"
 env_tmp="$(mktemp)"
 {
-  grep -Ev '^(CODEX_BIN|VIDEO_FACTORY_CODEX_MODEL|VIDEO_FACTORY_CODEX_EFFORT|VIDEO_FACTORY_CODEX_AUDIT_EFFORT)=' "$env_file" 2>/dev/null || true
+  grep -Ev '^(CODEX_BIN|VIDEO_FACTORY_CODEX_MODEL|VIDEO_FACTORY_CODEX_AUDIT_MODEL|VIDEO_FACTORY_CODEX_EFFORT|VIDEO_FACTORY_CODEX_AUDIT_EFFORT)=' "$env_file" 2>/dev/null || true
   printf 'CODEX_BIN=%s\n' "$codex_bin"
   printf 'VIDEO_FACTORY_CODEX_MODEL=%s\n' "$codex_model"
+  printf 'VIDEO_FACTORY_CODEX_AUDIT_MODEL=%s\n' "$codex_audit_model"
   printf 'VIDEO_FACTORY_CODEX_EFFORT=%s\n' "$codex_effort"
   printf 'VIDEO_FACTORY_CODEX_AUDIT_EFFORT=%s\n' "$codex_audit_effort"
 } >"$env_tmp"

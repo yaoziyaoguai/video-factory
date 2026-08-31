@@ -196,11 +196,14 @@ exit 42
       "utf8",
     );
 
-    assert.match(script, /default_codex_model=gpt-5\.6-sol/);
+    assert.match(script, /default_codex_model=gpt-5\.6-terra/);
+    assert.match(script, /default_codex_audit_model=gpt-5\.6-sol/);
     assert.match(script, /VIDEO_FACTORY_CODEX_MODEL:-\$existing_codex_model/);
+    assert.match(script, /VIDEO_FACTORY_CODEX_AUDIT_MODEL:-\$existing_codex_audit_model/);
     assert.match(script, /VIDEO_FACTORY_CODEX_EFFORT:-\$existing_codex_effort/);
     assert.match(script, /VIDEO_FACTORY_CODEX_AUDIT_EFFORT:-\$existing_codex_audit_effort/);
     assert.match(script, /printf 'VIDEO_FACTORY_CODEX_MODEL=%s\\n'/);
+    assert.match(script, /printf 'VIDEO_FACTORY_CODEX_AUDIT_MODEL=%s\\n'/);
     assert.match(script, /printf 'VIDEO_FACTORY_CODEX_AUDIT_EFFORT=%s\\n'/);
   });
 

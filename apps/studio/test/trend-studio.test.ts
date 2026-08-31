@@ -161,4 +161,39 @@ describe("TrendStudio", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("keeps the last non-empty cache when an explicit refresh returns no candidates", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-empty-trend-refresh-"));
+    const cachePath = path.join(root, "candidates.json");
+    const cached = [{ id: "trend-last-known", title: "上一版可用热点" }] as StudioTrendCandidate[];
+    try {
+      const seed = new TrendStudio({
+        repositoryRoot: "/repo",
+        cachePath,
+        environment: {},
+        now: () => new Date("2026-08-30T08:00:00.000Z"),
+        trendGateway: { listServices: async () => [], listSignals: async () => [] },
+        trendAgent: { listCandidates: async () => cached },
+      });
+      await seed.listCandidates();
+
+      const restarted = new TrendStudio({
+        repositoryRoot: "/repo",
+        cachePath,
+        environment: {},
+        now: () => new Date("2026-08-30T20:00:00.000Z"),
+        createRefreshId: () => "refresh-empty",
+        trendGateway: { listServices: async () => [], listSignals: async () => [] },
+        trendAgent: { listCandidates: async () => [] },
+      });
+      assert.deepEqual(await restarted.listCandidates(), cached);
+      await restarted.requestCandidateRefresh();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.equal(restarted.candidateRefreshStatus("refresh-empty")?.state, "failed");
+      assert.deepEqual(await restarted.listCandidates(), cached);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

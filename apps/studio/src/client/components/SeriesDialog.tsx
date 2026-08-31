@@ -58,7 +58,14 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
           <div><p className="eyebrow">系列策划</p><h2 id="series-dialog-title">创建系列</h2><p>只填三项就能开始，系统会先补齐一套经济实用的制作默认值。</p></div>
           <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
-        <form className="run-form series-form" onSubmit={submit}>
+        <form
+          className="run-form series-form"
+          onSubmit={submit}
+          onChange={() => {
+            if (error) setError(undefined);
+          }}
+          noValidate
+        >
           <label className="field field-wide"><span>系列名称</span><input name="name" required data-dialog-initial-focus placeholder="例如：AI 下班实验室" /></label>
           <label className="field field-wide"><span>系列承诺</span><textarea name="premise" required rows={3} placeholder="每一集稳定为观众解决什么问题" /></label>
           <label className="field"><span>目标受众</span><input name="audience" required placeholder="最想持续服务的那群人" /></label>
@@ -92,9 +99,15 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
 
 function required(data: FormData, key: string): string {
   const value = data.get(key);
-  if (typeof value !== "string" || !value.trim()) throw new Error("请完整填写系列定义。");
+  if (typeof value !== "string" || !value.trim()) throw new Error(`请填写${SERIES_FIELD_LABELS[key] ?? "必填内容"}。`);
   return value.trim();
 }
+
+const SERIES_FIELD_LABELS: Record<string, string> = {
+  name: "系列名称",
+  premise: "系列承诺",
+  audience: "目标受众",
+};
 
 function valueOr(data: FormData, key: string, fallback: string): string {
   const value = data.get(key);

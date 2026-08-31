@@ -37,7 +37,7 @@ import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey } from "./role-agen
 import { RoleAgentLoopError } from "./role-agent-loop.js";
 import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
-import { validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport } from "./codex-visual-review.js";
+import { VISUAL_REVIEW_AGENT_CONTRACT_VERSION, validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport } from "./codex-visual-review.js";
 import { parseBrief, parsePersistedBrief, parseProductionSeriesContext, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
 import { FileRunStore, RunLockedError } from "./run-store.js";
 import type { WorkerResponse } from "./python-worker-client.js";
@@ -177,6 +177,7 @@ export class ProductionPipeline {
       providers: registry,
       clock: this.clock,
       idFactory: (prefix) => prefix === "run" ? runId : this.idFactory(prefix),
+      shouldPause: () => this.consumePauseRequest(runId),
       checkpoint: async (run) => {
         const productionRun = run as WorkflowRun<ProductionBrief>;
         if (!created) {
@@ -205,10 +206,12 @@ export class ProductionPipeline {
     await firstCheckpoint;
     const completionWithLeaseRelease = completion.then(
       async (run) => {
+        if (run.status !== "paused") await rm(this.pauseRequestPath(runId), { force: true });
         await this.releaseExecutionLease(executionLease);
         return run;
       },
       async (error: unknown) => {
+        await rm(this.pauseRequestPath(runId), { force: true });
         await this.releaseExecutionLease(executionLease);
         throw error;
       },
@@ -237,6 +240,29 @@ export class ProductionPipeline {
 
   async remove(runId: string): Promise<void> {
     await this.store.remove(runId);
+  }
+
+  async requestPause(runId: string): Promise<void> {
+    const run = await this.store.load<ProductionBrief>(runId);
+    if (run.status !== "running") {
+      throw new Error(`Run '${runId}' is not running.`);
+    }
+    await writeFile(this.pauseRequestPath(runId), `${JSON.stringify({ requestedAt: this.clock() })}\n`, "utf8");
+    const latest = await this.store.load<ProductionBrief>(runId);
+    if (latest.status !== "running") {
+      await rm(this.pauseRequestPath(runId), { force: true });
+      throw new Error(`Run '${runId}' is no longer running.`);
+    }
+  }
+
+  async pauseRequested(runId: string): Promise<boolean> {
+    try {
+      await stat(this.pauseRequestPath(runId));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
   }
 
   async withRunMaintenanceLease<T>(runIds: string[], action: () => Promise<T>): Promise<T> {
@@ -386,7 +412,16 @@ export class ProductionPipeline {
   }
 
   async decide(runId: string, decision: HumanDecisionDraft): Promise<WorkflowRun<ProductionBrief>> {
-    return this.runPersistedTransition(runId, async (previous, checkpoint) => {
+    const dispatched = await this.dispatchDecision(runId, decision);
+    return dispatched.completion;
+  }
+
+  async dispatchDecision(
+    runId: string,
+    decision: HumanDecisionDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       const brief = parsePersistedBrief(previous.initialInput);
       const registry = this.createRegistry(brief);
       const runner = new WorkflowRunner({
@@ -394,9 +429,10 @@ export class ProductionPipeline {
         clock: this.clock,
         idFactory: this.idFactory,
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.consumePauseRequest(runId),
       });
       return runner.resume(this.createWorkflow(brief, decision), withPersistedBrief(previous, brief), decision);
-    });
+    }, listener);
   }
 
   async applyNodeOverride(runId: string, override: NodeOverrideDraft): Promise<WorkflowRun<ProductionBrief>> {
@@ -426,42 +462,94 @@ export class ProductionPipeline {
   }
 
   async authorizeSpend(runId: string, authorization: SpendAuthorizationDraft): Promise<WorkflowRun<ProductionBrief>> {
-    return this.runPersistedTransition(runId, async (previous, checkpoint) => {
+    const dispatched = await this.dispatchSpendAuthorization(runId, authorization);
+    return dispatched.completion;
+  }
+
+  async dispatchSpendAuthorization(
+    runId: string,
+    authorization: SpendAuthorizationDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       const brief = parsePersistedBrief(previous.initialInput);
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
         clock: this.clock,
         idFactory: this.idFactory,
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.consumePauseRequest(runId),
       });
       return runner.authorizeSpend(this.createWorkflow(brief), withPersistedBrief(previous, brief), authorization);
-    });
+    }, listener);
   }
 
   async resumeStale(runId: string): Promise<WorkflowRun<ProductionBrief>> {
-    return this.runPersistedTransition(runId, async (previous, checkpoint) => {
+    const dispatched = await this.dispatchResumeStale(runId);
+    return dispatched.completion;
+  }
+
+  async dispatchResumeStale(
+    runId: string,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       const brief = parsePersistedBrief(previous.initialInput);
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
         clock: this.clock,
         idFactory: this.idFactory,
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.consumePauseRequest(runId),
       });
       return runner.resumeStale(this.createWorkflow(brief), withPersistedBrief(previous, brief));
-    });
+    }, listener);
   }
 
   async retryFailedNode(runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>> {
-    return this.runPersistedTransition(runId, async (previous, checkpoint) => {
+    const dispatched = await this.dispatchRetryFailedNode(runId, nodeId);
+    return dispatched.completion;
+  }
+
+  async dispatchRetryFailedNode(
+    runId: string,
+    nodeId: string,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       const brief = parsePersistedBrief(previous.initialInput);
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
         clock: this.clock,
         idFactory: this.idFactory,
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.consumePauseRequest(runId),
       });
       return runner.retryFailedNode(this.createWorkflow(brief), withPersistedBrief(previous, brief), nodeId);
-    });
+    }, listener);
+  }
+
+  async resumePaused(runId: string): Promise<WorkflowRun<ProductionBrief>> {
+    const dispatched = await this.dispatchResumePaused(runId);
+    return dispatched.completion;
+  }
+
+  async dispatchResumePaused(
+    runId: string,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    await rm(this.pauseRequestPath(runId), { force: true });
+    return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
+      const brief = parsePersistedBrief(previous.initialInput);
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.consumePauseRequest(runId),
+      });
+      return runner.resumePaused(this.createWorkflow(brief), withPersistedBrief(previous, brief));
+    }, listener);
   }
 
   private async runPersistedTransition(
@@ -488,6 +576,80 @@ export class ProductionPipeline {
       return result;
     } finally {
       await this.releaseExecutionLease(lease);
+    }
+  }
+
+  private async dispatchPersistedTransition(
+    runId: string,
+    transition: (
+      previous: WorkflowRun<ProductionBrief>,
+      checkpoint: (run: WorkflowRun<ProductionBrief>) => Promise<void>,
+    ) => Promise<WorkflowRun<ProductionBrief>>,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    const lease = await this.acquireExecutionLease(runId, true);
+    let previous: WorkflowRun<ProductionBrief>;
+    try {
+      previous = await this.store.load<ProductionBrief>(runId);
+    } catch (error) {
+      await this.releaseExecutionLease(lease);
+      throw error;
+    }
+
+    let persisted = false;
+    let resolveCheckpoint!: () => void;
+    let rejectCheckpoint!: (error: unknown) => void;
+    const firstCheckpoint = new Promise<void>((resolve, reject) => {
+      resolveCheckpoint = resolve;
+      rejectCheckpoint = reject;
+    });
+    const checkpoint = async (run: WorkflowRun<ProductionBrief>) => {
+      if (!persisted) {
+        await this.store.save(run, previous.revision);
+        persisted = true;
+      } else {
+        await this.store.checkpoint(run);
+      }
+      await notifyListener(listener, run);
+      resolveCheckpoint();
+    };
+    const completion = transition(previous, checkpoint).then(
+      async (run) => {
+        if (!persisted) {
+          await this.store.save(run, previous.revision);
+          persisted = true;
+          await notifyListener(listener, run);
+          resolveCheckpoint();
+        }
+        if (run.status !== "paused") await rm(this.pauseRequestPath(runId), { force: true });
+        await this.releaseExecutionLease(lease);
+        return run;
+      },
+      async (error: unknown) => {
+        await rm(this.pauseRequestPath(runId), { force: true });
+        await this.releaseExecutionLease(lease);
+        rejectCheckpoint(error);
+        throw error;
+      },
+    );
+    void completion.catch(() => undefined);
+    await firstCheckpoint;
+    return { runId, completion };
+  }
+
+  private pauseRequestPath(runId: string): string {
+    return path.join(this.runsRoot, runId, ".pause-request.json");
+  }
+
+  private async consumePauseRequest(runId: string): Promise<boolean> {
+    const requestPath = this.pauseRequestPath(runId);
+    try {
+      await stat(requestPath);
+      await rm(requestPath, { force: true });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
     }
   }
 
@@ -538,6 +700,7 @@ export class ProductionPipeline {
       parentNodeIds: string[],
       getInput: (context: WorkflowContext) => Record<string, unknown>,
       role?: string,
+      validateInputOverride?: (input: unknown) => Record<string, unknown>,
     ): NodeDefinition => ({
       id,
       label,
@@ -556,12 +719,16 @@ export class ProductionPipeline {
         const response = capability === "script.draft" && brief.seriesContext
           ? await validateSeriesWorkerScriptResponse(workerResponse)
           : workerResponse;
+        const receipt = providerExecutionReceipt(provider, response);
+        if (capability === "voice.synthesize") {
+          receipt.parameters = effectiveVoiceReceiptParameters(input as Record<string, unknown>, receipt.parameters);
+        }
         return {
           ...workerResponseToNodeResult(response, context, parentNodeIds),
-          receipt: providerExecutionReceipt(provider, response),
+          receipt,
         };
       },
-      validateInputOverride: (input) => requireOutputRecord(input, `${id} input`),
+      validateInputOverride: validateInputOverride ?? ((input) => requireOutputRecord(input, `${id} input`)),
       validateOverride: (output) => validateWorkerNodeOverride(id, output),
     });
 
@@ -627,8 +794,15 @@ export class ProductionPipeline {
         brief.providers.voice,
         ["script", "assets"],
         ["script", "assets"],
-        (context) => ({ scriptPath: outputPath(context, "script", "scriptPath") }),
+        (context) => ({
+          scriptPath: outputPath(context, "script", "scriptPath"),
+          voice: brief.voiceDirection.profileId.slice(brief.voiceDirection.profileId.indexOf(":") + 1),
+          rate: brief.voiceDirection.rate,
+          pause_scale: brief.voiceDirection.pauseScale,
+          mastering_preset: brief.voiceDirection.masteringPreset,
+        }),
         "声音导演",
+        validateVoiceNodeInput,
       ),
       workerNode(
         "render",
@@ -972,16 +1146,19 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
 class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, CodexTaskExecution<unknown>> {
   readonly capability: Capability = "storyboard.plan";
   readonly label = "Codex 视觉导演";
-  readonly modelId = "codex";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
   readonly configurationSource = "system_default" as const;
-  readonly parameters = { promptPack: "video-factory/director-v6" };
+  readonly parameters = { promptPack: "video-factory/director-v8" };
 
   constructor(private readonly agent: VisualDirectorAgent) {}
 
   get id(): string {
     return this.agent.id;
+  }
+
+  get modelId(): string {
+    return this.agent.modelId ?? "codex-default";
   }
 
   async run(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<unknown>> {
@@ -994,7 +1171,6 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
 class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTaskExecution<unknown>> {
   readonly capability: Capability = "script.draft";
   readonly label = "Codex 编剧";
-  readonly modelId = "codex";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
   readonly configurationSource = "system_default" as const;
@@ -1004,6 +1180,10 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTask
 
   get id(): string {
     return this.agent.id;
+  }
+
+  get modelId(): string {
+    return this.agent.modelId ?? "codex-default";
   }
 
   async run(input: ScreenwriterAgentInput): Promise<CodexTaskExecution<unknown>> {
@@ -1027,10 +1207,10 @@ class VisualReviewProvider implements Provider<VisualReviewAgentInput, VisualRev
   get transport(): ProductionProviderRuntimeMetadata["transport"] { return this.metadata?.transport ?? "unix_socket"; }
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
   get configurationSource(): ExecutionConfigurationSource { return "system_default"; }
-  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v4" }; }
+  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v5", agentLoopMaxIterations: 3, independentAudit: true }; }
   get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
-  get maxCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
-  get maxAttempts(): number { return this.metadata?.maxAttempts ?? 1; }
+  get maxCostCny(): number { return roundCurrency((this.metadata?.estimatedCostCny ?? 0) * this.maxAttempts); }
+  get maxAttempts(): number { return Math.max(3, this.metadata?.maxAttempts ?? 3); }
   async run(input: VisualReviewAgentInput, context: WorkflowContext): Promise<VisualReviewExecution> {
     const request = context.operationRequestId
       ? { ...input, requestId: context.operationRequestId }
@@ -1845,18 +2025,43 @@ function visualReviewNode(
     execute: async (input, context) => {
       const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "visual-review"));
       const request = validateVisualReviewInput(input, Boolean(brief.director));
+      const parentArtifactIds = context.artifacts
+        .filter((artifact) => artifact.producer && ["render", "technical-review"].includes(artifact.producer.nodeId))
+        .map((artifact) => artifact.id);
       const provider = context.resolveProvider<VisualReviewAgentInput, VisualReviewExecution>({
         capability: "quality.review.visual",
         providerId,
       });
-      const execution = await provider.run(request, context);
+      let execution: VisualReviewExecution;
+      try {
+        execution = await provider.run({
+          ...request,
+          agentLoopCheckpoint: nodeAgentLoopCheckpoint(
+            runsRoot,
+            context.runId,
+            "visual-review",
+            request,
+            VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+          ),
+        }, context);
+      } catch (error) {
+        if (error instanceof RoleAgentLoopError) {
+          return failedAgentLoopNodeResult({
+            error,
+            attemptDirectory: attempt.directory,
+            nodeId: "visual-review",
+            attempt: attempt.attempt,
+            parentArtifactIds,
+            provider,
+            providerLabel: provider.label ?? "视觉审片",
+          });
+        }
+        throw error;
+      }
       const report = execution.output;
       const reportPath = path.join(attempt.directory, "visual_review.json");
       const content = `${JSON.stringify(report, null, 2)}\n`;
       await writeTextAtomically(reportPath, content);
-      const parentArtifactIds = context.artifacts
-        .filter((artifact) => artifact.producer && ["render", "technical-review"].includes(artifact.producer.nodeId))
-        .map((artifact) => artifact.id);
       const traceArtifact = await persistModelTrace({
         trace: execution.trace,
         attemptDirectory: attempt.directory,
@@ -1864,6 +2069,16 @@ function visualReviewNode(
         attempt: attempt.attempt,
         parentArtifactIds,
       });
+      const loopArtifact = await persistAgentLoopTrace({
+        loop: execution.agentLoop,
+        attemptDirectory: attempt.directory,
+        nodeId: "visual-review",
+        attempt: attempt.attempt,
+        parentArtifactIds,
+      });
+      const meteredAttemptCount = provider.billing === "metered"
+        ? Math.max(1, execution.agentLoop?.producerModelCallCount ?? execution.agentLoop?.iterations.length ?? 1)
+        : undefined;
       return {
         status: "succeeded",
         output: {
@@ -1882,14 +2097,24 @@ function visualReviewNode(
             ...(provider.parameters ?? {}),
             ...(execution.trace ? { promptPack: execution.trace.promptVersion } : {}),
             sampleMode: execution.sampling?.mode ?? "unknown",
+            ...(execution.agentLoop ? {
+              agentLoop: execution.agentLoop.status,
+              agentLoopIterations: execution.agentLoop.iterations.length,
+              auditReasoningEffort: execution.agentLoop.iterations.at(-1)?.auditTrace?.reasoningEffort ?? "max",
+              modelCallCount: execution.agentLoop.modelCallCount ?? execution.agentLoop.iterations.length * 2,
+              producerModelCallCount: execution.agentLoop.producerModelCallCount ?? execution.agentLoop.iterations.length,
+              auditModelCallCount: execution.agentLoop.auditModelCallCount ?? execution.agentLoop.iterations.length,
+            } : {}),
             ...(execution.sampling?.sceneCount !== undefined ? {
               samplingCoverage: `${execution.sampling.coveredScenePositions?.length ?? 0}/${execution.sampling.sceneCount}`,
               missingScenePositions: (execution.sampling.missingScenePositions ?? []).map(String),
             } : {}),
           },
-          ...(provider.estimatedCostCny !== undefined ? { estimatedCostCny: provider.estimatedCostCny } : {}),
+          ...(provider.estimatedCostCny !== undefined ? {
+            estimatedCostCny: roundCurrency(provider.estimatedCostCny * (meteredAttemptCount ?? 1)),
+          } : {}),
           ...(execution.requestId ? { requestId: execution.requestId } : {}),
-          ...(provider.billing === "metered" ? { meteredAttemptCount: 1 } : {}),
+          ...(meteredAttemptCount !== undefined ? { meteredAttemptCount } : {}),
         },
         artifacts: [fileArtifact(
           "review_report",
@@ -1902,7 +2127,7 @@ function visualReviewNode(
           providerId,
           "Sampled-frame AI visual review; human final review remains mandatory.",
           attempt.attempt,
-        ), ...(traceArtifact ? [traceArtifact] : [])],
+        ), ...(traceArtifact ? [traceArtifact] : []), ...(loopArtifact ? [loopArtifact] : [])],
       };
     },
     validateOverride: (output) => {
@@ -2038,13 +2263,16 @@ function assetSemanticRankNode(
         attempt: attempt.attempt,
         parentArtifactIds,
       });
+      const semanticReceipt = trace
+        ? modelTraceReceipt(trace, "Codex 语义选片", "subscription", agentLoop)
+        : undefined;
       return {
         status: "succeeded",
         output: { candidateRankingPath: rankingPath, ranking },
         receipt: {
-          ...(trace
+          ...(semanticReceipt
             ? {
-                ...modelTraceReceipt(trace, "Codex 语义选片", "subscription", agentLoop),
+                ...semanticReceipt,
                 ...(fallbackReason ? { fallbackReason } : {}),
               }
             : {
@@ -2056,7 +2284,10 @@ function assetSemanticRankNode(
                 configurationSource: "system_default" as const,
                 ...(ranker && fallbackReason ? { fallbackFromProviderId: ranker.id, fallbackReason } : {}),
               }),
-          parameters: { rankingMode: ranking.source === "model" ? "visual_semantic" : "deterministic" },
+          parameters: {
+            ...(semanticReceipt?.parameters ?? {}),
+            rankingMode: ranking.source === "model" ? "visual_semantic" : "deterministic",
+          },
           estimatedCostCny: 0,
           requestId: context.nextId("asset-ranking"),
         },
@@ -2228,6 +2459,7 @@ function providerConfig(
 function receiptParameters(parameters: Record<string, unknown>): Record<string, ExecutionParameterValue> {
   const allowed = new Set([
     "provider",
+    "profileId",
     "mediaType",
     "resolution",
     "voice",
@@ -2252,6 +2484,49 @@ function receiptParameters(parameters: Record<string, unknown>): Record<string, 
     }
   }
   return output;
+}
+
+function validateVoiceNodeInput(input: unknown): Record<string, unknown> {
+  const value = requireOutputRecord(input, "voice input");
+  const voice = requiredOutputString(value, "voice");
+  if (voice.length > 160 || /[\u0000-\u001f\u007f]/.test(voice)) {
+    throw new Error("voice input voice is invalid.");
+  }
+  const rate = Number(value.rate);
+  if (!Number.isInteger(rate) || rate < 120 || rate > 260) {
+    throw new Error("voice input rate must be an integer between 120 and 260.");
+  }
+  const pauseScale = Number(value.pause_scale);
+  if (!Number.isFinite(pauseScale) || pauseScale < 0.5 || pauseScale > 2) {
+    throw new Error("voice input pause_scale must be between 0.5 and 2.");
+  }
+  if (value.mastering_preset !== "natural" && value.mastering_preset !== "intimate" && value.mastering_preset !== "social") {
+    throw new Error("voice input mastering_preset is invalid.");
+  }
+  return {
+    scriptPath: requiredOutputString(value, "scriptPath"),
+    voice,
+    rate,
+    pause_scale: pauseScale,
+    mastering_preset: value.mastering_preset,
+  };
+}
+
+function effectiveVoiceReceiptParameters(
+  input: Record<string, unknown>,
+  current: Record<string, ExecutionParameterValue> | undefined,
+): Record<string, ExecutionParameterValue> {
+  const provider = typeof current?.provider === "string" ? current.provider : "voice";
+  const voice = requiredOutputString(input, "voice");
+  const prefix = provider === "macos-say" ? "macos" : provider;
+  return {
+    ...(current ?? {}),
+    profileId: `${prefix}:${voice}`,
+    voice,
+    rate: Number(input.rate),
+    pauseScale: Number(input.pause_scale),
+    masteringPreset: String(input.mastering_preset),
+  };
 }
 
 function validateProviderRuntimeMetadata(
@@ -2449,6 +2724,8 @@ function modelTraceReceipt(
         agentLoopIterations: loop.iterations.length,
         auditReasoningEffort: loop.iterations.at(-1)?.auditTrace?.reasoningEffort ?? "max",
         modelCallCount: Math.max(1, loop.modelCallCount ?? loop.iterations.length * 2 + (loop.pendingCandidate ? 1 : 0)),
+        producerModelCallCount: loop.producerModelCallCount ?? loop.iterations.length + (loop.pendingCandidate ? 1 : 0),
+        auditModelCallCount: loop.auditModelCallCount ?? loop.iterations.length,
       } : {}),
     },
   };
@@ -2699,7 +2976,7 @@ async function failedAgentLoopNodeResult(options: {
   nodeId: string;
   attempt: number;
   parentArtifactIds: string[];
-  provider: Pick<Provider, "id" | "modelId" | "transport" | "billing" | "configurationSource" | "parameters">;
+  provider: Pick<Provider, "id" | "modelId" | "transport" | "billing" | "configurationSource" | "parameters" | "estimatedCostCny">;
   providerLabel: string;
   output?: Record<string, unknown>;
   additionalArtifacts?: ArtifactDraft[];
@@ -2719,7 +2996,7 @@ async function failedAgentLoopNodeResult(options: {
     parentArtifactIds: options.parentArtifactIds,
   });
   const receipt = options.error.lastTrace
-    ? modelTraceReceipt(options.error.lastTrace, options.providerLabel, "subscription", options.error.agentLoop)
+    ? modelTraceReceipt(options.error.lastTrace, options.providerLabel, options.provider.billing === "metered" ? "metered" : "subscription", options.error.agentLoop)
     : {
         providerId: options.provider.id,
         providerLabel: options.providerLabel,
@@ -2734,6 +3011,17 @@ async function failedAgentLoopNodeResult(options: {
           modelCallCount: Math.max(1, options.error.agentLoop.modelCallCount ?? 1),
         },
       };
+  if (options.provider.billing === "metered") {
+    const meteredAttemptCount = Math.max(
+      1,
+      options.error.agentLoop.producerModelCallCount
+        ?? options.error.agentLoop.iterations.length + (options.error.agentLoop.pendingCandidate ? 1 : 0),
+    );
+    receipt.meteredAttemptCount = meteredAttemptCount;
+    if (options.provider.estimatedCostCny !== undefined) {
+      receipt.estimatedCostCny = roundCurrency(options.provider.estimatedCostCny * meteredAttemptCount);
+    }
+  }
   return {
     status: "failed",
     error: options.error.message,

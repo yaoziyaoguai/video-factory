@@ -1,11 +1,12 @@
 import json
+import re
 import shutil
 import subprocess
 import textwrap
 from pathlib import Path
 from typing import Optional
 
-from .stock_assets import default_asset_plan_path, load_asset_plan, local_card_style
+from .stock_assets import default_asset_plan_path, load_asset_plan
 
 
 FONT_CANDIDATES = [
@@ -191,12 +192,25 @@ def render_asset_video(
         int(asset["scene_position"]): asset
         for asset in asset_plan.get("scene_assets", [])
     }
+    director_routes = {
+        int(route["scene_position"]): route
+        for route in asset_plan.get("director_routing", [])
+        if isinstance(route, dict) and isinstance(route.get("scene_position"), int)
+    }
     clips = []
     scene_commands = []
     for scene in manifest["slides"]:
         asset = scene_assets[int(scene["position"])]
         caption_style = "editorial" if asset.get("provider") == "local" else "subtitle"
-        caption_path = write_caption_overlay(manifest, scene, captions_dir, width, height, style=caption_style)
+        caption_path = write_caption_overlay(
+            manifest,
+            scene,
+            captions_dir,
+            width,
+            height,
+            style=caption_style,
+            director_route=director_routes.get(int(scene["position"])),
+        )
         clip_path, command = render_scene_clip(scene, asset, caption_path, clips_dir, width, height)
         clips.append(clip_path)
         scene_commands.append(command)
@@ -258,6 +272,7 @@ def write_caption_overlay(
     width: int,
     height: int,
     style: str = "subtitle",
+    director_route: Optional[dict] = None,
 ) -> Path:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -321,6 +336,7 @@ def write_caption_overlay(
     title_y = body_y - max(58, height // 36)
 
     draw_bottom_scrim(draw, width, height, max(0, title_y - 96), height)
+    draw_director_labels(draw, ImageFont, director_overlay_labels(manifest, scene, director_route), width)
     draw.text(
         (margin, title_y),
         f"{manifest['title']}  {int(scene['position']):02d}/{len(manifest['slides']):02d}",
@@ -342,6 +358,49 @@ def write_caption_overlay(
     draw_aigc_badge(draw, ImageFont, width, scene)
     image.save(caption_path)
     return caption_path
+
+
+def director_overlay_labels(manifest: dict, scene: dict, director_route: Optional[dict]) -> list[str]:
+    if not isinstance(director_route, dict):
+        return []
+    shot = director_route.get("director_shot")
+    if not isinstance(shot, dict):
+        shot = {}
+    values = [str(scene.get("visual_prompt") or "")]
+    for key in ("subject", "visibleAction", "continuityNote"):
+        values.append(str(shot.get(key) or ""))
+    for key in ("successCriteria", "referenceRequirements"):
+        items = shot.get(key)
+        if isinstance(items, list):
+            values.extend(str(item) for item in items if isinstance(item, str))
+    joined = " ".join(values)
+    labels = quoted_overlay_text(joined)
+    complete_state = "三项完成" in joined or ("三项核验" in joined and "完成" in joined)
+    if complete_state:
+        historical = " ".join(str(item.get("visual_prompt") or "") for item in manifest.get("slides", []) if isinstance(item, dict))
+        recurring = [label for label in quoted_overlay_text(historical) if 1 <= len(label) <= 6 and historical.count(f"“{label}”") >= 2]
+        labels = recurring[:3] or labels
+        return [f"{label} · 已完成" for label in labels[:3]]
+    return labels[:3]
+
+
+def quoted_overlay_text(text: str) -> list[str]:
+    values = re.findall(r"[“\"]([^”\"]{1,24})[”\"]", text)
+    return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+
+def draw_director_labels(draw, ImageFont, labels: list[str], width: int) -> None:
+    if not labels:
+        return
+    font = load_font(ImageFont, max(26, width // 32))
+    x = max(56, width // 13)
+    y = 180
+    for label in labels:
+        box = draw.textbbox((0, 0), label, font=font)
+        item_width = min(width - x * 2, box[2] - box[0] + 56)
+        draw.rounded_rectangle((x, y, x + item_width, y + 72), radius=34, fill=(8, 15, 28, 205), outline=(255, 255, 255, 72), width=2)
+        draw.text((x + 28, y + 17), label, font=font, fill=(255, 255, 255, 244))
+        y += 88
 
 
 def render_scene_clip(
@@ -385,13 +444,6 @@ def render_scene_clip(
             "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
             f"d=1:s={width}x{height}:fps=30,setsar=1"
         )
-        if asset.get("provider") == "local":
-            background = local_card_style(int(scene["position"]))["background"].replace("#", "0x")
-            background_filter += (
-                ",fade=t=in:st=0:d=0.35:color=white,"
-                f"drawbox=x=170:y=665:w=860:h=185:color={background}@1:t=fill:enable='lt(t,1.35)',"
-                f"drawbox=x=170:y=835:w=860:h=185:color={background}@1:t=fill:enable='lt(t,2.85)'"
-            )
     else:
         raise RuntimeError(f"Unsupported scene asset media type: {asset['media_type']}")
 

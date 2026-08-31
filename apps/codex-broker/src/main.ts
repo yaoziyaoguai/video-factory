@@ -13,6 +13,7 @@ try {
     concurrency: config.concurrency,
     maxBacklog: config.maxBacklog,
     idempotencyDirectory: path.join(config.workspaceRoot, ".video-factory", "codex-idempotency", config.profile.identity.profileId),
+    sessionDirectory: path.join(config.workspaceRoot, ".video-factory", "codex-sessions", config.profile.identity.profileId),
   });
   await server.start();
   process.stdout.write(
@@ -24,7 +25,9 @@ try {
       `engine=${config.profile.identity.profileId === "zai" ? "chat-completions" : "codex-cli"}`,
       `workspace=${config.workspaceRoot}`,
       `codexBin=${config.codexBin}`,
+      `auditModel=${config.auditModel ?? "same-as-production"}`,
       `effort=${config.effort}`,
+      `auditEffort=${config.auditEffort}`,
       `concurrency=${config.concurrency}`,
       `backlog=${config.maxBacklog}`,
       `timeoutMs=${config.timeoutMs}`,

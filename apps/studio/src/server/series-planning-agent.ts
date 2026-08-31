@@ -73,11 +73,11 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         "集数连续、数量准确，且没有输入中不存在的事实、数字、经历、引用或来源",
       ],
       maxIterations: this.maxReviewIterations,
-      produce: (revision, { requestId }) => this.client.runTaskDetailed("series-roadmap", {
+      produce: (revision, { requestId, session }) => this.client.runTaskDetailed("series-roadmap", {
         ...request,
         ...(revision ? { revision } : {}),
-      }, requestId),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => this.client.runTaskDetailed("role-audit", {
+      }, requestId, session),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
@@ -92,7 +92,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         },
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
-      }, requestId),
+      }, requestId, session),
       validate: (value) => parseSeriesRoadmapOutput(value, series.pillars, startEpisodeNumber, count),
       ...(this.checkpointDirectory ? {
         checkpoint: fileRoleAgentLoopCheckpoint(
@@ -145,11 +145,11 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
       ],
       maxIterations: this.maxReviewIterations,
       initialCandidate: { episodes: [episodeDraft(episode)] },
-      produce: (revision, { requestId }) => this.client.runTaskDetailed("series-roadmap", {
+      produce: (revision, { requestId, session }) => this.client.runTaskDetailed("series-roadmap", {
         ...request,
         ...(revision ? { revision } : {}),
-      }, requestId),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => this.client.runTaskDetailed("role-audit", {
+      }, requestId, session),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
@@ -164,8 +164,14 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         },
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
-      }, requestId),
-      validate: (value) => parseSeriesRoadmapOutput(value, series.pillars, episode.episodeNumber, 1),
+      }, requestId, session),
+      validate: (value) => {
+        const parsed = parseSeriesRoadmapOutput(value, series.pillars, episode.episodeNumber, 1);
+        if (JSON.stringify(parsed.episodes[0]?.fromPrevious) !== JSON.stringify(episode.continuity.fromPrevious)) {
+          throw new Error("Series greenlight agent changed creator-owned fromPrevious requirements.");
+        }
+        return parsed;
+      },
       ...(this.checkpointDirectory ? {
         checkpoint: fileRoleAgentLoopCheckpoint(
           path.join(this.checkpointDirectory, `${checkpointKey}.json`),
@@ -176,9 +182,6 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
     const finalIteration = execution.agentLoop?.iterations.at(-1);
     const trace = execution.trace ?? finalIteration?.auditTrace;
     const draft = execution.output.episodes[0]!;
-    if (JSON.stringify(draft.fromPrevious) !== JSON.stringify(episode.continuity.fromPrevious)) {
-      throw new Error("Series greenlight agent changed creator-owned fromPrevious requirements.");
-    }
     return {
       draft,
       planning: {

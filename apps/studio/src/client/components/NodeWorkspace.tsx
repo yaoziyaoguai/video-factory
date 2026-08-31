@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, ChevronDown, CircleDollarSign, FilePenLine, Save, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, CircleDollarSign, FilePenLine, Pause, Save, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { StudioArtifact, StudioNode, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunStatus, StudioSpendAuthorizationInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
@@ -13,12 +13,18 @@ interface NodeWorkspaceProps {
   runStatus: StudioRunStatus;
   artifacts: StudioArtifact[];
   busy: boolean;
+  pauseBusy?: boolean;
+  pauseRequested?: boolean;
+  onRequestPause?: () => Promise<void>;
   onOverride: (nodeId: string, input: StudioNodeOverrideInput) => Promise<void>;
   onInputOverride?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
   onAuthorize: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy, onOverride, onInputOverride = async () => undefined, onAuthorize }: NodeWorkspaceProps) {
+export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy, pauseBusy = false, pauseRequested = false, onRequestPause, onOverride, onInputOverride = async () => undefined, onAuthorize }: NodeWorkspaceProps) {
+  const shouldOpenForAttention = node.status === "awaiting_spend_approval" || node.status === "approval_invalidated";
+  const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
+  const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
   const [editing, setEditing] = useState(false);
   const [editingInput, setEditingInput] = useState(false);
   const [editingDocument, setEditingDocument] = useState(false);
@@ -59,6 +65,15 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
     && (effectiveVersion?.artifactIds?.length
       ? effectiveVersion.artifactIds.includes(audioArtifact.id)
       : effectiveVersion?.source !== "human"));
+  const visualArtifacts = useMemo(
+    () => selectMaterializedVisualArtifacts(node, artifacts, effectiveVersion?.artifactIds),
+    [artifacts, effectiveVersion?.artifactIds, node],
+  );
+  const currentVisualArtifactIds = effectiveVersion?.artifactIds?.length ? effectiveVersion.artifactIds : node.artifactIds;
+  const visualsAreCurrent = Boolean(visualArtifacts.length
+    && runStatus !== "stale"
+    && !node.outputState?.stale
+    && visualArtifacts.every((artifact) => currentVisualArtifactIds.includes(artifact.id)));
   const spendInputs = useMemo(() => node.spendPlan?.inputVersionIds.map((versionId) => {
     const inputOwner = nodes.find((candidate) => candidate.inputState?.versions.some((version) => version.id === versionId));
     const outputOwner = nodes.find((candidate) => candidate.outputState?.versions.some((version) => version.id === versionId));
@@ -68,9 +83,10 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
     return { versionId, label: inputOwner ? `${owner?.label ?? "节点"}输入` : owner?.label ?? "上游交付", role: owner?.role ?? "生产角色", source };
   }) ?? [], [node.spendPlan?.inputVersionIds, nodes]);
   const hasStructuredOutput = node.output !== undefined || effectiveOutput(node) !== undefined;
-  const readOnlyReview = READ_ONLY_REVIEW_NODE_IDS.has(node.id);
-  const canEdit = !readOnlyReview && (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
-  const canEditInput = !readOnlyReview && effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
+  const outputReadOnly = READ_ONLY_OUTPUT_NODE_IDS.has(node.id);
+  const nodeReadOnly = READ_ONLY_NODE_IDS.has(node.id);
+  const canEdit = !outputReadOnly && (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
+  const canEditInput = !nodeReadOnly && effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
   const fallbackReason = useMemo(() => agentFallbackReason(execution), [execution]);
   const capability = useMemo(() => fallbackReason
@@ -80,6 +96,12 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
   const deliveryValue = documentPreview ?? node.output ?? effectiveOutput(node);
   const hasDelivery = hasCreatorDocumentContent(node.id, deliveryValue);
   const hasEditableInput = node.id !== "brief" && hasCreatorDocumentContent(`${node.id}-input`, effectiveInput(node));
+  const inputSources = useMemo(
+    () => creatorInputSources(node, nodes, effectiveInputVersion),
+    [effectiveInputVersion, node, nodes],
+  );
+  const hasReviewableInput = hasEditableInput || inputSources.length > 0;
+  const canRequestPause = runStatus === "running" && node.status === "succeeded" && (hasDelivery || hasReviewableInput) && onRequestPause !== undefined;
 
   useEffect(() => {
     if (!editing) setDraft(pretty(documentPreview ?? node.output ?? effectiveOutput(node) ?? {}));
@@ -88,6 +110,13 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
   useEffect(() => {
     if (!editingInput) setInputDraft(pretty(effectiveInput(node) ?? {}));
   }, [editingInput, node]);
+
+  useEffect(() => {
+    if (shouldOpenForAttention) {
+      setWorkspaceOpen(true);
+      setInputReviewOpen(true);
+    }
+  }, [shouldOpenForAttention]);
 
   useEffect(() => {
     if (!editableArtifact?.contentUrl) {
@@ -118,9 +147,20 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
 
   function beginEditing() {
     const usesDocument = Boolean(editableArtifact && documentPreview !== undefined);
+    setError(undefined);
     setEditingDocument(usesDocument);
     setDraft(pretty(usesDocument ? documentPreview : node.output ?? effectiveOutput(node) ?? {}));
     setEditing(true);
+  }
+
+  function cancelEditing() {
+    setError(undefined);
+    setEditing(false);
+  }
+
+  function cancelInputEditing() {
+    setError(undefined);
+    setEditingInput(false);
   }
 
   async function saveOverride(confirmTerminalEdit = false, preparedOverride?: StudioNodeOverrideInput) {
@@ -129,6 +169,14 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
       const parsed = preparedOverride ?? (editingDocument && editableArtifact
         ? { document: { artifactId: editableArtifact.id, content: JSON.parse(draft) as unknown } }
         : { output: JSON.parse(draft) as unknown });
+      const validationError = creatorDraftValidationError(
+        node.id,
+        "output" in parsed ? parsed.output : parsed.document?.content,
+      );
+      if (validationError) {
+        setError(validationError);
+        return;
+      }
       if (terminal && !confirmTerminalEdit) {
         setTerminalOverride(parsed);
         return;
@@ -145,6 +193,11 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
     setError(undefined);
     try {
       const parsed = preparedOverride ?? { input: JSON.parse(inputDraft) as unknown };
+      const validationError = creatorInputDraftValidationError(parsed.input);
+      if (validationError) {
+        setError(validationError);
+        return;
+      }
       if (terminal && !confirmTerminalEdit) {
         setTerminalInputOverride(parsed);
         return;
@@ -176,11 +229,15 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
 
   return (
     <details
+      id={`node-workspace-${node.id}`}
       className={`node-workspace is-${node.status}`}
       name="creator-workspaces"
       aria-label={`${node.label} · ${node.role ?? "生产角色"}`}
-      open={node.status === "awaiting_spend_approval" || node.status === "approval_invalidated"}
-      onToggle={(event) => revealExpandedWorkspace(event.currentTarget)}
+      open={workspaceOpen}
+      onToggle={(event) => {
+        setWorkspaceOpen(event.currentTarget.open);
+        revealExpandedWorkspace(event.currentTarget);
+      }}
     >
       <summary>
         <span className="node-workspace-state">{node.status === "succeeded" ? <Check aria-hidden="true" size={14} /> : <span />}</span>
@@ -196,6 +253,31 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>审计失败，已规则回退</strong>：{fallbackReason}</span></p> : null}
         {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />此节点结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成。</p> : null}
+        {canRequestPause ? <div className="node-pause-edit">
+          <span>{pauseRequested ? "已请求暂停；当前任务安全结束后会停在下一节点前。" : "想修改这一步？系统会先让当前任务安全结束，再停下来。"}</span>
+          <button className="button button-ghost" type="button" disabled={pauseBusy || pauseRequested} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{pauseRequested ? "等待暂停" : "暂停后修改"}</button>
+        </div> : null}
+
+        {canEditInput && hasReviewableInput ? <details className="node-input-adjustment" open={inputReviewOpen} onToggle={(event) => setInputReviewOpen(event.currentTarget.open)}>
+          <summary><FilePenLine aria-hidden="true" size={15} />查看和调整这个角色收到的内容</summary>
+          <div className="node-input-review">
+            {inputSources.length ? <section className="node-input-sources" aria-label={`${node.role ?? "生产角色"}收到的上游交付`}>
+              <header><strong>来自上游角色</strong><small>修改会在原角色处保存为新版本，并让后续旧结果失效。</small></header>
+              <div>
+                {inputSources.map((source) => <article key={source.node.id}>
+                  <span><strong>{source.node.role ?? "生产角色"} · {source.node.label}</strong><small>{source.versionLabel}{source.node.outputState?.stale ? " · 上游已变化" : ""}</small></span>
+                  <button className="button button-ghost" type="button" aria-label={`${source.canEdit ? "查看与修改" : "查看"} ${source.node.role ?? "生产角色"} · ${source.node.label}`} onClick={() => revealSourceWorkspace(source.node.id)}>{source.canEdit ? "查看与修改" : "查看"}</button>
+                </article>)}
+              </div>
+            </section> : null}
+            {hasEditableInput ? <section className="node-output-preview">
+              <header><div><strong>本节点专用设置</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 上游已变化，需复核" : ""}</small></div>{!editingInput ? <button className="button button-ghost" type="button" onClick={() => setEditingInput(true)}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
+              {effectiveInputVersion?.source === "reconstructed" ? <p className="node-version-note">旧任务没有保存当时的原始输入；这里展示的是按当前上游内容推断出的可编辑版本。</p> : null}
+              {editingInput ? <NodeStructuredEditor nodeId={`${node.id}-input`} value={safeParse(inputDraft)} assetProviderIds={assetProviderIds} onChange={(value) => { setError(undefined); setInputDraft(pretty(value)); }} /> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
+              {editingInput ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelInputEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveInputOverride()}><Save aria-hidden="true" size={15} />保存人工输入</button></footer> : null}
+            </section> : null}
+          </div>
+        </details> : null}
 
         {node.spendPlan ? (
           <section className="spend-gate" aria-label={`${node.label}费用确认`}>
@@ -207,21 +289,22 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
         ) : null}
 
         <section className="node-output-preview node-creator-delivery">
-          <header><div><strong>{node.role ?? "生产角色"}的交付</strong><small>{readOnlyReview ? "技术结果只读；需要调整时请修改上游内容后重跑" : effectiveVersion?.source === "human" ? "已采用你的修改" : hasDelivery ? "自动生成，可按需修改" : node.status === "pending" ? "等待上游完成" : "本节点没有需要人工阅读的内容"}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
-          {editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} onChange={(value) => setDraft(pretty(value))} /> : documentLoading ? <p className="node-document-state">正在读取结构化交付...</p> : documentError ? <p className="node-workspace-error" role="alert">结构化交付读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
+          <header><div><strong>{node.role ?? "生产角色"}的交付</strong><small>{deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
+          {node.id === "assets" && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
+            <header><strong>{visualsAreCurrent ? "实际镜头画面" : "上次生成的镜头画面"}</strong><small>{visualArtifacts.length} 个可预览镜头{visualsAreCurrent ? "" : " · 上游变化后需重新生成"}</small></header>
+            <div>
+              {visualArtifacts.map((artifact, index) => <figure key={artifact.id}>
+                {artifact.contentType?.startsWith("video/")
+                  ? <video aria-label={`镜头 ${index + 1} 画面预览`} src={artifact.contentUrl} controls playsInline preload="metadata" />
+                  : <img alt={`镜头 ${index + 1} 画面预览`} src={artifact.contentUrl} loading="lazy" />}
+                <figcaption><span>镜头 {index + 1}</span><small>{providerLabel(artifact.providerId) ?? artifact.providerId ?? "素材来源未记录"}</small></figcaption>
+              </figure>)}
+            </div>
+          </div> : null}
+          {editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取结构化交付...</p> : documentError ? <p className="node-workspace-error" role="alert">结构化交付读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
           {audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioIsCurrent ? "实际配音试听" : "上次生成的配音"}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? "实际配音试听" : "上次生成的配音试听"} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
-          {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => setEditing(false)}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
+          {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
         </section>
-
-        {canEditInput && hasEditableInput ? <details className="node-input-adjustment">
-          <summary><FilePenLine aria-hidden="true" size={15} />调整这个角色收到的内容</summary>
-          <section className="node-output-preview">
-            <header><div><strong>上游输入</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 上游已变化，需复核" : ""}</small></div>{!editingInput ? <button className="button button-ghost" type="button" onClick={() => setEditingInput(true)}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
-            {effectiveInputVersion?.source === "reconstructed" ? <p className="node-version-note">旧任务没有保存当时的原始输入；这里展示的是按当前上游内容推断出的可编辑版本。</p> : null}
-            {editingInput ? <NodeStructuredEditor nodeId={`${node.id}-input`} value={safeParse(inputDraft)} assetProviderIds={assetProviderIds} onChange={(value) => setInputDraft(pretty(value))} /> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
-            {editingInput ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => setEditingInput(false)}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveInputOverride()}><Save aria-hidden="true" size={15} />保存人工输入</button></footer> : null}
-          </section>
-        </details> : null}
 
         {error ? <p className="node-workspace-error" role="alert">{error}</p> : null}
       </div>
@@ -280,6 +363,15 @@ function revealExpandedWorkspace(workspace: HTMLDetailsElement): void {
   window.requestAnimationFrame(() => workspace.scrollIntoView({ block: "start" }));
 }
 
+function revealSourceWorkspace(nodeId: string): void {
+  if (typeof document === "undefined") return;
+  const workspace = document.getElementById(`node-workspace-${nodeId}`);
+  if (!(workspace instanceof HTMLDetailsElement)) return;
+  if (!workspace.open) workspace.querySelector<HTMLElement>(":scope > summary")?.click();
+  if (typeof workspace.scrollIntoView === "function") workspace.scrollIntoView({ behavior: "smooth", block: "start" });
+  window.requestAnimationFrame(() => workspace.querySelector<HTMLElement>("summary")?.focus());
+}
+
 function safeParse(value: string): unknown {
   try {
     return JSON.parse(value) as unknown;
@@ -302,13 +394,104 @@ const EDITABLE_ARTIFACT_KIND: Record<string, string> = {
   "publish-package": "publish_package",
 };
 
-const READ_ONLY_REVIEW_NODE_IDS = new Set(["render", "technical-review", "final-review"]);
+const READ_ONLY_NODE_IDS = new Set(["render", "technical-review", "final-review"]);
+const READ_ONLY_OUTPUT_NODE_IDS = new Set([...READ_ONLY_NODE_IDS, "assets", "voice"]);
+
+const INPUT_SOURCE_BY_FIELD: Record<string, string> = {
+  brief: "brief",
+  script: "script",
+  scriptPath: "script",
+  referenceGrammarPath: "reference-grammar",
+  directorPlan: "visual-direction",
+  directorPlanPath: "visual-direction",
+  candidateSearchPath: "asset-candidates",
+  candidateInventoryPath: "asset-candidates",
+  candidateRankingPath: "asset-semantic-rank",
+  assetPlan: "assets",
+  assetPlanPath: "assets",
+  voiceoverPlan: "voice",
+  voiceoverPlanPath: "voice",
+  renderManifestPath: "render",
+  videoPath: "render",
+  reviewPath: "technical-review",
+};
+
+interface CreatorInputSource {
+  node: StudioNode;
+  versionLabel: string;
+  canEdit: boolean;
+}
+
+function creatorInputSources(
+  currentNode: StudioNode,
+  nodes: StudioNode[],
+  inputVersion: NonNullable<StudioNode["inputState"]>["versions"][number] | undefined,
+): CreatorInputSource[] {
+  if (!inputVersion) return [];
+  const sourceNodeIds = new Set<string>();
+
+  for (const versionId of inputVersion.upstreamVersionIds) {
+    const owner = nodes.find((candidate) => candidate.outputState?.versions.some((version) => version.id === versionId));
+    if (owner && owner.id !== currentNode.id) sourceNodeIds.add(owner.id);
+  }
+
+  for (const field of Object.keys(asRecord(inputVersion.value) ?? {})) {
+    const sourceNodeId = INPUT_SOURCE_BY_FIELD[field];
+    if (sourceNodeId && sourceNodeId !== currentNode.id) sourceNodeIds.add(sourceNodeId);
+  }
+
+  return [...sourceNodeIds].map((nodeId) => nodes.find((candidate) => candidate.id === nodeId)).filter((source): source is StudioNode => source !== undefined).map((source) => {
+    const version = source.outputState?.versions.find((candidate) => candidate.id === source.outputState?.effectiveVersionId);
+    return {
+      node: source,
+      versionLabel: version?.source === "human" ? "人工版本" : "自动版本",
+      canEdit: !READ_ONLY_OUTPUT_NODE_IDS.has(source.id) && source.status !== "pending" && source.status !== "running",
+    };
+  });
+}
+
+function deliveryEditHint(
+  nodeId: string,
+  source: "generated" | "human" | undefined,
+  hasDelivery: boolean,
+  status: StudioNode["status"],
+  runStatus: StudioRunStatus,
+  pauseRequested: boolean,
+): string {
+  if (pauseRequested) return "已请求暂停；当前任务安全结束后即可修改";
+  if (nodeId === "assets") return runStatus === "running"
+    ? "画面只读；如需更换，请先暂停，再修改导演方案中的逐镜来源或提示。"
+    : "已经生成的画面只能预览；要更换画面，请修改上方导演方案中的逐镜来源或提示，再继续生成。";
+  if (nodeId === "voice") return runStatus === "running"
+    ? "声音只读；如需重配，请先暂停，再修改配音指令。"
+    : "已经生成的声音只能试听；修改下方配音指令后会重新合成。";
+  if (READ_ONLY_NODE_IDS.has(nodeId)) return "技术结果只读；需要调整时请修改上游内容后重跑";
+  if (runStatus === "running" && hasDelivery) return "后续节点正在执行；可先暂停，再修改这份交付";
+  if (runStatus === "paused" && hasDelivery) return "制作已暂停，可以修改；保存后下游旧结果会自动失效";
+  if (source === "human") return "已采用你的修改";
+  if (hasDelivery) return "自动生成，可按需修改";
+  return status === "pending" ? "等待上游完成" : "本节点没有需要人工阅读的内容";
+}
 
 function selectEditableArtifact(nodeId: string, artifacts: StudioArtifact[], effectiveArtifactIds?: string[]): StudioArtifact | undefined {
   const kind = EDITABLE_ARTIFACT_KIND[nodeId];
   if (!kind) return undefined;
   const candidates = artifacts.filter((artifact) => artifact.kind === kind && artifact.contentType === "application/json" && artifact.contentUrl);
   return candidates.find((artifact) => effectiveArtifactIds?.includes(artifact.id)) ?? candidates[0];
+}
+
+function selectMaterializedVisualArtifacts(
+  node: StudioNode,
+  artifacts: StudioArtifact[],
+  effectiveArtifactIds?: string[],
+): StudioArtifact[] {
+  if (node.id !== "assets") return [];
+  const candidates = artifacts.filter((artifact) => artifact.contentUrl
+    && (artifact.contentType?.startsWith("image/") || artifact.contentType?.startsWith("video/")))
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const currentIds = effectiveArtifactIds?.length ? effectiveArtifactIds : node.artifactIds;
+  const current = candidates.filter((artifact) => currentIds.includes(artifact.id));
+  return current.length ? current : candidates;
 }
 
 function effectiveOutput(node: StudioNode): unknown {
@@ -345,6 +528,102 @@ function hasMeaningfulValue(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(hasMeaningfulValue);
   if (typeof value === "object") return Object.values(value as Record<string, unknown>).some(hasMeaningfulValue);
   return true;
+}
+
+function creatorDraftValidationError(nodeId: string, value: unknown, requireModernPresence = true): string | undefined {
+  const draft = asRecord(value);
+  if (!draft) return "交付内容格式不正确，请检查后再保存。";
+  if (nodeId === "brief") {
+    return firstRequiredTextError(draft, [
+      ["title", "标题"],
+      ["angle", "切入角度"],
+      ["audience", "目标观众"],
+    ], requireModernPresence);
+  }
+  if (nodeId === "script") {
+    const topLevelError = firstRequiredTextError(draft, [
+      ["viewerPromise", "观众承诺"],
+      ["narrativeArc", "叙事弧线"],
+    ]);
+    if (topLevelError) return topLevelError;
+    return firstCollectionItemError(draft.scenes, "分镜", [
+      ["narration", "旁白"],
+      ["visual_prompt", "画面提示"],
+      ["visible_action", "可见动作"],
+    ]);
+  }
+  if (nodeId === "visual-direction") {
+    const topLevelError = firstRequiredTextError(draft, [
+      ["profileRationale", "风格选择理由"],
+    ]);
+    if (topLevelError) return topLevelError;
+    const bible = asRecord(draft.visualBible);
+    if (!bible) return "视觉圣经不能为空。";
+    const bibleError = firstRequiredTextError(bible, [
+      ["narrativeApproach", "叙事方式"],
+      ["pacing", "节奏"],
+      ["composition", "构图"],
+      ["camera", "镜头运动"],
+      ["color", "色彩"],
+      ["continuity", "连续性"],
+      ["sound", "声音"],
+    ]);
+    if (bibleError) return bibleError;
+    return firstCollectionItemError(draft.shots, "镜头计划", [
+      ["narrativeRole", "镜头任务"],
+      ["preferredProviderId", "首选画面能力"],
+      ["query", "素材检索词"],
+      ["generationPrompt", "生成提示"],
+      ["rationale", "选择理由"],
+      ["continuityNote", "连续性"],
+    ]);
+  }
+  return undefined;
+}
+
+function creatorInputDraftValidationError(value: unknown): string | undefined {
+  const input = asRecord(value);
+  if (!input) return "输入内容格式不正确，请检查后再保存。";
+  const containers: Array<[key: string, nodeId: string]> = [
+    ["brief", "brief"],
+    ["script", "script"],
+    ["visualDirection", "visual-direction"],
+    ["directorPlan", "visual-direction"],
+  ];
+  for (const [key, nodeId] of containers) {
+    if (!(key in input)) continue;
+    const error = creatorDraftValidationError(nodeId, input[key], false);
+    if (error) return `${key === "brief" ? "内容简报" : key === "script" ? "脚本" : "导演方案"}：${error}`;
+  }
+  return undefined;
+}
+
+function firstRequiredTextError(
+  value: Record<string, unknown>,
+  fields: Array<[key: string, label: string]>,
+  requirePresence = false,
+): string | undefined {
+  const missing = fields.find(([key]) => (
+    (requirePresence || key in value)
+    && (typeof value[key] !== "string" || !(value[key] as string).trim())
+  ));
+  return missing ? `${missing[1]}不能为空。` : undefined;
+}
+
+function firstCollectionItemError(
+  value: unknown,
+  collectionLabel: string,
+  fields: Array<[key: string, label: string]>,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) return `${collectionLabel}不能为空。`;
+  for (const [index, item] of value.entries()) {
+    const record = asRecord(item);
+    if (!record) return `${collectionLabel}第 ${index + 1} 项格式不正确。`;
+    const error = firstRequiredTextError(record, fields);
+    if (error) return `${collectionLabel}第 ${index + 1} 项：${error}`;
+  }
+  return undefined;
 }
 
 function inputSourceLabel(source: "derived" | "human" | "reconstructed" | undefined): string {

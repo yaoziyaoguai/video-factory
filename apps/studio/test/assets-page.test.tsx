@@ -152,8 +152,8 @@ describe("AssetsPage", () => {
     expect(screen.getByRole("heading", { level: 2, name: "夜晚书房" })).toBeInTheDocument();
     expect(screen.getByLabelText("窗边一杯水 · 镜头 1 预览")).toHaveAttribute("src", "/api/runs/run-1/artifacts/render/content#t=0.1");
     expect(screen.getByText("镜头 2")).toBeInTheDocument();
-    expect(screen.getAllByText("作品素材包 · 1 项")).toHaveLength(4);
-    expect(screen.getByRole("heading", { level: 2, name: "未归属项目" })).toBeInTheDocument();
+    expect(screen.getAllByText("作品素材包 · 1 项")).toHaveLength(3);
+    expect(screen.queryByRole("heading", { level: 2, name: "未归属项目" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "按资产" }));
     expect(screen.queryByText("作品素材包 · 1 项")).not.toBeInTheDocument();
@@ -162,5 +162,11 @@ describe("AssetsPage", () => {
     await user.click(screen.getByRole("button", { name: /声音/ }));
     expect(await screen.findByRole("heading", { level: 3, name: "夜晚书房" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 1" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "制作凭证" }));
+    expect(screen.getByRole("heading", { level: 3, name: "制作文档" })).toBeInTheDocument();
+    expect(screen.getAllByText("未归属").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/作品素材包/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 3, name: "夜晚书房" })).not.toBeInTheDocument();
   });
 });

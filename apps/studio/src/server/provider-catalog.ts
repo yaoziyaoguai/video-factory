@@ -18,6 +18,7 @@ export interface ProviderRuntime {
 export type CodexCatalogAvailability = Pick<CodexProviderSettings, "available" | "reason"> & {
   taskKinds?: readonly string[];
   modelId?: string;
+  taskModels?: Record<string, string>;
 };
 
 export function buildProviderCatalog(
@@ -40,13 +41,22 @@ export function buildProviderCatalog(
   const codex = codexAvailability ?? probeCodexSynchronously(environment);
   const reportedCodexModelId = codex.modelId?.trim() || environment.VIDEO_FACTORY_CODEX_MODEL?.trim();
   const codexModelId = reportedCodexModelId || "codex-default";
-  const codexModels = [textModelProfile(codexModelId, reportedCodexModelId || "由 Codex 运行时决定", "codex-broker", "openai", codex.available, reportedCodexModelId ? "服务器 Codex broker 当前实际使用的模型；切换需要更新运行时配置并重启 broker。" : "Codex broker 尚未报告具体模型；首次调用后会记录实际模型。")];
+  const modelForTask = (taskKind: string) => codex.taskModels?.[taskKind]?.trim() || codexModelId;
   const codexProfiles = (
     providerId: string,
     taskKind: string,
     taskType: "text" | "visual-review" = "text",
     runtimeAvailable = true,
-  ) => codexModels.map((model) => ({
+  ) => [textModelProfile(
+    modelForTask(taskKind),
+    modelForTask(taskKind) === "codex-default" ? "由 Codex 运行时决定" : modelForTask(taskKind),
+    "codex-broker",
+    "openai",
+    codex.available,
+    modelForTask(taskKind) === "codex-default"
+      ? "Codex broker 尚未报告具体模型；首次调用后会记录实际模型。"
+      : "服务器 Codex broker 针对此角色实际使用的模型；切换需要更新运行时配置并重启 broker。",
+  )].map((model) => ({
     ...model,
     providerId,
     available: runtimeAvailable && supportsTask(codex, taskKind),
@@ -57,7 +67,18 @@ export function buildProviderCatalog(
   const zaiCodexRequirement = providerTaskRequirement(resolveZaiCodexSocketPath(environment).requirement, zaiCodex, "visual-review");
   const zaiModelId = zaiCodex.modelId?.trim() || resolveZaiVisualReviewModelId(environment);
   const zaiModelLabel = zaiModelId === "glm-5.3-flash" ? "GLM-5.3-Flash" : zaiModelId;
-  const zaiVisualReviewAvailable = runtime.python && runtime.ffmpeg && runtime.ffprobe && supportsTask(zaiCodex, "visual-review");
+  const zaiVisualProducerAvailable = supportsTask(zaiCodex, "visual-review");
+  const independentAuditAvailable = supportsTask(codex, "role-audit");
+  const zaiVisualReviewAvailable = runtime.python
+    && runtime.ffmpeg
+    && runtime.ffprobe
+    && zaiVisualProducerAvailable
+    && independentAuditAvailable;
+  const zaiVisualReviewRequirement = !zaiVisualProducerAvailable
+    ? zaiCodexRequirement
+    : !independentAuditAvailable
+      ? `GLM 审片意见必须经过独立 Codex Agent 红队复核。${codexRequirement("role-audit")}`
+      : zaiCodexRequirement;
 
   return [
     provider({
@@ -70,9 +91,23 @@ export function buildProviderCatalog(
       description: "通过宿主机 Codex 把实时热点转译为可拍摄、可连载的中文短视频角度；失败时回退到确定性评分。",
       modes: ["热点理解", "选题提案", "结构化输出"],
       latency: "seconds",
-      defaultModelId: codexModelId,
+      defaultModelId: modelForTask("topic-ideas"),
       modelProfiles: codexProfiles("api-topic-editor-v1", "topic-ideas"),
       requirement: codexRequirement("topic-ideas"),
+    }),
+    provider({
+      id: "codex-series-showrunner-v1",
+      capability: "series.plan",
+      label: "Codex 系列主理人",
+      available: supportsTask(codex, "series-roadmap"),
+      kind: "external",
+      billing: "subscription",
+      description: "维护 Series Bible、Canon 与集间承接，规划长期路线并在单集开拍前重新绿灯审计。",
+      modes: ["系列圣经", "连续性", "单集绿灯", "三轮自审"],
+      latency: "seconds",
+      defaultModelId: modelForTask("series-roadmap"),
+      modelProfiles: codexProfiles("codex-series-showrunner-v1", "series-roadmap"),
+      requirement: codexRequirement("series-roadmap"),
     }),
     provider({
       id: "python-template-v1",
@@ -95,7 +130,7 @@ export function buildProviderCatalog(
       description: "按选题角度撰写可拍、可朗读、可核验的分镜脚本；编剧失败时制作明确失败，不回退模板。",
       modes: ["口语旁白", "3-10 场分镜", "逐场画面指令"],
       latency: "seconds",
-      defaultModelId: codexModelId,
+      defaultModelId: modelForTask("script-draft"),
       modelProfiles: codexProfiles("codex-screenwriter-v1", "script-draft"),
       requirement: codexRequirement("script-draft"),
     }),
@@ -109,7 +144,7 @@ export function buildProviderCatalog(
       description: "生成视觉圣经，并根据叙事、真实性、连续性和预算逐镜选择素材来源。",
       modes: ["导演角色", "视觉圣经", "逐镜路由"],
       latency: "seconds",
-      defaultModelId: codexModelId,
+      defaultModelId: modelForTask("director-plan"),
       modelProfiles: codexProfiles("api-visual-director-v1", "director-plan"),
       requirement: codexRequirement("director-plan"),
     }),
@@ -123,7 +158,7 @@ export function buildProviderCatalog(
       description: "安全抽取参考视频关键帧，只提炼节奏、构图、运镜、色彩、转场和声音结构等制作语法。",
       modes: ["关键帧分析", "镜头语法", "可编辑规则", "订阅能力"],
       latency: "seconds",
-      defaultModelId: codexModelId,
+      defaultModelId: modelForTask("reference-grammar"),
       modelProfiles: codexProfiles(
         "codex-reference-grammar-v1",
         "reference-grammar",
@@ -142,7 +177,7 @@ export function buildProviderCatalog(
       description: "在下载前依据逐镜意图重排图库候选；不可用时保留确定性原始排序。",
       modes: ["候选排序", "逐项理由", "人工锁定", "订阅能力"],
       latency: "seconds",
-      defaultModelId: codexModelId,
+      defaultModelId: modelForTask("asset-rank"),
       modelProfiles: codexProfiles("codex-asset-ranker-v1", "asset-rank"),
       requirement: codexRequirement("asset-rank"),
     }),
@@ -412,7 +447,7 @@ export function buildProviderCatalog(
         taskTypes: ["visual-review"],
         estimatedCnyPerClip: positiveEstimate(environment.ZAI_VISUAL_REVIEW_ESTIMATED_CNY, 0.1),
       }],
-      requirement: zaiCodexRequirement,
+      requirement: zaiVisualReviewRequirement,
     }),
     provider({
       id: "codex-visual-review-v1",
@@ -424,7 +459,7 @@ export function buildProviderCatalog(
       description: "从成片中安全抽取最多 12 张关键帧，由服务器 Codex 检查构图、连续性、节奏、文字可读性与内容安全。",
       modes: ["关键帧审片", "时间码问题", "修改建议", "订阅能力"],
       latency: "seconds",
-      defaultModelId: codexModelId,
+      defaultModelId: modelForTask("visual-review"),
       modelProfiles: codexProfiles(
         "codex-visual-review-v1",
         "visual-review",
@@ -443,9 +478,23 @@ export function buildProviderCatalog(
       description: "人工终审通过后为成片生成平台标题、描述与话题标签；不可用时发布包回退使用简报标题并如实标注来源。",
       modes: ["平台标题", "发布描述", "话题标签"],
       latency: "seconds",
-      defaultModelId: codexModelId,
+      defaultModelId: modelForTask("publish-copy"),
       modelProfiles: codexProfiles("codex-publish-copy-v1", "publish-copy"),
       requirement: codexRequirement("publish-copy"),
+    }),
+    provider({
+      id: "codex-role-auditor-v1",
+      capability: "role.audit",
+      label: "Codex 独立红队审计",
+      available: supportsTask(codex, "role-audit"),
+      kind: "external",
+      billing: "subscription",
+      description: "与生产角色隔离，逐条核对上下文、角色合同和下游边界；发现阻断问题时要求原角色修订。",
+      modes: ["独立会话", "max 推理", "最多三轮", "阻断门禁"],
+      latency: "seconds",
+      defaultModelId: modelForTask("role-audit"),
+      modelProfiles: codexProfiles("codex-role-auditor-v1", "role-audit"),
+      requirement: codexRequirement("role-audit"),
     }),
   ];
 }

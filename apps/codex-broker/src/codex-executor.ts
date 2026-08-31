@@ -26,6 +26,7 @@ export interface CodexExecutorIdentity {
   providerId: string;
   modelId: string;
   taskKinds: readonly string[];
+  taskModels?: Partial<Record<BrokerTaskKind, string>>;
 }
 
 export interface CodexExecutorProfile {
@@ -70,10 +71,15 @@ const MAX_VISUAL_REVIEW_FRAME_BYTES = 256 * 1024;
 const MAX_VISUAL_REVIEW_TOTAL_BYTES = 5 * 1024 * 1024;
 
 function redactDiagnosticSecrets(value: string): string {
-  return value.replace(
-    /(?:sk-(?:api-)?[A-Za-z0-9_-]{16,}|ark-[A-Za-z0-9-]{16,}|\b[A-Fa-f0-9]{32}\.[A-Za-z0-9_-]{8,})/g,
-    "[redacted]",
-  );
+  return value
+    .replace(
+      /(?:sk-(?:api-)?[A-Za-z0-9_-]{16,}|ark-[A-Za-z0-9-]{16,}|\b[A-Fa-f0-9]{32}\.[A-Za-z0-9_-]{8,})/g,
+      "[redacted]",
+    )
+    .replace(
+      /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+      "[redacted-session]",
+    );
 }
 
 function structuredCodexError(stdout: string): string | undefined {
@@ -178,6 +184,7 @@ export interface RoleAuditPayload {
   criteria: string[];
   context: Record<string, unknown>;
   candidate: Record<string, unknown>;
+  previousAudit?: Record<string, unknown>;
   images: RoleAuditImage[];
 }
 
@@ -218,6 +225,7 @@ export interface VisualReviewPayload {
   durationMs: number;
   frames: VisualReviewFrame[];
   reviewContext?: Record<string, unknown>;
+  revision?: Record<string, unknown>;
 }
 
 export interface AssetRankPayload {
@@ -274,6 +282,7 @@ export interface CodexExecutorOptions {
   profile?: CodexExecutorProfile;
   codexBin?: string;
   model?: string;
+  auditModel?: string;
   effort?: string;
   auditEffort?: string;
   env?: NodeJS.ProcessEnv;
@@ -286,11 +295,14 @@ export interface CodexExecutorOptions {
 
 export interface CodexExecutionOptions {
   signal?: AbortSignal;
+  sessionId?: string;
+  persistSession?: boolean;
 }
 
 export interface CodexExecutionResult {
   output: string;
   trace?: CodexTaskTrace;
+  sessionId?: string;
 }
 
 export interface BrokerTaskExecutor {
@@ -315,7 +327,7 @@ export function parseTaskRequest(
     throw new CodexExecutorError("Codex task request must be an object.", false);
   }
   const record = value as Record<string, unknown>;
-  assertExactKeys(record, ["protocolVersion", "requestId", "kind", "payload"], "request");
+  assertExactKeys(record, ["protocolVersion", "requestId", "kind", "payload", "sessionKey", "sessionHandle"], "request");
   if (record.protocolVersion !== CODEX_BRIDGE_PROTOCOL_VERSION) {
     throw new CodexExecutorError("Unsupported codex bridge protocol version.", false);
   }
@@ -388,7 +400,7 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
     };
   }
   if (kind === "role-audit") {
-    assertExactKeys(record, ["role", "iteration", "criteria", "context", "candidate", "images"], "payload");
+    assertExactKeys(record, ["role", "iteration", "criteria", "context", "candidate", "previousAudit", "images"], "payload");
     if (!Number.isInteger(record.iteration) || Number(record.iteration) < 1 || Number(record.iteration) > 3) {
       throw new CodexExecutorError("payload.iteration must be an integer between 1 and 3.", false);
     }
@@ -404,6 +416,9 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
         criteria,
         context: boundedRecord(record.context, "payload.context", 192 * 1024),
         candidate: boundedRecord(record.candidate, "payload.candidate", 192 * 1024),
+        ...(record.previousAudit === undefined ? {} : {
+          previousAudit: boundedRecord(record.previousAudit, "payload.previousAudit", 64 * 1024),
+        }),
         images: record.images === undefined ? [] : requireRoleAuditImages(record.images),
       },
     };
@@ -426,7 +441,7 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
     };
   }
   if (kind === "visual-review") {
-    assertExactKeys(record, ["durationMs", "frames", "reviewContext"], "payload");
+    assertExactKeys(record, ["durationMs", "frames", "reviewContext", "revision"], "payload");
     return {
       kind,
       payload: requireVisualReviewPayload(record),
@@ -479,6 +494,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
   private readonly workspaceRoot: string;
   private readonly profile: CodexExecutorProfile;
   private readonly model: string | undefined;
+  private readonly auditModel: string | undefined;
   private readonly effort: string | undefined;
   private readonly auditEffort: string | undefined;
   private readonly env: NodeJS.ProcessEnv;
@@ -493,6 +509,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
     this.workspaceRoot = options.workspaceRoot;
     this.profile = options.profile ?? codexExecutorProfileFor("openai", options.model);
     this.model = this.profile.model ?? options.model;
+    this.auditModel = options.auditModel ?? this.model;
     this.effort = options.effort;
     this.auditEffort = options.auditEffort ?? options.effort;
     this.env = options.env ?? process.env;
@@ -505,7 +522,16 @@ export class CodexExecutor implements BrokerTaskExecutor {
   }
 
   get identity(): CodexExecutorIdentity {
-    return this.profile.identity;
+    const taskModels = Object.fromEntries(
+      this.profile.identity.taskKinds.flatMap((kind) => {
+        const model = this.modelFor(kind as BrokerTaskKind);
+        return model ? [[kind, model]] : [];
+      }),
+    ) as Partial<Record<BrokerTaskKind, string>>;
+    return {
+      ...this.profile.identity,
+      ...(Object.keys(taskModels).length > 0 ? { taskModels } : {}),
+    };
   }
 
   async runTask(task: ValidatedTask, options: CodexExecutionOptions = {}): Promise<CodexExecutionResult> {
@@ -516,32 +542,41 @@ export class CodexExecutor implements BrokerTaskExecutor {
       );
     }
     const taskPrompt = taskPromptFor(task.kind, task.kind === "publish-copy" ? task.payload.platform : undefined);
-    const prompt = buildTaskPrompt(task, taskPrompt);
+    const prompt = options.sessionId
+      ? buildContinuationPrompt(task, taskPrompt)
+      : buildTaskPrompt(task, taskPrompt);
     const reasoningEffort = this.effortFor(task.kind);
+    const model = this.modelFor(task.kind);
     if (Buffer.byteLength(prompt, "utf8") > this.maxPromptBytes) {
       throw new CodexExecutorError(`Codex prompt exceeds ${this.maxPromptBytes} bytes.`, false);
     }
     await mkdir(this.workspaceRoot, { recursive: true });
     const taskDir = await mkdtemp(path.join(this.workspaceRoot, "task-"));
     try {
-      const output = await this.execute(task, taskDir, prompt, options.signal);
+      const execution = await this.execute(task, taskDir, prompt, options);
       return {
-        output,
+        output: execution.output,
         trace: {
           taskKind: task.kind,
           promptVersion: taskPrompt.version,
           prompt,
           providerId: this.identity.providerId,
-          modelId: this.identity.modelId,
+          modelId: model ?? this.identity.modelId,
           ...(reasoningEffort ? { reasoningEffort } : {}),
         },
+        ...(execution.sessionId ? { sessionId: execution.sessionId } : {}),
       };
     } finally {
       await rm(taskDir, { recursive: true, force: true });
     }
   }
 
-  private async execute(task: ValidatedTask, taskDir: string, prompt: string, signal?: AbortSignal): Promise<string> {
+  private async execute(
+    task: ValidatedTask,
+    taskDir: string,
+    prompt: string,
+    options: CodexExecutionOptions,
+  ): Promise<{ output: string; sessionId?: string }> {
     const workspaceDir = path.join(taskDir, "workspace");
     const lastMessagePath = path.join(taskDir, "last-message.txt");
     const schemaPath = path.join(taskDir, "output-schema.json");
@@ -557,8 +592,10 @@ export class CodexExecutor implements BrokerTaskExecutor {
       schemaPath,
       profile: this.profile,
       imagePaths,
-      ...(this.model !== undefined ? { model: this.model } : {}),
+      ...(this.modelFor(task.kind) !== undefined ? { model: this.modelFor(task.kind)! } : {}),
       ...(this.effortFor(task.kind) !== undefined ? { effort: this.effortFor(task.kind)! } : {}),
+      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      persistSession: options.persistSession === true,
     });
     const child = this.spawnProcess(command, args, {
       cwd: workspaceDir,
@@ -576,8 +613,8 @@ export class CodexExecutor implements BrokerTaskExecutor {
       cancelled = true;
       terminate();
     };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) onAbort();
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
     const timer = setTimeout(() => {
       timedOut = true;
       terminate();
@@ -602,7 +639,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
       await Promise.all([stdoutPromise, stderrPromise]);
     } finally {
       clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
+      options.signal?.removeEventListener("abort", onAbort);
     }
     if (cancelled) {
       throw new CodexExecutorError("Codex task was cancelled because its client disconnected.", true);
@@ -650,22 +687,32 @@ export class CodexExecutor implements BrokerTaskExecutor {
         );
       }
     }
-    return output;
+    const stdout = await stdoutPromise;
+    const sessionId = options.persistSession || options.sessionId
+      ? codexSessionIdFromJsonl(stdout) ?? options.sessionId
+      : undefined;
+    return { output, ...(sessionId ? { sessionId } : {}) };
   }
 
   private effortFor(kind: BrokerTaskKind): string | undefined {
     return kind === "role-audit" || kind === "visual-review" || kind === "series-roadmap" ? this.auditEffort : this.effort;
   }
 
+  private modelFor(kind: BrokerTaskKind): string | undefined {
+    return kind === "role-audit" || kind === "visual-review" || kind === "series-roadmap"
+      ? this.auditModel
+      : this.model;
+  }
+
 }
 
 // argv 唯一构建点。spawn 不经过 shell，因此 --config KEY=VALUE 不需要引号转义。
-// 以下 flags 已在 ECS 的 codex exec --help 实测验证：-s/--sandbox、-C/--cd、--ephemeral、
+// 以下 flags 已在 ECS 的 codex exec --help 实测验证：-s/--sandbox、-C/--cd、exec resume、
 // --ignore-user-config、--ignore-rules、--output-schema、--json、-o/--output-last-message、
 // --skip-git-repo-check、--disable。即使任务数据发生提示注入，模型也拿不到 shell 工具；
 // read-only sandbox 仍作为第二道操作系统边界保留。
 // CODEX_HOME 由 systemd unit 指向隔离目录，auth.json 是指向真实登录态的只读链接；
-// argv 只负责 --ignore-user-config/--ignore-rules/--ephemeral 与每任务临时 -C 目录；
+// argv 只负责 --ignore-user-config/--ignore-rules 与每任务临时目录；
 // 该目录刻意不是 Git 仓库，必须显式跳过 repo 信任检查，否则 codex exec 以退出码 1 拒绝运行。
 export function buildCodexExecCommand(input: {
   codexBin: string;
@@ -676,13 +723,41 @@ export function buildCodexExecCommand(input: {
   imagePaths?: readonly string[];
   model?: string;
   effort?: string;
+  sessionId?: string;
+  persistSession?: boolean;
 }): { command: string; args: string[] } {
+  if (input.sessionId) {
+    return {
+      command: input.codexBin,
+      args: [
+        "exec", "resume",
+        // 每轮都使用新的隔离临时目录；显式按 UUID 跨 cwd 恢复同一角色线程。
+        "--all",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--disable", "shell_tool",
+        "--disable", "unified_exec",
+        "--skip-git-repo-check",
+        "--config", "sandbox_mode=\"read-only\"",
+        "--output-schema", input.schemaPath,
+        "--output-last-message", input.lastMessagePath,
+        "--json",
+        ...((input.model ?? input.profile?.model) !== undefined
+          ? ["--model", (input.model ?? input.profile?.model)!]
+          : []),
+        ...(input.effort !== undefined ? ["--config", `model_reasoning_effort=${input.effort}`] : []),
+        ...(input.imagePaths ?? []).flatMap((imagePath) => ["--image", imagePath]),
+        input.sessionId,
+        "-",
+      ],
+    };
+  }
   return {
     command: input.codexBin,
     args: [
       "exec",
       "--sandbox", "read-only",
-      "--ephemeral",
+      ...(input.persistSession ? [] : ["--ephemeral"]),
       "--ignore-user-config",
       "--ignore-rules",
       "--disable", "shell_tool",
@@ -700,6 +775,23 @@ export function buildCodexExecCommand(input: {
       "-",
     ],
   };
+}
+
+export function codexSessionIdFromJsonl(stdout: string): string | undefined {
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as { type?: unknown; thread_id?: unknown };
+      if (event.type === "thread.started"
+        && typeof event.thread_id === "string"
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(event.thread_id)) {
+        return event.thread_id;
+      }
+    } catch {
+      // 非 JSON 诊断行不参与会话识别。
+    }
+  }
+  return undefined;
 }
 
 async function writeTaskImages(task: ValidatedTask, taskDir: string): Promise<string[]> {
@@ -761,6 +853,7 @@ export function buildTaskPrompt(
         ...(frame.phase ? { phase: frame.phase } : {}),
       })),
       ...(task.payload.reviewContext ? { reviewContext: task.payload.reviewContext } : {}),
+      ...(task.payload.revision ? { revision: task.payload.revision } : {}),
     };
   } else if (task.kind === "asset-rank") {
     data = {
@@ -795,6 +888,7 @@ export function buildTaskPrompt(
       criteria: task.payload.criteria,
       context: task.payload.context,
       candidate: task.payload.candidate,
+      ...(task.payload.previousAudit ? { previousAudit: task.payload.previousAudit } : {}),
       images: task.payload.images.map(({ jpeg: _jpeg, ...image }) => image),
     };
   } else {
@@ -818,6 +912,39 @@ export function buildTaskPrompt(
     ...(prompt.examples.length > 0
       ? ["参考样例：", ...prompt.examples.map((example) => `- ${example}`)]
       : []),
+    "",
+    DATA_ISOLATION_NOTICE,
+    "<<<TASK_DATA",
+    JSON.stringify(data),
+    "TASK_DATA>>>",
+    "",
+    "最终回复只输出一个满足 broker JSON Schema 的 JSON 对象，不要输出解释文字。",
+  ].join("\n");
+}
+
+export function buildContinuationPrompt(
+  task: ValidatedTask,
+  prompt = taskPromptFor(task.kind, task.kind === "publish-copy" ? task.payload.platform : undefined),
+): string {
+  const data = task.kind === "role-audit"
+    ? {
+      role: task.payload.role,
+      iteration: task.payload.iteration,
+      criteria: task.payload.criteria,
+      context: task.payload.context,
+      candidate: task.payload.candidate,
+      ...(task.payload.previousAudit ? { previousAudit: task.payload.previousAudit } : {}),
+      images: task.payload.images.map(({ jpeg: _jpeg, ...image }) => image),
+    }
+    : "revision" in task.payload && task.payload.revision
+      ? { revision: task.payload.revision }
+      : { continuation: task.payload };
+  return [
+    `Prompt Pack: ${prompt.version} · continuation`,
+    "这是同一制作角色会话的下一轮。沿用首轮已经确认的角色边界、上游事实和输出合同；不要重新定义目标。",
+    task.kind === "role-audit"
+      ? "只复核上一轮 blocking 是否已修复，并检查修复造成的新回归；不得移动审计门槛。"
+      : "只根据本轮 revision 修订候选；未被审计指出的问题保持不变。",
     "",
     DATA_ISOLATION_NOTICE,
     "<<<TASK_DATA",
@@ -1009,10 +1136,14 @@ function requireVisualReviewPayload(record: Record<string, unknown>): VisualRevi
   if (reviewContext && Buffer.byteLength(JSON.stringify(reviewContext), "utf8") > 128 * 1024) {
     throw new CodexExecutorError("payload.reviewContext exceeds 131072 bytes.", false);
   }
+  const revision = record.revision === undefined
+    ? undefined
+    : boundedRecord(record.revision, "payload.revision", 192 * 1024);
   return {
     durationMs: Number(record.durationMs),
     frames,
     ...(reviewContext ? { reviewContext } : {}),
+    ...(revision ? { revision } : {}),
   };
 }
 

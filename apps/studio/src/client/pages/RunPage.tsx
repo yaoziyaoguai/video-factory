@@ -27,6 +27,7 @@ export function RunPage() {
   const [costDetail, setCostDetail] = useState<StudioCostRunDetail>();
   const [costError, setCostError] = useState<string>();
   const [nodeMutationPending, setNodeMutationPending] = useState(false);
+  const [pausePending, setPausePending] = useState(false);
   const costRefreshTimer = useRef<number | undefined>(undefined);
   const snapshotRefreshPending = useRef(false);
 
@@ -195,6 +196,35 @@ export function RunPage() {
     }
   }
 
+  async function requestPause() {
+    setPausePending(true);
+    setError(undefined);
+    try {
+      const nextRun = await studioApi.requestPause(runId);
+      setRun((current) => preferRunSnapshot(current, nextRun));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setPausePending(false);
+    }
+  }
+
+  async function resumePaused() {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await withMutationProgress(() => studioApi.resumePaused(runId));
+      setRun((current) => preferRunSnapshot(current, nextRun));
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
   async function retryFailedNode(nodeId: string) {
     setNodeMutationPending(true);
     setError(undefined);
@@ -242,7 +272,7 @@ export function RunPage() {
       {connectionWarning && !isTerminal(run.status) ? <div className="inline-error" role="status"><AlertCircle aria-hidden="true" size={16} />{connectionWarning}</div> : null}
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
       {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
-      <RunWorkbench run={run} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onAuthorizeSpend={authorizeSpend} onRegenerateStale={regenerateStale} onRetryFailedNode={retryFailedNode} />
+      <RunWorkbench run={run} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onAuthorizeSpend={authorizeSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onRetryFailedNode={retryFailedNode} />
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
       <NewRunDialog
         open={restarting}

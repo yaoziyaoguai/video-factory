@@ -62,7 +62,7 @@ function CostMetrics({ totals, compact = false }: { totals: StudioCostTotals; co
     <article><CircleDollarSign aria-hidden="true" size={17} /><span>已核算消费</span><strong>{actualCostLabel(totals)}</strong></article>
     <article><Gauge aria-hidden="true" size={17} /><span>授权上限</span><strong>¥{totals.authorizedCostCny.toFixed(2)}</strong></article>
     <article><Clock3 aria-hidden="true" size={17} /><span>待核对记录</span><strong>{totals.actualPendingCount}</strong></article>
-    <article><RotateCcw aria-hidden="true" size={17} /><span>明确失败调用</span><strong>{totals.failedMeteredCalls}</strong></article>
+    <article><RotateCcw aria-hidden="true" size={17} /><span>按量调用失败</span><strong>{totals.failedMeteredCalls}</strong></article>
   </div>;
 }
 
@@ -93,7 +93,8 @@ function costLineLabel(line: StudioCostRunDetail["lines"][number]): string {
       ? `${line.meteredFailedAttemptCount} 次计费调用明确失败`
       : `${line.meteredFailedAttemptCount} / ${line.meteredAttemptCount} 次计费调用失败`;
   }
-  if (line.status === "failed") return "调用失败";
+  if (line.status === "failed" && line.billing === "subscription") return "订阅任务失败 · 不产生按量费用";
+  if (line.status === "failed") return "任务失败";
   if (line.actualCostSource === "configured_rate") return "按配置单价核算";
   if (line.actualCostSource === "provider_reported") return "供应商账单回填";
   if (line.billing === "metered") return "按量付费";

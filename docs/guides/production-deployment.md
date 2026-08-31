@@ -54,7 +54,7 @@ openssl rand -hex 32
 
 ## 2. 宿主机 Codex bridge（首次部署前）
 
-语义层由宿主机 `vf-codex` 用户下的 `apps/codex-broker` 提供，覆盖选题总编、编剧、视觉导演与发行编辑四个角色——一条热点视频最多四次 Codex 调用（系列与自定义入口跳过选题总编；发行编辑仅在人工终审通过后执行；任务受理后至多执行一次，受订阅配额约束）；应用容器只读挂载 `/run/video-factory-codex` 并经 Unix socket 调用，从不挂载 `~/.codex`，也不接收任何模型 API key。
+语义层由宿主机 `vf-codex` 用户下的 `apps/codex-broker` 提供。选题总编、系列主理人、编剧、视觉导演、语义选片、参考语法、视觉审片、发行编辑等角色按实际流程启用；其中需要质量判断的角色最多进行 3 轮“生产者修订 + 独立审计”，因此模型调用数取决于入口、启用节点和审计轮次，不能按每条视频固定估算。系列与自定义入口不会运行热点转译，发行编辑仅在人工终审通过后执行。应用容器只读挂载 `/run/video-factory-codex` 并经 Unix socket 调用，从不挂载 `~/.codex`，也不接收任何模型 API key。
 
 首次初始化（root，幂等，只验证不假设）：
 
@@ -67,7 +67,7 @@ bash scripts/setup-codex-broker-host.sh
 
 `scripts/deploy-production.sh` 会从候选镜像原子提取 broker 制品到 `/opt/video-factory/codex-broker/releases/<时间戳>` 并翻转 `current` 符号链接，随后重启 `vf-codex-broker` 并做 socket 健康检查；应用或公共健康检查失败时同时回滚应用镜像与上一个 broker release。
 
-超时与重放策略：broker 任务 deadline 为 285s，先于容器侧统一的 330s 客户端 deadline；任务一旦被受理，任何执行期失败（含超时）都返回 422 且客户端不重放——任务至多执行一次。仅连接层 ENOENT/ECONNREFUSED 与 503（队列满/停机，未受理）会做有界重试。已知边界：排队等待计入客户端 330s deadline，饱和时客户端可能放弃仍在排队的任务（同样不重放）。
+超时与重放策略：broker 单次模型任务默认 deadline 为 300s，可由 `VIDEO_FACTORY_CODEX_TIMEOUT_MS` 显式配置；Studio 客户端 deadline 为 1260s，用于覆盖单并发队列等待和同一角色最多 3 轮的多次任务。每个已受理的 `requestId` 不会因执行期失败或超时被客户端重放；仅连接层 ENOENT/ECONNREFUSED 与 503（队列满或停机、尚未受理）会做有界重试。Agent loop 的下一轮使用新的确定性 `requestId`，并在检查点中记录候选、审计和会话，基础设施失败不会静默消耗语义审计轮次。
 
 systemd 加固说明：真实 `~/.codex` 整体只读；Broker 使用 `/var/lib/video-factory-codex/codex-home` 保存 CLI 可变状态，其中 `auth.json` 只是指向真实登录凭据的只读链接。应用容器只挂载 `/run/video-factory-codex`，无法读取两个 Codex Home。首次真实任务后仍需用 `journalctl -u vf-codex-broker` 确认运行状态。
 

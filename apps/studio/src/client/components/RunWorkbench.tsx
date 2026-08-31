@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, Check, Clock3, Download, RotateCcw, Send, X, XCircle } from "lucide-react";
+import { Activity, AlertTriangle, Check, Clock3, Download, Pause, Play, RotateCcw, Send, X, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
@@ -15,18 +15,22 @@ interface RunWorkbenchProps {
   onRestart?: () => void;
   costDetail?: StudioCostRunDetail;
   nodeMutationPending?: boolean;
+  pausePending?: boolean;
   onOverrideNode?: (nodeId: string, input: StudioNodeOverrideInput) => Promise<void>;
   onOverrideNodeInput?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
   onAuthorizeSpend?: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
   onRegenerateStale?: () => Promise<void>;
+  onRequestPause?: () => Promise<void>;
+  onResumePaused?: () => Promise<void>;
   onRetryFailedNode?: (nodeId: string) => Promise<void>;
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, onOverrideNode, onOverrideNodeInput, onAuthorizeSpend, onRegenerateStale, onRetryFailedNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onAuthorizeSpend, onRegenerateStale, onRequestPause, onResumePaused, onRetryFailedNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
+  const [approvalOverrideNote, setApprovalOverrideNote] = useState("");
   const rejectDialogRef = useDialogFocus<HTMLElement>(rejecting, () => setRejecting(false), decisionPending);
   const approveDialogRef = useDialogFocus<HTMLElement>(approving, () => setApproving(false), decisionPending);
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
@@ -34,14 +38,19 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
   const activeSpendNode = creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
   const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id);
   const showReviewSurface = Boolean(video?.contentUrl || run.activeIntervention || isStoppedStatus(run.status));
+  const visualReview = visualReviewDecision(run);
+  const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
 
   const renderNodeWorkspace = (node: StudioRunDetail["nodes"][number]) => <NodeWorkspace
     key={node.id}
     node={node}
     nodes={run.nodes}
     runStatus={run.status}
-    artifacts={run.artifacts.filter((artifact) => node.artifactIds.includes(artifact.id))}
+    artifacts={run.artifacts.filter((artifact) => node.artifactIds.includes(artifact.id) || artifact.producerNodeId === node.id)}
     busy={nodeMutationPending}
+    pauseBusy={pausePending}
+    pauseRequested={run.pauseRequested === true}
+    {...(onRequestPause ? { onRequestPause } : {})}
     onOverride={onOverrideNode ?? (async () => undefined)}
     onInputOverride={onOverrideNodeInput ?? (async () => undefined)}
     onAuthorize={onAuthorizeSpend ?? (async () => undefined)}
@@ -52,6 +61,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
       setApproving(false);
       setRejecting(false);
       setRejectNote("");
+      setApprovalOverrideNote("");
     }
   }, [run.activeIntervention]);
 
@@ -89,13 +99,14 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
         <p>{run.currentAction?.label ?? runStateMessage(run)}</p>
         {run.progress ? <div className="run-live-metrics">
           <span><Activity aria-hidden="true" size={15} /><strong>{run.progress.completedNodes} / {run.progress.totalNodes}</strong> 个节点完成</span>
-          <span><Clock3 aria-hidden="true" size={15} />已运行 <strong>{formatDuration(run.progress.elapsedSeconds)}</strong></span>
+          <span><Clock3 aria-hidden="true" size={15} />{run.progress.currentNodeElapsedSeconds !== undefined ? "当前步骤" : "累计处理"} <strong>{formatDuration(run.progress.currentNodeElapsedSeconds ?? run.progress.elapsedSeconds)}</strong></span>
           <span>{etaLabel(run.progress)}</span>
           <span>节点状态更新于 {formatClock(run.progress.lastUpdatedAt)}</span>
           {costDetail ? <span>成本 <strong>¥{costDetail.totals.actualCostCny.toFixed(2)}</strong>{costDetail.totals.actualPendingCount ? ` · ${costDetail.totals.actualPendingCount} 笔待回写` : ""}</span> : null}
-          {connectionHeartbeatAt ? <span className="run-connection-live"><i aria-hidden="true" />云端连接刚刚确认</span> : null}
+          {connectionHeartbeatAt ? <span className="run-connection-live"><i aria-hidden="true" />制作服务连接刚刚确认</span> : null}
         </div> : null}
         {activeNodeModel(run) ? <p className="run-active-provider">当前能力：{activeNodeModel(run)}</p> : null}
+        {onRequestPause ? <button className="button button-ghost run-pause-button" type="button" disabled={pausePending || run.pauseRequested === true} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{run.pauseRequested ? "当前 Agent 结束后暂停" : "暂停后检查或修改"}</button> : null}
       </section> : null}
 
       {showReviewSurface ? <div className="review-layout">
@@ -125,18 +136,37 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
                 <h2>需要你的判断</h2>
               </div>
               <p>{run.activeIntervention.reason}</p>
+              {visualReviewRequiresRevision && visualReview ? <div className="agent-review-decision">
+                <strong>Agent 建议修改后再审</strong>
+                <p>{visualReview.summary}</p>
+                <div className="agent-review-facts">
+                  {visualReview.lowestScores.map((score) => <span key={score.key}>{score.label} <strong>{score.value}</strong></span>)}
+                  <span><strong>{visualReview.findingCount}</strong> 项问题</span>
+                  <span>置信度 <strong>{Math.round(visualReview.confidence * 100)}%</strong></span>
+                </div>
+                <p className="agent-review-guidance">打回会保留本轮产物；随后可调整方案并重新制作。批准则会覆盖 Agent 建议并生成发布包。</p>
+              </div> : null}
               <div className="decision-actions">
-                <button
-                  className="button button-primary"
-                  type="button"
-                  disabled={decisionPending}
-                  onClick={() => setApproving(true)}
-                >
-                  <Check aria-hidden="true" size={17} />批准进入发布包
-                </button>
-                <button className="button button-danger-ghost" type="button" disabled={decisionPending} onClick={() => setRejecting(true)}>
-                  <XCircle aria-hidden="true" size={17} />打回
-                </button>
+                {visualReviewRequiresRevision ? <>
+                  <button className="button button-danger" type="button" disabled={decisionPending} onClick={() => setRejecting(true)}>
+                    <RotateCcw aria-hidden="true" size={17} />按审片建议打回
+                  </button>
+                  <button className="button button-danger-ghost" type="button" disabled={decisionPending} onClick={() => setApproving(true)}>
+                    <Check aria-hidden="true" size={17} />仍要批准
+                  </button>
+                </> : <>
+                  <button
+                    className="button button-primary"
+                    type="button"
+                    disabled={decisionPending}
+                    onClick={() => setApproving(true)}
+                  >
+                    <Check aria-hidden="true" size={17} />批准进入发布包
+                  </button>
+                  <button className="button button-danger-ghost" type="button" disabled={decisionPending} onClick={() => setRejecting(true)}>
+                    <XCircle aria-hidden="true" size={17} />打回
+                  </button>
+                </>}
               </div>
             </section>
           ) : (
@@ -162,6 +192,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
               {run.status === "failed" && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && failedNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(failedNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />重试失败步骤</button> : null}
               {(run.status === "failed" || run.status === "rejected") && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
               {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />按人工版本继续生成</button> : null}
+              {run.status === "paused" && onResumePaused ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onResumePaused()}><Play aria-hidden="true" size={16} />继续自动制作</button> : null}
             </section>
           )}
 
@@ -206,19 +237,75 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
         <div className="dialog-backdrop" role="presentation">
           <section ref={approveDialogRef} className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="approve-title" tabIndex={-1}>
             <header className="dialog-header">
-              <div><p className="eyebrow">最终决定</p><h2 id="approve-title">确认批准成片</h2></div>
+              <div><p className="eyebrow">最终决定</p><h2 id="approve-title">{visualReviewRequiresRevision ? "确认覆盖审片建议" : "确认批准成片"}</h2></div>
               <button className="icon-button" type="button" onClick={() => setApproving(false)} disabled={decisionPending} title="关闭"><X aria-hidden="true" size={19} /></button>
             </header>
-            <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p><strong>批准后将生成发布包。</strong><span>这会结束人工终审；请确认已经完整观看画面、字幕并听过声音。</span></p></div>
+            <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p><strong>{visualReviewRequiresRevision ? "视觉审片建议先修改；继续批准属于人工覆盖。" : "批准后将生成发布包。"}</strong><span>这会结束人工终审；请确认已经完整观看画面、字幕并听过声音。</span></p></div>
+            {visualReviewRequiresRevision ? <label className="field field-wide decision-override-field">
+              <span>覆盖原因</span>
+              <textarea value={approvalOverrideNote} onChange={(event) => setApprovalOverrideNote(event.target.value)} placeholder="说明为何当前版本仍可发布" rows={3} data-dialog-initial-focus />
+            </label> : null}
             <footer className="dialog-actions">
               <button className="button button-ghost" type="button" onClick={() => setApproving(false)} disabled={decisionPending}>再看一遍</button>
-              <button className="button button-primary" type="button" disabled={decisionPending} onClick={() => void onDecision({ action: "approve" })}><Check aria-hidden="true" size={17} />{decisionPending ? "正在批准..." : "确认批准并生成发布包"}</button>
+              <button
+                className="button button-primary"
+                type="button"
+                disabled={decisionPending || (visualReviewRequiresRevision && !approvalOverrideNote.trim())}
+                onClick={() => void onDecision({
+                  action: "approve",
+                  ...(visualReviewRequiresRevision ? { note: `覆盖视觉审片建议：${approvalOverrideNote.trim()}` } : {}),
+                })}
+              ><Check aria-hidden="true" size={17} />{decisionPending ? "正在批准..." : visualReviewRequiresRevision ? "确认覆盖建议并生成发布包" : "确认批准并生成发布包"}</button>
             </footer>
           </section>
         </div>
       ) : null}
     </main>
   );
+}
+
+interface VisualReviewDecision {
+  recommendation: "approve" | "revise" | "reject";
+  confidence: number;
+  summary: string;
+  findingCount: number;
+  lowestScores: Array<{ key: string; label: string; value: number }>;
+}
+
+const VISUAL_SCORE_LABELS: Record<string, string> = {
+  composition: "构图",
+  continuity: "连续性",
+  pacing: "节奏",
+  legibility: "可读性",
+  safety: "安全性",
+};
+
+function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | undefined {
+  const node = run.nodes.find((item) => item.id === "visual-review");
+  if (!node) return undefined;
+  const effectiveOutput = node.outputState?.versions.find((version) => version.id === node.outputState?.effectiveVersionId)?.output ?? node.output;
+  if (!isRecord(effectiveOutput)) return undefined;
+  const report = isRecord(effectiveOutput.report) ? effectiveOutput.report : effectiveOutput;
+  if (report.recommendation !== "approve" && report.recommendation !== "revise" && report.recommendation !== "reject") return undefined;
+  const confidence = typeof report.confidence === "number" && Number.isFinite(report.confidence)
+    ? Math.min(1, Math.max(0, report.confidence))
+    : 0;
+  const scores = isRecord(report.scores) ? Object.entries(report.scores)
+    .filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1]))
+    .map(([key, value]) => ({ key, label: VISUAL_SCORE_LABELS[key] ?? key, value }))
+    .sort((left, right) => left.value - right.value)
+    .slice(0, 2) : [];
+  return {
+    recommendation: report.recommendation,
+    confidence,
+    summary: typeof report.summary === "string" && report.summary.trim() ? report.summary.trim() : "视觉审片发现需要人工确认的问题。",
+    findingCount: Array.isArray(report.findings) ? report.findings.length : 0,
+    lowestScores: scores,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function ProductionProgress({ run }: { run: StudioRunDetail }) {
@@ -239,7 +326,7 @@ function ProductionProgress({ run }: { run: StudioRunDetail }) {
 }
 
 function isStoppedStatus(status: StudioRunDetail["status"]): boolean {
-  return status === "succeeded" || status === "failed" || status === "rejected" || status === "stale";
+  return status === "succeeded" || status === "failed" || status === "rejected" || status === "paused" || status === "stale";
 }
 
 function failedNodeId(run: StudioRunDetail): string | undefined {
@@ -251,7 +338,8 @@ function hasUncertainPaidOutcome(run: StudioRunDetail): boolean {
 }
 
 function runningNodeLabel(run: StudioRunDetail): string {
-  const current = run.nodes.find((node) => node.id === run.currentNodeId)
+  const current = run.nodes.find((node) => node.id === run.currentAction?.nodeId)
+    ?? run.nodes.find((node) => node.id === run.currentNodeId)
     ?? run.nodes.find((node) => node.status === "running")
     ?? run.nodes.find((node) => node.status === "pending");
   if (current?.id === "script") {
@@ -316,15 +404,20 @@ function runStateMessage(run: StudioRunDetail): string {
   if (run.status === "awaiting_spend_approval") return "即将进入付费节点，请先检查前序交付、模型和费用上限。";
   if (run.status === "approval_invalidated") return "输入、模型或预算发生了变化，之前的费用确认已失效，请重新检查。";
   if (run.status === "stale") return "上游内容已被人工修改，后续旧结果不会继续使用，需要重新生成。";
+  if (run.status === "paused") return "制作已经安全暂停。现在可以修改已完成角色的输入或交付；不修改也可以直接继续。";
+  if (run.pauseRequested) return "已请求暂停；当前 Agent 会先安全完成，系统将在下一节点开始前停下。";
   return "制作正在自动执行，详情页会实时更新；连接中断时会明确提示。";
 }
 
 function nodeHasCreatorContent(node: StudioRunDetail["nodes"][number], run: StudioRunDetail): boolean {
+  if (NON_CREATIVE_WORKSPACE_NODE_IDS.has(node.id)) return false;
   if (["awaiting_spend_approval", "approval_invalidated", "needs_human", "stale", "failed", "rejected"].includes(node.status)) return true;
   if (hasContent(node.output)) return true;
   if (node.outputState?.versions.some((version) => hasContent(version.output) || version.artifactIds.length > 0)) return true;
   return node.artifactIds.some((artifactId) => run.artifacts.some((artifact) => artifact.id === artifactId && Boolean(artifact.contentUrl)));
 }
+
+const NON_CREATIVE_WORKSPACE_NODE_IDS = new Set(["render", "technical-review", "final-review"]);
 
 function hasContent(value: unknown): boolean {
   if (value === null || value === undefined || value === "") return false;

@@ -228,18 +228,24 @@ def search_assets(request: Dict[str, Any], output_dir: Path, started_at: float) 
 
 
 def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
-    script_path = require_existing_path(request["input"], "scriptPath")
+    input_values = request["input"]
+    script_path = require_existing_path(input_values, "scriptPath")
     parameters = request.get("parameters", {})
     provider = str(parameters.get("provider", "macos-say"))
+    voice = str(input_values.get("voice") or parameters.get("voice") or "") or None
+    profile_prefix = "macos" if provider == "macos-say" else provider
+    profile_id = str(input_values.get("profileId") or (
+        f"{profile_prefix}:{voice}" if input_values.get("voice") else parameters.get("profileId") or ""
+    )) or None
     plan_path = synthesize_voiceover_plan(
         script_path=script_path,
         output_dir=output_dir,
         provider=provider,
-        voice=str(parameters["voice"]) if parameters.get("voice") else None,
-        rate=int(parameters.get("rate", 190)),
-        profile_id=str(parameters["profileId"]) if parameters.get("profileId") else None,
-        pause_scale=float(parameters.get("pauseScale", 1)),
-        mastering_preset=str(parameters.get("masteringPreset", "natural")),
+        voice=voice,
+        rate=int(input_values.get("rate", parameters.get("rate", 190))),
+        profile_id=profile_id,
+        pause_scale=float(input_values.get("pause_scale", parameters.get("pauseScale", 1))),
+        mastering_preset=str(input_values.get("mastering_preset", parameters.get("masteringPreset", "natural"))),
     )
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     artifacts = [

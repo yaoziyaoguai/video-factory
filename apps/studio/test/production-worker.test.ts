@@ -46,6 +46,7 @@ describe("production provider runtime metadata", () => {
     const glm = metadata.find((item) => item.id === "glm-visual-review-v1");
     assert.equal(glm?.billingUnit, "run");
     assert.equal(glm?.modelId, "glm-5.3-flash-preview");
+    assert.equal(glm?.maxAttempts, 3);
     assert.equal(metadata.find((item) => item.id === "minimax-tts-v1")?.billingUnit, "run");
   });
 });

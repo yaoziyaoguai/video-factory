@@ -16,6 +16,13 @@ export interface CodexTaskTrace {
   reasoningEffort?: string;
 }
 
+export interface CodexTaskSession {
+  key: string;
+  handle?: string;
+}
+
+export type CodexBridgeFailureStage = "not_accepted" | "completed_failure" | "uncertain";
+
 export interface RoleAuditIssue {
   severity: "advisory" | "blocking";
   criterion: string;
@@ -56,6 +63,8 @@ export interface AgentLoopTrace {
   status: "passed" | "failed";
   maxIterations: number;
   modelCallCount?: number;
+  producerModelCallCount?: number;
+  auditModelCallCount?: number;
   iterations: AgentLoopIterationTrace[];
   pendingCandidate?: AgentLoopPendingCandidateTrace;
 }
@@ -64,6 +73,7 @@ export interface CodexTaskExecution<TOutput = unknown> {
   output: TOutput;
   trace?: CodexTaskTrace;
   agentLoop?: AgentLoopTrace;
+  session?: CodexTaskSession;
 }
 
 const TASK_PATH = "/v1/tasks";
@@ -76,7 +86,12 @@ const DEFAULT_RETRY_DELAY_MS = 500;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
 
 export class CodexBridgeError extends Error {
-  constructor(message: string, readonly transient: boolean) {
+  constructor(
+    message: string,
+    readonly transient: boolean,
+    readonly stage: CodexBridgeFailureStage = transient ? "not_accepted" : "uncertain",
+    readonly statusCode?: number,
+  ) {
     super(message);
     this.name = "CodexBridgeError";
   }
@@ -115,18 +130,30 @@ export class CodexBridgeClient {
     return (await this.runTaskDetailed(kind, payload, requestId)).output;
   }
 
-  async runTaskDetailed(kind: CodexTaskKind, payload: unknown, requestId: string = randomUUID()): Promise<CodexTaskExecution> {
+  async runTaskDetailed(
+    kind: CodexTaskKind,
+    payload: unknown,
+    requestId: string = randomUUID(),
+    session?: CodexTaskSession,
+  ): Promise<CodexTaskExecution> {
     if (!isCodexTaskKind(kind)) {
       throw new CodexBridgeError(`Unsupported codex task kind '${String(kind)}'.`, false);
     }
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestId)) {
       throw new CodexBridgeError("Codex bridge requestId is invalid.", false);
     }
-    const body = JSON.stringify({ protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION, requestId, kind, payload });
+    if (session !== undefined) validateTaskSession(session);
+    const body = JSON.stringify({
+      protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+      requestId,
+      kind,
+      payload,
+      ...(session ? { sessionKey: session.key, ...(session.handle ? { sessionHandle: session.handle } : {}) } : {}),
+    });
     let lastError: CodexBridgeError | undefined;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       try {
-        return await this.send(body);
+        return await this.send(body, session?.key);
       } catch (error) {
         if (!(error instanceof CodexBridgeError) || !error.transient || attempt === this.maxAttempts) throw error;
         lastError = error;
@@ -136,7 +163,7 @@ export class CodexBridgeClient {
     throw lastError ?? new CodexBridgeError("Codex bridge request failed.", false);
   }
 
-  private send(body: string): Promise<CodexTaskExecution> {
+  private send(body: string, sessionKey?: string): Promise<CodexTaskExecution> {
     return new Promise((resolve, reject) => {
       const request = http.request({
         socketPath: this.options.socketPath,
@@ -148,7 +175,7 @@ export class CodexBridgeClient {
         },
         signal: AbortSignal.timeout(this.timeoutMs),
       }, (response) => {
-        this.consume(response, request, resolve, reject);
+        this.consume(response, request, sessionKey, resolve, reject);
       });
       request.on("error", (error) => reject(mapTransportError(error, this.options.socketPath, this.timeoutMs)));
       request.end(body);
@@ -158,6 +185,7 @@ export class CodexBridgeClient {
   private consume(
     response: http.IncomingMessage,
     request: http.ClientRequest,
+    sessionKey: string | undefined,
     resolve: (value: CodexTaskExecution) => void,
     reject: (reason?: unknown) => void,
   ): void {
@@ -181,11 +209,18 @@ export class CodexBridgeClient {
       const status = response.statusCode ?? 0;
       const raw = Buffer.concat(chunks).toString("utf8");
       if (status !== 200) {
-        reject(new CodexBridgeError(`Codex bridge returned HTTP ${status}.${errorDetail(raw)}`, isRejectedBeforeAcceptance(status)));
+        const retryable = status === 503;
+        const notAccepted = retryable || isUnknownRoleSessionRejection(status, raw);
+        reject(new CodexBridgeError(
+          `Codex bridge returned HTTP ${status}.${errorDetail(raw)}`,
+          retryable,
+          notAccepted ? "not_accepted" : status === 422 ? "completed_failure" : "uncertain",
+          status,
+        ));
         return;
       }
       try {
-        resolve(parseEnvelope(raw));
+        resolve(parseEnvelope(raw, sessionKey));
       } catch (error) {
         reject(error);
       }
@@ -193,7 +228,7 @@ export class CodexBridgeClient {
   }
 }
 
-function parseEnvelope(raw: string): CodexTaskExecution {
+function parseEnvelope(raw: string, sessionKey?: string): CodexTaskExecution {
   const envelope = parseJsonOrThrow(raw, "Codex bridge returned a non-JSON response body.");
   if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) {
     throw new CodexBridgeError("Codex bridge response envelope must be an object.", false);
@@ -202,11 +237,33 @@ function parseEnvelope(raw: string): CodexTaskExecution {
   if (record.ok !== true || typeof record.output !== "string") {
     throw new CodexBridgeError("Codex bridge response envelope is missing ok/output.", false);
   }
+  if (record.sessionHandle !== undefined
+    && (sessionKey === undefined
+      || typeof record.sessionHandle !== "string"
+      || !isOpaqueSessionHandle(record.sessionHandle))) {
+    throw new CodexBridgeError("Codex bridge response session handle is invalid.", false);
+  }
   const output = parseJsonOrThrow(stripCodeFence(record.output), "Codex bridge output is not valid JSON.");
   return {
     output,
     ...(record.trace === undefined ? {} : { trace: parseTrace(record.trace) }),
+    ...(sessionKey && typeof record.sessionHandle === "string"
+      ? { session: { key: sessionKey, handle: record.sessionHandle } }
+      : {}),
   };
+}
+
+function validateTaskSession(session: CodexTaskSession): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(session.key)) {
+    throw new CodexBridgeError("Codex task session key is invalid.", false);
+  }
+  if (session.handle !== undefined && !isOpaqueSessionHandle(session.handle)) {
+    throw new CodexBridgeError("Codex task session handle is invalid.", false);
+  }
+}
+
+function isOpaqueSessionHandle(value: string): boolean {
+  return /^vfs_[A-Za-z0-9_-]{32}$/.test(value);
 }
 
 function parseTrace(value: unknown): CodexTaskTrace {
@@ -263,8 +320,8 @@ function mapTransportError(error: unknown, socketPath: string, timeoutMs: number
   );
 }
 
-function isRejectedBeforeAcceptance(status: number): boolean {
-  return status === 503;
+function isUnknownRoleSessionRejection(status: number, raw: string): boolean {
+  return status === 409 && raw.includes("Codex role session is unknown or belongs to a different production role.");
 }
 
 function isCodexTaskKind(value: string): value is CodexTaskKind {

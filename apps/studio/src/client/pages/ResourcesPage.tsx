@@ -1,8 +1,6 @@
 import {
   AlertCircle,
   ArrowUpRight,
-  Check,
-  CircleMinus,
   Clapperboard,
   Film,
   ListChecks,
@@ -20,8 +18,10 @@ import type {
   StudioLocalCapability,
   StudioCreatorSettings,
   StudioProductionDefaults,
+  StudioProductionRoleBindingKey,
   StudioProductionRecipeId,
   StudioProvider,
+  StudioRoleProviderDefaults,
   StudioPublishTarget,
   StudioResourceManifest,
   StudioTrendService,
@@ -47,6 +47,37 @@ const RECIPE_OPTIONS: Array<{ id: StudioProductionRecipeId; label: string }> = [
   { id: "cinematic-ai", label: "精品上限" },
 ];
 const DEFAULT_TOPIC_INSTRUCTION = "优先选择与普通人生活直接相关、能用可靠画面表达、具备明确反差或实用价值、可以发展成系列的题材。高热度但缺少可验证事实、可用画面或独特角度时，应降低推荐或明确放弃。";
+
+interface ProductionRoleDefinition {
+  key: StudioProductionRoleBindingKey;
+  label: string;
+  capability: string;
+  preferredProviderId: string;
+  responsibility: string;
+  mode: "agent" | "model" | "tool";
+  selectable?: boolean;
+  configurationAnchor?: string;
+  configurationLabel?: string;
+}
+
+const PRODUCTION_ROLE_DEFINITIONS: ProductionRoleDefinition[] = [
+  { key: "script", label: "编剧", capability: "script.draft", preferredProviderId: "codex-screenwriter-v1", responsibility: "把选题写成可拍、可朗读、可核验的逐镜脚本", mode: "agent" },
+  { key: "director", label: "视觉导演", capability: "storyboard.plan", preferredProviderId: "api-visual-director-v1", responsibility: "建立视觉圣经并逐镜决定画面来源", mode: "agent" },
+  { key: "assets", label: "画面执行", capability: "asset.prepare", preferredProviderId: "ai-shot-router-v1", responsibility: "按导演逐镜方案执行图库、本地素材和生成任务", mode: "tool", selectable: false, configurationAnchor: "visual-providers", configurationLabel: "去画面来源配置" },
+  { key: "voice", label: "配音执行", capability: "voice.synthesize", preferredProviderId: "macos-say-v1", responsibility: "按声音演员表执行音色、语速和停顿", mode: "tool", selectable: false, configurationAnchor: "voice-casting", configurationLabel: "去声音演员表配置" },
+  { key: "render", label: "剪辑师", capability: "video.render", preferredProviderId: "python-ffmpeg-v1", responsibility: "合成画面、字幕、旁白和音轨", mode: "tool" },
+  { key: "technicalReview", label: "技术质检", capability: "quality.review", preferredProviderId: "python-technical-review-v1", responsibility: "检查分辨率、时长、轨道、文件和产物哈希", mode: "tool" },
+  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "glm-visual-review-v1", responsibility: "用成片关键帧审查构图、连续性和可读性", mode: "model" },
+];
+
+const AUTOMATIC_AGENT_ROLES = [
+  { label: "选题总编", capability: "topic.intelligence" },
+  { label: "系列主理人", capability: "series.plan" },
+  { label: "参考片分析师", capability: "reference.grammar" },
+  { label: "语义选片师", capability: "asset.rank.semantic" },
+  { label: "发行编辑", capability: "publish.copy" },
+  { label: "独立红队审计", capability: "role.audit" },
+] as const;
 
 export function ResourcesPage() {
   const [providers, setProviders] = useState<StudioProvider[]>([]);
@@ -75,6 +106,7 @@ export function ResourcesPage() {
     masteringPreset: "natural",
   });
   const [defaultRecipeId, setDefaultRecipeId] = useState<StudioProductionRecipeId>("economy-daily");
+  const [roleProviderDefaults, setRoleProviderDefaults] = useState<StudioRoleProviderDefaults>({});
   const [modelDefaults, setModelDefaults] = useState<Record<string, string>>({});
   const [productionDefaults, setProductionDefaults] = useState<StudioProductionDefaults>(DEFAULT_PRODUCTION_DEFAULTS);
   const [topicInstruction, setTopicInstruction] = useState(DEFAULT_TOPIC_INSTRUCTION);
@@ -110,6 +142,7 @@ export function ResourcesPage() {
       setSettings(settingsResult.value);
       setVoiceDirection(settingsResult.value.voiceDirection);
       setDefaultRecipeId(settingsResult.value.defaultRecipeId);
+      setRoleProviderDefaults(settingsResult.value.roleProviderDefaults ?? {});
       setModelDefaults(settingsResult.value.modelDefaults ?? {});
       setProductionDefaults(settingsResult.value.productionDefaults ?? DEFAULT_PRODUCTION_DEFAULTS);
       setTopicInstruction(settingsResult.value.topicStrategy?.customInstruction ?? DEFAULT_TOPIC_INSTRUCTION);
@@ -135,6 +168,7 @@ export function ResourcesPage() {
       setSettings(updated);
       if (patch.voiceDirection) setVoiceDirection(updated.voiceDirection);
       if (patch.defaultRecipeId) setDefaultRecipeId(updated.defaultRecipeId);
+      if (patch.roleProviderDefaults) setRoleProviderDefaults(updated.roleProviderDefaults ?? {});
       if (patch.modelDefaults) setModelDefaults(updated.modelDefaults ?? {});
       if (patch.productionDefaults) setProductionDefaults(updated.productionDefaults);
       if (patch.topicStrategy) setTopicInstruction(updated.topicStrategy.customInstruction);
@@ -154,9 +188,11 @@ export function ResourcesPage() {
   const productionHasChanges = settings
     ? settings.defaultRecipeId !== defaultRecipeId
       || !sameProductionDefaults(settings.productionDefaults, productionDefaults)
+    : false;
+  const roleHasChanges = settings
+    ? !sameStringRecord(settings.roleProviderDefaults, roleProviderDefaults)
       || !sameStringRecord(settings.modelDefaults, modelDefaults)
     : false;
-  const modelHasChanges = settings ? !sameStringRecord(settings.modelDefaults, modelDefaults) : false;
   const topicHasChanges = settings ? (settings.topicStrategy?.customInstruction ?? DEFAULT_TOPIC_INSTRUCTION) !== topicInstruction.trim() : false;
   const readyFoundation = foundationProviders.filter(isProductionReady).length;
   const usablePublishTargets = publishTargets.filter((target) => target.status === "ready" || target.status === "manual_only").length;
@@ -214,7 +250,7 @@ export function ResourcesPage() {
             <label className="field"><span>默认时长</span><select aria-label="默认视频时长" value={String(productionDefaults.durationSeconds)} onChange={(event) => setProductionDefaults((current) => ({ ...current, durationSeconds: Number(event.target.value) as StudioProductionDefaults["durationSeconds"] }))}><option value="20">20 秒</option><option value="24">24 秒</option><option value="30">30 秒</option><option value="45">45 秒</option></select></label>
           </div>
           <div className="segmented-control configuration-review-mode" aria-label="终审方式"><span>人工终审</span><small>安全门禁，发布前不可跳过</small></div>
-          <div className="configuration-save-row"><span>{productionHasChanges ? "有未保存的创作默认值" : "当前默认值已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !productionHasChanges} onClick={() => void saveDefaults({ defaultRecipeId, productionDefaults, modelDefaults }, "创作默认值已保存，将从下一条新制作生效。")}><Save aria-hidden="true" size={16} />{productionHasChanges ? "保存创作默认" : "已保存"}</button></div>
+          <div className="configuration-save-row"><span>{productionHasChanges ? "有未保存的创作默认值" : "当前默认值已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !productionHasChanges} onClick={() => void saveDefaults({ defaultRecipeId, productionDefaults }, "创作默认值已保存，将从下一条新制作生效。")}><Save aria-hidden="true" size={16} />{productionHasChanges ? "保存创作默认" : "已保存"}</button></div>
         </div>}
       </section>
       {settingsNotice ? <p className="resource-settings-notice" role="status">{settingsNotice}</p> : null}
@@ -299,23 +335,30 @@ export function ResourcesPage() {
       </section>
 
       <section id="production-roles" className="resource-section foundation-registry">
-        <ResourceHeading eyebrow="岗位与模型" title="生产角色" meta="总编、编剧、导演、渲染、质检与发行编辑" />
+        <ResourceHeading eyebrow="岗位与模型" title="按角色配置生产能力" meta="先决定谁来做，再决定这个角色使用哪个模型" />
         {providerLoading ? <div className="region-loading">正在读取生产底座...</div> : providerError ? null : (
-          <div className="foundation-grid" aria-label="制作能力列表">
-            {foundationProviders.map((provider) => <FoundationProvider
-              key={provider.id}
-              provider={provider}
-              selectedModelId={modelDefaults[provider.id]}
-              onModelChange={(modelId) => setModelDefaults((current) => {
-                const next = { ...current };
-                if (modelId) next[provider.id] = modelId;
-                else delete next[provider.id];
-                return next;
+          <>
+            <div className="role-configuration-grid" aria-label="生产角色配置">
+              {PRODUCTION_ROLE_DEFINITIONS.map((definition) => {
+                const selected = resolveRoleProvider(definition, providers, roleProviderDefaults);
+                return <RoleProviderCard
+                  key={definition.key}
+                  definition={definition}
+                  providers={providers}
+                  selectedProvider={selected}
+                  selectedModelId={selected ? modelDefaults[selected.id] : undefined}
+                  onProviderChange={(providerId) => setRoleProviderDefaults((current) => ({ ...current, [definition.key]: providerId }))}
+                  onModelChange={(providerId, modelId) => setModelDefaults((current) => withStringSelection(current, providerId, modelId))}
+                />;
               })}
-            />)}
-          </div>
+            </div>
+            <div className="automatic-agent-roster" aria-label="自动参与的 Agent">
+              <header><strong>自动参与的 Agent</strong><span>这些角色由工作流按节点调用，不需要逐条记忆配置。</span></header>
+              <div>{AUTOMATIC_AGENT_ROLES.map((role) => <AutomaticAgentRole key={role.capability} label={role.label} provider={preferredAutomaticProvider(role.capability, providers)} />)}</div>
+            </div>
+          </>
         )}
-        {settings ? <div className="configuration-save-row foundation-save-row"><span>{modelHasChanges ? "有未保存的岗位模型调整" : "岗位模型配置已同步"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !modelHasChanges} onClick={() => void saveDefaults({ modelDefaults }, "岗位模型默认值已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{modelHasChanges ? "保存模型配置" : "已保存"}</button></div> : null}
+        {settings ? <div className="configuration-save-row foundation-save-row"><span>{roleHasChanges ? "有未保存的角色或模型调整" : "角色配置已同步"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !roleHasChanges} onClick={() => void saveDefaults({ roleProviderDefaults, modelDefaults }, "角色与模型默认值已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{roleHasChanges ? "保存角色配置" : "已保存"}</button></div> : null}
       </section>
 
       <section id="resource-manifest" className="resource-section resource-manifest-section" data-tour="resource-manifest">
@@ -415,26 +458,92 @@ function billingLabel(billing: StudioProvider["billing"]): string {
   return "免费";
 }
 
-function FoundationProvider({ provider, selectedModelId, onModelChange }: {
-  provider: StudioProvider;
+function RoleProviderCard({ definition, providers, selectedProvider, selectedModelId, onProviderChange, onModelChange }: {
+  definition: ProductionRoleDefinition;
+  providers: StudioProvider[];
+  selectedProvider: StudioProvider | undefined;
   selectedModelId: string | undefined;
-  onModelChange: (modelId: string) => void;
+  onProviderChange: (providerId: string) => void;
+  onModelChange: (providerId: string, modelId: string) => void;
 }) {
-  const ready = isProductionReady(provider);
-  const models = provider.modelProfiles?.filter((model) => model.available) ?? [];
-  const activeModelId = selectedModelId ?? provider.defaultModelId;
-  const activeModel = provider.modelProfiles?.find((model) => model.id === activeModelId);
-  const estimate = activeModel?.estimatedCnyPerClip ?? provider.estimatedCnyPerClip;
-  return <article className="foundation-provider">
-    <span className={ready ? "foundation-state is-ready" : "foundation-state"}>{ready ? <Check aria-hidden="true" size={15} /> : <CircleMinus aria-hidden="true" size={15} />}</span>
-    <div><strong>{provider.label}</strong><span className="foundation-description">{provider.description ?? capabilityLabel(provider.capability)}</span></div>
-    <span>{capabilityLabel(provider.capability)}</span>
-    <div className="foundation-model-control">
-      {models.length > 1 ? <label><small>默认模型</small><select aria-label={`${provider.label} 默认模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(event.target.value)}><option value="">服务默认：{provider.defaultModelId ?? "自动"}</option>{models.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}</select></label> : <span><small>当前模型</small><strong>{activeModel?.label ?? provider.defaultModelId ?? "无需模型"}</strong></span>}
-      <small>{billingLabel(provider.billing)}{estimate !== undefined ? ` · 估算 ¥${formatCost(estimate)}/${provider.billingUnit === "run" ? "条" : "次"}` : ""}</small>
-    </div>
-    <small>{provider.kind === "test" ? "仅测试" : providerReadinessLabel(provider, ready)}</small>
+  const candidates = providers.filter((provider) => provider.capability === definition.capability && provider.kind !== "test");
+  const models = selectedProvider?.modelProfiles?.filter((model) => model.available) ?? [];
+  const activeModel = selectedProvider?.modelProfiles?.find((model) => model.id === (selectedModelId ?? selectedProvider.defaultModelId));
+  const ready = Boolean(selectedProvider && isProductionReady(selectedProvider));
+  return <article className={ready ? "role-configuration" : "role-configuration is-unavailable"}>
+    <header>
+      <span>{definition.label}</span>
+      <em className={`role-mode is-${definition.mode}`}>{roleModeLabel(definition.mode)}</em>
+    </header>
+    <p>{definition.responsibility}</p>
+    {definition.selectable === false && definition.configurationAnchor ? <div className="role-linked-configuration">
+      <span>当前角色能力</span>
+      <strong>{selectedProvider?.label ?? "尚未配置"}</strong>
+      <a href={`#${definition.configurationAnchor}`}>{definition.configurationLabel}<ArrowUpRight aria-hidden="true" size={14} /></a>
+    </div> : <>
+      <label className="field">
+        <span>{definition.label}默认能力</span>
+        <select
+          aria-label={`${definition.label}默认能力`}
+          value={selectedProvider?.id ?? ""}
+          disabled={candidates.filter(isProductionReady).length < 2}
+          onChange={(event) => onProviderChange(event.target.value)}
+        >
+          {!selectedProvider ? <option value="">未配置</option> : null}
+          {candidates.map((provider) => <option key={provider.id} value={provider.id} disabled={!isProductionReady(provider)}>{provider.label}{isProductionReady(provider) ? "" : " · 不可用"}</option>)}
+        </select>
+      </label>
+      {selectedProvider && models.length > 0 ? <label className="field">
+        <span>默认模型</span>
+        <select aria-label={`${selectedProvider.label}默认模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(selectedProvider.id, event.target.value)}>
+          <option value="">服务默认：{selectedProvider.defaultModelId ?? "自动选择"}</option>
+          {models.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+        </select>
+      </label> : <div className="role-runtime-summary"><span>当前执行</span><strong>{activeModel?.label ?? selectedProvider?.defaultModelId ?? selectedProvider?.label ?? "尚未配置"}</strong></div>}
+    </>}
+    <footer><span>{selectedProvider ? billingLabel(selectedProvider.billing) : "无可用能力"}</span><strong>{selectedProvider ? providerReadinessLabel(selectedProvider, ready) : "需要配置"}</strong></footer>
   </article>;
+}
+
+function AutomaticAgentRole({ label, provider }: { label: string; provider: StudioProvider | undefined }) {
+  const ready = Boolean(provider && isProductionReady(provider));
+  const model = provider?.modelProfiles?.find((item) => item.id === provider.defaultModelId)?.label ?? provider?.defaultModelId;
+  return <article className={ready ? "automatic-agent-role" : "automatic-agent-role is-unavailable"}>
+    <span className="service-light" />
+    <div><strong>{label}</strong><small>{provider?.label ?? "尚未配置"}</small></div>
+    <em>{provider?.modes?.join(" · ") ?? model ?? "等待能力接入"}</em>
+  </article>;
+}
+
+function resolveRoleProvider(
+  definition: ProductionRoleDefinition,
+  providers: StudioProvider[],
+  defaults: StudioRoleProviderDefaults,
+): StudioProvider | undefined {
+  const candidates = providers.filter((provider) => provider.capability === definition.capability && provider.kind !== "test");
+  const configuredId = defaults[definition.key];
+  return candidates.find((provider) => provider.id === configuredId)
+    ?? candidates.find((provider) => provider.id === definition.preferredProviderId && isProductionReady(provider))
+    ?? candidates.find(isProductionReady)
+    ?? candidates[0];
+}
+
+function preferredAutomaticProvider(capability: string, providers: StudioProvider[]): StudioProvider | undefined {
+  const candidates = providers.filter((provider) => provider.capability === capability && provider.kind !== "test");
+  return candidates.find(isProductionReady) ?? candidates[0];
+}
+
+function roleModeLabel(mode: ProductionRoleDefinition["mode"]): string {
+  if (mode === "agent") return "Agent · 三轮内收敛";
+  if (mode === "model") return "模型审片";
+  return "确定性工具";
+}
+
+function withStringSelection(current: Record<string, string>, key: string, value: string): Record<string, string> {
+  const next = { ...current };
+  if (value) next[key] = value;
+  else delete next[key];
+  return next;
 }
 
 function formatCost(value: number): string {

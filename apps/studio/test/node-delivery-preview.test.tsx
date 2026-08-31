@@ -1,9 +1,25 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { NodeDeliveryPreview } from "../src/client/components/NodeDeliveryPreview.js";
 
 describe("NodeDeliveryPreview", () => {
+  it("makes every storyboard scene reachable instead of silently truncating the delivery", async () => {
+    const scenes = Array.from({ length: 11 }, (_, index) => ({
+      position: index + 1,
+      narration: `第 ${index + 1} 镜旁白`,
+    }));
+
+    render(<NodeDeliveryPreview nodeId="script" value={{ scenes }} />);
+
+    expect(screen.getByText("第 8 镜旁白")).toBeInTheDocument();
+    expect(screen.queryByText("第 9 镜旁白")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "展开其余 3 个分镜" }));
+    expect(screen.getByText("第 11 镜旁白")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "收起分镜" })).toBeInTheDocument();
+  });
+
   it("shows reviewable asset candidates without exposing download URLs", () => {
     const { container } = render(<NodeDeliveryPreview nodeId="assets" value={{
       job_id: 7,

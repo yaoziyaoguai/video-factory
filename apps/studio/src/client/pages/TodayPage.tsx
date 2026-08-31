@@ -27,7 +27,8 @@ import { TopicEntryWorkspace } from "../components/TopicEntryWorkspace.js";
 export function TodayPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const entryMode = searchParams.get("mode") === "series" ? "series" : searchParams.get("mode") === "manual" ? "custom" : "trend";
+  const requestedMode = searchParams.get("mode");
+  const entryMode = requestedMode === "series" ? "series" : requestedMode === "manual" || requestedMode === "custom" ? "custom" : "trend";
   const initialCandidateId = searchParams.get("candidate") ?? undefined;
   const [opportunities, setOpportunities] = useState<StudioOpportunity[]>([]);
   const [providers, setProviders] = useState<StudioProvider[]>([]);
@@ -55,6 +56,7 @@ export function TodayPage() {
   const [candidateActionError, setCandidateActionError] = useState<string>();
   const [adoptingCandidateId, setAdoptingCandidateId] = useState<string>();
   const [nextStepNotice, setNextStepNotice] = useState<string>();
+  const [trendRefreshFinishedAt, setTrendRefreshFinishedAt] = useState<string>();
   const adoptedSectionRef = useRef<HTMLElement>(null);
   const trendLoadingRef = useRef(false);
   const trendRefreshPollRef = useRef<number | undefined>(undefined);
@@ -72,8 +74,13 @@ export function TodayPage() {
       try {
         const status = await studioApi.trendCandidateRefreshStatus(refreshId);
         if (status.state === "succeeded") {
-          updateTrendInbox(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }));
-          setNextStepNotice(`热点候选已更新完成，共生成 ${status.candidateCount ?? 0} 条候选。`);
+          const refreshedInbox = updateTrendInbox(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }));
+          setTrendRefreshFinishedAt(status.finishedAt ?? new Date().toISOString());
+          const collectedCount = status.candidateCount ?? refreshedInbox.items.length;
+          const decidedCount = Math.max(0, collectedCount - refreshedInbox.items.length);
+          setNextStepNotice(decidedCount > 0
+            ? `本次采集 ${collectedCount} 条，其中 ${decidedCount} 条已进入制作区；当前有 ${refreshedInbox.items.length} 条待判断。`
+            : `热点候选已更新完成，当前有 ${refreshedInbox.items.length} 条待判断。`);
           return;
         }
         if (status.state === "failed") {
@@ -91,9 +98,9 @@ export function TodayPage() {
         setNextStepNotice("热点更新仍未完成，当前缓存可以继续使用；稍后可再次查看或手动刷新。");
         return;
       }
-      trendRefreshPollRef.current = window.setTimeout(() => void poll(attempt + 1, nextFailures), 15_000);
+      trendRefreshPollRef.current = window.setTimeout(() => void poll(attempt + 1, nextFailures), trendRefreshPollDelay(attempt));
     };
-    trendRefreshPollRef.current = window.setTimeout(() => void poll(0), 15_000);
+    trendRefreshPollRef.current = window.setTimeout(() => void poll(0), trendRefreshPollDelay(0));
   }, [updateTrendInbox]);
 
   useEffect(() => () => {
@@ -173,7 +180,7 @@ export function TodayPage() {
     if (entryMode === "series") void loadSeriesWorkspace();
   }, [entryMode, load, loadSeriesWorkspace, loadTrendInbox]);
   const inbox = entryMode === "trend" ? trendInbox : entryMode === "series" ? seriesInbox : undefined;
-  const trendMeta = useMemo(() => buildTrendMeta(trendInbox), [trendInbox]);
+  const trendMeta = useMemo(() => ({ ...buildTrendMeta(trendInbox), ...(trendRefreshFinishedAt ? { refreshedAt: trendRefreshFinishedAt } : {}) }), [trendInbox, trendRefreshFinishedAt]);
   const initialSeriesId = initialCandidateId
     ? seriesInbox?.items.find((item) => item.id === initialCandidateId)?.seriesId
     : undefined;
@@ -184,8 +191,8 @@ export function TodayPage() {
       : series[0]?.id;
   const visibleOpportunities = useMemo(
     () => opportunities.filter((item) => matchesEntryOrigin(entryMode, item.origin)
-      && (entryMode !== "series" || !selectedSeriesId || item.seriesId === selectedSeriesId)),
-    [entryMode, opportunities, selectedSeriesId],
+      && isPendingProduction(item, entryMode, series, selectedSeriesId, runs)),
+    [entryMode, opportunities, runs, selectedSeriesId, series],
   );
   const visibleRuns = useMemo(
     () => runs.filter((run) => matchesEntryOrigin(entryMode, run.creationOrigin)
@@ -233,6 +240,9 @@ export function TodayPage() {
     ? (inbox?.items.filter((item) => item.seriesId === selectedSeriesId).length ?? 0)
     : (inbox?.facets.total ?? 0);
   const dailyStatus = `${visibleCandidateCount} 条候选 · ${visibleOpportunities.length} 条制作机会 · ${visibleRuns.filter((run) => run.status === "succeeded").length} 条已完成`;
+  const seriesAuditReady = providersLoading
+    ? undefined
+    : !providersError && providers.some((provider) => provider.capability === "series.plan" && provider.available && provider.kind !== "test");
 
   useEffect(() => {
     setSelectedId((current) => current && visibleOpportunities.some((item) => item.id === current)
@@ -337,7 +347,7 @@ export function TodayPage() {
       {runsLoading ? <div className="region-loading">正在读取生产状态...</div> : runsError ? (
         <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={18} />生产状态读取失败：{runsError}</div>
       ) : <ProductionStrip runs={visibleRuns} />}
-      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
+      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
       {candidateActionError ? <div className="inline-error topic-action-error" role="alert"><AlertCircle aria-hidden="true" size={18} />{candidateActionError}</div> : null}
       {nextStepNotice ? <div className="next-step-notice" role="status"><CheckCircle2 aria-hidden="true" size={18} /><strong>{nextStepNotice}</strong><button type="button" onClick={() => setNextStepNotice(undefined)} aria-label="关闭下一步提示">知道了</button></div> : null}
 
@@ -345,7 +355,7 @@ export function TodayPage() {
         <header>
           <div>
             <p className="eyebrow">{entryMode === "series" ? "本集制作" : "待制作"}</p>
-            <h2 id="adopted-opportunities-title">{entryMode === "series" ? "本集制作准备" : "已采用的制作机会"}</h2>
+            <h2 id="adopted-opportunities-title">{entryMode === "series" ? "本集制作准备" : "待制作机会"}</h2>
           </div>
           {entryMode === "series" && selected ? (
             <label className="series-production-selector">
@@ -371,7 +381,7 @@ export function TodayPage() {
               <DirectorPanel opportunity={selected} providers={providers} {...(providersLoading || providersError ? { providerError: providersLoading ? "正在读取能力状态..." : `能力状态读取失败：${providersError}` } : {})} onProduce={openProductionDialog} />
             </div>
           )
-        ) : <div className="awaiting-adoption"><RadioTower aria-hidden="true" size={22} /><span>{entryMode === "series" ? "先从路线图采用一集；通过开拍审计后，它会在这里进入制作。" : "从上方采用一条候选，它会在这里进入内容确认与制作。"}</span></div>}
+        ) : <div className="awaiting-adoption"><RadioTower aria-hidden="true" size={22} /><span>{entryMode === "series" ? "当前没有待制作单集；从路线图采用下一集，或到制作记录继续已有工作。" : "当前没有待制作机会；从上方采用新候选，已投产内容请到制作记录继续。"}</span><Link className="button button-secondary" to="/projects">查看制作记录</Link></div>}
       </section>
 
       <OpportunityDialog open={opportunityDialogOpen} initialMode={opportunityDialogMode} onClose={() => setOpportunityDialogOpen(false)} onSubmit={createOpportunity} />
@@ -407,6 +417,33 @@ function matchesEntryOrigin(
   if (mode === "trend") return origin === "trend";
   if (mode === "series") return origin === "series";
   return origin === "manual";
+}
+
+function isPendingSeriesProduction(
+  opportunity: StudioOpportunity,
+  series: StudioSeries[],
+  selectedSeriesId: string | undefined,
+): boolean {
+  if (!selectedSeriesId || opportunity.seriesId !== selectedSeriesId || !opportunity.episodeNumber) return false;
+  const episode = series
+    .find((item) => item.id === selectedSeriesId)
+    ?.episodes.find((item) => item.episodeNumber === opportunity.episodeNumber);
+  return episode?.status === "selected"
+    && episode.opportunityId === opportunity.id
+    && episode.runId === undefined
+    && episode.runReservation === undefined;
+}
+
+function isPendingProduction(
+  opportunity: StudioOpportunity,
+  mode: "trend" | "series" | "custom",
+  series: StudioSeries[],
+  selectedSeriesId: string | undefined,
+  runs: StudioRunSummary[],
+): boolean {
+  if (mode === "series") return isPendingSeriesProduction(opportunity, series, selectedSeriesId);
+  if (opportunity.status !== "draft" && opportunity.status !== "shortlisted") return false;
+  return !runs.some((run) => run.opportunityId === opportunity.id);
 }
 
 function errorMessage(value: unknown): string {
@@ -449,4 +486,10 @@ function buildTrendMeta(inbox: StudioCandidateInbox | undefined) {
 
 function newestTimestamp(values: string[]): string | undefined {
   return values.filter((value) => Number.isFinite(Date.parse(value))).sort((left, right) => Date.parse(right) - Date.parse(left))[0];
+}
+
+function trendRefreshPollDelay(attempt: number): number {
+  if (attempt < 5) return 2_000;
+  if (attempt < 20) return 5_000;
+  return 15_000;
 }

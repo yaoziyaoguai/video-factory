@@ -91,11 +91,11 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
         "avoidCopying 明确排除人物身份、对白、品牌、独特情节和标志性资产",
       ],
       maxIterations: this.options.maxReviewIterations ?? 3,
-      produce: (revision, { requestId }) => client.runTaskDetailed!("reference-grammar", {
+      produce: (revision, { requestId, session }) => client.runTaskDetailed!("reference-grammar", {
         ...payload,
         ...(revision ? { revision } : {}),
-      }, requestId),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => client.runTaskDetailed!("role-audit", {
+      }, requestId, session),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => client.runTaskDetailed!("role-audit", {
         role,
         iteration,
         criteria,
@@ -128,7 +128,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
           ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
           ...(frame.phase ? { phase: frame.phase } : {}),
         })),
-      }, requestId),
+      }, requestId, session),
       validate: (value) => validateShotGrammar(value, payload.durationMs),
       ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
     });

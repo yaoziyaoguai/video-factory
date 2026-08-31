@@ -105,7 +105,15 @@ describe("CodexScreenwriterAgent", () => {
     assert.equal(execution.output.scenes[0]?.narration, "别眨眼，先看结果。");
     assert.deepEqual(client.calls.map((call) => call.kind), ["script-draft", "role-audit", "script-draft", "role-audit"]);
     const repairPayload = client.calls[2]!.payload as Record<string, unknown>;
-    assert.deepEqual(repairPayload.revision, { candidate: first, audit: repairAudit });
+    const revision = repairPayload.revision as Record<string, unknown>;
+    assert.equal(revision.mode, "repair-bootstrap");
+    assert.deepEqual(revision.candidate, first);
+    assert.match(String(revision.candidateHash), /^[a-f0-9]{64}$/);
+    assert.deepEqual(revision.audit, {
+      summary: repairAudit.summary,
+      issues: repairAudit.issues,
+      repairInstructions: repairAudit.repairInstructions,
+    });
     assert.equal(execution.agentLoop?.status, "passed");
     assert.equal(execution.agentLoop?.iterations.length, 2);
     assert.equal(execution.agentLoop?.iterations[0]?.audit.verdict, "repair");

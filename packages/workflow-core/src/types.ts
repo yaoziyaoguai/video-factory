@@ -15,6 +15,7 @@ export type WorkflowStatus =
   | "failed"
   | "needs_human"
   | "rejected"
+  | "paused"
   | "stale"
   | "awaiting_spend_approval"
   | "approval_invalidated";

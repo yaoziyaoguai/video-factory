@@ -25,8 +25,8 @@ describe("run observability", () => {
       startedAt: "2026-08-30T10:00:00.000Z",
       now: "2026-08-30T10:02:00.000Z",
       nodes: [
-        node("brief", "内容简报", "succeeded", { finishedAt: "2026-08-30T10:00:10.000Z" }),
-        node("script", "脚本", "succeeded", { finishedAt: "2026-08-30T10:01:00.000Z" }),
+        node("brief", "内容简报", "succeeded", { startedAt: "2026-08-30T10:00:00.000Z", finishedAt: "2026-08-30T10:00:10.000Z" }),
+        node("script", "脚本", "succeeded", { startedAt: "2026-08-30T10:00:10.000Z", finishedAt: "2026-08-30T10:01:00.000Z" }),
         node("assets", "画面", "running", { startedAt: "2026-08-30T10:01:00.000Z", role: "素材导演" }),
         node("voice", "配音", "pending"),
         node("render", "渲染", "pending"),
@@ -49,6 +49,7 @@ describe("run observability", () => {
       totalNodes: 7,
       percentage: 29,
       elapsedSeconds: 120,
+      currentNodeElapsedSeconds: 60,
       etaUnavailableReason: "insufficient_history",
     });
     expect(result.currentAction).toMatchObject({
@@ -56,6 +57,33 @@ describe("run observability", () => {
       role: "素材导演",
       label: "正在组织逐镜画面并核对素材来源",
     });
+  });
+
+  it("excludes human waiting and stale historical timestamps from processing time", () => {
+    const result = buildRunObservability({
+      status: "running",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      now: "2026-08-31T10:00:20.000Z",
+      nodes: [
+        node("script", "脚本", "succeeded", {
+          startedAt: "2026-08-30T10:00:00.000Z",
+          finishedAt: "2026-08-30T10:00:40.000Z",
+        }),
+        node("visual-direction", "导演方案", "running", {
+          startedAt: "2026-08-31T10:00:00.000Z",
+        }),
+        node("final-review", "人工终审", "pending", {
+          startedAt: "2026-08-30T10:05:00.000Z",
+        }),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.progress.elapsedSeconds).toBe(60);
+    expect(result.progress.currentNodeElapsedSeconds).toBe(20);
+    expect(result.progress.lastUpdatedAt).toBe("2026-08-31T10:00:00.000Z");
+    expect(result.currentAction?.nodeId).toBe("visual-direction");
   });
 
   it("describes the script node as a producer and independent-auditor loop", () => {

@@ -35,6 +35,11 @@ export function OpportunityDialog({ open, initialMode = "manual", onClose, onSub
 
   if (!open) return null;
 
+  function switchMode(nextMode: "manual" | "json") {
+    setMode(nextMode);
+    setError(undefined);
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitting(true);
@@ -63,10 +68,17 @@ export function OpportunityDialog({ open, initialMode = "manual", onClose, onSub
           <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
         <div className="dialog-mode-tabs" role="tablist" aria-label="录入方式">
-          <button type="button" role="tab" aria-selected={mode === "manual"} onClick={() => setMode("manual")}><PenLine aria-hidden="true" size={15} />手动录入</button>
-          <button type="button" role="tab" aria-selected={mode === "json"} onClick={() => setMode("json")}><Braces aria-hidden="true" size={15} />JSON 导入</button>
+          <button type="button" role="tab" aria-selected={mode === "manual"} onClick={() => switchMode("manual")}><PenLine aria-hidden="true" size={15} />手动录入</button>
+          <button type="button" role="tab" aria-selected={mode === "json"} onClick={() => switchMode("json")}><Braces aria-hidden="true" size={15} />JSON 导入</button>
         </div>
-        <form className="run-form opportunity-form" onSubmit={submit}>
+        <form
+          className="run-form opportunity-form"
+          onSubmit={submit}
+          onChange={() => {
+            if (error) setError(undefined);
+          }}
+          noValidate
+        >
           {mode === "manual" ? <ManualFields /> : (
             <label className="field field-wide json-field">
               <span>机会数据</span>
@@ -97,11 +109,10 @@ function ManualFields() {
         <label className="field field-wide"><span>开场钩子</span><textarea name="hook" required rows={3} placeholder="前 3 秒要说出的关键一句" /></label>
       </div>
       <details className="opportunity-advanced">
-        <summary>高级：系列、证据与评分</summary>
+        <summary>高级：证据与评分</summary>
         <div className="opportunity-advanced-body">
           <div className="form-section">
             <div className="form-section-heading"><h3>证据信号</h3><span>有真实来源时再补充</span></div>
-            <label className="field"><span>内容系列</span><input name="track" defaultValue="ordinary-life" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" /></label>
             <label className="field"><span>来源名称</span><input name="evidenceSource" placeholder="manual-research" /></label>
             <label className="field"><span>来源平台</span><input name="evidencePlatform" defaultValue="douyin" /></label>
             <label className="field field-wide"><span>观察关键词</span><input name="evidenceKeyword" placeholder="不填时使用选题标题" /></label>
@@ -129,7 +140,7 @@ function formInput(data: FormData): StudioOpportunityInput {
   return {
     title,
     platform,
-    track: optional(data, "track") ?? "ordinary-life",
+    track: "ordinary-life",
     audience: required(data, "audience"),
     painPoint: required(data, "painPoint"),
     hook: required(data, "hook"),

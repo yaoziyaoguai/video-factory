@@ -15,7 +15,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, StudioReferenceVideo, StudioTemplate } from "../../shared/api.js";
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
@@ -91,8 +91,15 @@ const RECIPES: Array<{
 ];
 
 export function NewRunDialog({ open, providers, initialValues, creatorSettings, onClose, onSubmit }: NewRunDialogProps) {
-  const defaults = useMemo(() => providerDefaults(providers), [providers]);
+  const defaults = useMemo(
+    () => providerDefaults(providers, creatorSettings?.roleProviderDefaults),
+    [creatorSettings?.roleProviderDefaults, providers],
+  );
   const [bindings, setBindings] = useState<StudioProductionInput["providers"]>(defaults);
+  const effectiveBindings = useMemo(
+    () => availableProviderBindings(bindings, defaults, providers),
+    [bindings, defaults, providers],
+  );
   const [activeKey, setActiveKey] = useState<BindingKey>("assets");
   const [recipeId, setRecipeId] = useState<RecipeId>("economy-daily");
   const [maxPaidShots, setMaxPaidShots] = useState(0);
@@ -139,12 +146,15 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     ?? creatorSettings?.modelDefaults?.[provider.id]
     ?? provider.defaultModelId;
   const visualReviewProvider = providers.find((provider) => {
-    return provider.capability === "quality.review.visual" && provider.id === bindings.visualReview && provider.available;
+    return provider.capability === "quality.review.visual" && provider.id === effectiveBindings.visualReview && provider.available;
   }) ?? providers.find((provider) => provider.capability === "quality.review.visual" && provider.available);
   const referenceGrammarProvider = providers.find((provider) => {
     return provider.id === "codex-reference-grammar-v1" && provider.capability === "reference.grammar" && provider.available;
   });
-  const semanticRankCompatible = Boolean(bindings.director && bindings.assets === "ai-shot-router-v1");
+  const roleAuditProvider = providers.find((provider) => {
+    return provider.id === "codex-role-auditor-v1" && provider.capability === "role.audit" && provider.available;
+  });
+  const semanticRankCompatible = Boolean(effectiveBindings.director && effectiveBindings.assets === "ai-shot-router-v1");
   const effectiveSemanticRank = semanticRankCompatible && semanticRankEnabled;
   const meteredSelected = selectedMeteredSources.length > 0 && maxPaidShots > 0;
   const meteredVisualReview = visualReviewEnabled && visualReviewProvider?.billing === "metered"
@@ -152,7 +162,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     : undefined;
   const meteredVoiceProvider = providers.find((provider) => {
     return provider.capability === "voice.synthesize"
-      && provider.id === bindings.voice
+      && provider.id === effectiveBindings.voice
       && provider.available
       && provider.billing === "metered";
   });
@@ -175,6 +185,10 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     return !item.optional
       && !providers.some((provider) => provider.capability === item.capability && provider.available && provider.kind !== "test");
   });
+  const missingProductionRoles = [
+    ...missingCapabilities.map((item) => item.label),
+    ...(roleAuditProvider ? [] : ["独立红队审计"]),
+  ];
 
   useEffect(() => {
     if (!open) {
@@ -195,7 +209,6 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
       ...defaults,
       ...(initialValues?.providers ?? {}),
       assets: "ai-shot-router-v1",
-      director: defaults.director ?? "",
       voice: providerForVoiceProfile(resolvedVoiceDirection.profileId),
     };
     const initialRecipe = imageStory
@@ -321,9 +334,9 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     }
   }
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
+  async function submit(form: HTMLFormElement) {
+    if (submitting) return;
+    const data = new FormData(form);
     setSubmitting(true);
     setError(undefined);
     try {
@@ -331,9 +344,16 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
         throw new Error(templateError ?? "模板目录尚未加载完成，请稍后重试。");
       }
       const selectedTemplate = templates.find((template) => template.id === selectedTemplateId)!;
-      const providersForRun: StudioProductionInput["providers"] = { ...bindings };
+      const providersForRun: StudioProductionInput["providers"] = { ...effectiveBindings };
       if (visualReviewEnabled && visualReviewProvider) providersForRun.visualReview = visualReviewProvider.id;
       else delete providersForRun.visualReview;
+      const selectedProviderIds = new Set([
+        ...Object.values(providersForRun).filter((providerId): providerId is string => Boolean(providerId)),
+        ...assetProviderIds,
+      ]);
+      const modelsForRun = Object.fromEntries(Object.entries(modelSelections).filter(([providerId, modelId]) => {
+        return selectedProviderIds.has(providerId) && Boolean(modelId);
+      }));
       await onSubmit({
         protocolVersion: "video-factory/brief-v1",
         title: requiredString(data, "title"),
@@ -352,10 +372,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
           runOverrides: { durationSeconds, automationLevel: selectedTemplate.automationLevel },
         },
         providers: providersForRun,
-        models: Object.fromEntries(assetProviderIds.flatMap((providerId) => {
-          const modelId = modelSelections[providerId];
-          return modelId ? [[providerId, modelId]] : [];
-        })),
+        models: modelsForRun,
         workflowFeatures: { assetSemanticRank: effectiveSemanticRank, referenceGrammar: Boolean(referenceVideo) },
         ...(referenceVideo ? { referenceVideo: { uploadId: referenceVideo.uploadId, label: referenceVideo.label } } : {}),
         director: { profileId: directorProfileId, assetProviderIds },
@@ -396,7 +413,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
           </button>
         </header>
 
-        <form className="run-form recipe-form" onSubmit={submit} key={initialValues?.title ?? "blank-production"}>
+        <form className="run-form recipe-form" onSubmit={(event) => event.preventDefault()} key={initialValues?.title ?? "blank-production"}>
           <div className="recipe-form-scroll">
             <section className="template-picker-section" aria-labelledby="template-picker-title">
               <div className="compact-section-heading">
@@ -537,6 +554,64 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
               </fieldset>
             </section>
 
+            <section className="production-team-section" aria-labelledby="production-team-title">
+              <div className="compact-section-heading">
+                <div><span>04</span><h3 id="production-team-title">开工前确认制作团队</h3></div>
+                <small>这里的选择会真实进入本次生产单</small>
+              </div>
+              <div className="production-role-grid">
+                {CAPABILITIES.map((item) => {
+                  const candidates = roleProviderCandidates(item, providers);
+                  const selected = providers.find((provider) => provider.id === effectiveBindings[item.key]);
+                  const Icon = item.icon;
+                  const models = selected?.modelProfiles?.filter((model) => model.available) ?? [];
+                  return <article className={selected?.available ? "production-role" : "production-role is-unavailable"} key={item.key}>
+                    <header>
+                      <span className="production-role-icon"><Icon aria-hidden="true" size={17} /></span>
+                      <span><strong>{item.role}</strong><small>{item.label}</small></span>
+                      <em>{roleExecutionLabel(item, selected)}</em>
+                    </header>
+                    <label className="field production-role-provider">
+                      <span>{item.role}能力</span>
+                      <select
+                        aria-label={`${item.role}能力`}
+                        value={selected?.id ?? ""}
+                        disabled={item.key === "voice" || candidates.length < 2}
+                        onChange={(event) => {
+                          const provider = providers.find((candidate) => candidate.id === event.target.value);
+                          if (!provider) return;
+                          setBindings((current) => ({ ...current, [item.key]: provider.id }));
+                          if (item.key === "visualReview") setVisualReviewEnabled(true);
+                        }}
+                      >
+                        {!selected ? <option value="">未配置</option> : null}
+                        {candidates.map((provider) => <option value={provider.id} key={provider.id}>{provider.label}</option>)}
+                      </select>
+                    </label>
+                    {models.length > 0 && selected ? <label className="field production-role-model">
+                      <span>{item.role}本次模型</span>
+                      <select
+                        aria-label={`${item.role}本次模型`}
+                        value={modelSelections[selected.id] ?? ""}
+                        onChange={(event) => setModelSelections((current) => withModelSelection(current, selected.id, event.target.value))}
+                      >
+                        <option value="">继承默认：{effectiveModelId(selected) ?? "运行时自动选择"}</option>
+                        {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+                      </select>
+                    </label> : <p>{item.key === "voice" ? "音色与语速在下方声音导演中调整。" : selected?.description ?? item.description}</p>}
+                    <small className="production-role-billing">{selected
+                      ? `${providerBillingLabel(selected)} · ${effectiveModelId(selected) ?? "不使用模型"}`
+                      : "尚未配置可执行能力"}</small>
+                  </article>;
+                })}
+              </div>
+              <div className={roleAuditProvider ? "production-auditor" : "production-auditor is-unavailable"}>
+                <span><ScanSearch aria-hidden="true" size={18} /></span>
+                <div><strong>{roleAuditProvider?.label ?? "独立红队审计未接通"}</strong><small>与生产角色隔离，逐节点检查上下文、输出合同和下游边界。</small></div>
+                <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "运行时模型"} · max 推理 · 最多三轮` : "开工前请先恢复 Codex 审计能力"}</em>
+              </div>
+            </section>
+
             <div className={advancedOpen ? "advanced-production is-open" : "advanced-production"}>
               <button className="advanced-production-toggle" type="button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((current) => !current)}>
                 <span>高级：逐节点配置</span><small>制作能力与人工终审</small><ChevronDown aria-hidden="true" size={17} />
@@ -549,7 +624,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 </div>
                 <div className="workflow-stage-list">
                   {CAPABILITIES.map((item, index) => {
-                    const selected = providers.find((provider) => provider.id === bindings[item.key]);
+                    const selected = providers.find((provider) => provider.id === effectiveBindings[item.key]);
                     const Icon = item.icon;
                     return (
                       <button
@@ -576,7 +651,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 </header>
                 <div className="provider-choice-list">
                   {activeProviders.map((provider) => {
-                    const selected = bindings[activeKey] === provider.id;
+                    const selected = effectiveBindings[activeKey] === provider.id;
                     return (
                       <label key={provider.id} className={selected ? "provider-choice is-selected" : "provider-choice"}>
                         <input
@@ -653,7 +728,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
             </div>
 
             <VoiceStudio
-              sectionLabel="04"
+              sectionLabel="05"
               value={voiceDirection}
               onChange={(next, providerId) => {
                 setVoiceDirection(next);
@@ -696,14 +771,16 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
               </label>
             </section>
 
-            {missingCapabilities.length > 0 ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />缺少正式生产能力：{missingCapabilities.map((item) => item.label).join("、")}。请先在素材与模型中完成配置。</p> : null}
+            {missingProductionRoles.length > 0 ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />缺少正式生产能力：{missingProductionRoles.join("、")}。请先在素材与模型中完成配置。</p> : null}
             {error ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
           </div>
 
           <footer className="dialog-actions recipe-dialog-actions">
-            <div><strong>{RECIPES.find((recipe) => recipe.id === recipeId)?.label}</strong><span>{hasMeteredCalls ? `当前预计 ¥${formatMoney(displayedTotalEstimate)}` : "无按量 API 扣费"}</span></div>
+            <div><strong>{RECIPES.find((recipe) => recipe.id === recipeId)?.label}</strong><span>{hasMeteredCalls ? `当前预计 ¥${formatMoney(displayedTotalEstimate)}` : roleAuditProvider?.billing === "subscription" ? "使用订阅额度，无按量 API 扣费" : "无按量 API 扣费"}</span></div>
             <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
-            <button className="button button-primary" type="submit" disabled={submitting || referenceUploading || !templatesLoaded || missingCapabilities.length > 0} data-tour="production-start">
+            <button className="button button-primary" type="button" onClick={(event) => {
+              if (event.currentTarget.form) void submit(event.currentTarget.form);
+            }} disabled={submitting || referenceUploading || !templatesLoaded || missingProductionRoles.length > 0} data-tour="production-start">
               <Check aria-hidden="true" size={17} />
               {submitting ? "正在创建..." : "开始制作"}
             </button>
@@ -726,16 +803,55 @@ function defaultVoiceDirection(providers: StudioProvider[]): StudioProductionInp
   };
 }
 
-function providerDefaults(providers: StudioProvider[]): StudioProductionInput["providers"] {
+function providerDefaults(
+  providers: StudioProvider[],
+  roleDefaults: StudioCreatorSettings["roleProviderDefaults"] = {},
+): StudioProductionInput["providers"] {
   return Object.fromEntries(CAPABILITIES.map((item) => {
     const candidates = providers.filter((provider) => provider.capability === item.capability && provider.kind !== "test");
     const preferredId = item.key === "voice"
       ? providerForVoiceProfile(defaultVoiceDirection(providers).profileId)
-      : item.preferred;
+      : roleDefaults?.[item.key] ?? item.preferred;
     const selected = candidates.find((provider) => provider.id === preferredId && provider.available)
       ?? candidates.find((provider) => provider.available);
     return [item.key, selected?.id ?? ""];
   })) as StudioProductionInput["providers"];
+}
+
+function availableProviderBindings(
+  requested: StudioProductionInput["providers"],
+  defaults: StudioProductionInput["providers"],
+  providers: StudioProvider[],
+): StudioProductionInput["providers"] {
+  return Object.fromEntries(CAPABILITIES.map((item) => {
+    const candidates = roleProviderCandidates(item, providers);
+    const selected = candidates.find((provider) => provider.id === requested[item.key])
+      ?? candidates.find((provider) => provider.id === defaults[item.key])
+      ?? candidates[0];
+    return [item.key, selected?.id ?? ""];
+  })) as StudioProductionInput["providers"];
+}
+
+function roleProviderCandidates(item: CapabilityDefinition, providers: StudioProvider[]): StudioProvider[] {
+  return providers.filter((provider) => {
+    if (!provider.available || provider.kind === "test" || provider.capability !== item.capability) return false;
+    return item.key !== "assets" || provider.id === "ai-shot-router-v1";
+  });
+}
+
+function roleExecutionLabel(item: CapabilityDefinition, provider: StudioProvider | undefined): string {
+  if (!provider?.available) return "未配置";
+  if (item.key === "visualReview") return "模型审片";
+  if (provider.id.startsWith("codex-") || provider.id === "api-visual-director-v1") return "Agent 创作 · 3 轮内收敛";
+  if (provider.id === "ai-shot-router-v1") return "AI 逐镜路由";
+  return "确定性工具";
+}
+
+function withModelSelection(current: Record<string, string>, providerId: string, modelId: string): Record<string, string> {
+  const next = { ...current };
+  if (modelId) next[providerId] = modelId;
+  else delete next[providerId];
+  return next;
 }
 
 function providerForVoiceProfile(profileId: string): string {
@@ -785,11 +901,17 @@ function sourceIdsForRecipe(
   const free = providers
     .filter((provider) => isAssetSource(provider) && provider.available && provider.billing !== "metered")
     .map((provider) => provider.id);
-  if (preferredId && providers.some((provider) => provider.id === preferredId && provider.available && isAssetSource(provider)) && !free.includes(preferredId)) {
-    free.push(preferredId);
-  }
   if (recipe.maxPaidShots === 0) return free;
-  const metered = providers
+  const preferredMetered = preferredId
+    ? providers.find((provider) => {
+        return provider.id === preferredId
+          && provider.available
+          && isAssetSource(provider)
+          && provider.billing === "metered"
+          && provider.estimatedCnyPerClip;
+      })
+    : undefined;
+  const metered = preferredMetered ?? providers
     .filter((provider) => isAssetSource(provider) && provider.available && provider.billing === "metered" && provider.estimatedCnyPerClip)
     .sort((left, right) => (left.estimatedCnyPerClip ?? Infinity) - (right.estimatedCnyPerClip ?? Infinity))[0];
   return metered ? [...free, metered.id] : free;

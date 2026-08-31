@@ -378,25 +378,31 @@ def prepare_routed_scene_assets(
         errors = []
         materialization_notes: list[str] = []
         duplicate_options: list[tuple[str, List[StockAssetCandidate]]] = []
+        recognized_stock_route = False
 
         for provider_id in provider_ids:
             try:
                 if is_generative_provider(provider_id):
-                    actual_asset = materialize_local_scene(scene, director_query, asset_dir)
+                    actual_asset = materialize_local_scene(scene, director_query, asset_dir, route)
                     actual_provider_id = "local-editorial-v1"
                     break
                 provider = stock_provider_name(provider_id)
                 if provider == "local":
-                    actual_asset = materialize_local_scene(scene, director_query, asset_dir)
+                    actual_asset = materialize_local_scene(scene, director_query, asset_dir, route)
                     actual_provider_id = provider_id
                     break
+                recognized_stock_route = True
                 stock_query = resolve_director_stock_query(scene, director_query)
-                candidates = (
+                discovered_candidates = (
                     list(inventory_by_scene.get(scene.position, {}).get(provider_id, []))
                     if candidate_inventory is not None
                     else search_stock_assets(provider=provider, query=stock_query, media_type=route_media_type, limit=limit)
                 )
-                candidates = reorder_candidates(candidates, ranking_by_scene.get(scene.position, []))
+                candidates = reorder_candidates(discovered_candidates, ranking_by_scene.get(scene.position, []))
+                if discovered_candidates and not candidates:
+                    materialization_notes.append(
+                        f"{provider_id}: semantic review rejected {len(discovered_candidates)} candidate(s)"
+                    )
                 duplicate_options.append((provider_id, candidates))
                 actual_asset = materialize_first_candidate(
                     scene,
@@ -424,6 +430,13 @@ def prepare_routed_scene_assets(
                 if actual_asset is not None:
                     actual_provider_id = provider_id
                     break
+
+        if actual_asset is None and recognized_stock_route:
+            actual_asset = materialize_local_scene(scene, director_query, asset_dir, route)
+            actual_provider_id = "local-editorial-v1"
+            materialization_notes.append(
+                "local-editorial-v1: fallback used because reviewed stock candidates were unavailable"
+            )
 
         if actual_asset is None or actual_provider_id is None:
             raise RuntimeError(f"No director-selected asset could be prepared for scene {scene.position}: {'; '.join(errors)}")
@@ -455,6 +468,7 @@ def prepare_routed_scene_assets(
             "requested_media_type": route_media_type,
             "query": actual_asset.query,
             "rationale": str(route.get("rationale") or ""),
+            "director_shot": route,
             "candidate_shortlist": candidate_shortlist,
         }
         if materialization_notes:
@@ -553,8 +567,12 @@ def reorder_candidates(
     return sorted(reviewed, key=lambda candidate: positions[(candidate.provider, candidate.asset_id)])
 
 
-def materialize_local_scene(scene: Scene, query: str, asset_dir: Path) -> SceneAsset:
-    actual_path = write_local_scene_card(scene, asset_dir / f"scene_{scene.position:02d}_local_card.png")
+def materialize_local_scene(scene: Scene, query: str, asset_dir: Path, director_shot: Optional[dict] = None) -> SceneAsset:
+    actual_path = write_local_scene_card(
+        scene,
+        asset_dir / f"scene_{scene.position:02d}_local_card.png",
+        director_shot=director_shot,
+    )
     return SceneAsset(
         scene_position=scene.position,
         provider="local",
@@ -1224,7 +1242,7 @@ def write_mock_image(candidate: StockAssetCandidate, local_path: Path) -> Path:
     return local_path
 
 
-def write_local_scene_card(scene: Scene, local_path: Path) -> Path:
+def write_local_scene_card(scene: Scene, local_path: Path, director_shot: Optional[dict] = None) -> Path:
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError as error:
@@ -1232,52 +1250,297 @@ def write_local_scene_card(scene: Scene, local_path: Path) -> Path:
 
     local_path = local_path.with_suffix(".png")
     width, height = 1080, 1920
-    style = local_card_style(scene.position)
-    title, items, kicker = local_card_content(scene)
+    spec = local_card_spec(scene, director_shot)
+    style = local_card_semantic_style(spec)
     image = Image.new("RGB", (width, height), style["background"])
     draw = ImageDraw.Draw(image)
-
-    draw_editorial_background(draw, width, height, style)
-    label_font = local_card_font(ImageFont, 34)
-    title_font = local_card_font(ImageFont, local_card_title_size(title))
-    kicker_font = local_card_font(ImageFont, 42)
-    item_font = local_card_font(ImageFont, local_card_item_size(items))
-    small_font = local_card_font(ImageFont, 28)
-    margin = 86
-
-    draw.text((margin, 90), "视觉笔记", font=small_font, fill=style["muted"])
-    draw.text((width - margin - 118, 84), f"{scene.position:02d}", font=label_font, fill=style["accent"])
-    draw.line((margin, 158, width - margin, 158), fill=style["rule"], width=3)
-    draw.text((margin, 260), kicker, font=kicker_font, fill=style["accent"])
-    title_bottom = draw_wrapped_text(
-        draw,
-        title,
-        (margin, 330),
-        title_font,
-        style["ink"],
-        width - margin * 2 - 160,
-        line_spacing=20,
-    )
-
-    y = max(720, title_bottom + 90)
-    for index, item in enumerate(items[:4], start=1):
-        number = f"{index:02d}"
-        draw.text((margin, y + 6), number, font=label_font, fill=style["accent"])
-        y = draw_wrapped_text(
-            draw,
-            item,
-            (margin + 118, y),
-            item_font,
-            style["ink"],
-            width - margin * 2 - 118,
-            line_spacing=16,
-        )
-        draw.line((margin + 118, y + 20, width - margin, y + 20), fill=style["rule"], width=2)
-        y += 74
-
-    draw.text((margin, 1280), f"SCENE {scene.position:02d}  ·  {scene.duration:.1f}s", font=small_font, fill=style["muted"])
+    draw_directed_card(draw, ImageFont, scene, spec, style, width, height)
     image.save(local_path)
     return local_path
+
+
+def local_card_spec(scene: Scene, director_shot: Optional[dict] = None) -> dict:
+    shot = director_shot if isinstance(director_shot, dict) else {}
+    supporting_text = " ".join([
+        scene.visual_prompt,
+        str(shot.get("query") or ""),
+        str(shot.get("subject") or ""),
+        str(shot.get("visibleAction") or ""),
+        " ".join(str(item) for item in shot.get("successCriteria", []) if isinstance(item, str)),
+    ])
+    quoted = quoted_display_text(supporting_text)
+    query = str(shot.get("query") or "").lower()
+    title, fallback_items, fallback_kicker = local_card_content(scene)
+    evidence_items = [item for item in ("来源", "原文", "适用范围") if item in supporting_text]
+
+    if "node output self review red team" in query:
+        return {
+            "layout": "audit_flow",
+            "kicker": "节点审计",
+            "title": "每个节点，都先过两关",
+            "items": ["节点输出", "自审", "独立红队"],
+            "status": "发现问题",
+        }
+
+    if "self review independent red team" in query:
+        return {
+            "layout": "audit_flow",
+            "kicker": "审核顺序",
+            "title": "先自审，再交独立红队",
+            "items": ["自审", "独立红队"],
+            "status": "",
+        }
+
+    if "overhead hand moving blank cards" in query:
+        return {
+            "layout": "card_pair",
+            "kicker": "每个节点",
+            "title": "同样走完两关",
+            "items": ["自审", "独立红队"],
+            "status": "重复执行",
+        }
+
+    if "paid step" in query and "confirmation" in query:
+        return {
+            "layout": "paid_gate",
+            "kicker": "费用边界",
+            "title": "付费前，停下来确认",
+            "items": ["返回修改", "确认继续"],
+            "status": "付费节点 · 未执行",
+        }
+
+    if "audit payment confirmation outro" in query:
+        return {
+            "layout": "audit_outro",
+            "kicker": "生产口诀",
+            "title": "每个节点：自审 → 红队",
+            "items": ["付费前：用户确认", "继续生产"],
+            "status": "",
+        }
+
+    if "status" in query and ("verification" in query or "核验" in supporting_text):
+        flow = next((item for item in quoted if "→" in item), "")
+        items = [part.strip() for part in flow.split("→") if part.strip()] if flow else [
+            item for item in quoted if item in {"生成完成", "待证据核验", "等待发布"}
+        ]
+        if len(items) < 2:
+            items = ["生成完成", "待证据核验"]
+        return {"layout": "status_flow", "kicker": "证据门禁", "title": "发布前，先核验", "items": items[:2], "status": items[-1]}
+
+    if "checklist" in query or len(evidence_items) == 3 or "缺一项" in scene.narration:
+        items = evidence_items or ["来源", "原文", "适用范围"]
+        pending = "缺" in scene.narration or "待核验" in supporting_text and "待发布" not in supporting_text
+        status = "待核验" if pending else ("待发布" if "待发布" in supporting_text else "核验完成")
+        return {
+            "layout": "checklist",
+            "kicker": "核验清单",
+            "title": "缺一项，就先不发布" if pending else "三项齐，才进入下一步",
+            "items": items[:3],
+            "status": status,
+            "pending_index": len(items[:3]) - 1 if pending else None,
+        }
+
+    if "missing source" in query or ("来源" in supporting_text and "未提供" in supporting_text):
+        return {"layout": "form", "kicker": "来源核验", "title": "来源", "items": ["未提供"], "status": "退回待核验"}
+
+    if "claim" in query or "typography" in query or "断言" in supporting_text:
+        statement = next((item for item in quoted if "断言" in item), title)
+        return {"layout": "statement", "kicker": "门禁拦截", "title": statement, "items": [], "status": "待证据核验"}
+
+    if "start card" in query or "conclusion" in query or "只是起点" in supporting_text:
+        conclusion = next((item for item in quoted if "起点" in item), title)
+        lead = next((item for item in quoted if item != conclusion), "能生成")
+        return {"layout": "conclusion", "kicker": "结论", "title": conclusion, "items": [lead], "status": ""}
+
+    return {"layout": "list", "kicker": fallback_kicker, "title": title, "items": fallback_items, "status": ""}
+
+
+def quoted_display_text(text: str) -> list[str]:
+    values = re.findall(r"[“\"]([^”\"]{1,32})[”\"]", text)
+    return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+
+def draw_directed_card(draw, ImageFont, scene: Scene, spec: dict, style: dict, width: int, height: int) -> None:
+    margin = 86
+    small_font = local_card_font(ImageFont, 28)
+    label_font = local_card_font(ImageFont, 36)
+    kicker_font = local_card_font(ImageFont, 42)
+    draw.rectangle((0, 0, 18, height), fill=style["accent"])
+    draw.text((margin, 92), str(spec["kicker"]), font=small_font, fill=style["muted"])
+    scene_label = f"{scene.position:02d} / {scene.duration:.1f}s"
+    label_box = draw.textbbox((0, 0), scene_label, font=small_font)
+    draw.text((width - margin - (label_box[2] - label_box[0]), 92), scene_label, font=small_font, fill=style["muted"])
+    draw.line((margin, 160, width - margin, 160), fill=style["rule"], width=2)
+
+    layout = str(spec["layout"])
+    if layout == "audit_flow":
+        title_font = local_card_font(ImageFont, local_card_title_size(str(spec["title"])))
+        title_bottom = draw_wrapped_text(draw, str(spec["title"]), (margin, 250), title_font, style["ink"], width - margin * 2, 16)
+        items = list(spec["items"])
+        colors = ["#7d8da8", "#2f73d8", "#d05252"] if len(items) == 3 else ["#2f73d8", "#d05252"]
+        top = max(570, title_bottom + 90)
+        row_height = 170 if len(items) == 3 else 210
+        row_gap = 78
+        item_font = local_card_font(ImageFont, 48 if len(items) == 3 else 56)
+        for index, item in enumerate(items):
+            row_top = top + index * (row_height + row_gap)
+            color = colors[index]
+            draw.rounded_rectangle((margin, row_top, width - margin, row_top + row_height), radius=24, fill=style["surface"], outline=color, width=5)
+            draw.ellipse((margin + 36, row_top + row_height // 2 - 30, margin + 96, row_top + row_height // 2 + 30), fill=color)
+            draw.text((margin + 132, row_top + row_height // 2 - 35), item, font=item_font, fill=style["ink"])
+            if index < len(items) - 1:
+                arrow_y = row_top + row_height + 14
+                draw.line((width // 2, arrow_y, width // 2, arrow_y + 42), fill=colors[index + 1], width=7)
+                draw.polygon([(width // 2 - 14, arrow_y + 34), (width // 2 + 14, arrow_y + 34), (width // 2, arrow_y + 56)], fill=colors[index + 1])
+        if spec.get("status"):
+            status = str(spec["status"])
+            status_font = local_card_font(ImageFont, 34)
+            badge_top = min(1260, top + len(items) * (row_height + row_gap) + 8)
+            draw.rounded_rectangle((width - margin - 260, badge_top, width - margin, badge_top + 76), radius=38, fill="#4b1f29")
+            badge_box = draw.textbbox((0, 0), status, font=status_font)
+            draw.text((width - margin - 130 - (badge_box[2] - badge_box[0]) / 2, badge_top + 19), status, font=status_font, fill="#ffb3b3")
+        return
+
+    if layout == "card_pair":
+        title_font = local_card_font(ImageFont, 70)
+        draw_wrapped_text(draw, str(spec["title"]), (margin, 270), title_font, style["ink"], width - margin * 2, 16)
+        item_font = local_card_font(ImageFont, 48)
+        card_width = 350
+        card_top = 650
+        card_height = 410
+        lefts = [margin, width - margin - card_width]
+        colors = ["#2f73d8", "#d05252"]
+        for index, item in enumerate(list(spec["items"])[:2]):
+            left = lefts[index]
+            draw.rounded_rectangle((left, card_top, left + card_width, card_top + card_height), radius=26, fill=style["surface"], outline=colors[index], width=5)
+            draw.rectangle((left + 34, card_top + 38, left + card_width - 34, card_top + 235), fill="#f7f8fb")
+            label_box = draw.textbbox((0, 0), item, font=item_font)
+            draw.text((left + card_width / 2 - (label_box[2] - label_box[0]) / 2, card_top + 290), item, font=item_font, fill=colors[index])
+        arrow_y = card_top + card_height // 2
+        draw.line((margin + card_width + 34, arrow_y, width - margin - card_width - 34, arrow_y), fill=style["accent"], width=7)
+        draw.polygon([(width // 2 + 18, arrow_y - 14), (width // 2 + 18, arrow_y + 14), (width // 2 + 40, arrow_y)], fill=style["accent"])
+        return
+
+    if layout == "paid_gate":
+        title_font = local_card_font(ImageFont, 70)
+        title_bottom = draw_wrapped_text(draw, str(spec["title"]), (margin, 260), title_font, style["ink"], width - margin * 2, 16)
+        boundary_y = max(590, title_bottom + 100)
+        draw.line((margin, boundary_y, width - margin, boundary_y), fill="#f59e0b", width=10)
+        boundary_font = local_card_font(ImageFont, 30)
+        draw.rounded_rectangle((margin, boundary_y - 55, margin + 250, boundary_y + 12), radius=30, fill="#633b0b")
+        draw.text((margin + 30, boundary_y - 40), "付费前确认", font=boundary_font, fill="#ffd18a")
+        node_top = boundary_y + 110
+        node_font = local_card_font(ImageFont, 42)
+        draw.rounded_rectangle((margin, node_top, width - margin, node_top + 150), radius=24, fill="#172235", outline="#64748b", width=4)
+        draw.ellipse((margin + 40, node_top + 48, margin + 94, node_top + 102), outline="#64748b", width=5)
+        draw.text((margin + 130, node_top + 47), str(spec["status"]), font=node_font, fill="#9ba7b8")
+        option_font = local_card_font(ImageFont, 38)
+        option_top = node_top + 230
+        option_width = (width - margin * 2 - 28) // 2
+        for index, item in enumerate(list(spec["items"])[:2]):
+            left = margin + index * (option_width + 28)
+            draw.rounded_rectangle((left, option_top, left + option_width, option_top + 118), radius=18, fill=style["surface"], outline="#7d8da8", width=3)
+            draw.ellipse((left + 28, option_top + 40, left + 64, option_top + 76), outline="#7d8da8", width=3)
+            draw.text((left + 84, option_top + 35), item, font=option_font, fill=style["ink"])
+        return
+
+    if layout == "audit_outro":
+        title_font = local_card_font(ImageFont, 70)
+        draw_wrapped_text(draw, str(spec["title"]), (margin, 270), title_font, style["ink"], width - margin * 2, 16)
+        rules = [(str(spec["items"][0]), "#f59e0b"), (str(spec["items"][1]), "#35a37a")]
+        top = 700
+        rule_font = local_card_font(ImageFont, 48)
+        for index, (item, color) in enumerate(rules):
+            row_top = top + index * 230
+            draw.rounded_rectangle((margin, row_top, width - margin, row_top + 160), radius=22, fill=style["surface"], outline=color, width=5)
+            draw.rectangle((margin, row_top, margin + 18, row_top + 160), fill=color)
+            draw.text((margin + 58, row_top + 52), item, font=rule_font, fill=style["ink"])
+        return
+
+    if layout == "status_flow":
+        title_font = local_card_font(ImageFont, 64)
+        draw_wrapped_text(draw, str(spec["title"]), (margin, 270), title_font, style["ink"], width - margin * 2, 16)
+        box_font = local_card_font(ImageFont, 54)
+        items = list(spec["items"])
+        for index, item in enumerate(items[:2]):
+            top = 610 + index * 280
+            active = index == 1
+            fill = style["accent"] if active else style["surface"]
+            ink = "#ffffff" if active else style["ink"]
+            draw.rounded_rectangle((margin, top, width - margin, top + 190), radius=26, fill=fill)
+            draw.text((margin + 56, top + 58), item, font=box_font, fill=ink)
+            if index == 0:
+                draw.line((width // 2, top + 206, width // 2, top + 252), fill=style["accent"], width=7)
+                draw.polygon([(width // 2 - 14, top + 240), (width // 2 + 14, top + 240), (width // 2, top + 260)], fill=style["accent"])
+        return
+
+    if layout == "checklist":
+        title_font = local_card_font(ImageFont, local_card_title_size(str(spec["title"])))
+        title_bottom = draw_wrapped_text(draw, str(spec["title"]), (margin, 260), title_font, style["ink"], width - margin * 2, 16)
+        row_font = local_card_font(ImageFont, 56)
+        pending_index = spec.get("pending_index")
+        for index, item in enumerate(list(spec["items"])[:3]):
+            top = max(590, title_bottom + 80) + index * 190
+            pending = pending_index == index
+            color = "#c43d32" if pending else "#188465"
+            draw.rounded_rectangle((margin, top, width - margin, top + 136), radius=18, fill=style["surface"], outline=color, width=4)
+            draw.ellipse((margin + 34, top + 38, margin + 94, top + 98), fill=color)
+            draw.text((margin + 128, top + 34), item, font=row_font, fill=style["ink"])
+            if pending:
+                draw.line((margin + 51, top + 68, margin + 77, top + 68), fill="#ffffff", width=6)
+            else:
+                draw.line((margin + 48, top + 68, margin + 59, top + 80), fill="#ffffff", width=6)
+                draw.line((margin + 59, top + 80, margin + 81, top + 55), fill="#ffffff", width=6)
+        status = str(spec.get("status") or "")
+        if status:
+            status_font = local_card_font(ImageFont, 40)
+            status_color = "#c43d32" if "核验" in status or "退回" in status else "#188465"
+            draw.rounded_rectangle((margin, 1230, width - margin, 1335), radius=52, outline=status_color, width=4)
+            status_box = draw.textbbox((0, 0), status, font=status_font)
+            draw.text(((width - (status_box[2] - status_box[0])) / 2, 1250), status, font=status_font, fill=status_color)
+        return
+
+    if layout == "form":
+        title_font = local_card_font(ImageFont, 72)
+        draw.text((margin, 300), "来源核验", font=title_font, fill=style["ink"])
+        field_font = local_card_font(ImageFont, 48)
+        draw.text((margin, 570), str(spec["title"]), font=kicker_font, fill=style["muted"])
+        draw.rounded_rectangle((margin, 650, width - margin, 810), radius=20, fill="#ffffff", outline="#c43d32", width=6)
+        draw.text((margin + 42, 698), str(spec["items"][0]), font=field_font, fill="#c43d32")
+        status_font = local_card_font(ImageFont, 48)
+        draw.text((margin, 940), str(spec["status"]), font=status_font, fill="#c43d32")
+        return
+
+    if layout in {"statement", "conclusion"}:
+        lead = str(spec["items"][0]) if spec.get("items") else str(spec["kicker"])
+        lead_font = local_card_font(ImageFont, 44)
+        lead_box = draw.textbbox((0, 0), lead, font=lead_font)
+        draw.text(((width - (lead_box[2] - lead_box[0])) / 2, 500), lead, font=lead_font, fill=style["muted"])
+        title_font = local_card_font(ImageFont, 100 if len(str(spec["title"])) <= 6 else 76)
+        lines = wrap_text_by_pixels(draw, str(spec["title"]), title_font, width - margin * 2)
+        line_height = 126
+        top = 640
+        for index, line in enumerate(lines):
+            box = draw.textbbox((0, 0), line, font=title_font)
+            draw.text(((width - (box[2] - box[0])) / 2, top + index * line_height), line, font=title_font, fill=style["ink"])
+        draw.line((250, top + len(lines) * line_height + 60, width - 250, top + len(lines) * line_height + 60), fill=style["accent"], width=10)
+        if spec.get("status"):
+            draw.text((margin, 1180), str(spec["status"]), font=kicker_font, fill=style["accent"])
+        return
+
+    draw_editorial_background(draw, width, height, style)
+    title = str(spec["title"])
+    items = list(spec["items"])
+    title_font = local_card_font(ImageFont, local_card_title_size(title))
+    draw.text((margin, 260), str(spec["kicker"]), font=kicker_font, fill=style["accent"])
+    title_bottom = draw_wrapped_text(draw, title, (margin, 330), title_font, style["ink"], width - margin * 2 - 120, 20)
+    item_font = local_card_font(ImageFont, local_card_item_size(items))
+    y = max(720, title_bottom + 90)
+    for index, item in enumerate(items[:4], start=1):
+        draw.text((margin, y + 6), f"{index:02d}", font=label_font, fill=style["accent"])
+        y = draw_wrapped_text(draw, item, (margin + 118, y), item_font, style["ink"], width - margin * 2 - 118, 16)
+        draw.line((margin + 118, y + 20, width - margin, y + 20), fill=style["rule"], width=2)
+        y += 74
 
 
 def local_card_style(scene_position: int) -> dict:
@@ -1308,6 +1571,31 @@ def local_card_style(scene_position: int) -> dict:
         },
     ]
     return styles[(scene_position - 2) % len(styles)]
+
+
+def local_card_semantic_style(spec: dict) -> dict:
+    layout = str(spec.get("layout") or "list")
+    if layout == "checklist" and spec.get("pending_index") is None:
+        return {
+            "background": "#f2f6f3", "surface": "#e5efe9", "ink": "#14211d",
+            "muted": "#5b6f67", "accent": "#188465", "rule": "#cadbd2",
+        }
+    if layout == "form" or (layout == "checklist" and spec.get("pending_index") is not None):
+        return {
+            "background": "#f8f3ef", "surface": "#f0e6df", "ink": "#211915",
+            "muted": "#77665c", "accent": "#c43d32", "rule": "#dfcfc5",
+        }
+    if layout in {"audit_flow", "card_pair", "paid_gate", "audit_outro"}:
+        return {
+            "background": "#0b1220", "surface": "#142238", "ink": "#f6f8fb",
+            "muted": "#aab5c5", "accent": "#f59e0b", "rule": "#2b3a50",
+        }
+    if layout in {"status_flow", "statement", "conclusion"}:
+        return {
+            "background": "#f7f3ea", "surface": "#eee7d9", "ink": "#111827",
+            "muted": "#6b6257", "accent": "#d97706", "rule": "#d9cdbb",
+        }
+    return local_card_style(2)
 
 
 def local_card_content(scene: Scene) -> tuple[str, list[str], str]:

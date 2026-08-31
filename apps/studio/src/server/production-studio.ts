@@ -3,7 +3,7 @@ import { mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile }
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { NodeVersionConflictError } from "@video-factory/workflow-core";
-import type { ArtifactDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
+import type { ArtifactDraft, HumanDecisionDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
 import type { ProductionTemplateSnapshot } from "@video-factory/template-core";
 import {
   parseBrief,
@@ -48,11 +48,31 @@ export interface StudioPipelinePort {
     actor: string;
     note?: string;
   }): Promise<WorkflowRun<ProductionBrief>>;
+  dispatchDecision?(
+    runId: string,
+    decision: HumanDecisionDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun>;
   applyNodeOverride(runId: string, override: NodeOverrideDraft): Promise<WorkflowRun<ProductionBrief>>;
   applyNodeInputOverride(runId: string, override: NodeInputOverrideDraft): Promise<WorkflowRun<ProductionBrief>>;
   authorizeSpend(runId: string, authorization: SpendAuthorizationDraft): Promise<WorkflowRun<ProductionBrief>>;
+  dispatchSpendAuthorization?(
+    runId: string,
+    authorization: SpendAuthorizationDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun>;
+  requestPause(runId: string): Promise<void>;
+  pauseRequested(runId: string): Promise<boolean>;
+  resumePaused(runId: string): Promise<WorkflowRun<ProductionBrief>>;
+  dispatchResumePaused?(runId: string, listener?: ProductionRunListener): Promise<DispatchedProductionRun>;
   resumeStale(runId: string): Promise<WorkflowRun<ProductionBrief>>;
+  dispatchResumeStale?(runId: string, listener?: ProductionRunListener): Promise<DispatchedProductionRun>;
   retryFailedNode(runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>>;
+  dispatchRetryFailedNode?(
+    runId: string,
+    nodeId: string,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun>;
   withRunMaintenanceLease<T>(runIds: string[], action: () => Promise<T>): Promise<T>;
 }
 
@@ -122,13 +142,17 @@ export class ProductionStudio {
 
   async get(runId: string): Promise<StudioRunDetail | undefined> {
     try {
-      const [run, archived, historyRuns] = await Promise.all([
+      const [run, archived, historyRuns, pauseRequested] = await Promise.all([
         this.options.pipeline.show(runId),
         this.options.archiveStore.list(),
         this.options.pipeline.list(),
+        this.options.pipeline.pauseRequested(runId),
       ]);
       this.historicalNodeDurations = collectNodeDurationHistory(historyRuns);
-      const detail = withArchiveState(this.toDetail(run), archived[run.id]);
+      const detail = {
+        ...withArchiveState(this.toDetail(run), archived[run.id]),
+        ...(pauseRequested ? { pauseRequested: true } : {}),
+      };
       return await withAgentLoopProgress(detail, this.options.workspaceRoot);
     } catch (error) {
       if (hasCode(error, "ENOENT")) return undefined;
@@ -293,6 +317,11 @@ export class ProductionStudio {
       this.historicalNodeDurations = collectNodeDurationHistory(await this.options.pipeline.list());
     }
     const dispatched = await this.options.pipeline.dispatch(brief, (run) => this.publish(this.toDetail(run)));
+    this.trackCompletion(dispatched);
+    return { runId: dispatched.runId, status: "running" };
+  }
+
+  private trackCompletion(dispatched: DispatchedProductionRun): void {
     const tracked: Promise<void> = dispatched.completion
       .then(() => undefined)
       .catch(async () => {
@@ -301,7 +330,14 @@ export class ProductionStudio {
       })
       .finally(() => this.completions.delete(tracked));
     this.completions.add(tracked);
-    return { runId: dispatched.runId, status: "running" };
+  }
+
+  private async dispatchedDetail(dispatched: DispatchedProductionRun): Promise<StudioRunDetail> {
+    this.trackCompletion(dispatched);
+    const running = await this.loadRequiredRun(dispatched.runId);
+    const detail = await withAgentLoopProgress(this.toDetail(running), this.options.workspaceRoot);
+    this.publish(detail);
+    return detail;
   }
 
   private toDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
@@ -353,20 +389,54 @@ export class ProductionStudio {
     const intervention = current.nodeRuns.find((node) => node.status === "needs_human")?.intervention;
     if (!intervention) throw new StudioConflictError("这条制作没有待处理的人工决定。");
     if (input.action === "reject" && !input.note?.trim()) throw new StudioConflictError("打回时必须填写原因。");
+    const decision: HumanDecisionDraft = {
+      interventionId: intervention.id,
+      action: input.action,
+      actor,
+      ...(input.note ? { note: input.note } : {}),
+    };
     let updated: WorkflowRun<ProductionBrief>;
     try {
-      updated = await this.options.pipeline.decide(runId, {
-        interventionId: intervention.id,
-        action: input.action,
-        actor,
-        ...(input.note ? { note: input.note } : {}),
-      });
+      if (this.options.pipeline.dispatchDecision) {
+        const dispatched = await this.options.pipeline.dispatchDecision(
+          runId,
+          decision,
+          (run) => this.publish(this.toDetail(run)),
+        );
+        return await this.dispatchedDetail(dispatched);
+      }
+      updated = await this.options.pipeline.decide(runId, decision);
     } catch (error) {
       if (error instanceof StaleRunRevisionError || (error instanceof Error && /locked by another writer/.test(error.message))) {
         throw new StudioConflictError("这条制作已被其他操作更新，请刷新页面后重试。");
       }
       throw error;
     }
+    const detail = this.toDetail(updated);
+    this.publish(detail);
+    return detail;
+  }
+
+  async requestPause(runId: string): Promise<StudioRunDetail> {
+    const current = await this.loadRequiredRun(runId);
+    if (current.status !== "running") throw new StudioConflictError("这条制作当前不在自动执行中。");
+    await this.options.pipeline.requestPause(runId);
+    const detail = { ...this.toDetail(current), pauseRequested: true };
+    this.publish(detail);
+    return detail;
+  }
+
+  async resumePaused(runId: string): Promise<StudioRunDetail> {
+    const current = await this.loadRequiredRun(runId);
+    if (current.status !== "paused") throw new StudioConflictError("这条制作当前没有暂停。");
+    if (this.options.pipeline.dispatchResumePaused) {
+      const dispatched = await this.options.pipeline.dispatchResumePaused(
+        runId,
+        (run) => this.publish(this.toDetail(run)),
+      );
+      return await this.dispatchedDetail(dispatched);
+    }
+    const updated = await this.options.pipeline.resumePaused(runId);
     const detail = this.toDetail(updated);
     this.publish(detail);
     return detail;
@@ -408,6 +478,7 @@ export class ProductionStudio {
         document: input.document,
         authorizedRunFiles: input.authorizedRunFiles ?? [],
       });
+      if (prepared.unchanged) return this.toDetail(current);
       overrideOutput = prepared.output;
       overrideArtifacts = prepared.artifacts;
       humanDocumentPaths = prepared.cleanupPaths;
@@ -419,6 +490,9 @@ export class ProductionStudio {
       runRoot: path.join(this.options.workspaceRoot, "runs", runId),
       allowPathChanges: editsDocument,
     });
+    if (!editsDocument && node.outputState?.stale !== true && isDeepStrictEqual(overrideOutput, reference)) {
+      return this.toDetail(current);
+    }
     let persisted = false;
     try {
       const updated = await this.options.pipeline.applyNodeOverride(runId, {
@@ -465,11 +539,15 @@ export class ProductionStudio {
     const effectiveInputVersion = node.inputState?.versions.find(
       (version) => version.id === node.inputState?.effectiveVersionId,
     );
+    const restoredInput = restoreManagedFileReferences(input.input, effectiveInputVersion?.value);
+    if (node.inputState?.stale !== true && isDeepStrictEqual(restoredInput, effectiveInputVersion?.value)) {
+      return this.toDetail(current);
+    }
     try {
       const updated = await this.options.pipeline.applyNodeInputOverride(runId, {
         nodeId,
         actor,
-        input: restoreManagedFileReferences(input.input, effectiveInputVersion?.value),
+        input: restoredInput,
         ...(effectiveInputVersion ? { expectedVersionId: effectiveInputVersion.id } : {}),
         allowTerminalEdit: isTerminalRun(current.status) && input.confirmTerminalEdit === true,
       });
@@ -493,7 +571,10 @@ export class ProductionStudio {
     runArtifacts: WorkflowRun<ProductionBrief>["artifacts"];
     document: NonNullable<StudioNodeOverrideInput["document"]>;
     authorizedRunFiles: string[];
-  }): Promise<{ output: Record<string, unknown>; artifacts: ArtifactDraft[]; cleanupPaths: string[] }> {
+  }): Promise<
+    | { unchanged: true }
+    | { unchanged: false; output: Record<string, unknown>; artifacts: ArtifactDraft[]; cleanupPaths: string[] }
+  > {
     const contract = EDITABLE_DOCUMENTS[options.nodeId];
     if (!contract) throw new StudioInputError(`节点“${options.nodeId}”没有可编辑的结构化产物。`);
     if (!isRecord(options.reference)) throw new StudioInputError(`节点“${options.nodeId}”尚无可编辑的结构化交付。`);
@@ -526,6 +607,9 @@ export class ProductionStudio {
       runRoot,
       allowPathChanges: options.authorizedRunFiles.length > 0,
     });
+    if (options.authorizedRunFiles.length === 0 && isDeepStrictEqual(requestedDocument, referenceDocument)) {
+      return { unchanged: true };
+    }
     const mediaRevision = await prepareAuthorizedRunFileArtifacts({
       nodeId: options.nodeId,
       actor: options.actor,
@@ -564,6 +648,7 @@ export class ProductionStudio {
       throw error;
     }
     return {
+      unchanged: false,
       output,
       cleanupPaths,
       artifacts: [{
@@ -620,7 +705,7 @@ export class ProductionStudio {
       throw new StudioConflictError("费用计划或上游版本已经变化，请重新检查后确认。");
     }
     try {
-      const updated = await this.options.pipeline.authorizeSpend(runId, {
+      const authorization: SpendAuthorizationDraft = {
         nodeId,
         inputVersionIds: [...plan.inputVersionIds],
         providerId: plan.providerId,
@@ -628,6 +713,17 @@ export class ProductionStudio {
         maxCostCny: plan.maxCostCny,
         maxAttempts: plan.maxAttempts,
         approvedBy,
+      };
+      if (this.options.pipeline.dispatchSpendAuthorization) {
+        const dispatched = await this.options.pipeline.dispatchSpendAuthorization(
+          runId,
+          authorization,
+          (run) => this.publish(this.toDetail(run)),
+        );
+        return await this.dispatchedDetail(dispatched);
+      }
+      const updated = await this.options.pipeline.authorizeSpend(runId, {
+        ...authorization,
       });
       const detail = this.toDetail(updated);
       this.publish(detail);
@@ -644,6 +740,13 @@ export class ProductionStudio {
     const current = await this.loadRequiredRun(runId);
     if (current.status !== "stale") throw new StudioConflictError("这条制作当前没有需要重新生成的旧结果。");
     try {
+      if (this.options.pipeline.dispatchResumeStale) {
+        const dispatched = await this.options.pipeline.dispatchResumeStale(
+          runId,
+          (run) => this.publish(this.toDetail(run)),
+        );
+        return await this.dispatchedDetail(dispatched);
+      }
       const updated = await this.options.pipeline.resumeStale(runId);
       const detail = this.toDetail(updated);
       this.publish(detail);
@@ -662,6 +765,14 @@ export class ProductionStudio {
       throw new StudioConflictError("这个节点当前不能重试，请刷新页面检查最新状态。");
     }
     try {
+      if (this.options.pipeline.dispatchRetryFailedNode) {
+        const dispatched = await this.options.pipeline.dispatchRetryFailedNode(
+          runId,
+          nodeId,
+          (run) => this.publish(this.toDetail(run)),
+        );
+        return await this.dispatchedDetail(dispatched);
+      }
       const updated = await this.options.pipeline.retryFailedNode(runId, nodeId);
       const detail = this.toDetail(updated);
       this.publish(detail);
@@ -858,7 +969,11 @@ export async function loadAgentLoopProgress(
 }
 
 function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undefined {
-  if (!isRecord(value) || value.version !== "video-factory/agent-loop-checkpoint-v3") return undefined;
+  if (!isRecord(value)
+    || (value.version !== "video-factory/agent-loop-checkpoint-v3"
+      && value.version !== "video-factory/agent-loop-checkpoint-v4"
+      && value.version !== "video-factory/agent-loop-checkpoint-v5"
+      && value.version !== "video-factory/agent-loop-checkpoint-v6")) return undefined;
   const maxIterations = Number(value.maxIterations);
   const completed = Array.isArray(value.completed) ? value.completed : [];
   const status = value.status;
@@ -1092,7 +1207,7 @@ async function writeStartRecord(recordPath: string, record: StartRecord): Promis
 }
 
 function toRunSummary(run: WorkflowRun<ProductionBrief>): StudioRunSummary {
-  const currentNodeId = run.nodeRuns.at(-1)?.nodeId ?? "brief";
+  const currentNodeId = activeRunNodeId(run);
   const videoArtifact = effectiveNodeArtifact(run, "render", (artifact) =>
     artifact.kind === "render" && artifact.contentType === "video/mp4")
     ?? legacyNodeArtifact(run, "render", (artifact) =>
@@ -1126,6 +1241,15 @@ function toRunSummary(run: WorkflowRun<ProductionBrief>): StudioRunSummary {
         : {}),
     } : {}),
   };
+}
+
+function activeRunNodeId(run: WorkflowRun<ProductionBrief>): string {
+  return run.nodeRuns.find((node) => node.status === "running")?.nodeId
+    ?? run.nodeRuns.find((node) => ["needs_human", "awaiting_spend_approval", "approval_invalidated", "stale"].includes(node.status))?.nodeId
+    ?? run.nodeRuns.find((node) => node.status === "failed" || node.status === "rejected")?.nodeId
+    ?? run.nodeRuns.find((node) => node.status === "pending")?.nodeId
+    ?? run.nodeRuns.at(-1)?.nodeId
+    ?? "brief";
 }
 
 function toRunDetail(

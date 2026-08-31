@@ -52,6 +52,7 @@ const [codexSettings, zaiCodexSettings] = await Promise.all([
   readZaiCodexProviderSettings(process.env),
 ]);
 const codexModelId = codexSettings.modelId || process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
+const codexModelFor = (taskKind: string) => codexSettings.taskModels?.[taskKind] || codexModelId;
 const zaiVisualReviewModelId = zaiCodexSettings.modelId || resolveZaiVisualReviewModelId(process.env);
 // 单并发 broker 中，21 分钟覆盖一个 10 分钟在途任务、一个完整执行和传输余量；
 // 生产任务会插队尚未开始的热点任务，客户端仍不重放已受理任务。
@@ -61,12 +62,20 @@ const codexClient = codexSettings.available
 const zaiCodexClient = zaiCodexSettings.available
   ? new CodexBridgeClient({ socketPath: zaiCodexSettings.socketPath, timeoutMs: 1_260_000 })
   : undefined;
-const directorAgent = codexClient ? new CodexVisualDirectorAgent({ client: codexClient }) : undefined;
-const screenwriterAgent = codexClient ? new CodexScreenwriterAgent({ client: codexClient }) : undefined;
+const independentRoleAuditReady = codexSettings.available
+  && (codexSettings.taskKinds === undefined || codexSettings.taskKinds.includes("role-audit"));
+const directorAgent = codexClient ? new CodexVisualDirectorAgent({
+  client: codexClient,
+  modelId: codexModelFor("director-plan"),
+}) : undefined;
+const screenwriterAgent = codexClient ? new CodexScreenwriterAgent({
+  client: codexClient,
+  modelId: codexModelFor("script-draft"),
+}) : undefined;
 const publishCopyWriter = codexClient ? new CodexPublishCopyWriter({ client: codexClient }) : undefined;
 const assetSemanticRanker = codexClient ? new CodexAssetSemanticRanker({
   client: codexClient,
-  modelId: codexModelId,
+  modelId: codexModelFor("asset-rank"),
 }) : undefined;
 const reviewMedia = new PythonReviewMediaPreprocessor({
   repositoryRoot,
@@ -77,14 +86,17 @@ const reviewMedia = new PythonReviewMediaPreprocessor({
 const referenceGrammarAgent = codexClient ? new CodexReferenceGrammarAgent({
   client: codexClient,
   media: reviewMedia,
-  modelId: codexModelId,
+  modelId: codexModelFor("reference-grammar"),
 }) : undefined;
 const visualReviewAgents = [
-  ...(zaiCodexClient ? [new CodexVisualReviewAgent({
+  ...(zaiCodexClient && codexClient && independentRoleAuditReady ? [new CodexVisualReviewAgent({
       client: zaiCodexClient,
+      auditClient: codexClient,
       media: reviewMedia,
       providerId: "glm-visual-review-v1",
       modelId: zaiVisualReviewModelId,
+      producerSessionMode: "stateless",
+      maxProducerCalls: 3,
     })] : []),
   ...(codexClient ? [new CodexVisualReviewAgent({
       client: codexClient,
@@ -95,7 +107,7 @@ const visualReviewAgents = [
         environment: process.env,
       }),
       providerId: "codex-visual-review-v1",
-      modelId: codexModelId,
+      modelId: codexModelFor("visual-review"),
     })] : []),
 ];
 const pipeline = new ProductionPipeline({
@@ -118,7 +130,13 @@ const service = new StudioService({
   workspaceRoot,
   pipeline,
   opportunities,
-  codexAvailability: { available: codexSettings.available, reason: codexSettings.reason, taskKinds: codexSettings.taskKinds, modelId: codexSettings.modelId },
+  codexAvailability: {
+    available: codexSettings.available,
+    reason: codexSettings.reason,
+    taskKinds: codexSettings.taskKinds,
+    modelId: codexSettings.modelId,
+    ...(codexSettings.taskModels ? { taskModels: codexSettings.taskModels } : {}),
+  },
   zaiCodexAvailability: { available: zaiCodexSettings.available, reason: zaiCodexSettings.reason, taskKinds: zaiCodexSettings.taskKinds, modelId: zaiCodexSettings.modelId },
   ...(codexClient ? {
     seriesPlanningAgent: new CodexSeriesPlanningAgent(

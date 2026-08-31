@@ -166,7 +166,7 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
       billing: "metered",
       billingUnit: "run",
       estimatedCostCny: positiveEstimate(environment.ZAI_VISUAL_REVIEW_ESTIMATED_CNY, 0.1),
-      maxAttempts: 1,
+      maxAttempts: 3,
     },
   ];
   for (const setting of readMeteredImageProviderSettings(environment)) metadata.push({

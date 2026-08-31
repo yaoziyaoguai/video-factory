@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 import {
   CodexExecutor,
   CodexExecutorError,
+  buildContinuationPrompt,
   buildTaskPrompt,
   buildCodexExecCommand,
   codexExecutorProfileFor,
@@ -385,6 +386,12 @@ describe("parseTaskRequest", () => {
     assert.equal(asset.kind, "asset-rank");
     assert.deepEqual(asset.payload.revision, assetInput.payload.revision);
 
+    const visualInput = visualReviewRequest();
+    visualInput.payload.revision = { candidate: { recommendation: "revise" }, audit: { repairInstructions: ["修正字幕安全区"] } };
+    const visual = parseTaskRequest(visualInput);
+    assert.equal(visual.kind, "visual-review");
+    assert.deepEqual(visual.payload.revision, visualInput.payload.revision);
+
     const greenlightInput = seriesRoadmapRequest();
     greenlightInput.payload.planningWindow = { startEpisodeNumber: 2, count: 1, mode: "greenlight" };
     greenlightInput.payload.targetEpisode = {
@@ -550,6 +557,59 @@ describe("buildCodexExecCommand", () => {
     assert.doesNotMatch(serialized, /\/bin\/(ba)?sh/);
     assert.doesNotMatch(serialized, /rm -rf/);
   });
+
+  it("resumes a persisted role session without the ephemeral flag", () => {
+    const { args } = buildCodexExecCommand({
+      codexBin: "/opt/codex/bin/codex",
+      workspaceDir: "/run/task/workspace",
+      lastMessagePath: "/run/task/last-message.txt",
+      schemaPath: "/run/task/output-schema.json",
+      model: "gpt-5.6-sol",
+      effort: "max",
+      sessionId: "019c0000-0000-7000-8000-000000000001",
+    });
+
+    assert.deepEqual(args.slice(0, 4), ["exec", "resume", "--all", "--ignore-user-config"]);
+    assert.ok(args.includes("sandbox_mode=\"read-only\""));
+    assert.ok(args.includes("019c0000-0000-7000-8000-000000000001"));
+    assert.equal(args.includes("--ephemeral"), false);
+    assert.equal(args.includes("--cd"), false);
+  });
+});
+
+describe("role audit continuation contract", () => {
+  it("accepts previousAudit and carries it into the bounded audit prompt", () => {
+    const request = roleAuditRequest();
+    request.payload.previousAudit = {
+      version: "video-factory/role-audit-v1",
+      verdict: "repair",
+      score: 70,
+      summary: "需要修订",
+      issues: [],
+      repairInstructions: ["缩短标题"],
+    };
+
+    const prompt = buildTaskPrompt(parseTaskRequest(request));
+
+    assert.match(prompt, /"previousAudit"/);
+    assert.match(prompt, /缩短标题/);
+  });
+
+  it("repeats the role, criteria, and bounded evidence context in every continuation", () => {
+    const request = roleAuditRequest();
+    request.payload.iteration = 2;
+    request.payload.context = {
+      roleScope: { owns: ["脚本"], doesNotOwn: ["素材版权"] },
+      evidence: { title: "一滴墨为什么能长成一座山" },
+    };
+
+    const prompt = buildContinuationPrompt(parseTaskRequest(request));
+
+    assert.match(prompt, /"role":"编剧"/);
+    assert.match(prompt, /"criteria":\["前两秒建立具体钩子"\]/);
+    assert.match(prompt, /"roleScope"/);
+    assert.match(prompt, /一滴墨为什么能长成一座山/);
+  });
 });
 
 describe("CodexExecutor.runTask", () => {
@@ -558,6 +618,8 @@ describe("CodexExecutor.runTask", () => {
     let receivedArgs: readonly string[] = [];
     const executor = new CodexExecutor({
       workspaceRoot,
+      model: "gpt-5.6-terra",
+      auditModel: "gpt-5.6-sol",
       effort: "high",
       auditEffort: "max",
       spawnFn: fakeSpawn(async ({ child, lastMessagePath, args }) => {
@@ -579,8 +641,37 @@ describe("CodexExecutor.runTask", () => {
     const result = await executor.runTask(parseTaskRequest(roleAuditRequest()));
 
     assert.ok(flagValues(receivedArgs, "--config").includes("model_reasoning_effort=max"));
+    assert.deepEqual(flagValues(receivedArgs, "--model"), ["gpt-5.6-sol"]);
+    assert.equal(result.trace?.modelId, "gpt-5.6-sol");
     assert.equal(result.trace?.reasoningEffort, "max");
+    assert.equal(executor.identity.taskModels?.["director-plan"], "gpt-5.6-terra");
+    assert.equal(executor.identity.taskModels?.["role-audit"], "gpt-5.6-sol");
     assert.deepEqual(await readdir(workspaceRoot), []);
+  });
+
+  it("uses the production model for director generation", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-director-model-"));
+    let receivedArgs: readonly string[] = [];
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      model: "gpt-5.6-terra",
+      auditModel: "gpt-5.6-sol",
+      effort: "high",
+      auditEffort: "max",
+      spawnFn: fakeSpawn(async ({ child, lastMessagePath, args }) => {
+        receivedArgs = args;
+        await writeFile(lastMessagePath, JSON.stringify({ ok: true }), "utf8");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("close", 0, null);
+      }),
+    });
+
+    const result = await executor.runTask(parseTaskRequest(directorRequest()));
+
+    assert.deepEqual(flagValues(receivedArgs, "--model"), ["gpt-5.6-terra"]);
+    assert.ok(flagValues(receivedArgs, "--config").includes("model_reasoning_effort=high"));
+    assert.equal(result.trace?.modelId, "gpt-5.6-terra");
   });
 
   it("uses max reasoning and the broker-owned schema for series planning", async () => {
@@ -816,6 +907,42 @@ describe("CodexExecutor.runTask", () => {
     assert.deepEqual(JSON.parse(dataSection), { brief: scriptRequest().payload.brief });
   });
 
+  it("captures the initial Codex thread and resumes with only the repair delta", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-session-broker-"));
+    const threadId = "019c0000-0000-7000-8000-000000000001";
+    const prompts: string[] = [];
+    const argvs: Array<readonly string[]> = [];
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      spawnFn: fakeSpawn(async ({ child, lastMessagePath, args }) => {
+        argvs.push([...args]);
+        prompts.push(Buffer.concat(child.stdinChunks).toString("utf8"));
+        await writeFile(lastMessagePath, JSON.stringify({ scenes: [{ position: prompts.length }] }), "utf8");
+        child.stdout.end(`${JSON.stringify({ type: "thread.started", thread_id: threadId })}\n`);
+        child.stderr.end();
+        child.emit("close", 0, null);
+      }),
+    });
+    const initialTask = parseTaskRequest(scriptRequest());
+    const first = await executor.runTask(initialTask, { persistSession: true });
+    const revisedRequest = scriptRequest();
+    revisedRequest.payload.revision = {
+      candidate: { scenes: [{ position: 1 }] },
+      audit: { repairInstructions: ["缩短开场"] },
+    };
+    assert.equal(first.sessionId, threadId);
+    const second = await executor.runTask(parseTaskRequest(revisedRequest), { sessionId: first.sessionId! });
+
+    assert.equal(second.sessionId, threadId);
+    assert.equal(argvs[0]?.[1], "--sandbox");
+    assert.equal(argvs[1]?.[1], "resume");
+    assert.ok(argvs[1]?.includes("--all"), "persistent role sessions must resume across isolated task directories");
+    assert.match(prompts[0] ?? "", /下班后别急着做这 3 件事/);
+    assert.match(prompts[1] ?? "", /缩短开场/);
+    assert.doesNotMatch(prompts[1] ?? "", /下班后别急着做这 3 件事/);
+    assert.doesNotMatch(prompts[1] ?? "", /普通上班族/);
+  });
+
   it("runs publish-copy with the hostile brief isolated as data", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
     let childRef: FakeCodexChild | undefined;
@@ -874,6 +1001,18 @@ describe("CodexExecutor.runTask", () => {
           child.emit("close", 1, null);
         },
         pattern: /code 1.*invalid_json_schema.*canonFacts.*\[redacted\]/,
+      },
+      {
+        name: "role session diagnostic",
+        behavior: ({ child }) => {
+          child.stderr.end();
+          child.stdout.end(`${JSON.stringify({
+            type: "turn.failed",
+            error: { message: "Session not found: 019c0000-0000-7000-8000-000000000001" },
+          })}\n`);
+          child.emit("close", 1, null);
+        },
+        pattern: /code 1.*Session not found: \[redacted-session\]/,
       },
       {
         name: "empty output",

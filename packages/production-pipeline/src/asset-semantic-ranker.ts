@@ -111,11 +111,11 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
         "没有把候选锁定，也没有新增、删除或替换候选素材",
       ],
       maxIterations: this.options.maxReviewIterations ?? 3,
-      produce: (revision, { requestId }) => client.runTaskDetailed!("asset-rank", {
+      produce: (revision, { requestId, session }) => client.runTaskDetailed!("asset-rank", {
         ...payload,
         ...(revision ? { revision } : {}),
-      }, requestId),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => client.runTaskDetailed!("role-audit", {
+      }, requestId, session),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => client.runTaskDetailed!("role-audit", {
         role,
         iteration,
         criteria,
@@ -138,7 +138,7 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
           sha256: thumbnail.sha256,
           jpegBase64: thumbnail.jpegBase64,
         })),
-      }, requestId),
+      }, requestId, session),
       validate: (value) => validateAssetSemanticRanking(value, report),
       ...(checkpoint ? { checkpoint } : {}),
     });

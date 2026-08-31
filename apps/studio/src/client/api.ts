@@ -204,6 +204,14 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/regenerate-stale`,
     { method: "POST" },
   ),
+  requestPause: (runId: string) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/pause`,
+    { method: "POST" },
+  ),
+  resumePaused: (runId: string) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/resume`,
+    { method: "POST" },
+  ),
   retryFailedNode: (runId: string, nodeId: string) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/retry`,
     { method: "POST" },

@@ -44,6 +44,11 @@ describe("creator settings API contracts", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 190, pauseScale: 1.1, masteringPreset: "social" },
       defaultRecipeId: "free-stock",
       defaultAssetProviderId: "pexels-stock-v1",
+      roleProviderDefaults: {
+        script: "codex-screenwriter-v1",
+        director: "api-visual-director-v1",
+        visualReview: "codex-visual-review-v1",
+      },
       productionDefaults: {
         directorProfileId: "documentary-observer",
         reviewMode: "manual",
@@ -54,6 +59,11 @@ describe("creator settings API contracts", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 190, pauseScale: 1.1, masteringPreset: "social" },
       defaultRecipeId: "free-stock",
       defaultAssetProviderId: "pexels-stock-v1",
+      roleProviderDefaults: {
+        script: "codex-screenwriter-v1",
+        director: "api-visual-director-v1",
+        visualReview: "codex-visual-review-v1",
+      },
       productionDefaults: {
         directorProfileId: "documentary-observer",
         reviewMode: "manual",
@@ -65,6 +75,8 @@ describe("creator settings API contracts", () => {
     assert.throws(() => parseStudioCreatorSettingsPatch({ productionDefaults: { directorProfileId: "famous-person" } }), /默认导演角色无效/);
     assert.throws(() => parseStudioCreatorSettingsPatch({ productionDefaults: { durationSeconds: 120 } }), /默认视频时长/);
     assert.throws(() => parseStudioCreatorSettingsPatch({ productionDefaults: { reviewMode: "automatic" } }), /人工终审/);
+    assert.throws(() => parseStudioCreatorSettingsPatch({ roleProviderDefaults: { unknown: "provider-v1" } }), /生产角色/);
+    assert.throws(() => parseStudioCreatorSettingsPatch({ roleProviderDefaults: { script: "bad provider" } }), /能力编号/);
   });
 
   it("accepts a configured cloud voice as the creator default", () => {

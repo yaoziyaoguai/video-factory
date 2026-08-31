@@ -17,20 +17,23 @@ export interface CodexVisualDirectorAgentOptions {
   retryDelayMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   maxReviewIterations?: number;
+  modelId?: string;
 }
 
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
-export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v6|role-audit-v1|director-validator-v1";
+export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v8|role-audit-v2|director-validator-v2";
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
 export class CodexVisualDirectorAgent implements VisualDirectorAgent {
   readonly id = "api-visual-director-v1";
+  readonly modelId: string;
   private readonly client: CodexBridgeClient;
   private readonly maxReviewIterations: number;
 
   constructor(options: CodexVisualDirectorAgentOptions) {
+    this.modelId = options.modelId?.trim() || "codex-default";
     this.maxReviewIterations = options.maxReviewIterations ?? 3;
     if (options.client) {
       this.client = options.client;
@@ -75,37 +78,134 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
         "系列视觉母题、角色/声音锚点、canon 与前后集连续性得到保持",
       ],
       maxIterations: this.maxReviewIterations,
-      produce: (revision, { requestId }) => this.client.runTaskDetailed("director-plan", {
+      produce: (revision, { requestId, session }) => this.client.runTaskDetailed("director-plan", {
         ...basePayload,
         ...(revision ? { revision } : {}),
-      }, requestId),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId }) => this.client.runTaskDetailed("role-audit", {
+      }, requestId, session),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
-        context: {
-          roleScope: {
-            owns: ["requestedProfileId", "resolvedProfileId", "profileRationale", "visualBible", "shots"],
-            doesNotOwn: ["素材实际下载结果", "生成模型最终画面", "配音成品", "渲染与审片结果"],
-          },
-          upstreamFacts: {
-            brief: directorInput.brief,
-            scenes: directorInput.scenes,
-          },
-          currentRoleContract: {
-            directorProfiles: VISUAL_DIRECTOR_PROFILES,
-            assetProviders: directorInput.assetProviders,
-            economics: directorInput.economics,
-          },
-          downstreamBoundary: "审查镜头计划是否能被已声明 Provider 执行；不得要求当前节点提供尚未生成或下载的真实画面。",
-        },
+        context: visualDirectorAuditContext(directorInput, candidate),
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
-      }, requestId),
+      }, requestId, session),
       validate: (value) => validateVisualDirectorPlan(value, validationFor(input)),
       ...(agentLoopCheckpoint ? { checkpoint: agentLoopCheckpoint } : {}),
     });
   }
+}
+
+function visualDirectorAuditContext(
+  input: Omit<VisualDirectorAgentInput, "agentLoopCheckpoint">,
+  candidate: VisualDirectorPlan,
+): Record<string, unknown> {
+  const { brief } = input;
+  const template = brief.templateBlueprint;
+  const reference = brief.referenceGrammar;
+  const series = brief.seriesContext;
+  const selectedDirectorProfile = VISUAL_DIRECTOR_PROFILES.find(({ id }) => id === candidate.resolvedProfileId);
+  if (!selectedDirectorProfile) throw new Error(`Director profile '${candidate.resolvedProfileId}' is unavailable.`);
+  return {
+    roleScope: {
+      owns: ["requestedProfileId", "resolvedProfileId", "profileRationale", "visualBible", "shots"],
+      doesNotOwn: ["素材实际下载结果", "生成模型最终画面", "配音成品", "渲染与审片结果"],
+    },
+    upstreamFacts: {
+      brief: {
+        title: brief.title,
+        angle: brief.angle,
+        audience: brief.audience,
+        platform: brief.platform,
+        durationSeconds: brief.durationSeconds,
+        requestedProfileId: brief.requestedProfileId,
+        ...(brief.editorial ? { editorial: brief.editorial } : {}),
+        ...(template ? {
+          template: {
+            automationLevel: template.automationLevel,
+            storyStructure: template.storyStructure.map(({ id, purpose, required }) => ({ id, purpose, required })),
+            shotSlots: template.shotSlots.map(({ id, beatId, purpose, durationSeconds, allowedCapabilities }) => ({
+              id,
+              beatId,
+              purpose,
+              durationSeconds,
+              allowedCapabilities,
+            })),
+            visualSystem: template.visualSystem,
+            soundSystem: template.soundSystem,
+            qualityRules: template.qualityRules.map(({ label, dimension, required, threshold }) => ({
+              label,
+              dimension,
+              required,
+              threshold,
+            })),
+            costPolicy: template.costPolicy,
+          },
+        } : {}),
+        ...(reference ? {
+          referenceGrammar: {
+            summary: reference.summary,
+            pacing: reference.pacing,
+            composition: reference.composition,
+            camera: reference.camera,
+            color: reference.color,
+            transitions: reference.transitions,
+            sound: reference.sound,
+            reusableRules: reference.reusableRules,
+            avoidCopying: reference.avoidCopying,
+            confidence: reference.confidence,
+          },
+        } : {}),
+        ...(series ? {
+          seriesContinuity: {
+            seriesName: series.seriesName,
+            episodeNumber: series.episodeNumber,
+            premise: series.premise,
+            arc: series.arc,
+            episode: {
+              pillar: series.episode.pillar,
+              viewerPromise: series.episode.viewerPromise,
+              hook: series.episode.hook,
+              payoff: series.episode.payoff,
+            },
+            bible: series.bible,
+            canon: {
+              revision: series.canon.revision,
+              facts: series.canon.facts.map(({ id, statement, sourceEpisodeId }) => ({ id, statement, sourceEpisodeId })),
+            },
+            continuity: series.continuity,
+          },
+        } : {}),
+      },
+      scenes: input.scenes.map((scene) => ({
+        position: scene.position,
+        narration: scene.narration,
+        duration: scene.duration,
+        visualStrategy: scene.visualStrategy,
+        visualPrompt: scene.visualPrompt,
+        visibleAction: scene.visibleAction,
+        ...(scene.onScreenText ? { onScreenText: scene.onScreenText } : {}),
+        ...(scene.soundCue ? { soundCue: scene.soundCue } : {}),
+        successCriteria: scene.successCriteria,
+        failureConditions: scene.failureConditions,
+      })),
+    },
+    currentRoleContract: {
+      availableDirectorProfileIds: VISUAL_DIRECTOR_PROFILES.map(({ id }) => id),
+      selectedDirectorProfile,
+      assetProviders: input.assetProviders.map((provider) => ({
+        id: provider.id,
+        label: provider.label,
+        billing: provider.billing,
+        deliveryTypes: provider.deliveryTypes,
+        strengths: provider.strengths,
+        constraints: provider.constraints,
+        estimatedCnyPerClip: provider.estimatedCnyPerClip,
+      })),
+      economics: input.economics,
+    },
+    downstreamBoundary: "审查镜头计划是否能被已声明 Provider 执行；不得要求当前节点提供尚未生成或下载的真实画面。",
+  };
 }
 
 function validationFor(input: VisualDirectorAgentInput): VisualDirectorPlanValidation {

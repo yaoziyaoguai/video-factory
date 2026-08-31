@@ -111,6 +111,8 @@ export interface StudioServicePort {
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
   authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy: string): Promise<StudioRunDetail>;
+  requestPause(runId: string): Promise<StudioRunDetail>;
+  resumePaused(runId: string): Promise<StudioRunDetail>;
   resumeStale(runId: string): Promise<StudioRunDetail>;
   retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail>;
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void;
@@ -411,6 +413,16 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/regenerate-stale", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     return options.service.resumeStale(request.params.runId);
+  });
+
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/pause", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    return options.service.requestPause(request.params.runId);
+  });
+
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/resume", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    return options.service.resumePaused(request.params.runId);
   });
 
   app.post<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/retry", async (request) => {

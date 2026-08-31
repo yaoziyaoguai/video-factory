@@ -143,6 +143,9 @@ export class TrendStudio {
     this.candidateLoadingForced = forceRefresh;
     try {
       const values = await loading;
+      if (values.length === 0 && this.candidateCache?.values.length) {
+        throw new Error("热点刷新没有返回候选，已保留上一版缓存。");
+      }
       const cachedAt = this.options.now().toISOString();
       await this.persistCache({ schemaVersion: 1, cachedAt, values });
       // 只有持久化生命周期结束后才发布新缓存，避免调用方看到新值时后台仍在改文件。

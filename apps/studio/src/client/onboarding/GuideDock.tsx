@@ -73,13 +73,13 @@ export function GuideDock({ open, pathname, onOpenChange, onStartFullTour, onSta
           </ol>
           <div className="guide-dock-actions">
             <button ref={primaryActionRef} className="guide-action-primary" type="button" onClick={() => start(onStartFullTour)}>
-              <Play aria-hidden="true" size={16} />完整带我做一条
+              <Play aria-hidden="true" size={16} />完整流程导览
             </button>
             <button type="button" onClick={() => start(onStartPageTour)}>
               讲解当前页面<ArrowRight aria-hidden="true" size={16} />
             </button>
           </div>
-          <p className="guide-dock-note">导览中可随时提前结束，也可以从页面上的问号入口再次打开。</p>
+          <p className="guide-dock-note">有可用候选时会跟随真实控件操作；导览不会替你启动生产或花钱，并可随时结束。</p>
         </section>
       ) : null}
       <button

@@ -19,6 +19,55 @@ function deterministicIds(): (prefix: string) => string {
 const clock = (): string => "2026-08-21T10:00:00.000Z";
 
 describe("WorkflowRunner", () => {
+  it("pauses between nodes on request and resumes without replaying completed work", async () => {
+    let pauseRequested = false;
+    let firstCalls = 0;
+    let secondCalls = 0;
+    const definition: WorkflowDefinition = {
+      id: "cooperative-pause",
+      name: "Cooperative pause",
+      version: "1.0.0",
+      nodes: [{
+        id: "script",
+        label: "Script",
+        capability: "script.draft",
+        mode: "automatic",
+        execute: () => {
+          firstCalls += 1;
+          pauseRequested = true;
+          return { output: { text: "draft" } };
+        },
+      }, {
+        id: "director",
+        label: "Director",
+        capability: "storyboard.plan",
+        mode: "automatic",
+        dependsOn: ["script"],
+        execute: () => {
+          secondCalls += 1;
+          return { output: { shots: 3 } };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({
+      shouldPause: () => pauseRequested,
+    });
+
+    const paused = await runner.run(definition, {});
+
+    assert.equal(paused.status, "paused");
+    assert.equal(firstCalls, 1);
+    assert.equal(secondCalls, 0);
+    assert.deepEqual(paused.nodeRuns.map((node) => [node.nodeId, node.status]), [["script", "succeeded"]]);
+
+    pauseRequested = false;
+    const resumed = await runner.resumePaused(definition, paused);
+
+    assert.equal(resumed.status, "succeeded");
+    assert.equal(firstCalls, 1);
+    assert.equal(secondCalls, 1);
+  });
+
   it("runs nodes in dependency order and tracks topic artifacts", async () => {
     const topicNode: NodeDefinition = {
       id: "topic-intelligence",
@@ -361,6 +410,71 @@ describe("WorkflowRunner", () => {
     });
   });
 
+  it("refreshes future execution plans on retry without rewriting completed history", async () => {
+    const firstRegistry = new ProviderRegistry();
+    firstRegistry.register({
+      id: "writer",
+      label: "Writer",
+      modelId: "writer-v1",
+      capability: "script.draft",
+      run: () => ({ text: "draft" }),
+    });
+    firstRegistry.register({
+      id: "reviewer",
+      label: "Reviewer",
+      modelId: "reviewer-v1",
+      capability: "quality.review",
+      run: () => {
+        throw new Error("temporary model failure");
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "refresh-retry-plan",
+      name: "Refresh retry plan",
+      version: "1.0.0",
+      nodes: [
+        { id: "script", label: "Script", capability: "script.draft", providerId: "writer", mode: "automatic" },
+        {
+          id: "review",
+          label: "Review",
+          capability: "quality.review",
+          providerId: "reviewer",
+          mode: "automatic",
+          dependsOn: ["script"],
+        },
+      ],
+    };
+    const failed = await new WorkflowRunner({ providers: firstRegistry }).run(definition, {});
+
+    const secondRegistry = new ProviderRegistry();
+    secondRegistry.register({
+      id: "writer",
+      label: "Writer",
+      modelId: "writer-v2",
+      capability: "script.draft",
+      run: () => ({ text: "new draft" }),
+    });
+    secondRegistry.register({
+      id: "reviewer",
+      label: "Reviewer",
+      modelId: "reviewer-v2",
+      capability: "quality.review",
+      run: () => ({ approved: true }),
+    });
+
+    const retried = await new WorkflowRunner({ providers: secondRegistry }).retryFailedNode(
+      definition,
+      failed,
+      "review",
+    );
+
+    assert.equal(retried.executionPlan?.find((plan) => plan.nodeId === "script")?.modelId, "writer-v1");
+    assert.equal(retried.executionPlan?.find((plan) => plan.nodeId === "script")?.snapshotSource, "created");
+    assert.equal(retried.executionPlan?.find((plan) => plan.nodeId === "review")?.modelId, "reviewer-v2");
+    assert.equal(retried.executionPlan?.find((plan) => plan.nodeId === "review")?.snapshotSource, "reconstructed");
+    assert.equal(retried.nodeRuns.find((node) => node.nodeId === "review")?.executionReceipt?.modelId, "reviewer-v2");
+  });
+
   it("snapshots custom receipt arrays independently from node results and receipt history", async () => {
     const mutableParameters = ["/private/input.mp4"];
     const mutableModelIds = ["review-v1"];
@@ -570,6 +684,57 @@ describe("WorkflowRunner", () => {
     };
     await assert.rejects(() => runner.resumeStale(definition, staleAfterUpstreamEdit), /uncertain paid-provider outcome/);
     assert.equal(calls, 1);
+  });
+
+  it("allows retry when an authorized node fails before invoking its metered provider", async () => {
+    let providerCalls = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "paid-voice",
+      label: "Paid voice",
+      modelId: "voice-v1",
+      capability: "voice.synthesize",
+      transport: "http_api",
+      billing: "metered",
+      estimatedCostCny: 0.5,
+      maxCostCny: 0.5,
+      maxAttempts: 1,
+      run: () => {
+        providerCalls += 1;
+        return { audio: "voice.mp3" };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "pre-provider-failure",
+      name: "Pre-provider failure",
+      version: "1.0.0",
+      nodes: [{
+        id: "voice",
+        label: "Voice",
+        capability: "voice.synthesize",
+        providerId: "paid-voice",
+        mode: "automatic",
+        execute: () => { throw new Error("invalid local input"); },
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+    const paused = await runner.run(definition, {});
+    const plan = paused.nodeRuns[0]?.spendPlan;
+    assert.ok(plan);
+    const failed = await runner.authorizeSpend(definition, paused, {
+      nodeId: plan.nodeId,
+      inputVersionIds: plan.inputVersionIds,
+      providerId: plan.providerId,
+      modelId: plan.modelId,
+      maxCostCny: plan.maxCostCny,
+      maxAttempts: plan.maxAttempts,
+      approvedBy: "producer",
+    });
+
+    assert.equal(providerCalls, 0);
+    assert.equal(failed.nodeRuns[0]?.outcomeUncertain, undefined);
+    const retry = await runner.retryFailedNode(definition, failed, "voice");
+    assert.equal(retry.status, "awaiting_spend_approval");
   });
 
   it("reuses the persisted external operation id when retrying an interrupted node", async () => {

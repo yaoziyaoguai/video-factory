@@ -64,12 +64,13 @@ export function buildRunObservability(input: BuildRunObservabilityInput): Studio
   const completedNodes = input.nodes.filter(isCompleted).length;
   const totalNodes = input.nodes.length;
   const lastUpdatedAt = latestTimestamp(input.startedAt, input.nodes);
-  const elapsedUntil = input.finishedAt ?? input.now;
+  const runningNode = input.nodes.find((node) => node.status === "running");
   const progress: StudioRunProgress = {
     completedNodes,
     totalNodes,
     percentage: totalNodes > 0 ? Math.round((completedNodes / totalNodes) * 100) : 0,
-    elapsedSeconds: secondsBetween(input.startedAt, elapsedUntil),
+    elapsedSeconds: activeProcessingSeconds(input.nodes, input.now),
+    ...(runningNode?.startedAt ? { currentNodeElapsedSeconds: secondsBetween(runningNode.startedAt, input.now) } : {}),
     lastUpdatedAt,
   };
   const eta = estimateRemaining(input);
@@ -283,13 +284,21 @@ function buildResultAvailability(
 }
 
 function latestTimestamp(startedAt: string, nodes: StudioNode[]): string {
-  const candidates = nodes.flatMap((node) => [
+  const candidates = nodes.filter((node) => node.status !== "pending" && node.status !== "stale").flatMap((node) => [
     node.startedAt,
     node.finishedAt,
     node.executionReceipt?.startedAt,
     node.executionReceipt?.finishedAt,
   ]).filter((value): value is string => Boolean(value));
   return candidates.reduce((latest, value) => Date.parse(value) > Date.parse(latest) ? value : latest, startedAt);
+}
+
+function activeProcessingSeconds(nodes: StudioNode[], now: string): number {
+  return nodes.reduce((total, node) => {
+    if (!node.startedAt) return total;
+    const end = node.status === "running" ? now : node.finishedAt;
+    return end ? total + secondsBetween(node.startedAt, end) : total;
+  }, 0);
 }
 
 function secondsBetween(start: string, end: string): number {

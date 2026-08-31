@@ -24,6 +24,7 @@ import { studioApi } from "../api.js";
 import { providerLabel } from "../presentation.js";
 
 type AssetFilter = "all" | StudioAssetMediaKind | "reusable" | "needs_review";
+type AssetCollection = "creative" | "records";
 
 export function AssetsPage() {
   const [manifest, setManifest] = useState<StudioResourceManifest>();
@@ -34,6 +35,7 @@ export function AssetsPage() {
   const [provider, setProvider] = useState("all");
   const [query, setQuery] = useState("");
   const [view, setView] = useState<"work" | "asset">("work");
+  const [collection, setCollection] = useState<AssetCollection>("creative");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,9 +53,13 @@ export function AssetsPage() {
     void load();
   }, [load]);
 
+  const collectionAssets = useMemo(() => (manifest?.assetIndex.assets ?? []).filter((asset) => (
+    collection === "creative" ? isCreativeAsset(asset) : !isCreativeAsset(asset)
+  )), [collection, manifest?.assetIndex.assets]);
+
   const assets = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("zh-CN");
-    return (manifest?.assetIndex.assets ?? []).filter((asset) => {
+    return collectionAssets.filter((asset) => {
       const matchesFilter = filter === "all"
         || (filter === "reusable" ? asset.reuseStatus === "ready"
           : filter === "needs_review" ? asset.reuseStatus === "review_required"
@@ -69,10 +75,10 @@ export function AssetsPage() {
         ...asset.usages.map((usage) => usage.providerId),
       ].filter(Boolean).join(" ").toLocaleLowerCase("zh-CN").includes(normalized);
     });
-  }, [filter, manifest?.assetIndex.assets, origin, provider, query]);
+  }, [collectionAssets, filter, origin, provider, query]);
 
-  const originOptions = Object.keys(manifest?.assetIndex.facets.origins ?? {}) as StudioAssetOrigin[];
-  const providerOptions = Object.keys(manifest?.assetIndex.facets.providers ?? {}).sort((left, right) => left.localeCompare(right));
+  const originOptions = [...new Set(collectionAssets.map((asset) => asset.origin))];
+  const providerOptions = [...new Set(collectionAssets.map((asset) => asset.providerId))].sort((left, right) => left.localeCompare(right));
   const hasFilters = filter !== "all" || origin !== "all" || provider !== "all" || Boolean(query.trim());
   const clearFilters = () => {
     setFilter("all");
@@ -81,6 +87,20 @@ export function AssetsPage() {
     setQuery("");
   };
   const workGroups = useMemo(() => groupAssetsByWork(assets), [assets]);
+  const collectionStats = useMemo(() => ({
+    reusable: collectionAssets.filter((asset) => asset.reuseStatus === "ready").length,
+    duplicateUses: collectionAssets.reduce((count, asset) => count + Math.max(0, asset.useCount - 1), 0),
+    needsReview: collectionAssets.filter((asset) => asset.reuseStatus === "review_required").length,
+    documents: collectionAssets.filter((asset) => asset.mediaKind === "document").length,
+    finalRenders: collectionAssets.filter((asset) => asset.origin === "final_render").length,
+  }), [collectionAssets]);
+  const switchCollection = (next: AssetCollection) => {
+    setCollection(next);
+    clearFilters();
+  };
+  const visibleFilters = collection === "creative"
+    ? FILTERS.filter((item) => item.id !== "document" && item.id !== "font" && item.id !== "other")
+    : FILTERS.filter((item) => item.id !== "reusable" && item.id !== "needs_review");
 
   return (
     <main className="page asset-library-page">
@@ -88,25 +108,37 @@ export function AssetsPage() {
         <div>
           <p className="eyebrow">创作资产</p>
           <h1>素材档案</h1>
-          <p className="page-summary">按内容去重归档，保留来源、授权状态和每一次入片记录。</p>
+          <p className="page-summary">{collection === "creative" ? "可再次用于创作的画面与声音，按内容去重并保留授权和入片记录。" : "最终成片、脚本与质检等制作凭证独立归档，不混入可复用素材。"}</p>
         </div>
-        <div className="asset-library-count"><strong>{manifest?.assetIndex.totalAssets ?? 0}</strong><span>项独立资产</span></div>
+        <div className="asset-library-count"><strong>{collectionAssets.length}</strong><span>{collection === "creative" ? "项创作素材" : "项制作凭证"}</span></div>
       </header>
 
       {manifest ? <section className="asset-index-summary" aria-label="素材库概况">
-        <div><Database aria-hidden="true" size={18} /><span>可直接复用<strong>{manifest.assetIndex.reusableCount}</strong></span></div>
-        <div><Layers3 aria-hidden="true" size={18} /><span>跨作品使用<strong>{manifest.assetIndex.duplicateUses}</strong></span></div>
-        <div className={manifest.assetIndex.needsReviewCount ? "needs-attention" : ""}><ShieldAlert aria-hidden="true" size={18} /><span>授权待确认<strong>{manifest.assetIndex.needsReviewCount}</strong></span></div>
+        {collection === "creative" ? <>
+          <div><Database aria-hidden="true" size={18} /><span>可直接复用<strong>{collectionStats.reusable}</strong></span></div>
+          <div><Layers3 aria-hidden="true" size={18} /><span>跨作品使用<strong>{collectionStats.duplicateUses}</strong></span></div>
+          <div className={collectionStats.needsReview ? "needs-attention" : ""}><ShieldAlert aria-hidden="true" size={18} /><span>授权待确认<strong>{collectionStats.needsReview}</strong></span></div>
+        </> : <>
+          <div><FileText aria-hidden="true" size={18} /><span>制作文档<strong>{collectionStats.documents}</strong></span></div>
+          <div><Film aria-hidden="true" size={18} /><span>最终成片<strong>{collectionStats.finalRenders}</strong></span></div>
+          <div><Database aria-hidden="true" size={18} /><span>其他记录<strong>{Math.max(0, collectionAssets.length - collectionStats.documents - collectionStats.finalRenders)}</strong></span></div>
+        </>}
       </section> : null}
-      {manifest?.truncatedItemCount ? <p className="resource-note">明细列表只展示前 500 条；上方索引与筛选仍覆盖全部 {manifest.totalItems} 条素材记录。</p> : null}
+      {manifest?.truncatedItemCount ? <p className="resource-note">原始制作条目仅保留前 500 条用于诊断；当前去重索引、筛选与素材档案仍覆盖全部 {manifest.totalItems} 条记录。</p> : null}
 
       <section className="asset-library-controls" aria-label="素材筛选">
-        <div className="asset-library-view" role="group" aria-label="素材组织方式">
-          <button type="button" aria-pressed={view === "work"} onClick={() => setView("work")}>按作品</button>
-          <button type="button" aria-pressed={view === "asset"} onClick={() => setView("asset")}>按资产</button>
+        <div className="asset-library-organizers">
+          <div className="asset-library-sections" role="group" aria-label="档案类型">
+            <button type="button" aria-pressed={collection === "creative"} onClick={() => switchCollection("creative")}>创作素材</button>
+            <button type="button" aria-pressed={collection === "records"} onClick={() => switchCollection("records")}>制作凭证</button>
+          </div>
+          <div className="asset-library-view" role="group" aria-label="素材组织方式">
+            <button type="button" aria-pressed={view === "work"} onClick={() => setView("work")}>按作品</button>
+            <button type="button" aria-pressed={view === "asset"} onClick={() => setView("asset")}>按资产</button>
+          </div>
         </div>
         <div className="asset-library-filters">
-          {FILTERS.map((item) => <button key={item.id} type="button" aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}<span>{assetCount(manifest, item.id)}</span></button>)}
+          {visibleFilters.map((item) => <button key={item.id} type="button" aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}<span>{assetCount(collectionAssets, item.id)}</span></button>)}
         </div>
         <div className="asset-library-refiners">
           <label><span className="sr-only">素材来源类型</span><select value={origin} onChange={(event) => setOrigin(event.target.value as "all" | StudioAssetOrigin)}><option value="all">全部来源</option>{originOptions.map((item) => <option key={item} value={item}>{originLabel(item)}</option>)}</select></label>
@@ -186,12 +218,15 @@ const FILTERS: Array<{ id: AssetFilter; label: string }> = [
   { id: "needs_review", label: "待确认" },
 ];
 
-function assetCount(manifest: StudioResourceManifest | undefined, filter: AssetFilter): number {
-  if (!manifest) return 0;
-  if (filter === "all") return manifest.assetIndex.totalAssets;
-  if (filter === "reusable") return manifest.assetIndex.reusableCount;
-  if (filter === "needs_review") return manifest.assetIndex.needsReviewCount;
-  return manifest.assetIndex.facets.mediaKinds[filter] ?? 0;
+function assetCount(assets: StudioIndexedAsset[], filter: AssetFilter): number {
+  if (filter === "all") return assets.length;
+  if (filter === "reusable") return assets.filter((asset) => asset.reuseStatus === "ready").length;
+  if (filter === "needs_review") return assets.filter((asset) => asset.reuseStatus === "review_required").length;
+  return assets.filter((asset) => asset.mediaKind === filter).length;
+}
+
+function isCreativeAsset(asset: StudioIndexedAsset): boolean {
+  return asset.origin !== "final_render" && ["video", "image", "audio"].includes(asset.mediaKind);
 }
 
 function assetTitle(asset: StudioIndexedAsset, usage = asset.usages.at(-1)): string {

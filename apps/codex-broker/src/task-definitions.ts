@@ -73,6 +73,8 @@ const DIRECTOR_PLAN_DIRECTIVE = [
   "本地编辑卡片只能承载标题、数据、清单、引语、转场或片尾，不能满足需要看见真实人物、动作、地点或现场环境的镜头。",
   "本地编辑卡片也不能凭空绘制定制插画、真实物体、物理光影动画或成对实拍照片；输入未列出自有素材库存时，绝不能假设这些素材存在。",
   "当前本地编辑 Provider 只交付一张静态卡片，所有元素从首帧就存在，渲染器最多做整张画面的轻微推拉；不得在 temporalBeats 或 generationPrompt 中承诺逐字、逐项、箭头、图形或物件动画。",
+  "选择 Provider 后，visibleAction、temporalBeats、generationPrompt、successCriteria 与 rationale 必须全部落在该 Provider 的能力内；rationale 不得一边选择它、一边承认它缺少所需能力或尚不能生产。",
+  "修订时只能使用本次输入已提供的 Provider ID。若审计建议的能力不在可用池中，必须在保持该镜叙事功能的前提下，把动作、逐秒节拍、生成提示和验收条件一起改写为现有 Provider 能真实交付的版本；不得要求新增一个输入中不存在的 Provider。",
   "deliveryType 是机器执行合同：本地卡片只能是 editorial_card；图库只能是 stock_video 或 stock_image；图片模型只能是 generated_image；视频模型只能是 generated_video。备选 Provider 也必须支持同一种交付类型。",
   "通用图库可以表现普通人物、动作和环境，但不能冒充具体事件、涉事人物或事发现场的证据。",
   "图库是检索而不是生成：只有常见、单一、容易搜到的动作才能选择图库；需要精确多步表演、物件状态严格变化或特定界面操作时，应选择生成式能力，或把镜头改写为诚实的说明画面。",
@@ -136,6 +138,7 @@ const ROLE_AUDIT_DIRECTIVE = [
   "先逐条核对 criteria，再检查候选内部一致性、可执行性、素材与模型能力边界、事实与成本约束，以及相邻节点契约。",
   "不得发明输入中不存在的验收要求、字段、数据格式、精度、公差、素材库存或事实证据；没有明确依据的不确定性只能记为 advisory，不能阻断。",
   "严格遵守 context.roleScope 与 downstreamBoundary：不得把下游节点尚未产出的证据当作当前角色的通过条件，也不得要求当前角色完成不属于它的工作。",
+  "修复指令只能引用 context.currentRoleContract 中已经声明的能力、Provider 和预算，不得要求新增或配置输入中不存在的 Provider。当前角色拥有候选字段时，应优先要求它把不可执行方案改写为现有能力可交付的等价表达；只有无法保留核心观众承诺时，才指出需要上游人工调整。",
   "iteration 大于 1 且输入含 previousAudit（上一轮审计）时，先复核上一轮 blocking 是否已修复。不得更换标准或移动门槛；只有修复造成的新回归，或上一轮确实漏掉且能直接引用 criteria/context 的关键合同冲突，才可新增 blocking。",
   "blocking 只用于必须修复才能进入下游的问题；advisory 用于不阻断生产但值得记录的改进。每个问题必须引用候选中的具体证据并给出可直接执行的修复指令。",
   "只有不存在 blocking 问题且 score 不低于 80 时才允许 verdict=pass；pass 时 repairInstructions 必须为空。",
@@ -221,7 +224,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
   }
   if (kind === "visual-review") {
     return {
-      version: "video-factory/visual-review-v4",
+      version: "video-factory/visual-review-v5",
       directive: VISUAL_REVIEW_DIRECTIVE,
       task: "按时间顺序审查附带的关键帧并生成严格结构化视觉审片报告。",
       outputRules: [
@@ -233,6 +236,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
         "confidence 必须是 0 到 1 之间的数字。",
         "没有问题时 findings 输出空数组，不要虚构问题。",
         "只有五项评分均不低于 60 且没有 warning 或 critical finding 时才允许 recommendation=approve。",
+        "收到 revision 时，只按独立审计指出的证据问题修复报告；不得为了通过审计而美化评分、删除真实问题或改变画面事实。",
       ],
       examples: [
         "正例：预期拉帘但关键帧里窗帘位置和照度都未变化，应在对应 timecode 标记意图未兑现并建议重生成该镜头。",
@@ -285,12 +289,14 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
     };
   }
   return {
-    version: "video-factory/director-v6",
+      version: "video-factory/director-v8",
     directive: DIRECTOR_PLAN_DIRECTIVE,
     task: "生成视觉圣经和逐镜素材路由。",
     outputRules: [
       "每个 shot 必须先完成结构化 Shot Spec，选择可执行的 deliveryType，再给出非空的 query 与 generationPrompt；即使图库使用 query 检索，也要用 generationPrompt 写清最终画面执行意图。",
       "temporalBeats 至少两段，使用 [0s-2s] 形式；successCriteria 必须能从产出画面直接检查。",
+      "不要逐字复述脚本的旁白、屏幕文字或既有成功条件；只补充导演角色拥有的视觉执行决策。",
+      "每个标量字段最多一句，temporalBeats 默认两段，数组默认 1 到 3 项；只有真实执行需要时才增加细节。",
     ],
     examples: [
       "正例：[0s-2s] 固定近景，手进入画面抓住窗帘；[2s-5s] 手向右拉开窗帘，日光扫过玻璃杯；[5s-6s] 镜头轻推近，杯沿高光稳定。",

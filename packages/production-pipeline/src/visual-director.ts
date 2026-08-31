@@ -216,6 +216,7 @@ export interface VisualAssetProviderCapability {
 
 export interface VisualDirectorAgent {
   id: string;
+  modelId?: string;
   plan(input: VisualDirectorAgentInput): Promise<unknown>;
   planDetailed?(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<unknown>>;
 }
@@ -278,6 +279,17 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
     if (sceneDuration !== undefined) {
       validateTemporalBeats(beats, sceneDuration, `shots[${index}].temporalBeats`);
     }
+    const visibleAction = optionalText(shot.visibleAction, `shots[${index}].visibleAction`);
+    const generationPrompt = text(shot.generationPrompt, `shots[${index}].generationPrompt`);
+    const successCriteria = optionalStringArray(shot.successCriteria, `shots[${index}].successCriteria`);
+    if (deliveryType === "editorial_card") {
+      assertStaticEditorialCard(
+        [visibleAction, ...(beats ?? []), generationPrompt, ...(successCriteria ?? [])],
+        `shots[${index}]`,
+      );
+    }
+    const rationale = text(shot.rationale, `shots[${index}].rationale`);
+    assertSelectedProviderIsExecutable(rationale, `shots[${index}].rationale`);
     return {
       scenePosition,
       narrativeRole: text(shot.narrativeRole, `shots[${index}].narrativeRole`),
@@ -291,8 +303,8 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       ...(optionalText(shot.environment, `shots[${index}].environment`) !== undefined
         ? { environment: optionalText(shot.environment, `shots[${index}].environment`)! }
         : {}),
-      ...(optionalText(shot.visibleAction, `shots[${index}].visibleAction`) !== undefined
-        ? { visibleAction: optionalText(shot.visibleAction, `shots[${index}].visibleAction`)! }
+      ...(visibleAction !== undefined
+        ? { visibleAction }
         : {}),
       ...(beats !== undefined
         ? { temporalBeats: beats }
@@ -312,12 +324,12 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       ...(optionalStringArray(shot.referenceRequirements, `shots[${index}].referenceRequirements`, true) !== undefined
         ? { referenceRequirements: optionalStringArray(shot.referenceRequirements, `shots[${index}].referenceRequirements`, true)! }
         : {}),
-      ...(optionalStringArray(shot.successCriteria, `shots[${index}].successCriteria`) !== undefined
-        ? { successCriteria: optionalStringArray(shot.successCriteria, `shots[${index}].successCriteria`)! }
+      ...(successCriteria !== undefined
+        ? { successCriteria }
         : {}),
       query: text(shot.query, `shots[${index}].query`),
-      generationPrompt: text(shot.generationPrompt, `shots[${index}].generationPrompt`),
-      rationale: text(shot.rationale, `shots[${index}].rationale`),
+      generationPrompt,
+      rationale,
       continuityNote: text(shot.continuityNote, `shots[${index}].continuityNote`),
       confidence: bounded(shot.confidence, `shots[${index}].confidence`, 0, 1),
       estimatedCostCny: serverCost(preferredProviderId, options.estimatedCnyPerClip),
@@ -386,6 +398,26 @@ function assertProviderDeliveryType(
   const supported = options.providerDeliveryTypes?.[provider];
   if (supported && !supported.includes(deliveryType)) {
     throw new Error(`${field} '${provider}' cannot deliver '${deliveryType}'.`);
+  }
+}
+
+const EDITORIAL_ELEMENT_ANIMATION_PATTERNS: RegExp[] = [
+  /(逐字|逐项|逐行|单字|每项).{0,16}(出现|显现|渐显|淡入|弹出|勾选|高亮|动画|切换)/,
+  /(高亮(?:带)?|边框|状态栏|圆点|对勾|文字|标题|数字|图形|箭头).{0,18}(扫过|横扫|变色|变红|变绿|切换|渐显|淡入|弹出|展开|移动|旋转|跳动|闪烁)/,
+  /(灰色|透明|黑色|红色|绿色).{0,12}(变为|切换为|渐变为)/,
+  /(同步变为|由透明渐显|元素动画|物件动画)/,
+];
+
+function assertStaticEditorialCard(values: Array<string | undefined>, field: string): void {
+  const animation = values.find((value) => value && EDITORIAL_ELEMENT_ANIMATION_PATTERNS.some((pattern) => pattern.test(value)));
+  if (animation) {
+    throw new Error(`${field} uses editorial_card but requests unsupported element animation: ${animation}`);
+  }
+}
+
+function assertSelectedProviderIsExecutable(rationale: string, field: string): void {
+  if (/(当前|所选|该)?\s*Provider.{0,24}(缺少|不支持|无法|不能).{0,20}(能力|动画|生产|交付)|需补充.{0,24}Provider|尚不能生产/.test(rationale)) {
+    throw new Error(`${field} admits that the selected provider cannot execute this shot.`);
   }
 }
 
