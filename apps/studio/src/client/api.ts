@@ -82,7 +82,7 @@ export const studioApi = {
   trendServices: () => requestJson<StudioTrendService[]>("/api/trend-services"),
   trendSignals: (platforms = ["douyin", "kuaishou", "weibo", "baidu", "toutiao", "zhihu", "bilibili", "thepaper", "36kr", "ithome", "sspai", "hupu", "tieba", "guokr"], limit = 160) => {
     const query = new URLSearchParams({ platforms: platforms.join(","), limit: String(limit) });
-    return requestJson<StudioTrendSignal[]>(`/api/trend-signals?${query}`);
+    return requestJson<StudioTrendSignal[]>(`/api/trend-signals?${query}`, { signal: AbortSignal.timeout(10_000) });
   },
   trendCandidates: () => requestJson<StudioTrendCandidate[]>("/api/trend-candidates"),
   refreshTrendCandidates: () => requestJson<StudioTrendRefreshReceipt>("/api/trend-candidates/refresh", { method: "POST" }),

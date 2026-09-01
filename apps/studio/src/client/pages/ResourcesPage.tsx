@@ -146,11 +146,14 @@ export function ResourcesPage() {
     setPublishError(undefined);
     setManifestError(undefined);
     setSettingsError(undefined);
-    const [providerResult, trendResult, serviceResult, signalResult, capabilityResult, settingsResult, publishResult, manifestResult] = await Promise.allSettled([
+    const signalRequest = studioApi.trendSignals(undefined, 16)
+      .then((values) => setSignals(values))
+      .catch(() => setSignals([]))
+      .finally(() => setTrendLoading(false));
+    const [providerResult, trendResult, serviceResult, capabilityResult, settingsResult, publishResult, manifestResult] = await Promise.allSettled([
       studioApi.providers(),
       studioApi.trendSources(),
       studioApi.trendServices(),
-      studioApi.trendSignals(undefined, 16),
       studioApi.localCapabilities(),
       studioApi.settings(),
       studioApi.publishTargets(),
@@ -162,7 +165,6 @@ export function ResourcesPage() {
     else setTrendError(errorMessage(trendResult.reason));
     if (serviceResult.status === "fulfilled") setServices(serviceResult.value);
     else setServiceError(errorMessage(serviceResult.reason));
-    if (signalResult.status === "fulfilled") setSignals(signalResult.value);
     if (capabilityResult.status === "fulfilled") setCapabilities(capabilityResult.value);
     if (settingsResult.status === "fulfilled") {
       setSettings(settingsResult.value);
@@ -181,7 +183,7 @@ export function ResourcesPage() {
     if (manifestResult.status === "fulfilled") setResourceManifest(manifestResult.value);
     else setManifestError(errorMessage(manifestResult.reason));
     setProviderLoading(false);
-    setTrendLoading(false);
+    await signalRequest;
   }, []);
 
   useEffect(() => { void load(); }, [load]);

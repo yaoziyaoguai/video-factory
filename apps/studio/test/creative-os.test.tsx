@@ -1063,6 +1063,51 @@ describe("Creative OS", () => {
     expect(screen.getByLabelText("NewsNow 内部服务已连接")).toBeInTheDocument();
   });
 
+  it("loads production configuration even when raw trend signals stall", async () => {
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "trendSources").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSignals").mockReturnValue(new Promise(() => undefined));
+    vi.spyOn(studioApi, "localCapabilities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "voices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "economy-daily",
+      roleProviderDefaults: {},
+      modelDefaults: {},
+      topicStrategy: { customInstruction: "优先可拍题材。" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+    vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
+      generatedAt: "2026-09-01T00:00:00.000Z",
+      totalItems: 0,
+      needsReviewCount: 0,
+      legacyRunsWithoutManifest: 0,
+      reconstructedRunCount: 0,
+      unreadableManifestCount: 0,
+      truncatedRunCount: 0,
+      truncatedItemCount: 0,
+      categories: { visual: 0, voice: 0, font: 0, document: 0, other: 0 },
+      items: [],
+      assetIndex: {
+        version: "video-factory/asset-index-v1",
+        totalAssets: 0,
+        duplicateUses: 0,
+        reusableCount: 0,
+        needsReviewCount: 0,
+        facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} },
+        assets: [],
+      },
+    });
+
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("combobox", { name: "默认导演角色" })).toBeInTheDocument();
+    expect(screen.getAllByText("模板脚本").length).toBeGreaterThan(0);
+    expect(screen.queryByText("正在读取创作默认值...")).not.toBeInTheDocument();
+  });
+
   it("keeps the configuration room focused on one editable category at a time", async () => {
     const user = userEvent.setup();
     vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
