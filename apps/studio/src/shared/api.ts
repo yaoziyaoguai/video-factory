@@ -686,6 +686,18 @@ export interface StudioNode {
   spendPlan?: StudioSpendPlan;
   spendAuthorizationId?: string;
   agentLoopProgress?: StudioAgentLoopProgress;
+  executionConfiguration?: StudioNodeExecutionConfiguration;
+}
+
+export interface StudioNodeExecutionConfiguration {
+  providerId: string;
+  modelSelections: Record<string, string>;
+  assetProviderIds?: string[];
+  economics?: {
+    allowMeteredProviders: boolean;
+    maxPaidShots: number;
+    maxCostCny: number;
+  };
 }
 
 export interface StudioAgentLoopProgress {
@@ -795,6 +807,18 @@ export interface StudioNodeOverrideInput {
 
 export interface StudioNodeInputOverrideInput {
   input: unknown;
+  confirmTerminalEdit?: boolean;
+}
+
+export interface StudioNodeExecutionConfigurationInput {
+  providerId?: string;
+  modelSelections?: Record<string, string | null>;
+  assetProviderIds?: string[];
+  economics?: {
+    allowMeteredProviders: boolean;
+    maxPaidShots: number;
+    maxCostCny: number;
+  };
   confirmTerminalEdit?: boolean;
 }
 

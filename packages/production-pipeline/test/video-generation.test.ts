@@ -102,7 +102,8 @@ describe("metered video generation adapters", () => {
     ];
     const adapter = new WanVideoAdapter({
       apiKey: "test-key",
-      model: "test-wan-model",
+      model: "wan2.7-t2v",
+      allowedModels: ["wan2.7-t2v", "wan3.0-video"],
       workspaceId: "workspace-1",
       fetch: async (url, init) => {
         requests.push({ url: String(url), init });
@@ -113,7 +114,7 @@ describe("metered video generation adapters", () => {
       timeoutMs: 100,
     });
 
-    const result = await adapter.generate({ prompt: "雨夜窗边的热茶", durationSeconds: 6, ratio: "9:16" });
+    const result = await adapter.generate({ prompt: "雨夜窗边的热茶", durationSeconds: 6, ratio: "9:16", modelId: "wan3.0-video" });
 
     assert.deepEqual(result, {
       providerId: "wan-video-v1",
@@ -129,16 +130,45 @@ describe("metered video generation adapters", () => {
       "https://workspace-1.cn-beijing.maas.aliyuncs.com/api/v1/tasks/wan-task-1",
     );
     assert.deepEqual(JSON.parse(String(requests[0]?.init?.body)), {
-      model: "test-wan-model",
+      model: "wan3.0-video",
       input: { prompt: "雨夜窗边的热茶" },
       parameters: {
         resolution: "720P",
         ratio: "9:16",
         duration: 6,
-        prompt_extend: true,
         watermark: false,
       },
     });
+    await assert.rejects(() => adapter.generate({
+      prompt: "不受支持的模型",
+      durationSeconds: 6,
+      ratio: "9:16",
+      modelId: "wan2.7-i2v",
+    }), /not allowed/);
+  });
+
+  it("keeps prompt extension only for pre-Wan-3 models", async () => {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const responses = [
+      jsonResponse({ output: { task_id: "wan27-task-1" } }),
+      jsonResponse({ output: { task_status: "SUCCEEDED", video_url: "https://example.com/wan27.mp4" } }),
+    ];
+    const adapter = new WanVideoAdapter({
+      apiKey: "test-key",
+      model: "wan2.7-t2v",
+      allowedModels: ["wan2.7-t2v", "wan3.0-video"],
+      workspaceId: "workspace-1",
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return responses.shift()!;
+      },
+      sleep: async () => undefined,
+    });
+
+    await adapter.generate({ prompt: "一束晨光落在书桌上", durationSeconds: 6, ratio: "9:16" });
+
+    const body = JSON.parse(String(requests[0]?.init?.body)) as { parameters: Record<string, unknown> };
+    assert.equal(body.parameters.prompt_extend, true);
   });
 
   it("normalizes the MiniMax task and file retrieval lifecycle", async () => {
@@ -160,6 +190,7 @@ describe("metered video generation adapters", () => {
     const adapter = new MiniMaxVideoAdapter({
       apiKey: "test-key",
       model: "MiniMax-Hailuo-2.3",
+      modelProtocols: { "MiniMax-Hailuo-2.3": "v1" },
       fetch: async (url, init) => {
         requests.push({ url: String(url), init });
         return responses.shift()!;
@@ -169,7 +200,7 @@ describe("metered video generation adapters", () => {
       timeoutMs: 100,
     });
 
-    const result = await adapter.generate({ prompt: "雨夜里的霓虹街道", durationSeconds: 8, ratio: "9:16" });
+    const result = await adapter.generate({ prompt: "雨夜里的霓虹街道", durationSeconds: 6, ratio: "9:16" });
 
     assert.deepEqual(result, {
       providerId: "hailuo-video-v1",
@@ -187,6 +218,64 @@ describe("metered video generation adapters", () => {
       prompt_optimizer: true,
       aigc_watermark: false,
     });
+  });
+
+  it("routes MiniMax H3 through the V2 multimodal protocol", async () => {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const responses = [
+      jsonResponse({ task_id: "h3-task-1" }),
+      jsonResponse({ task: { id: "h3-task-1", status: "running" } }),
+      jsonResponse({
+        task: {
+          id: "h3-task-1",
+          status: "succeeded",
+          content: { url: "https://example.com/h3.mp4" },
+        },
+      }),
+    ];
+    const adapter = new MiniMaxVideoAdapter({
+      apiKey: "test-key",
+      model: "MiniMax-Hailuo-2.3",
+      modelProtocols: { "MiniMax-Hailuo-2.3": "v1", "MiniMax-H3": "v2" },
+      baseUrl: "https://minimax.example/v1/",
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return responses.shift()!;
+      },
+      sleep: async () => undefined,
+      pollIntervalMs: 1,
+      timeoutMs: 100,
+    });
+
+    const result = await adapter.generate({
+      prompt: "雨滴沿玻璃滑落，城市霓虹散成流动色块",
+      durationSeconds: 5,
+      ratio: "9:16",
+      resolution: "768P",
+      modelId: "MiniMax-H3",
+    });
+
+    assert.deepEqual(result, {
+      providerId: "hailuo-video-v1",
+      taskId: "h3-task-1",
+      videoUrl: "https://example.com/h3.mp4",
+    });
+    assert.equal(requests[0]?.url, "https://minimax.example/v2/video_generation");
+    assert.equal(requests[1]?.url, "https://minimax.example/v2/query/video_generation/h3-task-1");
+    assert.deepEqual(JSON.parse(String(requests[0]?.init?.body)), {
+      model: "MiniMax-H3",
+      content: [{ type: "text", text: "雨滴沿玻璃滑落，城市霓虹散成流动色块" }],
+      resolution: "768P",
+      duration: 5,
+      ratio: "9:16",
+      aigc_watermark: false,
+    });
+    await assert.rejects(() => adapter.generate({
+      prompt: "未知模型",
+      durationSeconds: 5,
+      ratio: "9:16",
+      modelId: "MiniMax-Unknown",
+    }), /not allowed/);
   });
 
   it("surfaces MiniMax application-level errors returned with HTTP 200", async () => {

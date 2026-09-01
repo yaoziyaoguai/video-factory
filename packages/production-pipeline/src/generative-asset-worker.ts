@@ -35,6 +35,8 @@ export interface VideoGenerationRuntimeProfile {
   minDurationSeconds: number;
   maxDurationSeconds: number;
   supportsAudio: boolean;
+  estimatedCnyPerSecond?: number;
+  estimatedCnyPerSecondByResolution?: Record<string, number>;
 }
 
 export interface ImageGenerationAdapterBinding {
@@ -101,6 +103,7 @@ interface RoutedShot {
 interface ResolvedAssetBinding {
   mediaType: "image" | "video";
   estimatedCnyPerAsset: number;
+  estimateCny(scene: ScriptScene): number;
   modelId?: string;
   generate(
     scene: ScriptScene,
@@ -197,11 +200,6 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
 
     const maxPaidShots = boundedInteger(parameters.maxPaidShots, "maxPaidShots", 1, 20);
     const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0.01, 100_000);
-    const estimatedCost = roundMoney(maxPaidShots * binding.estimatedCnyPerAsset);
-    if (estimatedCost > maxCostCny) {
-      throw new Error(`Estimated cost ¥${estimatedCost} exceeds the production budget ¥${maxCostCny}.`);
-    }
-
     const baselineRequest = structuredClone(request);
     baselineRequest.parameters = {
       ...parameters,
@@ -218,6 +216,10 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const outputDir = requiredString(request.outputDir, "outputDir");
     const script = requiredRecord(JSON.parse(await readFile(scriptPath, "utf8")), "Script");
     const scenes = parseScenes(script.scenes).filter((scene) => scene.visualStrategy !== "local").slice(0, maxPaidShots);
+    const estimatedCost = roundMoney(scenes.reduce((sum, scene) => sum + binding.estimateCny(scene), 0));
+    if (estimatedCost > maxCostCny) {
+      throw new Error(`Estimated cost ¥${estimatedCost} exceeds the production budget ¥${maxCostCny}.`);
+    }
     const planPath = requiredString(baseline.output?.assetPlanPath, "assetPlanPath");
     const plan = requiredRecord(JSON.parse(await readFile(planPath, "utf8")), "Asset plan");
     const assets = Array.isArray(plan.scene_assets) ? plan.scene_assets : [];
@@ -230,11 +232,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     if (ledgerPath) await claimGenerationOperation(ledgerPath, operationId);
 
     for (const scene of scenes) {
+      const sceneCost = binding.estimateCny(scene);
       const job: GenerationJob = {
         scenePosition: scene.position,
         providerId,
         status: "submitted",
-        estimatedCostCny: binding.estimatedCnyPerAsset,
+        estimatedCostCny: sceneCost,
         mediaType: binding.mediaType,
         ...(binding.modelId ? { modelId: binding.modelId } : {}),
       };
@@ -244,11 +247,11 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           scene,
           scene.visualPrompt,
           async (progress) => {
-            applyProgress(job, progress, binding.estimatedCnyPerAsset);
+            applyProgress(job, progress, sceneCost);
             await writeJobs(jobsPath, jobs, ledgerPath, operationId);
           },
         );
-        applyAcceptedTask(job, generated.taskId, binding.estimatedCnyPerAsset);
+        applyAcceptedTask(job, generated.taskId, sceneCost);
         await writeJobs(jobsPath, jobs, ledgerPath, operationId);
         const media = await downloadGeneratedAsset(
           this.fetch,
@@ -287,7 +290,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       attemptedScenes: jobs.length,
       generatedScenes,
       fallbackScenes,
-      estimatedCostCny: roundMoney(jobs.length * binding.estimatedCnyPerAsset),
+      estimatedCostCny: estimatedCost,
       actualCostCny: accountedCostCny,
       actualCostSource: "configured_rate",
       ...meteredJobDiagnostics(jobs),
@@ -329,7 +332,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         attemptedScenes: jobs.length,
         generatedScenes,
         fallbackScenes,
-        estimatedCostCny: roundMoney(jobs.length * binding.estimatedCnyPerAsset),
+        estimatedCostCny: estimatedCost,
         actualCostCny: accountedCostCny,
         actualCostSource: "configured_rate",
         ...meteredJobDiagnostics(jobs),
@@ -409,7 +412,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     if (generatedRoutes.length > maxPaidShots) {
       throw new Error(`AI director selected ${generatedRoutes.length} paid shots, exceeding the limit ${maxPaidShots}.`);
     }
-    const estimatedCost = roundMoney(generatedRoutes.reduce((sum, item) => sum + item.binding.estimatedCnyPerAsset, 0));
+    const estimatedCost = roundMoney(generatedRoutes.reduce((sum, item) => sum + item.binding.estimateCny(item.scene), 0));
     if (estimatedCost > maxCostCny) {
       throw new Error(`Estimated cost ¥${estimatedCost} exceeds the production budget ¥${maxCostCny}.`);
     }
@@ -448,11 +451,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     if (ledgerPath) await claimGenerationOperation(ledgerPath, operationId);
 
     for (const { route, scene, binding, providerId } of generatedRoutes) {
+      const sceneCost = binding.estimateCny(scene);
       const job: GenerationJob = {
         scenePosition: scene.position,
         providerId,
         status: "submitted",
-        estimatedCostCny: binding.estimatedCnyPerAsset,
+        estimatedCostCny: sceneCost,
         mediaType: binding.mediaType,
         ...(binding.modelId ? { modelId: binding.modelId } : {}),
       };
@@ -462,11 +466,11 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           scene,
           compileGenerationPrompt(providerId, route, scene),
           async (progress) => {
-            applyProgress(job, progress, binding.estimatedCnyPerAsset);
+            applyProgress(job, progress, sceneCost);
             await writeJobs(jobsPath, jobs, ledgerPath, operationId);
           },
         );
-        applyAcceptedTask(job, generated.taskId, binding.estimatedCnyPerAsset);
+        applyAcceptedTask(job, generated.taskId, sceneCost);
         await writeJobs(jobsPath, jobs, ledgerPath, operationId);
         const media = await downloadGeneratedAsset(
           this.fetch,
@@ -583,6 +587,14 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       return {
         mediaType: "video",
         estimatedCnyPerAsset,
+        estimateCny: (scene) => {
+          const request = generationRequest(scene, scene.visualPrompt, profile);
+          const perSecond = request.resolution
+            ? profile?.estimatedCnyPerSecondByResolution?.[request.resolution]
+            : undefined;
+          const rate = perSecond ?? profile?.estimatedCnyPerSecond;
+          return rate ? roundMoney(request.durationSeconds * rate) : estimatedCnyPerAsset;
+        },
         ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
         generate: async (scene, prompt, onProgress) => {
           const result = await video.adapter.generate({
@@ -598,6 +610,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       return {
         mediaType: "image",
         estimatedCnyPerAsset: image.estimatedCnyPerImage,
+        estimateCny: () => image.estimatedCnyPerImage,
         generate: async (_scene, prompt, onProgress) => {
           const result = await image.adapter.generate({ prompt, ratio: "9:16" }, onProgress);
           return { taskId: result.taskId, url: result.imageUrl };
@@ -652,7 +665,9 @@ function generationRequest(
 function preferredResolution(resolutions: string[] | undefined): VideoGenerationRequest["resolution"] | undefined {
   if (!resolutions) return undefined;
   const normalized = resolutions.map((value) => value.toLowerCase());
-  return (["720p", "1080p", "480p"] as const).find((value) => normalized.includes(value));
+  const selected = (["768p", "720p", "1080p", "480p", "2k"] as const)
+    .find((value) => normalized.includes(value));
+  return selected === "768p" ? "768P" : selected === "2k" ? "2K" : selected;
 }
 
 function validateVideoRuntimeProfile(providerId: string, modelId: string, profile: VideoGenerationRuntimeProfile): void {
@@ -669,6 +684,15 @@ function validateVideoRuntimeProfile(providerId: string, modelId: string, profil
     || profile.minDurationSeconds > profile.maxDurationSeconds
     || typeof profile.supportsAudio !== "boolean") {
     throw new Error(`Adapter '${providerId}' has an invalid runtime profile for model '${modelId}'.`);
+  }
+  if (profile.estimatedCnyPerSecond !== undefined
+    && (!Number.isFinite(profile.estimatedCnyPerSecond) || profile.estimatedCnyPerSecond <= 0)) {
+    throw new Error(`Adapter '${providerId}' has an invalid per-second price for model '${modelId}'.`);
+  }
+  for (const [resolution, price] of Object.entries(profile.estimatedCnyPerSecondByResolution ?? {})) {
+    if (!profile.resolutions.includes(resolution) || !Number.isFinite(price) || price <= 0) {
+      throw new Error(`Adapter '${providerId}' has an invalid '${resolution}' price for model '${modelId}'.`);
+    }
   }
 }
 

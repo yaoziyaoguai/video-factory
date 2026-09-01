@@ -18,6 +18,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, StudioReferenceVideo, StudioTemplate } from "../../shared/api.js";
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
+import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { VoiceStudio } from "./VoiceStudio.js";
 import { studioApi } from "../api.js";
@@ -564,7 +565,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                   const candidates = roleProviderCandidates(item, providers);
                   const selected = providers.find((provider) => provider.id === effectiveBindings[item.key]);
                   const Icon = item.icon;
-                  const models = selected?.modelProfiles?.filter((model) => model.available) ?? [];
+                  const models = selectableModelsForCapability(selected?.modelProfiles, item.capability);
                   return <article className={selected?.available ? "production-role" : "production-role is-unavailable"} key={item.key}>
                     <header>
                       <span className="production-role-icon"><Icon aria-hidden="true" size={17} /></span>
@@ -599,6 +600,19 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                         {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                       </select>
                     </label> : <p>{item.key === "voice" ? "音色与语速在下方声音导演中调整。" : selected?.description ?? item.description}</p>}
+                    {item.key === "assets" ? <div className="production-role-source-models">
+                      <strong>本次画面来源与模型</strong>
+                      {selectedAssetSources.map((provider) => {
+                        const models = selectableModelsForCapability(provider.modelProfiles, provider.capability);
+                        return <label className="field" key={provider.id}>
+                        <span>{provider.label}</span>
+                        {models.length ? <select aria-label={`${provider.label}开工模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => withModelSelection(current, provider.id, event.target.value))}>
+                          <option value="">推荐默认：{effectiveModelId(provider) ?? "自动选择"}</option>
+                          {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+                        </select> : <small>{providerBillingLabel(provider)}</small>}
+                      </label>;})}
+                      <button className="button button-ghost" type="button" onClick={() => { setAdvancedOpen(true); setActiveKey("assets"); }}>调整来源</button>
+                    </div> : null}
                     <small className="production-role-billing">{selected
                       ? item.key === "assets"
                         ? maxPaidShots > 0
@@ -618,7 +632,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
 
             <div className={advancedOpen ? "advanced-production is-open" : "advanced-production"}>
               <button className="advanced-production-toggle" type="button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((current) => !current)}>
-                <span>高级：逐节点配置</span><small>制作能力与人工终审</small><ChevronDown aria-hidden="true" size={17} />
+                <span>更多：素材来源与节点细节</span><small>需要时再展开</small><ChevronDown aria-hidden="true" size={17} />
               </button>
               {advancedOpen ? <section className="workflow-config" aria-labelledby="workflow-config-title">
               <div className="workflow-stage-panel">
@@ -712,9 +726,9 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                     </label>;
                   })}
                 </div>
-                {selectedAssetSources.some((provider) => provider.modelProfiles?.length) ? <div className="asset-model-overrides" aria-label="本次生成模型">
+                {selectedAssetSources.some((provider) => selectableModelsForCapability(provider.modelProfiles, provider.capability).length) ? <div className="asset-model-overrides" aria-label="本次生成模型">
                   <div><strong>本次模型</strong><small>只覆盖这条制作，总配置不会被修改</small></div>
-                  {selectedAssetSources.filter((provider) => provider.modelProfiles?.length).map((provider) => <label className="field" key={provider.id}>
+                  {selectedAssetSources.filter((provider) => selectableModelsForCapability(provider.modelProfiles, provider.capability).length).map((provider) => <label className="field" key={provider.id}>
                     <span>{provider.label}</span>
                     <select aria-label={`${provider.label} 本次模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => {
                       const next = { ...current };
@@ -723,7 +737,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                       return next;
                     })}>
                       <option value="">继承默认：{effectiveModelId(provider) ?? "自动选择"}</option>
-                      {provider.modelProfiles?.filter((model) => model.available).map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+                      {selectableModelsForCapability(provider.modelProfiles, provider.capability).map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                     </select>
                     <small>{provider.modelProfiles?.find((model) => model.id === effectiveModelId(provider))?.description}</small>
                   </label>)}

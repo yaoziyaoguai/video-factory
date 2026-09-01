@@ -141,6 +141,12 @@ export interface HumanDecision extends HumanDecisionDraft {
   createdAt: string;
 }
 
+export interface ExecutionConfigurationOverrideDraft<TInitialInput = unknown> {
+  nodeId: string;
+  actor: string;
+  initialInput: TInitialInput;
+}
+
 export interface QualityGateResult {
   gateId: string;
   status: QualityGateStatus;

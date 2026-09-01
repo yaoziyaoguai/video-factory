@@ -207,6 +207,31 @@ describe("readZaiCodexProviderSettings", () => {
 });
 
 describe("buildProviderCatalog codex fallback", () => {
+  it("shows reviewed video model catalogs before provider credentials are configured", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      { available: false, reason: "not running" },
+    );
+
+    const wan = providers.find((provider) => provider.id === "wan-video-v1");
+    assert.equal(wan?.available, false);
+    assert.equal(wan?.defaultModelId, "wan3.0-video");
+    assert.deepEqual(wan?.modelProfiles?.map((model) => model.id), [
+      "wan3.0-video",
+      "wan3.0-video-prime",
+      "wan2.7-t2v",
+    ]);
+    assert.equal(wan?.modelProfiles?.every((model) => model.available === false), true);
+
+    const miniMax = providers.find((provider) => provider.id === "hailuo-video-v1");
+    assert.deepEqual(miniMax?.modelProfiles?.map((model) => model.id), [
+      "MiniMax-Hailuo-2.3",
+      "MiniMax-H3",
+      "MiniMax-H3-Max",
+    ]);
+  });
+
   it("keeps existing broker tasks available during a capability-expanding rollout", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },
@@ -279,7 +304,7 @@ describe("buildProviderCatalog codex fallback", () => {
         ARK_API_KEY: "test-ark-key",
         SEEDANCE_ESTIMATED_CNY_PER_CLIP: "2",
         MINIMAX_API_KEY: "test-minimax-key",
-        MINIMAX_VIDEO_MODEL_ID: "MiniMax-Hailuo-02",
+        MINIMAX_VIDEO_MODEL_ID: "MiniMax-Hailuo-2.3",
         MINIMAX_ESTIMATED_CNY_PER_CLIP: "1",
       },
       { available: false, reason: "not running" },

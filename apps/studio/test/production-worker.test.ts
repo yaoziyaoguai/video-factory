@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildDirectorAssetProviders,
+  buildProductionWorker,
   buildProductionProviderRuntimeMetadata,
   resolveProductionPython,
 } from "../src/server/production-worker.js";
@@ -70,7 +71,7 @@ describe("metered video provider settings", () => {
   });
 
   it("normalizes complete Seedance, MiniMax and Wan configurations for the runtime worker", () => {
-    const settings = readMeteredVideoProviderSettings({
+    const environment = {
       ARK_API_KEY: "seedance-key",
       SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
       SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
@@ -81,10 +82,12 @@ describe("metered video provider settings", () => {
       MINIMAX_BASE_URL: "https://minimax.example/v1/",
       DASHSCOPE_API_KEY: "wan-key",
       DASHSCOPE_WORKSPACE_ID: "workspace-1",
-      WAN_MODEL_ID: "wan-model",
+      WAN_MODEL_ID: "wan2.7-t2v",
       WAN_ESTIMATED_CNY_PER_CLIP: "2.25",
+      WAN_MODEL_ESTIMATES_JSON: JSON.stringify({ "wan3.0-video": 5.5, "wan2.7-t2v": 2.25 }),
       WAN_BASE_URL: "https://wan.example/",
-    });
+    };
+    const settings = readMeteredVideoProviderSettings(environment);
 
     assert.deepEqual(settings.map((setting) => ({
       providerId: setting.providerId,
@@ -107,6 +110,51 @@ describe("metered video provider settings", () => {
         baseUrl: "https://wan.example/",
       },
     ]);
+    const miniMax = settings.find((setting) => setting.providerId === "hailuo-video-v1");
+    assert.equal(miniMax?.models.find((model) => model.id === "MiniMax-H3")?.protocol, "v2");
+    assert.equal(miniMax?.models.find((model) => model.id === "MiniMax-H3")?.estimatedCnyPerSecond, 0.5);
+    assert.deepEqual(miniMax?.models.find((model) => model.id === "MiniMax-H3")?.resolutions, ["768P", "2K"]);
+    const wan = settings.find((setting) => setting.providerId === "wan-video-v1");
+    assert.equal(wan?.models.find((model) => model.id === "wan3.0-video")?.estimatedCnyPerClip, 5.5);
+    assert.deepEqual(wan?.models.find((model) => model.id === "wan3.0-video")?.taskTypes, ["text-to-video"]);
+    assert.equal(wan?.models.find((model) => model.id === "wan3.0-video")?.maxDurationSeconds, 15);
+    assert.equal(wan?.models.find((model) => model.id === "wan2.7-t2v")?.recommended, true);
+    assert.doesNotThrow(() => buildProductionWorker({
+      repositoryRoot: "/repo",
+      pythonPath: "/repo/python",
+      environment,
+    }));
+  });
+
+  it("rejects unreviewed Wan model ids before paid generation", () => {
+    assert.throws(() => readMeteredVideoProviderSettings({
+      DASHSCOPE_API_KEY: "wan-key",
+      DASHSCOPE_WORKSPACE_ID: "workspace-1",
+      WAN_MODEL_ID: "unreviewed-wan-model",
+      WAN_ESTIMATED_CNY_PER_CLIP: "2.25",
+    }), /no reviewed runtime profile/);
+  });
+
+  it("can select MiniMax H3 as the provider default without creating a second provider", () => {
+    const [setting] = readMeteredVideoProviderSettings({
+      MINIMAX_API_KEY: "minimax-key",
+      MINIMAX_VIDEO_MODEL_ID: "MiniMax-H3",
+      MINIMAX_ESTIMATED_CNY_PER_CLIP: "2",
+    });
+
+    assert.equal(setting?.providerId, "hailuo-video-v1");
+    assert.equal(setting?.model, "MiniMax-H3");
+    assert.equal(setting?.estimatedCnyPerClip, 2);
+    assert.equal(setting?.models.find((model) => model.id === "MiniMax-H3")?.recommended, true);
+    assert.equal(setting?.models.find((model) => model.id === "MiniMax-Hailuo-2.3")?.protocol, "v1");
+  });
+
+  it("requires a reviewed MiniMax model profile before paid generation", () => {
+    assert.throws(() => readMeteredVideoProviderSettings({
+      MINIMAX_API_KEY: "minimax-key",
+      MINIMAX_VIDEO_MODEL_ID: "unreviewed-minimax-model",
+      MINIMAX_ESTIMATED_CNY_PER_CLIP: "2",
+    }), /no reviewed runtime profile/);
   });
 
   it("uses Seedance 2.5 as a configurable Ark default instead of requiring a hard-coded model env", () => {

@@ -143,6 +143,7 @@ function inbox(items: StudioCandidateInboxItem[]) {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  window.history.replaceState(null, "", window.location.pathname);
 });
 
 describe("Creative OS", () => {
@@ -1062,12 +1063,52 @@ describe("Creative OS", () => {
     expect(screen.getByLabelText("NewsNow 内部服务已连接")).toBeInTheDocument();
   });
 
+  it("keeps the configuration room focused on one editable category at a time", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "trendSources").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSignals").mockResolvedValue([]);
+    vi.spyOn(studioApi, "localCapabilities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
+
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    const defaultsLink = screen.getByRole("link", { name: "创作默认" });
+    const rolesLink = screen.getByRole("link", { name: "岗位模型" });
+    expect(defaultsLink).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: "新建制作默认值" }).closest("section")).toHaveAttribute("data-active", "true");
+    expect(screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section")).not.toHaveAttribute("data-active");
+
+    await user.click(rolesLink);
+
+    expect(rolesLink).toHaveAttribute("aria-current", "page");
+    expect(defaultsLink).not.toHaveAttribute("aria-current");
+    expect(window.location.hash).toBe("#production-roles");
+    expect(screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section")).toHaveAttribute("data-active", "true");
+  });
+
   it("persists voice and visual choices as production defaults", async () => {
     const user = userEvent.setup();
-    const readyProviders = [
+    const readyProviders: StudioProvider[] = [
       ...providers,
       { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" as const, status: "ready" as const, billing: "free" as const },
       { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external" as const, status: "ready" as const, billing: "free" as const },
+      {
+        id: "minimax-video-v1",
+        capability: "asset.prepare",
+        label: "MiniMax 视频生成",
+        available: true,
+        kind: "external" as const,
+        status: "ready" as const,
+        billing: "metered" as const,
+        defaultModelId: "MiniMax-Hailuo-2.3",
+        modelProfiles: [
+          { id: "MiniMax-Hailuo-2.3", providerId: "minimax-video-v1", providerFamily: "minimax", label: "MiniMax Hailuo 2.3", description: "经济关键镜头", available: true, recommended: true, taskTypes: ["text-to-video"] },
+          { id: "MiniMax-H3", providerId: "minimax-video-v1", providerFamily: "minimax", label: "MiniMax H3", description: "高质量关键镜头", available: true, taskTypes: ["text-to-video"] },
+        ],
+      },
     ];
     const initialSettings = {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
@@ -1109,6 +1150,11 @@ describe("Creative OS", () => {
     expect(routerRow).not.toBeNull();
     await user.click(within(routerRow!).getByRole("button", { name: "设为默认" }));
     expect(update).toHaveBeenLastCalledWith({ defaultAssetProviderId: "ai-shot-router-v1" });
+
+    await user.click(screen.getByRole("link", { name: "画面来源" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "MiniMax 视频生成 默认模型" }), "MiniMax-H3");
+    await user.click(screen.getByRole("button", { name: "保存画面模型" }));
+    expect(update).toHaveBeenLastCalledWith({ modelDefaults: { "minimax-video-v1": "MiniMax-H3" } });
 
     await user.selectOptions(screen.getByRole("combobox", { name: "默认导演角色" }), "documentary-observer");
     await user.selectOptions(screen.getByRole("combobox", { name: "默认目标平台" }), "bilibili");

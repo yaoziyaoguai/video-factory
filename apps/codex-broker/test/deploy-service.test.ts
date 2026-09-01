@@ -20,7 +20,7 @@ describe("ZAI systemd service sample", () => {
 
     assert.match(service, /^User=vf-zai-codex$/m);
     assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_PROFILE=zai$/m);
-    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_EFFORT=max$/m);
+    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_EFFORT=xhigh$/m);
     assert.match(service, /^EnvironmentFile=\/etc\/video-factory\/zai-codex-broker\.env$/m);
     assert.match(service, /stat -c %%U:%%G \/etc\/video-factory\/zai-codex-broker\.env/);
     assert.match(service, /stat -c %%a \/etc\/video-factory\/zai-codex-broker\.env/);
@@ -177,6 +177,17 @@ exit 42
     assert.match(compose, /NODE_IMAGE: \$\{NODE_IMAGE:-node:22-alpine\}/);
     assert.match(compose, /ALPINE_MIRROR: \$\{ALPINE_MIRROR:-\}/);
     assert.match(deploy, /ALPINE_MIRROR="\$\{ALPINE_MIRROR:-http:\/\/mirrors\.cloud\.aliyuncs\.com\/alpine\}"/);
+  });
+
+  it("passes curated multi-model video settings into the production container", async () => {
+    const compose = await readFile(
+      path.join(repositoryRoot, "docker", "docker-compose.prod.yml"),
+      "utf8",
+    );
+
+    assert.match(compose, /SEEDANCE_MODEL_ESTIMATES_JSON: \$\{SEEDANCE_MODEL_ESTIMATES_JSON:-\}/);
+    assert.match(compose, /SEEDANCE_MODEL_PROFILES_JSON: \$\{SEEDANCE_MODEL_PROFILES_JSON:-\}/);
+    assert.match(compose, /WAN_MODEL_ESTIMATES_JSON: \$\{WAN_MODEL_ESTIMATES_JSON:-\}/);
   });
 
   it("installs a physical shared Node runtime instead of linking into a private home", async () => {

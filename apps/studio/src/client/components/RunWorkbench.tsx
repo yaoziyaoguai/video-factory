@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Check, Clock3, Download, Pause, Play, RotateCcw, Send, X, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProvider, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { platformLabel } from "../presentation.js";
@@ -9,6 +9,7 @@ import { RunCostDetailPanel } from "./CostDashboard.js";
 
 interface RunWorkbenchProps {
   run: StudioRunDetail;
+  providers?: StudioProvider[];
   decisionPending: boolean;
   onDecision: (input: StudioDecisionInput) => Promise<void>;
   onOpenPublish?: () => void;
@@ -18,6 +19,7 @@ interface RunWorkbenchProps {
   pausePending?: boolean;
   onOverrideNode?: (nodeId: string, input: StudioNodeOverrideInput) => Promise<void>;
   onOverrideNodeInput?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
+  onConfigureNode?: (nodeId: string, input: StudioNodeExecutionConfigurationInput) => Promise<void>;
   onAuthorizeSpend?: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
   onRegenerateStale?: () => Promise<void>;
   onRequestPause?: () => Promise<void>;
@@ -26,7 +28,7 @@ interface RunWorkbenchProps {
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onAuthorizeSpend, onRegenerateStale, onRequestPause, onResumePaused, onRetryFailedNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRegenerateStale, onRequestPause, onResumePaused, onRetryFailedNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
@@ -45,6 +47,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
     key={node.id}
     node={node}
     nodes={run.nodes}
+    providers={providers}
     runStatus={run.status}
     artifacts={run.artifacts.filter((artifact) => node.artifactIds.includes(artifact.id) || artifact.producerNodeId === node.id)}
     busy={nodeMutationPending}
@@ -53,6 +56,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
     {...(onRequestPause ? { onRequestPause } : {})}
     onOverride={onOverrideNode ?? (async () => undefined)}
     onInputOverride={onOverrideNodeInput ?? (async () => undefined)}
+    onConfigure={onConfigureNode ?? (async () => undefined)}
     onAuthorize={onAuthorizeSpend ?? (async () => undefined)}
   />;
 
@@ -148,10 +152,10 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
               </div> : null}
               <div className="decision-actions">
                 {visualReviewRequiresRevision ? <>
-                  <button className="button button-danger" type="button" disabled={decisionPending} onClick={() => setRejecting(true)}>
+                  <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => setRejecting(true)}>
                     <RotateCcw aria-hidden="true" size={17} />按审片建议打回
                   </button>
-                  <button className="button button-danger-ghost" type="button" disabled={decisionPending} onClick={() => setApproving(true)}>
+                  <button className="button button-primary" type="button" disabled={decisionPending} onClick={() => setApproving(true)}>
                     <Check aria-hidden="true" size={17} />仍要批准
                   </button>
                 </> : <>
@@ -163,7 +167,7 @@ export function RunWorkbench({ run, decisionPending, onDecision, onOpenPublish, 
                   >
                     <Check aria-hidden="true" size={17} />批准进入发布包
                   </button>
-                  <button className="button button-danger-ghost" type="button" disabled={decisionPending} onClick={() => setRejecting(true)}>
+                  <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => setRejecting(true)}>
                     <XCircle aria-hidden="true" size={17} />打回
                   </button>
                 </>}

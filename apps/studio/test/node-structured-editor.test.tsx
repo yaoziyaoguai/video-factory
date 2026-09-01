@@ -168,7 +168,7 @@ describe("NodeStructuredEditor", () => {
     expect(screen.getByRole("combobox", { name: "指定风格" })).toHaveDisplayValue("自动匹配");
     expect(screen.getByRole("combobox", { name: "导演风格" })).toHaveDisplayValue("几何秩序");
     expect(screen.getByRole("combobox", { name: "首选画面能力" })).toHaveDisplayValue("Pexels 图库");
-    expect(screen.getByRole("option", { name: "MiniMax 海螺视频生成" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "MiniMax 视频生成" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Seedance 视频生成" })).not.toBeInTheDocument();
     expect(screen.getByDisplayValue("几何秩序 匹配本片")).toBeInTheDocument();
     expect(screen.getByDisplayValue("节奏 舒缓克制，字幕密度 适中")).toBeInTheDocument();

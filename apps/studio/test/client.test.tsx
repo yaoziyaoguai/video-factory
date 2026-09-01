@@ -283,7 +283,7 @@ describe("Studio client", () => {
     expect(screen.getByText(/AI 根据题材选择导演语法/)).toBeInTheDocument();
     expect(screen.getByText("¥0")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /画面素材/ })).not.toBeInTheDocument();
-    await user.click(screen.getByText("高级：逐节点配置"));
+    await user.click(screen.getByText("更多：素材来源与节点细节"));
     await user.click(screen.getByRole("button", { name: /画面素材/ }));
     expect(screen.getByRole("radio", { name: /AI 逐镜路由/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /本地编辑卡片/ })).toBeChecked();
@@ -453,7 +453,7 @@ describe("Studio client", () => {
     );
 
     await user.type(screen.getByLabelText("视频标题"), "后台刷新不能清空这段编辑");
-    await user.click(screen.getByText("高级：逐节点配置"));
+    await user.click(screen.getByText("更多：素材来源与节点细节"));
     const voiceStage = screen.getByRole("button", { name: /配音声音导演/ });
     await user.click(voiceStage);
     expect(voiceStage).toHaveAttribute("aria-pressed", "true");
@@ -555,7 +555,7 @@ describe("Studio client", () => {
     ];
     render(<NewRunDialog open providers={providersWithVisualReview} onClose={onClose} onSubmit={async () => undefined} />);
 
-    await user.click(screen.getByText("高级：逐节点配置"));
+    await user.click(screen.getByText("更多：素材来源与节点细节"));
     const semanticRank = screen.getByRole("checkbox", { name: /候选语义选片/ });
     const visualReview = screen.getByRole("checkbox", { name: /视觉审片/ });
 
@@ -690,7 +690,7 @@ describe("Studio client", () => {
     render(<NewRunDialog open providers={providersWithModels} onClose={() => undefined} onSubmit={onSubmit} />);
 
     await user.click(screen.getByRole("radio", { name: /效果均衡/ }));
-    await user.click(screen.getByText("高级：逐节点配置"));
+    await user.click(screen.getByText("更多：素材来源与节点细节"));
     await user.selectOptions(screen.getByRole("combobox", { name: "火山方舟视频 本次模型" }), "premium-model");
 
     expect(screen.getByLabelText("预计成本上限")).toHaveValue(3);
@@ -731,7 +731,7 @@ describe("Studio client", () => {
     render(<NewRunDialog open providers={providersWithModels} creatorSettings={creatorSettings} onClose={() => undefined} onSubmit={vi.fn()} />);
 
     await user.click(await screen.findByRole("radio", { name: /效果均衡/ }));
-    await user.click(screen.getByText("高级：逐节点配置"));
+    await user.click(screen.getByText("更多：素材来源与节点细节"));
 
     expect(screen.getByRole("combobox", { name: "火山方舟视频 本次模型" })).toHaveValue("");
     expect(screen.getByRole("option", { name: "继承默认：premium-model" })).toBeInTheDocument();
@@ -921,7 +921,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("内容角度"), "用一个关键镜头建立情绪转折");
     await user.type(screen.getByLabelText("目标受众"), "普通上班族");
     await user.click(screen.getByRole("radio", { name: /效果均衡/ }));
-    await user.click(screen.getByText("高级：逐节点配置"));
+    await user.click(screen.getByText("更多：素材来源与节点细节"));
 
     expect(screen.getByRole("checkbox", { name: /Seedance 关键镜头/ })).toBeChecked();
     const localBaseline = screen.getByRole("checkbox", { name: /本地编辑卡片/ });
@@ -1025,7 +1025,7 @@ describe("Studio client", () => {
     expect(screen.getByRole("combobox", { name: "视频时长" })).toHaveValue("30");
     expect(screen.getByLabelText("终审模式")).toHaveTextContent("人工终审");
     expect(await screen.findByRole("slider", { name: "语速" })).toHaveValue("205");
-    await user.click(screen.getByText("高级：逐节点配置"));
+    await user.click(screen.getByText("更多：素材来源与节点细节"));
     expect(screen.getByRole("checkbox", { name: /Pexels 视频/ })).toBeChecked();
     await user.type(screen.getByLabelText("视频标题"), "默认值真实进入生产单");
     await user.type(screen.getByLabelText("内容角度"), "验证总配置不是展示页");
@@ -1116,7 +1116,7 @@ describe("Studio client", () => {
     expect(screen.queryByRole("option", { name: "测试音轨" })).not.toBeInTheDocument();
     expect(screen.getByText(/缺少正式生产能力：配音/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
-    await userEvent.setup().click(screen.getByText("高级：逐节点配置"));
+    await userEvent.setup().click(screen.getByText("更多：素材来源与节点细节"));
     expect(screen.getByRole("button", { name: /04配音声音导演未配置/ })).toBeInTheDocument();
   });
 

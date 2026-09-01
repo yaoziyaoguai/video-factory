@@ -461,6 +461,27 @@ export class ProductionPipeline {
     });
   }
 
+  async applyNodeExecutionConfiguration(
+    runId: string,
+    nodeId: string,
+    nextBriefInput: ProductionBrief,
+    actor: string,
+  ): Promise<WorkflowRun<ProductionBrief>> {
+    return this.runPersistedTransition(runId, async (previous) => {
+      const nextBrief = parseBrief(nextBriefInput);
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(nextBrief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+      });
+      return runner.applyExecutionConfigurationOverride(
+        this.createWorkflow(nextBrief),
+        previous,
+        { nodeId, actor, initialInput: nextBrief },
+      );
+    });
+  }
+
   async authorizeSpend(runId: string, authorization: SpendAuthorizationDraft): Promise<WorkflowRun<ProductionBrief>> {
     const dispatched = await this.dispatchSpendAuthorization(runId, authorization);
     return dispatched.completion;

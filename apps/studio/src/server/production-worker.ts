@@ -42,11 +42,13 @@ export function buildProductionWorker(options: ProductionWorkerOptions): Generat
         ? new MiniMaxVideoAdapter({
             apiKey: setting.apiKey,
             model: setting.model,
+            modelProtocols: Object.fromEntries(setting.models.map((model) => [model.id, model.protocol ?? "v1"])),
             ...(setting.baseUrl ? { baseUrl: setting.baseUrl } : {}),
           })
         : new WanVideoAdapter({
           apiKey: setting.apiKey,
           model: setting.model,
+          allowedModels: setting.models.map((model) => model.id),
           workspaceId: setting.workspaceId,
           ...(setting.baseUrl ? { baseUrl: setting.baseUrl } : {}),
         });
@@ -61,6 +63,10 @@ export function buildProductionWorker(options: ProductionWorkerOptions): Generat
         minDurationSeconds: model.minDurationSeconds,
         maxDurationSeconds: model.maxDurationSeconds,
         supportsAudio: model.supportsAudio,
+        ...(model.estimatedCnyPerSecond ? { estimatedCnyPerSecond: model.estimatedCnyPerSecond } : {}),
+        ...(model.estimatedCnyPerSecondByResolution
+          ? { estimatedCnyPerSecondByResolution: { ...model.estimatedCnyPerSecondByResolution } }
+          : {}),
       }])),
     };
   });
@@ -133,7 +139,7 @@ export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOption
       id: setting.providerId,
       label: setting.providerId === "seedance-video-v1"
         ? "Seedance 关键镜头"
-        : setting.providerId === "hailuo-video-v1" ? "MiniMax 海螺关键镜头" : "Wan 关键镜头",
+        : setting.providerId === "hailuo-video-v1" ? "MiniMax 视频生成" : "百炼 · 通义万相视频",
       billing: "metered",
       modes: ["AI 视频", "9:16"],
       deliveryTypes: ["generated_video"],
@@ -180,7 +186,7 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
   });
   for (const setting of readMeteredVideoProviderSettings(environment)) metadata.push({
     id: setting.providerId,
-    label: setting.providerId === "seedance-video-v1" ? "Seedance 关键镜头" : setting.providerId === "hailuo-video-v1" ? "MiniMax 海螺关键镜头" : "Wan 关键镜头",
+    label: setting.providerId === "seedance-video-v1" ? "Seedance 关键镜头" : setting.providerId === "hailuo-video-v1" ? "MiniMax 视频生成" : "百炼 · 通义万相视频",
     modelId: setting.model,
     transport: "http_api",
     billing: "metered",

@@ -127,7 +127,10 @@ describe("GenerativeAssetWorkerClient", () => {
   it("refuses a generation request before external calls when its estimate exceeds the budget", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
     const scriptPath = path.join(root, "script.json");
-    await writeFile(scriptPath, JSON.stringify({ scenes: [] }));
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 4, visual_strategy: "generated", visual_prompt: "第一条付费镜头" },
+      { position: 2, duration: 4, visual_strategy: "generated", visual_prompt: "第二条付费镜头" },
+    ] }));
     let called = false;
     const subject = new GenerativeAssetWorkerClient({
       fallback: new LocalAssetWorker(),
@@ -218,6 +221,51 @@ describe("GenerativeAssetWorkerClient", () => {
         },
       }],
     }), /invalid price/);
+  });
+
+  it("prices a video model by the resolution actually selected for generation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "雨夜城市街道" },
+    ] }));
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1.65,
+        defaultModelId: "MiniMax-H3-Max",
+        modelPrices: { "MiniMax-H3-Max": 1.65 },
+        modelProfiles: {
+          "MiniMax-H3-Max": {
+            taskTypes: ["text-to-video"],
+            resolutions: ["480P", "768P"],
+            minDurationSeconds: 5,
+            maxDurationSeconds: 15,
+            supportsAudio: true,
+            estimatedCnyPerSecond: 0.33,
+            estimatedCnyPerSecondByResolution: { "480P": 0.33, "768P": 0.5 },
+          },
+        },
+        adapter: {
+          providerId: "hailuo-video-v1",
+          generate: async (request) => {
+            assert.equal(request.resolution, "768P");
+            return { providerId: "hailuo-video-v1", taskId: "h3-max-task", videoUrl: "https://example.com/h3.mp4" };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("h3-video", { headers: { "content-type": "video/mp4" } }),
+    });
+
+    const request = workerRequest(scriptPath, outputDir, 1, 3);
+    (request.parameters as Record<string, unknown>).providerId = "hailuo-video-v1";
+    (request.parameters as Record<string, unknown>).modelSelections = { "hailuo-video-v1": "MiniMax-H3-Max" };
+    const response = await subject.run(request);
+
+    assert.equal(response.diagnostics?.estimatedCostCny, 2.5);
+    assert.equal(response.diagnostics?.actualCostCny, 2.5);
   });
 
   it("clamps paid requests to the selected model runtime boundary", async () => {

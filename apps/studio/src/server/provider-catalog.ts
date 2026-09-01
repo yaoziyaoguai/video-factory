@@ -5,7 +5,13 @@ import {
   resolveZaiVisualReviewModelId,
   type CodexProviderSettings,
 } from "./codex-provider-settings.js";
-import { readMeteredVideoProviderSettings } from "./video-provider-settings.js";
+import {
+  DEFAULT_MINIMAX_VIDEO_MODEL_ID,
+  DEFAULT_SEEDANCE_MODEL_ID,
+  DEFAULT_WAN_VIDEO_MODEL_ID,
+  readMeteredVideoProviderSettings,
+  reviewedVideoModelCatalog,
+} from "./video-provider-settings.js";
 import { readMeteredImageProviderSettings } from "./image-provider-settings.js";
 
 export interface ProviderRuntime {
@@ -28,6 +34,7 @@ export function buildProviderCatalog(
   zaiCodexAvailability?: CodexCatalogAvailability,
 ): StudioProvider[] {
   const videoSettings = readMeteredVideoProviderSettings(environment);
+  const reviewedVideoModels = reviewedVideoModelCatalog(environment);
   const imageSettings = readMeteredImageProviderSettings(environment);
   const seedreamSettings = imageSettings.find((setting) => setting.providerId === "seedream-image-v1");
   const seedanceSettings = videoSettings.find((setting) => setting.providerId === "seedance-video-v1");
@@ -269,50 +276,48 @@ export function buildProviderCatalog(
       modes: ["文生视频", "9:16", "2-15 秒", "无声素材"],
       latency: "minutes",
       ...(seedanceSettings ? { estimatedCnyPerClip: seedanceSettings.estimatedCnyPerClip } : {}),
-      ...(seedanceSettings ? {
-        defaultModelId: seedanceSettings.model,
-        modelProfiles: seedanceSettings.models.map((model) => ({
-          ...model,
-          providerId: "seedance-video-v1",
-          providerFamily: "ark-video",
-          available: seedanceAvailable,
-          description: model.recommended
-            ? "当前推荐的方舟视频模型，适合精品关键镜头与受控小额验证。"
-            : "同一方舟 API 下的可选视频模型，可按项目或节点覆盖默认值。",
-        })),
-      } : {}),
+      defaultModelId: seedanceSettings?.model ?? (environment.SEEDANCE_MODEL_ID?.trim() || DEFAULT_SEEDANCE_MODEL_ID),
+      modelProfiles: (seedanceSettings?.models ?? reviewedVideoModels["seedance-video-v1"]).map((model) => ({
+        ...model,
+        providerId: "seedance-video-v1",
+        providerFamily: "ark-video",
+        available: seedanceAvailable,
+        description: model.recommended
+          ? "当前推荐的方舟视频模型，适合精品关键镜头与受控小额验证。"
+          : "同一方舟 API 下的可选视频模型，可按项目或节点覆盖默认值。",
+      })),
       requirement: "需要 ARK_API_KEY 和 SEEDANCE_ESTIMATED_CNY_PER_CLIP；模型可在页面配置",
       docsUrl: "https://www.volcengine.com/docs/82379/1520757?lang=zh",
     }),
     provider({
       id: "hailuo-video-v1",
       capability: "asset.prepare",
-      label: "MiniMax 海螺关键镜头",
+      label: "MiniMax 视频生成",
       available: miniMaxAvailable,
       kind: "external",
       billing: "metered",
       status: miniMaxAvailable ? "ready" : "needs_config",
-      description: "MiniMax 海螺异步视频生成，适合需要明确运镜的少量表现镜头。",
-      modes: ["文生视频", "768P", "6 秒", "成片裁切为 9:16"],
+      description: "同一个 MiniMax Provider 下可选择 Hailuo 或 H3；H3 支持 4–15 秒、原生音画与最高 2K。",
+      modes: ["文生视频", "4–15 秒", "最高 2K", "逐镜可选模型"],
       latency: "minutes",
       ...(miniMaxSettings ? { estimatedCnyPerClip: miniMaxSettings.estimatedCnyPerClip } : {}),
-      ...(miniMaxSettings ? {
-        defaultModelId: miniMaxSettings.model,
-        modelProfiles: miniMaxSettings.models.map((model) => ({
-          ...model,
-          providerId: "hailuo-video-v1",
-          providerFamily: "minimax-video",
-          available: miniMaxAvailable,
-          description: "当前 MiniMax 海螺视频模型，适合预算内的少量表现镜头。",
-        })),
-      } : {}),
+      defaultModelId: miniMaxSettings?.model ?? (environment.MINIMAX_VIDEO_MODEL_ID?.trim() || DEFAULT_MINIMAX_VIDEO_MODEL_ID),
+      modelProfiles: (miniMaxSettings?.models ?? reviewedVideoModels["hailuo-video-v1"]).map((model) => ({
+        ...model,
+        providerId: "hailuo-video-v1",
+        providerFamily: "minimax-video",
+        available: miniMaxAvailable,
+        description: model.estimatedCnyPerSecond
+          ? `${model.label} 按时长与分辨率计费，默认规格约 ¥${model.estimatedCnyPerSecond.toFixed(2)}/秒；执行前按实际镜头重新核算。`
+          : "MiniMax Hailuo 固定规格视频模型，适合预算内的少量表现镜头。",
+      })),
       requirement: "需要 MINIMAX_API_KEY、MINIMAX_VIDEO_MODEL_ID 和 MINIMAX_ESTIMATED_CNY_PER_CLIP",
-      docsUrl: "https://platform.minimaxi.com/docs/api-reference/video-generation-t2v",
+      docsUrl: "https://platform.minimaxi.com/docs/api-reference/video-generation-v2-create",
     }),
     provider({
       id: "wan-video-v1",
       capability: "asset.prepare",
-      label: "Wan 关键镜头",
+      label: "百炼 · 通义万相视频",
       available: wanAvailable,
       kind: "external",
       billing: "metered",
@@ -321,16 +326,14 @@ export function buildProviderCatalog(
       modes: ["文生视频", "9:16", "720P", "2-15 秒"],
       latency: "minutes",
       ...(wanSettings ? { estimatedCnyPerClip: wanSettings.estimatedCnyPerClip } : {}),
-      ...(wanSettings ? {
-        defaultModelId: wanSettings.model,
-        modelProfiles: wanSettings.models.map((model) => ({
-          ...model,
-          providerId: "wan-video-v1",
-          providerFamily: "dashscope-video",
-          available: wanAvailable,
-          description: "当前阿里云 Model Studio 视频模型，按镜头调用。",
-        })),
-      } : {}),
+      defaultModelId: wanSettings?.model ?? (environment.WAN_MODEL_ID?.trim() || DEFAULT_WAN_VIDEO_MODEL_ID),
+      modelProfiles: (wanSettings?.models ?? reviewedVideoModels["wan-video-v1"]).map((model) => ({
+        ...model,
+        providerId: "wan-video-v1",
+        providerFamily: "dashscope-video",
+        available: wanAvailable,
+        description: "当前阿里云 Model Studio 视频模型，按镜头调用。",
+      })),
       requirement: "需要 DASHSCOPE_API_KEY、DASHSCOPE_WORKSPACE_ID、WAN_MODEL_ID 和 WAN_ESTIMATED_CNY_PER_CLIP",
       docsUrl: "https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference",
     }),

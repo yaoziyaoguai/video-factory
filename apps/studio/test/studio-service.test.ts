@@ -202,6 +202,16 @@ class FakePipeline implements StudioPipelinePort {
     return this.run;
   }
 
+  async applyNodeExecutionConfiguration(
+    _runId: string,
+    _nodeId: string,
+    brief: ProductionBrief,
+    _actor: string,
+  ): Promise<WorkflowRun<ProductionBrief>> {
+    this.run = { ...this.run, initialInput: brief, revision: this.run.revision + 1, status: "stale" };
+    return this.run;
+  }
+
   async authorizeSpend(_runId: string, authorization: SpendAuthorizationDraft): Promise<WorkflowRun<ProductionBrief>> {
     this.lastAuthorization = authorization;
     return this.run;
@@ -1497,6 +1507,54 @@ describe("StudioService", () => {
     assert.equal((pipeline.lastInput as ProductionBrief).modelSelectionSources?.["seedance-video-v1"], "run_override");
   });
 
+  it("removes a model override when its asset provider is removed from the node", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-node-model-cleanup-"));
+    const initialInput: ProductionBrief = {
+      ...brief,
+      providers: {
+        ...brief.providers,
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+      },
+      director: {
+        profileId: "auto",
+        assetProviderIds: ["local-editorial-v1", "seedance-video-v1"],
+      },
+      models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
+      modelSelectionSources: { "seedance-video-v1": "node_override" },
+      economics: {
+        recipeId: "keyshot-ai",
+        allowMeteredProviders: true,
+        maxPaidShots: 1,
+        maxCostCny: 4,
+      },
+    };
+    const pipeline = new FakePipeline({ ...waitingRun(workspaceRoot), initialInput });
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {
+        ARK_API_KEY: "test-ark-key",
+        SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
+      },
+      codexAvailability: { available: true, reason: "" },
+    });
+
+    await service.applyNodeExecutionConfiguration("run-1", "assets", {
+      assetProviderIds: ["local-editorial-v1"],
+      economics: {
+        allowMeteredProviders: false,
+        maxPaidShots: 0,
+        maxCostCny: 0,
+      },
+    }, "vfqa");
+
+    assert.deepEqual(pipeline.run.initialInput.director?.assetProviderIds, ["local-editorial-v1"]);
+    assert.equal(pipeline.run.initialInput.models?.["seedance-video-v1"], undefined);
+    assert.equal(pipeline.run.initialInput.modelSelectionSources?.["seedance-video-v1"], undefined);
+  });
+
   it("rejects an invalid explicit model instead of silently replacing it with the global default", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-invalid-model-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -1510,6 +1568,34 @@ describe("StudioService", () => {
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 4 },
       models: { "seedance-video-v1": 123 },
     }), /制作参数不符合要求/);
+    assert.equal(pipeline.dispatchCount, 0);
+  });
+
+  it("rejects a reviewed provider model when its task type does not fit the selected node", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-incompatible-model-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const environment = {
+      ARK_API_KEY: "test-ark-key",
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
+      SEEDANCE_MODEL_PROFILES_JSON: JSON.stringify([{
+        id: "seedance-image-only",
+        label: "Seedance 图生视频专用",
+        estimatedCnyPerClip: 3.5,
+        taskTypes: ["image-to-video"],
+        resolutions: ["720p"],
+        minDurationSeconds: 4,
+        maxDurationSeconds: 10,
+        supportsAudio: false,
+      }]),
+    };
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment });
+
+    await assert.rejects(() => service.startRun({
+      ...brief,
+      providers: { ...brief.providers, assets: "seedance-video-v1" },
+      economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 4 },
+      models: { "seedance-video-v1": "seedance-image-only" },
+    }), /不适合/);
     assert.equal(pipeline.dispatchCount, 0);
   });
 

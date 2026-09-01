@@ -1,6 +1,8 @@
 export type MeteredVideoProviderSettings = MiniMaxProviderSettings | SeedanceProviderSettings | WanProviderSettings;
 
 export const DEFAULT_SEEDANCE_MODEL_ID = "doubao-seedance-2-5-260628";
+export const DEFAULT_MINIMAX_VIDEO_MODEL_ID = "MiniMax-Hailuo-2.3";
+export const DEFAULT_WAN_VIDEO_MODEL_ID = "wan3.0-video";
 
 export interface VideoModelRuntimeProfile {
   id: string;
@@ -11,6 +13,9 @@ export interface VideoModelRuntimeProfile {
   minDurationSeconds: number;
   maxDurationSeconds: number;
   supportsAudio: boolean;
+  protocol?: "v1" | "v2";
+  estimatedCnyPerSecond?: number;
+  estimatedCnyPerSecondByResolution?: Record<string, number>;
   recommended?: boolean;
 }
 
@@ -43,7 +48,7 @@ export function readMeteredVideoProviderSettings(
   if (environment.ARK_API_KEY && seedanceEstimate !== undefined) {
     const model = environment.SEEDANCE_MODEL_ID?.trim() || DEFAULT_SEEDANCE_MODEL_ID;
     const modelEstimates = readModelEstimates(environment.SEEDANCE_MODEL_ESTIMATES_JSON);
-    const models = seedanceProfiles(
+    const models = reviewedSeedanceProfiles(
       model,
       seedanceEstimate,
       modelEstimates,
@@ -66,12 +71,17 @@ export function readMeteredVideoProviderSettings(
   const miniMaxEstimate = positiveNumber(environment.MINIMAX_ESTIMATED_CNY_PER_CLIP);
   if (environment.MINIMAX_API_KEY && environment.MINIMAX_VIDEO_MODEL_ID && miniMaxEstimate !== undefined) {
     const model = environment.MINIMAX_VIDEO_MODEL_ID;
+    const models = reviewedMiniMaxProfiles(model, miniMaxEstimate);
+    const configuredProfile = models.find((profile) => profile.id === model);
+    if (!configuredProfile) {
+      throw new Error(`MINIMAX_VIDEO_MODEL_ID '${model}' has no reviewed runtime profile.`);
+    }
     settings.push({
       providerId: "hailuo-video-v1",
       apiKey: environment.MINIMAX_API_KEY,
       model,
-      models: [genericProfile(model, "MiniMax 海螺", miniMaxEstimate, 6, 6, ["768P"])],
-      estimatedCnyPerClip: miniMaxEstimate,
+      models,
+      estimatedCnyPerClip: configuredProfile.estimatedCnyPerClip,
       ...(environment.MINIMAX_BASE_URL ? { baseUrl: environment.MINIMAX_BASE_URL } : {}),
     });
   }
@@ -84,20 +94,129 @@ export function readMeteredVideoProviderSettings(
     && wanEstimate !== undefined
   ) {
     const model = environment.WAN_MODEL_ID;
+    const models = reviewedWanProfiles(
+      model,
+      wanEstimate,
+      readModelEstimates(environment.WAN_MODEL_ESTIMATES_JSON, "WAN_MODEL_ESTIMATES_JSON"),
+    );
+    const configuredProfile = models.find((profile) => profile.id === model);
+    if (!configuredProfile) {
+      throw new Error(`WAN_MODEL_ID '${model}' has no reviewed runtime profile.`);
+    }
     settings.push({
       providerId: "wan-video-v1",
       apiKey: environment.DASHSCOPE_API_KEY,
       model,
-      models: [genericProfile(model, "Wan 视频", wanEstimate, 2, 15, ["720P"])],
+      models,
       workspaceId: environment.DASHSCOPE_WORKSPACE_ID,
-      estimatedCnyPerClip: wanEstimate,
+      estimatedCnyPerClip: configuredProfile.estimatedCnyPerClip,
       ...(environment.WAN_BASE_URL ? { baseUrl: environment.WAN_BASE_URL } : {}),
     });
   }
   return settings;
 }
 
-function seedanceProfiles(
+export function reviewedVideoModelCatalog(environment: NodeJS.ProcessEnv): Record<MeteredVideoProviderSettings["providerId"], VideoModelRuntimeProfile[]> {
+  const seedanceModel = environment.SEEDANCE_MODEL_ID?.trim() || DEFAULT_SEEDANCE_MODEL_ID;
+  const miniMaxModel = environment.MINIMAX_VIDEO_MODEL_ID?.trim() || DEFAULT_MINIMAX_VIDEO_MODEL_ID;
+  const wanModel = environment.WAN_MODEL_ID?.trim() || DEFAULT_WAN_VIDEO_MODEL_ID;
+  return {
+    "seedance-video-v1": reviewedSeedanceProfiles(
+      seedanceModel,
+      positiveNumber(environment.SEEDANCE_ESTIMATED_CNY_PER_CLIP) ?? 5,
+      readModelEstimates(environment.SEEDANCE_MODEL_ESTIMATES_JSON),
+      readSeedanceModelProfiles(environment.SEEDANCE_MODEL_PROFILES_JSON),
+    ),
+    "hailuo-video-v1": reviewedMiniMaxProfiles(
+      miniMaxModel,
+      positiveNumber(environment.MINIMAX_ESTIMATED_CNY_PER_CLIP) ?? 2.1,
+    ),
+    "wan-video-v1": reviewedWanProfiles(
+      wanModel,
+      positiveNumber(environment.WAN_ESTIMATED_CNY_PER_CLIP) ?? 5,
+      readModelEstimates(environment.WAN_MODEL_ESTIMATES_JSON, "WAN_MODEL_ESTIMATES_JSON"),
+    ),
+  };
+}
+
+function reviewedMiniMaxProfiles(configuredModel: string, hailuoEstimate: number): VideoModelRuntimeProfile[] {
+  const profiles: VideoModelRuntimeProfile[] = [
+    {
+      ...genericProfile("MiniMax-Hailuo-2.3", "MiniMax Hailuo 2.3", hailuoEstimate, 6, 6, ["768P", "1080P"]),
+      protocol: "v1",
+    },
+    {
+      id: "MiniMax-H3",
+      label: "MiniMax H3",
+      estimatedCnyPerClip: 2,
+      estimatedCnyPerSecond: 0.5,
+      estimatedCnyPerSecondByResolution: { "768P": 0.5, "2K": 0.8 },
+      taskTypes: ["text-to-video"],
+      resolutions: ["768P", "2K"],
+      minDurationSeconds: 4,
+      maxDurationSeconds: 15,
+      supportsAudio: true,
+      protocol: "v2",
+    },
+    {
+      id: "MiniMax-H3-Max",
+      label: "MiniMax H3 Max",
+      estimatedCnyPerClip: 1.65,
+      estimatedCnyPerSecond: 0.33,
+      estimatedCnyPerSecondByResolution: { "480P": 0.33, "768P": 0.5 },
+      taskTypes: ["text-to-video"],
+      resolutions: ["480P", "768P"],
+      minDurationSeconds: 5,
+      maxDurationSeconds: 15,
+      supportsAudio: true,
+      protocol: "v2",
+    },
+  ];
+  return profiles.map((profile) => profile.id === configuredModel ? { ...profile, recommended: true } : profile);
+}
+
+function reviewedWanProfiles(
+  configuredModel: string,
+  estimatedCnyPerClip: number,
+  modelEstimates: Record<string, number>,
+): VideoModelRuntimeProfile[] {
+  const estimate = (modelId: string) => modelEstimates[modelId] ?? estimatedCnyPerClip;
+  const profiles: VideoModelRuntimeProfile[] = [
+    {
+      id: "wan3.0-video",
+      label: "Wan 3.0",
+      estimatedCnyPerClip: estimate("wan3.0-video"),
+      taskTypes: ["text-to-video"],
+      resolutions: ["480P", "720P", "1080P"],
+      minDurationSeconds: 2,
+      maxDurationSeconds: 15,
+      supportsAudio: true,
+    },
+    {
+      id: "wan3.0-video-prime",
+      label: "Wan 3.0 Prime",
+      estimatedCnyPerClip: estimate("wan3.0-video-prime"),
+      taskTypes: ["text-to-video"],
+      resolutions: ["480P", "720P", "1080P"],
+      minDurationSeconds: 2,
+      maxDurationSeconds: 15,
+      supportsAudio: true,
+    },
+    {
+      id: "wan2.7-t2v",
+      label: "Wan 2.7 文生视频",
+      estimatedCnyPerClip: estimate("wan2.7-t2v"),
+      taskTypes: ["text-to-video"],
+      resolutions: ["720P", "1080P"],
+      minDurationSeconds: 2,
+      maxDurationSeconds: 15,
+      supportsAudio: true,
+    },
+  ];
+  return profiles.map((profile) => profile.id === configuredModel ? { ...profile, recommended: true } : profile);
+}
+
+function reviewedSeedanceProfiles(
   configuredModel: string,
   estimatedCnyPerClip: number,
   modelEstimates: Record<string, number>,
@@ -154,20 +273,23 @@ function genericProfile(
   };
 }
 
-function readModelEstimates(value: string | undefined): Record<string, number> {
+function readModelEstimates(
+  value: string | undefined,
+  variableName = "SEEDANCE_MODEL_ESTIMATES_JSON",
+): Record<string, number> {
   if (!value?.trim()) return {};
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error("SEEDANCE_MODEL_ESTIMATES_JSON must be valid JSON.");
+    throw new Error(`${variableName} must be valid JSON.`);
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("SEEDANCE_MODEL_ESTIMATES_JSON must be a JSON object.");
+    throw new Error(`${variableName} must be a JSON object.`);
   }
   return Object.fromEntries(Object.entries(parsed).map(([modelId, estimate]) => {
     if (!modelId.trim() || typeof estimate !== "number" || !Number.isFinite(estimate) || estimate <= 0) {
-      throw new Error(`SEEDANCE_MODEL_ESTIMATES_JSON has an invalid estimate for '${modelId}'.`);
+      throw new Error(`${variableName} has an invalid estimate for '${modelId}'.`);
     }
     return [modelId, estimate];
   }));

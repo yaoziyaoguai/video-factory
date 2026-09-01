@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { StudioCostDashboard as CostDto, StudioNode } from "../src/shared/api.js";
+import type { StudioCostDashboard as CostDto, StudioNode, StudioProvider } from "../src/shared/api.js";
 import { CostDashboard, RunCostDetailPanel } from "../src/client/components/CostDashboard.js";
 import { NodeWorkspace } from "../src/client/components/NodeWorkspace.js";
 
@@ -60,6 +60,52 @@ const succeededNode: StudioNode = {
 describe("node production workspaces", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("only offers provider models compatible with the current node", async () => {
+    const providers: StudioProvider[] = [{
+      id: "wan-video-v1",
+      capability: "asset.prepare",
+      label: "百炼 · 通义万相视频",
+      available: true,
+      kind: "external",
+      billing: "metered",
+      defaultModelId: "wan3.0-video",
+      modelProfiles: [
+        { id: "wan3.0-video", providerId: "wan-video-v1", providerFamily: "dashscope-video", label: "Wan 3.0", description: "文生视频", available: true, taskTypes: ["text-to-video"], estimatedCnyPerClip: 3 },
+        { id: "wan2.7-i2v", providerId: "wan-video-v1", providerFamily: "dashscope-video", label: "Wan 2.7 图生视频", description: "需要首帧图片", available: true, taskTypes: ["image-to-video"], estimatedCnyPerClip: 3 },
+      ],
+    }];
+    const node: StudioNode = {
+      id: "assets",
+      label: "画面",
+      role: "素材导演",
+      status: "pending",
+      artifactIds: [],
+      qualityGateResults: [],
+      executionConfiguration: {
+        providerId: "ai-shot-router-v1",
+        modelSelections: { "wan-video-v1": "wan3.0-video" },
+        assetProviderIds: ["wan-video-v1"],
+        economics: { allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 3 },
+      },
+    };
+
+    render(<NodeWorkspace
+      node={node}
+      providers={providers}
+      runStatus="paused"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onConfigure={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "调整" }));
+    const modelSelect = screen.getByRole("combobox", { name: "百炼 · 通义万相视频模型" });
+    expect(within(modelSelect).getByRole("option", { name: "Wan 3.0" })).toBeInTheDocument();
+    expect(within(modelSelect).queryByRole("option", { name: "Wan 2.7 图生视频" })).not.toBeInTheDocument();
   });
 
   it("shows provenance and saves a valid human output version", async () => {
@@ -455,7 +501,7 @@ describe("node production workspaces", () => {
     expect(screen.getByRole("img", { name: "镜头 1 画面预览" })).toHaveAttribute("src", "/scene-1.png");
     expect(container.querySelector('video[aria-label="镜头 2 画面预览"]')).toHaveAttribute("src", "/scene-2.mp4");
     expect(screen.getByText("本地编辑画面")).toBeInTheDocument();
-    expect(screen.getByText("MiniMax 海螺视频生成")).toBeInTheDocument();
+    expect(screen.getByText("MiniMax 视频生成")).toBeInTheDocument();
   });
 
   it("uses a multiline editor for every visual-review suggestion", async () => {

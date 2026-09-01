@@ -45,6 +45,7 @@ import type {
   StudioProductionInput,
   StudioProductionRoleBindingKey,
   StudioNodeInputOverrideInput,
+  StudioNodeExecutionConfigurationInput,
   StudioNodeOverrideInput,
   StudioSpendAuthorizationInput,
   StudioVoicePreviewInput,
@@ -531,6 +532,9 @@ export class StudioService {
   }
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor = "studio-owner"): Promise<StudioRunDetail> {
     return this.withSeriesRunEditLease(runId, async () => this.production.applyNodeInputOverride(runId, nodeId, input, actor));
+  }
+  applyNodeExecutionConfiguration(runId: string, nodeId: string, input: StudioNodeExecutionConfigurationInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    return this.withSeriesRunEditLease(runId, async () => this.production.applyNodeExecutionConfiguration(runId, nodeId, input, actor));
   }
   authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.authorizeSpend(runId, nodeId, input, approvedBy);

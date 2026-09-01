@@ -24,11 +24,13 @@ import {
   type StudioIntervention,
   type StudioNode,
   type StudioNodeInputOverrideInput,
+  type StudioNodeExecutionConfigurationInput,
   type StudioNodeOverrideInput,
   type StudioProvider,
   type StudioRunDetail,
   type StudioRunSummary,
 } from "../shared/api.js";
+import { modelSupportsCapability } from "../shared/model-compatibility.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 import { validateNodeOverrideOutput } from "./node-output-validator.js";
 import type { RunArchiveRepository } from "./run-archive-store.js";
@@ -55,6 +57,12 @@ export interface StudioPipelinePort {
   ): Promise<DispatchedProductionRun>;
   applyNodeOverride(runId: string, override: NodeOverrideDraft): Promise<WorkflowRun<ProductionBrief>>;
   applyNodeInputOverride(runId: string, override: NodeInputOverrideDraft): Promise<WorkflowRun<ProductionBrief>>;
+  applyNodeExecutionConfiguration(
+    runId: string,
+    nodeId: string,
+    brief: ProductionBrief,
+    actor: string,
+  ): Promise<WorkflowRun<ProductionBrief>>;
   authorizeSpend(runId: string, authorization: SpendAuthorizationDraft): Promise<WorkflowRun<ProductionBrief>>;
   dispatchSpendAuthorization?(
     runId: string,
@@ -562,6 +570,35 @@ export class ProductionStudio {
     }
   }
 
+  async applyNodeExecutionConfiguration(
+    runId: string,
+    nodeId: string,
+    input: StudioNodeExecutionConfigurationInput,
+    actor: string,
+  ): Promise<StudioRunDetail> {
+    const current = await this.loadRequiredRun(runId);
+    if (current.status === "running") {
+      throw new StudioConflictError("制作仍在执行，请先暂停，再修改这个节点的模型或预算。");
+    }
+    if (isTerminalRun(current.status) && input.confirmTerminalEdit !== true) {
+      throw new StudioConflictError("这条制作已经结束。请明确确认重新生成后再修改执行配置。");
+    }
+    const currentBrief = parseBrief(current.initialInput);
+    const updatedBrief = applyNodeExecutionConfiguration(currentBrief, nodeId, input);
+    await this.assertProvidersAvailable(updatedBrief, this.options.maxRunCostCny ?? 100);
+    try {
+      const updated = await this.options.pipeline.applyNodeExecutionConfiguration(runId, nodeId, updatedBrief, actor);
+      const detail = this.toDetail(updated);
+      this.publish(detail);
+      return detail;
+    } catch (error) {
+      if (error instanceof StaleRunRevisionError || (error instanceof Error && /locked by another writer/.test(error.message))) {
+        throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
+      }
+      throw error;
+    }
+  }
+
   private async prepareDocumentOverride(options: {
     runId: string;
     nodeId: string;
@@ -854,6 +891,9 @@ export class ProductionStudio {
       const model = provider?.modelProfiles?.find((candidate) => candidate.id === modelId);
       if (!provider || !model) throw new StudioInputError(`“${provider?.label ?? providerId}”不支持模型“${modelId}”。`);
       if (!model.available) throw new StudioInputError(`模型“${model.label}”当前不可用。`);
+      if (!modelSupportsCapability(model, provider.capability)) {
+        throw new StudioInputError(`模型“${model.label}”不适合“${provider.label}”当前所在节点。`);
+      }
     }
     let fixedMeteredEstimateCny = 0;
     const bindings: Array<[string, string]> = [
@@ -1353,6 +1393,7 @@ function toRunDetail(
       } : {}),
       ...(node?.spendPlan ? { spendPlan: { ...node.spendPlan, inputVersionIds: [...node.spendPlan.inputVersionIds] } } : {}),
       ...(node?.spendAuthorizationId ? { spendAuthorizationId: node.spendAuthorizationId } : {}),
+      ...nodeExecutionConfiguration(run.initialInput, id),
     };
   });
   const active = run.nodeRuns.find((node) => node.status === "needs_human")?.intervention;
@@ -1401,6 +1442,31 @@ function toRunDetail(
     ...(activeIntervention ? { activeIntervention } : {}),
     ...(videoArtifactId ? { videoArtifactId } : {}),
     ...(publishPackageArtifactId ? { publishPackageArtifactId } : {}),
+  };
+}
+
+function nodeExecutionConfiguration(
+  brief: ProductionBrief,
+  nodeId: string,
+): Pick<StudioNode, "executionConfiguration"> | Record<string, never> {
+  const providerField = NODE_PROVIDER_FIELDS[nodeId];
+  if (!providerField || nodeId === "render" || nodeId === "technical-review") return {};
+  const providerId = brief.providers[providerField];
+  if (!providerId) return {};
+  const relevantProviderIds = nodeId === "assets"
+    ? [providerId, ...(brief.director?.assetProviderIds ?? [])]
+    : [providerId];
+  const modelSelections = Object.fromEntries(relevantProviderIds.flatMap((id) => {
+    const modelId = brief.models?.[id];
+    return modelId ? [[id, modelId]] : [];
+  }));
+  return {
+    executionConfiguration: {
+      providerId,
+      modelSelections,
+      ...(nodeId === "assets" && brief.director ? { assetProviderIds: [...brief.director.assetProviderIds] } : {}),
+      ...(nodeId === "assets" ? { economics: { ...brief.economics } } : {}),
+    },
   };
 }
 
@@ -1472,6 +1538,77 @@ function productionInputMessage(error: unknown): string {
 
 function roundMoney(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+const NODE_PROVIDER_FIELDS: Partial<Record<string, keyof ProductionBrief["providers"]>> = {
+  script: "script",
+  "visual-direction": "director",
+  assets: "assets",
+  voice: "voice",
+  render: "render",
+  "technical-review": "technicalReview",
+  "visual-review": "visualReview",
+};
+
+function applyNodeExecutionConfiguration(
+  brief: ProductionBrief,
+  nodeId: string,
+  input: StudioNodeExecutionConfigurationInput,
+): ProductionBrief {
+  const providerField = NODE_PROVIDER_FIELDS[nodeId];
+  if (!providerField) throw new StudioInputError(`“${nodeId}”没有可切换的模型或执行能力。`);
+  if (nodeId !== "assets" && (input.assetProviderIds || input.economics)) {
+    throw new StudioInputError("素材来源和镜头预算只能在素材导演节点修改。");
+  }
+  if (nodeId === "assets" && input.providerId && input.providerId !== "ai-shot-router-v1") {
+    throw new StudioInputError("素材导演保持使用 AI 逐镜路由；请在下方选择火山、MiniMax、百炼等具体生成来源和模型。");
+  }
+
+  const previousProviderId = brief.providers[providerField];
+  const providers = { ...brief.providers };
+  if (input.providerId) providers[providerField] = input.providerId;
+  const director = input.assetProviderIds
+    ? brief.director
+      ? { ...brief.director, assetProviderIds: [...input.assetProviderIds] }
+      : undefined
+    : brief.director;
+  if (input.assetProviderIds && !director) throw new StudioInputError("当前制作没有启用导演素材池，不能修改逐镜来源。");
+
+  const models = { ...(brief.models ?? {}) };
+  const modelSelectionSources = { ...(brief.modelSelectionSources ?? {}) };
+  for (const [providerId, modelId] of Object.entries(input.modelSelections ?? {})) {
+    if (modelId === null) {
+      delete models[providerId];
+      delete modelSelectionSources[providerId];
+    } else {
+      models[providerId] = modelId;
+      modelSelectionSources[providerId] = "node_override";
+    }
+  }
+  const selectedProviderIds = new Set([
+    ...Object.values(providers).filter((value): value is string => typeof value === "string"),
+    ...(director?.assetProviderIds ?? []),
+  ]);
+  const previouslySelectedProviderIds = new Set([
+    ...(previousProviderId ? [previousProviderId] : []),
+    ...(brief.director?.assetProviderIds ?? []),
+  ]);
+  for (const providerId of previouslySelectedProviderIds) {
+    if (selectedProviderIds.has(providerId)) continue;
+    delete models[providerId];
+    delete modelSelectionSources[providerId];
+  }
+
+  const economics = input.economics
+    ? { recipeId: "custom" as const, ...input.economics }
+    : brief.economics;
+  return parseBrief({
+    ...brief,
+    providers,
+    ...(Object.keys(models).length ? { models, modelSelectionSources } : { models: undefined, modelSelectionSources: undefined }),
+    ...(director ? { director } : {}),
+    economics,
+  });
 }
 
 function hasCode(error: unknown, code: string): boolean {

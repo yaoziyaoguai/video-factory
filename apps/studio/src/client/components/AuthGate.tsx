@@ -69,27 +69,40 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated(session: StudioAuthSe
 
   return (
     <main className="auth-stage">
-      <div className="auth-atmosphere" aria-hidden="true">
-        <span>SCENE 01</span><i /><span>DAILY CUT</span>
+      <div className="auth-layout">
+        <section className="auth-panel" aria-labelledby="auth-title">
+          <div className="auth-brand"><span className="auth-mark"><Clapperboard aria-hidden="true" size={20} /></span><strong>VideoFactory</strong></div>
+          <div className="auth-copy">
+            <span className="auth-eyebrow">私人影像创作工作室</span>
+            <h1 id="auth-title">回到创作现场</h1>
+            <p>你的选题、分镜与制作记录都在这里。</p>
+          </div>
+          <form className="auth-form" onSubmit={(event) => void submit(event)}>
+            <label><span>用户名</span><input name="username" autoComplete="username" required autoFocus /></label>
+            <label><span>密码</span><input name="password" type="password" autoComplete="current-password" required /></label>
+            {error ? <p className="auth-error" role="alert">{error}</p> : null}
+            <button className="auth-submit" type="submit" disabled={pending}>
+              {pending ? <LoaderCircle className="auth-spinner-inline" aria-hidden="true" size={18} /> : <LockKeyhole aria-hidden="true" size={18} />}
+              <span>{pending ? "正在进入" : "进入 VideoFactory"}</span>
+              {!pending ? <ArrowRight aria-hidden="true" size={18} /> : null}
+            </button>
+          </form>
+        </section>
+        <aside className="auth-filmboard" aria-label="VideoFactory 影像工作台预览">
+          <figure className="auth-frame auth-frame-primary">
+            <img src="/media/studio-frame-1.jpg" alt="竖屏影像制作画面" />
+            <figcaption><span>01</span><small>STORY / FRAME</small></figcaption>
+          </figure>
+          <figure className="auth-frame">
+            <img src="/media/studio-frame-2.jpg" alt="影像镜头预览" />
+            <figcaption><span>02</span><small>VISUAL / CUT</small></figcaption>
+          </figure>
+          <figure className="auth-frame">
+            <img src="/media/studio-frame-3.jpg" alt="成片审阅画面" />
+            <figcaption><span>03</span><small>REVIEW / MASTER</small></figcaption>
+          </figure>
+        </aside>
       </div>
-      <section className="auth-panel" aria-labelledby="auth-title">
-        <div className="auth-brand"><span className="auth-mark"><Clapperboard aria-hidden="true" size={20} /></span><strong>VideoFactory</strong></div>
-        <div className="auth-copy">
-          <span className="auth-eyebrow">私人影像创作工作室</span>
-          <h1 id="auth-title">回到创作现场</h1>
-          <p>你的选题、分镜与制作记录都在这里。</p>
-        </div>
-        <form className="auth-form" onSubmit={(event) => void submit(event)}>
-          <label><span>用户名</span><input name="username" autoComplete="username" required autoFocus /></label>
-          <label><span>密码</span><input name="password" type="password" autoComplete="current-password" required /></label>
-          {error ? <p className="auth-error" role="alert">{error}</p> : null}
-          <button className="auth-submit" type="submit" disabled={pending}>
-            {pending ? <LoaderCircle className="auth-spinner-inline" aria-hidden="true" size={18} /> : <LockKeyhole aria-hidden="true" size={18} />}
-            <span>{pending ? "正在进入" : "进入 VideoFactory"}</span>
-            {!pending ? <ArrowRight aria-hidden="true" size={18} /> : null}
-          </button>
-        </form>
-      </section>
     </main>
   );
 }

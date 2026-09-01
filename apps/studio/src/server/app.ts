@@ -61,6 +61,7 @@ import {
   type StudioTemplateMutation,
   type StudioTemplateExperimentScorecard,
   type StudioNodeInputOverrideInput,
+  type StudioNodeExecutionConfigurationInput,
   type StudioNodeOverrideInput,
   type StudioSpendAuthorizationInput,
 } from "../shared/api.js";
@@ -110,6 +111,7 @@ export interface StudioServicePort {
   decide(runId: string, input: StudioDecisionInput, actor: string): Promise<StudioRunDetail>;
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
+  applyNodeExecutionConfiguration(runId: string, nodeId: string, input: StudioNodeExecutionConfigurationInput, actor: string): Promise<StudioRunDetail>;
   authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy: string): Promise<StudioRunDetail>;
   requestPause(runId: string): Promise<StudioRunDetail>;
   resumePaused(runId: string): Promise<StudioRunDetail>;
@@ -395,6 +397,17 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       request.params.runId,
       request.params.nodeId,
       parseNodeInputOverrideInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
+  app.put<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/execution-configuration", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.nodeId, "节点编号");
+    return options.service.applyNodeExecutionConfiguration(
+      request.params.runId,
+      request.params.nodeId,
+      parseNodeExecutionConfigurationInput(request.body),
       trustedStudioActor(auth, request.headers.cookie),
     );
   });
@@ -707,6 +720,43 @@ function parseNodeInputOverrideInput(value: unknown): StudioNodeInputOverrideInp
   }
   return {
     input: input.input,
+    ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
+  };
+}
+
+function parseNodeExecutionConfigurationInput(value: unknown): StudioNodeExecutionConfigurationInput {
+  const input = requireRecord(value, "节点执行配置");
+  const modelSelections = input.modelSelections === undefined
+    ? undefined
+    : Object.fromEntries(Object.entries(requireRecord(input.modelSelections, "模型选择")).map(([providerId, modelId]) => {
+        requireSafeRouteId(providerId, "能力编号");
+        return [providerId, modelId === null ? null : requireText(modelId, "模型编号")];
+      }));
+  let assetProviderIds: string[] | undefined;
+  if (input.assetProviderIds !== undefined) {
+    if (!Array.isArray(input.assetProviderIds) || input.assetProviderIds.length > 16) {
+      throw new StudioInputError("素材来源最多选择 16 项。");
+    }
+    assetProviderIds = [...new Set(input.assetProviderIds.map((item) => requireText(item, "素材来源")))];
+  }
+  let economics: StudioNodeExecutionConfigurationInput["economics"];
+  if (input.economics !== undefined) {
+    const candidate = requireRecord(input.economics, "节点预算");
+    if (typeof candidate.allowMeteredProviders !== "boolean") throw new StudioInputError("付费能力开关格式不正确。");
+    economics = {
+      allowMeteredProviders: candidate.allowMeteredProviders,
+      maxPaidShots: requireNonNegativeInteger(candidate.maxPaidShots, "付费镜头数"),
+      maxCostCny: requireNonNegativeNumber(candidate.maxCostCny, "成本上限"),
+    };
+  }
+  if (input.confirmTerminalEdit !== undefined && typeof input.confirmTerminalEdit !== "boolean") {
+    throw new StudioInputError("终态编辑确认必须是布尔值。");
+  }
+  return {
+    ...(input.providerId === undefined ? {} : { providerId: requireText(input.providerId, "执行能力") }),
+    ...(modelSelections ? { modelSelections } : {}),
+    ...(assetProviderIds ? { assetProviderIds } : {}),
+    ...(economics ? { economics } : {}),
     ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
   };
 }

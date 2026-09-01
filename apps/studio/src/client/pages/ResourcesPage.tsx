@@ -47,6 +47,17 @@ const RECIPE_OPTIONS: Array<{ id: StudioProductionRecipeId; label: string }> = [
   { id: "cinematic-ai", label: "精品上限" },
 ];
 const DEFAULT_TOPIC_INSTRUCTION = "优先选择与普通人生活直接相关、能用可靠画面表达、具备明确反差或实用价值、可以发展成系列的题材。高热度但缺少可验证事实、可用画面或独特角度时，应降低推荐或明确放弃。";
+const RESOURCE_SECTION_IDS = [
+  "creation-defaults",
+  "topic-strategy",
+  "trend-connections",
+  "voice-casting",
+  "visual-providers",
+  "production-roles",
+  "resource-manifest",
+  "publish-channels",
+] as const;
+type ResourceSectionId = typeof RESOURCE_SECTION_IDS[number];
 
 interface ProductionRoleDefinition {
   key: StudioProductionRoleBindingKey;
@@ -80,6 +91,7 @@ const AUTOMATIC_AGENT_ROLES = [
 ] as const;
 
 export function ResourcesPage() {
+  const [activeSection, setActiveSection] = useState<ResourceSectionId>(() => resourceSectionFromHash());
   const [providers, setProviders] = useState<StudioProvider[]>([]);
   const [trendSources, setTrendSources] = useState<StudioTrendSource[]>([]);
   const [services, setServices] = useState<StudioTrendService[]>([]);
@@ -110,6 +122,20 @@ export function ResourcesPage() {
   const [modelDefaults, setModelDefaults] = useState<Record<string, string>>({});
   const [productionDefaults, setProductionDefaults] = useState<StudioProductionDefaults>(DEFAULT_PRODUCTION_DEFAULTS);
   const [topicInstruction, setTopicInstruction] = useState(DEFAULT_TOPIC_INSTRUCTION);
+
+  useEffect(() => {
+    const syncSection = () => setActiveSection(resourceSectionFromHash());
+    window.addEventListener("hashchange", syncSection);
+    return () => window.removeEventListener("hashchange", syncSection);
+  }, []);
+
+  function showSection(sectionId: ResourceSectionId) {
+    setActiveSection(sectionId);
+    window.history.replaceState(null, "", `#${sectionId}`);
+    const reduceMotion = typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+  }
 
   const load = useCallback(async () => {
     setProviderLoading(true);
@@ -189,16 +215,17 @@ export function ResourcesPage() {
     ? settings.defaultRecipeId !== defaultRecipeId
       || !sameProductionDefaults(settings.productionDefaults, productionDefaults)
     : false;
+  const modelHasChanges = settings ? !sameStringRecord(settings.modelDefaults, modelDefaults) : false;
   const roleHasChanges = settings
     ? !sameStringRecord(settings.roleProviderDefaults, roleProviderDefaults)
-      || !sameStringRecord(settings.modelDefaults, modelDefaults)
+      || modelHasChanges
     : false;
   const topicHasChanges = settings ? (settings.topicStrategy?.customInstruction ?? DEFAULT_TOPIC_INSTRUCTION) !== topicInstruction.trim() : false;
   const readyFoundation = foundationProviders.filter(isProductionReady).length;
   const usablePublishTargets = publishTargets.filter((target) => target.status === "ready" || target.status === "manual_only").length;
 
   return (
-    <main className="page resources-page">
+    <main className="page resources-page" data-active-section={activeSection}>
       <header className="page-header resources-header">
         <div>
           <p className="eyebrow">创作控制室</p>
@@ -224,17 +251,17 @@ export function ResourcesPage() {
       </section>
 
       <nav className="configuration-index" aria-label="配置分区">
-        <a href="#creation-defaults"><SlidersHorizontal aria-hidden="true" size={15} />创作默认</a>
-        <a href="#topic-strategy"><Sparkles aria-hidden="true" size={15} />选题策略</a>
-        <a href="#trend-connections"><RadioTower aria-hidden="true" size={15} />热点信号</a>
-        <a href="#voice-casting"><Sparkles aria-hidden="true" size={15} />声音演员</a>
-        <a href="#visual-providers"><Film aria-hidden="true" size={15} />画面来源</a>
-        <a href="#resource-manifest"><ListChecks aria-hidden="true" size={15} />资源清单</a>
-        <a href="#production-roles"><Clapperboard aria-hidden="true" size={15} />岗位模型</a>
-        <a href="#publish-channels"><UploadCloud aria-hidden="true" size={15} />发布渠道</a>
+        <a href="#creation-defaults" aria-current={activeSection === "creation-defaults" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("creation-defaults"); }}><SlidersHorizontal aria-hidden="true" size={15} />创作默认</a>
+        <a href="#topic-strategy" aria-current={activeSection === "topic-strategy" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("topic-strategy"); }}><Sparkles aria-hidden="true" size={15} />选题策略</a>
+        <a href="#trend-connections" aria-current={activeSection === "trend-connections" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("trend-connections"); }}><RadioTower aria-hidden="true" size={15} />热点信号</a>
+        <a href="#voice-casting" aria-current={activeSection === "voice-casting" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("voice-casting"); }}><Sparkles aria-hidden="true" size={15} />声音演员</a>
+        <a href="#visual-providers" aria-current={activeSection === "visual-providers" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("visual-providers"); }}><Film aria-hidden="true" size={15} />画面来源</a>
+        <a href="#production-roles" aria-current={activeSection === "production-roles" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("production-roles"); }}><Clapperboard aria-hidden="true" size={15} />岗位模型</a>
+        <a href="#resource-manifest" aria-current={activeSection === "resource-manifest" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("resource-manifest"); }}><ListChecks aria-hidden="true" size={15} />资源清单</a>
+        <a href="#publish-channels" aria-current={activeSection === "publish-channels" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("publish-channels"); }}><UploadCloud aria-hidden="true" size={15} />发布渠道</a>
       </nav>
 
-      <section id="creation-defaults" className="resource-section configuration-defaults" data-tour="configuration-defaults">
+      <section id="creation-defaults" className="resource-section configuration-defaults" data-resource-section data-active={activeSection === "creation-defaults" ? "true" : undefined} data-tour="configuration-defaults">
         <ResourceHeading eyebrow="创作基线" title="新建制作默认值" meta="保存后自动带入下一条视频，创建时仍可单独调整" />
         {settingsError ? <ResourceError title="创作默认值读取失败" message={settingsError} retry={load} /> : !settings ? <div className="region-loading">正在读取创作默认值...</div> : <div className="configuration-sheet">
           <div className="configuration-intro">
@@ -255,7 +282,7 @@ export function ResourcesPage() {
       </section>
       {settingsNotice ? <p className="resource-settings-notice" role="status">{settingsNotice}</p> : null}
 
-      <section id="topic-strategy" className="resource-section topic-strategy-config" data-tour="topic-strategy">
+      <section id="topic-strategy" className="resource-section topic-strategy-config" data-resource-section data-active={activeSection === "topic-strategy" ? "true" : undefined} data-tour="topic-strategy">
         <ResourceHeading eyebrow="总编规则" title="选题策略" meta="热度只是信号，最终排序看能不能做成一条值得看的视频" />
         <div className="topic-rubric" aria-label="选题评分标准">
           {[['受众相关', '18%', '是否与明确人群的真实处境相关'], ['系列价值', '18%', '能否连续生产而不是一次性追热'], ['可拍性', '14%', '是否有可靠素材和可见动作'], ['成本效率', '14%', '在预算内能否达到及格线'], ['差异化', '14%', '是否提供通稿之外的新角度'], ['商业价值', '12%', '是否具备长期转化或合作空间'], ['合规安全', '10%', '事实、公共事件与平台风险']].map(([label, weight, detail]) => <article key={label}><span>{weight}</span><strong>{label}</strong><small>{detail}</small></article>)}
@@ -266,7 +293,7 @@ export function ResourcesPage() {
         </div>
       </section>
 
-      <section id="trend-connections" className="resource-section signal-desk" data-tour="resource-trends">
+      <section id="trend-connections" className="resource-section signal-desk" data-resource-section data-active={activeSection === "trend-connections" ? "true" : undefined} data-tour="resource-trends">
         <ResourceHeading eyebrow="信号台" title="热点接入" meta="最近一次采集 · 来源可追溯" />
         {trendError ? <ResourceError title="热点源状态未知" message={trendError} retry={load} /> : null}
         {serviceError ? <ResourceError title="热点服务状态未知" message={serviceError} retry={load} /> : null}
@@ -306,7 +333,7 @@ export function ResourcesPage() {
         ) : null}
       </section>
 
-      <div id="voice-casting" className="resource-voice-studio" data-tour="resource-voice">
+      <div id="voice-casting" className="resource-voice-studio" data-resource-section data-active={activeSection === "voice-casting" ? "true" : undefined} data-tour="resource-voice">
         <VoiceStudio title="声音演员表" sectionLabel="声音" value={voiceDirection} onChange={(next) => setVoiceDirection(next)} />
         <div className="resource-default-action">
           <div><strong>当前制作默认</strong><span>{voiceHasChanges ? "有未保存的声音调整" : "已保存"}</span></div>
@@ -314,27 +341,30 @@ export function ResourcesPage() {
         </div>
       </div>
 
-      <section id="visual-providers" className="resource-section visual-library" data-tour="resource-visual">
+      <section id="visual-providers" className="resource-section visual-library" data-resource-section data-active={activeSection === "visual-providers" ? "true" : undefined} data-tour="resource-visual">
         <ResourceHeading eyebrow="画面资源" title="生成与素材模型" meta={`${readyVisual} 项可直接生产`} />
         {providerLoading ? <div className="region-loading">正在读取画面能力...</div> : providerError ? (
           <ResourceError title="画面能力状态未知" message={providerError} retry={load} />
-        ) : <div className="provider-ledger">{visualProviders.map((provider) => <ProviderRow
-          key={provider.id}
-          provider={provider}
-          isDefault={settings?.defaultAssetProviderId === provider.id}
-          canSetDefault
-          selectedModelId={modelDefaults[provider.id]}
-          onModelChange={(modelId) => setModelDefaults((current) => {
-            const next = { ...current };
-            if (modelId) next[provider.id] = modelId;
-            else delete next[provider.id];
-            return next;
-          })}
-          onSetDefault={(providerId) => void saveDefaults({ defaultAssetProviderId: providerId }, `${provider.label} 已设为默认画面能力。`)}
-        />)}</div>}
+        ) : <>
+          <div className="provider-ledger">{visualProviders.map((provider) => <ProviderRow
+            key={provider.id}
+            provider={provider}
+            isDefault={settings?.defaultAssetProviderId === provider.id}
+            canSetDefault
+            selectedModelId={modelDefaults[provider.id]}
+            onModelChange={(modelId) => setModelDefaults((current) => {
+              const next = { ...current };
+              if (modelId) next[provider.id] = modelId;
+              else delete next[provider.id];
+              return next;
+            })}
+            onSetDefault={(providerId) => void saveDefaults({ defaultAssetProviderId: providerId }, `${provider.label} 已设为默认画面能力。`)}
+          />)}</div>
+          {settings ? <div className="configuration-save-row foundation-save-row"><span>{modelHasChanges ? "有未保存的画面模型调整" : "画面模型默认值已同步"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !modelHasChanges} onClick={() => void saveDefaults({ modelDefaults }, "画面模型默认值已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{modelHasChanges ? "保存画面模型" : "已保存"}</button></div> : null}
+        </>}
       </section>
 
-      <section id="production-roles" className="resource-section foundation-registry">
+      <section id="production-roles" className="resource-section foundation-registry" data-resource-section data-active={activeSection === "production-roles" ? "true" : undefined}>
         <ResourceHeading eyebrow="岗位与模型" title="按角色配置生产能力" meta="先决定谁来做，再决定这个角色使用哪个模型" />
         {providerLoading ? <div className="region-loading">正在读取生产底座...</div> : providerError ? null : (
           <>
@@ -361,7 +391,7 @@ export function ResourcesPage() {
         {settings ? <div className="configuration-save-row foundation-save-row"><span>{roleHasChanges ? "有未保存的角色或模型调整" : "角色配置已同步"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !roleHasChanges} onClick={() => void saveDefaults({ roleProviderDefaults, modelDefaults }, "角色与模型默认值已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{roleHasChanges ? "保存角色配置" : "已保存"}</button></div> : null}
       </section>
 
-      <section id="resource-manifest" className="resource-section resource-manifest-section" data-tour="resource-manifest">
+      <section id="resource-manifest" className="resource-section resource-manifest-section" data-resource-section data-active={activeSection === "resource-manifest" ? "true" : undefined} data-tour="resource-manifest">
         <ResourceHeading eyebrow="权利与来源" title="资源追溯清单" meta={resourceManifest ? `${resourceManifest.totalItems} 项资源 · ${resourceManifest.needsReviewCount} 项待复核` : "逐条记录来源、作者与授权状态"} />
         {manifestError ? <ResourceError title="资源清单读取失败" message={manifestError} retry={load} /> : !resourceManifest ? <div className="region-loading">正在汇总资源清单...</div> : <>
           <div className="resource-manifest-summary" aria-label="资源分类统计">
@@ -388,7 +418,7 @@ export function ResourcesPage() {
         </>}
       </section>
 
-      <section id="publish-channels" className="resource-section publishing-registry" data-tour="configuration-publishing">
+      <section id="publish-channels" className="resource-section publishing-registry" data-resource-section data-active={activeSection === "publish-channels" ? "true" : undefined} data-tour="configuration-publishing">
         <ResourceHeading eyebrow="交付出口" title="发布渠道" meta="未取得官方权限的平台只生成发布包，不会冒充自动发布" />
         {publishError ? <ResourceError title="发布渠道状态未知" message={publishError} retry={load} /> : (
           <div className="publishing-ledger" aria-label="发布渠道列表">
@@ -399,6 +429,14 @@ export function ResourcesPage() {
       </section>
     </main>
   );
+}
+
+function resourceSectionFromHash(): ResourceSectionId {
+  if (typeof window === "undefined") return "creation-defaults";
+  const candidate = window.location.hash.slice(1);
+  return RESOURCE_SECTION_IDS.includes(candidate as ResourceSectionId)
+    ? candidate as ResourceSectionId
+    : "creation-defaults";
 }
 
 function ResourceHeading({ eyebrow, title, meta }: { eyebrow: string; title: string; meta: string }) {
@@ -434,7 +472,8 @@ function ProviderRow({ provider, isDefault, canSetDefault, selectedModelId, onMo
   const ready = isProductionReady(provider);
   const Icon = provider.billing === "free" ? Film : Sparkles;
   const availableModels = provider.modelProfiles?.filter((model) => model.available) ?? [];
-  const staleSelection = selectedModelId && !availableModels.some((model) => model.id === selectedModelId)
+  const catalogModels = provider.modelProfiles ?? [];
+  const staleSelection = selectedModelId && !catalogModels.some((model) => model.id === selectedModelId)
     ? selectedModelId
     : undefined;
   const activeModel = provider.modelProfiles?.find((model) => model.id === (selectedModelId ?? provider.defaultModelId));
@@ -443,11 +482,11 @@ function ProviderRow({ provider, isDefault, canSetDefault, selectedModelId, onMo
     <article className="provider-ledger-row">
       <span className="provider-ledger-icon"><Icon aria-hidden="true" size={18} /></span>
       <div><strong>{provider.label}</strong><small>{provider.description ?? provider.id}</small>{!ready && provider.requirement ? <small className="provider-requirement">{provider.requirement}</small> : null}</div>
-      <span>{availableModels.length || selectedModelId ? <label className="provider-model-select"><small>默认模型</small><select aria-label={`${provider.label} 默认模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(event.target.value)}><option value="">继承服务默认：{provider.defaultModelId ?? "自动选择"}</option>{staleSelection ? <option value={staleSelection} disabled>已失效：{staleSelection}</option> : null}{availableModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}</select></label> : (provider.modes ?? []).slice(0, 3).join(" · ")}</span>
-      <strong className={provider.billing === "metered" ? "is-metered" : ""}>{billingLabel(provider.billing)}{estimate !== undefined ? ` · 约 ¥${formatCost(estimate)}/${provider.billingUnit === "run" ? "条" : "镜头"}` : ""}</strong>
+      <div className="provider-model-cell">{catalogModels.length || selectedModelId ? <label className="provider-model-select"><small>默认模型</small><select aria-label={`${provider.label} 默认模型`} value={selectedModelId ?? ""} disabled={!availableModels.length} onChange={(event) => onModelChange(event.target.value)}><option value="">继承服务默认：{provider.defaultModelId ?? "自动选择"}</option>{staleSelection ? <option value={staleSelection} disabled>已失效：{staleSelection}</option> : null}{catalogModels.map((model) => <option key={model.id} value={model.id} disabled={!model.available}>{model.label}{model.recommended ? " · 推荐" : ""}{model.available ? "" : " · 待配置"}</option>)}</select></label> : (provider.modes ?? []).slice(0, 3).join(" · ")}</div>
+      <strong className={`provider-cost${provider.billing === "metered" ? " is-metered" : ""}`}>{billingLabel(provider.billing)}{estimate !== undefined ? ` · 约 ¥${formatCost(estimate)}/${provider.billingUnit === "run" ? "条" : "镜头"}` : ""}</strong>
       <span className={ready ? "ledger-state is-ready" : "ledger-state"}>{providerReadinessLabel(provider, ready)}</span>
       {ready && canSetDefault ? <button className={isDefault ? "provider-default is-active" : "provider-default"} type="button" disabled={isDefault} onClick={() => onSetDefault(provider.id)}>{isDefault ? "制作默认" : "设为默认"}</button> : <span />}
-      {provider.docsUrl ? <a href={provider.docsUrl} target="_blank" rel="noreferrer" title={`${provider.label} 文档`}><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
+      {provider.docsUrl ? <a className="provider-doc-link" href={provider.docsUrl} target="_blank" rel="noreferrer" title={`${provider.label} 文档`}><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
     </article>
   );
 }

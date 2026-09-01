@@ -35,6 +35,7 @@ function StudioRoutes() {
       <Route path="/experiments" element={<ExperimentsPage />} />
       <Route path="/runs/:runId" element={<LegacyRunRedirect />} />
       <Route path="/providers" element={<Navigate to="/resources" replace />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }

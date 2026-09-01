@@ -6,7 +6,7 @@
   color: #20232c;
   background: #ffffff;
   border: 1px solid #d9dde3;
-  border-top: 4px solid #6d57cf;
+  border-top: 4px solid #0f5cf6;
   border-radius: 8px;
   box-shadow: 0 26px 70px rgb(30 34 44 / 22%);
 }
@@ -14,7 +14,7 @@
 .video-factory-tour .driver-popover-title {
   padding: 19px 52px 0 20px;
   color: #20232c;
-  font-family: "Noto Serif SC Variable", "Songti SC", serif;
+  font-family: "Manrope Variable", "Noto Sans SC Variable", "PingFang SC", sans-serif;
   font-size: 19px;
   font-weight: 720;
   line-height: 1.45;
@@ -61,7 +61,7 @@
 }
 
 .video-factory-tour .tour-end-button:hover {
-  color: #4f3ca4;
+  color: #0948c8;
 }
 
 .video-factory-tour button.driver-popover-prev-btn,
@@ -81,8 +81,8 @@
 
 .video-factory-tour button.driver-popover-next-btn {
   color: #ffffff;
-  background: #6652c5;
-  border-color: #6652c5;
+  background: #0f5cf6;
+  border-color: #0f5cf6;
 }
 
 .video-factory-tour button.driver-popover-prev-btn:hover,
@@ -100,7 +100,7 @@
 }
 
 .video-factory-tour .driver-popover-close-btn:hover {
-  color: #302765;
+  color: #0948c8;
 }
 
 .video-factory-tour.driver-popover-arrow-side-left .driver-popover-arrow { border-left-color: #ffffff; }

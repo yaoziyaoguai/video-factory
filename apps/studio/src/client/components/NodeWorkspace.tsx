@@ -1,6 +1,7 @@
-import { AlertTriangle, Check, ChevronDown, CircleDollarSign, FilePenLine, Pause, Save, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, CircleDollarSign, FilePenLine, Pause, Save, Settings2, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { StudioArtifact, StudioNode, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioRunStatus, StudioSpendAuthorizationInput } from "../../shared/api.js";
+import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput } from "../../shared/api.js";
+import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { providerLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
@@ -10,6 +11,7 @@ import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
 interface NodeWorkspaceProps {
   node: StudioNode;
   nodes?: StudioNode[];
+  providers?: StudioProvider[];
   runStatus: StudioRunStatus;
   artifacts: StudioArtifact[];
   busy: boolean;
@@ -18,10 +20,11 @@ interface NodeWorkspaceProps {
   onRequestPause?: () => Promise<void>;
   onOverride: (nodeId: string, input: StudioNodeOverrideInput) => Promise<void>;
   onInputOverride?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
+  onConfigure?: (nodeId: string, input: StudioNodeExecutionConfigurationInput) => Promise<void>;
   onAuthorize: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy, pauseBusy = false, pauseRequested = false, onRequestPause, onOverride, onInputOverride = async () => undefined, onAuthorize }: NodeWorkspaceProps) {
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, artifacts, busy, pauseBusy = false, pauseRequested = false, onRequestPause, onOverride, onInputOverride = async () => undefined, onConfigure = async () => undefined, onAuthorize }: NodeWorkspaceProps) {
   const shouldOpenForAttention = node.status === "awaiting_spend_approval" || node.status === "approval_invalidated";
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
@@ -253,6 +256,13 @@ export function NodeWorkspace({ node, nodes = [node], runStatus, artifacts, busy
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>审计失败，已规则回退</strong>：{fallbackReason}</span></p> : null}
         {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />此节点结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成。</p> : null}
+        {node.executionConfiguration ? <NodeExecutionConfigurationEditor
+          node={node}
+          providers={providers}
+          runStatus={runStatus}
+          busy={busy}
+          onSave={(input) => onConfigure(node.id, input)}
+        /> : null}
         {canRequestPause ? <div className="node-pause-edit">
           <span>{pauseRequested ? "已请求暂停；当前任务安全结束后会停在下一节点前。" : "想修改这一步？系统会先让当前任务安全结束，再停下来。"}</span>
           <button className="button button-ghost" type="button" disabled={pauseBusy || pauseRequested} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{pauseRequested ? "等待暂停" : "暂停后修改"}</button>
@@ -511,6 +521,169 @@ function configuredAssetProviderIds(nodes: StudioNode[]): string[] {
   return Array.isArray(director?.assetProviderIds)
     ? director.assetProviderIds.filter((value): value is string => typeof value === "string")
     : [];
+}
+
+function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, onSave }: {
+  node: StudioNode;
+  providers: StudioProvider[];
+  runStatus: StudioRunStatus;
+  busy: boolean;
+  onSave: (input: StudioNodeExecutionConfigurationInput) => Promise<void>;
+}) {
+  const configuration = node.executionConfiguration!;
+  const [editing, setEditing] = useState(false);
+  const [providerId, setProviderId] = useState(configuration.providerId);
+  const [modelSelections, setModelSelections] = useState<Record<string, string>>({ ...configuration.modelSelections });
+  const [assetProviderIds, setAssetProviderIds] = useState<string[]>([...(configuration.assetProviderIds ?? [])]);
+  const [maxPaidShots, setMaxPaidShots] = useState(configuration.economics?.maxPaidShots ?? 0);
+  const [maxCostCny, setMaxCostCny] = useState(configuration.economics?.maxCostCny ?? 0);
+  const [error, setError] = useState<string>();
+  const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
+  const canEdit = providers.length > 0 && !terminal && runStatus !== "running" && node.status !== "running";
+  const capability = configurableNodeCapability(node.id);
+  const roleProviders = capability
+    ? providers.filter((provider) => provider.available && provider.kind !== "test" && provider.capability === capability)
+    : [];
+  const selectedProvider = providers.find((provider) => provider.id === providerId);
+  const assetSources = providers.filter((provider) => provider.available
+    && provider.kind !== "test"
+    && provider.capability === "asset.prepare"
+    && provider.id !== "ai-shot-router-v1");
+  const selectedAssetSources = assetSources.filter((provider) => assetProviderIds.includes(provider.id));
+  const meteredSources = selectedAssetSources.filter((provider) => provider.billing === "metered");
+  const estimatedCeiling = maxPaidShots * Math.max(0, ...meteredSources.map((provider) => (
+    selectableModelsForCapability(provider.modelProfiles, provider.capability)
+      .find((model) => model.id === (modelSelections[provider.id] ?? provider.defaultModelId))?.estimatedCnyPerClip
+      ?? provider.estimatedCnyPerClip
+      ?? 0
+  )));
+  const selectedProviderModels = selectedProvider
+    ? selectableModelsForCapability(selectedProvider.modelProfiles, selectedProvider.capability)
+    : [];
+
+  useEffect(() => {
+    if (editing) return;
+    setProviderId(configuration.providerId);
+    setModelSelections({ ...configuration.modelSelections });
+    setAssetProviderIds([...(configuration.assetProviderIds ?? [])]);
+    setMaxPaidShots(configuration.economics?.maxPaidShots ?? 0);
+    setMaxCostCny(configuration.economics?.maxCostCny ?? 0);
+  }, [configuration, editing]);
+
+  function updateAssetSource(provider: StudioProvider, enabled: boolean) {
+    const next = enabled
+      ? [...new Set([...assetProviderIds, provider.id])]
+      : assetProviderIds.filter((id) => id !== provider.id);
+    setAssetProviderIds(next);
+    const nextMetered = assetSources.filter((source) => next.includes(source.id) && source.billing === "metered");
+    if (enabled && provider.billing === "metered") {
+      const shots = Math.max(1, maxPaidShots);
+      const estimate = selectableModelsForCapability(provider.modelProfiles, provider.capability)
+        .find((model) => model.id === (modelSelections[provider.id] ?? provider.defaultModelId))?.estimatedCnyPerClip
+        ?? provider.estimatedCnyPerClip
+        ?? 0;
+      setMaxPaidShots(shots);
+      setMaxCostCny((current) => Math.max(current, Math.ceil(estimate * shots * 100) / 100));
+    } else if (nextMetered.length === 0) {
+      setMaxPaidShots(0);
+      setMaxCostCny(0);
+    }
+  }
+
+  async function save() {
+    setError(undefined);
+    if (node.id === "assets" && assetProviderIds.length === 0) {
+      setError("至少保留一个画面来源。");
+      return;
+    }
+    if (node.id === "assets" && meteredSources.length > 0 && (maxPaidShots < 1 || maxCostCny <= 0)) {
+      setError("使用付费生成时，请设置付费镜头数和本次成本上限。");
+      return;
+    }
+    try {
+      const providerModels = node.id === "assets"
+        ? Object.fromEntries(assetProviderIds.map((id) => [id, modelSelections[id] ?? null]))
+        : { [providerId]: modelSelections[providerId] ?? null };
+      await onSave({
+        ...(node.id === "assets" ? {} : { providerId }),
+        modelSelections: providerModels,
+        ...(node.id === "assets" ? {
+          assetProviderIds,
+          economics: {
+            allowMeteredProviders: meteredSources.length > 0,
+            maxPaidShots: meteredSources.length > 0 ? maxPaidShots : 0,
+            maxCostCny: meteredSources.length > 0 ? maxCostCny : 0,
+          },
+        } : {}),
+      });
+      setEditing(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  return <section className="node-execution-config" aria-label={`${node.role ?? node.label}本次执行配置`}>
+    <header>
+      <span><Settings2 aria-hidden="true" size={16} /></span>
+      <div><strong>本次执行配置</strong><small>{editing ? "保存后继续制作才会生效，旧费用确认会自动失效" : executionConfigurationSummary(node, providers)}</small></div>
+      {canEdit && !editing ? <button className="button button-ghost" type="button" onClick={() => setEditing(true)}>调整</button> : null}
+    </header>
+    {editing ? <div className="node-execution-config-editor">
+      {node.id !== "assets" ? <>
+        <label className="field"><span>执行能力</span><select value={providerId} disabled={node.id === "voice" || roleProviders.length < 2} onChange={(event) => setProviderId(event.target.value)}>
+          {roleProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
+        </select></label>
+        {selectedProviderModels.length ? <label className="field"><span>本次模型</span><select value={modelSelections[providerId] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, [providerId]: event.target.value }))}>
+          <option value="">推荐默认：{selectedProvider?.defaultModelId ?? "运行时选择"}</option>
+          {selectedProviderModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+        </select></label> : null}
+      </> : <>
+        <div className="node-asset-source-options">
+          {assetSources.map((provider) => {
+            const selected = assetProviderIds.includes(provider.id);
+            const compatibleModels = selectableModelsForCapability(provider.modelProfiles, provider.capability);
+            return <article key={provider.id} className={selected ? "is-selected" : ""}>
+              <label><input type="checkbox" checked={selected} onChange={(event) => updateAssetSource(provider, event.target.checked)} /><span><strong>{provider.label}</strong><small>{provider.billing === "metered" ? "按镜头计费" : "免费来源"}</small></span></label>
+              {selected && compatibleModels.length ? <select aria-label={`${provider.label}模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, [provider.id]: event.target.value }))}>
+                <option value="">推荐默认：{provider.defaultModelId ?? "自动选择"}</option>
+                {compatibleModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+              </select> : null}
+            </article>;
+          })}
+        </div>
+        {meteredSources.length > 0 ? <div className="node-budget-fields">
+          <label className="field"><span>最多付费镜头</span><input type="number" min={1} max={20} value={maxPaidShots} onChange={(event) => setMaxPaidShots(Number(event.target.value))} /></label>
+          <label className="field"><span>本次成本上限（元）</span><input type="number" min={0.01} max={100000} step={0.1} value={maxCostCny} onChange={(event) => setMaxCostCny(Number(event.target.value))} /></label>
+          <p>按当前模型粗略估算不超过 ¥{estimatedCeiling.toFixed(2)}；这是提醒，不会把质量锁死，你可以提高上限。</p>
+        </div> : null}
+      </>}
+      {error ? <p className="node-workspace-error" role="alert">{error}</p> : null}
+      <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => { setError(undefined); setEditing(false); }}>取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void save()}><Save aria-hidden="true" size={15} />保存配置</button></footer>
+    </div> : null}
+  </section>;
+}
+
+function configurableNodeCapability(nodeId: string): string | undefined {
+  return {
+    script: "script.draft",
+    "visual-direction": "storyboard.plan",
+    voice: "voice.synthesize",
+    "visual-review": "quality.review.visual",
+  }[nodeId];
+}
+
+function executionConfigurationSummary(node: StudioNode, providers: StudioProvider[]): string {
+  const configuration = node.executionConfiguration!;
+  if (node.id === "assets") {
+    const sources = (configuration.assetProviderIds ?? []).map((id) => providers.find((provider) => provider.id === id)?.label ?? id);
+    const budget = configuration.economics?.allowMeteredProviders
+      ? ` · 最多 ${configuration.economics.maxPaidShots} 个付费镜头 / ¥${configuration.economics.maxCostCny}`
+      : " · 当前不调用付费生成";
+    return `${sources.join("、") || "未选择来源"}${budget}`;
+  }
+  const provider = providers.find((candidate) => candidate.id === configuration.providerId);
+  const modelId = configuration.modelSelections[configuration.providerId] ?? provider?.defaultModelId ?? "运行时自动选择";
+  return `${provider?.label ?? configuration.providerId} · ${modelId}`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

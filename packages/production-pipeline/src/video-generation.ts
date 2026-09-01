@@ -5,7 +5,7 @@ export interface VideoGenerationRequest {
   durationSeconds: number;
   ratio: VideoAspectRatio;
   modelId?: string;
-  resolution?: "480p" | "720p" | "1080p";
+  resolution?: "480p" | "720p" | "1080p" | "480P" | "720P" | "768P" | "1080P" | "2K";
   generateAudio?: boolean;
 }
 
@@ -122,6 +122,7 @@ function resolveRequestedModel(requested: string | undefined, fallback: string, 
 
 export interface MiniMaxVideoAdapterOptions extends AsyncAdapterOptions {
   baseUrl?: string;
+  modelProtocols?: Record<string, "v1" | "v2">;
 }
 
 export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
@@ -130,7 +131,7 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
   private readonly sleep: Sleep;
   private readonly pollIntervalMs: number;
   private readonly timeoutMs: number;
-  private readonly baseUrl: string;
+  private readonly apiRoot: string;
 
   constructor(private readonly options: MiniMaxVideoAdapterOptions) {
     validateOptions(options);
@@ -138,7 +139,7 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     this.sleep = options.sleep ?? defaultSleep;
     this.pollIntervalMs = options.pollIntervalMs ?? 15_000;
     this.timeoutMs = options.timeoutMs ?? 20 * 60_000;
-    this.baseUrl = stripTrailingSlash(options.baseUrl ?? "https://api.minimaxi.com/v1");
+    this.apiRoot = miniMaxApiRoot(options.baseUrl ?? "https://api.minimaxi.com");
   }
 
   async generate(
@@ -146,14 +147,25 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     validateRequest(request);
-    const submitted = await requestJson(this.fetch, `${this.baseUrl}/video_generation`, {
+    const model = resolveMiniMaxModel(request.modelId, this.options.model, this.options.modelProtocols);
+    return this.options.modelProtocols?.[model] === "v2"
+      ? this.generateV2(model, request, onProgress)
+      : this.generateV1(model, request, onProgress);
+  }
+
+  private async generateV1(
+    model: string,
+    request: VideoGenerationRequest,
+    onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+  ): Promise<VideoGenerationResult> {
+    const submitted = await requestJson(this.fetch, `${this.apiRoot}/v1/video_generation`, {
       method: "POST",
       headers: authHeaders(this.options.apiKey),
       body: JSON.stringify({
-        model: this.options.model,
+        model,
         prompt: miniMaxPrompt(request),
-        duration: 6,
-        resolution: "768P",
+        duration: request.durationSeconds,
+        resolution: normalizeMiniMaxResolution(request.resolution ?? "768P"),
         prompt_optimizer: true,
         aigc_watermark: false,
       }),
@@ -163,14 +175,14 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     await onProgress?.({ providerId: this.providerId, taskId, status: "submitted" });
     const startedAt = Date.now();
     while (Date.now() - startedAt <= this.timeoutMs) {
-      const queryUrl = new URL(`${this.baseUrl}/query/video_generation`);
+      const queryUrl = new URL(`${this.apiRoot}/v1/query/video_generation`);
       queryUrl.searchParams.set("task_id", taskId);
       const task = await requestJson(this.fetch, queryUrl.toString(), { headers: authHeaders(this.options.apiKey) });
       assertMiniMaxSuccess(task);
       const status = requiredString(task.status, "MiniMax task status");
       if (status === "Success") {
         const fileId = requiredString(task.file_id, "MiniMax file id");
-        const fileUrl = new URL(`${this.baseUrl}/files/retrieve`);
+        const fileUrl = new URL(`${this.apiRoot}/v1/files/retrieve`);
         fileUrl.searchParams.set("file_id", fileId);
         const retrieved = await requestJson(this.fetch, fileUrl.toString(), { headers: authHeaders(this.options.apiKey) });
         assertMiniMaxSuccess(retrieved);
@@ -191,11 +203,59 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
     throw new Error(message);
   }
+
+  private async generateV2(
+    model: string,
+    request: VideoGenerationRequest,
+    onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+  ): Promise<VideoGenerationResult> {
+    const submitted = await requestJson(this.fetch, `${this.apiRoot}/v2/video_generation`, {
+      method: "POST",
+      headers: authHeaders(this.options.apiKey),
+      body: JSON.stringify({
+        model,
+        content: [{ type: "text", text: request.prompt }],
+        resolution: normalizeMiniMaxResolution(request.resolution ?? "768P"),
+        duration: request.durationSeconds,
+        ratio: request.ratio,
+        aigc_watermark: false,
+      }),
+    });
+    const taskId = requiredString(submitted.task_id, "MiniMax H3 task id");
+    await onProgress?.({ providerId: this.providerId, taskId, status: "submitted" });
+    const startedAt = Date.now();
+    while (Date.now() - startedAt <= this.timeoutMs) {
+      const response = await requestJson(
+        this.fetch,
+        `${this.apiRoot}/v2/query/video_generation/${encodeURIComponent(taskId)}`,
+        { headers: authHeaders(this.options.apiKey) },
+      );
+      const task = requiredRecord(response.task, "MiniMax H3 task");
+      const status = requiredString(task.status, "MiniMax H3 task status");
+      if (status === "succeeded") {
+        const content = requiredRecord(task.content, "MiniMax H3 task content");
+        const videoUrl = requiredHttpUrl(content.url, "MiniMax H3 video URL");
+        await onProgress?.({ providerId: this.providerId, taskId, status: "succeeded", videoUrl });
+        return { providerId: this.providerId, taskId, videoUrl };
+      }
+      if (status === "failed" || status === "cancelled") {
+        const message = providerError(task.error, `MiniMax H3 task '${taskId}' ended with status '${status}'.`);
+        await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
+        throw new Error(message);
+      }
+      await onProgress?.({ providerId: this.providerId, taskId, status: "running" });
+      await this.sleep(this.pollIntervalMs);
+    }
+    const message = `MiniMax H3 task '${taskId}' timed out after ${this.timeoutMs}ms.`;
+    await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
+    throw new Error(message);
+  }
 }
 
 export interface WanVideoAdapterOptions extends AsyncAdapterOptions {
   workspaceId: string;
   baseUrl?: string;
+  allowedModels?: string[];
 }
 
 export class WanVideoAdapter implements VideoGenerationAdapter {
@@ -225,6 +285,7 @@ export class WanVideoAdapter implements VideoGenerationAdapter {
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     validateRequest(request);
+    const model = resolveRequestedModel(request.modelId, this.options.model, this.options.allowedModels);
     const submitted = await requestJson(
       this.fetch,
       `${this.baseUrl}/api/v1/services/aigc/video-generation/video-synthesis`,
@@ -232,13 +293,13 @@ export class WanVideoAdapter implements VideoGenerationAdapter {
         method: "POST",
         headers: { ...authHeaders(this.options.apiKey), "X-DashScope-Async": "enable" },
         body: JSON.stringify({
-          model: this.options.model,
+          model,
           input: { prompt: request.prompt },
           parameters: {
             resolution: "720P",
             ratio: request.ratio,
             duration: request.durationSeconds,
-            prompt_extend: true,
+            ...(model.startsWith("wan3.0-") ? {} : { prompt_extend: true }),
             watermark: false,
           },
         }),
@@ -300,6 +361,26 @@ function validateRequest(request: VideoGenerationRequest): void {
 function miniMaxPrompt(request: VideoGenerationRequest): string {
   const composition = request.ratio === "9:16" ? "竖屏 9:16 构图。" : `${request.ratio} 构图。`;
   return `${composition}${request.prompt}`;
+}
+
+function resolveMiniMaxModel(
+  requested: string | undefined,
+  fallback: string,
+  protocols: Record<string, "v1" | "v2"> | undefined,
+): string {
+  const model = requested?.trim() || fallback;
+  if (protocols && protocols[model] === undefined) {
+    throw new Error(`Video model '${model}' is not allowed for MiniMax.`);
+  }
+  return model;
+}
+
+function normalizeMiniMaxResolution(resolution: NonNullable<VideoGenerationRequest["resolution"]>): string {
+  return resolution === "2K" ? resolution : resolution.toUpperCase();
+}
+
+function miniMaxApiRoot(value: string): string {
+  return stripTrailingSlash(value).replace(/\/v[12]$/i, "");
 }
 
 function assertMiniMaxSuccess(value: Record<string, unknown>): void {

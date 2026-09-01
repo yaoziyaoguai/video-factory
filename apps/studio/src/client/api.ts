@@ -40,6 +40,7 @@ import type {
   StudioTemplateExperimentScorecard,
   StudioNodeOverrideInput,
   StudioNodeInputOverrideInput,
+  StudioNodeExecutionConfigurationInput,
   StudioSpendAuthorizationInput,
   StudioVoicePreviewInput,
   StudioVoiceProfile,
@@ -194,6 +195,10 @@ export const studioApi = {
   ),
   overrideNodeInput: (runId: string, nodeId: string, input: StudioNodeInputOverrideInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/input-override`,
+    { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  configureNode: (runId: string, nodeId: string, input: StudioNodeExecutionConfigurationInput) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/execution-configuration`,
     { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
   authorizeSpend: (runId: string, nodeId: string, input: StudioSpendAuthorizationInput) => requestJson<StudioRunDetail>(

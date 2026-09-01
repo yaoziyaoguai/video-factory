@@ -1,7 +1,7 @@
 import { AlertCircle, ArrowLeft, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { StudioCostRunDetail, StudioCreatorSettings, StudioDecisionInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProductionInput, StudioProvider, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProductionInput, StudioProvider, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
 import { studioApi, subscribeToRun } from "../api.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 import { RunWorkbench } from "../components/RunWorkbench.js";
@@ -27,6 +27,7 @@ export function RunPage() {
   const [costDetail, setCostDetail] = useState<StudioCostRunDetail>();
   const [costError, setCostError] = useState<string>();
   const [nodeMutationPending, setNodeMutationPending] = useState(false);
+  const [runProviders, setRunProviders] = useState<StudioProvider[]>([]);
   const [pausePending, setPausePending] = useState(false);
   const costRefreshTimer = useRef<number | undefined>(undefined);
   const snapshotRefreshPending = useRef(false);
@@ -57,10 +58,11 @@ export function RunPage() {
     setLoading(true);
     setError(undefined);
     try {
-      const [runResult, costResult] = await Promise.allSettled([studioApi.run(runId), studioApi.runCosts(runId)]);
+      const [runResult, costResult, providerResult] = await Promise.allSettled([studioApi.run(runId), studioApi.runCosts(runId), studioApi.providers()]);
       if (runResult.status === "rejected") throw runResult.reason;
       setRun(runResult.value);
       setCostDetail(costResult.status === "fulfilled" ? costResult.value : undefined);
+      setRunProviders(providerResult.status === "fulfilled" ? providerResult.value : []);
       setCostError(costResult.status === "rejected"
         ? `成本明细读取失败：${costResult.reason instanceof Error ? costResult.reason.message : String(costResult.reason)}`
         : undefined);
@@ -156,6 +158,21 @@ export function RunPage() {
     setError(undefined);
     try {
       const nextRun = await studioApi.overrideNodeInput(runId, nodeId, input);
+      setRun((current) => preferRunSnapshot(current, nextRun));
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
+  async function configureNode(nodeId: string, input: StudioNodeExecutionConfigurationInput) {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await studioApi.configureNode(runId, nodeId, input);
       setRun((current) => preferRunSnapshot(current, nextRun));
       await refreshCosts();
     } catch (caught) {
@@ -272,7 +289,7 @@ export function RunPage() {
       {connectionWarning && !isTerminal(run.status) ? <div className="inline-error" role="status"><AlertCircle aria-hidden="true" size={16} />{connectionWarning}</div> : null}
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
       {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
-      <RunWorkbench run={run} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onAuthorizeSpend={authorizeSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onRetryFailedNode={retryFailedNode} />
+      <RunWorkbench run={run} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onRetryFailedNode={retryFailedNode} />
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
       <NewRunDialog
         open={restarting}

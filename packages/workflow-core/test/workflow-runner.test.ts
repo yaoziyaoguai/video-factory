@@ -1718,6 +1718,55 @@ describe("WorkflowRunner", () => {
     assert.equal(completed.nodeRuns[0]?.executionReceipt?.billing, "metered");
   });
 
+  it("replans a stopped node after an execution configuration override without calling either provider", async () => {
+    let paidCalls = 0;
+    const registry = new ProviderRegistry();
+    for (const [id, modelId, estimatedCostCny] of [
+      ["video-a", "model-a", 1],
+      ["video-b", "model-b", 2],
+    ] as const) {
+      registry.register({
+        id,
+        label: id,
+        modelId,
+        capability: "asset.prepare",
+        transport: "http_api",
+        billing: "metered",
+        configurationSource: id === "video-b" ? "node_override" : "run_override",
+        estimatedCostCny,
+        maxCostCny: 4,
+        maxAttempts: 1,
+        run: () => {
+          paidCalls += 1;
+          return { assetIds: [id] };
+        },
+      });
+    }
+    const definition = (providerId: string): WorkflowDefinition => ({
+      id: "configurable-video",
+      name: "Configurable video",
+      version: "1.0.0",
+      nodes: [{ id: "assets", label: "Assets", capability: "asset.prepare", mode: "automatic", providerId }],
+    });
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+    const waiting = await runner.run(definition("video-a"), { selected: "video-a" });
+
+    const updated = runner.applyExecutionConfigurationOverride(
+      definition("video-b"),
+      waiting,
+      { nodeId: "assets", actor: "producer", initialInput: { selected: "video-b" } },
+    );
+
+    assert.equal(paidCalls, 0);
+    assert.equal(updated.status, "stale");
+    assert.equal(updated.nodeRuns[0]?.status, "stale");
+    assert.equal(updated.nodeRuns[0]?.spendPlan, undefined);
+    assert.deepEqual(updated.spendAuthorizations, []);
+    assert.equal(updated.executionPlan?.find((plan) => plan.nodeId === "assets")?.providerId, "video-b");
+    assert.equal(updated.executionPlan?.find((plan) => plan.nodeId === "assets")?.modelId, "model-b");
+    assert.equal(updated.executionPlan?.find((plan) => plan.nodeId === "assets")?.configurationSource, "node_override");
+  });
+
   it("does not fabricate actual usage when a successful metered provider omits it", async () => {
     const registry = new ProviderRegistry();
     registry.register({

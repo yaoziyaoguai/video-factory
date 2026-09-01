@@ -3,6 +3,7 @@ import type {
   Artifact,
   ArtifactDraft,
   ArtifactKind,
+  ExecutionConfigurationOverrideDraft,
   HumanDecisionDraft,
   HumanIntervention,
   HumanInterventionDraft,
@@ -594,6 +595,67 @@ export class WorkflowRunner {
     run.revision += 1;
     run.status = "stale";
     delete run.finishedAt;
+    return run;
+  }
+
+  applyExecutionConfigurationOverride<TInitialInput>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+    override: ExecutionConfigurationOverrideDraft<TInitialInput>,
+  ): WorkflowRun<TInitialInput> {
+    validateWorkflowDefinition(definition);
+    if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
+      throw new Error("Workflow definition does not match the persisted run.");
+    }
+    if (!override.actor.trim()) throw new Error("Execution configuration override actor is required.");
+    if (previousRun.status === "running") {
+      throw new Error(`Run '${previousRun.id}' must be paused before changing execution configuration.`);
+    }
+    const node = definition.nodes.find((candidate) => candidate.id === override.nodeId);
+    if (!node) throw new Error(`Unknown workflow node '${override.nodeId}'.`);
+    const previousNodeRun = previousRun.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId);
+    if (previousNodeRun?.status === "running") {
+      throw new Error(`Node '${override.nodeId}' execution configuration cannot change while it is running.`);
+    }
+    if (previousNodeRun?.outcomeUncertain) {
+      throw new Error(`Node '${override.nodeId}' has an uncertain paid-provider outcome and cannot be reconfigured.`);
+    }
+
+    const run = cloneWorkflowRun(previousRun);
+    run.initialInput = structuredClone(override.initialInput);
+    const target = run.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId);
+    const descendants = descendantNodeIds(definition.nodes, override.nodeId);
+    const invalidatedNodeIds = new Set([override.nodeId, ...descendants]);
+
+    if (target) markNodeExecutionStale(target, false);
+    for (const candidate of run.nodeRuns) {
+      if (descendants.has(candidate.nodeId)) markNodeExecutionStale(candidate, true);
+    }
+    run.interventions = run.interventions.filter((intervention) => !invalidatedNodeIds.has(intervention.nodeId));
+    run.spendAuthorizations = (run.spendAuthorizations ?? [])
+      .filter((authorization) => !invalidatedNodeIds.has(authorization.nodeId));
+
+    const outputs = new Map<string, unknown>();
+    for (const candidate of run.nodeRuns) {
+      if (candidate.status === "succeeded" && candidate.output !== undefined) outputs.set(candidate.nodeId, candidate.output);
+    }
+    const context = new InMemoryWorkflowContext(
+      run.id,
+      definition.id,
+      run.initialInput,
+      this.providers,
+      this.clock,
+      this.idFactory,
+      run.artifacts,
+      outputs,
+    );
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
+    run.executionPlan = refreshMutableExecutionPlan(definition, run, context as InMemoryWorkflowContext<unknown>);
+    run.revision += 1;
+    if (target) {
+      run.status = "stale";
+      delete run.finishedAt;
+    }
     return run;
   }
 
@@ -1885,6 +1947,18 @@ function workflowStatusFromNode(status: NodeStatus): WorkflowStatus | undefined 
     return "approval_invalidated";
   }
   return undefined;
+}
+
+function markNodeExecutionStale(node: NodeRun, inputIsStale: boolean): void {
+  node.status = "stale";
+  delete node.intervention;
+  delete node.spendPlan;
+  delete node.spendAuthorizationId;
+  delete node.operationRequestId;
+  delete node.interrupted;
+  delete node.executionReceipt;
+  if (node.outputState) node.outputState.stale = true;
+  if (inputIsStale && node.inputState) node.inputState.stale = true;
 }
 
 function validateWorkflowDefinition(definition: WorkflowDefinition): void {
