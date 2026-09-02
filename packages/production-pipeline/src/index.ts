@@ -107,6 +107,7 @@ export type {
   ProductionPipelineOptions,
   ProductionProviderRuntimeMetadata,
   ProductionRunListener,
+  ProductionSceneRevisionDraft,
   ProductionSpendRejectionDraft,
 } from "./production-pipeline.js";
 export { MiniMaxVideoAdapter, SeedanceVideoAdapter, WanVideoAdapter } from "./video-generation.js";

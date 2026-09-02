@@ -5,6 +5,7 @@ import path from "node:path";
 import { parseProductionBlueprint } from "@video-factory/template-core";
 import { check as checkFileLock, lock as lockFile } from "proper-lockfile";
 import {
+  NodeVersionConflictError,
   ProviderRegistry,
   WorkflowRunner,
   type Artifact,
@@ -95,6 +96,16 @@ export interface ProductionSpendRejectionDraft {
   targetEstimatedCostCny?: number;
   note?: string;
   rejectedBy: string;
+}
+
+export interface ProductionSceneRevisionDraft {
+  expectedRunRevision: number;
+  expectedAssetVersionId: string;
+  reviewArtifactId: string;
+  findingIndex: number;
+  reuseFromScenePosition: number;
+  actor: string;
+  note: string;
 }
 
 export interface ProductionPaidNodeReconciliationDraft {
@@ -615,6 +626,201 @@ export class ProductionPipeline {
       });
       return runner.applyNodeInputOverride(this.createWorkflow(brief), withPersistedBrief(previous, brief), override);
     });
+  }
+
+  async requestSceneRevision(
+    runId: string,
+    draft: ProductionSceneRevisionDraft,
+  ): Promise<WorkflowRun<ProductionBrief>> {
+    const dispatched = await this.dispatchSceneRevision(runId, draft);
+    return dispatched.completion;
+  }
+
+  async dispatchSceneRevision(
+    runId: string,
+    draft: ProductionSceneRevisionDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    await this.runPersistedTransition(runId, async (previous) => {
+      if (previous.revision !== draft.expectedRunRevision) {
+        throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
+      }
+      if (previous.status !== "needs_human") {
+        throw new Error(`Run '${runId}' is not waiting for human review.`);
+      }
+      if (!draft.actor.trim() || !draft.note.trim()) {
+        throw new Error("Scene revision actor and note are required.");
+      }
+      if (!Number.isInteger(draft.findingIndex) || draft.findingIndex < 0) {
+        throw new Error("Scene revision finding index is invalid.");
+      }
+      if (!Number.isInteger(draft.reuseFromScenePosition) || draft.reuseFromScenePosition < 1) {
+        throw new Error("Scene revision reuse source is invalid.");
+      }
+
+      const brief = parsePersistedBrief(previous.initialInput);
+      const definition = this.createWorkflow(brief);
+      const finalIntervention = previous.nodeRuns.find((node) => node.nodeId === "final-review")?.intervention;
+      if (!finalIntervention) throw new Error("Scene revision requires an active final-review intervention.");
+      const visualReviewNodeRun = previous.nodeRuns.find((node) => node.nodeId === "visual-review");
+      const visualReviewVersion = visualReviewNodeRun?.outputState?.versions.find(
+        (version) => version.id === visualReviewNodeRun.outputState?.effectiveVersionId,
+      );
+      const reviewArtifact = previous.artifacts.find((artifact) => artifact.id === draft.reviewArtifactId);
+      if (
+        !visualReviewVersion?.artifactIds.includes(draft.reviewArtifactId)
+        || reviewArtifact?.kind !== "review_report"
+        || reviewArtifact.producer?.nodeId !== "visual-review"
+      ) {
+        throw new Error("Scene revision requires a current visual-review report artifact.");
+      }
+      await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), reviewArtifact);
+      const reviewOutput = requireOutputRecord(
+        visualReviewVersion.output ?? visualReviewNodeRun?.output,
+        "visual review output",
+      );
+      const reviewDurationMs = Number(reviewOutput.durationMs);
+      if (!Number.isInteger(reviewDurationMs) || reviewDurationMs <= 0) {
+        throw new Error("Current visual-review duration is invalid.");
+      }
+      const storedReport = validateVisualReviewReport(
+        JSON.parse(await readFile(reviewArtifact.uri!, "utf8")),
+        reviewDurationMs,
+      );
+      if (draft.findingIndex >= storedReport.findings.length) {
+        throw new Error("Scene revision finding is no longer current.");
+      }
+
+      const renderNodeRun = previous.nodeRuns.find((node) => node.nodeId === "render");
+      const renderVersion = renderNodeRun?.outputState?.versions.find(
+        (version) => version.id === renderNodeRun.outputState?.effectiveVersionId,
+      );
+      const renderOutput = requireOutputRecord(renderVersion?.output ?? renderNodeRun?.output, "render output");
+      const renderManifestPath = requiredOutputString(renderOutput, "renderManifestPath");
+      const renderManifestArtifact = previous.artifacts.find((artifact) => (
+        renderVersion?.artifactIds.includes(artifact.id)
+        && artifact.kind === "render_manifest"
+        && artifact.uri === renderManifestPath
+        && artifact.producer?.nodeId === "render"
+      ));
+      if (!renderManifestArtifact) {
+        throw new Error("Scene revision requires the current render manifest artifact.");
+      }
+      await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), renderManifestArtifact);
+      const localizedReport = await localizeVisualReviewReport(
+        storedReport,
+        renderManifestPath,
+        reviewDurationMs,
+      );
+      const scenePosition = localizedReport.findings[draft.findingIndex]!.scenePosition!;
+      if (scenePosition === draft.reuseFromScenePosition) {
+        throw new Error("A scene cannot reuse itself as a revision source.");
+      }
+      if (draft.reuseFromScenePosition > scenePosition) {
+        throw new Error(`Reuse source scene ${draft.reuseFromScenePosition} must be earlier than reviewed scene ${scenePosition}.`);
+      }
+
+      const assetsNodeRun = previous.nodeRuns.find((node) => node.nodeId === "assets");
+      const assetVersion = assetsNodeRun?.outputState?.versions.find(
+        (version) => version.id === assetsNodeRun.outputState?.effectiveVersionId,
+      );
+      if (!assetVersion || assetVersion.id !== draft.expectedAssetVersionId) {
+        throw new NodeVersionConflictError("assets", draft.expectedAssetVersionId, assetVersion?.id ?? "missing");
+      }
+      const assetPlanArtifact = previous.artifacts.find((artifact) => (
+        artifact.kind === "asset_plan"
+        && Boolean(artifact.uri)
+        && assetVersion.artifactIds.includes(artifact.id)
+        && artifact.producer?.nodeId === "assets"
+      ));
+      if (!assetPlanArtifact?.uri) throw new Error("Current asset plan artifact is unavailable.");
+      await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), assetPlanArtifact);
+      const currentAssetOutput = requireOutputRecord(assetVersion.output ?? assetsNodeRun?.output, "assets output");
+      const currentPlan = requireOutputRecord(
+        JSON.parse(await readFile(assetPlanArtifact.uri, "utf8")),
+        "asset plan",
+      );
+      const revisedPlan = reviseAssetPlanByReuse(currentPlan, scenePosition, draft.reuseFromScenePosition);
+      const retainedArtifactIds = await mediaArtifactIdsReferencedByPlan(
+        this.store.runDirectory(runId),
+        previous.artifacts,
+        assetVersion.artifactIds,
+        revisedPlan,
+      );
+      const revisionDirectory = path.join(
+        this.runsRoot,
+        runId,
+        "nodes",
+        "assets",
+        "revisions",
+        `revision-${previous.revision + 1}`,
+      );
+      await mkdir(revisionDirectory, { recursive: true });
+      const revisedPlanPath = path.join(revisionDirectory, "asset_plan.json");
+      const revisedPlanContent = `${JSON.stringify(revisedPlan, null, 2)}\n`;
+      await writeTextAtomically(revisedPlanPath, revisedPlanContent);
+      const revisionRequest = {
+        version: "video-factory/scene-revision-v1",
+        reviewArtifactId: draft.reviewArtifactId,
+        findingIndex: draft.findingIndex,
+        scenePosition,
+        reuseFromScenePosition: draft.reuseFromScenePosition,
+        actor: draft.actor.trim(),
+        note: draft.note.trim(),
+      };
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+      });
+      const revised = runner.applyNodeRevision(definition, withPersistedBrief(previous, brief), {
+        nodeId: "assets",
+        actor: draft.actor.trim(),
+        output: {
+          ...currentAssetOutput,
+          assetPlanPath: revisedPlanPath,
+          currentMediaArtifactIds: retainedArtifactIds,
+        },
+        artifacts: [
+          fileArtifact(
+            "asset_plan",
+            revisedPlanPath,
+            revisedPlanContent,
+            "application/json",
+            assetPlanArtifact.schemaVersion ?? "video-factory/asset-plan-v1",
+            "assets",
+            [assetPlanArtifact.id, draft.reviewArtifactId],
+            "human-scene-revision-v1",
+            "Creator-requested reuse of an existing run asset; no new Provider call was made.",
+          ),
+          jsonArtifact(
+            "scene_revision_request",
+            revisionRequest,
+            "video-factory/scene-revision-v1",
+            "assets",
+            [assetPlanArtifact.id, draft.reviewArtifactId],
+          ),
+        ],
+        retainedArtifactIds,
+        invalidateDescendantNodeIds: [
+          "render",
+          "technical-review",
+          "visual-review",
+          "final-review",
+          "publish-package",
+        ],
+        expectedVersionId: draft.expectedAssetVersionId,
+        schemaVersion: assetVersion.schemaVersion,
+        decision: {
+          interventionId: finalIntervention.id,
+          action: "request_changes",
+          actor: draft.actor.trim(),
+          note: draft.note.trim(),
+        },
+      });
+      return revised;
+    });
+    return this.dispatchResumeStale(runId, listener);
   }
 
   async applyNodeExecutionConfiguration(
@@ -1433,7 +1639,7 @@ export class ProductionPipeline {
                     ? "视觉审片判定存在阻断问题，请人工确认后再继续。"
                     : "视觉审片建议修改，请人工确认是否继续。",
                   requiredAction: "approve",
-                  options: ["approve", "reject"],
+                  options: ["approve", "request_changes", "reject"],
                 },
               };
             }
@@ -1445,7 +1651,7 @@ export class ProductionPipeline {
             intervention: {
               reason: "请完整观看成片，检查画面、字幕、旁白、事实和素材授权。",
               requiredAction: "approve",
-              options: ["approve", "reject"],
+              options: ["approve", "request_changes", "reject"],
             },
           };
         },
@@ -1473,7 +1679,7 @@ export class ProductionPipeline {
         execute: async (input, context) => {
           const packageInput = validatePublishPackageInput(input);
           const publishBrief: ProductionBrief = { ...brief, ...packageInput.brief };
-          const currentArtifacts = currentArtifactsForPackaging(context, brief);
+          const currentArtifacts = await currentArtifactsForPackaging(context, brief);
           await verifyStoredArtifacts(currentArtifacts);
           const artifactIds = currentArtifacts.map((artifact) => artifact.id);
           const scriptParentIds = currentArtifacts
@@ -2755,9 +2961,12 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
   return { brief };
 }
 
-function validateVisualReviewInput(value: unknown, directorEnabled: boolean): VisualReviewAgentInput {
+function validateVisualReviewInput(
+  value: unknown,
+  directorEnabled: boolean,
+): VisualReviewAgentInput & { renderManifestPath: string } {
   const input = requireOutputRecord(value, "visual-review input");
-  const request: VisualReviewAgentInput = {
+  const request: VisualReviewAgentInput & { renderManifestPath: string } = {
     videoPath: requiredOutputString(input, "videoPath"),
     runRoot: requiredOutputString(input, "runRoot"),
     scriptPath: requiredOutputString(input, "scriptPath"),
@@ -2860,7 +3069,11 @@ function visualReviewNode(
         }
         throw error;
       }
-      const report = execution.output;
+      const report = await localizeVisualReviewReport(
+        execution.output,
+        request.renderManifestPath,
+        execution.inspectedDurationMs,
+      );
       const reportPath = path.join(attempt.directory, "visual_review.json");
       const content = `${JSON.stringify(report, null, 2)}\n`;
       await writeTextAtomically(reportPath, content);
@@ -3669,6 +3882,214 @@ function visualReviewRecommendation(input: unknown): VisualReviewReport["recomme
     : undefined;
 }
 
+async function localizeVisualReviewReport(
+  report: VisualReviewReport,
+  renderManifestPath: string,
+  actualDurationMs?: number,
+): Promise<VisualReviewReport> {
+  const manifest = requireOutputRecord(
+    JSON.parse(await readFile(renderManifestPath, "utf8")),
+    "render manifest",
+  );
+  if (!Array.isArray(manifest.slides) || manifest.slides.length === 0) {
+    throw new Error("Render manifest slides are required to localize visual review findings.");
+  }
+  const slides = manifest.slides.map((value, index) => {
+    const slide = requireOutputRecord(value, `render manifest slide ${index + 1}`);
+    const scenePosition = Number(slide.scene_position ?? slide.position);
+    const durationMs = Number(slide.duration) * 1_000;
+    if (!Number.isInteger(scenePosition) || scenePosition < 1 || !Number.isFinite(durationMs) || durationMs <= 0) {
+      throw new Error(`Render manifest slide ${index + 1} cannot localize visual review findings.`);
+    }
+    return { scenePosition, durationMs };
+  });
+  const manifestDurationMs = slides.reduce((sum, slide) => sum + slide.durationMs, 0);
+  if (actualDurationMs !== undefined && (!Number.isFinite(actualDurationMs) || actualDurationMs <= 0)) {
+    throw new Error("Inspected video duration must be positive to localize visual review findings.");
+  }
+  const timelineScale = actualDurationMs === undefined ? 1 : actualDurationMs / manifestDurationMs;
+  let startMs = 0;
+  const scenes = slides.map((slide, index) => {
+    const endMs = index === slides.length - 1 && actualDurationMs !== undefined
+      ? actualDurationMs
+      : startMs + slide.durationMs * timelineScale;
+    const timing = { scenePosition: slide.scenePosition, startMs, endMs };
+    startMs = endMs;
+    return timing;
+  });
+  return {
+    ...report,
+    findings: report.findings.map((finding) => {
+      const scene = scenes.find((timing, index) => (
+        finding.timecodeMs >= timing.startMs
+        && (finding.timecodeMs < timing.endMs || (index === scenes.length - 1 && finding.timecodeMs <= timing.endMs))
+      ));
+      if (!scene) throw new Error(`Visual review finding at ${finding.timecodeMs}ms is outside the render manifest timeline.`);
+      return { ...finding, scenePosition: scene.scenePosition };
+    }),
+  };
+}
+
+function reviseAssetPlanByReuse(
+  plan: Record<string, unknown>,
+  scenePosition: number,
+  reuseFromScenePosition: number,
+): Record<string, unknown> {
+  if (!Array.isArray(plan.scene_assets) || plan.scene_assets.length === 0) {
+    throw new Error("Asset plan scenes are required for a scene revision.");
+  }
+  const scenePositions = new Set<number>();
+  const scenes = plan.scene_assets.map((value, index) => {
+    const scene = requireOutputRecord(value, `asset plan scene ${index + 1}`);
+    const position = Number(scene.scene_position);
+    if (!Number.isInteger(position) || position < 1) {
+      throw new Error(`Asset plan scene ${index + 1} position is invalid.`);
+    }
+    if (scenePositions.has(position)) {
+      throw new Error(`Asset plan has duplicate scene position ${position}.`);
+    }
+    scenePositions.add(position);
+    return structuredClone(scene);
+  });
+  const scenesByPosition = new Map(scenes.map((scene) => [Number(scene.scene_position), scene] as const));
+  for (const start of scenes) {
+    const chain = new Set<number>();
+    let current: Record<string, unknown> | undefined = start;
+    while (current?.reuse_from_scene_position !== undefined) {
+      const position = Number(current.scene_position);
+      if (chain.has(position)) {
+        throw new Error(`Asset plan has a reuse cycle at scene ${position}.`);
+      }
+      chain.add(position);
+      const reusePosition = Number(current.reuse_from_scene_position);
+      if (!Number.isInteger(reusePosition) || reusePosition < 1) {
+        throw new Error(`Asset plan scene ${position} has an invalid reuse source.`);
+      }
+      current = scenesByPosition.get(reusePosition);
+      if (!current) {
+        throw new Error(`Asset plan scene ${position} has missing reuse source scene ${reusePosition}.`);
+      }
+    }
+  }
+  for (const scene of scenes) {
+    if (scene.reuse_from_scene_position === undefined) continue;
+    const position = Number(scene.scene_position);
+    const reusePosition = Number(scene.reuse_from_scene_position);
+    if (reusePosition >= position) {
+      throw new Error(`Asset plan scene ${position} must reuse an earlier scene.`);
+    }
+  }
+  const target = scenes.find((scene) => Number(scene.scene_position) === scenePosition);
+  const source = scenes.find((scene) => Number(scene.scene_position) === reuseFromScenePosition);
+  if (!target) throw new Error(`Asset plan does not contain reviewed scene ${scenePosition}.`);
+  if (!source) throw new Error(`Asset plan does not contain reuse source scene ${reuseFromScenePosition}.`);
+  if (typeof source.local_path !== "string" || !source.local_path.trim()) {
+    throw new Error(`Reuse source scene ${reuseFromScenePosition} has no materialized media.`);
+  }
+  if (
+    source.media_type === "editorial_card"
+    || source.provider === "local"
+    || String(source.provider ?? "").includes("editorial")
+    || String(source.source_url ?? "").startsWith("local://video-factory/card")
+  ) {
+    throw new Error(`Reuse source scene ${reuseFromScenePosition} editorial card cannot be reused as footage.`);
+  }
+  const reuseAsset = (
+    current: Record<string, unknown>,
+    reused: Record<string, unknown>,
+    reusePosition: number,
+  ): Record<string, unknown> => ({
+    ...reused,
+    scene_position: current.scene_position,
+    ...(current.duration !== undefined ? { duration: current.duration } : {}),
+    ...(current.query !== undefined ? { query: current.query } : {}),
+    reuse_from_scene_position: reusePosition,
+  });
+  const revisedScenes = scenes.map((scene) => Number(scene.scene_position) === scenePosition
+    ? reuseAsset(scene, source, reuseFromScenePosition)
+    : scene);
+  const revisedByPosition = new Map(
+    revisedScenes.map((scene) => [Number(scene.scene_position), scene] as const),
+  );
+  const pending = [scenePosition];
+  const propagated = new Set<number>();
+  while (pending.length > 0) {
+    const changedPosition = pending.shift()!;
+    if (propagated.has(changedPosition)) continue;
+    propagated.add(changedPosition);
+    const changed = revisedByPosition.get(changedPosition)!;
+    for (const [index, candidate] of revisedScenes.entries()) {
+      if (Number(candidate.reuse_from_scene_position) !== changedPosition) continue;
+      const candidatePosition = Number(candidate.scene_position);
+      const next = reuseAsset(candidate, changed, changedPosition);
+      revisedScenes[index] = next;
+      revisedByPosition.set(candidatePosition, next);
+      pending.push(candidatePosition);
+    }
+  }
+  const revisedRoutes = Array.isArray(plan.director_routing)
+    ? plan.director_routing.map((value, index) => {
+        const route = requireOutputRecord(value, `director route ${index + 1}`);
+        const position = Number(route.scene_position);
+        if (!propagated.has(position)) return structuredClone(route);
+        const revisedScene = revisedByPosition.get(position)!;
+        return {
+          ...route,
+          actual_provider_id: revisedScene.provider,
+          actual_provider: revisedScene.provider,
+          fallback_used: false,
+          generation_pending: false,
+          reuse_from_scene_position: revisedScene.reuse_from_scene_position,
+        };
+      })
+    : undefined;
+  return {
+    ...structuredClone(plan),
+    scene_assets: revisedScenes,
+    ...(revisedRoutes ? { director_routing: revisedRoutes } : {}),
+  };
+}
+
+async function mediaArtifactIdsReferencedByPlan(
+  runRoot: string,
+  artifacts: readonly Artifact[],
+  currentArtifactIds: readonly string[],
+  plan: Record<string, unknown>,
+): Promise<string[]> {
+  if (!Array.isArray(plan.scene_assets)) {
+    throw new Error("Asset plan scenes are required to select current media artifacts.");
+  }
+  const selected = new Set<string>();
+  for (const [index, value] of plan.scene_assets.entries()) {
+    const scene = requireOutputRecord(value, `asset plan scene ${index + 1}`);
+    const localPath = requiredOutputString(scene, "local_path");
+    const artifact = artifacts.find((candidate) => (
+      currentArtifactIds.includes(candidate.id)
+      && candidate.kind === "media_asset"
+      && candidate.uri === localPath
+      && candidate.producer?.nodeId === "assets"
+    ));
+    if (!artifact) {
+      throw new Error(`Asset plan scene ${Number(scene.scene_position)} does not reference a current media artifact.`);
+    }
+    await verifyStoredArtifactWithinRoot(runRoot, artifact);
+    selected.add(artifact.id);
+  }
+  return [...selected];
+}
+
+async function verifyStoredArtifactWithinRoot(runRoot: string, artifact: Artifact): Promise<void> {
+  if (!artifact.uri || !artifact.sha256 || artifact.sizeBytes === undefined) {
+    throw new Error(`Artifact '${artifact.id}' is missing file integrity metadata.`);
+  }
+  const [resolvedRoot, resolvedPath] = await Promise.all([realpath(runRoot), realpath(artifact.uri)]);
+  const relative = path.relative(resolvedRoot, resolvedPath);
+  if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`Artifact '${artifact.id}' is outside run '${path.basename(runRoot)}'.`);
+  }
+  await verifyArtifactBytes(resolvedPath, artifact.sha256, artifact.sizeBytes);
+}
+
 async function verifyNodeOverrideBoundary(runRoot: string, override: NodeOverrideDraft): Promise<void> {
   const resolvedRoot = await realpath(runRoot);
   const paths = collectOutputPaths(override.output);
@@ -3994,7 +4415,7 @@ async function reserveAttemptDirectory(root: string): Promise<{ directory: strin
   throw new Error(`No execution attempt directory is available under '${root}'.`);
 }
 
-function currentArtifactsForPackaging(context: WorkflowContext, brief: ProductionBrief): Artifact[] {
+async function currentArtifactsForPackaging(context: WorkflowContext, brief: ProductionBrief): Promise<Artifact[]> {
   const nodeOutputs = [
     { nodeId: "script", paths: [outputPath(context, "script", "scriptPath")] },
     ...(brief.workflowFeatures?.referenceGrammar ? [{ nodeId: "reference-grammar", paths: [outputPath(context, "reference-grammar", "referenceGrammarPath")] }] : []),
@@ -4021,6 +4442,55 @@ function currentArtifactsForPackaging(context: WorkflowContext, brief: Productio
       return artifact ? [artifact] : [];
     });
     if (matches.length === 0) throw new Error(`Current node '${nodeOutput.nodeId}' has no matching artifact descriptor.`);
+    const assetOutput = nodeOutput.nodeId === "assets"
+      ? requireOutputRecord(context.outputs.get("assets"), "current assets output")
+      : undefined;
+    if (assetOutput && Array.isArray(assetOutput.currentMediaArtifactIds)) {
+      const planArtifact = matches[0]!;
+      const mediaArtifactIds = assetOutput.currentMediaArtifactIds.map((value, index) => {
+        if (typeof value !== "string" || !value) {
+          throw new Error(`Current assets output media artifact id ${index + 1} is invalid.`);
+        }
+        return value;
+      });
+      if (mediaArtifactIds.length !== new Set(mediaArtifactIds).size) {
+        throw new Error("Current assets output contains duplicate media artifact ids.");
+      }
+      const plan = requireOutputRecord(
+        JSON.parse(await readFile(planArtifact.uri!, "utf8")),
+        "current asset plan",
+      );
+      if (!Array.isArray(plan.scene_assets) || plan.scene_assets.length === 0) {
+        throw new Error("Current asset plan has no scene assets for packaging.");
+      }
+      if (!selected.some((candidate) => candidate.id === planArtifact.id)) selected.push(planArtifact);
+      const referencedPaths = new Set<string>();
+      for (const [index, value] of plan.scene_assets.entries()) {
+        const scene = requireOutputRecord(value, `current asset plan scene ${index + 1}`);
+        referencedPaths.add(path.resolve(requiredOutputString(scene, "local_path")));
+      }
+      const mediaArtifacts = mediaArtifactIds.map((artifactId) => {
+        const artifact = context.artifacts.find((candidate) => (
+          candidate.id === artifactId
+          && candidate.producer?.nodeId === "assets"
+          && (candidate.kind === "media_asset" || candidate.kind === "human_media_revision")
+          && candidate.uri !== undefined
+        ));
+        if (!artifact) throw new Error(`Current assets output references invalid media artifact '${artifactId}'.`);
+        return artifact;
+      });
+      const mediaPaths = new Set(mediaArtifacts.map((artifact) => path.resolve(artifact.uri!)));
+      if (
+        mediaPaths.size !== referencedPaths.size
+        || [...mediaPaths].some((mediaPath) => !referencedPaths.has(mediaPath))
+      ) {
+        throw new Error("Current asset plan and media artifact ids do not describe the same files.");
+      }
+      for (const artifact of mediaArtifacts) {
+        if (!selected.some((candidate) => candidate.id === artifact.id)) selected.push(artifact);
+      }
+      continue;
+    }
     const currentAttempts = new Set(matches.flatMap((artifact) => artifact.producer ? [artifact.producer.attempt] : []));
     const currentNodeArtifacts = context.artifacts.filter((artifact) =>
       artifact.producer?.nodeId === nodeOutput.nodeId
