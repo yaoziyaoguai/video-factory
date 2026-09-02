@@ -15,6 +15,7 @@ import {
   type ProductionPaidNodeReconciliationDraft,
   type ProductionPaidNodeSummary,
   type ProductionRunListener,
+  type ProductionSceneRevisionDraft,
   type ProductionSpendRejectionDraft,
 } from "@video-factory/production-pipeline";
 import {
@@ -35,6 +36,7 @@ import {
   type StudioProvider,
   type StudioRunDetail,
   type StudioRunSummary,
+  type StudioSceneRevisionInput,
   type StudioSpendRejectionInput,
 } from "../shared/api.js";
 import { modelSupportsCapability } from "../shared/model-compatibility.js";
@@ -60,6 +62,11 @@ export interface StudioPipelinePort {
   dispatchDecision?(
     runId: string,
     decision: HumanDecisionDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun>;
+  dispatchSceneRevision?(
+    runId: string,
+    revision: ProductionSceneRevisionDraft,
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun>;
   applyNodeOverride(runId: string, override: NodeOverrideDraft): Promise<WorkflowRun<ProductionBrief>>;
@@ -410,7 +417,7 @@ export class ProductionStudio {
     const intervention = current.nodeRuns.find((node) => node.status === "needs_human")?.intervention;
     if (!intervention) throw new StudioConflictError("这条制作没有待处理的人工决定。");
     if (input.action === "reject" && !input.note?.trim()) throw new StudioConflictError("打回时必须填写原因。");
-    const decision: HumanDecisionDraft = {
+    const decision: HumanDecisionDraft & { action: "approve" | "reject" } = {
       interventionId: intervention.id,
       action: input.action,
       actor,
@@ -436,6 +443,37 @@ export class ProductionStudio {
     const detail = this.toDetail(updated);
     this.publish(detail);
     return detail;
+  }
+
+  async requestSceneRevision(
+    runId: string,
+    input: StudioSceneRevisionInput,
+    actor: string,
+  ): Promise<StudioRunDetail> {
+    const current = await this.loadRequiredRun(runId);
+    if (current.status !== "needs_human") {
+      throw new StudioConflictError("这条制作当前不在人工终审阶段。");
+    }
+    if (!this.options.pipeline.dispatchSceneRevision) {
+      throw new StudioConflictError("当前制作引擎不支持镜头返修。");
+    }
+    try {
+      const dispatched = await this.options.pipeline.dispatchSceneRevision(
+        runId,
+        { ...input, actor },
+        (run) => this.publish(this.toDetail(run)),
+      );
+      return await this.dispatchedDetail(dispatched);
+    } catch (error) {
+      if (
+        error instanceof StaleRunRevisionError
+        || error instanceof NodeVersionConflictError
+        || (error instanceof Error && /locked by another writer/.test(error.message))
+      ) {
+        throw new StudioConflictError("这条制作已被其他操作更新，请刷新页面后重试。");
+      }
+      throw error;
+    }
   }
 
   async requestPause(runId: string): Promise<StudioRunDetail> {

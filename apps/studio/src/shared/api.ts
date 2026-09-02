@@ -905,13 +905,13 @@ export interface StudioIntervention {
   id: string;
   nodeId: string;
   reason: string;
-  options: Array<"approve" | "reject">;
+  options: Array<"approve" | "request_changes" | "reject">;
   createdAt: string;
 }
 
 export interface StudioDecision {
   id: string;
-  action: "approve" | "reject";
+  action: "approve" | "request_changes" | "reject";
   actor: string;
   note?: string;
   createdAt: string;
@@ -1202,6 +1202,15 @@ export interface StudioDecisionInput {
   note?: string;
 }
 
+export interface StudioSceneRevisionInput {
+  expectedRunRevision: number;
+  expectedAssetVersionId: string;
+  reviewArtifactId: string;
+  findingIndex: number;
+  reuseFromScenePosition: number;
+  note: string;
+}
+
 export type StudioPublishPlatformId = "douyin" | "toutiao" | "kuaishou" | "bilibili" | "xiaohongshu";
 
 export interface StudioPublishTarget {
@@ -1430,9 +1439,26 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
   if (input.note !== undefined && typeof input.note !== "string") {
     throw new StudioInputError("审片说明必须是文字。");
   }
+  return { action: input.action, ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}) };
+}
+
+export function parseStudioSceneRevisionInput(value: unknown): StudioSceneRevisionInput {
+  const input = requiredObject(value, "镜头返修请求");
+  if (!Number.isSafeInteger(input.expectedRunRevision) || Number(input.expectedRunRevision) < 0) {
+    throw new StudioInputError("制作版本必须是非负整数。");
+  }
+  if (!Number.isSafeInteger(input.findingIndex) || Number(input.findingIndex) < 0) {
+    throw new StudioInputError("审片问题编号必须是非负整数。");
+  }
+  const note = requiredTrimmedString(input.note, "修改说明");
+  if (note.length > 2_000) throw new StudioInputError("修改说明不能超过 2000 个字符。");
   return {
-    action: input.action,
-    ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}),
+    expectedRunRevision: Number(input.expectedRunRevision),
+    expectedAssetVersionId: requiredTrimmedString(input.expectedAssetVersionId, "画面版本"),
+    reviewArtifactId: requiredTrimmedString(input.reviewArtifactId, "审片报告"),
+    findingIndex: Number(input.findingIndex),
+    reuseFromScenePosition: positiveInteger(input.reuseFromScenePosition, "复用母片镜头"),
+    note,
   };
 }
 

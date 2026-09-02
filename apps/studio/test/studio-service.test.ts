@@ -10,6 +10,7 @@ import type {
   ProductionPaidNodeReconciliationDraft,
   ProductionPaidNodeSummary,
   ProductionRunListener,
+  ProductionSceneRevisionDraft,
   ProductionSpendRejectionDraft,
 } from "@video-factory/production-pipeline";
 import { PaidOperationManualReconciliationError, StaleRunRevisionError } from "@video-factory/production-pipeline";
@@ -133,6 +134,7 @@ class FakePipeline implements StudioPipelinePort {
   lastInputOverride?: NodeInputOverrideDraft;
   lastAuthorization?: SpendAuthorizationDraft;
   lastSpendRejection?: ProductionSpendRejectionDraft;
+  lastSceneRevision?: ProductionSceneRevisionDraft;
   lastRetriedNodeId?: string;
   lastReconciliation?: ProductionPaidNodeReconciliationDraft;
   reconciliationError?: Error;
@@ -226,6 +228,16 @@ class FakePipeline implements StudioPipelinePort {
   async rejectSpend(_runId: string, rejection: ProductionSpendRejectionDraft): Promise<WorkflowRun<ProductionBrief>> {
     this.lastSpendRejection = rejection;
     return this.run;
+  }
+
+  async dispatchSceneRevision(
+    _runId: string,
+    revision: ProductionSceneRevisionDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    this.lastSceneRevision = revision;
+    this.listener = listener;
+    return { runId: this.run.id, completion: Promise.resolve(this.run) };
   }
 
   async requestPause(_runId: string): Promise<void> {
@@ -1821,6 +1833,32 @@ describe("StudioService", () => {
       () => service.decide("run-1", { action: "reject" }, "jinkun"),
       (error: unknown) => error instanceof StudioConflictError && /填写原因/.test(error.message),
     );
+  });
+
+  it("routes a scene-localized revision through the same run", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-scene-revision-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const result = await service.requestSceneRevision("run-1", {
+      expectedRunRevision: 0,
+      expectedAssetVersionId: "assets-v1",
+      reviewArtifactId: "review-1",
+      findingIndex: 0,
+      reuseFromScenePosition: 1,
+      note: "第二镜复用第一镜母片。",
+    }, "jinkun");
+
+    assert.equal(result.id, "run-1");
+    assert.deepEqual(pipeline.lastSceneRevision, {
+      expectedRunRevision: 0,
+      expectedAssetVersionId: "assets-v1",
+      reviewArtifactId: "review-1",
+      findingIndex: 0,
+      reuseFromScenePosition: 1,
+      actor: "jinkun",
+      note: "第二镜复用第一镜母片。",
+    });
   });
 
   it("maps concurrent review updates to a refreshable conflict", async () => {

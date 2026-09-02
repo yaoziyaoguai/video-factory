@@ -475,6 +475,12 @@ a { color: inherit; }
 .agent-review-facts span { padding: 6px 8px; border: 1px solid #d9c581; border-radius: 3px; background: rgb(255 255 255 / 55%); color: #62522d; font-size: 11px; }
 .agent-review-facts strong { color: #8d2f27; }
 .agent-review-decision .agent-review-guidance { padding-top: 9px; border-top: 1px solid #dfcf9b; color: #786b50; }
+.scene-revision-list { display: grid; gap: 10px; }
+.scene-revision-finding { display: grid; gap: 7px; padding: 11px; border: 1px solid #dfcf9b; border-radius: 10px; background: rgb(255 255 255 / 48%); }
+.scene-revision-finding p { margin: 0; font-size: 13px; line-height: 1.55; }
+.scene-revision-finding small { color: #786b50; line-height: 1.5; }
+.scene-finding-seek { justify-self: start; padding: 0; border: 0; background: transparent; color: #6e5521; font-weight: 750; cursor: pointer; }
+.scene-revision-controls { display: grid; gap: 8px; }
 .decision-override-field { padding: 0 22px 18px; }
 .decision-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
 .run-state-panel { border-bottom: 1px solid var(--line); }

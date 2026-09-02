@@ -26,6 +26,7 @@ import type {
   StudioPublishTarget,
   StudioRunDetail,
   StudioRunSummary,
+  StudioSceneRevisionInput,
   StudioSeries,
   StudioSeriesInput,
   StudioSeriesEpisodePlanInput,
@@ -528,6 +529,9 @@ export class StudioService {
   }
   decide(runId: string, input: StudioDecisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.decide(runId, input, actor);
+  }
+  requestSceneRevision(runId: string, input: StudioSceneRevisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    return this.production.requestSceneRevision(runId, input, actor);
   }
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor = "studio-owner"): Promise<StudioRunDetail> {
     return this.withSeriesRunEditLease(runId, async () => this.production.applyNodeOverride(runId, nodeId, input, actor));
