@@ -47,7 +47,10 @@ import type {
   StudioNodeInputOverrideInput,
   StudioNodeExecutionConfigurationInput,
   StudioNodeOverrideInput,
+  StudioPaidNodeSummary,
+  StudioPaidReconciliationInput,
   StudioSpendAuthorizationInput,
+  StudioSpendRejectionInput,
   StudioVoicePreviewInput,
   StudioVoiceProfile,
 } from "../shared/api.js";
@@ -176,7 +179,6 @@ export class StudioService {
       workspaceRoot: options.workspaceRoot,
       pipeline: options.pipeline,
       listProviders: () => this.capabilities.listProviders(),
-      maxRunCostCny: positiveNumber(environment.VIDEO_FACTORY_MAX_RUN_COST_CNY, 20),
       archiveStore: options.runArchive ?? new JsonRunArchiveStore(path.join(options.workspaceRoot, "archive", "runs.json")),
       now,
       resolveTemplateSnapshot: async (input, brief) => {
@@ -539,6 +541,9 @@ export class StudioService {
   authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.authorizeSpend(runId, nodeId, input, approvedBy);
   }
+  rejectSpend(runId: string, nodeId: string, input: StudioSpendRejectionInput, rejectedBy = "studio-owner"): Promise<StudioRunDetail> {
+    return this.production.rejectSpend(runId, nodeId, input, rejectedBy);
+  }
   requestPause(runId: string): Promise<StudioRunDetail> { return this.production.requestPause(runId); }
   resumePaused(runId: string): Promise<StudioRunDetail> { return this.production.resumePaused(runId); }
   resumeStale(runId: string): Promise<StudioRunDetail> { return this.production.resumeStale(runId); }
@@ -559,6 +564,21 @@ export class StudioService {
       if (current.seriesId) await this.reconcileSeriesRuns().catch(() => undefined);
       throw error;
     }
+  }
+  inspectPaidNode(runId: string, nodeId: string): Promise<StudioPaidNodeSummary> {
+    return this.production.inspectPaidNode(runId, nodeId);
+  }
+  async reconcilePaidNode(
+    runId: string,
+    nodeId: string,
+    input: StudioPaidReconciliationInput,
+    actor = "studio-owner",
+  ): Promise<StudioRunDetail> {
+    const current = await this.production.get(runId);
+    if (!current) throw new StudioNotFoundError("没有找到这条制作记录。");
+    const updated = await this.production.reconcilePaidNode(runId, nodeId, input, actor);
+    if (current.seriesId) await this.reconcileSeriesRuns();
+    return updated;
   }
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void {
     return this.production.subscribe(runId, listener);
@@ -732,12 +752,6 @@ function boundedCanonText(value: unknown): string | undefined {
 
 function isTemplateInputError(message: string): boolean {
   return /^(template |id |version |status |name |description |category |platforms |durationSeconds |automationLevel |storyStructure|shotSlots|visualSystem|soundSystem|qualityRules|capabilityRequirements|costPolicy)|Template '.+' (was not found|already exists)|A built-in template|Only a draft template|Draft template/.test(message);
-}
-
-function positiveNumber(value: string | undefined, fallback: number): number {
-  if (value === undefined || value.trim() === "") return fallback;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

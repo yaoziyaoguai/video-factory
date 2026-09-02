@@ -41,7 +41,10 @@ import type {
   StudioNodeOverrideInput,
   StudioNodeInputOverrideInput,
   StudioNodeExecutionConfigurationInput,
+  StudioPaidNodeSummary,
+  StudioPaidReconciliationInput,
   StudioSpendAuthorizationInput,
+  StudioSpendRejectionInput,
   StudioVoicePreviewInput,
   StudioVoiceProfile,
 } from "../shared/api.js";
@@ -205,6 +208,10 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/spend-authorizations`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
+  rejectSpend: (runId: string, nodeId: string, input: StudioSpendRejectionInput) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/spend-rejections`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
   regenerateStale: (runId: string) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/regenerate-stale`,
     { method: "POST" },
@@ -220,6 +227,13 @@ export const studioApi = {
   retryFailedNode: (runId: string, nodeId: string) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/retry`,
     { method: "POST" },
+  ),
+  paidOperation: (runId: string, nodeId: string) => requestJson<StudioPaidNodeSummary>(
+    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/paid-operation`,
+  ),
+  reconcilePaidOperation: (runId: string, nodeId: string, input: StudioPaidReconciliationInput) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/paid-operation/reconcile`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
   start: startProduction,
   decide: (runId: string, input: StudioDecisionInput) => requestJson<StudioRunDetail>(

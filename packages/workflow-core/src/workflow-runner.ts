@@ -1,5 +1,6 @@
 import { ProviderRegistry } from "./provider-registry.js";
 import type {
+  ApprovalPolicy,
   Artifact,
   ArtifactDraft,
   ArtifactKind,
@@ -24,6 +25,7 @@ import type {
   SpendAuthorization,
   SpendAuthorizationDraft,
   SpendPlan,
+  SpendQuote,
   WorkflowContext,
   WorkflowDefinition,
   WorkflowRun,
@@ -51,9 +53,11 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
   readonly #providers: ProviderRegistry;
   readonly #publicContext: WorkflowContext<TInitialInput>;
   #activeSpendAuthorization: Readonly<SpendAuthorization> | undefined;
+  #activeSpendAuthorizationExemptProviderId: string | undefined;
+  #activeAutomaticMeteredProviderId: string | undefined;
   #activeOperationRequestId: string | undefined;
   #activeMeteredAttempts = 0;
-  #activeMeteredAttemptObserver: ((attemptCount: number) => void) | undefined;
+  #activeMeteredAttemptObserver: ((attemptCount: number) => Promise<void> | void) | undefined;
 
   constructor(
     readonly runId: string,
@@ -74,6 +78,7 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
       get artifacts() { return context.artifacts; },
       get outputs() { return context.outputs; },
       get spendAuthorization() { return context.spendAuthorization; },
+      get spendAuthorizationExemptProviderId() { return context.spendAuthorizationExemptProviderId; },
       get operationRequestId() { return context.operationRequestId; },
       now: () => context.now(),
       nextId: (prefix: string) => context.nextId(prefix),
@@ -134,18 +139,32 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
     const safeContext = this.publicContext();
     if (provider.billing === "metered") {
       validateMeteredProvider(provider);
-      if (!this.#activeSpendAuthorization || !authorizationMatchesProvider(this.#activeSpendAuthorization, provider)) {
+      const authorizationMatches = this.#activeSpendAuthorization
+        && authorizationMatchesProvider(this.#activeSpendAuthorization, provider);
+      const authorizationExempt = this.#activeSpendAuthorizationExemptProviderId === provider.id;
+      const automaticExecutionAllowed = this.#activeAutomaticMeteredProviderId === provider.id;
+      if (!authorizationMatches && !authorizationExempt && !automaticExecutionAllowed) {
         throw new Error(`Metered provider '${provider.id}' is outside the active spend authorization.`);
       }
       return bindProvider(provider, async (input) => {
-          if (!this.#activeSpendAuthorization || !authorizationMatchesProvider(this.#activeSpendAuthorization, provider)) {
+          const activeAuthorization = this.#activeSpendAuthorization;
+          if (!activeAuthorization || !authorizationMatchesProvider(activeAuthorization, provider)) {
+            if (this.#activeSpendAuthorizationExemptProviderId === provider.id) return provider.run(input, safeContext);
+            if (this.#activeAutomaticMeteredProviderId === provider.id) {
+              if (this.#activeMeteredAttempts >= provider.maxAttempts) {
+                throw new Error(`Metered provider '${provider.id}' exceeded the automatic attempt limit.`);
+              }
+              this.#activeMeteredAttempts += 1;
+              await this.#activeMeteredAttemptObserver?.(this.#activeMeteredAttempts);
+              return provider.run(input, safeContext);
+            }
             throw new Error(`Metered provider '${provider.id}' is outside the active spend authorization.`);
           }
-          if (this.#activeMeteredAttempts >= this.#activeSpendAuthorization.maxAttempts) {
+          if (this.#activeMeteredAttempts >= activeAuthorization.maxAttempts) {
             throw new Error(`Metered provider '${provider.id}' exceeded the authorized attempt limit.`);
           }
           this.#activeMeteredAttempts += 1;
-          this.#activeMeteredAttemptObserver?.(this.#activeMeteredAttempts);
+          await this.#activeMeteredAttemptObserver?.(this.#activeMeteredAttempts);
           return provider.run(input, safeContext);
         });
     }
@@ -160,6 +179,10 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
     return this.#activeSpendAuthorization;
   }
 
+  get spendAuthorizationExemptProviderId(): string | undefined {
+    return this.#activeSpendAuthorizationExemptProviderId;
+  }
+
   get operationRequestId(): string | undefined {
     return this.#activeOperationRequestId;
   }
@@ -168,13 +191,19 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
     authorization: Readonly<SpendAuthorization> | undefined,
     operationRequestId: string,
     execute: () => Promise<T>,
-    onMeteredAttempt?: (attemptCount: number) => void,
+    onMeteredAttempt?: (attemptCount: number) => Promise<void> | void,
+    spendAuthorizationExemptProviderId?: string,
+    automaticMeteredProviderId?: string,
   ): Promise<T> {
     const previous = this.#activeSpendAuthorization;
+    const previousExemptProviderId = this.#activeSpendAuthorizationExemptProviderId;
+    const previousAutomaticProviderId = this.#activeAutomaticMeteredProviderId;
     const previousOperationRequestId = this.#activeOperationRequestId;
     const previousAttempts = this.#activeMeteredAttempts;
     const previousAttemptObserver = this.#activeMeteredAttemptObserver;
     this.#activeSpendAuthorization = authorization;
+    this.#activeSpendAuthorizationExemptProviderId = spendAuthorizationExemptProviderId;
+    this.#activeAutomaticMeteredProviderId = automaticMeteredProviderId;
     this.#activeOperationRequestId = operationRequestId;
     this.#activeMeteredAttempts = 0;
     this.#activeMeteredAttemptObserver = onMeteredAttempt;
@@ -182,6 +211,8 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
       return await execute();
     } finally {
       this.#activeSpendAuthorization = previous;
+      this.#activeSpendAuthorizationExemptProviderId = previousExemptProviderId;
+      this.#activeAutomaticMeteredProviderId = previousAutomaticProviderId;
       this.#activeOperationRequestId = previousOperationRequestId;
       this.#activeMeteredAttempts = previousAttempts;
       this.#activeMeteredAttemptObserver = previousAttemptObserver;
@@ -201,6 +232,7 @@ function bindProvider<TInput, TOutput>(
     ...(provider.modelId !== undefined ? { modelId: provider.modelId } : {}),
     ...(provider.transport !== undefined ? { transport: provider.transport } : {}),
     ...(provider.billing !== undefined ? { billing: provider.billing } : {}),
+    ...(provider.approvalPolicy !== undefined ? { approvalPolicy: provider.approvalPolicy } : {}),
     ...(provider.configurationSource !== undefined ? { configurationSource: provider.configurationSource } : {}),
     ...(provider.parameters !== undefined ? { parameters: cloneExecutionParameters(provider.parameters) } : {}),
     ...(provider.estimatedCostCny !== undefined ? { estimatedCostCny: provider.estimatedCostCny } : {}),
@@ -708,12 +740,21 @@ export class WorkflowRunner {
     );
     normalizeLegacyVersionStates(definition, run, context.publicContext());
     const provider = resolveNodeProvider(node, context);
-    const inputVersionIds = executionInputVersionIds(node, waitingNode, run.nodeRuns);
+    const upstreamVersionIds = inputVersionIdsForNode(node, run.nodeRuns);
+    const publicContext = context.publicContext();
+    const derivedInput = node.getInput ? node.getInput(publicContext) : (run.initialInput as unknown);
+    const input = resolveEffectiveNodeInput(node, waitingNode, derivedInput, upstreamVersionIds, publicContext);
+    const inputVersionIds = executionInputVersionIdsFromUpstream(waitingNode, upstreamVersionIds);
     if (!provider || provider.billing !== "metered") {
       throw new Error(`Node '${draft.nodeId}' no longer resolves to a metered provider.`);
     }
-    if (!spendPlanMatchesExecution(waitingNode.spendPlan, node, provider, inputVersionIds)) {
-      waitingNode.spendPlan = createSpendPlan(node, provider, inputVersionIds, context);
+    if (approvalPolicyFor(provider) !== "manual") {
+      throw new Error(`Node '${draft.nodeId}' no longer requires manual spend approval.`);
+    }
+    validateMeteredProvider(provider);
+    const quote = await resolveSpendQuote(provider, input, publicContext);
+    if (!spendPlanMatchesExecution(waitingNode.spendPlan, node, provider, quote, inputVersionIds)) {
+      waitingNode.spendPlan = createSpendPlan(node, provider, quote, inputVersionIds, publicContext);
       waitingNode.status = "approval_invalidated";
       delete waitingNode.spendAuthorizationId;
       run.revision += 1;
@@ -884,6 +925,10 @@ export class WorkflowRunner {
     delete retryNode.intervention;
     delete retryNode.executionReceipt;
     delete retryNode.spendPlan;
+    if (retryNode.spendAuthorizationId) {
+      const consumed = (run.consumedSpendAuthorizationIds ??= []);
+      if (!consumed.includes(retryNode.spendAuthorizationId)) consumed.push(retryNode.spendAuthorizationId);
+    }
     delete retryNode.spendAuthorizationId;
     delete retryNode.interrupted;
     if (!preserveInterruptedOperation) delete retryNode.operationRequestId;
@@ -936,11 +981,18 @@ export class WorkflowRunner {
         context as InMemoryWorkflowContext<unknown>,
         inputVersionIdsForNode(node, run.nodeRuns),
         run.spendAuthorizations ?? [],
-        new Set((run.executionReceipts ?? []).flatMap((receipt) => receipt.spendAuthorizationId ? [receipt.spendAuthorizationId] : [])),
+        new Set([
+          ...(run.consumedSpendAuthorizationIds ?? []),
+          ...(run.executionReceipts ?? []).flatMap((receipt) => receipt.spendAuthorizationId ? [receipt.spendAuthorizationId] : []),
+        ]),
         existingNodeRun,
         async (runningNode) => {
-          if (!existingNodeRun) {
+          if (!existingNodeRun && !run.nodeRuns.some((candidate) => candidate.nodeId === runningNode.nodeId)) {
             run.nodeRuns.push(runningNode);
+          }
+          if (runningNode.outcomeUncertain && runningNode.spendAuthorizationId) {
+            const consumed = (run.consumedSpendAuthorizationIds ??= []);
+            if (!consumed.includes(runningNode.spendAuthorizationId)) consumed.push(runningNode.spendAuthorizationId);
           }
           await this.checkpoint?.(run);
         },
@@ -950,7 +1002,21 @@ export class WorkflowRunner {
         context.outputs.set(node.id, nodeRun.output);
       }
       if (nodeRun.executionReceipt) {
-        (run.executionReceipts ??= []).push(cloneExecutionReceipt(nodeRun.executionReceipt));
+        const receipts = (run.executionReceipts ??= []);
+        const existingReceiptIndex = nodeRun.executionReceipt.requestId
+          ? receipts.findIndex((candidate) => (
+              candidate.nodeId === nodeRun.nodeId
+              && candidate.requestId === nodeRun.executionReceipt?.requestId
+            ))
+          : -1;
+        if (existingReceiptIndex >= 0) {
+          receipts[existingReceiptIndex] = mergeExecutionReceiptForSameRequest(
+            receipts[existingReceiptIndex]!,
+            nodeRun.executionReceipt,
+          );
+        } else {
+          receipts.push(cloneExecutionReceipt(nodeRun.executionReceipt));
+        }
       }
       if (nodeRun.intervention) {
         run.interventions.push(nodeRun.intervention);
@@ -1006,6 +1072,8 @@ export class WorkflowRunner {
     let receiptDraft = inlineReceiptDraft(node);
     let authorization: SpendAuthorization | undefined;
     let meteredAttemptCount = 0;
+    let spendAuthorizationExemptProviderId: string | undefined;
+    let automaticMeteredProvider: Pick<Provider, "id" | "modelId"> | undefined;
     try {
       const publicContext = context.publicContext();
       const derivedInput = node.getInput ? node.getInput(publicContext) : (context.initialInput as TInput);
@@ -1017,33 +1085,63 @@ export class WorkflowRunner {
       }
       if (provider?.billing === "metered") {
         validateMeteredProvider(provider);
-        const spendPlan = nodeRun.spendPlan ?? createSpendPlan(node, provider, inputVersionIds, context);
-        nodeRun.spendPlan = spendPlan;
-        if (!spendPlanMatchesExecution(spendPlan, node, provider, inputVersionIds)) {
-          throw new Error(`Spend plan for node '${node.id}' no longer matches its metered provider.`);
+        const approvalPolicy = approvalPolicyFor(provider);
+        if (approvalPolicy === "automatic") {
+          delete nodeRun.spendPlan;
+          delete nodeRun.spendAuthorizationId;
+          automaticMeteredProvider = provider;
+        } else {
+          const quote = await resolveSpendQuote(provider, input, publicContext);
+          if (quote.requiresAuthorization === false) {
+            delete nodeRun.spendPlan;
+            delete nodeRun.spendAuthorizationId;
+            spendAuthorizationExemptProviderId = provider.id;
+          } else {
+            const spendPlan = nodeRun.spendPlan ?? createSpendPlan(node, provider, quote, inputVersionIds, publicContext);
+            nodeRun.spendPlan = spendPlan;
+            if (!spendPlanMatchesExecution(spendPlan, node, provider, quote, inputVersionIds)) {
+              throw new Error(`Spend plan for node '${node.id}' no longer matches its metered provider.`);
+            }
+            authorization = spendAuthorizations.find((candidate) =>
+              !consumedSpendAuthorizationIds.has(candidate.id) && authorizationMatchesPlan(candidate, spendPlan));
+            if (!authorization) {
+              nodeRun.status = "awaiting_spend_approval";
+              return nodeRun;
+            }
+            nodeRun.spendAuthorizationId = authorization.id;
+          }
         }
-        authorization = spendAuthorizations.find((candidate) =>
-          !consumedSpendAuthorizationIds.has(candidate.id) && authorizationMatchesPlan(candidate, spendPlan));
-        if (!authorization) {
-          nodeRun.status = "awaiting_spend_approval";
-          return nodeRun;
-        }
-        nodeRun.spendAuthorizationId = authorization.id;
       }
 
       const execution = await context.withSpendAuthorization(
         authorization,
         nodeRun.operationRequestId,
         () => executeNode(node, input, context, provider),
-        (attemptCount) => { meteredAttemptCount = attemptCount; },
+        async (attemptCount) => {
+          meteredAttemptCount = attemptCount;
+          nodeRun.outcomeUncertain = true;
+          await onStarted(nodeRun);
+        },
+        spendAuthorizationExemptProviderId,
+        automaticMeteredProvider?.id,
       );
       const result = execution.result;
       const executionFinishedAt = context.now();
 
       const status = result.status ?? "succeeded";
+      if (status !== "failed") delete nodeRun.outcomeUncertain;
       validateNodeResultStatus(node.id, status, result);
       receiptDraft = execution.receipt;
-      validateReceiptCosts(receiptDraft, authorization);
+      if (spendAuthorizationExemptProviderId) {
+        receiptDraft = normalizeNoSpendReceipt(receiptDraft, spendAuthorizationExemptProviderId);
+      }
+      if (automaticMeteredProvider && receiptDraft.billing === "metered") {
+        receiptDraft = {
+          ...receiptDraft,
+          meteredAttemptCount: receiptDraft.meteredAttemptCount ?? meteredAttemptCount,
+        };
+      }
+      validateReceiptCosts(receiptDraft, authorization, automaticMeteredProvider);
 
       for (const draft of result.artifacts ?? []) {
         const artifact = context.addArtifact(draft);
@@ -1106,8 +1204,14 @@ export class WorkflowRunner {
       nodeRun.status = "failed";
       nodeRun.error = error instanceof Error ? error.message : String(error);
       nodeRun.finishedAt = context.now();
-      if (authorization && meteredAttemptCount > 0) nodeRun.outcomeUncertain = true;
+      if ((authorization || automaticMeteredProvider) && meteredAttemptCount > 0) nodeRun.outcomeUncertain = true;
       if (!nodeRun.executionReceipt) {
+        if (automaticMeteredProvider && receiptDraft.billing === "metered") {
+          receiptDraft = {
+            ...receiptDraft,
+            meteredAttemptCount: receiptDraft.meteredAttemptCount ?? meteredAttemptCount,
+          };
+        }
         nodeRun.executionReceipt = createExecutionReceipt(
           node,
           sanitizeFailureReceiptDraft(receiptDraft),
@@ -1168,6 +1272,7 @@ function cloneWorkflowRun<TInitialInput>(run: WorkflowRun<TInitialInput>): Workf
         clone.spendPlan = {
           ...nodeRun.spendPlan,
           inputVersionIds: [...nodeRun.spendPlan.inputVersionIds],
+          ...(nodeRun.spendPlan.items ? { items: nodeRun.spendPlan.items.map((item) => ({ ...item })) } : {}),
         };
       }
       if (nodeRun.outputState) {
@@ -1200,6 +1305,9 @@ function cloneWorkflowRun<TInitialInput>(run: WorkflowRun<TInitialInput>): Workf
     interventions: run.interventions.map((intervention) => ({ ...intervention })),
     decisions: run.decisions.map((decision) => ({ ...decision })),
     ...(run.executionReceipts ? { executionReceipts: run.executionReceipts.map(cloneExecutionReceipt) } : {}),
+    ...(run.consumedSpendAuthorizationIds
+      ? { consumedSpendAuthorizationIds: [...run.consumedSpendAuthorizationIds] }
+      : {}),
     ...(run.executionPlan ? { executionPlan: run.executionPlan.map((plan) => ({
       ...plan,
       ...(plan.parameters ? { parameters: cloneExecutionParameters(plan.parameters) } : {}),
@@ -1340,22 +1448,54 @@ function resolveNodeProvider<TInput, TOutput>(
 
 function createSpendPlan(
   node: { id: string },
-  provider: Pick<Provider, "id" | "modelId" | "estimatedCostCny" | "maxCostCny" | "maxAttempts">,
+  provider: Pick<Provider, "id"> & { modelId: string; maxAttempts: number },
+  quote: SpendQuote,
   inputVersionIds: string[],
   context: WorkflowContext,
 ): SpendPlan {
-  validateMeteredProvider(provider);
   return {
     id: context.nextId("spend-plan"),
     nodeId: node.id,
     inputVersionIds: [...inputVersionIds],
     providerId: provider.id,
     modelId: provider.modelId,
-    estimatedCostCny: provider.estimatedCostCny,
-    maxCostCny: provider.maxCostCny,
+    estimatedCostCny: quote.estimatedCostCny,
+    maxCostCny: quote.maxCostCny,
     maxAttempts: provider.maxAttempts,
+    ...(quote.items ? { items: quote.items.map((item) => ({ ...item })) } : {}),
     createdAt: context.now(),
   };
+}
+
+async function resolveSpendQuote<TInput>(
+  provider: Provider<TInput, unknown>,
+  input: TInput,
+  context: WorkflowContext,
+): Promise<SpendQuote> {
+  validateMeteredProvider(provider);
+  const quote = provider.quoteSpend
+    ? await provider.quoteSpend(input, context)
+    : { estimatedCostCny: provider.estimatedCostCny, maxCostCny: provider.maxCostCny };
+  validateSpendQuote(quote);
+  return {
+    estimatedCostCny: roundSpendMoney(quote.estimatedCostCny),
+    maxCostCny: roundSpendMoney(quote.maxCostCny),
+    ...(quote.items ? { items: quote.items.map((item) => ({ ...item, estimatedCostCny: roundSpendMoney(item.estimatedCostCny) })) } : {}),
+    ...(quote.requiresAuthorization === false ? { requiresAuthorization: false } : {}),
+  };
+}
+
+function roundSpendMoney(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function approvalPolicyFor(
+  provider: Pick<Provider, "billing" | "approvalPolicy">,
+): ApprovalPolicy {
+  if (provider.billing === "metered") {
+    return provider.approvalPolicy === "automatic" ? "automatic" : "manual";
+  }
+  return provider.approvalPolicy ?? "none";
 }
 
 function authorizationMatchesPlan(
@@ -1375,17 +1515,33 @@ function authorizationMatchesPlan(
 function spendPlanMatchesExecution(
   plan: SpendPlan,
   node: { id: string },
-  provider: Pick<Provider, "id" | "modelId" | "estimatedCostCny" | "maxCostCny" | "maxAttempts">,
+  provider: Pick<Provider, "id" | "modelId" | "maxAttempts">,
+  quote: SpendQuote,
   inputVersionIds: string[],
 ): boolean {
   return plan.nodeId === node.id
     && plan.providerId === provider.id
     && plan.modelId === provider.modelId
-    && plan.estimatedCostCny === provider.estimatedCostCny
-    && plan.maxCostCny === provider.maxCostCny
+    && plan.estimatedCostCny === quote.estimatedCostCny
+    && plan.maxCostCny === quote.maxCostCny
     && plan.maxAttempts === provider.maxAttempts
+    && spendQuoteItemsMatch(plan.items, quote.items)
     && plan.inputVersionIds.length === inputVersionIds.length
     && plan.inputVersionIds.every((versionId, index) => versionId === inputVersionIds[index]);
+}
+
+function spendQuoteItemsMatch(left: SpendQuote["items"], right: SpendQuote["items"]): boolean {
+  if (!left && !right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((item, index) => {
+    const candidate = right[index];
+    return candidate !== undefined
+      && item.id === candidate.id
+      && item.label === candidate.label
+      && item.providerId === candidate.providerId
+      && item.modelId === candidate.modelId
+      && item.estimatedCostCny === candidate.estimatedCostCny;
+  });
 }
 
 function createExecutionReceipt(
@@ -1469,14 +1625,64 @@ function validateMeteredProvider(
   }
 }
 
+function validateSpendQuote(quote: SpendQuote): void {
+  if (quote.requiresAuthorization !== undefined && typeof quote.requiresAuthorization !== "boolean") {
+    throw new Error("Spend quote requiresAuthorization must be a boolean when provided.");
+  }
+  if (quote.requiresAuthorization === false) {
+    if (quote.estimatedCostCny !== 0 || quote.maxCostCny !== 0 || quote.items !== undefined) {
+      throw new Error("A no-spend quote must contain exactly zero cost and no charge items.");
+    }
+    return;
+  }
+  if (!isFiniteNonNegative(quote.estimatedCostCny) || !isFinitePositive(quote.maxCostCny)) {
+    throw new Error("Spend quote must contain finite estimated and maximum costs.");
+  }
+  if (quote.estimatedCostCny > quote.maxCostCny) {
+    throw new Error("Spend quote estimated cost exceeds its maximum cost.");
+  }
+  if (!quote.items) return;
+  if (quote.items.length === 0 || quote.items.length > 100) {
+    throw new Error("Spend quote items must contain between 1 and 100 entries.");
+  }
+  if (new Set(quote.items.map((item) => item.id)).size !== quote.items.length) {
+    throw new Error("Spend quote items must have unique item ids.");
+  }
+  for (const item of quote.items) {
+    if (!item.id.trim() || !item.label.trim() || !item.providerId.trim() || !item.modelId.trim() || !isFinitePositive(item.estimatedCostCny)) {
+      throw new Error("Spend quote item is incomplete or has an invalid estimated cost.");
+    }
+  }
+  const itemTotal = quote.items.reduce((sum, item) => sum + item.estimatedCostCny, 0);
+  if (Math.round(itemTotal * 100) !== Math.round(quote.estimatedCostCny * 100)) {
+    throw new Error("Spend quote item total does not match the estimated cost.");
+  }
+}
+
+function normalizeNoSpendReceipt(
+  receipt: NodeExecutionReceiptDraft,
+  providerId: string,
+): NodeExecutionReceiptDraft {
+  if (receipt.providerId !== providerId) {
+    throw new Error(`No-spend execution resolved an unexpected provider '${receipt.providerId}'.`);
+  }
+  if ((receipt.actualCostCny ?? 0) !== 0 || (receipt.meteredAttemptCount ?? 0) !== 0 || (receipt.meteredFailedAttemptCount ?? 0) !== 0) {
+    throw new Error(`No-spend execution for provider '${providerId}' reported a metered charge or attempt.`);
+  }
+  return {
+    ...receipt,
+    billing: "free",
+    estimatedCostCny: 0,
+  };
+}
+
 function authorizationMatchesProvider(
   authorization: SpendAuthorizationDraft,
-  provider: Pick<Provider, "id" | "modelId" | "maxCostCny" | "maxAttempts">,
+  provider: Pick<Provider, "id" | "modelId" | "maxAttempts">,
 ): boolean {
   return isValidSpendAuthorizationScope(authorization)
     && authorization.providerId === provider.id
     && authorization.modelId === provider.modelId
-    && authorization.maxCostCny === provider.maxCostCny
     && authorization.maxAttempts === provider.maxAttempts;
 }
 
@@ -1506,6 +1712,7 @@ function isValidSpendAuthorizationScope(draft: SpendAuthorizationDraft): boolean
 function validateReceiptCosts(
   receipt: NodeExecutionReceiptDraft,
   authorization: SpendAuthorization | undefined,
+  automaticMeteredProvider?: Pick<Provider, "id" | "modelId">,
 ): void {
   if (receipt.actualModelIds !== undefined && (
     !Array.isArray(receipt.actualModelIds)
@@ -1516,7 +1723,13 @@ function validateReceiptCosts(
     throw new Error("Execution receipt actualModelIds must contain 1 to 20 valid model identifiers.");
   }
   if (receipt.billing === "metered" && !authorization) {
-    throw new Error(`Metered receipt for provider '${receipt.providerId}' has no active spend authorization.`);
+    if (
+      !automaticMeteredProvider
+      || receipt.providerId !== automaticMeteredProvider.id
+      || receipt.modelId !== automaticMeteredProvider.modelId
+    ) {
+      throw new Error(`Metered receipt for provider '${receipt.providerId}' has no active spend authorization.`);
+    }
   }
   if (authorization && (
     receipt.billing !== "metered"
@@ -1656,6 +1869,31 @@ function cloneExecutionReceipt(receipt: NodeExecutionReceipt): NodeExecutionRece
     ...(receipt.parameters ? { parameters: cloneExecutionParameters(receipt.parameters) } : {}),
     ...(receipt.actualModelIds ? { actualModelIds: [...receipt.actualModelIds] } : {}),
   };
+}
+
+function mergeExecutionReceiptForSameRequest(
+  previous: NodeExecutionReceipt,
+  current: NodeExecutionReceipt,
+): NodeExecutionReceipt {
+  if (previous.billing === "metered" && current.billing === "free") {
+    return {
+      ...cloneExecutionReceipt(previous),
+      status: current.status,
+      finishedAt: current.finishedAt,
+    };
+  }
+  const merged = cloneExecutionReceipt(current);
+  if (merged.actualCostCny === undefined && previous.actualCostCny !== undefined) {
+    merged.actualCostCny = previous.actualCostCny;
+    if (previous.actualCostSource) merged.actualCostSource = previous.actualCostSource;
+  }
+  if (merged.meteredAttemptCount === undefined && previous.meteredAttemptCount !== undefined) {
+    merged.meteredAttemptCount = previous.meteredAttemptCount;
+  }
+  if (merged.meteredFailedAttemptCount === undefined && previous.meteredFailedAttemptCount !== undefined) {
+    merged.meteredFailedAttemptCount = previous.meteredFailedAttemptCount;
+  }
+  return merged;
 }
 
 function isFinitePositive(value: unknown): value is number {

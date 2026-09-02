@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseProductionTemplateSnapshot, resolveTemplateSnapshot } from "../src/index.js";
+import { parseProductionTemplateSnapshot, resolveTemplateSnapshot, type ProductionBlueprintPatch } from "../src/index.js";
 import { validTemplate } from "./template-test-data.js";
 
 describe("resolveTemplateSnapshot", () => {
@@ -43,6 +43,22 @@ describe("resolveTemplateSnapshot", () => {
     assert.equal(Object.isFrozen(snapshot.resolvedBlueprint), true);
   });
 
+  it("accepts a legacy cost policy without carrying a video cap into the resolved production blueprint", () => {
+    const legacyTemplate = {
+      ...validTemplate(),
+      costPolicy: { currency: "CNY" as const, maxCost: 5, maxPaidShots: 1 },
+    };
+    const snapshot = resolveTemplateSnapshot({
+      template: legacyTemplate,
+      resolvedAt: "2026-08-27T10:00:00.000Z",
+      systemDefaults: { platform: "douyin" },
+    });
+
+    assert.equal("costPolicy" in snapshot.resolvedBlueprint, false);
+    assert.equal("costPolicy" in snapshot.fieldSources, false);
+    assert.equal(snapshot.sourceLayers.some((layer) => layer.appliedFields.includes("costPolicy")), false);
+  });
+
   it("preserves template model defaults in the immutable run snapshot", () => {
     const snapshot = resolveTemplateSnapshot({
       template: { ...validTemplate(), modelDefaults: { "seedance-video-v1": "doubao-seedance-2-0-fast-260128" } },
@@ -67,12 +83,16 @@ describe("resolveTemplateSnapshot", () => {
       runOverrides: { durationSeconds: -1 },
     }), /durationSeconds/);
 
-    assert.throws(() => resolveTemplateSnapshot({
+    const snapshot = resolveTemplateSnapshot({
       template: validTemplate(),
       resolvedAt: "2026-08-27T10:00:00.000Z",
       systemDefaults: { platform: "douyin" },
-      runOverrides: { costPolicy: { currency: "CNY", maxCost: -1, maxPaidShots: 0 } },
-    }), /costPolicy.maxCost/);
+      runOverrides: {
+        costPolicy: { currency: "CNY", maxCost: -1, maxPaidShots: 0 },
+      } as unknown as ProductionBlueprintPatch,
+    });
+    assert.equal("costPolicy" in snapshot.resolvedBlueprint, false);
+    assert.equal(snapshot.sourceLayers.some((layer) => layer.appliedFields.includes("costPolicy")), false);
   });
 
   it("round-trips a resolved snapshot through the runtime parser", () => {

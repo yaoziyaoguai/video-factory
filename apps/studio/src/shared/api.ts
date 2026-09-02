@@ -129,6 +129,7 @@ export interface StudioProvider {
   kind: "local" | "external" | "test";
   status?: "ready" | "needs_config" | "planned";
   billing?: "free" | "subscription" | "metered";
+  approvalPolicy?: "manual" | "automatic" | "none";
   description?: string;
   modes?: string[];
   latency?: "instant" | "seconds" | "minutes";
@@ -138,6 +139,7 @@ export interface StudioProvider {
   requirement?: string;
   defaultModelId?: string;
   modelProfiles?: StudioModelProfile[];
+  deliveryTypes?: Array<"editorial_card" | "stock_video" | "stock_image" | "generated_image" | "generated_video">;
 }
 
 export interface StudioTrendSource {
@@ -792,6 +794,13 @@ export interface StudioSpendPlan {
   estimatedCostCny: number;
   maxCostCny: number;
   maxAttempts: number;
+  items?: Array<{
+    id: string;
+    label: string;
+    providerId: string;
+    modelId: string;
+    estimatedCostCny: number;
+  }>;
   createdAt: string;
 }
 
@@ -828,6 +837,54 @@ export interface StudioSpendAuthorizationInput {
   modelId: string;
   maxCostCny: number;
   maxAttempts: number;
+}
+
+export interface StudioSpendRejectionInput {
+  spendPlanId: string;
+  reason: "too_expensive" | "provider_mix" | "plan_not_approved" | "other";
+  targetEstimatedCostCny?: number;
+  note?: string;
+}
+
+export type StudioPaidOperationState =
+  | "prepared"
+  | "submitted"
+  | "provider_succeeded"
+  | "materialized"
+  | "terminal_failed"
+  | "unknown";
+
+export interface StudioPaidOperationItem {
+  operationId: string;
+  itemRequestId: string;
+  quoteItemId: string;
+  scenePosition: number;
+  executorProviderId: string;
+  providerId: string;
+  modelId: string;
+  state: StudioPaidOperationState;
+  estimatedCostCny: number;
+  taskId?: string;
+  actualCostCny?: number;
+  actualCostSource?: "configured_rate";
+  error?: string;
+}
+
+export interface StudioPaidNodeSummary {
+  nodeId: string;
+  operationId?: string;
+  recommendedOutcome?: StudioPaidReconciliationInput["outcome"];
+  requiresManualReconciliation: boolean;
+  items: StudioPaidOperationItem[];
+}
+
+export interface StudioPaidReconciliationInput {
+  expectedRunRevision: number;
+  reconciliationId: string;
+  outcome: "resume_original" | "requote" | "confirmed_not_charged" | "confirmed_charged";
+  taskId?: string;
+  note?: string;
+  actualCostCny?: number;
 }
 
 export interface StudioArtifact {

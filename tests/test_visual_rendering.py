@@ -51,21 +51,31 @@ class VisualRenderingTest(unittest.TestCase):
 
         self.assertTrue(all(int(color[1:3], 16) >= 0xEE for color in backgrounds))
 
-    def test_local_card_spec_preserves_the_director_semantics_instead_of_using_one_generic_card(self):
-        status_scene = Scene(
-            position=2,
-            narration="不能。先让它过证据门禁。",
-            duration=2.2,
-            visual_strategy="local",
-            visual_prompt="上方灰色小标签“生成完成”，中央为橙色“待证据核验”。",
-        )
-        status = local_card_spec(status_scene, {
-            "query": "minimal evidence verification status card",
-            "successCriteria": ["首帧即可读到“生成完成 → 待证据核验”的完整关系。"],
-        })
-        self.assertEqual(status["layout"], "status_flow")
-        self.assertEqual(status["items"], ["生成完成", "待证据核验"])
+    def test_local_card_spec_rejects_internal_workflow_states_before_building_a_card(self):
+        cases = [
+            (
+                Scene(2, "不能。先让它过证据门禁。", 2.2, "local", "中央为橙色“待证据核验”。"),
+                {"query": "minimal evidence verification status card"},
+                "verification status flow",
+            ),
+            (
+                Scene(2, "来源未提供。", 2.2, "local", "来源未提供"),
+                {"query": "missing source form"},
+                "missing-source state",
+            ),
+            (
+                Scene(2, "这条断言还没有核验。", 2.2, "local", "展示断言"),
+                {"query": "claim review statement"},
+                "claim-review state",
+            ),
+        ]
 
+        for scene, shot, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    local_card_spec(scene, shot)
+
+    def test_local_card_spec_preserves_a_formal_director_checklist(self):
         checklist_scene = Scene(
             position=4,
             narration="三项齐，才进入待发布区。",
@@ -79,7 +89,6 @@ class VisualRenderingTest(unittest.TestCase):
         self.assertEqual(checklist["layout"], "checklist")
         self.assertEqual(checklist["items"], ["来源", "原文", "适用范围"])
         self.assertEqual(checklist["status"], "待发布")
-        self.assertEqual(local_card_semantic_style(status)["accent"], "#d97706")
         self.assertEqual(local_card_semantic_style(checklist)["accent"], "#188465")
 
     def test_local_card_spec_supports_audit_paid_gate_and_outro_visual_grammar(self):
@@ -105,6 +114,24 @@ class VisualRenderingTest(unittest.TestCase):
         self.assertEqual(outro["layout"], "audit_outro")
         self.assertEqual(outro["title"], "每个节点：自审 → 红队")
         self.assertEqual(local_card_semantic_style(audit)["background"], "#0b1220")
+
+    def test_generic_typography_direction_does_not_expose_internal_review_language(self):
+        scene = Scene(
+            position=6,
+            narration="延时压缩了光影。记住：影子在走，地球在转。",
+            duration=4,
+            visual_strategy="local",
+            visual_prompt="正式片尾知识结论卡",
+        )
+
+        card = local_card_spec(scene, {
+            "query": "navy science takeaway typography yellow",
+            "visibleAction": "所有文字从首帧完整存在，整张卡片轻微推近。",
+        })
+
+        self.assertEqual(card["layout"], "list")
+        self.assertNotIn("门禁", " ".join([card["kicker"], card["title"], card["status"]]))
+        self.assertNotIn("待证据核验", " ".join([card["kicker"], card["title"], card["status"]]))
 
     def test_stock_overlay_uses_only_director_requested_visible_labels(self):
         manifest = {

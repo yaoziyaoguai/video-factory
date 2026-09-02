@@ -154,6 +154,45 @@ describe("CostStudio", () => {
     assert.equal(detail?.totals.estimatedCostCny, 6);
   });
 
+  it("counts an interrupted operation only once when its original provider task is resumed", async () => {
+    const first = {
+      id: "interrupted-attempt",
+      nodeId: "assets",
+      capability: "asset.prepare",
+      providerId: "hailuo-video-v1",
+      modelId: "MiniMax-Hailuo",
+      billing: "metered",
+      status: "failed",
+      requestId: "stable-operation-1",
+      startedAt: "2026-08-27T11:00:00.000Z",
+      estimatedCostCny: 2.4,
+      actualCostCny: 2.4,
+      meteredAttemptCount: 1,
+      meteredFailedAttemptCount: 1,
+    };
+    const resumed = {
+      ...first,
+      id: "resumed-attempt",
+      status: "succeeded",
+      startedAt: "2026-08-27T11:05:00.000Z",
+      meteredFailedAttemptCount: 0,
+    };
+    const studio = new CostStudio(async () => ([{
+      id: "run-resumed-operation",
+      nodeRuns: [{ nodeId: "assets", status: "succeeded", executionReceipt: resumed }],
+      executionReceipts: [first, resumed],
+      spendAuthorizations: [],
+    }]));
+
+    const detail = await studio.runDetail("run-resumed-operation");
+
+    assert.equal(detail?.lines.length, 1);
+    assert.equal(detail?.lines[0]?.status, "succeeded");
+    assert.equal(detail?.totals.actualCostCny, 2.4);
+    assert.equal(detail?.totals.meteredCalls, 1);
+    assert.equal(detail?.totals.failedMeteredCalls, 0);
+  });
+
   it("keeps the authorized baseline after a paid node is replaced by a human version", async () => {
     const studio = new CostStudio(async () => ([{
       id: "run-human-revision",
@@ -258,5 +297,37 @@ describe("CostStudio", () => {
     const detail = await studio.runDetail("run-5");
     assert.equal(detail?.lines[0]?.status, "unknown");
     assert.equal(detail?.totals.failedMeteredCalls, 0);
+  });
+
+  it("keeps a resumed operation pending when part of its actual cost is already known", async () => {
+    const studio = new CostStudio(async () => ([{
+      id: "run-partial-voice",
+      nodeRuns: [{
+        nodeId: "voice",
+        status: "failed",
+        outcomeUncertain: true,
+        operationRequestId: "voice-operation-1",
+        executionReceipt: {
+          id: "voice-operation-1",
+          nodeId: "voice",
+          providerId: "minimax-tts-v1",
+          modelId: "speech-2.8-hd",
+          billing: "metered",
+          status: "failed",
+          requestId: "voice-operation-1",
+          startedAt: "2026-08-27T14:00:00.000Z",
+          actualCostCny: 0.1,
+          actualCostSource: "configured_rate",
+          meteredAttemptCount: 1,
+        },
+      }],
+      executionReceipts: [],
+      spendAuthorizations: [],
+    }]));
+
+    const detail = await studio.runDetail("run-partial-voice");
+    assert.equal(detail?.totals.actualCostCny, 0.1);
+    assert.equal(detail?.totals.actualPendingCount, 1);
+    assert.equal(detail?.lines[0]?.actualPending, true);
   });
 });

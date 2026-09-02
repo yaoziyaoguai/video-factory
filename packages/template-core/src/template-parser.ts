@@ -11,7 +11,8 @@ const TEMPLATE_ID = /^[a-z0-9][a-z0-9-]{1,63}$/;
 
 export function parseProductionTemplate(value: unknown): ProductionTemplate {
   const input = record(value, "template");
-  const template: ProductionTemplateInput = {
+  if (input.costPolicy !== undefined) validateLegacyCostPolicy(input.costPolicy);
+  const template: ProductionTemplate = {
     id: templateId(input.id),
     version: positiveInteger(input.version, "version"),
     status: templateStatus(input.status),
@@ -27,7 +28,6 @@ export function parseProductionTemplate(value: unknown): ProductionTemplate {
     soundSystem: soundSystem(input.soundSystem),
     qualityRules: qualityRules(input.qualityRules),
     capabilityRequirements: capabilityRequirements(input.capabilityRequirements),
-    costPolicy: costPolicy(input.costPolicy),
     ...(input.modelDefaults === undefined ? {} : { modelDefaults: modelDefaults(input.modelDefaults) }),
     createdAt: isoTimestamp(input.createdAt, "createdAt"),
     updatedAt: isoTimestamp(input.updatedAt, "updatedAt"),
@@ -152,17 +152,14 @@ function soundSystem(value: unknown): ProductionTemplateInput["soundSystem"] {
   };
 }
 
-function costPolicy(value: unknown): ProductionTemplateInput["costPolicy"] {
+function validateLegacyCostPolicy(value: unknown): void {
   const input = record(value, "costPolicy");
   if (input.currency !== "CNY") throw new Error("costPolicy.currency must be 'CNY'.");
-  return {
-    currency: "CNY",
-    maxCost: boundedNumber(input.maxCost, "costPolicy.maxCost", 0, 100_000),
-    maxPaidShots: boundedInteger(input.maxPaidShots, "costPolicy.maxPaidShots", 0, 100),
-  };
+  boundedNumber(input.maxCost, "costPolicy.maxCost", 0, Number.MAX_SAFE_INTEGER);
+  boundedInteger(input.maxPaidShots, "costPolicy.maxPaidShots", 0, Number.MAX_SAFE_INTEGER);
 }
 
-function validateReferences(template: ProductionTemplateInput): void {
+function validateReferences(template: Pick<ProductionTemplateInput, "storyStructure" | "shotSlots">): void {
   const beatIds = new Set(template.storyStructure.map((beat) => beat.id));
   for (const slot of template.shotSlots) {
     if (!beatIds.has(slot.beatId)) throw new Error(`shotSlots '${slot.id}' references unknown beatId '${slot.beatId}'.`);

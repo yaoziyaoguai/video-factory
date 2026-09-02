@@ -1,8 +1,8 @@
 import {
   PRODUCTION_DIRECTOR_PROFILE_IDS,
   type ProductionDirectorProfileId,
-  type ProductionEconomics,
   type ProductionSeriesContext,
+  type ProductionSpendFeedbackReason,
 } from "./contracts.js";
 import type { ProductionBlueprint } from "@video-factory/template-core";
 import type { CodexTaskExecution } from "./codex-chat.js";
@@ -155,7 +155,11 @@ export interface VisualDirectorPlanValidation {
   generativeProviderIds: string[];
   providerDeliveryTypes?: Record<string, VisualAssetDeliveryType[]>;
   estimatedCnyPerClip: Record<string, number>;
-  economics: ProductionEconomics;
+  economics: VisualDirectorEconomics;
+}
+
+export interface VisualDirectorEconomics {
+  allowMeteredProviders: boolean;
 }
 
 export interface VisualDirectorAgentInput {
@@ -198,7 +202,13 @@ export interface VisualDirectorAgentInput {
     constraints: string[];
     estimatedCnyPerClip: number;
   }>;
-  economics: ProductionEconomics;
+  economics: VisualDirectorEconomics;
+  costFeedback?: Array<{
+    reason: ProductionSpendFeedbackReason;
+    previousEstimatedCostCny: number;
+    targetEstimatedCostCny?: number;
+    note?: string;
+  }>;
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
 }
 
@@ -341,15 +351,8 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
   }
 
   const paidShots = shots.filter((shot) => shot.estimatedCostCny > 0);
-  const totalCost = roundMoney(paidShots.reduce((sum, shot) => sum + shot.estimatedCostCny, 0));
   if (paidShots.length > 0 && !options.economics.allowMeteredProviders) {
     throw new Error("Director plan selected a metered provider while paid providers are disabled.");
-  }
-  if (paidShots.length > options.economics.maxPaidShots) {
-    throw new Error(`Director plan exceeds the paid-shot limit of ${options.economics.maxPaidShots}.`);
-  }
-  if (totalCost > options.economics.maxCostCny) {
-    throw new Error(`Director plan estimated cost ¥${totalCost} exceeds budget ¥${options.economics.maxCostCny}.`);
   }
 
   return {

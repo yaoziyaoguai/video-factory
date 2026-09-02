@@ -50,7 +50,7 @@ function directorInput(): VisualDirectorAgentInput {
       constraints: ["不包含真实人物动作或现场环境"],
       estimatedCnyPerClip: 0,
     }],
-    economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
+    economics: { allowMeteredProviders: false },
   };
 }
 

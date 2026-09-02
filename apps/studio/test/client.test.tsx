@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NewRunDialog } from "../src/client/components/NewRunDialog.js";
 import { VoiceStudio } from "../src/client/components/VoiceStudio.js";
@@ -8,7 +8,7 @@ import { studioApi, subscribeToRun } from "../src/client/api.js";
 import { ProductionQueue } from "../src/client/components/ProductionQueue.js";
 import { RunWorkbench } from "../src/client/components/RunWorkbench.js";
 import { MultiPlatformPublishDialog } from "../src/client/components/MultiPlatformPublishDialog.js";
-import { preferRunSnapshot } from "../src/client/pages/RunPage.js";
+import { preferRunSnapshot, RunPage } from "../src/client/pages/RunPage.js";
 import type { StudioProvider, StudioRunDetail, StudioRunSummary, StudioTemplate } from "../src/shared/api.js";
 
 const runSummary: StudioRunSummary = {
@@ -27,7 +27,7 @@ const providers: StudioProvider[] = [
   { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "local" },
   { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
   { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑卡片", available: true, kind: "local" },
-  { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: false, kind: "external", requirement: "需要 PEXELS_API_KEY" },
+  { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external", status: "ready" },
   { id: "macos-say-v1", capability: "voice.synthesize", label: "macOS 系统配音", available: true, kind: "local" },
   { id: "python-ffmpeg-v1", capability: "video.render", label: "FFmpeg 竖屏渲染", available: true, kind: "local" },
   { id: "python-technical-review-v1", capability: "quality.review", label: "本地技术审片", available: true, kind: "local" },
@@ -55,7 +55,6 @@ function template(id: string, name: string): StudioTemplate {
     soundSystem: { voiceIntent: "可信", pace: "medium", musicIntent: "克制" },
     qualityRules: [{ id: "facts", label: "事实", dimension: "factual", required: true, threshold: 80 }],
     capabilityRequirements: [{ capability: "script.draft", required: true }],
-    costPolicy: { currency: "CNY", maxCost: 8, maxPaidShots: 1 },
     createdAt: "2026-08-27T00:00:00.000Z",
     updatedAt: "2026-08-27T00:00:00.000Z",
     builtIn: true,
@@ -263,7 +262,7 @@ describe("Studio client", () => {
     await waitFor(() => expect(onArchive).toHaveBeenCalledWith([first, second]));
   });
 
-  it("creates a valid local production brief without exposing unavailable providers", async () => {
+  it("creates a valid free-stock production brief without auto-selecting editorial cards", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
@@ -281,13 +280,13 @@ describe("Studio client", () => {
     expect(screen.getByRole("radio", { name: /效果均衡/ })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "导演角色" })).toHaveValue("auto");
     expect(screen.getByText(/AI 根据题材选择导演语法/)).toBeInTheDocument();
-    expect(screen.getByText("¥0")).toBeInTheDocument();
+    expect(screen.getByLabelText("费用方式")).toHaveTextContent("图片 / 视频无现金报价");
     expect(screen.queryByRole("button", { name: /画面素材/ })).not.toBeInTheDocument();
     await user.click(screen.getByText("更多：素材来源与节点细节"));
     await user.click(screen.getByRole("button", { name: /画面素材/ }));
     expect(screen.getByRole("radio", { name: /AI 逐镜路由/ })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: /本地编辑卡片/ })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: /Pexels 视频/ })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: /本地编辑卡片/ })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /Pexels 视频/ })).toBeChecked();
     expect(screen.getByRole("option", { name: "20 秒" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "18 秒" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "开始制作" }));
@@ -304,7 +303,7 @@ describe("Studio client", () => {
       providers: expect.objectContaining({ script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1" }),
       director: {
         profileId: "auto",
-        assetProviderIds: ["local-editorial-v1"],
+        assetProviderIds: ["pexels-stock-v1"],
       },
       voiceDirection: {
         profileId: "macos:Tingting",
@@ -323,6 +322,24 @@ describe("Studio client", () => {
     rerender(<NewRunDialog open={false} providers={providers} onClose={onClose} onSubmit={onSubmit} />);
     rerender(<NewRunDialog open providers={providers} onClose={onClose} onSubmit={onSubmit} />);
     await waitFor(() => expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled());
+  });
+
+  it("stops before production when only an unselected editorial card can supply visuals", async () => {
+    const providersWithoutAutomaticVisuals = providers.map((provider) => provider.id === "pexels-stock-v1"
+      ? { ...provider, available: false, status: "needs_config" as const, requirement: "需要 PEXELS_API_KEY" }
+      : provider);
+    render(<NewRunDialog
+      open
+      providers={providersWithoutAutomaticVisuals}
+      onClose={() => undefined}
+      onSubmit={vi.fn()}
+    />);
+
+    await screen.findByText("知识解释");
+    await userEvent.click(screen.getByText("更多：素材来源与节点细节"));
+    expect(screen.getByRole("checkbox", { name: /本地编辑卡片/ })).not.toBeChecked();
+    expect(screen.getByText(/缺少正式生产能力.*导演画面来源/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
   });
 
   it("starts production only from the explicit start control", async () => {
@@ -670,7 +687,7 @@ describe("Studio client", () => {
     expect(await screen.findByText("参考节奏.mp4")).toBeInTheDocument();
   });
 
-  it("recalculates the paid-shot budget from the selected model profile", async () => {
+  it("does not ask for a video-wide ceiling when updating the selected model", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const providersWithModels: StudioProvider[] = [...providers, {
@@ -693,8 +710,21 @@ describe("Studio client", () => {
     await user.click(screen.getByText("更多：素材来源与节点细节"));
     await user.selectOptions(screen.getByRole("combobox", { name: "火山方舟视频 本次模型" }), "premium-model");
 
-    expect(screen.getByLabelText("预计成本上限")).toHaveValue(3);
-    expect(screen.getByText(/生成最低 ¥3/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
+    expect(screen.getByText(/当前模型参考单价约 ¥3\/镜头/)).toBeInTheDocument();
+    expect(screen.getByLabelText("费用方式")).toHaveTextContent(/按实际方案报价.*逐项人工确认/);
+    await user.type(screen.getByLabelText("视频标题"), "为这条视频选择生成模型");
+    await user.type(screen.getByLabelText("内容角度"), "验证逐镜报价进入生产单");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      economics: {
+        recipeId: "keyshot-ai",
+        allowMeteredProviders: true,
+        maxPaidShots: 0,
+        maxCostCny: 0,
+      },
+    }));
   });
 
   it("quotes the effective template model before a paid run is submitted", async () => {
@@ -735,11 +765,11 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("combobox", { name: "火山方舟视频 本次模型" })).toHaveValue("");
     expect(screen.getByRole("option", { name: "继承默认：premium-model" })).toBeInTheDocument();
-    expect(screen.getByLabelText("预计成本上限")).toHaveValue(3);
-    expect(screen.getByText(/生成最低 ¥3/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("费用方式")).toHaveTextContent(/按实际方案报价.*逐项人工确认/);
   });
 
-  it("shows metered GLM review cost separately from the paid-shot budget", async () => {
+  it("treats GLM Flash visual review as Code Plan without a cash quote", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const providersWithGlmReview: StudioProvider[] = [
       ...providers,
@@ -749,17 +779,16 @@ describe("Studio client", () => {
         label: "GLM-5.3-Flash 视觉审片",
         available: true,
         kind: "external",
-        billing: "metered",
-        estimatedCnyPerClip: 0.1,
-        billingUnit: "run",
+        billing: "subscription",
+        approvalPolicy: "none",
       },
     ];
     render(<NewRunDialog open providers={providersWithGlmReview} onClose={() => undefined} onSubmit={onSubmit} />);
 
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
-    expect(screen.getByText("1 次付费审片")).toBeInTheDocument();
-    expect(screen.getByText(/视觉审片预计 ¥0.1，执行前分别确认/)).toBeInTheDocument();
-    expect(screen.getByLabelText("预计成本上限")).toBeDisabled();
+    expect(screen.queryByText("1 次付费审片")).not.toBeInTheDocument();
+    expect(screen.getByText(/视觉审片使用 Code Plan 额度/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
     const user = userEvent.setup();
     await user.type(screen.getByLabelText("视频标题"), "按次审片预算");
     await user.type(screen.getByLabelText("内容角度"), "审片不占付费镜头额度");
@@ -769,14 +798,14 @@ describe("Studio client", () => {
       providers: expect.objectContaining({ visualReview: "glm-visual-review-v1" }),
       economics: {
         recipeId: "economy-daily",
-        allowMeteredProviders: true,
+        allowMeteredProviders: false,
         maxPaidShots: 0,
         maxCostCny: 0,
       },
     }));
   });
 
-  it("treats metered voice as one separately approved run call", async () => {
+  it("auto-accounts metered voice without presenting a separate quote", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const providersWithMeteredVoice: StudioProvider[] = [
@@ -788,6 +817,7 @@ describe("Studio client", () => {
         available: true,
         kind: "external",
         billing: "metered",
+        approvalPolicy: "automatic",
         billingUnit: "run",
         estimatedCnyPerClip: 0.5,
       },
@@ -797,8 +827,8 @@ describe("Studio client", () => {
     ]);
     render(<NewRunDialog open providers={providersWithMeteredVoice} onClose={() => undefined} onSubmit={onSubmit} />);
 
-    expect(screen.getByText("1 次付费配音")).toBeInTheDocument();
-    expect(screen.getByText(/配音预计 ¥0.5，执行前分别确认/)).toBeInTheDocument();
+    expect(screen.queryByText("1 次付费配音")).not.toBeInTheDocument();
+    expect(screen.getByText(/配音自动记入成本账，不中断制作/)).toBeInTheDocument();
     await user.type(screen.getByLabelText("视频标题"), "按次配音预算");
     await user.type(screen.getByLabelText("内容角度"), "声音调用独立确认");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
@@ -898,7 +928,7 @@ describe("Studio client", () => {
     }));
   });
 
-  it("enables a metered recipe only when a priced model is configured", async () => {
+  it("enables paid providers without pre-filling a video ceiling or forcing an editorial card", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const configuredProviders: StudioProvider[] = [
@@ -925,23 +955,25 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("checkbox", { name: /Seedance 关键镜头/ })).toBeChecked();
     const localBaseline = screen.getByRole("checkbox", { name: /本地编辑卡片/ });
-    expect(localBaseline).toBeChecked();
-    expect(localBaseline).toBeDisabled();
-    expect(screen.getByLabelText("预计成本上限")).toHaveValue(3.5);
+    expect(localBaseline).not.toBeChecked();
+    expect(localBaseline).toBeEnabled();
+    expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("费用方式")).toHaveTextContent(/按实际方案报价.*逐项人工确认/);
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ assets: "ai-shot-router-v1", director: "api-visual-director-v1" }),
       director: expect.objectContaining({
         profileId: "auto",
-        assetProviderIds: expect.arrayContaining(["local-editorial-v1", "seedance-video-v1"]),
+        assetProviderIds: expect.arrayContaining(["pexels-stock-v1", "seedance-video-v1"]),
       }),
       economics: {
         recipeId: "keyshot-ai",
         allowMeteredProviders: true,
-        maxPaidShots: 1,
-        maxCostCny: 3.5,
+        maxPaidShots: 0,
+        maxCostCny: 0,
       },
     }));
+    expect(onSubmit.mock.calls[0]?.[0].director?.assetProviderIds).not.toContain("local-editorial-v1");
   });
 
   it("prefills an editable production brief from a selected opportunity", () => {
@@ -1102,7 +1134,7 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("button", { name: "开始制作" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      director: expect.objectContaining({ assetProviderIds: ["local-editorial-v1"] }),
+      director: expect.objectContaining({ assetProviderIds: ["pexels-stock-v1"] }),
     }));
   });
 
@@ -1626,24 +1658,368 @@ describe("Studio client", () => {
     expect(screen.getByRole("button", { name: "调整方案后重新制作" })).toBeInTheDocument();
   });
 
-  it("blocks retry and restart while a paid provider outcome is uncertain", () => {
+  it("shows paid task evidence and reconciles it instead of offering a blind retry", async () => {
     const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    const reconcile = vi.fn(async () => undefined);
     render(<RunWorkbench
       run={{
         ...withoutIntervention,
         status: "failed",
         nodes: withoutIntervention.nodes.map((node, index) => index === 0
-          ? { ...node, status: "failed", outcomeUncertain: true }
+          ? { ...node, id: "assets", label: "素材", status: "failed", outcomeUncertain: true }
           : node),
+      }}
+      paidNodeSummary={{
+        nodeId: "assets",
+        operationId: "paid-operation-1",
+        recommendedOutcome: "resume_original",
+        requiresManualReconciliation: false,
+        items: [{
+          operationId: "paid-operation-1",
+          itemRequestId: "paid-scene-1",
+          quoteItemId: "scene-1",
+          scenePosition: 1,
+          executorProviderId: "ai-shot-router-v1",
+          providerId: "seedance-video-v1",
+          modelId: "seedance-v1",
+          state: "submitted",
+          estimatedCostCny: 2.4,
+          taskId: "provider-task-1",
+          actualCostCny: 2.4,
+          actualCostSource: "configured_rate",
+        }],
       }}
       decisionPending={false}
       onDecision={async () => undefined}
       onRestart={vi.fn()}
       onRetryFailedNode={vi.fn()}
+      onReconcilePaidNode={reconcile}
     />);
 
-    expect(screen.getByText(/先在 Provider 控制台核对任务与账单/)).toBeInTheDocument();
+    expect(screen.getByText("Seedance · seedance-v1")).toBeInTheDocument();
+    expect(screen.getByText(/provider-task-1/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "调整方案后重新制作" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "核对付费任务" }));
+    expect(reconcile).toHaveBeenCalledWith("assets", { outcome: "resume_original" });
+  });
+
+  it("lets manual reconciliation attach a provider task id without exposing a retry action", async () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    const reconcile = vi.fn(async () => undefined);
+    render(<RunWorkbench
+      run={{
+        ...withoutIntervention,
+        status: "failed",
+        nodes: withoutIntervention.nodes.map((node, index) => index === 0
+          ? { ...node, id: "assets", label: "素材", status: "failed", outcomeUncertain: true }
+          : node),
+      }}
+      paidNodeSummary={{
+        nodeId: "assets",
+        operationId: "paid-operation-1",
+        requiresManualReconciliation: true,
+        items: [{
+          operationId: "paid-operation-1",
+          itemRequestId: "paid-scene-1",
+          quoteItemId: "scene-1",
+          scenePosition: 1,
+          executorProviderId: "ai-shot-router-v1",
+          providerId: "seedance-video-v1",
+          modelId: "seedance-v1",
+          state: "unknown",
+          estimatedCostCny: 2.4,
+        }],
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onRestart={vi.fn()}
+      onRetryFailedNode={vi.fn()}
+      onReconcilePaidNode={reconcile}
+    />);
+
+    expect(screen.getByText("需人工核销")).toBeInTheDocument();
+    expect(screen.getByText("尚无 Provider taskId")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "调整方案后重新制作" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "核对付费任务" })).not.toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("Provider taskId"), "provider-task-recovered");
+    await userEvent.click(screen.getByRole("button", { name: "录入 taskId 并核对原任务" }));
+    expect(reconcile).toHaveBeenCalledWith("assets", {
+      outcome: "resume_original",
+      taskId: "provider-task-recovered",
+    });
+  });
+
+  it("requires an audited confirmation before recording a charged manual outcome", async () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    const reconcile = vi.fn(async () => undefined);
+    render(<RunWorkbench
+      run={{
+        ...withoutIntervention,
+        status: "failed",
+        nodes: withoutIntervention.nodes.map((node, index) => index === 0
+          ? { ...node, id: "assets", label: "素材", status: "failed", outcomeUncertain: true }
+          : node),
+      }}
+      paidNodeSummary={{
+        nodeId: "assets",
+        operationId: "paid-operation-1",
+        requiresManualReconciliation: true,
+        items: [],
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onRestart={vi.fn()}
+      onRetryFailedNode={vi.fn()}
+      onReconcilePaidNode={reconcile}
+    />);
+
+    await userEvent.click(screen.getByRole("radio", { name: "已扣费" }));
+    await userEvent.type(screen.getByLabelText("实际费用（可选）"), "2.40");
+    await userEvent.type(screen.getByLabelText("核销说明"), "已在 Provider 控制台核实账单。 ");
+    const submit = screen.getByRole("button", { name: "确认已扣费并登记" });
+    expect(submit).toBeDisabled();
+    await userEvent.click(screen.getByRole("checkbox", { name: /我确认已在 Provider 控制台核对/ }));
+    await userEvent.click(submit);
+
+    expect(reconcile).toHaveBeenCalledWith("assets", {
+      outcome: "confirmed_charged",
+      actualCostCny: 2.4,
+      note: "已在 Provider 控制台核实账单。",
+    });
+  });
+
+  it("explains that requoting only covers failed or unstarted paid scenes", async () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    const reconcile = vi.fn(async () => undefined);
+    render(<RunWorkbench
+      run={{
+        ...withoutIntervention,
+        status: "failed",
+        nodes: withoutIntervention.nodes.map((node, index) => index === 0
+          ? { ...node, id: "assets", label: "素材", status: "failed", outcomeUncertain: true }
+          : node),
+      }}
+      paidNodeSummary={{
+        nodeId: "assets",
+        operationId: "paid-operation-1",
+        recommendedOutcome: "requote",
+        requiresManualReconciliation: false,
+        items: [{
+          operationId: "paid-operation-1",
+          itemRequestId: "paid-scene-2",
+          quoteItemId: "scene-2",
+          scenePosition: 2,
+          executorProviderId: "ai-shot-router-v1",
+          providerId: "seedance-video-v1",
+          modelId: "seedance-v1",
+          state: "terminal_failed",
+          estimatedCostCny: 2.4,
+        }],
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onReconcilePaidNode={reconcile}
+    />);
+
+    expect(screen.getByText(/只会为明确失败或尚未执行的镜头生成新报价/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "为未完成镜头重新报价" }));
+    expect(reconcile).toHaveBeenCalledWith("assets", { outcome: "requote" });
+  });
+
+  it("loads and reconciles paid task evidence from the run page with the current revision", async () => {
+    const { activeIntervention: _activeIntervention, ...runWithoutIntervention } = runDetail;
+    const uncertainRun: StudioRunDetail = {
+      ...runWithoutIntervention,
+      status: "failed",
+      nodes: runDetail.nodes.map((node, index) => index === 0
+        ? { ...node, id: "assets", label: "素材", status: "failed", outcomeUncertain: true }
+        : node),
+    };
+    vi.spyOn(studioApi, "run").mockResolvedValue(uncertainRun);
+    vi.spyOn(studioApi, "runCosts").mockResolvedValue({
+      runId: uncertainRun.id,
+      title: uncertainRun.title,
+      totals: {
+        estimatedCostCny: 2.4,
+        authorizedCostCny: 2.4,
+        actualCostCny: 2.4,
+        actualPendingCount: 0,
+        meteredCalls: 1,
+        subscriptionCalls: 0,
+        freeCalls: 0,
+        failedMeteredCalls: 0,
+      },
+      lines: [],
+    });
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "paidOperation").mockResolvedValue({
+      nodeId: "assets",
+      operationId: "paid-operation-1",
+      recommendedOutcome: "resume_original",
+      requiresManualReconciliation: false,
+      items: [{
+        operationId: "paid-operation-1",
+        itemRequestId: "paid-scene-1",
+        quoteItemId: "scene-1",
+        scenePosition: 1,
+        executorProviderId: "ai-shot-router-v1",
+        providerId: "seedance-video-v1",
+        modelId: "seedance-v1",
+        state: "submitted",
+        estimatedCostCny: 2.4,
+        taskId: "provider-task-1",
+      }],
+    });
+    const reconcile = vi.spyOn(studioApi, "reconcilePaidOperation").mockResolvedValue({ ...uncertainRun, revision: 4 });
+
+    render(<MemoryRouter initialEntries={["/projects/run-1"]}>
+      <Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes>
+    </MemoryRouter>);
+
+    await userEvent.click(await screen.findByRole("button", { name: "核对付费任务" }));
+    expect(reconcile).toHaveBeenCalledWith("run-1", "assets", {
+      expectedRunRevision: 3,
+      reconciliationId: expect.any(String),
+      outcome: "resume_original",
+    });
+  });
+
+  it("reuses the original revision and reconciliation id after an uncertain network response", async () => {
+    const { activeIntervention: _activeIntervention, ...runWithoutIntervention } = runDetail;
+    const uncertainRun: StudioRunDetail = {
+      ...runWithoutIntervention,
+      status: "failed",
+      nodes: runDetail.nodes.map((node, index) => index === 0
+        ? { ...node, id: "assets", label: "素材", status: "failed", outcomeUncertain: true }
+        : node),
+    };
+    const newerRun = { ...uncertainRun, revision: 4 };
+    const runRequest = vi.spyOn(studioApi, "run")
+      .mockResolvedValueOnce(uncertainRun)
+      .mockResolvedValue(newerRun);
+    vi.spyOn(studioApi, "runCosts").mockResolvedValue({
+      runId: uncertainRun.id,
+      title: uncertainRun.title,
+      totals: {
+        estimatedCostCny: 2.4,
+        authorizedCostCny: 2.4,
+        actualCostCny: 0,
+        actualPendingCount: 1,
+        meteredCalls: 1,
+        subscriptionCalls: 0,
+        freeCalls: 0,
+        failedMeteredCalls: 1,
+      },
+      lines: [],
+    });
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "paidOperation").mockResolvedValue({
+      nodeId: "assets",
+      operationId: "paid-operation-1",
+      recommendedOutcome: "resume_original",
+      requiresManualReconciliation: false,
+      items: [{
+        operationId: "paid-operation-1",
+        itemRequestId: "paid-scene-1",
+        quoteItemId: "scene-1",
+        scenePosition: 1,
+        executorProviderId: "ai-shot-router-v1",
+        providerId: "seedance-video-v1",
+        modelId: "seedance-v1",
+        state: "submitted",
+        estimatedCostCny: 2.4,
+        taskId: "provider-task-1",
+      }],
+    });
+    let rejectFirst!: (reason: Error) => void;
+    const firstRequest = new Promise<StudioRunDetail>((_resolve, reject) => { rejectFirst = reject; });
+    const reconcile = vi.spyOn(studioApi, "reconcilePaidOperation")
+      .mockImplementationOnce(() => firstRequest)
+      .mockResolvedValue(newerRun);
+    runRequest.mockClear();
+    reconcile.mockClear();
+
+    render(<MemoryRouter initialEntries={["/projects/run-1"]}>
+      <Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes>
+    </MemoryRouter>);
+
+    await userEvent.click(await screen.findByRole("button", { name: "核对付费任务" }));
+    await waitFor(() => expect(runRequest).toHaveBeenCalledTimes(2), { timeout: 2_000 });
+    rejectFirst(new Error("response lost after submission"));
+    await screen.findByText("response lost after submission");
+    await userEvent.click(screen.getByRole("button", { name: "核对付费任务" }));
+    await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2));
+
+    const firstInput = reconcile.mock.calls[0]?.[2];
+    const secondInput = reconcile.mock.calls[1]?.[2];
+    expect(firstInput?.expectedRunRevision).toBe(3);
+    expect(secondInput?.expectedRunRevision).toBe(3);
+    expect(secondInput?.reconciliationId).toBe(firstInput?.reconciliationId);
+  });
+
+  it("starts a new reconciliation when automatic TTS becomes uncertain again", async () => {
+    const { activeIntervention: _activeIntervention, ...runWithoutIntervention } = runDetail;
+    const voiceRun = (revision: number): StudioRunDetail => ({
+      ...runWithoutIntervention,
+      revision,
+      status: "failed",
+      nodes: runDetail.nodes.map((node, index) => index === 0
+        ? { ...node, id: "voice", label: "配音", status: "failed", outcomeUncertain: true }
+        : node),
+    });
+    vi.spyOn(studioApi, "run").mockResolvedValue(voiceRun(3));
+    vi.spyOn(studioApi, "runCosts").mockResolvedValue({
+      runId: runDetail.id,
+      title: runDetail.title,
+      totals: {
+        estimatedCostCny: 0.5,
+        authorizedCostCny: 0.5,
+        actualCostCny: 0,
+        actualPendingCount: 1,
+        meteredCalls: 1,
+        subscriptionCalls: 0,
+        freeCalls: 0,
+        failedMeteredCalls: 1,
+      },
+      lines: [],
+    });
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "paidOperation").mockResolvedValue({
+      nodeId: "voice",
+      requiresManualReconciliation: true,
+      items: [],
+    });
+    const reconcile = vi.spyOn(studioApi, "reconcilePaidOperation")
+      .mockResolvedValueOnce(voiceRun(4))
+      .mockResolvedValueOnce(voiceRun(5));
+    reconcile.mockClear();
+
+    render(<MemoryRouter initialEntries={["/projects/run-1"]}>
+      <Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes>
+    </MemoryRouter>);
+
+    expect(await screen.findByText("一次配音调用")).toBeInTheDocument();
+    expect(screen.getByText(/按本次调用记录与账单核对/)).toBeInTheDocument();
+    expect(screen.queryByText("0 个镜头")).not.toBeInTheDocument();
+    expect(screen.queryByText(/按 taskId 核对/)).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("radio", { name: "未扣费" }));
+    await userEvent.type(screen.getByLabelText("核销说明"), "账单中没有这次调用。");
+    await userEvent.click(screen.getByRole("checkbox", { name: /我确认已在 Provider 控制台核对/ }));
+    await userEvent.click(screen.getByRole("button", { name: "确认未扣费并解除锁定" }));
+    await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(1));
+
+    const secondSubmit = await screen.findByRole("button", { name: "确认未扣费并解除锁定" });
+    await waitFor(() => expect(secondSubmit).not.toBeDisabled());
+    await userEvent.click(secondSubmit);
+    await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2));
+
+    const firstInput = reconcile.mock.calls[0]?.[2];
+    const secondInput = reconcile.mock.calls[1]?.[2];
+    expect(firstInput?.expectedRunRevision).toBe(3);
+    expect(secondInput?.expectedRunRevision).toBe(4);
+    expect(secondInput?.reconciliationId).not.toBe(firstInput?.reconciliationId);
   });
 });

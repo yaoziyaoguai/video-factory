@@ -173,7 +173,7 @@ describe("ProductionBrief", () => {
     assert.equal(brief.voiceDirection.profileId, "minimax:female-chengshu");
   });
 
-  it("accepts a bounded paid-generation budget", () => {
+  it("normalizes legacy video-wide limits because every paid action is quoted separately", () => {
     const brief = pipeline.parseBrief({
       ...validBrief,
       economics: {
@@ -187,8 +187,8 @@ describe("ProductionBrief", () => {
     assert.deepEqual(brief.economics, {
       recipeId: "keyshot-ai",
       allowMeteredProviders: true,
-      maxPaidShots: 1,
-      maxCostCny: 8,
+      maxPaidShots: 0,
+      maxCostCny: 0,
     });
   });
 
@@ -276,6 +276,23 @@ describe("ProductionBrief", () => {
     );
   });
 
+  it("accepts zero as a non-binding target for a rejected asset quote", () => {
+    const brief = pipeline.parseBrief({
+      ...validBrief,
+      spendFeedback: [{
+        spendPlanId: "spend-plan-1",
+        nodeId: "assets",
+        reason: "too_expensive",
+        previousEstimatedCostCny: 4.8,
+        targetEstimatedCostCny: 0,
+        rejectedBy: "owner",
+        rejectedAt: "2026-09-02T00:00:00.000Z",
+      }],
+    });
+
+    assert.equal(brief.spendFeedback?.[0]?.targetEstimatedCostCny, 0);
+  });
+
   it("enables semantic candidate ranking only behind the director and shot-router contract", () => {
     assert.throws(
       () => pipeline.parseBrief({ ...validBrief, workflowFeatures: { assetSemanticRank: true, referenceGrammar: false } }),
@@ -342,7 +359,7 @@ describe("ProductionBrief", () => {
           recipeId: "keyshot-ai",
           allowMeteredProviders: true,
           maxPaidShots: 1,
-          maxCostCny: 0,
+          maxCostCny: -1,
         },
       }),
       /maxCostCny/,

@@ -147,6 +147,27 @@
 .studio-v3 .run-technical-diagnosis { color: #727986; font-size: 10px; }
 .studio-v3 .run-technical-diagnosis summary { width: fit-content; cursor: pointer; font-weight: 700; }
 .studio-v3 .run-technical-diagnosis code { display: block; margin-top: 7px; padding: 9px; overflow-wrap: anywhere; color: #69707b; background: #f3f4f6; border-radius: 4px; line-height: 1.55; }
+.studio-v3 .paid-operation-panel { display: grid; gap: 12px; margin-block: 4px 12px; padding-block: 14px 0; border-top: 1px solid #dce5f5; }
+.studio-v3 .paid-operation-panel.requires-manual { border-color: #efd9b2; }
+.studio-v3 .paid-operation-panel > header, .studio-v3 .paid-operation-items article > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.studio-v3 .paid-operation-panel > header strong { color: #284978; font-size: 13px; }
+.studio-v3 .paid-operation-panel.requires-manual > header strong { color: #9a5d18; }
+.studio-v3 .paid-operation-panel > header small, .studio-v3 .paid-operation-items article > header span { color: #747d8a; font-size: 12px; }
+.studio-v3 .paid-operation-items { display: grid; }
+.studio-v3 .paid-operation-items article { display: grid; gap: 5px; padding-block: 10px; border-bottom: 1px solid #e1e6ef; }
+.studio-v3 .paid-operation-items article > header strong, .studio-v3 .paid-operation-items p { margin: 0; color: #343d49; font-size: 13px; }
+.studio-v3 .paid-operation-items code { overflow-wrap: anywhere; color: #5d6673; font-size: 12px; }
+.studio-v3 .paid-operation-items article > small, .studio-v3 .paid-operation-panel > p { margin: 0; color: #69727e; font-size: 12px; line-height: 1.55; }
+.studio-v3 .paid-operation-panel > .button { width: 100%; }
+.studio-v3 .paid-reconciliation-controls, .studio-v3 .paid-task-id-control, .studio-v3 .paid-manual-resolution { display: grid; gap: 9px; }
+.studio-v3 .paid-reconciliation-controls { padding-top: 2px; }
+.studio-v3 .paid-task-id-control, .studio-v3 .paid-manual-resolution { padding-block: 12px 0; border: 0; border-top: 1px solid #eadbc3; }
+.studio-v3 .paid-manual-resolution { margin: 0; padding-inline: 0; }
+.studio-v3 .paid-manual-resolution legend { padding: 0 8px 0 0; color: #744e25; font-size: 12px; font-weight: 750; }
+.studio-v3 .paid-manual-options { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.studio-v3 .paid-manual-options label, .studio-v3 .paid-manual-confirmation { display: flex; align-items: flex-start; gap: 6px; color: #5d554b; font-size: 12px; line-height: 1.5; }
+.studio-v3 .paid-manual-options input, .studio-v3 .paid-manual-confirmation input { flex: 0 0 auto; margin-top: 2px; }
+.studio-v3 .paid-reconciliation-controls .button { width: 100%; }
 
 .studio-v3 .home-production-overview {
   display: grid;

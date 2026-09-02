@@ -27,6 +27,26 @@ export type CodexCatalogAvailability = Pick<CodexProviderSettings, "available" |
   taskModels?: Record<string, string>;
 };
 
+type AssetDeliveryType = NonNullable<StudioProvider["deliveryTypes"]>[number];
+
+const ASSET_PROVIDER_DELIVERY_TYPES = {
+  "local-editorial-v1": ["editorial_card"],
+  "pexels-stock-v1": ["stock_video", "stock_image"],
+  "pixabay-stock-v1": ["stock_video", "stock_image"],
+  "seedream-image-v1": ["generated_image"],
+  "seedance-video-v1": ["generated_video"],
+  "hailuo-video-v1": ["generated_video"],
+  "wan-video-v1": ["generated_video"],
+  "kling-video-v1": ["generated_video"],
+  "vidu-video-v1": ["generated_video"],
+} as const satisfies Record<string, readonly AssetDeliveryType[]>;
+
+export function assetProviderDeliveryTypes(providerId: string): AssetDeliveryType[] {
+  const deliveryTypes = ASSET_PROVIDER_DELIVERY_TYPES[providerId as keyof typeof ASSET_PROVIDER_DELIVERY_TYPES];
+  if (!deliveryTypes) throw new Error(`Asset provider '${providerId}' is missing its delivery type declaration.`);
+  return [...deliveryTypes];
+}
+
 export function buildProviderCatalog(
   runtime: ProviderRuntime,
   environment: NodeJS.ProcessEnv,
@@ -148,7 +168,7 @@ export function buildProviderCatalog(
       available: supportsTask(codex, "director-plan"),
       kind: "external",
       billing: "subscription",
-      description: "生成视觉圣经，并根据叙事、真实性、连续性和预算逐镜选择素材来源。",
+      description: "生成视觉圣经，并根据叙事、真实性、连续性和可执行性逐镜选择素材来源。",
       modes: ["导演角色", "视觉圣经", "逐镜路由"],
       latency: "seconds",
       defaultModelId: modelForTask("director-plan"),
@@ -195,7 +215,7 @@ export function buildProviderCatalog(
       available: runtime.python && supportsTask(codex, "director-plan"),
       kind: "external",
       description: "执行导演计划；每个镜头可独立调用本地、图库或图片及视频生成能力。",
-      modes: ["逐镜决策", "多来源", "预算门禁"],
+      modes: ["逐镜决策", "多来源", "逐项报价"],
       latency: "seconds",
       requirement: "需要 Python 和 Codex 视觉导演",
     }),
@@ -205,8 +225,9 @@ export function buildProviderCatalog(
       label: "本地编辑卡片",
       available: runtime.python,
       kind: "local",
-      description: "自有排版卡片与本地画面，版权清晰，是经济日更的稳定底座。",
-      modes: ["9:16", "自有素材", "零 API"],
+      description: "只在导演明确选择正式 editorial_card 时制作本地排版画面，不承担图库或生成失败的降级。",
+      modes: ["9:16", "显式说明卡", "零 API"],
+      deliveryTypes: assetProviderDeliveryTypes("local-editorial-v1"),
       latency: "seconds",
       requirement: "需要 python3",
     }),
@@ -218,6 +239,7 @@ export function buildProviderCatalog(
       kind: "external",
       description: "免费图库实拍镜头，适合日常、职场和环境类补画面。",
       modes: ["实拍视频", "实拍图片", "9:16 搜索"],
+      deliveryTypes: assetProviderDeliveryTypes("pexels-stock-v1"),
       latency: "seconds",
       requirement: "需要 PEXELS_API_KEY",
       docsUrl: "https://www.pexels.com/api/",
@@ -230,6 +252,7 @@ export function buildProviderCatalog(
       kind: "external",
       description: "免费图库补充源，可在配置后单独选择用于实拍画面搜索。",
       modes: ["实拍视频", "实拍图片", "安全搜索"],
+      deliveryTypes: assetProviderDeliveryTypes("pixabay-stock-v1"),
       latency: "seconds",
       requirement: "需要 PIXABAY_API_KEY",
       docsUrl: "https://pixabay.com/api/docs/",
@@ -244,6 +267,7 @@ export function buildProviderCatalog(
       status: seedreamAvailable ? "ready" : "needs_config",
       description: "火山方舟同步生成竖屏关键画面，适合解释性插画、概念视觉和系列统一风格。",
       modes: ["文生图", "9:16", "单张关键画面"],
+      deliveryTypes: assetProviderDeliveryTypes("seedream-image-v1"),
       latency: "seconds",
       ...(seedreamSettings ? { estimatedCnyPerClip: seedreamSettings.estimatedCnyPerImage } : {}),
       ...(seedreamSettings ? {
@@ -272,8 +296,9 @@ export function buildProviderCatalog(
       kind: "external",
       billing: "metered",
       status: seedanceAvailable ? "ready" : "needs_config",
-      description: "通过同一个火山方舟协议调用可配置的视频模型，只用于预算内的少量关键镜头。",
+      description: "通过同一个火山方舟协议调用可配置的视频模型；实际选中镜头逐项报价并等待人工确认。",
       modes: ["文生视频", "9:16", "2-15 秒", "无声素材"],
+      deliveryTypes: assetProviderDeliveryTypes("seedance-video-v1"),
       latency: "minutes",
       ...(seedanceSettings ? { estimatedCnyPerClip: seedanceSettings.estimatedCnyPerClip } : {}),
       defaultModelId: seedanceSettings?.model ?? (environment.SEEDANCE_MODEL_ID?.trim() || DEFAULT_SEEDANCE_MODEL_ID),
@@ -299,6 +324,7 @@ export function buildProviderCatalog(
       status: miniMaxAvailable ? "ready" : "needs_config",
       description: "同一个 MiniMax Provider 下可选择 Hailuo 或 H3；H3 支持 4–15 秒、原生音画与最高 2K。",
       modes: ["文生视频", "4–15 秒", "最高 2K", "逐镜可选模型"],
+      deliveryTypes: assetProviderDeliveryTypes("hailuo-video-v1"),
       latency: "minutes",
       ...(miniMaxSettings ? { estimatedCnyPerClip: miniMaxSettings.estimatedCnyPerClip } : {}),
       defaultModelId: miniMaxSettings?.model ?? (environment.MINIMAX_VIDEO_MODEL_ID?.trim() || DEFAULT_MINIMAX_VIDEO_MODEL_ID),
@@ -309,7 +335,7 @@ export function buildProviderCatalog(
         available: miniMaxAvailable,
         description: model.estimatedCnyPerSecond
           ? `${model.label} 按时长与分辨率计费，默认规格约 ¥${model.estimatedCnyPerSecond.toFixed(2)}/秒；执行前按实际镜头重新核算。`
-          : "MiniMax Hailuo 固定规格视频模型，适合预算内的少量表现镜头。",
+          : "MiniMax Hailuo 固定规格视频模型；实际选中镜头逐项报价并等待人工确认。",
       })),
       requirement: "需要 MINIMAX_API_KEY、MINIMAX_VIDEO_MODEL_ID 和 MINIMAX_ESTIMATED_CNY_PER_CLIP",
       docsUrl: "https://platform.minimaxi.com/docs/api-reference/video-generation-v2-create",
@@ -322,8 +348,9 @@ export function buildProviderCatalog(
       kind: "external",
       billing: "metered",
       status: wanAvailable ? "ready" : "needs_config",
-      description: "阿里云 Model Studio 异步视频生成，按预算生成关键镜头。",
+      description: "阿里云 Model Studio 异步视频生成；实际选中镜头逐项报价并等待人工确认。",
       modes: ["文生视频", "9:16", "720P", "2-15 秒"],
+      deliveryTypes: assetProviderDeliveryTypes("wan-video-v1"),
       latency: "minutes",
       ...(wanSettings ? { estimatedCnyPerClip: wanSettings.estimatedCnyPerClip } : {}),
       defaultModelId: wanSettings?.model ?? (environment.WAN_MODEL_ID?.trim() || DEFAULT_WAN_VIDEO_MODEL_ID),
@@ -346,6 +373,7 @@ export function buildProviderCatalog(
       available: miniMaxTtsAvailable,
       kind: "external",
       billing: "metered",
+      approvalPolicy: "automatic",
       status: miniMaxTtsAvailable ? "ready" : "needs_config",
       description: "使用 speech-2.8-turbo 合成自然中文旁白，逐场缓存后再由 FFmpeg 做响度与节奏统一。",
       modes: ["普通话", "多角色", "情绪与语速", "云端生成"],
@@ -432,11 +460,10 @@ export function buildProviderCatalog(
       label: "GLM-5.3-Flash 视觉审片",
       available: zaiVisualReviewAvailable,
       kind: "external",
-      billing: "metered",
-      estimatedCnyPerClip: positiveEstimate(environment.ZAI_VISUAL_REVIEW_ESTIMATED_CNY, 0.1),
-      billingUnit: "run",
-      description: `从成片中抽取带时间码的关键帧，通过普通 BigModel API 调用 ${zaiModelLabel}，检查构图、连续性、节奏、文字可读性与内容安全。`,
-      modes: ["原生多模态", "关键帧审片", "时间码问题", "按量 API"],
+      billing: "subscription",
+      approvalPolicy: "none",
+      description: `从成片中抽取带时间码的关键帧，使用用户的 Code Plan 调用 ${zaiModelLabel}，检查构图、连续性、节奏、文字可读性与内容安全。`,
+      modes: ["原生多模态", "关键帧审片", "时间码问题", "Code Plan"],
       latency: "seconds",
       defaultModelId: zaiModelId,
       modelProfiles: [{
@@ -446,9 +473,8 @@ export function buildProviderCatalog(
         providerFamily: "zai-bigmodel",
         available: zaiVisualReviewAvailable,
         recommended: true,
-        description: "抽取成片关键帧后执行多模态视觉审片，按单条成片估算费用。",
+        description: "抽取成片关键帧后执行多模态视觉审片，使用用户的 Code Plan 额度。",
         taskTypes: ["visual-review"],
-        estimatedCnyPerClip: positiveEstimate(environment.ZAI_VISUAL_REVIEW_ESTIMATED_CNY, 0.1),
       }],
       requirement: zaiVisualReviewRequirement,
     }),
@@ -677,6 +703,7 @@ function plannedVideoProvider(id: string, label: string, description: string): S
     billing: "metered",
     description,
     modes: ["视频生成", "统一任务协议"],
+    deliveryTypes: assetProviderDeliveryTypes(id),
     latency: "minutes",
     requirement: "适配器尚未启用",
   });

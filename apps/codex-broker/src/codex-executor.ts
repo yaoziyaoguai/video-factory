@@ -154,7 +154,15 @@ export interface DirectorPlanPayload {
   brief: unknown;
   scenes: unknown[];
   assetProviders: unknown[];
-  economics: unknown;
+  economics: {
+    allowMeteredProviders: boolean;
+  };
+  costFeedback?: Array<{
+    reason: "too_expensive" | "provider_mix" | "plan_not_approved" | "other";
+    previousEstimatedCostCny: number;
+    targetEstimatedCostCny?: number;
+    note?: string;
+  }>;
   revision?: Record<string, unknown>;
 }
 
@@ -474,16 +482,20 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
       },
     };
   }
-  assertExactKeys(record, ["directorProfiles", "brief", "scenes", "assetProviders", "economics", "revision"], "payload");
+  assertExactKeys(record, ["directorProfiles", "brief", "scenes", "assetProviders", "economics", "costFeedback", "revision"], "payload");
   const revision = record.revision === undefined ? undefined : boundedRecord(record.revision, "payload.revision", 192 * 1024);
+  const costFeedback = record.costFeedback === undefined
+    ? undefined
+    : requireDirectorCostFeedback(record.costFeedback);
   return {
     kind,
     payload: {
       directorProfiles: arrayValue(record.directorProfiles, "payload.directorProfiles"),
-      brief: requireRecord(record.brief, "payload.brief"),
+      brief: requireDirectorBrief(record.brief),
       scenes: arrayValue(record.scenes, "payload.scenes"),
       assetProviders: arrayValue(record.assetProviders, "payload.assetProviders"),
-      economics: requireRecord(record.economics, "payload.economics"),
+      economics: requireDirectorEconomics(record.economics),
+      ...(costFeedback?.length ? { costFeedback } : {}),
       ...(revision ? { revision } : {}),
     },
   };
@@ -898,6 +910,7 @@ export function buildTaskPrompt(
       assetProviders: task.payload.assetProviders,
       directorProfiles: task.payload.directorProfiles,
       economics: task.payload.economics,
+      ...(task.payload.costFeedback?.length ? { costFeedback: task.payload.costFeedback } : {}),
       ...(task.payload.revision ? { revision: task.payload.revision } : {}),
     };
   }
@@ -1040,6 +1053,64 @@ function assertExactKeys(record: Record<string, unknown>, allowed: readonly stri
       false,
     );
   }
+}
+
+function requireDirectorCostFeedback(value: unknown): NonNullable<DirectorPlanPayload["costFeedback"]> {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 10) {
+    throw new CodexExecutorError("payload.costFeedback must contain 1 to 10 entries.", false);
+  }
+  const reasons = new Set(["too_expensive", "provider_mix", "plan_not_approved", "other"]);
+  return value.map((entry, index) => {
+    const field = `payload.costFeedback[${index}]`;
+    const record = requireRecord(entry, field);
+    assertExactKeys(record, ["reason", "previousEstimatedCostCny", "targetEstimatedCostCny", "note"], field);
+    if (typeof record.reason !== "string" || !reasons.has(record.reason)) {
+      throw new CodexExecutorError(`${field}.reason is invalid.`, false);
+    }
+    const previousEstimatedCostCny = Number(record.previousEstimatedCostCny);
+    if (!Number.isFinite(previousEstimatedCostCny) || previousEstimatedCostCny < 0 || previousEstimatedCostCny > 100_000) {
+      throw new CodexExecutorError(`${field}.previousEstimatedCostCny must be between 0 and 100000.`, false);
+    }
+    const targetEstimatedCostCny = record.targetEstimatedCostCny === undefined
+      ? undefined
+      : Number(record.targetEstimatedCostCny);
+    if (targetEstimatedCostCny !== undefined
+      && (!Number.isFinite(targetEstimatedCostCny) || targetEstimatedCostCny < 0 || targetEstimatedCostCny > 100_000)) {
+      throw new CodexExecutorError(`${field}.targetEstimatedCostCny must be between 0 and 100000.`, false);
+    }
+    const note = record.note === undefined ? undefined : requiredText(record.note, `${field}.note`);
+    if (note && note.length > 1_000) throw new CodexExecutorError(`${field}.note exceeds 1000 characters.`, false);
+    return {
+      reason: record.reason as NonNullable<DirectorPlanPayload["costFeedback"]>[number]["reason"],
+      previousEstimatedCostCny,
+      ...(targetEstimatedCostCny !== undefined ? { targetEstimatedCostCny } : {}),
+      ...(note ? { note } : {}),
+    };
+  });
+}
+
+function requireDirectorEconomics(value: unknown): DirectorPlanPayload["economics"] {
+  const record = requireRecord(value, "payload.economics");
+  assertExactKeys(record, ["allowMeteredProviders"], "payload.economics");
+  if (typeof record.allowMeteredProviders !== "boolean") {
+    throw new CodexExecutorError("payload.economics.allowMeteredProviders must be a boolean.", false);
+  }
+  return { allowMeteredProviders: record.allowMeteredProviders };
+}
+
+function requireDirectorBrief(value: unknown): Record<string, unknown> {
+  const brief = requireRecord(value, "payload.brief");
+  if (brief.templateBlueprint === undefined) return brief;
+  return {
+    ...brief,
+    templateBlueprint: withoutLegacyCostPolicy(brief.templateBlueprint, "payload.brief.templateBlueprint"),
+  };
+}
+
+function withoutLegacyCostPolicy(value: unknown, field: string): Record<string, unknown> {
+  const blueprint = requireRecord(value, field);
+  const { costPolicy: _legacyCostPolicy, ...current } = blueprint;
+  return current;
 }
 
 function requiredText(value: unknown, field: string): string {
@@ -1276,7 +1347,7 @@ function requireScriptBrief(value: unknown): ScriptBrief {
     durationSeconds: Number(durationSeconds),
   };
   if (record.templateBlueprint !== undefined) {
-    brief.templateBlueprint = requireRecord(record.templateBlueprint, "payload.brief.templateBlueprint");
+    brief.templateBlueprint = withoutLegacyCostPolicy(record.templateBlueprint, "payload.brief.templateBlueprint");
   }
   if (record.editorial !== undefined) brief.editorial = requireEditorialBrief(record.editorial);
   return brief;

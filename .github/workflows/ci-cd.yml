@@ -66,25 +66,27 @@ jobs:
         env:
           PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
           PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}
+          RELEASE_SHA: ${{ github.sha }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 40m
-          envs: PROJECT_PATH,PUBLIC_HEALTH_URL
+          envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA
           script: |
             set -euo pipefail
             release_path="${PROJECT_PATH}.release"
             cd "$PROJECT_PATH"
-            git fetch origin +refs/heads/main:refs/remotes/origin/main
+            git fetch origin "$RELEASE_SHA"
             if [[ -e "$release_path/.git" ]]; then
-              git -C "$release_path" checkout --detach origin/main
+              git -C "$release_path" checkout --detach "$RELEASE_SHA"
             elif [[ -e "$release_path" ]]; then
               echo "Release path exists but is not a Git worktree: $release_path" >&2
               exit 1
             else
-              git worktree add --detach "$release_path" origin/main
+              git worktree add --detach "$release_path" "$RELEASE_SHA"
             fi
+            test "$(git -C "$release_path" rev-parse HEAD)" = "$RELEASE_SHA"
             VIDEO_FACTORY_ENV_FILE="$PROJECT_PATH/.env.docker.prod" \
               PUBLIC_HEALTH_URL="$PUBLIC_HEALTH_URL" \
               bash "$release_path/scripts/deploy-production.sh"

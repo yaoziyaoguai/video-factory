@@ -1000,7 +1000,7 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("准备跳槽前", draft.scenes[0].narration)
         self.assertLessEqual(max(len(scene.narration) for scene in draft.scenes), 32)
 
-    def test_prepare_assets_generates_local_cards_for_local_strategy(self):
+    def test_prepare_assets_does_not_treat_script_local_strategy_as_card_authorization(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace = root / "workspace"
@@ -1021,10 +1021,10 @@ class PipelineTest(unittest.TestCase):
 
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             providers = [asset["provider"] for asset in plan["scene_assets"]]
-            self.assertEqual(providers, ["mock", "local", "local", "local", "local"])
+            self.assertEqual(providers, ["mock", "mock", "mock", "mock", "mock"])
             for asset in plan["scene_assets"]:
                 self.assertTrue(Path(asset["local_path"]).exists())
-            self.assertEqual(plan["scene_assets"][1]["license_note"], "Owner-generated local graphic card; no external stock license required.")
+                self.assertNotEqual(asset.get("source_url"), "local://video-factory/card")
 
     def test_render_job_requires_assets_when_requested(self):
         with tempfile.TemporaryDirectory() as tmp:

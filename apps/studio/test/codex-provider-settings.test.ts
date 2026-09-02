@@ -351,12 +351,12 @@ describe("buildProviderCatalog codex fallback", () => {
     const glm = providers.find((provider) => provider.id === "glm-visual-review-v1");
 
     assert.equal(glm?.available, true);
-    assert.equal(glm?.billing, "metered");
-    assert.equal(glm?.estimatedCnyPerClip, 0.1);
-    assert.equal(glm?.billingUnit, "run");
+    assert.equal(glm?.billing, "subscription");
+    assert.equal(glm?.approvalPolicy, "none");
+    assert.equal(glm?.estimatedCnyPerClip, undefined);
     assert.equal(glm?.capability, "quality.review.visual");
     assert.match(glm?.description ?? "", /GLM-5\.3-Flash/);
-    assert.doesNotMatch(glm?.description ?? "", /Coding Plan/);
+    assert.match(glm?.description ?? "", /Code Plan/);
   });
 
   it("does not advertise GLM visual review without an independent Codex role auditor", () => {

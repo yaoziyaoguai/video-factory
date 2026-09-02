@@ -2,17 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   validateVisualDirectorPlan,
-  type ProductionEconomics,
   type VisualDirectorPlan,
   type VisualDirectorPlanValidation,
 } from "../src/index.js";
 
-const economics: ProductionEconomics = {
-  recipeId: "keyshot-ai",
-  allowMeteredProviders: true,
-  maxPaidShots: 1,
-  maxCostCny: 6,
-};
+const economics = { allowMeteredProviders: true };
 
 function plan(shots: VisualDirectorPlan["shots"]): VisualDirectorPlan {
   return {
@@ -100,12 +94,12 @@ describe("validateVisualDirectorPlan", () => {
     ]), options), /evidence shot.*generative provider/);
   });
 
-  it("rejects an AI plan that exceeds paid-shot or cost limits", () => {
+  it("does not apply a video-wide limit in the director execution gate", () => {
     const expensivePlan = plan([
       shot(1, "seedance-video-v1"),
       { ...shot(2, "seedance-video-v1"), authenticityPolicy: "illustrative" },
     ]);
-    assert.throws(() => validateVisualDirectorPlan(expensivePlan, {
+    const result = validateVisualDirectorPlan(expensivePlan, {
       scenePositions: [1, 2],
       allowedProviderIds: ["local-editorial-v1", "seedance-video-v1"],
       generativeProviderIds: ["seedance-video-v1"],
@@ -115,7 +109,26 @@ describe("validateVisualDirectorPlan", () => {
       },
       estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
       economics,
-    }), /paid-shot limit/);
+    });
+    assert.equal(result.shots.length, 2);
+    assert.equal(result.shots.reduce((sum, item) => sum + item.estimatedCostCny, 0), 11);
+  });
+
+  it("allows any number of metered shots when metered providers are explicitly enabled", () => {
+    const result = validateVisualDirectorPlan(plan([
+      shot(1, "seedance-video-v1"),
+      { ...shot(2, "seedance-video-v1"), authenticityPolicy: "illustrative" },
+    ]), {
+      scenePositions: [1, 2],
+      allowedProviderIds: ["seedance-video-v1"],
+      generativeProviderIds: ["seedance-video-v1"],
+      providerDeliveryTypes: { "seedance-video-v1": ["generated_video"] },
+      estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
+      economics,
+    });
+
+    assert.equal(result.shots.length, 2);
+    assert.equal(result.shots.reduce((sum, item) => sum + item.estimatedCostCny, 0), 11);
   });
 
   it("rejects a provider that cannot deliver the declared asset type", () => {

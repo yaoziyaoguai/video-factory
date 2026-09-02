@@ -18,7 +18,7 @@ export interface VideoGenerationResult {
 export interface VideoGenerationProgress {
   providerId: string;
   taskId: string;
-  status: "submitted" | "running" | "succeeded" | "failed";
+  status: "submitted" | "running" | "succeeded" | "failed" | "unknown";
   videoUrl?: string;
   error?: string;
 }
@@ -26,6 +26,11 @@ export interface VideoGenerationProgress {
 export interface VideoGenerationAdapter {
   readonly providerId: string;
   generate(
+    request: VideoGenerationRequest,
+    onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+  ): Promise<VideoGenerationResult>;
+  reconcile?(
+    taskId: string,
     request: VideoGenerationRequest,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult>;
@@ -86,6 +91,15 @@ export class SeedanceVideoAdapter implements VideoGenerationAdapter {
     });
     const taskId = requiredString(submitted.id, "Seedance task id");
     await onProgress?.({ providerId: this.providerId, taskId, status: "submitted" });
+    return this.reconcile(taskId, request, onProgress);
+  }
+
+  async reconcile(
+    taskId: string,
+    _request: VideoGenerationRequest,
+    onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+  ): Promise<VideoGenerationResult> {
+    taskId = requiredString(taskId, "Seedance task id");
     const startedAt = Date.now();
     while (Date.now() - startedAt <= this.timeoutMs) {
       const task = await requestJson(this.fetch, `${this.baseUrl}/contents/generations/tasks/${encodeURIComponent(taskId)}`, {
@@ -107,7 +121,7 @@ export class SeedanceVideoAdapter implements VideoGenerationAdapter {
       await this.sleep(this.pollIntervalMs);
     }
     const message = `Seedance task '${taskId}' timed out after ${this.timeoutMs}ms.`;
-    await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
+    await onProgress?.({ providerId: this.providerId, taskId, status: "unknown", error: message });
     throw new Error(message);
   }
 }
@@ -153,6 +167,17 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
       : this.generateV1(model, request, onProgress);
   }
 
+  async reconcile(
+    taskId: string,
+    request: VideoGenerationRequest,
+    onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+  ): Promise<VideoGenerationResult> {
+    const model = resolveMiniMaxModel(request.modelId, this.options.model, this.options.modelProtocols);
+    return this.options.modelProtocols?.[model] === "v2"
+      ? this.reconcileV2(requiredString(taskId, "MiniMax H3 task id"), onProgress)
+      : this.reconcileV1(requiredString(taskId, "MiniMax task id"), onProgress);
+  }
+
   private async generateV1(
     model: string,
     request: VideoGenerationRequest,
@@ -173,6 +198,13 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     assertMiniMaxSuccess(submitted);
     const taskId = requiredString(submitted.task_id, "MiniMax task id");
     await onProgress?.({ providerId: this.providerId, taskId, status: "submitted" });
+    return this.reconcileV1(taskId, onProgress);
+  }
+
+  private async reconcileV1(
+    taskId: string,
+    onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+  ): Promise<VideoGenerationResult> {
     const startedAt = Date.now();
     while (Date.now() - startedAt <= this.timeoutMs) {
       const queryUrl = new URL(`${this.apiRoot}/v1/query/video_generation`);
@@ -200,7 +232,7 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
       await this.sleep(this.pollIntervalMs);
     }
     const message = `MiniMax task '${taskId}' timed out after ${this.timeoutMs}ms.`;
-    await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
+    await onProgress?.({ providerId: this.providerId, taskId, status: "unknown", error: message });
     throw new Error(message);
   }
 
@@ -223,6 +255,13 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     });
     const taskId = requiredString(submitted.task_id, "MiniMax H3 task id");
     await onProgress?.({ providerId: this.providerId, taskId, status: "submitted" });
+    return this.reconcileV2(taskId, onProgress);
+  }
+
+  private async reconcileV2(
+    taskId: string,
+    onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+  ): Promise<VideoGenerationResult> {
     const startedAt = Date.now();
     while (Date.now() - startedAt <= this.timeoutMs) {
       const response = await requestJson(
@@ -247,7 +286,7 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
       await this.sleep(this.pollIntervalMs);
     }
     const message = `MiniMax H3 task '${taskId}' timed out after ${this.timeoutMs}ms.`;
-    await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
+    await onProgress?.({ providerId: this.providerId, taskId, status: "unknown", error: message });
     throw new Error(message);
   }
 }
@@ -308,6 +347,15 @@ export class WanVideoAdapter implements VideoGenerationAdapter {
     const submittedOutput = requiredRecord(submitted.output, "Wan task output");
     const taskId = requiredString(submittedOutput.task_id, "Wan task id");
     await onProgress?.({ providerId: this.providerId, taskId, status: "submitted" });
+    return this.reconcile(taskId, request, onProgress);
+  }
+
+  async reconcile(
+    taskId: string,
+    _request: VideoGenerationRequest,
+    onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+  ): Promise<VideoGenerationResult> {
+    taskId = requiredString(taskId, "Wan task id");
     const startedAt = Date.now();
     while (Date.now() - startedAt <= this.timeoutMs) {
       const task = await requestJson(this.fetch, `${this.baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`, {
@@ -320,16 +368,21 @@ export class WanVideoAdapter implements VideoGenerationAdapter {
         await onProgress?.({ providerId: this.providerId, taskId, status: "succeeded", videoUrl });
         return { providerId: this.providerId, taskId, videoUrl };
       }
-      if (status === "FAILED" || status === "CANCELED" || status === "UNKNOWN") {
+      if (status === "FAILED" || status === "CANCELED") {
         const message = providerError(output, `Wan task ended with status '${status}'.`);
         await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
+        throw new Error(message);
+      }
+      if (status === "UNKNOWN") {
+        const message = providerError(output, `Wan task ended with status '${status}'.`);
+        await onProgress?.({ providerId: this.providerId, taskId, status: "unknown", error: message });
         throw new Error(message);
       }
       await onProgress?.({ providerId: this.providerId, taskId, status: "running" });
       await this.sleep(this.pollIntervalMs);
     }
     const message = `Wan task '${taskId}' timed out after ${this.timeoutMs}ms.`;
-    await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
+    await onProgress?.({ providerId: this.providerId, taskId, status: "unknown", error: message });
     throw new Error(message);
   }
 }

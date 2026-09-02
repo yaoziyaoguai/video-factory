@@ -65,6 +65,7 @@ describe("ResourceGovernanceStudio", () => {
     assert.equal(knowledge?.metrics.visualMatch, 80);
     assert.equal(knowledge?.metrics.manualEditCount, 1);
     assert.equal(knowledge?.metrics.hookClarity, null);
+    assert.equal(knowledge?.metrics.costEfficiency, null);
     assert.equal(knowledge?.metrics.finalApprovalRate, 100);
   });
 
@@ -291,7 +292,6 @@ function completedRun(manifestPath: string, runId = "run-1", title = "知识解�
           soundSystem: { voiceIntent: "可信", pace: "medium", musicIntent: "克制" },
           qualityRules: [{ id: "facts", label: "事实", dimension: "factual", required: true, threshold: 80 }],
           capabilityRequirements: [{ capability: "script.draft", required: true }],
-          costPolicy: { currency: "CNY", maxCost: 0, maxPaidShots: 0 },
         },
         sourceLayers: [], fieldSources: {},
       },

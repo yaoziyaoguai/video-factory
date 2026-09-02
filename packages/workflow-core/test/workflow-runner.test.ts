@@ -9,6 +9,7 @@ import {
   type Provider,
   type WorkflowContext,
   type WorkflowDefinition,
+  type WorkflowRun,
 } from "../src/index.js";
 
 function deterministicIds(): (prefix: string) => string {
@@ -686,6 +687,113 @@ describe("WorkflowRunner", () => {
     assert.equal(calls, 1);
   });
 
+  it("durably marks an automatic metered operation uncertain before the provider call", async () => {
+    const checkpoints: WorkflowRun[] = [];
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "automatic-paid-voice",
+      label: "Automatic paid voice",
+      modelId: "voice-v1",
+      capability: "voice.synthesize",
+      transport: "http_api",
+      billing: "metered",
+      approvalPolicy: "automatic",
+      estimatedCostCny: 0.1,
+      maxCostCny: 0.1,
+      maxAttempts: 1,
+      run: () => {
+        assert.equal(checkpoints.at(-1)?.nodeRuns[0]?.outcomeUncertain, true);
+        return { audio: "voice.mp3" };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "automatic-paid-checkpoint",
+      name: "Automatic paid checkpoint",
+      version: "1.0.0",
+      nodes: [{
+        id: "voice",
+        label: "Voice",
+        capability: "voice.synthesize",
+        providerId: "automatic-paid-voice",
+        mode: "automatic",
+      }],
+    };
+    const runner = new WorkflowRunner({
+      clock,
+      idFactory: deterministicIds(),
+      providers: registry,
+      checkpoint: (run) => { checkpoints.push(structuredClone(run)); },
+    });
+
+    const completed = await runner.run(definition, {});
+
+    assert.equal(completed.status, "succeeded");
+    assert.equal(completed.nodeRuns[0]?.outcomeUncertain, undefined);
+  });
+
+  it("keeps an automatic metered operation locked when the provider returns a structured failure", async () => {
+    let calls = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "automatic-paid-voice",
+      label: "Automatic paid voice",
+      modelId: "voice-v1",
+      capability: "voice.synthesize",
+      transport: "http_api",
+      billing: "metered",
+      approvalPolicy: "automatic",
+      estimatedCostCny: 0.1,
+      maxCostCny: 0.1,
+      maxAttempts: 1,
+      run: () => {
+        calls += 1;
+        return { accepted: true };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "automatic-paid-structured-failure",
+      name: "Automatic paid structured failure",
+      version: "1.0.0",
+      nodes: [{
+        id: "voice",
+        label: "Voice",
+        capability: "voice.synthesize",
+        providerId: "automatic-paid-voice",
+        mode: "automatic",
+        execute: async (input, context) => {
+          await context.resolveProvider({
+            capability: "voice.synthesize",
+            providerId: "automatic-paid-voice",
+          }).run(input, context);
+          return {
+            status: "failed",
+            error: "provider response was ambiguous",
+            receipt: {
+              providerId: "automatic-paid-voice",
+              providerLabel: "Automatic paid voice",
+              modelId: "voice-v1",
+              transport: "http_api",
+              billing: "metered",
+              estimatedCostCny: 0.1,
+            },
+          };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+
+    const failed = await runner.run(definition, {});
+
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.nodeRuns.filter((node) => node.nodeId === "voice").length, 1);
+    assert.equal(failed.nodeRuns[0]?.outcomeUncertain, true);
+    await assert.rejects(
+      () => runner.retryFailedNode(definition, failed, "voice"),
+      /uncertain paid-provider outcome/,
+    );
+    assert.equal(calls, 1);
+  });
+
   it("allows retry when an authorized node fails before invoking its metered provider", async () => {
     let providerCalls = 0;
     const registry = new ProviderRegistry();
@@ -742,7 +850,15 @@ describe("WorkflowRunner", () => {
     const registry = new ProviderRegistry();
     registry.register({
       id: "idempotent-provider",
+      label: "Idempotent provider",
+      modelId: "voice-v1",
       capability: "voice.synthesize",
+      transport: "http_api",
+      billing: "metered",
+      approvalPolicy: "automatic",
+      estimatedCostCny: 0.1,
+      maxCostCny: 0.1,
+      maxAttempts: 1,
       run: (_input, context) => {
         observed.push(context.operationRequestId);
         return { audio: "voice.mp3" };
@@ -752,7 +868,31 @@ describe("WorkflowRunner", () => {
       id: "retry-interrupted-node",
       name: "Retry interrupted node",
       version: "1.0.0",
-      nodes: [{ id: "voice", label: "Voice", capability: "voice.synthesize", providerId: "idempotent-provider", mode: "automatic" }],
+      nodes: [{
+        id: "voice",
+        label: "Voice",
+        capability: "voice.synthesize",
+        providerId: "idempotent-provider",
+        mode: "automatic",
+        execute: async (input, context) => {
+          const provider = context.resolveProvider({ capability: "voice.synthesize", providerId: "idempotent-provider" });
+          const output = await provider.run(input, context);
+          assert.ok(context.operationRequestId);
+          return {
+            output,
+            receipt: {
+              providerId: "idempotent-provider",
+              providerLabel: "Idempotent provider",
+              modelId: "voice-v1",
+              transport: "http_api",
+              billing: "metered",
+              estimatedCostCny: 0.1,
+              meteredAttemptCount: 1,
+              requestId: context.operationRequestId,
+            },
+          };
+        },
+      }],
     };
     const interrupted = {
       id: "run-interrupted",
@@ -774,6 +914,24 @@ describe("WorkflowRunner", () => {
         qualityGateResults: [],
         error: "interrupted",
       }],
+      executionReceipts: [{
+        nodeId: "voice",
+        capability: "voice.synthesize" as const,
+        providerId: "idempotent-provider",
+        providerLabel: "Idempotent provider",
+        modelId: "voice-v1",
+        transport: "http_api" as const,
+        billing: "metered" as const,
+        status: "failed" as const,
+        estimatedCostCny: 0.1,
+        actualCostCny: 0.1,
+        actualCostSource: "configured_rate" as const,
+        meteredAttemptCount: 1,
+        meteredFailedAttemptCount: 1,
+        requestId: "persisted-operation-id",
+        startedAt: "2026-08-30T00:00:00.000Z",
+        finishedAt: "2026-08-30T00:01:00.000Z",
+      }],
       artifacts: [],
       interventions: [],
       decisions: [],
@@ -784,6 +942,10 @@ describe("WorkflowRunner", () => {
     assert.equal(retried.status, "succeeded");
     assert.deepEqual(observed, ["persisted-operation-id"]);
     assert.equal(retried.nodeRuns[0]?.interrupted, undefined);
+    assert.equal(retried.executionReceipts?.length, 1);
+    assert.equal(retried.executionReceipts?.[0]?.status, "succeeded");
+    assert.equal(retried.executionReceipts?.[0]?.actualCostCny, 0.1);
+    assert.equal(retried.executionReceipts?.[0]?.actualCostSource, "configured_rate");
   });
 
   it("records actual cost and fails the node when reported spending exceeds authorization", async () => {
@@ -1540,7 +1702,7 @@ describe("WorkflowRunner", () => {
     assert.deepEqual(completed.nodeRuns.find((node) => node.nodeId === "script")?.output, { title: "人工保留" });
   });
 
-  it("pauses a metered node until its exact spend plan is authorized", async () => {
+  it("new metered providers default to manual approval and pause for an exact spend plan", async () => {
     let paidCalls = 0;
     const registry = new ProviderRegistry();
     registry.register({
@@ -1648,6 +1810,370 @@ describe("WorkflowRunner", () => {
     assert.equal(resumed.revision, 1);
     assert.equal(resumed.spendAuthorizations?.length, 1);
     assert.equal(resumed.nodeRuns.find((node) => node.nodeId === "render")?.status, "succeeded");
+  });
+
+  it("metered manual provider pauses for an immutable spend authorization", async () => {
+    let paidCalls = 0;
+    let itemCostCny = 1.2;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "shot-router",
+      label: "Shot router",
+      modelId: "router-v2",
+      capability: "asset.prepare",
+      transport: "local_process",
+      billing: "metered",
+      approvalPolicy: "manual",
+      estimatedCostCny: 48,
+      maxCostCny: 48,
+      maxAttempts: 1,
+      quoteSpend: (input) => {
+        const shots = (input as { shots: Array<{ scenePosition: number }> }).shots;
+        return {
+          estimatedCostCny: shots.length * itemCostCny,
+          maxCostCny: shots.length * itemCostCny,
+          items: shots.map((shot) => ({
+            id: `scene-${shot.scenePosition}`,
+            label: `镜头 ${shot.scenePosition}`,
+            providerId: "seedance-video-v1",
+            modelId: "seedance-v1",
+            estimatedCostCny: itemCostCny,
+          })),
+        };
+      },
+      run: () => {
+        paidCalls += 1;
+        return { assetPlanPath: "assets.json" };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "quoted-assets",
+      name: "Quoted assets",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "shot-router",
+        mode: "automatic",
+        getInput: () => ({ shots: [{ scenePosition: 1 }, { scenePosition: 2 }, { scenePosition: 3 }] }),
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+
+    const paused = await runner.run(definition, {});
+    const plan = paused.nodeRuns[0]?.spendPlan;
+
+    assert.equal(paused.status, "awaiting_spend_approval");
+    assert.equal(paidCalls, 0);
+    assert.equal(plan?.estimatedCostCny, 3.6);
+    assert.equal(plan?.maxCostCny, 3.6);
+    assert.deepEqual(plan?.items, [
+      { id: "scene-1", label: "镜头 1", providerId: "seedance-video-v1", modelId: "seedance-v1", estimatedCostCny: 1.2 },
+      { id: "scene-2", label: "镜头 2", providerId: "seedance-video-v1", modelId: "seedance-v1", estimatedCostCny: 1.2 },
+      { id: "scene-3", label: "镜头 3", providerId: "seedance-video-v1", modelId: "seedance-v1", estimatedCostCny: 1.2 },
+    ]);
+
+    assert.ok(plan);
+    const originalPlan = structuredClone(plan);
+    itemCostCny = 1.5;
+    const invalidated = await runner.authorizeSpend(definition, paused, {
+      nodeId: plan.nodeId,
+      inputVersionIds: plan.inputVersionIds,
+      providerId: plan.providerId,
+      modelId: plan.modelId,
+      maxCostCny: plan.maxCostCny,
+      maxAttempts: plan.maxAttempts,
+      approvedBy: "producer",
+    });
+
+    assert.equal(invalidated.status, "approval_invalidated");
+    assert.equal(paidCalls, 0);
+    assert.deepEqual(paused.nodeRuns[0]?.spendPlan, originalPlan);
+    assert.notEqual(invalidated.nodeRuns[0]?.spendPlan?.id, plan.id);
+    assert.equal(invalidated.nodeRuns[0]?.spendPlan?.estimatedCostCny, 4.5);
+    assert.deepEqual(invalidated.nodeRuns[0]?.spendPlan?.items?.map((item) => item.estimatedCostCny), [1.5, 1.5, 1.5]);
+  });
+
+  it("rejects duplicate spend quote item ids before invoking a paid provider", async () => {
+    let calls = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "duplicate-quote-router",
+      modelId: "router-v1",
+      capability: "asset.prepare",
+      billing: "metered",
+      approvalPolicy: "manual",
+      estimatedCostCny: 2,
+      maxCostCny: 2,
+      maxAttempts: 1,
+      quoteSpend: () => ({
+        estimatedCostCny: 2,
+        maxCostCny: 2,
+        items: [
+          { id: "scene-1", label: "镜头 1", providerId: "seedance-video-v1", modelId: "seedance-v1", estimatedCostCny: 1 },
+          { id: "scene-1", label: "镜头 1 重复", providerId: "seedream-image-v1", modelId: "seedream-v1", estimatedCostCny: 1 },
+        ],
+      }),
+      run: () => {
+        calls += 1;
+        return { assetPlanPath: "never.json" };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "duplicate-spend-items",
+      name: "Duplicate spend items",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "duplicate-quote-router",
+        mode: "automatic",
+      }],
+    };
+
+    const failed = await new WorkflowRunner({ providers: registry }).run(definition, {});
+
+    assert.equal(failed.status, "failed");
+    assert.match(failed.nodeRuns[0]?.error ?? "", /unique item ids/i);
+    assert.equal(calls, 0);
+  });
+
+  it("metered automatic provider executes without a spend plan and keeps a metered receipt", async () => {
+    let calls = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "automatic-voice",
+      label: "Automatic voice",
+      modelId: "voice-v2",
+      capability: "voice.synthesize",
+      transport: "http_api",
+      billing: "metered",
+      approvalPolicy: "automatic",
+      estimatedCostCny: 0.4,
+      maxCostCny: 0.4,
+      maxAttempts: 1,
+      run: () => {
+        calls += 1;
+        return { uri: "voice.mp3" };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "automatic-metered-voice",
+      name: "Automatic metered voice",
+      version: "1.0.0",
+      nodes: [{
+        id: "voice",
+        label: "Voice",
+        capability: "voice.synthesize",
+        providerId: "automatic-voice",
+        mode: "automatic",
+      }],
+    };
+
+    const completed = await new WorkflowRunner({
+      clock,
+      idFactory: deterministicIds(),
+      providers: registry,
+    }).run(definition, {});
+
+    const nodeRun = completed.nodeRuns[0];
+    assert.equal(completed.status, "succeeded");
+    assert.equal(calls, 1);
+    assert.equal(nodeRun?.spendPlan, undefined);
+    assert.equal(nodeRun?.spendAuthorizationId, undefined);
+    assert.deepEqual(completed.spendAuthorizations, []);
+    assert.equal(nodeRun?.executionReceipt?.billing, "metered");
+    assert.equal(nodeRun?.executionReceipt?.spendAuthorizationId, undefined);
+    assert.equal(nodeRun?.executionReceipt?.meteredAttemptCount, 1);
+  });
+
+  it("metered automatic provider remains bounded by its declared attempt limit", async () => {
+    let calls = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "automatic-assets",
+      modelId: "assets-v2",
+      capability: "asset.prepare",
+      billing: "metered",
+      approvalPolicy: "automatic",
+      estimatedCostCny: 0.8,
+      maxCostCny: 0.8,
+      maxAttempts: 1,
+      run: () => {
+        calls += 1;
+        return { ok: true };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "bounded-automatic-assets",
+      name: "Bounded automatic assets",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "automatic-assets",
+        mode: "automatic",
+        execute: async (input, context) => {
+          const provider = context.resolveProvider({
+            capability: "asset.prepare",
+            providerId: "automatic-assets",
+          });
+          await provider.run(input, context);
+          await provider.run(input, context);
+          return { output: { ok: true } };
+        },
+      }],
+    };
+
+    const failed = await new WorkflowRunner({ providers: registry }).run(definition, {});
+    const nodeRun = failed.nodeRuns[0];
+
+    assert.equal(failed.status, "failed");
+    assert.equal(calls, 1);
+    assert.equal(nodeRun?.spendPlan, undefined);
+    assert.equal(nodeRun?.outcomeUncertain, true);
+    assert.match(nodeRun?.error ?? "", /automatic attempt limit/);
+    assert.equal(nodeRun?.executionReceipt?.billing, "metered");
+    assert.equal(nodeRun?.executionReceipt?.meteredAttemptCount, 1);
+    assert.equal(nodeRun?.executionReceipt?.spendAuthorizationId, undefined);
+  });
+
+  it("does not accept a stale manual authorization after a provider becomes automatic", async () => {
+    let calls = 0;
+    const registry = new ProviderRegistry();
+    const provider = (approvalPolicy: "manual" | "automatic"): Provider => ({
+      id: "changing-voice",
+      modelId: "voice-v2",
+      capability: "voice.synthesize",
+      billing: "metered",
+      approvalPolicy,
+      estimatedCostCny: 0.4,
+      maxCostCny: 0.4,
+      maxAttempts: 1,
+      run: () => {
+        calls += 1;
+        return { uri: "voice.mp3" };
+      },
+    });
+    registry.register(provider("manual"));
+    const definition: WorkflowDefinition = {
+      id: "changing-voice-policy",
+      name: "Changing voice policy",
+      version: "1.0.0",
+      nodes: [{
+        id: "voice",
+        label: "Voice",
+        capability: "voice.synthesize",
+        providerId: "changing-voice",
+        mode: "automatic",
+      }],
+    };
+    const runner = new WorkflowRunner({ providers: registry });
+    const paused = await runner.run(definition, {});
+    const plan = paused.nodeRuns[0]?.spendPlan;
+    assert.ok(plan);
+    registry.replace(provider("automatic"));
+
+    await assert.rejects(() => runner.authorizeSpend(definition, paused, {
+      nodeId: plan.nodeId,
+      inputVersionIds: plan.inputVersionIds,
+      providerId: plan.providerId,
+      modelId: plan.modelId,
+      maxCostCny: plan.maxCostCny,
+      maxAttempts: plan.maxAttempts,
+      approvedBy: "producer",
+    }), /no longer requires manual spend approval/);
+    assert.equal(calls, 0);
+    assert.deepEqual(paused.spendAuthorizations, []);
+  });
+
+  it("metered none policy fails closed instead of bypassing spend approval", async () => {
+    let calls = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "misconfigured-paid-review",
+      modelId: "review-v1",
+      capability: "quality.review",
+      billing: "metered",
+      approvalPolicy: "none",
+      estimatedCostCny: 0.5,
+      maxCostCny: 0.5,
+      maxAttempts: 1,
+      run: () => {
+        calls += 1;
+        return { approved: true };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "misconfigured-metered-review",
+      name: "Misconfigured metered review",
+      version: "1.0.0",
+      nodes: [{
+        id: "review",
+        label: "Review",
+        capability: "quality.review",
+        providerId: "misconfigured-paid-review",
+        mode: "automatic",
+      }],
+    };
+
+    const paused = await new WorkflowRunner({ providers: registry }).run(definition, {});
+
+    assert.equal(paused.status, "awaiting_spend_approval");
+    assert.equal(paused.nodeRuns[0]?.status, "awaiting_spend_approval");
+    assert.ok(paused.nodeRuns[0]?.spendPlan);
+    assert.equal(calls, 0);
+  });
+
+  it("runs a metered-capable node without approval only when its resolved quote is explicitly free", async () => {
+    let calls = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "conditional-router",
+      label: "Conditional router",
+      modelId: "router-v2",
+      capability: "asset.prepare",
+      transport: "local_process",
+      billing: "metered",
+      estimatedCostCny: 2.4,
+      maxCostCny: 2.4,
+      maxAttempts: 1,
+      quoteSpend: () => ({
+        estimatedCostCny: 0,
+        maxCostCny: 0,
+        requiresAuthorization: false,
+      }),
+      run: (_input, context) => {
+        calls += 1;
+        assert.equal(context.spendAuthorization, undefined);
+        return { assetPlanPath: "free-assets.json" };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "free-router-plan",
+      name: "Free router plan",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "conditional-router",
+        mode: "automatic",
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+
+    const completed = await runner.run(definition, {});
+
+    assert.equal(completed.status, "succeeded");
+    assert.equal(calls, 1);
+    assert.equal(completed.nodeRuns[0]?.spendPlan, undefined);
+    assert.deepEqual(completed.spendAuthorizations, []);
+    assert.equal(completed.nodeRuns[0]?.executionReceipt?.billing, "free");
+    assert.equal(completed.nodeRuns[0]?.executionReceipt?.estimatedCostCny, 0);
   });
 
   it("gates a metered provider before a custom node executor can call it", async () => {

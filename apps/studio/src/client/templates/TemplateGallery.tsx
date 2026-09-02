@@ -31,7 +31,7 @@ export function TemplateGallery({ templates, selectedId, onSelect }: TemplateGal
               <span className="template-card-meta">
                 <span><Clock3 size={13} aria-hidden="true" />{template.durationSeconds} 秒</span>
                 <span><Gauge size={13} aria-hidden="true" />{automationLabel(template.automationLevel)}</span>
-                <span><WalletCards size={13} aria-hidden="true" />上限 ¥{template.costPolicy.maxCost}</span>
+                <span><WalletCards size={13} aria-hidden="true" />付费逐项确认</span>
               </span>
               <span className="template-beat-line">{template.storyStructure.map((beat) => beat.label).join(" / ")}</span>
             </span>

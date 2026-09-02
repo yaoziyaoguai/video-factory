@@ -15,6 +15,7 @@ import {
 import { readMeteredVideoProviderSettings } from "./video-provider-settings.js";
 import { readMeteredImageProviderSettings } from "./image-provider-settings.js";
 import { resolveZaiVisualReviewModelId } from "./codex-provider-settings.js";
+import { assetProviderDeliveryTypes } from "./provider-catalog.js";
 import { buildStudioChildEnvironment } from "./studio-child-environment.js";
 
 export interface ProductionWorkerOptions {
@@ -88,7 +89,7 @@ export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOption
       label: "本地编辑卡片",
       billing: "free",
       modes: ["本地排版"],
-      deliveryTypes: ["editorial_card"],
+      deliveryTypes: assetProviderDeliveryTypes("local-editorial-v1"),
       strengths: ["标题卡、数据卡、清单步骤、引语、转场与片尾行动提示"],
       constraints: [
         "只交付一张静态卡片，所有元素从首帧就存在，渲染器最多做整张画面的轻微推拉",
@@ -105,7 +106,7 @@ export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOption
       label: "Pexels 视频",
       billing: "free",
       modes: ["实拍", "竖屏搜索"],
-      deliveryTypes: ["stock_video", "stock_image"],
+      deliveryTypes: assetProviderDeliveryTypes("pexels-stock-v1"),
       strengths: ["通用真实人物、生活动作、办公场景、城市与自然环境、建立镜头"],
       constraints: ["通用图库不是具体新闻事件证据", "不得把图库人物描述为事件当事人", "中文地域与具体事件匹配度可能有限"],
     });
@@ -116,7 +117,7 @@ export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOption
       label: "Pixabay 视频",
       billing: "free",
       modes: ["实拍", "安全搜索"],
-      deliveryTypes: ["stock_video", "stock_image"],
+      deliveryTypes: assetProviderDeliveryTypes("pixabay-stock-v1"),
       strengths: ["通用环境、物件、抽象概念与补充实拍镜头"],
       constraints: ["通用图库不是具体新闻事件证据", "不得把图库人物描述为事件当事人", "中文语义搜索结果可能需要人工复核"],
     });
@@ -127,7 +128,7 @@ export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOption
       label: "Seedream 关键画面",
       billing: "metered",
       modes: ["AI 图片", "9:16"],
-      deliveryTypes: ["generated_image"],
+      deliveryTypes: assetProviderDeliveryTypes(setting.providerId),
       strengths: ["解释性插画、抽象概念、无法检索到的关键静态画面与统一系列视觉"],
       constraints: ["合成内容不得作为事实证据", "人物、品牌与地标需要规避权利和误导风险", "成片必须保留 AIGC 标识"],
       estimatedCnyPerClip: setting.estimatedCnyPerImage,
@@ -142,7 +143,7 @@ export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOption
         : setting.providerId === "hailuo-video-v1" ? "MiniMax 视频生成" : "百炼 · 通义万相视频",
       billing: "metered",
       modes: ["AI 视频", "9:16"],
-      deliveryTypes: ["generated_video"],
+      deliveryTypes: assetProviderDeliveryTypes(setting.providerId),
       strengths: ["难以实拍的概念视觉、情绪化转场与关键表现镜头"],
       constraints: ["合成内容不得作为事实证据", "人物、品牌与地标需要规避权利和误导风险", "成片必须保留 AIGC 标识"],
       estimatedCnyPerClip: setting.estimatedCnyPerClip,
@@ -169,9 +170,8 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
       label: `${zaiVisualReviewModelId === "glm-5.3-flash" ? "GLM-5.3-Flash" : zaiVisualReviewModelId} 视觉审片`,
       modelId: zaiVisualReviewModelId,
       transport: "unix_socket",
-      billing: "metered",
-      billingUnit: "run",
-      estimatedCostCny: positiveEstimate(environment.ZAI_VISUAL_REVIEW_ESTIMATED_CNY, 0.1),
+      billing: "subscription",
+      approvalPolicy: "none",
       maxAttempts: 3,
     },
   ];
@@ -195,6 +195,15 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
     modelProfiles: setting.models.map((model) => ({
       modelId: model.id,
       estimatedCostCny: model.estimatedCnyPerClip,
+      taskTypes: [...model.taskTypes],
+      resolutions: [...model.resolutions],
+      minDurationSeconds: model.minDurationSeconds,
+      maxDurationSeconds: model.maxDurationSeconds,
+      supportsAudio: model.supportsAudio,
+      ...(model.estimatedCnyPerSecond ? { estimatedCnyPerSecond: model.estimatedCnyPerSecond } : {}),
+      ...(model.estimatedCnyPerSecondByResolution
+        ? { estimatedCnyPerSecondByResolution: { ...model.estimatedCnyPerSecondByResolution } }
+        : {}),
     })),
   });
   if (environment.MINIMAX_API_KEY) metadata.push({
@@ -203,6 +212,7 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
     modelId: environment.MINIMAX_TTS_MODEL_ID?.trim() || "speech-2.8-turbo",
     transport: "http_api",
     billing: "metered",
+    approvalPolicy: "automatic",
     billingUnit: "run",
     estimatedCostCny: positiveEstimate(environment.MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP, 0.5),
     maxAttempts: 1,

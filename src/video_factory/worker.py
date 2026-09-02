@@ -119,6 +119,10 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
     provider = str(parameters.get("provider", "local"))
     if provider not in {"local", "pexels", "pixabay", "mock", "ai-router"}:
         raise WorkerProtocolError(f"Unsupported asset provider: {provider}")
+    if provider == "local":
+        raise WorkerProtocolError(
+            "Local editorial cards require an explicit director route selecting local-editorial-v1 + editorial_card"
+        )
     if provider == "ai-router":
         director_plan_path = require_existing_path(request["input"], "directorPlanPath")
         director_plan = json.loads(director_plan_path.read_text(encoding="utf-8"))
@@ -159,9 +163,18 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
         license_note="License snapshot is stored per scene asset in this plan.",
     )
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    pending_generation_positions = {
+        int(route["scene_position"])
+        for route in plan.get("director_routing", [])
+        if isinstance(route, dict)
+        and route.get("generation_pending") is True
+        and isinstance(route.get("scene_position"), int)
+    }
     media_artifacts = []
     for scene_asset in plan.get("scene_assets", []):
         if not isinstance(scene_asset, dict):
+            continue
+        if int(scene_asset.get("scene_position", 0)) in pending_generation_positions:
             continue
         media_path = Path(str(scene_asset.get("local_path", "")))
         if not media_path.is_file():
@@ -237,6 +250,12 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
     profile_id = str(input_values.get("profileId") or (
         f"{profile_prefix}:{voice}" if input_values.get("voice") else parameters.get("profileId") or ""
     )) or None
+    configured_cost = parameters.get("estimatedCostCny")
+    valid_configured_cost = (
+        isinstance(configured_cost, (int, float))
+        and not isinstance(configured_cost, bool)
+        and configured_cost >= 0
+    )
     plan_path = synthesize_voiceover_plan(
         script_path=script_path,
         output_dir=output_dir,
@@ -246,6 +265,10 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
         profile_id=profile_id,
         pause_scale=float(input_values.get("pause_scale", parameters.get("pauseScale", 1))),
         mastering_preset=str(input_values.get("mastering_preset", parameters.get("masteringPreset", "natural"))),
+        operation_id=request["commandId"] if provider == "minimax" else None,
+        provider_id=str(parameters.get("providerId") or "minimax-tts-v1") if provider == "minimax" else None,
+        model_id=optional_string(parameters.get("modelId")) if provider == "minimax" else None,
+        estimated_cost_cny=float(configured_cost) if provider == "minimax" and valid_configured_cost else None,
     )
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     artifacts = [
@@ -264,6 +287,14 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
             license_note="VideoFactory voice timeline metadata.",
         ),
     ]
+    diagnostics: Dict[str, Any] = {}
+    if provider == "minimax" and valid_configured_cost:
+        diagnostics = {
+            "actualCostCny": round(float(configured_cost), 2),
+            "actualCostSource": "configured_rate",
+            "meteredAttemptCount": 1,
+            "meteredFailedAttemptCount": 0,
+        }
     return success_response(
         request,
         output={
@@ -272,6 +303,7 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
         },
         artifacts=artifacts,
         started_at=started_at,
+        diagnostics=diagnostics,
     )
 
 
@@ -430,6 +462,7 @@ def success_response(
     output: Dict[str, Any],
     artifacts: list,
     started_at: float,
+    diagnostics: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     return {
         "protocolVersion": WORKER_PROTOCOL_VERSION,
@@ -437,7 +470,10 @@ def success_response(
         "status": "succeeded",
         "output": output,
         "artifacts": artifacts,
-        "diagnostics": {"durationMs": round((time.monotonic() - started_at) * 1000, 3)},
+        "diagnostics": {
+            "durationMs": round((time.monotonic() - started_at) * 1000, 3),
+            **(diagnostics or {}),
+        },
     }
 
 

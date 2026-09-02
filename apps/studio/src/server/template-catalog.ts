@@ -126,7 +126,6 @@ function toTemplate(seed: TemplateSeed): ProductionTemplateInput {
       { capability: "video.render", required: true },
       { capability: "quality.review", required: true },
     ],
-    costPolicy: { currency: "CNY", maxCost: seed.id === "human-mini-doc" ? 20 : 8, maxPaidShots: seed.id === "human-mini-doc" ? 3 : 1 },
     createdAt: CREATED_AT,
     updatedAt: CREATED_AT,
   };

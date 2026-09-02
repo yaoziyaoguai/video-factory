@@ -20,6 +20,19 @@ export interface ProductionEconomics {
   maxCostCny: number;
 }
 
+export type ProductionSpendFeedbackReason = "too_expensive" | "provider_mix" | "plan_not_approved" | "other";
+
+export interface ProductionSpendFeedback {
+  spendPlanId: string;
+  nodeId: string;
+  reason: ProductionSpendFeedbackReason;
+  previousEstimatedCostCny: number;
+  targetEstimatedCostCny?: number;
+  note?: string;
+  rejectedBy: string;
+  rejectedAt: string;
+}
+
 export const PRODUCTION_DIRECTOR_PROFILE_IDS = [
   "auto",
   "documentary-observer",
@@ -147,6 +160,7 @@ export interface ProductionBrief {
   referenceVideo?: ProductionReferenceVideo;
   director?: ProductionDirectorDirection;
   economics: ProductionEconomics;
+  spendFeedback?: ProductionSpendFeedback[];
   voiceDirection: ProductionVoiceDirection;
   editorial?: ProductionEditorialDirection;
   seriesContext?: ProductionSeriesContext;
@@ -173,6 +187,7 @@ export function parseBrief(value: unknown): ProductionBrief {
   const referenceVideo = parseReferenceVideo(value.referenceVideo);
   const director = parseDirectorDirection(value.director, providers);
   const economics = parseEconomics(value.economics);
+  const spendFeedback = parseSpendFeedback(value.spendFeedback);
   const voiceDirection = parseVoiceDirection(value.voiceDirection);
   const editorial = parseEditorialDirection(value.editorial);
   const seriesContext = parseProductionSeriesContext(value.seriesContext);
@@ -229,11 +244,46 @@ export function parseBrief(value: unknown): ProductionBrief {
     ...(referenceVideo ? { referenceVideo } : {}),
     ...(director ? { director } : {}),
     economics,
+    ...(spendFeedback.length ? { spendFeedback } : {}),
     voiceDirection,
     ...(editorial ? { editorial } : {}),
     ...(seriesContext ? { seriesContext } : {}),
     ...(creationContext ? { creationContext } : {}),
   };
+}
+
+function parseSpendFeedback(value: unknown): ProductionSpendFeedback[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 20) throw new Error("spendFeedback must contain at most 20 entries.");
+  const reasons = new Set<ProductionSpendFeedbackReason>(["too_expensive", "provider_mix", "plan_not_approved", "other"]);
+  return value.map((entry, index) => {
+    const input = requireRecord(entry, `spendFeedback[${index}]`);
+    if (!reasons.has(input.reason as ProductionSpendFeedbackReason)) {
+      throw new Error(`spendFeedback[${index}].reason is invalid.`);
+    }
+    const previousEstimatedCostCny = boundedNumber(
+      input.previousEstimatedCostCny,
+      `spendFeedback[${index}].previousEstimatedCostCny`,
+      0,
+      100_000,
+      false,
+    );
+    const targetEstimatedCostCny = input.targetEstimatedCostCny === undefined
+      ? undefined
+      : boundedNumber(input.targetEstimatedCostCny, `spendFeedback[${index}].targetEstimatedCostCny`, 0, 100_000, false);
+    const note = input.note === undefined ? undefined : requireString(input.note, `spendFeedback[${index}].note`);
+    if (note && note.length > 1_000) throw new Error(`spendFeedback[${index}].note is too long.`);
+    return {
+      spendPlanId: requireString(input.spendPlanId, `spendFeedback[${index}].spendPlanId`),
+      nodeId: requireString(input.nodeId, `spendFeedback[${index}].nodeId`),
+      reason: input.reason as ProductionSpendFeedbackReason,
+      previousEstimatedCostCny,
+      ...(targetEstimatedCostCny !== undefined ? { targetEstimatedCostCny } : {}),
+      ...(note ? { note } : {}),
+      rejectedBy: requireString(input.rejectedBy, `spendFeedback[${index}].rejectedBy`),
+      rejectedAt: requireIsoTimestamp(input.rejectedAt, `spendFeedback[${index}].rejectedAt`),
+    };
+  });
 }
 
 function parseCreationContext(value: unknown): ProductionBrief["creationContext"] {
@@ -561,15 +611,10 @@ function parseEconomics(value: unknown): ProductionEconomics {
   if (typeof input.allowMeteredProviders !== "boolean") {
     throw new Error("economics.allowMeteredProviders must be a boolean.");
   }
-  const maxPaidShots = boundedNumber(input.maxPaidShots, "economics.maxPaidShots", 0, 20, true);
-  const maxCostCny = boundedNumber(input.maxCostCny, "economics.maxCostCny", 0, 100_000, false);
-  if (!input.allowMeteredProviders && (maxPaidShots !== 0 || maxCostCny !== 0)) {
-    throw new Error("economics.maxPaidShots and economics.maxCostCny must be 0 when metered providers are disabled.");
-  }
-  if (input.allowMeteredProviders && ((maxPaidShots === 0) !== (maxCostCny === 0))) {
-    throw new Error("economics.maxPaidShots and economics.maxCostCny must either both bound metered generation or both be 0.");
-  }
-  return { recipeId, allowMeteredProviders: input.allowMeteredProviders, maxPaidShots, maxCostCny };
+  // 历史 brief 仍可能携带全视频限额；仅校验格式后归零，付费安全由逐次报价和人工授权负责。
+  boundedNumber(input.maxPaidShots, "economics.maxPaidShots", 0, 20, true);
+  boundedNumber(input.maxCostCny, "economics.maxCostCny", 0, 100_000, false);
+  return { recipeId, allowMeteredProviders: input.allowMeteredProviders, maxPaidShots: 0, maxCostCny: 0 };
 }
 
 function boundedNumber(value: unknown, field: string, minimum: number, maximum: number, integer: boolean): number {

@@ -1,13 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import * as nodeFs from "node:fs";
 import { copyFile, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseProductionBlueprint } from "@video-factory/template-core";
+import { check as checkFileLock, lock as lockFile } from "proper-lockfile";
 import {
   ProviderRegistry,
   WorkflowRunner,
   type Artifact,
   type ArtifactDraft,
+  type ApprovalPolicy,
   type Capability,
   type HumanDecisionDraft,
   type NodeInputOverrideDraft,
@@ -19,6 +21,7 @@ import {
   type NodeExecutionResult,
   type Provider,
   type SpendAuthorizationDraft,
+  type SpendQuote,
   type WorkflowContext,
   type WorkflowDefinition,
   type WorkflowRun,
@@ -35,11 +38,19 @@ import { REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION, fallbackShotGrammar, validate
 import type { AgentLoopTrace, CodexTaskExecution, CodexTaskTrace } from "./codex-chat.js";
 import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
 import { RoleAgentLoopError } from "./role-agent-loop.js";
+import {
+  assetReuseSourceScenePosition,
+  estimateVideoGenerationCostCny,
+  inspectPaidAssetLedger,
+  paidAssetSourceFingerprint,
+  type PaidAssetLedgerItemSummary,
+  type VideoGenerationRuntimeProfile,
+} from "./generative-asset-worker.js";
 import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
 import { VISUAL_REVIEW_AGENT_CONTRACT_VERSION, validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport } from "./codex-visual-review.js";
 import { parseBrief, parsePersistedBrief, parseProductionSeriesContext, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
-import { FileRunStore, RunLockedError } from "./run-store.js";
+import { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
 import type { WorkerResponse } from "./python-worker-client.js";
 import {
   validateVisualDirectorPlan,
@@ -77,6 +88,94 @@ export interface DispatchedProductionRun {
   completion: Promise<WorkflowRun<ProductionBrief>>;
 }
 
+export interface ProductionSpendRejectionDraft {
+  nodeId: string;
+  spendPlanId: string;
+  reason: "too_expensive" | "provider_mix" | "plan_not_approved" | "other";
+  targetEstimatedCostCny?: number;
+  note?: string;
+  rejectedBy: string;
+}
+
+export interface ProductionPaidNodeReconciliationDraft {
+  nodeId: string;
+  expectedRunRevision: number;
+  reconciliationId: string;
+  outcome: "resume_original" | "requote" | "confirmed_not_charged" | "confirmed_charged";
+  taskId?: string;
+  actor?: string;
+  note?: string;
+  actualCostCny?: number;
+}
+
+export interface ProductionPaidOperationItemSummary {
+  operationId: string;
+  itemRequestId: string;
+  quoteItemId: string;
+  scenePosition: number;
+  executorProviderId: string;
+  providerId: string;
+  modelId: string;
+  state: PaidAssetLedgerItemSummary["state"];
+  estimatedCostCny: number;
+  taskId?: string;
+  actualCostCny?: number;
+  actualCostSource?: "configured_rate";
+  error?: string;
+}
+
+export interface ProductionPaidNodeSummary {
+  nodeId: string;
+  operationId?: string;
+  recommendedOutcome?: ProductionPaidNodeReconciliationDraft["outcome"];
+  requiresManualReconciliation: boolean;
+  items: ProductionPaidOperationItemSummary[];
+}
+
+interface PaidNodeReconciliationRecord {
+  version: "video-factory/paid-reconciliation-v1";
+  reconciliationId: string;
+  nodeId: string;
+  outcome: ProductionPaidNodeReconciliationDraft["outcome"];
+  taskId?: string;
+  actor?: string;
+  note?: string;
+  actualCostCny?: number;
+  reportedActualCostCny?: number;
+  expectedRunRevision: number;
+  status: "in_progress" | "completed";
+  createdAt: string;
+  resultingRunRevision?: number;
+}
+
+interface PaidVoiceOperationItem {
+  itemRequestId: string;
+  state: PaidAssetLedgerItemSummary["state"];
+  stateHistory: string[];
+}
+
+interface PaidVoiceOperationLedger {
+  version: "video-factory/paid-operation-v2";
+  operationId: string;
+  completed: boolean;
+  providerId: string;
+  modelId: string;
+  estimatedCostCny: number;
+  actualCostCny?: number;
+  actualCostSource?: "configured_rate";
+  items: PaidVoiceOperationItem[];
+}
+
+export class PaidOperationManualReconciliationError extends Error {
+  constructor(
+    readonly nodeId: string,
+    readonly items: readonly PaidAssetLedgerItemSummary[],
+  ) {
+    super(`Paid node '${nodeId}' still has an outcome that requires manual reconciliation.`);
+    this.name = "PaidOperationManualReconciliationError";
+  }
+}
+
 interface ProviderConfig {
   id: string;
   capability: Capability;
@@ -84,6 +183,7 @@ interface ProviderConfig {
   parameters: Record<string, unknown>;
   configurationSource: ExecutionConfigurationSource;
   metadata?: ProductionProviderRuntimeMetadata;
+  assetRuntimeMetadata?: ReadonlyMap<string, ProductionProviderRuntimeMetadata>;
 }
 
 const KNOWN_METERED_WORKER_PROVIDER_IDS = new Set([
@@ -93,7 +193,19 @@ const KNOWN_METERED_WORKER_PROVIDER_IDS = new Set([
   "wan-video-v1",
   "minimax-tts-v1",
 ]);
-const KNOWN_METERED_VISUAL_REVIEW_PROVIDER_IDS = new Set(["glm-visual-review-v1"]);
+const KNOWN_SUBSCRIPTION_VISUAL_REVIEW_PROVIDER_IDS = new Set(["glm-visual-review-v1"]);
+
+export interface ProductionProviderModelRuntimeMetadata {
+  modelId: string;
+  estimatedCostCny: number;
+  taskTypes?: VideoGenerationRuntimeProfile["taskTypes"];
+  resolutions?: string[];
+  minDurationSeconds?: number;
+  maxDurationSeconds?: number;
+  supportsAudio?: boolean;
+  estimatedCnyPerSecond?: number;
+  estimatedCnyPerSecondByResolution?: Record<string, number>;
+}
 
 export interface ProductionProviderRuntimeMetadata {
   id: string;
@@ -101,10 +213,11 @@ export interface ProductionProviderRuntimeMetadata {
   modelId: string;
   transport: "unix_socket" | "local_process" | "http_api";
   billing: "subscription" | "metered" | "free" | "local_compute";
+  approvalPolicy?: ApprovalPolicy;
   billingUnit?: "clip" | "run";
   estimatedCostCny?: number;
   maxAttempts?: number;
-  modelProfiles?: Array<{ modelId: string; estimatedCostCny: number }>;
+  modelProfiles?: ProductionProviderModelRuntimeMetadata[];
 }
 
 function productionNodeIds(brief: ProductionBrief): string[] {
@@ -136,11 +249,12 @@ const DEFAULT_EXECUTION_LEASE_HEARTBEAT_MS = 5_000;
 const DEFAULT_EXECUTION_LEASE_STALE_MS = 30_000;
 
 interface ExecutionLeaseHandle {
+  runId: string;
   path: string;
   token: string;
-  timer?: ReturnType<typeof setInterval>;
+  release?: (removeLock: boolean) => Promise<void>;
   active: boolean;
-  pending: Promise<void>;
+  failure?: Error;
 }
 
 export class ProductionPipeline {
@@ -183,6 +297,7 @@ export class ProductionPipeline {
         if (!created) {
           executionLease = await this.acquireExecutionLease(runId);
           try {
+            await this.assertExecutionLease(executionLease);
             await this.store.create(run);
             created = true;
           } catch (error) {
@@ -193,6 +308,7 @@ export class ProductionPipeline {
           resolveCreated();
           return;
         }
+        await this.assertExecutionLease(executionLease);
         await this.store.checkpoint(run);
         await notifyListener(listener, productionRun);
       },
@@ -270,8 +386,9 @@ export class ProductionPipeline {
     const leases: ExecutionLeaseHandle[] = [];
     try {
       for (const runId of ids) {
-        leases.push(await this.acquireExecutionLease(runId, true));
+        leases.push(await this.acquireExecutionLease(runId));
       }
+      for (const lease of leases) await this.assertExecutionLease(lease);
       return await action();
     } finally {
       for (const lease of leases.reverse()) {
@@ -289,7 +406,8 @@ export class ProductionPipeline {
       if (await this.hasFreshExecutionLease(run.id, leaseStaleAfterMs)) continue;
       let recoveryLease: ExecutionLeaseHandle | undefined;
       try {
-        recoveryLease = await this.acquireExecutionLease(run.id, true);
+        recoveryLease = await this.acquireExecutionLease(run.id);
+        await this.assertExecutionLease(recoveryLease);
         await this.store.update<ProductionBrief>(run.id, async (current) => {
           const finishedAt = this.clock();
           const runningNodeIndex = current.nodeRuns.findIndex((node) => node.status === "running");
@@ -337,71 +455,105 @@ export class ProductionPipeline {
     return recovered;
   }
 
-  private async acquireExecutionLease(runId: string, exclusive = false): Promise<ExecutionLeaseHandle> {
+  private async acquireExecutionLease(runId: string): Promise<ExecutionLeaseHandle> {
     const leasePath = this.executionLeasePath(runId);
     await mkdir(path.dirname(leasePath), { recursive: true });
     const handle: ExecutionLeaseHandle = {
+      runId,
       path: leasePath,
       token: randomUUID(),
       active: true,
-      pending: Promise.resolve(),
     };
-    if (exclusive) {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-          await writeFile(handle.path, executionLeasePayload(handle.token), { encoding: "utf8", flag: "wx", mode: 0o600 });
-          break;
-        } catch (error) {
-          if (!hasCode(error, "EEXIST")) throw error;
-          if (attempt > 0 || await this.hasFreshExecutionLease(runId, DEFAULT_EXECUTION_LEASE_STALE_MS)) {
-            throw new RunLockedError(runId);
-          }
-          await rm(handle.path, { force: true });
-        }
-      }
-    } else {
-      await this.writeExecutionLease(handle);
+    const requestedHeartbeatMs = this.options.executionLeaseHeartbeatMs ?? DEFAULT_EXECUTION_LEASE_HEARTBEAT_MS;
+    const heartbeatMs = Math.max(1_000, Math.min(requestedHeartbeatMs, DEFAULT_EXECUTION_LEASE_STALE_MS / 2));
+    const lockPath = this.executionLeaseLockPath(runId);
+    const lockRemoval = { acquired: false, force: false };
+    try {
+      const release = await lockFile(handle.path, {
+        realpath: false,
+        lockfilePath: lockPath,
+        stale: DEFAULT_EXECUTION_LEASE_STALE_MS,
+        update: heartbeatMs,
+        retries: 0,
+        fs: executionLeaseFileSystem(handle, lockPath, lockRemoval),
+        onCompromised: (error) => {
+          handle.failure = executionLeaseLostError(runId, error);
+          handle.active = false;
+        },
+      });
+      lockRemoval.acquired = true;
+      handle.release = async (removeLock) => {
+        lockRemoval.force = removeLock;
+        await release();
+      };
+    } catch (error) {
+      if (hasCode(error, "ELOCKED")) throw new RunLockedError(runId);
+      throw error;
     }
-    const heartbeatMs = this.options.executionLeaseHeartbeatMs ?? DEFAULT_EXECUTION_LEASE_HEARTBEAT_MS;
-    handle.timer = setInterval(() => {
-      if (!handle.active) return;
-      handle.pending = handle.pending.then(() => this.writeExecutionLease(handle)).catch(() => undefined);
-    }, heartbeatMs);
-    handle.timer.unref();
-    return handle;
-  }
-
-  private async writeExecutionLease(handle: ExecutionLeaseHandle): Promise<void> {
-    if (!handle.active) return;
     const temporary = `${handle.path}.tmp-${process.pid}-${randomUUID()}`;
     await writeFile(temporary, executionLeasePayload(handle.token), { encoding: "utf8", flag: "wx", mode: 0o600 });
     try {
-      if (handle.active) await rename(temporary, handle.path);
+      await rename(temporary, handle.path);
+      return handle;
+    } catch (error) {
+      const release = handle.release;
+      if (release) await release(true).catch(() => undefined);
+      throw error;
     } finally {
       await rm(temporary, { force: true });
+    }
+  }
+
+  private async assertExecutionLease(handle: ExecutionLeaseHandle | undefined): Promise<void> {
+    if (!handle) throw new Error("Execution lease was not acquired.");
+    if (handle.failure) throw handle.failure;
+    try {
+      const current = JSON.parse(await readFile(handle.path, "utf8")) as { token?: unknown };
+      if (!handle.active || current.token !== handle.token) {
+        handle.failure = executionLeaseLostError(handle.runId);
+        handle.active = false;
+        throw handle.failure;
+      }
+    } catch (error) {
+      if (handle.failure) throw handle.failure;
+      handle.failure = executionLeaseLostError(handle.runId, error);
+      handle.active = false;
+      throw handle.failure;
     }
   }
 
   private async releaseExecutionLease(handle: ExecutionLeaseHandle | undefined): Promise<void> {
     if (!handle) return;
     handle.active = false;
-    if (handle.timer) clearInterval(handle.timer);
-    await handle.pending;
+    let ownsMetadata = false;
     try {
       const current = JSON.parse(await readFile(handle.path, "utf8")) as { token?: unknown };
-      if (current.token === handle.token) await rm(handle.path, { force: true });
+      ownsMetadata = current.token === handle.token;
     } catch (error) {
       if (!hasCode(error, "ENOENT") && !(error instanceof SyntaxError)) throw error;
+    }
+    const release = handle.release;
+    if (!ownsMetadata) {
+      if (release) await release(false).catch((error) => {
+        if (!hasCode(error, "ERELEASED")) throw error;
+      });
+      return;
+    }
+    await rm(handle.path, { force: true });
+    if (release) {
+      await release(true).catch((error) => {
+        if (!hasCode(error, "ERELEASED")) throw error;
+      });
     }
   }
 
   private async hasFreshExecutionLease(runId: string, staleAfterMs: number): Promise<boolean> {
     try {
-      const lease = JSON.parse(await readFile(this.executionLeasePath(runId), "utf8")) as { heartbeatAt?: unknown };
-      if (typeof lease.heartbeatAt !== "string") return false;
-      const heartbeatAt = Date.parse(lease.heartbeatAt);
-      const now = Date.now();
-      return Number.isFinite(heartbeatAt) && Number.isFinite(now) && now - heartbeatAt <= staleAfterMs;
+      return await checkFileLock(this.executionLeasePath(runId), {
+        realpath: false,
+        lockfilePath: this.executionLeaseLockPath(runId),
+        stale: staleAfterMs,
+      });
     } catch {
       return false;
     }
@@ -409,6 +561,10 @@ export class ProductionPipeline {
 
   private executionLeasePath(runId: string): string {
     return path.join(this.runsRoot, runId, ".execution-lease.json");
+  }
+
+  private executionLeaseLockPath(runId: string): string {
+    return `${this.executionLeasePath(runId)}.lock`;
   }
 
   async decide(runId: string, decision: HumanDecisionDraft): Promise<WorkflowRun<ProductionBrief>> {
@@ -505,6 +661,75 @@ export class ProductionPipeline {
     }, listener);
   }
 
+  async rejectSpend(runId: string, rejection: ProductionSpendRejectionDraft): Promise<WorkflowRun<ProductionBrief>> {
+    const dispatched = await this.dispatchSpendRejection(runId, rejection);
+    return dispatched.completion;
+  }
+
+  async dispatchSpendRejection(
+    runId: string,
+    rejection: ProductionSpendRejectionDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
+      const brief = parsePersistedBrief(previous.initialInput);
+      if (previous.status !== "awaiting_spend_approval" && previous.status !== "approval_invalidated") {
+        throw new Error(`Run '${runId}' is not waiting for spend approval.`);
+      }
+      if (rejection.nodeId !== "assets" || !brief.director) {
+        throw new Error("Only an AI-directed asset quote can be returned to the director for replanning.");
+      }
+      if (!rejection.rejectedBy.trim()) throw new Error("Spend rejection actor is required.");
+      if (!["too_expensive", "provider_mix", "plan_not_approved", "other"].includes(rejection.reason)) {
+        throw new Error("Spend rejection reason is invalid.");
+      }
+      if (rejection.note !== undefined && (!rejection.note.trim() || rejection.note.trim().length > 1_000)) {
+        throw new Error("Spend rejection note must contain between 1 and 1000 characters.");
+      }
+      if (rejection.targetEstimatedCostCny !== undefined
+        && (!Number.isFinite(rejection.targetEstimatedCostCny) || rejection.targetEstimatedCostCny < 0 || rejection.targetEstimatedCostCny > 100_000)) {
+        throw new Error("Spend rejection target estimate must be a finite non-negative amount.");
+      }
+      const waitingNode = previous.nodeRuns.find((node) => node.nodeId === rejection.nodeId);
+      const plan = waitingNode?.spendPlan;
+      if (!plan || plan.id !== rejection.spendPlanId
+        || (waitingNode.status !== "awaiting_spend_approval" && waitingNode.status !== "approval_invalidated")) {
+        throw new Error("Spend rejection does not match the active quote.");
+      }
+      const nextBrief = parseBrief({
+        ...brief,
+        spendFeedback: [
+          ...(brief.spendFeedback ?? []),
+          {
+            spendPlanId: plan.id,
+            nodeId: rejection.nodeId,
+            reason: rejection.reason,
+            previousEstimatedCostCny: plan.estimatedCostCny,
+            ...(rejection.targetEstimatedCostCny !== undefined
+              ? { targetEstimatedCostCny: rejection.targetEstimatedCostCny }
+              : {}),
+            ...(rejection.note ? { note: rejection.note.trim() } : {}),
+            rejectedBy: rejection.rejectedBy.trim(),
+            rejectedAt: this.clock(),
+          },
+        ].slice(-20),
+      });
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(nextBrief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.consumePauseRequest(runId),
+      });
+      const stale = runner.applyExecutionConfigurationOverride(
+        this.createWorkflow(nextBrief),
+        withPersistedBrief(previous, brief),
+        { nodeId: "visual-direction", actor: rejection.rejectedBy.trim(), initialInput: nextBrief },
+      );
+      return stale;
+    }, listener);
+  }
+
   async resumeStale(runId: string): Promise<WorkflowRun<ProductionBrief>> {
     const dispatched = await this.dispatchResumeStale(runId);
     return dispatched.completion;
@@ -530,6 +755,328 @@ export class ProductionPipeline {
   async retryFailedNode(runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>> {
     const dispatched = await this.dispatchRetryFailedNode(runId, nodeId);
     return dispatched.completion;
+  }
+
+  async reconcilePaidNode(
+    runId: string,
+    draft: ProductionPaidNodeReconciliationDraft,
+  ): Promise<WorkflowRun<ProductionBrief>> {
+    if (!draft.nodeId.trim()) throw new Error("Paid reconciliation node id is required.");
+    if (!draft.reconciliationId.trim() || draft.reconciliationId.trim().length > 128) {
+      throw new Error("Paid reconciliation id must contain between 1 and 128 characters.");
+    }
+    if (!["resume_original", "requote", "confirmed_not_charged", "confirmed_charged"].includes(draft.outcome)) {
+      throw new Error("Paid reconciliation outcome is invalid.");
+    }
+    const taskId = draft.taskId?.trim();
+    if (draft.taskId !== undefined && (!taskId || taskId.length > 256)) {
+      throw new Error("Paid reconciliation task id must contain between 1 and 256 characters.");
+    }
+    if (taskId && draft.outcome !== "resume_original") {
+      throw new Error("A provider task id can only resume the original paid operation.");
+    }
+    const manualResolution = draft.outcome === "confirmed_not_charged" || draft.outcome === "confirmed_charged";
+    const actor = draft.actor?.trim();
+    const note = draft.note?.trim();
+    if (manualResolution && (!actor || actor.length > 160)) {
+      throw new Error("Paid manual reconciliation actor must contain between 1 and 160 characters.");
+    }
+    if (manualResolution && (!note || note.length > 2_000)) {
+      throw new Error("Paid manual reconciliation note must contain between 1 and 2000 characters.");
+    }
+    if (!manualResolution && (draft.actor !== undefined || draft.note !== undefined || draft.actualCostCny !== undefined)) {
+      throw new Error("Manual reconciliation evidence is only valid for a confirmed manual outcome.");
+    }
+    if (draft.actualCostCny !== undefined && (
+      draft.outcome !== "confirmed_charged"
+      || !Number.isFinite(draft.actualCostCny)
+      || draft.actualCostCny < 0
+    )) {
+      throw new Error("Paid reconciliation actual cost must be a finite non-negative amount for a confirmed charge.");
+    }
+    if (!Number.isInteger(draft.expectedRunRevision) || draft.expectedRunRevision < 0) {
+      throw new Error("Paid reconciliation expected run revision must be a non-negative integer.");
+    }
+    const lease = await this.acquireExecutionLease(runId);
+    try {
+      await this.assertExecutionLease(lease);
+      const previous = await this.store.load<ProductionBrief>(runId);
+      const recordPath = this.paidReconciliationPath(runId, draft.reconciliationId.trim());
+      const existingRecord = await readPaidNodeReconciliationRecord(recordPath);
+      if (existingRecord && (
+        existingRecord.reconciliationId !== draft.reconciliationId.trim()
+        || existingRecord.nodeId !== draft.nodeId
+        || existingRecord.outcome !== draft.outcome
+        || existingRecord.taskId !== taskId
+        || existingRecord.expectedRunRevision !== draft.expectedRunRevision
+        || existingRecord.actor !== actor
+        || existingRecord.note !== note
+        || existingRecord.reportedActualCostCny !== draft.actualCostCny
+      )) {
+        throw new Error(`Paid reconciliation '${draft.reconciliationId}' conflicts with its persisted request.`);
+      }
+      if (existingRecord?.status === "completed") return previous;
+      if (existingRecord?.status === "in_progress" && previous.revision !== existingRecord.expectedRunRevision) {
+        const currentNode = previous.nodeRuns.find((node) => node.nodeId === draft.nodeId);
+        if (!currentNode?.outcomeUncertain) {
+          await this.assertExecutionLease(lease);
+          await writePaidNodeReconciliationRecord(recordPath, {
+            ...existingRecord,
+            status: "completed",
+            resultingRunRevision: previous.revision,
+          });
+          return previous;
+        }
+      }
+      if (!existingRecord && previous.revision !== draft.expectedRunRevision) {
+        throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
+      }
+      const previousNode = previous.nodeRuns.find((node) => node.nodeId === draft.nodeId);
+      if (!previousNode || previousNode.status !== "failed" || !previousNode.outcomeUncertain) {
+        throw new Error(`Node '${draft.nodeId}' has no uncertain paid-provider outcome to reconcile.`);
+      }
+      if (draft.nodeId !== "assets" && draft.nodeId !== "voice" && !manualResolution) {
+        throw new PaidOperationManualReconciliationError(draft.nodeId, []);
+      }
+      const operationId = previousNode.operationRequestId;
+      const nodeDirectory = path.join(this.runsRoot, runId, "nodes", draft.nodeId);
+      let items = operationId
+        && draft.nodeId === "assets"
+        ? (await inspectPaidAssetLedger(nodeDirectory)).filter((item) => item.operationId === operationId)
+        : [];
+      let voiceOperation = operationId && draft.nodeId === "voice"
+        ? await readPaidVoiceOperation(nodeDirectory, operationId)
+        : undefined;
+      let resumeOriginalOperation = false;
+      if (draft.outcome === "resume_original" || draft.outcome === "requote") {
+        if (!operationId) {
+          throw new PaidOperationManualReconciliationError(draft.nodeId, items);
+        }
+        if (draft.nodeId === "assets") {
+          if (items.length === 0) throw new PaidOperationManualReconciliationError(draft.nodeId, items);
+          const missingTaskItems = items.filter((item) => (
+            (item.state === "submitted" || item.state === "unknown") && !item.taskId
+          ));
+          const matchingTaskItems = taskId ? items.filter((item) => item.taskId === taskId) : [];
+          if (taskId && !(
+            (missingTaskItems.length === 1 && matchingTaskItems.length === 0)
+            || (missingTaskItems.length === 0 && matchingTaskItems.length === 1)
+          )) {
+            throw new Error("A provider task id can only be attached when exactly one unresolved paid item is missing it.");
+          }
+          const missingQueryableTask = items.some((item) => (
+            (item.state === "submitted" || item.state === "unknown")
+            && !item.taskId
+            && (!taskId || item.itemRequestId !== missingTaskItems[0]?.itemRequestId)
+          ) || (
+            item.state === "provider_succeeded" && (!item.taskId || !item.resultUrl)
+          ));
+          if (missingQueryableTask) {
+            throw new PaidOperationManualReconciliationError(draft.nodeId, items);
+          }
+          resumeOriginalOperation = items.some((item) => (
+            item.state === "submitted"
+            || item.state === "provider_succeeded"
+            || item.state === "unknown"
+          )) || items.every((item) => item.state === "materialized");
+        } else if (draft.nodeId === "voice") {
+          if (!voiceOperation || !canResumePaidVoiceOperation(voiceOperation)) {
+            throw new PaidOperationManualReconciliationError(draft.nodeId, []);
+          }
+          if (taskId) throw new Error("Voice reconciliation does not accept a Provider task id.");
+          resumeOriginalOperation = true;
+        } else {
+          throw new PaidOperationManualReconciliationError(draft.nodeId, []);
+        }
+        const resolvedOutcome = resumeOriginalOperation ? "resume_original" : "requote";
+        if (draft.outcome !== resolvedOutcome) {
+          throw new Error(
+            `Paid reconciliation '${draft.reconciliationId}' requested '${draft.outcome}' but the ledger requires '${resolvedOutcome}'.`,
+          );
+        }
+      }
+      const confirmedActualCostCny = draft.outcome === "confirmed_charged"
+        ? draft.actualCostCny ?? originalPaidEstimate(previous, previousNode)
+        : undefined;
+      if (draft.outcome === "confirmed_charged" && confirmedActualCostCny === undefined) {
+        throw new Error("Paid reconciliation actual cost is required because the original estimate is unavailable.");
+      }
+      const reconciliationRecord: PaidNodeReconciliationRecord = existingRecord ?? {
+        version: "video-factory/paid-reconciliation-v1",
+        reconciliationId: draft.reconciliationId.trim(),
+        nodeId: draft.nodeId,
+        outcome: draft.outcome,
+        ...(taskId ? { taskId } : {}),
+        ...(actor ? { actor } : {}),
+        ...(note ? { note } : {}),
+        ...(confirmedActualCostCny !== undefined ? { actualCostCny: confirmedActualCostCny } : {}),
+        ...(draft.actualCostCny !== undefined ? { reportedActualCostCny: draft.actualCostCny } : {}),
+        expectedRunRevision: previous.revision,
+        status: "in_progress",
+        createdAt: this.clock(),
+      };
+      if (!existingRecord) {
+        await this.assertExecutionLease(lease);
+        await writePaidNodeReconciliationRecord(recordPath, reconciliationRecord);
+      }
+      if (draft.outcome === "confirmed_charged") {
+        const result = applyConfirmedChargedResolution(
+          previous,
+          draft.nodeId,
+          operationId,
+          confirmedActualCostCny!,
+          draft.actualCostCny !== undefined,
+          this.clock(),
+        );
+        await this.assertExecutionLease(lease);
+        await this.store.save(result, previous.revision);
+        await this.assertExecutionLease(lease);
+        await writePaidNodeReconciliationRecord(recordPath, {
+          ...reconciliationRecord,
+          status: "completed",
+          resultingRunRevision: result.revision,
+        });
+        return result;
+      }
+      if (taskId && operationId) {
+        if (draft.nodeId !== "assets") throw new Error("A provider task id can only reconcile a paid asset operation.");
+        await this.assertExecutionLease(lease);
+        items = await attachPaidAssetTaskId(nodeDirectory, operationId, taskId, items);
+      }
+      if (draft.outcome === "confirmed_not_charged" && operationId && items.length > 0) {
+        await this.assertExecutionLease(lease);
+        await markPaidAssetItemsNotCharged(nodeDirectory, operationId);
+        items = (await inspectPaidAssetLedger(nodeDirectory)).filter((item) => item.operationId === operationId);
+      }
+      if (draft.outcome === "confirmed_not_charged" && voiceOperation) {
+        await this.assertExecutionLease(lease);
+        voiceOperation = await markPaidVoiceItemsNotCharged(nodeDirectory, voiceOperation);
+        resumeOriginalOperation = true;
+      }
+      const retrySource = structuredClone(previous);
+      const settlement = draft.nodeId === "assets"
+        ? paidAssetSettlement(items)
+        : draft.nodeId === "voice" && voiceOperation
+          ? paidVoiceSettlement(voiceOperation)
+          : { actualCostCny: 0, meteredAttemptCount: 0 };
+      settlePaidOperationReceipt(
+        retrySource,
+        draft.nodeId,
+        operationId,
+        settlement.actualCostCny,
+        settlement.meteredAttemptCount,
+        this.clock(),
+      );
+      const retryNode = retrySource.nodeRuns.find((node) => node.nodeId === draft.nodeId)!;
+      delete retryNode.outcomeUncertain;
+      if (resumeOriginalOperation) {
+        retryNode.interrupted = true;
+      } else {
+        delete retryNode.interrupted;
+        delete retryNode.operationRequestId;
+      }
+
+      const brief = parsePersistedBrief(retrySource.initialInput);
+      let persisted = false;
+      const checkpoint = async (run: WorkflowRun<ProductionBrief>) => {
+        await this.assertExecutionLease(lease);
+        if (!persisted) {
+          await this.store.save(run, previous.revision);
+          persisted = true;
+          return;
+        }
+        await this.store.checkpoint(run);
+      };
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.consumePauseRequest(runId),
+      });
+      const result = await runner.retryFailedNode(
+        this.createWorkflow(brief),
+        withPersistedBrief(retrySource, brief),
+        draft.nodeId,
+      );
+      if (!persisted) {
+        await this.assertExecutionLease(lease);
+        await this.store.save(result, previous.revision);
+      }
+      await this.assertExecutionLease(lease);
+      await writePaidNodeReconciliationRecord(recordPath, {
+        ...reconciliationRecord,
+        status: "completed",
+        resultingRunRevision: result.revision,
+      });
+      return result;
+    } finally {
+      await this.releaseExecutionLease(lease);
+    }
+  }
+
+  async inspectPaidNode(runId: string, nodeId: string): Promise<ProductionPaidNodeSummary> {
+    const run = await this.store.load<ProductionBrief>(runId);
+    const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+    if (!node) throw new Error(`Unknown workflow node '${nodeId}'.`);
+    const operationId = node.operationRequestId;
+    if (!operationId) {
+      return { nodeId, requiresManualReconciliation: true, items: [] };
+    }
+    const nodeDirectory = path.join(this.runsRoot, runId, "nodes", nodeId);
+    if (nodeId === "voice") {
+      const voiceOperation = await readPaidVoiceOperation(nodeDirectory, operationId);
+      const resumable = voiceOperation ? canResumePaidVoiceOperation(voiceOperation) : false;
+      return {
+        nodeId,
+        operationId,
+        ...(resumable ? { recommendedOutcome: "resume_original" as const } : {}),
+        requiresManualReconciliation: !resumable,
+        items: [],
+      };
+    }
+    if (nodeId !== "assets") return { nodeId, operationId, requiresManualReconciliation: true, items: [] };
+    const ledgerItems = (await inspectPaidAssetLedger(
+      nodeDirectory,
+    )).filter((item) => item.operationId === operationId);
+    const requiresManualReconciliation = ledgerItems.length === 0 || ledgerItems.some((item) => (
+      (item.state === "submitted" || item.state === "unknown") && !item.taskId
+    ) || (
+      item.state === "provider_succeeded" && (!item.taskId || !item.resultUrl)
+    ));
+    const resumeOriginalOperation = ledgerItems.some((item) => (
+      item.state === "submitted"
+      || item.state === "provider_succeeded"
+      || item.state === "unknown"
+    )) || ledgerItems.every((item) => item.state === "materialized");
+    return {
+      nodeId,
+      operationId,
+      ...(!requiresManualReconciliation
+        ? { recommendedOutcome: resumeOriginalOperation ? "resume_original" as const : "requote" as const }
+        : {}),
+      requiresManualReconciliation,
+      items: ledgerItems.map((item) => ({
+        operationId: item.operationId,
+        itemRequestId: item.itemRequestId,
+        quoteItemId: item.quoteItemId,
+        scenePosition: item.scenePosition,
+        executorProviderId: item.executorProviderId,
+        providerId: item.providerId,
+        modelId: item.modelId,
+        state: item.state,
+        estimatedCostCny: item.estimatedCostCny,
+        ...(item.taskId ? { taskId: item.taskId } : {}),
+        ...(item.actualCostCny !== undefined ? { actualCostCny: item.actualCostCny } : {}),
+        ...(item.actualCostSource ? { actualCostSource: item.actualCostSource } : {}),
+        ...(item.error ? { error: item.error } : {}),
+      })),
+    };
+  }
+
+  private paidReconciliationPath(runId: string, reconciliationId: string): string {
+    const name = createHash("sha256").update(reconciliationId).digest("hex");
+    return path.join(this.store.runDirectory(runId), ".paid-reconciliations", `${name}.json`);
   }
 
   async dispatchRetryFailedNode(
@@ -580,11 +1127,13 @@ export class ProductionPipeline {
       checkpoint: (run: WorkflowRun<ProductionBrief>) => Promise<void>,
     ) => Promise<WorkflowRun<ProductionBrief>>,
   ): Promise<WorkflowRun<ProductionBrief>> {
-    const lease = await this.acquireExecutionLease(runId, true);
+    const lease = await this.acquireExecutionLease(runId);
     try {
+      await this.assertExecutionLease(lease);
       const previous = await this.store.load<ProductionBrief>(runId);
       let persisted = false;
       const checkpoint = async (run: WorkflowRun<ProductionBrief>) => {
+        await this.assertExecutionLease(lease);
         if (!persisted) {
           await this.store.save(run, previous.revision);
           persisted = true;
@@ -593,7 +1142,10 @@ export class ProductionPipeline {
         await this.store.checkpoint(run);
       };
       const result = await transition(previous, checkpoint);
-      if (!persisted) await this.store.save(result, previous.revision);
+      if (!persisted) {
+        await this.assertExecutionLease(lease);
+        await this.store.save(result, previous.revision);
+      }
       return result;
     } finally {
       await this.releaseExecutionLease(lease);
@@ -608,9 +1160,10 @@ export class ProductionPipeline {
     ) => Promise<WorkflowRun<ProductionBrief>>,
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun> {
-    const lease = await this.acquireExecutionLease(runId, true);
+    const lease = await this.acquireExecutionLease(runId);
     let previous: WorkflowRun<ProductionBrief>;
     try {
+      await this.assertExecutionLease(lease);
       previous = await this.store.load<ProductionBrief>(runId);
     } catch (error) {
       await this.releaseExecutionLease(lease);
@@ -625,6 +1178,7 @@ export class ProductionPipeline {
       rejectCheckpoint = reject;
     });
     const checkpoint = async (run: WorkflowRun<ProductionBrief>) => {
+      await this.assertExecutionLease(lease);
       if (!persisted) {
         await this.store.save(run, previous.revision);
         persisted = true;
@@ -637,6 +1191,7 @@ export class ProductionPipeline {
     const completion = transition(previous, checkpoint).then(
       async (run) => {
         if (!persisted) {
+          await this.assertExecutionLease(lease);
           await this.store.save(run, previous.revision);
           persisted = true;
           await notifyListener(listener, run);
@@ -1118,19 +1673,173 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
   get modelId(): string { return this.config.metadata?.modelId ?? this.id; }
   get transport(): ProductionProviderRuntimeMetadata["transport"] { return this.config.metadata?.transport ?? "local_process"; }
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.config.metadata?.billing ?? "local_compute"; }
+  get approvalPolicy(): ApprovalPolicy { return this.config.metadata?.approvalPolicy ?? (this.billing === "metered" ? "manual" : "none"); }
   get configurationSource(): ExecutionConfigurationSource { return this.config.configurationSource; }
   get parameters(): Record<string, ExecutionParameterValue> { return receiptParameters(this.config.parameters); }
   get estimatedCostCny(): number { return this.config.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number {
     if (this.config.metadata?.billing !== "metered") return 0;
-    return this.config.metadata.billingUnit === "run"
-      ? this.config.metadata.estimatedCostCny ?? 0
-      : typeof this.config.parameters.maxCostCny === "number" ? this.config.parameters.maxCostCny : 0;
+    const configuredLimit = this.config.parameters.maxCostCny;
+    if (typeof configuredLimit === "number" && Number.isFinite(configuredLimit) && configuredLimit > 0) {
+      return configuredLimit;
+    }
+    return roundCurrency((this.config.metadata.estimatedCostCny ?? 0) * this.maxAttempts);
   }
   get maxAttempts(): number {
     return this.config.metadata?.billing === "metered" && typeof this.config.metadata.maxAttempts === "number"
       ? this.config.metadata.maxAttempts
       : 1;
+  }
+
+  async quoteSpend(input: Record<string, unknown>, context: WorkflowContext): Promise<SpendQuote> {
+    if (this.capability !== "asset.prepare") {
+      return { estimatedCostCny: this.estimatedCostCny, maxCostCny: this.maxCostCny };
+    }
+    const modelSelections = stringRecord(this.config.parameters.modelSelections, "modelSelections");
+    if (this.id === "ai-shot-router-v1") {
+      const scriptPath = requiredOutputString(input, "scriptPath");
+      const directorPlanPath = requiredOutputString(input, "directorPlanPath");
+      const sceneDurations = await readScriptSceneDurations(scriptPath);
+      const directorPlan = requireOutputRecord(JSON.parse(await readFile(directorPlanPath, "utf8")), "director plan");
+      if (!Array.isArray(directorPlan.shots)) throw new Error("Director plan shots must be an array before quoting assets.");
+      const items = directorPlan.shots.flatMap((entry, index) => {
+        const shot = requireOutputRecord(entry, `director plan shot ${index + 1}`);
+        const directorEstimatedCostCny = Number(shot.estimatedCostCny);
+        if (!Number.isFinite(directorEstimatedCostCny) || directorEstimatedCostCny < 0) {
+          throw new Error(`Director plan shot ${index + 1} has an invalid server cost.`);
+        }
+        const scenePosition = Number(shot.scenePosition);
+        if (!Number.isInteger(scenePosition) || scenePosition < 1) {
+          throw new Error(`Director plan shot ${index + 1} has an invalid scene position.`);
+        }
+        const reuseFromScenePosition = typeof shot.reuseFromScenePosition === "number"
+          ? shot.reuseFromScenePosition
+          : undefined;
+        if (assetReuseSourceScenePosition({
+          ...(reuseFromScenePosition !== undefined ? { reuseFromScenePosition } : {}),
+          query: typeof shot.query === "string" ? shot.query : "",
+        }) !== undefined || directorEstimatedCostCny === 0) return [];
+        const providerId = requiredOutputString(shot, "preferredProviderId");
+        const modelId = modelSelections[providerId];
+        if (!modelId) throw new Error(`Paid asset provider '${providerId}' has no resolved model for quoting.`);
+        const sceneDuration = sceneDurations.get(scenePosition);
+        if (sceneDuration === undefined) {
+          throw new Error(`Director plan shot ${scenePosition} has no matching script scene for quoting.`);
+        }
+        return [{
+          id: `scene-${scenePosition}`,
+          label: `镜头 ${scenePosition}`,
+          providerId,
+          modelId,
+          estimatedCostCny: this.assetEstimatedCostCny(
+            providerId,
+            modelId,
+            sceneDuration,
+            directorEstimatedCostCny,
+          ),
+        }];
+      });
+      const reconciledItems = await this.incrementalAssetQuoteItems(
+        items,
+        [scriptPath, directorPlanPath],
+        context,
+      );
+      if (reconciledItems.reconciliationRequired) {
+        return { estimatedCostCny: 0, maxCostCny: 0, requiresAuthorization: false };
+      }
+      if (reconciledItems.items.length === 0) {
+        return { estimatedCostCny: 0, maxCostCny: 0, requiresAuthorization: false };
+      }
+      const estimatedCostCny = roundCurrency(reconciledItems.items.reduce((sum, item) => sum + item.estimatedCostCny, 0));
+      return {
+        estimatedCostCny,
+        maxCostCny: roundCurrency(estimatedCostCny * this.maxAttempts),
+        items: reconciledItems.items,
+      };
+    }
+
+    const scriptPath = requiredOutputString(input, "scriptPath");
+    const sceneDurations = await readScriptSceneDurations(scriptPath);
+    const script = requireOutputRecord(JSON.parse(await readFile(scriptPath, "utf8")), "script");
+    if (!Array.isArray(script.scenes)) throw new Error("Script scenes must be an array before quoting assets.");
+    const items = script.scenes.flatMap((entry, index) => {
+      const scene = requireOutputRecord(entry, `script scene ${index + 1}`);
+      if (scene.visual_strategy === "local") return [];
+      const scenePosition = Number(scene.position);
+      if (!Number.isInteger(scenePosition) || scenePosition < 1) throw new Error(`Script scene ${index + 1} has an invalid position.`);
+      const sceneDuration = sceneDurations.get(scenePosition);
+      if (sceneDuration === undefined) throw new Error(`Script scene ${index + 1} has no valid duration.`);
+      return [{
+        id: `scene-${scenePosition}`,
+        label: `镜头 ${scenePosition}`,
+        providerId: this.id,
+        modelId: this.modelId,
+        estimatedCostCny: this.assetEstimatedCostCny(
+          this.id,
+          this.modelId,
+          sceneDuration,
+          this.estimatedCostCny,
+        ),
+      }];
+    });
+    const reconciledItems = await this.incrementalAssetQuoteItems(items, [scriptPath], context);
+    if (reconciledItems.reconciliationRequired || reconciledItems.items.length === 0) {
+      return { estimatedCostCny: 0, maxCostCny: 0, requiresAuthorization: false };
+    }
+    const estimatedCostCny = roundCurrency(reconciledItems.items.reduce((sum, item) => sum + item.estimatedCostCny, 0));
+    return {
+      estimatedCostCny,
+      maxCostCny: roundCurrency(estimatedCostCny * this.maxAttempts),
+      items: reconciledItems.items,
+    };
+  }
+
+  private async incrementalAssetQuoteItems(
+    items: NonNullable<SpendQuote["items"]>,
+    sourcePaths: string[],
+    context: WorkflowContext,
+  ): Promise<{ items: NonNullable<SpendQuote["items"]>; reconciliationRequired: boolean }> {
+    const sourceFingerprint = await paidAssetSourceFingerprint(sourcePaths);
+    const ledgerItems = await inspectPaidAssetLedger(
+      path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId),
+      sourceFingerprint,
+    );
+    const matches = (item: NonNullable<SpendQuote["items"]>[number]) => ledgerItems.filter((candidate) => (
+      candidate.quoteItemId === item.id
+      && candidate.providerId === item.providerId
+      && candidate.modelId === item.modelId
+    ));
+    const reusableIds = new Set(items.filter((item) => matches(item).some((candidate) => (
+      candidate.state === "materialized"
+      || candidate.state === "provider_succeeded" && Boolean(candidate.taskId) && Boolean(candidate.resultUrl)
+    ))).map((item) => item.id));
+    const reconciliationRequired = items.some((item) => !reusableIds.has(item.id) && matches(item).some((candidate) => (
+      candidate.state === "submitted"
+      || candidate.state === "unknown"
+      || candidate.state === "provider_succeeded"
+    )));
+    return {
+      items: items.filter((item) => !reusableIds.has(item.id)),
+      reconciliationRequired,
+    };
+  }
+
+  private assetEstimatedCostCny(
+    providerId: string,
+    modelId: string,
+    sceneDurationSeconds: number,
+    fallbackEstimatedCostCny: number,
+  ): number {
+    const metadata = providerId === this.id
+      ? this.config.metadata
+      : this.config.assetRuntimeMetadata?.get(providerId);
+    const profile = metadata?.modelProfiles?.find((candidate) => candidate.modelId === modelId);
+    const estimatedCnyPerClip = profile?.estimatedCostCny ?? metadata?.estimatedCostCny ?? fallbackEstimatedCostCny;
+    return estimateVideoGenerationCostCny(
+      sceneDurationSeconds,
+      estimatedCnyPerClip,
+      videoPricingProfile(profile),
+    );
   }
 
   async run(input: Record<string, unknown>, context: WorkflowContext): Promise<WorkerResponse> {
@@ -1139,11 +1848,26 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
     const parameters: Record<string, unknown> = { ...this.config.parameters, providerId: this.config.id };
     if (this.billing === "metered") {
       const authorization = context.spendAuthorization;
-      if (!authorization || authorization.providerId !== this.id || authorization.modelId !== this.modelId) {
+      const noSpendExecution = context.spendAuthorizationExemptProviderId === this.id;
+      if (!authorization && noSpendExecution) {
+        const quote = await this.quoteSpend(input, context);
+        if (quote.requiresAuthorization !== false) {
+          throw new Error(`Metered provider '${this.id}' no-spend execution no longer matches its current quote.`);
+        }
+        parameters.maxCostCny = 0;
+        parameters.maxAttempts = 0;
+        parameters.estimatedCostCny = 0;
+      } else if (!authorization && this.approvalPolicy === "automatic") {
+        parameters.maxCostCny = this.maxCostCny;
+        parameters.maxAttempts = this.maxAttempts;
+        parameters.estimatedCostCny = this.estimatedCostCny;
+      } else if (!authorization || authorization.providerId !== this.id || authorization.modelId !== this.modelId) {
         throw new Error(`Metered provider '${this.id}' has no matching active authorization.`);
+      } else {
+        parameters.maxCostCny = authorization.maxCostCny;
+        parameters.maxAttempts = authorization.maxAttempts;
+        parameters.estimatedCostCny = this.estimatedCostCny;
       }
-      parameters.maxCostCny = authorization.maxCostCny;
-      parameters.maxAttempts = authorization.maxAttempts;
     }
     const response = await this.worker.run({
       protocolVersion: WORKER_PROTOCOL_VERSION,
@@ -1164,13 +1888,58 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
   }
 }
 
+async function readScriptSceneDurations(scriptPath: string): Promise<Map<number, number>> {
+  const script = requireOutputRecord(JSON.parse(await readFile(scriptPath, "utf8")), "script");
+  if (!Array.isArray(script.scenes)) throw new Error("Script scenes must be an array before quoting assets.");
+  const durations = new Map<number, number>();
+  for (const [index, entry] of script.scenes.entries()) {
+    const scene = requireOutputRecord(entry, `script scene ${index + 1}`);
+    const position = Number(scene.position);
+    const duration = Number(scene.duration);
+    if (!Number.isInteger(position) || position < 1 || durations.has(position)) {
+      throw new Error(`Script scene ${index + 1} has an invalid or duplicate position.`);
+    }
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new Error(`Script scene ${index + 1} has an invalid duration.`);
+    }
+    durations.set(position, duration);
+  }
+  return durations;
+}
+
+function videoPricingProfile(
+  profile: ProductionProviderModelRuntimeMetadata | undefined,
+): VideoGenerationRuntimeProfile | undefined {
+  if (!profile
+    || !profile.taskTypes
+    || !profile.resolutions
+    || profile.minDurationSeconds === undefined
+    || profile.maxDurationSeconds === undefined
+    || profile.supportsAudio === undefined) {
+    return undefined;
+  }
+  return {
+    taskTypes: [...profile.taskTypes],
+    resolutions: [...profile.resolutions],
+    minDurationSeconds: profile.minDurationSeconds,
+    maxDurationSeconds: profile.maxDurationSeconds,
+    supportsAudio: profile.supportsAudio,
+    ...(profile.estimatedCnyPerSecond !== undefined
+      ? { estimatedCnyPerSecond: profile.estimatedCnyPerSecond }
+      : {}),
+    ...(profile.estimatedCnyPerSecondByResolution
+      ? { estimatedCnyPerSecondByResolution: { ...profile.estimatedCnyPerSecondByResolution } }
+      : {}),
+  };
+}
+
 class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, CodexTaskExecution<unknown>> {
   readonly capability: Capability = "storyboard.plan";
   readonly label = "Codex 视觉导演";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
   readonly configurationSource = "system_default" as const;
-  readonly parameters = { promptPack: "video-factory/director-v8" };
+  readonly parameters = { promptPack: "video-factory/director-v9" };
 
   constructor(private readonly agent: VisualDirectorAgent) {}
 
@@ -1227,6 +1996,7 @@ class VisualReviewProvider implements Provider<VisualReviewAgentInput, VisualRev
   get modelId(): string { return this.agent.modelId; }
   get transport(): ProductionProviderRuntimeMetadata["transport"] { return this.metadata?.transport ?? "unix_socket"; }
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
+  get approvalPolicy(): ApprovalPolicy { return this.metadata?.approvalPolicy ?? "none"; }
   get configurationSource(): ExecutionConfigurationSource { return "system_default"; }
   get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v5", agentLoopMaxIterations: 3, independentAudit: true }; }
   get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
@@ -1254,6 +2024,7 @@ class UnavailableVisualReviewProvider implements Provider<VisualReviewAgentInput
   get modelId(): string { return this.metadata?.modelId ?? "configured-model"; }
   get transport(): ProductionProviderRuntimeMetadata["transport"] { return this.metadata?.transport ?? "unix_socket"; }
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
+  get approvalPolicy(): ApprovalPolicy { return this.metadata?.approvalPolicy ?? "none"; }
   get configurationSource(): ExecutionConfigurationSource { return "system_default"; }
   get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
@@ -1516,6 +2287,15 @@ function directorNode(
         capability: "storyboard.plan",
         providerId,
       });
+      const costFeedback = brief.spendFeedback?.slice(-10).reverse().map((feedback) => ({
+        reason: feedback.reason,
+        previousEstimatedCostCny: feedback.previousEstimatedCostCny,
+        ...(feedback.targetEstimatedCostCny !== undefined
+          ? { targetEstimatedCostCny: feedback.targetEstimatedCostCny }
+          : {}),
+        ...(feedback.note ? { note: feedback.note } : {}),
+      }));
+      const directorEconomics = { allowMeteredProviders: brief.economics.allowMeteredProviders };
       const parentArtifactIds = context.artifacts
         .filter((artifact) => artifact.producer && ["script", "reference-grammar"].includes(artifact.producer.nodeId))
         .map((artifact) => artifact.id);
@@ -1536,12 +2316,13 @@ function directorNode(
           },
           scenes,
           assetProviders,
-          economics: brief.economics,
+          economics: directorEconomics,
+          ...(costFeedback?.length ? { costFeedback } : {}),
           agentLoopCheckpoint: nodeAgentLoopCheckpoint(
             runsRoot,
             context.runId,
             "visual-direction",
-            { brief, scenes, assetProviders, economics: brief.economics, ...(referenceGrammar ? { referenceGrammar } : {}) },
+            { brief, scenes, assetProviders, economics: directorEconomics, ...(costFeedback?.length ? { costFeedback } : {}), ...(referenceGrammar ? { referenceGrammar } : {}) },
             VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
           ),
         }, context);
@@ -1569,7 +2350,7 @@ function directorNode(
           selectedCatalog.map((provider) => [provider.id, [...provider.deliveryTypes]]),
         ),
         estimatedCnyPerClip: Object.fromEntries(selectedCatalog.map((provider) => [provider.id, provider.estimatedCnyPerClip ?? 0])),
-        economics: brief.economics,
+        economics: directorEconomics,
       });
       const planPath = path.join(attempt.directory, "director_plan.json");
       const content = `${JSON.stringify(plan, null, 2)}\n`;
@@ -2329,7 +3110,7 @@ function assetSemanticRankNode(
     validateOverride: (output, context) => {
       const value = requireOutputRecord(output, "asset-semantic-rank");
       const reportPath = outputPath(context, "asset-candidates", "candidateSearchPath");
-      const report = parseAssetCandidateReport(JSON.parse(readFileSync(reportPath, "utf8")));
+      const report = parseAssetCandidateReport(JSON.parse(nodeFs.readFileSync(reportPath, "utf8")));
       return {
         ...value,
         candidateRankingPath: requiredOutputString(value, "candidateRankingPath"),
@@ -2350,23 +3131,43 @@ function providerConfigs(brief: ProductionBrief, options: ProductionPipelineOpti
       ? [providerConfig("asset-candidate-search-v1", "asset.search", "asset-candidates")]
       : []),
     providerConfig(brief.providers.assets, "asset.prepare", "assets", {
-      maxPaidShots: brief.economics.maxPaidShots,
-      maxCostCny: brief.economics.maxCostCny,
-      modelSelections: { ...(brief.models ?? {}) },
+      maxCostCny: 0,
+      modelSelections: resolvedAssetModels(brief, runtimeMetadata),
       freeProviderIds: (brief.director?.assetProviderIds ?? []).filter((providerId) =>
         options.assetProviders?.some((provider) => provider.id === providerId && provider.billing === "free")),
-    }, assetMetadata, assetConfigurationSource(brief)),
+    }, assetMetadata, assetConfigurationSource(brief), runtimeMetadata),
     providerConfig(brief.providers.voice, "voice.synthesize", "voice", {
       profileId: brief.voiceDirection.profileId,
       voice: brief.voiceDirection.profileId.slice(brief.voiceDirection.profileId.indexOf(":") + 1),
       rate: brief.voiceDirection.rate,
       pauseScale: brief.voiceDirection.pauseScale,
       masteringPreset: brief.voiceDirection.masteringPreset,
-      maxCostCny: brief.economics.maxCostCny,
+      maxCostCny: 0,
     }, runtimeMetadata.get(brief.providers.voice), modelSourceFor(brief, brief.providers.voice)),
     providerConfig(brief.providers.render, "video.render", "render", {}, runtimeMetadata.get(brief.providers.render), modelSourceFor(brief, brief.providers.render)),
     providerConfig(brief.providers.technicalReview, "quality.review", "technical-review", {}, runtimeMetadata.get(brief.providers.technicalReview), modelSourceFor(brief, brief.providers.technicalReview)),
   ];
+}
+
+function resolvedAssetModels(
+  brief: ProductionBrief,
+  metadata: Map<string, ProductionProviderRuntimeMetadata>,
+): Record<string, string> {
+  const providerIds = brief.director?.assetProviderIds ?? [brief.providers.assets];
+  return Object.fromEntries(providerIds.flatMap((providerId) => {
+    const runtime = metadata.get(providerId);
+    if (!runtime) return [];
+    return [[providerId, resolveRuntimeModel(runtime, brief.models?.[providerId]).modelId]];
+  }));
+}
+
+function stringRecord(value: unknown, field: string): Record<string, string> {
+  if (value === undefined) return {};
+  const input = requireOutputRecord(value, field);
+  return Object.fromEntries(Object.entries(input).map(([key, item]) => {
+    if (typeof item !== "string" || !item.trim()) throw new Error(`${field}.${key} must be a non-empty string.`);
+    return [key, item.trim()];
+  }));
 }
 
 function modelSourceFor(brief: ProductionBrief, providerId: string): ExecutionConfigurationSource {
@@ -2396,7 +3197,7 @@ function resolveAssetRuntimeMetadata(
     catalogById.get(id)?.billing === "metered" || KNOWN_METERED_WORKER_PROVIDER_IDS.has(id));
   const metered = meteredIds.map((id) => {
     const item = metadata.get(id);
-    validateProviderRuntimeMetadata(id, item, true, brief.economics.maxCostCny);
+    validateProviderRuntimeMetadata(id, item, true);
     return resolveRuntimeModel(item!, brief.models?.[id]);
   });
   if (!metered.length) return selected;
@@ -2407,7 +3208,7 @@ function resolveAssetRuntimeMetadata(
     modelId: metered.map((item) => item.modelId).sort().join("+") || "dynamic-router",
     transport: "local_process",
     billing: "metered",
-    estimatedCostCny: roundCurrency(highestUnitCost * brief.economics.maxPaidShots),
+    estimatedCostCny: roundCurrency(highestUnitCost),
     maxAttempts: 1,
   };
 }
@@ -2433,6 +3234,7 @@ function providerConfig(
   parametersOverride: Record<string, unknown> = {},
   metadata?: ProductionProviderRuntimeMetadata,
   configurationSource: ExecutionConfigurationSource = "system_default",
+  assetRuntimeMetadata?: ReadonlyMap<string, ProductionProviderRuntimeMetadata>,
 ): ProviderConfig {
   const known: Record<string, Record<string, Record<string, unknown>>> = {
     "script.draft": {
@@ -2472,9 +3274,16 @@ function providerConfig(
     id,
     metadata,
     KNOWN_METERED_WORKER_PROVIDER_IDS.has(id),
-    parametersOverride.maxCostCny,
   );
-  return { id, capability, nodeId, parameters: { ...parameters, ...parametersOverride }, configurationSource, ...(metadata ? { metadata } : {}) };
+  return {
+    id,
+    capability,
+    nodeId,
+    parameters: { ...parameters, ...parametersOverride },
+    configurationSource,
+    ...(metadata ? { metadata } : {}),
+    ...(assetRuntimeMetadata ? { assetRuntimeMetadata } : {}),
+  };
 }
 
 function receiptParameters(parameters: Record<string, unknown>): Record<string, ExecutionParameterValue> {
@@ -2490,7 +3299,6 @@ function receiptParameters(parameters: Record<string, unknown>): Record<string, 
     "expectedWidth",
     "expectedHeight",
     "production",
-    "maxPaidShots",
     "maxAttempts",
     "limit",
     "freeProviderIds",
@@ -2554,7 +3362,6 @@ function validateProviderRuntimeMetadata(
   providerId: string,
   metadata: ProductionProviderRuntimeMetadata | undefined,
   mustBeMetered: boolean,
-  maxCostCny: unknown,
 ): void {
   if (!metadata) {
     if (mustBeMetered) throw new Error(`Metered provider '${providerId}' requires runtime metadata.`);
@@ -2579,21 +3386,16 @@ function validateProviderRuntimeMetadata(
   ) {
     throw new Error(`Metered provider '${providerId}' requires finite positive cost and attempt limits.`);
   }
-  if (metadata.billingUnit === "run") return;
-  if (typeof maxCostCny !== "number" || !Number.isFinite(maxCostCny) || maxCostCny <= 0) {
-    throw new Error(`Metered provider '${providerId}' requires a finite positive generation limit.`);
-  }
-  if (metadata.estimatedCostCny > maxCostCny) {
-    throw new Error(`Metered provider '${providerId}' estimated cost exceeds the production limit.`);
-  }
 }
 
 function validateVisualReviewRuntimeMetadata(
   providerId: string,
   metadata: ProductionProviderRuntimeMetadata | undefined,
 ): void {
-  if (!KNOWN_METERED_VISUAL_REVIEW_PROVIDER_IDS.has(providerId)) return;
-  validateProviderRuntimeMetadata(providerId, metadata, true, metadata?.estimatedCostCny);
+  if (!KNOWN_SUBSCRIPTION_VISUAL_REVIEW_PROVIDER_IDS.has(providerId)) return;
+  if (!metadata || metadata.billing !== "subscription" || metadata.approvalPolicy !== "none") {
+    throw new Error(`Visual review provider '${providerId}' must use subscription billing without spend approval.`);
+  }
 }
 
 function roundCurrency(value: number): number {
@@ -3486,6 +4288,405 @@ async function verifyArtifactBytes(uri: string, expectedSha256: string, expected
   }
 }
 
+async function readPaidNodeReconciliationRecord(pathname: string): Promise<PaidNodeReconciliationRecord | undefined> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(pathname, "utf8"));
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return undefined;
+    throw error;
+  }
+  const manualResolution = isObjectRecord(value)
+    && (value.outcome === "confirmed_not_charged" || value.outcome === "confirmed_charged");
+  if (!isObjectRecord(value)
+    || value.version !== "video-factory/paid-reconciliation-v1"
+    || typeof value.reconciliationId !== "string"
+    || typeof value.nodeId !== "string"
+    || !["resume_original", "requote", "confirmed_not_charged", "confirmed_charged"].includes(String(value.outcome))
+    || (value.taskId !== undefined && (typeof value.taskId !== "string" || !value.taskId || value.taskId.length > 256))
+    || (value.actor !== undefined && (typeof value.actor !== "string" || !value.actor || value.actor.length > 160))
+    || (value.note !== undefined && (typeof value.note !== "string" || !value.note || value.note.length > 2_000))
+    || (value.actualCostCny !== undefined && (
+      typeof value.actualCostCny !== "number"
+      || !Number.isFinite(value.actualCostCny)
+      || value.actualCostCny < 0
+    ))
+    || (value.reportedActualCostCny !== undefined && (
+      typeof value.reportedActualCostCny !== "number"
+      || !Number.isFinite(value.reportedActualCostCny)
+      || value.reportedActualCostCny < 0
+    ))
+    || (manualResolution && (typeof value.actor !== "string" || typeof value.note !== "string"))
+    || (!manualResolution && (value.actor !== undefined || value.note !== undefined || value.actualCostCny !== undefined))
+    || (value.outcome === "confirmed_charged" && typeof value.actualCostCny !== "number")
+    || (value.outcome !== "confirmed_charged" && value.reportedActualCostCny !== undefined)
+    || (value.outcome !== "resume_original" && value.taskId !== undefined)
+    || !Number.isInteger(value.expectedRunRevision)
+    || (value.status !== "in_progress" && value.status !== "completed")
+    || typeof value.createdAt !== "string"
+    || (value.resultingRunRevision !== undefined && !Number.isInteger(value.resultingRunRevision))) {
+    throw new Error("Paid reconciliation record is incompatible or corrupted.");
+  }
+  return value as unknown as PaidNodeReconciliationRecord;
+}
+
+function originalPaidEstimate(
+  run: WorkflowRun<ProductionBrief>,
+  node: WorkflowRun<ProductionBrief>["nodeRuns"][number],
+): number | undefined {
+  const authorization = run.spendAuthorizations?.find((candidate) => candidate.id === node.spendAuthorizationId);
+  const candidates = [
+    node.spendPlan?.estimatedCostCny,
+    node.executionReceipt?.estimatedCostCny,
+    run.executionPlan?.find((candidate) => candidate.nodeId === node.nodeId)?.estimatedCostCny,
+    authorization?.maxCostCny,
+  ];
+  return candidates.find((candidate): candidate is number => (
+    typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0
+  ));
+}
+
+function applyConfirmedChargedResolution(
+  previous: WorkflowRun<ProductionBrief>,
+  nodeId: string,
+  operationId: string | undefined,
+  actualCostCny: number,
+  providerReportedCost: boolean,
+  reconciledAt: string,
+): WorkflowRun<ProductionBrief> {
+  const run = structuredClone(previous);
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId)!;
+  const executionPlan = run.executionPlan?.find((candidate) => candidate.nodeId === nodeId);
+  const nodeStartedAt = typeof node.startedAt === "string" && node.startedAt ? node.startedAt : undefined;
+  const receiptStartedAt = nodeStartedAt ?? reconciledAt;
+  const authorizationId = node.spendAuthorizationId;
+  const authorization = run.spendAuthorizations?.find((candidate) => candidate.id === authorizationId);
+  const providerId = node.executionReceipt?.providerId ?? executionPlan?.providerId ?? node.spendPlan?.providerId;
+  const modelId = node.executionReceipt?.modelId ?? executionPlan?.modelId ?? node.spendPlan?.modelId;
+  if (!providerId || !modelId) {
+    throw new Error(`Node '${nodeId}' is missing the paid provider identity required for charge reconciliation.`);
+  }
+  const receipt: NonNullable<typeof node.executionReceipt> = {
+    ...(node.executionReceipt ?? executionPlan ?? {
+      providerId,
+      providerLabel: providerId,
+      modelId,
+      transport: "http_api" as const,
+      billing: "metered" as const,
+    }),
+    nodeId,
+    ...(node.role ? { role: node.role } : {}),
+    capability: node.executionReceipt?.capability ?? executionPlan?.capability ?? "asset.prepare",
+    providerId,
+    modelId,
+    billing: "metered",
+    status: "failed",
+    estimatedCostCny: originalPaidEstimate(run, node) ?? actualCostCny,
+    actualCostCny,
+    actualCostSource: providerReportedCost ? "provider_reported" : "configured_rate",
+    meteredAttemptCount: Math.max(1, node.executionReceipt?.meteredAttemptCount ?? 0),
+    meteredFailedAttemptCount: Math.max(1, node.executionReceipt?.meteredFailedAttemptCount ?? 0),
+    ...(operationId ? { requestId: operationId } : {}),
+    ...(authorizationId ? { spendAuthorizationId: authorizationId } : {}),
+    ...(authorization ? { authorizedCostCny: authorization.maxCostCny } : {}),
+    startedAt: receiptStartedAt,
+    finishedAt: reconciledAt,
+  };
+  node.status = "failed";
+  node.executionReceipt = receipt;
+  node.finishedAt = reconciledAt;
+  node.error = "人工已确认计费，但该任务没有可恢复的素材；请调整方案后重新报价。";
+  delete node.outcomeUncertain;
+  delete node.interrupted;
+  delete node.operationRequestId;
+  delete node.spendAuthorizationId;
+  if (authorizationId) {
+    const consumed = (run.consumedSpendAuthorizationIds ??= []);
+    if (!consumed.includes(authorizationId)) consumed.push(authorizationId);
+  }
+  const receipts = (run.executionReceipts ??= []);
+  const existingIndex = receipts.findIndex((candidate) => (
+    candidate.nodeId === nodeId
+    && (
+      (operationId !== undefined && candidate.requestId === operationId)
+      || (nodeStartedAt !== undefined && candidate.startedAt === nodeStartedAt)
+    )
+  ));
+  if (existingIndex >= 0) receipts[existingIndex] = structuredClone(receipt);
+  else receipts.push(structuredClone(receipt));
+  run.revision += 1;
+  run.status = "failed";
+  run.finishedAt = reconciledAt;
+  return run;
+}
+
+function settlePaidOperationReceipt(
+  run: WorkflowRun<ProductionBrief>,
+  nodeId: string,
+  operationId: string | undefined,
+  actualCostCny: number,
+  meteredAttemptCount: number,
+  reconciledAt: string,
+): void {
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId)!;
+  const receipts = (run.executionReceipts ??= []);
+  const existingIndex = operationId
+    ? receipts.findIndex((candidate) => candidate.nodeId === nodeId && candidate.requestId === operationId)
+    : -1;
+  const historical = existingIndex >= 0 ? receipts[existingIndex] : undefined;
+  const executionPlan = run.executionPlan?.find((candidate) => candidate.nodeId === nodeId);
+  const receiptBase = node.executionReceipt ?? historical;
+  const base = receiptBase ?? executionPlan;
+  const providerId = base?.providerId ?? node.spendPlan?.providerId;
+  const modelId = base?.modelId ?? node.spendPlan?.modelId;
+  if (!providerId || !modelId) {
+    throw new Error(`Node '${nodeId}' is missing the paid provider identity required for reconciliation.`);
+  }
+  const authorizationId = node.spendAuthorizationId ?? receiptBase?.spendAuthorizationId;
+  const authorization = run.spendAuthorizations?.find((candidate) => candidate.id === authorizationId);
+  const receipt: NonNullable<typeof node.executionReceipt> = {
+    ...(base ?? {
+      providerId,
+      providerLabel: providerId,
+      modelId,
+      transport: "http_api" as const,
+      billing: "metered" as const,
+    }),
+    nodeId,
+    ...(node.role ? { role: node.role } : {}),
+    capability: base?.capability ?? (nodeId === "voice" ? "voice.synthesize" : "asset.prepare"),
+    providerId,
+    modelId,
+    billing: "metered",
+    status: "failed",
+    estimatedCostCny: originalPaidEstimate(run, node) ?? actualCostCny,
+    actualCostCny: roundCurrency(actualCostCny),
+    actualCostSource: "configured_rate",
+    meteredAttemptCount,
+    meteredFailedAttemptCount: 0,
+    ...(operationId ? { requestId: operationId } : {}),
+    ...(authorizationId ? { spendAuthorizationId: authorizationId } : {}),
+    ...(authorization ? { authorizedCostCny: authorization.maxCostCny } : {}),
+    startedAt: receiptBase?.startedAt ?? node.startedAt,
+    finishedAt: reconciledAt,
+  };
+  node.executionReceipt = structuredClone(receipt);
+  if (existingIndex >= 0) receipts[existingIndex] = structuredClone(receipt);
+  else receipts.push(structuredClone(receipt));
+}
+
+function paidAssetSettlement(items: PaidAssetLedgerItemSummary[]): {
+  actualCostCny: number;
+  meteredAttemptCount: number;
+} {
+  const billedItems = items.filter((item) => !item.carriedForwardFromItemRequestId && (
+    item.state === "materialized"
+    || item.state === "provider_succeeded" && Boolean(item.taskId) && Boolean(item.resultUrl)
+    || item.state === "submitted" && Boolean(item.taskId) && item.actualCostCny !== undefined
+  ));
+  return {
+    actualCostCny: roundCurrency(billedItems.reduce(
+      (sum, item) => sum + (item.actualCostCny ?? item.estimatedCostCny),
+      0,
+    )),
+    meteredAttemptCount: billedItems.length,
+  };
+}
+
+function paidVoiceSettlement(operation: PaidVoiceOperationLedger): {
+  actualCostCny: number;
+  meteredAttemptCount: number;
+} {
+  const hasMaterializedAudio = operation.items.some((item) => item.state === "materialized");
+  return {
+    actualCostCny: hasMaterializedAudio
+      ? roundCurrency(operation.actualCostCny ?? operation.estimatedCostCny)
+      : 0,
+    meteredAttemptCount: hasMaterializedAudio ? 1 : 0,
+  };
+}
+
+function canResumePaidVoiceOperation(operation: PaidVoiceOperationLedger): boolean {
+  return operation.items.length > 0 && operation.items.every((item) => (
+    item.state === "prepared" || item.state === "materialized"
+  ));
+}
+
+async function readPaidVoiceOperation(
+  nodeDirectory: string,
+  operationId: string,
+): Promise<PaidVoiceOperationLedger | undefined> {
+  const pathname = paidVoiceOperationPath(nodeDirectory, operationId);
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(pathname, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (!isObjectRecord(value)
+    || value.version !== "video-factory/paid-operation-v2"
+    || value.operationId !== operationId
+    || typeof value.providerId !== "string"
+    || typeof value.modelId !== "string"
+    || typeof value.completed !== "boolean"
+    || typeof value.estimatedCostCny !== "number"
+    || !Number.isFinite(value.estimatedCostCny)
+    || value.estimatedCostCny < 0
+    || !Array.isArray(value.items)) {
+    throw new Error("Paid voice operation ledger is incompatible or corrupted.");
+  }
+  const states = new Set(["prepared", "submitted", "provider_succeeded", "materialized", "terminal_failed", "unknown"]);
+  for (const item of value.items) {
+    if (!isObjectRecord(item)
+      || typeof item.itemRequestId !== "string"
+      || !states.has(String(item.state))
+      || !Array.isArray(item.stateHistory)
+      || item.stateHistory.some((state) => typeof state !== "string")) {
+      throw new Error("Paid voice operation ledger is incompatible or corrupted.");
+    }
+  }
+  if (value.actualCostCny !== undefined && (
+    typeof value.actualCostCny !== "number"
+    || !Number.isFinite(value.actualCostCny)
+    || value.actualCostCny < 0
+  )) {
+    throw new Error("Paid voice operation ledger has an invalid actual cost.");
+  }
+  return value as unknown as PaidVoiceOperationLedger;
+}
+
+async function markPaidVoiceItemsNotCharged(
+  nodeDirectory: string,
+  operation: PaidVoiceOperationLedger,
+): Promise<PaidVoiceOperationLedger> {
+  const ledger = structuredClone(operation);
+  for (const item of ledger.items) {
+    if (item.state === "materialized") continue;
+    item.state = "prepared";
+    if (item.stateHistory.at(-1) !== "prepared") item.stateHistory.push("prepared");
+    delete (item as PaidVoiceOperationItem & { error?: string }).error;
+  }
+  ledger.completed = ledger.items.every((item) => item.state === "materialized");
+  if (!ledger.items.some((item) => item.state === "materialized")) {
+    ledger.actualCostCny = 0;
+    ledger.actualCostSource = "configured_rate";
+  } else if (ledger.actualCostCny === undefined) {
+    ledger.actualCostCny = ledger.estimatedCostCny;
+    ledger.actualCostSource = "configured_rate";
+  }
+  await writeJsonRecordAtomically(paidVoiceOperationPath(nodeDirectory, ledger.operationId), ledger);
+  return ledger;
+}
+
+function paidVoiceOperationPath(nodeDirectory: string, operationId: string): string {
+  return path.join(
+    nodeDirectory,
+    ".voice-operations",
+    `${createHash("sha256").update(operationId).digest("hex")}.json`,
+  );
+}
+
+async function attachPaidAssetTaskId(
+  nodeDirectory: string,
+  operationId: string,
+  taskId: string,
+  items: PaidAssetLedgerItemSummary[],
+): Promise<PaidAssetLedgerItemSummary[]> {
+  if (items.length === 0) {
+    throw new PaidOperationManualReconciliationError("assets", []);
+  }
+  const missing = items.filter((item) => (
+    (item.state === "submitted" || item.state === "unknown") && !item.taskId
+  ));
+  if (missing.length === 0 && items.filter((item) => item.taskId === taskId).length === 1) {
+    return items;
+  }
+  if (missing.length !== 1) {
+    throw new Error("A provider task id can only be attached when exactly one unresolved paid item is missing it.");
+  }
+  const pathname = path.join(
+    nodeDirectory,
+    ".generation-operations",
+    `${createHash("sha256").update(operationId).digest("hex")}.json`,
+  );
+  const ledger = JSON.parse(await readFile(pathname, "utf8")) as {
+    version?: unknown;
+    operationId?: unknown;
+    items?: unknown;
+  };
+  if (ledger.version !== "video-factory/paid-operation-v2"
+    || ledger.operationId !== operationId
+    || !Array.isArray(ledger.items)) {
+    throw new Error("Paid operation ledger is incompatible or corrupted.");
+  }
+  const item = ledger.items.find((candidate): candidate is Record<string, unknown> => (
+    isObjectRecord(candidate) && candidate.itemRequestId === missing[0]!.itemRequestId
+  ));
+  if (!item || (item.state !== "submitted" && item.state !== "unknown") || item.taskId !== undefined) {
+    throw new Error("Paid operation ledger changed while attaching its provider task id.");
+  }
+  item.taskId = taskId;
+  await writeJsonRecordAtomically(pathname, ledger);
+  return (await inspectPaidAssetLedger(nodeDirectory)).filter((candidate) => candidate.operationId === operationId);
+}
+
+async function markPaidAssetItemsNotCharged(nodeDirectory: string, operationId: string): Promise<void> {
+  const pathname = path.join(
+    nodeDirectory,
+    ".generation-operations",
+    `${createHash("sha256").update(operationId).digest("hex")}.json`,
+  );
+  const ledger = JSON.parse(await readFile(pathname, "utf8")) as {
+    version?: unknown;
+    operationId?: unknown;
+    completed?: unknown;
+    items?: unknown;
+  };
+  if (ledger.version !== "video-factory/paid-operation-v2"
+    || ledger.operationId !== operationId
+    || !Array.isArray(ledger.items)) {
+    throw new Error("Paid operation ledger is incompatible or corrupted.");
+  }
+  for (const candidate of ledger.items) {
+    if (!isObjectRecord(candidate)) throw new Error("Paid operation ledger is incompatible or corrupted.");
+    if (candidate.state === "submitted"
+      || candidate.state === "unknown"
+      || candidate.state === "provider_succeeded" && (!candidate.taskId || !candidate.resultUrl)) {
+      candidate.state = "terminal_failed";
+      candidate.error = "Manual reconciliation confirmed that this provider task was not charged.";
+      delete candidate.actualCostCny;
+      delete candidate.actualCostSource;
+    }
+  }
+  ledger.completed = false;
+  await writeJsonRecordAtomically(pathname, ledger);
+}
+
+async function writeJsonRecordAtomically(pathname: string, value: unknown): Promise<void> {
+  const temporary = `${pathname}.tmp-${process.pid}-${randomUUID()}`;
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  try {
+    await rename(temporary, pathname);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+async function writePaidNodeReconciliationRecord(
+  pathname: string,
+  record: PaidNodeReconciliationRecord,
+): Promise<void> {
+  await mkdir(path.dirname(pathname), { recursive: true });
+  const temporary = `${pathname}.tmp-${process.pid}-${randomUUID()}`;
+  await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  try {
+    await rename(temporary, pathname);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
 async function notifyListener(listener: ProductionRunListener | undefined, run: WorkflowRun<ProductionBrief>): Promise<void> {
   if (!listener) {
     return;
@@ -3504,6 +4705,40 @@ function executionLeasePayload(token: string): string {
     pid: process.pid,
     heartbeatAt: new Date().toISOString(),
   })}\n`;
+}
+
+function executionLeaseFileSystem(
+  handle: Pick<ExecutionLeaseHandle, "path" | "token">,
+  lockPath: string,
+  removal: { acquired: boolean; force: boolean },
+): typeof nodeFs {
+  return {
+    ...nodeFs,
+    rmdir: ((target: nodeFs.PathLike, callback: (error: NodeJS.ErrnoException | null) => void) => {
+      const targetsLeaseLock = path.resolve(String(target)) === path.resolve(lockPath);
+      if (!removal.acquired || removal.force || !targetsLeaseLock) {
+        nodeFs.rmdir(target, callback);
+        return;
+      }
+      try {
+        const current = JSON.parse(nodeFs.readFileSync(handle.path, "utf8")) as { token?: unknown };
+        if (current.token === handle.token) {
+          nodeFs.rmdir(target, callback);
+          return;
+        }
+      } catch {
+        // 所有权无法证明时只注销本进程的 heartbeat，绝不删除可能已属于新进程的锁。
+      }
+      queueMicrotask(() => callback(null));
+    }) as typeof nodeFs.rmdir,
+  };
+}
+
+function executionLeaseLostError(runId: string, cause?: unknown): Error {
+  const error = new Error(`Run '${runId}' lost its execution lease.`);
+  error.name = "ExecutionLeaseLostError";
+  if (cause !== undefined) error.cause = cause;
+  return error;
 }
 
 function hasCode(error: unknown, code: string): boolean {

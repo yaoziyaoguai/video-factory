@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
@@ -82,12 +82,55 @@ interface GenerationJob {
   modelId?: string;
   videoUrl?: string;
   imageUrl?: string;
+  carriedForward?: boolean;
   error?: string;
+}
+
+export type PaidAssetItemState =
+  | "prepared"
+  | "submitted"
+  | "provider_succeeded"
+  | "materialized"
+  | "terminal_failed"
+  | "unknown";
+
+interface PaidAssetOperationItem {
+  itemRequestId: string;
+  quoteItemId: string;
+  inputFingerprint: string;
+  scenePosition: number;
+  executorProviderId: string;
+  providerId: string;
+  modelId: string;
+  sourceFingerprint: string;
+  parameters: Record<string, string | number | boolean>;
+  state: PaidAssetItemState;
+  estimatedCostCny: number;
+  taskId?: string;
+  resultUrl?: string;
+  localPath?: string;
+  sha256?: string;
+  sizeBytes?: number;
+  actualCostCny?: number;
+  actualCostSource?: "configured_rate";
+  carriedForwardFromItemRequestId?: string;
+  error?: string;
+}
+
+interface PaidAssetOperationLedger {
+  version: "video-factory/paid-operation-v2";
+  operationId: string;
+  completed: boolean;
+  items: PaidAssetOperationItem[];
 }
 
 interface RoutedShot {
   scenePosition: number;
+  preferredProviderId: string;
   providerIds: string[];
+  deliveryType?: string;
+  reuseFromScenePosition?: number;
+  query: string;
   generationPrompt: string;
   subject?: string;
   environment?: string;
@@ -110,13 +153,12 @@ interface ResolvedAssetBinding {
     prompt: string,
     onProgress: (progress: VideoGenerationProgress | ImageGenerationProgress) => Promise<void>,
   ): Promise<{ taskId: string; url: string }>;
-}
-
-interface RouteResolutionFailure {
-  scenePosition: number;
-  providerId: string;
-  modelId?: string;
-  reason: string;
+  reconcile?(
+    taskId: string,
+    scene: ScriptScene,
+    prompt: string,
+    onProgress: (progress: VideoGenerationProgress | ImageGenerationProgress) => Promise<void>,
+  ): Promise<{ taskId: string; url: string }>;
 }
 
 const KNOWN_METERED_ASSET_PROVIDERS = new Set([
@@ -195,44 +237,86 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       if (KNOWN_METERED_ASSET_PROVIDERS.has(providerId)) {
         throw new Error(`Metered asset provider '${providerId}' is not configured in this worker.`);
       }
-      return this.options.fallback.run(request);
+      const response = await this.options.fallback.run(request);
+      if (response.status === "succeeded") await assertCompletedWorkerResponse(request, response);
+      return response;
     }
 
-    const maxPaidShots = boundedInteger(parameters.maxPaidShots, "maxPaidShots", 1, 20);
-    const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0.01, 100_000);
+    const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0, 100_000);
+    const input = requiredRecord(request.input, "Worker input");
+    const scriptPath = requiredString(input.scriptPath, "scriptPath");
+    const outputDir = requiredString(request.outputDir, "outputDir");
+    const script = requiredRecord(JSON.parse(await readFile(scriptPath, "utf8")), "Script");
+    const allScenes = parseScenes(script.scenes);
+    if (allScenes.some((scene) => scene.visualStrategy === "local")) {
+      throw new Error(
+        "Direct local scenes require an explicit director route selecting local-editorial-v1 + editorial_card.",
+      );
+    }
+    const scenes = allScenes;
+    const operationId = requiredString(request.commandId, "commandId");
+    const sourceFingerprint = await paidAssetSourceFingerprint([scriptPath]);
+    const baseItems = scenes.map((scene) => createPaidAssetOperationItem(
+      operationId,
+      scene,
+      providerId,
+      providerId,
+      binding,
+      scene.visualPrompt,
+      sourceFingerprint,
+    ));
+    const preparedOperation = scenes.length
+      ? await preparePaidAssetOperation(outputDir, operationId, baseItems)
+      : undefined;
+    const estimatedCost = preparedOperation?.createCostCny ?? 0;
+    if (estimatedCost > 0 && maxCostCny <= 0) {
+      throw new Error("Paid asset execution requires a positive spend authorization.");
+    }
+    if (estimatedCost > maxCostCny) {
+      throw new Error(`Estimated cost ¥${estimatedCost} exceeds the authorized maximum ¥${maxCostCny}.`);
+    }
+    await mkdir(outputDir, { recursive: true });
+    const directPlanPath = path.join(outputDir, "direct_generation_plan.json");
+    await writeJsonAtomically(directPlanPath, {
+      version: "video-factory/director-plan-v1",
+      shots: scenes.map((scene) => ({
+        scenePosition: scene.position,
+        preferredProviderId: providerId,
+        alternativeProviderIds: [],
+        deliveryType: binding.mediaType === "image" ? "generated_image" : "generated_video",
+        query: scene.visualPrompt,
+        generationPrompt: scene.visualPrompt,
+      })),
+    });
     const baselineRequest = structuredClone(request);
+    baselineRequest.input = {
+      ...input,
+      directorPlanPath: directPlanPath,
+    };
     baselineRequest.parameters = {
       ...parameters,
-      providerId: "local-editorial-v1",
-      provider: "local",
+      provider: "ai-router",
     };
     const baseline = await this.options.fallback.run(baselineRequest);
     if (baseline.status !== "succeeded") {
       return baseline;
     }
-
-    const input = requiredRecord(request.input, "Worker input");
-    const scriptPath = requiredString(input.scriptPath, "scriptPath");
-    const outputDir = requiredString(request.outputDir, "outputDir");
-    const script = requiredRecord(JSON.parse(await readFile(scriptPath, "utf8")), "Script");
-    const scenes = parseScenes(script.scenes).filter((scene) => scene.visualStrategy !== "local").slice(0, maxPaidShots);
-    const estimatedCost = roundMoney(scenes.reduce((sum, scene) => sum + binding.estimateCny(scene), 0));
-    if (estimatedCost > maxCostCny) {
-      throw new Error(`Estimated cost ¥${estimatedCost} exceeds the production budget ¥${maxCostCny}.`);
-    }
     const planPath = requiredString(baseline.output?.assetPlanPath, "assetPlanPath");
     const plan = requiredRecord(JSON.parse(await readFile(planPath, "utf8")), "Asset plan");
     const assets = Array.isArray(plan.scene_assets) ? plan.scene_assets : [];
     const jobsPath = path.join(outputDir, "generation_jobs.json");
-    const operationId = requiredString(request.commandId, "commandId");
-    const ledgerPath = scenes.length > 0 ? generationLedgerPath(outputDir, operationId) : undefined;
+    const ledgerPath = preparedOperation?.ledgerPath;
     const jobs: GenerationJob[] = [];
     const mediaArtifacts: WorkerArtifactDescriptor[] = [];
 
-    if (ledgerPath) await claimGenerationOperation(ledgerPath, operationId);
+    const preparedItems = preparedOperation?.items ?? [];
+    const openedLedger = ledgerPath
+      ? await openGenerationOperation(ledgerPath, operationId, preparedItems)
+      : undefined;
 
     for (const scene of scenes) {
       const sceneCost = binding.estimateCny(scene);
+      const ledgerItem = openedLedger?.ledger.items.find((item) => item.scenePosition === scene.position);
       const job: GenerationJob = {
         scenePosition: scene.position,
         providerId,
@@ -243,16 +327,45 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       };
       jobs.push(job);
       try {
-        const generated = await binding.generate(
-          scene,
-          scene.visualPrompt,
-          async (progress) => {
-            applyProgress(job, progress, sceneCost);
-            await writeJobs(jobsPath, jobs, ledgerPath, operationId);
-          },
-        );
+        const resumedExistingTask = ledgerItem?.state === "provider_succeeded" || ledgerItem?.state === "materialized";
+        const generated = ledgerItem?.state === "provider_succeeded"
+          ? acceptedResultFromLedger(ledgerItem)
+          : ledgerItem?.state === "materialized"
+            ? acceptedResultFromLedger(ledgerItem)
+            : await generatePaidAssetItem({
+                binding,
+                scene,
+                prompt: scene.visualPrompt,
+                job,
+                jobs,
+                jobsPath,
+                sceneCost,
+                ledgerPath,
+                ledger: openedLedger?.ledger,
+                ledgerItem,
+                allowCreate: openedLedger?.created !== false,
+              });
         applyAcceptedTask(job, generated.taskId, sceneCost);
-        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
+        if (resumedExistingTask || ledgerItem?.carriedForwardFromItemRequestId) {
+          job.carriedForward = true;
+          delete job.actualCostCny;
+          delete job.actualCostSource;
+        }
+        await writeJobs(jobsPath, jobs);
+        if (ledgerItem?.state === "materialized") {
+          const materialized = await verifyMaterializedItem(ledgerItem);
+          applySucceeded(job, generated.taskId, generated.url);
+          replaceSceneAsset(plan, assets, scene, generated.taskId, materialized.path, providerId, binding.mediaType);
+          mediaArtifacts.push(await describeFile(
+            materialized.path,
+            "media_asset",
+            materialized.contentType,
+            providerId,
+            request,
+            `AI-generated ${binding.mediaType}; review provider terms, likeness rights, and AIGC disclosure before publishing.`,
+          ));
+          continue;
+        }
         const media = await downloadGeneratedAsset(
           this.fetch,
           generated.url,
@@ -263,8 +376,19 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           this.downloadTimeoutMs,
         );
         applySucceeded(job, generated.taskId, generated.url);
-        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
-        replaceSceneAsset(assets, scene, generated.taskId, media.path, providerId, binding.mediaType);
+        await writeJobs(jobsPath, jobs);
+        if (ledgerPath && openedLedger && ledgerItem) {
+          const descriptor = await fileIdentity(media.path);
+          Object.assign(ledgerItem, {
+            state: "materialized" as const,
+            localPath: media.path,
+            sha256: descriptor.sha256,
+            sizeBytes: descriptor.sizeBytes,
+          });
+          delete ledgerItem.error;
+          await writeGenerationLedger(ledgerPath, openedLedger.ledger);
+        }
+        replaceSceneAsset(plan, assets, scene, generated.taskId, media.path, providerId, binding.mediaType);
         mediaArtifacts.push(await describeFile(
           media.path,
           "media_asset",
@@ -276,17 +400,25 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       } catch (error) {
         job.status = "failed";
         job.error = error instanceof Error ? error.message : String(error);
-        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
+        await writeJobs(jobsPath, jobs);
+        if (ledgerPath && openedLedger && ledgerItem) {
+          ledgerItem.error = job.error;
+          if (ledgerItem.resultUrl && ledgerItem.taskId) {
+            ledgerItem.state = "provider_succeeded";
+          }
+          await writeGenerationLedger(ledgerPath, openedLedger.ledger);
+        }
+        break;
       }
     }
 
     const generatedScenes = jobs.filter((job) => job.status === "succeeded").length;
-    const fallbackScenes = jobs.length - generatedScenes;
+    const failedJob = jobs.find((job) => job.status === "failed");
+    const fallbackScenes = 0;
     const accountedCostCny = configuredCost(jobs);
     plan.scene_assets = assets;
     plan.generation = {
       providerId,
-      maxPaidShots,
       attemptedScenes: jobs.length,
       generatedScenes,
       fallbackScenes,
@@ -296,17 +428,22 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       ...meteredJobDiagnostics(jobs),
       ...actualModelDiagnostics(jobs),
       jobsPath,
-      localBaselinePreserved: true,
+      ...(failedJob ? { failedScenes: 1 } : {}),
     };
+    if (!failedJob) assertCompletedAssetPlan(plan, scenes, undefined, jobs);
     await writeJsonAtomically(planPath, plan);
-    await writeJobs(jobsPath, jobs, ledgerPath, operationId, true);
+    await writeJobs(jobsPath, jobs);
+    if (ledgerPath && openedLedger) {
+      openedLedger.ledger.completed = openedLedger.ledger.items.every((item) => item.state === "materialized");
+      await writeGenerationLedger(ledgerPath, openedLedger.ledger);
+    }
     const planArtifact = await describeFile(
       planPath,
       "asset_plan",
       "application/json",
       providerId,
       request,
-      "Mixed local and AI-generated asset plan with per-scene provenance.",
+      "AI-generated asset plan with per-scene provenance.",
     );
     const jobsArtifact = await describeFile(
       jobsPath,
@@ -316,28 +453,43 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       request,
       "External task IDs and validated successful result URLs retained for audit.",
     );
+    const diagnostics = {
+      ...(baseline.diagnostics ?? {}),
+      providerId,
+      attemptedScenes: jobs.length,
+      generatedScenes,
+      fallbackScenes,
+      estimatedCostCny: estimatedCost,
+      actualCostCny: accountedCostCny,
+      actualCostSource: "configured_rate" as const,
+      ...meteredJobDiagnostics(jobs),
+      ...actualModelDiagnostics(jobs),
+    };
+    if (failedJob) {
+      return {
+        ...baseline,
+        commandId: requiredString(request.commandId, "commandId"),
+        status: "failed",
+        output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath },
+        artifacts: [planArtifact, jobsArtifact],
+        error: {
+          code: "ASSET_GENERATION_FAILED",
+          message: `Scene ${failedJob.scenePosition} generation failed: ${failedJob.error ?? "unknown provider error"}`,
+        },
+        diagnostics,
+      };
+    }
     return {
       ...baseline,
       commandId: requiredString(request.commandId, "commandId"),
       output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath },
       artifacts: [
-        ...baseline.artifacts.filter((artifact) => artifact.uri !== planPath),
+        ...retainedFinalAssetArtifacts(baseline.artifacts, planPath, assets),
         planArtifact,
         jobsArtifact,
         ...mediaArtifacts,
       ],
-      diagnostics: {
-        ...(baseline.diagnostics ?? {}),
-        providerId,
-        attemptedScenes: jobs.length,
-        generatedScenes,
-        fallbackScenes,
-        estimatedCostCny: estimatedCost,
-        actualCostCny: accountedCostCny,
-        actualCostSource: "configured_rate",
-        ...meteredJobDiagnostics(jobs),
-        ...actualModelDiagnostics(jobs),
-      },
+      diagnostics,
     };
   }
 
@@ -349,79 +501,73 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const scriptPath = requiredString(input.scriptPath, "scriptPath");
     const directorPlanPath = requiredString(input.directorPlanPath, "directorPlanPath");
     const outputDir = requiredString(request.outputDir, "outputDir");
-    const maxPaidShots = boundedInteger(parameters.maxPaidShots, "maxPaidShots", 0, 20);
     const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0, 100_000);
     const script = requiredRecord(JSON.parse(await readFile(scriptPath, "utf8")), "Script");
     const scenes = parseScenes(script.scenes);
     const sceneByPosition = new Map(scenes.map((scene) => [scene.position, scene]));
     const directorPlan = requiredRecord(JSON.parse(await readFile(directorPlanPath, "utf8")), "Director plan");
     const routedShots = parseRoutedShots(directorPlan.shots);
+    assertExactScenePositions("Director plan", routedShots.map((shot) => shot.scenePosition), scenes);
     const modelSelections = optionalStringRecord(parameters.modelSelections, "modelSelections");
-    const freeProviderIds = new Set([
-      ...KNOWN_FREE_ASSET_PROVIDERS,
-      ...optionalStringArray(parameters.freeProviderIds, "freeProviderIds"),
-    ]);
-    const resolutionFailures: RouteResolutionFailure[] = [];
+    const byScenePosition = new Map(routedShots.map((route) => [route.scenePosition, route]));
     const generatedRoutes = routedShots.flatMap((route) => {
-      let selected: { providerId: string; modelId?: string; binding: ResolvedAssetBinding } | undefined;
-      let hasLocalFallback = false;
-      for (const providerId of route.providerIds) {
-        if (!KNOWN_METERED_ASSET_PROVIDERS.has(providerId)) {
-          if (freeProviderIds.has(providerId)) {
-            hasLocalFallback = true;
-            break;
-          }
-          resolutionFailures.push({
-            scenePosition: route.scenePosition,
-            providerId,
-            reason: `Provider '${providerId}' is not a recognized asset source.`,
-          });
-          continue;
+      const reuseFrom = assetReuseSourceScenePosition(route);
+      if (reuseFrom !== undefined) {
+        if (reuseFrom >= route.scenePosition || !byScenePosition.has(reuseFrom)) {
+          throw new Error(`Scene ${route.scenePosition} must reuse an earlier director scene, received ${reuseFrom}.`);
         }
-        const modelId = modelSelections[providerId];
-        try {
-          const binding = this.resolveBinding(providerId, modelId);
-          if (binding) {
-            selected = { providerId, ...(modelId ? { modelId } : {}), binding };
-            break;
-          }
-          resolutionFailures.push({
-            scenePosition: route.scenePosition,
-            providerId,
-            ...(modelId ? { modelId } : {}),
-            reason: `Provider '${providerId}' is not configured.`,
-          });
-        } catch (error) {
-          resolutionFailures.push({
-            scenePosition: route.scenePosition,
-            providerId,
-            ...(modelId ? { modelId } : {}),
-            reason: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-      if (!selected) {
-        const failure = [...resolutionFailures].reverse().find((item) => item.scenePosition === route.scenePosition);
-        if (failure && !hasLocalFallback) throw new Error(failure.reason);
         return [];
+      }
+      const providerId = route.preferredProviderId;
+      if (providerId === "local-editorial-v1") {
+        if (route.deliveryType !== "editorial_card") {
+          throw new Error(
+            `Scene ${route.scenePosition} may use local-editorial-v1 only with deliveryType editorial_card.`,
+          );
+        }
+        return [];
+      }
+      if (KNOWN_FREE_ASSET_PROVIDERS.has(providerId)) return [];
+      if (!KNOWN_METERED_ASSET_PROVIDERS.has(providerId)) {
+        throw new Error(`Provider '${providerId}' is not a recognized asset source.`);
       }
       const scene = sceneByPosition.get(route.scenePosition);
       if (!scene) throw new Error(`AI director selected unknown script scene ${route.scenePosition}.`);
-      return [{ route, scene, ...selected }];
+      const modelId = modelSelections[providerId];
+      const binding = this.resolveBinding(providerId, modelId);
+      if (!binding) {
+        throw new Error(`Provider '${providerId}' is not configured.`);
+      }
+      return [{ route, scene, providerId, ...(modelId ? { modelId } : {}), binding }];
     });
-    if (generatedRoutes.length > maxPaidShots) {
-      throw new Error(`AI director selected ${generatedRoutes.length} paid shots, exceeding the limit ${maxPaidShots}.`);
+    const operationId = requiredString(request.commandId, "commandId");
+    const sourceFingerprint = await paidAssetSourceFingerprint([scriptPath, directorPlanPath]);
+    const baseItems = generatedRoutes.map(({ route, scene, binding, providerId }) => createPaidAssetOperationItem(
+      operationId,
+      scene,
+      "ai-shot-router-v1",
+      providerId,
+      binding,
+      compileGenerationPrompt(providerId, route, scene),
+      sourceFingerprint,
+    ));
+    const preparedOperation = generatedRoutes.length
+      ? await preparePaidAssetOperation(outputDir, operationId, baseItems)
+      : undefined;
+    const estimatedCost = preparedOperation?.createCostCny ?? 0;
+    if (estimatedCost > 0 && maxCostCny <= 0) {
+      throw new Error("Paid asset execution requires a positive spend authorization.");
     }
-    const estimatedCost = roundMoney(generatedRoutes.reduce((sum, item) => sum + item.binding.estimateCny(item.scene), 0));
     if (estimatedCost > maxCostCny) {
-      throw new Error(`Estimated cost ¥${estimatedCost} exceeds the production budget ¥${maxCostCny}.`);
+      throw new Error(`Estimated cost ¥${estimatedCost} exceeds the authorized maximum ¥${maxCostCny}.`);
     }
 
     const baseline = await this.options.fallback.run(structuredClone(request));
     if (baseline.status !== "succeeded") {
       return baseline;
     }
-    if (generatedRoutes.length === 0 && resolutionFailures.length === 0) {
+    if (generatedRoutes.length === 0) {
+      await assertCompletedWorkerResponse(request, baseline);
       return {
         ...baseline,
         diagnostics: {
@@ -443,15 +589,18 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const plan = requiredRecord(JSON.parse(await readFile(planPath, "utf8")), "Asset plan");
     const assets = Array.isArray(plan.scene_assets) ? plan.scene_assets : [];
     const jobsPath = path.join(outputDir, "generation_jobs.json");
-    const operationId = requiredString(request.commandId, "commandId");
-    const ledgerPath = generatedRoutes.length > 0 ? generationLedgerPath(outputDir, operationId) : undefined;
+    const ledgerPath = preparedOperation?.ledgerPath;
     const jobs: GenerationJob[] = [];
     const mediaArtifacts: WorkerArtifactDescriptor[] = [];
 
-    if (ledgerPath) await claimGenerationOperation(ledgerPath, operationId);
+    const preparedItems = preparedOperation?.items ?? [];
+    const openedLedger = ledgerPath
+      ? await openGenerationOperation(ledgerPath, operationId, preparedItems)
+      : undefined;
 
     for (const { route, scene, binding, providerId } of generatedRoutes) {
       const sceneCost = binding.estimateCny(scene);
+      const ledgerItem = openedLedger?.ledger.items.find((item) => item.scenePosition === scene.position);
       const job: GenerationJob = {
         scenePosition: scene.position,
         providerId,
@@ -462,16 +611,46 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       };
       jobs.push(job);
       try {
-        const generated = await binding.generate(
-          scene,
-          compileGenerationPrompt(providerId, route, scene),
-          async (progress) => {
-            applyProgress(job, progress, sceneCost);
-            await writeJobs(jobsPath, jobs, ledgerPath, operationId);
-          },
-        );
+        const prompt = compileGenerationPrompt(providerId, route, scene);
+        const resumedExistingTask = ledgerItem?.state === "provider_succeeded" || ledgerItem?.state === "materialized";
+        const generated = ledgerItem?.state === "provider_succeeded"
+          ? acceptedResultFromLedger(ledgerItem)
+          : ledgerItem?.state === "materialized"
+            ? acceptedResultFromLedger(ledgerItem)
+            : await generatePaidAssetItem({
+                binding,
+                scene,
+                prompt,
+                job,
+                jobs,
+                jobsPath,
+                sceneCost,
+                ledgerPath,
+                ledger: openedLedger?.ledger,
+                ledgerItem,
+                allowCreate: openedLedger?.created !== false,
+              });
         applyAcceptedTask(job, generated.taskId, sceneCost);
-        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
+        if (resumedExistingTask || ledgerItem?.carriedForwardFromItemRequestId) {
+          job.carriedForward = true;
+          delete job.actualCostCny;
+          delete job.actualCostSource;
+        }
+        await writeJobs(jobsPath, jobs);
+        if (ledgerItem?.state === "materialized") {
+          const materialized = await verifyMaterializedItem(ledgerItem);
+          applySucceeded(job, generated.taskId, generated.url);
+          replaceSceneAsset(plan, assets, scene, generated.taskId, materialized.path, providerId, binding.mediaType);
+          mediaArtifacts.push(await describeFile(
+            materialized.path,
+            "media_asset",
+            materialized.contentType,
+            providerId,
+            request,
+            `AI-generated ${binding.mediaType} selected by the director plan; review terms, likeness rights, and AIGC disclosure.`,
+          ));
+          continue;
+        }
         const media = await downloadGeneratedAsset(
           this.fetch,
           generated.url,
@@ -482,8 +661,19 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           this.downloadTimeoutMs,
         );
         applySucceeded(job, generated.taskId, generated.url);
-        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
-        replaceSceneAsset(assets, scene, generated.taskId, media.path, providerId, binding.mediaType);
+        await writeJobs(jobsPath, jobs);
+        if (ledgerPath && openedLedger && ledgerItem) {
+          const descriptor = await fileIdentity(media.path);
+          Object.assign(ledgerItem, {
+            state: "materialized" as const,
+            localPath: media.path,
+            sha256: descriptor.sha256,
+            sizeBytes: descriptor.sizeBytes,
+          });
+          delete ledgerItem.error;
+          await writeGenerationLedger(ledgerPath, openedLedger.ledger);
+        }
+        replaceSceneAsset(plan, assets, scene, generated.taskId, media.path, providerId, binding.mediaType);
         mediaArtifacts.push(await describeFile(
           media.path,
           "media_asset",
@@ -495,22 +685,24 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       } catch (error) {
         job.status = "failed";
         job.error = error instanceof Error ? error.message : String(error);
-        await writeJobs(jobsPath, jobs, ledgerPath, operationId);
+        await writeJobs(jobsPath, jobs);
+        if (ledgerPath && openedLedger && ledgerItem) {
+          ledgerItem.error = job.error;
+          if (ledgerItem.resultUrl && ledgerItem.taskId) ledgerItem.state = "provider_succeeded";
+          await writeGenerationLedger(ledgerPath, openedLedger.ledger);
+        }
+        break;
       }
     }
 
     const generatedScenes = jobs.filter((job) => job.status === "succeeded").length;
-    const routedScenePositions = new Set(generatedRoutes.map((item) => item.scene.position));
-    const configurationFallbackScenes = new Set(
-      resolutionFailures.filter((item) => !routedScenePositions.has(item.scenePosition)).map((item) => item.scenePosition),
-    ).size;
-    const fallbackScenes = jobs.filter((job) => job.status !== "succeeded").length + configurationFallbackScenes;
+    const failedJob = jobs.find((job) => job.status === "failed");
+    const fallbackScenes = 0;
     const accountedCostCny = configuredCost(jobs);
     plan.scene_assets = assets;
     plan.generation = {
       providerId: "ai-shot-router-v1",
       directorPlanPath,
-      maxPaidShots,
       attemptedScenes: jobs.length,
       generatedScenes,
       fallbackScenes,
@@ -520,11 +712,15 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       ...meteredJobDiagnostics(jobs),
       ...actualModelDiagnostics(jobs),
       jobsPath,
-      localBaselinePreserved: true,
-      ...(resolutionFailures.length ? { skippedRoutes: resolutionFailures } : {}),
+      ...(failedJob ? { failedScenes: 1 } : {}),
     };
+    if (!failedJob) assertCompletedAssetPlan(plan, scenes, routedShots, jobs);
     await writeJsonAtomically(planPath, plan);
-    await writeJobs(jobsPath, jobs, ledgerPath, operationId, true);
+    await writeJobs(jobsPath, jobs);
+    if (ledgerPath && openedLedger) {
+      openedLedger.ledger.completed = openedLedger.ledger.items.every((item) => item.state === "materialized");
+      await writeGenerationLedger(ledgerPath, openedLedger.ledger);
+    }
     const planArtifact = await describeFile(
       planPath,
       "asset_plan",
@@ -541,29 +737,43 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       request,
       "External generation task IDs retained for audit.",
     );
+    const diagnostics = {
+      ...(baseline.diagnostics ?? {}),
+      providerId: "ai-shot-router-v1",
+      attemptedScenes: jobs.length,
+      generatedScenes,
+      fallbackScenes,
+      estimatedCostCny: estimatedCost,
+      actualCostCny: accountedCostCny,
+      actualCostSource: "configured_rate" as const,
+      ...meteredJobDiagnostics(jobs),
+      ...actualModelDiagnostics(jobs),
+    };
+    if (failedJob) {
+      return {
+        ...baseline,
+        commandId: requiredString(request.commandId, "commandId"),
+        status: "failed",
+        output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath },
+        artifacts: [planArtifact, jobsArtifact],
+        error: {
+          code: "ASSET_GENERATION_FAILED",
+          message: `Scene ${failedJob.scenePosition} generation failed: ${failedJob.error ?? "unknown provider error"}`,
+        },
+        diagnostics,
+      };
+    }
     return {
       ...baseline,
       commandId: requiredString(request.commandId, "commandId"),
       output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath },
       artifacts: [
-        ...baseline.artifacts.filter((artifact) => artifact.uri !== planPath),
+        ...retainedFinalAssetArtifacts(baseline.artifacts, planPath, assets),
         planArtifact,
         jobsArtifact,
         ...mediaArtifacts,
       ],
-      diagnostics: {
-        ...(baseline.diagnostics ?? {}),
-        providerId: "ai-shot-router-v1",
-        attemptedScenes: jobs.length,
-        generatedScenes,
-        fallbackScenes,
-        estimatedCostCny: estimatedCost,
-        actualCostCny: accountedCostCny,
-        actualCostSource: "configured_rate",
-        ...meteredJobDiagnostics(jobs),
-        ...actualModelDiagnostics(jobs),
-        ...(resolutionFailures.length ? { skippedRoutes: resolutionFailures } : {}),
-      },
+      diagnostics,
     };
   }
 
@@ -587,14 +797,11 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       return {
         mediaType: "video",
         estimatedCnyPerAsset,
-        estimateCny: (scene) => {
-          const request = generationRequest(scene, scene.visualPrompt, profile);
-          const perSecond = request.resolution
-            ? profile?.estimatedCnyPerSecondByResolution?.[request.resolution]
-            : undefined;
-          const rate = perSecond ?? profile?.estimatedCnyPerSecond;
-          return rate ? roundMoney(request.durationSeconds * rate) : estimatedCnyPerAsset;
-        },
+        estimateCny: (scene) => estimateVideoGenerationCostCny(
+          scene.duration,
+          estimatedCnyPerAsset,
+          profile,
+        ),
         ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
         generate: async (scene, prompt, onProgress) => {
           const result = await video.adapter.generate({
@@ -603,6 +810,17 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           }, onProgress);
           return { taskId: result.taskId, url: result.videoUrl };
         },
+        ...(video.adapter.reconcile
+          ? {
+              reconcile: async (taskId, scene, prompt, onProgress) => {
+                const result = await video.adapter.reconcile!(taskId, {
+                  ...generationRequest(scene, prompt, profile),
+                  ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
+                }, onProgress);
+                return { taskId: result.taskId, url: result.videoUrl };
+              },
+            }
+          : {}),
       };
     }
     const image = this.imageAdapters.get(providerId);
@@ -619,6 +837,22 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     }
     return undefined;
   }
+}
+
+export function estimateVideoGenerationCostCny(
+  sceneDurationSeconds: number,
+  estimatedCnyPerClip: number,
+  profile?: VideoGenerationRuntimeProfile,
+): number {
+  const minimum = profile?.minDurationSeconds ?? 4;
+  const maximum = profile?.maxDurationSeconds ?? 15;
+  const durationSeconds = Math.max(minimum, Math.min(maximum, Math.round(sceneDurationSeconds)));
+  const resolution = preferredResolution(profile?.resolutions);
+  const perSecond = resolution
+    ? profile?.estimatedCnyPerSecondByResolution?.[resolution]
+    : undefined;
+  const rate = perSecond ?? profile?.estimatedCnyPerSecond;
+  return roundMoney(rate ? durationSeconds * rate : estimatedCnyPerClip);
 }
 
 function optionalStringRecord(value: unknown, field: string): Record<string, string> {
@@ -718,14 +952,152 @@ function applyAcceptedTask(job: GenerationJob, taskId: string, costCny: number):
 }
 
 function configuredCost(jobs: GenerationJob[]): number {
-  return roundMoney(jobs.reduce((sum, job) => sum + (job.actualCostCny ?? 0), 0));
+  return roundMoney(jobs.reduce((sum, job) => sum + (job.carriedForward ? 0 : job.actualCostCny ?? 0), 0));
+}
+
+export function assetReuseSourceScenePosition(
+  route: { reuseFromScenePosition?: number; query: string },
+): number | undefined {
+  if (route.reuseFromScenePosition !== undefined) return route.reuseFromScenePosition;
+  const match = /^REUSE_ONLY\s+scene\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/i.exec(route.query);
+  if (!match) return undefined;
+  const token = match[1]?.toLowerCase() ?? "";
+  const words: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+  };
+  return /^\d+$/.test(token) ? Number(token) : words[token];
+}
+
+function retainedFinalAssetArtifacts(
+  artifacts: WorkerArtifactDescriptor[],
+  assetPlanPath: string,
+  assets: unknown[],
+): WorkerArtifactDescriptor[] {
+  const finalPaths = new Set(
+    assets.flatMap((asset) => {
+      if (typeof asset !== "object" || asset === null || Array.isArray(asset)) return [];
+      const localPath = optionalString((asset as Record<string, unknown>).local_path);
+      return localPath ? [localPath] : [];
+    }),
+  );
+  return artifacts.filter((artifact) => (
+    artifact.uri !== assetPlanPath
+    && (artifact.kind !== "media_asset" || finalPaths.has(artifact.uri))
+  ));
+}
+
+async function assertCompletedWorkerResponse(
+  request: Record<string, unknown>,
+  response: WorkerResponse,
+  jobs: GenerationJob[] = [],
+): Promise<void> {
+  const input = requiredRecord(request.input, "Worker input");
+  const scriptPath = requiredString(input.scriptPath, "scriptPath");
+  const script = requiredRecord(JSON.parse(await readFile(scriptPath, "utf8")), "Script");
+  const scenes = parseScenes(script.scenes);
+  const directorPlanPath = optionalString(input.directorPlanPath);
+  const routedShots = directorPlanPath
+    ? parseRoutedShots(requiredRecord(JSON.parse(await readFile(directorPlanPath, "utf8")), "Director plan").shots)
+    : undefined;
+  const planPath = requiredString(response.output?.assetPlanPath, "assetPlanPath");
+  const plan = requiredRecord(JSON.parse(await readFile(planPath, "utf8")), "Asset plan");
+  assertCompletedAssetPlan(plan, scenes, routedShots, jobs);
+  const finalPaths = new Set((Array.isArray(plan.scene_assets) ? plan.scene_assets : []).flatMap((asset) => {
+    if (typeof asset !== "object" || asset === null || Array.isArray(asset)) return [];
+    const localPath = optionalString((asset as Record<string, unknown>).local_path);
+    return localPath ? [localPath] : [];
+  }));
+  const obsoleteArtifact = response.artifacts.find((artifact) => artifact.kind === "media_asset" && !finalPaths.has(artifact.uri));
+  if (obsoleteArtifact) {
+    throw new Error(`Asset plan includes an obsolete media artifact: ${obsoleteArtifact.uri}`);
+  }
+}
+
+function assertCompletedAssetPlan(
+  plan: Record<string, unknown>,
+  scenes: ScriptScene[],
+  routedShots?: RoutedShot[],
+  jobs: GenerationJob[] = [],
+): void {
+  const assets = Array.isArray(plan.scene_assets) ? plan.scene_assets : [];
+  const routes = Array.isArray(plan.director_routing) ? plan.director_routing : [];
+  const editorialCards = new Set((routedShots ?? [])
+    .filter((shot) => shot.preferredProviderId === "local-editorial-v1" && shot.deliveryType === "editorial_card")
+    .map((shot) => shot.scenePosition));
+  const assetsByScene = new Map<number, Record<string, unknown>>();
+  for (const candidate of assets) {
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+      throw new Error("Asset plan includes an invalid scene asset.");
+    }
+    const asset = candidate as Record<string, unknown>;
+    const scenePosition = Number(asset.scene_position);
+    if (!Number.isInteger(scenePosition) || scenePosition < 1 || assetsByScene.has(scenePosition)) {
+      throw new Error("Asset plan must include exactly one asset per scene.");
+    }
+    if (!optionalString(asset.local_path)) {
+      throw new Error(`Scene ${scenePosition} is still pending generation and cannot be rendered.`);
+    }
+    const usesLocalCard = asset.provider === "local" || asset.source_url === "local://video-factory/card";
+    if (usesLocalCard && !editorialCards.has(scenePosition)) {
+      throw new Error(`Scene ${scenePosition} resolved to a local card without explicit editorial_card authorization.`);
+    }
+    assetsByScene.set(scenePosition, asset);
+  }
+  assertExactScenePositions("Asset plan", [...assetsByScene.keys()], scenes);
+  if (routedShots) {
+    assertExactScenePositions("Director plan", routedShots.map((shot) => shot.scenePosition), scenes);
+    const routePositions = routes.map((candidate) => {
+      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+        throw new Error("Asset plan includes an invalid director route.");
+      }
+      return Number((candidate as Record<string, unknown>).scene_position);
+    });
+    assertExactScenePositions("Asset plan director routes", routePositions, scenes);
+  }
+  for (const candidate of routes) {
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+      throw new Error("Asset plan includes an invalid director route.");
+    }
+    const route = candidate as Record<string, unknown>;
+    const scenePosition = Number(route.scene_position);
+    const asset = assetsByScene.get(scenePosition);
+    if (!asset) throw new Error(`Asset plan is missing a final asset for scene ${scenePosition}.`);
+    if (route.generation_pending === true) {
+      throw new Error(`Scene ${scenePosition} is still pending generation and cannot be rendered.`);
+    }
+  }
+  if (jobs.some((job) => job.status !== "succeeded")) {
+    throw new Error("Asset plan cannot succeed while a generation job is incomplete or failed.");
+  }
+}
+
+function assertExactScenePositions(label: string, positions: number[], scenes: ScriptScene[]): void {
+  const expected = scenes.map((scene) => scene.position);
+  const validPositions = positions.every((position) => Number.isInteger(position) && position > 0);
+  const actualSet = new Set(positions);
+  const expectedSet = new Set(expected);
+  const exact = validPositions
+    && positions.length === actualSet.size
+    && expected.length === expectedSet.size
+    && actualSet.size === expectedSet.size
+    && [...expectedSet].every((position) => actualSet.has(position));
+  if (!exact) throw new Error(`${label} must exactly cover every script scene once.`);
 }
 
 function meteredJobDiagnostics(jobs: GenerationJob[]): {
   meteredAttemptCount: number;
   meteredFailedAttemptCount: number;
 } {
-  const submittedJobs = jobs.filter((job) => Boolean(job.taskId?.trim()));
+  const submittedJobs = jobs.filter((job) => !job.carriedForward && Boolean(job.taskId?.trim()));
   return {
     meteredAttemptCount: submittedJobs.length,
     meteredFailedAttemptCount: submittedJobs.filter((job) => job.status === "failed").length,
@@ -742,12 +1114,21 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
     const shotSize = optionalString(shot.shotSize);
     const camera = optionalString(shot.camera);
     const lighting = optionalString(shot.lighting);
+    const deliveryType = optionalString(shot.deliveryType);
+    const preferredProviderId = requiredString(shot.preferredProviderId, `Director shot ${index + 1} preferredProviderId`);
+    const reuseFromScenePosition = shot.reuseFromScenePosition === undefined
+      ? undefined
+      : boundedInteger(shot.reuseFromScenePosition, `Director shot ${index + 1} reuseFromScenePosition`, 1, 10_000);
     return {
       scenePosition: boundedInteger(shot.scenePosition, `Director shot ${index + 1} scenePosition`, 1, 10_000),
+      preferredProviderId,
       providerIds: [
-        requiredString(shot.preferredProviderId, `Director shot ${index + 1} preferredProviderId`),
+        preferredProviderId,
         ...optionalStringArray(shot.alternativeProviderIds, `Director shot ${index + 1} alternativeProviderIds`),
       ],
+      ...(deliveryType ? { deliveryType } : {}),
+      ...(reuseFromScenePosition ? { reuseFromScenePosition } : {}),
+      query: optionalString(shot.query) ?? "",
       generationPrompt: typeof shot.generationPrompt === "string" && shot.generationPrompt.trim()
         ? shot.generationPrompt.trim()
         : "",
@@ -855,6 +1236,7 @@ function applySucceeded(job: GenerationJob, taskId: string, url: string): void {
 }
 
 function replaceSceneAsset(
+  plan: Record<string, unknown>,
   assets: unknown[],
   scene: ScriptScene,
   taskId: string,
@@ -862,25 +1244,57 @@ function replaceSceneAsset(
   providerId: string,
   mediaType: "image" | "video",
 ): void {
-  const next = {
-    scene_position: scene.position,
-    provider: providerId,
-    asset_id: taskId,
-    media_type: mediaType,
-    width: mediaType === "video" ? 720 : 1440,
-    height: mediaType === "video" ? 1280 : 2560,
-    duration: scene.duration,
-    local_path: clipPath,
-    creator: providerId,
-    license_note: `AI-generated ${mediaType}; provider terms and AIGC disclosure apply.`,
-    query: scene.visualPrompt,
-  };
-  const index = assets.findIndex((asset) => {
-    return typeof asset === "object" && asset !== null && !Array.isArray(asset)
-      && Number((asset as Record<string, unknown>).scene_position) === scene.position;
-  });
-  if (index >= 0) assets[index] = next;
-  else assets.push(next);
+  const routingRecords = Array.isArray(plan.director_routing) ? plan.director_routing : [];
+  const pending = [scene.position];
+  const visited = new Set<number>();
+  while (pending.length > 0) {
+    const scenePosition = pending.shift()!;
+    if (visited.has(scenePosition)) continue;
+    visited.add(scenePosition);
+    const index = assets.findIndex((asset) => {
+      return typeof asset === "object" && asset !== null && !Array.isArray(asset)
+        && Number((asset as Record<string, unknown>).scene_position) === scenePosition;
+    });
+    const existing = index >= 0 && typeof assets[index] === "object" && assets[index] !== null && !Array.isArray(assets[index])
+      ? assets[index] as Record<string, unknown>
+      : undefined;
+    const { source_url: _previousSourceUrl, ...existingFields } = existing ?? {};
+    const next = {
+      ...existingFields,
+      scene_position: scenePosition,
+      provider: providerId,
+      asset_id: taskId,
+      media_type: mediaType,
+      width: mediaType === "video" ? 720 : 1440,
+      height: mediaType === "video" ? 1280 : 2560,
+      duration: existing?.duration ?? scene.duration,
+      local_path: clipPath,
+      creator: providerId,
+      license_note: `AI-generated ${mediaType}; provider terms and AIGC disclosure apply.`,
+      query: existing?.query ?? scene.visualPrompt,
+    };
+    if (index >= 0) assets[index] = next;
+    else assets.push(next);
+
+    const route = routingRecords.find((entry) => {
+      return typeof entry === "object" && entry !== null && !Array.isArray(entry)
+        && Number((entry as Record<string, unknown>).scene_position) === scenePosition;
+    });
+    if (typeof route === "object" && route !== null && !Array.isArray(route)) {
+      const routing = route as Record<string, unknown>;
+      routing.actual_provider_id = providerId;
+      routing.actual_provider = providerId;
+      routing.fallback_used = scenePosition === scene.position && routing.preferred_provider_id !== providerId;
+      routing.generation_pending = false;
+    }
+    for (const entry of routingRecords) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+      const dependent = entry as Record<string, unknown>;
+      if (Number(dependent.reuse_from_scene_position) === scenePosition) {
+        pending.push(Number(dependent.scene_position));
+      }
+    }
+  }
 }
 
 async function downloadGeneratedAsset(
@@ -1106,40 +1520,418 @@ function imageExtension(contentType: string): string {
 async function writeJobs(
   pathname: string,
   jobs: GenerationJob[],
-  ledgerPath?: string,
-  operationId?: string,
-  completed = false,
 ): Promise<void> {
   await writeJsonAtomically(pathname, { version: "video-factory/generation-jobs-v1", jobs });
-  if (ledgerPath && operationId) {
-    await writeJsonAtomically(ledgerPath, {
-      version: "video-factory/generation-operation-v1",
-      operationId,
-      completed,
-      jobs,
-    });
+}
+
+function createPaidAssetOperationItem(
+  operationId: string,
+  scene: ScriptScene,
+  executorProviderId: string,
+  providerId: string,
+  binding: ResolvedAssetBinding,
+  prompt: string,
+  sourceFingerprint: string,
+): PaidAssetOperationItem {
+  const parameters = {
+    mediaType: binding.mediaType,
+    durationSeconds: binding.mediaType === "video" ? generationRequest(scene, prompt).durationSeconds : 1,
+    ratio: "9:16",
+  };
+  const modelId = binding.modelId ?? providerId;
+  const inputFingerprint = createHash("sha256").update(JSON.stringify({
+    scenePosition: scene.position,
+    providerId,
+    modelId,
+    prompt,
+    sourceFingerprint,
+    parameters,
+  })).digest("hex");
+  const itemRequestId = `paid-item-${createHash("sha256")
+    .update(`${operationId}\0${inputFingerprint}`)
+    .digest("hex")
+    .slice(0, 24)}`;
+  return {
+    itemRequestId,
+    quoteItemId: `scene-${scene.position}`,
+    inputFingerprint,
+    scenePosition: scene.position,
+    executorProviderId,
+    providerId,
+    modelId,
+    sourceFingerprint,
+    parameters,
+    state: "prepared",
+    estimatedCostCny: binding.estimateCny(scene),
+  };
+}
+
+async function preparePaidAssetOperation(
+  outputDir: string,
+  operationId: string,
+  items: PaidAssetOperationItem[],
+): Promise<{
+  ledgerPath: string;
+  items: PaidAssetOperationItem[];
+  existing: boolean;
+  createCostCny: number;
+}> {
+  const ledgerPath = generationLedgerPath(outputDir, operationId);
+  try {
+    const persisted = parsePaidAssetOperationLedger(JSON.parse(await readFile(ledgerPath, "utf8")), operationId);
+    if (!paidOperationInputsMatch(persisted.items, items)) {
+      throw new Error("This paid generation operation no longer matches its persisted item inputs.");
+    }
+    return { ledgerPath, items: persisted.items, existing: true, createCostCny: 0 };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+
+  const previousItems = await previousPaidAssetItems(path.dirname(ledgerPath), operationId);
+  const carriedItems = items.map((item) => {
+    const candidates = previousItems.filter((candidate) => candidate.inputFingerprint === item.inputFingerprint);
+    const reusable = candidates.find((candidate) => candidate.state === "materialized")
+      ?? candidates.find((candidate) => (
+        candidate.state === "provider_succeeded"
+        && Boolean(candidate.taskId)
+        && Boolean(candidate.resultUrl)
+      ));
+    if (reusable) {
+      return {
+        ...item,
+        state: reusable.state,
+        ...(reusable.taskId ? { taskId: reusable.taskId } : {}),
+        ...(reusable.resultUrl ? { resultUrl: reusable.resultUrl } : {}),
+        ...(reusable.localPath ? { localPath: reusable.localPath } : {}),
+        ...(reusable.sha256 ? { sha256: reusable.sha256 } : {}),
+        ...(reusable.sizeBytes !== undefined ? { sizeBytes: reusable.sizeBytes } : {}),
+        ...(reusable.actualCostCny !== undefined ? { actualCostCny: reusable.actualCostCny } : {}),
+        ...(reusable.actualCostSource ? { actualCostSource: reusable.actualCostSource } : {}),
+        carriedForwardFromItemRequestId: reusable.itemRequestId,
+      };
+    }
+    const unresolved = candidates.find((candidate) => (
+      candidate.state === "submitted"
+      || candidate.state === "provider_succeeded"
+      || candidate.state === "unknown"
+    ));
+    if (unresolved) {
+      throw new Error(
+        `Paid item '${unresolved.itemRequestId}' still has an unresolved provider outcome and must be reconciled before a new create.`,
+      );
+    }
+    return item;
+  });
+  return {
+    ledgerPath,
+    items: carriedItems,
+    existing: false,
+    createCostCny: roundMoney(carriedItems.reduce(
+      (sum, item) => sum + (item.carriedForwardFromItemRequestId ? 0 : item.estimatedCostCny),
+      0,
+    )),
+  };
+}
+
+async function previousPaidAssetItems(directory: string, operationId: string): Promise<PaidAssetOperationItem[]> {
+  let names: string[];
+  try {
+    names = (await readdir(directory)).filter((name) => name.endsWith(".json")).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const currentName = `${createHash("sha256").update(operationId).digest("hex")}.json`;
+  const items: PaidAssetOperationItem[] = [];
+  for (const name of names) {
+    if (name === currentName) continue;
+    const value = requiredRecord(JSON.parse(await readFile(path.join(directory, name), "utf8")), "Paid operation ledger");
+    if (value.version !== "video-factory/paid-operation-v2" || !Array.isArray(value.items)) continue;
+    items.push(...value.items as PaidAssetOperationItem[]);
+  }
+  return items;
+}
+
+export async function paidAssetSourceFingerprint(paths: readonly string[]): Promise<string> {
+  const hash = createHash("sha256");
+  for (const pathname of paths) {
+    const bytes = await readFile(pathname);
+    hash.update(String(bytes.byteLength));
+    hash.update("\0");
+    hash.update(bytes);
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+export interface PaidAssetLedgerItemSummary {
+  operationId: string;
+  itemRequestId: string;
+  quoteItemId: string;
+  inputFingerprint: string;
+  sourceFingerprint: string;
+  scenePosition: number;
+  executorProviderId: string;
+  providerId: string;
+  modelId: string;
+  state: PaidAssetItemState;
+  estimatedCostCny: number;
+  taskId?: string;
+  resultUrl?: string;
+  localPath?: string;
+  sha256?: string;
+  sizeBytes?: number;
+  actualCostCny?: number;
+  actualCostSource?: "configured_rate";
+  carriedForwardFromItemRequestId?: string;
+  error?: string;
+}
+
+export async function inspectPaidAssetLedger(
+  nodeDirectory: string,
+  sourceFingerprint?: string,
+): Promise<PaidAssetLedgerItemSummary[]> {
+  const directory = path.join(nodeDirectory, ".generation-operations");
+  let names: string[];
+  try {
+    names = (await readdir(directory)).filter((name) => name.endsWith(".json")).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const summaries: PaidAssetLedgerItemSummary[] = [];
+  for (const name of names) {
+    const record = requiredRecord(JSON.parse(await readFile(path.join(directory, name), "utf8")), "Paid operation ledger");
+    if (record.version !== "video-factory/paid-operation-v2" || typeof record.operationId !== "string" || !Array.isArray(record.items)) {
+      continue;
+    }
+    for (const item of record.items as PaidAssetOperationItem[]) {
+      if (sourceFingerprint && item.sourceFingerprint !== sourceFingerprint) continue;
+      summaries.push({
+      operationId: record.operationId,
+      itemRequestId: item.itemRequestId,
+      quoteItemId: item.quoteItemId,
+      inputFingerprint: item.inputFingerprint,
+      sourceFingerprint: item.sourceFingerprint,
+      scenePosition: item.scenePosition,
+      executorProviderId: item.executorProviderId,
+      providerId: item.providerId,
+      modelId: item.modelId,
+      state: item.state,
+      estimatedCostCny: item.estimatedCostCny,
+      ...(item.taskId ? { taskId: item.taskId } : {}),
+      ...(item.resultUrl ? { resultUrl: item.resultUrl } : {}),
+      ...(item.localPath ? { localPath: item.localPath } : {}),
+      ...(item.sha256 ? { sha256: item.sha256 } : {}),
+      ...(item.sizeBytes !== undefined ? { sizeBytes: item.sizeBytes } : {}),
+      ...(item.actualCostCny !== undefined ? { actualCostCny: item.actualCostCny } : {}),
+      ...(item.actualCostSource ? { actualCostSource: item.actualCostSource } : {}),
+      ...(item.carriedForwardFromItemRequestId
+        ? { carriedForwardFromItemRequestId: item.carriedForwardFromItemRequestId }
+        : {}),
+      ...(item.error ? { error: item.error } : {}),
+      });
+    }
+  }
+  return summaries;
+}
+
+async function openGenerationOperation(
+  ledgerPath: string,
+  operationId: string,
+  preparedItems: PaidAssetOperationItem[],
+): Promise<{ ledger: PaidAssetOperationLedger; created: boolean }> {
+  await mkdir(path.dirname(ledgerPath), { recursive: true });
+  const ledger: PaidAssetOperationLedger = {
+    version: "video-factory/paid-operation-v2",
+    operationId,
+    completed: false,
+    items: preparedItems,
+  };
+  try {
+    await writeFile(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    return { ledger, created: true };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const persisted = parsePaidAssetOperationLedger(JSON.parse(await readFile(ledgerPath, "utf8")), operationId);
+  if (!paidOperationInputsMatch(persisted.items, preparedItems)) {
+    throw new Error("This paid generation operation no longer matches its persisted item inputs.");
+  }
+  return { ledger: persisted, created: false };
+}
+
+function parsePaidAssetOperationLedger(value: unknown, operationId: string): PaidAssetOperationLedger {
+  const record = requiredRecord(value, "Paid operation ledger");
+  if (record.version !== "video-factory/paid-operation-v2" || record.operationId !== operationId || !Array.isArray(record.items)) {
+    throw new Error("Paid operation ledger is incompatible or corrupted.");
+  }
+  return record as unknown as PaidAssetOperationLedger;
+}
+
+function paidOperationInputsMatch(
+  persisted: PaidAssetOperationItem[],
+  prepared: PaidAssetOperationItem[],
+): boolean {
+  return persisted.length === prepared.length && prepared.every((item, index) => {
+    const candidate = persisted[index];
+    return candidate?.itemRequestId === item.itemRequestId
+      && candidate.inputFingerprint === item.inputFingerprint
+      && candidate.scenePosition === item.scenePosition
+      && candidate.executorProviderId === item.executorProviderId
+      && candidate.providerId === item.providerId
+      && candidate.modelId === item.modelId
+      && candidate.sourceFingerprint === item.sourceFingerprint;
+  });
+}
+
+async function generatePaidAssetItem(options: {
+  binding: ResolvedAssetBinding;
+  scene: ScriptScene;
+  prompt: string;
+  job: GenerationJob;
+  jobs: GenerationJob[];
+  jobsPath: string;
+  sceneCost: number;
+  ledgerPath: string | undefined;
+  ledger: PaidAssetOperationLedger | undefined;
+  ledgerItem: PaidAssetOperationItem | undefined;
+  allowCreate: boolean;
+}): Promise<{ taskId: string; url: string }> {
+  const { ledgerItem } = options;
+  const recordProgress = async (progress: VideoGenerationProgress | ImageGenerationProgress): Promise<void> => {
+    applyProgress(options.job, progress, options.sceneCost);
+    await writeJobs(options.jobsPath, options.jobs);
+    if (!ledgerItem || !options.ledgerPath || !options.ledger) return;
+    ledgerItem.taskId = progress.taskId;
+    ledgerItem.actualCostCny = roundMoney(options.sceneCost);
+    ledgerItem.actualCostSource = "configured_rate";
+    if (progress.status === "succeeded") {
+      const resultUrl = (progress as VideoGenerationProgress).videoUrl
+        ?? (progress as ImageGenerationProgress).imageUrl;
+      if (resultUrl) ledgerItem.resultUrl = resultUrl;
+      ledgerItem.state = "provider_succeeded";
+    } else if (progress.status === "failed") {
+      ledgerItem.state = "terminal_failed";
+      if (progress.error) ledgerItem.error = progress.error;
+    } else {
+      ledgerItem.state = "submitted";
+    }
+    await writeGenerationLedger(options.ledgerPath, options.ledger);
+  };
+  if (
+    ledgerItem
+    && (ledgerItem.state === "submitted" || ledgerItem.state === "unknown")
+    && ledgerItem.taskId
+    && options.binding.reconcile
+  ) {
+    const reconciled = await options.binding.reconcile(
+      ledgerItem.taskId,
+      options.scene,
+      options.prompt,
+      recordProgress,
+    );
+    ledgerItem.taskId = reconciled.taskId;
+    ledgerItem.resultUrl = reconciled.url;
+    ledgerItem.state = "provider_succeeded";
+    delete ledgerItem.error;
+    if (options.ledgerPath && options.ledger) await writeGenerationLedger(options.ledgerPath, options.ledger);
+    return reconciled;
+  }
+  if (ledgerItem && ledgerItem.state !== "prepared") {
+    if (ledgerItem.state === "submitted" || ledgerItem.state === "unknown") {
+      throw new Error(
+        `Paid item '${ledgerItem.itemRequestId}' has an unresolved provider outcome and cannot be created again.`,
+      );
+    }
+    if (ledgerItem.state === "terminal_failed") {
+      throw new Error(`Paid item '${ledgerItem.itemRequestId}' requires a new spend authorization before another create.`);
+    }
+  }
+  if (ledgerItem && !options.allowCreate) {
+    throw new Error(`Paid item '${ledgerItem.itemRequestId}' was prepared but not submitted; a new spend authorization is required.`);
+  }
+  if (ledgerItem && options.ledgerPath && options.ledger) {
+    ledgerItem.state = "unknown";
+    delete ledgerItem.error;
+    await writeGenerationLedger(options.ledgerPath, options.ledger);
+  }
+  try {
+    const generated = await options.binding.generate(
+      options.scene,
+      options.prompt,
+      recordProgress,
+    );
+    if (ledgerItem && options.ledgerPath && options.ledger) {
+      ledgerItem.taskId = generated.taskId;
+      ledgerItem.resultUrl = generated.url;
+      ledgerItem.state = "provider_succeeded";
+      ledgerItem.actualCostCny = roundMoney(options.sceneCost);
+      ledgerItem.actualCostSource = "configured_rate";
+      delete ledgerItem.error;
+      await writeGenerationLedger(options.ledgerPath, options.ledger);
+    }
+    return generated;
+  } catch (error) {
+    if (ledgerItem && options.ledgerPath && options.ledger) {
+      if (ledgerItem.state !== "terminal_failed" && ledgerItem.state !== "submitted") {
+        ledgerItem.state = "unknown";
+      }
+      ledgerItem.error = error instanceof Error ? error.message : String(error);
+      await writeGenerationLedger(options.ledgerPath, options.ledger);
+    }
+    throw error;
+  }
+}
+
+function acceptedResultFromLedger(item: PaidAssetOperationItem): { taskId: string; url: string } {
+  if (!item.taskId || !item.resultUrl) {
+    throw new Error(`Paid item '${item.itemRequestId}' is missing its accepted task result.`);
+  }
+  return { taskId: item.taskId, url: item.resultUrl };
+}
+
+async function verifyMaterializedItem(
+  item: PaidAssetOperationItem,
+): Promise<{ path: string; contentType: string }> {
+  if (!item.localPath || !item.sha256 || item.sizeBytes === undefined) {
+    throw new Error(`Paid item '${item.itemRequestId}' is missing its materialized file identity.`);
+  }
+  const identity = await fileIdentity(item.localPath);
+  if (identity.sha256 !== item.sha256 || identity.sizeBytes !== item.sizeBytes) {
+    throw new Error(`Paid item '${item.itemRequestId}' materialized file no longer matches its ledger identity.`);
+  }
+  const mediaType = item.parameters.mediaType;
+  return {
+    path: item.localPath,
+    contentType: mediaType === "video" ? "video/mp4" : mediaContentTypeFromPath(item.localPath),
+  };
+}
+
+function mediaContentTypeFromPath(value: string): string {
+  if (value.endsWith(".jpg") || value.endsWith(".jpeg")) return "image/jpeg";
+  if (value.endsWith(".webp")) return "image/webp";
+  return "image/png";
+}
+
+async function fileIdentity(value: string): Promise<{ sha256: string; sizeBytes: number }> {
+  const bytes = await readFile(value);
+  return {
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    sizeBytes: bytes.byteLength,
+  };
+}
+
+async function writeGenerationLedger(pathname: string, ledger: PaidAssetOperationLedger): Promise<void> {
+  await writeJsonAtomically(pathname, ledger);
 }
 
 function generationLedgerPath(outputDir: string, operationId: string): string {
   return path.join(path.dirname(outputDir), ".generation-operations", `${createHash("sha256").update(operationId).digest("hex")}.json`);
-}
-
-async function claimGenerationOperation(ledgerPath: string, operationId: string): Promise<void> {
-  await mkdir(path.dirname(ledgerPath), { recursive: true });
-  try {
-    await writeFile(ledgerPath, `${JSON.stringify({
-      version: "video-factory/generation-operation-v1",
-      operationId,
-      completed: false,
-      jobs: [],
-    }, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new Error("This paid generation operation was already started. Its provider outcome must be reconciled before any new paid attempt; the system will not resubmit it automatically.");
-    }
-    throw error;
-  }
 }
 
 async function writeJsonAtomically(pathname: string, value: unknown): Promise<void> {

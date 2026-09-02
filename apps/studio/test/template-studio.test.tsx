@@ -17,7 +17,7 @@ describe("TemplateGallery", () => {
 
     expect(screen.getByRole("radio", { name: /知识解释/ })).toHaveAttribute("aria-checked", "true");
     expect(screen.getAllByText("开场 / 解释 / 收束")).toHaveLength(2);
-    expect(screen.getAllByText("上限 ¥8")).toHaveLength(2);
+    expect(screen.getAllByText("付费逐项确认")).toHaveLength(2);
     await user.click(screen.getByRole("radio", { name: /照片故事/ }));
     expect(onSelect).toHaveBeenCalledWith(templates[1]);
   });
@@ -54,7 +54,6 @@ function template(
     soundSystem: { voiceIntent: "可信", pace: "medium", musicIntent: "克制" },
     qualityRules: [{ id: "facts", label: "事实", dimension: "factual", required: true, threshold: 80 }],
     capabilityRequirements: [{ capability: "script.draft", required: true }],
-    costPolicy: { currency: "CNY", maxCost: 8, maxPaidShots: 1 },
     createdAt: "2026-08-27T00:00:00.000Z",
     updatedAt: "2026-08-27T00:00:00.000Z",
     builtIn: true,

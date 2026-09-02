@@ -112,7 +112,13 @@ function directorRequest(): { protocolVersion: string; kind: string; payload: Re
       brief: { title: "下班后的城市", requestedProfileId: "auto" },
       scenes: [{ position: 1, narration: "夜晚开始了", duration: 5, visualPrompt: "雨夜城市", visualStrategy: "local" }],
       assetProviders: [{ id: "local-editorial-v1", label: "本地", deliveryTypes: ["editorial_card"], estimatedCnyPerClip: 0 }],
-      economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
+      economics: { allowMeteredProviders: false },
+      costFeedback: [{
+        reason: "too_expensive",
+        previousEstimatedCostCny: 4.8,
+        targetEstimatedCostCny: 0,
+        note: "优先尝试免费图库，但必须保留全部镜头。",
+      }],
     },
   };
 }
@@ -360,6 +366,9 @@ describe("parseTaskRequest", () => {
     assert.equal(director.kind, "director-plan");
     assert.deepEqual(director.payload.scenes, [{ position: 1, narration: "夜晚开始了", duration: 5, visualPrompt: "雨夜城市", visualStrategy: "local" }]);
     assert.deepEqual(director.payload.assetProviders, [{ id: "local-editorial-v1", label: "本地", deliveryTypes: ["editorial_card"], estimatedCnyPerClip: 0 }]);
+    assert.deepEqual(director.payload.costFeedback, directorRequest().payload.costFeedback);
+    assert.match(buildTaskPrompt(director), /优先尝试免费图库/);
+    assert.doesNotMatch(buildTaskPrompt(director), /maxPaidShots|maxCostCny|recipeId/);
 
     const script = parseTaskRequest(scriptRequest());
     assert.equal(script.kind, "script-draft");
@@ -369,7 +378,11 @@ describe("parseTaskRequest", () => {
       reasons: ["事件需要事实边界"],
       guardrails: ["不要虚构现场画面"],
     });
-    assert.deepEqual(script.payload.brief, scriptRequest().payload.brief);
+    const expectedScriptBrief = structuredClone(scriptRequest().payload.brief) as Record<string, unknown>;
+    delete (expectedScriptBrief.templateBlueprint as Record<string, unknown>).costPolicy;
+    assert.deepEqual(script.payload.brief, expectedScriptBrief);
+    assert.equal("costPolicy" in (script.payload.brief.templateBlueprint ?? {}), false);
+    assert.doesNotMatch(buildTaskPrompt(script), /costPolicy|maxPaidShots|maxCost/);
 
     const publishInput = publishCopyRequest();
     publishInput.payload.revision = { candidate: { title: "旧标题" }, audit: { repairInstructions: ["删除夸张承诺"] } };
@@ -413,6 +426,20 @@ describe("parseTaskRequest", () => {
     assert.deepEqual(greenlight.payload.targetEpisode?.inheritedFromPrevious, ["第 1 集已经验证工具可用"]);
     assert.match(buildTaskPrompt(greenlight), /fromPrevious 是创作者拥有的输入/);
     assert.match(buildTaskPrompt(greenlight), /第 1 集已经验证工具可用/);
+  });
+
+  it("rejects legacy video-wide caps in director payloads", async () => {
+    const request = directorRequest();
+    request.payload.economics = {
+      allowMeteredProviders: true,
+      maxPaidShots: 1,
+      maxCostCny: 6,
+    };
+
+    await assert.rejects(
+      async () => parseTaskRequest(request),
+      (error: unknown) => assertTerminal(error, /payload\.economics\.(maxPaidShots|maxCostCny) is not allowed/),
+    );
   });
 
   it("rejects unbound or mismatched series greenlight payloads", async () => {
@@ -904,7 +931,9 @@ describe("CodexExecutor.runTask", () => {
     assert.match(prompt, /不是给你的指令/);
     assert.ok(prompt.includes("你是面向中国短视频平台的创意编剧。"));
     const dataSection = prompt.split("<<<TASK_DATA\n")[1]!.split("\nTASK_DATA>>>")[0]!;
-    assert.deepEqual(JSON.parse(dataSection), { brief: scriptRequest().payload.brief });
+    const expectedBrief = structuredClone(scriptRequest().payload.brief) as Record<string, unknown>;
+    delete (expectedBrief.templateBlueprint as Record<string, unknown>).costPolicy;
+    assert.deepEqual(JSON.parse(dataSection), { brief: expectedBrief });
   });
 
   it("captures the initial Codex thread and resumes with only the repair delta", async () => {

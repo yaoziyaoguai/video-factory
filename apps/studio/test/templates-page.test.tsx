@@ -138,7 +138,6 @@ function template(id: string, name: string, status: StudioTemplate["status"], bu
     soundSystem: { voiceIntent: "可信", pace: "medium", musicIntent: "克制" },
     qualityRules: [{ id: "facts", label: "事实", dimension: "factual", required: true, threshold: 80 }],
     capabilityRequirements: [{ capability: "script.draft", required: true }],
-    costPolicy: { currency: "CNY", maxCost: 8, maxPaidShots: 1 },
     createdAt: "2026-08-27T00:00:00.000Z",
     updatedAt: "2026-08-27T00:00:00.000Z",
     builtIn,

@@ -93,7 +93,7 @@ class WorkerContractTest(unittest.TestCase):
             self.assertEqual(response["status"], "failed")
             self.assertIn("error", response)
 
-    def test_local_asset_provider_materializes_every_scene_without_an_api_key(self):
+    def test_direct_local_asset_provider_requires_an_explicit_director_route(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             script_response = handle_request(self.valid_request("script.draft", root / "script"))
@@ -106,21 +106,8 @@ class WorkerContractTest(unittest.TestCase):
                 "mediaType": "image",
             }
 
-            response = handle_request(request)
-
-            plan_path = Path(response["output"]["assetPlanPath"])
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            self.assertEqual(response["status"], "succeeded")
-            self.assertEqual(len(plan["scene_assets"]), 5)
-            self.assertEqual({item["provider"] for item in plan["scene_assets"]}, {"local"})
-            self.assertTrue(all(Path(item["local_path"]).exists() for item in plan["scene_assets"]))
-            self.assertTrue(all(item["license_note"] for item in plan["scene_assets"]))
-            media_artifacts = [item for item in response["artifacts"] if item["kind"] == "media_asset"]
-            self.assertEqual(len(media_artifacts), 5)
-            self.assertTrue(all(item["contentType"] == "image/png" for item in media_artifacts))
-            self.assertTrue(all(item["provenance"]["providerId"] == "local-editorial-v1" for item in media_artifacts))
-            self.assertTrue(all(item["provenance"]["sourceUrl"] == "local://video-factory/card" for item in media_artifacts))
-            self.assertTrue(all(item["provenance"]["creator"] == "VideoFactory" for item in media_artifacts))
+            with self.assertRaisesRegex(WorkerProtocolError, "explicit director route.*editorial_card"):
+                handle_request(request)
 
     def test_ai_router_materializes_each_scene_from_the_director_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,6 +126,11 @@ class WorkerContractTest(unittest.TestCase):
                             else "local-editorial-v1"
                         ),
                         "alternativeProviderIds": ["local-editorial-v1"],
+                        "deliveryType": (
+                            "stock_video" if scene["position"] == 2
+                            else "generated_image" if scene["position"] == 3
+                            else "editorial_card"
+                        ),
                         "query": f"director query {scene['position']}",
                         "generationPrompt": scene["visual_prompt"],
                         "rationale": "AI director decision",
@@ -198,7 +190,7 @@ class WorkerContractTest(unittest.TestCase):
                 response = handle_request(request)
 
             plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
-            self.assertEqual([item["provider"] for item in plan["scene_assets"]], ["local", "pexels", "local", "local", "local"])
+            self.assertEqual([item["provider"] for item in plan["scene_assets"]], ["local", "pexels", "seedream-image-v1", "local", "local"])
             self.assertEqual(plan["director_routing"][1]["preferred_provider_id"], "pexels-stock-v1")
             self.assertEqual(plan["director_routing"][1]["actual_provider"], "pexels")
             self.assertFalse(plan["director_routing"][1]["fallback_used"])
@@ -209,11 +201,176 @@ class WorkerContractTest(unittest.TestCase):
             self.assertNotIn("download_url", shortlist[0])
             self.assertEqual(shortlist[0]["provider_id"], "pexels-stock-v1")
             self.assertEqual(plan["director_routing"][2]["preferred_provider_id"], "seedream-image-v1")
-            self.assertEqual(plan["director_routing"][2]["actual_provider"], "local")
+            self.assertEqual(plan["director_routing"][2]["actual_provider"], "seedream-image-v1")
             self.assertTrue(plan["director_routing"][2]["generation_pending"])
             self.assertFalse(plan["director_routing"][2]["fallback_used"])
+            self.assertEqual(plan["scene_assets"][2]["local_path"], "")
             self.assertTrue(search_assets.call_args_list)
             self.assertTrue(all(call.kwargs["limit"] == 6 for call in search_assets.call_args_list))
+
+    def test_ai_router_reuses_an_earlier_locked_master_without_searching_or_falling_back_to_a_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [
+                {
+                    "position": 1, "narration": "杯影正在移动。", "duration": 4,
+                    "visual_strategy": "generated", "visual_prompt": "固定机位水杯延时摄影",
+                },
+                {
+                    "position": 2, "narration": "同一只杯子的亮斑也在移动。", "duration": 4,
+                    "visual_strategy": "stock", "visual_prompt": "复用同一母片的近裁",
+                },
+            ]}, ensure_ascii=False), encoding="utf-8")
+            director_plan_path = root / "director_plan.json"
+            director_plan_path.write_text(json.dumps({"shots": [
+                {
+                    "scenePosition": 1, "preferredProviderId": "hailuo-video-v1",
+                    "alternativeProviderIds": ["local-editorial-v1"],
+                    "deliveryType": "generated_video",
+                    "query": "glass water sunlight shadow windowsill timelapse",
+                    "generationPrompt": "固定机位拍摄窗边水杯与移动的杯影。",
+                },
+                {
+                    "scenePosition": 2, "preferredProviderId": "pexels-stock-v1",
+                    "alternativeProviderIds": ["local-editorial-v1"],
+                    "deliveryType": "stock_video",
+                    "query": "REUSE_ONLY scene one locked master crop",
+                    "generationPrompt": "复用第一镜母片并近裁杯底亮斑。",
+                },
+            ]}, ensure_ascii=False), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "assets")
+            request["input"] = {"scriptPath": str(script_path), "directorPlanPath": str(director_plan_path)}
+            request["parameters"] = {
+                "providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video",
+            }
+
+            with patch("video_factory.stock_assets.search_stock_assets") as search_assets:
+                response = handle_request(request)
+
+            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
+            first, reused = plan["scene_assets"]
+            self.assertEqual(reused["local_path"], first["local_path"])
+            self.assertEqual(reused["asset_id"], first["asset_id"])
+            self.assertEqual(first["provider"], "hailuo-video-v1")
+            self.assertEqual(first["local_path"], "")
+            self.assertEqual(reused["scene_position"], 2)
+            self.assertEqual(plan["director_routing"][1]["reuse_from_scene_position"], 1)
+            self.assertTrue(plan["director_routing"][1]["generation_pending"])
+            search_assets.assert_not_called()
+
+    def test_ai_router_rejects_duplicate_director_scenes_before_materializing_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [{
+                "position": 1, "narration": "唯一镜头", "duration": 4,
+                "visual_strategy": "local", "visual_prompt": "唯一说明卡",
+            }]}, ensure_ascii=False), encoding="utf-8")
+            director_plan_path = root / "director_plan.json"
+            shot = {
+                "scenePosition": 1,
+                "preferredProviderId": "local-editorial-v1",
+                "alternativeProviderIds": [],
+                "deliveryType": "editorial_card",
+                "query": "唯一说明卡",
+            }
+            director_plan_path.write_text(json.dumps({"shots": [shot, shot]}), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "assets")
+            request["input"] = {"scriptPath": str(script_path), "directorPlanPath": str(director_plan_path)}
+            request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router"}
+
+            with self.assertRaisesRegex(ValueError, "exactly cover every script scene"):
+                handle_request(request)
+
+    def test_ai_router_resolves_an_out_of_order_indirect_reuse_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            scenes = [
+                {"position": position, "narration": f"scene {position}", "duration": 4,
+                 "visual_strategy": "generated", "visual_prompt": f"shot {position}"}
+                for position in (3, 1, 2)
+            ]
+            script_path.write_text(json.dumps({"scenes": scenes}), encoding="utf-8")
+            director_plan_path = root / "director_plan.json"
+            director_plan_path.write_text(json.dumps({"shots": [
+                {"scenePosition": 3, "preferredProviderId": "pexels-stock-v1", "deliveryType": "stock_video",
+                 "reuseFromScenePosition": 2, "query": "REUSE_ONLY scene 2", "generationPrompt": "reuse two"},
+                {"scenePosition": 1, "preferredProviderId": "hailuo-video-v1", "deliveryType": "generated_video",
+                 "query": "master shot", "generationPrompt": "master shot"},
+                {"scenePosition": 2, "preferredProviderId": "pexels-stock-v1", "deliveryType": "stock_video",
+                 "reuseFromScenePosition": 1, "query": "REUSE_ONLY scene 1", "generationPrompt": "reuse one"},
+            ]}), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "assets")
+            request["input"] = {"scriptPath": str(script_path), "directorPlanPath": str(director_plan_path)}
+            request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video"}
+
+            with patch("video_factory.stock_assets.search_stock_assets") as search_assets:
+                response = handle_request(request)
+
+            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
+            assets = {asset["scene_position"]: asset for asset in plan["scene_assets"]}
+            routes = {route["scene_position"]: route for route in plan["director_routing"]}
+            self.assertEqual({assets[position]["asset_id"] for position in (1, 2, 3)}, {assets[1]["asset_id"]})
+            self.assertEqual({assets[position]["local_path"] for position in (1, 2, 3)}, {""})
+            self.assertTrue(all(routes[position]["generation_pending"] for position in (1, 2, 3)))
+            search_assets.assert_not_called()
+
+    def test_ai_router_rejects_invalid_reuse_graphs_before_materializing_assets(self):
+        cases = {
+            "missing source": {2: 9},
+            "self reference": {2: 2},
+            "forward reference": {1: 2},
+            "invalid indirect chain": {2: 1, 3: 4},
+        }
+        for name, sources in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                script_path = root / "script.json"
+                script_path.write_text(json.dumps({"scenes": [
+                    {
+                        "position": position,
+                        "narration": f"scene {position}",
+                        "duration": 4,
+                        "visual_strategy": "generated",
+                        "visual_prompt": f"shot {position}",
+                    }
+                    for position in (1, 2, 3)
+                ]}), encoding="utf-8")
+                shots = []
+                for position in (1, 2, 3):
+                    source = sources.get(position)
+                    if source is None:
+                        shots.append({
+                            "scenePosition": position,
+                            "preferredProviderId": "hailuo-video-v1",
+                            "deliveryType": "generated_video",
+                            "query": f"master {position}",
+                            "generationPrompt": f"master {position}",
+                        })
+                    else:
+                        shots.append({
+                            "scenePosition": position,
+                            "preferredProviderId": "pexels-stock-v1",
+                            "deliveryType": "stock_video",
+                            "reuseFromScenePosition": source,
+                            "query": f"REUSE_ONLY scene {source}",
+                            "generationPrompt": f"reuse {source}",
+                        })
+                director_plan_path = root / "director_plan.json"
+                director_plan_path.write_text(json.dumps({"shots": shots}), encoding="utf-8")
+                request = self.valid_request("asset.prepare", root / "assets")
+                request["input"] = {"scriptPath": str(script_path), "directorPlanPath": str(director_plan_path)}
+                request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router"}
+
+                with patch("video_factory.stock_assets.search_stock_assets") as search_assets:
+                    with self.assertRaisesRegex(ValueError, "must reuse an earlier existing scene"):
+                        handle_request(request)
+
+                search_assets.assert_not_called()
+                self.assertEqual(list((root / "assets").rglob("*.png")), [])
+                self.assertEqual(list((root / "assets").rglob("*.mp4")), [])
 
     def test_asset_search_returns_preview_candidates_without_downloading_media(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -226,6 +383,7 @@ class WorkerContractTest(unittest.TestCase):
                     "scenePosition": scene["position"],
                     "preferredProviderId": "pexels-stock-v1" if scene["position"] == 1 else "local-editorial-v1",
                     "alternativeProviderIds": ["local-editorial-v1"],
+                    "deliveryType": "stock_video" if scene["position"] == 1 else "editorial_card",
                     "query": f"scene query {scene['position']}",
                     "subject": "人物",
                     "environment": "室内",
@@ -276,6 +434,7 @@ class WorkerContractTest(unittest.TestCase):
                     "scenePosition": scene["position"],
                     "preferredProviderId": "pexels-stock-v1" if scene["position"] == 1 else "local-editorial-v1",
                     "alternativeProviderIds": ["local-editorial-v1"],
+                    "deliveryType": "stock_video" if scene["position"] == 1 else "editorial_card",
                     "query": f"scene query {scene['position']}",
                 } for scene in script["scenes"]],
             }, ensure_ascii=False), encoding="utf-8")
@@ -344,7 +503,7 @@ class WorkerContractTest(unittest.TestCase):
             self.assertEqual(plan["scene_assets"][0]["asset_id"], "candidate-2")
             search_assets.assert_not_called()
 
-    def test_ai_router_records_failed_candidate_materialization_before_fallback(self):
+    def test_ai_router_fails_when_reviewed_stock_candidates_cannot_be_materialized(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             script_path = Path(handle_request(self.valid_request("script.draft", root / "script"))["output"]["scriptPath"])
@@ -355,6 +514,7 @@ class WorkerContractTest(unittest.TestCase):
                     "scenePosition": scene["position"],
                     "preferredProviderId": "pexels-stock-v1" if scene["position"] == 1 else "local-editorial-v1",
                     "alternativeProviderIds": ["local-editorial-v1"],
+                    "deliveryType": "stock_video" if scene["position"] == 1 else "editorial_card",
                     "query": f"scene query {scene['position']}",
                 } for scene in script["scenes"]],
             }), encoding="utf-8")
@@ -393,15 +553,11 @@ class WorkerContractTest(unittest.TestCase):
             request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video"}
 
             with patch("video_factory.stock_assets.materialize_candidate", side_effect=RuntimeError("download timed out")):
-                response = handle_request(request)
+                with self.assertRaisesRegex(RuntimeError, "download timed out"):
+                    handle_request(request)
 
-            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
-            route = plan["director_routing"][0]
-            self.assertEqual(plan["scene_assets"][0]["provider"], "local")
-            self.assertIn("pexels:best", route["materialization_notes"][0])
-            self.assertIn("download timed out", route["materialization_notes"][0])
 
-    def test_ai_router_falls_back_to_local_when_reviewed_stock_has_no_usable_candidate(self):
+    def test_ai_router_fails_when_reviewed_stock_has_no_usable_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             script_path = Path(handle_request(self.valid_request("script.draft", root / "script"))["output"]["scriptPath"])
@@ -412,6 +568,7 @@ class WorkerContractTest(unittest.TestCase):
                     "scenePosition": scene["position"],
                     "preferredProviderId": "pexels-stock-v1" if scene["position"] == 1 else "local-editorial-v1",
                     "alternativeProviderIds": ["pixabay-stock-v1"] if scene["position"] == 1 else [],
+                    "deliveryType": "stock_video" if scene["position"] == 1 else "editorial_card",
                     "query": f"scene query {scene['position']}",
                 } for scene in script["scenes"]],
             }, ensure_ascii=False), encoding="utf-8")
@@ -459,16 +616,10 @@ class WorkerContractTest(unittest.TestCase):
             }
             request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video"}
 
-            response = handle_request(request)
+            with self.assertRaisesRegex(RuntimeError, "semantic review"):
+                handle_request(request)
 
-            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
-            route = plan["director_routing"][0]
-            self.assertEqual(plan["scene_assets"][0]["provider"], "local")
-            self.assertEqual(route["actual_provider_id"], "local-editorial-v1")
-            self.assertTrue(route["fallback_used"])
-            self.assertIn("semantic review", route["materialization_notes"][0])
-
-    def test_ai_router_rejects_low_semantic_fallbacks_but_keeps_human_locks(self):
+    def test_ai_router_rejects_low_semantic_candidates_without_inserting_a_card(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             script_path = Path(handle_request(self.valid_request("script.draft", root / "script"))["output"]["scriptPath"])
@@ -479,6 +630,7 @@ class WorkerContractTest(unittest.TestCase):
                     "scenePosition": scene["position"],
                     "preferredProviderId": "pexels-stock-v1" if scene["position"] in {1, 2} else "local-editorial-v1",
                     "alternativeProviderIds": ["local-editorial-v1"],
+                    "deliveryType": "stock_video" if scene["position"] in {1, 2} else "editorial_card",
                     "query": f"scene query {scene['position']}",
                 } for scene in script["scenes"]],
             }, ensure_ascii=False), encoding="utf-8")
@@ -528,17 +680,8 @@ class WorkerContractTest(unittest.TestCase):
             }
             request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video"}
 
-            def materialize(candidate, target):
-                target.write_bytes(b"video")
-                return target
-
-            with patch("video_factory.stock_assets.materialize_candidate", side_effect=materialize):
-                response = handle_request(request)
-
-            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
-            assets = {item["scene_position"]: item for item in plan["scene_assets"]}
-            self.assertEqual(assets[1]["provider"], "local")
-            self.assertEqual(assets[2]["asset_id"], "human-choice")
+            with self.assertRaisesRegex(RuntimeError, "semantic review"):
+                handle_request(request)
 
     def test_ai_router_prepares_independent_scenes_with_bounded_concurrency(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -553,6 +696,7 @@ class WorkerContractTest(unittest.TestCase):
                         "scenePosition": scene["position"],
                         "preferredProviderId": "local-editorial-v1",
                         "alternativeProviderIds": [],
+                        "deliveryType": "editorial_card",
                         "query": f"director query {scene['position']}",
                     }
                     for scene in script["scenes"]
@@ -730,6 +874,37 @@ class WorkerContractTest(unittest.TestCase):
             })
             self.assertEqual(plan["mastering"]["target_lufs"], -17)
 
+    def test_minimax_voice_records_the_authorized_configured_cost_after_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": []}), encoding="utf-8")
+            output_dir = root / "voice"
+            output_dir.mkdir()
+            track_path = output_dir / "narration.m4a"
+            track_path.write_bytes(b"audio")
+            plan_path = output_dir / "voiceover_plan.json"
+            plan_path.write_text(json.dumps({"track_path": str(track_path)}), encoding="utf-8")
+            request = self.valid_request("voice.synthesize", output_dir)
+            request["input"] = {"scriptPath": str(script_path)}
+            request["parameters"] = {
+                "providerId": "minimax-tts-v1",
+                "provider": "minimax",
+                "maxCostCny": 2,
+                "estimatedCostCny": 0.5,
+            }
+
+            with patch("video_factory.worker.synthesize_voiceover_plan", return_value=plan_path) as synthesize:
+                response = handle_request(request)
+
+            self.assertEqual(synthesize.call_args.kwargs.get("operation_id"), "command-1")
+            self.assertEqual(synthesize.call_args.kwargs.get("provider_id"), "minimax-tts-v1")
+            self.assertEqual(synthesize.call_args.kwargs.get("estimated_cost_cny"), 0.5)
+            self.assertEqual(response["diagnostics"]["actualCostCny"], 0.5)
+            self.assertEqual(response["diagnostics"]["actualCostSource"], "configured_rate")
+            self.assertEqual(response["diagnostics"]["meteredAttemptCount"], 1)
+            self.assertEqual(response["diagnostics"]["meteredFailedAttemptCount"], 0)
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_kokoro_provider_requires_a_verified_isolated_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -758,12 +933,21 @@ class WorkerContractTest(unittest.TestCase):
             script_request = self.valid_request("script.draft", root / "script")
             script_request["input"]["brief"]["durationSeconds"] = 20
             script_path = handle_request(script_request)["output"]["scriptPath"]
+            script = json.loads(Path(script_path).read_text(encoding="utf-8"))
+            director_plan_path = root / "director_plan.json"
+            director_plan_path.write_text(json.dumps({"shots": [{
+                "scenePosition": scene["position"],
+                "preferredProviderId": "local-editorial-v1",
+                "alternativeProviderIds": [],
+                "deliveryType": "editorial_card",
+                "query": scene["visual_prompt"],
+            } for scene in script["scenes"]]}), encoding="utf-8")
 
             asset_request = self.valid_request("asset.prepare", root / "assets")
-            asset_request["input"] = {"scriptPath": script_path}
+            asset_request["input"] = {"scriptPath": script_path, "directorPlanPath": str(director_plan_path)}
             asset_request["parameters"] = {
-                "providerId": "local-editorial-v1",
-                "provider": "local",
+                "providerId": "ai-shot-router-v1",
+                "provider": "ai-router",
                 "mediaType": "image",
             }
             asset_plan_path = handle_request(asset_request)["output"]["assetPlanPath"]

@@ -4,7 +4,7 @@ import { parseProductionTemplate } from "../src/index.js";
 import { validTemplate } from "./template-test-data.js";
 
 describe("parseProductionTemplate", () => {
-  it("validates references, capability requirements, and bounded costs", () => {
+  it("validates references, capability requirements, and legacy cost policy shape", () => {
     assert.throws(
       () => parseProductionTemplate({
         ...validTemplate(),
@@ -48,6 +48,14 @@ describe("parseProductionTemplate", () => {
 
     const draft = parseProductionTemplate({ ...validTemplate(), status: "draft" });
     assert.equal(Object.isFrozen(draft), false);
+  });
+
+  it("reads a legacy cost policy without exposing it on the production template", () => {
+    const parsed = parseProductionTemplate({
+      ...validTemplate(),
+      costPolicy: { currency: "CNY", maxCost: 5, maxPaidShots: 1 },
+    });
+    assert.equal("costPolicy" in parsed, false);
   });
 
   it("accepts bounded provider model defaults and rejects secret-like or malformed identifiers", () => {

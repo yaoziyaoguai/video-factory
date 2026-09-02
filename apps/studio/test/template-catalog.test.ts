@@ -23,6 +23,7 @@ describe("template catalog", () => {
       assert.ok(template.shotSlots.every((slot) => slot.allowedCapabilities.includes("asset.generate.video")));
       assert.ok(template.capabilityRequirements.every((requirement) => !requirement.capability.includes("provider")));
       assert.equal("providerId" in template, false);
+      assert.equal("costPolicy" in template, false);
     }
   });
 });

@@ -27,7 +27,6 @@ export function parseProductionBlueprint(value: unknown): ProductionBlueprint {
     soundSystem: input.soundSystem,
     qualityRules: input.qualityRules,
     capabilityRequirements: input.capabilityRequirements,
-    costPolicy: input.costPolicy,
     createdAt: timestamp,
     updatedAt: timestamp,
   });
@@ -41,7 +40,6 @@ export function parseProductionBlueprint(value: unknown): ProductionBlueprint {
     soundSystem: clone(parsed.soundSystem),
     qualityRules: clone(parsed.qualityRules),
     capabilityRequirements: clone(parsed.capabilityRequirements),
-    costPolicy: clone(parsed.costPolicy),
   };
 }
 

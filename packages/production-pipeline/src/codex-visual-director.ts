@@ -23,7 +23,7 @@ export interface CodexVisualDirectorAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
-export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v8|role-audit-v2|director-validator-v2";
+export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v9|role-audit-v2|director-validator-v2";
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
 export class CodexVisualDirectorAgent implements VisualDirectorAgent {
@@ -73,7 +73,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
       criteria: [
         "视觉圣经与题材、观众承诺、模板和参考语法一致",
         "每镜头的动作、逐秒节拍、构图、声音与验收条件可真实执行",
-        "素材 Provider、交付类型、能力约束和成本上限完全匹配",
+        "素材 Provider、交付类型和能力约束完全匹配；方案费用可真实报价，费用反馈只作为重规划偏好",
         "相邻镜头连续性成立，生成式画面不被伪装为事实证据",
         "系列视觉母题、角色/声音锚点、canon 与前后集连续性得到保持",
       ],
@@ -139,7 +139,6 @@ function visualDirectorAuditContext(
               required,
               threshold,
             })),
-            costPolicy: template.costPolicy,
           },
         } : {}),
         ...(reference ? {
