@@ -7,9 +7,14 @@ export function roleAgentCheckpointKey(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-export function fileRoleAgentLoopCheckpoint(filePath: string, key: string): RoleAgentLoopCheckpoint {
+export function fileRoleAgentLoopCheckpoint(
+  filePath: string,
+  key: string,
+  options: { restartExhausted?: boolean } = {},
+): RoleAgentLoopCheckpoint {
   return {
     key,
+    ...(options.restartExhausted !== undefined ? { restartExhausted: options.restartExhausted } : {}),
     async load(): Promise<unknown | undefined> {
       try {
         return JSON.parse(await readFile(filePath, "utf8")) as unknown;
