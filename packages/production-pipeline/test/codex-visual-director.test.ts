@@ -150,6 +150,14 @@ describe("CodexVisualDirectorAgent", () => {
       "suspense-staging",
     ]);
     assert.equal((contract.selectedDirectorProfile as { id: string }).id, "urban-poetic");
+    assert.deepEqual(contract.assetReuse, {
+      querySyntax: "REUSE_ONLY scene N",
+      execution: "下游素材执行器直接复用已解析的更早镜头母片，不会重新搜索、生成或计费。",
+      constraints: [
+        "N 只能引用更早且可成功解析的导演镜头。",
+        "复用保持相同媒体内容，不会产生新的动作、光线变化或画面状态。",
+      ],
+    });
     assert.deepEqual(Object.keys(auditPayload.context.upstreamFacts.scenes[0]!).sort(), [
       "duration",
       "failureConditions",

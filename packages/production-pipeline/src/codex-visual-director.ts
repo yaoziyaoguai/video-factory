@@ -23,7 +23,7 @@ export interface CodexVisualDirectorAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
-export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v9|role-audit-v2|director-validator-v2";
+export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v10|role-audit-v2|director-validator-v2";
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
 export class CodexVisualDirectorAgent implements VisualDirectorAgent {
@@ -192,6 +192,14 @@ function visualDirectorAuditContext(
     currentRoleContract: {
       availableDirectorProfileIds: VISUAL_DIRECTOR_PROFILES.map(({ id }) => id),
       selectedDirectorProfile,
+      assetReuse: {
+        querySyntax: "REUSE_ONLY scene N",
+        execution: "下游素材执行器直接复用已解析的更早镜头母片，不会重新搜索、生成或计费。",
+        constraints: [
+          "N 只能引用更早且可成功解析的导演镜头。",
+          "复用保持相同媒体内容，不会产生新的动作、光线变化或画面状态。",
+        ],
+      },
       assetProviders: input.assetProviders.map((provider) => ({
         id: provider.id,
         label: provider.label,

@@ -679,7 +679,7 @@ describe("ProductionPipeline", () => {
     assert.equal((assetCall?.input as Record<string, unknown>).directorPlanPath, directorArtifact.uri);
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/director-v9",
+      "video-factory/director-v10",
     );
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.modelId,

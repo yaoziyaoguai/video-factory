@@ -1939,7 +1939,7 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
   readonly configurationSource = "system_default" as const;
-  readonly parameters = { promptPack: "video-factory/director-v9" };
+  readonly parameters = { promptPack: "video-factory/director-v10" };
 
   constructor(private readonly agent: VisualDirectorAgent) {}
 
