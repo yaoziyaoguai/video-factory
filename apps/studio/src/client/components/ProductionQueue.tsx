@@ -63,7 +63,7 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
           <h1>制作记录</h1>
           <p className="page-summary">当前工作只保留正在推进和最近完成的内容，旧项目随时可以从归档中找回。</p>
         </div>
-        <button className="button button-primary" type="button" onClick={onCreate} data-tour="project-create">
+        <button className="button button-primary project-create-button" type="button" onClick={onCreate} data-tour="project-create">
           <Plus aria-hidden="true" size={17} />
           新建制作
         </button>

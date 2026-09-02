@@ -1,5 +1,9 @@
+/// <reference types="node" />
+
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NewRunDialog } from "../src/client/components/NewRunDialog.js";
@@ -204,11 +208,18 @@ describe("Studio client", () => {
     );
 
     expect(screen.getByRole("heading", { name: "制作记录", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建制作" })).toHaveClass("project-create-button");
     expect(screen.getByText(runSummary.title)).toBeInTheDocument();
     expect(screen.getAllByText("等你审片").length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: /进入审片/ })[0]).toHaveAttribute("href", "/projects/run-1");
     await user.click(screen.getByRole("button", { name: "筛选：待你处理" }));
     expect(screen.queryByText("已经完成的内容")).not.toBeInTheDocument();
+  });
+
+  it("keeps the mobile production create icon visible on its primary background", () => {
+    const css = readFileSync(resolve(process.cwd(), "src/client/studio-v3.css"), "utf8");
+
+    expect(css).toMatch(/\.project-create-button\s+svg\s*\{[^}]*color:\s*#ffffff;/);
   });
 
   it("archives completed records and keeps permanent deletion inside the archive", async () => {
