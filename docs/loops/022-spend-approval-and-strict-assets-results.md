@@ -69,8 +69,17 @@ PR #15 的第一次 GitHub Actions `Dependency security` 门禁因 2026-09-03 �
 
 旧的 `vf-next-capability-20260903`、`v2`、`v3` session 已明确放弃，没有恢复或人工点击发送。重新完整读取五档版 `oracle-web` Skill 后，使用 `/opt/homebrew/bin/oracle-web` 创建独立 session `vf-capability-feedback-loop-20260903`；页面实际进入新的 `/c/6a985627-7e24-83ed-a4f5-5b2017b59791` 对话并返回完整结果，强度回读为 `Pro，第 5 项，共 5 项`。wrapper 记录的 requested model 不能证明网页实际模型，因此网页模型保持未验证。Oracle 建议优先补“审片发现 → 精确 scene → 局部素材修订 → 完整重渲染 → 技术/视觉复验 → 同一 run 人工终审”闭环，而不是增加 Agent 编排；当前主 Codex 已综合并实现该建议。
 
-## Pending Release Evidence
+## Release Evidence Still Required
 
-- 本轮 scene revision 变更尚未部署；必须先完成最终 diff 审查，再提交并通过 GitHub Actions 部署阿里云，随后执行云端桌面与 `390x844` 移动端点击验收。禁止 SSH 覆盖生产代码。
+- scene revision 基线已通过 PR #15 和 GitHub Actions run `33676477349` 部署；本节新增的复用费用与移动端按钮修复仍须经新的 PR 和 GitHub Actions 部署阿里云，随后执行云端桌面与 `390x844` 移动端点击验收。禁止 SSH 覆盖生产代码。
 - 在最终真实成片存在后再核验 `ffprobe` 帧数/时长、`blackdetect`、逐片段画面、视觉一致性、内部术语和未授权卡片。
 - Oracle Web 能力评估开始前必须重新完整读取磁盘上的当前 `oracle-web/SKILL.md`，只按五档规则执行，不使用此前缓存的六档规则；Oracle 仅提供建议，由当前主 Codex 综合并实现。
+
+## 2026-09-03 Cloud QA Follow-up
+
+- 云端费用拒绝闭环已真实验证：对 `run-85e9d083-d1c9-4dbf-a0bb-04d9901227e4` 保存目标费用 ¥0 和“优先免费素材”的反馈后，revision 从 3 变为 4，状态进入“待重新生成”；系统没有自动调用导演，只有人工点击“按人工版本继续生成”后才开始重规划。
+- 重规划连续两次报错 `Director Agent repeated an unchanged candidate after repair feedback.`。trace 显示导演已把第 5 镜写成 `REUSE_ONLY scene 1`，独立审计也正确要求该镜从 ¥0.25 改为 ¥0；根因是 `validateVisualDirectorPlan` 对所有镜头无条件套用 Provider 服务端单价，使模型不可能满足复用费用审计并最终耗尽 agent loop。
+- TDD RED：新增回归用例后，付费 `seedance-video-v1` 的普通镜头和复用镜头实际费用为 `[5.5, 5.5]`，而预期为 `[5.5, 0]`。最小修复沿用素材执行器已有的 `REUSE_ONLY scene N` 解析规则，只把合法复用镜头归零；普通镜头继续忽略模型报价并使用服务端价格。GREEN：`visual-director.test.ts` 7/7 通过。
+- 移动端制作记录页的“新建制作”按钮曾显示为空白蓝色方块：通用小屏规则隐藏文字后，又把 `Plus` 图标设为与按钮背景相同的蓝色。最小修复给该按钮增加专用 class，只把该主按钮 SVG 设为白色；组件与 CSS 回归用例在修复前分别因缺少专用 class 和缺少白色图标规则失败，修复后 `client.test.tsx` 60/60 通过。
+- 第一次完整 `npm test` 在 Studio typecheck 阶段因 CSS 回归测试直接使用 Node API、但前端 tsconfig 未加载 Node 类型而失败；调整为测试文件局部声明 Node 类型后，Studio 窄测试与 typecheck 均通过，再从头重跑完整门禁。最终 `npm test` exit 0：TypeScript 304 passed（1 个显式真实 E2E skip）、broker 85 passed、Studio Vitest 191 passed、Studio server 289 passed、production build 与 package smoke 3 passed；Python unittest 98 passed，`git diff --check` 通过。
+- 上述修复尚待 PR、GitHub Actions 部署和阿里云桌面/移动端复测；在这些证据完成前不视为发布完成。
