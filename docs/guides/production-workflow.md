@@ -39,9 +39,9 @@ flowchart TB
 关键设计：
 
 - `WorkflowRunner` 只负责状态机与节点调度；每种具体能力由 Provider 实现。
-- `assets` 与 `voice` 在 `script` 之后并行，二者完成后才进入渲染。
+- `assets` 在 `script` 之后执行；素材报价获批并完成后才执行 `voice`，避免尚未接受画面方案时提前产生配音调用，二者完成后进入渲染。
 - TypeScript 是 `run.json` 的唯一所有者；Python worker 只写自己的 `attempt-1` 目录。
-- 人工终审是一个持久化 intervention，可以在另一个 CLI 进程中批准或拒绝。
+- 人工终审是一个持久化 intervention，可以批准、拒绝，或根据当前视觉审片 finding 提交受版本保护的局部素材返修。
 - `approve` 的加载、恢复、发布包写入和 revision 更新位于同一个 run lock transaction 中。
 - 发布包只代表“可以发布”。Web 端已经提供多平台合规检查、明确确认、幂等批次和失败隔离；只有正式平台适配器与账号授权都就绪时才调用官方上传接口。
 
@@ -87,7 +87,7 @@ workspace/factory/runs/<run-id>/
 | 配音 | `minimax-tts-v1`、`macos-say-v1`；`ffmpeg-tone-test-v1` 仅用于测试 | 自动 | 可继续增加云 TTS 或真人录音 Provider |
 | 渲染 | Python + FFmpeg，H.264/AAC，1080x1920 | 自动 | 可增加 Remotion 或其他渲染 Provider |
 | 技术审片 | 分辨率、编码、音量、时长、分镜覆盖、素材存在性 | 自动 | 可增加视觉/内容质量模型 |
-| 最终审片 | `manual` 支持跨进程 approve/reject；`automatic` 可跳过人工节点 | 可配置 | 当前人工动作严格限制为 approve/reject |
+| 最终审片 | `manual` 支持跨进程 approve/reject；视觉 finding 可触发 `request_changes` 局部返修；`automatic` 可跳过无问题的人工节点 | 可配置 | 返修只允许复用同一 run 中更早且已物化的非说明卡母片 |
 | 持久化 | 首个 worker 前创建 `run.json`，每个节点后 checkpoint | 自动 | 当前是单机 FileRunStore |
 | 并发保护 | PID lock、孤儿锁回收、revision 与副作用事务 | 自动 | 尚不是分布式锁 |
 | Worker 协议 | `video-factory/worker-v1` 单 JSON stdout，stderr 诊断 | 自动 | 可接入其他语言 worker |
@@ -202,7 +202,7 @@ npm --silent run factory -- reject "$RUN_ID" \
   --workspace workspace/factory
 ```
 
-`reject` 是终态。当前版本还没有从拒绝节点直接编辑并重试的状态迁移，应修改 brief 或 Provider 后创建新 run。
+`reject` 仍是终态。若视觉审片已经定位到具体镜头，可在 Studio 终审界面使用“提交局部返修”：选择更早且已物化的母片后，系统在同一 run 创建新的素材版本，只重跑渲染、技术质检、视觉审片和人工终审。改脚本或 Provider 等更大范围调整仍走节点编辑或重新规划。
 
 ### 5.4 使用 Pexels 或 Pixabay
 
