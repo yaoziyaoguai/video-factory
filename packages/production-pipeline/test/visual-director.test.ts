@@ -72,6 +72,30 @@ describe("validateVisualDirectorPlan", () => {
     assert.deepEqual(result.shots.map((item) => item.estimatedCostCny), [5.5, 0, 0]);
   });
 
+  it("prices a REUSE_ONLY shot at zero while retaining server prices for generated shots", () => {
+    const result = validateVisualDirectorPlan(
+      plan([
+        shot(1, "seedance-video-v1"),
+        {
+          ...shot(2, "seedance-video-v1"),
+          authenticityPolicy: "illustrative",
+          query: "REUSE_ONLY scene 1 locked master crop",
+          estimatedCostCny: 999,
+        },
+      ]),
+      {
+        scenePositions: [1, 2],
+        allowedProviderIds: ["seedance-video-v1"],
+        generativeProviderIds: ["seedance-video-v1"],
+        providerDeliveryTypes: { "seedance-video-v1": ["generated_video"] },
+        estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
+        economics,
+      },
+    );
+
+    assert.deepEqual(result.shots.map((item) => item.estimatedCostCny), [5.5, 0]);
+  });
+
   it("rejects missing, duplicate, unknown and evidence-generation routes", () => {
     const options: VisualDirectorPlanValidation = {
       scenePositions: [1, 2],

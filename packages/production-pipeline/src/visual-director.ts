@@ -8,6 +8,7 @@ import type { ProductionBlueprint } from "@video-factory/template-core";
 import type { CodexTaskExecution } from "./codex-chat.js";
 import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { ShotGrammar } from "./reference-grammar.js";
+import { assetReuseSourceScenePosition } from "./generative-asset-worker.js";
 
 export const DIRECTOR_PLAN_VERSION = "video-factory/director-plan-v1" as const;
 
@@ -300,6 +301,7 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
     }
     const rationale = text(shot.rationale, `shots[${index}].rationale`);
     assertSelectedProviderIsExecutable(rationale, `shots[${index}].rationale`);
+    const query = text(shot.query, `shots[${index}].query`);
     return {
       scenePosition,
       narrativeRole: text(shot.narrativeRole, `shots[${index}].narrativeRole`),
@@ -337,12 +339,14 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       ...(successCriteria !== undefined
         ? { successCriteria }
         : {}),
-      query: text(shot.query, `shots[${index}].query`),
+      query,
       generationPrompt,
       rationale,
       continuityNote: text(shot.continuityNote, `shots[${index}].continuityNote`),
       confidence: bounded(shot.confidence, `shots[${index}].confidence`, 0, 1),
-      estimatedCostCny: serverCost(preferredProviderId, options.estimatedCnyPerClip),
+      estimatedCostCny: assetReuseSourceScenePosition({ query }) === undefined
+        ? serverCost(preferredProviderId, options.estimatedCnyPerClip)
+        : 0,
     };
   }).sort((left, right) => left.scenePosition - right.scenePosition);
 
