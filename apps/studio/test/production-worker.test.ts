@@ -9,6 +9,7 @@ import {
 import { readMeteredImageProviderSettings } from "../src/server/image-provider-settings.js";
 import { readMeteredVideoProviderSettings } from "../src/server/video-provider-settings.js";
 import { buildStudioChildEnvironment } from "../src/server/studio-child-environment.js";
+import { assetProviderDeliveryTypes } from "../src/server/provider-catalog.js";
 
 describe("production Python runtime", () => {
   it("prefers an explicit runtime, then the verified project environment", () => {
@@ -36,7 +37,27 @@ describe("production Python runtime", () => {
 });
 
 describe("production provider runtime metadata", () => {
-  it("marks GLM review and MiniMax voice as per-run metered calls", () => {
+  it("uses the shared asset delivery directory for every director source", () => {
+    const providers = buildDirectorAssetProviders({ environment: {
+      PEXELS_API_KEY: "pexels-key",
+      PIXABAY_API_KEY: "pixabay-key",
+      ARK_API_KEY: "ark-key",
+      SEEDANCE_ESTIMATED_CNY_PER_CLIP: "4",
+      MINIMAX_API_KEY: "minimax-key",
+      MINIMAX_VIDEO_MODEL_ID: "MiniMax-Hailuo-2.3",
+      MINIMAX_ESTIMATED_CNY_PER_CLIP: "2",
+      DASHSCOPE_API_KEY: "wan-key",
+      DASHSCOPE_WORKSPACE_ID: "workspace-1",
+      WAN_MODEL_ID: "wan2.7-t2v",
+      WAN_ESTIMATED_CNY_PER_CLIP: "2.25",
+    } });
+
+    for (const provider of providers) {
+      assert.deepEqual(provider.deliveryTypes, assetProviderDeliveryTypes(provider.id));
+    }
+  });
+
+  it("uses Code Plan for GLM review and auto-accounts the low-cost MiniMax voice call", () => {
     const metadata = buildProductionProviderRuntimeMetadata({
       MINIMAX_API_KEY: "test-only-key",
       MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP: "0.5",
@@ -45,10 +66,14 @@ describe("production provider runtime metadata", () => {
     });
 
     const glm = metadata.find((item) => item.id === "glm-visual-review-v1");
-    assert.equal(glm?.billingUnit, "run");
+    assert.equal(glm?.billing, "subscription");
+    assert.equal(glm?.approvalPolicy, "none");
     assert.equal(glm?.modelId, "glm-5.3-flash-preview");
     assert.equal(glm?.maxAttempts, 3);
-    assert.equal(metadata.find((item) => item.id === "minimax-tts-v1")?.billingUnit, "run");
+    const voice = metadata.find((item) => item.id === "minimax-tts-v1");
+    assert.equal(voice?.billing, "metered");
+    assert.equal(voice?.approvalPolicy, "automatic");
+    assert.equal(voice?.billingUnit, "run");
   });
 });
 

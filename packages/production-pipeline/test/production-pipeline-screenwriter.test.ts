@@ -116,7 +116,6 @@ const templateSnapshot = {
     soundSystem: { voiceIntent: "聪明但不居高临下", pace: "medium", musicIntent: "轻盈节拍" },
     qualityRules: [{ id: "facts", label: "事实准确", dimension: "factual", required: true, threshold: 80 }],
     capabilityRequirements: [{ capability: "script.draft", required: true }],
-    costPolicy: { currency: "CNY", maxCost: 0, maxPaidShots: 0 },
   },
   sourceLayers: [{ layer: "template", sourceId: "knowledge-explainer@1", appliedFields: ["storyStructure"] }],
   fieldSources: { storyStructure: "template" },

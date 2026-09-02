@@ -108,6 +108,52 @@ describe("node production workspaces", () => {
     expect(within(modelSelect).queryByRole("option", { name: "Wan 2.7 图生视频" })).not.toBeInTheDocument();
   });
 
+  it("lets a paused asset node enable paid generation without forcing a video ceiling", async () => {
+    const onConfigure = vi.fn(async () => undefined);
+    const providers: StudioProvider[] = [
+      { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels", available: true, kind: "external", billing: "free" },
+      { id: "seedance-video-v1", capability: "asset.prepare", label: "Seedance", available: true, kind: "external", billing: "metered", estimatedCnyPerClip: 3 },
+    ];
+    const node: StudioNode = {
+      id: "assets",
+      label: "画面",
+      role: "素材导演",
+      status: "pending",
+      artifactIds: [],
+      qualityGateResults: [],
+      executionConfiguration: {
+        providerId: "ai-shot-router-v1",
+        modelSelections: {},
+        assetProviderIds: ["pexels-stock-v1"],
+        economics: { allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
+      },
+    };
+
+    render(<NodeWorkspace
+      node={node}
+      providers={providers}
+      runStatus="paused"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onConfigure={onConfigure}
+      onAuthorize={async () => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "调整" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /Seedance/ }));
+    expect(screen.queryByRole("spinbutton", { name: "付费镜头上限（可选）" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("spinbutton", { name: "单视频费用上限（可选）" })).not.toBeInTheDocument();
+    expect(screen.getByText(/按实际导演方案报价.*逐笔人工确认/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "保存配置" }));
+
+    expect(onConfigure).toHaveBeenCalledWith("assets", {
+      modelSelections: { "pexels-stock-v1": null, "seedance-video-v1": null },
+      assetProviderIds: ["pexels-stock-v1", "seedance-video-v1"],
+      economics: { allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    });
+  });
+
   it("shows provenance and saves a valid human output version", async () => {
     const onOverride = vi.fn(async () => undefined);
     render(<NodeWorkspace node={succeededNode} runStatus="stale" artifacts={[]} busy={false} onOverride={onOverride} onInputOverride={async () => undefined} onAuthorize={async () => undefined} />);
@@ -744,6 +790,56 @@ describe("node production workspaces", () => {
       modelId: "MiniMax-Hailuo-02",
       maxCostCny: 3,
       maxAttempts: 1,
+    });
+  });
+
+  it("stores a rejected asset quote with a zero target for manual replanning", async () => {
+    const onRejectSpend = vi.fn(async () => undefined);
+    const paidNode: StudioNode = {
+      id: "assets",
+      label: "画面",
+      role: "素材导演",
+      status: "awaiting_spend_approval",
+      artifactIds: [],
+      qualityGateResults: [],
+      spendPlan: {
+        id: "plan-1",
+        inputVersionIds: ["director-v1"],
+        providerId: "ai-shot-router-v1",
+        modelId: "seedance-v1",
+        estimatedCostCny: 4.8,
+        maxCostCny: 4.8,
+        maxAttempts: 1,
+        items: [
+          { id: "scene-1", label: "镜头 1", providerId: "seedance-video-v1", modelId: "seedance-v1", estimatedCostCny: 2.4 },
+          { id: "scene-2", label: "镜头 2", providerId: "seedance-video-v1", modelId: "seedance-v1", estimatedCostCny: 2.4 },
+        ],
+        createdAt: "2026-08-27T00:00:00.000Z",
+      },
+    };
+    render(<NodeWorkspace
+      node={paidNode}
+      runStatus="awaiting_spend_approval"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onAuthorize={async () => undefined}
+      onRejectSpend={onRejectSpend}
+    />);
+
+    expect(screen.getByText("镜头 1 · seedance-video-v1 · seedance-v1")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "这份报价不合适" }));
+    const dialog = screen.getByRole("dialog", { name: "保存费用反馈" });
+    await userEvent.clear(within(dialog).getByRole("spinbutton", { name: "下一版目标预计费用（可选）" }));
+    await userEvent.type(within(dialog).getByRole("spinbutton", { name: "下一版目标预计费用（可选）" }), "0");
+    await userEvent.type(within(dialog).getByRole("textbox", { name: "具体调整意见（可选）" }), "第二镜优先改用真实图库。");
+    await userEvent.click(within(dialog).getByRole("button", { name: "保存反馈" }));
+
+    expect(onRejectSpend).toHaveBeenCalledWith("assets", {
+      spendPlanId: "plan-1",
+      reason: "too_expensive",
+      targetEstimatedCostCny: 0,
+      note: "第二镜优先改用真实图库。",
     });
   });
 

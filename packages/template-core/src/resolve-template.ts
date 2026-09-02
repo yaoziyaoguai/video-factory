@@ -8,6 +8,18 @@ import type {
   TemplateLayerReceipt,
 } from "./types.js";
 
+const PRODUCTION_BLUEPRINT_FIELDS: readonly (keyof ProductionBlueprint)[] = [
+  "platform",
+  "durationSeconds",
+  "automationLevel",
+  "storyStructure",
+  "shotSlots",
+  "visualSystem",
+  "soundSystem",
+  "qualityRules",
+  "capabilityRequirements",
+];
+
 export function resolveTemplateSnapshot(input: ResolveTemplateSnapshotInput): ProductionTemplateSnapshot {
   if (Number.isNaN(Date.parse(input.resolvedAt))) throw new Error("resolvedAt must be an ISO timestamp.");
   const template = parseProductionTemplate(input.template);
@@ -20,7 +32,6 @@ export function resolveTemplateSnapshot(input: ResolveTemplateSnapshotInput): Pr
     soundSystem: clone(template.soundSystem),
     qualityRules: clone(template.qualityRules),
     capabilityRequirements: clone(template.capabilityRequirements),
-    costPolicy: clone(template.costPolicy),
   };
   const layers: Array<{ layer: TemplateLayer; sourceId: string; patch: ProductionBlueprintPatch | undefined }> = [
     { layer: "system", sourceId: "system-defaults", patch: input.systemDefaults },
@@ -35,9 +46,7 @@ export function resolveTemplateSnapshot(input: ResolveTemplateSnapshotInput): Pr
 
   for (const item of layers) {
     if (!item.patch) continue;
-    const appliedFields = Object.entries(item.patch)
-      .filter(([, value]) => value !== undefined)
-      .map(([field]) => field);
+    const appliedFields = PRODUCTION_BLUEPRINT_FIELDS.filter((field) => item.patch![field] !== undefined);
     if (appliedFields.length === 0) continue;
     for (const field of appliedFields) {
       const value = item.patch[field as keyof ProductionBlueprint];
@@ -75,7 +84,6 @@ function validateResolvedBlueprint(
     "soundSystem",
     "qualityRules",
     "capabilityRequirements",
-    "costPolicy",
   ];
   const missing = required.filter((field) => value[field] === undefined);
   if (missing.length > 0) throw new Error(`Template resolution is missing required fields: ${missing.join(", ")}.`);
@@ -96,7 +104,6 @@ function validateResolvedBlueprint(
     soundSystem: blueprint.soundSystem,
     qualityRules: blueprint.qualityRules,
     capabilityRequirements: blueprint.capabilityRequirements,
-    costPolicy: blueprint.costPolicy,
     createdAt: timestamp,
     updatedAt: timestamp,
   });
@@ -110,7 +117,6 @@ function validateResolvedBlueprint(
     soundSystem: clone(parsed.soundSystem),
     qualityRules: clone(parsed.qualityRules),
     capabilityRequirements: clone(parsed.capabilityRequirements),
-    costPolicy: clone(parsed.costPolicy),
   };
 }
 

@@ -1,7 +1,7 @@
 import { AlertCircle, ArrowLeft, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { StudioCostRunDetail, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProductionInput, StudioProvider, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioRunDetail, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { studioApi, subscribeToRun } from "../api.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 import { RunWorkbench } from "../components/RunWorkbench.js";
@@ -29,8 +29,16 @@ export function RunPage() {
   const [nodeMutationPending, setNodeMutationPending] = useState(false);
   const [runProviders, setRunProviders] = useState<StudioProvider[]>([]);
   const [pausePending, setPausePending] = useState(false);
+  const [paidNodeSummary, setPaidNodeSummary] = useState<StudioPaidNodeSummary>();
+  const [paidOperationError, setPaidOperationError] = useState<string>();
   const costRefreshTimer = useRef<number | undefined>(undefined);
   const snapshotRefreshPending = useRef(false);
+  const paidSummaryRequest = useRef(0);
+  const reconciliationRequests = useRef(new Map<string, {
+    reconciliationId: string;
+    expectedRunRevision: number;
+  }>());
+  const uncertainPaidNodeId = run?.nodes.find((node) => node.outcomeUncertain === true)?.id;
 
   const refreshCosts = useCallback(async () => {
     try {
@@ -38,6 +46,26 @@ export function RunPage() {
       setCostError(undefined);
     } catch (caught) {
       setCostError(`成本明细读取失败：${caught instanceof Error ? caught.message : String(caught)}`);
+    }
+  }, [runId]);
+
+  const refreshPaidNode = useCallback(async (nodeId: string | undefined) => {
+    const requestId = ++paidSummaryRequest.current;
+    if (!nodeId) {
+      setPaidNodeSummary(undefined);
+      setPaidOperationError(undefined);
+      return;
+    }
+    setPaidNodeSummary(undefined);
+    try {
+      const summary = await studioApi.paidOperation(runId, nodeId);
+      if (requestId !== paidSummaryRequest.current) return;
+      setPaidNodeSummary(summary);
+      setPaidOperationError(undefined);
+    } catch (caught) {
+      if (requestId !== paidSummaryRequest.current) return;
+      setPaidNodeSummary(undefined);
+      setPaidOperationError(`付费任务证据读取失败：${caught instanceof Error ? caught.message : String(caught)}`);
     }
   }, [runId]);
 
@@ -76,6 +104,10 @@ export function RunPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void refreshPaidNode(uncertainPaidNodeId);
+  }, [refreshPaidNode, uncertainPaidNodeId]);
 
   useEffect(() => {
     if (!run || run.status === "succeeded" || run.status === "failed" || run.status === "rejected") {
@@ -198,6 +230,21 @@ export function RunPage() {
     }
   }
 
+  async function rejectSpend(nodeId: string, input: StudioSpendRejectionInput) {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await withMutationProgress(() => studioApi.rejectSpend(runId, nodeId, input));
+      setRun((current) => preferRunSnapshot(current, nextRun));
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
   async function regenerateStale() {
     setNodeMutationPending(true);
     setError(undefined);
@@ -258,6 +305,39 @@ export function RunPage() {
     }
   }
 
+  async function reconcilePaidNode(nodeId: string, input: StudioPaidReconciliationDraft) {
+    if (!run) return;
+    const reconciliationKey = `${runId}:${nodeId}:${paidNodeSummary?.operationId ?? "unknown"}:${JSON.stringify(input)}`;
+    let reconciliationRequest = reconciliationRequests.current.get(reconciliationKey);
+    if (!reconciliationRequest) {
+      reconciliationRequest = {
+        reconciliationId: createReconciliationId(),
+        expectedRunRevision: run.revision,
+      };
+      reconciliationRequests.current.set(reconciliationKey, reconciliationRequest);
+    }
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await withMutationProgress(() => studioApi.reconcilePaidOperation(runId, nodeId, {
+        expectedRunRevision: reconciliationRequest.expectedRunRevision,
+        reconciliationId: reconciliationRequest.reconciliationId,
+        ...input,
+      }));
+      reconciliationRequests.current.delete(reconciliationKey);
+      setRun((current) => preferRunSnapshot(current, nextRun));
+      setConnectionWarning(undefined);
+      await Promise.all([
+        refreshCosts(),
+        refreshPaidNode(nextRun.nodes.find((node) => node.outcomeUncertain === true)?.id),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
   async function withMutationProgress(operation: () => Promise<StudioRunDetail>): Promise<StudioRunDetail> {
     const poll = window.setInterval(() => {
       void refreshRunSnapshot();
@@ -289,7 +369,8 @@ export function RunPage() {
       {connectionWarning && !isTerminal(run.status) ? <div className="inline-error" role="status"><AlertCircle aria-hidden="true" size={16} />{connectionWarning}</div> : null}
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
       {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
-      <RunWorkbench run={run} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onRetryFailedNode={retryFailedNode} />
+      {paidOperationError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{paidOperationError}</div> : null}
+      <RunWorkbench run={run} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
       <NewRunDialog
         open={restarting}
@@ -316,4 +397,10 @@ export function RunPage() {
 
 function isTerminal(status: StudioRunDetail["status"] | undefined): boolean {
   return status === "succeeded" || status === "failed" || status === "rejected";
+}
+
+type StudioPaidReconciliationDraft = Omit<StudioPaidReconciliationInput, "expectedRunRevision" | "reconciliationId">;
+
+function createReconciliationId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `paid-reconciliation-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }

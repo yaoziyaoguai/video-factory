@@ -155,6 +155,10 @@ describe("NodeStructuredEditor", () => {
     const { container } = render(<NodeStructuredEditor
       nodeId="visual-direction"
       assetProviderIds={["pexels-stock-v1", "hailuo-video-v1"]}
+      assetProviders={[
+        { id: "pexels-stock-v1", label: "Pexels 图库", deliveryTypes: ["stock_video", "stock_image"] },
+        { id: "hailuo-video-v1", label: "MiniMax 视频生成", deliveryTypes: ["generated_video"] },
+      ]}
       value={{
         requestedProfileId: "auto",
         resolvedProfileId: "geometric-control",
@@ -176,6 +180,39 @@ describe("NodeStructuredEditor", () => {
     expect(screen.queryByRole("spinbutton", { name: "镜头序号" })).not.toBeInTheDocument();
     expect(container).not.toHaveTextContent("requestedProfileId");
     expect(container).not.toHaveTextContent("shot-question");
+  });
+
+  it("keeps the director shot contract consistent when its visual provider changes", async () => {
+    const onChange = vi.fn();
+    render(<NodeStructuredEditor
+      nodeId="visual-direction"
+      assetProviderIds={["pexels-stock-v1", "hailuo-video-v1"]}
+      assetProviders={[
+        { id: "pexels-stock-v1", label: "Pexels 图库", deliveryTypes: ["stock_video", "stock_image"] },
+        { id: "hailuo-video-v1", label: "MiniMax 视频生成", deliveryTypes: ["generated_video"] },
+      ]}
+      value={{
+        shots: [{
+          scenePosition: 1,
+          narrativeRole: "question / shot-question：提出问题",
+          authenticityPolicy: "evidence",
+          preferredProviderId: "pexels-stock-v1",
+          deliveryType: "stock_video",
+          alternativeProviderIds: ["pixabay-stock-v1"],
+        }],
+      }}
+      onChange={onChange}
+    />);
+
+    await userEvent.setup().selectOptions(screen.getByRole("combobox", { name: "首选画面能力" }), "hailuo-video-v1");
+    expect(onChange).toHaveBeenCalledWith({
+      shots: [expect.objectContaining({
+        authenticityPolicy: "illustrative",
+        preferredProviderId: "hailuo-video-v1",
+        deliveryType: "generated_video",
+        alternativeProviderIds: [],
+      })],
+    });
   });
 
   it("does not offer renderer metadata as editable asset content", () => {

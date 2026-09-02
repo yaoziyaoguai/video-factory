@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from urllib.error import HTTPError, URLError
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -138,7 +138,7 @@ def search_scene_asset_candidates(
     }
     for scene in scenes:
         query = query_for_scene(scene)
-        if provider == "local" or scene.visual_strategy == "local":
+        if provider == "local":
             candidates = [local_card_candidate(scene, query)]
         else:
             candidates = search_stock_assets(
@@ -168,10 +168,11 @@ def search_routed_scene_asset_candidates(
     media_type: str = "video",
     limit: int = 6,
 ) -> tuple[Path, Path]:
+    scene_list = list(scenes)
     shots = director_plan.get("shots")
     if not isinstance(shots, list):
         raise ValueError("Director plan shots must be an array")
-    routes = {int(shot["scenePosition"]): shot for shot in shots if isinstance(shot, dict)}
+    routes = director_routes_for_scenes(shots, scene_list)
     report = {
         "version": "video-factory/asset-candidates-v1",
         "job_id": job_id,
@@ -186,7 +187,7 @@ def search_routed_scene_asset_candidates(
         "created_at": report["created_at"],
         "scene_candidates": [],
     }
-    for scene in scenes:
+    for scene in scene_list:
         route = routes.get(scene.position)
         if route is None:
             raise ValueError(f"Director plan is missing scene {scene.position}")
@@ -202,11 +203,12 @@ def search_routed_scene_asset_candidates(
             "stock_video": "video",
             "generated_video": "video",
         }.get(delivery_type, media_type)
+        reuse_from_scene_position = reuse_source_scene_position(route)
         provider_ids = [preferred_id, *[item.strip() for item in alternatives if item.strip() != preferred_id]]
         public_candidates = []
         private_candidates = []
         search_errors = []
-        for provider_id in provider_ids:
+        for provider_id in provider_ids if reuse_from_scene_position is None else []:
             if is_generative_provider(provider_id) or stock_provider_name(provider_id) == "local":
                 continue
             provider = stock_provider_name(provider_id)
@@ -231,6 +233,7 @@ def search_routed_scene_asset_candidates(
                 "generation_prompt": str(route.get("generationPrompt") or ""),
                 "temporal_beats": " | ".join(str(beat) for beat in (route.get("temporalBeats") or []) if str(beat).strip()),
                 "continuity_note": str(route.get("continuityNote") or ""),
+                "reuse_from_scene_position": str(reuse_from_scene_position or ""),
             },
             "query": director_query,
             "candidates": public_candidates,
@@ -262,25 +265,6 @@ def prepare_scene_assets(
 
     for scene in scenes:
         query = query_for_scene(scene)
-        if provider == "local" or scene.visual_strategy == "local":
-            actual_path = write_local_scene_card(scene, asset_dir / f"scene_{scene.position:02d}_local_card.png")
-            scene_assets.append(
-                SceneAsset(
-                    scene_position=scene.position,
-                    provider="local",
-                    asset_id=f"scene-{scene.position:02d}-card",
-                    media_type="image",
-                    width=1080,
-                    height=1920,
-                    duration=float(scene.duration),
-                    local_path=str(actual_path),
-                    source_url="local://video-factory/card",
-                    creator="VideoFactory",
-                    license_note=PROVIDER_LICENSE_NOTE["local"],
-                    query=query,
-                )
-            )
-            continue
         candidates = search_stock_assets(
             provider=provider,
             query=query,
@@ -337,7 +321,20 @@ def prepare_routed_scene_assets(
     shots = director_plan.get("shots")
     if not isinstance(shots, list):
         raise ValueError("Director plan shots must be an array")
-    routes = {int(shot["scenePosition"]): shot for shot in shots if isinstance(shot, dict)}
+    routes = director_routes_for_scenes(shots, scene_list)
+    reuse_sources: dict[int, int] = {}
+    for scene in scene_list:
+        route = routes.get(scene.position)
+        if route is None:
+            raise ValueError(f"Director plan is missing scene {scene.position}")
+        source_position = reuse_source_scene_position(route)
+        if source_position is None:
+            continue
+        if source_position >= scene.position or source_position not in routes:
+            raise ValueError(
+                f"Director plan scene {scene.position} must reuse an earlier existing scene, got {source_position}"
+            )
+        reuse_sources[scene.position] = source_position
     ranking_by_scene = ranking_candidate_ids_by_scene(candidate_ranking)
     inventory_by_scene = inventory_candidates_by_scene_provider(candidate_inventory)
     claimed_stock_assets: set[tuple[str, str]] = set()
@@ -374,24 +371,44 @@ def prepare_routed_scene_assets(
         provider_ids = [preferred_id, *[item.strip() for item in alternatives if item.strip() != preferred_id]]
         actual_asset = None
         actual_provider_id = None
-        generation_pending = is_generative_provider(preferred_id)
+        generation_pending = False
         errors = []
         materialization_notes: list[str] = []
         duplicate_options: list[tuple[str, List[StockAssetCandidate]]] = []
-        recognized_stock_route = False
+        editorial_card = is_explicit_editorial_card(preferred_id, delivery_type)
 
-        for provider_id in provider_ids:
+        if preferred_id == "local-editorial-v1":
+            if not editorial_card:
+                raise ValueError(
+                    f"Director plan scene {scene.position} may use local-editorial-v1 only with deliveryType editorial_card"
+                )
+            actual_asset = materialize_local_scene(scene, director_query, asset_dir, route)
+            actual_provider_id = preferred_id
+        elif is_generative_provider(preferred_id):
+            # 生成镜头在真正的 Provider 调用完成前没有可渲染素材。这里保留可审计的待生成记录，
+            # 但绝不以本地说明卡伪装为已完成画面。
+            actual_asset = pending_generated_scene_asset(
+                scene,
+                director_query,
+                preferred_id,
+                route_media_type,
+            )
+            actual_provider_id = preferred_id
+            generation_pending = True
+
+        for provider_id in provider_ids if actual_asset is None else []:
             try:
                 if is_generative_provider(provider_id):
-                    actual_asset = materialize_local_scene(scene, director_query, asset_dir, route)
-                    actual_provider_id = "local-editorial-v1"
-                    break
+                    materialization_notes.append(
+                        f"{provider_id}: skipped because generated-provider alternatives require an explicit rerun"
+                    )
+                    continue
                 provider = stock_provider_name(provider_id)
                 if provider == "local":
-                    actual_asset = materialize_local_scene(scene, director_query, asset_dir, route)
-                    actual_provider_id = provider_id
-                    break
-                recognized_stock_route = True
+                    materialization_notes.append(
+                        f"{provider_id}: skipped because local editorial cards are not a fallback"
+                    )
+                    continue
                 stock_query = resolve_director_stock_query(scene, director_query)
                 discovered_candidates = (
                     list(inventory_by_scene.get(scene.position, {}).get(provider_id, []))
@@ -431,15 +448,11 @@ def prepare_routed_scene_assets(
                     actual_provider_id = provider_id
                     break
 
-        if actual_asset is None and recognized_stock_route:
-            actual_asset = materialize_local_scene(scene, director_query, asset_dir, route)
-            actual_provider_id = "local-editorial-v1"
-            materialization_notes.append(
-                "local-editorial-v1: fallback used because reviewed stock candidates were unavailable"
-            )
-
         if actual_asset is None or actual_provider_id is None:
-            raise RuntimeError(f"No director-selected asset could be prepared for scene {scene.position}: {'; '.join(errors)}")
+            details = [*errors, *materialization_notes]
+            raise RuntimeError(
+                f"No director-selected asset could be prepared for scene {scene.position}: {'; '.join(details)}"
+            )
         candidate_shortlist = []
         seen_candidates: set[tuple[str, str]] = set()
         for provider_id, candidates in duplicate_options:
@@ -475,8 +488,54 @@ def prepare_routed_scene_assets(
             routing_record["materialization_notes"] = list(dict.fromkeys(materialization_notes))
         return actual_asset, routing_record
 
-    with ThreadPoolExecutor(max_workers=min(ASSET_PREPARE_WORKERS, max(1, len(scene_list)))) as executor:
-        prepared = list(executor.map(prepare_scene, scene_list))
+    primary_scenes = [scene for scene in scene_list if scene.position not in reuse_sources]
+    with ThreadPoolExecutor(max_workers=min(ASSET_PREPARE_WORKERS, max(1, len(primary_scenes)))) as executor:
+        primary_prepared = list(executor.map(prepare_scene, primary_scenes))
+    prepared_by_scene = {
+        scene.position: prepared
+        for scene, prepared in zip(primary_scenes, primary_prepared)
+    }
+    pending_reuse = {scene.position: scene for scene in scene_list if scene.position in reuse_sources}
+    while pending_reuse:
+        resolved_positions = []
+        for scene_position, scene in pending_reuse.items():
+            source_position = reuse_sources[scene_position]
+            source = prepared_by_scene.get(source_position)
+            if source is None:
+                continue
+            source_asset, source_routing = source
+            route = routes[scene.position]
+            director_query = required_route_text(route, "query", scene.position)
+            reused_asset = replace(
+                source_asset,
+                scene_position=scene.position,
+                duration=float(scene.duration),
+                query=director_query,
+            )
+            reused_routing = {
+                "scene_position": scene.position,
+                "preferred_provider_id": required_route_text(route, "preferredProviderId", scene.position),
+                "actual_provider_id": source_routing["actual_provider_id"],
+                "actual_provider": source_routing["actual_provider"],
+                "fallback_used": False,
+                "generation_pending": bool(source_routing.get("generation_pending")),
+                "reuse_from_scene_position": source_position,
+                "director_query": director_query,
+                "requested_media_type": source_routing["requested_media_type"],
+                "query": director_query,
+                "rationale": str(route.get("rationale") or ""),
+                "director_shot": route,
+                "candidate_shortlist": [],
+                "materialization_notes": [f"Reuses the locked master asset from scene {source_position}."],
+            }
+            prepared_by_scene[scene.position] = (reused_asset, reused_routing)
+            resolved_positions.append(scene_position)
+        if not resolved_positions:
+            unresolved = ", ".join(str(position) for position in sorted(pending_reuse))
+            raise ValueError(f"Director plan cannot resolve reused scenes: {unresolved}")
+        for scene_position in resolved_positions:
+            del pending_reuse[scene_position]
+    prepared = [prepared_by_scene[scene.position] for scene in scene_list]
     scene_assets = [item[0] for item in prepared]
     routing_records = [item[1] for item in prepared]
 
@@ -486,6 +545,27 @@ def prepare_routed_scene_assets(
     payload["director_plan_version"] = str(director_plan.get("version") or "video-factory/director-plan-v1")
     plan_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return plan_path
+
+
+def director_routes_for_scenes(shots: list, scenes: Iterable[Scene]) -> dict[int, dict]:
+    scene_positions = [scene.position for scene in scenes]
+    route_positions = []
+    routes: dict[int, dict] = {}
+    for shot in shots:
+        if not isinstance(shot, dict):
+            raise ValueError("Director plan shots must contain objects")
+        position = shot.get("scenePosition")
+        if not isinstance(position, int) or isinstance(position, bool) or position < 1:
+            raise ValueError("Director plan scenePosition must be a positive integer")
+        route_positions.append(position)
+        routes[position] = shot
+    if (
+        len(scene_positions) != len(set(scene_positions))
+        or len(route_positions) != len(set(route_positions))
+        or set(route_positions) != set(scene_positions)
+    ):
+        raise ValueError("Director plan must exactly cover every script scene once")
+    return routes
 
 
 def ranking_candidate_ids_by_scene(candidate_ranking: Optional[dict]) -> dict[int, list[RankedCandidatePreference]]:
@@ -589,6 +669,28 @@ def materialize_local_scene(scene: Scene, query: str, asset_dir: Path, director_
     )
 
 
+def pending_generated_scene_asset(
+    scene: Scene,
+    query: str,
+    provider_id: str,
+    media_type: str,
+) -> SceneAsset:
+    return SceneAsset(
+        scene_position=scene.position,
+        provider=provider_id,
+        asset_id=f"pending-scene-{scene.position:02d}",
+        media_type=media_type,
+        width=720 if media_type == "video" else 1440,
+        height=1280 if media_type == "video" else 2560,
+        duration=float(scene.duration),
+        local_path="",
+        source_url=f"pending://video-factory/generation/scene-{scene.position:02d}",
+        creator="VideoFactory pending generation",
+        license_note="Generation has not completed; this scene cannot be rendered or published.",
+        query=query,
+    )
+
+
 def materialize_first_candidate(
     scene: Scene,
     candidates: Iterable[StockAssetCandidate],
@@ -648,11 +750,31 @@ def is_generative_provider(provider_id: str) -> bool:
     }
 
 
+def is_explicit_editorial_card(provider_id: str, delivery_type: str) -> bool:
+    return provider_id == "local-editorial-v1" and delivery_type == "editorial_card"
+
+
 def required_route_text(route: dict, field: str, scene_position: int) -> str:
     value = route.get(field)
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"Director plan {field} is invalid for scene {scene_position}")
     return value.strip()
+
+
+def reuse_source_scene_position(route: dict) -> Optional[int]:
+    explicit = route.get("reuseFromScenePosition")
+    if isinstance(explicit, int) and not isinstance(explicit, bool) and explicit > 0:
+        return explicit
+    query = str(route.get("query") or "").strip()
+    match = re.match(r"(?i)^REUSE_ONLY\s+scene\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b", query)
+    if match is None:
+        return None
+    token = match.group(1).lower()
+    words = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+    return int(token) if token.isdigit() else words[token]
 
 
 def search_stock_assets(
@@ -1273,86 +1395,88 @@ def local_card_spec(scene: Scene, director_shot: Optional[dict] = None) -> dict:
     title, fallback_items, fallback_kicker = local_card_content(scene)
     evidence_items = [item for item in ("来源", "原文", "适用范围") if item in supporting_text]
 
+    def final_card(spec: dict) -> dict:
+        visible_text = " ".join(str(spec.get(field) or "") for field in ("kicker", "title", "status"))
+        visible_text = " ".join([visible_text, *[str(item) for item in spec.get("items", [])]])
+        forbidden = next((term for term in ("门禁拦截", "证据门禁", "待证据核验", "退回待核验") if term in visible_text), None)
+        if forbidden:
+            # 内部工作流状态宁可让素材节点失败，也不能混入正式成片。
+            raise ValueError(f"Editorial card contains internal workflow terminology: {forbidden}")
+        return spec
+
     if "node output self review red team" in query:
-        return {
+        return final_card({
             "layout": "audit_flow",
             "kicker": "节点审计",
             "title": "每个节点，都先过两关",
             "items": ["节点输出", "自审", "独立红队"],
             "status": "发现问题",
-        }
+        })
 
     if "self review independent red team" in query:
-        return {
+        return final_card({
             "layout": "audit_flow",
             "kicker": "审核顺序",
             "title": "先自审，再交独立红队",
             "items": ["自审", "独立红队"],
             "status": "",
-        }
+        })
 
     if "overhead hand moving blank cards" in query:
-        return {
+        return final_card({
             "layout": "card_pair",
             "kicker": "每个节点",
             "title": "同样走完两关",
             "items": ["自审", "独立红队"],
             "status": "重复执行",
-        }
+        })
 
     if "paid step" in query and "confirmation" in query:
-        return {
+        return final_card({
             "layout": "paid_gate",
             "kicker": "费用边界",
             "title": "付费前，停下来确认",
             "items": ["返回修改", "确认继续"],
             "status": "付费节点 · 未执行",
-        }
+        })
 
     if "audit payment confirmation outro" in query:
-        return {
+        return final_card({
             "layout": "audit_outro",
             "kicker": "生产口诀",
             "title": "每个节点：自审 → 红队",
             "items": ["付费前：用户确认", "继续生产"],
             "status": "",
-        }
+        })
 
     if "status" in query and ("verification" in query or "核验" in supporting_text):
-        flow = next((item for item in quoted if "→" in item), "")
-        items = [part.strip() for part in flow.split("→") if part.strip()] if flow else [
-            item for item in quoted if item in {"生成完成", "待证据核验", "等待发布"}
-        ]
-        if len(items) < 2:
-            items = ["生成完成", "待证据核验"]
-        return {"layout": "status_flow", "kicker": "证据门禁", "title": "发布前，先核验", "items": items[:2], "status": items[-1]}
+        raise ValueError("Editorial card may not render an internal verification status flow")
 
     if "checklist" in query or len(evidence_items) == 3 or "缺一项" in scene.narration:
         items = evidence_items or ["来源", "原文", "适用范围"]
         pending = "缺" in scene.narration or "待核验" in supporting_text and "待发布" not in supporting_text
         status = "待核验" if pending else ("待发布" if "待发布" in supporting_text else "核验完成")
-        return {
+        return final_card({
             "layout": "checklist",
             "kicker": "核验清单",
             "title": "缺一项，就先不发布" if pending else "三项齐，才进入下一步",
             "items": items[:3],
             "status": status,
             "pending_index": len(items[:3]) - 1 if pending else None,
-        }
+        })
 
     if "missing source" in query or ("来源" in supporting_text and "未提供" in supporting_text):
-        return {"layout": "form", "kicker": "来源核验", "title": "来源", "items": ["未提供"], "status": "退回待核验"}
+        raise ValueError("Editorial card may not render an internal missing-source state")
 
-    if "claim" in query or "typography" in query or "断言" in supporting_text:
-        statement = next((item for item in quoted if "断言" in item), title)
-        return {"layout": "statement", "kicker": "门禁拦截", "title": statement, "items": [], "status": "待证据核验"}
+    if "claim" in query or "断言" in supporting_text:
+        raise ValueError("Editorial card may not render an internal claim-review state")
 
     if "start card" in query or "conclusion" in query or "只是起点" in supporting_text:
         conclusion = next((item for item in quoted if "起点" in item), title)
         lead = next((item for item in quoted if item != conclusion), "能生成")
-        return {"layout": "conclusion", "kicker": "结论", "title": conclusion, "items": [lead], "status": ""}
+        return final_card({"layout": "conclusion", "kicker": "结论", "title": conclusion, "items": [lead], "status": ""})
 
-    return {"layout": "list", "kicker": fallback_kicker, "title": title, "items": fallback_items, "status": ""}
+    return final_card({"layout": "list", "kicker": fallback_kicker, "title": title, "items": fallback_items, "status": ""})
 
 
 def quoted_display_text(text: str) -> list[str]:

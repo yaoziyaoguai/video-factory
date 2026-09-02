@@ -44,6 +44,10 @@ export interface CapabilityRequirement {
   required: boolean;
 }
 
+/**
+ * 仅用于读取历史模板。费用控制已经移到每次真实报价后的人工授权，
+ * 因此这个字段不会进入解析后的模板或生产蓝图。
+ */
 export interface TemplateCostPolicy {
   currency: "CNY";
   maxCost: number;
@@ -66,13 +70,14 @@ export interface ProductionTemplateInput {
   soundSystem: SoundSystemTemplate;
   qualityRules: QualityRuleTemplate[];
   capabilityRequirements: CapabilityRequirement[];
-  costPolicy: TemplateCostPolicy;
+  /** @deprecated 仅兼容旧模板输入；解析后会丢弃。 */
+  costPolicy?: TemplateCostPolicy;
   modelDefaults?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 }
 
-export type ProductionTemplate = Readonly<ProductionTemplateInput>;
+export type ProductionTemplate = Readonly<Omit<ProductionTemplateInput, "costPolicy">>;
 
 export interface ProductionBlueprint {
   platform: string;
@@ -84,7 +89,6 @@ export interface ProductionBlueprint {
   soundSystem: SoundSystemTemplate;
   qualityRules: QualityRuleTemplate[];
   capabilityRequirements: CapabilityRequirement[];
-  costPolicy: TemplateCostPolicy;
 }
 
 export type ProductionBlueprintPatch = Partial<ProductionBlueprint>;

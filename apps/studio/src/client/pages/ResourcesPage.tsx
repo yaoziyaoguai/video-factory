@@ -44,7 +44,7 @@ const RECIPE_OPTIONS: Array<{ id: StudioProductionRecipeId; label: string }> = [
   { id: "economy-daily", label: "经济日更" },
   { id: "free-stock", label: "全免费精搜" },
   { id: "keyshot-ai", label: "效果均衡" },
-  { id: "cinematic-ai", label: "精品上限" },
+  { id: "cinematic-ai", label: "开放精品生成" },
 ];
 const DEFAULT_TOPIC_INSTRUCTION = "优先选择与普通人生活直接相关、能用可靠画面表达、具备明确反差或实用价值、可以发展成系列的题材。高热度但缺少可验证事实、可用画面或独特角度时，应降低推荐或明确放弃。";
 const RESOURCE_SECTION_IDS = [
@@ -268,10 +268,10 @@ export function ResourcesPage() {
         {settingsError ? <ResourceError title="创作默认值读取失败" message={settingsError} retry={load} /> : !settings ? <div className="region-loading">正在读取创作默认值...</div> : <div className="configuration-sheet">
           <div className="configuration-intro">
             <Settings2 aria-hidden="true" size={22} />
-            <div><strong>先定创作习惯，再开始生产</strong><p>默认使用人工终审和经济日更；模型只在节点需要时调用，付费镜头仍受制作配方约束。</p><small>运行底座 {capabilities.filter((item) => item.state === "ready").length}/{capabilities.length} 项就绪</small></div>
+            <div><strong>先定创作习惯，再开始生产</strong><p>默认使用人工终审和经济日更；图片、视频生成会按实际导演方案逐项报价并等待人工确认。</p><small>运行底座 {capabilities.filter((item) => item.state === "ready").length}/{capabilities.length} 项就绪</small></div>
           </div>
           <div className="configuration-fields">
-            <label className="field"><span>成本策略</span><select aria-label="默认成本策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
+            <label className="field"><span>画面来源策略</span><select aria-label="默认画面来源策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
             <label className="field"><span>导演角色</span><select aria-label="默认导演角色" value={productionDefaults.directorProfileId} onChange={(event) => setProductionDefaults((current) => ({ ...current, directorProfileId: event.target.value as StudioProductionDefaults["directorProfileId"] }))}>
               <option value="auto">自动选导演</option><option value="documentary-observer">纪实观察</option><option value="quiet-humanism">静观生活</option><option value="urban-poetic">都市诗意</option><option value="chromatic-storytelling">色彩叙事</option><option value="geometric-control">几何秩序</option><option value="suspense-staging">悬念调度</option>
             </select></label>
@@ -287,7 +287,7 @@ export function ResourcesPage() {
       <section id="topic-strategy" className="resource-section topic-strategy-config" data-resource-section data-active={activeSection === "topic-strategy" ? "true" : undefined} data-tour="topic-strategy">
         <ResourceHeading eyebrow="总编规则" title="选题策略" meta="热度只是信号，最终排序看能不能做成一条值得看的视频" />
         <div className="topic-rubric" aria-label="选题评分标准">
-          {[['受众相关', '18%', '是否与明确人群的真实处境相关'], ['系列价值', '18%', '能否连续生产而不是一次性追热'], ['可拍性', '14%', '是否有可靠素材和可见动作'], ['成本效率', '14%', '在预算内能否达到及格线'], ['差异化', '14%', '是否提供通稿之外的新角度'], ['商业价值', '12%', '是否具备长期转化或合作空间'], ['合规安全', '10%', '事实、公共事件与平台风险']].map(([label, weight, detail]) => <article key={label}><span>{weight}</span><strong>{label}</strong><small>{detail}</small></article>)}
+          {[['受众相关', '18%', '是否与明确人群的真实处境相关'], ['系列价值', '18%', '能否连续生产而不是一次性追热'], ['可拍性', '14%', '是否有可靠素材和可见动作'], ['成本效率', '14%', '方案成本与画面价值是否匹配'], ['差异化', '14%', '是否提供通稿之外的新角度'], ['商业价值', '12%', '是否具备长期转化或合作空间'], ['合规安全', '10%', '事实、公共事件与平台风险']].map(([label, weight, detail]) => <article key={label}><span>{weight}</span><strong>{label}</strong><small>{detail}</small></article>)}
         </div>
         <div className="topic-instruction-editor">
           <label className="field"><span>给选题总编的补充偏好</span><textarea aria-label="选题总编补充偏好" rows={5} maxLength={2000} value={topicInstruction} onChange={(event) => setTopicInstruction(event.target.value)} /><small>这段文字参与 Codex 选题排序，但不能覆盖事实核验、合规规则和结构化输出要求。</small></label>

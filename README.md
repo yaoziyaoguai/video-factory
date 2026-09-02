@@ -14,7 +14,7 @@ VideoFactory 是一个本地优先的短视频 Creative OS。当前 Web Studio �
 - 机会必须包含至少一条来源声明；人工录入内容由用户自行核验，平台指标仅在数据连接器接入后展示。
 - 保留原有 SQLite CLI，用于选题实验、历史 job、指标记录和兼容路径。
 - 保留人工审核和手动发布，不在 MVP 阶段自动点击平台发布。
-- Seedance、MiniMax 海螺与 Wan 已接入统一异步生成协议；默认关闭，只有配置完整并通过镜头数与人民币预算双门禁后才调用。
+- Seedance、MiniMax 海螺与 Wan 已接入统一异步生成协议；默认关闭，配置完整后按导演实际选中的镜头逐项报价，只有人工确认本次报价后才调用。
 - 可灵与 Vidu 保留为明确的规划项，不会伪装成可用 Provider。
 
 ## 快速开始
@@ -41,7 +41,7 @@ make codex-broker-status
 
 默认端口为 TrendRadar `8080`、TrendRadar MCP `3333`、NewsNow `4444`、DailyHotApi `6688` 和 RSSHub `1200`。所有服务只绑定 `127.0.0.1`；API key 不写入仓库，也不会由配置页面回传。
 
-默认“经济日更”配方不允许计费调用，预计成本上限为 `¥0`。免费图库或付费图片、视频模型按需配置：
+默认“经济日更”配方不选择计费图片或视频能力。免费图库或付费图片、视频模型按需配置：
 
 ```bash
 cp .env.example .env
@@ -51,7 +51,7 @@ npm run studio:dev
 
 Studio 会自动读取仓库根目录的 `.env`，shell 中已经存在的环境变量优先。配置 `PEXELS_API_KEY` 后才会启用 Pexels；密钥只在忽略文件中保存，API 和资源页不会返回密钥值。
 
-Seedream 需要 `ARK_API_KEY`、`SEEDREAM_MODEL_ID` 和 `SEEDREAM_ESTIMATED_CNY_PER_IMAGE`；Seedance 需要 `ARK_API_KEY`、`SEEDANCE_MODEL_ID` 和 `SEEDANCE_ESTIMATED_CNY_PER_CLIP`；MiniMax 海螺需要 `MINIMAX_API_KEY`、`MINIMAX_VIDEO_MODEL_ID` 和 `MINIMAX_ESTIMATED_CNY_PER_CLIP`；Wan 需要 `DASHSCOPE_API_KEY`、`DASHSCOPE_WORKSPACE_ID`、`WAN_MODEL_ID` 和 `WAN_ESTIMATED_CNY_PER_CLIP`。MiniMax 云配音只需 `MINIMAX_API_KEY`，默认使用 `speech-2.8-turbo`。估价用于生产前预算门禁，应按账号实际计费配置一个保守值，不代表厂商实时价格。
+Seedream 需要 `ARK_API_KEY`、`SEEDREAM_MODEL_ID` 和 `SEEDREAM_ESTIMATED_CNY_PER_IMAGE`；Seedance 需要 `ARK_API_KEY`、`SEEDANCE_MODEL_ID` 和 `SEEDANCE_ESTIMATED_CNY_PER_CLIP`；MiniMax 海螺需要 `MINIMAX_API_KEY`、`MINIMAX_VIDEO_MODEL_ID` 和 `MINIMAX_ESTIMATED_CNY_PER_CLIP`；Wan 需要 `DASHSCOPE_API_KEY`、`DASHSCOPE_WORKSPACE_ID`、`WAN_MODEL_ID` 和 `WAN_ESTIMATED_CNY_PER_CLIP`。MiniMax 云配音只需 `MINIMAX_API_KEY`，默认使用 `speech-2.8-turbo`。图片和视频估价用于生成逐镜报价，应按账号实际计费配置一个保守值，不代表厂商实时价格；系统不设置全片费用上限。
 
 完整验证：
 
@@ -171,7 +171,7 @@ npm run factory -- reject <run-id> \
   --workspace workspace/factory
 ```
 
-同一条 workflow 可在 brief 中把 `providers.assets` 从 `local-editorial-v1` 换成 `pexels-stock-v1`、`pixabay-stock-v1`、`seedance-video-v1` 或 `wan-video-v1`。外部 Provider 需要先在进程环境或仓库根目录 `.env` 中提供完整配置；程序不会通过 API 输出配置值。付费模型会先生成本地保底素材，只替换脚本中允许生成的关键场景，并把任务 ID、估算费用、临时结果 URL 和本地文件写入审计 artifact。
+同一条 workflow 可在 brief 中把 `providers.assets` 从 `local-editorial-v1` 换成 `pexels-stock-v1`、`pixabay-stock-v1`、`seedance-video-v1` 或 `wan-video-v1`。外部 Provider 需要先在进程环境或仓库根目录 `.env` 中提供完整配置；程序不会通过 API 输出配置值。图库或生成失败会让对应素材节点明确失败，不会改用本地说明卡；只有导演显式选择 `local-editorial-v1 + editorial_card` 时才制作正式卡片。付费生成会把任务 ID、估算费用、临时结果 URL 和本地文件写入审计 artifact。
 
 每次 run 位于 `workspace/factory/runs/<run-id>/`，核心产物包括：
 

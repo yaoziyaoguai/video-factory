@@ -825,6 +825,7 @@ body { background: var(--canvas); }
 .studio-v3 .spend-gate > div > span { align-items: flex-start; flex-direction: column; gap: 2px; }
 .studio-v3 .spend-gate strong { font-size: 11px; }
 .studio-v3 .spend-gate small { color: #766328; font-size: 9px; }
+.studio-v3 .spend-gate-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
 .studio-v3 .spend-authorized { display: inline-flex; align-items: center; gap: 5px; color: var(--green); font-size: 10px; font-weight: 780; }
 .studio-v3 .node-output-preview { overflow: hidden; background: #ffffff; border: 1px solid #dadbd5; border-radius: 6px; }
 .studio-v3 .node-output-preview > header { min-height: 47px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 11px; border-bottom: 1px solid var(--line); }
@@ -919,6 +920,7 @@ body { background: var(--canvas); }
 .studio-v3 .node-confirm-layer > section { width: min(430px, 100%); display: grid; justify-items: start; gap: 10px; padding: 20px; color: var(--ink); background: #fffef8; border: 1px solid #d8d6ca; border-radius: 8px; box-shadow: 0 22px 60px rgb(0 0 0 / 24%); }
 .studio-v3 .node-confirm-layer h3 { margin: 0; font: 700 19px/1.3 "Manrope Variable", "Noto Sans SC Variable", "PingFang SC", sans-serif; }
 .studio-v3 .node-confirm-layer p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.65; }
+.studio-v3 .node-confirm-layer .field { width: 100%; }
 .studio-v3 .node-confirm-layer > section > div:last-child { width: 100%; display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .studio-v3 .spend-input-versions { width: 100%; display: grid; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; }
 .studio-v3 .spend-input-versions > div { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 9px 10px; background: #ffffff; border-bottom: 1px solid var(--line); }
@@ -1014,6 +1016,8 @@ body { background: var(--canvas); }
   .studio-v3 .node-preview-summary, .studio-v3 .node-preview-facts, .studio-v3 .node-preview-items { grid-template-columns: 1fr; }
   .studio-v3 .spend-gate { align-items: stretch; flex-direction: column; }
   .studio-v3 .spend-gate > .button { width: 100%; }
+  .studio-v3 .spend-gate-actions { width: 100%; align-items: stretch; flex-direction: column; }
+  .studio-v3 .spend-gate-actions .button { width: 100%; }
   .studio-v3 .cost-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .studio-v3 .cost-dashboard-grid { grid-template-columns: 1fr; }
   .studio-v3 .cost-metrics.is-compact { grid-template-columns: 1fr; }

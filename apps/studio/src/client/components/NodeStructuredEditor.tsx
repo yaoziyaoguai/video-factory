@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
+import type { StudioProvider } from "../../shared/api.js";
 import { creatorContainerViewId, creatorViewId, isCreatorNestedField, isCreatorTopLevelField } from "../creator-document-policy.js";
 import { humanizeCreativeText, providerLabel } from "../presentation.js";
 
@@ -7,6 +8,7 @@ interface NodeStructuredEditorProps {
   nodeId: string;
   value: unknown;
   assetProviderIds?: string[];
+  assetProviders?: Array<Pick<StudioProvider, "id" | "label" | "deliveryTypes">>;
   onChange: (value: unknown) => void;
 }
 
@@ -62,7 +64,7 @@ const LABELS: Record<string, string> = {
   beats: "节拍",
   visualBible: "视觉圣经",
   scores: "评分",
-  economics: "成本策略",
+  economics: "画面来源策略",
   director: "导演配置",
   voiceDirection: "声音配置",
   viewerPromise: "观众承诺",
@@ -151,7 +153,7 @@ const ENUM_OPTIONS: Record<string, Array<{ value: string; label: string }>> = {
   resolvedProfileId: directorOptions(false),
 };
 
-export function NodeStructuredEditor({ nodeId, value, assetProviderIds = [], onChange }: NodeStructuredEditorProps) {
+export function NodeStructuredEditor({ nodeId, value, assetProviderIds = [], assetProviders = [], onChange }: NodeStructuredEditorProps) {
   const record = asRecord(value);
   if (!record) return <p className="node-document-state">这个交付没有适合手工修改的内容。</p>;
   const entries = Object.entries(record).filter(([key, fieldValue]) => hasEditableValue(fieldValue) && isCreatorTopLevelField(nodeId, key, fieldValue));
@@ -163,18 +165,42 @@ export function NodeStructuredEditor({ nodeId, value, assetProviderIds = [], onC
       nodeId={nodeId}
       value={fieldValue}
       assetProviderIds={assetProviderIds}
+      assetProviders={assetProviders}
       path={[key]}
       depth={0}
-      onChange={(path, next) => onChange(updateAtPath(record, path, next))}
+      onChange={(path, next) => onChange(updateCreativeField(record, nodeId, path, next, assetProviders))}
     />)}
   </div>;
 }
 
-function StructuredField({ nodeId, fieldKey, value, assetProviderIds, path, depth, onChange }: {
+function updateCreativeField(
+  record: Record<string, unknown>,
+  nodeId: string,
+  path: Array<string | number>,
+  value: unknown,
+  assetProviders: Array<Pick<StudioProvider, "id" | "label" | "deliveryTypes">>,
+): Record<string, unknown> {
+  const updated = updateAtPath(record, path, value);
+  if (creatorViewId(nodeId) !== "visual-direction" || path.at(-1) !== "preferredProviderId" || typeof value !== "string") {
+    return updated;
+  }
+  const deliveryType = assetProviders.find((provider) => provider.id === value)?.deliveryTypes?.[0];
+  if (!deliveryType) return updated;
+  const shotPath = path.slice(0, -1);
+  let consistent = updateAtPath(updated, [...shotPath, "deliveryType"], deliveryType);
+  consistent = updateAtPath(consistent, [...shotPath, "alternativeProviderIds"], []);
+  if (deliveryType === "generated_image" || deliveryType === "generated_video" || deliveryType === "editorial_card") {
+    consistent = updateAtPath(consistent, [...shotPath, "authenticityPolicy"], "illustrative");
+  }
+  return consistent;
+}
+
+function StructuredField({ nodeId, fieldKey, value, assetProviderIds, assetProviders, path, depth, onChange }: {
   nodeId: string;
   fieldKey: string;
   value: unknown;
   assetProviderIds: string[];
+  assetProviders: Array<Pick<StudioProvider, "id" | "label" | "deliveryTypes">>;
   path: Array<string | number>;
   depth: number;
   onChange: (path: Array<string | number>, value: unknown) => void;
@@ -206,7 +232,7 @@ function StructuredField({ nodeId, fieldKey, value, assetProviderIds, path, dept
             <button type="button" title="向下移动" aria-label={`下移候选素材 ${index + 1}`} disabled={index === value.length - 1} onClick={() => onChange(path, moveArrayItem(value, index, index + 1))}><ArrowDown aria-hidden="true" size={15} /></button>
             <button type="button" title="移出候选池" aria-label={`移出候选素材 ${index + 1}`} onClick={() => onChange(path, value.filter((_, candidateIndex) => candidateIndex !== index))}><Trash2 aria-hidden="true" size={15} /></button>
           </div> : null}
-          {fields.map(([childKey, childValue]) => <StructuredField key={childKey} nodeId={nodeId} fieldKey={childKey} value={childValue} assetProviderIds={assetProviderIds} path={[...path, index, childKey]} depth={depth + 1} onChange={onChange} />)}
+          {fields.map(([childKey, childValue]) => <StructuredField key={childKey} nodeId={nodeId} fieldKey={childKey} value={childValue} assetProviderIds={assetProviderIds} assetProviders={assetProviders} path={[...path, index, childKey]} depth={depth + 1} onChange={onChange} />)}
         </div>
       </details>;
     })}</section>;
@@ -219,7 +245,7 @@ function StructuredField({ nodeId, fieldKey, value, assetProviderIds, path, dept
       nestedViewId ? isCreatorTopLevelField(nestedViewId, childKey, childValue) : isCreatorNestedField(childKey)
     ));
     if (!fields.length) return null;
-    return <section className="node-editor-group"><header><strong>{label(fieldKey)}</strong></header><div>{fields.map(([childKey, childValue]) => <StructuredField key={childKey} nodeId={nodeId} fieldKey={childKey} value={childValue} assetProviderIds={assetProviderIds} path={[...path, childKey]} depth={depth + 1} onChange={onChange} />)}</div></section>;
+    return <section className="node-editor-group"><header><strong>{label(fieldKey)}</strong></header><div>{fields.map(([childKey, childValue]) => <StructuredField key={childKey} nodeId={nodeId} fieldKey={childKey} value={childValue} assetProviderIds={assetProviderIds} assetProviders={assetProviders} path={[...path, childKey]} depth={depth + 1} onChange={onChange} />)}</div></section>;
   }
   if (typeof value === "boolean") {
     return <label className="node-editor-toggle"><input type="checkbox" checked={value} onChange={(event) => onChange(path, event.target.checked)} /><span>{label(fieldKey)}<small>{value ? "是" : "否"}</small></span></label>;
@@ -228,7 +254,7 @@ function StructuredField({ nodeId, fieldKey, value, assetProviderIds, path, dept
   const options = stringValue === undefined
     ? undefined
     : fieldKey === "preferredProviderId"
-      ? assetProviderOptions(assetProviderIds, stringValue)
+      ? assetProviderOptions(assetProviderIds, stringValue, assetProviders)
       : ENUM_OPTIONS[fieldKey];
   if (options && stringValue !== undefined) {
     const choices = options.some((option) => option.value === stringValue)
@@ -392,7 +418,11 @@ function directorOptions(includeAuto: boolean): Array<{ value: string; label: st
   ];
 }
 
-function assetProviderOptions(configuredIds: string[], currentId: string): Array<{ value: string; label: string }> {
+function assetProviderOptions(
+  configuredIds: string[],
+  currentId: string,
+  providers: Array<Pick<StudioProvider, "id" | "label">>,
+): Array<{ value: string; label: string }> {
   return [...new Set([currentId, ...configuredIds])]
-    .map((value) => ({ value, label: providerLabel(value) ?? value }));
+    .map((value) => ({ value, label: providers.find((provider) => provider.id === value)?.label ?? providerLabel(value) ?? value }));
 }

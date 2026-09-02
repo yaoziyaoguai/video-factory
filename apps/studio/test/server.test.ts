@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import { buildStudioApp, type StudioServicePort } from "../src/server/app.js";
 import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
-import type { StudioOpportunity, StudioRunDetail } from "../src/shared/api.js";
+import type { StudioOpportunity, StudioPaidReconciliationInput, StudioRunDetail } from "../src/shared/api.js";
 
 function runDetail(status: StudioRunDetail["status"] = "needs_human"): StudioRunDetail {
   return {
@@ -174,10 +174,19 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     applyNodeInputOverride: async () => runDetail("stale"),
     applyNodeExecutionConfiguration: async () => runDetail("stale"),
     authorizeSpend: async () => runDetail("running"),
+    rejectSpend: async () => runDetail("stale"),
     requestPause: async () => ({ ...runDetail("running"), pauseRequested: true }),
     resumePaused: async () => runDetail("running"),
     resumeStale: async () => runDetail("running"),
     retryFailedNode: async () => runDetail("running"),
+    inspectPaidNode: async (_runId, nodeId) => ({
+      nodeId,
+      operationId: "paid-operation-1",
+      recommendedOutcome: "resume_original",
+      requiresManualReconciliation: false,
+      items: [],
+    }),
+    reconcilePaidNode: async () => runDetail("running"),
     subscribe: () => () => undefined,
     resolveArtifact: async () => undefined,
     publishReadiness: async (runId) => ({
@@ -367,6 +376,14 @@ describe("Studio API", () => {
       resumePaused: async () => { calls.push("resume"); return runDetail("running"); },
       resumeStale: async () => { calls.push("regenerate"); return runDetail("running"); },
       retryFailedNode: async (_runId, nodeId) => { calls.push(`retry:${nodeId}`); return runDetail("running"); },
+      inspectPaidNode: async (runId, nodeId) => {
+        calls.push(`inspect-paid:${runId}:${nodeId}`);
+        return { nodeId, operationId: "paid-operation-1", recommendedOutcome: "resume_original", requiresManualReconciliation: false, items: [] };
+      },
+      reconcilePaidNode: async (runId, nodeId, input) => {
+        calls.push(`reconcile-paid:${runId}:${nodeId}:${input.expectedRunRevision}:${input.reconciliationId}:${input.outcome}`);
+        return runDetail("running");
+      },
     });
     const app = buildStudioApp({ service });
 
@@ -379,6 +396,12 @@ describe("Studio API", () => {
     const resume = await app.inject({ method: "POST", url: "/api/runs/run-1/resume" });
     const regenerate = await app.inject({ method: "POST", url: "/api/runs/run-1/regenerate-stale" });
     const retry = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/voice/retry" });
+    const paidItems = await app.inject({ method: "GET", url: "/api/runs/run-1/nodes/assets/paid-operation" });
+    const reconcile = await app.inject({
+      method: "POST",
+      url: "/api/runs/run-1/nodes/assets/paid-operation/reconcile",
+      payload: { expectedRunRevision: 1, reconciliationId: "reconcile-assets-1", outcome: "resume_original" },
+    });
 
     assert.equal(costs.statusCode, 200);
     assert.equal(costs.json().totals.actualPendingCount, 1);
@@ -391,7 +414,88 @@ describe("Studio API", () => {
     assert.equal(resume.statusCode, 200);
     assert.equal(regenerate.statusCode, 200);
     assert.equal(retry.statusCode, 200);
-    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "config:assets:MiniMax-H3:8:studio-owner", "spend:assets:MiniMax-Hailuo-02:studio-owner", "pause", "resume", "regenerate", "retry:voice"]);
+    assert.equal(paidItems.statusCode, 200);
+    assert.equal(reconcile.statusCode, 200);
+    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "config:assets:MiniMax-H3:8:studio-owner", "spend:assets:MiniMax-Hailuo-02:studio-owner", "pause", "resume", "regenerate", "retry:voice", "inspect-paid:run-1:assets", "reconcile-paid:run-1:assets:1:reconcile-assets-1:resume_original"]);
+    await app.close();
+  });
+
+  it("validates a manual paid reconciliation and injects the trusted server actor", async () => {
+    let forwarded: { input: StudioPaidReconciliationInput; actor?: string } | undefined;
+    const service = fakeService({
+      reconcilePaidNode: async (_runId, _nodeId, input, ...actors: string[]) => {
+        forwarded = { input, ...(actors[0] ? { actor: actors[0] } : {}) };
+        return runDetail("failed");
+      },
+    });
+    const app = buildStudioApp({ service });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/runs/run-1/nodes/assets/paid-operation/reconcile",
+      payload: {
+        expectedRunRevision: 3,
+        reconciliationId: "manual-charge-1",
+        outcome: "confirmed_charged",
+        note: "Provider 控制台显示任务已计费。",
+        actualCostCny: 2.4,
+        actor: "forged-client-actor",
+      },
+    });
+    const missingNote = await app.inject({
+      method: "POST",
+      url: "/api/runs/run-1/nodes/assets/paid-operation/reconcile",
+      payload: {
+        expectedRunRevision: 3,
+        reconciliationId: "manual-charge-2",
+        outcome: "confirmed_not_charged",
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(forwarded, {
+      input: {
+        expectedRunRevision: 3,
+        reconciliationId: "manual-charge-1",
+        outcome: "confirmed_charged",
+        note: "Provider 控制台显示任务已计费。",
+        actualCostCny: 2.4,
+      },
+      actor: "studio-owner",
+    });
+    assert.equal(missingNote.statusCode, 400);
+    assert.match(missingNote.json().error, /核销说明/);
+    await app.close();
+  });
+
+  it("rejects malformed spend feedback before calling the production service", async () => {
+    let calls = 0;
+    const app = buildStudioApp({ service: fakeService({
+      rejectSpend: async () => {
+        calls += 1;
+        return runDetail("stale");
+      },
+    }) });
+    const invalidPayloads = [
+      { spendPlanId: "plan-1", reason: "invalid" },
+      { spendPlanId: "plan-1", reason: "other", note: "" },
+      { spendPlanId: "plan-1", reason: "other", note: "x".repeat(1_001) },
+      { spendPlanId: "plan-1", reason: "too_expensive", targetEstimatedCostCny: -1 },
+      { spendPlanId: "plan-1", reason: "too_expensive", targetEstimatedCostCny: Number.NaN },
+      { spendPlanId: "plan-1", reason: "too_expensive", targetEstimatedCostCny: 100_001 },
+      { spendPlanId: "", reason: "other" },
+    ];
+
+    for (const payload of invalidPayloads) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/runs/run-1/nodes/assets/spend-rejections",
+        payload,
+      });
+      assert.equal(response.statusCode, 400, JSON.stringify(payload));
+    }
+
+    assert.equal(calls, 0);
     await app.close();
   });
 
@@ -439,7 +543,6 @@ describe("Studio API", () => {
       soundSystem: { voiceIntent: "可信", pace: "medium" as const, musicIntent: "克制" },
       qualityRules: [{ id: "facts", label: "事实", dimension: "factual" as const, required: true, threshold: 80 }],
       capabilityRequirements: [{ capability: "script.draft", required: true }],
-      costPolicy: { currency: "CNY" as const, maxCost: 5, maxPaidShots: 1 },
       createdAt: "2026-08-27T00:00:00.000Z",
       updatedAt: "2026-08-27T00:00:00.000Z",
       builtIn: true,

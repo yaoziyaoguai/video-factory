@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@video-factory/template-core": "0.1.0",
-    "@video-factory/workflow-core": "0.1.0"
+    "@video-factory/workflow-core": "0.1.0",
+    "proper-lockfile": "^4.1.2"
   }
 }

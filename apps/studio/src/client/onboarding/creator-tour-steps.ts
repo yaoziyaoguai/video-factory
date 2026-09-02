@@ -101,7 +101,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
     waitForElement: 8_000,
     popover: {
       title: "先选经济边界",
-      description: "“经济日更”优先使用已就绪的低成本能力。付费模型配方会明确展示镜头数与预算上限。",
+      description: "“经济日更”优先使用已就绪的免费能力。启用图片或视频生成后，系统会按实际方案逐项报价并等待人工确认。",
       side: "right",
       align: "start",
     },
@@ -286,7 +286,7 @@ const RESOURCE_TOUR_STEPS: DriveStep[] = [
   },
   {
     element: '[data-tour="configuration-defaults"]',
-    popover: { title: "把常用选择保存为默认", description: "成本策略、导演角色、平台、时长和终审方式会自动带入下一条新制作，创建时仍可单独修改。", side: "bottom", align: "center" },
+    popover: { title: "把常用选择保存为默认", description: "画面来源策略、导演角色、平台、时长和终审方式会自动带入下一条新制作，创建时仍可单独修改。", side: "bottom", align: "center" },
   },
   {
     element: '[data-tour="resource-trends"]',

@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import type { HumanDecisionDraft, WorkflowRun } from "@video-factory/workflow-core";
 import { ProductionPipeline } from "./production-pipeline.js";
 import { PythonWorkerClient } from "./python-worker-client.js";
+import type { VisualAssetProviderCapability, VisualDirectorAgent } from "./visual-director.js";
 
 interface PipelineCommands {
   start(input: unknown): Promise<WorkflowRun>;
@@ -17,6 +18,58 @@ export interface CliDependencies {
   createPipeline: (workspaceRoot: string) => PipelineCommands;
   stdout: (text: string) => void;
 }
+
+const EXPLICIT_EDITORIAL_DIRECTOR_ID = "explicit-editorial-director-v1";
+
+// 部署 smoke 必须显式经过导演路由，不能靠素材失败降级出卡片。
+const explicitEditorialDirector: VisualDirectorAgent = {
+  id: EXPLICIT_EDITORIAL_DIRECTOR_ID,
+  modelId: "rules-v1",
+  plan: async (input) => ({
+    version: "video-factory/director-plan-v1",
+    requestedProfileId: input.brief.requestedProfileId,
+    resolvedProfileId: "geometric-control",
+    profileRationale: "部署 smoke 明确选择静态编辑画面，以验证离线媒体链路。",
+    visualBible: {
+      narrativeApproach: "每个场景使用一张完整静态画面。",
+      pacing: "按脚本场景稳定推进。",
+      composition: "统一竖屏信息构图。",
+      camera: "整张画面保持静态。",
+      color: "使用统一高对比配色。",
+      continuity: "所有场景保持同一版式系统。",
+      sound: "使用离线测试音轨。",
+    },
+    shots: input.scenes.map((scene) => {
+      const midpoint = scene.duration / 2;
+      return {
+        scenePosition: scene.position,
+        narrativeRole: "部署链路验证",
+        authenticityPolicy: "illustrative",
+        preferredProviderId: "local-editorial-v1",
+        deliveryType: "editorial_card",
+        alternativeProviderIds: [],
+        temporalBeats: [
+          `[0s-${midpoint}s] 保持完整静态画面`,
+          `[${midpoint}s-${scene.duration}s] 保持统一版式`,
+        ],
+        query: scene.visualPrompt,
+        generationPrompt: scene.visualPrompt,
+        rationale: "部署 smoke 主动选择本地静态编辑画面。",
+        continuityNote: "沿用统一版式。",
+        confidence: 1,
+        estimatedCostCny: 0,
+      };
+    }),
+  }),
+};
+
+const localEditorialAssetProvider: VisualAssetProviderCapability = {
+  id: "local-editorial-v1",
+  label: "本地编辑卡片",
+  billing: "free",
+  modes: ["本地排版"],
+  deliveryTypes: ["editorial_card"],
+};
 
 export async function runCli(
   argv: string[],
@@ -39,7 +92,7 @@ export async function runCli(
     const brief = JSON.parse(await readFile(path.resolve(briefPath), "utf8")) as unknown;
     const run = await dependencies.createPipeline(workspaceRoot).start(brief);
     dependencies.stdout(JSON.stringify(runSummary(run, workspaceRoot)));
-    return 0;
+    return run.status === "failed" ? 1 : 0;
   }
 
   if (command === "show") {
@@ -100,7 +153,12 @@ function defaultDependencies(): CliDependencies {
         env: { ...process.env, PYTHONPATH: pythonPath },
         timeoutMs: 20 * 60 * 1000,
       });
-      return new ProductionPipeline({ workspaceRoot, worker });
+      return new ProductionPipeline({
+        workspaceRoot,
+        worker,
+        directorAgent: explicitEditorialDirector,
+        assetProviders: [localEditorialAssetProvider],
+      });
     },
     stdout: (text) => process.stdout.write(`${text}\n`),
   };
@@ -159,8 +217,11 @@ function usage(): string {
 
 const entrypoint = process.argv[1] ? pathToFileURL(process.argv[1]).href : undefined;
 if (entrypoint === import.meta.url) {
-  runCli(process.argv.slice(2)).catch((error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
-  });
+  runCli(process.argv.slice(2)).then(
+    (exitCode) => { process.exitCode = exitCode; },
+    (error: unknown) => {
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      process.exitCode = 1;
+    },
+  );
 }

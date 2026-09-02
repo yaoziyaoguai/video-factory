@@ -1,6 +1,6 @@
 import { AlertTriangle, Check, ChevronDown, CircleDollarSign, FilePenLine, Pause, Save, Settings2, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput } from "../../shared/api.js";
+import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { providerLabel } from "../presentation.js";
@@ -22,9 +22,10 @@ interface NodeWorkspaceProps {
   onInputOverride?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
   onConfigure?: (nodeId: string, input: StudioNodeExecutionConfigurationInput) => Promise<void>;
   onAuthorize: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
+  onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, artifacts, busy, pauseBusy = false, pauseRequested = false, onRequestPause, onOverride, onInputOverride = async () => undefined, onConfigure = async () => undefined, onAuthorize }: NodeWorkspaceProps) {
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, artifacts, busy, pauseBusy = false, pauseRequested = false, onRequestPause, onOverride, onInputOverride = async () => undefined, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
   const shouldOpenForAttention = node.status === "awaiting_spend_approval" || node.status === "approval_invalidated";
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
@@ -32,6 +33,10 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const [editingInput, setEditingInput] = useState(false);
   const [editingDocument, setEditingDocument] = useState(false);
   const [authorizing, setAuthorizing] = useState(false);
+  const [rejectingSpend, setRejectingSpend] = useState(false);
+  const [spendRejectionReason, setSpendRejectionReason] = useState<StudioSpendRejectionInput["reason"]>("too_expensive");
+  const [targetEstimatedCostCny, setTargetEstimatedCostCny] = useState("");
+  const [spendRejectionNote, setSpendRejectionNote] = useState("");
   const [draft, setDraft] = useState(() => pretty(node.output ?? effectiveOutput(node) ?? {}));
   const [inputDraft, setInputDraft] = useState(() => pretty(effectiveInput(node) ?? {}));
   const [error, setError] = useState<string>();
@@ -41,6 +46,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const [terminalOverride, setTerminalOverride] = useState<StudioNodeOverrideInput>();
   const [terminalInputOverride, setTerminalInputOverride] = useState<StudioNodeInputOverrideInput>();
   const spendDialogRef = useDialogFocus<HTMLElement>(authorizing, () => setAuthorizing(false), busy);
+  const spendRejectionDialogRef = useDialogFocus<HTMLElement>(rejectingSpend, () => setRejectingSpend(false), busy);
   const terminalDialogRef = useDialogFocus<HTMLElement>(terminalOverride !== undefined, () => setTerminalOverride(undefined), busy);
   const terminalInputDialogRef = useDialogFocus<HTMLElement>(terminalInputOverride !== undefined, () => setTerminalInputOverride(undefined), busy);
   const receipt = node.executionReceipt;
@@ -96,6 +102,10 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     ? `审计失败，已规则回退 · ${fallbackReason}`
     : creatorCapabilityLabel(execution, node.spendPlan), [execution, fallbackReason, node.spendPlan]);
   const assetProviderIds = useMemo(() => configuredAssetProviderIds(nodes), [nodes]);
+  const editableAssetProviders = useMemo(
+    () => providers.filter((provider) => assetProviderIds.includes(provider.id)),
+    [assetProviderIds, providers],
+  );
   const deliveryValue = documentPreview ?? node.output ?? effectiveOutput(node);
   const hasDelivery = hasCreatorDocumentContent(node.id, deliveryValue);
   const hasEditableInput = node.id !== "brief" && hasCreatorDocumentContent(`${node.id}-input`, effectiveInput(node));
@@ -120,6 +130,13 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       setInputReviewOpen(true);
     }
   }, [shouldOpenForAttention]);
+
+  useEffect(() => {
+    setRejectingSpend(false);
+    setSpendRejectionReason("too_expensive");
+    setTargetEstimatedCostCny("");
+    setSpendRejectionNote("");
+  }, [node.spendPlan?.id]);
 
   useEffect(() => {
     if (!editableArtifact?.contentUrl) {
@@ -230,6 +247,27 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     }
   }
 
+  async function rejectSpend() {
+    if (!node.spendPlan) return;
+    setError(undefined);
+    const target = targetEstimatedCostCny.trim() ? Number(targetEstimatedCostCny) : undefined;
+    if (target !== undefined && (!Number.isFinite(target) || target < 0 || target > 100_000)) {
+      setError("下一版目标预计费用必须在 0 到 100000 之间。");
+      return;
+    }
+    try {
+      await onRejectSpend(node.id, {
+        spendPlanId: node.spendPlan.id,
+        reason: spendRejectionReason,
+        ...(target !== undefined ? { targetEstimatedCostCny: target } : {}),
+        ...(spendRejectionNote.trim() ? { note: spendRejectionNote.trim() } : {}),
+      });
+      setRejectingSpend(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
   return (
     <details
       id={`node-workspace-${node.id}`}
@@ -283,7 +321,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             {hasEditableInput ? <section className="node-output-preview">
               <header><div><strong>本节点专用设置</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 上游已变化，需复核" : ""}</small></div>{!editingInput ? <button className="button button-ghost" type="button" onClick={() => setEditingInput(true)}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
               {effectiveInputVersion?.source === "reconstructed" ? <p className="node-version-note">旧任务没有保存当时的原始输入；这里展示的是按当前上游内容推断出的可编辑版本。</p> : null}
-              {editingInput ? <NodeStructuredEditor nodeId={`${node.id}-input`} value={safeParse(inputDraft)} assetProviderIds={assetProviderIds} onChange={(value) => { setError(undefined); setInputDraft(pretty(value)); }} /> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
+              {editingInput ? <NodeStructuredEditor nodeId={`${node.id}-input`} value={safeParse(inputDraft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setInputDraft(pretty(value)); }} /> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
               {editingInput ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelInputEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveInputOverride()}><Save aria-hidden="true" size={15} />保存人工输入</button></footer> : null}
             </section> : null}
           </div>
@@ -291,9 +329,9 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
 
         {node.spendPlan ? (
           <section className="spend-gate" aria-label={`${node.label}费用确认`}>
-            <div><CircleDollarSign aria-hidden="true" size={20} /><span><strong>执行前费用确认</strong><small>预计 ¥{node.spendPlan.estimatedCostCny.toFixed(2)}，最高 ¥{node.spendPlan.maxCostCny.toFixed(2)} · 最多 {node.spendPlan.maxAttempts} 次</small></span></div>
+            <div><CircleDollarSign aria-hidden="true" size={20} /><span><strong>执行前费用确认</strong><small>预计 ¥{node.spendPlan.estimatedCostCny.toFixed(2)}，最高 ¥{node.spendPlan.maxCostCny.toFixed(2)} · 最多 {node.spendPlan.maxAttempts} 次</small>{node.spendPlan.items?.map((item) => <small key={item.id}><span>{item.label} · {item.providerId} · {item.modelId}</span> · ¥{item.estimatedCostCny.toFixed(2)}</small>)}</span></div>
             {node.spendAuthorizationId ? <span className="spend-authorized"><ShieldCheck aria-hidden="true" size={15} />已授权</span> : (
-              <button className="button button-primary" type="button" disabled={busy} onClick={() => setAuthorizing(true)}><ShieldCheck aria-hidden="true" size={16} />检查并确认</button>
+              <div className="spend-gate-actions">{node.id === "assets" ? <button className="button button-ghost" type="button" disabled={busy} onClick={() => setRejectingSpend(true)}>这份报价不合适</button> : null}<button className="button button-primary" type="button" disabled={busy} onClick={() => setAuthorizing(true)}><ShieldCheck aria-hidden="true" size={16} />检查并确认</button></div>
             )}
           </section>
         ) : null}
@@ -311,7 +349,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
               </figure>)}
             </div>
           </div> : null}
-          {editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取结构化交付...</p> : documentError ? <p className="node-workspace-error" role="alert">结构化交付读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
+          {editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取结构化交付...</p> : documentError ? <p className="node-workspace-error" role="alert">结构化交付读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
           {audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioIsCurrent ? "实际配音试听" : "上次生成的配音"}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? "实际配音试听" : "上次生成的配音试听"} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
           {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
         </section>
@@ -323,11 +361,27 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <section ref={spendDialogRef} role="dialog" aria-modal="true" aria-label="确认本次费用" tabIndex={-1}>
           <CircleDollarSign aria-hidden="true" size={24} />
           <h3>确认执行 {node.label}</h3>
-          <p>这次授权只对下面已经审阅的输入版本、{node.spendPlan.modelId} 和最高 ¥{node.spendPlan.maxCostCny.toFixed(2)} 有效。任何内容、模型、预算或重试次数变化都会让授权自动失效。</p>
+          <p>这次授权只对下面已经审阅的输入版本、{node.spendPlan.modelId} 和本次最高授权额 ¥{node.spendPlan.maxCostCny.toFixed(2)} 有效。任何内容、模型、报价或重试次数变化都会让授权自动失效。</p>
           <div className="spend-input-versions" aria-label="本次付费所使用的上游版本">
             {spendInputs.map((input) => <div key={input.versionId}><span><strong>{input.role} · {input.label}</strong><small>{input.source === "human" ? "人工版本" : "自动版本"}</small></span><code>{shortId(input.versionId)}</code></div>)}
           </div>
           <div><button className="button button-ghost" type="button" onClick={() => setAuthorizing(false)}>返回检查</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void authorize()}>确认并执行</button></div>
+        </section>
+      </div> : null}
+      {rejectingSpend && node.spendPlan ? <div className="node-confirm-layer" role="presentation">
+        <section ref={spendRejectionDialogRef} role="dialog" aria-modal="true" aria-label="保存费用反馈" tabIndex={-1}>
+          <CircleDollarSign aria-hidden="true" size={24} />
+          <h3>把这份报价退回导演</h3>
+          <p>这里只保存反馈，不会立即调用导演。你可以先修改方案或 Provider，再手动重新规划；新方案会重新报价并再次等待你确认。</p>
+          <label className="field"><span>不接受这份报价的原因</span><select value={spendRejectionReason} onChange={(event) => setSpendRejectionReason(event.target.value as StudioSpendRejectionInput["reason"])}>
+            <option value="too_expensive">总价太高，希望降低费用</option>
+            <option value="provider_mix">Provider 或素材组合不合适</option>
+            <option value="plan_not_approved">前面的画面方案不认可</option>
+            <option value="other">其他原因</option>
+          </select></label>
+          <label className="field"><span>下一版目标预计费用（可选，0 表示优先全免费）</span><input aria-label="下一版目标预计费用（可选）" type="number" min={0} max={100000} step={0.01} value={targetEstimatedCostCny} onChange={(event) => setTargetEstimatedCostCny(event.target.value)} /></label>
+          <label className="field"><span>具体调整意见（可选）</span><textarea aria-label="具体调整意见（可选）" rows={3} maxLength={1000} value={spendRejectionNote} onChange={(event) => setSpendRejectionNote(event.target.value)} /></label>
+          <div><button className="button button-ghost" type="button" onClick={() => setRejectingSpend(false)}>返回检查</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void rejectSpend()}>保存反馈</button></div>
         </section>
       </div> : null}
       {terminalOverride !== undefined ? <div className="node-confirm-layer" role="presentation">
@@ -535,8 +589,6 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
   const [providerId, setProviderId] = useState(configuration.providerId);
   const [modelSelections, setModelSelections] = useState<Record<string, string>>({ ...configuration.modelSelections });
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([...(configuration.assetProviderIds ?? [])]);
-  const [maxPaidShots, setMaxPaidShots] = useState(configuration.economics?.maxPaidShots ?? 0);
-  const [maxCostCny, setMaxCostCny] = useState(configuration.economics?.maxCostCny ?? 0);
   const [error, setError] = useState<string>();
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
   const canEdit = providers.length > 0 && !terminal && runStatus !== "running" && node.status !== "running";
@@ -551,12 +603,6 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
     && provider.id !== "ai-shot-router-v1");
   const selectedAssetSources = assetSources.filter((provider) => assetProviderIds.includes(provider.id));
   const meteredSources = selectedAssetSources.filter((provider) => provider.billing === "metered");
-  const estimatedCeiling = maxPaidShots * Math.max(0, ...meteredSources.map((provider) => (
-    selectableModelsForCapability(provider.modelProfiles, provider.capability)
-      .find((model) => model.id === (modelSelections[provider.id] ?? provider.defaultModelId))?.estimatedCnyPerClip
-      ?? provider.estimatedCnyPerClip
-      ?? 0
-  )));
   const selectedProviderModels = selectedProvider
     ? selectableModelsForCapability(selectedProvider.modelProfiles, selectedProvider.capability)
     : [];
@@ -566,8 +612,6 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
     setProviderId(configuration.providerId);
     setModelSelections({ ...configuration.modelSelections });
     setAssetProviderIds([...(configuration.assetProviderIds ?? [])]);
-    setMaxPaidShots(configuration.economics?.maxPaidShots ?? 0);
-    setMaxCostCny(configuration.economics?.maxCostCny ?? 0);
   }, [configuration, editing]);
 
   function updateAssetSource(provider: StudioProvider, enabled: boolean) {
@@ -575,29 +619,12 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
       ? [...new Set([...assetProviderIds, provider.id])]
       : assetProviderIds.filter((id) => id !== provider.id);
     setAssetProviderIds(next);
-    const nextMetered = assetSources.filter((source) => next.includes(source.id) && source.billing === "metered");
-    if (enabled && provider.billing === "metered") {
-      const shots = Math.max(1, maxPaidShots);
-      const estimate = selectableModelsForCapability(provider.modelProfiles, provider.capability)
-        .find((model) => model.id === (modelSelections[provider.id] ?? provider.defaultModelId))?.estimatedCnyPerClip
-        ?? provider.estimatedCnyPerClip
-        ?? 0;
-      setMaxPaidShots(shots);
-      setMaxCostCny((current) => Math.max(current, Math.ceil(estimate * shots * 100) / 100));
-    } else if (nextMetered.length === 0) {
-      setMaxPaidShots(0);
-      setMaxCostCny(0);
-    }
   }
 
   async function save() {
     setError(undefined);
     if (node.id === "assets" && assetProviderIds.length === 0) {
       setError("至少保留一个画面来源。");
-      return;
-    }
-    if (node.id === "assets" && meteredSources.length > 0 && (maxPaidShots < 1 || maxCostCny <= 0)) {
-      setError("使用付费生成时，请设置付费镜头数和本次成本上限。");
       return;
     }
     try {
@@ -611,8 +638,8 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
           assetProviderIds,
           economics: {
             allowMeteredProviders: meteredSources.length > 0,
-            maxPaidShots: meteredSources.length > 0 ? maxPaidShots : 0,
-            maxCostCny: meteredSources.length > 0 ? maxCostCny : 0,
+            maxPaidShots: 0,
+            maxCostCny: 0,
           },
         } : {}),
       });
@@ -652,9 +679,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
           })}
         </div>
         {meteredSources.length > 0 ? <div className="node-budget-fields">
-          <label className="field"><span>最多付费镜头</span><input type="number" min={1} max={20} value={maxPaidShots} onChange={(event) => setMaxPaidShots(Number(event.target.value))} /></label>
-          <label className="field"><span>本次成本上限（元）</span><input type="number" min={0.01} max={100000} step={0.1} value={maxCostCny} onChange={(event) => setMaxCostCny(Number(event.target.value))} /></label>
-          <p>按当前模型粗略估算不超过 ¥{estimatedCeiling.toFixed(2)}；这是提醒，不会把质量锁死，你可以提高上限。</p>
+          <p>按实际导演方案报价；所有计费节点执行前逐笔人工确认。若报价不合适，可退回导演降低费用。</p>
         </div> : null}
       </>}
       {error ? <p className="node-workspace-error" role="alert">{error}</p> : null}
@@ -677,7 +702,7 @@ function executionConfigurationSummary(node: StudioNode, providers: StudioProvid
   if (node.id === "assets") {
     const sources = (configuration.assetProviderIds ?? []).map((id) => providers.find((provider) => provider.id === id)?.label ?? id);
     const budget = configuration.economics?.allowMeteredProviders
-      ? ` · 最多 ${configuration.economics.maxPaidShots} 个付费镜头 / ¥${configuration.economics.maxCostCny}`
+      ? " · 按实际方案报价 · 执行前逐笔确认"
       : " · 当前不调用付费生成";
     return `${sources.join("、") || "未选择来源"}${budget}`;
   }

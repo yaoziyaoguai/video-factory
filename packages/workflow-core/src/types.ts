@@ -40,6 +40,8 @@ export type ExecutionTransport = "unix_socket" | "local_process" | "http_api" | 
 
 export type BillingType = "subscription" | "metered" | "free" | "local_compute" | "human";
 
+export type ApprovalPolicy = "manual" | "automatic" | "none";
+
 export type NodeExecutionReceiptStatus = "succeeded" | "failed" | "rejected" | "needs_human";
 export type ExecutionConfigurationSource = "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
 export type ExecutionParameterValue = string | number | boolean | string[];
@@ -270,7 +272,24 @@ export interface SpendPlan {
   estimatedCostCny: number;
   maxCostCny: number;
   maxAttempts: number;
+  items?: SpendQuoteItem[];
   createdAt: string;
+}
+
+export interface SpendQuoteItem {
+  id: string;
+  label: string;
+  providerId: string;
+  modelId: string;
+  estimatedCostCny: number;
+}
+
+export interface SpendQuote {
+  estimatedCostCny: number;
+  maxCostCny: number;
+  items?: SpendQuoteItem[];
+  // 只有解析后的当前输入明确不产生任何计费调用时，Provider 才能声明这一轮无需人工授权。
+  requiresAuthorization?: boolean;
 }
 
 export interface SpendAuthorizationDraft {
@@ -295,11 +314,13 @@ export interface Provider<TInput = unknown, TOutput = unknown> {
   capability: Capability;
   transport?: ExecutionTransport;
   billing?: BillingType;
+  approvalPolicy?: ApprovalPolicy;
   configurationSource?: ExecutionConfigurationSource;
   parameters?: Record<string, ExecutionParameterValue>;
   estimatedCostCny?: number;
   maxCostCny?: number;
   maxAttempts?: number;
+  quoteSpend?: (input: TInput, context: WorkflowContext) => Promise<SpendQuote> | SpendQuote;
   run: (input: TInput, context: WorkflowContext) => Promise<TOutput> | TOutput;
 }
 
@@ -380,6 +401,7 @@ export interface WorkflowRun<TInitialInput = unknown> {
   decisions: HumanDecision[];
   executionReceipts?: NodeExecutionReceipt[];
   spendAuthorizations?: SpendAuthorization[];
+  consumedSpendAuthorizationIds?: string[];
 }
 
 export interface WorkflowContext<TInitialInput = unknown> {
@@ -389,6 +411,7 @@ export interface WorkflowContext<TInitialInput = unknown> {
   artifacts: readonly Artifact[];
   outputs: ReadonlyMap<string, unknown>;
   readonly spendAuthorization: Readonly<SpendAuthorization> | undefined;
+  readonly spendAuthorizationExemptProviderId: string | undefined;
   readonly operationRequestId: string | undefined;
   now: () => string;
   nextId: (prefix: string) => string;

@@ -43,7 +43,6 @@ export function validTemplate(): ProductionTemplateInput {
       { capability: "script.draft", required: true },
       { capability: "video.render", required: true },
     ],
-    costPolicy: { currency: "CNY", maxCost: 5, maxPaidShots: 1 },
     createdAt: "2026-08-27T09:00:00.000Z",
     updatedAt: "2026-08-27T09:00:00.000Z",
   };

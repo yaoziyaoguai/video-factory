@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { MiniMaxVideoAdapter, SeedanceVideoAdapter, WanVideoAdapter } from "../src/index.js";
+import type { VideoGenerationAdapter } from "../src/index.js";
 
 describe("metered video generation adapters", () => {
   it("normalizes the Seedance asynchronous task lifecycle", async () => {
@@ -44,6 +45,36 @@ describe("metered video generation adapters", () => {
       watermark: false,
       generate_audio: false,
     });
+  });
+
+  it("continues a Seedance task by taskId without submitting a second create request", async () => {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const adapter = new SeedanceVideoAdapter({
+      apiKey: "test-key",
+      model: "test-seedance-model",
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({
+          id: "seedance-task-existing",
+          status: "succeeded",
+          content: { video_url: "https://example.com/existing.mp4" },
+        });
+      },
+      sleep: async () => undefined,
+    });
+
+    const result = await adapter.reconcile!(
+      "seedance-task-existing",
+      { prompt: "原请求", durationSeconds: 5, ratio: "9:16" },
+    );
+
+    assert.equal(result.taskId, "seedance-task-existing");
+    assert.equal(requests.length, 1);
+    assert.equal(
+      requests[0]?.url,
+      "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/seedance-task-existing",
+    );
+    assert.equal(requests[0]?.init?.method, undefined);
   });
 
   it("selects an allowlisted Seedance model per request and sends bounded quality parameters", async () => {
@@ -147,6 +178,32 @@ describe("metered video generation adapters", () => {
     }), /not allowed/);
   });
 
+  it("continues a Wan task by taskId without submitting a second create request", async () => {
+    const requests: string[] = [];
+    const adapter = new WanVideoAdapter({
+      apiKey: "test-key",
+      model: "wan3.0-video",
+      workspaceId: "workspace-1",
+      fetch: async (url) => {
+        requests.push(String(url));
+        return jsonResponse({ output: {
+          task_id: "wan-existing",
+          task_status: "SUCCEEDED",
+          video_url: "https://example.com/wan-existing.mp4",
+        } });
+      },
+      sleep: async () => undefined,
+    });
+
+    const result = await adapter.reconcile!(
+      "wan-existing",
+      { prompt: "原请求", durationSeconds: 6, ratio: "9:16" },
+    );
+
+    assert.equal(result.videoUrl, "https://example.com/wan-existing.mp4");
+    assert.deepEqual(requests, ["https://workspace-1.cn-beijing.maas.aliyuncs.com/api/v1/tasks/wan-existing"]);
+  });
+
   it("keeps prompt extension only for pre-Wan-3 models", async () => {
     const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const responses = [
@@ -218,6 +275,43 @@ describe("metered video generation adapters", () => {
       prompt_optimizer: true,
       aigc_watermark: false,
     });
+  });
+
+  it("continues a MiniMax task by taskId without submitting a second create request", async () => {
+    const requests: string[] = [];
+    const responses = [
+      jsonResponse({
+        task_id: "minimax-existing",
+        status: "Success",
+        file_id: "minimax-file-existing",
+        base_resp: { status_code: 0, status_msg: "success" },
+      }),
+      jsonResponse({
+        file: { file_id: "minimax-file-existing", download_url: "https://example.com/minimax-existing.mp4" },
+        base_resp: { status_code: 0, status_msg: "success" },
+      }),
+    ];
+    const adapter = new MiniMaxVideoAdapter({
+      apiKey: "test-key",
+      model: "MiniMax-Hailuo-2.3",
+      modelProtocols: { "MiniMax-Hailuo-2.3": "v1" },
+      fetch: async (url) => {
+        requests.push(String(url));
+        return responses.shift()!;
+      },
+      sleep: async () => undefined,
+    });
+
+    const result = await adapter.reconcile!(
+      "minimax-existing",
+      { prompt: "原请求", durationSeconds: 6, ratio: "9:16", modelId: "MiniMax-Hailuo-2.3" },
+    );
+
+    assert.equal(result.videoUrl, "https://example.com/minimax-existing.mp4");
+    assert.deepEqual(requests, [
+      "https://api.minimaxi.com/v1/query/video_generation?task_id=minimax-existing",
+      "https://api.minimaxi.com/v1/files/retrieve?file_id=minimax-file-existing",
+    ]);
   });
 
   it("routes MiniMax H3 through the V2 multimodal protocol", async () => {
@@ -316,28 +410,87 @@ describe("metered video generation adapters", () => {
     assert.deepEqual(progress, ["submitted:", "failed:内容审核未通过"]);
   });
 
-  it("marks a polling timeout as failed", async () => {
+  it("keeps a polling timeout uncertain so the accepted task cannot be recreated", async () => {
+    const timeoutOptions = { sleep: async () => new Promise<void>((resolve) => setTimeout(resolve, 2)), pollIntervalMs: 0, timeoutMs: 1 };
+    const cases: Array<{ label: string; adapter: VideoGenerationAdapter }> = [{
+      label: "Seedance",
+      adapter: new SeedanceVideoAdapter({
+        apiKey: "test-key",
+        model: "test-seedance-model",
+        fetch: async (_url, init) => init?.method === "POST"
+          ? jsonResponse({ id: "seedance-task-timeout" })
+          : jsonResponse({ status: "running" }),
+        ...timeoutOptions,
+      }),
+    }, {
+      label: "MiniMax v1",
+      adapter: new MiniMaxVideoAdapter({
+        apiKey: "test-key",
+        model: "MiniMax-Hailuo-2.3",
+        modelProtocols: { "MiniMax-Hailuo-2.3": "v1" },
+        fetch: async (_url, init) => init?.method === "POST"
+          ? jsonResponse({ task_id: "minimax-v1-timeout", base_resp: { status_code: 0 } })
+          : jsonResponse({ status: "Processing", base_resp: { status_code: 0 } }),
+        ...timeoutOptions,
+      }),
+    }, {
+      label: "MiniMax v2",
+      adapter: new MiniMaxVideoAdapter({
+        apiKey: "test-key",
+        model: "MiniMax-H3",
+        modelProtocols: { "MiniMax-H3": "v2" },
+        fetch: async (_url, init) => init?.method === "POST"
+          ? jsonResponse({ task_id: "minimax-v2-timeout" })
+          : jsonResponse({ task: { status: "running" } }),
+        ...timeoutOptions,
+      }),
+    }, {
+      label: "Wan",
+      adapter: new WanVideoAdapter({
+        apiKey: "test-key",
+        model: "test-wan-model",
+        workspaceId: "workspace-1",
+        fetch: async (url) => String(url).includes("video-synthesis")
+          ? jsonResponse({ output: { task_id: "wan-task-timeout" } })
+          : jsonResponse({ output: { task_status: "RUNNING" } }),
+        ...timeoutOptions,
+      }),
+    }];
+
+    for (const testCase of cases) {
+      const progress: string[] = [];
+      await assert.rejects(
+        () => testCase.adapter.generate(
+          { prompt: "测试超时状态", durationSeconds: 5, ratio: "9:16" },
+          (event) => { progress.push(event.status); },
+        ),
+        /timed out/,
+      );
+      assert.equal(progress.at(-1), "unknown", testCase.label);
+    }
+  });
+
+  it("keeps Wan's UNKNOWN provider status queryable by its original task id", async () => {
     const progress: string[] = [];
+    const responses = [
+      jsonResponse({ output: { task_id: "wan-task-unknown" } }),
+      jsonResponse({ output: { task_status: "UNKNOWN" } }),
+    ];
     const adapter = new WanVideoAdapter({
       apiKey: "test-key",
       model: "test-wan-model",
       workspaceId: "workspace-1",
-      fetch: async (url) => String(url).includes("video-synthesis")
-        ? jsonResponse({ output: { task_id: "wan-task-timeout" } })
-        : jsonResponse({ output: { task_status: "RUNNING" } }),
-      sleep: async () => new Promise((resolve) => setTimeout(resolve, 2)),
-      pollIntervalMs: 0,
-      timeoutMs: 1,
+      fetch: async () => responses.shift()!,
     });
 
     await assert.rejects(
       () => adapter.generate(
-        { prompt: "测试超时状态", durationSeconds: 5, ratio: "9:16" },
+        { prompt: "测试未知状态", durationSeconds: 5, ratio: "9:16" },
         (event) => { progress.push(event.status); },
       ),
-      /timed out/,
+      /UNKNOWN/,
     );
-    assert.equal(progress.at(-1), "failed");
+    assert.equal(progress.at(-1), "unknown");
   });
 
   it("surfaces non-success HTTP responses before polling", async () => {

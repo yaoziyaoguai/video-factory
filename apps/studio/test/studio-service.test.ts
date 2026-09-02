@@ -7,9 +7,12 @@ import type { HumanDecisionDraft, NodeInputOverrideDraft, NodeOverrideDraft, Spe
 import type {
   DispatchedProductionRun,
   ProductionBrief,
+  ProductionPaidNodeReconciliationDraft,
+  ProductionPaidNodeSummary,
   ProductionRunListener,
+  ProductionSpendRejectionDraft,
 } from "@video-factory/production-pipeline";
-import { StaleRunRevisionError } from "@video-factory/production-pipeline";
+import { PaidOperationManualReconciliationError, StaleRunRevisionError } from "@video-factory/production-pipeline";
 import {
   StudioConflictError,
   StudioService,
@@ -129,7 +132,10 @@ class FakePipeline implements StudioPipelinePort {
   lastOverride?: NodeOverrideDraft;
   lastInputOverride?: NodeInputOverrideDraft;
   lastAuthorization?: SpendAuthorizationDraft;
+  lastSpendRejection?: ProductionSpendRejectionDraft;
   lastRetriedNodeId?: string;
+  lastReconciliation?: ProductionPaidNodeReconciliationDraft;
+  reconciliationError?: Error;
   pauseRequestedValue = false;
   dispatchCount = 0;
   lastInput?: unknown;
@@ -217,6 +223,11 @@ class FakePipeline implements StudioPipelinePort {
     return this.run;
   }
 
+  async rejectSpend(_runId: string, rejection: ProductionSpendRejectionDraft): Promise<WorkflowRun<ProductionBrief>> {
+    this.lastSpendRejection = rejection;
+    return this.run;
+  }
+
   async requestPause(_runId: string): Promise<void> {
     this.pauseRequestedValue = true;
   }
@@ -237,6 +248,25 @@ class FakePipeline implements StudioPipelinePort {
 
   async retryFailedNode(_runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>> {
     this.lastRetriedNodeId = nodeId;
+    return this.run;
+  }
+
+  async inspectPaidNode(_runId: string, nodeId: string): Promise<ProductionPaidNodeSummary> {
+    return {
+      nodeId,
+      operationId: "paid-operation-1",
+      recommendedOutcome: "resume_original",
+      requiresManualReconciliation: false,
+      items: [],
+    };
+  }
+
+  async reconcilePaidNode(
+    _runId: string,
+    draft: ProductionPaidNodeReconciliationDraft,
+  ): Promise<WorkflowRun<ProductionBrief>> {
+    this.lastReconciliation = draft;
+    if (this.reconciliationError) throw this.reconciliationError;
     return this.run;
   }
 
@@ -650,6 +680,7 @@ describe("StudioService", () => {
     assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot?.templateId, "knowledge-explainer");
     assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot?.resolvedBlueprint.platform, "douyin");
     assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot?.resolvedBlueprint.durationSeconds, 24);
+    assert.equal("costPolicy" in ((pipeline.lastInput as ProductionBrief).templateSnapshot?.resolvedBlueprint ?? {}), false);
     assert.deepEqual(snapshots, ["needs_human"]);
     await assert.rejects(
       () => service.startRun({
@@ -1076,7 +1107,7 @@ describe("StudioService", () => {
     );
   });
 
-  it("enforces manual review and a server-side hard budget before dispatch", async () => {
+  it("enforces manual review while ignoring the retired service-wide cost ceiling", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({
@@ -1087,11 +1118,12 @@ describe("StudioService", () => {
     });
 
     await assert.rejects(() => service.startRun({ ...brief, reviewMode: "automatic" }), /人工终审/);
-    await assert.rejects(() => service.startRun({
+    const result = await service.startRun({
       ...brief,
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 9 },
-    }), /服务端安全上限.*8/);
-    assert.equal(pipeline.dispatchCount, 0);
+    });
+    assert.deepEqual(result, { runId: "run-1", status: "running" });
+    assert.equal(pipeline.dispatchCount, 1);
   });
 
   it("persists production idempotency across service restarts", async () => {
@@ -1167,6 +1199,65 @@ describe("StudioService", () => {
       /Provider 控制台核对任务和账单/,
     );
     assert.equal(pipeline.lastRetriedNodeId, undefined);
+  });
+
+  it("forwards the paid reconciliation id, revision, and outcome without changing them", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-paid-reconciliation-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await service.reconcilePaidNode("run-1", "assets", {
+      expectedRunRevision: 7,
+      reconciliationId: "reconcile-assets-7",
+      outcome: "requote",
+    });
+
+    assert.deepEqual(pipeline.lastReconciliation, {
+      nodeId: "assets",
+      expectedRunRevision: 7,
+      reconciliationId: "reconcile-assets-7",
+      outcome: "requote",
+    });
+  });
+
+  it("adds the trusted actor to a manual paid reconciliation", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-manual-paid-resolution-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await service.reconcilePaidNode("run-1", "assets", {
+      expectedRunRevision: 7,
+      reconciliationId: "confirm-charge-assets-7",
+      outcome: "confirmed_charged",
+      note: "Provider 控制台确认已扣费。",
+      actualCostCny: 2.4,
+    }, "billing-reviewer");
+
+    assert.deepEqual(pipeline.lastReconciliation, {
+      nodeId: "assets",
+      expectedRunRevision: 7,
+      reconciliationId: "confirm-charge-assets-7",
+      outcome: "confirmed_charged",
+      actor: "billing-reviewer",
+      note: "Provider 控制台确认已扣费。",
+      actualCostCny: 2.4,
+    });
+  });
+
+  it("turns an unqueryable paid task into an explicit manual-reconciliation conflict", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-manual-reconciliation-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    pipeline.reconciliationError = new PaidOperationManualReconciliationError("assets", []);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(
+      () => service.reconcilePaidNode("run-1", "assets", {
+        expectedRunRevision: 7,
+        reconciliationId: "reconcile-assets-manual",
+        outcome: "resume_original",
+      }),
+      (error: unknown) => error instanceof StudioConflictError && /人工核销任务和账单/.test(error.message),
+    );
   });
 
   it("returns a running snapshot after retry dispatch without waiting for the long model task", async () => {
@@ -1370,7 +1461,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
-  it("blocks metered providers when paid generation is disabled or underfunded", async () => {
+  it("blocks disabled metered providers but ignores legacy video-wide ceilings", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({
@@ -1391,28 +1482,45 @@ describe("StudioService", () => {
     };
 
     await assert.rejects(() => service.startRun(seedanceBrief), /未允许使用付费能力/);
-    await assert.rejects(
-      () => service.startRun({
-        ...seedanceBrief,
-        economics: {
-          recipeId: "keyshot-ai",
-          allowMeteredProviders: true,
-          maxPaidShots: 2,
-          maxCostCny: 5,
-        },
-      }),
-      /预计需要.*7.*预计成本上限.*5/,
-    );
-
     await service.startRun({
       ...seedanceBrief,
       economics: {
         recipeId: "keyshot-ai",
         allowMeteredProviders: true,
-        maxPaidShots: 1,
-        maxCostCny: 4,
+        maxPaidShots: 2,
+        maxCostCny: 5,
       },
     });
+    assert.equal(pipeline.dispatchCount, 1);
+    assert.deepEqual((pipeline.lastInput as ProductionBrief).economics, {
+      recipeId: "keyshot-ai",
+      allowMeteredProviders: true,
+      maxPaidShots: 0,
+      maxCostCny: 0,
+    });
+  });
+
+  it("allows a metered provider when zero means the video has no user-configured ceiling", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-unlimited-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {
+        ARK_API_KEY: "seedance-key",
+        SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
+        SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
+      },
+    });
+
+    const result = await service.startRun({
+      ...brief,
+      providers: { ...brief.providers, assets: "seedance-video-v1" },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    });
+
+    assert.deepEqual(result, { runId: "run-1", status: "running" });
     assert.equal(pipeline.dispatchCount, 1);
   });
 
@@ -1442,7 +1550,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
-  it("includes per-run model estimates in the server-side safety ceiling", async () => {
+  it("does not let a legacy global ceiling override the selected video's metered run estimate", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({
@@ -1454,7 +1562,7 @@ describe("StudioService", () => {
       zaiCodexAvailability: { available: true, reason: "" },
     });
 
-    await assert.rejects(() => service.startRun({
+    const result = await service.startRun({
       ...brief,
       providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
       economics: {
@@ -1463,8 +1571,9 @@ describe("StudioService", () => {
         maxPaidShots: 0,
         maxCostCny: 0,
       },
-    }), /按次能力预计合计.*0\.1.*安全上限.*0\.05/);
-    assert.equal(pipeline.dispatchCount, 0);
+    });
+    assert.deepEqual(result, { runId: "run-1", status: "running" });
+    assert.equal(pipeline.dispatchCount, 1);
   });
 
   it("resolves model defaults as global, then template, then explicit run override", async () => {
@@ -1642,7 +1751,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
-  it("rejects a partially metered director pool without a free fallback", async () => {
+  it("allows a fully metered director pool before the actual selected shots are quoted", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({
@@ -1657,7 +1766,7 @@ describe("StudioService", () => {
       },
     });
 
-    await assert.rejects(() => service.startRun({
+    const result = await service.startRun({
       ...brief,
       providers: {
         ...brief.providers,
@@ -1666,8 +1775,9 @@ describe("StudioService", () => {
       },
       director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 3.5 },
-    }), /至少保留一个免费素材来源/);
-    assert.equal(pipeline.dispatchCount, 0);
+    });
+    assert.deepEqual(result, { runId: "run-1", status: "running" });
+    assert.equal(pipeline.dispatchCount, 1);
   });
 
   it("refuses test-only providers at the server production boundary", async () => {
@@ -1837,6 +1947,46 @@ describe("StudioService", () => {
       maxCostCny: 3,
       maxAttempts: 1,
       approvedBy: "trusted-owner",
+    });
+  });
+
+  it("returns an exact active asset quote to the director with structured cost feedback", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-spend-feedback-"));
+    const run = waitingRun(workspaceRoot);
+    run.status = "awaiting_spend_approval";
+    run.nodeRuns.unshift({
+      nodeId: "assets",
+      status: "awaiting_spend_approval",
+      artifactIds: [],
+      qualityGateResults: [],
+      spendPlan: {
+        id: "plan-current",
+        inputVersionIds: ["director-v1"],
+        providerId: "ai-shot-router-v1",
+        modelId: "seedance-v1",
+        estimatedCostCny: 4.8,
+        maxCostCny: 4.8,
+        maxAttempts: 1,
+        createdAt: "2026-08-27T00:00:00.000Z",
+      },
+    });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await service.rejectSpend("run-1", "assets", {
+      spendPlanId: "plan-current",
+      reason: "too_expensive",
+      targetEstimatedCostCny: 2.4,
+      note: "第二镜优先改用真实图库。",
+    }, "trusted-owner");
+
+    assert.deepEqual(pipeline.lastSpendRejection, {
+      nodeId: "assets",
+      spendPlanId: "plan-current",
+      reason: "too_expensive",
+      targetEstimatedCostCny: 2.4,
+      note: "第二镜优先改用真实图库。",
+      rejectedBy: "trusted-owner",
     });
   });
 

@@ -9,10 +9,15 @@
   "reviewMode": "automatic",
   "providers": {
     "script": "python-template-v1",
-    "assets": "local-editorial-v1",
+    "director": "explicit-editorial-director-v1",
+    "assets": "ai-shot-router-v1",
     "voice": "ffmpeg-tone-test-v1",
     "render": "python-ffmpeg-v1",
     "technicalReview": "python-technical-review-v1"
+  },
+  "director": {
+    "profileId": "auto",
+    "assetProviderIds": ["local-editorial-v1"]
   },
   "voiceDirection": {
     "profileId": "tone:test-tone",

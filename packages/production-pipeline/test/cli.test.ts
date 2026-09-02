@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -83,6 +84,73 @@ describe("factory CLI", () => {
       /--actor/,
     );
   });
+
+  it("returns a non-zero exit code when a run finishes as failed", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-cli-"));
+    const briefPath = path.join(root, "brief.json");
+    await writeFile(briefPath, JSON.stringify({ title: "smoke" }), "utf8");
+    const output: string[] = [];
+
+    const exitCode = await runCli(["run", briefPath, "--workspace", root], {
+      createPipeline: () => ({
+        start: async () => failedRun(),
+        show: async () => failedRun(),
+        decide: async () => failedRun(),
+      }),
+      stdout: (text) => output.push(text),
+    });
+
+    assert.equal(exitCode, 1);
+    assert.equal(JSON.parse(output[0]!).status, "failed");
+  });
+
+  it("propagates a failed run to the executable process exit code", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-cli-process-"));
+    const briefPath = path.join(root, "brief.json");
+    await writeFile(briefPath, JSON.stringify({
+      protocolVersion: "video-factory/brief-v1",
+      title: "失败退出码检查",
+      angle: "验证素材失败不会被进程吞掉",
+      audience: "VideoFactory 运维人员",
+      nicheSlug: "cli-failure",
+      durationSeconds: 20,
+      platform: "douyin",
+      reviewMode: "automatic",
+      providers: {
+        script: "python-template-v1",
+        assets: "local-editorial-v1",
+        voice: "ffmpeg-tone-test-v1",
+        render: "python-ffmpeg-v1",
+        technicalReview: "python-technical-review-v1",
+      },
+      voiceDirection: {
+        profileId: "tone:test-tone",
+        rate: 180,
+        pauseScale: 1,
+        masteringPreset: "natural",
+      },
+    }), "utf8");
+
+    const child = spawn(process.execPath, [
+      "--import",
+      "tsx",
+      path.resolve("packages/production-pipeline/src/cli.ts"),
+      "run",
+      briefPath,
+      "--workspace",
+      path.join(root, "workspace"),
+    ], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    const [exitCode] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve([code, signal]));
+    });
+
+    assert.equal(exitCode, 1);
+    assert.equal(JSON.parse(stdout).status, "failed");
+  });
 });
 
 function waitingRun(): WorkflowRun {
@@ -105,5 +173,22 @@ function waitingRun(): WorkflowRun {
       requiredAction: "approve",
     }],
     decisions: [],
+  };
+}
+
+function failedRun(): WorkflowRun {
+  return {
+    ...waitingRun(),
+    status: "failed",
+    nodeRuns: [{
+      nodeId: "assets",
+      status: "failed",
+      startedAt: "2026-08-21T10:00:00.000Z",
+      finishedAt: "2026-08-21T10:01:00.000Z",
+      error: "asset preparation failed",
+      artifactIds: [],
+      qualityGateResults: [],
+    }],
+    interventions: [],
   };
 }

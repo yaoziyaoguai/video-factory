@@ -11,6 +11,8 @@ export type {
   ProductionWorkflowFeatures,
   ProductionReferenceVideo,
   ProductionSeriesContext,
+  ProductionSpendFeedback,
+  ProductionSpendFeedbackReason,
   ProductionVoiceDirection,
 } from "./contracts.js";
 export { DIRECTOR_PLAN_VERSION, VISUAL_DIRECTOR_PROFILES, validateVisualDirectorPlan } from "./visual-director.js";
@@ -22,6 +24,7 @@ export type {
   VisualAssetProviderCapability,
   VisualDirectorAgent,
   VisualDirectorAgentInput,
+  VisualDirectorEconomics,
   VisualDirectorPlan,
   VisualDirectorPlanValidation,
   VisualDirectorProfileDefinition,
@@ -95,12 +98,16 @@ export type {
   WorkerArtifactDescriptor,
   WorkerResponse,
 } from "./python-worker-client.js";
-export { ProductionPipeline } from "./production-pipeline.js";
+export { PaidOperationManualReconciliationError, ProductionPipeline } from "./production-pipeline.js";
 export type {
   DispatchedProductionRun,
+  ProductionPaidNodeSummary,
+  ProductionPaidNodeReconciliationDraft,
+  ProductionPaidOperationItemSummary,
   ProductionPipelineOptions,
   ProductionProviderRuntimeMetadata,
   ProductionRunListener,
+  ProductionSpendRejectionDraft,
 } from "./production-pipeline.js";
 export { MiniMaxVideoAdapter, SeedanceVideoAdapter, WanVideoAdapter } from "./video-generation.js";
 export type {
@@ -122,10 +129,16 @@ export type {
   ImageGenerationResult,
   SeedreamImageAdapterOptions,
 } from "./image-generation.js";
-export { GenerativeAssetWorkerClient } from "./generative-asset-worker.js";
+export {
+  GenerativeAssetWorkerClient,
+  inspectPaidAssetLedger,
+  paidAssetSourceFingerprint,
+} from "./generative-asset-worker.js";
 export type {
   GenerativeAssetWorkerClientOptions,
   ImageGenerationAdapterBinding,
+  PaidAssetItemState,
+  PaidAssetLedgerItemSummary,
   VideoGenerationAdapterBinding,
 } from "./generative-asset-worker.js";
 export { runCli } from "./cli.js";

@@ -53,7 +53,7 @@ const SCREENWRITER_DIRECTIVE = [
   "不得假设存在未在输入中列出的自有照片、采访、产品图或成对对照素材；需要这些素材时应改写为可检索或可生成的镜头，并在失败条件中明确素材缺口。",
   "不得编造数字、引语或当事人表态；证据不足时用问题句。",
   "输入含 editorial 时必须遵守其 verdict 和 guardrails；produce_image_story 应优先来源卡、数据卡与静态实证，不写成虚构现场。",
-  "输入含 templateBlueprint 时，它是生产合同：按 storyStructure 组织叙事，按 shotSlots 规划镜头，并遵守 visualSystem、soundSystem、qualityRules 与 costPolicy。",
+  "输入含 templateBlueprint 时，它是生产合同：按 storyStructure 组织叙事，按 shotSlots 规划镜头，并遵守 visualSystem、soundSystem 与 qualityRules。",
   "输入含 seriesContext 时，它是系列连续性合同：series bible 是长期规则，canon 只包含已通过内部终审并定版的事实，continuity 是本集必须承接和留给下一集的记忆。本集仍必须独立兑现 viewerPromise，不得靠下一集补完核心价值。",
   "输入含 seriesContext 时，顶层 canonFacts 必须列出 1-8 条本集已经明确建立、可供后集引用的事实。不得把预告、计划、悬念、提问、目标或尚待验证的结论写入 canonFacts。",
   "search_terms 是中文短词组，用于图库检索，不要放整句话。",
@@ -68,7 +68,7 @@ const DIRECTOR_PLAN_DIRECTIVE = [
   "每个镜头先写中性的 Shot Spec：主体、环境、可见动作、逐秒动作、景别、机位、运镜、光线、连续性锚点、参考素材、负面约束和成功条件。",
   "逐秒动作使用 [0s-2s] 这类时间段，必须能在镜头时长内完成；不要用‘高级感’‘氛围感’代替可见动作。",
   "generationPrompt 是 Provider Compiler 根据 Shot Spec 生成的执行提示，只保留该模型需要执行的主体、动作、镜头、光线、声音和风格，不得混入版权、审批、成本或工作流说明。",
-  "经济策略只给出成本上限，不规定免费素材和生成素材的比例。",
+  "费用不在导演阶段按全片上限截断。先输出覆盖所有场景的完整可执行方案；系统随后根据实际选中的 Provider、model 和镜头逐项生成真实报价，任何付费调用都必须等待人工确认。",
   "逐镜先判断观众必须实际看见什么，再依据每个 Provider 的 strengths 和 constraints 做选择；这些约束高于成本偏好。",
   "本地编辑卡片只能承载标题、数据、清单、引语、转场或片尾，不能满足需要看见真实人物、动作、地点或现场环境的镜头。",
   "本地编辑卡片也不能凭空绘制定制插画、真实物体、物理光影动画或成对实拍照片；输入未列出自有素材库存时，绝不能假设这些素材存在。",
@@ -86,10 +86,11 @@ const DIRECTOR_PLAN_DIRECTIVE = [
   "只能使用输入提供的 Provider ID，必须覆盖每个场景且不得重复。",
   "evidence 镜头不得选择 AI 生成 Provider；不确定时优先真实素材并降低 confidence。",
   "输入含 editorial 时，其 guardrails 是硬约束；produce_image_story 不得把具体事件改造成生成式现场或当事人表演。",
-  "输入含 templateBlueprint 时，它是生产合同：视觉圣经必须落实 visualSystem 和 soundSystem，逐镜方案必须对应 storyStructure、shotSlots、qualityRules 与 costPolicy。",
+  "输入含 templateBlueprint 时，它是生产合同：视觉圣经必须落实 visualSystem 和 soundSystem，逐镜方案必须对应 storyStructure、shotSlots 与 qualityRules。",
   "输入含 referenceGrammar 时，只吸收其节奏、构图、运镜、色彩、转场和声音结构等抽象规则；不得复制参考视频中的人物身份、品牌、对白、事实和独特情节。",
   "输入含 seriesContext 时，视觉母题、角色/物件状态、声音锚点和已内部定版 canon 必须连续；本集新增变化只能作为当前单集方案，不能擅自改写系列圣经或宣称已经写入 canon。",
-  "当付费镜头上限小于场景数时，其余镜头必须选择输入中的免费 Provider；绝不能把每个场景都指向付费 Provider。",
+  "输入含 costFeedback 时，它代表上一份报价被拒绝后的人类重规划偏好；应结合 reason、note 和 targetEstimatedCostCny，在不牺牲镜头完整性与可执行性的前提下调整 Provider 组合。目标预计费用只是优化方向，不是硬门禁。",
+  "若现有能力无法达到目标预计费用，仍须输出覆盖全部镜头的完整方案，由系统给出新的真实报价；不得删镜头、虚构免费素材、偷偷替换未授权 Provider，也不得用说明卡作为素材失败或费用不足的降级结果。",
   "requestedProfileId 为 auto 时，根据题材选择最合适的非 auto 导演角色。",
   "输入含 revision 时，必须依据其中独立审计指出的具体问题修复上一版候选，同时重新输出完整结果；不得照抄未修复的上一版。",
   "只输出 JSON 对象，不要输出解释文字或 Markdown。",
@@ -289,7 +290,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
     };
   }
   return {
-      version: "video-factory/director-v8",
+    version: "video-factory/director-v9",
     directive: DIRECTOR_PLAN_DIRECTIVE,
     task: "生成视觉圣经和逐镜素材路由。",
     outputRules: [

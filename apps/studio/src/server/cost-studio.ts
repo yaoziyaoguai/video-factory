@@ -88,6 +88,10 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       ? nonNegativeInteger(parameters?.modelCallCount) ?? 1
       : undefined;
     const estimatedCostCny = nonNegativeNumber(receipt.estimatedCostCny) ?? 0;
+    const currentNode = nodes.get(nodeId);
+    const currentOperationPending = currentNode?.outcomeUncertain === true
+      && Boolean(currentNode.operationRequestId)
+      && currentNode.operationRequestId === text(receipt.requestId);
     const authorizedCostCny = nonNegativeNumber(receipt.authorizedCostCny)
       ?? (isRecord(authorization) ? nonNegativeNumber(authorization.maxCostCny) : undefined)
       // 旧回执没有固化授权上限；按已执行的预估额恢复保守基线，并沿用旧版去重规则。
@@ -114,7 +118,7 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       ...(meteredAttemptCount !== undefined ? { meteredAttemptCount } : {}),
       ...(meteredFailedAttemptCount !== undefined ? { meteredFailedAttemptCount } : {}),
       ...(subscriptionCallCount !== undefined ? { subscriptionCallCount } : {}),
-      actualPending: billing === "metered" && actualCost === undefined,
+      actualPending: billing === "metered" && (actualCost === undefined || currentOperationPending),
       startedAt,
       ...(text(receipt.finishedAt) ? { finishedAt: text(receipt.finishedAt) } : {}),
     }];
@@ -154,10 +158,13 @@ function mergeReceipts(current: unknown[], history: unknown[]): unknown[] {
   const merged = new Map<string, Record<string, unknown>>();
   for (const [index, value] of [...current, ...history].entries()) {
     if (!isRecord(value)) continue;
-    const key = [value.nodeId, value.startedAt, value.providerId, value.modelId ?? value.model]
-      .map(text)
-      .filter(Boolean)
-      .join(":") || `receipt:${index}`;
+    const requestId = text(value.requestId);
+    const key = requestId
+      ? `request:${text(value.nodeId)}:${requestId}`
+      : [value.nodeId, value.startedAt, value.providerId, value.modelId ?? value.model]
+        .map(text)
+        .filter(Boolean)
+        .join(":") || `receipt:${index}`;
     merged.set(key, { ...(merged.get(key) ?? {}), ...value });
   }
   return [...merged.values()];
@@ -204,14 +211,26 @@ function uniqueAuthorizedCost(lines: StudioCostLine[]): number {
   }));
 }
 
-function nodeMap(value: unknown): Map<string, { role?: string; status?: string }> {
-  const result = new Map<string, { role?: string; status?: string }>();
+function nodeMap(value: unknown): Map<string, {
+  role?: string;
+  status?: string;
+  outcomeUncertain?: boolean;
+  operationRequestId?: string;
+}> {
+  const result = new Map<string, {
+    role?: string;
+    status?: string;
+    outcomeUncertain?: boolean;
+    operationRequestId?: string;
+  }>();
   if (!Array.isArray(value)) return result;
   for (const item of value) {
     if (!isRecord(item) || !text(item.nodeId)) continue;
     result.set(text(item.nodeId), {
       ...(text(item.role) ? { role: text(item.role) } : {}),
       ...(text(item.status) ? { status: text(item.status) } : {}),
+      ...(item.outcomeUncertain === true ? { outcomeUncertain: true } : {}),
+      ...(text(item.operationRequestId) ? { operationRequestId: text(item.operationRequestId) } : {}),
     });
   }
   return result;

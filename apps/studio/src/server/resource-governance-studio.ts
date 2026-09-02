@@ -106,15 +106,6 @@ export class ResourceGovernanceStudio {
         if (node.nodeId !== "technical-review" || node.status !== "succeeded" || node.outputState?.stale === true || !isRecord(node.output)) return [];
         return typeof node.output.passed === "boolean" ? [node.output.passed ? 100 : 0] : [];
       }));
-      const costRatios = samples.flatMap((run) => {
-        const budget = run.initialInput.economics.maxCostCny;
-        if (budget <= 0) return [];
-        const actualCost = (run.executionReceipts ?? []).reduce((sum, receipt) => sum + (receipt.actualCostCny ?? 0), 0);
-        return [actualCost / budget];
-      });
-      const costEfficiency = costRatios.length
-        ? clampScore(100 - average(costRatios) * 100)
-        : null;
       return {
         templateId,
         templateName,
@@ -124,7 +115,7 @@ export class ResourceGovernanceStudio {
           narrativeCompleteness: samples.length ? percent(completed.length, samples.length) : null,
           visualMatch: visualScores.length ? roundScore(average(visualScores)) : null,
           soundQuality: soundChecks.length ? roundScore(average(soundChecks)) : null,
-          costEfficiency,
+          costEfficiency: null,
           manualEditCount,
           finalApprovalRate: samples.length ? percent(approved.length, samples.length) : null,
         },
@@ -501,10 +492,6 @@ function average(values: number[]): number {
 
 function percent(numerator: number, denominator: number): number {
   return roundScore((numerator / denominator) * 100);
-}
-
-function clampScore(value: number): number {
-  return roundScore(Math.max(0, Math.min(100, value)));
 }
 
 function roundScore(value: number): number {

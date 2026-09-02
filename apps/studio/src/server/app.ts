@@ -63,7 +63,10 @@ import {
   type StudioNodeInputOverrideInput,
   type StudioNodeExecutionConfigurationInput,
   type StudioNodeOverrideInput,
+  type StudioPaidNodeSummary,
+  type StudioPaidReconciliationInput,
   type StudioSpendAuthorizationInput,
+  type StudioSpendRejectionInput,
 } from "../shared/api.js";
 
 export interface StudioServicePort {
@@ -113,10 +116,13 @@ export interface StudioServicePort {
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeExecutionConfiguration(runId: string, nodeId: string, input: StudioNodeExecutionConfigurationInput, actor: string): Promise<StudioRunDetail>;
   authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy: string): Promise<StudioRunDetail>;
+  rejectSpend(runId: string, nodeId: string, input: StudioSpendRejectionInput, rejectedBy: string): Promise<StudioRunDetail>;
   requestPause(runId: string): Promise<StudioRunDetail>;
   resumePaused(runId: string): Promise<StudioRunDetail>;
   resumeStale(runId: string): Promise<StudioRunDetail>;
   retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail>;
+  inspectPaidNode(runId: string, nodeId: string): Promise<StudioPaidNodeSummary>;
+  reconcilePaidNode(runId: string, nodeId: string, input: StudioPaidReconciliationInput, actor: string): Promise<StudioRunDetail>;
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void;
   resolveArtifact(runId: string, artifactId: string): Promise<StudioArtifactResource | undefined>;
   listPublishTargets(): Promise<StudioPublishTarget[]>;
@@ -423,6 +429,17 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     );
   });
 
+  app.post<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/spend-rejections", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.nodeId, "节点编号");
+    return options.service.rejectSpend(
+      request.params.runId,
+      request.params.nodeId,
+      parseSpendRejectionInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/regenerate-stale", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     return options.service.resumeStale(request.params.runId);
@@ -442,6 +459,23 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     requireSafeRouteId(request.params.runId, "制作编号");
     requireSafeRouteId(request.params.nodeId, "节点编号");
     return options.service.retryFailedNode(request.params.runId, request.params.nodeId);
+  });
+
+  app.get<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/paid-operation", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.nodeId, "节点编号");
+    return options.service.inspectPaidNode(request.params.runId, request.params.nodeId);
+  });
+
+  app.post<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/paid-operation/reconcile", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.nodeId, "节点编号");
+    return options.service.reconcilePaidNode(
+      request.params.runId,
+      request.params.nodeId,
+      parsePaidReconciliationInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
   });
 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/decisions", async (request) => {
@@ -772,6 +806,65 @@ function parseSpendAuthorizationInput(value: unknown): StudioSpendAuthorizationI
     modelId: requireText(input.modelId, "modelId"),
     maxCostCny: requireNonNegativeNumber(input.maxCostCny, "maxCostCny"),
     maxAttempts: requirePositiveInteger(input.maxAttempts, "maxAttempts"),
+  };
+}
+
+function parseSpendRejectionInput(value: unknown): StudioSpendRejectionInput {
+  const input = requireRecord(value, "费用反馈请求");
+  if (input.reason !== "too_expensive" && input.reason !== "provider_mix"
+    && input.reason !== "plan_not_approved" && input.reason !== "other") {
+    throw new StudioInputError("费用反馈原因不正确。");
+  }
+  const note = input.note === undefined ? undefined : requireText(input.note, "费用反馈说明");
+  if (note && note.length > 1_000) throw new StudioInputError("费用反馈说明最多 1000 个字符。");
+  const targetEstimatedCostCny = input.targetEstimatedCostCny === undefined
+    ? undefined
+    : requireNonNegativeNumber(input.targetEstimatedCostCny, "目标预计费用");
+  if (targetEstimatedCostCny !== undefined && targetEstimatedCostCny > 100_000) {
+    throw new StudioInputError("目标预计费用必须在 0 到 100000 之间。");
+  }
+  return {
+    spendPlanId: requireText(input.spendPlanId, "费用报价编号"),
+    reason: input.reason,
+    ...(targetEstimatedCostCny !== undefined ? { targetEstimatedCostCny } : {}),
+    ...(note ? { note } : {}),
+  };
+}
+
+function parsePaidReconciliationInput(value: unknown): StudioPaidReconciliationInput {
+  const input = requireRecord(value, "付费任务核对请求");
+  if (!Number.isInteger(input.expectedRunRevision) || Number(input.expectedRunRevision) < 0) {
+    throw new StudioInputError("制作版本必须是非负整数。");
+  }
+  if (input.outcome !== "resume_original" && input.outcome !== "requote"
+    && input.outcome !== "confirmed_not_charged" && input.outcome !== "confirmed_charged") {
+    throw new StudioInputError("付费任务核对方式不正确。");
+  }
+  const reconciliationId = requireText(input.reconciliationId, "核对请求编号");
+  if (reconciliationId.length > 128) throw new StudioInputError("核对请求编号最多 128 个字符。");
+  const taskId = input.taskId === undefined ? undefined : requireText(input.taskId, "Provider taskId");
+  if (taskId && taskId.length > 256) throw new StudioInputError("Provider taskId 最多 256 个字符。");
+  if (taskId && input.outcome !== "resume_original") {
+    throw new StudioInputError("Provider taskId 只能用于核对原任务。");
+  }
+  const manualResolution = input.outcome === "confirmed_not_charged" || input.outcome === "confirmed_charged";
+  const note = input.note === undefined ? undefined : requireText(input.note, "人工核销说明");
+  if (manualResolution && !note) throw new StudioInputError("人工核销说明不能为空。");
+  if (note && note.length > 2_000) throw new StudioInputError("人工核销说明最多 2000 个字符。");
+  if (note && !manualResolution) throw new StudioInputError("人工核销说明只能用于人工确认结论。");
+  const actualCostCny = input.actualCostCny === undefined
+    ? undefined
+    : requireNonNegativeNumber(input.actualCostCny, "实际费用");
+  if (actualCostCny !== undefined && input.outcome !== "confirmed_charged") {
+    throw new StudioInputError("实际费用只能用于确认已扣费。");
+  }
+  return {
+    expectedRunRevision: Number(input.expectedRunRevision),
+    reconciliationId,
+    outcome: input.outcome,
+    ...(taskId ? { taskId } : {}),
+    ...(note ? { note } : {}),
+    ...(actualCostCny !== undefined ? { actualCostCny } : {}),
   };
 }
 

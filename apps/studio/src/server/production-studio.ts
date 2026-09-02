@@ -6,12 +6,16 @@ import { NodeVersionConflictError } from "@video-factory/workflow-core";
 import type { ArtifactDraft, HumanDecisionDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
 import type { ProductionTemplateSnapshot } from "@video-factory/template-core";
 import {
+  PaidOperationManualReconciliationError,
   parseBrief,
   RunLockedError,
   StaleRunRevisionError,
   type DispatchedProductionRun,
   type ProductionBrief,
+  type ProductionPaidNodeReconciliationDraft,
+  type ProductionPaidNodeSummary,
   type ProductionRunListener,
+  type ProductionSpendRejectionDraft,
 } from "@video-factory/production-pipeline";
 import {
   StudioInputError,
@@ -26,9 +30,12 @@ import {
   type StudioNodeInputOverrideInput,
   type StudioNodeExecutionConfigurationInput,
   type StudioNodeOverrideInput,
+  type StudioPaidNodeSummary,
+  type StudioPaidReconciliationInput,
   type StudioProvider,
   type StudioRunDetail,
   type StudioRunSummary,
+  type StudioSpendRejectionInput,
 } from "../shared/api.js";
 import { modelSupportsCapability } from "../shared/model-compatibility.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
@@ -64,9 +71,15 @@ export interface StudioPipelinePort {
     actor: string,
   ): Promise<WorkflowRun<ProductionBrief>>;
   authorizeSpend(runId: string, authorization: SpendAuthorizationDraft): Promise<WorkflowRun<ProductionBrief>>;
+  rejectSpend(runId: string, rejection: ProductionSpendRejectionDraft): Promise<WorkflowRun<ProductionBrief>>;
   dispatchSpendAuthorization?(
     runId: string,
     authorization: SpendAuthorizationDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun>;
+  dispatchSpendRejection?(
+    runId: string,
+    rejection: ProductionSpendRejectionDraft,
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun>;
   requestPause(runId: string): Promise<void>;
@@ -76,6 +89,11 @@ export interface StudioPipelinePort {
   resumeStale(runId: string): Promise<WorkflowRun<ProductionBrief>>;
   dispatchResumeStale?(runId: string, listener?: ProductionRunListener): Promise<DispatchedProductionRun>;
   retryFailedNode(runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>>;
+  inspectPaidNode(runId: string, nodeId: string): Promise<ProductionPaidNodeSummary>;
+  reconcilePaidNode(
+    runId: string,
+    draft: ProductionPaidNodeReconciliationDraft,
+  ): Promise<WorkflowRun<ProductionBrief>>;
   dispatchRetryFailedNode?(
     runId: string,
     nodeId: string,
@@ -88,7 +106,6 @@ export interface ProductionStudioOptions {
   workspaceRoot: string;
   pipeline: StudioPipelinePort;
   listProviders: () => Promise<StudioProvider[]>;
-  maxRunCostCny?: number;
   archiveStore: RunArchiveRepository;
   now?: () => Date;
   resolveTemplateSnapshot?: (input: unknown, brief: ProductionBrief) => Promise<ProductionTemplateSnapshot>;
@@ -290,19 +307,15 @@ export class ProductionStudio {
     if (brief.reviewMode !== "manual") {
       throw new StudioInputError("正式制作必须经过人工终审，不能自动跳过发布前确认。");
     }
-    const maxRunCostCny = this.options.maxRunCostCny ?? 20;
-    if (brief.economics.maxCostCny > maxRunCostCny) {
-      throw new StudioInputError(`本次成本上限不能超过服务端安全上限 ¥${maxRunCostCny}。`);
-    }
     if (this.options.resolveTemplateSnapshot) {
       try {
         const templateSnapshot = await this.options.resolveTemplateSnapshot(input, brief);
-        brief = applyTemplateModelDefaults({ ...brief, templateSnapshot }, templateSnapshot.modelDefaults);
+        brief = parseBriefWithInputError(applyTemplateModelDefaults({ ...brief, templateSnapshot }, templateSnapshot.modelDefaults));
       } catch (error) {
         throw new StudioInputError(error instanceof Error ? error.message : "模板解析失败。");
       }
     }
-    await this.assertProvidersAvailable(brief, maxRunCostCny);
+    await this.assertProvidersAvailable(brief);
     if (!idempotencyKey) return this.dispatchBrief(brief);
     assertIdempotencyKey(idempotencyKey);
     const existing = this.startsInFlight.get(idempotencyKey);
@@ -585,7 +598,7 @@ export class ProductionStudio {
     }
     const currentBrief = parseBrief(current.initialInput);
     const updatedBrief = applyNodeExecutionConfiguration(currentBrief, nodeId, input);
-    await this.assertProvidersAvailable(updatedBrief, this.options.maxRunCostCny ?? 100);
+    await this.assertProvidersAvailable(updatedBrief);
     try {
       const updated = await this.options.pipeline.applyNodeExecutionConfiguration(runId, nodeId, updatedBrief, actor);
       const detail = this.toDetail(updated);
@@ -773,6 +786,48 @@ export class ProductionStudio {
     }
   }
 
+  async rejectSpend(
+    runId: string,
+    nodeId: string,
+    input: StudioSpendRejectionInput,
+    rejectedBy: string,
+  ): Promise<StudioRunDetail> {
+    const current = await this.loadRequiredRun(runId);
+    const node = current.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+    const plan = node?.spendPlan;
+    if (!plan || plan.id !== input.spendPlanId
+      || (node.status !== "awaiting_spend_approval" && node.status !== "approval_invalidated")) {
+      throw new StudioConflictError("费用报价或上游版本已经变化，请重新检查后再反馈。");
+    }
+    const rejection: ProductionSpendRejectionDraft = {
+      nodeId,
+      spendPlanId: plan.id,
+      reason: input.reason,
+      ...(input.targetEstimatedCostCny !== undefined ? { targetEstimatedCostCny: input.targetEstimatedCostCny } : {}),
+      ...(input.note ? { note: input.note } : {}),
+      rejectedBy,
+    };
+    try {
+      if (this.options.pipeline.dispatchSpendRejection) {
+        const dispatched = await this.options.pipeline.dispatchSpendRejection(
+          runId,
+          rejection,
+          (run) => this.publish(this.toDetail(run)),
+        );
+        return await this.dispatchedDetail(dispatched);
+      }
+      const updated = await this.options.pipeline.rejectSpend(runId, rejection);
+      const detail = this.toDetail(updated);
+      this.publish(detail);
+      return detail;
+    } catch (error) {
+      if (error instanceof StaleRunRevisionError || (error instanceof Error && /locked by another writer/.test(error.message))) {
+        throw new StudioConflictError("费用报价已被其他操作更新，请刷新后重试。");
+      }
+      throw error;
+    }
+  }
+
   async resumeStale(runId: string): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
     if (current.status !== "stale") throw new StudioConflictError("这条制作当前没有需要重新生成的旧结果。");
@@ -822,6 +877,43 @@ export class ProductionStudio {
     }
   }
 
+  async inspectPaidNode(runId: string, nodeId: string): Promise<StudioPaidNodeSummary> {
+    await this.loadRequiredRun(runId);
+    return this.options.pipeline.inspectPaidNode(runId, nodeId);
+  }
+
+  async reconcilePaidNode(
+    runId: string,
+    nodeId: string,
+    input: StudioPaidReconciliationInput,
+    actor = "studio-owner",
+  ): Promise<StudioRunDetail> {
+    try {
+      const manualResolution = input.outcome === "confirmed_not_charged" || input.outcome === "confirmed_charged";
+      const updated = await this.options.pipeline.reconcilePaidNode(runId, {
+        nodeId,
+        expectedRunRevision: input.expectedRunRevision,
+        reconciliationId: input.reconciliationId,
+        outcome: input.outcome,
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+        ...(manualResolution ? { actor } : {}),
+        ...(input.note ? { note: input.note } : {}),
+        ...(input.actualCostCny !== undefined ? { actualCostCny: input.actualCostCny } : {}),
+      });
+      const detail = this.toDetail(updated);
+      this.publish(detail);
+      return detail;
+    } catch (error) {
+      if (error instanceof PaidOperationManualReconciliationError) {
+        throw new StudioConflictError("这笔付费任务无法自动查询，请在 Provider 控制台人工核销任务和账单。");
+      }
+      if (error instanceof StaleRunRevisionError || error instanceof RunLockedError) {
+        throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
+      }
+      throw error;
+    }
+  }
+
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void {
     const listeners = this.listeners.get(runId) ?? new Set<(run: StudioRunDetail) => void>();
     listeners.add(listener);
@@ -864,7 +956,7 @@ export class ProductionStudio {
     }
   }
 
-  private async assertProvidersAvailable(brief: ProductionBrief, maxRunCostCny: number): Promise<void> {
+  private async assertProvidersAvailable(brief: ProductionBrief): Promise<void> {
     const providers = await this.options.listProviders();
     const selectedProviderIds = new Set([
       brief.providers.script,
@@ -895,7 +987,6 @@ export class ProductionStudio {
         throw new StudioInputError(`模型“${model.label}”不适合“${provider.label}”当前所在节点。`);
       }
     }
-    let fixedMeteredEstimateCny = 0;
     const bindings: Array<[string, string]> = [
       ["script.draft", brief.providers.script],
       ...(brief.director && brief.providers.director ? [["storyboard.plan", brief.providers.director] as [string, string]] : []),
@@ -920,23 +1011,10 @@ export class ProductionStudio {
       }
       const selectedEstimate = modelEstimate(selected, brief.models?.[selected.id]);
       if (selectedEstimate === undefined) {
-        throw new StudioInputError(`“${selected.label}”尚未配置估价，不能进入预算计算。`);
-      }
-      if (selected.billingUnit === "run") {
-        fixedMeteredEstimateCny = roundMoney(fixedMeteredEstimateCny + selectedEstimate);
-        continue;
-      }
-      if (brief.economics.maxPaidShots < 1) {
-        throw new StudioInputError(`“${selected.label}”按镜头计费，但本次没有设置付费镜头额度。`);
-      }
-      const estimatedCost = roundMoney(selectedEstimate * brief.economics.maxPaidShots);
-      if (estimatedCost > brief.economics.maxCostCny) {
-        throw new StudioInputError(`“${selected.label}”预计需要 ¥${estimatedCost}，超过本次预计成本上限 ¥${brief.economics.maxCostCny}。`);
+        throw new StudioInputError(`“${selected.label}”尚未配置估价，不能生成执行前报价。`);
       }
     }
     if (brief.director) {
-      let hasMeteredSource = false;
-      let hasFreeSource = false;
       for (const id of brief.director.assetProviderIds) {
         const selected = providers.find((provider) => provider.capability === "asset.prepare" && provider.id === id);
         if (!selected) throw new StudioInputError(`导演素材池中没有找到“${id}”。`);
@@ -945,25 +1023,15 @@ export class ProductionStudio {
           throw new StudioInputError(`“${selected.label}”不能作为导演的镜头素材来源。`);
         }
         if (selected.billing === "metered") {
-          hasMeteredSource = true;
           if (!brief.economics.allowMeteredProviders) {
-            throw new StudioInputError(`当前成本策略未允许使用“${selected.label}”。`);
+            throw new StudioInputError(`当前画面来源策略未允许使用“${selected.label}”。`);
           }
           const selectedEstimate = modelEstimate(selected, brief.models?.[selected.id]);
-          if (!selectedEstimate || selectedEstimate > brief.economics.maxCostCny) {
-            throw new StudioInputError(`“${selected.label}”的单镜估价超过本次成本上限。`);
+          if (!selectedEstimate) {
+            throw new StudioInputError(`“${selected.label}”尚未配置单镜估价，不能生成执行前报价。`);
           }
-        } else {
-          hasFreeSource = true;
         }
       }
-      if (hasMeteredSource && !hasFreeSource) {
-        throw new StudioInputError("使用付费镜头时，导演素材池必须至少保留一个免费素材来源作为其余镜头与失败回退的保底。");
-      }
-    }
-    const estimatedRunCeiling = roundMoney(brief.economics.maxCostCny + fixedMeteredEstimateCny);
-    if (estimatedRunCeiling > maxRunCostCny) {
-      throw new StudioInputError(`本次镜头预算与按次能力预计合计 ¥${estimatedRunCeiling}，超过服务端安全上限 ¥${maxRunCostCny}。`);
     }
   }
 
@@ -1531,13 +1599,9 @@ function productionInputMessage(error: unknown): string {
   if (message.includes("protocolVersion")) return "制作参数版本不受支持，请刷新页面后重试。";
   if (/\b(title|angle|audience|nicheSlug|platform)\b/.test(message)) return "请完整填写标题、内容角度、目标受众、系列标识和平台。";
   if (message.includes("providers")) return "制作能力配置不完整，请重新选择制作配方。";
-  if (message.includes("economics")) return "预计成本和付费镜头设置不符合要求。";
+  if (message.includes("economics")) return "付费能力设置不符合要求。";
   if (message.includes("voiceDirection")) return "配音设置不符合要求，请重新选择音色。";
   return "制作参数不符合要求，请检查后重试。";
-}
-
-function roundMoney(value: number): number {
-  return Math.round(value * 100) / 100;
 }
 
 const NODE_PROVIDER_FIELDS: Partial<Record<string, keyof ProductionBrief["providers"]>> = {
@@ -1558,7 +1622,7 @@ function applyNodeExecutionConfiguration(
   const providerField = NODE_PROVIDER_FIELDS[nodeId];
   if (!providerField) throw new StudioInputError(`“${nodeId}”没有可切换的模型或执行能力。`);
   if (nodeId !== "assets" && (input.assetProviderIds || input.economics)) {
-    throw new StudioInputError("素材来源和镜头预算只能在素材导演节点修改。");
+    throw new StudioInputError("素材来源和付费能力设置只能在素材导演节点修改。");
   }
   if (nodeId === "assets" && input.providerId && input.providerId !== "ai-shot-router-v1") {
     throw new StudioInputError("素材导演保持使用 AI 逐镜路由；请在下方选择火山、MiniMax、百炼等具体生成来源和模型。");

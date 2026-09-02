@@ -1,9 +1,9 @@
 import { Activity, AlertTriangle, Check, Clock3, Download, Pause, Play, RotateCcw, Send, X, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProvider, StudioRunDetail, StudioSpendAuthorizationInput } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { platformLabel } from "../presentation.js";
+import { platformLabel, providerLabel } from "../presentation.js";
 import { NodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 
@@ -21,14 +21,17 @@ interface RunWorkbenchProps {
   onOverrideNodeInput?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
   onConfigureNode?: (nodeId: string, input: StudioNodeExecutionConfigurationInput) => Promise<void>;
   onAuthorizeSpend?: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
+  onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
   onRegenerateStale?: () => Promise<void>;
   onRequestPause?: () => Promise<void>;
   onResumePaused?: () => Promise<void>;
   onRetryFailedNode?: (nodeId: string) => Promise<void>;
+  paidNodeSummary?: StudioPaidNodeSummary;
+  onReconcilePaidNode?: (nodeId: string, input: StudioPaidReconciliationDraft) => Promise<void>;
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRegenerateStale, onRequestPause, onResumePaused, onRetryFailedNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
@@ -40,6 +43,8 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const activeSpendNode = creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
   const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id);
   const showReviewSurface = Boolean(video?.contentUrl || run.activeIntervention || isStoppedStatus(run.status));
+  const uncertainPaidNode = run.nodes.find((node) => node.outcomeUncertain === true);
+  const visiblePaidNodeSummary = paidNodeSummary?.nodeId === uncertainPaidNode?.id ? paidNodeSummary : undefined;
   const visualReview = visualReviewDecision(run);
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
 
@@ -58,6 +63,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
     onInputOverride={onOverrideNodeInput ?? (async () => undefined)}
     onConfigure={onConfigureNode ?? (async () => undefined)}
     onAuthorize={onAuthorizeSpend ?? (async () => undefined)}
+    onRejectSpend={onRejectSpend ?? (async () => undefined)}
   />;
 
   useEffect(() => {
@@ -96,7 +102,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
           <div><p className="eyebrow">当前需要处理</p><h2 id="current-production-action-title">现在需要你：确认{activeSpendNode.label}</h2></div>
           <StatusBadge status={run.status} />
         </header>
-        <p>{activeSpendNode.role ?? "当前角色"}完成后，系统会继续推进后续节点。请先检查它收到的内容、实际使用的模型和费用上限。</p>
+        <p>{activeSpendNode.role ?? "当前角色"}完成后，系统会继续推进后续节点。请先检查它收到的内容、实际使用的模型和本次报价。</p>
         {renderNodeWorkspace(activeSpendNode)}
       </section> : !showReviewSurface ? <section className="current-production-action is-running" aria-live="polite">
         <header><div><p className="eyebrow">自动制作中</p><h2>{runningNodeLabel(run)}</h2></div><StatusBadge status={run.status} /></header>
@@ -192,6 +198,11 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 <h2>当前状态</h2>
                 <p>{runStateMessage(run)}</p>
               </>}
+              {visiblePaidNodeSummary ? <PaidOperationPanel
+                summary={visiblePaidNodeSummary}
+                busy={nodeMutationPending}
+                {...(onReconcilePaidNode ? { onReconcile: onReconcilePaidNode } : {})}
+              /> : null}
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />多平台发布</button> : null}
               {run.status === "failed" && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && failedNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(failedNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />重试失败步骤</button> : null}
               {(run.status === "failed" || run.status === "rejected") && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
@@ -266,6 +277,124 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
       ) : null}
     </main>
   );
+}
+
+function PaidOperationPanel({ summary, busy, onReconcile }: {
+  summary: StudioPaidNodeSummary;
+  busy: boolean;
+  onReconcile?: (nodeId: string, input: StudioPaidReconciliationDraft) => Promise<void>;
+}) {
+  const [taskId, setTaskId] = useState("");
+  const [manualOutcome, setManualOutcome] = useState<"confirmed_not_charged" | "confirmed_charged">();
+  const [note, setNote] = useState("");
+  const [actualCost, setActualCost] = useState("");
+  const [manualConfirmed, setManualConfirmed] = useState(false);
+  const outcome = summary.recommendedOutcome === "resume_original" || summary.recommendedOutcome === "requote"
+    ? summary.recommendedOutcome
+    : undefined;
+  const missingTaskItems = summary.items.filter((item) => (
+    (item.state === "submitted" || item.state === "unknown") && !item.taskId
+  ));
+  const canAttachTaskId = missingTaskItems.length === 1;
+  const parsedActualCost = actualCost.trim() ? Number(actualCost) : undefined;
+  const actualCostValid = parsedActualCost === undefined || (Number.isFinite(parsedActualCost) && parsedActualCost >= 0);
+  const isRunLevelVoiceCall = summary.nodeId === "voice" && summary.items.length === 0;
+  const title = summary.requiresManualReconciliation
+    ? "需人工核销"
+    : outcome === "requote"
+      ? "需要重新报价"
+      : "原付费任务可继续核对";
+  return <section className={`paid-operation-panel${summary.requiresManualReconciliation ? " requires-manual" : ""}`} aria-label="付费任务证据">
+    <header><strong>{title}</strong><small>{isRunLevelVoiceCall ? "一次配音调用" : `${summary.items.length} 个镜头`}</small></header>
+    <div className="paid-operation-items">
+      {summary.items.map((item) => <article key={`${item.operationId}:${item.itemRequestId}`}>
+        <header><strong>镜头 {item.scenePosition}</strong><span>{paidOperationStateLabel(item.state)}</span></header>
+        <p>{paidProviderName(item.providerId)} · {item.modelId}</p>
+        {item.taskId ? <code>taskId: {item.taskId}</code> : <small>尚无 Provider taskId</small>}
+        <small>{paidOperationCostLabel(item)}</small>
+      </article>)}
+    </div>
+    {summary.requiresManualReconciliation
+      ? <p>{isRunLevelVoiceCall
+        ? "系统不会自动重试。请在配音 Provider 控制台按本次调用记录与账单核对，再进行人工核销。"
+        : "系统不会自动重试。请在 Provider 控制台按 taskId 核对任务与账单，再进行人工核销。"}</p>
+      : outcome === "requote" ? <p>只会为明确失败或尚未执行的镜头生成新报价；已完成和待核对镜头不会再次创建任务。</p> : <p>继续查询并下载原 taskId，不会创建新任务或新增报价。</p>}
+    {summary.requiresManualReconciliation && onReconcile ? <div className="paid-reconciliation-controls">
+      {canAttachTaskId ? <div className="paid-task-id-control">
+        <label className="field field-wide">
+          <span>Provider taskId</span>
+          <input value={taskId} onChange={(event) => setTaskId(event.target.value)} maxLength={256} placeholder="从 Provider 控制台复制" />
+        </label>
+        <button
+          className="button button-secondary"
+          type="button"
+          disabled={busy || !taskId.trim()}
+          onClick={() => void onReconcile(summary.nodeId, { outcome: "resume_original", taskId: taskId.trim() })}
+        ><Activity aria-hidden="true" size={16} />录入 taskId 并核对原任务</button>
+      </div> : null}
+      <fieldset className="paid-manual-resolution" disabled={busy}>
+        <legend>Provider 控制台核销结论</legend>
+        <div className="paid-manual-options">
+          <label><input type="radio" name={`paid-outcome-${summary.nodeId}`} checked={manualOutcome === "confirmed_not_charged"} onChange={() => setManualOutcome("confirmed_not_charged")} />未扣费</label>
+          <label><input type="radio" name={`paid-outcome-${summary.nodeId}`} checked={manualOutcome === "confirmed_charged"} onChange={() => setManualOutcome("confirmed_charged")} />已扣费</label>
+        </div>
+        {manualOutcome === "confirmed_charged" ? <label className="field field-wide">
+          <span>实际费用（可选）</span>
+          <input type="number" min="0" step="0.01" value={actualCost} onChange={(event) => setActualCost(event.target.value)} placeholder="留空则登记原预估费用" />
+        </label> : null}
+        <label className="field field-wide">
+          <span>核销说明</span>
+          <textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={2_000} rows={3} placeholder="写明在 Provider 控制台核对到的任务和账单证据" />
+        </label>
+        <label className="paid-manual-confirmation"><input type="checkbox" checked={manualConfirmed} onChange={(event) => setManualConfirmed(event.target.checked)} />我确认已在 Provider 控制台核对任务与账单，此结论将写入审计记录。</label>
+        <button
+          className={`button ${manualOutcome === "confirmed_charged" ? "button-danger" : "button-primary"}`}
+          type="button"
+          disabled={!manualOutcome || !note.trim() || !manualConfirmed || !actualCostValid}
+          onClick={() => {
+            if (!manualOutcome) return;
+            void onReconcile(summary.nodeId, {
+              outcome: manualOutcome,
+              note: note.trim(),
+              ...(manualOutcome === "confirmed_charged" && parsedActualCost !== undefined
+                ? { actualCostCny: parsedActualCost }
+                : {}),
+            });
+          }}
+        >{manualOutcome === "confirmed_charged" ? "确认已扣费并登记" : "确认未扣费并解除锁定"}</button>
+      </fieldset>
+    </div> : null}
+    {!summary.requiresManualReconciliation && outcome && onReconcile ? <button
+      className="button button-primary"
+      type="button"
+      disabled={busy}
+      onClick={() => void onReconcile(summary.nodeId, { outcome })}
+    >{outcome === "requote" ? <><RotateCcw aria-hidden="true" size={16} />为未完成镜头重新报价</> : <><Activity aria-hidden="true" size={16} />核对付费任务</>}</button> : null}
+  </section>;
+}
+
+type StudioPaidReconciliationDraft = Omit<StudioPaidReconciliationInput, "expectedRunRevision" | "reconciliationId">;
+
+function paidProviderName(providerId: string): string {
+  return (providerLabel(providerId) ?? providerId).replace(/ (?:视频|图片)生成$/, "");
+}
+
+function paidOperationStateLabel(state: StudioPaidNodeSummary["items"][number]["state"]): string {
+  return ({
+    prepared: "尚未提交",
+    submitted: "已提交",
+    provider_succeeded: "Provider 已完成",
+    materialized: "已落盘",
+    terminal_failed: "明确失败",
+    unknown: "状态未知",
+  } as const)[state];
+}
+
+function paidOperationCostLabel(item: StudioPaidNodeSummary["items"][number]): string {
+  if (item.actualCostCny !== undefined) return `已计费 ¥${item.actualCostCny.toFixed(2)}`;
+  if (item.state === "prepared" || item.state === "terminal_failed") return `未计费 · 预估 ¥${item.estimatedCostCny.toFixed(2)}`;
+  if (item.state === "materialized") return "已完成 · 费用待回写";
+  return `待确认 · 预估 ¥${item.estimatedCostCny.toFixed(2)}`;
 }
 
 interface VisualReviewDecision {
@@ -405,8 +534,8 @@ function runStateMessage(run: StudioRunDetail): string {
     }
     return safeRunError(run.nodes.find((node) => node.status === "failed")?.error);
   }
-  if (run.status === "awaiting_spend_approval") return "即将进入付费节点，请先检查前序交付、模型和费用上限。";
-  if (run.status === "approval_invalidated") return "输入、模型或预算发生了变化，之前的费用确认已失效，请重新检查。";
+  if (run.status === "awaiting_spend_approval") return "即将进入付费节点，请先检查前序交付、模型和本次报价。";
+  if (run.status === "approval_invalidated") return "输入、模型、报价或重试次数发生了变化，之前的费用确认已失效，请重新检查。";
   if (run.status === "stale") return "上游内容已被人工修改，后续旧结果不会继续使用，需要重新生成。";
   if (run.status === "paused") return "制作已经安全暂停。现在可以修改已完成角色的输入或交付；不修改也可以直接继续。";
   if (run.pauseRequested) return "已请求暂停；当前 Agent 会先安全完成，系统将在下一节点开始前停下。";

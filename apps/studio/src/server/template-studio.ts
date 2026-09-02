@@ -75,7 +75,6 @@ export class TemplateStudio {
         { capability: "voice.synthesize", required: true },
         { capability: "video.render", required: true },
       ],
-      costPolicy: { currency: "CNY", maxCost: 8, maxPaidShots: 1 },
       createdAt: timestamp,
       updatedAt: timestamp,
     }, input.expectedRevision);
@@ -103,11 +102,6 @@ export class TemplateStudio {
       platform: input.platform,
       durationSeconds: selection.runOverrides?.durationSeconds ?? input.durationSeconds,
       ...(selection.runOverrides?.automationLevel ? { automationLevel: selection.runOverrides.automationLevel } : {}),
-      costPolicy: {
-        currency: "CNY",
-        maxCost: input.economics.maxCostCny,
-        maxPaidShots: input.economics.maxPaidShots,
-      },
     };
     return resolveTemplateSnapshot({
       template,
@@ -127,7 +121,6 @@ interface TemplateRunInput {
   template?: unknown;
   platform: string;
   durationSeconds: number;
-  economics: Pick<StudioProductionInput["economics"], "maxCostCny" | "maxPaidShots">;
 }
 
 function parseTemplateSelection(value: unknown): NonNullable<StudioProductionInput["template"]> {

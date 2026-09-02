@@ -3,7 +3,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  CircleDollarSign,
   Clapperboard,
   FileText,
   Film,
@@ -61,33 +60,33 @@ const RECIPES: Array<{
   id: RecipeId;
   label: string;
   description: string;
-  maxPaidShots: number;
+  allowMeteredProviders: boolean;
   recommended?: boolean;
 }> = [
   {
     id: "economy-daily",
     label: "经济日更",
     description: "AI 导演在全部免费来源中逐镜决策",
-    maxPaidShots: 0,
+    allowMeteredProviders: false,
     recommended: true,
   },
   {
     id: "free-stock",
     label: "全免费精搜",
     description: "零计费，允许更广的免费素材池",
-    maxPaidShots: 0,
+    allowMeteredProviders: false,
   },
   {
     id: "keyshot-ai",
     label: "效果均衡",
-    description: "AI 可在预算内选择最多 1 个付费镜头",
-    maxPaidShots: 1,
+    description: "允许 AI 选择付费关键镜头，每个计费节点执行前确认",
+    allowMeteredProviders: true,
   },
   {
     id: "cinematic-ai",
-    label: "精品上限",
-    description: "AI 可在预算内选择最多 3 个付费镜头",
-    maxPaidShots: 3,
+    label: "开放精品生成",
+    description: "优先开放精品生成能力，每个计费节点执行前确认",
+    allowMeteredProviders: true,
   },
 ];
 
@@ -103,8 +102,6 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   );
   const [activeKey, setActiveKey] = useState<BindingKey>("assets");
   const [recipeId, setRecipeId] = useState<RecipeId>("economy-daily");
-  const [maxPaidShots, setMaxPaidShots] = useState(0);
-  const [budgetCny, setBudgetCny] = useState(0);
   const [directorProfileId, setDirectorProfileId] = useState<StudioDirectorProfileId>("auto");
   const [platform, setPlatform] = useState("douyin");
   const [durationSeconds, setDurationSeconds] = useState(24);
@@ -141,6 +138,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   });
   const selectedAssetSources = assetSources.filter((provider) => assetProviderIds.includes(provider.id));
   const selectedMeteredSources = selectedAssetSources.filter((provider) => provider.billing === "metered");
+  const selectedRecipe = RECIPES.find((recipe) => recipe.id === recipeId) ?? RECIPES[0]!;
   const selectedTemplate = templates.find((template) => template.id === selectedTemplateId);
   const effectiveModelId = (provider: StudioProvider) => modelSelections[provider.id]
     ?? selectedTemplate?.modelDefaults?.[provider.id]
@@ -157,30 +155,23 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   });
   const semanticRankCompatible = Boolean(effectiveBindings.director && effectiveBindings.assets === "ai-shot-router-v1");
   const effectiveSemanticRank = semanticRankCompatible && semanticRankEnabled;
-  const meteredSelected = selectedMeteredSources.length > 0 && maxPaidShots > 0;
-  const meteredVisualReview = visualReviewEnabled && visualReviewProvider?.billing === "metered"
+  const meteredSelected = selectedMeteredSources.length > 0 && selectedRecipe.allowMeteredProviders;
+  const subscriptionVisualReview = visualReviewEnabled && visualReviewProvider?.billing === "subscription"
     ? visualReviewProvider
     : undefined;
-  const meteredVoiceProvider = providers.find((provider) => {
+  const automaticVoiceProvider = providers.find((provider) => {
     return provider.capability === "voice.synthesize"
       && provider.id === effectiveBindings.voice
       && provider.available
-      && provider.billing === "metered";
+      && provider.billing === "metered"
+      && provider.approvalPolicy === "automatic";
   });
-  const visualReviewEstimate = meteredVisualReview?.estimatedCnyPerClip ?? 0;
-  const voiceEstimate = meteredVoiceProvider?.estimatedCnyPerClip ?? 0;
-  const hasMeteredCalls = meteredSelected || meteredVisualReview !== undefined || meteredVoiceProvider !== undefined;
-  const highestMeteredClip = Math.max(...selectedMeteredSources.map((provider) => selectedModelEstimate(provider, effectiveModelId(provider)) ?? Number.NEGATIVE_INFINITY));
-  const minimumBudget = meteredSelected && Number.isFinite(highestMeteredClip)
-    ? roundMoney(highestMeteredClip * maxPaidShots)
-    : 0;
-  const displayedBudget = meteredSelected ? Math.max(budgetCny, minimumBudget) : 0;
-  const displayedTotalEstimate = roundMoney(displayedBudget + visualReviewEstimate + voiceEstimate);
+  const hasMeteredCalls = meteredSelected || automaticVoiceProvider !== undefined;
   const economics: StudioProductionInput["economics"] = {
     recipeId,
     allowMeteredProviders: hasMeteredCalls,
-    maxPaidShots: meteredSelected ? maxPaidShots : 0,
-    maxCostCny: meteredSelected ? displayedBudget : 0,
+    maxPaidShots: 0,
+    maxCostCny: 0,
   };
   const missingCapabilities = CAPABILITIES.filter((item) => {
     return !item.optional
@@ -188,6 +179,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   });
   const missingProductionRoles = [
     ...missingCapabilities.map((item) => item.label),
+    ...(assetProviderIds.length > 0 ? [] : ["导演画面来源"]),
     ...(roleAuditProvider ? [] : ["独立质量审计"]),
   ];
 
@@ -221,8 +213,6 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
       ?? sourceIdsForRecipe(recipe, providers, creatorSettings?.defaultAssetProviderId);
     setBindings(initialBindings);
     setRecipeId(recipe.id);
-    setMaxPaidShots(imageStory ? 0 : initialValues?.economics?.maxPaidShots ?? recipe.maxPaidShots);
-    setBudgetCny(imageStory ? 0 : initialValues?.economics?.maxCostCny ?? estimatedRecipeBudget(recipe, sourceIds, providers));
     setDirectorProfileId(initialProfile);
     setPlatform(initialValues?.platform ?? creatorSettings?.productionDefaults?.platform ?? "douyin");
     setDurationSeconds(initialValues?.durationSeconds ?? creatorSettings?.productionDefaults?.durationSeconds ?? 24);
@@ -278,13 +268,10 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
 
   function applyRecipe(nextId: RecipeId) {
     const recipe = RECIPES.find((item) => item.id === nextId) ?? RECIPES[0]!;
-    if (imageStory && recipe.maxPaidShots > 0) return;
     const sourceIds = sourceIdsForRecipe(recipe, providers);
     setRecipeId(nextId);
-    setMaxPaidShots(recipe.maxPaidShots);
     setBindings((current) => ({ ...current, assets: "ai-shot-router-v1" }));
     setAssetProviderIds(sourceIds);
-    setBudgetCny(estimatedRecipeBudget(recipe, sourceIds, providers));
     setActiveKey("assets");
   }
 
@@ -295,11 +282,9 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   }
 
   function toggleAssetProvider(provider: StudioProvider) {
-    if (!provider.available || (provider.billing === "metered" && maxPaidShots === 0)) return;
+    if (!provider.available || (provider.billing === "metered" && !selectedRecipe.allowMeteredProviders)) return;
     setAssetProviderIds((current) => {
-      const baselineId = requiredFreeBaselineId(current, providers);
       if (current.includes(provider.id)) {
-        if (provider.id === baselineId) return current;
         return current.length === 1 ? current : current.filter((id) => id !== provider.id);
       }
       return [...current, provider.id];
@@ -397,17 +382,11 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
           <div>
             <p className="eyebrow">制作方案</p>
             <h2 id="new-run-title">新建制作</h2>
-            <p>先定内容与预计成本，再选择合适的画面和声音能力。</p>
+            <p>先定内容与画面方案；图片和视频按实际方案报价，声音与审片不打断制作。</p>
           </div>
-          <div className="dialog-budget" aria-label="当前预算">
-            <span>{hasMeteredCalls
-              ? [
-                  meteredSelected ? `${maxPaidShots} 个付费镜头上限` : "",
-                  meteredVoiceProvider ? "1 次付费配音" : "",
-                  meteredVisualReview ? "1 次付费审片" : "",
-                ].filter(Boolean).join(" + ")
-              : "无按量 API 扣费"}</span>
-            <strong>¥{formatMoney(displayedTotalEstimate)}</strong>
+          <div className="dialog-budget" aria-label="费用方式">
+            <span>{meteredSelected ? "图片 / 视频按实际方案报价" : "图片 / 视频无现金报价"}</span>
+            <strong>{meteredSelected ? "逐项人工确认" : "不中断制作"}</strong>
           </div>
           <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭" aria-label="关闭新建制作">
             <X aria-hidden="true" size={19} />
@@ -535,13 +514,13 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
 
             <section className="recipe-section" aria-labelledby="recipe-section-title" data-tour="production-recipes">
               <div className="compact-section-heading">
-                <div><span>03</span><h3 id="recipe-section-title">成本策略</h3></div>
-                <small>只约束预算，不规定素材组合</small>
+                <div><span>03</span><h3 id="recipe-section-title">画面来源策略</h3></div>
+                <small>决定导演可用能力，不设全片费用上限</small>
               </div>
               <fieldset className="recipe-options">
                 <legend className="sr-only">制作配方</legend>
                 {RECIPES.map((recipe) => {
-                  const available = recipeAvailable(recipe, providers) && (!imageStory || recipe.maxPaidShots === 0);
+                  const available = recipeAvailable(recipe, providers);
                   return (
                   <label key={recipe.id} className={available ? "recipe-option" : "recipe-option is-disabled"}>
                     <input type="radio" name="recipe" value={recipe.id} checked={recipeId === recipe.id} disabled={!available} onChange={() => applyRecipe(recipe.id)} />
@@ -615,8 +594,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                     </div> : null}
                     <small className="production-role-billing">{selected
                       ? item.key === "assets"
-                        ? maxPaidShots > 0
-                          ? `路由决策免费 · 最多 ${maxPaidShots} 个生成镜头按模型计费`
+                        ? meteredSelected
+                          ? "路由决策免费 · 按实际导演方案报价 · 生成前逐笔人工确认"
                           : "路由决策免费 · 当前配方不调用付费生成"
                         : `${providerBillingLabel(selected)} · ${effectiveModelId(selected) ?? "不使用模型"}`
                       : "尚未配置可执行能力"}</small>
@@ -709,10 +688,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 <div className="asset-source-options">
                   {assetSources.map((provider) => {
                     const checked = assetProviderIds.includes(provider.id);
-                    const baselineId = requiredFreeBaselineId(assetProviderIds, providers);
                     const disabled = !provider.available
-                      || (provider.billing === "metered" && maxPaidShots === 0)
-                      || (checked && provider.id === baselineId)
+                      || (provider.billing === "metered" && !selectedRecipe.allowMeteredProviders)
                       || (checked && assetProviderIds.length === 1);
                     return <label key={provider.id} className={checked ? "asset-source-option is-selected" : "asset-source-option"}>
                       <input
@@ -728,19 +705,22 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 </div>
                 {selectedAssetSources.some((provider) => selectableModelsForCapability(provider.modelProfiles, provider.capability).length) ? <div className="asset-model-overrides" aria-label="本次生成模型">
                   <div><strong>本次模型</strong><small>只覆盖这条制作，总配置不会被修改</small></div>
-                  {selectedAssetSources.filter((provider) => selectableModelsForCapability(provider.modelProfiles, provider.capability).length).map((provider) => <label className="field" key={provider.id}>
-                    <span>{provider.label}</span>
-                    <select aria-label={`${provider.label} 本次模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => {
-                      const next = { ...current };
-                      if (event.target.value) next[provider.id] = event.target.value;
-                      else delete next[provider.id];
-                      return next;
-                    })}>
-                      <option value="">继承默认：{effectiveModelId(provider) ?? "自动选择"}</option>
-                      {selectableModelsForCapability(provider.modelProfiles, provider.capability).map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
-                    </select>
-                    <small>{provider.modelProfiles?.find((model) => model.id === effectiveModelId(provider))?.description}</small>
-                  </label>)}
+                  {selectedAssetSources.filter((provider) => selectableModelsForCapability(provider.modelProfiles, provider.capability).length).map((provider) => {
+                    const selectedModel = provider.modelProfiles?.find((model) => model.id === effectiveModelId(provider));
+                    return <label className="field" key={provider.id}>
+                      <span>{provider.label}</span>
+                      <select aria-label={`${provider.label} 本次模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => {
+                        const next = { ...current };
+                        if (event.target.value) next[provider.id] = event.target.value;
+                        else delete next[provider.id];
+                        return next;
+                      })}>
+                        <option value="">继承默认：{effectiveModelId(provider) ?? "自动选择"}</option>
+                        {selectableModelsForCapability(provider.modelProfiles, provider.capability).map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+                      </select>
+                      <small>{selectedModel?.description}{selectedModel?.estimatedCnyPerClip !== undefined ? ` · 当前模型参考单价约 ¥${formatMoney(selectedModel.estimatedCnyPerClip)}/镜头，实际以逐项报价为准` : ""}</small>
+                    </label>;
+                  })}
                 </div> : null}
               </section> : null}
             </div>
@@ -778,15 +758,14 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                   : "ZAI Codex broker 尚未接通，本次跳过视觉模型审片"}</small>
               </label>
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>
-              <label className="budget-control">
-                <span><CircleDollarSign aria-hidden="true" size={16} /><strong>生成预算上限</strong></span>
-                <span className="budget-input"><span>¥</span><input aria-label="预计成本上限" type="number" min={minimumBudget} step="0.1" value={displayedBudget} disabled={!meteredSelected} onChange={(event) => setBudgetCny(Number(event.target.value))} /></span>
-                <small>{meteredSelected
-                  ? `最多 ${maxPaidShots} 个计费镜头，生成最低 ¥${formatMoney(minimumBudget)}${meteredVoiceProvider ? `；配音约 ¥${formatMoney(voiceEstimate)}` : ""}${meteredVisualReview ? `；审片约 ¥${formatMoney(visualReviewEstimate)}` : ""}，按量节点执行前分别确认`
-                  : meteredVoiceProvider || meteredVisualReview
-                    ? `${meteredVoiceProvider ? `配音预计 ¥${formatMoney(voiceEstimate)}` : ""}${meteredVoiceProvider && meteredVisualReview ? "；" : ""}${meteredVisualReview ? `视觉审片预计 ¥${formatMoney(visualReviewEstimate)}` : ""}，执行前分别确认`
-                    : "当前配方不会主动调用计费 API"}</small>
-              </label>
+              <div className="budget-control">
+                <span><strong>费用确认方式</strong></span>
+                <small>{[
+                  meteredSelected ? "图片和视频按实际方案逐项报价，人工确认后才执行" : "图片和视频不会产生现金报价",
+                  automaticVoiceProvider ? "配音自动记入成本账，不中断制作" : "",
+                  subscriptionVisualReview ? "视觉审片使用 Code Plan 额度，不产生现金报价" : "",
+                ].filter(Boolean).join("；")}</small>
+              </div>
             </section>
 
             {missingProductionRoles.length > 0 ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />缺少正式生产能力：{missingProductionRoles.join("、")}。请先在素材与模型中完成配置。</p> : null}
@@ -794,7 +773,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
           </div>
 
           <footer className="dialog-actions recipe-dialog-actions">
-            <div><strong>{RECIPES.find((recipe) => recipe.id === recipeId)?.label}</strong><span>{hasMeteredCalls ? `当前预计 ¥${formatMoney(displayedTotalEstimate)}` : roleAuditProvider?.billing === "subscription" ? "使用订阅额度，无按量 API 扣费" : "无按量 API 扣费"}</span></div>
+            <div><strong>{selectedRecipe.label}</strong><span>{meteredSelected ? "图片 / 视频按实际方案报价 · 逐项人工确认" : roleAuditProvider?.billing === "subscription" ? "订阅能力不产生现金报价" : "图片 / 视频无现金报价"}</span></div>
             <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
             <button className="button button-primary" type="button" onClick={(event) => {
               if (event.currentTarget.form) void submit(event.currentTarget.form);
@@ -879,28 +858,12 @@ function providerForVoiceProfile(profileId: string): string {
   return "macos-say-v1";
 }
 
-function estimatedRecipeBudget(
-  recipe: (typeof RECIPES)[number],
-  assetProviderIds: string[],
-  providers: StudioProvider[],
-): number {
-  const price = Math.max(...providers
-    .filter((provider) => assetProviderIds.includes(provider.id) && provider.billing === "metered" && provider.estimatedCnyPerClip)
-    .map((provider) => provider.estimatedCnyPerClip!));
-  return Number.isFinite(price) ? roundMoney(price * recipe.maxPaidShots) : 0;
-}
-
-function selectedModelEstimate(provider: StudioProvider, modelId: string | undefined): number | undefined {
-  if (!modelId) return provider.estimatedCnyPerClip;
-  return provider.modelProfiles?.find((model) => model.id === modelId)?.estimatedCnyPerClip;
-}
-
 function recipeAvailable(recipe: (typeof RECIPES)[number], providers: StudioProvider[]): boolean {
   const foundationReady = providers.some((provider) => provider.id === "api-visual-director-v1" && provider.available)
     && providers.some((provider) => provider.id === "ai-shot-router-v1" && provider.available);
   if (!foundationReady) return false;
-  if (recipe.maxPaidShots === 0) {
-    return providers.some((provider) => isAssetSource(provider) && provider.available && provider.billing !== "metered");
+  if (!recipe.allowMeteredProviders) {
+    return providers.some((provider) => isAutomaticAssetSource(provider) && provider.available && provider.billing !== "metered");
   }
   return providers.some((provider) => {
     return provider.available
@@ -917,9 +880,9 @@ function sourceIdsForRecipe(
   preferredId?: string,
 ): string[] {
   const free = providers
-    .filter((provider) => isAssetSource(provider) && provider.available && provider.billing !== "metered")
+    .filter((provider) => isAutomaticAssetSource(provider) && provider.available && provider.billing !== "metered")
     .map((provider) => provider.id);
-  if (recipe.maxPaidShots === 0) return free;
+  if (!recipe.allowMeteredProviders) return free;
   const preferredMetered = preferredId
     ? providers.find((provider) => {
         return provider.id === preferredId
@@ -939,16 +902,8 @@ function isAssetSource(provider: StudioProvider): boolean {
   return provider.capability === "asset.prepare" && provider.kind !== "test" && provider.id !== "ai-shot-router-v1";
 }
 
-function requiredFreeBaselineId(assetProviderIds: string[], providers: StudioProvider[]): string | undefined {
-  const hasMeteredSource = providers.some((provider) => {
-    return assetProviderIds.includes(provider.id) && provider.billing === "metered";
-  });
-  if (!hasMeteredSource) return undefined;
-  const selectedFreeSources = providers.filter((provider) => {
-    return assetProviderIds.includes(provider.id) && provider.available && isAssetSource(provider) && provider.billing !== "metered";
-  });
-  return selectedFreeSources.find((provider) => provider.id === "local-editorial-v1")?.id
-    ?? selectedFreeSources[0]?.id;
+function isAutomaticAssetSource(provider: StudioProvider): boolean {
+  return isAssetSource(provider) && provider.id !== "local-editorial-v1";
 }
 
 function requiredString(data: FormData, key: string): string {
@@ -965,10 +920,6 @@ function topicSlug(title: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return `topic-${(hash >>> 0).toString(16).padStart(8, "0")}`;
-}
-
-function roundMoney(value: number): number {
-  return Math.round(value * 100) / 100;
 }
 
 function formatMoney(value: number): string {

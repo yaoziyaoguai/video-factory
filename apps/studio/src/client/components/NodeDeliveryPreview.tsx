@@ -164,7 +164,7 @@ const FIELD_LABELS: Record<string, string> = {
   checks: "检查项",
   findings: "审片发现",
   artifacts: "发布产物",
-  economics: "成本策略",
+  economics: "画面来源策略",
   director: "导演配置",
   voiceDirection: "声音配置",
   visualBible: "视觉圣经",
