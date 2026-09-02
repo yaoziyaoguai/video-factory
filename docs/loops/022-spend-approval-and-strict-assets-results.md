@@ -49,6 +49,8 @@ Status: active
 
 发布前第一次根级 `npm test` 在 typecheck 阶段 exit 2：缺少 `expectedVersionId` 的负向测试夹具仍直接断言为 `NodeRevisionDraft`，被 TypeScript 判定为不安全转换。改成显式 `unknown` 双重断言后从头重跑；第二次根级命令明确 exit 0，第一次失败没有计作通过。
 
+PR #15 的第一次 GitHub Actions `Dependency security` 门禁因 2026-09-03 新披露/生效的 `fast-uri` high severity 公告失败：lockfile 同时锁定了受影响的 3.1.5 与 4.1.2。失败在本地通过 npm 官方审计端点稳定复现；仅刷新传递依赖后分别锁定为 3.1.7 与 4.1.4，`npm audit --omit=dev --audit-level=high` 变为 0 vulnerabilities。随后使用与 CI 一致的 npm 10.9.8 从 lockfile 执行 `npm ci` 成功，并重新完整运行 `npm test`，exit 0。
+
 ## Deployed Baseline And Cloud QA
 
 - 基线发布 SHA `e771e2f1b728d957a5936b69b949cd78bad23514` 已由 GitHub Actions run `33623889159` 构建并部署；Tests、dependency security、Docker build、Linux video smoke 和阿里云部署全部成功。
