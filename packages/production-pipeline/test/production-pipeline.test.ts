@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import type { Artifact } from "@video-factory/workflow-core";
+import { NodeVersionConflictError, type Artifact } from "@video-factory/workflow-core";
 import type { WorkerResponse } from "../src/index.js";
 import * as pipeline from "../src/index.js";
 
@@ -83,6 +83,15 @@ class FakeWorker {
         })
       : JSON.stringify({ capability });
     await writeFile(primaryPath, content, "utf8");
+    if (capability === "video.render") {
+      await writeFile(String(output.renderManifestPath), JSON.stringify({
+        duration_target: 10,
+        slides: [
+          { position: 1, duration: 5 },
+          { position: 2, duration: 5 },
+        ],
+      }), "utf8");
+    }
     const providerId = String((request.parameters as Record<string, unknown>).providerId);
     return {
       protocolVersion: "video-factory/worker-v1",
@@ -111,7 +120,23 @@ class FakeWorker {
 describe("ProductionPipeline", () => {
   it("runs GLM visual review through Code Plan without a cash spend approval", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-review-"));
-    const worker = new FakeWorker();
+    class LocalizedReviewWorker extends FakeWorker {
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const response = await super.run(request);
+        if (request.capability !== "video.render") return response;
+        const manifestPath = String(response.output?.renderManifestPath);
+        const content = JSON.stringify({
+          duration_target: 10,
+          slides: [
+            { position: 1, duration: 5 },
+            { position: 2, duration: 5 },
+          ],
+        });
+        await writeFile(manifestPath, content, "utf8");
+        return response;
+      }
+    }
+    const worker = new LocalizedReviewWorker();
     const reviewCalls: pipeline.VisualReviewAgentInput[] = [];
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
@@ -141,12 +166,19 @@ describe("ProductionPipeline", () => {
               version: "video-factory/visual-review-v1",
               summary: "画面可进入人工终审。",
               scores: { composition: 80, continuity: 80, pacing: 80, legibility: 80, safety: 95 },
-              findings: [],
+              findings: [{
+                timecodeMs: 9_000,
+                category: "continuity",
+                severity: "warning",
+                description: "第一镜结尾动作不连续。",
+                suggestion: "替换第一镜素材。",
+              }],
               confidence: 0.8,
               recommendation: "approve",
             };
             return {
               output,
+              inspectedDurationMs: 20_000,
               agentLoop: {
                 version: "video-factory/agent-loop-v1",
                 role: "视觉审片员",
@@ -180,7 +212,455 @@ describe("ProductionPipeline", () => {
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.billing, "subscription");
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.estimatedCostCny, 0);
+    const visualOutput = waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.output as {
+      report: pipeline.VisualReviewReport;
+    };
+    assert.equal(visualOutput.report.findings[0]?.scenePosition, 1);
     assert.ok(waiting.artifacts.some((artifact) => artifact.kind === "review_report" && artifact.provenance.providerId === "glm-visual-review-v1"));
+  });
+
+  it("reuses one reviewed scene inside the same run and reruns only render and review", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-scene-revision-"));
+    class SceneRevisionWorker extends FakeWorker {
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const response = await super.run(request);
+        const outputDir = String(request.outputDir);
+        if (request.capability === "asset.prepare") {
+          const firstMediaPath = path.join(outputDir, "scene-1.png");
+          const secondMediaPath = path.join(outputDir, "scene-2.png");
+          await writeFile(firstMediaPath, "scene-one", "utf8");
+          await writeFile(secondMediaPath, "scene-two", "utf8");
+          const assetPlanPath = String(response.output?.assetPlanPath);
+          const content = JSON.stringify({
+            job_id: 1,
+            scene_assets: [
+              { scene_position: 1, provider: "fixture-one", asset_id: "one", media_type: "image", duration: 5, local_path: firstMediaPath, source_url: "fixture://one", creator: "fixture", license_note: "fixture", query: "one" },
+              { scene_position: 2, provider: "fixture-two", asset_id: "two", media_type: "image", duration: 5, local_path: secondMediaPath, source_url: "fixture://two", creator: "fixture", license_note: "fixture", query: "two" },
+              { scene_position: 3, provider: "fixture-two", asset_id: "two", media_type: "image", duration: 5, local_path: secondMediaPath, source_url: "fixture://two", creator: "fixture", license_note: "fixture", query: "three", reuse_from_scene_position: 2 },
+            ],
+            director_routing: [
+              { scene_position: 1, actual_provider_id: "fixture-one", actual_provider: "fixture-one", fallback_used: false, generation_pending: false },
+              { scene_position: 2, actual_provider_id: "fixture-two", actual_provider: "fixture-two", fallback_used: false, generation_pending: false },
+              { scene_position: 3, actual_provider_id: "fixture-two", actual_provider: "fixture-two", fallback_used: false, generation_pending: false, reuse_from_scene_position: 2 },
+            ],
+          });
+          await writeFile(assetPlanPath, content, "utf8");
+          response.artifacts[0] = {
+            ...response.artifacts[0]!,
+            kind: "asset_plan",
+            sha256: createHash("sha256").update(content).digest("hex"),
+            sizeBytes: Buffer.byteLength(content),
+          };
+          for (const [uri, body] of [[firstMediaPath, "scene-one"], [secondMediaPath, "scene-two"]] as const) {
+            response.artifacts.push({
+              kind: "media_asset",
+              uri,
+              sha256: createHash("sha256").update(body).digest("hex"),
+              sizeBytes: Buffer.byteLength(body),
+              contentType: "image/png",
+              provenance: {
+                providerId: "fixture",
+                producerNodeId: String(request.nodeRunId),
+                attempt: Number(request.attempt),
+                licenseNote: "Fixture asset.",
+              },
+            });
+          }
+        }
+        if (request.capability === "video.render") {
+          const manifestPath = String(response.output?.renderManifestPath);
+          const manifestContent = JSON.stringify({
+            duration_target: 15,
+            slides: [{ position: 1, duration: 5 }, { position: 2, duration: 5 }, { position: 3, duration: 5 }],
+          });
+          await writeFile(manifestPath, manifestContent, "utf8");
+          response.artifacts.push({
+            kind: "render_manifest",
+            uri: manifestPath,
+            sha256: createHash("sha256").update(manifestContent).digest("hex"),
+            sizeBytes: Buffer.byteLength(manifestContent),
+            contentType: "application/json",
+            provenance: {
+              providerId: "fixture",
+              producerNodeId: String(request.nodeRunId),
+              attempt: Number(request.attempt),
+              licenseNote: "Fixture render manifest.",
+            },
+          });
+        }
+        return response;
+      }
+    }
+    const worker = new SceneRevisionWorker();
+    const visualReviewAgent: pipeline.VisualReviewAgent = {
+      id: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async () => ({
+        output: {
+          version: "video-factory/visual-review-v1",
+          summary: "第二镜需要替换。",
+          scores: { composition: 80, continuity: 65, pacing: 80, legibility: 80, safety: 95 },
+          findings: [{ timecodeMs: 6_000, category: "continuity", severity: "warning", description: "动作不连续。", suggestion: "复用第一镜。" }],
+          confidence: 0.9,
+          recommendation: "revise",
+        },
+        inspectedDurationMs: 15_000,
+      }),
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      providerRuntimeMetadata: [{
+        id: "glm-visual-review-v1",
+        label: "GLM-5.3-Flash 视觉审片",
+        modelId: "glm-5.3-flash",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 3,
+      }],
+      visualReviewAgents: [visualReviewAgent],
+    });
+    const waiting = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+    });
+    const reviewArtifact = waiting.artifacts.find((artifact) => artifact.kind === "review_report" && artifact.producer?.nodeId === "visual-review")!;
+    const assetsBefore = waiting.nodeRuns.find((node) => node.nodeId === "assets")!;
+    const assetVersionId = assetsBefore.outputState?.effectiveVersionId;
+    const voiceBefore = waiting.nodeRuns.find((node) => node.nodeId === "voice")!;
+    const sceneOneMedia = waiting.artifacts.find((artifact) => artifact.kind === "media_asset" && artifact.uri?.endsWith("scene-1.png"));
+    const sceneTwoMedia = waiting.artifacts.find((artifact) => artifact.kind === "media_asset" && artifact.uri?.endsWith("scene-2.png"));
+    assert.ok(assetVersionId);
+    assert.ok(sceneOneMedia);
+    assert.ok(sceneTwoMedia);
+
+    const revisionRequest = {
+      expectedRunRevision: waiting.revision,
+      expectedAssetVersionId: assetVersionId,
+      reviewArtifactId: reviewArtifact.id,
+      findingIndex: 0,
+      reuseFromScenePosition: 1,
+      actor: "director",
+      note: "第二镜复用第一镜母片。",
+    };
+    const callsBeforeRevision = worker.calls.length;
+    await assert.rejects(
+      () => subject.requestSceneRevision(waiting.id, {
+        ...revisionRequest,
+        expectedRunRevision: waiting.revision - 1,
+      }),
+      pipeline.StaleRunRevisionError,
+    );
+    await assert.rejects(
+      () => subject.requestSceneRevision(waiting.id, {
+        ...revisionRequest,
+        expectedAssetVersionId: "stale-assets-version",
+      }),
+      NodeVersionConflictError,
+    );
+    await assert.rejects(
+      () => subject.requestSceneRevision(waiting.id, {
+        ...revisionRequest,
+        reuseFromScenePosition: 3,
+      }),
+      /must be earlier than reviewed scene 2/,
+    );
+    assert.equal(worker.calls.length, callsBeforeRevision);
+    assert.equal((await subject.loadPersisted(waiting.id)).revision, waiting.revision);
+    assert.equal(waiting.decisions.length, 0);
+
+    const reviewedAgain = await subject.requestSceneRevision(waiting.id, revisionRequest);
+
+    assert.equal(reviewedAgain.id, waiting.id);
+    assert.equal(reviewedAgain.status, "needs_human");
+    assert.equal(reviewedAgain.decisions.at(-1)?.action, "request_changes");
+    assert.deepEqual(worker.calls.map((call) => call.capability), [
+      "script.draft", "asset.prepare", "voice.synthesize", "video.render", "quality.review",
+      "video.render", "quality.review",
+    ]);
+    const revisedPlanPath = String((reviewedAgain.nodeRuns.find((node) => node.nodeId === "assets")?.output as Record<string, unknown>).assetPlanPath);
+    const revisedPlan = JSON.parse(await readFile(revisedPlanPath, "utf8")) as {
+      scene_assets: Array<Record<string, unknown>>;
+      director_routing: Array<Record<string, unknown>>;
+    };
+    assert.equal(revisedPlan.scene_assets[1]?.local_path, revisedPlan.scene_assets[0]?.local_path);
+    assert.equal(revisedPlan.scene_assets[1]?.reuse_from_scene_position, 1);
+    assert.equal(revisedPlan.scene_assets[2]?.local_path, revisedPlan.scene_assets[0]?.local_path);
+    assert.equal(revisedPlan.scene_assets[2]?.reuse_from_scene_position, 2);
+    assert.equal(revisedPlan.director_routing[1]?.actual_provider_id, "fixture-one");
+    assert.equal(revisedPlan.director_routing[2]?.actual_provider_id, "fixture-one");
+    const assetsAfter = reviewedAgain.nodeRuns.find((node) => node.nodeId === "assets")!;
+    const effectiveAssets = assetsAfter.outputState?.versions.find(
+      (version) => version.id === assetsAfter.outputState?.effectiveVersionId,
+    );
+    assert.equal(effectiveAssets?.artifactIds.includes(sceneOneMedia.id), true);
+    assert.equal(effectiveAssets?.artifactIds.includes(sceneTwoMedia.id), false);
+    const voiceAfter = reviewedAgain.nodeRuns.find((node) => node.nodeId === "voice")!;
+    assert.equal(voiceAfter.outputState?.versions.length, 1);
+    assert.equal(voiceAfter.outputState?.effectiveVersionId, voiceBefore.outputState?.effectiveVersionId);
+    assert.deepEqual(voiceAfter.artifactIds, voiceBefore.artifactIds);
+    assert.deepEqual(voiceAfter.executionReceipt, voiceBefore.executionReceipt);
+    assert.equal(reviewedAgain.nodeRuns.find((node) => node.nodeId === "render")?.outputState?.versions.length, 2);
+    assert.equal(reviewedAgain.nodeRuns.find((node) => node.nodeId === "visual-review")?.outputState?.versions.length, 2);
+
+    const nextReviewArtifact = reviewedAgain.artifacts.find((artifact) => (
+      artifact.kind === "review_report"
+      && artifact.producer?.nodeId === "visual-review"
+      && reviewedAgain.nodeRuns.find((node) => node.nodeId === "visual-review")
+        ?.outputState?.versions.at(-1)?.artifactIds.includes(artifact.id)
+    ));
+    const nextAssetVersionId = assetsAfter.outputState?.effectiveVersionId;
+    assert.ok(nextReviewArtifact);
+    assert.ok(nextAssetVersionId);
+    const persistedRunPath = path.join(workspaceRoot, "runs", reviewedAgain.id, "run.json");
+    const persistedRunContent = await readFile(persistedRunPath, "utf8");
+    const wrongKindRun = JSON.parse(persistedRunContent) as {
+      artifacts: Array<{ id: string; kind: string }>;
+    };
+    wrongKindRun.artifacts.find((artifact) => artifact.id === nextReviewArtifact.id)!.kind = "media_asset";
+    await writeFile(persistedRunPath, JSON.stringify(wrongKindRun), "utf8");
+    const callsBeforeInvalidRevision = worker.calls.length;
+    try {
+      await assert.rejects(
+        () => subject.requestSceneRevision(reviewedAgain.id, {
+          expectedRunRevision: reviewedAgain.revision,
+          expectedAssetVersionId: nextAssetVersionId,
+          reviewArtifactId: nextReviewArtifact.id,
+          findingIndex: 0,
+          reuseFromScenePosition: 1,
+          actor: "director",
+          note: "错误类型的制品不能作为审片报告。",
+        }),
+        /current visual-review report artifact/,
+      );
+    } finally {
+      await writeFile(persistedRunPath, persistedRunContent, "utf8");
+    }
+    assert.equal(worker.calls.length, callsBeforeInvalidRevision);
+
+    const reviewReportContent = await readFile(nextReviewArtifact.uri!, "utf8");
+    const forgedReport = JSON.parse(reviewReportContent) as { findings: Array<{ scenePosition?: number }> };
+    forgedReport.findings[0]!.scenePosition = 1;
+    const forgedReportContent = JSON.stringify(forgedReport);
+    const forgedRun = JSON.parse(persistedRunContent) as {
+      artifacts: Array<{ id: string; sha256?: string; sizeBytes?: number }>;
+      nodeRuns: Array<{
+        nodeId: string;
+        output?: { report?: typeof forgedReport };
+        outputState?: { effectiveVersionId: string; versions: Array<{ id: string; output?: { report?: typeof forgedReport } }> };
+      }>;
+    };
+    const forgedReviewArtifact = forgedRun.artifacts.find((artifact) => artifact.id === nextReviewArtifact.id)!;
+    forgedReviewArtifact.sha256 = createHash("sha256").update(forgedReportContent).digest("hex");
+    forgedReviewArtifact.sizeBytes = Buffer.byteLength(forgedReportContent);
+    const forgedVisualNode = forgedRun.nodeRuns.find((node) => node.nodeId === "visual-review")!;
+    forgedVisualNode.output!.report = forgedReport;
+    forgedVisualNode.outputState!.versions.find(
+      (version) => version.id === forgedVisualNode.outputState!.effectiveVersionId,
+    )!.output!.report = forgedReport;
+    await writeFile(nextReviewArtifact.uri!, forgedReportContent, "utf8");
+    await writeFile(persistedRunPath, JSON.stringify(forgedRun), "utf8");
+    try {
+      await assert.rejects(
+        () => subject.requestSceneRevision(reviewedAgain.id, {
+          expectedRunRevision: reviewedAgain.revision,
+          expectedAssetVersionId: nextAssetVersionId,
+          reviewArtifactId: nextReviewArtifact.id,
+          findingIndex: 0,
+          reuseFromScenePosition: 2,
+          actor: "director",
+          note: "服务端必须按时间轴重新定位，不能相信报告自报镜头号。",
+        }),
+        /cannot reuse itself/,
+      );
+    } finally {
+      await writeFile(nextReviewArtifact.uri!, reviewReportContent, "utf8");
+      await writeFile(persistedRunPath, persistedRunContent, "utf8");
+    }
+    assert.equal(worker.calls.length, callsBeforeInvalidRevision);
+
+    await writeFile(nextReviewArtifact.uri!, `${reviewReportContent}\n`, "utf8");
+    try {
+      await assert.rejects(
+        () => subject.requestSceneRevision(reviewedAgain.id, {
+          expectedRunRevision: reviewedAgain.revision,
+          expectedAssetVersionId: nextAssetVersionId,
+          reviewArtifactId: nextReviewArtifact.id,
+          findingIndex: 0,
+          reuseFromScenePosition: 1,
+          actor: "director",
+          note: "不得使用被篡改的审片报告。",
+        }),
+        /sha256 does not match/,
+      );
+    } finally {
+      await writeFile(nextReviewArtifact.uri!, reviewReportContent, "utf8");
+      await writeFile(persistedRunPath, persistedRunContent, "utf8");
+    }
+    assert.equal(worker.calls.length, callsBeforeInvalidRevision);
+
+    const currentAssetPlanArtifact = reviewedAgain.artifacts.find((artifact) => (
+      artifact.kind === "asset_plan"
+      && effectiveAssets?.artifactIds.includes(artifact.id)
+    ));
+    assert.ok(currentAssetPlanArtifact?.uri);
+    const assetPlanContent = await readFile(currentAssetPlanArtifact.uri, "utf8");
+    const assertInvalidPlan = async (
+      invalidPlan: { scene_assets: Array<Record<string, unknown>> },
+      expectedError: RegExp,
+      note: string,
+    ) => {
+      const invalidPlanContent = JSON.stringify(invalidPlan);
+      const invalidPlanRun = JSON.parse(persistedRunContent) as {
+        artifacts: Array<{ id: string; sha256?: string; sizeBytes?: number }>;
+      };
+      const invalidPlanArtifact = invalidPlanRun.artifacts.find(
+        (artifact) => artifact.id === currentAssetPlanArtifact.id,
+      )!;
+      invalidPlanArtifact.sha256 = createHash("sha256").update(invalidPlanContent).digest("hex");
+      invalidPlanArtifact.sizeBytes = Buffer.byteLength(invalidPlanContent);
+      await writeFile(currentAssetPlanArtifact.uri!, invalidPlanContent, "utf8");
+      await writeFile(persistedRunPath, JSON.stringify(invalidPlanRun), "utf8");
+      try {
+        await assert.rejects(() => subject.requestSceneRevision(reviewedAgain.id, {
+          expectedRunRevision: reviewedAgain.revision,
+          expectedAssetVersionId: nextAssetVersionId,
+          reviewArtifactId: nextReviewArtifact.id,
+          findingIndex: 0,
+          reuseFromScenePosition: 1,
+          actor: "director",
+          note,
+        }), expectedError);
+      } finally {
+        await writeFile(currentAssetPlanArtifact.uri!, assetPlanContent, "utf8");
+        await writeFile(persistedRunPath, persistedRunContent, "utf8");
+      }
+      assert.equal(worker.calls.length, callsBeforeInvalidRevision);
+    };
+
+    const duplicatePlan = JSON.parse(assetPlanContent) as { scene_assets: Array<Record<string, unknown>> };
+    duplicatePlan.scene_assets.push({ ...duplicatePlan.scene_assets[0] });
+    await assertInvalidPlan(duplicatePlan, /duplicate scene position/, "重复镜头编号必须被拒绝。");
+
+    const cyclicPlan = JSON.parse(assetPlanContent) as { scene_assets: Array<Record<string, unknown>> };
+    cyclicPlan.scene_assets[0]!.reuse_from_scene_position = 3;
+    await assertInvalidPlan(cyclicPlan, /reuse cycle/, "复用链不能形成循环。");
+
+    const missingSourcePlan = JSON.parse(assetPlanContent) as { scene_assets: Array<Record<string, unknown>> };
+    missingSourcePlan.scene_assets[2]!.reuse_from_scene_position = 99;
+    await assertInvalidPlan(missingSourcePlan, /missing reuse source scene 99/, "复用来源必须存在。");
+
+    const forwardReusePlan = JSON.parse(assetPlanContent) as { scene_assets: Array<Record<string, unknown>> };
+    delete forwardReusePlan.scene_assets[1]!.reuse_from_scene_position;
+    delete forwardReusePlan.scene_assets[2]!.reuse_from_scene_position;
+    forwardReusePlan.scene_assets[0]!.reuse_from_scene_position = 2;
+    await assertInvalidPlan(forwardReusePlan, /must reuse an earlier scene/, "已有素材计划中的复用也必须只指向更早镜头。");
+
+    const editorialSourcePlan = JSON.parse(assetPlanContent) as { scene_assets: Array<Record<string, unknown>> };
+    editorialSourcePlan.scene_assets[0]!.media_type = "image";
+    editorialSourcePlan.scene_assets[0]!.provider = "local";
+    editorialSourcePlan.scene_assets[0]!.source_url = "local://video-factory/card";
+    await assertInvalidPlan(editorialSourcePlan, /editorial card cannot be reused/, "说明卡不能成为复用母片。");
+
+    await writeFile(currentAssetPlanArtifact.uri, `${assetPlanContent}\n`, "utf8");
+    try {
+      await assert.rejects(
+        () => subject.requestSceneRevision(reviewedAgain.id, {
+          expectedRunRevision: reviewedAgain.revision,
+          expectedAssetVersionId: nextAssetVersionId,
+          reviewArtifactId: nextReviewArtifact.id,
+          findingIndex: 0,
+          reuseFromScenePosition: 1,
+          actor: "director",
+          note: "不得使用被篡改的素材计划。",
+        }),
+        /sha256 does not match/,
+      );
+    } finally {
+      await writeFile(currentAssetPlanArtifact.uri, assetPlanContent, "utf8");
+      await writeFile(persistedRunPath, persistedRunContent, "utf8");
+    }
+    assert.equal(worker.calls.length, callsBeforeInvalidRevision);
+
+    const wrongPlanProducerRun = JSON.parse(persistedRunContent) as {
+      artifacts: Array<{ id: string; producer?: { nodeId: string } }>;
+    };
+    wrongPlanProducerRun.artifacts.find((artifact) => artifact.id === currentAssetPlanArtifact.id)!.producer!.nodeId = "voice";
+    await writeFile(persistedRunPath, JSON.stringify(wrongPlanProducerRun), "utf8");
+    try {
+      await assert.rejects(
+        () => subject.requestSceneRevision(reviewedAgain.id, {
+          expectedRunRevision: reviewedAgain.revision,
+          expectedAssetVersionId: nextAssetVersionId,
+          reviewArtifactId: nextReviewArtifact.id,
+          findingIndex: 0,
+          reuseFromScenePosition: 1,
+          actor: "director",
+          note: "素材计划必须来自 assets 节点。",
+        }),
+        /Current asset plan artifact is unavailable/,
+      );
+    } finally {
+      await writeFile(persistedRunPath, persistedRunContent, "utf8");
+    }
+
+    const wrongMediaProducerRun = JSON.parse(persistedRunContent) as {
+      artifacts: Array<{ id: string; producer?: { nodeId: string } }>;
+    };
+    wrongMediaProducerRun.artifacts.find((artifact) => artifact.id === sceneOneMedia.id)!.producer!.nodeId = "voice";
+    await writeFile(persistedRunPath, JSON.stringify(wrongMediaProducerRun), "utf8");
+    try {
+      await assert.rejects(
+        () => subject.requestSceneRevision(reviewedAgain.id, {
+          expectedRunRevision: reviewedAgain.revision,
+          expectedAssetVersionId: nextAssetVersionId,
+          reviewArtifactId: nextReviewArtifact.id,
+          findingIndex: 0,
+          reuseFromScenePosition: 1,
+          actor: "director",
+          note: "母片必须来自 assets 节点。",
+        }),
+        /does not reference a current media artifact/,
+      );
+    } finally {
+      await writeFile(persistedRunPath, persistedRunContent, "utf8");
+    }
+
+    const sceneOneBytes = await readFile(sceneOneMedia.uri!);
+    try {
+      await writeFile(sceneOneMedia.uri!, "tampered-scene-one", "utf8");
+      await assert.rejects(
+        () => subject.requestSceneRevision(reviewedAgain.id, {
+          expectedRunRevision: reviewedAgain.revision,
+          expectedAssetVersionId: nextAssetVersionId,
+          reviewArtifactId: nextReviewArtifact.id,
+          findingIndex: 0,
+          reuseFromScenePosition: 1,
+          actor: "director",
+          note: "不得复用已被篡改的母片。",
+        }),
+        /sha256 does not match/,
+      );
+    } finally {
+      await writeFile(sceneOneMedia.uri!, sceneOneBytes);
+    }
+    assert.equal((await subject.loadPersisted(reviewedAgain.id)).revision, reviewedAgain.revision);
+
+    const approved = await subject.decide(reviewedAgain.id, {
+      interventionId: reviewedAgain.interventions.at(-1)!.id,
+      action: "approve",
+      actor: "director",
+      note: "返修后批准。",
+    });
+    const publishArtifact = approved.artifacts.find((artifact) => artifact.kind === "publish_package");
+    assert.ok(publishArtifact?.uri);
+    const publishPackage = JSON.parse(await readFile(publishArtifact.uri, "utf8")) as {
+      artifacts: Array<{ id: string }>;
+    };
+    assert.equal(publishPackage.artifacts.some((artifact) => artifact.id === sceneOneMedia.id), true);
+    assert.equal(publishPackage.artifacts.some((artifact) => artifact.id === sceneTwoMedia.id), false);
   });
 
   it("fails closed when the Code Plan visual reviewer has no subscription metadata", async () => {

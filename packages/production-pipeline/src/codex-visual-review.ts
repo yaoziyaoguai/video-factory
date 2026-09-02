@@ -52,6 +52,7 @@ export type VisualReviewExecution = CodexTaskExecution<VisualReviewReport> & {
 
 export interface VisualReviewFinding {
   timecodeMs: number;
+  scenePosition?: number;
   category: "composition" | "continuity" | "pacing" | "legibility" | "safety" | "other";
   severity: "info" | "warning" | "critical";
   description: string;
@@ -281,7 +282,18 @@ export function validateVisualReviewReport(value: unknown, durationMs: number): 
     if (!Number.isInteger(timecodeMs) || Number(timecodeMs) < 0 || Number(timecodeMs) > durationMs) throw new Error("Visual review finding timecode is invalid.");
     const category = enumValue(finding.category, ["composition", "continuity", "pacing", "legibility", "safety", "other"] as const, "category");
     const severity = enumValue(finding.severity, ["info", "warning", "critical"] as const, "severity");
-    return { timecodeMs: Number(timecodeMs), category, severity, description: text(finding.description, "description"), suggestion: text(finding.suggestion, "suggestion") };
+    const scenePosition = finding.scenePosition;
+    if (scenePosition !== undefined && (!Number.isInteger(scenePosition) || Number(scenePosition) < 1)) {
+      throw new Error("Visual review finding scene position is invalid.");
+    }
+    return {
+      timecodeMs: Number(timecodeMs),
+      ...(scenePosition !== undefined ? { scenePosition: Number(scenePosition) } : {}),
+      category,
+      severity,
+      description: text(finding.description, "description"),
+      suggestion: text(finding.suggestion, "suggestion"),
+    };
   });
   const confidence = report.confidence;
   if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw new Error("Visual review confidence is invalid.");

@@ -544,8 +544,8 @@ describe("node production workspaces", () => {
       onAuthorize={async () => undefined}
     />);
 
-    expect(screen.getByRole("img", { name: "镜头 1 画面预览" })).toHaveAttribute("src", "/scene-1.png");
-    expect(container.querySelector('video[aria-label="镜头 2 画面预览"]')).toHaveAttribute("src", "/scene-2.mp4");
+    expect(screen.getByRole("img", { name: "素材 1 画面预览" })).toHaveAttribute("src", "/scene-1.png");
+    expect(container.querySelector('video[aria-label="素材 2 画面预览"]')).toHaveAttribute("src", "/scene-2.mp4");
     expect(screen.getByText("本地编辑画面")).toBeInTheDocument();
     expect(screen.getByText("MiniMax 视频生成")).toBeInTheDocument();
   });

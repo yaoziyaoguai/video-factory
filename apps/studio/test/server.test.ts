@@ -170,6 +170,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     deleteRun: async () => undefined,
     startRun: async () => ({ runId: "run-2", status: "running" }),
     decide: async (_runId, input) => runDetail(input.action === "approve" ? "succeeded" : "rejected"),
+    requestSceneRevision: async () => runDetail("needs_human"),
     applyNodeOverride: async () => runDetail("stale"),
     applyNodeInputOverride: async () => runDetail("stale"),
     applyNodeExecutionConfiguration: async () => runDetail("stale"),
@@ -1151,6 +1152,40 @@ describe("Studio API", () => {
 
     assert.equal(response.statusCode, 400);
     assert.equal(called, false);
+    await app.close();
+  });
+
+  it("accepts a scene-localized revision request", async () => {
+    let received: unknown;
+    const app = buildStudioApp({ service: fakeService({
+      requestSceneRevision: async (_runId, input) => {
+        received = input;
+        return runDetail("needs_human");
+      },
+    }) });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/runs/run-1/scene-revisions",
+      payload: {
+        expectedRunRevision: 1,
+        expectedAssetVersionId: "assets-v1",
+        reviewArtifactId: "review-1",
+        findingIndex: 0,
+        reuseFromScenePosition: 1,
+        note: "第二镜复用第一镜母片。",
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(received, {
+      expectedRunRevision: 1,
+      expectedAssetVersionId: "assets-v1",
+      reviewArtifactId: "review-1",
+      findingIndex: 0,
+      reuseFromScenePosition: 1,
+      note: "第二镜复用第一镜母片。",
+    });
     await app.close();
   });
 

@@ -339,13 +339,13 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <section className="node-output-preview node-creator-delivery">
           <header><div><strong>{node.role ?? "生产角色"}的交付</strong><small>{deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
           {node.id === "assets" && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
-            <header><strong>{visualsAreCurrent ? "实际镜头画面" : "上次生成的镜头画面"}</strong><small>{visualArtifacts.length} 个可预览镜头{visualsAreCurrent ? "" : " · 上游变化后需重新生成"}</small></header>
+            <header><strong>{visualsAreCurrent ? "实际素材画面" : "上次生成的素材画面"}</strong><small>{visualArtifacts.length} 个可预览素材{visualsAreCurrent ? "" : " · 上游变化后需重新生成"}</small></header>
             <div>
               {visualArtifacts.map((artifact, index) => <figure key={artifact.id}>
                 {artifact.contentType?.startsWith("video/")
-                  ? <video aria-label={`镜头 ${index + 1} 画面预览`} src={artifact.contentUrl} controls playsInline preload="metadata" />
-                  : <img alt={`镜头 ${index + 1} 画面预览`} src={artifact.contentUrl} loading="lazy" />}
-                <figcaption><span>镜头 {index + 1}</span><small>{providerLabel(artifact.providerId) ?? artifact.providerId ?? "素材来源未记录"}</small></figcaption>
+                  ? <video aria-label={`素材 ${index + 1} 画面预览`} src={artifact.contentUrl} controls playsInline preload="metadata" />
+                  : <img alt={`素材 ${index + 1} 画面预览`} src={artifact.contentUrl} loading="lazy" />}
+                <figcaption><span>素材 {index + 1}</span><small>{providerLabel(artifact.providerId) ?? artifact.providerId ?? "素材来源未记录"}</small></figcaption>
               </figure>)}
             </div>
           </div> : null}

@@ -40,6 +40,7 @@ export type {
   NodeInputState,
   NodeInputVersion,
   NodeOverrideDraft,
+  NodeRevisionDraft,
   NodeOutputSource,
   NodeOutputState,
   NodeOutputVersion,

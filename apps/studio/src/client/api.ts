@@ -1,6 +1,7 @@
 import type {
   StartRunResponse,
   StudioDecisionInput,
+  StudioSceneRevisionInput,
   StudioCandidateInbox,
   StudioCandidateAdoptionInput,
   StudioCandidateInboxQuery,
@@ -238,6 +239,14 @@ export const studioApi = {
   start: startProduction,
   decide: (runId: string, input: StudioDecisionInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/decisions`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  ),
+  requestSceneRevision: (runId: string, input: StudioSceneRevisionInput) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/scene-revisions`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },

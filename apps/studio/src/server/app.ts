@@ -13,6 +13,7 @@ import {
   parseStudioOpportunityInput,
   parseStudioOpportunityStatusInput,
   parseStudioDecisionInput,
+  parseStudioSceneRevisionInput,
   parseStudioPublishInput,
   parseStudioVoicePreviewInput,
   type StartRunResponse,
@@ -25,6 +26,7 @@ import {
   type StudioCostDashboard,
   type StudioCostRunDetail,
   type StudioDecisionInput,
+  type StudioSceneRevisionInput,
   type StudioHealth,
   type StudioLocalCapability,
   type StudioOpportunity,
@@ -112,6 +114,7 @@ export interface StudioServicePort {
   uploadReferenceVideo?(input: { label: string; mimeType: string; bytes: Buffer }): Promise<StudioReferenceVideo>;
   deleteReferenceVideo?(uploadId: string): Promise<void>;
   decide(runId: string, input: StudioDecisionInput, actor: string): Promise<StudioRunDetail>;
+  requestSceneRevision(runId: string, input: StudioSceneRevisionInput, actor: string): Promise<StudioRunDetail>;
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeExecutionConfiguration(runId: string, nodeId: string, input: StudioNodeExecutionConfigurationInput, actor: string): Promise<StudioRunDetail>;
@@ -482,6 +485,15 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     requireSafeRouteId(request.params.runId, "制作编号");
     const input = parseStudioDecisionInput(request.body);
     return options.service.decide(request.params.runId, input, trustedStudioActor(auth, request.headers.cookie));
+  });
+
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/scene-revisions", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    return options.service.requestSceneRevision(
+      request.params.runId,
+      parseStudioSceneRevisionInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
   });
 
   app.get<{ Params: { runId: string } }>("/api/runs/:runId/publishing/readiness", async (request) => {

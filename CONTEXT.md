@@ -26,7 +26,7 @@ Workflow 中的一个生产节点。节点可以自动执行，也可以要求�
 
 人工介入某个节点的执行或决策。人工介入不是异常路径，而是 Workflow 的一等能力，例如人工挑素材、改脚本、拒绝成片、确认发布。
 
-当前 production runtime 已实现的机器决策只有 `approve` 和 `reject`。改脚本、换 provider、替换素材属于后续可扩展 intervention，不在现有合同中提前宣称。
+当前 production runtime 支持 `approve`、`request_changes` 和 `reject`。`request_changes` 必须携带受版本保护的节点修订；Studio 已支持从当前视觉审片 finding 定位镜头、复用更早母片，并在同一 run 中重新渲染和复审。改脚本或换 Provider 仍通过节点版本与重新规划入口完成。
 
 ## Artifact
 

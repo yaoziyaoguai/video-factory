@@ -16,6 +16,7 @@ import type {
   NodeExecutionResult,
   NodeInputOverrideDraft,
   NodeOverrideDraft,
+  NodeRevisionDraft,
   NodeRun,
   NodeStatus,
   Provider,
@@ -327,6 +328,9 @@ export class WorkflowRunner {
   ): Promise<WorkflowRun<TInitialInput>> {
     validateWorkflowDefinition(definition);
     validateResumeRequest(definition, previousRun, decision);
+    if (decision.action === "request_changes") {
+      throw new Error("A request_changes decision must include a node revision.");
+    }
 
     const run = cloneWorkflowRun(previousRun);
     const waitingNode = run.nodeRuns.find((nodeRun) => nodeRun.intervention?.id === decision.interventionId);
@@ -627,6 +631,92 @@ export class WorkflowRunner {
     run.revision += 1;
     run.status = "stale";
     delete run.finishedAt;
+    return run;
+  }
+
+  applyNodeRevision<TInitialInput, TOutput = unknown>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+    revision: NodeRevisionDraft<TOutput>,
+  ): WorkflowRun<TInitialInput> {
+    validateResumeRequest(definition, previousRun, revision.decision);
+    if (revision.decision.action !== "request_changes") {
+      throw new Error("Node revision must use a request_changes decision.");
+    }
+    if (!revision.expectedVersionId?.trim()) {
+      throw new Error("Node revision must include the expected current output version.");
+    }
+    if (revision.decision.actor !== revision.actor) {
+      throw new Error("Node revision actor must match the human decision actor.");
+    }
+    const descendants = descendantNodeIds(definition.nodes, revision.nodeId);
+    const invalidatedNodeIds = new Set(revision.invalidateDescendantNodeIds);
+    for (const nodeId of invalidatedNodeIds) {
+      if (!descendants.has(nodeId)) {
+        throw new Error(`Node revision can only invalidate descendants of '${revision.nodeId}'.`);
+      }
+      for (const descendantId of descendantNodeIds(definition.nodes, nodeId)) {
+        if (!invalidatedNodeIds.has(descendantId)) {
+          throw new Error(`Node revision invalidation must include descendant '${descendantId}'.`);
+        }
+      }
+    }
+    const waitingNode = previousRun.nodeRuns.find(
+      (nodeRun) => nodeRun.intervention?.id === revision.decision.interventionId,
+    );
+    if (!waitingNode || !invalidatedNodeIds.has(waitingNode.nodeId)) {
+      throw new Error("Node revision must invalidate the node with the active intervention.");
+    }
+    const revisedNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === revision.nodeId);
+    const currentVersion = revisedNode?.outputState?.versions.find(
+      (version) => version.id === revisedNode.outputState?.effectiveVersionId,
+    );
+    if (!currentVersion) {
+      throw new Error(`Node revision '${revision.nodeId}' has no current output version.`);
+    }
+    for (const artifactId of revision.retainedArtifactIds) {
+      if (!currentVersion.artifactIds.includes(artifactId)) {
+        throw new Error(`Node revision cannot retain non-current artifact '${artifactId}'.`);
+      }
+    }
+
+    const run = this.applyNodeOverride(definition, previousRun, revision);
+    const previousArtifactIds = new Set(previousRun.artifacts.map((artifact) => artifact.id));
+    const newArtifactIds = run.artifacts
+      .filter((artifact) => !previousArtifactIds.has(artifact.id))
+      .map((artifact) => artifact.id);
+    const revisedNodeRun = run.nodeRuns.find((nodeRun) => nodeRun.nodeId === revision.nodeId)!;
+    const revisedVersion = revisedNodeRun.outputState?.versions.find(
+      (version) => version.id === revisedNodeRun.outputState?.effectiveVersionId,
+    );
+    if (!revisedVersion) {
+      throw new Error(`Node revision '${revision.nodeId}' did not create an output version.`);
+    }
+    const exactArtifactIds = [...new Set([...revision.retainedArtifactIds, ...newArtifactIds])];
+    revisedVersion.artifactIds = exactArtifactIds;
+    revisedNodeRun.artifactIds = exactArtifactIds;
+
+    // 返修可保留不受内容影响的昂贵产物；只有调用方明确列出的后代才会重新执行。
+    const preservedNodeIds = new Set([...descendants].filter((nodeId) => !invalidatedNodeIds.has(nodeId)));
+    const previousClone = cloneWorkflowRun(previousRun);
+    run.nodeRuns = run.nodeRuns.map((nodeRun) => {
+      if (!preservedNodeIds.has(nodeRun.nodeId)) return nodeRun;
+      return previousClone.nodeRuns.find((candidate) => candidate.nodeId === nodeRun.nodeId)!;
+    });
+    run.interventions.push(
+      ...previousClone.interventions.filter((intervention) => preservedNodeIds.has(intervention.nodeId)),
+    );
+    run.spendAuthorizations = [
+      ...(run.spendAuthorizations ?? []),
+      ...(previousClone.spendAuthorizations ?? []).filter(
+        (authorization) => preservedNodeIds.has(authorization.nodeId),
+      ),
+    ];
+    run.decisions.push({
+      ...revision.decision,
+      id: this.idFactory("decision"),
+      createdAt: this.clock(),
+    });
     return run;
   }
 

@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Check, Clock3, Download, Pause, Play, RotateCcw, Send, X, XCircle } from "lucide-react";
-import { useEffect, useState } from "react";
-import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
+import { useEffect, useRef, useState } from "react";
+import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { platformLabel, providerLabel } from "../presentation.js";
@@ -12,6 +12,7 @@ interface RunWorkbenchProps {
   providers?: StudioProvider[];
   decisionPending: boolean;
   onDecision: (input: StudioDecisionInput) => Promise<void>;
+  onRequestSceneRevision?: (input: StudioSceneRevisionInput) => Promise<void>;
   onOpenPublish?: () => void;
   onRestart?: () => void;
   costDetail?: StudioCostRunDetail;
@@ -31,11 +32,12 @@ interface RunWorkbenchProps {
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onRequestSceneRevision, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
   const [approvalOverrideNote, setApprovalOverrideNote] = useState("");
+  const previewRef = useRef<HTMLVideoElement>(null);
   const rejectDialogRef = useDialogFocus<HTMLElement>(rejecting, () => setRejecting(false), decisionPending);
   const approveDialogRef = useDialogFocus<HTMLElement>(approving, () => setApproving(false), decisionPending);
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
@@ -47,6 +49,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const visiblePaidNodeSummary = paidNodeSummary?.nodeId === uncertainPaidNode?.id ? paidNodeSummary : undefined;
   const visualReview = visualReviewDecision(run);
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
+  const assetVersionId = run.nodes.find((node) => node.id === "assets")?.outputState?.effectiveVersionId;
 
   const renderNodeWorkspace = (node: StudioRunDetail["nodes"][number]) => <NodeWorkspace
     key={node.id}
@@ -131,7 +134,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
           </div>
           <div className="video-frame">
             {video?.contentUrl ? (
-              <video title="成片预览" src={`${video.contentUrl}#t=0.1`} controls playsInline preload="auto" />
+              <video ref={previewRef} title="成片预览" src={`${video.contentUrl}#t=0.1`} controls playsInline preload="auto" />
             ) : (
               <div className="video-unavailable">视频将在渲染完成后出现在这里</div>
             )}
@@ -154,6 +157,26 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                   <span><strong>{visualReview.findingCount}</strong> 项问题</span>
                   <span>置信度 <strong>{Math.round(visualReview.confidence * 100)}%</strong></span>
                 </div>
+                {onRequestSceneRevision && assetVersionId && visualReview.reviewArtifactId
+                  ? <div className="scene-revision-list">
+                    {visualReview.findings.map((finding, index) => <SceneRevisionFinding
+                      key={`${finding.timecodeMs}:${index}`}
+                      finding={finding}
+                      busy={decisionPending}
+                      onSeek={() => {
+                        if (!previewRef.current) return;
+                        previewRef.current.currentTime = finding.timecodeMs / 1_000;
+                      }}
+                      onSubmit={(input) => onRequestSceneRevision({
+                        expectedRunRevision: run.revision,
+                        expectedAssetVersionId: assetVersionId,
+                        reviewArtifactId: visualReview.reviewArtifactId!,
+                        findingIndex: index,
+                        ...input,
+                      })}
+                    />)}
+                  </div>
+                  : null}
                 <p className="agent-review-guidance">打回会保留本轮产物；随后可调整方案并重新制作。批准则会覆盖 Agent 建议并生成发布包。</p>
               </div> : null}
               <div className="decision-actions">
@@ -402,7 +425,17 @@ interface VisualReviewDecision {
   confidence: number;
   summary: string;
   findingCount: number;
+  findings: VisualReviewFinding[];
+  reviewArtifactId?: string;
   lowestScores: Array<{ key: string; label: string; value: number }>;
+}
+
+interface VisualReviewFinding {
+  timecodeMs: number;
+  scenePosition?: number;
+  category: string;
+  description: string;
+  suggestion: string;
 }
 
 const VISUAL_SCORE_LABELS: Record<string, string> = {
@@ -428,13 +461,71 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
     .map(([key, value]) => ({ key, label: VISUAL_SCORE_LABELS[key] ?? key, value }))
     .sort((left, right) => left.value - right.value)
     .slice(0, 2) : [];
+  const findings = Array.isArray(report.findings) ? report.findings.flatMap((value): VisualReviewFinding[] => {
+    if (!isRecord(value) || !Number.isInteger(value.timecodeMs) || Number(value.timecodeMs) < 0) return [];
+    const scenePosition = Number(value.scenePosition);
+    return [{
+      timecodeMs: Number(value.timecodeMs),
+      ...(Number.isInteger(scenePosition) && scenePosition > 0 ? { scenePosition } : {}),
+      category: typeof value.category === "string" ? value.category : "other",
+      description: typeof value.description === "string" ? value.description : "未提供问题说明。",
+      suggestion: typeof value.suggestion === "string" ? value.suggestion : "请人工检查此处画面。",
+    }];
+  }) : [];
+  const effectiveVersion = node.outputState?.versions.find((version) => version.id === node.outputState?.effectiveVersionId);
+  const reviewArtifactId = effectiveVersion?.artifactIds.find((artifactId) => (
+    run.artifacts.some((artifact) => artifact.id === artifactId && artifact.kind === "review_report" && artifact.producerNodeId === "visual-review")
+  ));
   return {
     recommendation: report.recommendation,
     confidence,
     summary: typeof report.summary === "string" && report.summary.trim() ? report.summary.trim() : "视觉审片发现需要人工确认的问题。",
-    findingCount: Array.isArray(report.findings) ? report.findings.length : 0,
+    findingCount: findings.length,
+    findings,
+    ...(reviewArtifactId ? { reviewArtifactId } : {}),
     lowestScores: scores,
   };
+}
+
+function SceneRevisionFinding({ finding, busy, onSeek, onSubmit }: {
+  finding: VisualReviewFinding;
+  busy: boolean;
+  onSeek: () => void;
+  onSubmit: (input: Pick<StudioSceneRevisionInput, "reuseFromScenePosition" | "note">) => Promise<void>;
+}) {
+  const [sourcePosition, setSourcePosition] = useState("");
+  const [note, setNote] = useState("");
+  const sourceOptions = finding.scenePosition
+    ? Array.from({ length: Math.max(0, finding.scenePosition - 1) }, (_, index) => index + 1)
+    : [];
+  const seconds = Math.floor(finding.timecodeMs / 1_000);
+  const timecode = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  return <article className="scene-revision-finding">
+    <button className="scene-finding-seek" type="button" onClick={onSeek}>
+      {finding.scenePosition ? `镜头 ${finding.scenePosition}` : "未定位镜头"} · {timecode}
+    </button>
+    <p>{finding.description}</p>
+    <small>{finding.suggestion}</small>
+    {sourceOptions.length > 0 ? <div className="scene-revision-controls">
+      <label className="field">
+        <span>复用母片</span>
+        <select value={sourcePosition} onChange={(event) => setSourcePosition(event.target.value)}>
+          <option value="">选择已有镜头</option>
+          {sourceOptions.map((position) => <option key={position} value={position}>镜头 {position}</option>)}
+        </select>
+      </label>
+      <label className="field field-wide">
+        <span>修改说明</span>
+        <textarea value={note} onChange={(event) => setNote(event.target.value)} rows={2} maxLength={2_000} />
+      </label>
+      <button
+        className="button button-secondary"
+        type="button"
+        disabled={busy || !sourcePosition || !note.trim()}
+        onClick={() => void onSubmit({ reuseFromScenePosition: Number(sourcePosition), note: note.trim() })}
+      >提交局部返修</button>
+    </div> : null}
+  </article>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

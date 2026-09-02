@@ -352,6 +352,22 @@ describe("CodexVisualReviewAgent", () => {
     );
   });
 
+  it("preserves a validated scene position on each localized finding", () => {
+    const localized = validateVisualReviewReport({
+      ...report,
+      findings: [{ ...report.findings[0], scenePosition: 2 }],
+    }, 6_000);
+
+    assert.equal(localized.findings[0]?.scenePosition, 2);
+    assert.throws(
+      () => validateVisualReviewReport({
+        ...report,
+        findings: [{ ...report.findings[0], scenePosition: 0 }],
+      }, 6_000),
+      /scene position is invalid/,
+    );
+  });
+
   it("fails closed when model recommendation conflicts with scores, findings, or confidence", () => {
     assert.equal(validateVisualReviewReport({
       ...report,

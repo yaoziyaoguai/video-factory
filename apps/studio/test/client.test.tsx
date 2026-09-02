@@ -1240,6 +1240,84 @@ describe("Studio client", () => {
     expect(onDecision).toHaveBeenCalledWith({ action: "approve", note: "覆盖视觉审片建议：已逐帧复核，当前版本符合本次发布要求" });
   });
 
+  it("submits a localized scene revision and seeks the preview to the finding", async () => {
+    const user = userEvent.setup();
+    const onRequestSceneRevision = vi.fn().mockResolvedValue(undefined);
+    const run: StudioRunDetail = {
+      ...runDetail,
+      revision: 7,
+      artifacts: [
+        ...runDetail.artifacts,
+        { id: "review-current", kind: "review_report", producerNodeId: "visual-review", createdAt: "2026-08-21T10:00:30.000Z" },
+      ],
+      nodes: [
+        ...runDetail.nodes.filter((node) => node.id !== "final-review"),
+        {
+          id: "assets",
+          label: "画面",
+          status: "succeeded",
+          artifactIds: [],
+          qualityGateResults: [],
+          outputState: { generatedVersionId: "assets-v1", effectiveVersionId: "assets-v1", stale: false, versions: [] },
+        },
+        {
+          id: "visual-review",
+          label: "视觉审片",
+          status: "succeeded",
+          artifactIds: ["review-current"],
+          qualityGateResults: [],
+          outputState: {
+            generatedVersionId: "review-v1",
+            effectiveVersionId: "review-v1",
+            stale: false,
+            versions: [{
+              id: "review-v1",
+              source: "generated",
+              artifactIds: ["review-current"],
+              inputVersionIds: [],
+              createdAt: "2026-08-21T10:00:30.000Z",
+              createdBy: "glm-visual-review-v1",
+              schemaVersion: "video-factory/visual-review-v1",
+              output: { report: {
+                recommendation: "revise",
+                confidence: 0.91,
+                summary: "第二镜动作不连续。",
+                scores: { composition: 80, continuity: 45, pacing: 80, legibility: 85, safety: 95 },
+                findings: [{
+                  timecodeMs: 6_000,
+                  scenePosition: 2,
+                  category: "continuity",
+                  severity: "warning",
+                  description: "第二镜与第一镜动作不连续。",
+                  suggestion: "复用第一镜母片。",
+                }],
+              } },
+            }],
+          },
+        },
+        runDetail.nodes.find((node) => node.id === "final-review")!,
+      ],
+    };
+
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} onRequestSceneRevision={onRequestSceneRevision} />);
+    const preview = screen.getByTitle("成片预览") as HTMLVideoElement;
+    Object.defineProperty(preview, "currentTime", { value: 0, writable: true });
+    await user.click(screen.getByRole("button", { name: /镜头 2.*00:06/ }));
+    expect(preview.currentTime).toBe(6);
+    await user.selectOptions(screen.getByLabelText("复用母片"), "1");
+    await user.type(screen.getByLabelText("修改说明"), "第二镜复用第一镜母片");
+    await user.click(screen.getByRole("button", { name: "提交局部返修" }));
+
+    expect(onRequestSceneRevision).toHaveBeenCalledWith({
+      expectedRunRevision: 7,
+      expectedAssetVersionId: "assets-v1",
+      reviewArtifactId: "review-current",
+      findingIndex: 0,
+      reuseFromScenePosition: 1,
+      note: "第二镜复用第一镜母片",
+    });
+  });
+
   it("keeps technical execution nodes out of the editable creative deliverables", () => {
     const run: StudioRunDetail = {
       ...runDetail,
@@ -1284,7 +1362,7 @@ describe("Studio client", () => {
     render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
     await user.click(screen.getByText("画面").closest("summary")!);
 
-    expect(document.querySelector('video[aria-label="镜头 1 画面预览"]')).toHaveAttribute("src", "/api/scene-video");
+    expect(document.querySelector('video[aria-label="素材 1 画面预览"]')).toHaveAttribute("src", "/api/scene-video");
   });
 
   it("puts the current paid node and its confirmation action above unfinished output", async () => {
