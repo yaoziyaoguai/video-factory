@@ -411,6 +411,7 @@ body { background: var(--canvas); }
   .studio-v3 .today-header p:last-child, .studio-v3 .page-summary { font-size: 12px; line-height: 1.55; }
   .studio-v3 .today-header > .button, .studio-v3 .page-header > .button { width: 40px; min-width: 40px; padding: 0; overflow: hidden; color: transparent; gap: 0; font-size: 0; }
   .studio-v3 .today-header > .button svg, .studio-v3 .page-header > .button svg { flex: 0 0 18px; color: var(--accent); }
+  .studio-v3 .page-header > .project-create-button svg { color: #ffffff; }
   .studio-v3 .production-strip > a,
   .studio-v3 .production-strip-review > a { width: 68px; min-width: 68px; height: 34px; box-sizing: border-box; justify-content: center; padding: 0 7px; overflow: visible; color: #ffffff; font-size: 11px; white-space: nowrap; }
   .studio-v3 .production-strip > a svg { flex: 0 0 13px; color: #ffffff; }
