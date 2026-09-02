@@ -123,7 +123,7 @@ describe("broker-owned task definitions", () => {
 
     assert.equal(topic.version, "video-factory/topic-editor-v2");
     assert.equal(script.version, "video-factory/screenwriter-v4");
-    assert.equal(director.version, "video-factory/director-v9");
+    assert.equal(director.version, "video-factory/director-v10");
     assert.equal(review.version, "video-factory/visual-review-v5");
     assert.match(review.outputRules.join("\n"), /不得为了通过审计而美化评分/);
     assert.match(topic.directive, /值得做视频/);
@@ -144,6 +144,11 @@ describe("broker-owned task definitions", () => {
     assert.match(director.directive, /costFeedback.*重规划偏好/);
     assert.match(director.directive, /目标预计费用.*不是硬门禁/);
     assert.match(director.directive, /不得.*说明卡.*降级/);
+    assert.match(director.directive, /REUSE_ONLY scene N/);
+    assert.match(director.directive, /只允许引用更早镜头/);
+    assert.match(director.directive, /不会重新搜索、生成或计费/);
+    assert.match(director.directive, /不会产生新的动作、光线变化或画面状态/);
+    assert.match(director.directive, /没有可执行的免费或复用方案.*保留可执行的付费镜头.*重新报价/);
     assert.doesNotMatch(director.directive, /付费镜头上限是硬边界/);
     assert.doesNotMatch(director.directive, /costPolicy/);
     assert.doesNotMatch(script.directive, /costPolicy/);

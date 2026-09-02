@@ -79,6 +79,7 @@ const DIRECTOR_PLAN_DIRECTIVE = [
   "通用图库可以表现普通人物、动作和环境，但不能冒充具体事件、涉事人物或事发现场的证据。",
   "图库是检索而不是生成：只有常见、单一、容易搜到的动作才能选择图库；需要精确多步表演、物件状态严格变化或特定界面操作时，应选择生成式能力，或把镜头改写为诚实的说明画面。",
   "图库 query 使用 3 到 8 个具体英文概念，优先主体、动作和环境，不放运镜、光线、画幅、字幕安全区或整句提示词；同一组概念不得机械复用于相邻镜头。",
+  "若某镜只需原样复用更早镜头的已解析母片，将 query 精确写为 REUSE_ONLY scene N；N 只允许引用更早镜头。下游素材执行器会直接复用相同媒体内容，不会重新搜索、生成或计费；复用不会产生新的动作、光线变化或画面状态，因此 Shot Spec 与验收条件不得声称这些变化。",
   "AI 生成画面只用于 illustrative 或 expressive 镜头，不得作为事实证据，并应避免肖像、品牌和地标误导。",
   "不设任何素材来源配额；只有当每个镜头都独立符合 Provider 能力时，才可以全部选择同一来源。",
   "preferredProviderId、rationale、query 和 generationPrompt 必须相互一致，alternativeProviderIds 也必须能真实承接该镜头。",
@@ -90,6 +91,7 @@ const DIRECTOR_PLAN_DIRECTIVE = [
   "输入含 referenceGrammar 时，只吸收其节奏、构图、运镜、色彩、转场和声音结构等抽象规则；不得复制参考视频中的人物身份、品牌、对白、事实和独特情节。",
   "输入含 seriesContext 时，视觉母题、角色/物件状态、声音锚点和已内部定版 canon 必须连续；本集新增变化只能作为当前单集方案，不能擅自改写系列圣经或宣称已经写入 canon。",
   "输入含 costFeedback 时，它代表上一份报价被拒绝后的人类重规划偏好；应结合 reason、note 和 targetEstimatedCostCny，在不牺牲镜头完整性与可执行性的前提下调整 Provider 组合。目标预计费用只是优化方向，不是硬门禁。",
+  "没有可执行的免费或复用方案时，必须保留可执行的付费镜头并由系统重新报价；不得把 Provider 标成不得调用或把 confidence 降为 0 来伪装成可执行方案。",
   "若现有能力无法达到目标预计费用，仍须输出覆盖全部镜头的完整方案，由系统给出新的真实报价；不得删镜头、虚构免费素材、偷偷替换未授权 Provider，也不得用说明卡作为素材失败或费用不足的降级结果。",
   "requestedProfileId 为 auto 时，根据题材选择最合适的非 auto 导演角色。",
   "输入含 revision 时，必须依据其中独立审计指出的具体问题修复上一版候选，同时重新输出完整结果；不得照抄未修复的上一版。",
@@ -290,7 +292,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
     };
   }
   return {
-    version: "video-factory/director-v9",
+    version: "video-factory/director-v10",
     directive: DIRECTOR_PLAN_DIRECTIVE,
     task: "生成视觉圣经和逐镜素材路由。",
     outputRules: [

@@ -26,17 +26,29 @@ Status: active
 - 生产部署 workflow 使用 GitHub commit SHA，避免远端部署漂移到未经验证的代码。
 - MiniMax operation ledger 在多场旁白部分成功时按已物化场景份额累计配置成本；生产环境显式暴露 `MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP`。
 - 生产 CLI 在 run 失败时同时返回非零结果并设置进程退出码，GitHub Actions 不再把 `status: failed` 当成成功；Linux smoke 通过独立的显式导演路由主动选择本地静态编辑画面，不放宽生产素材门禁。
+- 导演提示词与独立审计合同显式声明 `REUSE_ONLY scene N`：只能复用更早且已解析的母片，不重新搜索、生成或计费，也不能声称复用产生了新动作、光线或状态。没有可执行的免费/复用路线时必须保留可执行付费镜头重新报价，不能用 `confidence=0` 或“不得调用”伪装成完成方案。
+- 导演 prompt pack、执行回执和 agent checkpoint contract 同步升级至 `director-v10`，避免失败运行继续复用已耗尽的 v9 checkpoint。
 
 ## Verification So Far
 
-- `npm test`: core 298 passed、1 个真实 E2E skip；broker 85 passed；Studio Vitest 189 passed；Studio server 287 passed；production build 与 package smoke 3 passed。
+- `npm test`: core 298 passed、1 个真实 E2E skip；broker 85 passed；Studio Vitest 189 passed；Studio server 287 passed；production build 与 package smoke 3 passed。`director-v10` 修复后于 2026-09-02 重新完整执行并通过。
 - `PYTHONPATH=src .local/python/.venv/bin/python -m unittest discover -s tests`: 98 passed。
 - 混合报价集成用例验证生成图片 ¥0.25、生成视频 ¥2.40，授权前两个外部 adapter 都是 0 次，授权后各调用 1 次，最终计划引用真实文件而非说明卡。
 - 新增 MiniMax 部分成功回归用例先以 `0.50 != 0.25` 失败，再在最小实现后通过；`tests.test_voiceover` 共 15 个测试通过。
 - `bash -n`、`docker-compose ... config -q` 与 `git diff --check` 通过；`video-factory:preflight` production image 构建成功。
 - Linux container smoke 的 9 个节点全部 `succeeded`，技术审片 `passed`；最终 MP4 经 `ffprobe` 核验为 1080×1920、30fps、20.000 秒、600 帧。
 
-这些仍是工作树阶段证据。GitHub Actions、阿里云部署、云端点击和真实制作成片核验尚未完成，当前不能据此宣称发布完成。
+`director-v10` 的本地 TDD 证据：新增断言后 3 个用例分别因 prompt version、`assetReuse` 审计合同和 execution receipt 仍为 v9 而失败；最小实现后相关 73/73、broker 85/85、production-pipeline 238/238（另 1 个真实 E2E skip）以及完整 `npm test` 均通过，`git diff --check` 通过。
+
+## Deployed Baseline And Cloud QA
+
+- 基线发布 SHA `e771e2f1b728d957a5936b69b949cd78bad23514` 已由 GitHub Actions run `33623889159` 构建并部署；Tests、dependency security、Docker build、Linux video smoke 和阿里云部署全部成功。
+- 阿里云 release SHA 与该 commit 一致，`video_factory_prod` healthy，`vf-codex-broker` 与 `vf-zai-codex-broker` active，`/api/health` 正常。生产代码未通过 SSH 手工覆盖。
+- 云端桌面和 `390x844` 移动端已验证新建制作、Provider/model 选择、底部导航、配置和素材页；`local-editorial-v1` 默认未选，移动端没有整页横向溢出。
+- 免费 run `run-9e85a961-dca4-4eea-8a1b-451af5e8dd56` 在图库无合格素材时明确停在 scene 5，消费 ¥0.00，未生成任何说明卡。
+- 付费门禁 run `run-85e9d083-d1c9-4dbf-a0bb-04d9901227e4` 首次给出 6 个 MiniMax H3 镜头、每镜 ¥2、合计 ¥12；授权前消费、授权和付费 receipt 均为 0。
+- 点击“这份报价不合适”并保存 ¥0 目标与免费/复用反馈后，只把 run 标为 `stale`，没有自动调用导演；人工点击继续生成后仍未产生付费调用或说明卡。
+- 该次真实重规划最终被独立审计拒绝：导演把“复用母片”误解为 Hailuo 必须跨任务继承参考帧，并输出 `confidence=0` 的不可调用候选。源码和运行 trace 共同确认，执行器与报价器已经支持 `REUSE_ONLY`，缺口是 v9 真实导演 prompt 和审计合同没有声明该路由；这正是本次 `director-v10` 修复的直接原因。
 
 ## Oracle Web Status
 
@@ -44,7 +56,8 @@ Status: active
 
 ## Pending Release Evidence
 
-- commit、push、GitHub Actions verify/security/deploy 全绿和 ECS release SHA 对齐。
-- SSH loopback 隧道下的云端桌面广覆盖点击测试。
-- `390x844` 移动端关键路径、最终视频 `ffprobe` 帧数/时长和逐片段画面检查。
+- 提交并通过 GitHub Actions 部署 `director-v10`，确认 ECS release SHA 对齐；禁止 SSH 覆盖生产代码。
+- 云端重新运行真实费用反馈：确认导演能产出合法 `REUSE_ONLY`，复用镜头不重复报价，且无免费/复用方案时返回真实付费报价而非不可调用假方案。
+- 桌面与 `390x844` 移动端重走报价拒绝、手动重规划和失败停机路径；不批准测试中的任何付费镜头。
+- 在最终真实成片存在后再核验 `ffprobe` 帧数/时长、`blackdetect`、逐片段画面、视觉一致性、内部术语和未授权卡片。
 - Oracle Web 在网页模型与 thinking selection 可验证后的独立能力评估。
