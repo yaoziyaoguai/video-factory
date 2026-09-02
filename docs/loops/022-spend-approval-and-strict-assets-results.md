@@ -1,7 +1,7 @@
 # Loop 022: Spend Approval And Strict Assets Results
 
 Date: 2026-09-02
-Status: active
+Status: complete
 
 ## Outcome
 
@@ -69,11 +69,11 @@ PR #15 的第一次 GitHub Actions `Dependency security` 门禁因 2026-09-03 �
 
 旧的 `vf-next-capability-20260903`、`v2`、`v3` session 已明确放弃，没有恢复或人工点击发送。重新完整读取五档版 `oracle-web` Skill 后，使用 `/opt/homebrew/bin/oracle-web` 创建独立 session `vf-capability-feedback-loop-20260903`；页面实际进入新的 `/c/6a985627-7e24-83ed-a4f5-5b2017b59791` 对话并返回完整结果，强度回读为 `Pro，第 5 项，共 5 项`。wrapper 记录的 requested model 不能证明网页实际模型，因此网页模型保持未验证。Oracle 建议优先补“审片发现 → 精确 scene → 局部素材修订 → 完整重渲染 → 技术/视觉复验 → 同一 run 人工终审”闭环，而不是增加 Agent 编排；当前主 Codex 已综合并实现该建议。
 
-## Release Evidence Still Required
+## Acceptance Boundary
 
-- scene revision 基线已通过 PR #15 和 GitHub Actions run `33676477349` 部署；本节新增的复用费用与移动端按钮修复仍须经新的 PR 和 GitHub Actions 部署阿里云，随后执行云端桌面与 `390x844` 移动端点击验收。禁止 SSH 覆盖生产代码。
-- 在最终真实成片存在后再核验 `ffprobe` 帧数/时长、`blackdetect`、逐片段画面、视觉一致性、内部术语和未授权卡片。
-- Oracle Web 能力评估开始前必须重新完整读取磁盘上的当前 `oracle-web/SKILL.md`，只按五档规则执行，不使用此前缓存的六档规则；Oracle 仅提供建议，由当前主 Codex 综合并实现。
+- PR #15、#16、#17 均已通过 GitHub Actions 部署阿里云；生产代码没有通过 SSH 手工覆盖。
+- 本轮没有批准任何图片或视频报价，因此没有为验收额外产生真实付费成片。将来批准某份真实素材报价并得到最终成片后，仍需对该具体成片执行 `ffprobe` 帧数/时长、`blackdetect`、逐片段画面、视觉一致性、内部术语和未授权卡片检查。
+- Oracle Web 能力评估已完成；结果只作为执行建议，最终方案和实现由当前主 Codex 综合负责。
 
 ## 2026-09-03 Cloud QA Follow-up
 
@@ -82,4 +82,15 @@ PR #15 的第一次 GitHub Actions `Dependency security` 门禁因 2026-09-03 �
 - TDD RED：新增回归用例后，付费 `seedance-video-v1` 的普通镜头和复用镜头实际费用为 `[5.5, 5.5]`，而预期为 `[5.5, 0]`。最小修复沿用素材执行器已有的 `REUSE_ONLY scene N` 解析规则，只把合法复用镜头归零；普通镜头继续忽略模型报价并使用服务端价格。GREEN：`visual-director.test.ts` 7/7 通过。
 - 移动端制作记录页的“新建制作”按钮曾显示为空白蓝色方块：通用小屏规则隐藏文字后，又把 `Plus` 图标设为与按钮背景相同的蓝色。最小修复给该按钮增加专用 class，只把该主按钮 SVG 设为白色；组件与 CSS 回归用例在修复前分别因缺少专用 class 和缺少白色图标规则失败，修复后 `client.test.tsx` 60/60 通过。
 - 第一次完整 `npm test` 在 Studio typecheck 阶段因 CSS 回归测试直接使用 Node API、但前端 tsconfig 未加载 Node 类型而失败；调整为测试文件局部声明 Node 类型后，Studio 窄测试与 typecheck 均通过，再从头重跑完整门禁。最终 `npm test` exit 0：TypeScript 304 passed（1 个显式真实 E2E skip）、broker 85 passed、Studio Vitest 191 passed、Studio server 289 passed、production build 与 package smoke 3 passed；Python unittest 98 passed，`git diff --check` 通过。
-- 上述修复尚待 PR、GitHub Actions 部署和阿里云桌面/移动端复测；在这些证据完成前不视为发布完成。
+- 上述复用费用与移动端按钮修复已由 PR #16 合并为 `9422b4a3ed48e67a73041d85ff1a819ec6bbc0ab`；GitHub Actions run `33688332569` 的 Test and build、Dependency security 和 Deploy to Alibaba ECS 全部通过。阿里云 release、容器、两个 broker 和 health endpoint 均已核验正常。
+
+## 2026-09-03 Exhausted Retry Fix And Final Cloud QA
+
+- PR #16 部署后的云端点击暴露了另一个独立缺陷：`POST /nodes/visual-direction/retry` 返回 revision 7 的 `running` 快照后，run 在约 84ms 内恢复为原错误，broker `active=0`。新建的 `attempt-6` 复制了旧 receipt 的 5 次模型调用，而没有真的调用 Provider。
+- 云端持久状态确认根因不是 HTTP、dispatch 或 execution lease：生产节点的 checkpoint key 只由 `runId + nodeId + input + contractVersion` 组成；同输入的人工 retry 命中旧 `exhausted` checkpoint，Role Agent Loop 按合同直接回放终态。
+- TDD RED 使用 Production Pipeline 真实 retry 路径模拟耗尽 checkpoint，稳定失败为 `modelCalls: 1 !== 2`。最小修复让生产节点 checkpoint 只在状态为 `exhausted` 时开启 `cycle + 1`；`running` checkpoint 继续沿用候选、会话和 request id，普通 Role Agent Loop 调用仍保持 exhausted 默认终止。GREEN 后同一 checkpoint key 的新 cycle 产生不同模型 request id，节点继续成功。
+- 发布前根级 `npm test` exit 0：TypeScript 305 passed（1 个显式真实 E2E skip）、broker 85 passed、Studio Vitest 191 passed、Studio server 289 passed、production build 与 package smoke 3 passed；Python unittest 98 passed。第一次 `npm audit` 因 npmmirror 不实现 audit API 返回 HTTP 404，不计为通过；切换 npm 官方 registry 后重跑为 0 vulnerabilities。
+- PR #17 合并为 `21343d0b14c14836dfccbb667d9cd5e4458dd728`。GitHub Actions run `33691873671` 全部通过：Dependency security 17s、Test and build 3m12s（含 production image 与 Linux 成片 smoke）、Deploy to Alibaba ECS 1m33s。
+- 阿里云同一 run `run-85e9d083-d1c9-4dbf-a0bb-04d9901227e4` 的真实重试从 revision 7 进入 revision 8；目标 checkpoint 从 `cycle 0 exhausted` 进入 `cycle 1 running`，broker 真实出现 `active=1`。最终导演 cycle 1 在第 2/3 轮通过独立审计，共 4 次新模型调用，run 停在新的 ¥12 素材报价。六镜需要不同动作，因此没有伪造复用或迎合 ¥0 目标；未批准报价，实际消费、授权、待核对和按量失败均为 0。
+- 定向复用 run `run-ab5fadf1-9111-4223-835b-7bbcc5634545` 再次核验：Scene 4、7 均为 `REUSE_ONLY scene 2` 且费用为 ¥0；不可变报价只含 Scene 1、3、5、8、9、10、11 七张 Seedream 图片，总计 ¥1.75；两个 run 的持久 artifact 扫描均没有说明卡。
+- 云端桌面 1440×1000 与移动端 390×844 均满足 `scrollWidth = clientWidth`，无横向溢出，console 0 error / 0 warning。移动端费用反馈弹窗宽 362px，返回与保存按钮均为 86×42 且完整位于视口；点击“返回检查”没有保存反馈或触发导演。截图保存在 `output/playwright/cloud-qa/desktop-replanned-quote-after-pr17.png` 与 `output/playwright/cloud-qa/mobile-reuse-quote-after-pr17.png`。
