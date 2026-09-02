@@ -116,7 +116,7 @@ export interface ArtifactDraft<TData = unknown> {
   producer?: ArtifactProducer;
 }
 
-export type HumanDecisionAction = "approve" | "reject";
+export type HumanDecisionAction = "approve" | "request_changes" | "reject";
 
 export interface HumanInterventionDraft {
   reason: string;
@@ -261,6 +261,13 @@ export interface NodeOverrideDraft<TOutput = unknown> {
   expectedVersionId?: string;
   allowTerminalEdit?: boolean;
   schemaVersion?: string;
+}
+
+export interface NodeRevisionDraft<TOutput = unknown> extends NodeOverrideDraft<TOutput> {
+  expectedVersionId: string;
+  retainedArtifactIds: string[];
+  invalidateDescendantNodeIds: string[];
+  decision: HumanDecisionDraft & { action: "request_changes" };
 }
 
 export interface SpendPlan {

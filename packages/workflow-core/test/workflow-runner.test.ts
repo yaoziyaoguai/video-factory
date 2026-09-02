@@ -6,6 +6,7 @@ import {
   scoreTopicCandidate,
   topicCandidateArtifact,
   type NodeDefinition,
+  type NodeRevisionDraft,
   type Provider,
   type WorkflowContext,
   type WorkflowDefinition,
@@ -1452,6 +1453,350 @@ describe("WorkflowRunner", () => {
     ]);
     assert.equal(regenerated.nodeRuns.find((node) => node.nodeId === "unrelated")?.outputState?.versions.length, 1);
     assert.equal(regenerated.executionReceipts?.length, 8);
+  });
+
+  it("records request changes and reruns only the revised asset descendants", async () => {
+    const calls = { assets: 0, voice: 0, render: 0, review: 0, final: 0 };
+    const definition: WorkflowDefinition = {
+      id: "review-directed-scene-revision",
+      name: "Review-directed scene revision",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "assets",
+          label: "Assets",
+          capability: "asset.prepare",
+          mode: "automatic",
+          execute: () => {
+            calls.assets += 1;
+            return {
+              output: { assetPlanPath: "/tmp/asset-plan-v1.json" },
+              artifacts: [
+                { kind: "asset_plan", data: { version: 1 } },
+                { kind: "media_asset", data: { scenePosition: 1 } },
+                { kind: "media_asset", data: { scenePosition: 2 } },
+              ],
+            };
+          },
+        },
+        {
+          id: "voice",
+          label: "Voice",
+          capability: "voice.synthesize",
+          mode: "automatic",
+          dependsOn: ["assets"],
+          execute: () => {
+            calls.voice += 1;
+            return { output: { voicePath: "/tmp/voice.m4a" } };
+          },
+        },
+        {
+          id: "render",
+          label: "Render",
+          capability: "video.render",
+          mode: "automatic",
+          dependsOn: ["assets", "voice"],
+          execute: () => {
+            calls.render += 1;
+            return { output: { videoPath: `/tmp/render-${calls.render}.mp4` } };
+          },
+        },
+        {
+          id: "visual-review",
+          label: "Visual review",
+          capability: "quality.review.visual",
+          mode: "automatic",
+          dependsOn: ["render"],
+          execute: () => {
+            calls.review += 1;
+            return { output: { report: { findings: [{ scenePosition: 2 }] } } };
+          },
+        },
+        {
+          id: "final-review",
+          label: "Final review",
+          capability: "quality.review.human",
+          mode: "manual",
+          dependsOn: ["visual-review"],
+          execute: () => {
+            calls.final += 1;
+            return {
+              status: "needs_human",
+              output: { reviewed: true },
+              intervention: {
+                reason: "Scene 2 needs a different asset.",
+                requiredAction: "approve",
+                options: ["approve", "request_changes", "reject"],
+              },
+            };
+          },
+        },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    const intervention = waiting.interventions.at(-1)!;
+    const assets = waiting.nodeRuns.find((node) => node.nodeId === "assets")!;
+    const currentAssetVersion = assets.outputState?.versions.find(
+      (version) => version.id === assets.outputState?.effectiveVersionId,
+    );
+    const sceneOneArtifact = waiting.artifacts.find((artifact) => (
+      artifact.kind === "media_asset"
+      && (artifact.data as { scenePosition?: number } | undefined)?.scenePosition === 1
+    ));
+    const sceneTwoArtifact = waiting.artifacts.find((artifact) => (
+      artifact.kind === "media_asset"
+      && (artifact.data as { scenePosition?: number } | undefined)?.scenePosition === 2
+    ));
+    const originalPlanArtifact = waiting.artifacts.find((artifact) => artifact.kind === "asset_plan");
+    assert.ok(currentAssetVersion);
+    assert.ok(sceneOneArtifact);
+    assert.ok(sceneTwoArtifact);
+    assert.ok(originalPlanArtifact);
+
+    await assert.rejects(
+      () => runner.resume(definition, waiting, {
+        interventionId: intervention.id,
+        action: "request_changes",
+        actor: "director",
+      }),
+      /must include a node revision/,
+    );
+
+    assert.throws(
+      () => runner.applyNodeRevision(definition, waiting, {
+        nodeId: "assets",
+        actor: "director",
+        output: { assetPlanPath: "/tmp/asset-plan-v1.json" },
+        artifacts: [],
+        retainedArtifactIds: [],
+        invalidateDescendantNodeIds: ["render", "visual-review", "final-review"],
+        decision: {
+          interventionId: intervention.id,
+          action: "request_changes",
+          actor: "director",
+        },
+      } as unknown as NodeRevisionDraft),
+      /must include the expected current output version/,
+    );
+
+    assert.throws(
+      () => runner.applyNodeRevision(definition, waiting, {
+        nodeId: "assets",
+        actor: "director",
+        output: { assetPlanPath: "/tmp/asset-plan-v1.json" },
+        artifacts: [],
+        retainedArtifactIds: ["artifact-not-current"],
+        invalidateDescendantNodeIds: ["render", "visual-review", "final-review"],
+        expectedVersionId: assets.outputState!.effectiveVersionId,
+        decision: {
+          interventionId: intervention.id,
+          action: "request_changes",
+          actor: "director",
+        },
+      }),
+      /cannot retain non-current artifact/,
+    );
+
+    assert.throws(
+      () => runner.applyNodeRevision(definition, waiting, {
+        nodeId: "assets",
+        actor: "director",
+        output: { assetPlanPath: "/tmp/asset-plan-v1.json" },
+        artifacts: [],
+        retainedArtifactIds: [],
+        invalidateDescendantNodeIds: ["render", "visual-review", "final-review"],
+        expectedVersionId: assets.outputState!.effectiveVersionId,
+        decision: {
+          interventionId: intervention.id,
+          action: "approve",
+          actor: "director",
+        },
+      } as unknown as NodeRevisionDraft),
+      /must use a request_changes decision/,
+    );
+
+    const revised = runner.applyNodeRevision(definition, waiting, {
+      nodeId: "assets",
+      actor: "director",
+      output: { assetPlanPath: "/tmp/asset-plan-v2.json" },
+      artifacts: [
+        { kind: "asset_plan", uri: "/tmp/asset-plan-v2.json" },
+        { kind: "scene_revision_request", data: { scenePosition: 2, reuseFromScenePosition: 1 } },
+      ],
+      retainedArtifactIds: [sceneOneArtifact.id, sceneOneArtifact.id],
+      invalidateDescendantNodeIds: ["render", "visual-review", "final-review"],
+      expectedVersionId: assets.outputState!.effectiveVersionId,
+      decision: {
+        interventionId: intervention.id,
+        action: "request_changes",
+        actor: "director",
+        note: "Scene 2 reuses scene 1.",
+      },
+    });
+
+    assert.equal(revised.status, "stale");
+    assert.equal(revised.decisions.at(-1)?.action, "request_changes");
+    assert.equal(revised.interventions.length, 0);
+    assert.equal(revised.nodeRuns.find((node) => node.nodeId === "assets")?.status, "succeeded");
+    assert.equal(revised.nodeRuns.find((node) => node.nodeId === "voice")?.status, "succeeded");
+    assert.deepEqual(
+      revised.nodeRuns.filter((node) => node.status === "stale").map((node) => node.nodeId),
+      ["render", "visual-review", "final-review"],
+    );
+    const revisedAssetVersion = revised.nodeRuns.find((node) => node.nodeId === "assets")?.outputState?.versions.at(-1);
+    assert.deepEqual(
+      revisedAssetVersion?.artifactIds.map((artifactId) => revised.artifacts.find((artifact) => artifact.id === artifactId)?.kind),
+      ["media_asset", "asset_plan", "scene_revision_request"],
+    );
+    assert.equal(revisedAssetVersion?.artifactIds.includes(originalPlanArtifact.id), false);
+    assert.equal(revisedAssetVersion?.artifactIds.includes(sceneTwoArtifact.id), false);
+
+    const reviewedAgain = await runner.resumeStale(definition, revised);
+
+    assert.equal(reviewedAgain.status, "needs_human");
+    assert.deepEqual(calls, { assets: 1, voice: 1, render: 2, review: 2, final: 2 });
+    assert.equal(reviewedAgain.decisions.at(-1)?.action, "request_changes");
+  });
+
+  it("rejects a node revision that invalidates a non-descendant", async () => {
+    const definition: WorkflowDefinition = {
+      id: "bounded-node-revision",
+      name: "Bounded node revision",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "assets",
+          label: "Assets",
+          capability: "asset.prepare",
+          mode: "automatic",
+          execute: () => ({ output: { assetPlanPath: "/tmp/asset-plan-v1.json" } }),
+        },
+        {
+          id: "final-review",
+          label: "Final review",
+          capability: "quality.review.human",
+          mode: "manual",
+          dependsOn: ["assets"],
+          execute: () => ({
+            status: "needs_human",
+            intervention: {
+              reason: "Review",
+              requiredAction: "approve",
+              options: ["approve", "request_changes", "reject"],
+            },
+          }),
+        },
+        {
+          id: "unrelated",
+          label: "Unrelated",
+          capability: "noop",
+          mode: "automatic",
+          execute: () => ({ output: { ok: true } }),
+        },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    const assets = waiting.nodeRuns.find((node) => node.nodeId === "assets")!;
+    const intervention = waiting.interventions.at(-1)!;
+
+    assert.throws(
+      () => runner.applyNodeRevision(definition, waiting, {
+        nodeId: "assets",
+        actor: "director",
+        output: { assetPlanPath: "/tmp/asset-plan-v1.json" },
+        artifacts: [],
+        retainedArtifactIds: [],
+        invalidateDescendantNodeIds: ["unrelated"],
+        expectedVersionId: assets.outputState!.effectiveVersionId,
+        decision: {
+          interventionId: intervention.id,
+          action: "request_changes",
+          actor: "director",
+        },
+      }),
+      /only invalidate descendants/,
+    );
+  });
+
+  it("rejects a node revision that leaves an invalidated node's descendants current", async () => {
+    const definition: WorkflowDefinition = {
+      id: "closed-node-revision",
+      name: "Closed node revision",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "assets",
+          label: "Assets",
+          capability: "asset.prepare",
+          mode: "automatic",
+          execute: () => ({ output: { assetPlanPath: "/tmp/asset-plan.json" } }),
+        },
+        {
+          id: "render",
+          label: "Render",
+          capability: "video.render",
+          mode: "automatic",
+          dependsOn: ["assets"],
+          execute: () => ({ output: { videoPath: "/tmp/video.mp4" } }),
+        },
+        {
+          id: "final-review",
+          label: "Final review",
+          capability: "quality.review.human",
+          mode: "manual",
+          dependsOn: ["render"],
+          execute: () => ({
+            status: "needs_human",
+            intervention: {
+              reason: "Review",
+              requiredAction: "approve",
+              options: ["approve", "request_changes", "reject"],
+            },
+          }),
+        },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    const assets = waiting.nodeRuns.find((node) => node.nodeId === "assets")!;
+
+    assert.throws(
+      () => runner.applyNodeRevision(definition, waiting, {
+        nodeId: "assets",
+        actor: "director",
+        output: { assetPlanPath: "/tmp/asset-plan.json" },
+        artifacts: [],
+        retainedArtifactIds: [],
+        invalidateDescendantNodeIds: ["render"],
+        expectedVersionId: assets.outputState!.effectiveVersionId,
+        decision: {
+          interventionId: waiting.interventions.at(-1)!.id,
+          action: "request_changes",
+          actor: "director",
+        },
+      }),
+      /must include descendant 'final-review'/,
+    );
+
+    assert.throws(
+      () => runner.applyNodeRevision(definition, waiting, {
+        nodeId: "assets",
+        actor: "director",
+        output: { assetPlanPath: "/tmp/asset-plan.json" },
+        artifacts: [],
+        retainedArtifactIds: [],
+        invalidateDescendantNodeIds: [],
+        expectedVersionId: assets.outputState!.effectiveVersionId,
+        decision: {
+          interventionId: waiting.interventions.at(-1)!.id,
+          action: "request_changes",
+          actor: "director",
+        },
+      }),
+      /must invalidate the node with the active intervention/,
+    );
   });
 
   it("cannot mark a run succeeded by overriding one leaf while another node is stale", async () => {
