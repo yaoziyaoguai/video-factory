@@ -4385,11 +4385,12 @@ function nodeAgentLoopCheckpoint(
   input: unknown,
   contractVersion: string,
 ): ReturnType<typeof fileRoleAgentLoopCheckpoint> {
-  // Broker 幂等键必须限定在单次制作内；相同内容的两次制作也应分别生成和审计。
+  // 同一制作内沿用 running checkpoint；人工重试 exhausted 节点时开启新 cycle，避免回放旧失败终态。
   const key = roleAgentCheckpointKey({ runId, nodeId, input, contractVersion });
   return fileRoleAgentLoopCheckpoint(
     path.join(runsRoot, runId, "nodes", nodeId, "agent-loop-checkpoints", `${key}.json`),
     key,
+    { restartExhausted: true },
   );
 }
 

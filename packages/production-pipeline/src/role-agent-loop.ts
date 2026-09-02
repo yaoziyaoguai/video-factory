@@ -57,6 +57,7 @@ interface RoleRepairFeedback {
 
 export interface RoleAgentLoopCheckpoint {
   key: string;
+  restartExhausted?: boolean;
   load(): Promise<unknown | undefined>;
   save(value: unknown): Promise<void>;
 }
@@ -426,7 +427,7 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
   if (candidate.status === "passed" && (pendingCandidate || completed.at(-1)?.audit.verdict !== "pass")) {
     throw new Error("Passed agent loop checkpoint has no passing final audit.");
   }
-  return {
+  const restored: PersistedLoopState = {
     version: "video-factory/agent-loop-checkpoint-v6",
     key: candidate.key,
     contractDigest: candidate.contractDigest,
@@ -445,6 +446,12 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
     ...(pendingCandidate ? { pendingCandidate } : {}),
     ...(validationFailure ? { validationFailure } : {}),
   };
+  if (restored.status === "exhausted" && options.checkpoint.restartExhausted) {
+    const restarted = fresh(restored.cycle + 1);
+    await persistCheckpoint(options, restarted);
+    return restarted;
+  }
+  return restored;
 }
 
 async function persistCheckpoint<TOutput>(

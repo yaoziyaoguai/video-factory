@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import {
   ProductionPipeline,
   RoleAgentLoopError,
+  runRoleAgentLoop,
   type ScreenwriterAgent,
   type ScreenwriterAgentInput,
   type ScriptDraft,
@@ -202,6 +203,65 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.notEqual(first.id, second.id);
     assert.equal(inputs.length, 2);
     assert.notEqual(inputs[0]?.agentLoopCheckpoint?.key, inputs[1]?.agentLoopCheckpoint?.key);
+  });
+
+  it("starts a fresh agent loop after an explicit retry of an exhausted node", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-retry-cycle-"));
+    const checkpointKeys: string[] = [];
+    const requestIds: string[] = [];
+    let modelCalls = 0;
+    const agent: ScreenwriterAgent = {
+      id: "codex-screenwriter-v1",
+      draft: async () => scriptDraft,
+      draftDetailed: async (input) => {
+        const checkpoint = input.agentLoopCheckpoint;
+        assert.ok(checkpoint);
+        checkpointKeys.push(checkpoint.key);
+        return runRoleAgentLoop({
+          role: "编剧",
+          contractVersion: "retry-cycle-test-v1",
+          criteria: ["前两秒建立具体钩子"],
+          maxIterations: 1,
+          checkpoint,
+          produce: async (_revision, { requestId }) => {
+            modelCalls += 1;
+            requestIds.push(requestId);
+            return { output: scriptDraft };
+          },
+          audit: async () => ({
+            output: modelCalls === 1
+              ? {
+                  version: "video-factory/role-audit-v1",
+                  verdict: "repair",
+                  score: 70,
+                  summary: "仍需修订。",
+                  issues: [{ severity: "blocking", criterion: "钩子", evidence: "开场偏慢", repairInstruction: "重写开场" }],
+                  repairInstructions: ["重写开场"],
+                }
+              : {
+                  version: "video-factory/role-audit-v1",
+                  verdict: "pass",
+                  score: 92,
+                  summary: "可以继续。",
+                  issues: [],
+                  repairInstructions: [],
+                },
+          }),
+          validate: (value) => value as ScriptDraft,
+        });
+      },
+    };
+    const subject = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent });
+    const failed = await subject.start(brief);
+
+    assert.equal(failed.status, "failed");
+    const retried = await subject.retryFailedNode(failed.id, "script");
+
+    assert.equal(modelCalls, 2);
+    assert.equal(checkpointKeys.length, 2);
+    assert.equal(checkpointKeys[0], checkpointKeys[1]);
+    assert.notEqual(requestIds[0], requestIds[1]);
+    assert.notEqual(retried.status, "failed");
   });
 
   it("preserves the last rejected script draft as an editable artifact", async () => {
