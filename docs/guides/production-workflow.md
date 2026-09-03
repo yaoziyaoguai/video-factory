@@ -1,6 +1,6 @@
 # VideoFactory 生产工作流与使用指南
 
-本文描述 Loop 9 已经实现并通过真实媒体 E2E 验证的能力。它的边界是：从一个已确定的 `ProductionBrief` 开始，到生成经技术审片和人工终审的发布包结束。平台上传与真实指标回流尚未自动化。
+本文描述当前 `ProductionPipeline` 的执行边界：从一个已确定的 `ProductionBrief` 开始，到生成经技术审片、视觉审片和人工终审的发布包结束。平台上传与真实指标回流仍由产品边界之外的人工或正式连接器负责。
 
 ## 1. 端到端生产流程
 
@@ -82,8 +82,8 @@ workspace/factory/runs/<run-id>/
 |---|---|---|---|
 | Brief 合同 | `video-factory/brief-v1`，校验必填字段、20-180 秒、终审模式与 Provider binding | 自动 | 可新增协议版本 |
 | 工作流调度 | TS DAG、依赖排序、节点状态、失败/拒绝传播 | 自动 | Node/Provider 接口可扩展 |
-| 脚本 | `python-template-v1` | 自动 | 可增加 LLM、规则模板或人工脚本 Provider |
-| 素材 | AI 导演逐镜路由本地卡片、Pexels、Pixabay、Seedream 图片及已配置的视频模型 | 自动 | 图片/视频 Provider 通过 adapter 扩展，无需改 graph |
+| 脚本 | Codex 编剧 Agent + 独立审计；确定性模板只用于明确选择的本地/测试路径 | 自动 | 模型与本地 Provider 通过同一 capability 合同替换 |
+| 素材 | AI 导演逐镜路由 Pexels、Pixabay、Seedream、视频模型、人工素材和 `REUSE_ONLY` | 自动 + 付费前人工审批 | 图片/视频 Provider 通过目录与 adapter 扩展；失败不得生成说明卡 |
 | 配音 | `minimax-tts-v1`、`macos-say-v1`；`ffmpeg-tone-test-v1` 仅用于测试 | 自动 | 可继续增加云 TTS 或真人录音 Provider |
 | 渲染 | Python + FFmpeg，H.264/AAC，1080x1920 | 自动 | 可增加 Remotion 或其他渲染 Provider |
 | 技术审片 | 分辨率、编码、音量、时长、分镜覆盖、素材存在性 | 自动 | 可增加视觉/内容质量模型 |
@@ -241,21 +241,10 @@ jq '.providers.assets = "pixabay-stock-v1"' \
 
 | 状态 | 能力 | 说明 |
 |---|---|---|
-| 已完成 | Brief 到真实 MP4、技术审片、人工终审、发布包 | Loop 9 已通过真实媒体 E2E |
-| 已完成但独立 | 选题候选生成、评分、周计划和指标记录 CLI | 尚未接入 `daily-production` graph |
-| 下一阶段 | 选题 Agent -> brief 自动生成 | 需要真实账号数据校准选题目标与评分权重 |
-| 下一阶段 | 正式 Agent tool surface | 至少暴露 `start_production_run` 与 `get_production_run`，终审仍由人完成 |
-| 下一阶段 | 抖音等平台自动上传 | 需要平台权限、风控策略、AIGC 标识和失败补偿 |
-| 下一阶段 | 发布后 T+24h 指标回流 | 先用 3 条真实发布验证字段与节奏，再自动化 |
-| 未实现 | 分布式队列、跨主机锁、自动 retry/resume | 当前单机每天一条的目标不要求这些设施 |
-| 待验证 | 云端 TTS、AI 图片/视频对播放表现的实际增益 | 逐条记录成本与完播数据，不提前增加持续成本 |
-
-## 7. Loop 10 的正确入口
-
-Loop 10 不是继续堆功能，而是完成一次最小市场闭环：
-
-1. 固定一个账号、一个内容方向和一套视觉模板。
-2. 连续生产并人工终审 3 条视频。
-3. 人工上传并记录 `run id`、平台 `post id/URL` 与发布时间。
-4. T+24h 回填播放、完播、互动和新增关注。
-5. 用数据决定先改选题、脚本、素材、配音还是节奏；一次只改变一个主要变量。
+| 已实现 | Brief 到真实 MP4、技术/视觉审片、人工终审、局部素材返修和发布包 | 同一 run 保留版本、lineage 与审计证据 |
+| 已实现 | 图片/视频逐镜报价与人工授权 | 没有全局或单视频硬费用上限；拒绝后由用户主动重新规划 |
+| 已实现 | TTS 自动执行与人民币记账 | 不弹素材报价，但仍写入 operation ledger |
+| 已实现 | `REUSE_ONLY` 直接/间接母片复用 | 只允许更早且已物化的非说明卡媒体，费用为 0 |
+| 单机边界 | File/JSON store、PID/文件锁、revision/CAS 与 execution lease | 多实例前必须换成带事务和唯一约束的数据库/协调层 |
+| 人工边界 | 外部平台上传与真实指标回流 | 发布包不等于自动发布；当前不替用户操作平台账号 |
+| 需逐片验证 | 新批准的付费最终成片 | 对具体成片执行 ffprobe、blackdetect、逐镜视觉和内部术语检查 |

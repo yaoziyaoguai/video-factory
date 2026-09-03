@@ -1,0 +1,44 @@
+# VideoFactory 项目演进
+
+本文只保留仍有解释价值的阶段结果。详细旧计划、一次性审计和截图已经从当前工作树移除，但可从 Git commit `2d4f842b160801925115acbae9d1e536079334c6` 恢复。
+
+## 2026-08-20：从内容脚本到工作流底座
+
+Loop 001–008 建立了选题实验、脚本、指标、1080×1920 渲染、素材追踪和导演级视觉规则，并把固定 Python CLI 链路提升为 TS-first workflow core。Python 随后收敛为媒体 worker，TypeScript 成为 run、Provider、artifact 和人工介入合同的所有者。
+
+关键基线提交：`845398b` 至 `8eaf1d3`。
+
+## 2026-08-21 至 08-24：Web Studio 与 Creator OS
+
+Loop 009–020 完成真实有声 MP4、技术质检、跨进程人工终审与发布包，随后把 CLI 操作面升级为 Creative OS。热点证据、系列、自定义创作、资源配置、制作记录和审片工作台逐步合并为一套产品；浏览器 dogfood 推动界面从操作后台迭代为 Light Curated Studio。
+
+这些阶段也确立了三个长期边界：不伪造趋势或平台指标、不静默替换已绑定 Provider、人工决定是正式工作流状态。
+
+对应的早期计划、视觉稿和审计报告已经完成使命，不再作为当前实现文档。
+
+## 2026-08-25 至 09-01：可编辑生产与角色 Agent
+
+生产链增加了宿主机 Codex broker、版本化角色 Prompt Pack、独立审计、可编辑节点交付、动态模型路由、参考视频制作语法和系列 Canon。UI、API 与核心工作流的职责继续分离，run revision、artifact lineage 和 Provider receipt 成为可恢复生产的事实来源。
+
+代表提交：
+
+- `a5fa235` / PR #12：可编辑、可观察的生产工作流。
+- `c9bd1d3`：完整节点编辑与角色生产闭环。
+- `e358b1a`：现行 Studio 工作流与视觉体系。
+
+## 2026-09-02 至 09-03：费用、严格素材与返修闭环
+
+Loop 022 取消了全局和单视频硬费用上限，改为图片/视频逐镜报价与人工批准；TTS 自动执行并后台记账。素材失败不再降级为说明卡，`REUSE_ONLY` 成为零费用、可追踪的真实母片复用路由。
+
+Oracle Web 建议优先补齐“视觉 finding → scene → 局部素材修订 → 完整重渲染 → 技术/视觉复验 → 人工终审”，主 Codex 随后实现并验证了同一 run 的 scene-local revision。云端真实测试又发现 exhausted checkpoint 被 retry 回放，最终改为生产节点人工 retry 开启新 cycle。
+
+已发布变更：
+
+- PR #13 / `e771e2f`：付费素材审批与严格路由。
+- PR #14 / `eeef976`：导演可执行母片复用合同。
+- PR #15 / `9cf0941`：scene-local 视觉返修闭环。
+- PR #16 / `9422b4a`：复用镜头费用归零与移动端操作修复。
+- PR #17 / `21343d0`：exhausted Agent Loop 人工 retry 新 cycle。
+- PR #18 / `2d4f842`：最终云端验收记录。
+
+完整现行证据见 [Loop 022](loops/022-spend-approval-and-strict-assets-results.md)。

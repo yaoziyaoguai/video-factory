@@ -65,7 +65,7 @@ Canon Fact 不是路线图标题、viewer promise、下一集预告或最后一�
 
 Codex 不可用、输出结构错误或三轮未通过时，系列创建仍可生成明确标注的 deterministic fallback 草案，保证创作者能继续查看和编辑路线图。fallback 记录 Provider、模型、Prompt Pack、审计状态和原因，不能伪装成 Agent 审核通过；在独立 Greenlight Agent 恢复并审计通过前，repository 和应用服务都会拒绝采用该集，因此草案不会绕过审计进入生产。
 
-生产 run 明确失败、拒绝或被合规删除后，单集回到 `selected`，保留 `attemptRunIds` 作为历史，但释放当前 `runId`，允许用户从同一个已采用机会重试。若计费 Provider 已受理请求、进程却在保存 task ID 或结果前中断，结果被视为 `outcomeUncertain`：单集进入 `paused` 并保留原 `runId`，禁止另起一次付费制作，只允许原任务对账或沿用原 operation request ID 恢复。已经成为 Canon 来源的 Internal Master 不能永久删除，只能归档。Agent loop 的 `exhausted` checkpoint 是终态；同一 checkpoint key 不会悄悄再开启额外三轮，重新审计必须显式产生新 key。
+生产 run 明确失败、拒绝或被合规删除后，单集回到 `selected`，保留 `attemptRunIds` 作为历史，但释放当前 `runId`，允许用户从同一个已采用机会重试。若计费 Provider 已受理请求、进程却在保存 task ID 或结果前中断，结果被视为 `outcomeUncertain`：单集进入 `paused` 并保留原 `runId`，禁止另起一次付费制作，只允许原任务对账或沿用原 operation request ID 恢复。已经成为 Canon 来源的 Internal Master 不能永久删除，只能归档。Agent loop 的 `exhausted` checkpoint 不会被后台自动重放；生产节点只有在用户显式点击 retry 后才开启 `cycle + 1` 并生成新的 broker request id，`running` checkpoint 则继续沿用已保存的候选、会话和 request id。
 
 迁移旧系列时，创作者可以把一条历史成功成片明确绑定到某一集。旧任务没有结构化 `canonFacts` 时，系统不得从标题或旁白猜测正史；该集会标记为已恢复并显示“请人工补充承接”的连续性提示。这个显式迁移确认可以解锁下一集，但不会向 Canon Ledger 写入任何虚构事实。
 
