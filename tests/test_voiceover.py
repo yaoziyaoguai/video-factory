@@ -85,6 +85,25 @@ class MiniMaxVoiceoverTest(unittest.TestCase):
                     )
             self.assertFalse(output_path.exists())
 
+    def test_does_not_retry_a_connection_reset_with_an_unknown_provider_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "voice.mp3"
+            with patch(
+                "video_factory.voiceover.urlopen",
+                side_effect=ConnectionResetError(104, "Connection reset by peer"),
+            ) as request:
+                with self.assertRaisesRegex(RuntimeError, "automatic retry is disabled"):
+                    synthesize_minimax_audio(
+                        text="连接中断后不能猜测服务商是否已经完成合成。",
+                        output_path=output_path,
+                        voice="female-chengshu",
+                        rate=185,
+                        api_key="test-key",
+                    )
+
+            self.assertEqual(request.call_count, 1)
+            self.assertFalse(output_path.exists())
+
     def test_persists_a_minimax_scene_before_the_request_and_materializes_the_raw_audio(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1,7 +1,7 @@
 import { AlertCircle, ArrowLeft, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { StudioCostRunDetail, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioReworkDraft, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { studioApi, subscribeToRun } from "../api.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 import { RunWorkbench } from "../components/RunWorkbench.js";
@@ -24,6 +24,7 @@ export function RunPage() {
   const [restarting, setRestarting] = useState(false);
   const [restartProviders, setRestartProviders] = useState<StudioProvider[]>([]);
   const [restartSettings, setRestartSettings] = useState<StudioCreatorSettings>();
+  const [restartDraft, setRestartDraft] = useState<StudioReworkDraft>();
   const [costDetail, setCostDetail] = useState<StudioCostRunDetail>();
   const [costError, setCostError] = useState<string>();
   const [nodeMutationPending, setNodeMutationPending] = useState(false);
@@ -169,9 +170,14 @@ export function RunPage() {
   async function beginRestart() {
     setError(undefined);
     try {
-      const [providers, settings] = await Promise.all([studioApi.providers(), studioApi.settings()]);
+      const [providers, settings, draft] = await Promise.all([
+        studioApi.providers(),
+        studioApi.settings(),
+        studioApi.reworkDraft(runId),
+      ]);
       setRestartProviders(providers);
       setRestartSettings(settings);
+      setRestartDraft(draft);
       setRestarting(true);
     } catch (caught) {
       setError(`无法读取重新制作所需配置：${caught instanceof Error ? caught.message : String(caught)}`);
@@ -333,12 +339,15 @@ export function RunPage() {
     setNodeMutationPending(true);
     setError(undefined);
     try {
-      const nextRun = await withMutationProgress(() => studioApi.reconcilePaidOperation(runId, nodeId, {
+      let nextRun = await withMutationProgress(() => studioApi.reconcilePaidOperation(runId, nodeId, {
         expectedRunRevision: reconciliationRequest.expectedRunRevision,
         reconciliationId: reconciliationRequest.reconciliationId,
         ...input,
       }));
       reconciliationRequests.current.delete(reconciliationKey);
+      if (nodeId === "voice" && input.outcome === "confirmed_charged") {
+        nextRun = await withMutationProgress(() => studioApi.retryFailedNode(runId, nodeId));
+      }
       setRun((current) => preferRunSnapshot(current, nextRun));
       setConnectionWarning(undefined);
       await Promise.all([
@@ -365,7 +374,7 @@ export function RunPage() {
   }
 
   if (loading) {
-    return <div className="page-loading"><LoaderCircle aria-hidden="true" size={22} />正在读取生产现场...</div>;
+    return <div className="page-loading"><LoaderCircle aria-hidden="true" size={22} />正在读取制作详情...</div>;
   }
   if (!run) {
     return (
@@ -390,18 +399,7 @@ export function RunPage() {
         open={restarting}
         providers={restartProviders}
         {...(restartSettings ? { creatorSettings: restartSettings } : {})}
-        initialValues={{
-          title: run.title,
-          angle: run.angle,
-          audience: run.audience,
-          nicheSlug: run.nicheSlug,
-          platform: run.platform,
-          durationSeconds: run.durationSeconds,
-          reviewMode: "manual",
-          ...(run.creationOrigin && run.opportunityId ? {
-            creationContext: { origin: run.creationOrigin, opportunityId: run.opportunityId },
-          } : {}),
-        }}
+        {...(restartDraft ? { initialValues: restartDraft.input } : {})}
         onClose={() => setRestarting(false)}
         onSubmit={restartProduction}
       />

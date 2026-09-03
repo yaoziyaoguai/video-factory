@@ -140,7 +140,7 @@ const FIELD_LABELS: Record<string, string> = {
   timecodeMs: "发生时间",
   shots: "镜头计划",
   scene_assets: "逐镜素材",
-  director_routing: "导演路由",
+  director_routing: "导演画面方案",
   candidate_shortlist: "候选素材",
   scene_candidates: "逐镜候选",
   semanticScore: "语义匹配分",
@@ -167,7 +167,7 @@ const FIELD_LABELS: Record<string, string> = {
   economics: "画面来源策略",
   director: "导演配置",
   voiceDirection: "声音配置",
-  visualBible: "视觉圣经",
+  visualBible: "全片视觉规则",
   mastering: "声音处理",
   audio: "音频检查",
   scores: "评分",
@@ -186,7 +186,7 @@ const FIELD_LABELS: Record<string, string> = {
 
 export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps) {
   const record = asRecord(value);
-  if (!record) return <p className="node-document-state">该节点暂时没有结构化交付。</p>;
+  if (!record) return <p className="node-document-state">这一步暂时没有可查看的详细内容。</p>;
   const inputPreview = nodeId.endsWith("-input");
   const viewId = creatorViewId(nodeId);
   const assetRoutes = viewId === "assets" && Array.isArray(record.director_routing)
@@ -226,7 +226,7 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
       && !(viewId === "asset-semantic-rank" && entry.key === "scenes"));
 
   if (!primary.length && !nested.length && !collections.length && !assetRoutes.length && !candidateScenes.length && !rankingScenes.length) {
-    return <p className="node-document-state">这个节点没有需要人工查看或修改的创作内容。</p>;
+    return <p className="node-document-state">这一步没有需要人工查看或修改的创作内容。</p>;
   }
 
   return (

@@ -120,6 +120,7 @@ function visualDirectorAuditContext(
         durationSeconds: brief.durationSeconds,
         requestedProfileId: brief.requestedProfileId,
         ...(brief.editorial ? { editorial: brief.editorial } : {}),
+        ...(brief.rework ? { rework: brief.rework } : {}),
         ...(template ? {
           template: {
             automationLevel: template.automationLevel,

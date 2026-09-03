@@ -81,4 +81,46 @@ describe("editorial production decision", () => {
     assert.equal(decision.verdict, "produce_video");
     assert.match(decision.reasons.join(" "), /系列/);
   });
+
+  it("requires every viral-video gate to clear its exact boundary", () => {
+    const passing = {
+      ...base,
+      title: "三步实测 AI 如何减少重复工作",
+      freshness: "evergreen" as const,
+      score: {
+        ...base.score,
+        audienceReach: 60,
+        visualFeasibility: 68,
+        novelty: 55,
+        complianceRisk: 45,
+        final: 70,
+      },
+    };
+    assert.equal(decideEditorialFormat(passing).verdict, "produce_video");
+    for (const score of [
+      { audienceReach: 59 },
+      { visualFeasibility: 67 },
+      { novelty: 54 },
+      { complianceRisk: 46 },
+    ]) {
+      assert.equal(decideEditorialFormat({ ...passing, score: { ...passing.score, ...score } }).verdict, "skip");
+    }
+    assert.equal(decideEditorialFormat({
+      ...passing,
+      title: "AI 与普通工作的关系",
+      score: { ...passing.score, visualFeasibility: 77 },
+    }).verdict, "skip");
+  });
+
+  it("maps each motion-video shape to a concrete production template", () => {
+    const productDemo = decideEditorialFormat({ ...base, title: "实测 AI 如何整理一份会议记录", freshness: "evergreen" });
+    const liveBrief = decideEditorialFormat({ ...base, title: "AI 助手进入普通人的工作", freshness: "live" });
+    const miniDoc = decideEditorialFormat({ ...base, title: "乡村青年返乡后的真实工作", category: "agriculture-rural", freshness: "evergreen" });
+    const explainer = decideEditorialFormat({ ...base, title: "为什么 AI 会改变普通人的工作分工", freshness: "evergreen" });
+
+    assert.equal(productDemo.recommendedTemplate?.id, "product-demo");
+    assert.equal(liveBrief.recommendedTemplate?.id, "trend-fact-brief");
+    assert.equal(miniDoc.recommendedTemplate?.id, "human-mini-doc");
+    assert.equal(explainer.recommendedTemplate?.id, "knowledge-explainer");
+  });
 });

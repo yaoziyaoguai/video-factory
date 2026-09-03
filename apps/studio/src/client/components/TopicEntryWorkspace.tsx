@@ -28,6 +28,7 @@ import type {
   StudioSeriesEpisodePlanInput,
   StudioTopicCategory,
 } from "../../shared/api.js";
+import { reasoningEffortLabel } from "../presentation.js";
 import { platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
 import { CandidateVerificationDialog } from "./CandidateVerificationDialog.js";
 import { SeriesEpisodeDialog } from "./SeriesEpisodeDialog.js";
@@ -110,7 +111,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             <div>
               <p className="eyebrow">{mode === "trend" ? "实时信号" : "系列策划"}</p>
               <h2>{mode === "trend" ? "热点候选收件箱" : "系列选题台"}</h2>
-              <p>{mode === "trend" ? "信号已经过选题 Agent 转译；先筛选，再核验证据。" : "每个系列保留长期承诺，策划器只生成接下来的可制作集数。"}</p>
+              <p>{mode === "trend" ? "热点信号已经过选题总编转译；先筛选，再核验证据。" : "每个系列保留长期承诺，策划器只生成接下来的可制作集数。"}</p>
             </div>
             {mode === "trend" ? (
               <div className="trend-refresh-status" aria-label="热点更新状态">
@@ -134,7 +135,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
           ) : mode === "series" && props.series.length === 0 ? (
             <div className="series-empty"><LibraryBig aria-hidden="true" size={28} /><div><h3>先创建一个可持续的系列</h3><p>定义受众、栏目承诺和内容支柱后，系统会给出连续编号的下一集候选。</p></div><button className="button button-primary" type="button" onClick={props.onCreateSeries}>创建第一个系列</button></div>
           ) : mode === "trend" && modeItems.length === 0 ? (
-            <div className="series-empty"><RadioTower aria-hidden="true" size={28} /><div><h3>当前没有可用热点候选</h3><p>可能是上游暂时离线、缓存为空，或选题 Agent 没有发现值得制作的内容。可手动刷新，或录入已确认来源的研究结果。</p></div><button className="button button-primary" type="button" onClick={props.onManual}>手动录入</button><button className="button button-secondary" type="button" onClick={props.onImport}>导入 JSON</button></div>
+            <div className="series-empty"><RadioTower aria-hidden="true" size={28} /><div><h3>当前没有可用热点候选</h3><p>可能是热点来源暂时离线、还没有缓存，或选题总编没有发现真正值得制作的内容。可手动刷新，或录入已确认来源的研究结果。</p></div><button className="button button-primary" type="button" onClick={props.onManual}>手动录入</button><button className="button button-secondary" type="button" onClick={props.onImport}>导入 JSON</button></div>
           ) : mode === "series" && selectedSeries ? (
             <SeriesRoadmap
               series={selectedSeries}
@@ -320,12 +321,12 @@ function SeriesRoadmap({
               {selectedEpisode.planning.auditSummary ? <p><strong>审计结论：</strong>{selectedEpisode.planning.auditSummary}{selectedEpisode.planning.auditScore !== undefined ? `（${selectedEpisode.planning.auditScore} 分）` : ""}</p> : null}
               {selectedEpisode.planning.fallbackReason ? <p>{selectedEpisode.planning.fallbackReason}</p> : null}
             </section>
-            {auditUnavailable ? <p className="series-lock-note"><ShieldAlert aria-hidden="true" size={15} />开拍前独立审计 Agent 尚未就绪。<Link to="/resources#production-roles">去配置系列主理人</Link></p> : null}
+            {auditUnavailable ? <p className="series-lock-note"><ShieldAlert aria-hidden="true" size={15} />开拍前独立质量审计尚未就绪。<Link to="/resources#production-roles">去配置系列主理人</Link></p> : null}
             {blockedBy ? <p className="series-lock-note"><LockKeyhole aria-hidden="true" size={15} />第 {blockedBy} 集尚未定版；完成审片后，本集会自动继承最新已确认内容再解锁。</p> : null}
             {selectedEpisode.status === "planned" ? (
               <div className="series-episode-actions">
                 <button className="button button-secondary" type="button" disabled={adoptingId !== undefined} onClick={() => setEditing(true)}><PencilLine aria-hidden="true" size={16} />编辑路线图</button>
-                <button className="button button-primary" type="button" disabled={!mayAdopt || adoptingId !== undefined || auditAvailabilityPending || auditUnavailable} onClick={() => selectedCandidate && void onAdopt(selectedCandidate)}>{adoptingId === selectedEpisode.id ? "正在审计..." : blockedBy ? `完成第 ${blockedBy} 集后解锁` : auditAvailabilityPending ? "正在确认审计能力" : auditUnavailable ? "开拍审计未就绪" : needsGreenlight ? "先审计，再进入制作" : "采用本集并进入制作"}<ArrowRight aria-hidden="true" size={16} /></button>
+                <button className="button button-primary" type="button" disabled={!mayAdopt || adoptingId !== undefined || auditAvailabilityPending || auditUnavailable} onClick={() => selectedCandidate && void onAdopt(selectedCandidate)}>{adoptingId === selectedEpisode.id ? "正在复核..." : blockedBy ? `完成第 ${blockedBy} 集后解锁` : auditAvailabilityPending ? "正在确认复核能力" : auditUnavailable ? "开拍前复核未就绪" : needsGreenlight ? "先复核，再进入制作" : "采用本集并进入制作"}<ArrowRight aria-hidden="true" size={16} /></button>
               </div>
             ) : isMigrationPendingEpisode(selectedEpisode) ? (
               <section className="series-legacy-recovery" aria-label="恢复历史单集">
@@ -366,13 +367,13 @@ function planningAuditLabel(planning: StudioSeries["episodes"][number]["planning
 function planningSourceLabel(planning: StudioSeries["episodes"][number]["planning"]): string {
   if (planning.source === "human") return "人工 / 手工编辑";
   if (planning.source === "rules") return "规则策划 / 确定性保底";
-  return `${planning.providerId} / ${planning.modelId}`;
+  return "AI 系列总编";
 }
 
 function planningReasoningLabel(planning: StudioSeries["episodes"][number]["planning"]): string {
   if (planning.source === "human") return "人工决定";
   if (planning.source === "rules") return "固定规则";
-  return planning.reasoningEffort ?? "由 Provider 决定";
+  return reasoningEffortLabel(planning.reasoningEffort);
 }
 
 function seriesEpisodeStatusLabel(episode: StudioSeries["episodes"][number], locked = false): string {
@@ -393,7 +394,7 @@ function seriesEpisodeProgressNote(episode: StudioSeries["episodes"][number]): s
   return {
     planned: "本集仍在路线图中。",
     selected: "本集已进入制作区，可以继续确认配方并启动生产。",
-    in_production: "本集正在制作；需要语义判断的角色会执行独立 Agent 审计。",
+    in_production: "本集正在制作；需要语义判断的内容会接受独立质量审计。",
     ready: "本集已通过审片并成为后续可依赖的定版内容，可以推进下一集。",
     published: "本集已经完成外部分发。",
     paused: "本集已经暂停，不会继续进入生产。",
@@ -459,6 +460,14 @@ function CandidateDetail({ item, adopting, disabled, onAdopt }: { item: StudioCa
         <strong>{editorialVerdictLabel(item.editorialDecision.verdict)} · {item.editorialDecision.score} 分</strong>
         <p>{item.editorialDecision.reasons[0]}</p>
         <small>{item.editorialDecision.guardrails[0]}</small>
+        {item.editorialDecision.recommendedTemplate ? (
+          <div className="candidate-template-recommendation">
+            <span>推荐形态</span>
+            <strong>{item.editorialDecision.recommendedTemplate.name}</strong>
+            <p>{item.editorialDecision.recommendedTemplate.format}</p>
+            <small>{item.editorialDecision.recommendedTemplate.rationale}</small>
+          </div>
+        ) : null}
       </div>
       <div className="candidate-meta">
         <span><Clock3 aria-hidden="true" size={13} />{item.freshness === "live" ? "实时" : item.freshness === "today" ? "今日" : "常青"}</span>
@@ -498,7 +507,7 @@ function CustomEntry({ onManual, onImport }: { onManual: () => void; onImport: (
       <div><p className="eyebrow">自主选题</p><h2>自定义创作</h2><p>不追热点也完全成立。把自己的观察、系列外灵感或已经核验的研究直接送进同一套制作流程。</p></div>
       <div className="custom-entry-actions">
         <button className="custom-entry-action" type="button" onClick={onManual}><PenLine aria-hidden="true" size={22} /><span><strong>手动录入</strong><small>填写标题、受众、痛点和开场钩子</small></span><ArrowRight aria-hidden="true" size={17} /></button>
-        <button className="custom-entry-action" type="button" onClick={onImport}><FileInput aria-hidden="true" size={22} /><span><strong>导入 JSON</strong><small>接入外部研究或其他 Agent 的结构化结果</small></span><ArrowRight aria-hidden="true" size={17} /></button>
+        <button className="custom-entry-action" type="button" onClick={onImport}><FileInput aria-hidden="true" size={22} /><span><strong>导入 JSON</strong><small>接入外部研究或其他 AI 工具的结构化结果</small></span><ArrowRight aria-hidden="true" size={17} /></button>
       </div>
     </div>
   );

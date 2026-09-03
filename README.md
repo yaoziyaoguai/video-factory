@@ -8,11 +8,14 @@ VideoFactory 是面向单人创作者的本地优先短视频 Creative OS。它�
 
 - 图片和视频按导演最终选中的逐镜方案报价。没有全局或单视频硬费用上限，任何计费 Provider 都必须在调用前获得人工确认。
 - MiniMax TTS 自动执行并按人民币记账，不弹素材报价；GLM-5.3-Flash 视觉审片使用 Code Plan，不产生现金报价。
+- 选题推荐不是热榜搬运：总编必须同时判断受众价值、来源可靠性、可拍性和适合的视频形态，并为每个可制作选题绑定推荐模板。
 - 拒绝报价只保存结构化反馈。只有用户主动选择重新规划，导演才会生成新方案和新报价。
+- 成片被打回后，新制作会继承上一版模板、模型、画面来源、声音和导演配置；审片 finding 会按脚本、导演方案和画面素材三类预填并真正进入对应生产输入。
 - 图库为空、下载失败、生成失败或复用失败都会让对应节点明确停止，不能用说明卡伪装成功。
 - `editorial_card` 只有在导演明确选择 `local-editorial-v1` 时才是合法成片内容，且不能出现内部工作流术语。
 - `REUSE_ONLY scene N` 复用更早且已物化的母片，不重新搜索、生成或计费，也不能虚构新的动作或画面状态。
 - Agent 负责提案，程序负责可计算事实，用户保留费用审批、节点修改、局部返修和最终审片权。
+- 面向创作者的界面使用“制作步骤、服务商、来源核验、逐镜自动调度”等可理解用语；`Node`、`Provider`、`gate` 等术语只保留在工程合同与审计记录中。
 
 ## 系统结构
 
@@ -139,6 +142,7 @@ feature branch -> Pull Request -> GitHub Actions -> Alibaba ECS
 - [Loop 工程方法](docs/loop-engineering.md)
 - [项目演进摘要](docs/HISTORY.md)
 - [当前费用与严格素材验收记录](docs/loops/022-spend-approval-and-strict-assets-results.md)
+- [爆款选题、返工继承与创作者语言记录](docs/loops/023-viral-selection-rework-and-creator-language.md)
 
 历史实现计划、过期视觉方案和一次性验收报告不再保留在当前工作树；需要考古时从 Git 历史读取，清理前基线为 `2d4f842b160801925115acbae9d1e536079334c6`。
 

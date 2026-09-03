@@ -40,9 +40,47 @@ describe("ProductionBrief", () => {
     assert.deepEqual(brief.economics, {
       recipeId: "economy-daily",
       allowMeteredProviders: false,
-      maxPaidShots: 0,
-      maxCostCny: 0,
     });
+  });
+
+  it("preserves bounded node-level rework instructions and prior creative documents", () => {
+    const parsed = pipeline.parseBrief({
+      ...validBrief,
+      rework: {
+        sourceRunId: "run-rejected-1",
+        sourceRunRevision: 17,
+        rejectionReason: "第 3 镜文字干扰主体。",
+        nodeInstructions: {
+          script: "保留事实，只缩短第三镜旁白。",
+          visualDirection: "重做第三镜构图并移除画面内文字。",
+          assets: "只替换第三镜，其他母片保持不变。",
+        },
+        findings: [{
+          timecodeMs: 8_500,
+          scenePosition: 3,
+          category: "text_interference",
+          description: "画面内文字与字幕重叠。",
+          suggestion: "换用无字母片。",
+          targetNodeIds: ["visual-direction", "assets"],
+        }],
+        previousScript: { viewerPromise: "解释真实原因" },
+        previousDirectorPlan: { visualBible: { typography: "字幕之外不出现文字" } },
+      },
+    });
+
+    assert.equal(parsed.rework?.sourceRunId, "run-rejected-1");
+    assert.equal(parsed.rework?.nodeInstructions.assets, "只替换第三镜，其他母片保持不变。");
+    assert.deepEqual(parsed.rework?.findings[0]?.targetNodeIds, ["visual-direction", "assets"]);
+    assert.deepEqual(parsed.rework?.previousScript, { viewerPromise: "解释真实原因" });
+    assert.throws(() => pipeline.parseBrief({
+      ...validBrief,
+      rework: {
+        sourceRunId: "../escape",
+        sourceRunRevision: 1,
+        nodeInstructions: { script: "修改", visualDirection: "修改", assets: "修改" },
+        findings: [],
+      },
+    }), /rework\.sourceRunId is invalid/);
   });
 
   it("preserves the formally approved previous-episode handoff in series context", () => {
@@ -187,8 +225,6 @@ describe("ProductionBrief", () => {
     assert.deepEqual(brief.economics, {
       recipeId: "keyshot-ai",
       allowMeteredProviders: true,
-      maxPaidShots: 0,
-      maxCostCny: 0,
     });
   });
 
@@ -206,8 +242,6 @@ describe("ProductionBrief", () => {
     assert.deepEqual(brief.economics, {
       recipeId: "economy-daily",
       allowMeteredProviders: true,
-      maxPaidShots: 0,
-      maxCostCny: 0,
     });
   });
 

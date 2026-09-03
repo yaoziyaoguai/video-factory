@@ -142,7 +142,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
         throw new SeriesStoreConflictError(`第 ${episodeNumber} 集已经进入后续阶段，请刷新后再试。`);
       }
       if (episode.canonBaseRevision !== current.canon.revision) {
-        throw new SeriesStoreConflictError(`第 ${episodeNumber} 集尚未通过最新 Canon 的开拍审计。`);
+        throw new SeriesStoreConflictError(`第 ${episodeNumber} 集尚未通过基于最新已确认内容的开拍复核。`);
       }
       if (episode.planning.auditStatus !== "passed") {
         throw new SeriesStoreConflictError(`第 ${episodeNumber} 集尚未通过独立开拍审计。`);
@@ -150,7 +150,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       const upstreamEdit = current.episodes.find((candidate) => candidate.episodeNumber < episode.episodeNumber
         && activeEditLease(candidate, updatedAt));
       if (upstreamEdit) {
-        throw new SeriesStoreConflictError(`第 ${upstreamEdit.episodeNumber} 集正在修改，完成并重新写入 Canon 前不能采用第 ${episodeNumber} 集。`);
+        throw new SeriesStoreConflictError(`第 ${upstreamEdit.episodeNumber} 集正在修改，完成并更新已确认内容前不能采用第 ${episodeNumber} 集。`);
       }
       const blocker = blockingPriorEpisode(current, episode);
       if (blocker) {
@@ -337,12 +337,12 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       }
       const blocker = blockingPriorEpisode(current, episode);
       if (blocker) {
-        throw new SeriesStoreConflictError(`第 ${blocker.episodeNumber} 集尚未形成有效 Canon，不能开始第 ${episode.episodeNumber} 集。`);
+        throw new SeriesStoreConflictError(`第 ${blocker.episodeNumber} 集尚未形成有效的已确认内容，不能开始第 ${episode.episodeNumber} 集。`);
       }
       const upstreamEdit = current.episodes.find((candidate) => candidate.episodeNumber < episode.episodeNumber
         && activeEditLease(candidate, updatedAt));
       if (upstreamEdit) {
-        throw new SeriesStoreConflictError(`第 ${upstreamEdit.episodeNumber} 集正在修改，完成并重新写入 Canon 前不能开始第 ${episode.episodeNumber} 集。`);
+        throw new SeriesStoreConflictError(`第 ${upstreamEdit.episodeNumber} 集正在修改，完成并更新已确认内容前不能开始第 ${episode.episodeNumber} 集。`);
       }
       if (episode.status !== "selected" || episode.opportunityId !== opportunityId || episode.runId || episode.runReservation) {
         throw new SeriesStoreConflictError(`第 ${episode.episodeNumber} 集已经被其他制作占用，请刷新制作记录。`);
@@ -428,12 +428,12 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       if (episode.runId === runId) return structuredClone(current);
       const blocker = blockingPriorEpisode(current, episode);
       if (blocker) {
-        throw new SeriesStoreConflictError(`第 ${blocker.episodeNumber} 集尚未形成有效 Canon，不能开始第 ${episode.episodeNumber} 集。`);
+        throw new SeriesStoreConflictError(`第 ${blocker.episodeNumber} 集尚未形成有效的已确认内容，不能开始第 ${episode.episodeNumber} 集。`);
       }
       const upstreamEdit = current.episodes.find((candidate) => candidate.episodeNumber < episode.episodeNumber
         && activeEditLease(candidate, updatedAt));
       if (upstreamEdit) {
-        throw new SeriesStoreConflictError(`第 ${upstreamEdit.episodeNumber} 集正在修改，完成并重新写入 Canon 前不能开始第 ${episode.episodeNumber} 集。`);
+        throw new SeriesStoreConflictError(`第 ${upstreamEdit.episodeNumber} 集正在修改，完成并更新已确认内容前不能开始第 ${episode.episodeNumber} 集。`);
       }
       if (episode.status !== "selected" || episode.runId) {
         throw new SeriesStoreConflictError(`第 ${episode.episodeNumber} 集已经绑定其他制作记录。`);
@@ -542,7 +542,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
     const series = (await this.read()).series.find((candidate) => candidate.episodes.some((episode) => episode.runId === runId));
     const episode = series?.episodes.find((candidate) => candidate.runId === runId);
     if (episode?.status === "ready" || episode?.status === "published") {
-      throw new SeriesStoreConflictError("这条制作已经成为系列 Canon 的来源，不能永久删除；请归档保留，或先建立正式修订。");
+      throw new SeriesStoreConflictError("这条制作已经成为系列已确认内容的来源，不能永久删除；请归档保留，或先建立正式修订。");
     }
   }
 
@@ -951,7 +951,7 @@ function historicalAdoptedEpisodes(
       title: `${record.name ?? "历史系列"} ${String(episodeNumber).padStart(2, "0")}｜历史已采用单集`,
       viewerPromise: premise,
       hook: "保留迁移前已经采用的系列单集。",
-      payoff: "等待关联历史制作记录并恢复正式 Canon。",
+      payoff: "等待关联历史制作记录并恢复正式的已确认内容。",
       ...(episodeNumber > 1 ? {
         previousEpisodeId: `series-${seriesId}-episode-${String(episodeNumber - 1).padStart(3, "0")}`,
       } : {}),

@@ -22,6 +22,7 @@ import type {
   StudioProvider,
   StudioResourceManifest,
   StudioReferenceVideo,
+  StudioReworkDraft,
   StudioRunDetail,
   StudioRunSummary,
   StudioSeries,
@@ -182,6 +183,7 @@ export const studioApi = {
   costs: () => requestJson<StudioCostDashboard>("/api/costs"),
   runCosts: (runId: string) => requestJson<StudioCostRunDetail>(`/api/runs/${encodeURIComponent(runId)}/costs`),
   run: (runId: string) => requestJson<StudioRunDetail>(`/api/runs/${encodeURIComponent(runId)}`),
+  reworkDraft: (runId: string) => requestJson<StudioReworkDraft>(`/api/runs/${encodeURIComponent(runId)}/rework-draft`),
   uploadReferenceVideo: (file: File) => requestJson<StudioReferenceVideo>("/api/reference-videos", {
     method: "POST",
     headers: {

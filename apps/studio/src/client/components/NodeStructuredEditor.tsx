@@ -62,7 +62,7 @@ const LABELS: Record<string, string> = {
   shots: "镜头计划",
   findings: "审片问题",
   beats: "节拍",
-  visualBible: "视觉圣经",
+  visualBible: "全片视觉规则",
   scores: "评分",
   economics: "画面来源策略",
   director: "导演配置",

@@ -91,6 +91,11 @@ export interface StudioCreatorSettings {
 }
 
 export interface StudioTopicStrategy {
+  positioning?: string;
+  targetAudience?: string;
+  preferredDirections?: string;
+  excludedDirections?: string;
+  sourcePolicy?: "primary_or_two_independent" | "traceable_source";
   customInstruction: string;
 }
 
@@ -101,7 +106,7 @@ export interface StudioCreatorSettingsPatch {
   roleProviderDefaults?: StudioRoleProviderDefaults;
   modelDefaults?: Record<string, string>;
   productionDefaults?: Partial<StudioProductionDefaults>;
-  topicStrategy?: StudioTopicStrategy;
+  topicStrategy?: Partial<StudioTopicStrategy>;
 }
 
 export interface StudioModelProfile {
@@ -205,11 +210,19 @@ export type StudioCandidateRisk = "low" | "review" | "high";
 export type StudioVerificationStatus = "ready" | "review_required" | "blocked" | "verified";
 export type StudioEditorialVerdict = "produce_video" | "produce_image_story" | "skip";
 
+export interface StudioTemplateRecommendation {
+  id: string;
+  name: string;
+  format: string;
+  rationale: string;
+}
+
 export interface StudioEditorialDecision {
   verdict: StudioEditorialVerdict;
   score: number;
   reasons: string[];
   guardrails: string[];
+  recommendedTemplate?: StudioTemplateRecommendation;
 }
 
 export interface StudioCandidateVerification {
@@ -697,8 +710,6 @@ export interface StudioNodeExecutionConfiguration {
   assetProviderIds?: string[];
   economics?: {
     allowMeteredProviders: boolean;
-    maxPaidShots: number;
-    maxCostCny: number;
   };
 }
 
@@ -825,8 +836,6 @@ export interface StudioNodeExecutionConfigurationInput {
   assetProviderIds?: string[];
   economics?: {
     allowMeteredProviders: boolean;
-    maxPaidShots: number;
-    maxCostCny: number;
   };
   confirmTerminalEdit?: boolean;
 }
@@ -874,6 +883,7 @@ export interface StudioPaidNodeSummary {
   nodeId: string;
   operationId?: string;
   recommendedOutcome?: StudioPaidReconciliationInput["outcome"];
+  failureKind?: "unknown_outcome" | "terminal_failure" | "missing_evidence";
   requiresManualReconciliation: boolean;
   items: StudioPaidOperationItem[];
 }
@@ -1137,6 +1147,34 @@ export interface StudioCostRunDetail extends StudioCostRunSummary {
   lines: StudioCostLine[];
 }
 
+export interface StudioReworkFinding {
+  timecodeMs: number;
+  scenePosition?: number;
+  category: string;
+  description: string;
+  suggestion: string;
+  targetNodeIds: Array<"script" | "visual-direction" | "assets">;
+}
+
+export interface StudioReworkContext {
+  sourceRunId: string;
+  sourceRunRevision: number;
+  rejectionReason?: string;
+  nodeInstructions: {
+    script: string;
+    visualDirection: string;
+    assets: string;
+  };
+  findings: StudioReworkFinding[];
+  previousScript?: Record<string, unknown>;
+  previousDirectorPlan?: Record<string, unknown>;
+}
+
+export interface StudioReworkDraft {
+  input: StudioProductionInput;
+  inheritedNodeIds: string[];
+}
+
 export interface StudioProductionInput {
   protocolVersion: "video-factory/brief-v1";
   title: string;
@@ -1157,6 +1195,7 @@ export interface StudioProductionInput {
     origin: "trend" | "series" | "manual";
     opportunityId: string;
   };
+  rework?: StudioReworkContext;
   voiceDirection: StudioVoiceDirection;
   providers: {
     script: string;
@@ -1183,8 +1222,6 @@ export interface StudioProductionInput {
   economics: {
     recipeId: StudioProductionRecipeId;
     allowMeteredProviders: boolean;
-    maxPaidShots: number;
-    maxCostCny: number;
   };
 }
 
@@ -1407,11 +1444,40 @@ export function parseStudioCreatorSettingsPatch(value: unknown): StudioCreatorSe
   }
   if (input.topicStrategy !== undefined) {
     const strategy = requiredObject(input.topicStrategy, "选题策略");
-    const customInstruction = requiredTrimmedString(strategy.customInstruction, "选题总编补充指令");
-    if (customInstruction.length > 2_000) throw new StudioInputError("选题总编补充指令不能超过 2000 个字符。");
-    patch.topicStrategy = { customInstruction };
+    const customInstruction = optionalTopicStrategyText(strategy.customInstruction, "选题总编补充指令", 2_000) ?? "";
+    const positioning = requiredTopicStrategyTextIfPresent(strategy.positioning, "内容定位", 500);
+    const targetAudience = requiredTopicStrategyTextIfPresent(strategy.targetAudience, "核心受众", 500);
+    const preferredDirections = requiredTopicStrategyTextIfPresent(strategy.preferredDirections, "优先题材", 1_000);
+    const excludedDirections = requiredTopicStrategyTextIfPresent(strategy.excludedDirections, "避开题材", 1_000);
+    const sourcePolicy = strategy.sourcePolicy;
+    if (sourcePolicy !== undefined && sourcePolicy !== "primary_or_two_independent" && sourcePolicy !== "traceable_source") {
+      throw new StudioInputError("候选来源标准无效。");
+    }
+    patch.topicStrategy = {
+      customInstruction,
+      ...(positioning ? { positioning } : {}),
+      ...(targetAudience ? { targetAudience } : {}),
+      ...(preferredDirections ? { preferredDirections } : {}),
+      ...(excludedDirections ? { excludedDirections } : {}),
+      ...(sourcePolicy ? { sourcePolicy } : {}),
+    };
   }
   return patch;
+}
+
+function optionalTopicStrategyText(value: unknown, label: string, maxLength: number): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "string" && value.trim() === "") return undefined;
+  const text = requiredTrimmedString(value, label);
+  if (text.length > maxLength) throw new StudioInputError(`${label}不能超过 ${maxLength} 个字符。`);
+  return text;
+}
+
+function requiredTopicStrategyTextIfPresent(value: unknown, label: string, maxLength: number): string | undefined {
+  if (value === undefined) return undefined;
+  const text = requiredTrimmedString(value, label);
+  if (text.length > maxLength) throw new StudioInputError(`${label}不能超过 ${maxLength} 个字符。`);
+  return text;
 }
 
 export function parseStudioCandidateAdoptionInput(value: unknown): StudioCandidateAdoptionInput {
@@ -1457,7 +1523,7 @@ export function parseStudioSceneRevisionInput(value: unknown): StudioSceneRevisi
     expectedAssetVersionId: requiredTrimmedString(input.expectedAssetVersionId, "画面版本"),
     reviewArtifactId: requiredTrimmedString(input.reviewArtifactId, "审片报告"),
     findingIndex: Number(input.findingIndex),
-    reuseFromScenePosition: positiveInteger(input.reuseFromScenePosition, "复用母片镜头"),
+    reuseFromScenePosition: positiveInteger(input.reuseFromScenePosition, "替换来源镜头"),
     note,
   };
 }
@@ -1611,11 +1677,28 @@ function parseEditorialDecision(value: unknown): StudioEditorialDecision {
   if (verdict !== "produce_video" && verdict !== "produce_image_story" && verdict !== "skip") {
     throw new StudioInputError("编辑结论无效。");
   }
+  const recommendedTemplate = input.recommendedTemplate === undefined
+    ? undefined
+    : parseTemplateRecommendation(input.recommendedTemplate);
+  if (verdict === "skip" && recommendedTemplate) {
+    throw new StudioInputError("跳过的选题不能推荐制作模板。");
+  }
   return {
     verdict,
     score: boundedNumber(input.score, "生产价值分"),
     reasons: requiredStringArray(input.reasons, "编辑理由"),
     guardrails: requiredStringArray(input.guardrails, "制作边界"),
+    ...(recommendedTemplate ? { recommendedTemplate } : {}),
+  };
+}
+
+function parseTemplateRecommendation(value: unknown): StudioTemplateRecommendation {
+  const input = requiredObject(value, "推荐模板");
+  return {
+    id: requiredTrimmedString(input.id, "推荐模板编号"),
+    name: requiredTrimmedString(input.name, "推荐模板名称"),
+    format: requiredTrimmedString(input.format, "推荐视频形态"),
+    rationale: requiredTrimmedString(input.rationale, "模板推荐理由"),
   };
 }
 

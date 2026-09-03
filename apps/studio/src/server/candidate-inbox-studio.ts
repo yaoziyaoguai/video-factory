@@ -7,6 +7,7 @@ import type {
   StudioOpportunity,
   StudioOpportunityEvidence,
   StudioOpportunityInput,
+  StudioTopicStrategy,
   StudioTrendCandidate,
 } from "../shared/api.js";
 import type { OpportunityStudio } from "./opportunity-studio.js";
@@ -19,6 +20,7 @@ export interface CandidateInboxStudioOptions {
   trends: { listCandidates(): Promise<StudioTrendCandidate[]> };
   series: Pick<SeriesStudio, "listCandidates" | "advanceEpisode">;
   opportunities: Pick<OpportunityStudio, "list" | "create">;
+  topicStrategy?: () => Promise<StudioTopicStrategy>;
   now?: () => Date;
 }
 
@@ -35,20 +37,26 @@ export class CandidateInboxStudio {
   async list(query: StudioCandidateInboxQuery): Promise<StudioCandidateInbox> {
     const includeTrends = !query.origins?.length || query.origins.includes("trend");
     const includeSeries = !query.origins?.length || query.origins.includes("series");
-    const [trendCandidates, seriesCandidates, adoptedOpportunities] = await Promise.all([
+    const [trendCandidates, seriesCandidates, adoptedOpportunities, topicStrategy] = await Promise.all([
       includeTrends ? this.options.trends.listCandidates() : Promise.resolve([]),
       includeSeries ? this.options.series.listCandidates() : Promise.resolve([]),
       this.options.opportunities.list(),
+      includeTrends ? this.options.topicStrategy?.().catch(() => undefined) : Promise.resolve(undefined),
     ]);
     const adoptedIds = new Set(adoptedOpportunities.map((item) => item.id));
-    const normalizedTrends = trendCandidates.map((candidate) => this.normalizeTrend(candidate));
+    const normalizedTrends = trendCandidates.map((candidate) => this.normalizeTrend(candidate, topicStrategy?.sourcePolicy));
     this.rememberTrendCandidates(normalizedTrends);
     const available = [
       ...normalizedTrends,
-      ...seriesCandidates.map((candidate) => ({
-        ...candidate,
-        editorialDecision: candidate.editorialDecision ?? decideEditorialFormat(candidate),
-      })),
+      ...seriesCandidates.map((candidate) => {
+        const recommendation = decideEditorialFormat(candidate);
+        return {
+          ...candidate,
+          editorialDecision: candidate.editorialDecision?.recommendedTemplate
+            ? candidate.editorialDecision
+            : { ...candidate.editorialDecision, recommendedTemplate: recommendation.recommendedTemplate! },
+        };
+      }),
     ].filter((candidate) => !adoptedIds.has(candidate.id));
     const facets = buildFacets(available);
     const filtered = available
@@ -120,7 +128,10 @@ export class CandidateInboxStudio {
     return opportunity;
   }
 
-  private normalizeTrend(candidate: StudioTrendCandidate): StudioCandidateInboxItem {
+  private normalizeTrend(
+    candidate: StudioTrendCandidate,
+    sourcePolicy?: StudioTopicStrategy["sourcePolicy"],
+  ): StudioCandidateInboxItem {
     const collectedAt = candidate.evidence
       .map((item) => item.collectedAt)
       .filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)))
@@ -128,7 +139,7 @@ export class CandidateInboxStudio {
     const category = candidate.category ?? classifyTopicCategory(candidate.title, candidate.track);
     const freshness = candidate.freshness ?? topicFreshness(collectedAt, this.now());
     const risk = candidate.risk ?? topicRiskLevel(candidate.title);
-    const verification = candidateVerification(risk, candidate.evidence);
+    const verification = candidateVerification(risk, candidate.evidence, sourcePolicy);
     const normalized = {
       ...candidate,
       origin: "trend" as const,
@@ -170,11 +181,28 @@ export class CandidateInboxStudio {
 function candidateVerification(
   risk: StudioCandidateInboxItem["risk"],
   evidence: StudioCandidateInboxItem["evidence"],
+  sourcePolicy?: StudioTopicStrategy["sourcePolicy"],
 ): StudioCandidateVerification {
   const independentSources = new Set(evidence.map(evidenceIdentity).filter(Boolean)).size;
   const linkedSources = new Set(
     evidence.filter((item) => item.evidenceUrl).map(evidenceIdentity).filter(Boolean),
   ).size;
+  if (sourcePolicy === "primary_or_two_independent" && (independentSources < 2 || linkedSources < 2)) {
+    return {
+      status: "blocked",
+      independentSources,
+      requiredSources: 2,
+      reasons: ["当前总编规则要求至少 2 个独立且可打开的来源，补齐前不会进入制作推荐。"],
+    };
+  }
+  if (sourcePolicy === "traceable_source" && linkedSources < 1) {
+    return {
+      status: "blocked",
+      independentSources,
+      requiredSources: 1,
+      reasons: ["当前总编规则要求至少 1 个可打开的原始来源，补齐前不会进入制作推荐。"],
+    };
+  }
   if (risk === "high" && (independentSources < 2 || linkedSources < 2)) {
     return {
       status: "blocked",

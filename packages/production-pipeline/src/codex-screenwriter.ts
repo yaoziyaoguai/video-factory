@@ -43,6 +43,11 @@ export interface ScreenwriterAgentInput {
       guardrails: string[];
     };
     seriesContext?: ProductionSeriesContext;
+    rework?: {
+      sourceRunId: string;
+      instruction: string;
+      previousScript?: Record<string, unknown>;
+    };
   };
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
 }
@@ -155,6 +160,7 @@ function screenwriterAuditContext(brief: ScreenwriterAgentInput["brief"]): Recor
       audience: brief.audience,
       nicheSlug: brief.nicheSlug,
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
+      ...(brief.rework ? { rework: brief.rework } : {}),
     },
     currentRoleContract: {
       platform: brief.platform,
@@ -196,6 +202,13 @@ function screenwriterAuditContext(brief: ScreenwriterAgentInput["brief"]): Recor
         bible: series.bible,
         acceptedCanonFacts: series.canon.facts.map(({ statement }) => statement),
         continuity: series.continuity,
+      },
+    } : {}),
+    ...(brief.rework ? {
+      rework: {
+        sourceRunId: brief.rework.sourceRunId,
+        instruction: brief.rework.instruction,
+        previousScript: brief.rework.previousScript,
       },
     } : {}),
   };

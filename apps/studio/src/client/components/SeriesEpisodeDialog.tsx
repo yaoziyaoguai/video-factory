@@ -54,7 +54,7 @@ export function SeriesEpisodeDialog({ open, series, episode, onClose, onSubmit }
     }}>
       <section ref={dialogRef} className="run-dialog series-episode-dialog" role="dialog" aria-modal="true" aria-labelledby="series-episode-dialog-title" tabIndex={-1}>
         <header className="dialog-header">
-          <div><p className="eyebrow">路线图人工修订</p><h2 id="series-episode-dialog-title">编辑第 {episode.episodeNumber} 集</h2><p>保存后会保留人工溯源；后续编剧、导演与审片 Agent 仍会基于你的版本独立审计。</p></div>
+          <div><p className="eyebrow">路线图人工修订</p><h2 id="series-episode-dialog-title">编辑第 {episode.episodeNumber} 集</h2><p>保存后会保留人工修改记录；后续编剧、导演与审片 AI 仍会基于你的版本独立检查。</p></div>
           <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
         <form className="run-form series-episode-form" onSubmit={submit}>
@@ -65,7 +65,7 @@ export function SeriesEpisodeDialog({ open, series, episode, onClose, onSubmit }
           <label className="field field-wide"><span>本集必须兑现</span><textarea name="payoff" defaultValue={episode.payoff} rows={2} required /></label>
           <label className="field"><span>本集额外承接要求</span><textarea name="fromPrevious" defaultValue={episode.continuity.fromPrevious.join("\n")} rows={3} placeholder="每行一项；系统继承的正史交接会单独保留" /></label>
           <label className="field"><span>留给下一集</span><textarea name="toNext" defaultValue={episode.continuity.toNext.join("\n")} rows={3} placeholder="每行一项" /></label>
-          <p className="series-edit-notice field-wide"><PencilLine aria-hidden="true" size={16} /><span><strong>人工版本优先</strong> 系统不会把路线图 Agent 的旧结果悄悄覆盖回来。保存后，原策划审计会标为已失效。</span></p>
+          <p className="series-edit-notice field-wide"><PencilLine aria-hidden="true" size={16} /><span><strong>人工版本优先</strong> 系统不会把 AI 路线图的旧结果悄悄覆盖回来。保存后，原策划审计会标为已失效。</span></p>
           {error ? <p className="form-error field-wide" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
           <footer className="dialog-actions field-wide">
             <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>

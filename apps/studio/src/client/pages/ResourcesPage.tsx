@@ -27,10 +27,12 @@ import type {
   StudioTrendService,
   StudioTrendSignal,
   StudioTrendSource,
+  StudioTopicStrategy,
   StudioVoiceDirection,
 } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { VoiceStudio } from "../components/VoiceStudio.js";
+import { creatorFacingTechnicalText, providerLabel, providerModelLabel } from "../presentation.js";
 
 const SERVICE_STATUS = { ready: "在线", degraded: "受限", stopped: "离线" } as const;
 const DEFAULT_PRODUCTION_DEFAULTS: StudioProductionDefaults = {
@@ -46,7 +48,14 @@ const RECIPE_OPTIONS: Array<{ id: StudioProductionRecipeId; label: string }> = [
   { id: "keyshot-ai", label: "效果均衡" },
   { id: "cinematic-ai", label: "开放精品生成" },
 ];
-const DEFAULT_TOPIC_INSTRUCTION = "优先选择与普通人生活直接相关、能用可靠画面表达、具备明确反差或实用价值、可以发展成系列的题材。高热度但缺少可验证事实、可用画面或独特角度时，应降低推荐或明确放弃。";
+const DEFAULT_TOPIC_STRATEGY: StudioTopicStrategy = {
+  positioning: "把复杂热点转成普通人能看懂、能验证、看完有收获的短视频。",
+  targetAudience: "希望快速理解新事物，但反感标题党和空泛说教的中文短视频用户。",
+  preferredDirections: "真实生活影响\n可实证的方法或变化\n有清楚反差、过程或结论\n能发展成系列",
+  excludedDirections: "只有热度、没有新角度\n无法找到可靠画面或事实来源\n消费灾难、伤亡或未经证实的争议\n只能靠大段说明卡讲清",
+  sourcePolicy: "primary_or_two_independent",
+  customInstruction: "优先考虑 24–45 秒内能兑现观众承诺的题材。",
+};
 const RESOURCE_SECTION_IDS = [
   "creation-defaults",
   "topic-strategy",
@@ -73,7 +82,7 @@ interface ProductionRoleDefinition {
 
 const PRODUCTION_ROLE_DEFINITIONS: ProductionRoleDefinition[] = [
   { key: "script", label: "编剧", capability: "script.draft", preferredProviderId: "codex-screenwriter-v1", responsibility: "把选题写成可拍、可朗读、可核验的逐镜脚本", mode: "agent" },
-  { key: "director", label: "视觉导演", capability: "storyboard.plan", preferredProviderId: "api-visual-director-v1", responsibility: "建立视觉圣经并逐镜决定画面来源", mode: "agent" },
+  { key: "director", label: "视觉导演", capability: "storyboard.plan", preferredProviderId: "api-visual-director-v1", responsibility: "统一全片视觉规则并逐镜决定画面来源", mode: "agent" },
   { key: "assets", label: "画面执行", capability: "asset.prepare", preferredProviderId: "ai-shot-router-v1", responsibility: "按导演逐镜方案执行图库、本地素材和生成任务", mode: "tool", selectable: false, configurationAnchor: "visual-providers", configurationLabel: "去画面来源配置" },
   { key: "voice", label: "配音执行", capability: "voice.synthesize", preferredProviderId: "macos-say-v1", responsibility: "按声音演员表执行音色、语速和停顿", mode: "tool", selectable: false, configurationAnchor: "voice-casting", configurationLabel: "去声音演员表配置" },
   { key: "render", label: "剪辑师", capability: "video.render", preferredProviderId: "python-ffmpeg-v1", responsibility: "合成画面、字幕、旁白和音轨", mode: "tool" },
@@ -85,7 +94,7 @@ const AUTOMATIC_AGENT_ROLES = [
   { label: "选题总编", capability: "topic.intelligence" },
   { label: "系列主理人", capability: "series.plan" },
   { label: "参考片分析师", capability: "reference.grammar" },
-  { label: "语义选片师", capability: "asset.rank.semantic" },
+  { label: "候选画面复核", capability: "asset.rank.semantic" },
   { label: "发行编辑", capability: "publish.copy" },
   { label: "独立质量审计", capability: "role.audit" },
 ] as const;
@@ -121,7 +130,7 @@ export function ResourcesPage() {
   const [roleProviderDefaults, setRoleProviderDefaults] = useState<StudioRoleProviderDefaults>({});
   const [modelDefaults, setModelDefaults] = useState<Record<string, string>>({});
   const [productionDefaults, setProductionDefaults] = useState<StudioProductionDefaults>(DEFAULT_PRODUCTION_DEFAULTS);
-  const [topicInstruction, setTopicInstruction] = useState(DEFAULT_TOPIC_INSTRUCTION);
+  const [topicStrategy, setTopicStrategy] = useState<StudioTopicStrategy>(DEFAULT_TOPIC_STRATEGY);
 
   useEffect(() => {
     const syncSection = () => setActiveSection(resourceSectionFromHash());
@@ -173,7 +182,7 @@ export function ResourcesPage() {
       setRoleProviderDefaults(settingsResult.value.roleProviderDefaults ?? {});
       setModelDefaults(settingsResult.value.modelDefaults ?? {});
       setProductionDefaults(settingsResult.value.productionDefaults ?? DEFAULT_PRODUCTION_DEFAULTS);
-      setTopicInstruction(settingsResult.value.topicStrategy?.customInstruction ?? DEFAULT_TOPIC_INSTRUCTION);
+      setTopicStrategy({ ...DEFAULT_TOPIC_STRATEGY, ...settingsResult.value.topicStrategy });
     } else {
       setSettings(undefined);
       setSettingsError(errorMessage(settingsResult.reason));
@@ -199,7 +208,7 @@ export function ResourcesPage() {
       if (patch.roleProviderDefaults) setRoleProviderDefaults(updated.roleProviderDefaults ?? {});
       if (patch.modelDefaults) setModelDefaults(updated.modelDefaults ?? {});
       if (patch.productionDefaults) setProductionDefaults(updated.productionDefaults);
-      if (patch.topicStrategy) setTopicInstruction(updated.topicStrategy.customInstruction);
+      if (patch.topicStrategy) setTopicStrategy({ ...DEFAULT_TOPIC_STRATEGY, ...updated.topicStrategy });
       setSettingsNotice(successMessage);
     } catch (caught) {
       setSettingsNotice(`保存失败：${errorMessage(caught)}`);
@@ -208,8 +217,9 @@ export function ResourcesPage() {
     }
   }
 
-  const visualProviders = useMemo(() => providers.filter((provider) => provider.capability === "asset.prepare"), [providers]);
-  const foundationProviders = useMemo(() => providers.filter((provider) => provider.capability !== "asset.prepare" && provider.capability !== "voice.synthesize"), [providers]);
+  const visualProviders = useMemo(() => providers.filter((provider) => provider.capability === "asset.prepare" || provider.capability === "avatar.generate"), [providers]);
+  const visualProviderGroups = useMemo(() => groupVisualProviders(visualProviders), [visualProviders]);
+  const foundationProviders = useMemo(() => providers.filter((provider) => provider.capability !== "asset.prepare" && provider.capability !== "avatar.generate" && provider.capability !== "voice.synthesize"), [providers]);
   const readyVisual = visualProviders.filter(isProductionReady).length;
   const readyServices = services.filter((service) => service.status === "ready").length;
   const voiceHasChanges = settings ? !sameVoiceDirection(settings.voiceDirection, voiceDirection) : false;
@@ -222,7 +232,13 @@ export function ResourcesPage() {
     ? !sameStringRecord(settings.roleProviderDefaults, roleProviderDefaults)
       || modelHasChanges
     : false;
-  const topicHasChanges = settings ? (settings.topicStrategy?.customInstruction ?? DEFAULT_TOPIC_INSTRUCTION) !== topicInstruction.trim() : false;
+  const topicHasChanges = settings ? !sameTopicStrategy({ ...DEFAULT_TOPIC_STRATEGY, ...settings.topicStrategy }, topicStrategy) : false;
+  const topicStrategyComplete = Boolean(
+    topicStrategy.positioning?.trim()
+    && topicStrategy.targetAudience?.trim()
+    && topicStrategy.preferredDirections?.trim()
+    && topicStrategy.excludedDirections?.trim(),
+  );
   const readyFoundation = foundationProviders.filter(isProductionReady).length;
   const usablePublishTargets = publishTargets.filter((target) => target.status === "ready" || target.status === "manual_only").length;
 
@@ -231,7 +247,7 @@ export function ResourcesPage() {
       <header className="page-header resources-header">
         <div>
           <p className="eyebrow">创作控制室</p>
-          <h1>总配置</h1>
+          <h1>创作设置</h1>
           <p className="page-summary">为下一条视频确定默认创作方式，并检查热点、模型、声音、画面和发布出口是否真正可用。</p>
         </div>
         <button
@@ -248,7 +264,7 @@ export function ResourcesPage() {
       <section className="resource-masthead" aria-label="能力概览" data-tour="resource-overview">
         <div><span>热点服务</span><strong>{serviceError ? "—" : `${readyServices}/${services.length}`}</strong></div>
         <div><span>画面来源</span><strong>{providerError ? "—" : readyVisual}</strong></div>
-        <div><span>生产岗位</span><strong>{providerError ? "—" : `${readyFoundation}/${foundationProviders.length}`}</strong></div>
+        <div><span>制作能力</span><strong>{providerError ? "—" : `${readyFoundation}/${foundationProviders.length}`}</strong></div>
         <div className="resource-budget"><UploadCloud aria-hidden="true" size={17} /><span>发布出口</span><strong>{publishError ? "—" : usablePublishTargets}</strong></div>
       </section>
 
@@ -278,20 +294,27 @@ export function ResourcesPage() {
             <label className="field"><span>目标平台</span><select aria-label="默认目标平台" value={productionDefaults.platform} onChange={(event) => setProductionDefaults((current) => ({ ...current, platform: event.target.value as StudioProductionDefaults["platform"] }))}><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option><option value="bilibili">哔哩哔哩</option></select></label>
             <label className="field"><span>默认时长</span><select aria-label="默认视频时长" value={String(productionDefaults.durationSeconds)} onChange={(event) => setProductionDefaults((current) => ({ ...current, durationSeconds: Number(event.target.value) as StudioProductionDefaults["durationSeconds"] }))}><option value="20">20 秒</option><option value="24">24 秒</option><option value="30">30 秒</option><option value="45">45 秒</option></select></label>
           </div>
-          <div className="segmented-control configuration-review-mode" aria-label="终审方式"><span>人工终审</span><small>安全门禁，发布前不可跳过</small></div>
+          <div className="segmented-control configuration-review-mode" aria-label="终审方式"><span>人工终审</span><small>发布前不可跳过的安全检查</small></div>
           <div className="configuration-save-row"><span>{productionHasChanges ? "有未保存的创作默认值" : "当前默认值已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !productionHasChanges} onClick={() => void saveDefaults({ defaultRecipeId, productionDefaults }, "创作默认值已保存，将从下一条新制作生效。")}><Save aria-hidden="true" size={16} />{productionHasChanges ? "保存创作默认" : "已保存"}</button></div>
         </div>}
       </section>
       {settingsNotice ? <p className="resource-settings-notice" role="status">{settingsNotice}</p> : null}
 
       <section id="topic-strategy" className="resource-section topic-strategy-config" data-resource-section data-active={activeSection === "topic-strategy" ? "true" : undefined} data-tour="topic-strategy">
-        <ResourceHeading eyebrow="总编规则" title="选题策略" meta="热度只是信号，最终排序看能不能做成一条值得看的视频" />
+        <ResourceHeading eyebrow="总编规则" title="什么题值得做" meta="热度只是信号；推荐必须同时有观众价值、可靠来源和可执行的视频形态" />
         <div className="topic-rubric" aria-label="选题评分标准">
           {[['受众相关', '18%', '是否与明确人群的真实处境相关'], ['系列价值', '18%', '能否连续生产而不是一次性追热'], ['可拍性', '14%', '是否有可靠素材和可见动作'], ['成本效率', '14%', '方案成本与画面价值是否匹配'], ['差异化', '14%', '是否提供通稿之外的新角度'], ['商业价值', '12%', '是否具备长期转化或合作空间'], ['合规安全', '10%', '事实、公共事件与平台风险']].map(([label, weight, detail]) => <article key={label}><span>{weight}</span><strong>{label}</strong><small>{detail}</small></article>)}
         </div>
         <div className="topic-instruction-editor">
-          <label className="field"><span>给选题总编的补充偏好</span><textarea aria-label="选题总编补充偏好" rows={5} maxLength={2000} value={topicInstruction} onChange={(event) => setTopicInstruction(event.target.value)} /><small>这段文字参与 Codex 选题排序，但不能覆盖事实核验、合规规则和结构化输出要求。</small></label>
-          <div className="configuration-save-row"><span>{topicHasChanges ? "有未保存的选题偏好" : "选题偏好已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !topicHasChanges || !topicInstruction.trim()} onClick={() => void saveDefaults({ topicStrategy: { customInstruction: topicInstruction.trim() } }, "选题总编偏好已保存，下一次刷新候选时生效。") }><Save aria-hidden="true" size={16} />{topicHasChanges ? "保存选题策略" : "已保存"}</button></div>
+          <div className="topic-strategy-fields">
+            <label className="field"><span>账号内容定位</span><input required aria-label="账号内容定位" maxLength={500} value={topicStrategy.positioning ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, positioning: event.target.value }))} /><small>必填。一句话说明这个账号长期替观众解决什么问题。</small></label>
+            <label className="field"><span>核心观众</span><input required aria-label="核心观众" maxLength={500} value={topicStrategy.targetAudience ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, targetAudience: event.target.value }))} /><small>必填。写真实处境和认知需求，不写“所有人”。</small></label>
+            <label className="field"><span>优先寻找</span><textarea required aria-label="优先题材" rows={5} maxLength={1000} value={topicStrategy.preferredDirections ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, preferredDirections: event.target.value }))} /><small>必填。每行一个方向；它决定总编主动寻找什么。</small></label>
+            <label className="field"><span>明确避开</span><textarea required aria-label="避开题材" rows={5} maxLength={1000} value={topicStrategy.excludedDirections ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, excludedDirections: event.target.value }))} /><small>必填。每行一个红线；不适合做成视频的热点应直接放弃。</small></label>
+            <label className="field"><span>进入推荐前的来源标准</span><select aria-label="候选来源标准" value={topicStrategy.sourcePolicy ?? "primary_or_two_independent"} onChange={(event) => setTopicStrategy((current) => ({ ...current, sourcePolicy: event.target.value as NonNullable<StudioTopicStrategy["sourcePolicy"]> }))}><option value="primary_or_two_independent">至少两个独立且可打开的来源</option><option value="traceable_source">至少一个可打开的来源</option></select><small>这是实际准入条件；高风险事实仍会要求额外核验。</small></label>
+            <label className="field"><span>其他具体原则</span><textarea aria-label="其他选题原则" rows={3} maxLength={2000} value={topicStrategy.customInstruction} onChange={(event) => setTopicStrategy((current) => ({ ...current, customInstruction: event.target.value }))} placeholder="例如：优先能在 30 秒内通过实验或前后对比兑现承诺的题材" /><small>只补充上面没有覆盖的具体判断，不要重复系统底线。</small></label>
+          </div>
+          <div className="configuration-save-row"><span>{!topicStrategyComplete ? "请先补全四项必填规则" : topicHasChanges ? "有未保存的总编规则" : "总编规则已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !topicHasChanges || !topicStrategyComplete} onClick={() => void saveDefaults({ topicStrategy: normalizeTopicStrategy(topicStrategy) }, "总编规则已保存，下一次刷新候选时生效。") }><Save aria-hidden="true" size={16} />{topicHasChanges ? "保存总编规则" : "已保存"}</button></div>
         </div>
       </section>
 
@@ -344,33 +367,33 @@ export function ResourcesPage() {
       </div>
 
       <section id="visual-providers" className="resource-section visual-library" data-resource-section data-active={activeSection === "visual-providers" ? "true" : undefined} data-tour="resource-visual">
-        <ResourceHeading eyebrow="画面资源" title="生成与素材模型" meta={`${readyVisual} 项可直接生产`} />
+        <ResourceHeading eyebrow="画面资源" title="按画面能力选择模型" meta={`${readyVisual} 项可直接生产 · 服务商仅标明能力来源`} />
         {providerLoading ? <div className="region-loading">正在读取画面能力...</div> : providerError ? (
           <ResourceError title="画面能力状态未知" message={providerError} retry={load} />
         ) : <>
-          <div className="provider-ledger">{visualProviders.map((provider) => <ProviderRow
-            key={provider.id}
-            provider={provider}
-            isDefault={settings?.defaultAssetProviderId === provider.id}
-            canSetDefault
-            selectedModelId={modelDefaults[provider.id]}
-            onModelChange={(modelId) => setModelDefaults((current) => {
-              const next = { ...current };
-              if (modelId) next[provider.id] = modelId;
-              else delete next[provider.id];
-              return next;
-            })}
-            onSetDefault={(providerId) => void saveDefaults({ defaultAssetProviderId: providerId }, `${provider.label} 已设为默认画面能力。`)}
-          />)}</div>
-          {settings ? <div className="configuration-save-row foundation-save-row"><span>{modelHasChanges ? "有未保存的画面模型调整" : "画面模型默认值已同步"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !modelHasChanges} onClick={() => void saveDefaults({ modelDefaults }, "画面模型默认值已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{modelHasChanges ? "保存画面模型" : "已保存"}</button></div> : null}
+          <div className="visual-capability-groups">{visualProviderGroups.map((group) => <section key={group.id} className="visual-capability-group" aria-labelledby={`visual-capability-${group.id}`}>
+            <header><div><strong id={`visual-capability-${group.id}`}>{group.label}</strong><small>{group.description}</small></div><span>{group.providers.filter(isProductionReady).length}/{group.providers.length} 可用</span></header>
+            <div className="provider-ledger">{group.providers.map((provider) => <ProviderRow
+              key={provider.id}
+              provider={provider}
+              selectedModelId={modelDefaults[provider.id]}
+              onModelChange={(modelId) => setModelDefaults((current) => {
+                const next = { ...current };
+                if (modelId) next[provider.id] = modelId;
+                else delete next[provider.id];
+                return next;
+              })}
+            />)}</div>
+          </section>)}</div>
+          {settings ? <div className="configuration-save-row foundation-save-row"><span>{modelHasChanges ? "有未保存的画面模型调整" : "推荐模型已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !modelHasChanges} onClick={() => void saveDefaults({ modelDefaults }, "画面推荐模型已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{modelHasChanges ? "保存画面模型" : "已保存"}</button></div> : null}
         </>}
       </section>
 
       <section id="production-roles" className="resource-section foundation-registry" data-resource-section data-active={activeSection === "production-roles" ? "true" : undefined}>
         <ResourceHeading eyebrow="岗位与模型" title="按角色配置生产能力" meta="先决定谁来做，再决定这个角色使用哪个模型" />
-        {providerLoading ? <div className="region-loading">正在读取生产底座...</div> : providerError ? null : (
+        {providerLoading ? <div className="region-loading">正在读取制作能力...</div> : providerError ? null : (
           <>
-            <div className="role-configuration-grid" aria-label="生产角色配置">
+            <div className="role-configuration-grid" aria-label="制作角色配置">
               {PRODUCTION_ROLE_DEFINITIONS.map((definition) => {
                 const selected = resolveRoleProvider(definition, providers, roleProviderDefaults);
                 return <RoleProviderCard
@@ -384,8 +407,8 @@ export function ResourcesPage() {
                 />;
               })}
             </div>
-            <div className="automatic-agent-roster" aria-label="自动参与的 Agent">
-              <header><strong>自动参与的 Agent</strong><span>这些角色由工作流按节点调用，不需要逐条记忆配置。</span></header>
+            <div className="automatic-agent-roster" aria-label="自动参与的 AI 角色">
+              <header><strong>自动参与的 AI 角色</strong><span>系统会在对应制作步骤自动调用这些角色，不需要逐条选择。</span></header>
               <div>{AUTOMATIC_AGENT_ROLES.map((role) => <AutomaticAgentRole key={role.capability} label={role.label} provider={preferredAutomaticProvider(role.capability, providers)} />)}</div>
             </div>
           </>
@@ -409,7 +432,7 @@ export function ResourcesPage() {
               const sourceUrl = externalResourceUrl(item.sourceUrl);
               return <article key={`${item.runId}:${item.id}`}>
                 <span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span>
-                <div><strong>{item.creator ?? item.kind}</strong><small>{item.runTitle} · {item.providerId}</small><p>{item.licenseNote ?? "缺少授权说明，需要人工复核。"}</p></div>
+                <div><strong>{item.creator ?? item.kind}</strong><small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small><p>{item.licenseNote ?? "缺少授权说明，需要人工复核。"}</p></div>
                 <span className={item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{item.reviewStatus === "recorded" ? "已记录" : "待复核"}</span>
                 {sourceUrl ? <a href={sourceUrl} target="_blank" rel="noreferrer" title="核验资源来源"><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
               </article>;
@@ -427,7 +450,7 @@ export function ResourcesPage() {
             {publishTargets.map((target) => <PublishTargetRow key={target.id} target={target} />)}
           </div>
         )}
-        <div className="compliance-baseline"><ShieldCheck aria-hidden="true" size={18} /><div><strong>不可关闭的发布门禁</strong><span>人工终审、素材授权、事实核验、AIGC 显式与隐式标识会在发送前再次检查。</span></div></div>
+        <div className="compliance-baseline"><ShieldCheck aria-hidden="true" size={18} /><div><strong>不可跳过的发布检查</strong><span>人工终审、素材授权、事实核验、页面可见的 AI 标识和文件内标记会在发送前再次检查。</span></div></div>
       </section>
     </main>
   );
@@ -463,13 +486,10 @@ function ResourceError({ title, message, retry }: { title: string; message: stri
   return <div className="page-error" role="alert"><AlertCircle aria-hidden="true" size={18} /><span><strong>{title}</strong>{message}</span><button className="icon-button" type="button" onClick={() => void retry()} title="重试"><RefreshCw aria-hidden="true" size={17} /></button></div>;
 }
 
-function ProviderRow({ provider, isDefault, canSetDefault, selectedModelId, onModelChange, onSetDefault }: {
+function ProviderRow({ provider, selectedModelId, onModelChange }: {
   provider: StudioProvider;
-  isDefault: boolean;
-  canSetDefault: boolean;
   selectedModelId: string | undefined;
   onModelChange: (modelId: string) => void;
-  onSetDefault: (providerId: string) => void;
 }) {
   const ready = isProductionReady(provider);
   const Icon = provider.billing === "free" ? Film : Sparkles;
@@ -483,20 +503,42 @@ function ProviderRow({ provider, isDefault, canSetDefault, selectedModelId, onMo
   return (
     <article className="provider-ledger-row">
       <span className="provider-ledger-icon"><Icon aria-hidden="true" size={18} /></span>
-      <div><strong>{provider.label}</strong><small>{provider.description ?? provider.id}</small>{!ready && provider.requirement ? <small className="provider-requirement">{provider.requirement}</small> : null}</div>
-      <div className="provider-model-cell">{catalogModels.length || selectedModelId ? <label className="provider-model-select"><small>默认模型</small><select aria-label={`${provider.label} 默认模型`} value={selectedModelId ?? ""} disabled={!availableModels.length} onChange={(event) => onModelChange(event.target.value)}><option value="">继承服务默认：{provider.defaultModelId ?? "自动选择"}</option>{staleSelection ? <option value={staleSelection} disabled>已失效：{staleSelection}</option> : null}{catalogModels.map((model) => <option key={model.id} value={model.id} disabled={!model.available}>{model.label}{model.recommended ? " · 推荐" : ""}{model.available ? "" : " · 待配置"}</option>)}</select></label> : (provider.modes ?? []).slice(0, 3).join(" · ")}</div>
+      <div><strong>{provider.label}</strong><small>{creatorFacingTechnicalText(provider.description) ?? "由系统按当前配置使用"}</small>{!ready && provider.requirement ? <small className="provider-requirement">{creatorFacingTechnicalText(provider.requirement)}</small> : null}</div>
+      <div className="provider-model-cell">{catalogModels.length || selectedModelId ? <label className="provider-model-select"><small>新制作推荐模型</small><select aria-label={`${provider.label} 推荐模型`} value={selectedModelId ?? ""} disabled={!availableModels.length} onChange={(event) => onModelChange(event.target.value)}><option value="">服务推荐：{providerModelLabel(provider, provider.defaultModelId)}</option>{staleSelection ? <option value={staleSelection} disabled>已失效：{staleSelection}</option> : null}{catalogModels.map((model) => <option key={model.id} value={model.id} disabled={!model.available}>{model.label}{model.recommended ? " · 推荐" : ""}{model.available ? "" : " · 待配置"}</option>)}</select></label> : (provider.modes ?? []).slice(0, 3).map((mode) => creatorFacingTechnicalText(mode)).join(" · ")}</div>
       <strong className={`provider-cost${provider.billing === "metered" ? " is-metered" : ""}`}>{billingLabel(provider.billing)}{estimate !== undefined ? ` · 约 ¥${formatCost(estimate)}/${provider.billingUnit === "run" ? "条" : "镜头"}` : ""}</strong>
       <span className={ready ? "ledger-state is-ready" : "ledger-state"}>{providerReadinessLabel(provider, ready)}</span>
-      {ready && canSetDefault ? <button className={isDefault ? "provider-default is-active" : "provider-default"} type="button" disabled={isDefault} onClick={() => onSetDefault(provider.id)}>{isDefault ? "制作默认" : "设为默认"}</button> : <span />}
+      <span className="provider-family-label">{creatorFacingProviderKind(provider)}</span>
       {provider.docsUrl ? <a className="provider-doc-link" href={provider.docsUrl} target="_blank" rel="noreferrer" title={`${provider.label} 文档`}><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
     </article>
   );
+}
+
+function groupVisualProviders(providers: StudioProvider[]): Array<{ id: string; label: string; description: string; providers: StudioProvider[] }> {
+  const definitions = [
+    { id: "stock", label: "图库实拍", description: "搜索可追溯的真实视频或图片", matches: (provider: StudioProvider) => provider.deliveryTypes?.some((type) => type === "stock_video" || type === "stock_image") },
+    { id: "image", label: "AI 生图", description: "生成关键画面或图解，不冒充事实现场", matches: (provider: StudioProvider) => provider.deliveryTypes?.includes("generated_image") },
+    { id: "video", label: "AI 生视频", description: "生成需要连续动作和镜头运动的片段", matches: (provider: StudioProvider) => provider.deliveryTypes?.includes("generated_video") },
+    { id: "avatar", label: "数字人", description: "图片与旁白驱动的独立表演能力", matches: (provider: StudioProvider) => provider.capability === "avatar.generate" || provider.modelProfiles?.some((model) => model.taskTypes.includes("digital-human")) },
+    { id: "editorial", label: "主动排版画面", description: "只用于导演明确选择的标题、数据或片尾，不处理素材失败", matches: (provider: StudioProvider) => provider.deliveryTypes?.includes("editorial_card") },
+    { id: "routing", label: "逐镜选择画面来源", description: "按导演方案调用上述能力，本身不是画面模型", matches: (provider: StudioProvider) => provider.id === "ai-shot-router-v1" },
+  ];
+  return definitions.map(({ matches, ...definition }) => ({ ...definition, providers: providers.filter(matches) })).filter((group) => group.providers.length > 0);
 }
 
 function billingLabel(billing: StudioProvider["billing"]): string {
   if (billing === "metered") return "按量计费";
   if (billing === "subscription") return "订阅额度";
   return "免费";
+}
+
+function creatorFacingProviderKind(provider: StudioProvider): string {
+  if (provider.id === "ai-shot-router-v1") return "自动调度";
+  if (provider.deliveryTypes?.some((type) => type === "stock_video" || type === "stock_image")) return "图库素材";
+  if (provider.deliveryTypes?.includes("generated_video")) return "视频生成";
+  if (provider.deliveryTypes?.includes("generated_image")) return "图片生成";
+  if (provider.deliveryTypes?.includes("editorial_card")) return "主动排版";
+  if (provider.capability === "avatar.generate") return "数字人";
+  return "创作能力";
 }
 
 function RoleProviderCard({ definition, providers, selectedProvider, selectedModelId, onProviderChange, onModelChange }: {
@@ -537,7 +579,7 @@ function RoleProviderCard({ definition, providers, selectedProvider, selectedMod
       {selectedProvider && models.length > 0 ? <label className="field">
         <span>默认模型</span>
         <select aria-label={`${selectedProvider.label}默认模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(selectedProvider.id, event.target.value)}>
-          <option value="">服务默认：{selectedProvider.defaultModelId ?? "自动选择"}</option>
+          <option value="">服务默认：{providerModelLabel(selectedProvider, selectedProvider.defaultModelId)}</option>
           {models.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
         </select>
       </label> : <div className="role-runtime-summary"><span>当前执行</span><strong>{activeModel?.label ?? selectedProvider?.defaultModelId ?? selectedProvider?.label ?? "尚未配置"}</strong></div>}
@@ -552,8 +594,20 @@ function AutomaticAgentRole({ label, provider }: { label: string; provider: Stud
   return <article className={ready ? "automatic-agent-role" : "automatic-agent-role is-unavailable"}>
     <span className="service-light" />
     <div><strong>{label}</strong><small>{provider?.label ?? "尚未配置"}</small></div>
-    <em>{provider?.modes?.join(" · ") ?? model ?? "等待能力接入"}</em>
+    <em>{provider ? automaticRoleSummary(provider.capability) : model ?? "等待能力接入"}</em>
   </article>;
+}
+
+function automaticRoleSummary(capability: string): string {
+  const labels: Record<string, string> = {
+    "topic.intelligence": "筛选候选 · 人工采用",
+    "series.plan": "连续规划 · 人工开拍",
+    "reference.grammar": "提炼参考片表达",
+    "asset.rank.semantic": "逐镜比较素材",
+    "publish.copy": "生成平台发布文案",
+    "role.audit": "独立复核 · 最多三轮",
+  };
+  return labels[capability] ?? "自动执行 · 保留人工终审";
 }
 
 function resolveRoleProvider(
@@ -575,7 +629,7 @@ function preferredAutomaticProvider(capability: string, providers: StudioProvide
 }
 
 function roleModeLabel(mode: ProductionRoleDefinition["mode"]): string {
-  if (mode === "agent") return "Agent · 三轮内收敛";
+  if (mode === "agent") return "AI 创作 · 最多三轮质量修订";
   if (mode === "model") return "模型审片";
   return "确定性工具";
 }
@@ -679,4 +733,20 @@ function sameProductionDefaults(left: StudioProductionDefaults | undefined, righ
 
 function sameStringRecord(left: Record<string, string> | undefined, right: Record<string, string>): boolean {
   return JSON.stringify(Object.entries(left ?? {}).sort()) === JSON.stringify(Object.entries(right).sort());
+}
+
+function normalizeTopicStrategy(strategy: StudioTopicStrategy): StudioTopicStrategy {
+  const text = (value: string | undefined) => value?.trim();
+  return {
+    customInstruction: strategy.customInstruction.trim(),
+    ...(text(strategy.positioning) ? { positioning: text(strategy.positioning)! } : {}),
+    ...(text(strategy.targetAudience) ? { targetAudience: text(strategy.targetAudience)! } : {}),
+    ...(text(strategy.preferredDirections) ? { preferredDirections: text(strategy.preferredDirections)! } : {}),
+    ...(text(strategy.excludedDirections) ? { excludedDirections: text(strategy.excludedDirections)! } : {}),
+    ...(strategy.sourcePolicy ? { sourcePolicy: strategy.sourcePolicy } : {}),
+  };
+}
+
+function sameTopicStrategy(left: StudioTopicStrategy, right: StudioTopicStrategy): boolean {
+  return JSON.stringify(normalizeTopicStrategy(left)) === JSON.stringify(normalizeTopicStrategy(right));
 }

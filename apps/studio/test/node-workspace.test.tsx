@@ -87,7 +87,7 @@ describe("node production workspaces", () => {
         providerId: "ai-shot-router-v1",
         modelSelections: { "wan-video-v1": "wan3.0-video" },
         assetProviderIds: ["wan-video-v1"],
-        economics: { allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 3 },
+        economics: { allowMeteredProviders: true },
       },
     };
 
@@ -125,7 +125,7 @@ describe("node production workspaces", () => {
         providerId: "ai-shot-router-v1",
         modelSelections: {},
         assetProviderIds: ["pexels-stock-v1"],
-        economics: { allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
+        economics: { allowMeteredProviders: false },
       },
     };
 
@@ -150,7 +150,7 @@ describe("node production workspaces", () => {
     expect(onConfigure).toHaveBeenCalledWith("assets", {
       modelSelections: { "pexels-stock-v1": null, "seedance-video-v1": null },
       assetProviderIds: ["pexels-stock-v1", "seedance-video-v1"],
-      economics: { allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+      economics: { allowMeteredProviders: true },
     });
   });
 
@@ -827,11 +827,11 @@ describe("node production workspaces", () => {
       onRejectSpend={onRejectSpend}
     />);
 
-    expect(screen.getByText("镜头 1 · seedance-video-v1 · seedance-v1")).toBeInTheDocument();
+    expect(screen.getByText("镜头 1 · Seedance 视频生成 · seedance-v1")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "这份报价不合适" }));
     const dialog = screen.getByRole("dialog", { name: "保存费用反馈" });
-    await userEvent.clear(within(dialog).getByRole("spinbutton", { name: "下一版目标预计费用（可选）" }));
-    await userEvent.type(within(dialog).getByRole("spinbutton", { name: "下一版目标预计费用（可选）" }), "0");
+    await userEvent.clear(within(dialog).getByRole("spinbutton", { name: "希望下一版控制在多少元（可选）" }));
+    await userEvent.type(within(dialog).getByRole("spinbutton", { name: "希望下一版控制在多少元（可选）" }), "0");
     await userEvent.type(within(dialog).getByRole("textbox", { name: "具体调整意见（可选）" }), "第二镜优先改用真实图库。");
     await userEvent.click(within(dialog).getByRole("button", { name: "保存反馈" }));
 
@@ -972,7 +972,7 @@ describe("node production workspaces", () => {
     };
     render(<MemoryRouter><CostDashboard dashboard={dashboard} /></MemoryRouter>);
 
-    expect(screen.getByRole("heading", { name: "每一分钱都能追到节点" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "每一笔费用都能追到制作步骤" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /付费成片/ })).toHaveAttribute("href", "/projects/run-1");
     expect(screen.getAllByText("¥3.00").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/1 笔待核对/).length).toBeGreaterThan(0);

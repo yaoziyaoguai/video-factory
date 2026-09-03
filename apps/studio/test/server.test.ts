@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { buildStudioApp, type StudioServicePort } from "../src/server/app.js";
+import { StudioConflictError } from "../src/server/studio-service.js";
 import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
 import type { StudioOpportunity, StudioPaidReconciliationInput, StudioRunDetail } from "../src/shared/api.js";
 
@@ -63,6 +64,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
       curated: true,
     }]),
     previewVoice: async () => undefined,
+    reworkDraft: async () => undefined,
     getCreatorSettings: async () => ({
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "economy-daily",
@@ -78,7 +80,10 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
         platform: input.productionDefaults?.platform ?? "douyin",
         durationSeconds: input.productionDefaults?.durationSeconds ?? 24,
       },
-      topicStrategy: input.topicStrategy ?? { customInstruction: "优先可拍、可核验、可连载的题材。" },
+      topicStrategy: {
+        customInstruction: "优先可拍、可核验、可连载的题材。",
+        ...input.topicStrategy,
+      },
       ...(input.defaultAssetProviderId ? { defaultAssetProviderId: input.defaultAssetProviderId } : {}),
     }),
     listTemplates: async () => ({ storeRevision: 0, templates: [] }),
@@ -371,7 +376,7 @@ describe("Studio API", () => {
       }),
       applyNodeOverride: async (_runId, nodeId, input, actor) => { calls.push(`override:${nodeId}:${String((input.output as { hook?: string }).hook)}:${actor}`); return runDetail("stale"); },
       applyNodeInputOverride: async (_runId, nodeId, input, actor) => { calls.push(`input:${nodeId}:${String((input.input as { title?: string }).title)}:${actor}`); return runDetail("stale"); },
-      applyNodeExecutionConfiguration: async (_runId, nodeId, input, actor) => { calls.push(`config:${nodeId}:${input.modelSelections?.["hailuo-video-v1"]}:${input.economics?.maxCostCny}:${actor}`); return runDetail("stale"); },
+      applyNodeExecutionConfiguration: async (_runId, nodeId, input, actor) => { calls.push(`config:${nodeId}:${input.modelSelections?.["hailuo-video-v1"]}:${input.economics?.allowMeteredProviders}:${actor}`); return runDetail("stale"); },
       authorizeSpend: async (_runId, nodeId, input, approvedBy) => { calls.push(`spend:${nodeId}:${input.modelId}:${approvedBy}`); return runDetail("running"); },
       requestPause: async () => { calls.push("pause"); return { ...runDetail("running"), pauseRequested: true }; },
       resumePaused: async () => { calls.push("resume"); return runDetail("running"); },
@@ -417,7 +422,7 @@ describe("Studio API", () => {
     assert.equal(retry.statusCode, 200);
     assert.equal(paidItems.statusCode, 200);
     assert.equal(reconcile.statusCode, 200);
-    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "config:assets:MiniMax-H3:8:studio-owner", "spend:assets:MiniMax-Hailuo-02:studio-owner", "pause", "resume", "regenerate", "retry:voice", "inspect-paid:run-1:assets", "reconcile-paid:run-1:assets:1:reconcile-assets-1:resume_original"]);
+    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "config:assets:MiniMax-H3:true:studio-owner", "spend:assets:MiniMax-Hailuo-02:studio-owner", "pause", "resume", "regenerate", "retry:voice", "inspect-paid:run-1:assets", "reconcile-paid:run-1:assets:1:reconcile-assets-1:resume_original"]);
     await app.close();
   });
 
@@ -465,7 +470,7 @@ describe("Studio API", () => {
       actor: "studio-owner",
     });
     assert.equal(missingNote.statusCode, 400);
-    assert.match(missingNote.json().error, /核销说明/);
+    assert.match(missingNote.json().error, /核对记录/);
     await app.close();
   });
 
@@ -690,9 +695,11 @@ describe("Studio API", () => {
 
   it("reads and persists creator defaults", async () => {
     let savedRecipe = "";
+    let savedTopicStrategy: unknown;
     const app = buildStudioApp({ service: fakeService({
       updateCreatorSettings: async (input) => {
         savedRecipe = input.defaultRecipeId ?? "";
+        savedTopicStrategy = input.topicStrategy;
         return {
           voiceDirection: input.voiceDirection ?? { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
           defaultRecipeId: input.defaultRecipeId ?? "economy-daily",
@@ -702,7 +709,10 @@ describe("Studio API", () => {
             platform: input.productionDefaults?.platform ?? "douyin",
             durationSeconds: input.productionDefaults?.durationSeconds ?? 24,
           },
-          topicStrategy: input.topicStrategy ?? { customInstruction: "优先可拍、可核验、可连载的题材。" },
+          topicStrategy: {
+            customInstruction: "优先可拍、可核验、可连载的题材。",
+            ...input.topicStrategy,
+          },
         };
       },
     }) });
@@ -714,13 +724,53 @@ describe("Studio API", () => {
       payload: {
         voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
         defaultRecipeId: "free-stock",
+        topicStrategy: {
+          positioning: "替普通人解释技术变化。",
+          targetAudience: "关注 AI 的职场人。",
+          preferredDirections: "真实工作影响",
+          excludedDirections: "只有热度没有证据",
+          sourcePolicy: "primary_or_two_independent",
+          customInstruction: "必须能用画面兑现承诺。",
+        },
       },
     });
 
     assert.equal(initial.statusCode, 200);
     assert.equal(updated.statusCode, 200);
     assert.equal(savedRecipe, "free-stock");
+    assert.deepEqual(savedTopicStrategy, {
+      positioning: "替普通人解释技术变化。",
+      targetAudience: "关注 AI 的职场人。",
+      preferredDirections: "真实工作影响",
+      excludedDirections: "只有热度没有证据",
+      sourcePolicy: "primary_or_two_independent",
+      customInstruction: "必须能用画面兑现承诺。",
+    });
     assert.equal(updated.json().voiceDirection.rate, 205);
+
+    const withoutCustomInstruction = await app.inject({
+      method: "PATCH",
+      url: "/api/settings",
+      payload: {
+        topicStrategy: {
+          positioning: "替普通人解释技术变化。",
+          targetAudience: "关注 AI 的职场人。",
+          preferredDirections: "真实工作影响",
+          excludedDirections: "只有热度没有证据",
+          sourcePolicy: "primary_or_two_independent",
+          customInstruction: "   ",
+        },
+      },
+    });
+    assert.equal(withoutCustomInstruction.statusCode, 200);
+    assert.deepEqual(savedTopicStrategy, {
+      positioning: "替普通人解释技术变化。",
+      targetAudience: "关注 AI 的职场人。",
+      preferredDirections: "真实工作影响",
+      excludedDirections: "只有热度没有证据",
+      sourcePolicy: "primary_or_two_independent",
+      customInstruction: "",
+    });
     await app.close();
   });
 
@@ -1115,6 +1165,56 @@ describe("Studio API", () => {
 
     assert.equal(response.statusCode, 404);
     assert.deepEqual(response.json(), { error: "没有找到这条制作记录。" });
+    await app.close();
+  });
+
+  it("returns a node-prefilled rework draft and preserves conflict semantics", async () => {
+    const draft = {
+      input: {
+        protocolVersion: "video-factory/brief-v1" as const,
+        title: "第一条视频",
+        angle: "实用清单",
+        audience: "普通上班族",
+        nicheSlug: "life-avoidance",
+        durationSeconds: 24,
+        platform: "douyin",
+        reviewMode: "manual" as const,
+        providers: {
+          script: "python-template-v1",
+          assets: "ai-shot-router-v1",
+          voice: "macos-say-v1",
+          render: "python-ffmpeg-v1",
+          technicalReview: "python-technical-review-v1",
+        },
+        economics: { recipeId: "economy-daily" as const, allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
+        voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
+        rework: {
+          sourceRunId: "run-1",
+          sourceRunRevision: 3,
+          rejectionReason: "第三镜文字遮挡主体。",
+          nodeInstructions: { script: "缩短旁白。", visualDirection: "重做第三镜构图。", assets: "替换第三镜素材。" },
+          findings: [],
+        },
+      },
+      inheritedNodeIds: ["brief", "script", "visual-direction", "visual-review"],
+    };
+    const app = buildStudioApp({ service: fakeService({
+      reworkDraft: async (runId) => runId === "run-1"
+        ? draft
+        : runId === "running-run"
+          ? Promise.reject(new StudioConflictError("只有失败或已打回的制作才能生成返工草稿。"))
+          : undefined,
+    }) });
+
+    const found = await app.inject({ method: "GET", url: "/api/runs/run-1/rework-draft" });
+    const missing = await app.inject({ method: "GET", url: "/api/runs/missing/rework-draft" });
+    const conflict = await app.inject({ method: "GET", url: "/api/runs/running-run/rework-draft" });
+
+    assert.equal(found.statusCode, 200);
+    assert.equal(found.json().input.rework.nodeInstructions.assets, "替换第三镜素材。");
+    assert.equal(missing.statusCode, 404);
+    assert.equal(conflict.statusCode, 409);
+    assert.deepEqual(conflict.json(), { error: "只有失败或已打回的制作才能生成返工草稿。" });
     await app.close();
   });
 

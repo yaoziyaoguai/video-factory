@@ -191,6 +191,31 @@ function stubAgent(
 }
 
 describe("ProductionPipeline codex screenwriter", () => {
+  it("passes editable rework instructions and the previous script into the new script node", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-rework-"));
+    const { agent, inputs } = stubAgent(() => scriptDraft);
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent });
+
+    await pipeline.start({
+      ...brief,
+      rework: {
+        sourceRunId: "run-rejected-1",
+        sourceRunRevision: 9,
+        nodeInstructions: {
+          script: "缩短第三镜旁白，保留前两镜。",
+          visualDirection: "第三镜重做构图。",
+          assets: "第三镜换成无字母片。",
+        },
+        findings: [],
+        previousScript: { viewerPromise: "原承诺", scenes: [{ position: 1 }] },
+      },
+    });
+
+    assert.equal(inputs[0]?.brief.rework?.sourceRunId, "run-rejected-1");
+    assert.equal(inputs[0]?.brief.rework?.instruction, "缩短第三镜旁白，保留前两镜。");
+    assert.deepEqual(inputs[0]?.brief.rework?.previousScript, { viewerPromise: "原承诺", scenes: [{ position: 1 }] });
+  });
+
   it("scopes identical agent loops to their production run", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-run-scope-"));
     const worker = new RecordingWorker();

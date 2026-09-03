@@ -95,7 +95,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
           <NavLink to="/projects" data-tour="projects-nav"><Layers3 aria-hidden="true" size={18} /><span>制作记录</span></NavLink>
           <NavLink to="/assets"><Images aria-hidden="true" size={18} /><span>素材库</span></NavLink>
           <NavLink to="/templates"><LayoutTemplate aria-hidden="true" size={18} /><span>模板工坊</span></NavLink>
-          <NavLink to="/resources"><Settings2 aria-hidden="true" size={18} /><span>总配置</span></NavLink>
+          <NavLink to="/resources"><Settings2 aria-hidden="true" size={18} /><span>创作设置</span></NavLink>
           <NavLink to="/experiments"><ChartNoAxesCombined aria-hidden="true" size={18} /><span>制作复盘</span></NavLink>
         </nav>
         <div className="sidebar-footer">
@@ -238,6 +238,6 @@ const SEARCH_DESTINATIONS = [
   { to: "/projects", label: "制作记录", description: "查看、继续、归档或恢复制作", keywords: "项目 视频 成片", icon: Layers3 },
   { to: "/assets", label: "素材库", description: "检索画面、声音与授权记录", keywords: "媒体 资产 来源", icon: Images },
   { to: "/templates", label: "模板工坊", description: "选择或创建视频模板", keywords: "栏目 风格", icon: LayoutTemplate },
-  { to: "/resources", label: "总配置", description: "模型、素材、成本与平台", keywords: "API 方舟 MiniMax Codex", icon: Settings2 },
+  { to: "/resources", label: "创作设置", description: "模型、素材、费用与发布平台", keywords: "总配置 API 方舟 MiniMax Codex", icon: Settings2 },
   { to: "/experiments", label: "制作复盘", description: "查看质量与成本表现", keywords: "数据 统计", icon: ChartNoAxesCombined },
 ] as const;

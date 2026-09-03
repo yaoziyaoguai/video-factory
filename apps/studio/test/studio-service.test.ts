@@ -21,7 +21,7 @@ import {
 } from "../src/server/studio-service.js";
 import { JsonOpportunityStore } from "../src/server/opportunity-store.js";
 import { JsonRunArchiveStore } from "../src/server/run-archive-store.js";
-import { loadAgentLoopProgress } from "../src/server/production-studio.js";
+import { loadAgentLoopProgress, ProductionStudio } from "../src/server/production-studio.js";
 import type { StudioOpportunityInput, StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
 
 const brief: ProductionBrief = {
@@ -329,6 +329,166 @@ const opportunityInput: StudioOpportunityInput = {
 };
 
 describe("StudioService", () => {
+  it("builds a rejected-run draft that inherits production choices and prefills affected nodes", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rework-draft-"));
+    const scriptPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "attempt-1", "script.json");
+    const storyboardPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "visual-direction", "attempt-1", "storyboard.json");
+    await mkdir(path.dirname(scriptPath), { recursive: true });
+    await mkdir(path.dirname(storyboardPath), { recursive: true });
+    await writeFile(scriptPath, JSON.stringify({ viewerPromise: "原版承诺", scenes: [{ position: 1 }] }), "utf8");
+    await writeFile(storyboardPath, JSON.stringify({ visualBible: { typography: "画面内不出现文字" } }), "utf8");
+    const base = waitingRun(workspaceRoot);
+    const rejectedRun: WorkflowRun<ProductionBrief> = {
+      ...base,
+      status: "rejected",
+      revision: 12,
+      initialInput: {
+        ...brief,
+        providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1", visualReview: "glm-visual-review-v1" },
+        models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
+        director: { profileId: "documentary-observer", assetProviderIds: ["pexels-stock-v1", "seedance-video-v1"] },
+      },
+      decisions: [{
+        interventionId: "intervention-1",
+        action: "reject",
+        decidedBy: "owner",
+        decidedAt: "2026-08-21T10:02:00.000Z",
+        note: "第三镜画面文字干扰严重。",
+      }],
+      nodeRuns: [
+        {
+          nodeId: "script",
+          status: "succeeded",
+          startedAt: base.startedAt,
+          finishedAt: base.startedAt,
+          artifactIds: ["artifact-script"],
+          qualityGateResults: [],
+        },
+        {
+          nodeId: "visual-direction",
+          status: "succeeded",
+          startedAt: base.startedAt,
+          finishedAt: base.startedAt,
+          artifactIds: ["artifact-storyboard"],
+          qualityGateResults: [],
+        },
+        {
+          nodeId: "visual-review",
+          status: "succeeded",
+          startedAt: base.startedAt,
+          finishedAt: base.startedAt,
+          artifactIds: [],
+          qualityGateResults: [],
+          output: { report: { findings: [{ timecodeMs: 8_000, scenePosition: 3, category: "typography", description: "文字遮挡主体。", suggestion: "换用无字母片。" }] } },
+        },
+      ],
+      artifacts: [
+        {
+          id: "artifact-script",
+          kind: "script",
+          uri: scriptPath,
+          createdAt: base.startedAt,
+          contentType: "application/json",
+          sizeBytes: 64,
+          sha256: "b".repeat(64),
+          producer: { nodeId: "script", attempt: 1 },
+          provenance: { providerId: "codex-screenwriter-v1" },
+        },
+        {
+          id: "artifact-storyboard",
+          kind: "storyboard",
+          uri: storyboardPath,
+          createdAt: base.startedAt,
+          contentType: "application/json",
+          sizeBytes: 64,
+          sha256: "c".repeat(64),
+          producer: { nodeId: "visual-direction", attempt: 1 },
+          provenance: { providerId: "api-visual-director-v1" },
+        },
+      ],
+    };
+    const service = new StudioService({ workspaceRoot, pipeline: new FakePipeline(rejectedRun), commandAvailable: allCommandsAvailable, environment: {} });
+
+    const draft = await service.reworkDraft("run-1");
+
+    assert.equal(draft?.input.rework?.sourceRunRevision, 12);
+    assert.equal(draft?.input.director?.profileId, "documentary-observer");
+    assert.equal(draft?.input.models?.["seedance-video-v1"], "doubao-seedance-2-5-260628");
+    assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /文字遮挡主体/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /不得用说明卡/);
+    assert.deepEqual(draft?.input.rework?.previousScript, { viewerPromise: "原版承诺", scenes: [{ position: 1 }] });
+    assert.deepEqual(draft?.inheritedNodeIds, ["brief", "script", "visual-direction", "visual-review"]);
+  });
+
+  it("reuses the rejected run's immutable template snapshot when the rework keeps that version", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rework-template-snapshot-"));
+    const historicalSnapshot: NonNullable<ProductionBrief["templateSnapshot"]> = {
+      templateId: "knowledge-explainer",
+      templateVersion: 1,
+      resolvedAt: "2026-08-21T09:59:00.000Z",
+      resolvedBlueprint: {
+        platform: "douyin",
+        durationSeconds: 24,
+        automationLevel: "assisted",
+        storyStructure: [{ id: "historical-hook", label: "旧版开场", purpose: "保留当时的叙事承诺", required: true }],
+        shotSlots: [{ id: "historical-shot", beatId: "historical-hook", purpose: "旧版镜头", durationSeconds: 24, allowedCapabilities: ["asset.search"], manualReplacement: true }],
+        visualSystem: { composition: "旧版构图规则", colorIntent: "旧版暖色", subtitleDensity: "medium", pacing: "measured" },
+        soundSystem: { voiceIntent: "旧版声音", pace: "medium", musicIntent: "克制" },
+        qualityRules: [{ id: "historical-quality", label: "旧版质量线", dimension: "artistic", required: true, threshold: 80 }],
+        capabilityRequirements: [{ capability: "script.draft", required: true }],
+      },
+      sourceLayers: [{ layer: "template", sourceId: "knowledge-explainer@1", appliedFields: ["storyStructure", "visualSystem"] }],
+      fieldSources: { storyStructure: "template", visualSystem: "template" },
+    };
+    const sourceBrief: ProductionBrief = {
+      ...brief,
+      providers: { ...brief.providers, script: "codex-screenwriter-v1" },
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      templateSnapshot: historicalSnapshot,
+    };
+    const pipeline = new FakePipeline({
+      ...waitingRun(workspaceRoot),
+      revision: 7,
+      status: "rejected",
+      initialInput: sourceBrief,
+    });
+    let currentTemplateResolveCalls = 0;
+    const production = new ProductionStudio({
+      workspaceRoot,
+      pipeline,
+      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive", "runs.json")),
+      listProviders: async () => [
+        { id: "codex-screenwriter-v1", capability: "script.draft", label: "Codex 编剧", available: true, kind: "external" },
+        { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑画面", available: true, kind: "local" },
+        { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" },
+        { id: "python-ffmpeg-v1", capability: "video.render", label: "本地渲染", available: true, kind: "local" },
+        { id: "python-technical-review-v1", capability: "quality.review", label: "机器质检", available: true, kind: "local" },
+      ],
+      resolveTemplateSnapshot: async () => {
+        currentTemplateResolveCalls += 1;
+        return { ...historicalSnapshot, templateVersion: 2, resolvedAt: "2026-09-04T00:00:00.000Z" };
+      },
+    });
+
+    await production.start({
+      ...sourceBrief,
+      template: { templateId: "knowledge-explainer", templateVersion: 1 },
+      rework: {
+        sourceRunId: "run-1",
+        sourceRunRevision: 7,
+        nodeInstructions: {
+          script: "按审片意见精简第三镜旁白。",
+          visualDirection: "保留旧版视觉规则，只修第三镜。",
+          assets: "第三镜使用无字画面，禁止说明卡。",
+        },
+        findings: [],
+      },
+    });
+
+    assert.equal(currentTemplateResolveCalls, 0);
+    assert.deepEqual((pipeline.lastInput as ProductionBrief).templateSnapshot, historicalSnapshot);
+  });
+
   it("reads a safe live agent-loop summary from the latest node checkpoint", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-agent-progress-"));
     const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "agent-loop-checkpoints");
@@ -1069,7 +1229,7 @@ describe("StudioService", () => {
     await service.archiveRuns(["run-1"]);
     await assert.rejects(
       () => service.deleteRun("run-1"),
-      /Canon 的来源/,
+      /已确认内容的来源/,
     );
 
     const ready = (await service.listSeries())[0]!;
@@ -1208,7 +1368,7 @@ describe("StudioService", () => {
 
     await assert.rejects(
       () => service.retryFailedNode("run-1", "render"),
-      /Provider 控制台核对任务和账单/,
+      /服务商控制台核对任务和账单/,
     );
     assert.equal(pipeline.lastRetriedNodeId, undefined);
   });
@@ -1268,7 +1428,7 @@ describe("StudioService", () => {
         reconciliationId: "reconcile-assets-manual",
         outcome: "resume_original",
       }),
-      (error: unknown) => error instanceof StudioConflictError && /人工核销任务和账单/.test(error.message),
+      (error: unknown) => error instanceof StudioConflictError && /人工核对任务和账单/.test(error.message),
     );
   });
 
@@ -1507,8 +1667,6 @@ describe("StudioService", () => {
     assert.deepEqual((pipeline.lastInput as ProductionBrief).economics, {
       recipeId: "keyshot-ai",
       allowMeteredProviders: true,
-      maxPaidShots: 0,
-      maxCostCny: 0,
     });
   });
 

@@ -38,10 +38,16 @@ export function planVisualDirection(input: VisualDirectionInput): StudioVisualPl
         duration: "14-24 秒",
         description: `回到人物、结果或前后对照，用一个可验证变化回答“${topic}”并留出评论问题。`,
         searchQuery: `${topic} 前后对比 结果 人物反应`,
-        source: "local-card",
+        source: payoffSourceFor(category),
       },
     ],
   };
+}
+
+function payoffSourceFor(category: StudioTopicCategory): StudioVisualSource {
+  if (category === "technology" || category === "finance-career" || category === "education" || category === "gaming") return "screen";
+  if (category === "society" || category === "entertainment" || category === "health-sports" || category === "automotive") return "stock";
+  return "creator";
 }
 
 function contextSourceFor(category: StudioTopicCategory): StudioVisualSource {

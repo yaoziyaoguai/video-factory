@@ -6,11 +6,11 @@ import { providerLabel, runNodeLabel } from "../presentation.js";
 export function CostDashboard({ dashboard }: { dashboard: StudioCostDashboard }) {
   return (
     <section className="cost-dashboard" aria-labelledby="cost-dashboard-title">
-      <header className="section-heading"><div><p className="eyebrow">成本账本</p><h2 id="cost-dashboard-title">每一分钱都能追到节点</h2></div><span>人民币 CNY</span></header>
+      <header className="section-heading"><div><p className="eyebrow">费用记录</p><h2 id="cost-dashboard-title">每一笔费用都能追到制作步骤</h2></div><span>人民币 CNY</span></header>
       <CostMetrics totals={dashboard.totals} />
       <div className="cost-dashboard-grid">
         <CostRanking title="按服务商" groups={dashboard.byProvider} kind="provider" />
-        <CostRanking title="按生产节点" groups={dashboard.byNode} kind="node" />
+        <CostRanking title="按制作步骤" groups={dashboard.byNode} kind="node" />
       </div>
       <div className="cost-run-table">
         <header><strong>视频明细</strong><span>{dashboard.runs.length} 条制作</span></header>
@@ -24,7 +24,7 @@ export function RunCostDetailPanel({ detail }: { detail: StudioCostRunDetail }) 
   const lines = groupCostLines(detail.lines);
   return (
     <section className="run-cost-detail" aria-labelledby="run-cost-title">
-      <header className="section-heading"><div><p className="eyebrow">本片成本</p><h2 id="run-cost-title">消费概览</h2></div><ReceiptText aria-hidden="true" size={19} /></header>
+      <header className="section-heading"><div><p className="eyebrow">本片费用</p><h2 id="run-cost-title">费用明细</h2></div><ReceiptText aria-hidden="true" size={19} /></header>
       <CostMetrics totals={detail.totals} compact />
       <details className="cost-call-details">
         <summary><span><strong>逐角色消费明细</strong><small>查看本片使用了哪些能力</small></span><b>{lines.length} 项</b></summary>

@@ -381,7 +381,7 @@ export function TodayPage() {
               <DirectorPanel opportunity={selected} providers={providers} {...(providersLoading || providersError ? { providerError: providersLoading ? "正在读取能力状态..." : `能力状态读取失败：${providersError}` } : {})} onProduce={openProductionDialog} />
             </div>
           )
-        ) : <div className="awaiting-adoption"><RadioTower aria-hidden="true" size={22} /><span>{entryMode === "series" ? "当前没有待制作单集；从路线图采用下一集，或到制作记录继续已有工作。" : "当前没有待制作机会；从上方采用新候选，已投产内容请到制作记录继续。"}</span><Link className="button button-secondary" to="/projects">查看制作记录</Link></div>}
+        ) : <div className="awaiting-adoption"><RadioTower aria-hidden="true" size={22} /><span>{entryMode === "series" ? "当前没有待制作单集；从路线图采用下一集，或到制作记录继续已有工作。" : "当前没有待制作机会；从上方采用新候选，已开始制作的内容请到制作记录继续。"}</span><Link className="button button-secondary" to="/projects">查看制作记录</Link></div>}
       </section>
 
       <OpportunityDialog open={opportunityDialogOpen} initialMode={opportunityDialogMode} onClose={() => setOpportunityDialogOpen(false)} onSubmit={createOpportunity} />
@@ -399,6 +399,9 @@ export function TodayPage() {
             reasons: selected.editorialDecision.reasons,
             guardrails: selected.editorialDecision.guardrails,
           },
+          ...(selected.editorialDecision.recommendedTemplate ? {
+            template: { templateId: selected.editorialDecision.recommendedTemplate.id },
+          } : {}),
         } : {}),
         creationContext: {
           origin: selected.origin === "trend" || selected.origin === "series" ? selected.origin : "manual",

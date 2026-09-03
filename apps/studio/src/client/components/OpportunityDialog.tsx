@@ -83,7 +83,7 @@ export function OpportunityDialog({ open, initialMode = "manual", onClose, onSub
             <label className="field field-wide json-field">
               <span>机会数据</span>
               <textarea name="json" required data-dialog-initial-focus rows={18} spellCheck={false} placeholder={'{"title":"...","evidence":[...],"scores":{...}}'} />
-              <small>字段结构与 Studio Opportunity API 一致，提交后仍由服务端校验。</small>
+              <small>请使用选题导入格式；提交后系统仍会检查字段和内容。</small>
             </label>
           )}
           {error ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}

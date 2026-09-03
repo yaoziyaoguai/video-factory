@@ -170,10 +170,20 @@ describe("CandidateInboxStudio", () => {
     assert.equal(listed.items.find((item) => item.id === highRisk.id)?.editorialDecision.verdict, "skip");
     assert.equal(listed.items.find((item) => item.id === review.id)?.verification.status, "review_required");
     assert.equal(listed.items.find((item) => item.id === review.id)?.editorialDecision.verdict, "produce_image_story");
+    assert.deepEqual(
+      listed.items.find((item) => item.id === review.id)?.editorialDecision.recommendedTemplate,
+      {
+        id: "photo-story",
+        name: "证据图解",
+        format: "来源画面与数据证据驱动的图解视频",
+        rationale: "公共议题缺少可安全生成的连续现场，采用来源画面、数据和少量获授权实景更可信。",
+      },
+    );
     await assert.rejects(() => inbox.adopt(highRisk.id, { origin: "trend", verificationConfirmed: true }), /至少需要 2 个独立来源/);
     await assert.rejects(() => inbox.adopt(review.id, { origin: "trend" }), /确认核验/);
     const adopted = await inbox.adopt(review.id, { origin: "trend", verificationConfirmed: true });
     assert.equal(adopted.verification?.status, "verified");
+    assert.equal(adopted.editorialDecision?.recommendedTemplate?.id, "photo-story");
   });
 
   it("does not treat two aggregators carrying the same publisher link as independent evidence", async () => {
@@ -213,6 +223,38 @@ describe("CandidateInboxStudio", () => {
 
     assert.equal(listed?.verification.status, "blocked");
     assert.equal(listed?.verification.independentSources, 1);
+  });
+
+  it("enforces the configured source policy for ordinary low-risk candidates", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-source-policy-inbox-"));
+    const opportunities = new OpportunityStudio({
+      opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
+    });
+    const series = new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) });
+    const oneLinkedSource = {
+      ...trendCandidate,
+      evidence: [{ ...trendCandidate.evidence[0]!, evidenceUrl: "https://example.com/ai-workflow" }],
+    };
+    const strictInbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [oneLinkedSource] },
+      series,
+      opportunities,
+      topicStrategy: async () => ({ customInstruction: "", sourcePolicy: "primary_or_two_independent" }),
+    });
+    const relaxedInbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [oneLinkedSource] },
+      series,
+      opportunities,
+      topicStrategy: async () => ({ customInstruction: "", sourcePolicy: "traceable_source" }),
+    });
+
+    const [strict] = (await strictInbox.list({ origins: ["trend"] })).items;
+    const [relaxed] = (await relaxedInbox.list({ origins: ["trend"] })).items;
+
+    assert.equal(strict?.verification.status, "blocked");
+    assert.equal(strict?.editorialDecision.verdict, "skip");
+    assert.match(strict?.verification.reasons[0] ?? "", /至少 2 个独立且可打开的来源/);
+    assert.equal(relaxed?.verification.status, "ready");
   });
 
   it("can adopt a candidate the user saw just before a background trend refresh", async () => {

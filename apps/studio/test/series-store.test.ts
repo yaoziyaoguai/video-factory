@@ -341,7 +341,7 @@ describe("JsonSeriesStore", () => {
     assert.match(ready.episodes[1]?.continuity.inheritedFromPrevious[0] ?? "", /票据模糊时必须人工复核/);
     await assert.rejects(
       () => store.adoptEpisode("series-1", 2, "2026-08-24T09:11:00.000Z"),
-      (error: unknown) => error instanceof SeriesStoreConflictError && /开拍审计/.test(error.message),
+      (error: unknown) => error instanceof SeriesStoreConflictError && /开拍复核/.test(error.message),
     );
     const staleEpisode = ready.episodes[1]!;
     const rebased = await store.rebaseEpisodePlan("series-1", 2, ready.revision, ready.canon.revision, {
@@ -404,7 +404,7 @@ describe("JsonSeriesStore", () => {
     assert.equal(stale.episodes[1]?.continuity.inheritedFromPrevious.some((value) => value.includes("结论 A")), false);
     await assert.rejects(
       () => store.reserveRun("series-1", "series-series-1-episode-002", "series-series-1-episode-002", "reservation-2", "2026-08-24T09:21:00.000Z"),
-      (error: unknown) => error instanceof SeriesStoreConflictError && /第 1 集尚未形成有效 Canon/.test(error.message),
+      (error: unknown) => error instanceof SeriesStoreConflictError && /第 1 集尚未形成有效的已确认内容/.test(error.message),
     );
 
     await store.reconcileRuns([{ id: "run-1", status: "failed", revision: 5 }], "2026-08-24T09:30:00.000Z");
