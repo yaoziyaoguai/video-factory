@@ -96,6 +96,45 @@ describe("CostStudio", () => {
     assert.equal(detail?.lines[0]?.actualPending, true);
   });
 
+  it("does not report a pending bill when the provider rejected before task submission", async () => {
+    const studio = new CostStudio(async () => ([{
+      id: "run-definitive-rejection",
+      initialInput: { title: "提交前被拒绝" },
+      nodeRuns: [{
+        nodeId: "assets",
+        status: "failed",
+        outcomeUncertain: true,
+        operationRequestId: "provider-operation-rejected",
+        executionReceipt: {
+          id: "receipt-rejected",
+          nodeId: "assets",
+          capability: "asset.prepare",
+          providerId: "seedream-image-v1",
+          modelId: "doubao-seedream-test",
+          billing: "metered",
+          status: "failed",
+          requestId: "provider-operation-rejected",
+          startedAt: "2026-08-27T11:00:00.000Z",
+          finishedAt: "2026-08-27T11:00:01.000Z",
+          estimatedCostCny: 1.75,
+          actualCostCny: 0,
+          actualCostSource: "configured_rate",
+          meteredAttemptCount: 0,
+          meteredFailedAttemptCount: 0,
+        },
+      }],
+      executionReceipts: [],
+      spendAuthorizations: [],
+    }]));
+
+    const detail = await studio.runDetail("run-definitive-rejection");
+
+    assert.equal(detail?.totals.actualCostCny, 0);
+    assert.equal(detail?.totals.actualPendingCount, 0);
+    assert.equal(detail?.totals.meteredCalls, 0);
+    assert.equal(detail?.lines[0]?.actualPending, false);
+  });
+
   it("counts every producer and auditor call in an agent loop", async () => {
     const studio = new CostStudio(async () => ([{
       id: "run-agent-loop",
