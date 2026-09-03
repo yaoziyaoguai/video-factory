@@ -1,60 +1,42 @@
 # VideoFactory Loop Engineering
 
-VideoFactory 的 loop 不是普通 todo list。它是一个可复盘的工程闭环：每轮都必须说明为什么做、怎么做、如何验证、哪些证据证明完成。
+Loop 是一轮可复盘的工程闭环，不是长期堆积的 todo 或实现计划。当前工作树只保留仍能指导实现的规则和最新验收记录；已完成的旧计划与逐轮截图由 Git 历史保存。
 
-## Loop Definition
+## Loop 合同
 
-一个 loop 包含：
+每轮必须记录：
 
-- `objective`：本轮要改变什么能力。
-- `success_criteria`：完成标准，必须可观察。
-- `phase events`：每个阶段发生了什么。
-- `evidence`：命令、文件、测试、导出物或数据。
-- `status`：`active`、`completed`、`blocked`、`skipped`。
+- `objective`：本轮要改变的可观察能力。
+- `success_criteria`：可以被测试或人工验收证明的完成标准。
+- `phase events`：发现、设计、实现、验证、审查和发布过程中发生了什么。
+- `evidence`：测试命令、失败复现、artifact、PR、部署和真实界面验证。
+- `status`：`active`、`completed`、`blocked` 或 `skipped`。
 
-数据库实体是 `engineering_loops` 和 `loop_events`。CLI 是事实入口，文档是人类可读入口。
+数据库中的 `engineering_loops` 与 `loop_events` 是机器可读记录；仓库文档只保留需要长期阅读的决策和最新验收。
 
-## Stages
+## 阶段
 
-| Stage | Purpose | Evidence |
+| Stage | 目的 | 最低证据 |
 |---|---|---|
-| `discover` | 明确问题和约束 | 调研摘要、用户决策、风险清单 |
-| `plan` | 切出最小可交付范围 | plan 文件、成功标准、非目标 |
-| `implement` | 改代码或产出内容资产 | diff、生成文件、样例 |
-| `verify` | 证明本轮能力可用 | 测试命令、CLI 输出、导出包 |
-| `review` | 找错、降复杂度、确认范围 | review 结论、剩余风险 |
-| `ship` | 提交、推送或准备交付 | commit、branch、PR、发布包 |
-| `learn` | 把结果变成下一轮输入 | 数据复盘、失败原因、下一轮假设 |
+| `discover` | 确认问题、根因和约束 | 复现、代码路径、风险 |
+| `plan` | 限定最小结果与非目标 | 成功标准、影响文件 |
+| `implement` | 完成最小行为改动 | diff、RED/GREEN |
+| `verify` | 证明目标行为与回归风险 | 完整命令与 exit code |
+| `review` | 检查正确性、范围和复杂度 | review 结论与修正 |
+| `ship` | 经 PR 和 CI/CD 发布 | PR、Action、release SHA |
+| `learn` | 把真实结果反馈到下一轮 | 失败原因、保留边界 |
 
-## Skill And Plugin Operating System
+## 规则
 
-当前仓库采用轻量人工掌舵，不直接跑全自动 `lfg`。
+1. 非平凡变更从 `codex/<slug>` 分支开始。
+2. 行为改动先写可失败的回归测试，再做最小实现。
+3. 自动化测试、真实浏览器验收和生产健康检查分别记录，不能互相代替。
+4. 图片/视频费用审批、最终审片和外部发布始终由人决定。
+5. `data/`、`workspace/`、`output/`、密钥和浏览器产物不提交。
+6. 完成的计划不继续作为当前事实；长期有效的决定进入 ADR、指南或 README。
+7. 发布只走 PR、GitHub Actions 和固定 SHA 部署，不通过 SSH 覆盖代码。
 
-| Need | Preferred Skill / Plugin | Use |
-|---|---|---|
-| 模糊方向收敛 | `decision-mapping`、`ce-brainstorm` | 用于赛道、商业化、产品方向不清时 |
-| 工程计划 | `ce-plan` | 生成 implementation-ready 计划 |
-| 工程执行 | `ce-work` | 按计划完成代码和本地验证 |
-| 代码审查 | `ce-code-review` 或普通 review stance | 行为改动完成后找 bug 和测试缺口 |
-| 文档审查 | `ce-doc-review` | plan 或长文档需要清晰度检查时 |
-| 浏览器/视觉 QA | `qa`、`ce-test-browser`、`playwright` | 有 Web UI 或视频预览页面时 |
-| 提交发布 | `ce-commit`、`ce-commit-push-pr`、GitHub plugin | 提交、推送、PR |
-| 长任务保存 | `checkpoint`、`context-save` | loop 中断前保存状态 |
-| 外部调研 | `browse`、web search | 平台规则、API、开源项目更新 |
-
-`lfg` 只在明确要自动完成到 PR、且不需要中途确认时使用。VideoFactory 当前阶段更适合 `ce-plan -> ce-work -> review -> commit/push`。
-
-## Loop Rules
-
-1. 非平凡变更从 `codex/<loop-slug>` 分支开始。
-2. 每个 loop 先写成功标准，再写代码。
-3. 每个行为改动必须有测试或可复现 CLI 验证。
-4. 每个 loop 至少记录一个 `verify` 事件。
-5. 不把 `data/`、`workspace/` 和生成产物提交进仓库。
-6. 内容产品决策先验证小样，不用工程复杂度替代内容判断。
-7. 自动发布平台放后期，MVP 阶段保留人工审核。
-
-## CLI Cheatsheet
+## CLI
 
 ```bash
 PYTHONPATH=src python3 -m video_factory loop-start <slug> "<title>" \
@@ -73,10 +55,8 @@ PYTHONPATH=src python3 -m video_factory loop-complete <slug-or-id> \
   --verification "make test"
 ```
 
-## Current Loop Sequence
+## 现行记录
 
-1. `loop-1-topic-experiments`：建立大众赛道选题实验基础。
-2. `loop-2-script-quality`：按赛道升级脚本和分镜质量。
-3. `loop-3-review-package-metrics`：发布包和数据复盘。
-4. `loop-4-low-cost-render`：生成可发布的 1080x1920 MP4。
-5. `loop-5-asset-automation`：接素材、TTS、字幕和 scene 级重生成。
+- 当前完整验收：[Loop 022：费用审批与严格素材](loops/022-spend-approval-and-strict-assets-results.md)
+- 历史阶段摘要：[项目演进](HISTORY.md)
+- 清理前完整文档树：Git commit `2d4f842b160801925115acbae9d1e536079334c6`

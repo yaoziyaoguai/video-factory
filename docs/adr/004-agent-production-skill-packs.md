@@ -34,7 +34,7 @@ flowchart LR
   S --> D[Deterministic evaluator]
   D --> O[Editable node output]
   O --> G{Next node costs money?}
-  G -- yes --> H[Human review and bounded spend authorization]
+  G -- yes --> H[Human review of immutable shot quote]
   G -- no --> N[Continue]
   H --> N
   N --> R[Runtime receipt and cost ledger]
@@ -53,7 +53,7 @@ flowchart LR
 ## Preview And Spend Policy
 
 - 所有节点输入、输出和实际能力回执都可见；用户修改后生成新版本并使下游失效。
-- 每个付费节点前必须停止，展示本次实际输入版本、Provider、最大授权金额和已有免费产物。
+- 每个付费图片/视频节点前必须停止，展示本次实际输入版本、Provider、逐镜不可变报价和已有免费产物；没有视频级硬费用上限。
 - 视频生成按首批镜头预览后再放量；首批不通过时只重做受影响镜头。
 - 成片视觉审查按渲染时间线抽取首屏和逐镜中点，不把转场帧当作镜头证据。
 

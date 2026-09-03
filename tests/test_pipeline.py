@@ -147,7 +147,7 @@ class PipelineTest(unittest.TestCase):
                     "--summary",
                     "Plan written.",
                     "--evidence",
-                    "docs/loops/001-topic-experiment.md",
+                    "docs/HISTORY.md",
                 ]
             )
             complete_exit = run_cli(

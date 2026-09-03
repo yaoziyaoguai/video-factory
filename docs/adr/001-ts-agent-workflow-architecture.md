@@ -4,7 +4,7 @@ Date: 2026-08-21
 
 ## Status
 
-Accepted for the next implementation loop.
+Accepted and implemented. TypeScript owns workflow/control-plane semantics; Python remains the media worker.
 
 ## Context
 

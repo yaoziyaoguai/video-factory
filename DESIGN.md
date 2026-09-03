@@ -105,8 +105,7 @@ The 9:16 native video monitor is the primary surface. Workflow status remains ab
 - `>=1361px`：完整 Light Curated Studio 侧栏，主要工作区使用稳定三栏编排。
 - `901-1360px`：图标侧栏，选题/焦点二栏，导演控制下移。
 - `701-900px`：图标侧栏，主要工作区单栏，机会列表横向浏览。
-- `<=700px`：置顶品牌栏和固定四项底部导航；三步状态并排可见，编辑提案、声音角色和 Provider 台账转为单栏，弹窗成为全宽 sheet。
-- 旧版基础组件还在 `1180/980/920/760/410px` 处理队列、表单和超窄屏细节；它们是组件级约束，不改变上述 Creator Canvas 主断点。
+- `<=700px`：置顶品牌栏和固定五项底部导航；三步状态并排可见，编辑提案、声音角色和 Provider 台账转为单栏，弹窗成为全宽 sheet。
 - Required viewport checks: 390x844, 768x1024, 1440x900, 1920x1080.
 - Route changes reset document scroll. No page may create document-level horizontal overflow.
 - Visual acceptance requires real screenshots at desktop and mobile widths, plus a console warning/error sweep. Tablet-specific polish is not part of the current release, but layouts must remain usable without overflow.

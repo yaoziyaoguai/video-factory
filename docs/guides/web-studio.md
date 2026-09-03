@@ -55,7 +55,7 @@ flowchart LR
     H -->|采用到制作区| K[(opportunities.json)]
     K --> L[可编辑 Production Brief]
     Y[(settings.json)] --> L
-    L --> M[Provider 就绪与预算检查]
+    L --> M[Provider 就绪与报价策略]
     M --> N[ProductionPipeline]
     N --> O[脚本]
     O --> P[画面]
@@ -99,7 +99,7 @@ TrendRadar 自带 11 个中文平台榜单与静态报告，当前关闭其内�
 - 需要复核：点击采用后必须在确认框中明确继续，系统不会悄悄放行。
 - 高风险公共事件：至少需要 2 条带 URL 的独立来源；不足时采用按钮禁用。模型生成的扩展事实不会进入标题、hook 或推荐理由。
 
-每张候选卡会解释总分的主要贡献项和风险扣分，并给出开场、展开、收束三拍视觉计划。素材来源只是建议，可在正式 Brief 中替换为本地素材、素材库、编辑卡片或已配置的生成式视觉 Provider。
+每张候选卡会解释总分的主要贡献项和风险扣分，并给出开场、展开、收束三拍视觉计划。素材来源只是建议，可在正式 Brief 中替换为本地素材、素材库或已配置的生成式视觉 Provider。`editorial_card` 只在导演主动把它选为正式创作内容时可用，不能承担失败 fallback。
 
 三个入口采用后共享同一套生产引擎，但机会区、制作记录和 API 集合仍按入口隔离。任何正式机会必须包含：
 
@@ -215,7 +215,7 @@ flowchart TB
 | Production Brief | 已实现 | 从机会预填但必须人工确认 |
 | 创作默认值 | 已实现 | 画面来源策略、导演、平台、时长、终审、声音与素材 Provider 持久化并自动继承 |
 | 站内创作向导 | 已实现 | 首次自动出现；15 步跨页向导；当前页向导；悬浮入口；可提前结束 |
-| 本地制作 | 已实现 | 脚本、编辑卡片、macOS 配音、FFmpeg mastering、ffprobe |
+| 本地制作 | 已实现 | 脚本、导演显式选择的 editorial card、macOS 配音、FFmpeg mastering、ffprobe |
 | 外部素材 | 可插拔 | Pexels/Pixabay 需要 key，未配置时禁用 |
 | Codex 语义层 | 已实现 | 选题总编、编剧、视觉导演、发行编辑四角色；人工终审与确定性技术质检保留为硬边界 |
 | 自动趋势采集 | 部分实现 | DailyHotApi/NewsNow 已归一化；TrendRadar/RSSHub 当前仅做健康检查 |
