@@ -89,9 +89,14 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       : undefined;
     const estimatedCostCny = nonNegativeNumber(receipt.estimatedCostCny) ?? 0;
     const currentNode = nodes.get(nodeId);
+    const definitiveNoSubmission = billing === "metered"
+      && reportedMeteredAttemptCount === 0
+      && (reportedFailedAttemptCount ?? 0) === 0
+      && (actualCost ?? 0) === 0;
     const currentOperationPending = currentNode?.outcomeUncertain === true
       && Boolean(currentNode.operationRequestId)
-      && currentNode.operationRequestId === text(receipt.requestId);
+      && currentNode.operationRequestId === text(receipt.requestId)
+      && !definitiveNoSubmission;
     const authorizedCostCny = nonNegativeNumber(receipt.authorizedCostCny)
       ?? (isRecord(authorization) ? nonNegativeNumber(authorization.maxCostCny) : undefined)
       // 旧回执没有固化授权上限；按已执行的预估额恢复保守基线，并沿用旧版去重规则。
@@ -118,7 +123,9 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       ...(meteredAttemptCount !== undefined ? { meteredAttemptCount } : {}),
       ...(meteredFailedAttemptCount !== undefined ? { meteredFailedAttemptCount } : {}),
       ...(subscriptionCallCount !== undefined ? { subscriptionCallCount } : {}),
-      actualPending: billing === "metered" && (actualCost === undefined || currentOperationPending),
+      actualPending: billing === "metered"
+        && !definitiveNoSubmission
+        && (actualCost === undefined || currentOperationPending),
       startedAt,
       ...(text(receipt.finishedAt) ? { finishedAt: text(receipt.finishedAt) } : {}),
     }];

@@ -237,6 +237,46 @@ describe("run observability", () => {
     expect(result.failure?.impact).toContain("成片已保留");
   });
 
+  it("does not ask for billing reconciliation when a zero-attempt receipt proves rejection before submission", () => {
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:01:00.000Z",
+      now: "2026-08-30T10:01:00.000Z",
+      nodes: [
+        node("assets", "画面", "failed", {
+          role: "素材导演",
+          outcomeUncertain: true,
+          error: "The input text may contain sensitive information.",
+          executionReceipt: {
+            providerId: "seedream-image-v1",
+            providerLabel: "Seedream 关键画面",
+            modelId: "doubao-seedream-test",
+            transport: "http_api",
+            billing: "metered",
+            status: "failed",
+            actualCostCny: 0,
+            actualCostSource: "configured_rate",
+            meteredAttemptCount: 0,
+            meteredFailedAttemptCount: 0,
+            startedAt: "2026-08-30T10:00:00.000Z",
+            finishedAt: "2026-08-30T10:01:00.000Z",
+          },
+        }),
+        node("voice", "配音", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure?.recoveryActions).not.toContain("先到服务商控制台核对任务状态与账单");
+    expect(result.failure).toMatchObject({
+      category: "content_policy",
+      summary: "Seedream 关键画面没有通过内容安全检查",
+    });
+    expect(result.failure?.recoveryActions).toContain("修改该节点的输入内容");
+  });
+
   it("keeps an explicit human rejection separate from a system failure", () => {
     const result = buildRunObservability({
       status: "rejected",

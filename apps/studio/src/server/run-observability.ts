@@ -197,19 +197,28 @@ function buildFailure(nodes: StudioNode[], videoAvailable: boolean): StudioRunFa
       ? `前面 ${savedNodeCount} 个节点的结果已保留；${laterNodes[0]?.label ?? "后续制作"}尚未开始。`
       : `${laterNodes[0]?.label ?? "后续制作"}尚未开始。`;
   const normalized = normalizeFailure(raw, failed, provider);
+  const outcomeUncertain = failed.outcomeUncertain === true && !isDefinitiveZeroAttemptFailure(failed);
   return {
     nodeId: failed.id,
     nodeLabel: failed.label,
     category: normalized.category,
     summary: normalized.summary,
     impact: preserved,
-    retryable: !failed.outcomeUncertain && normalized.retryable,
-    recoveryActions: failed.outcomeUncertain
+    retryable: !outcomeUncertain && normalized.retryable,
+    recoveryActions: outcomeUncertain
       ? ["先到服务商控制台核对任务状态与账单", "确认没有重复扣费后再决定是否重试"]
       : normalized.recoveryActions,
     savedNodeCount,
     technicalDetail: raw,
   };
+}
+
+function isDefinitiveZeroAttemptFailure(node: StudioNode): boolean {
+  const receipt = node.executionReceipt;
+  return receipt?.billing === "metered"
+    && receipt.meteredAttemptCount === 0
+    && (receipt.meteredFailedAttemptCount ?? 0) === 0
+    && (receipt.actualCostCny ?? 0) === 0;
 }
 
 function normalizeFailure(raw: string, node: StudioNode, provider?: string): Pick<StudioRunFailure, "category" | "summary" | "retryable" | "recoveryActions"> {
@@ -238,10 +247,10 @@ function normalizeFailure(raw: string, node: StudioNode, provider?: string): Pic
       recoveryActions: ["到创作设置检查对应服务的密钥与权限", "测试连接成功后再重试"],
     };
   }
-  if (/moderation|content.?policy|审核|违规|敏感|rejected by provider/i.test(raw)) {
+  if (/moderation|content.?policy|sensitive information|审核|违规|敏感|rejected by provider/i.test(raw)) {
     return {
       category: "content_policy",
-      summary: `${service} 没有通过内容安全检查`,
+      summary: `${service}没有通过内容安全检查`,
       retryable: false,
       recoveryActions: ["修改该节点的输入内容", "确认人物、品牌与素材权利后重新生成"],
     };
