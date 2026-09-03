@@ -283,8 +283,8 @@ export function ResourcesPage() {
         <a href="#trend-connections" aria-current={activeSection === "trend-connections" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("trend-connections"); }}><RadioTower aria-hidden="true" size={15} />热点信号</a>
         <a href="#voice-casting" aria-current={activeSection === "voice-casting" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("voice-casting"); }}><Sparkles aria-hidden="true" size={15} />声音演员</a>
         <a href="#visual-providers" aria-current={activeSection === "visual-providers" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("visual-providers"); }}><Film aria-hidden="true" size={15} />画面来源</a>
-        <a href="#production-roles" aria-current={activeSection === "production-roles" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("production-roles"); }}><Clapperboard aria-hidden="true" size={15} />岗位模型</a>
-        <a href="#resource-manifest" aria-current={activeSection === "resource-manifest" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("resource-manifest"); }}><ListChecks aria-hidden="true" size={15} />资源清单</a>
+        <a href="#production-roles" aria-current={activeSection === "production-roles" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("production-roles"); }}><Clapperboard aria-hidden="true" size={15} />制作分工</a>
+        <a href="#resource-manifest" aria-current={activeSection === "resource-manifest" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("resource-manifest"); }}><ListChecks aria-hidden="true" size={15} />来源与授权</a>
         <a href="#publish-channels" aria-current={activeSection === "publish-channels" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("publish-channels"); }}><UploadCloud aria-hidden="true" size={15} />发布渠道</a>
       </nav>
 
@@ -441,7 +441,7 @@ export function ResourcesPage() {
               const sourceUrl = externalResourceUrl(item.sourceUrl);
               return <article key={`${item.runId}:${item.id}`}>
                 <span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span>
-                <div><strong>{item.creator ?? resourceItemLabel(item)}</strong><small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small><p>{item.licenseNote ?? "缺少授权说明，需要人工复核。"}</p></div>
+                <div><strong>{item.creator ?? resourceItemLabel(item)}</strong><small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small><p>{creatorFacingTechnicalText(item.licenseNote) ?? "缺少授权说明，需要人工复核。"}</p></div>
                 <span className={item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{item.reviewStatus === "recorded" ? "已记录" : "待复核"}</span>
                 {sourceUrl ? <a href={sourceUrl} target="_blank" rel="noreferrer" title="核验资源来源"><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
               </article>;
@@ -703,7 +703,7 @@ function isProductionReady(provider: StudioProvider): boolean {
 }
 
 function serviceKind(kind: StudioTrendService["kind"]): string {
-  return kind === "collector" ? "采集与历史" : kind === "feed" ? "中文 RSS 路由" : "榜单接口";
+  return kind === "collector" ? "采集与历史" : kind === "feed" ? "中文资讯订阅" : "榜单接口";
 }
 
 function browserServiceUrl(value: string | undefined): string | undefined {
