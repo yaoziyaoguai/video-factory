@@ -384,6 +384,19 @@ describe("parseTaskRequest", () => {
     assert.equal("costPolicy" in (script.payload.brief.templateBlueprint ?? {}), false);
     assert.doesNotMatch(buildTaskPrompt(script), /costPolicy|maxPaidShots|maxCost/);
 
+    const reworkInput = scriptRequest();
+    (reworkInput.payload.brief as Record<string, unknown>).rework = {
+      sourceRunId: "run-rejected-1",
+      instruction: "保留前两镜，只把第三镜的白纸改写为无字 A4 打印纸。",
+      previousScript: { viewerPromise: "解释灯光为什么会改变纸面颜色", scenes: [{ position: 1 }] },
+    };
+    const reworkScript = parseTaskRequest(reworkInput);
+    assert.equal(reworkScript.kind, "script-draft");
+    if (reworkScript.kind !== "script-draft") throw new Error("expected script-draft task");
+    assert.deepEqual(reworkScript.payload.brief.rework, (reworkInput.payload.brief as Record<string, unknown>).rework);
+    assert.match(buildTaskPrompt(reworkScript), /保留前两镜/);
+    assert.match(buildTaskPrompt(reworkScript), /previousScript/);
+
     const publishInput = publishCopyRequest();
     publishInput.payload.revision = { candidate: { title: "旧标题" }, audit: { repairInstructions: ["删除夸张承诺"] } };
     const publish = parseTaskRequest(publishInput);
@@ -495,6 +508,16 @@ describe("parseTaskRequest", () => {
     const fractional = scriptRequest();
     (fractional.payload.brief as Record<string, unknown>).durationSeconds = 24.5;
     await assert.rejects(async () => parseTaskRequest(fractional), (error: unknown) => assertTerminal(error, /integer between 20 and 180/));
+
+    const invalidRework = scriptRequest();
+    (invalidRework.payload.brief as Record<string, unknown>).rework = {
+      sourceRunId: "../run-1",
+      instruction: "重做第三镜",
+    };
+    await assert.rejects(
+      async () => parseTaskRequest(invalidRework),
+      (error: unknown) => assertTerminal(error, /rework\.sourceRunId is invalid/),
+    );
 
     const missingNarrations = publishCopyRequest();
     delete missingNarrations.payload.narrations;

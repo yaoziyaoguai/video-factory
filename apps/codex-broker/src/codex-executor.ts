@@ -179,6 +179,11 @@ export interface ScriptBrief {
     reasons: string[];
     guardrails: string[];
   };
+  rework?: {
+    sourceRunId: string;
+    instruction: string;
+    previousScript?: Record<string, unknown>;
+  };
 }
 
 export interface ScriptDraftPayload {
@@ -1331,7 +1336,7 @@ function requireScriptBrief(value: unknown): ScriptBrief {
   const record = requireRecord(value, "payload.brief");
   assertExactKeys(
     record,
-    ["title", "angle", "audience", "nicheSlug", "platform", "durationSeconds", "templateBlueprint", "editorial"],
+    ["title", "angle", "audience", "nicheSlug", "platform", "durationSeconds", "templateBlueprint", "editorial", "rework"],
     "payload.brief",
   );
   const durationSeconds = record.durationSeconds;
@@ -1350,7 +1355,29 @@ function requireScriptBrief(value: unknown): ScriptBrief {
     brief.templateBlueprint = withoutLegacyCostPolicy(record.templateBlueprint, "payload.brief.templateBlueprint");
   }
   if (record.editorial !== undefined) brief.editorial = requireEditorialBrief(record.editorial);
+  if (record.rework !== undefined) brief.rework = requireScriptRework(record.rework);
   return brief;
+}
+
+function requireScriptRework(value: unknown): NonNullable<ScriptBrief["rework"]> {
+  const record = requireRecord(value, "payload.brief.rework");
+  assertExactKeys(record, ["sourceRunId", "instruction", "previousScript"], "payload.brief.rework");
+  const sourceRunId = requiredText(record.sourceRunId, "payload.brief.rework.sourceRunId");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sourceRunId)) {
+    throw new CodexExecutorError("payload.brief.rework.sourceRunId is invalid.", false);
+  }
+  const instruction = requiredText(record.instruction, "payload.brief.rework.instruction");
+  if (instruction.length > 6_000) {
+    throw new CodexExecutorError("payload.brief.rework.instruction exceeds 6000 characters.", false);
+  }
+  const previousScript = record.previousScript === undefined
+    ? undefined
+    : boundedRecord(record.previousScript, "payload.brief.rework.previousScript", 150_000);
+  return {
+    sourceRunId,
+    instruction,
+    ...(previousScript ? { previousScript } : {}),
+  };
 }
 
 function requireEditorialBrief(value: unknown): NonNullable<ScriptBrief["editorial"]> {

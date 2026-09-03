@@ -23,7 +23,7 @@ export interface CodexVisualDirectorAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
-export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v10|role-audit-v2|director-validator-v2";
+export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v11|role-audit-v2|director-validator-v2";
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
 export class CodexVisualDirectorAgent implements VisualDirectorAgent {

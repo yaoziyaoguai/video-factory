@@ -1760,7 +1760,8 @@ function buildReworkNodeInstructions(
   findings: StudioReworkFinding[],
   rejectionReason?: string,
 ): { script: string; visualDirection: string; assets: string } {
-  const rejection = rejectionReason ? `人工打回原因：${rejectionReason.trim()}\n` : "";
+  const rejection = rejectionReason ? `本次重做原因：${rejectionReason.trim()}\n` : "";
+  const contentSafetyFailure = /内容安全|敏感|sensitive information/i.test(rejectionReason ?? "");
   const linesFor = (nodeId: StudioReworkFinding["targetNodeIds"][number]) => findings
     .filter((finding) => finding.targetNodeIds.includes(nodeId))
     .map((finding) => {
@@ -1772,10 +1773,17 @@ function buildReworkNodeInstructions(
   const scriptLines = linesFor("script");
   const visualLines = linesFor("visual-direction");
   const assetLines = linesFor("assets");
+  if (contentSafetyFailure && findings.length === 0) {
+    return {
+      script: `${rejection}以上一版脚本为底稿，保留旁白、事实和叙事结构；只把 visual_prompt 与 search_terms 中可能产生歧义的说法改成中性、具体、可见的物体和动作描述，不改写无关内容。`.trim(),
+      visualDirection: `${rejection}以上一版导演方案为底稿，保留全片视觉规则、构图和连续性；定位被拒绝镜头，只重写送给图片或视频模型的主体、环境、动作、生成提示和验收条件。使用中性、具体的物体描述，不得写入 Provider 名称、AIGC 标识、披露、费用、授权或工作流术语。`.trim(),
+      assets: `${rejection}严格执行修订后的逐镜路由；提交前检查最终生成提示只包含画面内容。复用镜头继续使用同一母片，不重新生成或计费；再次被拒绝时立即停住，不得用说明卡或无关素材替代。`.trim(),
+    };
+  }
   return {
-    script: `${rejection}以上一版脚本为底稿，保留未被打回的叙事与事实，只修改下列内容：\n${scriptLines.join("\n") || "- 审片未定位到脚本文字问题；只根据人工打回原因做必要修改，不重写无关段落。"}`.trim(),
-    visualDirection: `${rejection}以上一版导演方案为底稿，保留未被打回的全片视觉规则与镜头，只重做下列问题：\n${visualLines.join("\n") || "- 审片没有结构化视觉问题；依据人工打回原因定位并改写受影响镜头。"}`.trim(),
-    assets: `${rejection}严格执行修订后的逐镜路由；保留未受影响母片，不得用说明卡、无关图库素材或内部术语掩盖失败：\n${assetLines.join("\n") || "- 只替换人工打回原因涉及的素材，其余镜头保持连续性。"}`.trim(),
+    script: `${rejection}以上一版脚本为底稿，保留未被要求修改的叙事与事实，只修改下列内容：\n${scriptLines.join("\n") || "- 当前没有定位到脚本文字问题；只根据本次重做原因做必要修改，不重写无关段落。"}`.trim(),
+    visualDirection: `${rejection}以上一版导演方案为底稿，保留未被要求修改的全片视觉规则与镜头，只重做下列问题：\n${visualLines.join("\n") || "- 当前没有结构化视觉问题；依据本次重做原因定位并改写受影响镜头。"}`.trim(),
+    assets: `${rejection}严格执行修订后的逐镜路由；保留未受影响母片，不得用说明卡、无关图库素材或内部术语掩盖失败：\n${assetLines.join("\n") || "- 只替换本次重做原因涉及的素材，其余镜头保持连续性。"}`.trim(),
   };
 }
 

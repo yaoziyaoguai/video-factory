@@ -1131,7 +1131,7 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
-    expect(await screen.findByRole("heading", { name: "按审片意见重新制作" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "调整方案后重新制作" })).toBeInTheDocument();
     expect(screen.getByText("素材自带文字与字幕重叠。")).toBeInTheDocument();
     const assetInstruction = screen.getByRole("textbox", { name: "画面素材修改要求" });
     expect(assetInstruction).toHaveValue(rework.nodeInstructions.assets);
@@ -1242,7 +1242,7 @@ describe("Studio client", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "调整方案后重新制作" }));
     expect(draft).toHaveBeenCalledWith("run-1");
-    expect(await screen.findByRole("heading", { name: "按审片意见重新制作" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "调整方案后重新制作" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "脚本修改要求" })).toHaveValue(rework.nodeInstructions.script);
     expect(screen.getByRole("textbox", { name: "导演方案修改要求" })).toHaveValue(rework.nodeInstructions.visualDirection);
     expect(screen.getByRole("textbox", { name: "画面素材修改要求" })).toHaveValue(rework.nodeInstructions.assets);

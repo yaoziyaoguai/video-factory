@@ -416,6 +416,7 @@ describe("StudioService", () => {
     assert.equal(draft?.input.models?.["seedance-video-v1"], "doubao-seedance-2-5-260628");
     assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /文字遮挡主体/);
     assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /不得用说明卡/);
+    assert.match(draft?.input.rework?.nodeInstructions.script ?? "", /本次重做原因/);
     assert.deepEqual(draft?.input.rework?.previousScript, { viewerPromise: "原版承诺", scenes: [{ position: 1 }] });
     assert.deepEqual(draft?.inheritedNodeIds, ["brief", "script", "visual-direction", "visual-review"]);
   });
@@ -487,6 +488,34 @@ describe("StudioService", () => {
 
     assert.equal(currentTemplateResolveCalls, 0);
     assert.deepEqual((pipeline.lastInput as ProductionBrief).templateSnapshot, historicalSnapshot);
+  });
+
+  it("prefills actionable generation changes after a content-safety failure", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rework-content-safety-"));
+    const base = waitingRun(workspaceRoot);
+    const failedRun: WorkflowRun<ProductionBrief> = {
+      ...base,
+      status: "failed",
+      decisions: [],
+      interventions: [],
+      nodeRuns: [{
+        nodeId: "assets",
+        status: "failed",
+        startedAt: base.startedAt,
+        finishedAt: base.finishedAt,
+        artifactIds: [],
+        qualityGateResults: [],
+        error: "The input text may contain sensitive information.",
+      }],
+      artifacts: [],
+    };
+    const service = new StudioService({ workspaceRoot, pipeline: new FakePipeline(failedRun), commandAvailable: allCommandsAvailable, environment: {} });
+
+    const draft = await service.reworkDraft("run-1");
+
+    assert.match(draft?.input.rework?.nodeInstructions.script ?? "", /visual_prompt 与 search_terms/);
+    assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /中性、具体的物体描述/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /再次被拒绝时立即停住/);
   });
 
   it("reads a safe live agent-loop summary from the latest node checkpoint", async () => {

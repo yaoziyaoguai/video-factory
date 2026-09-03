@@ -973,7 +973,7 @@ describe("node production workspaces", () => {
     render(<MemoryRouter><CostDashboard dashboard={dashboard} /></MemoryRouter>);
 
     expect(screen.getByRole("heading", { name: "每一笔费用都能追到制作步骤" })).toBeInTheDocument();
-    expect(screen.getByText("已批准报价合计")).toBeInTheDocument();
+    expect(screen.getByText("累计授权额度")).toBeInTheDocument();
     expect(screen.queryByText("授权上限")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: /付费成片/ })).toHaveAttribute("href", "/projects/run-1");
     expect(screen.getAllByText("¥3.00").length).toBeGreaterThan(0);
@@ -1012,7 +1012,7 @@ describe("node production workspaces", () => {
       }],
     }} />);
 
-    expect(screen.getByText("按量调用失败")).toBeInTheDocument();
+    expect(screen.getByText("付费服务失败")).toBeInTheDocument();
     await userEvent.click(screen.getByText("逐角色消费明细"));
     expect(screen.getByText("Codex · gpt-5.6-terra")).toBeInTheDocument();
     expect(screen.getByText("订阅任务失败 · 不产生按量费用")).toBeInTheDocument();

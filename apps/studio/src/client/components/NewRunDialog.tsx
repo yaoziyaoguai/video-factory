@@ -394,7 +394,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
         <header className="dialog-header recipe-dialog-header">
           <div>
             <p className="eyebrow">制作方案</p>
-            <h2 id="new-run-title">{rework ? "按审片意见重新制作" : "新建制作"}</h2>
+            <h2 id="new-run-title">{rework ? "调整方案后重新制作" : "新建制作"}</h2>
             <p>{rework ? "已继承上一版方案；下面的修改要求会真正交给对应制作步骤执行。" : "先定内容与画面方案；图片和视频按实际方案报价，声音与审片不打断制作。"}</p>
           </div>
           <div className="dialog-budget" aria-label="费用方式">
@@ -481,11 +481,11 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
 
             {rework ? <section className="rework-brief-section" aria-labelledby="rework-brief-title">
               <div className="compact-section-heading">
-                <div><span>返工</span><h3 id="rework-brief-title">按审片意见修改</h3></div>
+                <div><span>返工</span><h3 id="rework-brief-title">按反馈修改</h3></div>
                 <small>已预填到对应制作步骤，可在开工前调整</small>
               </div>
-              {rework.rejectionReason ? <div className="rework-rejection-note"><strong>本次打回原因</strong><span>{rework.rejectionReason}</span></div> : null}
-              {rework.findings.length > 0 ? <div className="rework-finding-list" aria-label="审片发现">
+              {rework.rejectionReason ? <div className="rework-rejection-note"><strong>本次重做原因</strong><span>{rework.rejectionReason}</span></div> : null}
+              {rework.findings.length > 0 ? <div className="rework-finding-list" aria-label="需要处理的问题">
                 {rework.findings.map((finding, index) => <article className="rework-finding" key={`${finding.timecodeMs}-${finding.category}-${index}`}>
                   <header><strong>{finding.scenePosition ? `第 ${finding.scenePosition} 镜` : "全片"}</strong><span>{formatTimecode(finding.timecodeMs)}</span><em>{reworkFindingCategoryLabel(finding.category)}</em></header>
                   <p>{finding.description}</p>
