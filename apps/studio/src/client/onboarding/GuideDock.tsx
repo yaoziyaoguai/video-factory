@@ -103,7 +103,7 @@ function guideContext(pathname: string): { title: string; description: string; s
     return { title: "到了制作记录，接下来这样做", description: "看制作状态，打开具体记录；只有“等你审片”时才需要操作。", step: 2 };
   }
   if (pathname.startsWith("/projects/")) {
-    return { title: "生产现场，先判断要不要动手", description: "看节点进度和成片；出现人工判断时审片，批准后可下载发布包或进入多平台发布。", step: 3 };
+    return { title: "制作详情，先判断要不要动手", description: "看每一步的进度和成片；出现人工判断时审片，批准后可下载发布包或进入多平台发布。", step: 3 };
   }
   if (pathname === "/resources") {
     return { title: "先把创作习惯和能力配好", description: "保存新建制作的默认值，再检查热点、声音、画面、模型和发布出口。", step: 1 };

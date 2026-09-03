@@ -538,6 +538,10 @@ body:has(.studio-v3) {
 .studio-v3 .asset-work-group > header small { color: var(--muted); font-size: 9px; font-weight: 750; }
 .studio-v3 .asset-work-group > header h2 { margin: 3px 0 0; font-size: 16px; }
 .studio-v3 .asset-work-group > header a { color: var(--muted); font-size: 10px; font-weight: 750; text-decoration: none; }
+.studio-v3 .asset-work-toggle { min-width: 0; display: flex; align-items: center; gap: 10px; padding: 0; color: inherit; background: transparent; border: 0; text-align: left; cursor: pointer; }
+.studio-v3 .asset-work-toggle > svg { flex: 0 0 auto; color: var(--muted); transition: transform 160ms ease; }
+.studio-v3 .asset-work-toggle[aria-expanded="true"] > svg { transform: rotate(180deg); }
+.studio-v3 .asset-work-toggle > div { min-width: 0; }
 .studio-v3 .asset-card { min-width: 0; overflow: hidden; background: #ffffff; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); transition: border-color 190ms ease, transform 190ms cubic-bezier(.2, .75, .2, 1), box-shadow 190ms ease; animation: studio-surface-enter 360ms cubic-bezier(.22, .8, .24, 1) backwards; }
 .studio-v3 .asset-card:hover { border-color: #cfe0ff; box-shadow: var(--shadow-raised); transform: translateY(-2px); }
 .studio-v3 .asset-card-preview { position: relative; min-height: 210px; aspect-ratio: 16 / 10; display: grid; align-content: center; justify-items: center; gap: 8px; overflow: hidden; color: #737b85; background: #eef1f3; border-bottom: 1px solid var(--line); font-size: 10px; }
@@ -888,6 +892,14 @@ body:has(.studio-v3) {
 .studio-v3 .provider-model-select small { font-size: 11px; }
 .studio-v3 .provider-model-select select { min-height: 38px; font-size: 11px; }
 .studio-v3 .provider-default { min-height: 40px; border-radius: 5px; font-size: 11px; }
+.studio-v3 .visual-capability-groups { display: grid; gap: 26px; }
+.studio-v3 .visual-capability-group { display: grid; gap: 8px; }
+.studio-v3 .visual-capability-group > header { display: flex; align-items: end; justify-content: space-between; gap: 16px; padding-bottom: 8px; border-bottom: 1px solid var(--line-strong); }
+.studio-v3 .visual-capability-group > header > div { display: grid; gap: 3px; }
+.studio-v3 .visual-capability-group > header strong { font-size: 15px; }
+.studio-v3 .visual-capability-group > header small, .studio-v3 .visual-capability-group > header > span { color: var(--muted); font-size: 10px; }
+.studio-v3 .provider-ledger-row { grid-template-columns: 38px minmax(230px, 1.2fr) minmax(180px, .8fr) auto 68px minmax(70px, auto) 24px; }
+.studio-v3 .provider-family-label { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 
 .studio-v3 .field input,
 .studio-v3 .field select,
@@ -1408,6 +1420,8 @@ body:has(.studio-v3) {
 .studio-v3 .topic-rubric article small { color: var(--muted); font-size: 11px; line-height: 1.55; }
 .studio-v3 .topic-instruction-editor { display: grid; gap: 14px; padding-top: 20px; }
 .studio-v3 .topic-instruction-editor textarea { max-width: 900px; line-height: 1.75; }
+.studio-v3 .topic-strategy-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.studio-v3 .topic-strategy-fields .field { align-content: start; }
 
 @media (max-width: 760px) {
   .studio-v3 .template-header-actions { align-items: flex-end; flex-direction: column-reverse; }
@@ -1650,6 +1664,20 @@ body:has(.studio-v3) {
 .studio-v3 .configuration-intro p { color: var(--muted); }
 .studio-v3 .configuration-intro small { color: var(--green); }
 .studio-v3 .voice-direction { background: #ffffff; border-top-color: var(--accent); }
+.studio-v3 .voice-preset-picker { display: grid; gap: 10px; }
+.studio-v3 .voice-preset-picker > header { display: grid; gap: 3px; }
+.studio-v3 .voice-preset-picker > header strong { font-size: 12px; }
+.studio-v3 .voice-preset-picker > header small { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.studio-v3 .voice-preset-picker > div { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.studio-v3 .voice-preset-picker button { display: grid; gap: 3px; padding: 10px; color: var(--ink); background: #f8f9fa; border: 1px solid var(--line); border-radius: 6px; text-align: left; cursor: pointer; }
+.studio-v3 .voice-preset-picker button[aria-pressed="true"] { color: #0948c8; background: var(--accent-soft); border-color: #b9cffb; }
+.studio-v3 .voice-preset-picker button strong { font-size: 11px; }
+.studio-v3 .voice-preset-picker button small { color: var(--muted); font-size: 9px; line-height: 1.4; }
+.studio-v3 .voice-advanced-toggle { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; padding: 9px 0; color: var(--ink); background: transparent; border: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); text-align: left; cursor: pointer; }
+.studio-v3 .voice-advanced-toggle small { color: var(--muted); font-size: 9px; text-align: right; }
+.studio-v3 .voice-advanced-toggle svg { transition: transform 160ms ease; }
+.studio-v3 .voice-advanced-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.studio-v3 .voice-advanced-controls { display: grid; gap: 18px; }
 .studio-v3 .voice-card.is-selected { background: var(--accent-soft); }
 .studio-v3 .voice-preview-button { color: #626a76; background: #ffffff; border-color: var(--line-strong); }
 .studio-v3 .resource-settings-notice { color: #176d56; background: #e9f5f0; border-color: #bcded0; }
@@ -1914,6 +1942,7 @@ body:has(.studio-v3) {
     grid-column: 3;
     grid-row: 1;
   }
+  .studio-v3 .provider-ledger-row > .provider-family-label { display: none; }
   .studio-v3 .provider-ledger-row > .provider-default {
     display: block;
     grid-column: 2;
@@ -2103,6 +2132,7 @@ body:has(.studio-v3) {
 .studio-v3 .automatic-agent-role em { overflow: hidden; color: #777e86; font-size: 9px; font-style: normal; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (max-width: 900px) {
+  .studio-v3 .topic-strategy-fields { grid-template-columns: 1fr; }
   .studio-v3 .production-role-grid,
   .studio-v3 .role-configuration-grid,
   .studio-v3 .automatic-agent-roster > div { grid-template-columns: 1fr; }

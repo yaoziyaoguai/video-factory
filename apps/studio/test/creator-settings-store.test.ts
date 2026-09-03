@@ -25,6 +25,14 @@ describe("JsonCreatorSettingsStore", () => {
       defaultAssetProviderId: "pexels-stock-v1",
       roleProviderDefaults: { script: "codex-screenwriter-v1", director: "api-visual-director-v1" },
       productionDefaults: { directorProfileId: "documentary-observer", durationSeconds: 30 },
+      topicStrategy: {
+        positioning: "替普通人解释技术变化。",
+        targetAudience: "关注 AI 但不想看营销稿的职场人。",
+        preferredDirections: "真实工作影响\n可复现实验",
+        excludedDirections: "只有热度没有证据",
+        sourcePolicy: "primary_or_two_independent",
+        customInstruction: "必须能在 30 秒内兑现标题承诺。",
+      },
     });
 
     const reloaded = await new JsonCreatorSettingsStore(file).get();
@@ -40,6 +48,14 @@ describe("JsonCreatorSettingsStore", () => {
       reviewMode: "manual",
       platform: "douyin",
       durationSeconds: 30,
+    });
+    assert.deepEqual(reloaded.topicStrategy, {
+      positioning: "替普通人解释技术变化。",
+      targetAudience: "关注 AI 但不想看营销稿的职场人。",
+      preferredDirections: "真实工作影响\n可复现实验",
+      excludedDirections: "只有热度没有证据",
+      sourcePolicy: "primary_or_two_independent",
+      customInstruction: "必须能在 30 秒内兑现标题承诺。",
     });
   });
 
@@ -71,5 +87,32 @@ describe("JsonCreatorSettingsStore", () => {
     const settings = await new JsonCreatorSettingsStore(file).get();
 
     assert.deepEqual(settings.roleProviderDefaults, { script: "codex-screenwriter-v1" });
+  });
+
+  it("merges a partial topic strategy without resetting saved creator choices", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-settings-topic-patch-"));
+    const file = path.join(root, "creator-settings.json");
+    const store = new JsonCreatorSettingsStore(file);
+
+    await store.update({
+      topicStrategy: {
+        positioning: "专门解释 AI 对普通工作的真实影响。",
+        targetAudience: "希望获得可执行建议的职场人。",
+        preferredDirections: "可复现实验",
+        excludedDirections: "未经证实的争议",
+        sourcePolicy: "traceable_source",
+        customInstruction: "先验证再下结论。",
+      },
+    });
+    await store.update({ topicStrategy: { customInstruction: "保持事实准确。" } });
+
+    assert.deepEqual((await store.get()).topicStrategy, {
+      positioning: "专门解释 AI 对普通工作的真实影响。",
+      targetAudience: "希望获得可执行建议的职场人。",
+      preferredDirections: "可复现实验",
+      excludedDirections: "未经证实的争议",
+      sourcePolicy: "traceable_source",
+      customInstruction: "保持事实准确。",
+    });
   });
 });

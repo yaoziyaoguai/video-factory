@@ -113,7 +113,7 @@ function continueAction(run: StudioRunSummary): string {
 }
 
 function continueMessage(run: StudioRunSummary): string {
-  if (run.nextAction === "confirm_spend") return "下一个节点会产生费用，正在等你检查前序内容。";
+  if (run.nextAction === "confirm_spend") return "下一步会产生费用，正在等你检查前面的内容。";
   if (run.nextAction === "review") return "成片已经准备好，正在等你完整观看和判断。";
   if (run.nextAction === "regenerate") return "人工修改已经保存，正在等你确认后续重新生成。";
   if (run.status === "succeeded") return "这条视频已经完成，可以查看成片与发布包。";

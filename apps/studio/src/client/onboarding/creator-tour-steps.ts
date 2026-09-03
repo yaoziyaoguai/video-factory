@@ -41,7 +41,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
     waitForElement: 5_000,
     popover: {
       title: "采用候选，才会进入制作区",
-      description: "先看原始来源与证据门禁。常规候选可直接采用；敏感候选需要确认核验，证据不足的高风险热点会被阻止。",
+      description: "先看原始来源与核验结果。常规候选可直接采用；敏感候选需要确认核验，证据不足的高风险热点会被阻止。",
       side: "top",
       align: "end",
       showButtons: ["previous", "close"],
@@ -68,7 +68,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
   {
     element: '[data-tour="director-panel"]',
     popover: {
-      title: "导演台检查生产边界",
+      title: "导演台检查能否开拍",
       description: "这里确认叙事、制作能力与成本边界。缺少必要能力时，系统会明确阻止开拍。",
       side: "left",
       align: "start",
@@ -78,7 +78,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
     element: () => visibleTourElement("projects-nav"),
     popover: {
       title: "开始后，从制作记录继续",
-      description: "制作会出现在“制作记录”。点进记录可看节点进度、成片预览和人工终审。",
+      description: "制作会出现在“制作记录”。点进记录可看每一步的进度、成片预览和人工终审。",
       side: "right",
       align: "center",
     },
@@ -100,7 +100,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="production-recipes"]',
     waitForElement: 8_000,
     popover: {
-      title: "先选经济边界",
+      title: "先选画面费用方式",
       description: "“经济日更”优先使用已就绪的免费能力。启用图片或视频生成后，系统会按实际方案逐项报价并等待人工确认。",
       side: "right",
       align: "start",
@@ -119,7 +119,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
   {
     popover: {
       title: "第三步：等待自动制作",
-      description: "启动后会进入制作详情并实时更新节点；断线时页面会提示并自动重连。记录和已生成产物会保留。",
+      description: "启动后会进入制作详情并实时更新每一步；断线时页面会提示并自动重连。记录和已生成产物会保留。",
     },
   },
   {
@@ -211,7 +211,7 @@ const PROJECT_TOUR_STEPS: DriveStep[] = [
   {
     element: '[data-tour="project-item"]',
     popover: {
-      title: "打开任务，进入生产现场",
+      title: "打开任务，进入制作详情",
       description: "点击“打开制作记录”“进入审片”或“查看成片”。下一页会告诉你现在要等、要审，还是可以下载发布包。",
       side: "top",
       align: "start",
@@ -229,7 +229,7 @@ const RUN_TOUR_STEPS: DriveStep[] = [
   {
     element: '[data-tour="run-header"]',
     popover: {
-      title: "这是这条视频的生产现场",
+      title: "这是这条视频的制作详情",
       description: "标题旁的状态决定现在要做什么：制作中就等待，等你审片就做人工终审，已完成就取发布包或做多平台发布。",
       side: "bottom",
       align: "start",
@@ -238,7 +238,7 @@ const RUN_TOUR_STEPS: DriveStep[] = [
   {
     element: '[data-tour="run-workflow"]',
     popover: {
-      title: "逐节点看真实进度",
+      title: "逐步查看真实进度",
       description: "绿色表示完成，黄色表示进行中或等你判断，红色表示失败或被打回。页面会实时刷新。",
       side: "bottom",
       align: "center",
@@ -248,7 +248,7 @@ const RUN_TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="run-preview"]',
     popover: {
       title: "先看完整成片",
-      description: "渲染结束后在这里播放和下载。没有成片时继续看节点状态，不需要重复创建任务。",
+      description: "渲染结束后在这里播放和下载。没有成片时继续看制作进度，不需要重复创建任务。",
       side: "right",
       align: "start",
     },
@@ -282,7 +282,7 @@ const RUN_TOUR_STEPS: DriveStep[] = [
 const RESOURCE_TOUR_STEPS: DriveStep[] = [
   {
     element: '[data-tour="resource-overview"]',
-    popover: { title: "先看整套工厂是否可用", description: "这里汇总热点服务、画面来源、生产岗位和发布出口。", side: "bottom", align: "start" },
+    popover: { title: "先看整套工厂是否可用", description: "这里汇总热点服务、画面来源、制作能力和发布出口。", side: "bottom", align: "start" },
   },
   {
     element: '[data-tour="configuration-defaults"]',

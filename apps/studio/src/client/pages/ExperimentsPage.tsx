@@ -39,7 +39,7 @@ export function ExperimentsPage() {
         <article><ScanSearch aria-hidden="true" size={17} /><span>等你审片</span><strong>{stats.needsReview}</strong></article>
       </section>
       {costs ? <CostDashboard dashboard={costs} /> : null}
-      {costError ? <div className="page-error" role="alert"><AlertCircle aria-hidden="true" size={18} /><span><strong>成本账本读取失败</strong>{costError}</span><button className="icon-button" type="button" onClick={() => void load()} title="重试成本账本"><RefreshCw aria-hidden="true" size={17} /></button></div> : null}
+      {costError ? <div className="page-error" role="alert"><AlertCircle aria-hidden="true" size={18} /><span><strong>费用记录读取失败</strong>{costError}</span><button className="icon-button" type="button" onClick={() => void load()} title="重新读取费用记录"><RefreshCw aria-hidden="true" size={17} /></button></div> : null}
       <section className="analytics-empty" aria-labelledby="analytics-empty-title" data-tour="experiment-outcomes">
         <span><BarChart3 aria-hidden="true" size={24} /></span>
         <p className="eyebrow">平台结果连接器</p>

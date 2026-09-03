@@ -1,5 +1,6 @@
 import {
   Database,
+  ChevronDown,
   ExternalLink,
   FileText,
   Film,
@@ -19,6 +20,7 @@ import type {
   StudioIndexedAsset,
   StudioIndexedAssetUsage,
   StudioResourceManifest,
+  StudioRunSummary,
 } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { providerLabel } from "../presentation.js";
@@ -36,12 +38,17 @@ export function AssetsPage() {
   const [query, setQuery] = useState("");
   const [view, setView] = useState<"work" | "asset">("work");
   const [collection, setCollection] = useState<AssetCollection>("creative");
+  const [runs, setRuns] = useState<StudioRunSummary[]>([]);
+  const [expandedWorkKeys, setExpandedWorkKeys] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(undefined);
     try {
-      setManifest(await studioApi.resourceManifest());
+      const [manifestResult, runsResult] = await Promise.allSettled([studioApi.resourceManifest(), studioApi.runs()]);
+      if (manifestResult.status === "rejected") throw manifestResult.reason;
+      setManifest(manifestResult.value);
+      setRuns(runsResult.status === "fulfilled" ? runsResult.value : []);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "素材库暂时无法读取。");
     } finally {
@@ -86,7 +93,15 @@ export function AssetsPage() {
     setProvider("all");
     setQuery("");
   };
-  const workGroups = useMemo(() => groupAssetsByWork(assets), [assets]);
+  const workGroups = useMemo(() => groupAssetsByWork(assets, runs), [assets, runs]);
+  useEffect(() => {
+    setExpandedWorkKeys((current) => {
+      const visible = new Set(workGroups.map((group) => group.key));
+      const retained = new Set([...current].filter((key) => visible.has(key)));
+      if (retained.size === 0 && workGroups[0]) retained.add(workGroups[0].key);
+      return retained;
+    });
+  }, [workGroups]);
   const collectionStats = useMemo(() => ({
     reusable: collectionAssets.filter((asset) => asset.reuseStatus === "ready").length,
     duplicateUses: collectionAssets.reduce((count, asset) => count + Math.max(0, asset.useCount - 1), 0),
@@ -107,10 +122,10 @@ export function AssetsPage() {
       <header className="page-header asset-library-header">
         <div>
           <p className="eyebrow">创作资产</p>
-          <h1>素材档案</h1>
-          <p className="page-summary">{collection === "creative" ? "可再次用于创作的画面与声音，按内容去重并保留授权和入片记录。" : "最终成片、脚本与质检等制作凭证独立归档，不混入可复用素材。"}</p>
+          <h1>素材库</h1>
+          <p className="page-summary">{collection === "creative" ? "可再次用于创作的画面与声音，按内容去重并保留授权和入片记录。" : "最终成片、脚本与质检记录独立归档，不混入可复用素材。"}</p>
         </div>
-        <div className="asset-library-count"><strong>{collectionAssets.length}</strong><span>{collection === "creative" ? "项创作素材" : "项制作凭证"}</span></div>
+        <div className="asset-library-count"><strong>{collectionAssets.length}</strong><span>{collection === "creative" ? "项创作素材" : "项成片与记录"}</span></div>
       </header>
 
       {manifest ? <section className="asset-index-summary" aria-label="素材库概况">
@@ -124,13 +139,13 @@ export function AssetsPage() {
           <div><Database aria-hidden="true" size={18} /><span>其他记录<strong>{Math.max(0, collectionAssets.length - collectionStats.documents - collectionStats.finalRenders)}</strong></span></div>
         </>}
       </section> : null}
-      {manifest?.truncatedItemCount ? <p className="resource-note">原始制作条目仅保留前 500 条用于诊断；当前去重索引、筛选与素材档案仍覆盖全部 {manifest.totalItems} 条记录。</p> : null}
+      {manifest?.truncatedItemCount ? <p className="resource-note">页面只展开最近 500 条明细；搜索、筛选和素材统计仍覆盖全部 {manifest.totalItems} 条记录。</p> : null}
 
       <section className="asset-library-controls" aria-label="素材筛选">
         <div className="asset-library-organizers">
           <div className="asset-library-sections" role="group" aria-label="档案类型">
             <button type="button" aria-pressed={collection === "creative"} onClick={() => switchCollection("creative")}>创作素材</button>
-            <button type="button" aria-pressed={collection === "records"} onClick={() => switchCollection("records")}>制作凭证</button>
+            <button type="button" aria-pressed={collection === "records"} onClick={() => switchCollection("records")}>成片与记录</button>
           </div>
           <div className="asset-library-view" role="group" aria-label="素材组织方式">
             <button type="button" aria-pressed={view === "work"} onClick={() => setView("work")}>按作品</button>
@@ -149,22 +164,29 @@ export function AssetsPage() {
 
       {error ? <div className="inline-error" role="alert">{error}<button className="button button-secondary" type="button" onClick={() => void load()}>重新读取</button></div> : null}
       {loading && !manifest ? <div className="asset-library-empty">正在建立素材索引...</div> : null}
-      {!loading && manifest && assets.length === 0 ? <div className="asset-library-empty"><FolderOpen aria-hidden="true" size={28} /><strong>这个范围里还没有素材</strong><span>{hasFilters ? "可以清除筛选，查看完整素材档案。" : "完成一次真实制作后，镜头会自动归档到这里。"}</span>{hasFilters ? <button className="button button-secondary" type="button" onClick={clearFilters}>清除筛选</button> : null}</div> : null}
+      {!loading && manifest && assets.length === 0 ? <div className="asset-library-empty"><FolderOpen aria-hidden="true" size={28} /><strong>这个范围里还没有内容</strong><span>{hasFilters ? "可以清除筛选，查看完整素材库。" : "完成一次真实制作后，镜头和制作记录会自动归档到这里。"}</span>{hasFilters ? <button className="button button-secondary" type="button" onClick={clearFilters}>清除筛选</button> : null}</div> : null}
 
       {assets.length && view === "asset" ? <section className="asset-library-grid" aria-live="polite">
         {assets.map((asset) => <AssetCard asset={asset} key={asset.key} />)}
       </section> : null}
       {assets.length && view === "work" ? <section className="asset-work-groups" aria-live="polite">
-        {workGroups.map((group) => <section className="asset-work-group" key={group.key} aria-labelledby={`asset-work-${group.key}`}>
-          <header><div><small>作品素材包 · {group.items.length} 项</small><h2 id={`asset-work-${group.key}`}>{group.runTitle}</h2></div>{group.runId ? <Link to={`/projects/${group.runId}`}>打开制作</Link> : null}</header>
-          <div className="asset-library-grid">{group.items.map(({ asset, usage }) => <AssetCard asset={asset} usage={usage} grouped key={`${asset.key}:${usage?.itemId ?? "unassigned"}`} />)}</div>
-        </section>)}
+        {workGroups.map((group, index) => {
+          const expanded = expandedWorkKeys.has(group.key);
+          return <section className={expanded ? "asset-work-group is-expanded" : "asset-work-group"} key={group.key} aria-labelledby={`asset-work-${group.key}`}>
+          <header><button type="button" className="asset-work-toggle" aria-expanded={expanded} aria-controls={`asset-work-items-${group.key}`} onClick={() => setExpandedWorkKeys((current) => {
+            const next = new Set(current);
+            if (next.has(group.key)) next.delete(group.key); else next.add(group.key);
+            return next;
+          })}><ChevronDown aria-hidden="true" size={18} /><div><small>{index === 0 ? "最近制作" : "历史制作"} · {group.items.length} 项素材</small><h2 id={`asset-work-${group.key}`}>{group.runTitle}</h2></div></button>{group.runId ? <Link to={`/projects/${group.runId}`}>打开制作</Link> : null}</header>
+          {expanded ? <div id={`asset-work-items-${group.key}`} className="asset-library-grid">{group.items.map(({ asset, usage }) => <AssetCard asset={asset} usage={usage} grouped key={`${asset.key}:${usage?.itemId ?? "unassigned"}`} />)}</div> : null}
+          </section>;
+        })}
       </section> : null}
     </main>
   );
 }
 
-function groupAssetsByWork(assets: StudioIndexedAsset[]): Array<{ key: string; runId?: string; runTitle: string; items: Array<{ asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage }> }> {
+function groupAssetsByWork(assets: StudioIndexedAsset[], runs: StudioRunSummary[]): Array<{ key: string; runId?: string; runTitle: string; items: Array<{ asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage }> }> {
   const groups = new Map<string, { key: string; runId?: string; runTitle: string; items: Array<{ asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage }> }>();
   for (const asset of assets) {
     if (!asset.usages.length) {
@@ -178,7 +200,12 @@ function groupAssetsByWork(assets: StudioIndexedAsset[]): Array<{ key: string; r
       groups.set(usage.runId, group);
     }
   }
-  return [...groups.values()];
+  const runOrder = new Map(runs.map((run, index) => [run.id, index]));
+  return [...groups.values()].sort((left, right) => {
+    if (!left.runId) return 1;
+    if (!right.runId) return -1;
+    return (runOrder.get(left.runId) ?? Number.MAX_SAFE_INTEGER) - (runOrder.get(right.runId) ?? Number.MAX_SAFE_INTEGER);
+  });
 }
 
 function AssetCard({ asset, usage, grouped = false }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; grouped?: boolean }) {

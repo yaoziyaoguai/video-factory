@@ -139,6 +139,7 @@ export interface ProductionPaidNodeSummary {
   nodeId: string;
   operationId?: string;
   recommendedOutcome?: ProductionPaidNodeReconciliationDraft["outcome"];
+  failureKind?: "unknown_outcome" | "terminal_failure" | "missing_evidence";
   requiresManualReconciliation: boolean;
   items: ProductionPaidOperationItemSummary[];
 }
@@ -1227,21 +1228,29 @@ export class ProductionPipeline {
     if (!node) throw new Error(`Unknown workflow node '${nodeId}'.`);
     const operationId = node.operationRequestId;
     if (!operationId) {
-      return { nodeId, requiresManualReconciliation: true, items: [] };
+      return { nodeId, failureKind: "missing_evidence", requiresManualReconciliation: true, items: [] };
     }
     const nodeDirectory = path.join(this.runsRoot, runId, "nodes", nodeId);
     if (nodeId === "voice") {
       const voiceOperation = await readPaidVoiceOperation(nodeDirectory, operationId);
       const resumable = voiceOperation ? canResumePaidVoiceOperation(voiceOperation) : false;
+      const terminalFailure = Boolean(voiceOperation?.items.some((item) => item.state === "terminal_failed"))
+        && voiceOperation!.items.every((item) => (
+          item.state === "prepared" || item.state === "materialized" || item.state === "terminal_failed"
+        ));
       return {
         nodeId,
         operationId,
-        ...(resumable ? { recommendedOutcome: "resume_original" as const } : {}),
+        ...(resumable
+          ? { recommendedOutcome: "resume_original" as const }
+          : terminalFailure
+            ? { recommendedOutcome: "confirmed_not_charged" as const, failureKind: "terminal_failure" as const }
+            : { failureKind: voiceOperation ? "unknown_outcome" as const : "missing_evidence" as const }),
         requiresManualReconciliation: !resumable,
         items: [],
       };
     }
-    if (nodeId !== "assets") return { nodeId, operationId, requiresManualReconciliation: true, items: [] };
+    if (nodeId !== "assets") return { nodeId, operationId, failureKind: "missing_evidence", requiresManualReconciliation: true, items: [] };
     const ledgerItems = (await inspectPaidAssetLedger(
       nodeDirectory,
     )).filter((item) => item.operationId === operationId);
@@ -1566,6 +1575,13 @@ export class ProductionPipeline {
           ...(brief.director ? { directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath") } : {}),
           ...(brief.workflowFeatures?.assetSemanticRank ? { candidateRankingPath: outputPath(context, "asset-semantic-rank", "candidateRankingPath") } : {}),
           ...(brief.workflowFeatures?.assetSemanticRank ? { candidateInventoryPath: outputPath(context, "asset-candidates", "candidateInventoryPath") } : {}),
+          ...(brief.rework ? {
+            rework: {
+              sourceRunId: brief.rework.sourceRunId,
+              instruction: brief.rework.nodeInstructions.assets,
+              findings: brief.rework.findings.filter((finding) => finding.targetNodeIds.includes("assets")),
+            },
+          } : {}),
         }),
         "素材导演",
       ),
@@ -2519,6 +2535,14 @@ function directorNode(
             ...(brief.editorial ? { editorial: brief.editorial } : {}),
             ...(referenceGrammar ? { referenceGrammar } : {}),
             ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
+            ...(brief.rework ? {
+              rework: {
+                sourceRunId: brief.rework.sourceRunId,
+                visualDirectionInstruction: brief.rework.nodeInstructions.visualDirection,
+                assetInstruction: brief.rework.nodeInstructions.assets,
+                ...(brief.rework.previousDirectorPlan ? { previousDirectorPlan: brief.rework.previousDirectorPlan } : {}),
+              },
+            } : {}),
           },
           scenes,
           assetProviders,
@@ -2919,6 +2943,13 @@ function screenwriterBrief(brief: ProductionBrief): ScreenwriterAgentInput["brie
     ...(brief.templateSnapshot ? { templateBlueprint: brief.templateSnapshot.resolvedBlueprint } : {}),
     ...(brief.editorial ? { editorial: brief.editorial } : {}),
     ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
+    ...(brief.rework ? {
+      rework: {
+        sourceRunId: brief.rework.sourceRunId,
+        instruction: brief.rework.nodeInstructions.script,
+        ...(brief.rework.previousScript ? { previousScript: brief.rework.previousScript } : {}),
+      },
+    } : {}),
   };
 }
 
@@ -2957,6 +2988,16 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
   if (rawBrief.seriesContext !== undefined) {
     const seriesContext = parseProductionSeriesContext(rawBrief.seriesContext);
     if (seriesContext) brief.seriesContext = seriesContext;
+  }
+  if (rawBrief.rework !== undefined) {
+    const rework = requireOutputRecord(rawBrief.rework, "script input rework");
+    brief.rework = {
+      sourceRunId: requiredOutputString(rework, "sourceRunId"),
+      instruction: requiredOutputString(rework, "instruction"),
+      ...(rework.previousScript === undefined
+        ? {}
+        : { previousScript: requireOutputRecord(rework.previousScript, "script input rework.previousScript") }),
+    };
   }
   return { brief };
 }
@@ -3172,12 +3213,12 @@ function assetSemanticRankNode(
   return {
     id: "asset-semantic-rank",
     label: "Rank asset candidates",
-    role: "语义选片师",
+    role: "候选画面复核",
     capability: "asset.rank.semantic",
     providerId: ranker?.id ?? "deterministic-quality-v1",
     plannedExecution: ranker ? {
       providerId: ranker.id,
-      providerLabel: "Codex 语义选片",
+      providerLabel: "Codex 候选画面排序",
       modelId: ranker.modelId,
       transport: "unix_socket",
       billing: "subscription",
@@ -3249,7 +3290,7 @@ function assetSemanticRankNode(
                 configurationSource: "system_default",
                 parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v1" },
               },
-              providerLabel: "Codex 语义选片",
+              providerLabel: "Codex 候选画面排序",
             });
           }
           fallbackReason = publicFallbackReason(error);
@@ -3279,7 +3320,7 @@ function assetSemanticRankNode(
         parentArtifactIds,
       });
       const semanticReceipt = trace
-        ? modelTraceReceipt(trace, "Codex 语义选片", "subscription", agentLoop)
+        ? modelTraceReceipt(trace, "Codex 候选画面排序", "subscription", agentLoop)
         : undefined;
       return {
         status: "succeeded",

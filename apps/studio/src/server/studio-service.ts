@@ -18,6 +18,7 @@ import type {
   StudioOpportunityInput,
   StudioOpportunityStatus,
   StudioProvider,
+  StudioReworkDraft,
   StudioResourceManifest,
   StudioReferenceVideo,
   StudioPublishBatch,
@@ -166,10 +167,13 @@ export class StudioService {
       ...(options.createSeriesId ? { createId: options.createSeriesId } : {}),
       ...(options.seriesPlanningAgent ? { planningAgent: options.seriesPlanningAgent } : {}),
     });
+    this.creatorSettings = options.creatorSettings
+      ?? new JsonCreatorSettingsStore(path.join(options.workspaceRoot, "settings", "creator-settings.json"));
     this.candidateInbox = new CandidateInboxStudio({
       trends: this.trends,
       series: this.series,
       opportunities: this.opportunities,
+      topicStrategy: async () => (await this.creatorSettings.get()).topicStrategy,
       now,
     });
     this.templates = new TemplateStudio(
@@ -214,8 +218,6 @@ export class StudioService {
       ...(options.publishers ? { publishers: options.publishers } : {}),
       now,
     });
-    this.creatorSettings = options.creatorSettings
-      ?? new JsonCreatorSettingsStore(path.join(options.workspaceRoot, "settings", "creator-settings.json"));
     this.referenceVideos = new ReferenceVideoStore(path.join(options.workspaceRoot, "uploads", "reference-videos"), now);
     this.resourceGovernance = new ResourceGovernanceStudio(options.workspaceRoot, () => options.pipeline.list(), now);
   }
@@ -322,6 +324,7 @@ export class StudioService {
       : runs;
   }
   getRun(runId: string): Promise<StudioRunDetail | undefined> { return this.production.get(runId); }
+  reworkDraft(runId: string): Promise<StudioReworkDraft | undefined> { return this.production.reworkDraft(runId); }
   archiveRuns(runIds: string[]): Promise<void> { return this.production.archive(runIds); }
   restoreRuns(runIds: string[]): Promise<void> { return this.production.restore(runIds); }
   async deleteRun(runId: string): Promise<void> {
@@ -555,7 +558,7 @@ export class StudioService {
     const current = await this.production.get(runId);
     if (!current) throw new StudioNotFoundError("没有找到这条制作记录。");
     if (current.nodes.find((node) => node.id === nodeId)?.outcomeUncertain) {
-      throw new StudioConflictError("付费服务可能已经受理这次请求。请先在 Provider 控制台核对任务和账单，系统不会自动再次扣费。");
+      throw new StudioConflictError("付费服务可能已经受理这次请求。请先到服务商控制台核对任务和账单，系统不会自动再次扣费。");
     }
     if (current.seriesId && current.episodeNumber) {
       await this.series.resumeRun(current.seriesId, current.episodeNumber, runId);

@@ -1128,6 +1128,17 @@ describe("ProductionPipeline", () => {
     const run = await subject.start({
       ...brief,
       templateSnapshot,
+      rework: {
+        sourceRunId: "run-rejected-1",
+        sourceRunRevision: 7,
+        nodeInstructions: {
+          script: "保留原脚本，只缩短第二镜。",
+          visualDirection: "第二镜改成与第一镜一致的自然纪实构图。",
+          assets: "第二镜只用无字实拍素材，不得生成说明卡。",
+        },
+        findings: [],
+        previousDirectorPlan: { version: "video-factory/director-plan-v1", shots: [{ scenePosition: 2 }] },
+      },
       providers: {
         ...brief.providers,
         director: "api-visual-director-v1",
@@ -1157,6 +1168,11 @@ describe("ProductionPipeline", () => {
     ]);
     const assetCall = worker.calls.find((call) => call.capability === "asset.prepare");
     assert.equal((assetCall?.input as Record<string, unknown>).directorPlanPath, directorArtifact.uri);
+    assert.deepEqual((assetCall?.input as Record<string, unknown>).rework, {
+      sourceRunId: "run-rejected-1",
+      instruction: "第二镜只用无字实拍素材，不得生成说明卡。",
+      findings: [],
+    });
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.parameters?.promptPack,
       "video-factory/director-v10",
@@ -1166,6 +1182,12 @@ describe("ProductionPipeline", () => {
       "gpt-5.6-terra",
     );
     assert.deepEqual(directorInput?.brief.templateBlueprint, templateSnapshot.resolvedBlueprint);
+    assert.deepEqual(directorInput?.brief.rework, {
+      sourceRunId: "run-rejected-1",
+      visualDirectionInstruction: "第二镜改成与第一镜一致的自然纪实构图。",
+      assetInstruction: "第二镜只用无字实拍素材，不得生成说明卡。",
+      previousDirectorPlan: { version: "video-factory/director-plan-v1", shots: [{ scenePosition: 2 }] },
+    });
     assert.equal(directorInput?.scenes[0]?.onScreenText, "早餐第一步");
     assert.equal(directorInput?.scenes[0]?.soundCue, "摊位环境声");
   });

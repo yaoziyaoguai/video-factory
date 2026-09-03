@@ -13,7 +13,7 @@ export function validateNodeOverrideOutput(options: {
   allowPathChanges?: boolean;
 }): void {
   if (!isRecord(options.reference)) {
-    throw new StudioInputError(`节点“${options.nodeId}”尚无可编辑的结构化交付。`);
+    throw new StudioInputError(`制作步骤“${options.nodeId}”尚无可编辑的详细内容。`);
   }
   if (!isRecord(options.output)) {
     throw new StudioInputError("节点交付必须是 JSON 对象，不能是文字、数组或空值。");

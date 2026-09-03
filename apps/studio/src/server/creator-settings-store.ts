@@ -46,7 +46,12 @@ export const DEFAULT_CREATOR_SETTINGS: StudioCreatorSettings = {
     durationSeconds: 24,
   },
   topicStrategy: {
-    customInstruction: "优先选择与普通人生活直接相关、能用可靠画面表达、具备明确反差或实用价值、可以发展成系列的题材。高热度但缺少可验证事实、可用画面或独特角度时，应降低推荐或明确放弃。",
+    positioning: "把复杂热点转成普通人能看懂、能验证、看完有收获的短视频。",
+    targetAudience: "希望快速理解新事物，但反感标题党和空泛说教的中文短视频用户。",
+    preferredDirections: "真实生活影响\n可实证的方法或变化\n有清楚反差、过程或结论\n能发展成系列",
+    excludedDirections: "只有热度、没有新角度\n无法找到可靠画面或事实来源\n消费灾难、伤亡或未经证实的争议\n只能靠大段说明卡讲清",
+    sourcePolicy: "primary_or_two_independent",
+    customInstruction: "优先考虑 24–45 秒内能兑现观众承诺的题材。",
   },
 };
 
@@ -80,7 +85,7 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
           reviewMode: "manual",
         },
         topicStrategy: patch.topicStrategy
-          ? { ...patch.topicStrategy }
+          ? { ...file.settings.topicStrategy, ...patch.topicStrategy }
           : { ...file.settings.topicStrategy },
       };
       await this.write({ version: 1, settings });

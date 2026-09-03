@@ -28,10 +28,10 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
   const productionReady = !providerError && capabilities.every((item) => item.available);
   const hasTopicAgent = providers.some((provider) => provider.capability === "topic.intelligence" && provider.available && provider.kind !== "test");
   const topicIntelligenceCopy = opportunity.origin === "trend"
-    ? "热点转译、机会评分与证据门禁由 Codex 执行"
+    ? "热点转译、机会评分与来源核验由 Codex 执行"
     : opportunity.origin === "series"
-      ? "系列选题、连续性检查与开拍审计由 Codex 执行"
-      : "自定义命题复核、机会评分与证据门禁由 Codex 执行";
+      ? "系列选题、连续性检查与开拍前复核由 Codex 执行"
+      : "自定义命题复核、机会评分与来源核验由 Codex 执行";
 
   return (
     <aside className="director-panel" aria-label="导演控制台" data-tour="director-panel">
@@ -54,7 +54,7 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
       </section>
 
       <section className="capability-check">
-        <h3>生产链路</h3>
+        <h3>制作步骤</h3>
         {providerError ? <p className="director-inline-error">{providerError}</p> : null}
         {capabilities.map((item) => (
           <div key={item.capability}>

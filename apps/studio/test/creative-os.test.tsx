@@ -56,7 +56,7 @@ const opportunity: StudioOpportunity = {
 const providers: StudioProvider[] = [
   { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" },
   { id: "api-visual-director-v1", capability: "storyboard.plan", label: "本地视觉导演", available: true, kind: "local" },
-  { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑卡片", available: true, kind: "local" },
+  { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑卡片", available: true, kind: "local", deliveryTypes: ["editorial_card"] },
   { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" },
   { id: "python-ffmpeg-v1", capability: "video.render", label: "FFmpeg 渲染", available: true, kind: "local" },
   { id: "python-technical-review-v1", capability: "quality.review", label: "技术审片", available: true, kind: "local" },
@@ -102,7 +102,18 @@ function candidate(index: number, category: StudioCandidateInboxItem["category"]
     freshness: "live",
     risk: "low",
     verification: { status: "ready", independentSources: 1, requiredSources: 1, reasons: ["常规风险"] },
-    editorialDecision: { verdict: "produce_video", score: 82, reasons: ["适合视频表达。"], guardrails: ["逐镜核验。"] },
+    editorialDecision: {
+      verdict: "produce_video",
+      score: 82,
+      reasons: ["适合视频表达。"],
+      guardrails: ["逐镜核验。"],
+      recommendedTemplate: {
+        id: "knowledge-explainer",
+        name: "知识解释",
+        format: "问题、因果模型与生活验证构成的解释视频",
+        rationale: "让抽象信息形成可复述的因果链。",
+      },
+    },
     title: `候选提案 ${index}`,
     platform: index % 2 === 0 ? "bilibili" : "douyin",
     track: "daily-observer",
@@ -193,7 +204,7 @@ describe("Creative OS", () => {
 
     expect(await screen.findByRole("heading", { name: "待制作机会" })).toBeInTheDocument();
     expect(screen.queryByText(pending.title)).not.toBeInTheDocument();
-    expect(screen.getByText(/已投产内容请到制作记录继续/)).toBeInTheDocument();
+    expect(screen.getByText(/已开始制作的内容请到制作记录继续/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "查看制作记录" })).toHaveAttribute("href", "/projects");
   });
 
@@ -210,6 +221,7 @@ describe("Creative OS", () => {
     expect(await screen.findByRole("heading", { name: "热点候选收件箱" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(8);
     expect(screen.getByRole("heading", { name: opportunity.title })).toBeInTheDocument();
+    expect(screen.getByText("问题、因果模型与生活验证构成的解释视频")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /科技 5/ }));
     expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(5);
@@ -369,7 +381,7 @@ describe("Creative OS", () => {
     expect(navigation.getByRole("link", { name: /制作记录/ })).toHaveAttribute("href", "/projects");
     expect(navigation.getByRole("link", { name: /素材库/ })).toHaveAttribute("href", "/assets");
     expect(navigation.getByRole("link", { name: /模板工坊/ })).toHaveAttribute("href", "/templates");
-    expect(navigation.getByRole("link", { name: /总配置/ })).toHaveAttribute("href", "/resources");
+    expect(navigation.getByRole("link", { name: /创作设置/ })).toHaveAttribute("href", "/resources");
     expect(navigation.getByRole("link", { name: /制作复盘/ })).toHaveAttribute("href", "/experiments");
   });
 
@@ -451,10 +463,10 @@ describe("Creative OS", () => {
       { id: "api-topic-editor-v1", capability: "topic.intelligence", label: "Codex 选题总编", available: true, kind: "external" },
     ];
     const { rerender } = render(<MemoryRouter><DirectorPanel opportunity={{ ...opportunity, origin: "manual" }} providers={topicProviders} onProduce={() => undefined} /></MemoryRouter>);
-    expect(screen.getByText("自定义命题复核、机会评分与证据门禁由 Codex 执行")).toBeInTheDocument();
+    expect(screen.getByText("自定义命题复核、机会评分与来源核验由 Codex 执行")).toBeInTheDocument();
 
     rerender(<MemoryRouter><DirectorPanel opportunity={{ ...opportunity, origin: "series" }} providers={topicProviders} onProduce={() => undefined} /></MemoryRouter>);
-    expect(screen.getByText("系列选题、连续性检查与开拍审计由 Codex 执行")).toBeInTheDocument();
+    expect(screen.getByText("系列选题、连续性检查与开拍前复核由 Codex 执行")).toBeInTheDocument();
   });
 
   it("carries the configured default duration into an adopted opportunity", async () => {
@@ -546,7 +558,7 @@ describe("Creative OS", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "当前没有可用热点候选" })).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "手动录入" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "导入 JSON" })).toBeInTheDocument();
-    expect(screen.getByText(/上游暂时离线/)).toBeInTheDocument();
+    expect(screen.getByText(/热点来源暂时离线/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "导入 JSON" }));
     expect(screen.getByRole("tab", { name: "JSON 导入" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("textbox", { name: /机会数据/ })).toHaveFocus();
@@ -689,10 +701,10 @@ describe("Creative OS", () => {
 
     expect(await screen.findByRole("region", { name: "本季策划摘要" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /E01.*候选提案 20/ })).toBeInTheDocument();
-    expect(screen.getByText("openai / codex-default")).toBeInTheDocument();
+    expect(screen.getByText("AI 系列总编")).toBeInTheDocument();
     expect(screen.getByText("独立审计 2/3 轮通过")).toBeInTheDocument();
     expect(screen.getByText(/路线图有独立价值并形成递进.*91 分/)).toBeInTheDocument();
-    expect(screen.getByText("xhigh")).toBeInTheDocument();
+    expect(screen.getByText("深入推理")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "编辑路线图" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "本集制作准备" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "选择待制作单集" })).toBeInTheDocument();
@@ -1029,6 +1041,7 @@ describe("Creative OS", () => {
         kind: "external",
         status: "ready",
         billing: "metered",
+        deliveryTypes: ["generated_video"],
         description: "按预算生成少量关键镜头。",
         modes: ["文生视频", "9:16"],
         estimatedCnyPerClip: 8,
@@ -1041,6 +1054,7 @@ describe("Creative OS", () => {
         kind: "external",
         status: "planned",
         billing: "metered",
+        deliveryTypes: ["generated_video"],
         description: "账号权限确认后启用。",
       },
     ]);
@@ -1054,7 +1068,7 @@ describe("Creative OS", () => {
     }]);
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
-    const assetSection = (await screen.findByRole("heading", { name: "生成与素材模型" })).closest("section");
+    const assetSection = (await screen.findByRole("heading", { name: "按画面能力选择模型" })).closest("section");
     expect(assetSection).not.toBeNull();
     expect(within(assetSection!).getByText("Seedance 关键镜头")).toBeInTheDocument();
     expect(within(assetSection!).getByText("Kling 可灵")).toBeInTheDocument();
@@ -1142,7 +1156,7 @@ describe("Creative OS", () => {
     const readyProviders: StudioProvider[] = [
       ...providers,
       { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" as const, status: "ready" as const, billing: "free" as const },
-      { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external" as const, status: "ready" as const, billing: "free" as const },
+      { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external" as const, status: "ready" as const, billing: "free" as const, deliveryTypes: ["stock_video"] as const },
       {
         id: "minimax-video-v1",
         capability: "asset.prepare",
@@ -1151,6 +1165,7 @@ describe("Creative OS", () => {
         kind: "external" as const,
         status: "ready" as const,
         billing: "metered" as const,
+        deliveryTypes: ["generated_video"] as const,
         defaultModelId: "MiniMax-Hailuo-2.3",
         modelProfiles: [
           { id: "MiniMax-Hailuo-2.3", providerId: "minimax-video-v1", providerFamily: "minimax", label: "MiniMax Hailuo 2.3", description: "经济关键镜头", available: true, recommended: true, taskTypes: ["text-to-video"] },
@@ -1178,29 +1193,38 @@ describe("Creative OS", () => {
       ...initialSettings,
       ...patch,
       productionDefaults: { ...initialSettings.productionDefaults, ...patch.productionDefaults },
+      topicStrategy: { ...initialSettings.topicStrategy, ...patch.topicStrategy },
     }));
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
     expect(await screen.findByRole("button", { name: "已是制作默认" })).toBeDisabled();
     expect(screen.getByRole("heading", { name: "新建制作默认值" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "发布渠道" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /高级微调/ }));
     fireEvent.change(screen.getByRole("slider", { name: "语速" }), { target: { value: "190" } });
     await user.click(await screen.findByRole("button", { name: "设为制作默认" }));
     expect(update).toHaveBeenCalledWith({ voiceDirection: { ...initialSettings.voiceDirection, rate: 190 } });
 
-    const assetSection = screen.getByRole("heading", { name: "生成与素材模型" }).closest("section");
+    const assetSection = screen.getByRole("heading", { name: "按画面能力选择模型" }).closest("section");
     expect(assetSection).not.toBeNull();
-    const pexelsRow = within(assetSection!).getByText("Pexels 视频").closest("article");
-    expect(pexelsRow).not.toBeNull();
-    await user.click(within(pexelsRow!).getByRole("button", { name: "设为默认" }));
-    expect(update).toHaveBeenLastCalledWith({ defaultAssetProviderId: "pexels-stock-v1" });
-    const routerRow = within(assetSection!).getByText("AI 逐镜路由").closest("article");
-    expect(routerRow).not.toBeNull();
-    await user.click(within(routerRow!).getByRole("button", { name: "设为默认" }));
-    expect(update).toHaveBeenLastCalledWith({ defaultAssetProviderId: "ai-shot-router-v1" });
+    expect(within(assetSection!).getByText("Pexels 视频")).toBeInTheDocument();
+    expect(within(assetSection!).getByText("AI 逐镜路由")).toBeInTheDocument();
+    expect(within(assetSection!).queryByRole("button", { name: "设为默认" })).not.toBeInTheDocument();
+    const stockGroup = screen.getByText("图库实拍").closest("section");
+    const generatedVideoGroup = screen.getByText("AI 生视频").closest("section");
+    const routingGroup = screen.getByText("逐镜选择画面来源").closest("section");
+    const editorialGroup = screen.getByText("主动排版画面").closest("section");
+    expect(stockGroup).not.toBeNull();
+    expect(generatedVideoGroup).not.toBeNull();
+    expect(routingGroup).not.toBeNull();
+    expect(editorialGroup).not.toBeNull();
+    expect(within(stockGroup!).getByText("Pexels 视频")).toBeInTheDocument();
+    expect(within(generatedVideoGroup!).getByText("MiniMax 视频生成")).toBeInTheDocument();
+    expect(within(routingGroup!).getByText("AI 逐镜路由")).toBeInTheDocument();
+    expect(within(editorialGroup!).getByText("本地编辑卡片")).toBeInTheDocument();
 
     await user.click(screen.getByRole("link", { name: "画面来源" }));
-    await user.selectOptions(screen.getByRole("combobox", { name: "MiniMax 视频生成 默认模型" }), "MiniMax-H3");
+    await user.selectOptions(screen.getByRole("combobox", { name: "MiniMax 视频生成 推荐模型" }), "MiniMax-H3");
     await user.click(screen.getByRole("button", { name: "保存画面模型" }));
     expect(update).toHaveBeenLastCalledWith({ modelDefaults: { "minimax-video-v1": "MiniMax-H3" } });
 
@@ -1279,6 +1303,7 @@ describe("Creative OS", () => {
       roleProviderDefaults: patch.roleProviderDefaults ?? initialSettings.roleProviderDefaults,
       modelDefaults: patch.modelDefaults ?? initialSettings.modelDefaults,
       productionDefaults: { ...initialSettings.productionDefaults, ...patch.productionDefaults },
+      topicStrategy: { ...initialSettings.topicStrategy, ...patch.topicStrategy },
     }));
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
@@ -1291,7 +1316,7 @@ describe("Creative OS", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧默认能力" }), "codex-screenwriter-v1");
     await user.selectOptions(screen.getByRole("combobox", { name: "Codex 编剧默认模型" }), "gpt-5.6-sol");
     expect(screen.getByText("独立质量审计")).toBeInTheDocument();
-    expect(screen.getByText(/xhigh.*最多三轮/)).toBeInTheDocument();
+    expect(screen.getByText("独立复核 · 最多三轮")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));
 
     expect(update).toHaveBeenLastCalledWith(expect.objectContaining({

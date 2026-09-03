@@ -205,7 +205,7 @@ function buildFailure(nodes: StudioNode[], videoAvailable: boolean): StudioRunFa
     impact: preserved,
     retryable: !failed.outcomeUncertain && normalized.retryable,
     recoveryActions: failed.outcomeUncertain
-      ? ["先到 Provider 控制台核对任务状态与账单", "确认没有重复扣费后再决定是否重试"]
+      ? ["先到服务商控制台核对任务状态与账单", "确认没有重复扣费后再决定是否重试"]
       : normalized.recoveryActions,
     savedNodeCount,
     technicalDetail: raw,
@@ -235,7 +235,7 @@ function normalizeFailure(raw: string, node: StudioNode, provider?: string): Pic
       category: "configuration",
       summary: `${service} 的账号、密钥或权限配置不可用`,
       retryable: false,
-      recoveryActions: ["到总配置检查对应服务的密钥与权限", "测试连接成功后再重试"],
+      recoveryActions: ["到创作设置检查对应服务的密钥与权限", "测试连接成功后再重试"],
     };
   }
   if (/moderation|content.?policy|审核|违规|敏感|rejected by provider/i.test(raw)) {

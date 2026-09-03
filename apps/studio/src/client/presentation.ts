@@ -1,10 +1,10 @@
 export const RUN_NODE_LABELS: Record<string, string> = {
   brief: "内容简报",
   script: "脚本",
-  "reference-grammar": "参考镜头语法",
+  "reference-grammar": "参考视频风格分析",
   "visual-direction": "导演方案",
   "asset-candidates": "候选素材",
-  "asset-semantic-rank": "语义选片",
+  "asset-semantic-rank": "候选画面排序",
   assets: "画面",
   voice: "配音",
   render: "渲染",
@@ -52,9 +52,9 @@ export function providerLabel(providerId?: string): string | undefined {
     "codex-screenwriter-v1": "Codex 编剧",
     "api-visual-director-v1": "Codex 视觉导演",
     "codex-reference-grammar-v1": "Codex 参考视频分析",
-    "codex-asset-ranker-v1": "Codex 语义选片",
+    "codex-asset-ranker-v1": "Codex 候选画面排序",
     "codex-publish-copy-v1": "Codex 发行编辑",
-    "ai-shot-router-v1": "AI 逐镜路由",
+    "ai-shot-router-v1": "AI 逐镜选择画面来源",
     "local-editorial-v1": "本地编辑画面",
     "pexels-stock-v1": "Pexels 图库",
     "pixabay-stock-v1": "Pixabay 图库",
@@ -73,6 +73,14 @@ export function providerLabel(providerId?: string): string | undefined {
     minimax: "MiniMax",
     seedance: "Seedance",
   } as Record<string, string>)[providerId] ?? providerId;
+}
+
+export function providerModelLabel(
+  provider: { defaultModelId?: string; modelProfiles?: Array<{ id: string; label: string }> } | undefined,
+  modelId?: string,
+): string {
+  if (!modelId) return "自动选择";
+  return provider?.modelProfiles?.find((model) => model.id === modelId)?.label ?? modelId;
 }
 
 export function humanizeCreativeText(value: string): string {
@@ -104,6 +112,37 @@ export function humanizeCreativeText(value: string): string {
     .replace(/符合\s*素材能力\s*强项/g, "发挥所选画面能力的强项")
     .replace(/合同约束/g, "创作约束")
     .replace(/\s+(提问镜头|原理镜头|验证镜头|结论镜头)\s+/g, "$1");
+}
+
+export function creatorFacingTechnicalText(value?: string): string | undefined {
+  if (!value) return undefined;
+  return value
+    .replace(/Series Bible/gi, "系列设定")
+    .replace(/\bCanon\b/gi, "已确认内容")
+    .replace(/\bAgent\b/gi, "AI")
+    .replace(/\bProvider\b/gi, "服务")
+    .replace(/\bMCP\b/gi, "标准接口")
+    .replace(/\bCode Plan\b/gi, "订阅额度")
+    .replace(/\bTTS API\b/gi, "云端配音服务")
+    .replace(/\bAPI\b/gi, "服务接口")
+    .replace(/\bSQLite\b/gi, "本地历史记录")
+    .replace(/xhigh\s*推理/gi, "深入推理")
+    .replace(/阻断门禁/g, "不通过则要求修改")
+    .replace(/技术门禁/g, "技术检查")
+    .replace(/产物校验/g, "文件校验")
+    .replace(/结构化输出/g, "按固定格式交付")
+    .replace(/绿灯审计/g, "开拍前复核")
+    .replace(/本地生成/g, "在本机生成")
+    .replace(/异步生成/g, "后台生成")
+    .replace(/统一任务协议/g, "统一调用");
+}
+
+export function reasoningEffortLabel(value: unknown): string {
+  if (value === "none" || value === "minimal" || value === "low") return "快速判断";
+  if (value === "medium") return "标准推理";
+  if (value === "high" || value === "xhigh") return "深入推理";
+  if (value === "max" || value === "ultra") return "最高强度推理";
+  return "由服务自动选择";
 }
 
 export function proposalSourceLabel(providerId: string): string {

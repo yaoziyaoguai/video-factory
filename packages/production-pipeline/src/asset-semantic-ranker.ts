@@ -102,7 +102,7 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
     if (typeof client.runTaskDetailed !== "function") return { output: await this.rank(report) };
     const payload = await this.rankPayload(report);
     return runRoleAgentLoop({
-      role: "语义选片师",
+      role: "候选画面复核",
       contractVersion: ASSET_RANK_AGENT_CONTRACT_VERSION,
       criteria: [
         "逐镜候选完整保留，排名和原始排名均连续且没有重复",

@@ -20,7 +20,7 @@ export function CandidateVerificationDialog({ candidate, pending, onClose, onCon
     <div className="dialog-backdrop" role="presentation">
       <section ref={dialogRef} className="verification-dialog" role="dialog" aria-modal="true" aria-labelledby="verification-title" tabIndex={-1}>
         <header className="dialog-header">
-          <div><p className="eyebrow">证据门禁</p><h2 id="verification-title">采用前核验证据</h2></div>
+          <div><p className="eyebrow">来源核验</p><h2 id="verification-title">采用前核验证据</h2></div>
           <button className="icon-button" type="button" onClick={onClose} disabled={pending} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
         <div className="verification-dialog-body">

@@ -45,7 +45,7 @@ export function OpportunityRail({ opportunities, selectedId, onSelect, onCreate 
 }
 
 function statusLabel(status: StudioOpportunity["status"]): string {
-  return ({ draft: "草稿", shortlisted: "候选", approved: "已投产", rejected: "已放弃", tested: "已复盘" })[status];
+  return ({ draft: "草稿", shortlisted: "候选", approved: "已开始制作", rejected: "已放弃", tested: "已复盘" })[status];
 }
 
 function formatFreshness(value: string): string {

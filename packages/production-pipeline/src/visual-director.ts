@@ -179,6 +179,12 @@ export interface VisualDirectorAgentInput {
     };
     referenceGrammar?: ShotGrammar;
     seriesContext?: ProductionSeriesContext;
+    rework?: {
+      sourceRunId: string;
+      visualDirectionInstruction: string;
+      assetInstruction: string;
+      previousDirectorPlan?: Record<string, unknown>;
+    };
   };
   scenes: Array<{
     position: number;

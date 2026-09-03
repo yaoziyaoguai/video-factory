@@ -21,6 +21,7 @@ import { selectableModelsForCapability } from "../../shared/model-compatibility.
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { VoiceStudio } from "./VoiceStudio.js";
 import { studioApi } from "../api.js";
+import { creatorFacingTechnicalText } from "../presentation.js";
 import { TemplateGallery } from "../templates/TemplateGallery.js";
 
 interface NewRunDialogProps {
@@ -48,8 +49,8 @@ interface CapabilityDefinition {
 
 const CAPABILITIES: CapabilityDefinition[] = [
   { key: "script", capability: "script.draft", label: "脚本生成", role: "编剧", description: "结构、钩子与分镜文案", preferred: "codex-screenwriter-v1", icon: FileText },
-  { key: "director", capability: "storyboard.plan", label: "导演方案", role: "导演", description: "视觉圣经与逐镜素材决策", preferred: "api-visual-director-v1", icon: Clapperboard },
-  { key: "assets", capability: "asset.prepare", label: "画面素材", role: "素材导演", description: "执行 AI 导演生成的逐镜路由", preferred: "ai-shot-router-v1", icon: Image },
+  { key: "director", capability: "storyboard.plan", label: "导演方案", role: "导演", description: "统一全片视觉规则并逐镜决定画面", preferred: "api-visual-director-v1", icon: Clapperboard },
+  { key: "assets", capability: "asset.prepare", label: "画面素材", role: "素材导演", description: "按导演方案逐镜寻找或生成画面", preferred: "ai-shot-router-v1", icon: Image },
   { key: "voice", capability: "voice.synthesize", label: "配音", role: "声音导演", description: "旁白音色与语速", preferred: "macos-say-v1", icon: Mic2 },
   { key: "render", capability: "video.render", label: "视频渲染", role: "剪辑师", description: "9:16 合成、字幕与音轨", preferred: "python-ffmpeg-v1", icon: Film },
   { key: "technicalReview", capability: "quality.review", label: "机器质检", role: "技术质检", description: "分辨率、时长与产物校验", preferred: "python-technical-review-v1", icon: ScanSearch },
@@ -79,13 +80,13 @@ const RECIPES: Array<{
   {
     id: "keyshot-ai",
     label: "效果均衡",
-    description: "允许 AI 选择付费关键镜头，每个计费节点执行前确认",
+    description: "允许 AI 选择付费关键镜头，每次生成图片或视频前确认",
     allowMeteredProviders: true,
   },
   {
     id: "cinematic-ai",
     label: "开放精品生成",
-    description: "优先开放精品生成能力，每个计费节点执行前确认",
+    description: "优先开放精品生成能力，每次生成图片或视频前确认",
     allowMeteredProviders: true,
   },
 ];
@@ -120,9 +121,11 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   const [templates, setTemplates] = useState<StudioTemplate[]>([]);
   const [templatesLoaded, setTemplatesLoaded] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState(
-    initialValues?.editorial?.verdict === "produce_image_story" ? "photo-story" : "knowledge-explainer",
+    initialValues?.template?.templateId
+      ?? (initialValues?.editorial?.verdict === "produce_image_story" ? "photo-story" : "knowledge-explainer"),
   );
   const [templateError, setTemplateError] = useState<string>();
+  const [rework, setRework] = useState<StudioProductionInput["rework"]>(initialValues?.rework);
   const initializedForOpen = useRef(false);
   const initializationRevision = useRef(0);
   const dialogRef = useDialogFocus<HTMLElement>(open, onClose, submitting);
@@ -170,8 +173,6 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   const economics: StudioProductionInput["economics"] = {
     recipeId,
     allowMeteredProviders: hasMeteredCalls,
-    maxPaidShots: 0,
-    maxCostCny: 0,
   };
   const missingCapabilities = CAPABILITIES.filter((item) => {
     return !item.optional
@@ -204,7 +205,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
       assets: "ai-shot-router-v1",
       voice: providerForVoiceProfile(resolvedVoiceDirection.profileId),
     };
-    const initialRecipe = imageStory
+    const initialRecipe = imageStory && !initialValues?.rework
       ? "free-stock"
       : initialValues?.economics?.recipeId ?? creatorSettings?.defaultRecipeId ?? "economy-daily";
     const recipe = RECIPES.find((item) => item.id === initialRecipe) ?? RECIPES[0]!;
@@ -230,9 +231,11 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     setActiveKey("assets");
     setAdvancedOpen(false);
     setError(undefined);
-    const requestedTemplateId = imageStory ? "photo-story" : initialValues?.editorial ? "trend-fact-brief" : "knowledge-explainer";
+    const requestedTemplateId = initialValues?.template?.templateId
+      ?? (imageStory ? "photo-story" : initialValues?.editorial ? "trend-fact-brief" : "knowledge-explainer");
     setSelectedTemplateId(requestedTemplateId);
     setTemplateError(undefined);
+    setRework(initialValues?.rework ? structuredClone(initialValues.rework) : undefined);
     setTemplates([]);
     setTemplatesLoaded(false);
     void studioApi.templates()
@@ -352,10 +355,20 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
         ...(editorial ? { editorial } : {}),
         ...(initialValues?.seriesContext ? { seriesContext: initialValues.seriesContext } : {}),
         ...(initialValues?.creationContext ? { creationContext: initialValues.creationContext } : {}),
+        ...(rework ? { rework } : {}),
         voiceDirection,
         template: {
           templateId: selectedTemplateId,
-          runOverrides: { durationSeconds, automationLevel: selectedTemplate.automationLevel },
+          ...(initialValues?.template?.templateId === selectedTemplateId && initialValues.template.templateVersion !== undefined
+            ? { templateVersion: initialValues.template.templateVersion }
+            : {}),
+          runOverrides: {
+            durationSeconds,
+            ...(initialValues?.template?.templateId === selectedTemplateId
+              && initialValues.template.templateVersion !== undefined
+              ? {}
+              : { automationLevel: selectedTemplate.automationLevel }),
+          },
         },
         providers: providersForRun,
         models: modelsForRun,
@@ -381,8 +394,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
         <header className="dialog-header recipe-dialog-header">
           <div>
             <p className="eyebrow">制作方案</p>
-            <h2 id="new-run-title">新建制作</h2>
-            <p>先定内容与画面方案；图片和视频按实际方案报价，声音与审片不打断制作。</p>
+            <h2 id="new-run-title">{rework ? "按审片意见重新制作" : "新建制作"}</h2>
+            <p>{rework ? "已继承上一版方案；下面的修改要求会真正交给对应制作步骤执行。" : "先定内容与画面方案；图片和视频按实际方案报价，声音与审片不打断制作。"}</p>
           </div>
           <div className="dialog-budget" aria-label="费用方式">
             <span>{meteredSelected ? "图片 / 视频按实际方案报价" : "图片 / 视频无现金报价"}</span>
@@ -398,7 +411,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
             <section className="template-picker-section" aria-labelledby="template-picker-title">
               <div className="compact-section-heading">
                 <div><span>00</span><h3 id="template-picker-title">视频模板</h3></div>
-                <small>模板决定叙事语法，不锁死模型和素材</small>
+                <small>模板决定这条视频怎么讲，不锁死模型和素材</small>
               </div>
               {templates.length > 0 ? (
                 <TemplateGallery
@@ -411,7 +424,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 />
               ) : (
                 <div className="template-loading" aria-live="polite">
-                  <strong>{selectedTemplateId === "photo-story" ? "照片故事" : "知识解释"}</strong>
+                  <strong>{selectedTemplateId === "photo-story" ? "证据图解" : "正在准备推荐模板"}</strong>
                   <span>{templateError ?? "正在读取模板目录..."}</span>
                 </div>
               )}
@@ -466,6 +479,36 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
               ) : null}
             </section>
 
+            {rework ? <section className="rework-brief-section" aria-labelledby="rework-brief-title">
+              <div className="compact-section-heading">
+                <div><span>返工</span><h3 id="rework-brief-title">按审片意见修改</h3></div>
+                <small>已预填到对应制作步骤，可在开工前调整</small>
+              </div>
+              {rework.rejectionReason ? <div className="rework-rejection-note"><strong>本次打回原因</strong><span>{rework.rejectionReason}</span></div> : null}
+              {rework.findings.length > 0 ? <div className="rework-finding-list" aria-label="审片发现">
+                {rework.findings.map((finding, index) => <article className="rework-finding" key={`${finding.timecodeMs}-${finding.category}-${index}`}>
+                  <header><strong>{finding.scenePosition ? `第 ${finding.scenePosition} 镜` : "全片"}</strong><span>{formatTimecode(finding.timecodeMs)}</span><em>{reworkFindingCategoryLabel(finding.category)}</em></header>
+                  <p>{finding.description}</p>
+                  <small>建议：{finding.suggestion}</small>
+                </article>)}
+              </div> : null}
+              <div className="rework-instruction-grid">
+                <label className="field">
+                  <span>脚本修改要求</span>
+                  <textarea required value={rework.nodeInstructions.script} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, script: event.target.value } } : current)} />
+                </label>
+                <label className="field">
+                  <span>导演方案修改要求</span>
+                  <textarea required value={rework.nodeInstructions.visualDirection} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, visualDirection: event.target.value } } : current)} />
+                </label>
+                <label className="field">
+                  <span>画面素材修改要求</span>
+                  <textarea required value={rework.nodeInstructions.assets} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, assets: event.target.value } } : current)} />
+                </label>
+              </div>
+              <p className="rework-boundary-note">上一版脚本和导演方案会作为修改基线带入；这些文字是待执行要求，不代表问题已经修好。</p>
+            </section> : null}
+
             <section className="director-casting-section" aria-labelledby="director-casting-title">
               <div className="compact-section-heading">
                 <div><span>02</span><h3 id="director-casting-title">导演角色</h3></div>
@@ -487,7 +530,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
 
             <section className="reference-style-section" aria-labelledby="reference-style-title">
               <div className="compact-section-heading">
-                <div><span>02B</span><h3 id="reference-style-title">参考镜头语法</h3></div>
+                <div><span>02B</span><h3 id="reference-style-title">参考视频风格</h3></div>
                 <small>可选，不复制参考内容</small>
               </div>
               <div className={referenceVideo ? "reference-video-control has-file" : "reference-video-control"}>
@@ -575,7 +618,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                         value={modelSelections[selected.id] ?? ""}
                         onChange={(event) => setModelSelections((current) => withModelSelection(current, selected.id, event.target.value))}
                       >
-                        <option value="">继承默认：{effectiveModelId(selected) ?? "运行时自动选择"}</option>
+                        <option value="">继承推荐：{effectiveModelId(selected) ?? "由系统按当前配置选择"}</option>
                         {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                       </select>
                     </label> : <p>{item.key === "voice" ? "音色与语速在下方声音导演中调整。" : selected?.description ?? item.description}</p>}
@@ -595,8 +638,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                     <small className="production-role-billing">{selected
                       ? item.key === "assets"
                         ? meteredSelected
-                          ? "路由决策免费 · 按实际导演方案报价 · 生成前逐笔人工确认"
-                          : "路由决策免费 · 当前配方不调用付费生成"
+                          ? "画面方案本身不收费 · 按实际生成需求报价 · 生成前逐笔人工确认"
+                          : "画面方案本身不收费 · 当前方案不调用付费生成"
                         : `${providerBillingLabel(selected)} · ${effectiveModelId(selected) ?? "不使用模型"}`
                       : "尚未配置可执行能力"}</small>
                   </article>;
@@ -604,20 +647,20 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
               </div>
               <div className={roleAuditProvider ? "production-auditor" : "production-auditor is-unavailable"}>
                 <span><ScanSearch aria-hidden="true" size={18} /></span>
-                <div><strong>{roleAuditProvider?.label ?? "独立质量审计未接通"}</strong><small>与生产角色隔离，逐节点检查上下文、输出合同和下游边界。</small></div>
-                <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "运行时模型"} · xhigh 推理 · 最多三轮` : "开工前请先恢复 Codex 审计能力"}</em>
+                <div><strong>{roleAuditProvider?.label ?? "独立质量审计未接通"}</strong><small>由独立 AI 逐步检查输入、交付格式和后续使用是否一致。</small></div>
+                <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "实际使用模型"} · 深度质量审计 · 最多三轮` : "开工前请先恢复 Codex 审计能力"}</em>
               </div>
             </section>
 
             <div className={advancedOpen ? "advanced-production is-open" : "advanced-production"}>
               <button className="advanced-production-toggle" type="button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((current) => !current)}>
-                <span>更多：素材来源与节点细节</span><small>需要时再展开</small><ChevronDown aria-hidden="true" size={17} />
+                <span>更多：素材来源与制作细节</span><small>需要时再展开</small><ChevronDown aria-hidden="true" size={17} />
               </button>
               {advancedOpen ? <section className="workflow-config" aria-labelledby="workflow-config-title">
               <div className="workflow-stage-panel">
                 <div className="compact-section-heading workflow-heading">
-                  <div><span>A</span><h3 id="workflow-config-title">制作节点</h3></div>
-                  <small>点击节点更换能力</small>
+                  <div><span>A</span><h3 id="workflow-config-title">制作步骤</h3></div>
+                  <small>点击步骤更换能力</small>
                 </div>
                 <div className="workflow-stage-list">
                   {CAPABILITIES.map((item, index) => {
@@ -666,8 +709,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                               {providerBillingLabel(provider)}
                             </span>
                           </span>
-                          <span>{provider.description ?? provider.id}</span>
-                          <span className="provider-mode-list">{(provider.modes ?? []).map((mode) => <small key={mode}>{mode}</small>)}</span>
+                          <span>{creatorFacingTechnicalText(provider.description) ?? "由系统按当前配置使用"}</span>
+                          <span className="provider-mode-list">{(provider.modes ?? []).map((mode) => <small key={mode}>{creatorFacingTechnicalText(mode)}</small>)}</span>
                         </span>
                         <span className="provider-choice-status">
                           {provider.available ? <Check aria-hidden="true" size={15} /> : <AlertCircle aria-hidden="true" size={15} />}
@@ -698,13 +741,13 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                         disabled={disabled}
                         onChange={() => toggleAssetProvider(provider)}
                       />
-                      <span><strong>{provider.label}</strong><small>{provider.description ?? provider.id}</small></span>
+                      <span><strong>{provider.label}</strong><small>{creatorFacingTechnicalText(provider.description) ?? "由系统按当前配置使用"}</small></span>
                       <em>{providerBillingLabel(provider)}</em>
                     </label>;
                   })}
                 </div>
                 {selectedAssetSources.some((provider) => selectableModelsForCapability(provider.modelProfiles, provider.capability).length) ? <div className="asset-model-overrides" aria-label="本次生成模型">
-                  <div><strong>本次模型</strong><small>只覆盖这条制作，总配置不会被修改</small></div>
+                  <div><strong>本次模型</strong><small>只覆盖这条制作，创作设置不会被修改</small></div>
                   {selectedAssetSources.filter((provider) => selectableModelsForCapability(provider.modelProfiles, provider.capability).length).map((provider) => {
                     const selectedModel = provider.modelProfiles?.find((model) => model.id === effectiveModelId(provider));
                     return <label className="field" key={provider.id}>
@@ -734,11 +777,11 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
               }}
             />
 
-            <section className="production-guardrails" aria-label="生产门禁">
+            <section className="production-guardrails" aria-label="开工前检查">
               <label className={effectiveSemanticRank ? "visual-review-control is-enabled" : "visual-review-control"}>
                 <input type="checkbox" checked={effectiveSemanticRank} disabled={!semanticRankCompatible} onChange={(event) => setSemanticRankEnabled(event.target.checked)} />
-                <span><Sparkles aria-hidden="true" size={17} /><strong>候选语义选片</strong></span>
-                <small>{semanticRankCompatible ? "先预览图库候选并给出逐镜排序；失败时保留素材源原顺序，下载前仍可人工调整" : "需要先启用 AI 视觉导演与逐镜路由"}</small>
+                <span><Sparkles aria-hidden="true" size={17} /><strong>AI 候选画面排序</strong></span>
+                <small>{semanticRankCompatible ? "先预览图库候选并给出逐镜排序；失败时保留素材源原顺序，下载前仍可人工调整" : "需要先启用 AI 视觉导演与逐镜画面选择"}</small>
               </label>
               <label className={visualReviewEnabled ? "visual-review-control is-enabled" : "visual-review-control"}>
                 <input
@@ -755,7 +798,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片</strong></span>
                 <small>{visualReviewProvider
                   ? `${visualReviewProvider.label} · 抽帧审查，不上传音轨`
-                  : "ZAI Codex broker 尚未接通，本次跳过视觉模型审片"}</small>
+                  : "ZAI 视觉审片服务当前不可用，本次不会运行视觉审片"}</small>
               </label>
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>
               <div className="budget-control">
@@ -776,7 +819,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
             <div><strong>{selectedRecipe.label}</strong><span>{meteredSelected ? "图片 / 视频按实际方案报价 · 逐项人工确认" : roleAuditProvider?.billing === "subscription" ? "订阅能力不产生现金报价" : "图片 / 视频无现金报价"}</span></div>
             <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
             <button className="button button-primary" type="button" onClick={(event) => {
-              if (event.currentTarget.form) void submit(event.currentTarget.form);
+              if (event.currentTarget.form?.reportValidity()) void submit(event.currentTarget.form);
             }} disabled={submitting || referenceUploading || !templatesLoaded || missingProductionRoles.length > 0} data-tour="production-start">
               <Check aria-hidden="true" size={17} />
               {submitting ? "正在创建..." : "开始制作"}
@@ -839,8 +882,8 @@ function roleProviderCandidates(item: CapabilityDefinition, providers: StudioPro
 function roleExecutionLabel(item: CapabilityDefinition, provider: StudioProvider | undefined): string {
   if (!provider?.available) return "未配置";
   if (item.key === "visualReview") return "模型审片";
-  if (provider.id.startsWith("codex-") || provider.id === "api-visual-director-v1") return "Agent 创作 · 3 轮内收敛";
-  if (provider.id === "ai-shot-router-v1") return "AI 逐镜路由";
+  if (provider.id.startsWith("codex-") || provider.id === "api-visual-director-v1") return "AI 创作 · 最多 3 轮质量修订";
+  if (provider.id === "ai-shot-router-v1") return "AI 逐镜选择画面来源";
   return "确定性工具";
 }
 
@@ -930,6 +973,25 @@ function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
   return `${(value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+function formatTimecode(timecodeMs: number): string {
+  const totalSeconds = Math.floor(timecodeMs / 1_000);
+  return `${String(Math.floor(totalSeconds / 60)).padStart(2, "0")}:${String(totalSeconds % 60).padStart(2, "0")}`;
+}
+
+function reworkFindingCategoryLabel(category: string): string {
+  const labels: Record<string, string> = {
+    composition: "构图",
+    continuity: "画面连续性",
+    pacing: "节奏",
+    legibility: "可读性",
+    typography: "画面文字",
+    narration: "旁白",
+    safety: "内容安全",
+    other: "其他问题",
+  };
+  return labels[category.trim().toLowerCase()] ?? "其他问题";
 }
 
 function providerBillingLabel(provider: StudioProvider): string {

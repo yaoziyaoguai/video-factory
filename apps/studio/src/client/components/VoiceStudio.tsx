@@ -1,4 +1,4 @@
-import { LoaderCircle, Mic2, Minus, Play, Plus, Volume2 } from "lucide-react";
+import { ChevronDown, LoaderCircle, Mic2, Minus, Play, Plus, Volume2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { StudioVoiceDirection, StudioVoiceProfile } from "../../shared/api.js";
 import { studioApi } from "../api.js";
@@ -21,6 +21,12 @@ const RECOMMENDED_VOICES = new Set([
   "minimax:female-chengshu",
 ]);
 type VoiceFilter = "recommended" | "female" | "male" | "cloud" | "system";
+const VOICE_PRESETS = [
+  { id: "explainer", label: "知识讲解", description: "清楚、有推进感，不像播报", rate: 190, pauseScale: 1, masteringPreset: "social" },
+  { id: "documentary", label: "人物纪实", description: "留出情绪和画面呼吸", rate: 170, pauseScale: 1.2, masteringPreset: "intimate" },
+  { id: "news", label: "热点快讯", description: "信息密度高，咬字优先", rate: 205, pauseScale: 0.9, masteringPreset: "social" },
+  { id: "lifestyle", label: "生活清单", description: "自然亲近，节奏不过满", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+] as const satisfies ReadonlyArray<{ id: string; label: string; description: string; rate: number; pauseScale: number; masteringPreset: StudioVoiceDirection["masteringPreset"] }>;
 
 export function VoiceStudio({ value, onChange, title = "声音导演", sectionLabel = "04" }: VoiceStudioProps) {
   const [voices, setVoices] = useState<StudioVoiceProfile[]>([]);
@@ -30,6 +36,7 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
   const [previewing, setPreviewing] = useState<string>();
   const [audioUrl, setAudioUrl] = useState<string>();
   const [filter, setFilter] = useState<VoiceFilter>("recommended");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const selected = useMemo(
     () => voices.find((voice) => voice.id === direction.profileId),
     [direction.profileId, voices],
@@ -48,6 +55,9 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
     cloud: voices.filter((voice) => voice.engine === "minimax").length,
     system: voices.filter((voice) => voice.engine === "macos").length,
   }), [direction.profileId, voices]);
+  const selectedPreset = VOICE_PRESETS.find((preset) => preset.rate === direction.rate
+    && preset.pauseScale === direction.pauseScale
+    && preset.masteringPreset === direction.masteringPreset);
 
   useEffect(() => setDirection(value), [value]);
   useEffect(() => {
@@ -146,6 +156,19 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
           </div>
 
           <div className="voice-direction">
+            <div className="voice-preset-picker" aria-label="内容声音方案">
+              <header><strong>内容声音方案</strong><small>已按常见短视频内容校准语速、停顿与响度</small></header>
+              <div>{VOICE_PRESETS.map((preset) => <button
+                key={preset.id}
+                type="button"
+                aria-pressed={selectedPreset?.id === preset.id}
+                onClick={() => update({ ...direction, rate: preset.rate, pauseScale: preset.pauseScale, masteringPreset: preset.masteringPreset }, selected)}
+              ><strong>{preset.label}</strong><small>{preset.description}</small></button>)}</div>
+            </div>
+            <button className="voice-advanced-toggle" type="button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((current) => !current)}>
+              <span>高级微调</span><small>{direction.rate} 字/分 · 停顿 {direction.pauseScale.toFixed(1)}× · {masteringPresetLabel(direction.masteringPreset)}</small><ChevronDown aria-hidden="true" size={16} />
+            </button>
+            {advancedOpen ? <div className="voice-advanced-controls">
             <div className="voice-slider">
               <span><strong>语速</strong><output>{direction.rate} 字/分</output></span>
               <div className="voice-slider-control">
@@ -168,6 +191,7 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
               <label><input type="radio" name="mastering" checked={direction.masteringPreset === "intimate"} onChange={() => update({ ...direction, masteringPreset: "intimate" }, selected)} /><span>贴近人声</span></label>
               <label><input type="radio" name="mastering" checked={direction.masteringPreset === "social"} onChange={() => update({ ...direction, masteringPreset: "social" }, selected)} /><span>社交清晰</span></label>
             </fieldset>
+            </div> : null}
             {audioUrl ? <audio className="voice-audio" aria-label="声音试听" controls autoPlay src={audioUrl}><track kind="captions" /></audio> : (
               <div className="voice-audio-placeholder"><Volume2 aria-hidden="true" size={17} /><span>{selected?.label ?? "选择一个音色"}</span></div>
             )}
@@ -179,11 +203,15 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
           <Mic2 aria-hidden="true" size={19} />
           <div>
             <strong>当前没有正式配音演员</strong>
-            <span>云服务器未接入 TTS API，测试音轨不会用于成片。</span>
+            <span>云服务器尚未接入正式配音服务，测试音轨不会用于成片。</span>
           </div>
         </div>
       ) : null}
       {error ? <p className="form-error" role="alert">{error}</p> : null}
     </section>
   );
+}
+
+function masteringPresetLabel(preset: StudioVoiceDirection["masteringPreset"]): string {
+  return preset === "intimate" ? "贴近人声" : preset === "social" ? "社交清晰" : "自然";
 }

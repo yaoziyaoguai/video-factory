@@ -162,6 +162,7 @@ describe("Studio client", () => {
     }));
     expect(await screen.findByLabelText("声音试听")).toHaveAttribute("src", "blob:voice-preview");
 
+    await user.click(screen.getByRole("button", { name: /高级微调/ }));
     await user.click(screen.getByRole("radio", { name: "社交清晰" }));
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ masteringPreset: "social" }), "macos-say-v1");
 
@@ -188,6 +189,25 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("tab", { name: /系统音色/ }));
     expect(screen.getByRole("radio", { name: /Flo/ })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /Meijia/ })).toBeInTheDocument();
+  });
+
+  it("applies a calibrated content voice preset as one coherent direction", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<VoiceStudio
+      value={{ profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" }}
+      onChange={onChange}
+    />);
+
+    await user.click(await screen.findByRole("button", { name: /人物纪实/ }));
+
+    expect(onChange).toHaveBeenLastCalledWith({
+      profileId: "macos:Tingting",
+      rate: 170,
+      pauseScale: 1.2,
+      masteringPreset: "intimate",
+    }, "macos-say-v1");
+    expect(screen.getByRole("button", { name: /高级微调/ })).toHaveTextContent("170 字/分 · 停顿 1.2× · 贴近人声");
   });
 
   it("explains why production voice is unavailable instead of leaving an empty panel", async () => {
@@ -293,7 +313,7 @@ describe("Studio client", () => {
     expect(screen.getByText(/AI 根据题材选择导演语法/)).toBeInTheDocument();
     expect(screen.getByLabelText("费用方式")).toHaveTextContent("图片 / 视频无现金报价");
     expect(screen.queryByRole("button", { name: /画面素材/ })).not.toBeInTheDocument();
-    await user.click(screen.getByText("更多：素材来源与节点细节"));
+    await user.click(screen.getByText("更多：素材来源与制作细节"));
     await user.click(screen.getByRole("button", { name: /画面素材/ }));
     expect(screen.getByRole("radio", { name: /AI 逐镜路由/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /本地编辑卡片/ })).not.toBeChecked();
@@ -325,8 +345,6 @@ describe("Studio client", () => {
       economics: {
         recipeId: "economy-daily",
         allowMeteredProviders: false,
-        maxPaidShots: 0,
-        maxCostCny: 0,
       },
     }));
 
@@ -347,7 +365,7 @@ describe("Studio client", () => {
     />);
 
     await screen.findByText("知识解释");
-    await userEvent.click(screen.getByText("更多：素材来源与节点细节"));
+    await userEvent.click(screen.getByText("更多：素材来源与制作细节"));
     expect(screen.getByRole("checkbox", { name: /本地编辑卡片/ })).not.toBeChecked();
     expect(screen.getByText(/缺少正式生产能力.*导演画面来源/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
@@ -454,7 +472,7 @@ describe("Studio client", () => {
     expect(screen.getByRole("heading", { name: "开工前确认制作团队" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "编剧能力" })).toHaveValue("codex-screenwriter-v1");
     expect(screen.getByText(/独立质量审计/)).toBeInTheDocument();
-    expect(screen.getByText(/xhigh.*最多三轮/)).toBeInTheDocument();
+    expect(screen.getByText(/深度质量审计.*最多三轮/)).toBeInTheDocument();
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "gpt-5.6-sol");
     await user.type(screen.getByLabelText("视频标题"), "角色配置必须在开工前确认");
     await user.type(screen.getByLabelText("内容角度"), "验证编剧模型覆盖真实进入生产单");
@@ -481,7 +499,7 @@ describe("Studio client", () => {
     );
 
     await user.type(screen.getByLabelText("视频标题"), "后台刷新不能清空这段编辑");
-    await user.click(screen.getByText("更多：素材来源与节点细节"));
+    await user.click(screen.getByText("更多：素材来源与制作细节"));
     const voiceStage = screen.getByRole("button", { name: /配音声音导演/ });
     await user.click(voiceStage);
     expect(voiceStage).toHaveAttribute("aria-pressed", "true");
@@ -583,8 +601,8 @@ describe("Studio client", () => {
     ];
     render(<NewRunDialog open providers={providersWithVisualReview} onClose={onClose} onSubmit={async () => undefined} />);
 
-    await user.click(screen.getByText("更多：素材来源与节点细节"));
-    const semanticRank = screen.getByRole("checkbox", { name: /候选语义选片/ });
+    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    const semanticRank = screen.getByRole("checkbox", { name: /AI 候选画面排序/ });
     const visualReview = screen.getByRole("checkbox", { name: /视觉审片/ });
 
     await user.click(semanticRank);
@@ -718,7 +736,7 @@ describe("Studio client", () => {
     render(<NewRunDialog open providers={providersWithModels} onClose={() => undefined} onSubmit={onSubmit} />);
 
     await user.click(screen.getByRole("radio", { name: /效果均衡/ }));
-    await user.click(screen.getByText("更多：素材来源与节点细节"));
+    await user.click(screen.getByText("更多：素材来源与制作细节"));
     await user.selectOptions(screen.getByRole("combobox", { name: "火山方舟视频 本次模型" }), "premium-model");
 
     expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
@@ -732,8 +750,6 @@ describe("Studio client", () => {
       economics: {
         recipeId: "keyshot-ai",
         allowMeteredProviders: true,
-        maxPaidShots: 0,
-        maxCostCny: 0,
       },
     }));
   });
@@ -772,7 +788,7 @@ describe("Studio client", () => {
     render(<NewRunDialog open providers={providersWithModels} creatorSettings={creatorSettings} onClose={() => undefined} onSubmit={vi.fn()} />);
 
     await user.click(await screen.findByRole("radio", { name: /效果均衡/ }));
-    await user.click(screen.getByText("更多：素材来源与节点细节"));
+    await user.click(screen.getByText("更多：素材来源与制作细节"));
 
     expect(screen.getByRole("combobox", { name: "火山方舟视频 本次模型" })).toHaveValue("");
     expect(screen.getByRole("option", { name: "继承默认：premium-model" })).toBeInTheDocument();
@@ -810,8 +826,6 @@ describe("Studio client", () => {
       economics: {
         recipeId: "economy-daily",
         allowMeteredProviders: false,
-        maxPaidShots: 0,
-        maxCostCny: 0,
       },
     }));
   });
@@ -849,8 +863,6 @@ describe("Studio client", () => {
       providers: expect.objectContaining({ voice: "minimax-tts-v1" }),
       economics: expect.objectContaining({
         allowMeteredProviders: true,
-        maxPaidShots: 0,
-        maxCostCny: 0,
       }),
     }));
   });
@@ -962,7 +974,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("内容角度"), "用一个关键镜头建立情绪转折");
     await user.type(screen.getByLabelText("目标受众"), "普通上班族");
     await user.click(screen.getByRole("radio", { name: /效果均衡/ }));
-    await user.click(screen.getByText("更多：素材来源与节点细节"));
+    await user.click(screen.getByText("更多：素材来源与制作细节"));
 
     expect(screen.getByRole("checkbox", { name: /Seedance 关键镜头/ })).toBeChecked();
     const localBaseline = screen.getByRole("checkbox", { name: /本地编辑卡片/ });
@@ -980,8 +992,6 @@ describe("Studio client", () => {
       economics: {
         recipeId: "keyshot-ai",
         allowMeteredProviders: true,
-        maxPaidShots: 0,
-        maxCostCny: 0,
       },
     }));
     expect(onSubmit.mock.calls[0]?.[0].director?.assetProviderIds).not.toContain("local-editorial-v1");
@@ -1038,8 +1048,214 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       editorial: expect.objectContaining({ verdict: "produce_image_story" }),
-      economics: expect.objectContaining({ allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 }),
+      economics: expect.objectContaining({ allowMeteredProviders: false }),
     }));
+  });
+
+  it("starts from the template recommended by the editorial decision", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <NewRunDialog
+        open
+        providers={providers}
+        initialValues={{
+          title: "一条值得解释的实时变化",
+          angle: "从可核验事实解释观众影响",
+          audience: "关注变化的普通用户",
+          nicheSlug: "verified-change",
+          editorial: { verdict: "produce_video", reasons: ["具有时效价值。"], guardrails: ["逐项核验来源。"] },
+          template: { templateId: "trend-fact-brief" },
+        }}
+        onClose={() => undefined}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(await screen.findByRole("radio", { name: /热点事实简报/ })).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      template: expect.objectContaining({ templateId: "trend-fact-brief" }),
+    }));
+  });
+
+  it("edits node-prefilled review guidance while inheriting the rejected production choices", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const rework = {
+      sourceRunId: "run-rejected-1",
+      sourceRunRevision: 8,
+      rejectionReason: "第三镜文字遮挡主体，画面风格也与前两镜不一致。",
+      nodeInstructions: {
+        script: "缩短第三镜旁白，保留前两镜原文。",
+        visualDirection: "第三镜沿用前两镜的自然纪实风格并留出字幕安全区。",
+        assets: "只替换第三镜，禁止使用带字素材和说明卡。",
+      },
+      findings: [{
+        timecodeMs: 8_500,
+        scenePosition: 3,
+        category: "text_interference",
+        description: "素材自带文字与字幕重叠。",
+        suggestion: "换成无字母片并保持人物方向一致。",
+        targetNodeIds: ["visual-direction", "assets"] as Array<"visual-direction" | "assets">,
+      }],
+      previousScript: { scenes: [{ position: 3, narration: "旧旁白" }] },
+      previousDirectorPlan: { shots: [{ scenePosition: 3, visualIntent: "旧构图" }] },
+    };
+    render(<NewRunDialog
+      open
+      providers={providers}
+      initialValues={{
+        title: "被打回的视频",
+        angle: "保留主体，只修视觉问题",
+        audience: "短视频创作者",
+        nicheSlug: "rework-case",
+        durationSeconds: 24,
+        platform: "bilibili",
+        reviewMode: "manual",
+        template: { templateId: "knowledge-explainer", templateVersion: 3 },
+        providers: {
+          script: "python-template-v1",
+          director: "api-visual-director-v1",
+          assets: "ai-shot-router-v1",
+          voice: "macos-say-v1",
+          render: "python-ffmpeg-v1",
+          technicalReview: "python-technical-review-v1",
+        },
+        models: { "pexels-stock-v1": "search-v2" },
+        director: { profileId: "documentary-observer", assetProviderIds: ["pexels-stock-v1"] },
+        economics: { recipeId: "free-stock", allowMeteredProviders: false },
+        voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
+        rework,
+      }}
+      onClose={() => undefined}
+      onSubmit={onSubmit}
+    />);
+
+    expect(await screen.findByRole("heading", { name: "按审片意见重新制作" })).toBeInTheDocument();
+    expect(screen.getByText("素材自带文字与字幕重叠。")).toBeInTheDocument();
+    const assetInstruction = screen.getByRole("textbox", { name: "画面素材修改要求" });
+    expect(assetInstruction).toHaveValue(rework.nodeInstructions.assets);
+    await user.clear(assetInstruction);
+    await user.type(assetInstruction, "第三镜改用无字实拍母片，其他镜头不得变化。");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      template: expect.objectContaining({ templateId: "knowledge-explainer", templateVersion: 3 }),
+      providers: expect.objectContaining({
+        script: "python-template-v1",
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+        voice: "macos-say-v1",
+      }),
+      models: { "pexels-stock-v1": "search-v2" },
+      director: { profileId: "documentary-observer", assetProviderIds: ["pexels-stock-v1"] },
+      voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
+      rework: expect.objectContaining({
+        sourceRunId: "run-rejected-1",
+        previousScript: rework.previousScript,
+        previousDirectorPlan: rework.previousDirectorPlan,
+        nodeInstructions: expect.objectContaining({
+          script: rework.nodeInstructions.script,
+          visualDirection: rework.nodeInstructions.visualDirection,
+          assets: "第三镜改用无字实拍母片，其他镜头不得变化。",
+        }),
+      }),
+    }));
+  });
+
+  it("loads the rejected run draft from the run page and submits the real node-prefilled rework", async () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    const rejectedRun: StudioRunDetail = {
+      ...withoutIntervention,
+      status: "rejected",
+      decisions: [{
+        id: "decision-reject-1",
+        action: "reject",
+        actor: "owner",
+        note: "第三镜文字遮挡主体。",
+        createdAt: "2026-08-21T11:00:00.000Z",
+      }],
+    };
+    const rework = {
+      sourceRunId: rejectedRun.id,
+      sourceRunRevision: rejectedRun.revision,
+      rejectionReason: "第三镜文字遮挡主体。",
+      nodeInstructions: {
+        script: "缩短第三镜旁白。",
+        visualDirection: "第三镜保留字幕安全区。",
+        assets: "第三镜改用无字实拍画面，禁止说明卡。",
+      },
+      findings: [{
+        timecodeMs: 8_500,
+        scenePosition: 3,
+        category: "text_interference",
+        description: "素材文字与字幕重叠。",
+        suggestion: "换成无字画面。",
+        targetNodeIds: ["visual-direction", "assets"] as Array<"visual-direction" | "assets">,
+      }],
+      previousScript: { scenes: [{ position: 3, narration: "旧旁白" }] },
+      previousDirectorPlan: { shots: [{ scenePosition: 3, visualIntent: "旧构图" }] },
+    };
+    const input = {
+      protocolVersion: "video-factory/brief-v1" as const,
+      title: rejectedRun.title,
+      angle: rejectedRun.angle,
+      audience: rejectedRun.audience,
+      nicheSlug: rejectedRun.nicheSlug,
+      durationSeconds: rejectedRun.durationSeconds,
+      platform: rejectedRun.platform,
+      reviewMode: "manual" as const,
+      template: { templateId: "knowledge-explainer", templateVersion: 3 },
+      providers: {
+        script: "python-template-v1",
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+        voice: "macos-say-v1",
+        render: "python-ffmpeg-v1",
+        technicalReview: "python-technical-review-v1",
+      },
+      director: { profileId: "documentary-observer" as const, assetProviderIds: ["pexels-stock-v1"] },
+      economics: { recipeId: "free-stock" as const, allowMeteredProviders: false },
+      voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" as const },
+      rework,
+    };
+    vi.spyOn(studioApi, "run").mockResolvedValue(rejectedRun);
+    vi.spyOn(studioApi, "runCosts").mockResolvedValue({
+      runId: rejectedRun.id,
+      title: rejectedRun.title,
+      totals: { estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0 },
+      lines: [],
+    });
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: input.voiceDirection,
+      defaultRecipeId: "economy-daily",
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      topicStrategy: { customInstruction: "" },
+    });
+    const draft = vi.spyOn(studioApi, "reworkDraft").mockResolvedValue({ input, inheritedNodeIds: ["brief", "script", "visual-direction", "visual-review"] });
+    const start = vi.spyOn(studioApi, "start").mockResolvedValue({ runId: "run-rework-2", status: "running" });
+
+    render(<MemoryRouter initialEntries={["/projects/run-1"]}>
+      <Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes>
+    </MemoryRouter>);
+
+    await userEvent.click(await screen.findByRole("button", { name: "调整方案后重新制作" }));
+    expect(draft).toHaveBeenCalledWith("run-1");
+    expect(await screen.findByRole("heading", { name: "按审片意见重新制作" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "脚本修改要求" })).toHaveValue(rework.nodeInstructions.script);
+    expect(screen.getByRole("textbox", { name: "导演方案修改要求" })).toHaveValue(rework.nodeInstructions.visualDirection);
+    expect(screen.getByRole("textbox", { name: "画面素材修改要求" })).toHaveValue(rework.nodeInstructions.assets);
+
+    await userEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    await waitFor(() => expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      rework: expect.objectContaining({
+        sourceRunId: "run-1",
+        nodeInstructions: rework.nodeInstructions,
+        previousScript: rework.previousScript,
+        previousDirectorPlan: rework.previousDirectorPlan,
+      }),
+    })));
   });
 
   it("uses persisted creator defaults for recipe, voice, and asset provider", async () => {
@@ -1067,8 +1283,8 @@ describe("Studio client", () => {
     expect(screen.getByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
     expect(screen.getByRole("combobox", { name: "视频时长" })).toHaveValue("30");
     expect(screen.getByLabelText("终审模式")).toHaveTextContent("人工终审");
-    expect(await screen.findByRole("slider", { name: "语速" })).toHaveValue("205");
-    await user.click(screen.getByText("更多：素材来源与节点细节"));
+    expect(await screen.findByRole("button", { name: /高级微调/ })).toHaveTextContent("205 字/分");
+    await user.click(screen.getByText("更多：素材来源与制作细节"));
     expect(screen.getByRole("checkbox", { name: /Pexels 视频/ })).toBeChecked();
     await user.type(screen.getByLabelText("视频标题"), "默认值真实进入生产单");
     await user.type(screen.getByLabelText("内容角度"), "验证总配置不是展示页");
@@ -1115,7 +1331,7 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("button", { name: "开始制作" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      economics: expect.objectContaining({ allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 }),
+      economics: expect.objectContaining({ allowMeteredProviders: false }),
       director: expect.objectContaining({
         assetProviderIds: expect.not.arrayContaining(["seedance-video-v1"]),
       }),
@@ -1159,7 +1375,7 @@ describe("Studio client", () => {
     expect(screen.queryByRole("option", { name: "测试音轨" })).not.toBeInTheDocument();
     expect(screen.getByText(/缺少正式生产能力：配音/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
-    await userEvent.setup().click(screen.getByText("更多：素材来源与节点细节"));
+    await userEvent.setup().click(screen.getByText("更多：素材来源与制作细节"));
     expect(screen.getByRole("button", { name: /04配音声音导演未配置/ })).toBeInTheDocument();
   });
 
@@ -1234,7 +1450,7 @@ describe("Studio client", () => {
 
     render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
 
-    expect(screen.getByText("Agent 建议修改后再审")).toBeInTheDocument();
+    expect(screen.getByText("视觉审片建议修改后再审")).toBeInTheDocument();
     expect(screen.getByText("请完整观看成片，确认内容和节奏。")).toBeInTheDocument();
     expect(screen.getAllByText("画面语义与导演方案不一致，需要修改后再审。").length).toBeGreaterThan(0);
     expect(screen.getByText((_, element) => element?.textContent === "连续性 41")).toBeInTheDocument();
@@ -1315,9 +1531,9 @@ describe("Studio client", () => {
     Object.defineProperty(preview, "currentTime", { value: 0, writable: true });
     await user.click(screen.getByRole("button", { name: /镜头 2.*00:06/ }));
     expect(preview.currentTime).toBe(6);
-    await user.selectOptions(screen.getByLabelText("复用母片"), "1");
+    await user.selectOptions(screen.getByLabelText("用已有镜头替换"), "1");
     await user.type(screen.getByLabelText("修改说明"), "第二镜复用第一镜母片");
-    await user.click(screen.getByRole("button", { name: "提交局部返修" }));
+    await user.click(screen.getByRole("button", { name: "替换后重新审片" }));
 
     expect(onRequestSceneRevision).toHaveBeenCalledWith({
       expectedRunRevision: 7,
@@ -1412,7 +1628,7 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("heading", { name: "现在需要你：确认配音" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "检查并确认" })).toBeInTheDocument();
-    expect(screen.getByText(/声音导演完成后，系统会继续推进后续节点/)).toBeInTheDocument();
+    expect(screen.getByText(/声音导演完成后，系统会继续推进后续步骤/)).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "成片预览" })).not.toBeInTheDocument();
   });
 
@@ -1625,7 +1841,7 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("region", { name: "制作进度" })).toBeInTheDocument();
     expect(screen.getAllByText("策划定稿").length).toBeGreaterThan(0);
-    expect(screen.getByText("1 / 4 个节点完成")).toBeInTheDocument();
+    expect(screen.getByText("1 / 4 个步骤完成")).toBeInTheDocument();
     expect(screen.getByText("7 秒")).toBeInTheDocument();
     expect(screen.getByText("当前步骤")).toBeInTheDocument();
     expect(screen.getByText("正在统一叙事节奏、镜头语法与视觉规则")).toBeInTheDocument();
@@ -1692,7 +1908,7 @@ describe("Studio client", () => {
     expect(screen.getByText("MiniMax Speech 当前请求过多，配音没有生成完成")).toBeInTheDocument();
     expect(screen.getByText(/脚本与导演方案已保留/)).toBeInTheDocument();
     expect(screen.getByText("稍后重试配音")).toBeInTheDocument();
-    expect(screen.getByText("已保留 4 个前序节点")).toBeInTheDocument();
+    expect(screen.getByText("已保留前面 4 个步骤的结果")).toBeInTheDocument();
     expect(screen.getByText("HTTP 429 rate limit exceeded")).not.toBeVisible();
     expect(screen.getByText("技术诊断")).toBeInTheDocument();
   });
@@ -1731,7 +1947,7 @@ describe("Studio client", () => {
           summary: "MiniMax Speech 的账号、密钥或权限配置不可用",
           impact: "脚本与导演方案已保留；渲染尚未开始。",
           retryable: false,
-          recoveryActions: ["到总配置检查对应服务的密钥与权限"],
+          recoveryActions: ["到创作设置检查对应服务的密钥与权限"],
           savedNodeCount: 4,
           technicalDetail: "HTTP 401 unauthorized",
         },
@@ -1827,13 +2043,13 @@ describe("Studio client", () => {
       onReconcilePaidNode={reconcile}
     />);
 
-    expect(screen.getByText("需人工核销")).toBeInTheDocument();
-    expect(screen.getByText("尚无 Provider taskId")).toBeInTheDocument();
+    expect(screen.getByText("需要人工核对账单")).toBeInTheDocument();
+    expect(screen.getByText("尚无服务商任务编号")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "调整方案后重新制作" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "核对付费任务" })).not.toBeInTheDocument();
-    await userEvent.type(screen.getByLabelText("Provider taskId"), "provider-task-recovered");
-    await userEvent.click(screen.getByRole("button", { name: "录入 taskId 并核对原任务" }));
+    await userEvent.type(screen.getByLabelText("服务商任务编号"), "provider-task-recovered");
+    await userEvent.click(screen.getByRole("button", { name: "录入编号并核对原任务" }));
     expect(reconcile).toHaveBeenCalledWith("assets", {
       outcome: "resume_original",
       taskId: "provider-task-recovered",
@@ -1866,16 +2082,16 @@ describe("Studio client", () => {
 
     await userEvent.click(screen.getByRole("radio", { name: "已扣费" }));
     await userEvent.type(screen.getByLabelText("实际费用（可选）"), "2.40");
-    await userEvent.type(screen.getByLabelText("核销说明"), "已在 Provider 控制台核实账单。 ");
+    await userEvent.type(screen.getByLabelText("核对记录"), "已在服务商控制台核实账单。 ");
     const submit = screen.getByRole("button", { name: "确认已扣费并登记" });
     expect(submit).toBeDisabled();
-    await userEvent.click(screen.getByRole("checkbox", { name: /我确认已在 Provider 控制台核对/ }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /我确认已在服务商控制台核对/ }));
     await userEvent.click(submit);
 
     expect(reconcile).toHaveBeenCalledWith("assets", {
       outcome: "confirmed_charged",
       actualCostCny: 2.4,
-      note: "已在 Provider 控制台核实账单。",
+      note: "已在服务商控制台核实账单。",
     });
   });
 
@@ -2077,38 +2293,63 @@ describe("Studio client", () => {
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
     vi.spyOn(studioApi, "paidOperation").mockResolvedValue({
       nodeId: "voice",
+      failureKind: "unknown_outcome",
       requiresManualReconciliation: true,
       items: [],
     });
-    const reconcile = vi.spyOn(studioApi, "reconcilePaidOperation")
-      .mockResolvedValueOnce(voiceRun(4))
-      .mockResolvedValueOnce(voiceRun(5));
+    const reconcile = vi.spyOn(studioApi, "reconcilePaidOperation").mockResolvedValueOnce(voiceRun(4));
+    const retry = vi.spyOn(studioApi, "retryFailedNode").mockResolvedValueOnce({
+      ...voiceRun(5),
+      nodes: voiceRun(5).nodes.map((node) => node.id === "voice" ? { ...node, outcomeUncertain: false } : node),
+    });
     reconcile.mockClear();
+    retry.mockClear();
 
     render(<MemoryRouter initialEntries={["/projects/run-1"]}>
       <Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes>
     </MemoryRouter>);
 
-    expect(await screen.findByText("一次配音调用")).toBeInTheDocument();
-    expect(screen.getByText(/按本次调用记录与账单核对/)).toBeInTheDocument();
+    expect(await screen.findByText("配音连接中断")).toBeInTheDocument();
+    expect(screen.getByText(/按原预估费用保守记账/)).toBeInTheDocument();
     expect(screen.queryByText("0 个镜头")).not.toBeInTheDocument();
     expect(screen.queryByText(/按 taskId 核对/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "未扣费" })).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("radio", { name: "未扣费" }));
-    await userEvent.type(screen.getByLabelText("核销说明"), "账单中没有这次调用。");
-    await userEvent.click(screen.getByRole("checkbox", { name: /我确认已在 Provider 控制台核对/ }));
-    await userEvent.click(screen.getByRole("button", { name: "确认未扣费并解除锁定" }));
+    await userEvent.click(screen.getByRole("button", { name: "重新配音" }));
     await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(retry).toHaveBeenCalledWith("run-1", "voice"));
+    expect(reconcile.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+      expectedRunRevision: 3,
+      outcome: "confirmed_charged",
+    }));
+  });
 
-    const secondSubmit = await screen.findByRole("button", { name: "确认未扣费并解除锁定" });
-    await waitFor(() => expect(secondSubmit).not.toBeDisabled());
-    await userEvent.click(secondSubmit);
-    await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2));
+  it("does not record a charge when the voice provider explicitly rejects the request", async () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    const reconcile = vi.fn().mockResolvedValue(undefined);
+    render(<RunWorkbench
+      run={{
+        ...withoutIntervention,
+        status: "failed",
+        nodes: withoutIntervention.nodes.map((node, index) => index === 0
+          ? { ...node, id: "voice", label: "配音", status: "failed", outcomeUncertain: true }
+          : node),
+      }}
+      paidNodeSummary={{
+        nodeId: "voice",
+        failureKind: "terminal_failure",
+        requiresManualReconciliation: true,
+        items: [],
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onReconcilePaidNode={reconcile}
+    />);
 
-    const firstInput = reconcile.mock.calls[0]?.[2];
-    const secondInput = reconcile.mock.calls[1]?.[2];
-    expect(firstInput?.expectedRunRevision).toBe(3);
-    expect(secondInput?.expectedRunRevision).toBe(4);
-    expect(secondInput?.reconciliationId).not.toBe(firstInput?.reconciliationId);
+    expect(screen.getByText("配音请求被明确拒绝")).toBeInTheDocument();
+    expect(screen.getByText("本次不记账")).toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "已扣费" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "不记账并重新配音" }));
+    expect(reconcile).toHaveBeenCalledWith("voice", expect.objectContaining({ outcome: "confirmed_not_charged" }));
   });
 });

@@ -116,7 +116,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
             })),
           },
           currentRoleContract: { evidenceType: "sampled_keyframes", continuousMotionAndAudioAreNotProven: true },
-          downstreamBoundary: "只提炼抽象制作语法，不得复刻人物、对白、品牌、独特情节或要求后续画面已经生成。",
+          downstreamBoundary: "只提炼可复用的抽象风格规则，不得复刻人物、对白、品牌、独特情节或要求后续画面已经生成。",
         },
         candidate,
         ...(previousAudit ? { previousAudit } : {}),

@@ -1,152 +1,230 @@
 import { parseProductionTemplate, type ProductionTemplate, type ProductionTemplateInput } from "@video-factory/template-core";
 
 const CREATED_AT = "2026-08-27T00:00:00.000Z";
+const PLATFORMS = ["douyin", "xiaohongshu", "shipinhao", "bilibili"];
+const CAPABILITY_REQUIREMENTS = [
+  { capability: "script.draft", required: true },
+  { capability: "storyboard.plan", required: true },
+  { capability: "asset.prepare", required: true },
+  { capability: "voice.synthesize", required: true },
+  { capability: "video.render", required: true },
+  { capability: "quality.review", required: true },
+];
 
-interface TemplateSeed {
-  id: string;
-  name: string;
-  description: string;
-  category: string;
-  durationSeconds: number;
-  automationLevel: ProductionTemplateInput["automationLevel"];
-  beats: Array<[id: string, label: string, purpose: string]>;
-  visual: [composition: string, colorIntent: string, pacing: ProductionTemplateInput["visualSystem"]["pacing"]];
-  sound: [voiceIntent: string, pace: ProductionTemplateInput["soundSystem"]["pace"], musicIntent: string];
-  qualityDimension: ProductionTemplateInput["qualityRules"][number]["dimension"];
+function visualCapabilities(): string[] {
+  return ["asset.search", "asset.generate.image", "asset.generate.video"];
 }
 
-const SEEDS: TemplateSeed[] = [
-  {
+function publishedTemplate(input: Omit<ProductionTemplateInput, "version" | "status" | "platforms" | "capabilityRequirements" | "createdAt" | "updatedAt">): ProductionTemplate {
+  return parseProductionTemplate({
+    ...input,
+    version: 2,
+    status: "published",
+    platforms: PLATFORMS,
+    capabilityRequirements: CAPABILITY_REQUIREMENTS,
+    createdAt: CREATED_AT,
+    updatedAt: CREATED_AT,
+  });
+}
+
+export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = [
+  publishedTemplate({
     id: "trend-fact-brief",
     name: "热点事实解读",
-    description: "先核事实，再用一个清晰角度解释事件为什么值得关注。",
+    description: "用可核验事实打开冲突，以时间线和现场证据澄清边界，最后只给观众真正需要的影响判断。",
     category: "trend",
     durationSeconds: 36,
     automationLevel: "assisted",
-    beats: [["hook", "事实钩子", "给出已核验且有张力的事实"], ["context", "补足语境", "说明来龙去脉和信息边界"], ["meaning", "解释影响", "回答这件事与观众有什么关系"], ["close", "克制收束", "留下可验证的结论而非煽动"]],
-    visual: ["新闻证据优先，人物和地点保持可识别", "中性色为主，警示信息用红色点缀", "dynamic"],
-    sound: ["冷静、可信、不过度表演", "medium", "低存在感新闻节奏"],
-    qualityDimension: "factual",
-  },
-  {
+    storyStructure: [
+      { id: "verified-hook", label: "已证实的反差", purpose: "首句只说已经核验且足以改变理解的事实", required: true },
+      { id: "evidence-line", label: "证据链", purpose: "用来源、时间和关键画面重建事实顺序", required: true },
+      { id: "viewer-impact", label: "与你何干", purpose: "把事件影响翻译成观众能判断的具体变化", required: true },
+      { id: "known-unknown", label: "边界收束", purpose: "明确已知、未知和下一步观察点", required: true },
+    ],
+    shotSlots: [
+      { id: "fact-cold-open", beatId: "verified-hook", purpose: "用来源明确的关键瞬间或原始文件局部冷开场", durationSeconds: 3, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "fact-source", beatId: "verified-hook", purpose: "拉出发布主体、日期与原始标题，建立证据归属", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "fact-timeline-a", beatId: "evidence-line", purpose: "呈现时间线第一节点及对应现场或公开材料", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "fact-timeline-b", beatId: "evidence-line", purpose: "呈现改变判断的第二节点，不重复上一画面", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "fact-boundary", beatId: "evidence-line", purpose: "用画面区分官方已确认内容与仍待核验说法", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "fact-impact-person", beatId: "viewer-impact", purpose: "落到一个具体使用场景、成本或选择变化", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "fact-impact-proof", beatId: "viewer-impact", purpose: "用可复查页面、数据或前后状态支撑影响判断", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "fact-close", beatId: "known-unknown", purpose: "回到真实人物或现场，以待观察问题克制结束", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+    ],
+    visualSystem: { composition: "原始来源占据视觉主体；时间、主体和证据边界保持可扫描，禁止用无关灾难空镜制造情绪", colorIntent: "中性纸面与真实现场色为主；红色只标记风险或矛盾，不承担装饰", subtitleDensity: "medium", pacing: "dynamic" },
+    soundSystem: { voiceIntent: "冷静、明确、有判断但不抢跑事实", pace: "medium", musicIntent: "低存在感脉冲，只帮助时间线推进，不渲染灾难与冲突" },
+    qualityRules: [
+      { id: "trend-source-visible", label: "每个事实判断可追溯到画面中的来源", dimension: "factual", required: true, threshold: 95 },
+      { id: "trend-no-fake-scene", label: "不得把生成或无关画面包装成事件现场", dimension: "copyright", required: true, threshold: 100 },
+      { id: "trend-viewer-payoff", label: "收束必须给出具体影响而非复述热搜", dimension: "artistic", required: true, threshold: 88 },
+      { id: "trend-platform-safety", label: "标题与画面不消费伤亡、不制造未证实恐慌", dimension: "platform", required: true, threshold: 95 },
+    ],
+  }),
+  publishedTemplate({
     id: "knowledge-explainer",
     name: "知识解释",
-    description: "把一个复杂问题拆成观众能理解和复述的因果链。",
+    description: "从一个反直觉问题出发，用最小因果模型和真实例子让观众在结尾能自己复述并应用。",
     category: "knowledge",
     durationSeconds: 42,
     automationLevel: "assisted",
-    beats: [["question", "提出问题", "从日常误解切入"], ["model", "建立模型", "给出最少但足够的核心概念"], ["example", "具体例子", "用生活场景验证解释"], ["takeaway", "一句带走", "形成可复述结论"]],
-    visual: ["一个镜头只承载一个概念，图形与实拍交替", "自然底色配高对比知识标记", "measured"],
-    sound: ["聪明但不居高临下", "medium", "简洁轻盈的节拍"],
-    qualityDimension: "factual",
-  },
-  {
+    storyStructure: [
+      { id: "misconception", label: "打破误解", purpose: "用日常判断失灵的瞬间建立认知缺口", required: true },
+      { id: "mechanism", label: "最小模型", purpose: "只解释理解问题必需的因果关系", required: true },
+      { id: "worked-example", label: "带入例子", purpose: "在具体场景中逐步验证模型", required: true },
+      { id: "transfer", label: "迁移判断", purpose: "给出观众可马上使用的判断方法", required: true },
+    ],
+    shotSlots: [
+      { id: "knowledge-failed-intuition", beatId: "misconception", purpose: "先演示一个符合直觉却得到错误结果的生活瞬间", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-question", beatId: "misconception", purpose: "冻结关键动作并提出唯一核心问题", durationSeconds: 3, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-cause", beatId: "mechanism", purpose: "用一个对象或关系图显露真正起作用的变量", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-chain", beatId: "mechanism", purpose: "连续展示原因如何推动结果，禁止堆术语", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-example-setup", beatId: "worked-example", purpose: "换到真实案例并标出输入条件", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-example-change", beatId: "worked-example", purpose: "只改变一个变量，展示结果随之变化", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-rule", beatId: "transfer", purpose: "把因果链压缩成一句可复述判断规则", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-use", beatId: "transfer", purpose: "回到开场场景，用新规则做出更好的选择", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+    ],
+    visualSystem: { composition: "实拍问题与简洁机制图交替；一个画面只承担一个因果步骤，主体关系始终可追踪", colorIntent: "自然底色配单一高对比标记色，同一变量始终使用同一颜色", subtitleDensity: "medium", pacing: "measured" },
+    soundSystem: { voiceIntent: "聪明、清楚、像和观众共同推理，不使用居高临下的课堂腔", pace: "medium", musicIntent: "轻量节拍在模型建立后进入，例证处让位于动作与界面声" },
+    qualityRules: [
+      { id: "knowledge-one-model", label: "全片只围绕一个可验证的核心因果模型", dimension: "factual", required: true, threshold: 92 },
+      { id: "knowledge-example-proves", label: "例子必须真正验证模型而非仅作装饰", dimension: "artistic", required: true, threshold: 88 },
+      { id: "knowledge-legible", label: "术语、标记和关键操作在手机画幅清晰可读", dimension: "technical", required: true, threshold: 90 },
+      { id: "knowledge-transfer", label: "结尾必须给出可迁移的判断而非口号", dimension: "platform", required: true, threshold: 86 },
+    ],
+  }),
+  publishedTemplate({
     id: "photo-story",
-    name: "照片故事",
-    description: "围绕有限照片建立时间、人物和情绪变化。",
-    category: "photo",
-    durationSeconds: 30,
+    name: "证据图解",
+    description: "当连续现场不可得或不应生成时，以来源画面、文件、数据和少量获授权实景建立可信叙事。",
+    category: "evidence-story",
+    durationSeconds: 32,
     automationLevel: "assisted",
-    beats: [["arrival", "第一眼", "用最有信息量的照片建立场景"], ["detail", "细节推进", "从局部发现关系或变化"], ["turn", "情绪转折", "让前后照片形成意义差"], ["memory", "余韵", "用一句旁白把记忆留住"]],
-    visual: ["尊重照片原始比例，用运动和留白制造呼吸", "从照片取色，避免滤镜覆盖真实质感", "calm"],
-    sound: ["亲近、像在讲一段真实记忆", "slow", "稀疏环境声和轻音乐"],
-    qualityDimension: "copyright",
-  },
-  {
+    storyStructure: [
+      { id: "claim", label: "核心判断", purpose: "先给出需要被证据支持的唯一判断", required: true },
+      { id: "source-sequence", label: "来源序列", purpose: "按时间或因果顺序呈现原始材料", required: true },
+      { id: "reading", label: "证据解读", purpose: "指出材料中真正改变理解的细节", required: true },
+      { id: "limit", label: "证据边界", purpose: "说明材料能证明什么、不能证明什么", required: true },
+    ],
+    shotSlots: [
+      { id: "evidence-claim-image", beatId: "claim", purpose: "用最有信息量的来源画面建立问题，不使用标题卡代替素材", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "evidence-source-origin", beatId: "source-sequence", purpose: "完整展示来源主体、日期和材料类型", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "evidence-source-detail-a", beatId: "source-sequence", purpose: "在第一份材料中放大与判断直接相关的细节", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "evidence-source-detail-b", beatId: "source-sequence", purpose: "切换到独立材料交叉印证或暴露差异", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "evidence-data-shape", beatId: "reading", purpose: "把关键数字转换为比例、时间或空间关系", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "evidence-real-context", beatId: "reading", purpose: "用获授权实景说明证据落到真实生活的含义", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "evidence-contrast", beatId: "reading", purpose: "并置两份材料，明确相同点与冲突点", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "evidence-limit-close", beatId: "limit", purpose: "停在仍未知的具体问题或下一项可验证信号", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+    ],
+    visualSystem: { composition: "来源画面是主体，裁切必须保留上下文；数据图只解释关系，禁止整页文字卡和伪现场插画", colorIntent: "从原始材料取色，注释统一使用一种强调色，证据与解释保持视觉层级", subtitleDensity: "low", pacing: "measured" },
+    soundSystem: { voiceIntent: "克制、逐证据推进，清楚区分事实、解释和未知", pace: "medium", musicIntent: "稀疏底噪或极轻音乐，材料切换由声音标点而非夸张转场承担" },
+    qualityRules: [
+      { id: "evidence-provenance", label: "每份关键材料保留可识别的来源与时间", dimension: "factual", required: true, threshold: 98 },
+      { id: "evidence-rights", label: "来源画面具有授权、合理使用依据或待审标记", dimension: "copyright", required: true, threshold: 95 },
+      { id: "evidence-no-card-fallback", label: "不得用说明卡代替缺失素材或调用失败", dimension: "technical", required: true, threshold: 100 },
+      { id: "evidence-claim-boundary", label: "旁白不得超出材料能够支持的结论", dimension: "platform", required: true, threshold: 96 },
+    ],
+  }),
+  publishedTemplate({
     id: "product-demo",
-    name: "产品教程",
-    description: "以真实操作和前后结果证明工具或产品解决了什么。",
-    category: "tutorial",
+    name: "实证演示",
+    description: "用未经剪辑掩盖的关键操作、前后对照与失败边界证明一个产品或方法是否真的有用。",
+    category: "demonstration",
     durationSeconds: 45,
     automationLevel: "assisted",
-    beats: [["pain", "真实问题", "展示使用前的具体阻碍"], ["steps", "关键步骤", "只保留完成任务必须的操作"], ["proof", "结果证明", "展示可核对的前后差异"], ["limit", "边界说明", "说明适用条件和限制"]],
-    visual: ["界面和产品细节必须可辨识，指示动作精确", "产品本色配功能强调色", "dynamic"],
-    sound: ["清楚、直接、行动导向", "fast", "节奏明确但不盖过讲解"],
-    qualityDimension: "technical",
-  },
-  {
+    storyStructure: [
+      { id: "pain-proof", label: "问题复现", purpose: "先让观众看见具体阻碍与失败结果", required: true },
+      { id: "critical-actions", label: "关键动作", purpose: "只保留决定成败的操作步骤", required: true },
+      { id: "result-proof", label: "结果验收", purpose: "用相同条件验证前后差异", required: true },
+      { id: "fit-limit", label: "适用边界", purpose: "说清适合谁、何时不值得用", required: true },
+    ],
+    shotSlots: [
+      { id: "demo-bad-result", beatId: "pain-proof", purpose: "以未解决问题的真实结果开场，保留可辨识条件", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "demo-friction-detail", beatId: "pain-proof", purpose: "近景呈现最耗时、易错或令人放弃的具体环节", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "demo-input", beatId: "critical-actions", purpose: "展示操作前输入、设置与基准状态", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "demo-action-one", beatId: "critical-actions", purpose: "连续记录第一个决定性操作及即时反馈", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "demo-action-two", beatId: "critical-actions", purpose: "记录第二个决定性操作，光标或手部不能遮挡结果", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "demo-output", beatId: "result-proof", purpose: "完整展示输出形成过程，禁止只剪最终截图", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "demo-side-by-side", beatId: "result-proof", purpose: "用同机位或同数据口径对照使用前后", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "demo-stress", beatId: "result-proof", purpose: "加入一个更难输入或反例验证稳定性", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "demo-limit", beatId: "fit-limit", purpose: "用真实失败或限制条件说明不适用场景", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+    ],
+    visualSystem: { composition: "操作对象占主画面，手势、光标、输入与结果保持同一空间关系；卖点文字不能遮挡证据", colorIntent: "保留产品真实界面和材质，只用单一强调色标记当前动作", subtitleDensity: "medium", pacing: "dynamic" },
+    soundSystem: { voiceIntent: "直接、准确、以验收标准而非形容词建立说服力", pace: "fast", musicIntent: "动作段落使用明确节拍，结果验证时降低音乐以保留反馈声" },
+    qualityRules: [
+      { id: "demo-continuity", label: "关键操作保持连续，不用跳剪隐藏等待或失败", dimension: "factual", required: true, threshold: 94 },
+      { id: "demo-readable", label: "输入、控件和结果在手机画幅可辨识", dimension: "technical", required: true, threshold: 95 },
+      { id: "demo-comparable", label: "前后对照使用同一条件和评价口径", dimension: "artistic", required: true, threshold: 92 },
+      { id: "demo-limit-honest", label: "至少呈现一个真实限制或不适用条件", dimension: "platform", required: true, threshold: 90 },
+    ],
+  }),
+  publishedTemplate({
     id: "human-mini-doc",
     name: "人物微纪录",
-    description: "用行动、环境和一句关键表达建立真实人物弧光。",
+    description: "通过人物在真实环境中的目标、阻力和一个不可替代的动作，让观众自己感受变化而非听标签。",
     category: "documentary",
     durationSeconds: 60,
     automationLevel: "manual",
-    beats: [["world", "人物所在", "先看环境和日常行动"], ["desire", "正在追求", "让目标从行动而非标签中出现"], ["friction", "真实阻力", "保留矛盾和不完美"], ["gesture", "一个动作", "用具体动作完成情绪收束"]],
-    visual: ["观察式镜头，优先自然光和真实空间关系", "肤色准确，保留环境本来的颜色", "calm"],
-    sound: ["尊重人物语气，少用全知旁白", "slow", "环境声优先，音乐延后进入"],
-    qualityDimension: "artistic",
-  },
-  {
+    storyStructure: [
+      { id: "world", label: "进入生活", purpose: "先观察人物每天真实面对的空间和动作", required: true },
+      { id: "desire", label: "目标浮现", purpose: "从选择与行动中让人物目标自然出现", required: true },
+      { id: "friction", label: "阻力发生", purpose: "保留困难、犹豫和不完美反应", required: true },
+      { id: "gesture", label: "动作收束", purpose: "用一个具体动作承载变化和余韵", required: true },
+    ],
+    shotSlots: [
+      { id: "doc-space-wide", beatId: "world", purpose: "静观环境全景，让人物以真实比例进入自己的空间", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "doc-routine-hands", beatId: "world", purpose: "记录双手完成熟悉劳动的连续细节", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "doc-face-listening", beatId: "world", purpose: "停留在人物倾听或思考而非说话的面部反应", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "doc-choice", beatId: "desire", purpose: "跟随人物做出与目标相关的一次真实选择", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "doc-object", beatId: "desire", purpose: "用一个被长期使用的物件显露人物投入与时间", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "doc-obstacle-wide", beatId: "friction", purpose: "在不中断行动的中景里让阻力自然发生", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "doc-imperfect-reaction", beatId: "friction", purpose: "保留人物面对失败时未经表演的停顿或修正", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "doc-retry", beatId: "friction", purpose: "观察人物重新开始，避免旁白替代过程", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "doc-defining-gesture", beatId: "gesture", purpose: "让一个完成、交付或告别动作兑现人物变化", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "doc-empty-space", beatId: "gesture", purpose: "人物离开后在环境中多停留一拍，保留余韵", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "doc-final-look", beatId: "gesture", purpose: "以人物重新看向目标或日常的真实状态结束", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "doc-room-tone", beatId: "gesture", purpose: "使用同期环境的末镜承接声音，不添加总结卡", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+    ],
+    visualSystem: { composition: "观察式中景与动作细节交替，尊重真实空间方向；不要求人物为镜头重复情绪", colorIntent: "肤色准确并保留场所原色，避免统一滤镜抹平人物生活质感", subtitleDensity: "low", pacing: "calm" },
+    soundSystem: { voiceIntent: "人物原声优先；旁白只补不可见背景，不替人物解释感受", pace: "slow", musicIntent: "前半段只保留同期声，音乐最早在阻力显现后进入并在结尾退出" },
+    qualityRules: [
+      { id: "doc-action-reveals", label: "人物特质必须由动作和选择显露，不能只靠标签旁白", dimension: "artistic", required: true, threshold: 94 },
+      { id: "doc-consent", label: "人物形象、地点与原声具有明确授权", dimension: "copyright", required: true, threshold: 100 },
+      { id: "doc-room-tone", label: "关键场景保留连续同期声和空间方向", dimension: "technical", required: true, threshold: 88 },
+      { id: "doc-no-manipulation", label: "剪辑不虚构因果、不诱导人物重复情绪", dimension: "factual", required: true, threshold: 96 },
+    ],
+  }),
+  publishedTemplate({
     id: "ranked-comparison",
-    name: "榜单对比",
-    description: "用一致标准比较多个选项，避免只给结论不给依据。",
+    name: "条件式对比",
+    description: "先公开比较标准，再用一致测试条件逐项对照，最终按不同人群给出条件结论而非万能冠军。",
     category: "comparison",
     durationSeconds: 40,
     automationLevel: "automatic",
-    beats: [["criteria", "先讲标准", "告诉观众按什么比较"], ["contrast", "快速对照", "保持每项证据结构一致"], ["winner", "条件结论", "给出不同需求下的选择"], ["caveat", "重要例外", "说明榜单不适用的情况"]],
-    visual: ["统一机位和信息框架，差异项使用可扫描标记", "多色分类但保持背景克制", "dynamic"],
-    sound: ["利落、公平、有判断", "fast", "轻量计分节奏"],
-    qualityDimension: "platform",
-  },
-];
-
-export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = SEEDS.map((seed) => parseProductionTemplate(toTemplate(seed)));
-
-function toTemplate(seed: TemplateSeed): ProductionTemplateInput {
-  const storyStructure = seed.beats.map(([id, label, purpose]) => ({ id, label, purpose, required: true }));
-  const shotSlots = createShotSlots(seed);
-  return {
-    id: seed.id,
-    version: 1,
-    status: "published",
-    name: seed.name,
-    description: seed.description,
-    category: seed.category,
-    platforms: ["douyin", "xiaohongshu", "shipinhao", "bilibili"],
-    durationSeconds: seed.durationSeconds,
-    automationLevel: seed.automationLevel,
-    storyStructure,
-    shotSlots,
-    visualSystem: {
-      composition: seed.visual[0],
-      colorIntent: seed.visual[1],
-      subtitleDensity: seed.id === "photo-story" || seed.id === "human-mini-doc" ? "low" : "medium",
-      pacing: seed.visual[2],
-    },
-    soundSystem: { voiceIntent: seed.sound[0], pace: seed.sound[1], musicIntent: seed.sound[2] },
+    storyStructure: [
+      { id: "stakes", label: "选择代价", purpose: "说明选错会损失什么，建立比较必要性", required: true },
+      { id: "criteria", label: "统一标准", purpose: "提前公开少而关键的比较维度", required: true },
+      { id: "head-to-head", label: "同场验证", purpose: "在相同条件下呈现差异和证据", required: true },
+      { id: "conditional-pick", label: "条件结论", purpose: "针对不同需求给出选择与例外", required: true },
+    ],
+    shotSlots: [
+      { id: "compare-cost-of-wrong", beatId: "stakes", purpose: "用真实使用失败或额外成本展示选错代价", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "compare-contenders", beatId: "stakes", purpose: "同机位并列展示全部选项及版本信息", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "compare-criteria", beatId: "criteria", purpose: "在开测前一次性公布三项以内评价标准", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "compare-test-one", beatId: "head-to-head", purpose: "在相同输入与时长下完成第一项测试", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "compare-test-two", beatId: "head-to-head", purpose: "保持相同机位完成第二项测试并显露差异", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "compare-proof-detail", beatId: "head-to-head", purpose: "放大最影响选择的结果细节或测量数据", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "compare-edge-case", beatId: "head-to-head", purpose: "用边界场景揭示领先选项的代价", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "compare-persona-a", beatId: "conditional-pick", purpose: "为第一类明确需求匹配选项并回放对应证据", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "compare-persona-b", beatId: "conditional-pick", purpose: "为另一类需求给出不同选择，避免总冠军叙事", durationSeconds: 3, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "compare-caveat", beatId: "conditional-pick", purpose: "以测试未覆盖的条件结束，明确结论有效范围", durationSeconds: 3, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+    ],
+    visualSystem: { composition: "选项使用固定位置、尺度和信息框架；差异由证据画面显露，不用装饰性分数替代测试", colorIntent: "每个选项保持一种稳定识别色，胜负状态只在对应标准内出现", subtitleDensity: "medium", pacing: "dynamic" },
+    soundSystem: { voiceIntent: "利落、公平、敢下条件式判断，先说标准再说结论", pace: "fast", musicIntent: "统一节拍保持各项测试时长可感知，结论处降低音乐突出限制条件" },
     qualityRules: [
-      { id: "content-safety", label: "内容与平台安全", dimension: "platform", required: true, threshold: 90 },
-      { id: `primary-${seed.qualityDimension}`, label: "模板核心质量", dimension: seed.qualityDimension, required: true, threshold: 80 },
+      { id: "compare-same-conditions", label: "所有选项使用相同输入、版本和测试条件", dimension: "factual", required: true, threshold: 98 },
+      { id: "compare-criteria-before", label: "评价标准必须在展示结果前公开", dimension: "artistic", required: true, threshold: 92 },
+      { id: "compare-visible-proof", label: "每个结论都有同屏结果或可复查数据支撑", dimension: "technical", required: true, threshold: 94 },
+      { id: "compare-no-absolute-winner", label: "不得把条件结论包装成对所有人适用的冠军", dimension: "platform", required: true, threshold: 92 },
     ],
-    capabilityRequirements: [
-      { capability: "script.draft", required: true },
-      { capability: "storyboard.plan", required: true },
-      { capability: "asset.prepare", required: true },
-      { capability: "voice.synthesize", required: true },
-      { capability: "video.render", required: true },
-      { capability: "quality.review", required: true },
-    ],
-    createdAt: CREATED_AT,
-    updatedAt: CREATED_AT,
-  };
-}
-
-function createShotSlots(seed: TemplateSeed): ProductionTemplateInput["shotSlots"] {
-  const slotCount = Math.max(6, Math.min(14, Math.round(seed.durationSeconds / 4)));
-  const beatOccurrences = new Map<string, number>();
-  const purposes = ["建立具体画面", "展示动作或变化", "补充关键细节", "用结果或反应兑现"];
-  return Array.from({ length: slotCount }, (_, index) => {
-    const beatIndex = Math.min(seed.beats.length - 1, Math.floor(index * seed.beats.length / slotCount));
-    const [beatId, label] = seed.beats[beatIndex]!;
-    const occurrence = (beatOccurrences.get(beatId) ?? 0) + 1;
-    beatOccurrences.set(beatId, occurrence);
-    return {
-      id: `shot-${beatId}-${occurrence}`,
-      beatId,
-      purpose: `${label} · ${purposes[index % purposes.length]}`,
-      durationSeconds: Math.max(2, Math.round(seed.durationSeconds / slotCount)),
-      allowedCapabilities: ["asset.search", "asset.generate.image", "asset.generate.video"],
-      manualReplacement: true,
-    };
-  });
-}
+  }),
+];

@@ -16,8 +16,10 @@ export type ProductionRecipeId = "economy-daily" | "free-stock" | "keyshot-ai" |
 export interface ProductionEconomics {
   recipeId: ProductionRecipeId;
   allowMeteredProviders: boolean;
-  maxPaidShots: number;
-  maxCostCny: number;
+  /** @deprecated 历史 brief 兼容字段；逐笔报价与人工授权已取代全片限额。 */
+  maxPaidShots?: number;
+  /** @deprecated 历史 brief 兼容字段；逐笔报价与人工授权已取代全片限额。 */
+  maxCostCny?: number;
 }
 
 export type ProductionSpendFeedbackReason = "too_expensive" | "provider_mix" | "plan_not_approved" | "other";
@@ -63,6 +65,29 @@ export interface ProductionEditorialDirection {
   verdict: "produce_video" | "produce_image_story";
   reasons: string[];
   guardrails: string[];
+}
+
+export interface ProductionReworkFinding {
+  timecodeMs: number;
+  scenePosition?: number;
+  category: string;
+  description: string;
+  suggestion: string;
+  targetNodeIds: Array<"script" | "visual-direction" | "assets">;
+}
+
+export interface ProductionReworkContext {
+  sourceRunId: string;
+  sourceRunRevision: number;
+  rejectionReason?: string;
+  nodeInstructions: {
+    script: string;
+    visualDirection: string;
+    assets: string;
+  };
+  findings: ProductionReworkFinding[];
+  previousScript?: Record<string, unknown>;
+  previousDirectorPlan?: Record<string, unknown>;
 }
 
 export interface ProductionWorkflowFeatures {
@@ -168,6 +193,7 @@ export interface ProductionBrief {
     origin: "trend" | "series" | "manual";
     opportunityId: string;
   };
+  rework?: ProductionReworkContext;
 }
 
 export function parseBrief(value: unknown): ProductionBrief {
@@ -192,6 +218,7 @@ export function parseBrief(value: unknown): ProductionBrief {
   const editorial = parseEditorialDirection(value.editorial);
   const seriesContext = parseProductionSeriesContext(value.seriesContext);
   const creationContext = parseCreationContext(value.creationContext);
+  const rework = parseReworkContext(value.rework);
   const templateSnapshot = value.templateSnapshot === undefined
     ? undefined
     : parseProductionTemplateSnapshot(value.templateSnapshot);
@@ -249,7 +276,74 @@ export function parseBrief(value: unknown): ProductionBrief {
     ...(editorial ? { editorial } : {}),
     ...(seriesContext ? { seriesContext } : {}),
     ...(creationContext ? { creationContext } : {}),
+    ...(rework ? { rework } : {}),
   };
+}
+
+function parseReworkContext(value: unknown): ProductionReworkContext | undefined {
+  if (value === undefined) return undefined;
+  const input = requireRecord(value, "rework");
+  const sourceRunId = requireString(input.sourceRunId, "rework.sourceRunId");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sourceRunId)) throw new Error("rework.sourceRunId is invalid.");
+  const sourceRunRevision = boundedNumber(input.sourceRunRevision, "rework.sourceRunRevision", 0, 1_000_000, true);
+  const instructions = requireRecord(input.nodeInstructions, "rework.nodeInstructions");
+  const nodeInstructions = {
+    script: boundedReworkText(instructions.script, "rework.nodeInstructions.script"),
+    visualDirection: boundedReworkText(instructions.visualDirection, "rework.nodeInstructions.visualDirection"),
+    assets: boundedReworkText(instructions.assets, "rework.nodeInstructions.assets"),
+  };
+  if (!Array.isArray(input.findings) || input.findings.length > 50) {
+    throw new Error("rework.findings must contain at most 50 entries.");
+  }
+  const allowedTargets = new Set(["script", "visual-direction", "assets"]);
+  const findings = input.findings.map((entry, index): ProductionReworkFinding => {
+    const finding = requireRecord(entry, `rework.findings[${index}]`);
+    const timecodeMs = boundedNumber(finding.timecodeMs, `rework.findings[${index}].timecodeMs`, 0, 10_800_000, true);
+    const scenePosition = finding.scenePosition === undefined
+      ? undefined
+      : boundedNumber(finding.scenePosition, `rework.findings[${index}].scenePosition`, 1, 10_000, true);
+    if (!Array.isArray(finding.targetNodeIds) || finding.targetNodeIds.length === 0 || finding.targetNodeIds.length > 3) {
+      throw new Error(`rework.findings[${index}].targetNodeIds is invalid.`);
+    }
+    const targetNodeIds = [...new Set(finding.targetNodeIds.map((target, targetIndex) => {
+      if (typeof target !== "string" || !allowedTargets.has(target)) {
+        throw new Error(`rework.findings[${index}].targetNodeIds[${targetIndex}] is invalid.`);
+      }
+      return target as ProductionReworkFinding["targetNodeIds"][number];
+    }))];
+    return {
+      timecodeMs,
+      ...(scenePosition === undefined ? {} : { scenePosition }),
+      category: boundedReworkText(finding.category, `rework.findings[${index}].category`, 120),
+      description: boundedReworkText(finding.description, `rework.findings[${index}].description`),
+      suggestion: boundedReworkText(finding.suggestion, `rework.findings[${index}].suggestion`),
+      targetNodeIds,
+    };
+  });
+  const rejectionReason = input.rejectionReason === undefined
+    ? undefined
+    : boundedReworkText(input.rejectionReason, "rework.rejectionReason");
+  return {
+    sourceRunId,
+    sourceRunRevision,
+    ...(rejectionReason ? { rejectionReason } : {}),
+    nodeInstructions,
+    findings,
+    ...(input.previousScript === undefined ? {} : { previousScript: boundedReworkDocument(input.previousScript, "rework.previousScript") }),
+    ...(input.previousDirectorPlan === undefined ? {} : { previousDirectorPlan: boundedReworkDocument(input.previousDirectorPlan, "rework.previousDirectorPlan") }),
+  };
+}
+
+function boundedReworkText(value: unknown, field: string, maxLength = 6_000): string {
+  const text = requireString(value, field);
+  if (text.length > maxLength) throw new Error(`${field} must not exceed ${maxLength} characters.`);
+  return text;
+}
+
+function boundedReworkDocument(value: unknown, field: string): Record<string, unknown> {
+  const document = requireRecord(value, field);
+  if (JSON.stringify(document).length > 150_000) throw new Error(`${field} is too large.`);
+  return structuredClone(document);
 }
 
 function parseSpendFeedback(value: unknown): ProductionSpendFeedback[] {
@@ -599,8 +693,6 @@ function parseEconomics(value: unknown): ProductionEconomics {
     return {
       recipeId: "economy-daily",
       allowMeteredProviders: false,
-      maxPaidShots: 0,
-      maxCostCny: 0,
     };
   }
   const input = requireRecord(value, "economics");
@@ -611,10 +703,10 @@ function parseEconomics(value: unknown): ProductionEconomics {
   if (typeof input.allowMeteredProviders !== "boolean") {
     throw new Error("economics.allowMeteredProviders must be a boolean.");
   }
-  // 历史 brief 仍可能携带全视频限额；仅校验格式后归零，付费安全由逐次报价和人工授权负责。
-  boundedNumber(input.maxPaidShots, "economics.maxPaidShots", 0, 20, true);
-  boundedNumber(input.maxCostCny, "economics.maxCostCny", 0, 100_000, false);
-  return { recipeId, allowMeteredProviders: input.allowMeteredProviders, maxPaidShots: 0, maxCostCny: 0 };
+  // 历史 brief 仍可能携带全视频限额；仅校验格式后丢弃，付费安全由逐次报价和人工授权负责。
+  if (input.maxPaidShots !== undefined) boundedNumber(input.maxPaidShots, "economics.maxPaidShots", 0, 20, true);
+  if (input.maxCostCny !== undefined) boundedNumber(input.maxCostCny, "economics.maxCostCny", 0, 100_000, false);
+  return { recipeId, allowMeteredProviders: input.allowMeteredProviders };
 }
 
 function boundedNumber(value: unknown, field: string, minimum: number, maximum: number, integer: boolean): number {

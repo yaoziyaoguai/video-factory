@@ -14,6 +14,7 @@ import type {
 } from "../shared/api.js";
 import { JsonTemplateStore } from "./template-store.js";
 import { StudioInputError } from "../shared/api.js";
+import { BUILTIN_TEMPLATES } from "./template-catalog.js";
 
 export class TemplateStudio {
   constructor(
@@ -113,7 +114,11 @@ export class TemplateStudio {
   }
 
   private toDto(template: ProductionTemplateInput): StudioTemplate {
-    return { ...structuredClone(template), builtIn: template.status === "published" && template.version === 1 && BUILTIN_IDS.has(template.id) };
+    return {
+      ...structuredClone(template),
+      builtIn: template.status === "published"
+        && BUILTIN_TEMPLATES.some((candidate) => candidate.id === template.id && candidate.version === template.version),
+    };
   }
 }
 
@@ -157,15 +162,6 @@ function parseTemplateSelection(value: unknown): NonNullable<StudioProductionInp
     ...(runOverrides ? { runOverrides } : {}),
   };
 }
-
-const BUILTIN_IDS = new Set([
-  "trend-fact-brief",
-  "knowledge-explainer",
-  "photo-story",
-  "product-demo",
-  "human-mini-doc",
-  "ranked-comparison",
-]);
 
 function platformProfile(platform: string): ProductionBlueprintPatch {
   if (platform === "bilibili") return { platform, durationSeconds: 60 };

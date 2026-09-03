@@ -33,6 +33,7 @@ import {
   type StudioOpportunityInput,
   type StudioOpportunityStatus,
   type StudioProvider,
+  type StudioReworkDraft,
   type StudioResourceManifest,
   type StudioReferenceVideo,
   type StudioPublishBatch,
@@ -105,6 +106,7 @@ export interface StudioServicePort {
   updateOpportunityStatus(opportunityId: string, status: StudioOpportunityStatus): Promise<StudioOpportunity>;
   listRuns(origin?: "trend" | "series" | "manual"): Promise<StudioRunSummary[]>;
   getRun(runId: string): Promise<StudioRunDetail | undefined>;
+  reworkDraft(runId: string): Promise<StudioReworkDraft | undefined>;
   archiveRuns(runIds: string[]): Promise<void>;
   restoreRuns(runIds: string[]): Promise<void>;
   deleteRun(runId: string): Promise<void>;
@@ -374,6 +376,15 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       return reply.code(404).send({ error: "没有找到这条制作记录。" });
     }
     return run;
+  });
+
+  app.get<{ Params: { runId: string } }>("/api/runs/:runId/rework-draft", async (request, reply) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    const draft = await options.service.reworkDraft(request.params.runId);
+    if (!draft) {
+      return reply.code(404).send({ error: "没有找到这条制作记录，无法准备返工方案。" });
+    }
+    return draft;
   });
 
   app.delete<{ Params: { runId: string } }>("/api/runs/:runId", async (request, reply) => {
@@ -791,8 +802,6 @@ function parseNodeExecutionConfigurationInput(value: unknown): StudioNodeExecuti
     if (typeof candidate.allowMeteredProviders !== "boolean") throw new StudioInputError("付费能力开关格式不正确。");
     economics = {
       allowMeteredProviders: candidate.allowMeteredProviders,
-      maxPaidShots: requireNonNegativeInteger(candidate.maxPaidShots, "付费镜头数"),
-      maxCostCny: requireNonNegativeNumber(candidate.maxCostCny, "成本上限"),
     };
   }
   if (input.confirmTerminalEdit !== undefined && typeof input.confirmTerminalEdit !== "boolean") {
@@ -860,10 +869,10 @@ function parsePaidReconciliationInput(value: unknown): StudioPaidReconciliationI
     throw new StudioInputError("Provider taskId 只能用于核对原任务。");
   }
   const manualResolution = input.outcome === "confirmed_not_charged" || input.outcome === "confirmed_charged";
-  const note = input.note === undefined ? undefined : requireText(input.note, "人工核销说明");
-  if (manualResolution && !note) throw new StudioInputError("人工核销说明不能为空。");
-  if (note && note.length > 2_000) throw new StudioInputError("人工核销说明最多 2000 个字符。");
-  if (note && !manualResolution) throw new StudioInputError("人工核销说明只能用于人工确认结论。");
+  const note = input.note === undefined ? undefined : requireText(input.note, "人工核对记录");
+  if (manualResolution && !note) throw new StudioInputError("人工核对记录不能为空。");
+  if (note && note.length > 2_000) throw new StudioInputError("人工核对记录最多 2000 个字符。");
+  if (note && !manualResolution) throw new StudioInputError("人工核对记录只能用于人工确认结论。");
   const actualCostCny = input.actualCostCny === undefined
     ? undefined
     : requireNonNegativeNumber(input.actualCostCny, "实际费用");

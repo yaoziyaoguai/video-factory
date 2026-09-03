@@ -2,6 +2,7 @@ import { AlertCircle, Check, Copy, LayoutTemplate, Plus, RefreshCw, Save, Send, 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { StudioProvider, StudioTemplate, StudioTemplateExperimentScorecard } from "../../shared/api.js";
 import { studioApi } from "../api.js";
+import { providerModelLabel } from "../presentation.js";
 import { TemplateGallery } from "../templates/TemplateGallery.js";
 
 export function TemplatesPage() {
@@ -185,7 +186,7 @@ export function TemplatesPage() {
   return (
     <main className="page template-studio-page">
       <header className="page-header template-page-header">
-        <div><p className="eyebrow">制作语法</p><h1>模板工坊</h1><p className="page-summary">把经过验证的叙事、镜头与质量规则沉淀成下一次可以直接使用的制作语法。</p></div>
+        <div><p className="eyebrow">成片方法</p><h1>模板工坊</h1><p className="page-summary">把经过验证的讲述方式、镜头安排与质量规则保存成下一次可以直接使用的视频模板。</p></div>
         <div className="template-header-actions">
           <button className="icon-button" type="button" onClick={refreshTemplates} disabled={loading} title="刷新模板"><RefreshCw size={18} aria-hidden="true" /></button>
           <button className="button button-primary" type="button" onClick={() => { if (confirmDiscard()) setCreateOpen(true); }}><Plus size={17} aria-hidden="true" />新建空白模板</button>
@@ -232,14 +233,14 @@ export function TemplatesPage() {
                 <label className="field"><span>音乐策略</span><textarea rows={3} value={draft.soundSystem.musicIntent} disabled={draft.status !== "draft"} onChange={(event) => setDraft({ ...draft, soundSystem: { ...draft.soundSystem, musicIntent: event.target.value } })} /></label>
               </div>
               {modelProviders.length ? <section className="template-model-strategy" aria-label="模板模型策略">
-                <div className="section-heading"><div><h3>模型策略</h3><p>只覆盖本模板需要固定的模型，其余继承总配置。</p></div><span>{Object.keys(draft.modelDefaults ?? {}).length} 项覆盖</span></div>
+                <div className="section-heading"><div><h3>模型策略</h3><p>只覆盖本模板需要固定的模型，其余继承创作设置。</p></div><span>{Object.keys(draft.modelDefaults ?? {}).length} 项覆盖</span></div>
                 <div>{modelProviders.map((provider) => {
                   const selectedModelId = draft.modelDefaults?.[provider.id] ?? "";
                   const selected = provider.modelProfiles?.find((model) => model.id === selectedModelId);
                   return <label className="template-model-field" key={provider.id}>
-                    <span><strong>{provider.label}</strong><small>{selected ? "模板覆盖" : "继承总配置"}</small></span>
+                    <span><strong>{provider.label}</strong><small>{selected ? "模板覆盖" : "继承创作设置"}</small></span>
                     <select aria-label={`${provider.label} 模板模型`} value={selectedModelId} disabled={draft.status !== "draft"} onChange={(event) => setTemplateModel(provider.id, event.target.value)}>
-                      <option value="">继承总配置 · {provider.defaultModelId ?? "自动选择"}</option>
+                      <option value="">继承创作设置 · {providerModelLabel(provider, provider.defaultModelId)}</option>
                       {provider.modelProfiles?.map((model) => <option key={model.id} value={model.id} disabled={!model.available}>{model.label}{model.recommended ? " · 推荐" : ""}{model.available ? "" : " · 当前不可用"}</option>)}
                     </select>
                     <small>{selected?.description ?? "创建任务时仍可对本次制作单独覆盖。"}</small>
@@ -275,7 +276,7 @@ export function TemplatesPage() {
       ) : null}
       {createOpen ? <div className="dialog-backdrop" role="presentation">
         <section className="reject-dialog create-template-dialog" role="dialog" aria-modal="true" aria-labelledby="create-template-title">
-          <header className="dialog-header"><div><p className="eyebrow">新制作语法</p><h2 id="create-template-title">创建空白模板</h2></div><button className="icon-button" type="button" aria-label="关闭" disabled={saving} onClick={() => setCreateOpen(false)}><X size={18} aria-hidden="true" /></button></header>
+          <header className="dialog-header"><div><p className="eyebrow">新视频模板</p><h2 id="create-template-title">创建空白模板</h2></div><button className="icon-button" type="button" aria-label="关闭" disabled={saving} onClick={() => setCreateOpen(false)}><X size={18} aria-hidden="true" /></button></header>
           <div className="create-template-fields">
             <label className="field"><span>模板名称</span><input autoFocus value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="例如：城市人物微纪录" /></label>
             <label className="field"><span>适用说明</span><textarea rows={3} value={createDescription} onChange={(event) => setCreateDescription(event.target.value)} placeholder="适合什么题材、观众和表达目标" /></label>

@@ -92,6 +92,72 @@ describe("TrendOpportunityAgent", () => {
     ]);
   });
 
+  it("turns the structured creator strategy into a bounded self-contained editorial instruction", async () => {
+    const codexClient = new CapturingCodexClient(() => ({
+      ideas: [{
+        signalId: "signal-ai",
+        title: "下班后的 AI 时间账本",
+        track: "ai-daily-life",
+        audience: "普通上班族",
+        painPoint: "工具很多，却没有减少疲惫",
+        hook: "真正偷走你下班时间的，可能不是加班。",
+        rationale: "适合做低成本生活实验。",
+        novelty: 85,
+        seriesPotential: 88,
+        monetization: 72,
+      }],
+    }));
+    const model = new CodexTopicIdeaModel(codexClient);
+
+    await model.generate(signals, {
+      positioning: "替普通人解释技术变化。",
+      targetAudience: "关注 AI 但不想看营销稿的职场人。",
+      preferredDirections: "真实工作影响\n可复现实验",
+      excludedDirections: "只有热度没有证据",
+      sourcePolicy: "primary_or_two_independent",
+      customInstruction: "必须能在 30 秒内兑现标题承诺。",
+    });
+
+    const payload = codexClient.calls[0]!.payload as { strategy?: string };
+    assert.match(payload.strategy ?? "", /内容定位：替普通人解释技术变化/);
+    assert.match(payload.strategy ?? "", /核心受众：关注 AI 但不想看营销稿的职场人/);
+    assert.match(payload.strategy ?? "", /优先题材：\n真实工作影响\n可复现实验/);
+    assert.match(payload.strategy ?? "", /至少需要两个相互独立、可打开的来源/);
+    assert.match(payload.strategy ?? "", /必须能在 30 秒内兑现标题承诺/);
+    assert.equal((payload.strategy ?? "").length <= 6_000, true);
+  });
+
+  it("keeps the final custom rule after all bounded strategy fields", async () => {
+    const codexClient = new CapturingCodexClient(() => ({
+      ideas: [{
+        signalId: "signal-ai",
+        title: "下班后的 AI 时间账本",
+        track: "ai-daily-life",
+        audience: "普通上班族",
+        painPoint: "工具很多，却没有减少疲惫",
+        hook: "真正偷走你下班时间的，可能不是加班。",
+        rationale: "适合做低成本生活实验。",
+        novelty: 85,
+        seriesPotential: 88,
+        monetization: 72,
+      }],
+    }));
+    const model = new CodexTopicIdeaModel(codexClient);
+
+    await model.generate(signals, {
+      positioning: "定".repeat(500),
+      targetAudience: "众".repeat(500),
+      preferredDirections: "优".repeat(1_000),
+      excludedDirections: "避".repeat(1_000),
+      sourcePolicy: "primary_or_two_independent",
+      customInstruction: "最后这条原则不能丢失。".repeat(100),
+    });
+
+    const payload = codexClient.calls[0]!.payload as { strategy?: string };
+    assert.match(payload.strategy ?? "", /最后这条原则不能丢失/);
+    assert.equal((payload.strategy ?? "").length <= 6_000, true);
+  });
+
   it("builds traceable zero-cost candidates when no semantic model is ready", async () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => signals },
@@ -108,6 +174,7 @@ describe("TrendOpportunityAgent", () => {
     assert.equal(candidates[1]?.score.complianceRisk > candidates[0]!.score.complianceRisk, true);
     assert.equal(candidates[0]?.visualPlan?.beats.length, 3);
     assert.match(candidates[0]?.visualPlan?.beats[0]?.searchQuery ?? "", /普通人开始用 AI/);
+    assert.equal(candidates[0]?.visualPlan?.beats.some((beat) => beat.source === "local-card"), false);
   });
 
   it("uses a local idea model while preserving source evidence and bounded scores", async () => {
@@ -144,7 +211,7 @@ describe("TrendOpportunityAgent", () => {
     assert.equal(candidate?.generatedAt, "2026-08-24T08:05:00.000Z");
   });
 
-  it("keeps broad rule candidates when the model only selects a few ideas", async () => {
+  it("keeps a deliberately small editorial desk when the model only selects a few ideas", async () => {
     const broadSignals = Array.from({ length: 18 }, (_, index): StudioTrendSignal => ({
       id: `signal-${index}`,
       sourceId: index % 2 === 0 ? "dailyhot" : "newsnow",
@@ -176,7 +243,7 @@ describe("TrendOpportunityAgent", () => {
     const candidates = await agent.listCandidates();
 
     assert.equal(requestedLimit, 160);
-    assert.equal(candidates.length, 18);
+    assert.equal(candidates.length, 12);
     assert.equal(candidates.some((candidate) => candidate.providerId === "api-topic-editor-v1"), true);
     assert.equal(candidates.some((candidate) => candidate.providerId === "trend-heuristic-v1"), true);
   });
@@ -211,7 +278,7 @@ describe("TrendOpportunityAgent", () => {
 
     const candidates = await agent.listCandidates();
 
-    assert.equal(candidates.length, 60);
+    assert.equal(candidates.length, 12);
     assert.equal(candidates.some((candidate) => candidate.providerId === "api-topic-editor-v1"), true);
   });
 
@@ -302,7 +369,7 @@ describe("TrendOpportunityAgent", () => {
       return result;
     }, {});
 
-    assert.equal(candidates.length, 60);
+    assert.equal(candidates.length, 12);
     assert.equal(counts.missing, undefined);
     assert.equal(Math.max(...Object.values(counts)) <= 20, true);
     assert.equal(Object.keys(counts).length, 6);
@@ -318,6 +385,29 @@ describe("TrendOpportunityAgent", () => {
 
     assert.equal(candidates[0]?.providerId, "trend-heuristic-v1");
     assert.match(candidates[0]?.rationale ?? "", /排名/);
+  });
+
+  it("still applies creator positioning, audience, preferences, and exclusions in rule fallback", async () => {
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => signals },
+      model: { id: "api-topic-editor-v1", generate: async () => { throw new Error("model offline"); } },
+      strategy: async () => ({
+        positioning: "只解释能让普通人采取行动的变化",
+        targetAudience: "不想看营销稿的职场人",
+        preferredDirections: "AI 工作效率",
+        excludedDirections: "台风",
+        sourcePolicy: "primary_or_two_independent",
+        customInstruction: "",
+      }),
+    });
+
+    const candidates = await agent.listCandidates();
+
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0]?.title, "普通人开始用 AI 管理下班后的时间");
+    assert.equal(candidates[0]?.audience, "不想看营销稿的职场人");
+    assert.match(candidates[0]?.painPoint ?? "", /只解释能让普通人采取行动的变化/);
+    assert.equal(candidates.some((candidate) => candidate.title.includes("台风")), false);
   });
 
   it("retries one smaller batch when the model returns malformed structured output", async () => {

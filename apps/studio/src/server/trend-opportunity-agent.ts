@@ -48,7 +48,8 @@ export interface TrendOpportunityAgentOptions {
   strategy?: () => Promise<StudioTopicStrategy>;
 }
 
-const TREND_CANDIDATE_LIMIT = 60;
+// 候选台是总编做过取舍的短名单，不是把聚合榜单换一种样式全部搬进来。
+const TREND_CANDIDATE_LIMIT = 12;
 
 export class TrendOpportunityAgent {
   private readonly now: () => Date;
@@ -59,9 +60,10 @@ export class TrendOpportunityAgent {
 
   async listCandidates(): Promise<StudioTrendCandidate[]> {
     const signals = await this.options.signals.listSignals({ limit: 160 });
-    const signalGroups = groupEquivalentSignals(signals);
-    const primarySignals = signalGroups.map((group) => group[0]!);
     const strategy = await this.options.strategy?.().catch(() => undefined);
+    const signalGroups = groupEquivalentSignals(signals)
+      .filter((group) => !strategyExcludesSignal(strategy, group[0]!));
+    const primarySignals = signalGroups.map((group) => group[0]!);
     if (this.options.model) {
       try {
         const ideas = await generateModelIdeas(this.options.model, primarySignals, strategy);
@@ -77,15 +79,20 @@ export class TrendOpportunityAgent {
           const selectedSignalIds = new Set(modelCandidates.keys());
           const ruleCandidates = signalGroups
             .filter((group) => !selectedSignalIds.has(group[0]!.id))
-            .map((group) => this.fromSignal(group))
-            .sort(byFinalScore);
+            .map((group) => this.fromSignal(group, strategy))
+            .sort((left, right) => byStrategyThenFinal(left, right, strategy));
           return selectCandidatePortfolio(selectedByModel, ruleCandidates, TREND_CANDIDATE_LIMIT);
         }
       } catch {
         // 模型是增强节点；不可用时仍需稳定输出可追溯的规则候选。
       }
     }
-    return selectCandidatePortfolio([], signalGroups.map((group) => this.fromSignal(group)).sort(byFinalScore), TREND_CANDIDATE_LIMIT);
+    return selectCandidatePortfolio(
+      [],
+      signalGroups.map((group) => this.fromSignal(group, strategy))
+        .sort((left, right) => byStrategyThenFinal(left, right, strategy)),
+      TREND_CANDIDATE_LIMIT,
+    );
   }
 
   private fromModelIdea(idea: TrendModelIdea, signals: StudioTrendSignal[]): StudioTrendCandidate {
@@ -109,7 +116,7 @@ export class TrendOpportunityAgent {
     });
   }
 
-  private fromSignal(signals: StudioTrendSignal[]): StudioTrendCandidate {
+  private fromSignal(signals: StudioTrendSignal[], strategy?: StudioTopicStrategy): StudioTrendCandidate {
     const signal = signals[0]!;
     const risk = complianceRisk(signal.title);
     const track = inferTrack(signal.title);
@@ -118,8 +125,10 @@ export class TrendOpportunityAgent {
       relatedSignals: signals,
       title: risk >= 60 ? groundedEditorialTitle(signal.title, track) : signal.title,
       track,
-      audience: audienceFor(track),
-      painPoint: `热点信息很多，但缺少一个与普通人直接相关的解释角度`,
+      audience: strategy?.targetAudience?.trim() || audienceFor(track),
+      painPoint: strategy?.positioning?.trim()
+        ? `热点信息很多，需要按照“${strategy.positioning.trim()}”筛出真正值得讲的部分`
+        : "热点信息很多，但缺少一个与普通人直接相关的解释角度",
       hook: risk >= 60
         ? `${signal.title}正在上榜。先不猜结论，只核验可靠来源已经确认的信息。`
         : `“${signal.title}”正在上升，但真正值得讲的是它与你有什么关系。`,
@@ -226,7 +235,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         title: item.title,
         heat: item.heat ?? null,
       })),
-      ...(strategy?.customInstruction ? { strategy: strategy.customInstruction } : {}),
+      ...(strategy ? { strategy: formatTopicStrategy(strategy) } : {}),
     };
     const execution = await runRoleAgentLoop<{ ideas: TrendModelIdea[] }>({
       role: "选题总编",
@@ -268,6 +277,46 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
     });
     return execution.output.ideas;
   }
+}
+
+function formatTopicStrategy(strategy: StudioTopicStrategy): string {
+  return [
+    strategy.positioning ? `内容定位：${strategy.positioning}` : undefined,
+    strategy.targetAudience ? `核心受众：${strategy.targetAudience}` : undefined,
+    strategy.preferredDirections ? `优先题材：\n${strategy.preferredDirections}` : undefined,
+    strategy.excludedDirections ? `明确避开：\n${strategy.excludedDirections}` : undefined,
+    strategy.sourcePolicy === "primary_or_two_independent"
+      ? "来源标准：至少需要两个相互独立、可打开的来源才进入制作推荐。"
+      : "来源标准：至少保留一个可打开的来源；高风险事实仍需额外核验。",
+    strategy.customInstruction ? `补充原则：${strategy.customInstruction}` : undefined,
+  ].filter((value): value is string => Boolean(value)).join("\n\n").slice(0, 6_000);
+}
+
+function strategyExcludesSignal(strategy: StudioTopicStrategy | undefined, signal: StudioTrendSignal): boolean {
+  if (!strategy?.excludedDirections?.trim()) return false;
+  const subject = `${signal.title} ${signal.platform}`.toLowerCase();
+  return strategyTerms(strategy.excludedDirections).some((term) => subject.includes(term));
+}
+
+function byStrategyThenFinal(
+  left: StudioTrendCandidate,
+  right: StudioTrendCandidate,
+  strategy?: StudioTopicStrategy,
+): number {
+  const preferred = strategyTerms(strategy?.preferredDirections ?? "");
+  const preference = (candidate: StudioTrendCandidate) => {
+    const subject = `${candidate.title} ${candidate.track} ${candidate.rationale}`.toLowerCase();
+    return preferred.filter((term) => subject.includes(term)).length;
+  };
+  return preference(right) - preference(left) || byFinalScore(left, right);
+}
+
+function strategyTerms(value: string): string[] {
+  return [...new Set(value
+    .toLowerCase()
+    .split(/[\s\n,，、;；。/或与及]+/)
+    .map((term) => term.replace(/^(?:只有|无法|消费|未经证实的|只能靠|优先|避免|不要)/, "").trim())
+    .filter((term) => term.length >= 2))];
 }
 
 function parseTopicIdeasOutput(value: unknown): { ideas: TrendModelIdea[] } {
@@ -426,10 +475,23 @@ function selectCandidatePortfolio(
   const categoryCounts = countBy(selected, (candidate) => candidate.category ?? "lifestyle");
   const platformCounts = countBy(selected, (candidate) => candidate.platform);
   const remaining = candidates.filter((candidate) => !selectedIds.has(candidate.id));
+  // 先为新的内容类别保留席位，避免高分但同质的单一热点占满短名单。
   for (const candidate of remaining) {
     const category = candidate.category ?? "lifestyle";
     if (selected.length >= limit) break;
-    if ((categoryCounts.get(category) ?? 0) >= 10 || (platformCounts.get(candidate.platform) ?? 0) >= 5) continue;
+    if (selectedIds.has(candidate.id) || (categoryCounts.get(category) ?? 0) > 0) continue;
+    if ((platformCounts.get(candidate.platform) ?? 0) >= 5) continue;
+    selected.push(candidate);
+    selectedIds.add(candidate.id);
+    categoryCounts.set(category, 1);
+    platformCounts.set(candidate.platform, (platformCounts.get(candidate.platform) ?? 0) + 1);
+  }
+  const categoryLimit = Math.max(2, Math.ceil(limit / 4));
+  for (const candidate of remaining) {
+    const category = candidate.category ?? "lifestyle";
+    if (selected.length >= limit) break;
+    if (selectedIds.has(candidate.id)) continue;
+    if ((categoryCounts.get(category) ?? 0) >= categoryLimit || (platformCounts.get(candidate.platform) ?? 0) >= 5) continue;
     selected.push(candidate);
     selectedIds.add(candidate.id);
     categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + 1);

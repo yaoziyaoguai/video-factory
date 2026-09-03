@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
-import { providerLabel } from "../presentation.js";
+import { providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
@@ -89,7 +89,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     const owner = inputOwner ?? outputOwner;
     const source = inputOwner?.inputState?.versions.find((candidate) => candidate.id === versionId)?.source
       ?? outputOwner?.outputState?.versions.find((candidate) => candidate.id === versionId)?.source;
-    return { versionId, label: inputOwner ? `${owner?.label ?? "节点"}输入` : owner?.label ?? "上游交付", role: owner?.role ?? "生产角色", source };
+    return { versionId, label: inputOwner ? `${owner?.label ?? "制作步骤"}输入` : owner?.label ?? "前序交付", role: owner?.role ?? "制作角色", source };
   }) ?? [], [node.spendPlan?.inputVersionIds, nodes]);
   const hasStructuredOutput = node.output !== undefined || effectiveOutput(node) !== undefined;
   const outputReadOnly = READ_ONLY_OUTPUT_NODE_IDS.has(node.id);
@@ -252,7 +252,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     setError(undefined);
     const target = targetEstimatedCostCny.trim() ? Number(targetEstimatedCostCny) : undefined;
     if (target !== undefined && (!Number.isFinite(target) || target < 0 || target > 100_000)) {
-      setError("下一版目标预计费用必须在 0 到 100000 之间。");
+      setError("希望下一版控制的费用必须在 0 到 100000 元之间。");
       return;
     }
     try {
@@ -273,7 +273,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       id={`node-workspace-${node.id}`}
       className={`node-workspace is-${node.status}`}
       name="creator-workspaces"
-      aria-label={`${node.label} · ${node.role ?? "生产角色"}`}
+      aria-label={`${node.label} · ${node.role ?? "制作角色"}`}
       open={workspaceOpen}
       onToggle={(event) => {
         setWorkspaceOpen(event.currentTarget.open);
@@ -282,7 +282,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     >
       <summary>
         <span className="node-workspace-state">{node.status === "succeeded" ? <Check aria-hidden="true" size={14} /> : <span />}</span>
-        <span className="node-workspace-title"><strong>{node.label}</strong><small>{node.role ?? "生产角色"}</small></span>
+        <span className="node-workspace-title"><strong>{node.label}</strong><small>{node.role ?? "制作角色"}</small></span>
         {capability ? <span className="node-workspace-provenance">{capability}</span> : <span />}
         {node.outputState?.stale ? <span className="node-stale-label"><AlertTriangle aria-hidden="true" size={14} />旧结果</span> : null}
         <ChevronDown className="node-workspace-chevron" aria-hidden="true" size={17} />
@@ -290,10 +290,10 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       <div className="node-workspace-body">
         {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
           <strong>{agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
-          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{node.agentLoopProgress.latestAudit.summary}</span> : <span>正在建立本轮候选，完成后由独立 Agent 审计。</span>}
+          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{node.agentLoopProgress.latestAudit.summary}</span> : <span>正在生成本轮方案，完成后由独立 AI 做质量审计。</span>}
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>审计失败，已规则回退</strong>：{fallbackReason}</span></p> : null}
-        {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />此节点结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成。</p> : null}
+        {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />这一步的结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成。</p> : null}
         {node.executionConfiguration ? <NodeExecutionConfigurationEditor
           node={node}
           providers={providers}
@@ -302,24 +302,24 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           onSave={(input) => onConfigure(node.id, input)}
         /> : null}
         {canRequestPause ? <div className="node-pause-edit">
-          <span>{pauseRequested ? "已请求暂停；当前任务安全结束后会停在下一节点前。" : "想修改这一步？系统会先让当前任务安全结束，再停下来。"}</span>
+          <span>{pauseRequested ? "已请求暂停；当前任务安全结束后会停在下一步开始前。" : "想修改这一步？系统会先让当前任务安全结束，再停下来。"}</span>
           <button className="button button-ghost" type="button" disabled={pauseBusy || pauseRequested} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{pauseRequested ? "等待暂停" : "暂停后修改"}</button>
         </div> : null}
 
         {canEditInput && hasReviewableInput ? <details className="node-input-adjustment" open={inputReviewOpen} onToggle={(event) => setInputReviewOpen(event.currentTarget.open)}>
           <summary><FilePenLine aria-hidden="true" size={15} />查看和调整这个角色收到的内容</summary>
           <div className="node-input-review">
-            {inputSources.length ? <section className="node-input-sources" aria-label={`${node.role ?? "生产角色"}收到的上游交付`}>
-              <header><strong>来自上游角色</strong><small>修改会在原角色处保存为新版本，并让后续旧结果失效。</small></header>
+            {inputSources.length ? <section className="node-input-sources" aria-label={`${node.role ?? "制作角色"}收到的前序内容`}>
+              <header><strong>来自前序步骤</strong><small>修改会在原步骤保存为新版本，并让后续旧结果失效。</small></header>
               <div>
                 {inputSources.map((source) => <article key={source.node.id}>
-                  <span><strong>{source.node.role ?? "生产角色"} · {source.node.label}</strong><small>{source.versionLabel}{source.node.outputState?.stale ? " · 上游已变化" : ""}</small></span>
-                  <button className="button button-ghost" type="button" aria-label={`${source.canEdit ? "查看与修改" : "查看"} ${source.node.role ?? "生产角色"} · ${source.node.label}`} onClick={() => revealSourceWorkspace(source.node.id)}>{source.canEdit ? "查看与修改" : "查看"}</button>
+                  <span><strong>{source.node.role ?? "制作角色"} · {source.node.label}</strong><small>{source.versionLabel}{source.node.outputState?.stale ? " · 前序内容已变化" : ""}</small></span>
+                  <button className="button button-ghost" type="button" aria-label={`${source.canEdit ? "查看与修改" : "查看"} ${source.node.role ?? "制作角色"} · ${source.node.label}`} onClick={() => revealSourceWorkspace(source.node.id)}>{source.canEdit ? "查看与修改" : "查看"}</button>
                 </article>)}
               </div>
             </section> : null}
             {hasEditableInput ? <section className="node-output-preview">
-              <header><div><strong>本节点专用设置</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 上游已变化，需复核" : ""}</small></div>{!editingInput ? <button className="button button-ghost" type="button" onClick={() => setEditingInput(true)}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
+              <header><div><strong>本步骤专用设置</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 前序内容已变化，需复核" : ""}</small></div>{!editingInput ? <button className="button button-ghost" type="button" onClick={() => setEditingInput(true)}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
               {effectiveInputVersion?.source === "reconstructed" ? <p className="node-version-note">旧任务没有保存当时的原始输入；这里展示的是按当前上游内容推断出的可编辑版本。</p> : null}
               {editingInput ? <NodeStructuredEditor nodeId={`${node.id}-input`} value={safeParse(inputDraft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setInputDraft(pretty(value)); }} /> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
               {editingInput ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelInputEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveInputOverride()}><Save aria-hidden="true" size={15} />保存人工输入</button></footer> : null}
@@ -329,7 +329,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
 
         {node.spendPlan ? (
           <section className="spend-gate" aria-label={`${node.label}费用确认`}>
-            <div><CircleDollarSign aria-hidden="true" size={20} /><span><strong>执行前费用确认</strong><small>预计 ¥{node.spendPlan.estimatedCostCny.toFixed(2)}，最高 ¥{node.spendPlan.maxCostCny.toFixed(2)} · 最多 {node.spendPlan.maxAttempts} 次</small>{node.spendPlan.items?.map((item) => <small key={item.id}><span>{item.label} · {item.providerId} · {item.modelId}</span> · ¥{item.estimatedCostCny.toFixed(2)}</small>)}</span></div>
+            <div><CircleDollarSign aria-hidden="true" size={20} /><span><strong>执行前费用确认</strong><small>预计 ¥{node.spendPlan.estimatedCostCny.toFixed(2)}，最高 ¥{node.spendPlan.maxCostCny.toFixed(2)} · 最多 {node.spendPlan.maxAttempts} 次</small>{node.spendPlan.items?.map((item) => <small key={item.id}><span>{item.label} · {providerLabel(item.providerId) ?? "画面服务"} · {providerModelLabel(providers.find((provider) => provider.id === item.providerId), item.modelId)}</span> · ¥{item.estimatedCostCny.toFixed(2)}</small>)}</span></div>
             {node.spendAuthorizationId ? <span className="spend-authorized"><ShieldCheck aria-hidden="true" size={15} />已授权</span> : (
               <div className="spend-gate-actions">{node.id === "assets" ? <button className="button button-ghost" type="button" disabled={busy} onClick={() => setRejectingSpend(true)}>这份报价不合适</button> : null}<button className="button button-primary" type="button" disabled={busy} onClick={() => setAuthorizing(true)}><ShieldCheck aria-hidden="true" size={16} />检查并确认</button></div>
             )}
@@ -337,7 +337,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         ) : null}
 
         <section className="node-output-preview node-creator-delivery">
-          <header><div><strong>{node.role ?? "生产角色"}的交付</strong><small>{deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
+          <header><div><strong>{node.role ?? "制作角色"}的交付</strong><small>{deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
           {node.id === "assets" && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
             <header><strong>{visualsAreCurrent ? "实际素材画面" : "上次生成的素材画面"}</strong><small>{visualArtifacts.length} 个可预览素材{visualsAreCurrent ? "" : " · 上游变化后需重新生成"}</small></header>
             <div>
@@ -349,7 +349,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
               </figure>)}
             </div>
           </div> : null}
-          {editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取结构化交付...</p> : documentError ? <p className="node-workspace-error" role="alert">结构化交付读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
+          {editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
           {audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioIsCurrent ? "实际配音试听" : "上次生成的配音"}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? "实际配音试听" : "上次生成的配音试听"} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
           {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
         </section>
@@ -361,7 +361,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <section ref={spendDialogRef} role="dialog" aria-modal="true" aria-label="确认本次费用" tabIndex={-1}>
           <CircleDollarSign aria-hidden="true" size={24} />
           <h3>确认执行 {node.label}</h3>
-          <p>这次授权只对下面已经审阅的输入版本、{node.spendPlan.modelId} 和本次最高授权额 ¥{node.spendPlan.maxCostCny.toFixed(2)} 有效。任何内容、模型、报价或重试次数变化都会让授权自动失效。</p>
+          <p>这次授权只对下面已经审阅的输入版本、{providerModelLabel(providers.find((provider) => provider.id === node.spendPlan?.providerId), node.spendPlan.modelId)} 和本次最高授权额 ¥{node.spendPlan.maxCostCny.toFixed(2)} 有效。任何内容、模型、报价或重试次数变化都会让授权自动失效。</p>
           <div className="spend-input-versions" aria-label="本次付费所使用的上游版本">
             {spendInputs.map((input) => <div key={input.versionId}><span><strong>{input.role} · {input.label}</strong><small>{input.source === "human" ? "人工版本" : "自动版本"}</small></span><code>{shortId(input.versionId)}</code></div>)}
           </div>
@@ -372,14 +372,14 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <section ref={spendRejectionDialogRef} role="dialog" aria-modal="true" aria-label="保存费用反馈" tabIndex={-1}>
           <CircleDollarSign aria-hidden="true" size={24} />
           <h3>把这份报价退回导演</h3>
-          <p>这里只保存反馈，不会立即调用导演。你可以先修改方案或 Provider，再手动重新规划；新方案会重新报价并再次等待你确认。</p>
+          <p>这里只保存反馈，不会立即调用导演。你可以先修改方案或画面来源，再手动重新规划；新方案会重新报价并再次等待你确认。</p>
           <label className="field"><span>不接受这份报价的原因</span><select value={spendRejectionReason} onChange={(event) => setSpendRejectionReason(event.target.value as StudioSpendRejectionInput["reason"])}>
             <option value="too_expensive">总价太高，希望降低费用</option>
-            <option value="provider_mix">Provider 或素材组合不合适</option>
+            <option value="provider_mix">画面来源或素材组合不合适</option>
             <option value="plan_not_approved">前面的画面方案不认可</option>
             <option value="other">其他原因</option>
           </select></label>
-          <label className="field"><span>下一版目标预计费用（可选，0 表示优先全免费）</span><input aria-label="下一版目标预计费用（可选）" type="number" min={0} max={100000} step={0.01} value={targetEstimatedCostCny} onChange={(event) => setTargetEstimatedCostCny(event.target.value)} /></label>
+          <label className="field"><span>希望下一版控制在多少元（可选，0 表示只用免费画面）</span><input aria-label="希望下一版控制在多少元（可选）" type="number" min={0} max={100000} step={0.01} value={targetEstimatedCostCny} onChange={(event) => setTargetEstimatedCostCny(event.target.value)} /></label>
           <label className="field"><span>具体调整意见（可选）</span><textarea aria-label="具体调整意见（可选）" rows={3} maxLength={1000} value={spendRejectionNote} onChange={(event) => setSpendRejectionNote(event.target.value)} /></label>
           <div><button className="button button-ghost" type="button" onClick={() => setRejectingSpend(false)}>返回检查</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void rejectSpend()}>保存反馈</button></div>
         </section>
@@ -396,7 +396,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <section ref={terminalInputDialogRef} role="dialog" aria-modal="true" aria-labelledby={`terminal-input-edit-${node.id}`} tabIndex={-1}>
           <AlertTriangle aria-hidden="true" size={24} />
           <h3 id={`terminal-input-edit-${node.id}`}>创建已结束制作的人工输入版本？</h3>
-          <p>保存后，本节点和全部后续结果会过期；系统不会自动调用任何付费能力。</p>
+          <p>保存后，本步骤和全部后续结果会过期；系统不会自动调用任何付费能力。</p>
           <div><button className="button button-ghost" type="button" onClick={() => setTerminalInputOverride(undefined)}>取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveInputOverride(true, terminalInputOverride)}>确认创建输入版本</button></div>
         </section>
       </div> : null}
@@ -413,7 +413,7 @@ function agentLoopPhaseLabel(progress: NonNullable<StudioNode["agentLoopProgress
         ? "独立审计已通过"
         : progress.phase === "exhausted"
           ? "三轮审计未通过"
-          : "生产 Agent 生成中";
+          : "AI 创作中";
   return `第 ${progress.iteration} / ${progress.maxIterations} 轮 · ${phase}`;
 }
 
@@ -530,11 +530,11 @@ function deliveryEditHint(
     ? "声音只读；如需重配，请先暂停，再修改配音指令。"
     : "已经生成的声音只能试听；修改下方配音指令后会重新合成。";
   if (READ_ONLY_NODE_IDS.has(nodeId)) return "技术结果只读；需要调整时请修改上游内容后重跑";
-  if (runStatus === "running" && hasDelivery) return "后续节点正在执行；可先暂停，再修改这份交付";
+  if (runStatus === "running" && hasDelivery) return "后续步骤正在执行；可先暂停，再修改这份交付";
   if (runStatus === "paused" && hasDelivery) return "制作已暂停，可以修改；保存后下游旧结果会自动失效";
   if (source === "human") return "已采用你的修改";
   if (hasDelivery) return "自动生成，可按需修改";
-  return status === "pending" ? "等待上游完成" : "本节点没有需要人工阅读的内容";
+  return status === "pending" ? "等待前一步完成" : "本步骤没有需要人工阅读的内容";
 }
 
 function selectEditableArtifact(nodeId: string, artifacts: StudioArtifact[], effectiveArtifactIds?: string[]): StudioArtifact | undefined {
@@ -638,8 +638,6 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
           assetProviderIds,
           economics: {
             allowMeteredProviders: meteredSources.length > 0,
-            maxPaidShots: 0,
-            maxCostCny: 0,
           },
         } : {}),
       });
@@ -661,7 +659,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
           {roleProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
         </select></label>
         {selectedProviderModels.length ? <label className="field"><span>本次模型</span><select value={modelSelections[providerId] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, [providerId]: event.target.value }))}>
-          <option value="">推荐默认：{selectedProvider?.defaultModelId ?? "运行时选择"}</option>
+          <option value="">推荐模型：{providerModelLabel(selectedProvider, selectedProvider?.defaultModelId)}</option>
           {selectedProviderModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
         </select></label> : null}
       </> : <>
@@ -672,14 +670,14 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
             return <article key={provider.id} className={selected ? "is-selected" : ""}>
               <label><input type="checkbox" checked={selected} onChange={(event) => updateAssetSource(provider, event.target.checked)} /><span><strong>{provider.label}</strong><small>{provider.billing === "metered" ? "按镜头计费" : "免费来源"}</small></span></label>
               {selected && compatibleModels.length ? <select aria-label={`${provider.label}模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, [provider.id]: event.target.value }))}>
-                <option value="">推荐默认：{provider.defaultModelId ?? "自动选择"}</option>
+                <option value="">推荐默认：{providerModelLabel(provider, provider.defaultModelId)}</option>
                 {compatibleModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
               </select> : null}
             </article>;
           })}
         </div>
         {meteredSources.length > 0 ? <div className="node-budget-fields">
-          <p>按实际导演方案报价；所有计费节点执行前逐笔人工确认。若报价不合适，可退回导演降低费用。</p>
+          <p>按实际导演方案报价；每次生成付费图片或视频前逐笔人工确认。若报价不合适，可退回导演降低费用。</p>
         </div> : null}
       </>}
       {error ? <p className="node-workspace-error" role="alert">{error}</p> : null}
@@ -707,8 +705,8 @@ function executionConfigurationSummary(node: StudioNode, providers: StudioProvid
     return `${sources.join("、") || "未选择来源"}${budget}`;
   }
   const provider = providers.find((candidate) => candidate.id === configuration.providerId);
-  const modelId = configuration.modelSelections[configuration.providerId] ?? provider?.defaultModelId ?? "运行时自动选择";
-  return `${provider?.label ?? configuration.providerId} · ${modelId}`;
+  const modelId = configuration.modelSelections[configuration.providerId] ?? provider?.defaultModelId;
+  return `${provider?.label ?? configuration.providerId} · ${providerModelLabel(provider, modelId)}`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -756,7 +754,7 @@ function creatorDraftValidationError(nodeId: string, value: unknown, requireMode
     ]);
     if (topLevelError) return topLevelError;
     const bible = asRecord(draft.visualBible);
-    if (!bible) return "视觉圣经不能为空。";
+    if (!bible) return "全片视觉规则不能为空。";
     const bibleError = firstRequiredTextError(bible, [
       ["narrativeApproach", "叙事方式"],
       ["pacing", "节奏"],
@@ -846,9 +844,9 @@ function creatorCapabilityLabel(
   const auditEffort = execution?.parameters?.auditReasoningEffort;
   return [
     `本次使用 ${providerLabel(providerId) ?? execution?.providerLabel ?? providerId} · ${modelId}`,
-    typeof reasoningEffort === "string" ? `推理 ${reasoningEffort}` : undefined,
-    typeof loopIterations === "number" ? `生产 Agent → 独立审计 Agent · ${loopIterations}/3 轮` : undefined,
-    typeof auditEffort === "string" ? `审计推理 ${auditEffort}` : undefined,
+    typeof reasoningEffort === "string" ? reasoningEffortLabel(reasoningEffort) : undefined,
+    typeof loopIterations === "number" ? `AI 创作与独立质量审计 · ${loopIterations}/3 轮` : undefined,
+    typeof auditEffort === "string" ? `质量复核：${reasoningEffortLabel(auditEffort)}` : undefined,
   ].filter(Boolean).join(" · ");
 }
 

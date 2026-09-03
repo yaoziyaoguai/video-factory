@@ -8,7 +8,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .kokoro_voice import synthesize_kokoro_audio
@@ -545,9 +545,9 @@ def _prepare_minimax_audio_request(
 def _execute_minimax_audio_request(request: Request, output_path: Path) -> Path:
     try:
         with urlopen(request, timeout=90) as response:
-            result = json.loads(response.read().decode("utf-8"))
+            response_bytes = response.read()
     except HTTPError as error:
-        if 400 <= error.code < 500 and error.code not in {408, 409, 425, 499}:
+        if 400 <= error.code < 500 and error.code not in {408, 409, 425, 429, 499}:
             message = error.reason
             try:
                 body = json.loads(error.read(65536).decode("utf-8"))
@@ -557,9 +557,19 @@ def _execute_minimax_audio_request(request: Request, output_path: Path) -> Path:
             raise _MiniMaxTerminalError(
                 f"MiniMax speech synthesis HTTP {error.code} rejected: {message}"
             ) from error
-        raise RuntimeError(f"MiniMax speech synthesis request failed: {error}") from error
-    except Exception as error:
-        raise RuntimeError(f"MiniMax speech synthesis request failed: {error}") from error
+        raise RuntimeError(
+            "MiniMax speech synthesis request failed with an unknown provider outcome; "
+            "automatic retry is disabled to prevent duplicate billing."
+        ) from error
+    except (ConnectionResetError, TimeoutError, URLError, OSError) as error:
+        raise RuntimeError(
+            "MiniMax speech synthesis request failed with an unknown provider outcome; "
+            "automatic retry is disabled to prevent duplicate billing."
+        ) from error
+    try:
+        result = json.loads(response_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("MiniMax speech synthesis returned an ambiguous response.") from error
 
     if not isinstance(result, dict):
         raise RuntimeError("MiniMax speech synthesis returned an ambiguous response.")
