@@ -183,11 +183,10 @@ function candidateVerification(
   evidence: StudioCandidateInboxItem["evidence"],
   sourcePolicy?: StudioTopicStrategy["sourcePolicy"],
 ): StudioCandidateVerification {
-  const independentSources = new Set(evidence.map(evidenceIdentity).filter(Boolean)).size;
-  const linkedSources = new Set(
-    evidence.filter((item) => item.evidenceUrl).map(evidenceIdentity).filter(Boolean),
-  ).size;
-  if (sourcePolicy === "primary_or_two_independent" && (independentSources < 2 || linkedSources < 2)) {
+  const effectiveSourcePolicy = sourcePolicy ?? "primary_or_two_independent";
+  const independentSources = new Set(evidence.map(traceableEvidenceIdentity).filter(Boolean)).size;
+  const linkedSources = independentSources;
+  if (effectiveSourcePolicy === "primary_or_two_independent" && (independentSources < 2 || linkedSources < 2)) {
     return {
       status: "blocked",
       independentSources,
@@ -195,7 +194,7 @@ function candidateVerification(
       reasons: ["当前总编规则要求至少 2 个独立且可打开的来源，补齐前不会进入制作推荐。"],
     };
   }
-  if (sourcePolicy === "traceable_source" && linkedSources < 1) {
+  if (effectiveSourcePolicy === "traceable_source" && linkedSources < 1) {
     return {
       status: "blocked",
       independentSources,
@@ -227,15 +226,23 @@ function candidateVerification(
   };
 }
 
-function evidenceIdentity(evidence: StudioOpportunityEvidence): string {
-  if (evidence.evidenceUrl) {
-    try {
-      return new URL(evidence.evidenceUrl).hostname.toLowerCase().replace(/^(?:www|m)\./, "");
-    } catch {
-      // 非标准链接继续使用发布平台，不能退回聚合器名称制造虚假的独立性。
-    }
+function traceableEvidenceIdentity(evidence: StudioOpportunityEvidence): string {
+  if (!evidence.evidenceUrl) return "";
+  try {
+    const url = new URL(evidence.evidenceUrl);
+    const hostname = url.hostname.toLowerCase().replace(/^(?:www|m)\./, "");
+    const searchPage = hostname === "s.weibo.com"
+      || (hostname === "baidu.com" && url.pathname === "/s")
+      || hostname === "search.bilibili.com"
+      || hostname === "so.toutiao.com"
+      || (hostname === "douyin.com" && url.pathname.startsWith("/search"))
+      || (hostname === "zhihu.com" && url.pathname.startsWith("/search"))
+      || (hostname === "xiaohongshu.com" && url.pathname.startsWith("/search_result"));
+    if (searchPage) return "";
+    return hostname;
+  } catch {
+    return "";
   }
-  return evidence.platform.trim().toLowerCase() || evidence.source.trim().toLowerCase();
 }
 
 function buildFacets(items: StudioCandidateInboxItem[]): StudioCandidateInbox["facets"] {

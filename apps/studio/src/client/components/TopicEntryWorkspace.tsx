@@ -28,7 +28,7 @@ import type {
   StudioSeriesEpisodePlanInput,
   StudioTopicCategory,
 } from "../../shared/api.js";
-import { reasoningEffortLabel } from "../presentation.js";
+import { creatorFacingTechnicalText, reasoningEffortLabel } from "../presentation.js";
 import { platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
 import { CandidateVerificationDialog } from "./CandidateVerificationDialog.js";
 import { SeriesEpisodeDialog } from "./SeriesEpisodeDialog.js";
@@ -312,14 +312,14 @@ function SeriesRoadmap({
               <section><span>留给下一集</span><p>{selectedEpisode.continuity.toNext.join("；")}</p></section>
             </div>
             <section className="series-agent-route" aria-label="本集智能制作与审计流程">
-              <div><Sparkles aria-hidden="true" size={16} /><span><strong>路线图策划记录</strong><small>{selectedEpisode.planning.role} · {selectedEpisode.planning.auditRole}</small></span></div>
+              <div><Sparkles aria-hidden="true" size={16} /><span><strong>路线图策划记录</strong><small>{creatorFacingTechnicalText(selectedEpisode.planning.role)} · {creatorFacingTechnicalText(selectedEpisode.planning.auditRole)}</small></span></div>
               <dl>
                 <div><dt>生成</dt><dd>{planningSourceLabel(selectedEpisode.planning)}</dd></div>
                 <div><dt>审计</dt><dd>{planningAuditLabel(selectedEpisode.planning)}</dd></div>
                 <div><dt>推理</dt><dd>{planningReasoningLabel(selectedEpisode.planning)}</dd></div>
               </dl>
               {selectedEpisode.planning.auditSummary ? <p><strong>审计结论：</strong>{selectedEpisode.planning.auditSummary}{selectedEpisode.planning.auditScore !== undefined ? `（${selectedEpisode.planning.auditScore} 分）` : ""}</p> : null}
-              {selectedEpisode.planning.fallbackReason ? <p>{selectedEpisode.planning.fallbackReason}</p> : null}
+              {selectedEpisode.planning.fallbackReason ? <p>{creatorFacingTechnicalText(selectedEpisode.planning.fallbackReason)}</p> : null}
             </section>
             {auditUnavailable ? <p className="series-lock-note"><ShieldAlert aria-hidden="true" size={15} />开拍前独立质量审计尚未就绪。<Link to="/resources#production-roles">去配置系列主理人</Link></p> : null}
             {blockedBy ? <p className="series-lock-note"><LockKeyhole aria-hidden="true" size={15} />第 {blockedBy} 集尚未定版；完成审片后，本集会自动继承最新已确认内容再解锁。</p> : null}

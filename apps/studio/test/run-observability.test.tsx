@@ -106,7 +106,7 @@ describe("run observability", () => {
       publishPackageAvailable: false,
     });
 
-    expect(result.currentAction?.label).toBe("编剧与独立审计 Agent 正在迭代脚本，最多 3 轮");
+    expect(result.currentAction?.label).toBe("编剧正在根据独立复核意见修改脚本，最多 3 轮");
   });
 
   it("does not claim an Agent audit for the local template script provider", () => {

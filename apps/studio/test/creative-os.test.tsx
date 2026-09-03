@@ -452,7 +452,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("link", { name: /manual-research/ })).toHaveAttribute("href", "https://example.com/evidence");
     expect(screen.getByText("84")).toBeInTheDocument();
     expect(screen.getByLabelText("机会评分维度")).toHaveTextContent("安全82%");
-    expect(screen.getAllByText(/人工评分/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/录入时估分/).length).toBeGreaterThan(0);
     await user.click(screen.getByRole("button", { name: "新建制作" }));
     expect(onProduce).toHaveBeenCalledOnce();
   });
@@ -1080,7 +1080,7 @@ describe("Creative OS", () => {
     expect(screen.getByLabelText("NewsNow 内部服务已连接")).toBeInTheDocument();
   });
 
-  it("loads production configuration even when raw trend signals stall", async () => {
+  it("loads production configuration even when unrelated resource requests stall", async () => {
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
     vi.spyOn(studioApi, "trendSources").mockResolvedValue([]);
     vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
@@ -1096,27 +1096,7 @@ describe("Creative OS", () => {
       productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
-    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
-      generatedAt: "2026-09-01T00:00:00.000Z",
-      totalItems: 0,
-      needsReviewCount: 0,
-      legacyRunsWithoutManifest: 0,
-      reconstructedRunCount: 0,
-      unreadableManifestCount: 0,
-      truncatedRunCount: 0,
-      truncatedItemCount: 0,
-      categories: { visual: 0, voice: 0, font: 0, document: 0, other: 0 },
-      items: [],
-      assetIndex: {
-        version: "video-factory/asset-index-v1",
-        totalAssets: 0,
-        duplicateUses: 0,
-        reusableCount: 0,
-        needsReviewCount: 0,
-        facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} },
-        assets: [],
-      },
-    });
+    vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
 
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 

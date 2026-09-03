@@ -150,6 +150,7 @@ describe("AssetsPage", () => {
     expect(await screen.findByRole("heading", { level: 3, name: "清晨饮水 · 镜头 2" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 1" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "夜晚书房" })).toBeInTheDocument();
+    expect(screen.getByText("MiniMax 中文配音")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /历史制作.*窗边一杯水/ })).toHaveAttribute("aria-expanded", "false");
     await user.click(screen.getByRole("button", { name: /历史制作.*窗边一杯水/ }));
     expect(screen.getByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 1" })).toBeInTheDocument();

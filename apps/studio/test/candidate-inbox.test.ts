@@ -21,13 +21,24 @@ const trendCandidate = {
   rationale: "来自可追溯热点信号。",
   providerId: "api-topic-editor-v1",
   generatedAt: "2026-08-24T08:05:00.000Z",
-  evidence: [{
-    source: "dailyhot",
-    platform: "douyin",
-    keyword: "AI 工作流",
-    strength: 96,
-    collectedAt: "2026-08-24T08:00:00.000Z",
-  }],
+  evidence: [
+    {
+      source: "技术媒体 A",
+      platform: "douyin",
+      keyword: "AI 工作流",
+      strength: 96,
+      evidenceUrl: "https://example.com/ai-workflow",
+      collectedAt: "2026-08-24T08:00:00.000Z",
+    },
+    {
+      source: "技术媒体 B",
+      platform: "douyin",
+      keyword: "AI 工作流实测",
+      strength: 88,
+      evidenceUrl: "https://example.org/ai-workflow-test",
+      collectedAt: "2026-08-24T08:01:00.000Z",
+    },
+  ],
   score: {
     audienceReach: 90,
     visualFeasibility: 88,
@@ -70,7 +81,7 @@ describe("CandidateInboxStudio", () => {
     assert.equal(reviewCalls, 0);
     assert.equal(created.episodes.length, 6);
     assert.equal(created.episodes.every((episode) => episode.planning.auditStatus === "fallback"), true);
-    assert.match(created.episodes[0]?.planning.fallbackReason ?? "", /开拍 Agent/);
+    assert.match(created.episodes[0]?.planning.fallbackReason ?? "", /独立复核/);
     assert.equal((await series.list())[0]?.id, created.id);
   });
 
@@ -137,7 +148,7 @@ describe("CandidateInboxStudio", () => {
 
     await assert.rejects(
       () => inbox.adopt(candidate!.id, { origin: "series" }),
-      /审计 Agent 当前不可用/,
+      /开拍前独立复核/,
     );
   });
 
@@ -151,6 +162,7 @@ describe("CandidateInboxStudio", () => {
       ...trendCandidate,
       id: "trend-high-risk",
       title: "台风登陆消息持续更新",
+      evidence: [trendCandidate.evidence[0]!],
       score: { ...trendCandidate.score, complianceRisk: 72 },
     };
     const review = {
@@ -179,7 +191,7 @@ describe("CandidateInboxStudio", () => {
         rationale: "公共议题缺少可安全生成的连续现场，采用来源画面、数据和少量获授权实景更可信。",
       },
     );
-    await assert.rejects(() => inbox.adopt(highRisk.id, { origin: "trend", verificationConfirmed: true }), /至少需要 2 个独立来源/);
+    await assert.rejects(() => inbox.adopt(highRisk.id, { origin: "trend", verificationConfirmed: true }), /至少 2 个独立且可打开的来源/);
     await assert.rejects(() => inbox.adopt(review.id, { origin: "trend" }), /确认核验/);
     const adopted = await inbox.adopt(review.id, { origin: "trend", verificationConfirmed: true });
     assert.equal(adopted.verification?.status, "verified");
@@ -255,6 +267,52 @@ describe("CandidateInboxStudio", () => {
     assert.equal(strict?.editorialDecision.verdict, "skip");
     assert.match(strict?.verification.reasons[0] ?? "", /至少 2 个独立且可打开的来源/);
     assert.equal(relaxed?.verification.status, "ready");
+  });
+
+  it("fails closed when the source policy is missing", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-default-source-policy-inbox-"));
+    const opportunities = new OpportunityStudio({
+      opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
+    });
+    const series = new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) });
+    const inbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [{
+        ...trendCandidate,
+        evidence: [{ ...trendCandidate.evidence[0]!, evidenceUrl: "https://example.com/ai-workflow" }],
+      }] },
+      series,
+      opportunities,
+    });
+
+    const [candidate] = (await inbox.list({ origins: ["trend"] })).items;
+
+    assert.equal(candidate?.verification.status, "blocked");
+    assert.equal(candidate?.verification.requiredSources, 2);
+  });
+
+  it("does not treat search-result pages as original sources", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-search-result-evidence-inbox-"));
+    const opportunities = new OpportunityStudio({
+      opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
+    });
+    const series = new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) });
+    const inbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [{
+        ...trendCandidate,
+        evidence: [
+          { ...trendCandidate.evidence[0]!, source: "微博搜索", evidenceUrl: "https://s.weibo.com/weibo?q=%23AI%23" },
+          { ...trendCandidate.evidence[0]!, source: "百度搜索", evidenceUrl: "https://www.baidu.com/s?wd=AI" },
+        ],
+      }] },
+      series,
+      opportunities,
+      topicStrategy: async () => ({ customInstruction: "", sourcePolicy: "traceable_source" }),
+    });
+
+    const [candidate] = (await inbox.list({ origins: ["trend"] })).items;
+
+    assert.equal(candidate?.verification.status, "blocked");
+    assert.match(candidate?.verification.reasons[0] ?? "", /可打开的原始来源/);
   });
 
   it("can adopt a candidate the user saw just before a background trend refresh", async () => {

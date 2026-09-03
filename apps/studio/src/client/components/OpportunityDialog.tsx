@@ -109,7 +109,7 @@ function ManualFields() {
         <label className="field field-wide"><span>开场钩子</span><textarea name="hook" required rows={3} placeholder="前 3 秒要说出的关键一句" /></label>
       </div>
       <details className="opportunity-advanced">
-        <summary>高级：证据与评分</summary>
+        <summary>高级：补充证据与调整估分</summary>
         <div className="opportunity-advanced-body">
           <div className="form-section">
             <div className="form-section-heading"><h3>证据信号</h3><span>有真实来源时再补充</span></div>
@@ -120,7 +120,7 @@ function ManualFields() {
             <label className="field"><span>证据链接</span><input name="evidenceUrl" type="url" placeholder="https://" /></label>
           </div>
           <div className="form-section">
-            <div className="form-section-heading"><h3>人工评分</h3><span>0–100，合规风险分越低越好</span></div>
+            <div className="form-section-heading"><h3>各维度估分</h3><span>可按你的判断调整；合规风险分越低越好</span></div>
             <div className="score-fields">
               {SCORE_FIELDS.map(([name, label, defaultValue]) => (
                 <label className="field" key={name}><span>{label}</span><input name={name} type="number" min="0" max="100" defaultValue={defaultValue} /></label>

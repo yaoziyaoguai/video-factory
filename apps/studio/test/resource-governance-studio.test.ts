@@ -57,6 +57,8 @@ describe("ResourceGovernanceStudio", () => {
     assert.equal(manifest.assetIndex.assets[0]?.aspectRatio, "9:16");
     assert.equal(manifest.assetIndex.assets[0]?.usages[0]?.scenePosition, 1);
     assert.equal(manifest.assetIndex.assets[0]?.tags.includes("上班族"), true);
+    assert.equal(manifest.assetIndex.assets[0]?.tags.includes("stock_video"), false);
+    assert.equal(manifest.assetIndex.assets[0]?.tags.includes("pexels-stock-v1"), false);
 
     const scorecards = await studio.templateExperiments();
     const knowledge = scorecards.find((item) => item.templateId === "knowledge-explainer");

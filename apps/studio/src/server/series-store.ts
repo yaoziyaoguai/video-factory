@@ -923,7 +923,7 @@ function normalizeEpisode(episode: StudioSeriesEpisode): StudioSeriesEpisode {
       providerId: "series-roadmap-v1",
       modelId: "deterministic",
       promptVersion: "video-factory/series-migration-v2",
-      fallbackReason: "该单集创建于 Agent 策划记录启用之前。",
+      fallbackReason: "该单集创建于路线图策划记录启用之前。",
     },
   };
 }

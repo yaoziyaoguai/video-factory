@@ -1407,7 +1407,7 @@ describe("Studio API", () => {
         final: 84,
       },
       scoreProvenance: {
-        source: "人工维度评分 · topic-intelligence-v1",
+        source: "录入时估分 · topic-intelligence-v1",
         scoredAt: "2026-08-22T10:00:00.000Z",
       },
       createdAt: "2026-08-22T10:00:00.000Z",

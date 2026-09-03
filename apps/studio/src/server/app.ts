@@ -863,10 +863,10 @@ function parsePaidReconciliationInput(value: unknown): StudioPaidReconciliationI
   }
   const reconciliationId = requireText(input.reconciliationId, "核对请求编号");
   if (reconciliationId.length > 128) throw new StudioInputError("核对请求编号最多 128 个字符。");
-  const taskId = input.taskId === undefined ? undefined : requireText(input.taskId, "Provider taskId");
-  if (taskId && taskId.length > 256) throw new StudioInputError("Provider taskId 最多 256 个字符。");
+  const taskId = input.taskId === undefined ? undefined : requireText(input.taskId, "服务任务编号");
+  if (taskId && taskId.length > 256) throw new StudioInputError("服务任务编号最多 256 个字符。");
   if (taskId && input.outcome !== "resume_original") {
-    throw new StudioInputError("Provider taskId 只能用于核对原任务。");
+    throw new StudioInputError("服务任务编号只能用于核对原任务。");
   }
   const manualResolution = input.outcome === "confirmed_not_charged" || input.outcome === "confirmed_charged";
   const note = input.note === undefined ? undefined : requireText(input.note, "人工核对记录");

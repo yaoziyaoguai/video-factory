@@ -64,7 +64,7 @@ describe("JsonTemplateStore", () => {
     );
   });
 
-  it("loads built-ins and user versions newest first", async () => {
+  it("keeps curated built-ins ahead of user versions", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-templates-"));
     const file = path.join(root, "templates.json");
     const store = new JsonTemplateStore(file, BUILTIN_TEMPLATES);
@@ -73,7 +73,8 @@ describe("JsonTemplateStore", () => {
     const snapshot = await new JsonTemplateStore(file, BUILTIN_TEMPLATES).list();
     assert.equal(snapshot.storeRevision, 1);
     assert.equal(snapshot.templates.length, 7);
-    assert.equal(snapshot.templates[0]?.id, "my-photo-story");
+    assert.equal(snapshot.templates[0]?.id, BUILTIN_TEMPLATES[0]?.id);
+    assert.equal(snapshot.templates.at(-1)?.id, "my-photo-story");
   });
 
   it("resolves only published templates when a run asks for the latest version", async () => {

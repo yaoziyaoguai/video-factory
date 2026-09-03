@@ -43,7 +43,7 @@ export class JsonTemplateStore {
     const custom = state.templates
       .map((template) => parseProductionTemplate(template))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.version - left.version);
-    return { storeRevision: state.revision, templates: [...custom, ...this.builtIns] };
+    return { storeRevision: state.revision, templates: [...this.builtIns, ...custom] };
   }
 
   async get(id: string, version?: number): Promise<ProductionTemplate | undefined> {

@@ -221,10 +221,10 @@ describe("node production workspaces", () => {
     const { container } = render(<NodeWorkspace node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     const summary = container.querySelector("summary");
-    expect(summary).toHaveTextContent("审计失败，已规则回退");
+    expect(summary).toHaveTextContent("智能复核未完成，已使用基础方案");
     expect(summary).toHaveTextContent(fallbackReason);
     expect(summary).not.toHaveTextContent("自审 3 轮");
-    expect(screen.getByRole("alert")).toHaveTextContent(`审计失败，已规则回退：${fallbackReason}`);
+    expect(screen.getByRole("alert")).toHaveTextContent(`智能复核未完成，已使用基础方案：${fallbackReason}`);
   });
 
   it("shows the live agent-loop round, phase, and latest audit summary", () => {
@@ -335,9 +335,9 @@ describe("node production workspaces", () => {
     const { container } = render(<NodeWorkspace node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     const summary = container.querySelector("summary");
-    expect(summary).toHaveTextContent("审计失败，已规则回退");
+    expect(summary).toHaveTextContent("智能复核未完成，已使用基础方案");
     expect(summary).toHaveTextContent(fallbackReason);
-    expect(screen.getByRole("alert")).toHaveTextContent(`审计失败，已规则回退：${fallbackReason}`);
+    expect(screen.getByRole("alert")).toHaveTextContent(`智能复核未完成，已使用基础方案：${fallbackReason}`);
   });
 
   it("shows the immutable planned provider and model before a node executes", async () => {
@@ -973,6 +973,8 @@ describe("node production workspaces", () => {
     render(<MemoryRouter><CostDashboard dashboard={dashboard} /></MemoryRouter>);
 
     expect(screen.getByRole("heading", { name: "每一笔费用都能追到制作步骤" })).toBeInTheDocument();
+    expect(screen.getByText("已批准报价合计")).toBeInTheDocument();
+    expect(screen.queryByText("授权上限")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: /付费成片/ })).toHaveAttribute("href", "/projects/run-1");
     expect(screen.getAllByText("¥3.00").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/1 笔待核对/).length).toBeGreaterThan(0);
@@ -1012,6 +1014,7 @@ describe("node production workspaces", () => {
 
     expect(screen.getByText("按量调用失败")).toBeInTheDocument();
     await userEvent.click(screen.getByText("逐角色消费明细"));
+    expect(screen.getByText("Codex · gpt-5.6-terra")).toBeInTheDocument();
     expect(screen.getByText("订阅任务失败 · 不产生按量费用")).toBeInTheDocument();
   });
 });

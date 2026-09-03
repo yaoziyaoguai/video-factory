@@ -1288,7 +1288,7 @@ function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undef
 }
 
 function agentLoopActionLabel(role: string, progress: StudioAgentLoopProgress): string {
-  const prefix = `${role} Agent 第 ${progress.iteration}/${progress.maxIterations} 轮`;
+  const prefix = `${role}第 ${progress.iteration}/${progress.maxIterations} 轮`;
   if (progress.phase === "auditing") return `${prefix}：独立审计正在检查`;
   if (progress.phase === "repairing") return `${prefix}：按上一轮审计修订`;
   if (progress.phase === "passed") return `${prefix}：独立审计已通过`;

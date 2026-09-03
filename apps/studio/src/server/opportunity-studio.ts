@@ -63,7 +63,7 @@ export class OpportunityStudio {
             ? "系列策划 · series-planner-v1"
             : input.origin === "trend"
               ? "热点候选 · topic-intelligence-v1"
-              : "人工维度评分 · topic-intelligence-v1",
+              : "录入时估分 · topic-intelligence-v1",
           scoredAt: timestamp,
         },
         createdAt: timestamp,

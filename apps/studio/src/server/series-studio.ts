@@ -327,8 +327,8 @@ export class SeriesStudio {
     if (!needsGreenlight) return series;
     if (!this.options.planningAgent) {
       throw new SeriesStoreConflictError(episode.canonBaseRevision !== series.canon.revision
-        ? "系列正史已更新，但开拍审计 Agent 当前不可用，不能沿用旧路线图。"
-        : "这集尚未通过独立开拍审计，审计 Agent 当前不可用，不能进入制作。");
+        ? "系列已定版内容有更新，但开拍前复核当前不可用，不能沿用旧路线图。"
+        : "这集尚未通过开拍前独立复核，当前不能进入制作。");
     }
     const reviewed = await this.options.planningAgent.reviewEpisode(series, episode);
     return this.options.series.rebaseEpisodePlan(
@@ -372,13 +372,13 @@ export class SeriesStudio {
     return this.planner.planEpisodes(series, count, undefined, {
       source: "rules",
       role: "系列总编",
-      auditRole: "开拍前独立质量审计 Agent",
+      auditRole: "开拍前独立质量复核",
       auditStatus: "fallback",
       auditIterations: 0,
       providerId: "series-roadmap-v2",
       modelId: "deterministic",
       promptVersion: "video-factory/series-rules-v2",
-      fallbackReason: "已先保存可编辑路线图；采用单集前会由系列开拍 Agent 基于最新正史完成独立审计。",
+      fallbackReason: "已先保存可编辑路线图；采用单集前会基于最新已定版内容完成独立复核。",
     });
   }
 }
