@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { SeedreamImageAdapter } from "../src/index.js";
+import { ProviderRequestRejectedError, SeedreamImageAdapter } from "../src/index.js";
 
 describe("SeedreamImageAdapter", () => {
   it("requests one vertical image through the official Ark endpoint", async () => {
@@ -46,6 +46,22 @@ describe("SeedreamImageAdapter", () => {
     await assert.rejects(
       () => adapter.generate({ prompt: "竖屏画面", ratio: "9:16" }),
       /image data is missing/i,
+    );
+  });
+
+  it("marks an explicit HTTP rejection as a definitive pre-submission failure", async () => {
+    const adapter = new SeedreamImageAdapter({
+      apiKey: "secret-ark-key",
+      model: "doubao-seedream-test",
+      fetch: async () => Response.json({
+        error: { message: "The input text may contain sensitive information." },
+      }, { status: 400 }),
+    });
+
+    await assert.rejects(
+      () => adapter.generate({ prompt: "竖屏画面", ratio: "9:16" }),
+      (error: unknown) => error instanceof ProviderRequestRejectedError
+        && /sensitive information/i.test(error.message),
     );
   });
 });

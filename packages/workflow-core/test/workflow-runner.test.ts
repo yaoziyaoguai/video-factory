@@ -795,6 +795,63 @@ describe("WorkflowRunner", () => {
     assert.equal(calls, 1);
   });
 
+  it("unlocks a metered failure when the receipt proves no request was submitted", async () => {
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "automatic-paid-image",
+      label: "Automatic paid image",
+      modelId: "image-v1",
+      capability: "asset.prepare",
+      transport: "http_api",
+      billing: "metered",
+      approvalPolicy: "automatic",
+      estimatedCostCny: 0.25,
+      maxCostCny: 0.25,
+      maxAttempts: 1,
+      run: () => ({ rejected: true }),
+    });
+    const definition: WorkflowDefinition = {
+      id: "automatic-paid-definitive-rejection",
+      name: "Automatic paid definitive rejection",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "automatic-paid-image",
+        mode: "automatic",
+        execute: async (input, context) => {
+          await context.resolveProvider({
+            capability: "asset.prepare",
+            providerId: "automatic-paid-image",
+          }).run(input, context);
+          return {
+            status: "failed",
+            error: "provider rejected before creating a task",
+            receipt: {
+              providerId: "automatic-paid-image",
+              providerLabel: "Automatic paid image",
+              modelId: "image-v1",
+              transport: "http_api",
+              billing: "metered",
+              estimatedCostCny: 0.25,
+              actualCostCny: 0,
+              actualCostSource: "configured_rate",
+              meteredAttemptCount: 0,
+              meteredFailedAttemptCount: 0,
+            },
+          };
+        },
+      }],
+    };
+
+    const failed = await new WorkflowRunner({ providers: registry }).run(definition, {});
+
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.nodeRuns[0]?.outcomeUncertain, undefined);
+    assert.equal(failed.nodeRuns[0]?.executionReceipt?.meteredAttemptCount, 0);
+  });
+
   it("allows retry when an authorized node fails before invoking its metered provider", async () => {
     let providerCalls = 0;
     const registry = new ProviderRegistry();

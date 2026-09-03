@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import {
   GenerativeAssetWorkerClient,
+  ProviderRequestRejectedError,
   WORKER_PROTOCOL_VERSION,
   type VideoGenerationAdapter,
   type ImageGenerationAdapter,
@@ -704,7 +705,7 @@ describe("GenerativeAssetWorkerClient", () => {
         adapter: {
           providerId: "seedance-video-v1",
           generate: async () => {
-            throw new Error("model has not been activated");
+            throw new ProviderRequestRejectedError("model has not been activated");
           },
         },
       }],
@@ -716,6 +717,10 @@ describe("GenerativeAssetWorkerClient", () => {
 
     assert.equal(jobs.jobs[0].taskId, undefined);
     assert.equal(jobs.jobs[0].status, "failed");
+    const ledgers = await readdir(path.join(root, ".generation-operations"));
+    const ledger = JSON.parse(await readFile(path.join(root, ".generation-operations", ledgers[0]!), "utf8"));
+    assert.equal(ledger.items[0].state, "terminal_failed");
+    assert.equal(ledger.items[0].actualCostCny, undefined);
     assert.equal(response.diagnostics?.actualCostCny, 0);
     assert.equal(response.diagnostics?.meteredAttemptCount, 0);
     assert.equal(response.diagnostics?.meteredFailedAttemptCount, 0);

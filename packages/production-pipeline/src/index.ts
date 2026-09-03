@@ -122,6 +122,7 @@ export type {
   WanVideoAdapterOptions,
 } from "./video-generation.js";
 export { SeedreamImageAdapter } from "./image-generation.js";
+export { ProviderRequestRejectedError } from "./provider-request-error.js";
 export type {
   ImageAspectRatio,
   ImageGenerationAdapter,

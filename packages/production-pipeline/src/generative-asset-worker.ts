@@ -16,6 +16,7 @@ import type {
   ImageGenerationAdapter,
   ImageGenerationProgress,
 } from "./image-generation.js";
+import { ProviderRequestRejectedError } from "./provider-request-error.js";
 
 interface WorkerClient {
   run(request: Record<string, unknown>): Promise<WorkerResponse>;
@@ -1879,7 +1880,11 @@ async function generatePaidAssetItem(options: {
     return generated;
   } catch (error) {
     if (ledgerItem && options.ledgerPath && options.ledger) {
-      if (ledgerItem.state !== "terminal_failed" && ledgerItem.state !== "submitted") {
+      if (error instanceof ProviderRequestRejectedError && !ledgerItem.taskId) {
+        ledgerItem.state = "terminal_failed";
+        delete ledgerItem.actualCostCny;
+        delete ledgerItem.actualCostSource;
+      } else if (ledgerItem.state !== "terminal_failed" && ledgerItem.state !== "submitted") {
         ledgerItem.state = "unknown";
       }
       ledgerItem.error = error instanceof Error ? error.message : String(error);

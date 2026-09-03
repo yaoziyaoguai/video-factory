@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { ProviderRequestRejectedError } from "./provider-request-error.js";
 
 export type ImageAspectRatio = "9:16" | "16:9" | "1:1" | "3:4" | "4:3";
 
@@ -79,7 +80,9 @@ export class SeedreamImageAdapter implements ImageGenerationAdapter {
     }
     const record = requiredRecord(value, "Seedream response");
     if (!response.ok) {
-      throw new Error(providerError(record, `Seedream request failed with status ${response.status}.`));
+      throw new ProviderRequestRejectedError(
+        providerError(record, `Seedream request failed with status ${response.status}.`),
+      );
     }
     if (!Array.isArray(record.data) || record.data.length === 0) {
       throw new Error("Seedream image data is missing.");

@@ -1985,8 +1985,8 @@ describe("Studio client", () => {
           quoteItemId: "scene-1",
           scenePosition: 1,
           executorProviderId: "ai-shot-router-v1",
-          providerId: "seedance-video-v1",
-          modelId: "seedance-v1",
+          providerId: "seedream-image-v1",
+          modelId: "seedream-image-v1",
           state: "submitted",
           estimatedCostCny: 2.4,
           taskId: "provider-task-1",
@@ -1994,6 +1994,17 @@ describe("Studio client", () => {
           actualCostSource: "configured_rate",
         }],
       }}
+      providers={[{
+        id: "seedream-image-v1",
+        capability: "asset.prepare",
+        label: "Seedream 关键画面",
+        available: true,
+        kind: "external",
+        billing: "metered",
+        status: "ready",
+        description: "关键画面",
+        modes: ["文生图"],
+      }]}
       decisionPending={false}
       onDecision={async () => undefined}
       onRestart={vi.fn()}
@@ -2001,7 +2012,8 @@ describe("Studio client", () => {
       onReconcilePaidNode={reconcile}
     />);
 
-    expect(screen.getByText("Seedance · seedance-v1")).toBeInTheDocument();
+    expect(screen.getByText("Seedream")).toBeInTheDocument();
+    expect(screen.queryByText(/seedream-image-v1/)).not.toBeInTheDocument();
     expect(screen.getByText(/provider-task-1/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "调整方案后重新制作" })).not.toBeInTheDocument();
@@ -2128,6 +2140,7 @@ describe("Studio client", () => {
       onReconcilePaidNode={reconcile}
     />);
 
+    expect(screen.getByText("Seedance · seedance-v1")).toBeInTheDocument();
     expect(screen.getByText(/只会为明确失败或尚未执行的镜头生成新报价/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "为未完成镜头重新报价" }));
     expect(reconcile).toHaveBeenCalledWith("assets", { outcome: "requote" });

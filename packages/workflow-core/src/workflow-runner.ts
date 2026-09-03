@@ -1219,7 +1219,6 @@ export class WorkflowRunner {
       const executionFinishedAt = context.now();
 
       const status = result.status ?? "succeeded";
-      if (status !== "failed") delete nodeRun.outcomeUncertain;
       validateNodeResultStatus(node.id, status, result);
       receiptDraft = execution.receipt;
       if (spendAuthorizationExemptProviderId) {
@@ -1232,6 +1231,9 @@ export class WorkflowRunner {
         };
       }
       validateReceiptCosts(receiptDraft, authorization, automaticMeteredProvider);
+      if (status !== "failed" || isDefinitiveZeroAttemptFailure(receiptDraft)) {
+        delete nodeRun.outcomeUncertain;
+      }
 
       for (const draft of result.artifacts ?? []) {
         const artifact = context.addArtifact(draft);
@@ -1314,6 +1316,13 @@ export class WorkflowRunner {
       return nodeRun;
     }
   }
+}
+
+function isDefinitiveZeroAttemptFailure(receipt: NodeExecutionReceiptDraft): boolean {
+  return receipt.billing === "metered"
+    && receipt.meteredAttemptCount === 0
+    && (receipt.meteredFailedAttemptCount ?? 0) === 0
+    && (receipt.actualCostCny ?? 0) === 0;
 }
 
 function validateResumeRequest<TInitialInput>(
