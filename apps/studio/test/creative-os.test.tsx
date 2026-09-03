@@ -1118,7 +1118,7 @@ describe("Creative OS", () => {
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
     const defaultsLink = screen.getByRole("link", { name: "创作默认" });
-    const rolesLink = screen.getByRole("link", { name: "岗位模型" });
+    const rolesLink = screen.getByRole("link", { name: "制作分工" });
     expect(defaultsLink).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("heading", { name: "新建制作默认值" }).closest("section")).toHaveAttribute("data-active", "true");
     expect(screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section")).not.toHaveAttribute("data-active");

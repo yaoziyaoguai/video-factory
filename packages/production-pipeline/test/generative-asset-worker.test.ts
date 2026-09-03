@@ -761,7 +761,11 @@ describe("GenerativeAssetWorkerClient", () => {
           camera: "缓慢推进后保持稳定",
           lighting: "暖色自然侧逆光",
           negativeConstraints: ["不出现文字水印"],
-          successCriteria: ["蒸汽持续可见", "食物主体不变形"],
+          successCriteria: [
+            "蒸汽持续可见",
+            "食物主体不变形",
+            "成片中 Seedream 素材的 AIGC 标识清晰可见且未被裁切、遮挡或移除",
+          ],
           rationale: "付费只用于无法精准检索的核心特写",
         },
       ],
@@ -799,6 +803,7 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.match(generated[0]!, /可见动作：白色蒸汽/);
     assert.match(generated[0]!, /必须实现：蒸汽持续可见/);
     assert.doesNotMatch(generated[0]!, /预算|审批|版权|工作流/);
+    assert.doesNotMatch(generated[0]!, /Seedream|AIGC|标识|裁切|遮挡|移除/);
     const plan = JSON.parse(await readFile(String(response.output?.assetPlanPath), "utf8"));
     assert.equal(plan.scene_assets[0].provider, "pexels");
     assert.equal(plan.scene_assets[1].provider, "seedance-video-v1");

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
-import { providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
+import { catalogModelLabel, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
@@ -100,7 +100,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const fallbackReason = useMemo(() => agentFallbackReason(execution), [execution]);
   const capability = useMemo(() => fallbackReason
     ? `智能复核未完成，已使用基础方案 · ${fallbackReason}`
-    : creatorCapabilityLabel(execution, node.spendPlan), [execution, fallbackReason, node.spendPlan]);
+    : creatorCapabilityLabel(execution, node.spendPlan, providers), [execution, fallbackReason, node.spendPlan, providers]);
   const assetProviderIds = useMemo(() => configuredAssetProviderIds(nodes), [nodes]);
   const editableAssetProviders = useMemo(
     () => providers.filter((provider) => assetProviderIds.includes(provider.id)),
@@ -835,6 +835,7 @@ function shortId(value: string | undefined): string | undefined {
 function creatorCapabilityLabel(
   execution: StudioNode["executionReceipt"] | StudioNode["plannedExecution"] | undefined,
   spendPlan: StudioNode["spendPlan"],
+  providers: StudioProvider[],
 ): string | undefined {
   const providerId = execution?.providerId ?? spendPlan?.providerId;
   const modelId = execution?.modelId ?? spendPlan?.modelId;
@@ -842,8 +843,10 @@ function creatorCapabilityLabel(
   const reasoningEffort = execution?.parameters?.reasoningEffort;
   const loopIterations = execution?.parameters?.agentLoopIterations;
   const auditEffort = execution?.parameters?.auditReasoningEffort;
+  const providerName = providerLabel(providerId) ?? execution?.providerLabel ?? providerId;
+  const modelName = catalogModelLabel(providers, modelId);
   return [
-    `本次使用 ${providerLabel(providerId) ?? execution?.providerLabel ?? providerId} · ${modelId}`,
+    `本次使用 ${providerName}${modelId === providerId || modelName === providerName ? "" : ` · ${modelName}`}`,
     typeof reasoningEffort === "string" ? reasoningEffortLabel(reasoningEffort) : undefined,
     typeof loopIterations === "number" ? `AI 创作与独立质量审计 · ${loopIterations}/3 轮` : undefined,
     typeof auditEffort === "string" ? `质量复核：${reasoningEffortLabel(auditEffort)}` : undefined,

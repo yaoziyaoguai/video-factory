@@ -53,6 +53,7 @@ export function providerLabel(providerId?: string): string | undefined {
     "api-visual-director-v1": "Codex 视觉导演",
     "codex-reference-grammar-v1": "Codex 参考视频分析",
     "codex-asset-ranker-v1": "Codex 候选画面排序",
+    "asset-candidate-search-v1": "图库候选搜索",
     "codex-publish-copy-v1": "Codex 发行编辑",
     "ai-shot-router-v1": "AI 逐镜选择画面来源",
     "local-editorial-v1": "本地编辑画面",
@@ -83,6 +84,15 @@ export function providerModelLabel(
 ): string {
   if (!modelId) return "自动选择";
   return provider?.modelProfiles?.find((model) => model.id === modelId)?.label ?? modelId;
+}
+
+export function catalogModelLabel(providers: Array<{ modelProfiles?: Array<{ id: string; label: string }> }>, modelId?: string): string | undefined {
+  if (!modelId) return undefined;
+  for (const provider of providers) {
+    const label = provider.modelProfiles?.find((model) => model.id === modelId)?.label;
+    if (label) return label;
+  }
+  return modelId;
 }
 
 export function humanizeCreativeText(value: string): string {
@@ -119,6 +129,11 @@ export function humanizeCreativeText(value: string): string {
 export function creatorFacingTechnicalText(value?: string): string | undefined {
   if (!value) return undefined;
   return value
+    .replace(/Immutable execution trace containing the exact prompt, prompt pack, provider, and model; no credentials are stored\.?/gi, "保存了本次使用的提示、配置、服务和模型，不包含任何密钥。")
+    .replace(/AI-directed per-shot asset plan with actual provider provenance\.?/gi, "按导演逐镜方案生成的画面清单，并保留每个镜头的实际来源。")
+    .replace(/External generation task IDs retained for audit\.?/gi, "保留生成任务编号，便于核对服务状态与账单。")
+    .replace(/AI-generated (?:image|video) selected by the director plan; review terms, likeness rights, and AIGC disclosure\.?/gi, "由导演方案选中的 AI 画面；发布前需核对使用条款、肖像权和 AI 内容声明。")
+    .replace(/AI-generated (?:image|video); review provider terms, likeness rights, and AIGC disclosure before publishing\.?/gi, "AI 生成画面；发布前需核对使用条款、肖像权和 AI 内容声明。")
     .replace(/Series Bible/gi, "系列设定")
     .replace(/\bCanon\b/gi, "已确认内容")
     .replace(/\bAgent\b/gi, "AI")
