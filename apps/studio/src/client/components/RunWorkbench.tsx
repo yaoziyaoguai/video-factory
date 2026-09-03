@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { platformLabel, providerLabel } from "../presentation.js";
+import { platformLabel, providerLabel, providerModelLabel } from "../presentation.js";
 import { NodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 
@@ -223,6 +223,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               </>}
               {visiblePaidNodeSummary ? <PaidOperationPanel
                 summary={visiblePaidNodeSummary}
+                providers={providers}
                 busy={nodeMutationPending}
                 {...(onReconcilePaidNode ? { onReconcile: onReconcilePaidNode } : {})}
               /> : null}
@@ -302,8 +303,9 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   );
 }
 
-function PaidOperationPanel({ summary, busy, onReconcile }: {
+function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
   summary: StudioPaidNodeSummary;
+  providers: StudioProvider[];
   busy: boolean;
   onReconcile?: (nodeId: string, input: StudioPaidReconciliationDraft) => Promise<void>;
 }) {
@@ -362,7 +364,7 @@ function PaidOperationPanel({ summary, busy, onReconcile }: {
     <div className="paid-operation-items">
       {summary.items.map((item) => <article key={`${item.operationId}:${item.itemRequestId}`}>
         <header><strong>镜头 {item.scenePosition}</strong><span>{paidOperationStateLabel(item.state)}</span></header>
-        <p>{paidProviderName(item.providerId)} · {item.modelId}</p>
+        <p>{paidProviderIdentity(providers, item.providerId, item.modelId)}</p>
         {item.taskId ? <code>服务商任务编号：{item.taskId}</code> : <small>尚无服务商任务编号</small>}
         <small>{paidOperationCostLabel(item)}</small>
       </article>)}
@@ -430,6 +432,14 @@ type StudioPaidReconciliationDraft = Omit<StudioPaidReconciliationInput, "expect
 
 function paidProviderName(providerId: string): string {
   return (providerLabel(providerId) ?? providerId).replace(/ (?:视频|图片)生成$/, "");
+}
+
+function paidProviderIdentity(providers: StudioProvider[], providerId: string, modelId: string): string {
+  const providerName = paidProviderName(providerId);
+  const provider = providers.find((candidate) => candidate.id === providerId);
+  if (modelId === providerId) return providerName;
+  const modelName = providerModelLabel(provider, modelId);
+  return modelName === providerName ? providerName : `${providerName} · ${modelName}`;
 }
 
 function paidOperationStateLabel(state: StudioPaidNodeSummary["items"][number]["state"]): string {

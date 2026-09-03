@@ -1860,6 +1860,119 @@ describe("ProductionPipeline", () => {
     assert.equal(crashReplayAssetCalls.at(-1)?.commandId, operationId);
   });
 
+  it("re-quotes a persisted pre-submission rejection without asking for manual billing confirmation", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-paid-pre-submission-"));
+    const worker = new FakeWorker();
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      providerRuntimeMetadata: [{
+        id: "seedream-image-v1",
+        label: "Seedream 关键画面",
+        modelId: "doubao-seedream-test",
+        transport: "http_api",
+        billing: "metered",
+        estimatedCostCny: 0.25,
+        maxAttempts: 1,
+      }],
+    });
+    const interrupted = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, assets: "seedream-image-v1" },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    });
+    const assetsNode = interrupted.nodeRuns.find((node) => node.nodeId === "assets")!;
+    const scriptPath = String((interrupted.nodeRuns.find((node) => node.nodeId === "script")?.output as Record<string, unknown>)?.scriptPath);
+    const originalPlan = assetsNode.spendPlan!;
+    const operationId = "rejected-before-submission-operation";
+    const authorizationId = "authorization-before-rejection";
+    interrupted.spendAuthorizations = [{
+      id: authorizationId,
+      nodeId: originalPlan.nodeId,
+      inputVersionIds: originalPlan.inputVersionIds,
+      providerId: originalPlan.providerId,
+      modelId: originalPlan.modelId,
+      maxCostCny: originalPlan.maxCostCny,
+      maxAttempts: originalPlan.maxAttempts,
+      approvedBy: "owner",
+      approvedAt: "2026-08-24T08:00:00.000Z",
+    }];
+    assetsNode.status = "failed";
+    assetsNode.operationRequestId = operationId;
+    assetsNode.spendAuthorizationId = authorizationId;
+    assetsNode.outcomeUncertain = true;
+    assetsNode.error = "The input text may contain sensitive information.";
+    assetsNode.executionReceipt = {
+      nodeId: "assets",
+      capability: "asset.prepare",
+      providerId: "seedream-image-v1",
+      providerLabel: "Seedream 关键画面",
+      modelId: "doubao-seedream-test",
+      transport: "http_api",
+      billing: "metered",
+      status: "failed",
+      estimatedCostCny: originalPlan.estimatedCostCny,
+      actualCostCny: 0,
+      actualCostSource: "configured_rate",
+      meteredAttemptCount: 0,
+      meteredFailedAttemptCount: 0,
+      requestId: operationId,
+      spendAuthorizationId: authorizationId,
+      authorizedCostCny: originalPlan.maxCostCny,
+      startedAt: "2026-08-24T08:00:00.000Z",
+      finishedAt: "2026-08-24T08:00:01.000Z",
+    };
+    interrupted.status = "failed";
+    interrupted.finishedAt = "2026-08-24T08:00:01.000Z";
+    await writeFile(
+      path.join(workspaceRoot, "runs", interrupted.id, "run.json"),
+      `${JSON.stringify(interrupted, null, 2)}\n`,
+      "utf8",
+    );
+
+    const sourceFingerprint = await pipeline.paidAssetSourceFingerprint([scriptPath]);
+    const ledgerDirectory = path.join(workspaceRoot, "runs", interrupted.id, "nodes", "assets", ".generation-operations");
+    await mkdir(ledgerDirectory, { recursive: true });
+    const baseItem = {
+      executorProviderId: "seedream-image-v1",
+      providerId: "seedream-image-v1",
+      modelId: "doubao-seedream-test",
+      sourceFingerprint,
+      parameters: { mediaType: "image", durationSeconds: 5, ratio: "9:16" },
+      estimatedCostCny: 0.25,
+    };
+    const ledgerPath = path.join(ledgerDirectory, `${createHash("sha256").update(operationId).digest("hex")}.json`);
+    await writeFile(ledgerPath, `${JSON.stringify({
+      version: "video-factory/paid-operation-v2",
+      operationId,
+      completed: false,
+      items: [
+        { ...baseItem, itemRequestId: "unknown-scene-1", quoteItemId: "scene-1", inputFingerprint: "input-1", scenePosition: 1, state: "unknown", error: assetsNode.error },
+        { ...baseItem, itemRequestId: "prepared-scene-2", quoteItemId: "scene-2", inputFingerprint: "input-2", scenePosition: 2, state: "prepared" },
+      ],
+    }, null, 2)}\n`, "utf8");
+
+    const summary = await subject.inspectPaidNode(interrupted.id, "assets");
+    assert.equal(summary.requiresManualReconciliation, false);
+    assert.equal(summary.recommendedOutcome, "requote");
+    assert.deepEqual(summary.items.map((item) => item.state), ["terminal_failed", "prepared"]);
+
+    const requoted = await subject.reconcilePaidNode(interrupted.id, {
+      nodeId: "assets",
+      expectedRunRevision: interrupted.revision,
+      reconciliationId: "reconcile-pre-submission-rejection",
+      outcome: "requote",
+    });
+
+    assert.equal(requoted.status, "awaiting_spend_approval");
+    assert.deepEqual(
+      requoted.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan?.items?.map((item) => item.id),
+      ["scene-1", "scene-2"],
+    );
+    const persistedLedger = JSON.parse(await readFile(ledgerPath, "utf8"));
+    assert.equal(persistedLedger.items[0].state, "terminal_failed");
+  });
+
   it("creates an incremental quote for a terminal failure while preserving a materialized scene", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-paid-requote-"));
     const worker = new FakeWorker();

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { MiniMaxVideoAdapter, SeedanceVideoAdapter, WanVideoAdapter } from "../src/index.js";
+import { MiniMaxVideoAdapter, ProviderRequestRejectedError, SeedanceVideoAdapter, WanVideoAdapter } from "../src/index.js";
 import type { VideoGenerationAdapter } from "../src/index.js";
 
 describe("metered video generation adapters", () => {
@@ -381,7 +381,7 @@ describe("metered video generation adapters", () => {
 
     await assert.rejects(
       () => adapter.generate({ prompt: "测试余额错误", durationSeconds: 6, ratio: "9:16" }),
-      /insufficient balance/,
+      (error: unknown) => error instanceof ProviderRequestRejectedError && /insufficient balance/.test(error.message),
     );
   });
 
@@ -502,7 +502,7 @@ describe("metered video generation adapters", () => {
 
     await assert.rejects(
       () => adapter.generate({ prompt: "测试请求错误", durationSeconds: 5, ratio: "9:16" }),
-      /quota exceeded/,
+      (error: unknown) => error instanceof ProviderRequestRejectedError && /quota exceeded/.test(error.message),
     );
   });
 });

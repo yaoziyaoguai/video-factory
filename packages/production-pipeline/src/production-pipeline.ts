@@ -1051,6 +1051,16 @@ export class ProductionPipeline {
         && draft.nodeId === "assets"
         ? (await inspectPaidAssetLedger(nodeDirectory)).filter((item) => item.operationId === operationId)
         : [];
+      if (
+        draft.outcome === "requote"
+        && operationId
+        && draft.nodeId === "assets"
+        && isTrustedPreSubmissionAssetRejection(previousNode, items)
+      ) {
+        await this.assertExecutionLease(lease);
+        await markPaidAssetPreSubmissionRejections(nodeDirectory, operationId);
+        items = (await inspectPaidAssetLedger(nodeDirectory)).filter((item) => item.operationId === operationId);
+      }
       let voiceOperation = operationId && draft.nodeId === "voice"
         ? await readPaidVoiceOperation(nodeDirectory, operationId)
         : undefined;
@@ -1254,16 +1264,21 @@ export class ProductionPipeline {
     const ledgerItems = (await inspectPaidAssetLedger(
       nodeDirectory,
     )).filter((item) => item.operationId === operationId);
-    const requiresManualReconciliation = ledgerItems.length === 0 || ledgerItems.some((item) => (
+    const effectiveItems = isTrustedPreSubmissionAssetRejection(node, ledgerItems)
+      ? ledgerItems.map((item) => item.state === "unknown" && !item.taskId
+        ? { ...item, state: "terminal_failed" as const, actualCostCny: undefined, actualCostSource: undefined }
+        : item)
+      : ledgerItems;
+    const requiresManualReconciliation = effectiveItems.length === 0 || effectiveItems.some((item) => (
       (item.state === "submitted" || item.state === "unknown") && !item.taskId
     ) || (
       item.state === "provider_succeeded" && (!item.taskId || !item.resultUrl)
     ));
-    const resumeOriginalOperation = ledgerItems.some((item) => (
+    const resumeOriginalOperation = effectiveItems.some((item) => (
       item.state === "submitted"
       || item.state === "provider_succeeded"
       || item.state === "unknown"
-    )) || ledgerItems.every((item) => item.state === "materialized");
+    )) || effectiveItems.every((item) => item.state === "materialized");
     return {
       nodeId,
       operationId,
@@ -1271,7 +1286,7 @@ export class ProductionPipeline {
         ? { recommendedOutcome: resumeOriginalOperation ? "resume_original" as const : "requote" as const }
         : {}),
       requiresManualReconciliation,
-      items: ledgerItems.map((item) => ({
+      items: effectiveItems.map((item) => ({
         operationId: item.operationId,
         itemRequestId: item.itemRequestId,
         quoteItemId: item.quoteItemId,
@@ -5167,6 +5182,50 @@ async function markPaidAssetItemsNotCharged(nodeDirectory: string, operationId: 
       || candidate.state === "provider_succeeded" && (!candidate.taskId || !candidate.resultUrl)) {
       candidate.state = "terminal_failed";
       candidate.error = "Manual reconciliation confirmed that this provider task was not charged.";
+      delete candidate.actualCostCny;
+      delete candidate.actualCostSource;
+    }
+  }
+  ledger.completed = false;
+  await writeJsonRecordAtomically(pathname, ledger);
+}
+
+function isTrustedPreSubmissionAssetRejection(
+  node: Pick<WorkflowRun<ProductionBrief>["nodeRuns"][number], "executionReceipt">,
+  items: readonly PaidAssetLedgerItemSummary[],
+): boolean {
+  const receipt = node.executionReceipt;
+  return receipt?.billing === "metered"
+    && receipt.meteredAttemptCount === 0
+    && (receipt.meteredFailedAttemptCount ?? 0) === 0
+    && (receipt.actualCostCny ?? 0) === 0
+    && items.some((item) => item.state === "unknown" && !item.taskId)
+    && items.every((item) => item.state === "prepared"
+      || item.state === "terminal_failed"
+      || item.state === "unknown" && !item.taskId);
+}
+
+async function markPaidAssetPreSubmissionRejections(nodeDirectory: string, operationId: string): Promise<void> {
+  const pathname = path.join(
+    nodeDirectory,
+    ".generation-operations",
+    `${createHash("sha256").update(operationId).digest("hex")}.json`,
+  );
+  const ledger = JSON.parse(await readFile(pathname, "utf8")) as {
+    version?: unknown;
+    operationId?: unknown;
+    completed?: unknown;
+    items?: unknown;
+  };
+  if (ledger.version !== "video-factory/paid-operation-v2"
+    || ledger.operationId !== operationId
+    || !Array.isArray(ledger.items)) {
+    throw new Error("Paid operation ledger is incompatible or corrupted.");
+  }
+  for (const candidate of ledger.items) {
+    if (!isObjectRecord(candidate)) throw new Error("Paid operation ledger is incompatible or corrupted.");
+    if (candidate.state === "unknown" && !candidate.taskId) {
+      candidate.state = "terminal_failed";
       delete candidate.actualCostCny;
       delete candidate.actualCostSource;
     }
