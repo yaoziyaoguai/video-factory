@@ -99,7 +99,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
   const fallbackReason = useMemo(() => agentFallbackReason(execution), [execution]);
   const capability = useMemo(() => fallbackReason
-    ? `审计失败，已规则回退 · ${fallbackReason}`
+    ? `智能复核未完成，已使用基础方案 · ${fallbackReason}`
     : creatorCapabilityLabel(execution, node.spendPlan), [execution, fallbackReason, node.spendPlan]);
   const assetProviderIds = useMemo(() => configuredAssetProviderIds(nodes), [nodes]);
   const editableAssetProviders = useMemo(
@@ -292,7 +292,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           <strong>{agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
           {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{node.agentLoopProgress.latestAudit.summary}</span> : <span>正在生成本轮方案，完成后由独立 AI 做质量审计。</span>}
         </div> : null}
-        {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>审计失败，已规则回退</strong>：{fallbackReason}</span></p> : null}
+        {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>智能复核未完成，已使用基础方案</strong>：{fallbackReason}</span></p> : null}
         {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />这一步的结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成。</p> : null}
         {node.executionConfiguration ? <NodeExecutionConfigurationEditor
           node={node}

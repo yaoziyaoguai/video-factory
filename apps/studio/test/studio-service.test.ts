@@ -696,6 +696,42 @@ describe("StudioService", () => {
     assert.equal(detail?.currentAction?.label, "编剧正在生成结构化脚本");
   });
 
+  it("shows creator-facing agent-loop progress without internal Agent terminology", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-live-agent-label-"));
+    const checkpointDirectory = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "agent-loop-checkpoints");
+    await mkdir(checkpointDirectory, { recursive: true });
+    await writeFile(path.join(checkpointDirectory, "progress.json"), JSON.stringify({
+      version: "video-factory/agent-loop-checkpoint-v4",
+      maxIterations: 3,
+      status: "running",
+      completed: [{ iteration: 1, audit: { verdict: "repair", score: 70, summary: "开场需要更具体。" } }],
+      pendingCandidate: { iteration: 2, candidate: { title: "第二轮脚本" } },
+    }), "utf8");
+    const run = waitingRun(workspaceRoot);
+    run.status = "running";
+    delete run.finishedAt;
+    run.nodeRuns = [{
+      nodeId: "script",
+      role: "编剧",
+      status: "running",
+      startedAt: "2026-08-21T10:00:10.000Z",
+      artifactIds: [],
+      qualityGateResults: [],
+    }];
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(run),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      now: () => new Date("2026-08-21T10:00:20.000Z"),
+    });
+
+    const detail = await service.getRun("run-1");
+
+    assert.equal(detail?.currentAction?.label, "编剧第 2/3 轮：独立审计正在检查");
+    assert.equal(detail?.currentAction?.label.includes("Agent"), false);
+  });
+
   it("maps the effective render and publish-package versions instead of historical artifacts", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const run = waitingRun(workspaceRoot);
@@ -2911,7 +2947,7 @@ describe("StudioService", () => {
     assert.equal(created.title, opportunityInput.title);
     assert.equal(created.score.final > 0, true);
     assert.deepEqual(created.scoreProvenance, {
-      source: "人工维度评分 · topic-intelligence-v1",
+      source: "录入时估分 · topic-intelligence-v1",
       scoredAt: "2026-08-22T10:00:00.000Z",
     });
     assert.equal(listed[0]?.id, "opportunity-1");

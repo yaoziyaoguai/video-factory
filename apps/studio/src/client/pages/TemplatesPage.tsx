@@ -270,7 +270,7 @@ export function TemplatesPage() {
             ) : (
               <button className="button button-primary" type="button" disabled={saving} onClick={() => void cloneSelected()}><Copy size={16} aria-hidden="true" />创建可编辑副本</button>
             )}
-            <span><Check size={14} aria-hidden="true" />预演只展示结构，不调用计费 API</span>
+            <span><Check size={14} aria-hidden="true" />预演只展示结构，不会产生费用</span>
           </footer>
         </section>
       ) : null}

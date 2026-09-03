@@ -67,10 +67,12 @@ export function providerLabel(providerId?: string): string | undefined {
     "python-technical-review-v1": "本地机器质检",
     "codex-visual-review-v1": "Codex 视觉审片",
     "glm-visual-review-v1": "GLM-5.3-Flash 视觉审片",
+    openai: "Codex",
     pexels: "Pexels 图库",
     pixabay: "Pixabay 图库",
     local: "本地编辑画面",
     minimax: "MiniMax",
+    "minimax-tts-v1": "MiniMax 中文配音",
     seedance: "Seedance",
   } as Record<string, string>)[providerId] ?? providerId;
 }
@@ -171,7 +173,7 @@ export const TOPIC_CATEGORY_LABELS = {
 } as const;
 
 export function scoreSourceLabel(source: string): string {
-  if (source.startsWith("人工维度评分")) return "人工评分";
+  if (source.startsWith("人工维度评分") || source.startsWith("录入时估分")) return "录入时估分";
   if (source.startsWith("历史记录")) return "历史评分";
   return source.replace(/\s*·\s*[a-z0-9._:-]+$/i, "");
 }

@@ -155,44 +155,53 @@ export function ResourcesPage() {
     setPublishError(undefined);
     setManifestError(undefined);
     setSettingsError(undefined);
+    const providerRequest = studioApi.providers()
+      .then((values) => setProviders(values))
+      .catch((error) => setProviderError(errorMessage(error)))
+      .finally(() => setProviderLoading(false));
     const signalRequest = studioApi.trendSignals(undefined, 16)
       .then((values) => setSignals(values))
       .catch(() => setSignals([]))
       .finally(() => setTrendLoading(false));
-    const [providerResult, trendResult, serviceResult, capabilityResult, settingsResult, publishResult, manifestResult] = await Promise.allSettled([
-      studioApi.providers(),
-      studioApi.trendSources(),
-      studioApi.trendServices(),
-      studioApi.localCapabilities(),
-      studioApi.settings(),
-      studioApi.publishTargets(),
-      studioApi.resourceManifest(),
+    const trendRequest = studioApi.trendSources()
+      .then((values) => setTrendSources(values))
+      .catch((error) => setTrendError(errorMessage(error)));
+    const serviceRequest = studioApi.trendServices()
+      .then((values) => setServices(values))
+      .catch((error) => setServiceError(errorMessage(error)));
+    const capabilityRequest = studioApi.localCapabilities()
+      .then((values) => setCapabilities(values))
+      .catch(() => setCapabilities([]));
+    const settingsRequest = studioApi.settings()
+      .then((value) => {
+        setSettings(value);
+        setVoiceDirection(value.voiceDirection);
+        setDefaultRecipeId(value.defaultRecipeId);
+        setRoleProviderDefaults(value.roleProviderDefaults ?? {});
+        setModelDefaults(value.modelDefaults ?? {});
+        setProductionDefaults(value.productionDefaults ?? DEFAULT_PRODUCTION_DEFAULTS);
+        setTopicStrategy({ ...DEFAULT_TOPIC_STRATEGY, ...value.topicStrategy });
+      })
+      .catch((error) => {
+        setSettings(undefined);
+        setSettingsError(errorMessage(error));
+      });
+    const publishRequest = studioApi.publishTargets()
+      .then((values) => setPublishTargets(values))
+      .catch((error) => setPublishError(errorMessage(error)));
+    const manifestRequest = studioApi.resourceManifest()
+      .then((value) => setResourceManifest(value))
+      .catch((error) => setManifestError(errorMessage(error)));
+    await Promise.allSettled([
+      providerRequest,
+      signalRequest,
+      trendRequest,
+      serviceRequest,
+      capabilityRequest,
+      settingsRequest,
+      publishRequest,
+      manifestRequest,
     ]);
-    if (providerResult.status === "fulfilled") setProviders(providerResult.value);
-    else setProviderError(errorMessage(providerResult.reason));
-    if (trendResult.status === "fulfilled") setTrendSources(trendResult.value);
-    else setTrendError(errorMessage(trendResult.reason));
-    if (serviceResult.status === "fulfilled") setServices(serviceResult.value);
-    else setServiceError(errorMessage(serviceResult.reason));
-    if (capabilityResult.status === "fulfilled") setCapabilities(capabilityResult.value);
-    if (settingsResult.status === "fulfilled") {
-      setSettings(settingsResult.value);
-      setVoiceDirection(settingsResult.value.voiceDirection);
-      setDefaultRecipeId(settingsResult.value.defaultRecipeId);
-      setRoleProviderDefaults(settingsResult.value.roleProviderDefaults ?? {});
-      setModelDefaults(settingsResult.value.modelDefaults ?? {});
-      setProductionDefaults(settingsResult.value.productionDefaults ?? DEFAULT_PRODUCTION_DEFAULTS);
-      setTopicStrategy({ ...DEFAULT_TOPIC_STRATEGY, ...settingsResult.value.topicStrategy });
-    } else {
-      setSettings(undefined);
-      setSettingsError(errorMessage(settingsResult.reason));
-    }
-    if (publishResult.status === "fulfilled") setPublishTargets(publishResult.value);
-    else setPublishError(errorMessage(publishResult.reason));
-    if (manifestResult.status === "fulfilled") setResourceManifest(manifestResult.value);
-    else setManifestError(errorMessage(manifestResult.reason));
-    setProviderLoading(false);
-    await signalRequest;
   }, []);
 
   useEffect(() => { void load(); }, [load]);
@@ -432,7 +441,7 @@ export function ResourcesPage() {
               const sourceUrl = externalResourceUrl(item.sourceUrl);
               return <article key={`${item.runId}:${item.id}`}>
                 <span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span>
-                <div><strong>{item.creator ?? item.kind}</strong><small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small><p>{item.licenseNote ?? "缺少授权说明，需要人工复核。"}</p></div>
+                <div><strong>{item.creator ?? resourceItemLabel(item)}</strong><small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small><p>{item.licenseNote ?? "缺少授权说明，需要人工复核。"}</p></div>
                 <span className={item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{item.reviewStatus === "recorded" ? "已记录" : "待复核"}</span>
                 {sourceUrl ? <a href={sourceUrl} target="_blank" rel="noreferrer" title="核验资源来源"><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
               </article>;
@@ -470,6 +479,14 @@ function ResourceHeading({ eyebrow, title, meta }: { eyebrow: string; title: str
 
 function resourceCategoryLabel(category: StudioResourceManifest["items"][number]["category"]): string {
   return ({ visual: "画面", voice: "声音", font: "字体", document: "文档", other: "其他" } as const)[category];
+}
+
+function resourceItemLabel(item: StudioResourceManifest["items"][number]): string {
+  if (item.category === "visual") return item.contentType?.startsWith("image/") ? "图片画面" : "视频画面";
+  if (item.category === "voice") return "配音音频";
+  if (item.category === "font") return "字体文件";
+  if (item.category === "document") return "制作文档";
+  return "制作资源";
 }
 
 function externalResourceUrl(value?: string): string | undefined {

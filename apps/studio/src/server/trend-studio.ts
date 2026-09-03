@@ -104,7 +104,7 @@ export class TrendStudio {
     }).catch(() => {
       this.finishRefresh(refreshId, {
         state: "failed",
-        error: "热点来源或选题 Agent 暂时不可用，请稍后手动重试。",
+        error: "热点来源或选题总编暂时不可用，请稍后手动重试。",
       });
     });
     return { refreshId, status: alreadyRunning ? "already_running" : "started", requestedAt };

@@ -58,7 +58,7 @@ describe("TrendStudio", () => {
       state: "failed",
       requestedAt: "2026-08-30T12:00:00.000Z",
       finishedAt: "2026-08-30T12:00:00.000Z",
-      error: "热点来源或选题 Agent 暂时不可用，请稍后手动重试。",
+      error: "热点来源或选题总编暂时不可用，请稍后手动重试。",
     });
   });
 

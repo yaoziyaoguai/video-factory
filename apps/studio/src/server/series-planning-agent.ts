@@ -107,7 +107,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
       planning: {
         source: "agent",
         role: "系列总编",
-        auditRole: "独立质量审计 Agent",
+        auditRole: "独立质量复核",
         auditStatus: "passed",
         auditIterations: execution.agentLoop?.iterations.length ?? 1,
         ...(finalAudit ? { auditScore: finalAudit.score, auditSummary: finalAudit.summary } : {}),
@@ -187,7 +187,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
       planning: {
         source: episode.planning.source === "human" ? "human" : "agent",
         role: "系列开拍总编",
-        auditRole: "独立质量审计 Agent",
+        auditRole: "独立质量复核",
         auditStatus: "passed",
         auditIterations: execution.agentLoop?.iterations.length ?? 1,
         ...(finalIteration ? { auditScore: finalIteration.audit.score, auditSummary: finalIteration.audit.summary } : {}),

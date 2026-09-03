@@ -122,9 +122,32 @@ describe("TrendOpportunityAgent", () => {
     assert.match(payload.strategy ?? "", /内容定位：替普通人解释技术变化/);
     assert.match(payload.strategy ?? "", /核心受众：关注 AI 但不想看营销稿的职场人/);
     assert.match(payload.strategy ?? "", /优先题材：\n真实工作影响\n可复现实验/);
-    assert.match(payload.strategy ?? "", /至少需要两个相互独立、可打开的来源/);
+    assert.match(payload.strategy ?? "", /至少需要两个相互独立、可打开的原始来源/);
     assert.match(payload.strategy ?? "", /必须能在 30 秒内兑现标题承诺/);
     assert.equal((payload.strategy ?? "").length <= 6_000, true);
+  });
+
+  it("describes the strict source standard when an older strategy has no source policy", async () => {
+    const codexClient = new CapturingCodexClient(() => ({
+      ideas: [{
+        signalId: "signal-ai",
+        title: "下班后的 AI 时间账本",
+        track: "ai-daily-life",
+        audience: "普通上班族",
+        painPoint: "工具很多，却没有减少疲惫",
+        hook: "先看它是否真的节省时间。",
+        rationale: "适合做低成本生活实验。",
+        novelty: 85,
+        seriesPotential: 88,
+        monetization: 72,
+      }],
+    }));
+    const model = new CodexTopicIdeaModel(codexClient);
+
+    await model.generate(signals, { customInstruction: "" });
+
+    const payload = codexClient.calls[0]!.payload as { strategy?: string };
+    assert.match(payload.strategy ?? "", /至少需要两个相互独立、可打开的原始来源/);
   });
 
   it("keeps the final custom rule after all bounded strategy fields", async () => {

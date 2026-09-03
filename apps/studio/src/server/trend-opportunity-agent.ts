@@ -285,9 +285,9 @@ function formatTopicStrategy(strategy: StudioTopicStrategy): string {
     strategy.targetAudience ? `核心受众：${strategy.targetAudience}` : undefined,
     strategy.preferredDirections ? `优先题材：\n${strategy.preferredDirections}` : undefined,
     strategy.excludedDirections ? `明确避开：\n${strategy.excludedDirections}` : undefined,
-    strategy.sourcePolicy === "primary_or_two_independent"
-      ? "来源标准：至少需要两个相互独立、可打开的来源才进入制作推荐。"
-      : "来源标准：至少保留一个可打开的来源；高风险事实仍需额外核验。",
+    strategy.sourcePolicy === "traceable_source"
+      ? "来源标准：至少保留一个可打开的原始来源；高风险事实仍需额外核验。"
+      : "来源标准：至少需要两个相互独立、可打开的原始来源才进入制作推荐。",
     strategy.customInstruction ? `补充原则：${strategy.customInstruction}` : undefined,
   ].filter((value): value is string => Boolean(value)).join("\n\n").slice(0, 6_000);
 }

@@ -814,7 +814,7 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
     expect(screen.queryByText("1 次付费审片")).not.toBeInTheDocument();
-    expect(screen.getByText(/视觉审片使用 Code Plan 额度/)).toBeInTheDocument();
+    expect(screen.getByText(/视觉审片使用订阅额度/)).toBeInTheDocument();
     expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
     const user = userEvent.setup();
     await user.type(screen.getByLabelText("视频标题"), "按次审片预算");

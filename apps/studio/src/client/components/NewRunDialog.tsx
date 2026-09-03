@@ -806,7 +806,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 <small>{[
                   meteredSelected ? "图片和视频按实际方案逐项报价，人工确认后才执行" : "图片和视频不会产生现金报价",
                   automaticVoiceProvider ? "配音自动记入成本账，不中断制作" : "",
-                  subscriptionVisualReview ? "视觉审片使用 Code Plan 额度，不产生现金报价" : "",
+                  subscriptionVisualReview ? "视觉审片使用订阅额度，不产生现金报价" : "",
                 ].filter(Boolean).join("；")}</small>
               </div>
             </section>

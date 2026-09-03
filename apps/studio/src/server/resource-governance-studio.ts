@@ -400,13 +400,9 @@ function assetReuseStatus(item: StudioResourceManifestItem, mediaKind: StudioAss
   return item.contentUrl || item.sourceUrl ? "ready" : "review_required";
 }
 
-function assetTags(item: StudioResourceManifestItem, mediaKind: StudioAssetMediaKind, origin: StudioAssetOrigin): string[] {
+function assetTags(item: StudioResourceManifestItem, _mediaKind: StudioAssetMediaKind, _origin: StudioAssetOrigin): string[] {
   return uniqueTags([
     item.runTitle,
-    item.kind,
-    item.providerId,
-    mediaKind,
-    origin,
     item.creator ?? "",
     item.query ?? "",
     ...(item.semanticTags ?? []),
