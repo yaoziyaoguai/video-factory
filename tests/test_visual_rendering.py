@@ -174,9 +174,10 @@ class VisualRenderingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = {"title": "不会显示的项目名", "slides": [{}, {}]}
-            first_scene = {"position": 1, "text": "杯壁出现水珠。"}
-            second_scene = {"position": 2, "text": "杯壁出现水珠。"}
-            changed_subtitle = {"position": 2, "text": "水珠来自空气。"}
+            # 使用所有 CI 字体都能区分的拉丁字符，避免缺少 CJK 字形时两句字幕都渲染成相同方框。
+            first_scene = {"position": 1, "text": "Condensation forms."}
+            second_scene = {"position": 2, "text": "Condensation forms."}
+            changed_subtitle = {"position": 2, "text": "Water comes from air."}
 
             first_path = write_caption_overlay(manifest, first_scene, root, 360, 640)
             first_image = Image.open(first_path).convert("RGBA")
