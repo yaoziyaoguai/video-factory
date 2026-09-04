@@ -28,10 +28,10 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
   const productionReady = !providerError && capabilities.every((item) => item.available);
   const hasTopicAgent = providers.some((provider) => provider.capability === "topic.intelligence" && provider.available && provider.kind !== "test");
   const topicIntelligenceCopy = opportunity.origin === "trend"
-    ? "热点转译、机会评分与来源核验由 Codex 执行"
+    ? "热点转译、制作潜力判断与来源核验由 AI 选题总编完成"
     : opportunity.origin === "series"
-      ? "系列选题、连续性检查与开拍前复核由 Codex 执行"
-      : "自定义命题复核、机会评分与来源核验由 Codex 执行";
+      ? "系列选题、连续性检查与开拍前复核由 AI 系列总编完成"
+      : "自定义命题复核、制作潜力判断与来源核验由 AI 选题总编完成";
 
   return (
     <aside className="director-panel" aria-label="导演控制台" data-tour="director-panel">
@@ -67,7 +67,7 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
 
       <div className="model-state">
         <span>选题智能</span>
-        <strong>{hasTopicAgent ? "Codex 选题总编已接入" : "规则总编可用"}</strong>
+        <strong>{hasTopicAgent ? "AI 选题总编可用" : "规则选题可用"}</strong>
         <small>{hasTopicAgent ? topicIntelligenceCopy : "当前使用可追溯规则评分，仍由你确认最终叙事"}</small>
       </div>
 

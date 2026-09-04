@@ -8,7 +8,7 @@ import { OpportunityStudio } from "../src/server/opportunity-studio.js";
 import { JsonOpportunityStore } from "../src/server/opportunity-store.js";
 import { SeriesStudio } from "../src/server/series-studio.js";
 import { JsonSeriesStore } from "../src/server/series-store.js";
-import type { StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
+import type { StudioCandidateInboxItem, StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
 
 const trendCandidate = {
   id: "trend-1",
@@ -117,6 +117,114 @@ describe("CandidateInboxStudio", () => {
     assert.equal(result.items.length, 6);
     assert.equal(result.items.every((item) => item.origin === "series"), true);
     assert.equal(trendCalls, 0);
+  });
+
+  it("uses the latest editorial gate and omits a template when a series candidate is blocked", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-blocked-editorial-"));
+    const opportunities = new OpportunityStudio({
+      opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
+    });
+    const blockedCandidate: StudioCandidateInboxItem = {
+      ...trendCandidate,
+      id: "series-blocked-by-evidence",
+      origin: "series",
+      category: "technology",
+      freshness: "evergreen",
+      risk: "low",
+      verification: {
+        status: "blocked",
+        independentSources: 0,
+        requiredSources: 1,
+        reasons: ["系列证据尚未达到开拍标准。"],
+      },
+      editorialDecision: {
+        verdict: "produce_video",
+        score: 90,
+        reasons: ["旧路线图曾建议开拍。"],
+        guardrails: ["开拍前重新检查证据。"],
+      },
+      seriesId: "series-blocked",
+      seriesName: "待核验系列",
+      episodeNumber: 1,
+      seriesSequence: { status: "ready" },
+    };
+    const inbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [] },
+      series: {
+        listCandidates: async () => [blockedCandidate],
+        advanceEpisode: async () => { throw new Error("blocked candidates cannot advance"); },
+      },
+      opportunities,
+    });
+
+    const [listed] = (await inbox.list({ origins: ["series"] })).items;
+
+    assert.equal(listed?.editorialDecision.verdict, "skip");
+    assert.equal(listed?.editorialDecision.recommendedTemplate, undefined);
+    assert.match(listed?.editorialDecision.reasons[0] ?? "", /证据门槛未满足/);
+  });
+
+  it("does not recommend templates for skipped or sequence-blocked series candidates", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-unavailable-template-"));
+    const opportunities = new OpportunityStudio({
+      opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
+    });
+    const skippedCandidate: StudioCandidateInboxItem = {
+      ...trendCandidate,
+      id: "series-skipped",
+      origin: "series",
+      category: "technology",
+      freshness: "evergreen",
+      risk: "low",
+      verification: {
+        status: "ready",
+        independentSources: 1,
+        requiredSources: 1,
+        reasons: ["系列路线图已保存。"],
+      },
+      editorialDecision: {
+        verdict: "skip",
+        score: 40,
+        reasons: ["当前单集不值得开拍。"],
+        guardrails: ["重写单集承诺后再评估。"],
+        recommendedTemplate: {
+          id: "human-mini-doc",
+          name: "人物微纪录",
+          format: "旧的模板推荐",
+          rationale: "这是不应继续展示的历史数据。",
+        },
+      },
+      seriesId: "series-unavailable",
+      seriesName: "暂缓系列",
+      episodeNumber: 1,
+      seriesSequence: { status: "ready" },
+    };
+    const sequenceBlockedCandidate: StudioCandidateInboxItem = {
+      ...skippedCandidate,
+      id: "series-sequence-blocked",
+      episodeNumber: 2,
+      editorialDecision: {
+        verdict: "produce_video",
+        score: 76,
+        reasons: ["上一集尚未完成。"],
+        guardrails: ["必须按集数顺序推进。"],
+      },
+      seriesSequence: { status: "blocked", blockedByEpisodeNumber: 1 },
+    };
+    const inbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [] },
+      series: {
+        listCandidates: async () => [skippedCandidate, sequenceBlockedCandidate],
+        advanceEpisode: async () => { throw new Error("unavailable candidates cannot advance"); },
+      },
+      opportunities,
+    });
+
+    const listed = (await inbox.list({ origins: ["series"] })).items;
+
+    assert.equal(listed.find((item) => item.id === skippedCandidate.id)?.editorialDecision.verdict, "skip");
+    assert.equal(listed.find((item) => item.id === skippedCandidate.id)?.editorialDecision.recommendedTemplate, undefined);
+    assert.equal(listed.find((item) => item.id === sequenceBlockedCandidate.id)?.editorialDecision.recommendedTemplate, undefined);
   });
 
   it("keeps a rule roadmap editable but blocks adoption while the independent audit Agent is unavailable", async () => {

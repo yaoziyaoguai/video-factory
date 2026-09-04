@@ -14,6 +14,11 @@ Alibaba ECS
     │     ├── CODEX_HOME=/var/lib/video-factory-codex/codex-home（可变运行状态）
     │     ├── auth.json -> /home/vf-codex/.codex/auth.json（只读链接）
     │     └── /run/video-factory-codex/worker.sock 0660 vf-codex:vf-bridge
+    ├── systemd: vf-zai-codex-broker（vf-zai-codex 用户，同一版本的 broker 制品）
+    │     ├── glm-5.3 文本任务 -> Coding Plan endpoint
+    │     ├── glm-5.3-flash 带图任务 -> 通用 Chat Completion endpoint
+    │     ├── /var/lib/video-factory-zai-codex/workspace（任务幂等记录）
+    │     └── /run/video-factory-zai-codex/worker.sock 0660 vf-zai-codex:vf-bridge
     ├── Nginx :80/:443
     │     └── video.wangjinkun333.me -> 127.0.0.1:4317
     └── Docker
@@ -65,11 +70,13 @@ bash scripts/setup-codex-broker-host.sh
 
 脚本创建显式数字 gid 的 `vf-bridge` 组（默认 22002，可用 `CODEX_BRIDGE_GID` 覆盖）、目录与 systemd 单元，按 vf-codex 自有路径优先的顺序校验 Node 22 与 `codex login status`（校验时的 PATH 与 unit 一致，因为 Codex CLI 的 shebang 依赖 `env node`）；未登录时直接失败并给出操作指引，绝不自动复制 auth。部署脚本会从 `getent group vf-bridge` 派生 gid 并导出 `VIDEO_FACTORY_CODEX_SOCKET_GID`——compose 插值中 shell 环境优先于 env-file，因此无需手改生产 env 文件。
 
-`scripts/deploy-production.sh` 会从候选镜像原子提取 broker 制品到 `/opt/video-factory/codex-broker/releases/<时间戳>` 并翻转 `current` 符号链接，随后重启 `vf-codex-broker` 并做 socket 健康检查；应用或公共健康检查失败时同时回滚应用镜像与上一个 broker release。
+`scripts/deploy-production.sh` 会从候选镜像原子提取 broker 制品到 `/opt/video-factory/codex-broker/releases/<时间戳>` 并翻转 `current` 符号链接，同时安装该版本的 OpenAI 与 ZAI systemd unit，再分别重启和检查两个 socket。两个 unit 都在切换前单独备份；应用、任一已配置 broker 或公共健康检查失败时，会拒绝部分可用的发布，并恢复部署前真实运行的两个 unit、broker release 与应用镜像。不能只从旧 release 取 unit，因为早期 release 尚未包含 ZAI unit。
 
 超时与重放策略：broker 单次模型任务默认 deadline 为 300s，可由 `VIDEO_FACTORY_CODEX_TIMEOUT_MS` 显式配置；Studio 客户端 deadline 为 1260s，用于覆盖单并发队列等待和同一角色最多 3 轮的多次任务。每个已受理的 `requestId` 不会因执行期失败或超时被客户端重放；仅连接层 ENOENT/ECONNREFUSED 与 503（队列满或停机、尚未受理）会做有界重试。Agent loop 的下一轮使用新的确定性 `requestId`，并在检查点中记录候选、审计和会话，基础设施失败不会静默消耗语义审计轮次。
 
-systemd 加固说明：真实 `~/.codex` 整体只读；Broker 使用 `/var/lib/video-factory-codex/codex-home` 保存 CLI 可变状态，其中 `auth.json` 只是指向真实登录凭据的只读链接。应用容器只挂载 `/run/video-factory-codex`，无法读取两个 Codex Home。首次真实任务后仍需用 `journalctl -u vf-codex-broker` 确认运行状态。
+模型切换发生在 Studio 的角色候选池，而不是 Broker 内部暗换模型。用户为节点选择一个首选模型，其余健康且合同兼容的模型按质量、稳定性与耗时形成候选顺序；只有连接、超时、限流、容量或模型不可用才继续下一个候选。输出结构错误、业务校验失败和审计返修必须停在当前模型。每个候选使用独立请求与会话边界，最终 trace 记录尝试顺序、失败原因和实际采用模型。
+
+systemd 加固说明：真实 `~/.codex` 整体只读；OpenAI Broker 使用 `/var/lib/video-factory-codex/codex-home` 保存 CLI 可变状态，其中 `auth.json` 只是指向真实登录凭据的只读链接。ZAI Broker 的 `ProtectSystem=strict` 保持不变，但必须允许写入 `/var/lib/video-factory-zai-codex` 与 `/run/video-factory-zai-codex`，否则模型结果虽已返回，幂等提交仍会因无法创建 `.video-factory/codex-idempotency` 而失败。应用容器只挂载两个 `/run` socket 目录，无法读取任何 Broker 状态目录或密钥。首次真实任务后仍需用 `journalctl -u vf-codex-broker -u vf-zai-codex-broker` 确认运行状态。
 
 `codex login status` 只验证登录凭据存在，不能证明 ECS 真的能连接 OpenAI。生产部署会在切换 release 前，以 `vf-codex` 用户请求 `https://api.openai.com/v1/models`；收到任意 HTTP 响应（通常是未带 API key 的 401）即代表 TLS 出口可达，连接超时则保持旧版本不动。若 ECS 的 OpenAI 出口依赖已有 systemd 隧道，并且该隧道会在临时 `AUTH_FAILED` 后以成功状态退出，应给对应实例安装仓库内的重连策略：
 
@@ -97,10 +104,10 @@ make setup-local-trends
 
 ## 4. 首次启动与健康检查
 
-完成第 2 节的宿主机初始化后再执行部署；部署脚本会拒绝在缺少 `vf-bridge` 组时启动。
+完成第 2 节的宿主机初始化后再执行部署。下面的手工命令只允许首次 bootstrap；后续正式发布必须由 GitHub Actions 传入精确 `RELEASE_SHA`，部署脚本会核对当前 detached worktree 的提交，不能从服务器工作区直接绕过发布流程。部署脚本也会拒绝在缺少 `vf-bridge` 组时启动。
 
 ```bash
-bash scripts/deploy-production.sh
+VIDEO_FACTORY_DEPLOYMENT_MODE=bootstrap bash scripts/deploy-production.sh
 curl --fail http://127.0.0.1:4317/api/health
 docker inspect --format '{{.State.Health.Status}}' video_factory_prod
 ```

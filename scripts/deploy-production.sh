@@ -4,13 +4,19 @@ set -Eeuo pipefail
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 environment_file="${VIDEO_FACTORY_ENV_FILE:-$repository_root/.env.docker.prod}"
 public_health_url="${PUBLIC_HEALTH_URL:-}"
+release_sha="${RELEASE_SHA:-}"
+deployment_mode="${VIDEO_FACTORY_DEPLOYMENT_MODE:-release}"
 container="video_factory_prod"
 broker_service=vf-codex-broker
 broker_unit=/etc/systemd/system/vf-codex-broker.service
 zai_broker_service=vf-zai-codex-broker
+zai_broker_unit=/etc/systemd/system/vf-zai-codex-broker.service
 broker_root=/opt/video-factory/codex-broker
 broker_user=vf-codex
 broker_socket=/run/video-factory-codex/worker.sock
+zai_broker_user=vf-zai-codex
+zai_broker_state_root=/var/lib/video-factory-zai-codex
+zai_broker_workspace="$zai_broker_state_root/workspace"
 trend_network=video-factory-trends
 compose=(docker compose --project-name video-factory --env-file "$environment_file" -f "$repository_root/docker/docker-compose.prod.yml")
 # ECS 在中国大陆构建镜像时使用阿里云 Alpine 源；CI 直接 docker build 时保留全球官方源。
@@ -19,9 +25,34 @@ zai_broker_enabled=0
 if systemctl cat "$zai_broker_service" >/dev/null 2>&1 && [[ -s /etc/video-factory/zai-codex-broker.env ]]; then
   zai_broker_enabled=1
 fi
+zai_broker_configured="$zai_broker_enabled"
 
 if [[ ! -f "$environment_file" ]]; then
   echo "Missing production environment file: $environment_file" >&2
+  exit 1
+fi
+
+if [[ "$deployment_mode" == "release" ]]; then
+  if [[ ! "$release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "Production releases require the exact 40-character RELEASE_SHA supplied by GitHub Actions." >&2
+    exit 1
+  fi
+  repository_sha="$(git -C "$repository_root" rev-parse HEAD)"
+  if [[ "$repository_sha" != "$release_sha" ]]; then
+    echo "Release checkout mismatch: expected $release_sha, found $repository_sha." >&2
+    exit 1
+  fi
+  if ! repository_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"; then
+    echo "Unable to verify release checkout cleanliness; refusing to build." >&2
+    exit 1
+  fi
+  if [[ -n "$repository_status" ]]; then
+    echo "Release checkout is not clean; refusing to build from mixed or untracked files." >&2
+    printf '%s\n' "$repository_status" >&2
+    exit 1
+  fi
+elif [[ "$deployment_mode" != "bootstrap" ]]; then
+  echo "VIDEO_FACTORY_DEPLOYMENT_MODE must be 'release' or 'bootstrap'." >&2
   exit 1
 fi
 
@@ -41,6 +72,26 @@ ensure_zai_runtime_mount() {
   fi
 }
 
+ensure_zai_workspace() {
+  local target
+  for target in "$zai_broker_state_root" "$zai_broker_workspace"; do
+    if [[ -L "$target" || -e "$target" && ! -d "$target" ]]; then
+      echo "Refusing unsafe ZAI broker workspace path: $target" >&2
+      return 1
+    fi
+  done
+  install -d -o "$zai_broker_user" -g vf-bridge -m 0750 \
+    "$zai_broker_state_root" "$zai_broker_workspace" || return 1
+  for target in "$zai_broker_state_root" "$zai_broker_workspace"; do
+    if [[ "$(stat -c %U:%G "$target")" != "$zai_broker_user:vf-bridge" \
+      || "$(stat -c %a "$target")" != 750 ]]; then
+      echo "ZAI broker workspace has unsafe ownership or mode: $target" >&2
+      return 1
+    fi
+  done
+  runuser -u "$zai_broker_user" -- test -w "$zai_broker_workspace"
+}
+
 check_codex_upstream() {
   local attempt
   for attempt in 1 2 3; do
@@ -55,6 +106,34 @@ check_codex_upstream() {
   return 1
 }
 
+check_zai_upstream() {
+  # 两个官方 models 端点都只读取目录，不提交 prompt、不创建模型任务，也不会
+  # 产生内容生成费用；要求 200 可同时验证 TLS、API key 与普通/Code Plan 两条路由。
+  "$broker_root/bin/node" --env-file=/etc/video-factory/zai-codex-broker.env --input-type=module --eval '
+    const urls = [
+      "https://open.bigmodel.cn/api/paas/v4/models",
+      "https://open.bigmodel.cn/api/coding/paas/v4/models",
+    ];
+    const key = process.env.ZAI_BIGMODEL_API_KEY?.trim();
+    if (!key) process.exit(2);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      for (const url of urls) {
+        const response = await fetch(url, {
+          method: "GET",
+          headers: { authorization: `Bearer ${key}` },
+          signal: controller.signal,
+        });
+        await response.body?.cancel();
+        if (response.status !== 200) process.exit(3);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  '
+}
+
 bridge_gid="$(getent group vf-bridge | cut -d: -f3 || true)"
 if [[ -z "$bridge_gid" ]]; then
   echo "Host is not initialized. Run scripts/setup-codex-broker-host.sh first." >&2
@@ -65,6 +144,12 @@ fi
 export VIDEO_FACTORY_CODEX_SOCKET_GID="$bridge_gid"
 if [[ "$zai_broker_enabled" -eq 0 ]]; then
   ensure_zai_runtime_mount || exit 1
+else
+  ensure_zai_workspace || exit 1
+  check_zai_upstream || {
+    echo "ZAI upstream readiness check failed; leaving the current production release untouched." >&2
+    exit 1
+  }
 fi
 check_codex_upstream || exit 1
 
@@ -84,15 +169,32 @@ fi
 
 previous_broker_release="$(readlink "$broker_root/current" 2>/dev/null || true)"
 previous_broker_unit_backup="$(mktemp)"
+previous_zai_broker_unit_backup="$(mktemp)"
 candidate_broker_release=""
 if [[ -f "$broker_unit" ]]; then
   cp -a "$broker_unit" "$previous_broker_unit_backup"
 fi
+if [[ -f "$zai_broker_unit" ]]; then
+  cp -a "$zai_broker_unit" "$previous_zai_broker_unit_backup"
+fi
+
+app_health() {
+  local url="$1" timeout_seconds="${2:-5}" health_json
+  health_json="$(curl --fail --silent --show-error --max-time "$timeout_seconds" "$url")" || return 1
+  APP_HEALTH_JSON="$health_json" "$broker_root/bin/node" --eval '
+    try {
+      const health = JSON.parse(process.env.APP_HEALTH_JSON ?? "");
+      process.exit(health?.status === "ok" ? 0 : 1);
+    } catch {
+      process.exit(1);
+    }
+  '
+}
 
 wait_for_health() {
   local attempts="$1" count
   for count in $(seq 1 "$attempts"); do
-    if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:4317/api/health >/dev/null; then
+    if app_health http://127.0.0.1:4317/api/health; then
       return 0
     fi
     sleep 5
@@ -101,14 +203,40 @@ wait_for_health() {
 }
 
 broker_health() {
-  local socket="$1"
-  curl --fail --silent --max-time 5 --unix-socket "$socket" http://localhost/health >/dev/null
+  local socket="$1" expected_profile="$2" expected_provider="$3" expected_kinds="$4" health_json
+  health_json="$(curl --fail --silent --max-time 5 --unix-socket "$socket" http://localhost/health)" || return 1
+  BROKER_HEALTH_JSON="$health_json" \
+    EXPECTED_BROKER_PROFILE="$expected_profile" \
+    EXPECTED_BROKER_PROVIDER="$expected_provider" \
+    EXPECTED_BROKER_KINDS="$expected_kinds" \
+    "$broker_root/bin/node" --eval '
+      try {
+        const health = JSON.parse(process.env.BROKER_HEALTH_JSON ?? "");
+        const expectedKinds = (process.env.EXPECTED_BROKER_KINDS ?? "").split(",").filter(Boolean);
+        const actualKinds = Array.isArray(health.taskKinds) ? health.taskKinds : [];
+        const taskModels = health.taskModels;
+        const identityMatches = health.protocolVersion === "video-factory/codex-bridge-v2"
+          && health.profileId === process.env.EXPECTED_BROKER_PROFILE
+          && health.providerId === process.env.EXPECTED_BROKER_PROVIDER
+          && typeof health.modelId === "string" && health.modelId.length > 0;
+        const kindsMatch = expectedKinds.length === actualKinds.length
+          && expectedKinds.every((kind) => actualKinds.includes(kind));
+        const modelsMatch = taskModels && typeof taskModels === "object" && !Array.isArray(taskModels)
+          && expectedKinds.every((kind) => typeof taskModels[kind] === "string" && taskModels[kind].length > 0);
+        const zaiModelsMatch = process.env.EXPECTED_BROKER_PROFILE !== "zai"
+          || taskModels["director-plan"] === health.modelId
+            && taskModels["script-draft"] === health.modelId;
+        process.exit(identityMatches && kindsMatch && modelsMatch && zaiModelsMatch ? 0 : 1);
+      } catch {
+        process.exit(1);
+      }
+    '
 }
 
 wait_for_broker_health() {
-  local socket="$1" attempts="$2" count
+  local socket="$1" attempts="$2" expected_profile="$3" expected_provider="$4" expected_kinds="$5" count
   for count in $(seq 1 "$attempts"); do
-    if broker_health "$socket"; then
+    if broker_health "$socket" "$expected_profile" "$expected_provider" "$expected_kinds"; then
       return 0
     fi
     sleep 2
@@ -116,27 +244,35 @@ wait_for_broker_health() {
   return 1
 }
 
-install_broker_unit_from_release() {
-  local release="$1" source="$1/deploy/vf-codex-broker.service"
+install_broker_units_from_release() {
+  local release="$1" source="$1/deploy/vf-codex-broker.service" zai_source="$1/deploy/vf-zai-codex-broker.service"
   if [[ ! -f "$source" ]]; then
     echo "Broker release is missing its systemd unit: $source" >&2
     return 1
   fi
   install -m 0644 "$source" "$broker_unit" || return 1
+  if [[ "$zai_broker_configured" -eq 1 ]]; then
+    if [[ ! -f "$zai_source" ]]; then
+      echo "Broker release is missing its ZAI systemd unit: $zai_source" >&2
+      return 1
+    fi
+    install -m 0644 "$zai_source" "$zai_broker_unit" || return 1
+  fi
   systemctl daemon-reload || return 1
 }
 
 restart_brokers() {
   local failed=0
-  if ! systemctl restart "$broker_service" || ! wait_for_broker_health "$broker_socket" 20; then
+  if ! systemctl restart "$broker_service" \
+    || ! wait_for_broker_health "$broker_socket" 20 openai openai \
+      topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
     failed=1
   fi
   if [[ "$zai_broker_enabled" -eq 1 ]]; then
-    if ! systemctl restart "$zai_broker_service" || ! wait_for_broker_health "$zai_broker_socket" 20; then
-      echo "Optional ZAI visual-review broker is unavailable; continuing with the primary Codex broker." >&2
-      zai_broker_enabled=0
-      systemctl stop "$zai_broker_service" || true
-      ensure_zai_runtime_mount || failed=1
+    if ! systemctl restart "$zai_broker_service" \
+      || ! wait_for_broker_health "$zai_broker_socket" 20 zai zai-bigmodel-api director-plan,script-draft,visual-review; then
+      echo "Configured ZAI Code Plan broker is unavailable; refusing a partial deployment." >&2
+      failed=1
     fi
   fi
   return "$failed"
@@ -158,11 +294,17 @@ rollback_broker() {
   if ! ln -sfn "$previous_broker_release" "$broker_root/current"; then
     return 1
   fi
-  if [[ -f "$previous_broker_release/deploy/vf-codex-broker.service" ]]; then
-    install_broker_unit_from_release "$previous_broker_release" || return 1
-  elif [[ -s "$previous_broker_unit_backup" ]]; then
+  # 回滚必须恢复部署前实际运行的 unit。旧 release 可能早于 ZAI unit 纳入制品，
+  # 只按 release 取文件会让应用已回滚、视觉审片服务却留在新版本。
+  if [[ -s "$previous_broker_unit_backup" ]]; then
     install -m 0644 "$previous_broker_unit_backup" "$broker_unit" || return 1
+    if [[ "$zai_broker_configured" -eq 1 ]]; then
+      [[ -s "$previous_zai_broker_unit_backup" ]] || return 1
+      install -m 0644 "$previous_zai_broker_unit_backup" "$zai_broker_unit" || return 1
+    fi
     systemctl daemon-reload || return 1
+  elif [[ -f "$previous_broker_release/deploy/vf-codex-broker.service" ]]; then
+    install_broker_units_from_release "$previous_broker_release" || return 1
   else
     echo "No previous broker unit is available for rollback." >&2
     return 1
@@ -172,18 +314,20 @@ rollback_broker() {
 
 rollback() {
   local failed=0
-  # 两个 broker 共享同一个 release 指针，先一起恢复并通过各自健康检查，
-  # 再恢复应用镜像，避免最终留下新旧版本混跑。
+  # 两个 broker 共享同一个 release 指针，先一起恢复并通过各自健康检查。
+  # 应用只有在候选容器已开始切换时才重建，避免 Broker 前置失败打断运行中的制作。
   rollback_broker || failed=1
-  if [[ -z "$previous_image" ]] || ! docker image inspect video-factory:rollback >/dev/null 2>&1; then
-    echo "No previous VideoFactory image is available for rollback." >&2
-    failed=1
-  else
-    echo "Restoring the previous VideoFactory image."
-    if ! docker tag video-factory:rollback video-factory:candidate \
-      || ! "${compose[@]}" up --detach --no-deps --force-recreate app \
-      || ! wait_for_health 24; then
+  if [[ "$app_mutated" -eq 1 ]]; then
+    if [[ -z "$previous_image" ]] || ! docker image inspect video-factory:rollback >/dev/null 2>&1; then
+      echo "No previous VideoFactory image is available for rollback." >&2
       failed=1
+    else
+      echo "Restoring the previous VideoFactory image."
+      if ! docker tag video-factory:rollback video-factory:candidate \
+        || ! "${compose[@]}" up --detach --no-deps --force-recreate app \
+        || ! wait_for_health 24; then
+        failed=1
+      fi
     fi
   fi
   return "$failed"
@@ -192,6 +336,7 @@ rollback() {
 deployment_mutated=0
 deployment_committed=0
 rollback_in_progress=0
+app_mutated=0
 
 rollback_on_exit() {
   local status="$?" rollback_status=0
@@ -207,7 +352,7 @@ rollback_on_exit() {
       echo "Rollback did not fully recover every component; operator intervention is required." >&2
     fi
   fi
-  rm -f "$previous_broker_unit_backup"
+  rm -f "$previous_broker_unit_backup" "$previous_zai_broker_unit_backup"
   exit "$status"
 }
 
@@ -230,7 +375,9 @@ stage_broker_release() {
     rm -rf "$staging"
     return 1
   fi
-  if [[ ! -f "$staging/broker/dist/main.js" || ! -f "$staging/broker/deploy/vf-codex-broker.service" ]]; then
+  if [[ ! -f "$staging/broker/dist/main.js"
+    || ! -f "$staging/broker/deploy/vf-codex-broker.service"
+    || ! -f "$staging/broker/deploy/vf-zai-codex-broker.service" ]]; then
     echo "Candidate image does not contain a complete broker release." >&2
     rm -rf "$staging"
     return 1
@@ -265,7 +412,7 @@ if ! ln -sfn "$candidate_broker_release" "$broker_root/current"; then
   exit 1
 fi
 
-if ! install_broker_unit_from_release "$broker_root/current"; then
+if ! install_broker_units_from_release "$broker_root/current"; then
   exit 1
 fi
 
@@ -277,6 +424,7 @@ if ! restart_brokers; then
   exit 1
 fi
 
+app_mutated=1
 if ! "${compose[@]}" up --detach --remove-orphans --force-recreate app; then
   exit 1
 fi
@@ -287,16 +435,18 @@ if ! wait_for_health 36; then
   exit 1
 fi
 
-if ! broker_health "$broker_socket"; then
+if ! broker_health "$broker_socket" openai openai \
+  topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
   echo "Codex broker became unhealthy after the app deployment." >&2
   exit 1
 fi
-if [[ "$zai_broker_enabled" -eq 1 ]] && ! broker_health "$zai_broker_socket"; then
-  echo "ZAI visual-review broker became unhealthy after the app deployment." >&2
+if [[ "$zai_broker_enabled" -eq 1 ]] && ! broker_health "$zai_broker_socket" zai zai-bigmodel-api \
+  director-plan,script-draft,visual-review; then
+  echo "ZAI Code Plan broker became unhealthy after the app deployment." >&2
   exit 1
 fi
 
-if [[ -n "$public_health_url" ]] && ! curl --fail --silent --show-error --max-time 15 "$public_health_url" >/dev/null; then
+if [[ -n "$public_health_url" ]] && ! app_health "$public_health_url" 15; then
   echo "Public health check failed: $public_health_url" >&2
   exit 1
 fi

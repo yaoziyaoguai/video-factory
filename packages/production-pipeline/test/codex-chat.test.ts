@@ -115,6 +115,18 @@ describe("CodexBridgeClient", () => {
       prompt: "Prompt Pack: video-factory/screenwriter-v2\nactual prompt",
       providerId: "openai",
       modelId: "gpt-5.4",
+      attemptedModelIds: ["glm-5.3", "gpt-5.4"],
+      modelCandidateAttempts: [{
+        modelId: "glm-5.3",
+        providerId: "zai-bigmodel-api",
+        outcome: "failed",
+        failureStage: "not_accepted",
+        failureReason: "连接失败",
+      }, {
+        modelId: "gpt-5.4",
+        providerId: "openai",
+        outcome: "succeeded",
+      }],
     } as const;
     const bridge = await startBridge((_request, response) => {
       respondWithJson(response, 200, { ok: true, output: "{\"scenes\":[]}", trace });
@@ -125,6 +137,87 @@ describe("CodexBridgeClient", () => {
       const result = await client.runTaskDetailed("script-draft", { brief: {} });
 
       assert.deepEqual(result, { output: { scenes: [] }, trace });
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("rejects malformed model candidate traces instead of silently dropping them", async () => {
+    const bridge = await startBridge((_request, response) => {
+      respondWithJson(response, 200, {
+        ok: true,
+        output: "{\"scenes\":[]}",
+        trace: {
+          taskKind: "script-draft",
+          promptVersion: "video-factory/screenwriter-v2",
+          prompt: "actual prompt",
+          providerId: "openai",
+          modelId: "gpt-5.4",
+          modelCandidateAttempts: [{ modelId: "gpt-5.4", providerId: "openai", outcome: "succeeded", failureReason: "impossible" }],
+        },
+      });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
+
+      await assert.rejects(
+        () => client.runTaskDetailed("script-draft", { brief: {} }),
+        /successful model candidate attempt cannot contain a failure/,
+      );
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("requires failed model attempts to preserve both stage and public reason", async () => {
+    const bridge = await startBridge((_request, response) => {
+      respondWithJson(response, 200, {
+        ok: true,
+        output: "{\"scenes\":[]}",
+        trace: {
+          taskKind: "script-draft",
+          promptVersion: "video-factory/screenwriter-v2",
+          prompt: "actual prompt",
+          providerId: "openai",
+          modelId: "gpt-5.4",
+          modelCandidateAttempts: [{ modelId: "glm-5.3", providerId: "zai-bigmodel-api", outcome: "failed" }],
+        },
+      });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
+
+      await assert.rejects(
+        () => client.runTaskDetailed("script-draft", { brief: {} }),
+        /failed model candidate attempt must describe its failure/,
+      );
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("requires every model attempt to preserve its broker provider identity", async () => {
+    const bridge = await startBridge((_request, response) => {
+      respondWithJson(response, 200, {
+        ok: true,
+        output: "{\"scenes\":[]}",
+        trace: {
+          taskKind: "script-draft",
+          promptVersion: "video-factory/screenwriter-v2",
+          prompt: "actual prompt",
+          providerId: "openai",
+          modelId: "gpt-5.4",
+          modelCandidateAttempts: [{ modelId: "gpt-5.4", outcome: "succeeded" }],
+        },
+      });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
+
+      await assert.rejects(
+        () => client.runTaskDetailed("script-draft", { brief: {} }),
+        /broker provider identity/,
+      );
     } finally {
       await bridge.close();
     }
@@ -258,6 +351,29 @@ describe("CodexBridgeClient", () => {
         assert.ok(error instanceof CodexBridgeError);
         assert.equal(error.transient, false);
         assert.match(error.message, /HTTP 422/);
+        return true;
+      });
+      assert.equal(bridge.requests.length, 1);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("preserves an accepted transient provider classification without replaying the request", async () => {
+    const bridge = await startBridge((_request, response) => {
+      respondWithJson(response, 422, {
+        error: "Codex task failed transiently: the model service is temporarily unavailable.",
+      });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, maxAttempts: 3, sleep: async () => {} });
+
+      await assert.rejects(() => client.runTask("script-draft", {}), (error: unknown) => {
+        assert.ok(error instanceof CodexBridgeError);
+        assert.equal(error.transient, false);
+        assert.equal(error.stage, "completed_failure");
+        assert.equal(error.statusCode, 422);
+        assert.match(error.message, /failed transiently.*temporarily unavailable/i);
         return true;
       });
       assert.equal(bridge.requests.length, 1);

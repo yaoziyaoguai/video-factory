@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { CodexExecutor } from "../src/codex-executor.js";
 import { createBrokerExecutor } from "../src/executor-factory.js";
 import { brokerRuntimeConfigFromEnv } from "../src/runtime-config.js";
-import { ZaiVisualReviewExecutor } from "../src/zai-visual-review-executor.js";
+import { ZaiCodePlanExecutor } from "../src/zai-code-plan-executor.js";
 
 describe("brokerRuntimeConfigFromEnv", () => {
   it("selects fixed OpenAI and ZAI profiles without retaining the ZAI key", () => {
@@ -26,7 +26,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
       VIDEO_FACTORY_CODEX_EFFORT: "max",
     });
     assert.equal(zai.profile.identity.profileId, "zai");
-    assert.equal(zai.profile.identity.modelId, "glm-5.3-flash");
+    assert.equal(zai.profile.identity.modelId, "glm-5.3");
     assert.equal(zai.socketPath, "/run/video-factory-zai-codex/worker.sock");
     assert.equal(zai.workspaceRoot, "/var/lib/video-factory-zai-codex/workspace");
     assert.equal(zai.effort, "max");
@@ -35,9 +35,9 @@ describe("brokerRuntimeConfigFromEnv", () => {
     const customZai = brokerRuntimeConfigFromEnv({
       VIDEO_FACTORY_CODEX_PROFILE: "zai",
       ZAI_BIGMODEL_API_KEY: fakeSecret,
-      ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3-flash-preview",
+      ZAI_TEXT_MODEL_ID: "glm-5.3-preview",
     });
-    assert.equal(customZai.profile.identity.modelId, "glm-5.3-flash-preview");
+    assert.equal(customZai.profile.identity.modelId, "glm-5.3-preview");
   });
 
   it("allows the host to configure production and deep-review models independently", () => {
@@ -72,8 +72,8 @@ describe("brokerRuntimeConfigFromEnv", () => {
       zaiEnvironment,
       { fetchFn },
     );
-    assert.ok(zai instanceof ZaiVisualReviewExecutor);
-    assert.deepEqual(zai.identity.taskKinds, ["visual-review"]);
+    assert.ok(zai instanceof ZaiCodePlanExecutor);
+    assert.deepEqual(zai.identity.taskKinds, ["director-plan", "script-draft", "visual-review"]);
 
     const openai = createBrokerExecutor(brokerRuntimeConfigFromEnv({}), {});
     assert.ok(openai instanceof CodexExecutor);

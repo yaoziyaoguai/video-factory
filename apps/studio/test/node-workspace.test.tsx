@@ -57,9 +57,161 @@ const succeededNode: StudioNode = {
   },
 };
 
+const seedanceProvider: StudioProvider = {
+  id: "seedance-video-v1",
+  capability: "asset.prepare",
+  label: "Seedance 视频生成",
+  available: true,
+  kind: "external",
+  billing: "metered",
+  defaultModelId: "seedance-v1",
+  modelProfiles: [{
+    id: "seedance-v1",
+    providerId: "seedance-video-v1",
+    providerFamily: "seedance",
+    label: "Seedance 1",
+    description: "视频生成",
+    available: true,
+    taskTypes: ["text-to-video"],
+  }],
+};
+
+const hailuoProvider: StudioProvider = {
+  id: "hailuo-video-v1",
+  capability: "asset.prepare",
+  label: "MiniMax 视频生成",
+  available: true,
+  kind: "external",
+  billing: "metered",
+  defaultModelId: "MiniMax-Hailuo-02",
+  modelProfiles: [{
+    id: "MiniMax-Hailuo-02",
+    providerId: "hailuo-video-v1",
+    providerFamily: "minimax",
+    label: "MiniMax Hailuo 02",
+    description: "视频生成",
+    available: true,
+    taskTypes: ["text-to-video"],
+  }],
+};
+
 describe("node production workspaces", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("describes this step's service and model choices in creator language", async () => {
+    const providers: StudioProvider[] = [{
+      id: "codex-screenwriter-v1",
+      capability: "script.draft",
+      label: "AI 编剧",
+      available: true,
+      kind: "external",
+      billing: "subscription",
+      defaultModelId: "gpt-5.6-terra",
+      modelProfiles: [{
+        id: "gpt-5.6-terra",
+        providerId: "codex-screenwriter-v1",
+        providerFamily: "openai",
+        label: "GPT-5.6 Terra",
+        description: "日常创作",
+        available: true,
+        taskTypes: ["text"],
+      }],
+    }, {
+      id: "python-template-v1",
+      capability: "script.draft",
+      label: "模板编剧",
+      available: true,
+      kind: "local",
+    }];
+    const node: StudioNode = {
+      id: "script",
+      label: "脚本",
+      role: "编剧",
+      status: "pending",
+      artifactIds: [],
+      qualityGateResults: [],
+      executionConfiguration: {
+        providerId: "codex-screenwriter-v1",
+        modelSelections: {},
+      },
+    };
+
+    render(<NodeWorkspace
+      node={node}
+      providers={providers}
+      runStatus="paused"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onConfigure={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    const configuration = screen.getByRole("region", { name: "编剧本次制作选择" });
+    expect(within(configuration).getByText("本次制作选择")).toBeInTheDocument();
+    expect(configuration).not.toHaveTextContent("本次执行配置");
+    await userEvent.click(within(configuration).getByRole("button", { name: "调整" }));
+    expect(within(configuration).getByRole("combobox", { name: "制作方式" })).toBeInTheDocument();
+    const modelSelect = within(configuration).getByRole("combobox", { name: "首选模型" });
+    expect(within(modelSelect).getByRole("option", { name: "使用推荐：GPT-5.6 Terra" })).toBeInTheDocument();
+    expect(configuration).not.toHaveTextContent(/执行能力|推荐默认/);
+    expect(within(configuration).getByRole("button", { name: "保存选择" })).toBeInTheDocument();
+  });
+
+  it("lets a paused node replace an unavailable inherited provider", async () => {
+    const onConfigure = vi.fn(async () => undefined);
+    const providers: StudioProvider[] = [{
+      id: "retired-screenwriter-v1",
+      capability: "script.draft",
+      label: "已停用编剧",
+      available: false,
+      kind: "external",
+      billing: "subscription",
+    }, {
+      id: "codex-screenwriter-v1",
+      capability: "script.draft",
+      label: "AI 编剧",
+      available: true,
+      kind: "external",
+      billing: "subscription",
+    }];
+    const node: StudioNode = {
+      id: "script",
+      label: "脚本",
+      role: "编剧",
+      status: "pending",
+      artifactIds: [],
+      qualityGateResults: [],
+      executionConfiguration: {
+        providerId: "retired-screenwriter-v1",
+        modelSelections: {},
+      },
+    };
+
+    render(<NodeWorkspace
+      node={node}
+      providers={providers}
+      runStatus="paused"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onConfigure={onConfigure}
+      onAuthorize={async () => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "调整" }));
+    const providerSelect = screen.getByRole("combobox", { name: "制作方式" });
+    expect(providerSelect).toBeEnabled();
+    expect(within(providerSelect).getByRole("option", { name: "已停用编剧（已失效）" })).toBeDisabled();
+    await userEvent.selectOptions(providerSelect, "codex-screenwriter-v1");
+    await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+    expect(onConfigure).toHaveBeenCalledWith("script", {
+      providerId: "codex-screenwriter-v1",
+      modelSelections: { "codex-screenwriter-v1": null },
+    });
   });
 
   it("only offers provider models compatible with the current node", async () => {
@@ -145,7 +297,7 @@ describe("node production workspaces", () => {
     expect(screen.queryByRole("spinbutton", { name: "付费镜头上限（可选）" })).not.toBeInTheDocument();
     expect(screen.queryByRole("spinbutton", { name: "单视频费用上限（可选）" })).not.toBeInTheDocument();
     expect(screen.getByText(/按实际导演方案报价.*逐笔人工确认/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
 
     expect(onConfigure).toHaveBeenCalledWith("assets", {
       modelSelections: { "pexels-stock-v1": null, "seedance-video-v1": null },
@@ -154,11 +306,67 @@ describe("node production workspaces", () => {
     });
   });
 
+  it("shows and removes an unavailable inherited asset source", async () => {
+    const onConfigure = vi.fn(async () => undefined);
+    const providers: StudioProvider[] = [{
+      id: "retired-stock-v1",
+      capability: "asset.prepare",
+      label: "已停用素材库",
+      available: false,
+      kind: "external",
+      billing: "free",
+    }, {
+      id: "pexels-stock-v1",
+      capability: "asset.prepare",
+      label: "Pexels",
+      available: true,
+      kind: "external",
+      billing: "free",
+    }];
+    const node: StudioNode = {
+      id: "assets",
+      label: "画面",
+      role: "素材导演",
+      status: "pending",
+      artifactIds: [],
+      qualityGateResults: [],
+      executionConfiguration: {
+        providerId: "ai-shot-router-v1",
+        modelSelections: {},
+        assetProviderIds: ["retired-stock-v1", "pexels-stock-v1"],
+        economics: { allowMeteredProviders: false },
+      },
+    };
+
+    render(<NodeWorkspace
+      node={node}
+      providers={providers}
+      runStatus="paused"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onConfigure={onConfigure}
+      onAuthorize={async () => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "调整" }));
+    const unavailableSource = screen.getByRole("checkbox", { name: /已停用素材库.*已失效/ });
+    expect(unavailableSource).toBeChecked();
+    await userEvent.click(unavailableSource);
+    await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+    expect(onConfigure).toHaveBeenCalledWith("assets", {
+      modelSelections: { "pexels-stock-v1": null },
+      assetProviderIds: ["pexels-stock-v1"],
+      economics: { allowMeteredProviders: false },
+    });
+  });
+
   it("shows provenance and saves a valid human output version", async () => {
     const onOverride = vi.fn(async () => undefined);
     render(<NodeWorkspace node={succeededNode} runStatus="stale" artifacts={[]} busy={false} onOverride={onOverride} onInputOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
-    expect(screen.getByText(/本次使用 Codex 编剧 · codex/)).toBeInTheDocument();
+    expect(screen.getByText("本次使用 AI 编剧")).toBeInTheDocument();
     expect(screen.queryByText("codex-screenwriter-v1")).not.toBeInTheDocument();
     expect(screen.queryByText("codex-runtime-actual")).not.toBeInTheDocument();
     expect(screen.queryByText("模板默认")).not.toBeInTheDocument();
@@ -236,13 +444,13 @@ describe("node production workspaces", () => {
         maxIterations: 3,
         phase: "auditing" as const,
         completedIterations: 1,
-        latestAudit: { verdict: "repair" as const, score: 68, summary: "开场钩子仍需具体。" },
+        latestAudit: { verdict: "repair" as const, score: 68, summary: "generated_image的on_screen_text仍有blocking。" },
       },
     };
     render(<NodeWorkspace node={node} runStatus="running" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     expect(screen.getByText("第 2 / 3 轮 · 独立审计中")).toBeInTheDocument();
-    expect(screen.getByText("上一轮 68 分：开场钩子仍需具体。")).toBeInTheDocument();
+    expect(screen.getByText("上一轮 68 分：AI 图片生成的屏幕文字仍有必须修改的问题。")).toBeInTheDocument();
   });
 
   it("keeps the role workspace open while live run data rerenders", async () => {
@@ -340,6 +548,28 @@ describe("node production workspaces", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(`智能复核未完成，已使用基础方案：${fallbackReason}`);
   });
 
+  it("distinguishes a successful backup model from a degraded rule fallback", () => {
+    const fallbackReason = "首选模型服务端错误（HTTP 500），已自动切换到替补模型。";
+    const node: StudioNode = {
+      ...succeededNode,
+      executionReceipt: {
+        ...succeededNode.executionReceipt!,
+        providerId: "openai",
+        providerLabel: "Codex 视觉审片",
+        modelId: "gpt-backup",
+        fallbackFromProviderId: "glm-visual-review-v1",
+        fallbackReason,
+        actualModelIds: ["glm-5.3-flash", "gpt-backup"],
+      },
+    };
+    const { container } = render(<NodeWorkspace node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+
+    const summary = container.querySelector("summary");
+    expect(summary).toHaveTextContent("首选模型暂时不可用，已使用替补模型");
+    expect(summary).not.toHaveTextContent("已使用基础方案");
+    expect(screen.getByRole("alert")).toHaveTextContent(`首选模型暂时不可用，已使用替补模型：${fallbackReason}`);
+  });
+
   it("shows the immutable planned provider and model before a node executes", async () => {
     const pendingNode: StudioNode = {
       id: "visual-direction",
@@ -362,7 +592,7 @@ describe("node production workspaces", () => {
     };
     render(<NodeWorkspace node={pendingNode} runStatus="running" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
-    expect(screen.getByText(/Codex 视觉导演 · gpt-5.4/)).toBeInTheDocument();
+    expect(screen.getByText(/AI 视觉导演/)).toBeInTheDocument();
     expect(screen.queryByText("api-visual-director-v1")).not.toBeInTheDocument();
     expect(screen.queryByText("模板默认")).not.toBeInTheDocument();
     expect(screen.queryByText(/director-v6/)).not.toBeInTheDocument();
@@ -382,9 +612,12 @@ describe("node production workspaces", () => {
         meteredFailedAttemptCount: 1,
       },
     };
-    render(<NodeWorkspace node={node} runStatus="stale" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    render(<NodeWorkspace node={node} providers={[{
+      ...seedanceProvider,
+      modelProfiles: [{ ...seedanceProvider.modelProfiles![0]!, id: "seedance-2.5", label: "Seedance 2.5" }],
+    }]} runStatus="stale" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
-    expect(screen.getByText(/本次使用 Seedance 视频生成 · seedance-2.5/)).toBeInTheDocument();
+    expect(screen.getByText(/本次使用 Seedance 视频生成 · Seedance 2.5/)).toBeInTheDocument();
     expect(screen.queryByText(/1 \/ 1 次计费任务失败/)).not.toBeInTheDocument();
     expect(screen.queryByText(/预估 ¥8.00/)).not.toBeInTheDocument();
     expect(screen.queryByText(/核算 ¥0.00/)).not.toBeInTheDocument();
@@ -712,7 +945,7 @@ describe("node production workspaces", () => {
       onAuthorize={async () => undefined}
     />);
 
-    expect(screen.getByText(/本次使用 Codex 编剧 · codex/)).toBeInTheDocument();
+    expect(screen.getByText("本次使用 AI 编剧")).toBeInTheDocument();
     expect(screen.queryByText(/video-factory\/screenwriter-v2/)).not.toBeInTheDocument();
     expect(screen.queryByText(/实际发送内容/)).not.toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
@@ -769,7 +1002,7 @@ describe("node production workspaces", () => {
         }],
       },
     };
-    render(<NodeWorkspace node={paidNode} nodes={[scriptNode, paidNode]} runStatus="awaiting_spend_approval" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={onAuthorize} />);
+    render(<NodeWorkspace node={paidNode} nodes={[scriptNode, paidNode]} providers={[hailuoProvider]} runStatus="awaiting_spend_approval" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={onAuthorize} />);
 
     const inputReview = screen.getByText("查看和调整这个角色收到的内容").closest("details");
     const spendGate = screen.getByRole("button", { name: "检查并确认" }).closest("section");
@@ -780,7 +1013,8 @@ describe("node production workspaces", () => {
     const dialog = screen.getByRole("dialog", { name: "确认本次费用" });
     expect(within(dialog).getByText("编剧 · 脚本")).toBeInTheDocument();
     expect(within(dialog).getByText("人工版本")).toBeInTheDocument();
-    expect(screen.getAllByText(/MiniMax-Hailuo-02/).length).toBeGreaterThan(0);
+    expect(within(dialog).queryByText("script-v2")).not.toBeInTheDocument();
+    expect(screen.getAllByText(/MiniMax Hailuo 02/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/最高 ¥3.00/).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("button", { name: "确认并执行" }));
 
@@ -819,6 +1053,7 @@ describe("node production workspaces", () => {
     };
     render(<NodeWorkspace
       node={paidNode}
+      providers={[seedanceProvider]}
       runStatus="awaiting_spend_approval"
       artifacts={[]}
       busy={false}
@@ -827,9 +1062,12 @@ describe("node production workspaces", () => {
       onRejectSpend={onRejectSpend}
     />);
 
-    expect(screen.getByText("镜头 1 · Seedance 视频生成 · seedance-v1")).toBeInTheDocument();
+    expect(screen.getByText("镜头 1 · Seedance 视频生成 · Seedance 1")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "这份报价不合适" }));
     const dialog = screen.getByRole("dialog", { name: "保存费用反馈" });
+    expect(within(dialog).getByRole("heading", { name: "把这份报价退回导演" })).toBeInTheDocument();
+    expect(within(dialog).getByText(/新方案会重新报价并再次等待你确认/)).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(/Agent|Provider|broker|schema|manifest|fallback|taskId|director-v1/i);
     await userEvent.clear(within(dialog).getByRole("spinbutton", { name: "希望下一版控制在多少元（可选）" }));
     await userEvent.type(within(dialog).getByRole("spinbutton", { name: "希望下一版控制在多少元（可选）" }), "0");
     await userEvent.type(within(dialog).getByRole("textbox", { name: "具体调整意见（可选）" }), "第二镜优先改用真实图库。");
@@ -973,7 +1211,7 @@ describe("node production workspaces", () => {
     render(<MemoryRouter><CostDashboard dashboard={dashboard} /></MemoryRouter>);
 
     expect(screen.getByRole("heading", { name: "每一笔费用都能追到制作步骤" })).toBeInTheDocument();
-    expect(screen.getByText("累计授权额度")).toBeInTheDocument();
+    expect(screen.getByText("已批准报价合计")).toBeInTheDocument();
     expect(screen.queryByText("授权上限")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: /付费成片/ })).toHaveAttribute("href", "/projects/run-1");
     expect(screen.getAllByText("¥3.00").length).toBeGreaterThan(0);
@@ -1014,7 +1252,7 @@ describe("node production workspaces", () => {
 
     expect(screen.getByText("付费服务失败")).toBeInTheDocument();
     await userEvent.click(screen.getByText("逐角色消费明细"));
-    expect(screen.getByText("Codex · gpt-5.6-terra")).toBeInTheDocument();
+    expect(screen.getByText("AI 创作服务 · gpt-5.6-terra")).toBeInTheDocument();
     expect(screen.getByText("订阅任务失败 · 不产生按量费用")).toBeInTheDocument();
   });
 });

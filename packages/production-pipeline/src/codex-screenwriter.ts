@@ -1,7 +1,7 @@
 import { CodexBridgeClient, type CodexTaskExecution } from "./codex-chat.js";
 import type { ProductionBlueprint } from "@video-factory/template-core";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
-import type { ProductionSeriesContext } from "./contracts.js";
+import type { ProductionReworkFinding, ProductionSeriesContext } from "./contracts.js";
 
 export type ScriptVisualStrategy = "stock" | "image" | "generated" | "local";
 
@@ -46,10 +46,13 @@ export interface ScreenwriterAgentInput {
     rework?: {
       sourceRunId: string;
       instruction: string;
+      findings: ProductionReworkFinding[];
       previousScript?: Record<string, unknown>;
     };
   };
+  selectedModelId?: string;
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
+  agentLoopCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
 }
 
 export interface ScreenwriterAgent {
@@ -61,6 +64,7 @@ export interface ScreenwriterAgent {
 
 export interface CodexScreenwriterAgentOptions {
   client?: CodexBridgeClient;
+  auditClient?: Pick<CodexBridgeClient, "runTaskDetailed">;
   socketPath?: string;
   timeoutMs?: number;
   maxAttempts?: number;
@@ -68,23 +72,28 @@ export interface CodexScreenwriterAgentOptions {
   sleep?: (milliseconds: number) => Promise<void>;
   maxReviewIterations?: number;
   modelId?: string;
+  sessionMode?: "stateful" | "stateless";
 }
 
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_SCREENWRITER_TIMEOUT_MS = 660_000;
 const DEFAULT_SCREENWRITER_MAX_ATTEMPTS = 2;
-export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v5|role-audit-v1|script-validator-v1";
+export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v6|role-audit-v1|script-validator-v1";
 
 // id 固定为 codex-screenwriter-v1：brief.providers.script 持久化该 id，registry 按 id 匹配 provider。
 export class CodexScreenwriterAgent implements ScreenwriterAgent {
   readonly id = "codex-screenwriter-v1";
   readonly modelId: string;
   private readonly client: CodexBridgeClient;
+  private readonly auditClient: Pick<CodexBridgeClient, "runTaskDetailed"> | undefined;
   private readonly maxReviewIterations: number;
+  private readonly sessionMode: "stateful" | "stateless";
 
   constructor(options: CodexScreenwriterAgentOptions) {
     this.modelId = options.modelId?.trim() || "codex-default";
+    this.auditClient = options.auditClient;
     this.maxReviewIterations = options.maxReviewIterations ?? 3;
+    this.sessionMode = options.sessionMode ?? "stateful";
     if (options.client) {
       this.client = options.client;
     } else {
@@ -103,6 +112,7 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
 
   // 模型输出为 unknown：先经 validateScriptDraft 硬校验，malformed/不合法直接抛错，没有任何 fallback。
   async draft(input: ScreenwriterAgentInput): Promise<ScriptDraft> {
+    this.assertSelectedModel(input.selectedModelId);
     validateScreenwriterTarget(input);
     const rawDraft = await this.client.runTask("script-draft", { brief: input.brief });
     return validateScriptDraft(rawDraft, {
@@ -112,7 +122,9 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
   }
 
   async draftDetailed(input: ScreenwriterAgentInput): Promise<CodexTaskExecution<ScriptDraft>> {
+    this.assertSelectedModel(input.selectedModelId);
     validateScreenwriterTarget(input);
+    const auditClient = this.auditClient ?? this.client;
     return runRoleAgentLoop({
       role: "编剧",
       contractVersion: SCREENWRITER_AGENT_CONTRACT_VERSION,
@@ -123,26 +135,33 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
         "事实、素材可得性、平台与模板约束均未被虚构或绕过",
         "系列单集遵守系列圣经、已内部定版 canon 与前后集连续性，并在本集形成独立兑现",
         "系列单集的 canonFacts 只记录本集已经明确建立且可供后集引用的事实，不得包含预告、计划、悬念、问题或尚待验证的结论",
+        "返工时只处理分配给 script 的 findingId；当前节点可以说明已落实修改，但不得宣称问题已经复验通过",
       ],
       maxIterations: this.maxReviewIterations,
       produce: (revision, { requestId, session }) => this.client.runTaskDetailed("script-draft", {
         brief: input.brief,
         ...(revision ? { revision } : {}),
-      }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => this.client.runTaskDetailed("role-audit", {
+      }, requestId, this.sessionMode === "stateless" ? undefined : session),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => auditClient.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
         context: screenwriterAuditContext(input.brief),
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
-      }, requestId, session),
+      }, requestId, this.sessionMode === "stateless" ? undefined : session),
       validate: (value) => validateScriptDraft(value, {
         durationSeconds: input.brief.durationSeconds,
         requireCanonFacts: Boolean(input.brief.seriesContext),
       }),
       ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
     });
+  }
+
+  private assertSelectedModel(selectedModelId: string | undefined): void {
+    if (selectedModelId && selectedModelId !== this.modelId) {
+      throw new Error(`Selected model '${selectedModelId}' is not available for screenwriting.`);
+    }
   }
 }
 
@@ -208,8 +227,10 @@ function screenwriterAuditContext(brief: ScreenwriterAgentInput["brief"]): Recor
       rework: {
         sourceRunId: brief.rework.sourceRunId,
         instruction: brief.rework.instruction,
+        findings: brief.rework.findings,
         previousScript: brief.rework.previousScript,
       },
+      verificationBoundary: "findingId 仅追踪修改要求；只有后续视觉审片的新报告批准后才算 verified，当前编剧审计不得宣称已复验。",
     } : {}),
   };
 }

@@ -7,6 +7,10 @@ import type {
   StudioProductionRoleBindingKey,
   StudioRoleProviderDefaults,
 } from "../shared/api.js";
+import {
+  DEFAULT_STUDIO_PRODUCTION_DEFAULTS,
+  DEFAULT_STUDIO_TOPIC_STRATEGY,
+} from "../shared/api.js";
 
 const PRODUCTION_ROLE_KEYS = new Set<StudioProductionRoleBindingKey>([
   "script",
@@ -36,23 +40,12 @@ export const DEFAULT_CREATOR_SETTINGS: StudioCreatorSettings = {
     pauseScale: 1,
     masteringPreset: "natural",
   },
+  voiceDirectionCustomized: false,
   defaultRecipeId: "economy-daily",
   roleProviderDefaults: {},
   modelDefaults: {},
-  productionDefaults: {
-    directorProfileId: "auto",
-    reviewMode: "manual",
-    platform: "douyin",
-    durationSeconds: 24,
-  },
-  topicStrategy: {
-    positioning: "把复杂热点转成普通人能看懂、能验证、看完有收获的短视频。",
-    targetAudience: "希望快速理解新事物，但反感标题党和空泛说教的中文短视频用户。",
-    preferredDirections: "真实生活影响\n可实证的方法或变化\n有清楚反差、过程或结论\n能发展成系列",
-    excludedDirections: "只有热度、没有新角度\n无法找到可靠画面或事实来源\n消费灾难、伤亡或未经证实的争议\n只能靠大段说明卡讲清",
-    sourcePolicy: "primary_or_two_independent",
-    customInstruction: "优先考虑 24–45 秒内能兑现观众承诺的题材。",
-  },
+  productionDefaults: { ...DEFAULT_STUDIO_PRODUCTION_DEFAULTS },
+  topicStrategy: { ...DEFAULT_STUDIO_TOPIC_STRATEGY },
 };
 
 export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
@@ -75,6 +68,7 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
         ...file.settings,
         ...patch,
         ...(patch.voiceDirection ? { voiceDirection: { ...patch.voiceDirection } } : {}),
+        voiceDirectionCustomized: patch.voiceDirection ? true : file.settings.voiceDirectionCustomized ?? false,
         roleProviderDefaults: patch.roleProviderDefaults
           ? { ...patch.roleProviderDefaults }
           : { ...file.settings.roleProviderDefaults },
@@ -107,6 +101,8 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
           ...structuredClone(DEFAULT_CREATOR_SETTINGS),
           ...parsed.settings,
           voiceDirection: { ...DEFAULT_CREATOR_SETTINGS.voiceDirection, ...parsed.settings.voiceDirection },
+          voiceDirectionCustomized: parsed.settings.voiceDirectionCustomized
+            ?? !sameVoiceDirection(parsed.settings.voiceDirection, DEFAULT_CREATOR_SETTINGS.voiceDirection),
           roleProviderDefaults: sanitizeRoleProviderDefaults(parsed.settings.roleProviderDefaults),
           modelDefaults: { ...DEFAULT_CREATOR_SETTINGS.modelDefaults, ...parsed.settings.modelDefaults },
           productionDefaults: {
@@ -136,6 +132,16 @@ export class JsonCreatorSettingsStore implements CreatorSettingsRepository {
       await rm(temporaryPath, { force: true });
     }
   }
+}
+
+function sameVoiceDirection(
+  left: StudioCreatorSettings["voiceDirection"],
+  right: StudioCreatorSettings["voiceDirection"],
+): boolean {
+  return left.profileId === right.profileId
+    && left.rate === right.rate
+    && left.pauseScale === right.pauseScale
+    && left.masteringPreset === right.masteringPreset;
 }
 
 function sanitizeRoleProviderDefaults(value: unknown): StudioRoleProviderDefaults {

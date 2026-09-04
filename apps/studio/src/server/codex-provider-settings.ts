@@ -40,6 +40,25 @@ export interface CodexProviderSettingsOptions {
   socketProbe?: (socketPath: string) => Promise<CodexSocketStatus | CodexSocketProbeResult>;
 }
 
+export function supportsBrokerTasks(
+  settings: Pick<CodexProviderSettings, "available" | "taskKinds">,
+  ...taskKinds: string[]
+): boolean {
+  return settings.available && taskKinds.every((taskKind) => settings.taskKinds.includes(taskKind));
+}
+
+export function auditedRoleCandidateAvailability(
+  codex: Pick<CodexProviderSettings, "available" | "taskKinds">,
+  zai: Pick<CodexProviderSettings, "available" | "taskKinds">,
+  taskKind: string,
+): { codex: boolean; zai: boolean } {
+  const independentAuditReady = supportsBrokerTasks(codex, "role-audit");
+  return {
+    codex: independentAuditReady && supportsBrokerTasks(codex, taskKind),
+    zai: independentAuditReady && supportsBrokerTasks(zai, taskKind),
+  };
+}
+
 interface CodexSocketProbeResult {
   status: CodexSocketStatus;
   taskKinds: string[];
@@ -70,12 +89,16 @@ export function resolveZaiCodexSocketPath(environment: NodeJS.ProcessEnv): Codex
   return {
     socketPath: configured || DEFAULT_ZAI_CODEX_SOCKET_PATH,
     configured: configured.length > 0,
-    requirement: "需要 ZAI visual-review broker 正在监听，并将 VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH 指向该 Unix socket。",
+    requirement: "需要 ZAI Code Plan broker 正在监听，并将 VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH 指向该 Unix socket。",
   };
 }
 
 export function resolveZaiVisualReviewModelId(environment: NodeJS.ProcessEnv): string {
   return environment.ZAI_VISUAL_REVIEW_MODEL_ID?.trim() || "glm-5.3-flash";
+}
+
+export function resolveZaiTextModelId(environment: NodeJS.ProcessEnv): string {
+  return environment.ZAI_TEXT_MODEL_ID?.trim() || "glm-5.3";
 }
 
 // 异步层：先验证文件类型与权限，再通过 Unix socket 请求 /health 并核对协议版本。
@@ -97,12 +120,10 @@ export async function readZaiCodexProviderSettings(
   environment: NodeJS.ProcessEnv,
   options: CodexProviderSettingsOptions = {},
 ): Promise<CodexProviderSettings> {
-  const modelId = resolveZaiVisualReviewModelId(environment);
   return readProviderSettings(resolveZaiCodexSocketPath(environment), {
     profileId: "zai",
     providerId: "zai-bigmodel-api",
-    modelId,
-    taskKinds: ["visual-review"],
+    taskKinds: ["director-plan", "script-draft", "visual-review"],
   }, options);
 }
 

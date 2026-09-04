@@ -97,7 +97,7 @@ export class SeriesPlanner {
         pillar,
         title: `${series.name} ${episode}｜${pillar}：${lens}`,
         viewerPromise: `围绕“${pillar}”给出一个可验证、可复用的具体结论。`,
-        hook: `这一集不讲空泛方法，我们直接验证：${lens}。`,
+        hook: `第 ${episodeNumber} 集直接验证“${lens}”：${series.audience}最终能得到什么可复核结果？`,
         payoff: `完成“${lens}”，并把结论交给下一集继续验证。`,
         fromPrevious: episodeNumber === 1 ? [] : ["承接上一集定版后写入的连续性记忆，不把路线图意图冒充正史。"],
         toNext: [`保留“${pillar}”尚未解决的一个边界问题，供下一集推进。`],
@@ -129,10 +129,11 @@ export class SeriesPlanner {
       painPoint: episode.viewerPromise,
       hook: episode.hook,
       evidence: [{
-        source: "series-roadmap",
+        source: `系列路线图「${series.name}」第 ${episode.episodeNumber} 集`,
         platform: series.platform,
         keyword: `${series.name} / ${episode.pillar}`,
         strength: 82,
+        evidenceUrl: seriesRoadmapUrl(episode.id),
         collectedAt: episode.updatedAt,
       }],
       audienceReach: 74,
@@ -209,6 +210,13 @@ function rulePlanning(): StudioSeriesEpisodePlanning {
 
 function episodeId(seriesId: string, episodeNumber: number): string {
   return `series-${seriesId}-episode-${String(episodeNumber).padStart(3, "0")}`;
+}
+
+function seriesRoadmapUrl(candidateId: string): string {
+  const url = new URL("https://video.wangjinkun333.me/topics");
+  url.searchParams.set("mode", "series");
+  url.searchParams.set("candidate", candidateId);
+  return url.toString();
 }
 
 function blockingEpisode(series: SeriesRecord, episode: StudioSeriesEpisode): StudioSeriesEpisode | undefined {

@@ -256,7 +256,7 @@ describe("CodexBrokerServer routes", () => {
     }
   });
 
-  it("reports the ZAI identity and rejects tasks outside that profile before execution", async () => {
+  it("reports the ZAI text identity and accepts text tasks through the same isolated profile", async () => {
     let executed = false;
     const broker = await startBroker({
       profile: codexExecutorProfileFor("zai"),
@@ -269,17 +269,16 @@ describe("CodexBrokerServer routes", () => {
       const report = await healthReport(broker.socketPath);
       assert.equal(report.profileId, "zai");
       assert.equal(report.providerId, "zai-bigmodel-api");
-      assert.equal(report.modelId, "glm-5.3-flash");
-      assert.deepEqual(report.taskKinds, ["visual-review"]);
+      assert.equal(report.modelId, "glm-5.3");
+      assert.deepEqual(report.taskKinds, ["director-plan", "script-draft", "visual-review"]);
 
       const response = await brokerRequest(broker.socketPath, {
         method: "POST",
         path: "/v1/tasks",
-        body: topicTaskBody("wrong-profile"),
+        body: scriptTaskBody("zai-script"),
       });
-      assert.equal(response.status, 400);
-      assert.match(JSON.parse(response.body).error, /not allowed for broker profile 'zai'/);
-      assert.equal(executed, false);
+      assert.equal(response.status, 200);
+      assert.equal(executed, true);
     } finally {
       await broker.close();
     }
@@ -686,6 +685,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       assert.equal(transient.status, 422);
       assert.equal(transient.headers["retry-after"], undefined);
       assert.match(JSON.parse(transient.body).error, /transiently/);
+      assert.equal(JSON.parse(transient.body).failureKind, "model_provider_transient");
       assert.doesNotMatch(transient.body, /SECRET-PAYLOAD-MARKER/);
 
       const terminal = await brokerRequest(broker.socketPath, {
@@ -694,6 +694,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       assert.equal(terminal.status, 422);
       assert.equal(terminal.headers["retry-after"], undefined);
       assert.match(JSON.parse(terminal.body).error, /invalid JSON/);
+      assert.equal(JSON.parse(terminal.body).failureKind, undefined);
 
       const credentialDiagnostic = await brokerRequest(broker.socketPath, {
         method: "POST", path: "/v1/tasks", body: topicTaskBody("credential-diagnostic"),
@@ -707,11 +708,34 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       });
       assert.equal(unknown.status, 500);
       assert.match(JSON.parse(unknown.body).error, /failed to run the task/);
+      assert.equal(JSON.parse(unknown.body).failureKind, undefined);
       assert.doesNotMatch(unknown.body, /SECRET-PAYLOAD-MARKER/);
 
       const report = await healthReport(broker.socketPath);
       assert.equal(report.failed, 4);
       assert.equal(report.completed, 0);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("preserves a transient provider outage without exposing the CLI diagnostic", async () => {
+    const broker = await startBroker({
+      script: () => {
+        throw new CodexExecutorError(
+          "Codex exited with code 1. HTTP 429 Too Many Requests OPENAI_API_KEY=host-secret",
+          true,
+        );
+      },
+    });
+    try {
+      const response = await brokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body: topicTaskBody("provider-outage"),
+      });
+
+      assert.equal(response.status, 422);
+      assert.match(JSON.parse(response.body).error, /failed transiently.*temporarily unavailable/i);
+      assert.doesNotMatch(response.body, /429|Too Many Requests|OPENAI_API_KEY|host-secret/);
     } finally {
       await broker.close();
     }

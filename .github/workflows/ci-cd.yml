@@ -79,6 +79,15 @@ jobs:
             cd "$PROJECT_PATH"
             git fetch origin "$RELEASE_SHA"
             if [[ -e "$release_path/.git" ]]; then
+              if ! release_status="$(git -C "$release_path" status --porcelain=v1 --untracked-files=all)"; then
+                echo "Unable to verify release worktree cleanliness; refusing to reuse it." >&2
+                exit 1
+              fi
+              if [[ -n "$release_status" ]]; then
+                echo "Release worktree is not clean; refusing to reuse it." >&2
+                printf '%s\n' "$release_status" >&2
+                exit 1
+              fi
               git -C "$release_path" checkout --detach "$RELEASE_SHA"
             elif [[ -e "$release_path" ]]; then
               echo "Release path exists but is not a Git worktree: $release_path" >&2

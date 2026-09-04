@@ -78,7 +78,7 @@ const LABELS: Record<string, string> = {
   authenticityPolicy: "真实度要求",
   scenePosition: "镜头序号",
   scene_position: "镜头序号",
-  preferredProviderId: "首选画面能力",
+  preferredProviderId: "首选画面来源",
   shotSize: "景别",
   cameraMovement: "镜头运动",
   subjectMovement: "主体运动",
@@ -259,7 +259,7 @@ function StructuredField({ nodeId, fieldKey, value, assetProviderIds, assetProvi
   if (options && stringValue !== undefined) {
     const choices = options.some((option) => option.value === stringValue)
       ? options
-      : [{ value: stringValue, label: fieldKey === "preferredProviderId" ? providerLabel(stringValue) ?? stringValue : stringValue }, ...options];
+      : [{ value: stringValue, label: fieldKey === "preferredProviderId" ? providerLabel(stringValue) ?? "未识别的画面来源" : stringValue }, ...options];
     return <label className="node-editor-field"><span>{label(fieldKey)}</span><select value={stringValue} onChange={(event) => onChange(path, event.target.value)}>{choices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>;
   }
   const multiline = typeof value === "string" && (value.length > 72 || /(prompt|narration|summary|description|suggestion|rationale|note|hook|angle)/i.test(fieldKey));
@@ -424,5 +424,5 @@ function assetProviderOptions(
   providers: Array<Pick<StudioProvider, "id" | "label">>,
 ): Array<{ value: string; label: string }> {
   return [...new Set([currentId, ...configuredIds])]
-    .map((value) => ({ value, label: providers.find((provider) => provider.id === value)?.label ?? providerLabel(value) ?? value }));
+    .map((value) => ({ value, label: providers.find((provider) => provider.id === value)?.label ?? providerLabel(value) ?? "未识别的画面来源" }));
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ZAI 视觉审片 broker 的一次性宿主机初始化。密钥只从既有 0600 文件读取。
+# ZAI Code Plan broker 的一次性宿主机初始化。密钥只从既有 0600 文件读取。
 set -Eeuo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,6 +8,8 @@ broker_user=vf-zai-codex
 broker_group=vf-bridge
 broker_uid="${ZAI_CODEX_UID:-22003}"
 broker_home=/home/vf-zai-codex
+broker_state_root=/var/lib/video-factory-zai-codex
+broker_workspace="$broker_state_root/workspace"
 broker_socket=/run/video-factory-zai-codex/worker.sock
 env_file=/etc/video-factory/zai-codex-broker.env
 unit_source="$repository_root/apps/codex-broker/deploy/vf-zai-codex-broker.service"
@@ -28,6 +30,7 @@ fi
 if ! id -nG "$broker_user" | tr ' ' '\n' | grep -qx "$broker_group"; then
   usermod -aG "$broker_group" "$broker_user"
 fi
+install -d -o "$broker_user" -g "$broker_group" -m 0750 "$broker_state_root" "$broker_workspace"
 
 [[ -f "$env_file" ]] || fail "缺少 $env_file；请先以 root:root 0600 写入 ZAI_BIGMODEL_API_KEY。"
 [[ "$(stat -c %U:%G "$env_file")" == "root:root" ]] || fail "$env_file 必须属于 root:root。"
@@ -53,7 +56,7 @@ if [[ -f "$broker_root/current/dist/main.js" ]]; then
   systemctl restart "$service"
   for _ in $(seq 1 20); do
     if curl --fail --silent --max-time 5 --unix-socket "$broker_socket" http://localhost/health >/dev/null; then
-      echo "ZAI visual-review broker 已就绪。"
+      echo "ZAI Code Plan broker 已就绪。"
       exit 0
     fi
     sleep 1

@@ -2,6 +2,7 @@ import type { StudioProvider, StudioTrendService, StudioTrendSource } from "../s
 import {
   resolveCodexSocketPath,
   resolveZaiCodexSocketPath,
+  resolveZaiTextModelId,
   resolveZaiVisualReviewModelId,
   type CodexProviderSettings,
 } from "./codex-provider-settings.js";
@@ -91,11 +92,39 @@ export function buildProviderCatalog(
   }));
   const codexRequirement = (taskKind: string) => providerTaskRequirement(resolveCodexSocketPath(environment).requirement, codex, taskKind);
   const zaiCodex = zaiCodexAvailability ?? { available: false, reason: "尚未完成独立 broker 协议健康检查。" };
-  const zaiCodexRequirement = providerTaskRequirement(resolveZaiCodexSocketPath(environment).requirement, zaiCodex, "visual-review");
-  const zaiModelId = zaiCodex.modelId?.trim() || resolveZaiVisualReviewModelId(environment);
+  const zaiCodexRequirementFor = (taskKind: string) => providerTaskRequirement(resolveZaiCodexSocketPath(environment).requirement, zaiCodex, taskKind);
+  const zaiCodexRequirement = zaiCodexRequirementFor("visual-review");
+  const zaiTextModelId = zaiCodex.modelId?.trim() || resolveZaiTextModelId(environment);
+  const zaiModelForTask = (taskKind: string) => zaiCodex.taskModels?.[taskKind]?.trim() || zaiTextModelId;
+  const zaiModelId = zaiCodex.taskModels?.["visual-review"]?.trim() || resolveZaiVisualReviewModelId(environment);
   const zaiModelLabel = zaiModelId === "glm-5.3-flash" ? "GLM-5.3-Flash" : zaiModelId;
-  const zaiVisualProducerAvailable = supportsTask(zaiCodex, "visual-review");
   const independentAuditAvailable = supportsTask(codex, "role-audit");
+  const codexRoleAvailable = (taskKind: string) => supportsTask(codex, taskKind) && independentAuditAvailable;
+  const zaiRoleAvailable = (taskKind: string) => supportsTask(zaiCodex, taskKind) && independentAuditAvailable;
+  const roleModelProfiles = (providerId: string, taskKind: string) => [
+    ...codexProfiles(providerId, taskKind, "text", independentAuditAvailable).map((model) => ({
+      ...model,
+      recommended: codexRoleAvailable(taskKind),
+    })),
+    {
+      ...textModelProfile(
+        zaiModelForTask(taskKind),
+        zaiModelForTask(taskKind) === "glm-5.3" ? "GLM-5.3" : zaiModelForTask(taskKind),
+        providerId,
+        "zai-bigmodel",
+        zaiRoleAvailable(taskKind),
+        "智谱 Coding Plan 文本模型；首选模型发生连接、超时、限流、容量或服务不可用时可作为候选，业务校验失败不会触发切换。",
+      ),
+      recommended: !codexRoleAvailable(taskKind) && zaiRoleAvailable(taskKind),
+    },
+  ];
+  const roleRequirement = (taskKind: string) => codexRoleAvailable(taskKind) || zaiRoleAvailable(taskKind)
+    ? "至少一个已通过健康检查的兼容文本模型可用。"
+    : !independentAuditAvailable
+      ? `编剧和视觉导演的输出必须经过独立 Codex Agent 质量复核。${codexRequirement("role-audit")}`
+      : `Codex：${codexRequirement(taskKind)} ZAI：${zaiCodexRequirementFor(taskKind)}`;
+  const zaiVisualProducerAvailable = supportsTask(zaiCodex, "visual-review");
+  const codexVisualProducerAvailable = supportsTask(codex, "visual-review");
   const zaiVisualReviewAvailable = runtime.python
     && runtime.ffmpeg
     && runtime.ffprobe
@@ -151,29 +180,29 @@ export function buildProviderCatalog(
       id: "codex-screenwriter-v1",
       capability: "script.draft",
       label: "Codex 编剧",
-      available: supportsTask(codex, "script-draft"),
+      available: codexRoleAvailable("script-draft") || zaiRoleAvailable("script-draft"),
       kind: "external",
       billing: "subscription",
-      description: "按选题角度撰写可拍、可朗读、可核验的分镜脚本；编剧失败时制作明确失败，不回退模板。",
+      description: "按选题角度撰写可拍、可朗读、可核验的分镜脚本；首选模型调用故障时按候选顺序切换，内容校验或质量审计失败时明确失败，不回退模板。",
       modes: ["口语旁白", "3-10 场分镜", "逐场画面指令"],
       latency: "seconds",
-      defaultModelId: modelForTask("script-draft"),
-      modelProfiles: codexProfiles("codex-screenwriter-v1", "script-draft"),
-      requirement: codexRequirement("script-draft"),
+      defaultModelId: codexRoleAvailable("script-draft") ? modelForTask("script-draft") : zaiModelForTask("script-draft"),
+      modelProfiles: roleModelProfiles("codex-screenwriter-v1", "script-draft"),
+      requirement: roleRequirement("script-draft"),
     }),
     provider({
       id: "api-visual-director-v1",
       capability: "storyboard.plan",
       label: "Codex 视觉导演",
-      available: supportsTask(codex, "director-plan"),
+      available: codexRoleAvailable("director-plan") || zaiRoleAvailable("director-plan"),
       kind: "external",
       billing: "subscription",
-      description: "统一全片视觉规则，并根据叙事、真实性、连续性和可执行性逐镜选择画面来源。",
+      description: "统一全片视觉规则，并根据叙事、真实性、连续性和可执行性逐镜选择画面来源；首选模型调用故障时按健康候选顺序切换。",
       modes: ["导演角色", "全片视觉规则", "逐镜选画面"],
       latency: "seconds",
-      defaultModelId: modelForTask("director-plan"),
-      modelProfiles: codexProfiles("api-visual-director-v1", "director-plan"),
-      requirement: codexRequirement("director-plan"),
+      defaultModelId: codexRoleAvailable("director-plan") ? modelForTask("director-plan") : zaiModelForTask("director-plan"),
+      modelProfiles: roleModelProfiles("api-visual-director-v1", "director-plan"),
+      requirement: roleRequirement("director-plan"),
     }),
     provider({
       id: "codex-reference-grammar-v1",
@@ -212,7 +241,7 @@ export function buildProviderCatalog(
       id: "ai-shot-router-v1",
       capability: "asset.prepare",
       label: "AI 逐镜路由",
-      available: runtime.python && supportsTask(codex, "director-plan"),
+      available: runtime.python && (codexRoleAvailable("director-plan") || zaiRoleAvailable("director-plan")),
       kind: "external",
       description: "执行导演计划；每个镜头可独立调用本地、图库或图片及视频生成能力。",
       modes: ["逐镜决策", "多来源", "逐项报价"],
@@ -322,7 +351,7 @@ export function buildProviderCatalog(
       kind: "external",
       billing: "metered",
       status: miniMaxAvailable ? "ready" : "needs_config",
-      description: "同一个 MiniMax Provider 下可选择 Hailuo 或 H3；H3 支持 4–15 秒、原生音画与最高 2K。",
+      description: "同一个 MiniMax 服务中可选择 Hailuo 或 H3；H3 支持 4–15 秒、原生音画与最高 2K。",
       modes: ["文生视频", "4–15 秒", "最高 2K", "逐镜可选模型"],
       deliveryTypes: assetProviderDeliveryTypes("hailuo-video-v1"),
       latency: "minutes",
@@ -364,7 +393,7 @@ export function buildProviderCatalog(
       requirement: "需要 DASHSCOPE_API_KEY、DASHSCOPE_WORKSPACE_ID、WAN_MODEL_ID 和 WAN_ESTIMATED_CNY_PER_CLIP",
       docsUrl: "https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference",
     }),
-    plannedVideoProvider("kling-video-v1", "Kling 可灵", "可灵官方 API 的模型目录与鉴权适配将在账号权限确认后启用。"),
+    plannedVideoProvider("kling-video-v1", "Kling 可灵", "可灵官方接口的模型目录与鉴权适配将在账号权限确认后启用。"),
     plannedVideoProvider("vidu-video-v1", "Vidu", "参考生视频、模板和口型能力将在统一生成任务协议上接入。"),
     provider({
       id: "minimax-tts-v1",
@@ -482,7 +511,7 @@ export function buildProviderCatalog(
       id: "codex-visual-review-v1",
       capability: "quality.review.visual",
       label: "Codex 视觉审片",
-      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && supportsTask(codex, "visual-review"),
+      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && codexVisualProducerAvailable && independentAuditAvailable,
       kind: "external",
       billing: "subscription",
       description: "从成片中安全抽取最多 12 张关键帧，由服务器 Codex 检查构图、连续性、节奏、文字可读性与内容安全。",
@@ -493,9 +522,13 @@ export function buildProviderCatalog(
         "codex-visual-review-v1",
         "visual-review",
         "visual-review",
-        runtime.python && runtime.ffmpeg && runtime.ffprobe,
+        runtime.python && runtime.ffmpeg && runtime.ffprobe && independentAuditAvailable,
       ),
-      requirement: codexRequirement("visual-review"),
+      requirement: !codexVisualProducerAvailable
+        ? codexRequirement("visual-review")
+        : !independentAuditAvailable
+          ? `Codex 审片意见必须经过独立质量复核。${codexRequirement("role-audit")}`
+          : codexRequirement("visual-review"),
     }),
     provider({
       id: "codex-publish-copy-v1",

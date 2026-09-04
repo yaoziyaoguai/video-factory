@@ -27,7 +27,7 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
     ?? (profileId === "openai" ? DEFAULT_PRODUCTION_MODEL : undefined);
   const configuredAuditModel = optionalText(env, "VIDEO_FACTORY_CODEX_AUDIT_MODEL")
     ?? (profileId === "openai" ? DEFAULT_DEEP_REVIEW_MODEL : undefined);
-  const configuredZaiModel = optionalText(env, "ZAI_VISUAL_REVIEW_MODEL_ID");
+  const configuredZaiModel = optionalText(env, "ZAI_TEXT_MODEL_ID");
   if (profileId === "zai" && configuredModel !== undefined) {
     throw new Error("VIDEO_FACTORY_CODEX_MODEL cannot override the zai profile model.");
   }

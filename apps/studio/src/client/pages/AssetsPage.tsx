@@ -157,7 +157,7 @@ export function AssetsPage() {
         </div>
         <div className="asset-library-refiners">
           <label><span className="sr-only">素材来源类型</span><select value={origin} onChange={(event) => setOrigin(event.target.value as "all" | StudioAssetOrigin)}><option value="all">全部来源</option>{originOptions.map((item) => <option key={item} value={item}>{originLabel(item)}</option>)}</select></label>
-          <label><span className="sr-only">素材提供方</span><select value={provider} onChange={(event) => setProvider(event.target.value)}><option value="all">全部提供方</option>{providerOptions.map((item) => <option key={item} value={item}>{providerLabel(item) ?? item}</option>)}</select></label>
+          <label><span className="sr-only">素材提供方</span><select value={provider} onChange={(event) => setProvider(event.target.value)}><option value="all">全部提供方</option>{providerOptions.map((item) => <option key={item} value={item}>{providerLabel(item) ?? "其他制作服务"}</option>)}</select></label>
           <label className="asset-library-search"><Search aria-hidden="true" size={16} /><span className="sr-only">搜索素材</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索画面、标签或作品" /></label>
         </div>
       </section>
@@ -216,7 +216,7 @@ function AssetCard({ asset, usage, grouped = false }: { asset: StudioIndexedAsse
     <div className="asset-card-copy">
       <header><span>{originLabel(asset.origin)} · {mediaKindLabel(asset.mediaKind)}</span><b className={`reuse-${asset.reuseStatus}`}>{reuseStatusLabel(asset.reuseStatus)}</b></header>
       <h3>{assetTitle(asset, resolvedUsage)}</h3>
-      <p className="asset-provider">{providerLabel(asset.providerId) ?? asset.providerId}{asset.creator ? ` · ${asset.creator}` : ""}</p>
+      <p className="asset-provider">{providerLabel(asset.providerId) ?? "其他制作服务"}{asset.creator ? ` · ${asset.creator}` : ""}</p>
       {metadata.length ? <ul className="asset-metadata" aria-label="素材规格">{metadata.map((item) => <li key={item}>{item}</li>)}</ul> : null}
       {asset.tags.length ? <div className="asset-tags">{asset.tags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
       <footer>

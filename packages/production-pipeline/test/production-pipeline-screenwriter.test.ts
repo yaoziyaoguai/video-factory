@@ -194,7 +194,8 @@ describe("ProductionPipeline codex screenwriter", () => {
   it("passes editable rework instructions and the previous script into the new script node", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-rework-"));
     const { agent, inputs } = stubAgent(() => scriptDraft);
-    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent });
+    const worker = new RecordingWorker();
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker, screenwriterAgent: agent });
 
     await pipeline.start({
       ...brief,
@@ -206,14 +207,34 @@ describe("ProductionPipeline codex screenwriter", () => {
           visualDirection: "第三镜重做构图。",
           assets: "第三镜换成无字母片。",
         },
-        findings: [],
+        findings: [
+          {
+            findingId: "vf_111111111111111111111111",
+            timecodeMs: 1_000,
+            category: "pacing",
+            description: "旁白过长",
+            suggestion: "缩短旁白",
+            targetNodeIds: ["script"],
+          },
+          {
+            findingId: "vf_222222222222222222222222",
+            timecodeMs: 8_000,
+            category: "continuity",
+            description: "画面跳变",
+            suggestion: "调整构图并替换母片",
+            targetNodeIds: ["visual-direction", "assets"],
+          },
+        ],
         previousScript: { viewerPromise: "原承诺", scenes: [{ position: 1 }] },
       },
     });
 
     assert.equal(inputs[0]?.brief.rework?.sourceRunId, "run-rejected-1");
     assert.equal(inputs[0]?.brief.rework?.instruction, "缩短第三镜旁白，保留前两镜。");
+    assert.deepEqual(inputs[0]?.brief.rework?.findings.map(({ findingId }) => findingId), ["vf_111111111111111111111111"]);
     assert.deepEqual(inputs[0]?.brief.rework?.previousScript, { viewerPromise: "原承诺", scenes: [{ position: 1 }] });
+    const assetInput = worker.requests.find(({ capability }) => capability === "asset.prepare")?.input.rework as { findings?: Array<{ findingId: string }> };
+    assert.deepEqual(assetInput.findings?.map(({ findingId }) => findingId), ["vf_222222222222222222222222"]);
   });
 
   it("scopes identical agent loops to their production run", async () => {
@@ -228,6 +249,26 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.notEqual(first.id, second.id);
     assert.equal(inputs.length, 2);
     assert.notEqual(inputs[0]?.agentLoopCheckpoint?.key, inputs[1]?.agentLoopCheckpoint?.key);
+  });
+
+  it("passes the selected screenwriter model and isolates checkpoints by model", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-model-scope-"));
+    const { agent, inputs } = stubAgent(() => scriptDraft);
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent });
+
+    await pipeline.start({
+      ...brief,
+      models: { "codex-screenwriter-v1": "glm-5.3" },
+    });
+
+    const input = inputs[0];
+    assert.equal(input?.selectedModelId, "glm-5.3");
+    assert.ok(input?.agentLoopCheckpointForModel);
+    const selectedCheckpoint = input.agentLoopCheckpointForModel("glm-5.3");
+    const backupCheckpoint = input.agentLoopCheckpointForModel("gpt-5.6-sol");
+    assert.notEqual(selectedCheckpoint.key, backupCheckpoint.key);
+    assert.notEqual(selectedCheckpoint.key, input.agentLoopCheckpoint?.key);
+    assert.equal(input.agentLoopCheckpointForModel("glm-5.3").key, selectedCheckpoint.key);
   });
 
   it("starts a fresh agent loop after an explicit retry of an exhausted node", async () => {
@@ -394,6 +435,20 @@ describe("ProductionPipeline codex screenwriter", () => {
           providerId: "openai",
           modelId: "gpt-5.4",
           reasoningEffort: "high",
+          fallbackFromModelId: "glm-5.3",
+          fallbackReason: "首选模型连接失败，已自动切换。",
+          attemptedModelIds: ["glm-5.3", "gpt-5.4"],
+          modelCandidateAttempts: [{
+            modelId: "glm-5.3",
+            providerId: "zai-bigmodel-api",
+            outcome: "failed",
+            failureStage: "not_accepted",
+            failureReason: "连接失败",
+          }, {
+            modelId: "gpt-5.4",
+            providerId: "openai",
+            outcome: "succeeded",
+          }],
         },
         agentLoop: {
           version: "video-factory/agent-loop-v1",
@@ -442,6 +497,20 @@ describe("ProductionPipeline codex screenwriter", () => {
       providerId: "openai",
       modelId: "gpt-5.4",
       reasoningEffort: "high",
+      fallbackFromModelId: "glm-5.3",
+      fallbackReason: "首选模型连接失败，已自动切换。",
+      attemptedModelIds: ["glm-5.3", "gpt-5.4"],
+      modelCandidateAttempts: [{
+        modelId: "glm-5.3",
+        providerId: "zai-bigmodel-api",
+        outcome: "failed",
+        failureStage: "not_accepted",
+        failureReason: "连接失败",
+      }, {
+        modelId: "gpt-5.4",
+        providerId: "openai",
+        outcome: "succeeded",
+      }],
       prompt: "Prompt Pack: video-factory/screenwriter-v2\nactual prompt",
     });
     const loopArtifact = run.artifacts.find((artifact) => artifact.kind === "agent_loop_trace");
@@ -453,6 +522,8 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.equal(scriptNode?.executionReceipt?.parameters?.agentLoopIterations, 1);
     assert.equal(scriptNode?.executionReceipt?.parameters?.auditReasoningEffort, "xhigh");
     assert.equal(scriptNode?.executionReceipt?.parameters?.modelCallCount, 2);
+    assert.equal(scriptNode?.executionReceipt?.fallbackReason, "首选模型连接失败，已自动切换。");
+    assert.deepEqual(scriptNode?.executionReceipt?.actualModelIds, ["glm-5.3", "gpt-5.4"]);
     const generatedVersion = scriptNode?.outputState?.versions.find((version) => version.source === "generated");
     assert.ok(generatedVersion?.artifactIds.includes(traceArtifact.id));
   });

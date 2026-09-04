@@ -1,6 +1,8 @@
 import {
   CodexExecutorError,
+  DEFAULT_ZAI_TEXT_MODEL_ID,
   DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID,
+  ZAI_TASK_KINDS,
   buildTaskPrompt,
   codexExecutorProfileFor,
   type BrokerTaskExecutor,
@@ -10,35 +12,48 @@ import {
   type ValidatedTask,
 } from "./codex-executor.js";
 import {
+  BROKER_TASK_KINDS,
   outputSchemaFor,
   outputValidationErrorFor,
   taskPromptFor,
 } from "./task-definitions.js";
 
 const ZAI_CHAT_COMPLETIONS_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+const ZAI_CODING_PLAN_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
 const DEFAULT_TIMEOUT_MS = 285_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES = 16 * 1024;
 const ERROR_RESPONSE_READ_TIMEOUT_MS = 250;
 
-export interface ZaiVisualReviewExecutorOptions {
+export interface ZaiCodePlanExecutorOptions {
   env?: NodeJS.ProcessEnv;
   fetchFn?: typeof fetch;
   effort?: string;
   timeoutMs?: number;
 }
 
-export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
+export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
   readonly identity: CodexExecutorIdentity;
   private readonly apiKey: string;
   private readonly fetchFn: typeof fetch;
   private readonly effort: string;
   private readonly timeoutMs: number;
+  private readonly textModelId: string;
+  private readonly visualModelId: string;
 
-  constructor(options: ZaiVisualReviewExecutorOptions = {}) {
+  constructor(options: ZaiCodePlanExecutorOptions = {}) {
     const environment = options.env ?? process.env;
-    const modelId = environment.ZAI_VISUAL_REVIEW_MODEL_ID?.trim() || DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID;
-    this.identity = codexExecutorProfileFor("zai", undefined, modelId).identity;
+    this.textModelId = environment.ZAI_TEXT_MODEL_ID?.trim() || DEFAULT_ZAI_TEXT_MODEL_ID;
+    this.visualModelId = environment.ZAI_VISUAL_REVIEW_MODEL_ID?.trim() || DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID;
+    this.identity = {
+      ...codexExecutorProfileFor("zai", undefined, this.textModelId).identity,
+      modelId: this.textModelId,
+      taskKinds: [...ZAI_TASK_KINDS],
+      taskModels: Object.fromEntries(ZAI_TASK_KINDS.map((kind) => [
+        kind,
+        kind === "visual-review" ? this.visualModelId : this.textModelId,
+      ])),
+    };
     this.apiKey = environment.ZAI_BIGMODEL_API_KEY?.trim() ?? "";
     if (!this.apiKey) throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
     this.fetchFn = options.fetchFn ?? fetch;
@@ -50,13 +65,6 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
     task: ValidatedTask,
     options: CodexExecutionOptions = {},
   ): Promise<CodexExecutionResult> {
-    if (task.kind !== "visual-review") {
-      throw new CodexExecutorError(
-        `Task kind '${task.kind}' is not allowed for the ZAI visual-review executor.`,
-        false,
-      );
-    }
-
     const taskPrompt = taskPromptFor(task.kind);
     const prompt = [
       buildTaskPrompt(task, taskPrompt),
@@ -69,25 +77,27 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
     options.signal?.addEventListener("abort", abort, { once: true });
     if (options.signal?.aborted) abort();
     const timeout = setTimeout(() => controller.abort(new Error("timeout")), this.timeoutMs);
+    const images = taskImages(task);
+    const modelId = images.length > 0 ? this.visualModelId : this.textModelId;
 
     try {
-      const response = await this.fetchFn(ZAI_CHAT_COMPLETIONS_URL, {
+      const response = await this.fetchFn(images.length > 0 ? ZAI_CHAT_COMPLETIONS_URL : ZAI_CODING_PLAN_URL, {
         method: "POST",
         headers: {
           authorization: `Bearer ${this.apiKey}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          model: this.identity.modelId,
+          model: modelId,
           messages: [{
             role: "user",
-            content: [
+            content: images.length > 0 ? [
               { type: "text", text: prompt },
-              ...task.payload.frames.map((frame) => ({
+              ...images.map((image) => ({
                 type: "image_url",
-                image_url: { url: `data:image/jpeg;base64,${frame.jpeg.toString("base64")}` },
+                image_url: { url: `data:image/jpeg;base64,${image.toString("base64")}` },
               })),
-            ],
+            ] : prompt,
           }],
           thinking: { type: "enabled", clear_thinking: false },
           reasoning_effort: this.effort,
@@ -103,7 +113,7 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
         const code = await readErrorCode(response);
         throw new CodexExecutorError(
           `ZAI Chat Completion returned HTTP ${response.status}${code ? ` (code ${code})` : ""}.`,
-          false,
+          response.status === 408 || response.status === 429 || response.status >= 500,
         );
       }
       const raw = await readBoundedResponse(response);
@@ -116,11 +126,12 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
         throw new CodexExecutorError("ZAI Chat Completion output is not valid JSON.", false);
       }
       const validationError = outputValidationErrorFor(task.kind, parsed);
-      if (validationError !== undefined) {
-        throw new CodexExecutorError(`ZAI output does not match visual-review schema: ${validationError}`, false);
-      }
-      const findings = (parsed as { findings: Array<{ timecodeMs: number }> }).findings;
-      if (findings.some((finding) => finding.timecodeMs > task.payload.durationMs)) {
+      if (validationError !== undefined) throw new CodexExecutorError(`ZAI output does not match ${task.kind} schema: ${validationError}`, false);
+      const visualFindings = task.kind === "visual-review"
+        ? (parsed as { findings: Array<{ timecodeMs: number }> }).findings
+        : [];
+      if (task.kind === "visual-review"
+        && visualFindings.some((finding) => finding.timecodeMs > task.payload.durationMs)) {
         throw new CodexExecutorError(
           "ZAI output does not match visual-review schema: finding timecodeMs exceeds payload.durationMs.",
           false,
@@ -133,7 +144,7 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
           promptVersion: taskPrompt.version,
           prompt,
           providerId: this.identity.providerId,
-          modelId: this.identity.modelId,
+          modelId,
           reasoningEffort: this.effort,
         },
       };
@@ -142,8 +153,8 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
       const cancelled = options.signal?.aborted === true;
       throw new CodexExecutorError(
         cancelled
-          ? "ZAI visual-review task was cancelled because its client disconnected."
-          : `ZAI visual-review request ${controller.signal.aborted ? "timed out" : "could not connect"}.`,
+          ? "ZAI Code Plan task was cancelled because its client disconnected."
+          : `ZAI Code Plan request ${controller.signal.aborted ? "timed out" : "could not connect"}.`,
         true,
       );
     } finally {
@@ -151,6 +162,16 @@ export class ZaiVisualReviewExecutor implements BrokerTaskExecutor {
       options.signal?.removeEventListener("abort", abort);
     }
   }
+}
+
+
+function taskImages(task: ValidatedTask): Buffer[] {
+  if (task.kind === "visual-review" || task.kind === "reference-grammar") {
+    return task.payload.frames.map((frame) => frame.jpeg);
+  }
+  if (task.kind === "asset-rank") return task.payload.thumbnails.map((thumbnail) => thumbnail.jpeg);
+  if (task.kind === "role-audit") return task.payload.images.map((image) => image.jpeg);
+  return [];
 }
 
 async function readErrorCode(response: Response): Promise<string | undefined> {

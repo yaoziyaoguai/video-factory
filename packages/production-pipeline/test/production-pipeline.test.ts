@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { NodeVersionConflictError, type Artifact } from "@video-factory/workflow-core";
+import { NodeVersionConflictError, type Artifact, type WorkflowRun } from "@video-factory/workflow-core";
 import type { WorkerResponse } from "../src/index.js";
 import * as pipeline from "../src/index.js";
 
@@ -117,7 +117,87 @@ class FakeWorker {
   }
 }
 
+async function assertCandidateFailureTrace(
+  run: WorkflowRun<pipeline.ProductionBrief>,
+  nodeId: string,
+  expectedAttempts: pipeline.ModelCandidateAttempt[],
+): Promise<void> {
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+  const finalAttempt = expectedAttempts.at(-1)!;
+  assert.equal(run.status, "failed");
+  assert.equal(node?.status, "failed");
+  assert.equal(node?.executionReceipt?.providerId, finalAttempt.providerId);
+  assert.equal(node?.executionReceipt?.modelId, finalAttempt.modelId);
+  assert.deepEqual(node?.executionReceipt?.actualModelIds, expectedAttempts.map(({ modelId }) => modelId));
+  assert.doesNotMatch(node?.error ?? "", /secret-primary|secret-backup/);
+
+  const artifact = run.artifacts.find((candidate) => (
+    candidate.kind === "model_trace"
+    && candidate.producer?.nodeId === nodeId
+  ));
+  assert.ok(artifact?.uri);
+  assert.equal(artifact.schemaVersion, "video-factory/model-candidate-failures-v1");
+  const payload = JSON.parse(await readFile(artifact.uri, "utf8")) as Record<string, unknown>;
+  assert.equal(payload.status, "failed");
+  assert.deepEqual(payload.attemptedModelIds, expectedAttempts.map(({ modelId }) => modelId));
+  assert.deepEqual(payload.modelCandidateAttempts, expectedAttempts);
+  assert.equal("prompt" in payload, false);
+  assert.doesNotMatch(JSON.stringify(payload), /secret-primary|secret-backup/);
+}
+
 describe("ProductionPipeline", () => {
+  it("persists every failed screenwriter model instead of reporting only the preferred model", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-exhausted-"));
+    const failingAgent = (modelId: string, error: Error): pipeline.ScreenwriterAgent => ({
+      id: "codex-screenwriter-v1",
+      modelId,
+      draft: async () => { throw error; },
+      draftDetailed: async () => { throw error; },
+    });
+    const screenwriterAgent = new pipeline.FallbackScreenwriterAgent({
+      candidates: [{
+        providerId: "zai-bigmodel-api",
+        agent: failingAgent("glm-5.3", new pipeline.CodexBridgeError(
+          "socket /private/run/producer failed with ECONNREFUSED secret-primary",
+          true,
+          "not_accepted",
+        )),
+      }, {
+        providerId: "openai",
+        agent: failingAgent("gpt-5.6-sol", new pipeline.CodexBridgeError(
+          "request timed out while using secret-backup",
+          false,
+          "uncertain",
+        )),
+      }],
+    });
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      screenwriterAgent,
+    });
+
+    const run = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, script: "codex-screenwriter-v1" },
+      models: { "codex-screenwriter-v1": "glm-5.3" },
+    });
+
+    await assertCandidateFailureTrace(run, "script", [{
+      modelId: "glm-5.3",
+      providerId: "zai-bigmodel-api",
+      outcome: "failed",
+      failureStage: "not_accepted",
+      failureReason: "连接失败",
+    }, {
+      modelId: "gpt-5.6-sol",
+      providerId: "openai",
+      outcome: "failed",
+      failureStage: "uncertain",
+      failureReason: "调用超时",
+    }]);
+  });
+
   it("runs GLM visual review through Code Plan without a cash spend approval", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-review-"));
     class LocalizedReviewWorker extends FakeWorker {
@@ -200,6 +280,7 @@ describe("ProductionPipeline", () => {
     const waiting = await subject.start({
       ...brief,
       providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      models: { "glm-visual-review-v1": "glm-5.3-flash" },
     });
 
     assert.equal(waiting.status, "needs_human");
@@ -207,6 +288,12 @@ describe("ProductionPipeline", () => {
     assert.equal(reviewCalls.length, 1);
     assert.match(reviewCalls[0]!.videoPath, /final\.mp4$/);
     assert.match(reviewCalls[0]!.renderManifestPath ?? "", /render_manifest\.json$/);
+    assert.equal(reviewCalls[0]!.selectedModelId, "glm-5.3-flash");
+    const reviewPrimaryCheckpoint = reviewCalls[0]!.agentLoopCheckpointForModel?.("glm-5.3-flash");
+    const reviewBackupCheckpoint = reviewCalls[0]!.agentLoopCheckpointForModel?.("gpt-5.6-sol");
+    assert.ok(reviewPrimaryCheckpoint);
+    assert.ok(reviewBackupCheckpoint);
+    assert.notEqual(reviewPrimaryCheckpoint.key, reviewBackupCheckpoint.key);
     assert.ok(waiting.nodeRuns.some((node) => node.nodeId === "visual-review" && node.status === "succeeded"));
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "glm-5.3-flash");
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
@@ -217,6 +304,146 @@ describe("ProductionPipeline", () => {
     };
     assert.equal(visualOutput.report.findings[0]?.scenePosition, 1);
     assert.ok(waiting.artifacts.some((artifact) => artifact.kind === "review_report" && artifact.provenance.providerId === "glm-visual-review-v1"));
+  });
+
+  it("records the actual provider and both models when visual review uses its backup", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-review-backup-"));
+    const output: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "替补模型已完成审片。",
+      scores: { composition: 85, continuity: 83, pacing: 82, legibility: 86, safety: 96 },
+      findings: [],
+      confidence: 0.86,
+      recommendation: "approve",
+    };
+    const primary: pipeline.VisualReviewAgent = {
+      id: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async () => {
+        throw new pipeline.CodexBridgeError("Codex bridge returned HTTP 503.", false, "uncertain", 503);
+      },
+    };
+    const backup: pipeline.VisualReviewAgent = {
+      id: "codex-visual-review-v1",
+      modelId: "gpt-backup",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async () => ({
+        output,
+        inspectedDurationMs: 10_000,
+        trace: {
+          taskKind: "visual-review",
+          promptVersion: "visual-review-test-v1",
+          prompt: "bounded test prompt",
+          providerId: "openai",
+          modelId: "gpt-backup",
+        },
+      }),
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      providerRuntimeMetadata: [{
+        id: "glm-visual-review-v1",
+        label: "GLM-5.3-Flash 视觉审片",
+        modelId: "glm-5.3-flash",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 3,
+      }],
+      visualReviewAgents: [new pipeline.FallbackVisualReviewAgent({
+        primary,
+        primaryProviderId: "zai-bigmodel-api",
+        backups: [{ agent: backup, label: "Codex 视觉审片", providerId: "openai" }],
+      })],
+    });
+
+    const waiting = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+    });
+    const receipt = waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt;
+
+    assert.equal(waiting.status, "needs_human");
+    assert.equal(receipt?.providerId, "openai");
+    assert.equal(receipt?.providerLabel, "Codex 视觉审片");
+    assert.equal(receipt?.modelId, "gpt-backup");
+    assert.equal(receipt?.fallbackFromProviderId, "zai-bigmodel-api");
+    assert.match(receipt?.fallbackReason ?? "", /已自动切换到 gpt-backup/);
+    assert.deepEqual(receipt?.actualModelIds, ["glm-5.3-flash", "gpt-backup"]);
+    assert.equal(receipt?.billing, "subscription");
+    assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
+  });
+
+  it("persists every failed visual-review model without fabricating an unavailable prompt", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-review-exhausted-"));
+    const failingReviewer = (id: string, modelId: string, error: Error): pipeline.VisualReviewAgent => ({
+      id,
+      modelId,
+      review: async () => { throw error; },
+      reviewDetailed: async () => { throw error; },
+    });
+    const visualReviewAgent = new pipeline.FallbackVisualReviewAgent({
+      primary: failingReviewer(
+        "glm-visual-review-v1",
+        "glm-5.3-flash",
+        new pipeline.CodexBridgeError(
+          "Codex bridge returned HTTP 503. secret-primary",
+          false,
+          "uncertain",
+          503,
+        ),
+      ),
+      primaryProviderId: "zai-bigmodel-api",
+      backups: [{
+        providerId: "openai",
+        agent: failingReviewer(
+          "codex-visual-review-v1",
+          "gpt-5.6-sol",
+          new pipeline.CodexBridgeError(
+            "Codex bridge returned HTTP 429. secret-backup",
+            false,
+            "not_accepted",
+            429,
+          ),
+        ),
+      }],
+    });
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      providerRuntimeMetadata: [{
+        id: "glm-visual-review-v1",
+        label: "GLM-5.3-Flash 视觉审片",
+        modelId: "glm-5.3-flash",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 3,
+      }],
+      visualReviewAgents: [visualReviewAgent],
+    });
+
+    const run = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+    });
+
+    await assertCandidateFailureTrace(run, "visual-review", [{
+      modelId: "glm-5.3-flash",
+      providerId: "zai-bigmodel-api",
+      outcome: "failed",
+      failureStage: "uncertain",
+      failureReason: "服务端错误（HTTP 503）",
+    }, {
+      modelId: "gpt-5.6-sol",
+      providerId: "openai",
+      outcome: "failed",
+      failureStage: "not_accepted",
+      failureReason: "请求过多",
+    }]);
   });
 
   it("reuses one reviewed scene inside the same run and reruns only render and review", async () => {
@@ -859,6 +1086,134 @@ describe("ProductionPipeline", () => {
     }), /requires starting a new run/);
   });
 
+  it("uses the current edited brief for screenwriting, direction, publishing, and agent checkpoints", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-current-brief-"));
+    const screenwriterInputs: pipeline.ScreenwriterAgentInput[] = [];
+    const directorInputs: pipeline.VisualDirectorAgentInput[] = [];
+    const publishInputs: Array<{
+      brief: { title: string; angle: string; audience: string; nicheSlug: string };
+      agentLoopCheckpoint?: { key: string };
+    }> = [];
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      screenwriterAgent: {
+        id: "codex-screenwriter-v1",
+        draft: async (input) => {
+          screenwriterInputs.push(input);
+          return {
+            scenes: [1, 2, 3].map((position) => ({
+              position,
+              narration: `${input.brief.title}：第 ${position} 个可执行步骤。`,
+              duration: 10,
+              visual_strategy: "stock",
+              visual_prompt: `第 ${position} 个真实生活动作`,
+              search_terms: [`生活动作 ${position}`],
+            })),
+          };
+        },
+      },
+      directorAgent: {
+        id: "api-visual-director-v1",
+        plan: async (input) => {
+          directorInputs.push(input);
+          return {
+            version: "video-factory/director-plan-v1",
+            requestedProfileId: input.brief.requestedProfileId,
+            resolvedProfileId: "documentary-observer",
+            profileRationale: "使用实拍镜头保持可信。",
+            visualBible: {
+              narrativeApproach: "逐步展示",
+              pacing: "均匀",
+              composition: "稳定中景",
+              camera: "固定机位",
+              color: "自然色",
+              continuity: "同一时段",
+              sound: "环境声",
+            },
+            shots: input.scenes.map((scene) => ({
+              scenePosition: scene.position,
+              narrativeRole: "解释",
+              authenticityPolicy: "evidence",
+              preferredProviderId: "pexels-stock-v1",
+              deliveryType: "stock_video",
+              alternativeProviderIds: [],
+              temporalBeats: [`[0s-${scene.duration / 2}s] 建立动作`, `[${scene.duration / 2}s-${scene.duration}s] 完成动作`],
+              query: scene.visualPrompt,
+              generationPrompt: scene.visualPrompt,
+              rationale: "真实图库可以执行。",
+              continuityNote: "保持自然色。",
+              confidence: 0.8,
+              estimatedCostCny: 999,
+            })),
+          };
+        },
+      },
+      publishCopyWriter: {
+        id: "codex-publish-copy-v1",
+        write: async (input) => {
+          publishInputs.push(input);
+          return { title: input.brief.title, description: input.brief.angle, hashtags: ["生活方法"] };
+        },
+      },
+      assetProviders: [{
+        id: "pexels-stock-v1",
+        label: "Pexels",
+        billing: "free",
+        modes: ["图库视频"],
+        deliveryTypes: ["stock_video"],
+      }],
+    });
+    const original = await subject.start({
+      ...brief,
+      reviewMode: "automatic",
+      providers: {
+        ...brief.providers,
+        script: "codex-screenwriter-v1",
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+      },
+      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+    });
+    assert.equal(original.status, "succeeded");
+    const briefOutput = original.nodeRuns.find((node) => node.nodeId === "brief")?.output as pipeline.ProductionBrief;
+    const revisedTitle = "人工重写：下班后先做这一件事";
+    const revisedAngle = "只保留一个马上能执行的动作";
+    const revisedAudience = "刚结束一天工作的年轻人";
+    const stale = await subject.applyNodeOverride(original.id, {
+      nodeId: "brief",
+      actor: "producer",
+      allowTerminalEdit: true,
+      output: {
+        ...briefOutput,
+        title: revisedTitle,
+        angle: revisedAngle,
+        audience: revisedAudience,
+      },
+    });
+    const regenerated = await subject.resumeStale(stale.id);
+
+    assert.equal(regenerated.status, "succeeded");
+    assert.equal(screenwriterInputs.length, 2);
+    assert.equal(directorInputs.length, 2);
+    assert.equal(publishInputs.length, 2);
+    assert.deepEqual(
+      [screenwriterInputs[1]?.brief.title, directorInputs[1]?.brief.title, publishInputs[1]?.brief.title],
+      [revisedTitle, revisedTitle, revisedTitle],
+    );
+    assert.deepEqual(
+      [screenwriterInputs[1]?.brief.angle, directorInputs[1]?.brief.angle, publishInputs[1]?.brief.angle],
+      [revisedAngle, revisedAngle, revisedAngle],
+    );
+    assert.deepEqual(
+      [screenwriterInputs[1]?.brief.audience, directorInputs[1]?.brief.audience, publishInputs[1]?.brief.audience],
+      [revisedAudience, revisedAudience, revisedAudience],
+    );
+    assert.notEqual(screenwriterInputs[0]?.agentLoopCheckpoint?.key, screenwriterInputs[1]?.agentLoopCheckpoint?.key);
+    assert.notEqual(directorInputs[0]?.agentLoopCheckpoint?.key, directorInputs[1]?.agentLoopCheckpoint?.key);
+    assert.notEqual(publishInputs[0]?.agentLoopCheckpoint?.key, publishInputs[1]?.agentLoopCheckpoint?.key);
+  });
+
   it("rejects override paths outside the selected run", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-override-boundary-"));
     const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });
@@ -1053,6 +1408,74 @@ describe("ProductionPipeline", () => {
     assert.equal(worker.calls.length, 0);
   });
 
+  it("persists every failed visual-director model before stopping the storyboard node", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-director-exhausted-"));
+    const failingAgent = (modelId: string, error: Error): pipeline.VisualDirectorAgent => ({
+      id: "api-visual-director-v1",
+      modelId,
+      plan: async () => { throw error; },
+      planDetailed: async () => { throw error; },
+    });
+    const directorAgent = new pipeline.FallbackVisualDirectorAgent({
+      candidates: [{
+        providerId: "openai",
+        agent: failingAgent("gpt-5.6-terra", new pipeline.CodexBridgeError(
+          "Codex bridge returned HTTP 503. secret-primary",
+          true,
+          "not_accepted",
+          503,
+        )),
+      }, {
+        providerId: "zai-bigmodel-api",
+        agent: failingAgent("glm-5.3", new pipeline.CodexBridgeError(
+          "socket /private/run/director failed with ECONNREFUSED secret-backup",
+          true,
+          "not_accepted",
+        )),
+      }],
+    });
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      directorAgent,
+      assetProviders: [{
+        id: "local-editorial-v1",
+        label: "本地编辑卡片",
+        billing: "free",
+        modes: ["本地"],
+        deliveryTypes: ["editorial_card"],
+      }],
+    });
+
+    const run = await subject.start({
+      ...brief,
+      providers: {
+        ...brief.providers,
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+      },
+      models: { "api-visual-director-v1": "gpt-5.6-terra" },
+      director: {
+        profileId: "auto",
+        assetProviderIds: ["local-editorial-v1"],
+      },
+    });
+
+    await assertCandidateFailureTrace(run, "visual-direction", [{
+      modelId: "gpt-5.6-terra",
+      providerId: "openai",
+      outcome: "failed",
+      failureStage: "not_accepted",
+      failureReason: "服务端错误（HTTP 503）",
+    }, {
+      modelId: "glm-5.3",
+      providerId: "zai-bigmodel-api",
+      outcome: "failed",
+      failureStage: "not_accepted",
+      failureReason: "连接失败",
+    }]);
+  });
+
   it("runs an AI director before assets and passes its per-shot plan to the router", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
     const worker = new FakeWorker();
@@ -1128,6 +1551,7 @@ describe("ProductionPipeline", () => {
     const run = await subject.start({
       ...brief,
       templateSnapshot,
+      models: { "api-visual-director-v1": "gpt-5.6-terra" },
       rework: {
         sourceRunId: "run-rejected-1",
         sourceRunRevision: 7,
@@ -1136,7 +1560,26 @@ describe("ProductionPipeline", () => {
           visualDirection: "第二镜改成与第一镜一致的自然纪实构图。",
           assets: "第二镜只用无字实拍素材，不得生成说明卡。",
         },
-        findings: [],
+        findings: [
+          {
+            findingId: "vf_aaaaaaaaaaaaaaaaaaaaaaaa",
+            timecodeMs: 4_000,
+            scenePosition: 1,
+            category: "pacing",
+            description: "第一镜旁白太长。",
+            suggestion: "缩短旁白。",
+            targetNodeIds: ["script"],
+          },
+          {
+            findingId: "vf_bbbbbbbbbbbbbbbbbbbbbbbb",
+            timecodeMs: 8_000,
+            scenePosition: 2,
+            category: "continuity",
+            description: "第二镜画面不连续。",
+            suggestion: "调整构图并替换素材。",
+            targetNodeIds: ["visual-direction", "assets"],
+          },
+        ],
         previousDirectorPlan: { version: "video-factory/director-plan-v1", shots: [{ scenePosition: 2 }] },
       },
       providers: {
@@ -1171,25 +1614,197 @@ describe("ProductionPipeline", () => {
     assert.deepEqual((assetCall?.input as Record<string, unknown>).rework, {
       sourceRunId: "run-rejected-1",
       instruction: "第二镜只用无字实拍素材，不得生成说明卡。",
-      findings: [],
+      findings: [{
+        findingId: "vf_bbbbbbbbbbbbbbbbbbbbbbbb",
+        timecodeMs: 8_000,
+        scenePosition: 2,
+        category: "continuity",
+        description: "第二镜画面不连续。",
+        suggestion: "调整构图并替换素材。",
+        targetNodeIds: ["visual-direction", "assets"],
+      }],
     });
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/director-v10",
+      "video-factory/director-v11",
     );
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.modelId,
       "gpt-5.6-terra",
     );
+    assert.equal(directorInput?.selectedModelId, "gpt-5.6-terra");
+    const directorPrimaryCheckpoint = directorInput?.agentLoopCheckpointForModel?.("gpt-5.6-terra");
+    const directorBackupCheckpoint = directorInput?.agentLoopCheckpointForModel?.("glm-5.3");
+    assert.ok(directorPrimaryCheckpoint);
+    assert.ok(directorBackupCheckpoint);
+    assert.notEqual(directorPrimaryCheckpoint.key, directorBackupCheckpoint.key);
     assert.deepEqual(directorInput?.brief.templateBlueprint, templateSnapshot.resolvedBlueprint);
     assert.deepEqual(directorInput?.brief.rework, {
       sourceRunId: "run-rejected-1",
       visualDirectionInstruction: "第二镜改成与第一镜一致的自然纪实构图。",
       assetInstruction: "第二镜只用无字实拍素材，不得生成说明卡。",
+      findings: [{
+        findingId: "vf_bbbbbbbbbbbbbbbbbbbbbbbb",
+        timecodeMs: 8_000,
+        scenePosition: 2,
+        category: "continuity",
+        description: "第二镜画面不连续。",
+        suggestion: "调整构图并替换素材。",
+        targetNodeIds: ["visual-direction", "assets"],
+      }],
       previousDirectorPlan: { version: "video-factory/director-plan-v1", shots: [{ scenePosition: 2 }] },
     });
     assert.equal(directorInput?.scenes[0]?.onScreenText, "早餐第一步");
     assert.equal(directorInput?.scenes[0]?.soundCue, "摊位环境声");
+  });
+
+  it("validates and reprices a human visual plan before invalidating the old asset approval", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-human-director-plan-"));
+    const worker = new FakeWorker();
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      directorAgent: {
+        id: "api-visual-director-v1",
+        plan: async (input) => ({
+          version: "video-factory/director-plan-v1",
+          requestedProfileId: "auto",
+          resolvedProfileId: "geometric-control",
+          profileRationale: "生成镜头可以稳定交付解释动作。",
+          visualBible: {
+            narrativeApproach: "逐镜解释",
+            pacing: "均匀",
+            composition: "稳定中景",
+            camera: "固定机位",
+            color: "自然暖色",
+            continuity: "保持统一",
+            sound: "环境声",
+          },
+          shots: input.scenes.map((scene) => ({
+            scenePosition: scene.position,
+            narrativeRole: "解释",
+            authenticityPolicy: "illustrative",
+            preferredProviderId: "seedance-video-v1",
+            deliveryType: "generated_video",
+            alternativeProviderIds: [],
+            temporalBeats: [`[0s-${scene.duration / 2}s] 建立主体`, `[${scene.duration / 2}s-${scene.duration}s] 完成动作`],
+            query: scene.visualPrompt,
+            generationPrompt: scene.visualPrompt,
+            rationale: "生成能力可以执行这一镜。",
+            continuityNote: "保持同一色温。",
+            confidence: 0.8,
+            estimatedCostCny: 0,
+          })),
+        }),
+      },
+      assetProviders: [{
+        id: "seedance-video-v1",
+        label: "Seedance",
+        billing: "metered",
+        modes: ["文生视频"],
+        deliveryTypes: ["generated_video"],
+        estimatedCnyPerClip: 2.4,
+        generative: true,
+      }, {
+        id: "local-editorial-v1",
+        label: "本地编辑卡片",
+        billing: "free",
+        modes: ["本地"],
+        deliveryTypes: ["editorial_card"],
+      }],
+      providerRuntimeMetadata: [{
+        id: "seedance-video-v1",
+        label: "Seedance",
+        modelId: "seedance-v1",
+        transport: "http_api",
+        billing: "metered",
+        estimatedCostCny: 2.4,
+        maxAttempts: 1,
+      }],
+    });
+    const awaiting = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1", "local-editorial-v1"] },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    });
+    const spendPlan = awaiting.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
+    assert.ok(spendPlan);
+    const reviewed = await subject.authorizeSpend(awaiting.id, {
+      nodeId: spendPlan.nodeId,
+      inputVersionIds: spendPlan.inputVersionIds,
+      providerId: spendPlan.providerId,
+      modelId: spendPlan.modelId,
+      maxCostCny: spendPlan.maxCostCny,
+      maxAttempts: spendPlan.maxAttempts,
+      approvedBy: "owner",
+    });
+    assert.equal(reviewed.status, "needs_human");
+    assert.equal(reviewed.spendAuthorizations?.length, 1);
+
+    const currentPlanPath = String((reviewed.nodeRuns.find((node) => node.nodeId === "visual-direction")?.output as Record<string, unknown>).directorPlanPath);
+    const currentPlan = JSON.parse(await readFile(currentPlanPath, "utf8")) as Record<string, unknown> & { shots: Array<Record<string, unknown>> };
+    const submissions = path.join(workspaceRoot, "runs", reviewed.id, "manual-submissions");
+    await mkdir(submissions, { recursive: true });
+    const invalidPlans: Array<[string, Record<string, unknown>, RegExp]> = [
+      ["missing-scene", { ...currentPlan, shots: currentPlan.shots.slice(0, 1) }, /cover every script scene/],
+      ["duplicate-scene", {
+        ...currentPlan,
+        shots: currentPlan.shots.map((shot, index) => index === 1 ? { ...shot, scenePosition: 1 } : shot),
+      }, /duplicate scene 1/],
+      ["wrong-delivery", {
+        ...currentPlan,
+        shots: currentPlan.shots.map((shot, index) => index === 0 ? { ...shot, deliveryType: "stock_video" } : shot),
+      }, /cannot deliver 'stock_video'/],
+      ["generated-evidence", {
+        ...currentPlan,
+        shots: currentPlan.shots.map((shot, index) => index === 0 ? { ...shot, authenticityPolicy: "evidence" } : shot),
+      }, /evidence shot 1 cannot use a generative provider/],
+      ["animated-card", {
+        ...currentPlan,
+        shots: currentPlan.shots.map((shot, index) => index === 0 ? {
+          ...shot,
+          preferredProviderId: "local-editorial-v1",
+          deliveryType: "editorial_card",
+          generationPrompt: "标题逐字淡入",
+        } : shot),
+      }, /unsupported element animation/],
+    ];
+    for (const [name, invalidPlan, expectedError] of invalidPlans) {
+      const submittedPath = path.join(submissions, `${name}.json`);
+      await writeFile(submittedPath, `${JSON.stringify(invalidPlan, null, 2)}\n`, "utf8");
+      await assert.rejects(
+        () => subject.applyNodeOverride(reviewed.id, {
+          nodeId: "visual-direction",
+          actor: "director",
+          output: { directorPlanPath: submittedPath },
+        }),
+        expectedError,
+      );
+      assert.equal((await subject.show(reviewed.id)).revision, reviewed.revision);
+    }
+
+    const submittedPath = path.join(submissions, "valid-but-underpriced.json");
+    await writeFile(submittedPath, `${JSON.stringify({
+      ...currentPlan,
+      shots: currentPlan.shots.map((shot) => ({ ...shot, estimatedCostCny: 0 })),
+    }, null, 2)}\n`, "utf8");
+    const revised = await subject.applyNodeOverride(reviewed.id, {
+      nodeId: "visual-direction",
+      actor: "director",
+      output: { directorPlanPath: submittedPath },
+    });
+
+    const visualNode = revised.nodeRuns.find((node) => node.nodeId === "visual-direction");
+    const normalizedPath = String((visualNode?.output as Record<string, unknown>).directorPlanPath);
+    assert.equal(revised.status, "stale");
+    assert.notEqual(normalizedPath, submittedPath);
+    assert.equal(visualNode?.outputState?.versions.at(-1)?.source, "human");
+    assert.equal(revised.nodeRuns.find((node) => node.nodeId === "assets")?.status, "stale");
+    assert.equal(revised.spendAuthorizations?.length, 0);
+    const normalizedPlan = JSON.parse(await readFile(normalizedPath, "utf8")) as { shots: Array<{ estimatedCostCny: number }> };
+    assert.deepEqual(normalizedPlan.shots.map((shot) => shot.estimatedCostCny), [2.4, 2.4]);
+    assert.ok(revised.artifacts.some((artifact) => artifact.kind === "storyboard" && artifact.uri === normalizedPath));
   });
 
   it("routes a Kokoro profile through the local neural voice provider", async () => {
@@ -2067,6 +2682,537 @@ describe("ProductionPipeline", () => {
     assert.deepEqual(nextAssets?.spendPlan?.items?.map((item) => item.id), ["scene-2"]);
     assert.equal(worker.calls.filter((call) => call.capability === "asset.prepare").length, 0);
     assert.equal(requoted.spendAuthorizations?.[0]?.id, oldAuthorizationId);
+  });
+
+  it("requires a fresh quote and approval before a paid fallback asset model can run", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-paid-model-requote-"));
+    class TerminalThenSuccessfulAssetWorker extends FakeWorker {
+      private assetAttempt = 0;
+
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        if (request.capability !== "asset.prepare" || this.assetAttempt++ > 0) {
+          return super.run(request);
+        }
+        this.calls.push(request);
+        const input = request.input as Record<string, unknown>;
+        const parameters = request.parameters as Record<string, unknown>;
+        const modelSelections = parameters.modelSelections as Record<string, string>;
+        const modelId = modelSelections["hailuo-video-v1"]!;
+        const sourceFingerprint = await pipeline.paidAssetSourceFingerprint([String(input.scriptPath)]);
+        const ledgerDirectory = path.join(path.dirname(String(request.outputDir)), ".generation-operations");
+        await mkdir(ledgerDirectory, { recursive: true });
+        const operationId = String(request.commandId);
+        await writeFile(
+          path.join(ledgerDirectory, `${createHash("sha256").update(operationId).digest("hex")}.json`),
+          `${JSON.stringify({
+            version: "video-factory/paid-operation-v2",
+            operationId,
+            completed: false,
+            items: [1, 2].map((scenePosition) => ({
+              itemRequestId: `terminal-scene-${scenePosition}`,
+              quoteItemId: `scene-${scenePosition}`,
+              inputFingerprint: `terminal-input-${scenePosition}`,
+              sourceFingerprint,
+              scenePosition,
+              executorProviderId: "hailuo-video-v1",
+              providerId: "hailuo-video-v1",
+              modelId,
+              parameters: { mediaType: "video", durationSeconds: 5, ratio: "9:16" },
+              state: "terminal_failed",
+              estimatedCostCny: 2.4,
+              actualCostCny: 0,
+              actualCostSource: "configured_rate",
+              error: "Provider rejected the request before creating a task.",
+            })),
+          }, null, 2)}\n`,
+          "utf8",
+        );
+        return {
+          protocolVersion: "video-factory/worker-v1",
+          commandId: operationId,
+          status: "failed",
+          artifacts: [],
+          error: { code: "PROVIDER_REJECTED", message: "Provider rejected the request before creating a task." },
+          diagnostics: {
+            actualCostCny: 0,
+            actualCostSource: "configured_rate",
+            meteredAttemptCount: 1,
+            meteredFailedAttemptCount: 1,
+            actualModelIds: [modelId],
+          },
+        };
+      }
+    }
+
+    const worker = new TerminalThenSuccessfulAssetWorker();
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      providerRuntimeMetadata: [{
+        id: "hailuo-video-v1",
+        label: "MiniMax 海螺关键镜头",
+        modelId: "MiniMax-Hailuo-02",
+        transport: "http_api",
+        billing: "metered",
+        estimatedCostCny: 2.4,
+        maxAttempts: 1,
+        modelProfiles: [{
+          modelId: "MiniMax-Hailuo-02-backup",
+          estimatedCostCny: 1.1,
+          taskTypes: ["text-to-video"],
+          resolutions: ["768P"],
+          minDurationSeconds: 5,
+          maxDurationSeconds: 10,
+          supportsAudio: false,
+        }],
+      }],
+    });
+    const initialBrief: pipeline.ProductionBrief = {
+      ...brief,
+      providers: { ...brief.providers, assets: "hailuo-video-v1" },
+      models: { "hailuo-video-v1": "MiniMax-Hailuo-02" },
+      modelSelectionSources: { "hailuo-video-v1": "run_override" },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    };
+    const paused = await subject.start(initialBrief);
+    const originalPlan = paused.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
+    assert.ok(originalPlan);
+
+    const failed = await subject.authorizeSpend(paused.id, {
+      nodeId: originalPlan.nodeId,
+      inputVersionIds: originalPlan.inputVersionIds,
+      providerId: originalPlan.providerId,
+      modelId: originalPlan.modelId,
+      maxCostCny: originalPlan.maxCostCny,
+      maxAttempts: originalPlan.maxAttempts,
+      approvedBy: "owner",
+    });
+    const oldAuthorizationId = failed.nodeRuns.find((node) => node.nodeId === "assets")?.spendAuthorizationId;
+    assert.equal(failed.status, "failed");
+    assert.ok(oldAuthorizationId);
+    assert.equal(failed.nodeRuns.find((node) => node.nodeId === "assets")?.outcomeUncertain, true);
+    assert.equal(worker.calls.filter((call) => call.capability === "asset.prepare").length, 1);
+
+    const summary = await subject.inspectPaidNode(failed.id, "assets");
+    assert.equal(summary.recommendedOutcome, "requote");
+    assert.equal(summary.requiresManualReconciliation, false);
+    const reconciled = await subject.reconcilePaidNode(failed.id, {
+      nodeId: "assets",
+      expectedRunRevision: failed.revision,
+      reconciliationId: "terminal-primary-model-requote",
+      outcome: "requote",
+    });
+    assert.equal(reconciled.status, "awaiting_spend_approval");
+    assert.deepEqual(reconciled.consumedSpendAuthorizationIds, [oldAuthorizationId]);
+
+    const switched = await subject.applyNodeExecutionConfiguration(
+      reconciled.id,
+      "assets",
+      {
+        ...reconciled.initialInput,
+        models: { ...(reconciled.initialInput.models ?? {}), "hailuo-video-v1": "MiniMax-Hailuo-02-backup" },
+        modelSelectionSources: {
+          ...(reconciled.initialInput.modelSelectionSources ?? {}),
+          "hailuo-video-v1": "node_override",
+        },
+      },
+      "owner",
+    );
+    assert.equal(switched.spendAuthorizations?.some((authorization) => authorization.id === oldAuthorizationId), false);
+
+    const requoted = await subject.resumeStale(switched.id);
+    const fallbackPlan = requoted.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
+    assert.equal(requoted.status, "awaiting_spend_approval");
+    assert.ok(fallbackPlan);
+    assert.notEqual(fallbackPlan.id, originalPlan.id);
+    assert.equal(fallbackPlan.providerId, "hailuo-video-v1");
+    assert.equal(fallbackPlan.modelId, "MiniMax-Hailuo-02-backup");
+    assert.equal(fallbackPlan.estimatedCostCny, 2.2);
+    assert.deepEqual(fallbackPlan.items, [
+      { id: "scene-1", label: "镜头 1", providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02-backup", estimatedCostCny: 1.1 },
+      { id: "scene-2", label: "镜头 2", providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02-backup", estimatedCostCny: 1.1 },
+    ]);
+    const fallbackCalls = () => worker.calls.filter((call) => (
+      call.capability === "asset.prepare"
+      && (call.parameters as Record<string, Record<string, string>>).modelSelections?.["hailuo-video-v1"] === "MiniMax-Hailuo-02-backup"
+    ));
+    assert.equal(fallbackCalls().length, 0, "requote must not call the fallback model before its own approval");
+
+    await assert.rejects(() => subject.authorizeSpend(requoted.id, {
+      nodeId: originalPlan.nodeId,
+      inputVersionIds: originalPlan.inputVersionIds,
+      providerId: originalPlan.providerId,
+      modelId: originalPlan.modelId,
+      maxCostCny: originalPlan.maxCostCny,
+      maxAttempts: originalPlan.maxAttempts,
+      approvedBy: "owner",
+    }), /does not match the active plan/);
+    assert.equal(fallbackCalls().length, 0, "the primary model approval must not authorize the fallback model");
+
+    const completed = await subject.authorizeSpend(requoted.id, {
+      nodeId: fallbackPlan.nodeId,
+      inputVersionIds: fallbackPlan.inputVersionIds,
+      providerId: fallbackPlan.providerId,
+      modelId: fallbackPlan.modelId,
+      maxCostCny: fallbackPlan.maxCostCny,
+      maxAttempts: fallbackPlan.maxAttempts,
+      approvedBy: "owner",
+    });
+    assert.equal(completed.status, "needs_human");
+    assert.equal(fallbackCalls().length, 1, "the fallback model may run only after its exact quote is approved");
+  });
+
+  it("requires a fresh quote and approval before a paid generated-image model can change", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-paid-image-model-requote-"));
+    class TerminalThenSuccessfulSeedreamWorker extends FakeWorker {
+      private seedreamFailed = false;
+
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const parameters = request.parameters as Record<string, unknown>;
+        if (
+          request.capability !== "asset.prepare"
+          || parameters.providerId !== "seedream-image-v1"
+          || this.seedreamFailed
+        ) {
+          return super.run(request);
+        }
+        this.seedreamFailed = true;
+        this.calls.push(request);
+        const input = request.input as Record<string, unknown>;
+        const modelSelections = parameters.modelSelections as Record<string, string>;
+        const modelId = modelSelections["seedream-image-v1"]!;
+        const sourceFingerprint = await pipeline.paidAssetSourceFingerprint([String(input.scriptPath)]);
+        const ledgerDirectory = path.join(path.dirname(String(request.outputDir)), ".generation-operations");
+        await mkdir(ledgerDirectory, { recursive: true });
+        const operationId = String(request.commandId);
+        await writeFile(
+          path.join(ledgerDirectory, `${createHash("sha256").update(operationId).digest("hex")}.json`),
+          `${JSON.stringify({
+            version: "video-factory/paid-operation-v2",
+            operationId,
+            completed: false,
+            items: [1, 2].map((scenePosition) => ({
+              itemRequestId: `terminal-seedream-scene-${scenePosition}`,
+              quoteItemId: `scene-${scenePosition}`,
+              inputFingerprint: `terminal-seedream-input-${scenePosition}`,
+              sourceFingerprint,
+              scenePosition,
+              executorProviderId: "seedream-image-v1",
+              providerId: "seedream-image-v1",
+              modelId,
+              parameters: { mediaType: "image", ratio: "9:16" },
+              state: "terminal_failed",
+              estimatedCostCny: 0.25,
+              actualCostCny: 0,
+              actualCostSource: "configured_rate",
+              error: "Provider rejected the image request before creating a task.",
+            })),
+          }, null, 2)}\n`,
+          "utf8",
+        );
+        return {
+          protocolVersion: "video-factory/worker-v1",
+          commandId: operationId,
+          status: "failed",
+          artifacts: [],
+          error: { code: "PROVIDER_REJECTED", message: "Provider rejected the image request before creating a task." },
+          diagnostics: {
+            actualCostCny: 0,
+            actualCostSource: "configured_rate",
+            meteredAttemptCount: 1,
+            meteredFailedAttemptCount: 1,
+            actualModelIds: [modelId],
+          },
+        };
+      }
+    }
+
+    const worker = new TerminalThenSuccessfulSeedreamWorker();
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      providerRuntimeMetadata: [{
+        id: "seedream-image-v1",
+        label: "Seedream 关键画面",
+        modelId: "doubao-seedream-primary",
+        transport: "http_api",
+        billing: "metered",
+        estimatedCostCny: 0.25,
+        maxAttempts: 1,
+        modelProfiles: [{
+          modelId: "doubao-seedream-backup",
+          estimatedCostCny: 0.15,
+        }],
+      }],
+    });
+    const initialBrief: pipeline.ProductionBrief = {
+      ...brief,
+      providers: { ...brief.providers, assets: "seedream-image-v1" },
+      models: { "seedream-image-v1": "doubao-seedream-primary" },
+      modelSelectionSources: { "seedream-image-v1": "run_override" },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    };
+    const paused = await subject.start(initialBrief);
+    const originalPlan = paused.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
+    assert.ok(originalPlan);
+
+    const failed = await subject.authorizeSpend(paused.id, {
+      nodeId: originalPlan.nodeId,
+      inputVersionIds: originalPlan.inputVersionIds,
+      providerId: originalPlan.providerId,
+      modelId: originalPlan.modelId,
+      maxCostCny: originalPlan.maxCostCny,
+      maxAttempts: originalPlan.maxAttempts,
+      approvedBy: "owner",
+    });
+    const oldAuthorizationId = failed.nodeRuns.find((node) => node.nodeId === "assets")?.spendAuthorizationId;
+    assert.equal(failed.status, "failed");
+    assert.ok(oldAuthorizationId);
+    assert.equal(worker.calls.filter((call) => (
+      call.capability === "asset.prepare"
+      && (call.parameters as Record<string, unknown>).providerId === "seedream-image-v1"
+    )).length, 1);
+
+    const summary = await subject.inspectPaidNode(failed.id, "assets");
+    assert.equal(summary.recommendedOutcome, "requote");
+    assert.equal(summary.requiresManualReconciliation, false);
+    const reconciled = await subject.reconcilePaidNode(failed.id, {
+      nodeId: "assets",
+      expectedRunRevision: failed.revision,
+      reconciliationId: "terminal-seedream-provider-requote",
+      outcome: "requote",
+    });
+    assert.equal(reconciled.status, "awaiting_spend_approval");
+    assert.deepEqual(reconciled.consumedSpendAuthorizationIds, [oldAuthorizationId]);
+
+    const switched = await subject.applyNodeExecutionConfiguration(
+      reconciled.id,
+      "assets",
+      {
+        ...reconciled.initialInput,
+        models: { ...(reconciled.initialInput.models ?? {}), "seedream-image-v1": "doubao-seedream-backup" },
+        modelSelectionSources: {
+          ...(reconciled.initialInput.modelSelectionSources ?? {}),
+          "seedream-image-v1": "node_override",
+        },
+      },
+      "owner",
+    );
+    assert.equal(switched.spendAuthorizations?.some((authorization) => authorization.id === oldAuthorizationId), false);
+
+    const requoted = await subject.resumeStale(switched.id);
+    const fallbackPlan = requoted.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
+    assert.equal(requoted.status, "awaiting_spend_approval");
+    assert.ok(fallbackPlan);
+    assert.notEqual(fallbackPlan.id, originalPlan.id);
+    assert.equal(fallbackPlan.providerId, "seedream-image-v1");
+    assert.equal(fallbackPlan.modelId, "doubao-seedream-backup");
+    assert.equal(fallbackPlan.estimatedCostCny, 0.3);
+    const backupCalls = () => worker.calls.filter((call) => (
+      call.capability === "asset.prepare"
+      && ((call.parameters as Record<string, unknown>).modelSelections as Record<string, string>)?.["seedream-image-v1"] === "doubao-seedream-backup"
+    ));
+    assert.equal(backupCalls().length, 0, "requote must not call the backup image model before its own approval");
+
+    await assert.rejects(() => subject.authorizeSpend(requoted.id, {
+      nodeId: originalPlan.nodeId,
+      inputVersionIds: originalPlan.inputVersionIds,
+      providerId: originalPlan.providerId,
+      modelId: originalPlan.modelId,
+      maxCostCny: originalPlan.maxCostCny,
+      maxAttempts: originalPlan.maxAttempts,
+      approvedBy: "owner",
+    }), /does not match the active plan/);
+    assert.equal(backupCalls().length, 0, "the old image-model approval must not authorize the backup image model");
+
+    const completed = await subject.authorizeSpend(requoted.id, {
+      nodeId: fallbackPlan.nodeId,
+      inputVersionIds: fallbackPlan.inputVersionIds,
+      providerId: fallbackPlan.providerId,
+      modelId: fallbackPlan.modelId,
+      maxCostCny: fallbackPlan.maxCostCny,
+      maxAttempts: fallbackPlan.maxAttempts,
+      approvedBy: "owner",
+    });
+    assert.equal(completed.status, "needs_human");
+    assert.equal(backupCalls().length, 1, "the backup image model may run only after its exact quote is approved");
+  });
+
+  it("requires a fresh quote and approval before changing between paid video providers", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-paid-video-provider-requote-"));
+    class TerminalSeedanceThenSuccessfulHailuoWorker extends FakeWorker {
+      private seedanceFailed = false;
+
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const parameters = request.parameters as Record<string, unknown>;
+        if (
+          request.capability !== "asset.prepare"
+          || parameters.providerId !== "seedance-video-v1"
+          || this.seedanceFailed
+        ) {
+          return super.run(request);
+        }
+        this.seedanceFailed = true;
+        this.calls.push(request);
+        const input = request.input as Record<string, unknown>;
+        const modelSelections = parameters.modelSelections as Record<string, string>;
+        const modelId = modelSelections["seedance-video-v1"]!;
+        const sourceFingerprint = await pipeline.paidAssetSourceFingerprint([String(input.scriptPath)]);
+        const ledgerDirectory = path.join(path.dirname(String(request.outputDir)), ".generation-operations");
+        await mkdir(ledgerDirectory, { recursive: true });
+        const operationId = String(request.commandId);
+        await writeFile(
+          path.join(ledgerDirectory, `${createHash("sha256").update(operationId).digest("hex")}.json`),
+          `${JSON.stringify({
+            version: "video-factory/paid-operation-v2",
+            operationId,
+            completed: false,
+            items: [1, 2].map((scenePosition) => ({
+              itemRequestId: `terminal-seedance-scene-${scenePosition}`,
+              quoteItemId: `scene-${scenePosition}`,
+              inputFingerprint: `terminal-seedance-input-${scenePosition}`,
+              sourceFingerprint,
+              scenePosition,
+              executorProviderId: "seedance-video-v1",
+              providerId: "seedance-video-v1",
+              modelId,
+              parameters: { mediaType: "video", durationSeconds: 5, ratio: "9:16" },
+              state: "terminal_failed",
+              estimatedCostCny: 1.2,
+              actualCostCny: 0,
+              actualCostSource: "configured_rate",
+              error: "Provider rejected the video request before creating a task.",
+            })),
+          }, null, 2)}\n`,
+          "utf8",
+        );
+        return {
+          protocolVersion: "video-factory/worker-v1",
+          commandId: operationId,
+          status: "failed",
+          artifacts: [],
+          error: { code: "PROVIDER_REJECTED", message: "Provider rejected the video request before creating a task." },
+          diagnostics: {
+            actualCostCny: 0,
+            actualCostSource: "configured_rate",
+            meteredAttemptCount: 1,
+            meteredFailedAttemptCount: 1,
+            actualModelIds: [modelId],
+          },
+        };
+      }
+    }
+
+    const worker = new TerminalSeedanceThenSuccessfulHailuoWorker();
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      providerRuntimeMetadata: [{
+        id: "seedance-video-v1",
+        label: "火山方舟视频",
+        modelId: "doubao-seedance-primary",
+        transport: "http_api",
+        billing: "metered",
+        estimatedCostCny: 1.2,
+        maxAttempts: 1,
+      }, {
+        id: "hailuo-video-v1",
+        label: "MiniMax 海螺视频",
+        modelId: "MiniMax-Hailuo-02",
+        transport: "http_api",
+        billing: "metered",
+        estimatedCostCny: 2.4,
+        maxAttempts: 1,
+      }],
+    });
+    const initialBrief: pipeline.ProductionBrief = {
+      ...brief,
+      providers: { ...brief.providers, assets: "seedance-video-v1" },
+      models: { "seedance-video-v1": "doubao-seedance-primary" },
+      modelSelectionSources: { "seedance-video-v1": "run_override" },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    };
+    const paused = await subject.start(initialBrief);
+    const originalPlan = paused.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
+    assert.ok(originalPlan);
+
+    const failed = await subject.authorizeSpend(paused.id, {
+      nodeId: originalPlan.nodeId,
+      inputVersionIds: originalPlan.inputVersionIds,
+      providerId: originalPlan.providerId,
+      modelId: originalPlan.modelId,
+      maxCostCny: originalPlan.maxCostCny,
+      maxAttempts: originalPlan.maxAttempts,
+      approvedBy: "owner",
+    });
+    const oldAuthorizationId = failed.nodeRuns.find((node) => node.nodeId === "assets")?.spendAuthorizationId;
+    assert.equal(failed.status, "failed");
+    assert.ok(oldAuthorizationId);
+
+    const summary = await subject.inspectPaidNode(failed.id, "assets");
+    assert.equal(summary.recommendedOutcome, "requote");
+    assert.equal(summary.requiresManualReconciliation, false);
+    const reconciled = await subject.reconcilePaidNode(failed.id, {
+      nodeId: "assets",
+      expectedRunRevision: failed.revision,
+      reconciliationId: "terminal-seedance-provider-requote",
+      outcome: "requote",
+    });
+    assert.equal(reconciled.status, "awaiting_spend_approval");
+    assert.deepEqual(reconciled.consumedSpendAuthorizationIds, [oldAuthorizationId]);
+
+    const switched = await subject.applyNodeExecutionConfiguration(
+      reconciled.id,
+      "assets",
+      {
+        ...reconciled.initialInput,
+        providers: { ...reconciled.initialInput.providers, assets: "hailuo-video-v1" },
+        models: { ...(reconciled.initialInput.models ?? {}), "hailuo-video-v1": "MiniMax-Hailuo-02" },
+        modelSelectionSources: {
+          ...(reconciled.initialInput.modelSelectionSources ?? {}),
+          "hailuo-video-v1": "node_override",
+        },
+      },
+      "owner",
+    );
+    assert.equal(switched.spendAuthorizations?.some((authorization) => authorization.id === oldAuthorizationId), false);
+
+    const requoted = await subject.resumeStale(switched.id);
+    const fallbackPlan = requoted.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
+    assert.equal(requoted.status, "awaiting_spend_approval");
+    assert.ok(fallbackPlan);
+    assert.notEqual(fallbackPlan.id, originalPlan.id);
+    assert.equal(fallbackPlan.providerId, "hailuo-video-v1");
+    assert.equal(fallbackPlan.modelId, "MiniMax-Hailuo-02");
+    assert.equal(fallbackPlan.estimatedCostCny, 4.8);
+    const hailuoCalls = () => worker.calls.filter((call) => (
+      call.capability === "asset.prepare"
+      && (call.parameters as Record<string, unknown>).providerId === "hailuo-video-v1"
+    ));
+    assert.equal(hailuoCalls().length, 0, "requote must not call the new video provider before its own approval");
+
+    await assert.rejects(() => subject.authorizeSpend(requoted.id, {
+      nodeId: originalPlan.nodeId,
+      inputVersionIds: originalPlan.inputVersionIds,
+      providerId: originalPlan.providerId,
+      modelId: originalPlan.modelId,
+      maxCostCny: originalPlan.maxCostCny,
+      maxAttempts: originalPlan.maxAttempts,
+      approvedBy: "owner",
+    }), /does not match the active plan/);
+    assert.equal(hailuoCalls().length, 0, "the old provider approval must not authorize the new video provider");
+
+    const completed = await subject.authorizeSpend(requoted.id, {
+      nodeId: fallbackPlan.nodeId,
+      inputVersionIds: fallbackPlan.inputVersionIds,
+      providerId: fallbackPlan.providerId,
+      modelId: fallbackPlan.modelId,
+      maxCostCny: fallbackPlan.maxCostCny,
+      maxAttempts: fallbackPlan.maxAttempts,
+      approvedBy: "owner",
+    });
+    assert.equal(completed.status, "needs_human");
+    assert.equal(hailuoCalls().length, 1, "the new video provider may run only after its exact quote is approved");
   });
 
   it("records a trusted not-charged resolution and requotes only unfinished paid scenes", async () => {

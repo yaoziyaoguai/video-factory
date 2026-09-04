@@ -17,6 +17,45 @@ class CapturingCodexClient extends CodexBridgeClient {
   }
 }
 
+class SequencedCodexClient extends CodexBridgeClient {
+  readonly calls: Array<{
+    kind: CodexTaskKind;
+    payload: unknown;
+    requestId: string;
+    session: CodexTaskExecution["session"];
+  }> = [];
+
+  constructor(
+    private readonly responses: unknown[],
+    private readonly providerId: string,
+    private readonly modelId: string,
+  ) {
+    super({ socketPath: "/nonexistent/vf-codex.sock", sleep: async () => {} });
+  }
+
+  async runTaskDetailed(
+    kind: CodexTaskKind,
+    payload: unknown,
+    requestId: string,
+    session?: CodexTaskExecution["session"],
+  ): Promise<CodexTaskExecution> {
+    this.calls.push({ kind, payload, requestId, session: structuredClone(session) });
+    const output = this.responses.shift();
+    if (output === undefined) throw new Error("missing sequenced response");
+    return {
+      output,
+      trace: {
+        taskKind: kind,
+        promptVersion: `test/${kind}`,
+        prompt: `prompt:${kind}`,
+        providerId: this.providerId,
+        modelId: this.modelId,
+        reasoningEffort: this.providerId === "openai" ? "xhigh" : "high",
+      },
+    };
+  }
+}
+
 function directorInput(): VisualDirectorAgentInput {
   return {
     brief: {
@@ -101,39 +140,83 @@ function validPlan(): Record<string, unknown> {
 }
 
 describe("CodexVisualDirectorAgent", () => {
-  it("requires an independent role audit before returning a detailed plan", async () => {
-    const calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
-    const client = new class extends CodexBridgeClient {
-      constructor() { super({ socketPath: "/nonexistent/vf-codex.sock" }); }
-      async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
-        calls.push({ kind, payload });
-        return {
-          output: kind === "director-plan" ? validPlan() : {
-            version: "video-factory/role-audit-v1",
-            verdict: "pass",
-            score: 94,
-            summary: "逐镜方案可执行。",
-            issues: [],
-            repairInstructions: [],
-          },
-          trace: {
-            taskKind: kind,
-            promptVersion: `test/${kind}`,
-            prompt: `prompt:${kind}`,
-            providerId: "openai",
-            modelId: "gpt-5.6-sol",
-            reasoningEffort: "xhigh",
-          },
-        };
-      }
-    }();
-    const agent = new CodexVisualDirectorAgent({ client, maxReviewIterations: 2 });
+  it("rejects a stale selected model before calling a single configured agent", async () => {
+    const client = new CapturingCodexClient(() => validPlan());
+    const agent = new CodexVisualDirectorAgent({ client, modelId: "gpt-current" });
 
-    const execution = await agent.planDetailed(directorInput());
+    await assert.rejects(
+      () => agent.plan({ ...directorInput(), selectedModelId: "gpt-offline" }),
+      /is not available for visual direction/,
+    );
+    assert.equal(client.calls.length, 0);
+  });
+
+  it("routes stateless ZAI production and independent OpenAI audit to separate clients", async () => {
+    const firstPlan = validPlan();
+    const repairedPlan = validPlan();
+    repairedPlan.profileRationale = "都市夜景、人物动作与冷暖光对照共同兑现观众承诺。";
+    const repairAudit = {
+      version: "video-factory/role-audit-v1",
+      verdict: "repair",
+      score: 78,
+      summary: "导演风格理由没有连接具体动作与光线。",
+      issues: [{
+        severity: "blocking",
+        criterion: "视觉圣经与观众承诺一致",
+        evidence: "理由只写题材适配，没有说明动作和光线如何兑现承诺。",
+        repairInstruction: "把人物动作、冷暖光和观众承诺写进风格理由。",
+      }],
+      repairInstructions: ["补全动作、光线与观众承诺之间的关系。"],
+    };
+    const passAudit = {
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 94,
+      summary: "逐镜方案可执行。",
+      issues: [],
+      repairInstructions: [],
+    };
+    const producerClient = new SequencedCodexClient(
+      [firstPlan, repairedPlan],
+      "zai-bigmodel-api",
+      "glm-5.3",
+    );
+    const auditClient = new SequencedCodexClient(
+      [repairAudit, passAudit],
+      "openai",
+      "gpt-5.6-sol",
+    );
+    const agent = new CodexVisualDirectorAgent({
+      client: producerClient,
+      auditClient,
+      maxReviewIterations: 2,
+      modelId: "glm-5.3",
+      sessionMode: "stateless",
+    });
+
+    const execution = await agent.planDetailed({ ...directorInput(), selectedModelId: "glm-5.3" });
 
     assert.equal(execution.agentLoop?.status, "passed");
-    assert.deepEqual(calls.map(({ kind }) => kind), ["director-plan", "role-audit"]);
-    const auditPayload = calls[1]!.payload as {
+    assert.deepEqual(producerClient.calls.map(({ kind }) => kind), ["director-plan", "director-plan"]);
+    assert.deepEqual(auditClient.calls.map(({ kind }) => kind), ["role-audit", "role-audit"]);
+    assert.deepEqual(producerClient.calls.map(({ session }) => session), [undefined, undefined]);
+    assert.equal(
+      ((producerClient.calls[1]!.payload as Record<string, unknown>).revision as { mode?: string }).mode,
+      "repair-bootstrap",
+    );
+    assert.deepEqual(
+      execution.agentLoop?.iterations.map((iteration) => [
+        iteration.candidateTrace?.providerId,
+        iteration.candidateTrace?.modelId,
+        iteration.auditTrace?.providerId,
+        iteration.auditTrace?.modelId,
+      ]),
+      [
+        ["zai-bigmodel-api", "glm-5.3", "openai", "gpt-5.6-sol"],
+        ["zai-bigmodel-api", "glm-5.3", "openai", "gpt-5.6-sol"],
+      ],
+    );
+    const auditPayload = auditClient.calls[0]!.payload as {
       context: {
         upstreamFacts: { scenes: Array<Record<string, unknown>> };
         currentRoleContract: Record<string, unknown>;

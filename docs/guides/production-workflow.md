@@ -17,16 +17,21 @@ flowchart TB
 
     subgraph WORKERS[Python 媒体执行平面]
         RUNNER --> SCRIPT[script.draft\n脚本]
-        SCRIPT --> ASSETS[asset.prepare\n素材计划]
-        SCRIPT --> VOICE[voice.synthesize\n旁白与音频计划]
+        SCRIPT --> DIRECTOR[storyboard.plan\n导演方案]
+        DIRECTOR --> ASSETS[asset.prepare\n素材执行]
+        ASSETS --> VOICE[voice.synthesize\n旁白与音频计划]
         ASSETS --> RENDER[video.render\n1080x1920 MP4]
         VOICE --> RENDER
         RENDER --> TECH[quality.review\nffprobe + 音量 + 时长 + 素材门禁]
+        VISUAL[quality.review.visual\n关键帧视觉审片]
     end
 
     TECH -- failed --> FAILED[Run failed]
     TECH -- rejected --> REJECTED[Run rejected\n保留审片报告]
-    TECH -- passed --> FINAL{终审模式}
+    TECH -- passed --> VISUAL
+    VISUAL -- failed --> FAILED
+    VISUAL -- revise / reject --> FINAL{终审模式}
+    VISUAL -- approve --> FINAL
     FINAL -- manual --> HUMAN[人工完整观看成片]
     HUMAN -- reject --> REJECTED
     HUMAN -- approve --> VERIFY[重新校验全部文件 artifact]
@@ -45,6 +50,7 @@ flowchart TB
 - 人工终审是一个持久化 intervention，可以批准、拒绝，或根据当前视觉审片 finding 提交受版本保护的局部素材返修。
 - `approve` 的加载、恢复、发布包写入和 revision 更新位于同一个 run lock transaction 中。
 - 被打回后可从返工草稿重新制作。原模板版本、模型、画面来源、声音和导演配置默认继承，视觉 finding 会按问题类型预填到编剧、视觉导演和素材执行输入；所有字段在开工前仍可修改。
+- 每个模型节点只有一个首选模型；同一能力下其他健康模型是有序候选。系统只在调用层故障时切换，内容结构、业务校验或质量审计失败仍留在当前节点修正。模型尝试顺序和最终采用模型进入执行回执。
 - 发布包只代表“可以发布”。Web 端已经提供多平台合规检查、明确确认、幂等批次和失败隔离；只有正式平台适配器与账号授权都就绪时才调用官方上传接口。
 
 ## 2. Run 状态流转
@@ -84,7 +90,7 @@ workspace/factory/runs/<run-id>/
 |---|---|---|---|
 | Brief 合同 | `video-factory/brief-v1`，校验必填字段、20-180 秒、终审模式与 Provider binding | 自动 | 可新增协议版本 |
 | 工作流调度 | TS DAG、依赖排序、节点状态、失败/拒绝传播 | 自动 | Node/Provider 接口可扩展 |
-| 脚本 | Codex 编剧 Agent + 独立审计；确定性模板只用于明确选择的本地/测试路径 | 自动 | 模型与本地 Provider 通过同一 capability 合同替换 |
+| 脚本 | Codex/GLM 有序候选池 + 独立审计；确定性模板只用于明确选择的本地/测试路径 | 自动 | 用户选择首选模型，兼容候选只在调用故障时接管 |
 | 素材 | AI 导演逐镜路由 Pexels、Pixabay、Seedream、视频模型、人工素材和 `REUSE_ONLY` | 自动 + 付费前人工审批 | 图片/视频 Provider 通过目录与 adapter 扩展；失败不得生成说明卡 |
 | 配音 | `minimax-tts-v1`、`macos-say-v1`；`ffmpeg-tone-test-v1` 仅用于测试 | 自动 | 可继续增加云 TTS 或真人录音 Provider |
 | 渲染 | Python + FFmpeg，H.264/AAC，1080x1920 | 自动 | 可增加 Remotion 或其他渲染 Provider |

@@ -4,6 +4,7 @@ import type {
   StudioCandidateRisk,
   StudioCandidateVerification,
   StudioEditorialDecision,
+  StudioOpportunityEvidence,
   StudioOpportunityScore,
   StudioTemplateRecommendation,
   StudioTopicCategory,
@@ -19,22 +20,20 @@ export interface EditorialDecisionInput {
   risk: StudioCandidateRisk;
   verification: StudioCandidateVerification;
   score: StudioOpportunityScore;
+  audience?: string;
+  painPoint?: string;
+  hook?: string;
+  evidence?: Array<Pick<StudioOpportunityEvidence, "source" | "evidenceUrl">>;
 }
 
 const STATIC_UPDATE_PATTERN = /通报|公告|回应|声明|会议(?:召开|举行|通报|决定)|发布会|任免|判决|调查进展|数据公布|逝世|去世|政策发布|外交|冲突|伤亡|事故|地震|台风|暴雨|救灾/;
 const ACTION_PATTERN = /实测|实验|挑战|教程|方法|对比|体验|探店|旅行|美食|运动|比赛|改造|制作|开箱|测评|操作|演示|工作流|如何|三步|一天/;
+const COMPARISON_PATTERN = /对比|横评|测评|谁更适合|怎么选|选哪个|\bA\s*(?:还是|vs\.?)\s*B\b/i;
+const HOOK_PATTERN = /[？?]|\d|为什么|如何|到底|能不能|不是.+而是|别.+先|实测|对比|横评|省下|少花|多赚|变化/;
+const GENERIC_AUDIENCE_PATTERN = /^(所有人|大家|普通人|用户|年轻人|成年人)$/;
+const GENERIC_TOPIC_PATTERN = /^(?:(?:今天|今日|本周|最新|实时|全网|平台)?(?:热搜|热点|话题|新闻|资讯|消息|榜单|大事)(?:来了|来袭|更新|速递|盘点|汇总|上榜|第一)?)$/;
 
 export function decideEditorialFormat(input: EditorialDecisionInput): StudioEditorialDecision {
-  if (input.origin === "series") {
-    return {
-      verdict: "produce_video",
-      score: clamp(Math.round((input.score.visualFeasibility + input.score.seriesPotential + input.score.productionCostEfficiency) / 3)),
-      reasons: ["系列内容有持续叙事承诺，适合用动作、过程和连续镜头建立栏目记忆。"],
-      guardrails: ["每集必须提供新的验证、行动或结论，不能只重复栏目模板。"],
-      recommendedTemplate: templateRecommendation("human-mini-doc", "真实行动与连续观察驱动的人物短纪录", "系列内容需要可持续的人物行动和环境变化，而不是反复套用信息卡。"),
-    };
-  }
-
   if (input.verification.status === "blocked") {
     return {
       verdict: "skip",
@@ -44,8 +43,19 @@ export function decideEditorialFormat(input: EditorialDecisionInput): StudioEdit
     };
   }
 
+  const readinessIssues = viralReadinessIssues(input);
+  if (readinessIssues.length > 0) {
+    return {
+      verdict: "skip",
+      score: 0,
+      reasons: [`选题尚未达到视频生产门槛：${readinessIssues.join("；")}。`],
+      guardrails: ["先补齐明确受众、具体痛点、两秒开场承诺和可追溯证据，再重新评估制作形式。"],
+    };
+  }
+
   const staticUpdate = STATIC_UPDATE_PATTERN.test(`${input.title} ${input.track}`);
-  const hasAction = ACTION_PATTERN.test(`${input.title} ${input.track}`);
+  const comparison = COMPARISON_PATTERN.test(`${input.title} ${input.track}`);
+  const hasAction = comparison || ACTION_PATTERN.test(`${input.title} ${input.track}`);
   const videoValue = Math.round(
     input.score.visualFeasibility * 0.34
     + input.score.novelty * 0.2
@@ -94,21 +104,30 @@ export function decideEditorialFormat(input: EditorialDecisionInput): StudioEdit
     };
   }
 
-  const recommendedTemplate = recommendMotionTemplate(input, hasAction);
+  const recommendedTemplate = recommendMotionTemplate(input, hasAction, comparison);
+  const audience = input.audience!.trim();
+  const painPoint = input.painPoint!.trim();
+  const evidenceSources = input.evidence!.map((item) => item.source.trim()).filter(Boolean).join("、");
   return {
     verdict: "produce_video",
     score: clamp(videoValue),
     reasons: [hasAction
-      ? "题材包含可演示的行动或过程，视频能提供文字无法替代的观看价值。"
-      : "画面可行性、受众关联和创作增量达到视频生产门槛。"],
-    guardrails: ["逐镜选择最能承担叙事任务的来源，热度本身不能替代内容价值。"],
+      ? `面向${audience}，用可见行动解决“${painPoint}”，视频能提供文字无法替代的观看价值。`
+      : `面向${audience}，围绕“${painPoint}”的画面可行性和创作增量达到视频生产门槛。`],
+    guardrails: [`前两秒兑现钩子“${input.hook!.trim()}”；事实与结果必须回到${evidenceSources}，热度本身不能替代内容价值。`],
     recommendedTemplate,
   };
 }
 
-function recommendMotionTemplate(input: EditorialDecisionInput, hasAction: boolean): StudioTemplateRecommendation {
+function recommendMotionTemplate(input: EditorialDecisionInput, hasAction: boolean, comparison: boolean): StudioTemplateRecommendation {
+  if (comparison) {
+    return templateRecommendation("ranked-comparison", "统一标准、同条件测试与条件结论构成的横评视频", "题材的核心承诺是帮助观众做选择，必须先公开标准，再用同条件证据给出分人群结论。");
+  }
   if (hasAction) {
     return templateRecommendation("product-demo", "问题、关键动作与结果证据构成的实测视频", "题材的观看价值来自过程和结果，必须让观众看见真实操作而不是听口播描述。");
+  }
+  if (input.origin === "series") {
+    return templateRecommendation("human-mini-doc", "真实行动与连续观察驱动的人物短纪录", "系列内容需要可持续的人物行动和环境变化，而不是反复套用信息卡。");
   }
   if (input.category === "society" || input.freshness === "live") {
     return templateRecommendation("trend-fact-brief", "事实钩子、证据语境与影响判断构成的热点短片", "时效型选题需要先建立可核验事实，再用画面解释它为何与观众相关。");
@@ -117,6 +136,20 @@ function recommendMotionTemplate(input: EditorialDecisionInput, hasAction: boole
     return templateRecommendation("human-mini-doc", "人物行动、环境细节与真实阻力驱动的观察短片", "这类题材的差异化来自具体人物和现场关系，微纪录比通用解说更有记忆点。");
   }
   return templateRecommendation("knowledge-explainer", "问题、因果模型与生活验证构成的解释视频", "题材需要把抽象信息变成可理解、可复述且可验证的因果链。");
+}
+
+function viralReadinessIssues(input: EditorialDecisionInput): string[] {
+  const audience = input.audience?.trim() ?? "";
+  const painPoint = input.painPoint?.trim() ?? "";
+  const hook = input.hook?.trim() ?? "";
+  const title = input.title.trim().replace(/[\s\p{P}\p{S}]+/gu, "");
+  const issues: string[] = [];
+  if (!title || GENERIC_TOPIC_PATTERN.test(title)) issues.push("标题没有形成可判断的具体问题");
+  if (!audience || GENERIC_AUDIENCE_PATTERN.test(audience)) issues.push("受众仍然过于宽泛");
+  if (painPoint.length < 8) issues.push("痛点或具体收益不清楚");
+  if (!hook || !HOOK_PATTERN.test(hook)) issues.push("开场没有足够具体的停留理由");
+  if (!input.evidence?.some((item) => item.source.trim() && item.evidenceUrl?.trim())) issues.push("证据没有可追溯来源");
+  return issues;
 }
 
 function templateRecommendation(

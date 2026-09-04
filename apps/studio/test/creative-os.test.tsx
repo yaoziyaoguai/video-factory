@@ -463,10 +463,10 @@ describe("Creative OS", () => {
       { id: "api-topic-editor-v1", capability: "topic.intelligence", label: "Codex 选题总编", available: true, kind: "external" },
     ];
     const { rerender } = render(<MemoryRouter><DirectorPanel opportunity={{ ...opportunity, origin: "manual" }} providers={topicProviders} onProduce={() => undefined} /></MemoryRouter>);
-    expect(screen.getByText("自定义命题复核、机会评分与来源核验由 Codex 执行")).toBeInTheDocument();
+    expect(screen.getByText("自定义命题复核、制作潜力判断与来源核验由 AI 选题总编完成")).toBeInTheDocument();
 
     rerender(<MemoryRouter><DirectorPanel opportunity={{ ...opportunity, origin: "series" }} providers={topicProviders} onProduce={() => undefined} /></MemoryRouter>);
-    expect(screen.getByText("系列选题、连续性检查与开拍前复核由 Codex 执行")).toBeInTheDocument();
+    expect(screen.getByText("系列选题、连续性检查与开拍前复核由 AI 系列总编完成")).toBeInTheDocument();
   });
 
   it("carries the configured default duration into an adopted opportunity", async () => {
@@ -486,7 +486,7 @@ describe("Creative OS", () => {
 
     await user.click(await screen.findByRole("button", { name: "新建制作" }));
 
-    expect(screen.getByRole("combobox", { name: "视频时长" })).toHaveValue("45");
+    expect(screen.getByRole("combobox", { name: "目标时长" })).toHaveValue("45");
   });
 
   it("presents an executable visual plan for every topic without fake stock frames", () => {
@@ -771,7 +771,7 @@ describe("Creative OS", () => {
 
     await screen.findByRole("heading", { name: "热点候选收件箱" });
     expect(screen.getAllByText("下班后的 AI 时间账本").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Codex 选题总编").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("AI 选题总编").length).toBeGreaterThan(0);
     await user.click(screen.getByRole("button", { name: "采用候选 下班后的 AI 时间账本" }));
 
     expect(adopt).toHaveBeenCalledWith("trend-1", { origin: "trend" });
@@ -1070,13 +1070,13 @@ describe("Creative OS", () => {
 
     const assetSection = (await screen.findByRole("heading", { name: "按画面能力选择模型" })).closest("section");
     expect(assetSection).not.toBeNull();
-    expect(within(assetSection!).getByText("Seedance 关键镜头")).toBeInTheDocument();
+    expect(within(assetSection!).getByText("Seedance 视频生成")).toBeInTheDocument();
     expect(within(assetSection!).getByText("Kling 可灵")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "热点接入" })).toBeInTheDocument();
     expect(screen.getByText("抖音官方热点")).toBeInTheDocument();
     expect(screen.getAllByText("按量计费").length).toBeGreaterThan(0);
     expect(screen.getAllByText("需要配置").length).toBeGreaterThan(0);
-    expect(within(within(assetSection!).getByText("Seedance 关键镜头").closest("article")!).getByText("已配置")).toBeInTheDocument();
+    expect(within(within(assetSection!).getByText("Seedance 视频生成").closest("article")!).getByText("已配置")).toBeInTheDocument();
     expect(screen.getByLabelText("NewsNow 内部服务已连接")).toBeInTheDocument();
   });
 
@@ -1180,6 +1180,11 @@ describe("Creative OS", () => {
     expect(await screen.findByRole("button", { name: "已是制作默认" })).toBeDisabled();
     expect(screen.getByRole("heading", { name: "新建制作默认值" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "发布渠道" })).toBeInTheDocument();
+    const recipeSelect = screen.getByRole("combobox", { name: "默认画面来源策略" });
+    expect(within(recipeSelect).getAllByRole("option")).toHaveLength(2);
+    expect(recipeSelect).toHaveValue("free-stock");
+    expect(within(recipeSelect).queryByRole("option", { name: "经济日更" })).not.toBeInTheDocument();
+    expect(within(recipeSelect).queryByRole("option", { name: "开放精品生成" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /高级微调/ }));
     fireEvent.change(screen.getByRole("slider", { name: "语速" }), { target: { value: "190" } });
     await user.click(await screen.findByRole("button", { name: "设为制作默认" }));
@@ -1187,8 +1192,8 @@ describe("Creative OS", () => {
 
     const assetSection = screen.getByRole("heading", { name: "按画面能力选择模型" }).closest("section");
     expect(assetSection).not.toBeNull();
-    expect(within(assetSection!).getByText("Pexels 视频")).toBeInTheDocument();
-    expect(within(assetSection!).getByText("AI 逐镜路由")).toBeInTheDocument();
+    expect(within(assetSection!).getByText("Pexels 图库")).toBeInTheDocument();
+    expect(within(assetSection!).getByText("AI 逐镜选择画面来源")).toBeInTheDocument();
     expect(within(assetSection!).queryByRole("button", { name: "设为默认" })).not.toBeInTheDocument();
     const stockGroup = screen.getByText("图库实拍").closest("section");
     const generatedVideoGroup = screen.getByText("AI 生视频").closest("section");
@@ -1198,13 +1203,13 @@ describe("Creative OS", () => {
     expect(generatedVideoGroup).not.toBeNull();
     expect(routingGroup).not.toBeNull();
     expect(editorialGroup).not.toBeNull();
-    expect(within(stockGroup!).getByText("Pexels 视频")).toBeInTheDocument();
+    expect(within(stockGroup!).getByText("Pexels 图库")).toBeInTheDocument();
     expect(within(generatedVideoGroup!).getByText("MiniMax 视频生成")).toBeInTheDocument();
-    expect(within(routingGroup!).getByText("AI 逐镜路由")).toBeInTheDocument();
-    expect(within(editorialGroup!).getByText("本地编辑卡片")).toBeInTheDocument();
+    expect(within(routingGroup!).getByText("AI 逐镜选择画面来源")).toBeInTheDocument();
+    expect(within(editorialGroup!).getByText("本地编辑画面")).toBeInTheDocument();
 
     await user.click(screen.getByRole("link", { name: "画面来源" }));
-    await user.selectOptions(screen.getByRole("combobox", { name: "MiniMax 视频生成 推荐模型" }), "MiniMax-H3");
+    await user.selectOptions(screen.getByRole("combobox", { name: "MiniMax 视频生成 首选模型" }), "MiniMax-H3");
     await user.click(screen.getByRole("button", { name: "保存画面模型" }));
     expect(update).toHaveBeenLastCalledWith({ modelDefaults: { "minimax-video-v1": "MiniMax-H3" } });
 
@@ -1212,7 +1217,7 @@ describe("Creative OS", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "默认目标平台" }), "bilibili");
     await user.click(screen.getByRole("button", { name: "保存创作默认" }));
     expect(update).toHaveBeenLastCalledWith({
-      defaultRecipeId: "economy-daily",
+      defaultRecipeId: "free-stock",
       productionDefaults: {
         directorProfileId: "documentary-observer",
         reviewMode: "manual",
@@ -1288,13 +1293,14 @@ describe("Creative OS", () => {
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
     expect(await screen.findByRole("heading", { name: "按角色配置生产能力" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "编剧默认能力" })).toHaveValue("python-template-v1");
+    expect(screen.getByRole("combobox", { name: "编剧首选能力" })).toHaveValue("python-template-v1");
+    expect(screen.getByText("其余可用能力只在首选服务故障时依次接管，不会与首选同时重复生成。")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "去画面来源配置" })).toHaveAttribute("href", "#visual-providers");
     expect(screen.getByRole("link", { name: "去声音演员表配置" })).toHaveAttribute("href", "#voice-casting");
-    expect(screen.queryByRole("combobox", { name: "画面执行默认能力" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: "配音执行默认能力" })).not.toBeInTheDocument();
-    await user.selectOptions(screen.getByRole("combobox", { name: "编剧默认能力" }), "codex-screenwriter-v1");
-    await user.selectOptions(screen.getByRole("combobox", { name: "Codex 编剧默认模型" }), "gpt-5.6-sol");
+    expect(screen.queryByRole("combobox", { name: "画面执行首选能力" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "配音执行首选能力" })).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByRole("combobox", { name: "编剧首选能力" }), "codex-screenwriter-v1");
+    await user.selectOptions(screen.getByRole("combobox", { name: "AI 编剧首选模型" }), "gpt-5.6-sol");
     expect(screen.getByText("独立质量审计")).toBeInTheDocument();
     expect(screen.getByText("独立复核 · 最多三轮")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));

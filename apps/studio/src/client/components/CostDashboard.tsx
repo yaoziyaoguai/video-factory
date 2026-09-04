@@ -60,7 +60,7 @@ function groupCostLines(lines: StudioCostRunDetail["lines"]): GroupedCostLine[] 
 function CostMetrics({ totals, compact = false }: { totals: StudioCostTotals; compact?: boolean }) {
   return <div className={compact ? "cost-metrics is-compact" : "cost-metrics"}>
     <article><CircleDollarSign aria-hidden="true" size={17} /><span>实际消费</span><strong>{actualCostLabel(totals)}</strong></article>
-    <article title="历史所有已确认报价的总额，不代表实际消费"><Gauge aria-hidden="true" size={17} /><span>累计授权额度</span><strong>¥{totals.authorizedCostCny.toFixed(2)}</strong></article>
+    <article title="历史所有已确认报价的总额，不是费用上限，也不代表实际消费"><Gauge aria-hidden="true" size={17} /><span>已批准报价合计</span><strong>¥{totals.authorizedCostCny.toFixed(2)}</strong></article>
     <article><Clock3 aria-hidden="true" size={17} /><span>待人工核账</span><strong>{totals.actualPendingCount}</strong></article>
     <article><RotateCcw aria-hidden="true" size={17} /><span>付费服务失败</span><strong>{totals.failedMeteredCalls}</strong></article>
   </div>;

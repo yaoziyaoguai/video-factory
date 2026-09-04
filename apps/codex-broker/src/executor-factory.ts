@@ -3,7 +3,7 @@ import {
   type BrokerTaskExecutor,
 } from "./codex-executor.js";
 import type { BrokerRuntimeConfig } from "./runtime-config.js";
-import { ZaiVisualReviewExecutor } from "./zai-visual-review-executor.js";
+import { ZaiCodePlanExecutor } from "./zai-code-plan-executor.js";
 
 export interface BrokerExecutorDependencies {
   fetchFn?: typeof fetch;
@@ -15,7 +15,7 @@ export function createBrokerExecutor(
   dependencies: BrokerExecutorDependencies = {},
 ): BrokerTaskExecutor {
   if (config.profile.identity.profileId === "zai") {
-    return new ZaiVisualReviewExecutor({
+    return new ZaiCodePlanExecutor({
       env: environment,
       effort: config.effort,
       timeoutMs: config.timeoutMs,

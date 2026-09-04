@@ -413,7 +413,7 @@ export class ProductionStudio {
       throw new StudioInputError("正式制作必须经过人工终审，不能自动跳过发布前确认。");
     }
     if (brief.rework && brief.providers.script !== "codex-screenwriter-v1") {
-      throw new StudioInputError("按审片意见返工需要使用支持自由文本修改的 AI 编剧，请在编剧一栏选择 Codex 编剧后再开工。");
+      throw new StudioInputError("按审片意见返工需要使用支持自由文本修改的 AI 编剧，请在编剧一栏选择 AI 编剧后再开工。");
     }
     const inheritedTemplateSnapshot = await this.reworkSourceTemplateSnapshot(input, brief);
     if (inheritedTemplateSnapshot) {
@@ -464,6 +464,10 @@ export class ProductionStudio {
     }
     if (source.status !== "failed" && source.status !== "rejected") {
       throw new StudioConflictError("只有失败或已打回的制作才能作为返工来源。");
+    }
+    const canonicalFindings = reworkFindings(this.toDetail(source));
+    if (!isDeepStrictEqual(brief.rework.findings, canonicalFindings)) {
+      throw new StudioConflictError("审片问题已经变化或被修改，请重新读取原制作的返工草稿。");
     }
     const sourceSnapshot = parseBrief(source.initialInput).templateSnapshot;
     if (!sourceSnapshot || !isRecord(input) || !isRecord(input.template)) return undefined;
@@ -1142,7 +1146,7 @@ export class ProductionStudio {
     if (brief.workflowFeatures?.referenceGrammar) {
       const referenceProvider = providers.find((provider) => provider.id === "codex-reference-grammar-v1");
       if (!referenceProvider?.available || referenceProvider.capability !== "reference.grammar") {
-        throw new StudioInputError("参考视频分析能力当前不可用，请检查 Codex Broker 后重试。");
+        throw new StudioInputError("参考视频分析当前不可用，请到创作设置检查 AI 分析服务后重试。");
       }
     }
     for (const [providerId, modelId] of Object.entries(brief.models ?? {})) {
@@ -1726,13 +1730,14 @@ function collectNodeDurationHistory(runs: WorkflowRun<ProductionBrief>[]): Recor
 
 function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
   const node = run.nodes.find((candidate) => candidate.id === "visual-review");
+  const sourceReviewVersionId = node?.outputState?.effectiveVersionId ?? "legacy-output";
   const effectiveOutput = node?.outputState?.versions.find(
     (version) => version.id === node.outputState?.effectiveVersionId,
   )?.output ?? node?.output;
   if (!isRecord(effectiveOutput)) return [];
   const report = isRecord(effectiveOutput.report) ? effectiveOutput.report : effectiveOutput;
   if (!Array.isArray(report.findings)) return [];
-  return report.findings.flatMap((value): StudioReworkFinding[] => {
+  return report.findings.flatMap((value, findingIndex): StudioReworkFinding[] => {
     if (!isRecord(value) || !Number.isInteger(value.timecodeMs) || Number(value.timecodeMs) < 0) return [];
     const description = typeof value.description === "string" && value.description.trim()
       ? value.description.trim()
@@ -1745,14 +1750,21 @@ function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
     const targetNodeIds: StudioReworkFinding["targetNodeIds"] = /节奏|叙事|旁白|文案|pacing|narrative|script|voice/i.test(`${category} ${description} ${suggestion}`)
       ? ["script", "visual-direction", "assets"]
       : ["visual-direction", "assets"];
-    return [{
+    const normalizedFinding = {
       timecodeMs: Number(value.timecodeMs),
       ...(Number.isInteger(scenePosition) && scenePosition > 0 ? { scenePosition } : {}),
       category,
       description,
       suggestion,
       targetNodeIds,
-    }];
+    };
+    const findingId = `vf_${createHash("sha256").update(JSON.stringify({
+      sourceRunId: run.id,
+      sourceReviewVersionId,
+      findingIndex,
+      finding: normalizedFinding,
+    })).digest("hex").slice(0, 24)}`;
+    return [{ findingId, ...normalizedFinding }];
   });
 }
 

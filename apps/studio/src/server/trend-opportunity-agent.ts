@@ -130,8 +130,8 @@ export class TrendOpportunityAgent {
         ? `热点信息很多，需要按照“${strategy.positioning.trim()}”筛出真正值得讲的部分`
         : "热点信息很多，但缺少一个与普通人直接相关的解释角度",
       hook: risk >= 60
-        ? `${signal.title}正在上榜。先不猜结论，只核验可靠来源已经确认的信息。`
-        : `“${signal.title}”正在上升，但真正值得讲的是它与你有什么关系。`,
+        ? `${signal.title}正在上榜。先不猜结论，只核验可靠来源已经确认了什么？`
+        : `“${signal.title}”正在上升，它到底与你有什么关系？`,
       rationale: risk >= 60
         ? risk >= 72
           ? `该热点涉及高风险公共事件；系统未扩写事实，只保留原始信号与核验问题。`
@@ -410,7 +410,7 @@ function groundModelIdea(idea: TrendModelIdea, signal: StudioTrendSignal): Trend
     audience: bodyUnsafe ? "关注这一热点与日常生活关系的中文短视频用户" : idea.audience,
     painPoint: bodyUnsafe ? "热点结论很多，但缺少只基于现有证据的解释" : idea.painPoint,
     hook: bodyUnsafe
-      ? `${signal.title}正在上榜。先不猜结论，只看哪些问题能够被证据支持。`
+      ? `${signal.title}正在上榜。先不猜结论，只看哪些问题能够被证据支持？`
       : clean(idea.hook, `先核验“${signal.title}”中真正影响普通人的部分。`),
     rationale: sensitive
       ? riskLevel === "high"

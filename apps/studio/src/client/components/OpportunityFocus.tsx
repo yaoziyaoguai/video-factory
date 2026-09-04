@@ -89,7 +89,7 @@ export function OpportunityFocus({ opportunity }: { opportunity: StudioOpportuni
 }
 
 function visualSourceLabel(source: StudioVisualSource): string {
-  return { creator: "创作者拍摄", stock: "素材库", screen: "屏幕录制", "local-card": "本地信息卡", generated: "生成模型" }[source];
+  return { creator: "创作者拍摄", stock: "素材库", screen: "屏幕录制", "local-card": "主动排版画面", generated: "AI 生成画面" }[source];
 }
 
 function Score({ label, value }: { label: string; value: number }) {

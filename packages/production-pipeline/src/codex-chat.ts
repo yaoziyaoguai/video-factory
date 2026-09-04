@@ -7,6 +7,24 @@ export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as 
 export const CODEX_TASK_KINDS = ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"] as const;
 export type CodexTaskKind = (typeof CODEX_TASK_KINDS)[number];
 
+interface ModelCandidateAttemptBase {
+  modelId: string;
+  providerId: string;
+}
+
+export type ModelCandidateAttempt = ModelCandidateAttemptBase & (
+  | {
+    outcome: "succeeded";
+    failureStage?: never;
+    failureReason?: never;
+  }
+  | {
+    outcome: "failed";
+    failureStage: CodexBridgeFailureStage | "transport";
+    failureReason: string;
+  }
+);
+
 export interface CodexTaskTrace {
   taskKind: CodexTaskKind;
   promptVersion: string;
@@ -14,6 +32,10 @@ export interface CodexTaskTrace {
   providerId: string;
   modelId: string;
   reasoningEffort?: string;
+  fallbackFromModelId?: string;
+  fallbackReason?: string;
+  attemptedModelIds?: string[];
+  modelCandidateAttempts?: ModelCandidateAttempt[];
 }
 
 export interface CodexTaskSession {
@@ -22,6 +44,7 @@ export interface CodexTaskSession {
 }
 
 export type CodexBridgeFailureStage = "not_accepted" | "completed_failure" | "uncertain";
+export type CodexBridgeFailureKind = "model_provider_transient";
 
 export interface RoleAuditIssue {
   severity: "advisory" | "blocking";
@@ -91,6 +114,7 @@ export class CodexBridgeError extends Error {
     readonly transient: boolean,
     readonly stage: CodexBridgeFailureStage = transient ? "not_accepted" : "uncertain",
     readonly statusCode?: number,
+    readonly failureKind?: CodexBridgeFailureKind,
   ) {
     super(message);
     this.name = "CodexBridgeError";
@@ -211,11 +235,13 @@ export class CodexBridgeClient {
       if (status !== 200) {
         const retryable = status === 503;
         const notAccepted = retryable || isUnknownRoleSessionRejection(status, raw);
+        const failureKind = bridgeFailureKind(raw);
         reject(new CodexBridgeError(
           `Codex bridge returned HTTP ${status}.${errorDetail(raw)}`,
           retryable,
           notAccepted ? "not_accepted" : status === 422 ? "completed_failure" : "uncertain",
           status,
+          failureKind,
         ));
         return;
       }
@@ -278,6 +304,7 @@ function parseTrace(value: unknown): CodexTaskTrace {
     || typeof trace.modelId !== "string" || !trace.modelId) {
     throw new CodexBridgeError("Codex bridge trace is invalid.", false);
   }
+  const modelCandidateAttempts = parseModelCandidateAttempts(trace.modelCandidateAttempts);
   return {
     taskKind: trace.taskKind as CodexTaskKind,
     promptVersion: trace.promptVersion,
@@ -287,7 +314,61 @@ function parseTrace(value: unknown): CodexTaskTrace {
     ...(typeof trace.reasoningEffort === "string" && trace.reasoningEffort
       ? { reasoningEffort: trace.reasoningEffort }
       : {}),
+    ...(typeof trace.fallbackFromModelId === "string" && trace.fallbackFromModelId
+      ? { fallbackFromModelId: trace.fallbackFromModelId }
+      : {}),
+    ...(typeof trace.fallbackReason === "string" && trace.fallbackReason
+      ? { fallbackReason: trace.fallbackReason }
+      : {}),
+    ...(Array.isArray(trace.attemptedModelIds)
+      && trace.attemptedModelIds.length > 0
+      && trace.attemptedModelIds.every((modelId) => typeof modelId === "string" && modelId)
+      ? { attemptedModelIds: [...new Set(trace.attemptedModelIds)] as string[] }
+      : {}),
+    ...(modelCandidateAttempts ? { modelCandidateAttempts } : {}),
   };
+}
+
+function parseModelCandidateAttempts(value: unknown): ModelCandidateAttempt[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new CodexBridgeError("Codex bridge model candidate attempts are invalid.", false);
+  }
+  return value.map((item) => {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      throw new CodexBridgeError("Codex bridge model candidate attempt is invalid.", false);
+    }
+    const attempt = item as Record<string, unknown>;
+    if (typeof attempt.modelId !== "string" || !attempt.modelId
+      || (attempt.outcome !== "failed" && attempt.outcome !== "succeeded")
+      || (attempt.failureStage !== undefined
+        && attempt.failureStage !== "not_accepted"
+        && attempt.failureStage !== "completed_failure"
+        && attempt.failureStage !== "uncertain"
+        && attempt.failureStage !== "transport")
+      || (attempt.failureReason !== undefined
+        && (typeof attempt.failureReason !== "string" || !attempt.failureReason))) {
+      throw new CodexBridgeError("Codex bridge model candidate attempt is invalid.", false);
+    }
+    if (typeof attempt.providerId !== "string" || !attempt.providerId) {
+      throw new CodexBridgeError("Codex bridge model candidate attempt is missing its broker provider identity.", false);
+    }
+    if (attempt.outcome === "succeeded"
+      && (attempt.failureStage !== undefined || attempt.failureReason !== undefined)) {
+      throw new CodexBridgeError("Codex bridge successful model candidate attempt cannot contain a failure.", false);
+    }
+    if (attempt.outcome === "failed"
+      && (attempt.failureStage === undefined || attempt.failureReason === undefined)) {
+      throw new CodexBridgeError("Codex bridge failed model candidate attempt must describe its failure.", false);
+    }
+    return {
+      modelId: attempt.modelId,
+      providerId: attempt.providerId,
+      outcome: attempt.outcome,
+      ...(attempt.failureStage ? { failureStage: attempt.failureStage } : {}),
+      ...(typeof attempt.failureReason === "string" ? { failureReason: attempt.failureReason } : {}),
+    } as ModelCandidateAttempt;
+  });
 }
 
 function parseJsonOrThrow(value: string, terminalMessage: string): unknown {
@@ -331,6 +412,15 @@ function isCodexTaskKind(value: string): value is CodexTaskKind {
 function errorDetail(raw: string): string {
   const detail = raw.trim().slice(0, 160);
   return detail ? ` ${detail}` : "";
+}
+
+function bridgeFailureKind(raw: string): CodexBridgeFailureKind | undefined {
+  try {
+    const body = JSON.parse(raw) as Record<string, unknown>;
+    return body.failureKind === "model_provider_transient" ? body.failureKind : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function defaultSleep(milliseconds: number): Promise<void> {

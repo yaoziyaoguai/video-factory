@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
+import { applyTemplateVoiceRecommendation, voicePresetForTemplate } from "../src/shared/template-voice-recommendation.js";
 
 describe("template catalog", () => {
   it("ships six authored production grammars with distinct shot language and strict quality gates", () => {
@@ -30,5 +31,26 @@ describe("template catalog", () => {
       assert.equal("costPolicy" in template, false);
     }
     assert.equal(new Set(BUILTIN_TEMPLATES.map((template) => template.shotSlots.map((slot) => slot.purpose).join("|"))).size, 6);
+  });
+
+  it("maps every template sound system to one calibrated voice preset without replacing the actor", () => {
+    const expected = new Map([
+      ["trend-fact-brief", "news"],
+      ["knowledge-explainer", "explainer"],
+      ["photo-story", "explainer"],
+      ["product-demo", "news"],
+      ["human-mini-doc", "documentary"],
+      ["ranked-comparison", "news"],
+    ]);
+    const baseDirection = { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const };
+
+    for (const template of BUILTIN_TEMPLATES) {
+      assert.equal(voicePresetForTemplate(template).id, expected.get(template.id));
+      assert.equal(applyTemplateVoiceRecommendation(template, baseDirection).profileId, "macos:Tingting");
+    }
+    assert.deepEqual(
+      applyTemplateVoiceRecommendation(BUILTIN_TEMPLATES.find((template) => template.id === "ranked-comparison")!, baseDirection),
+      { profileId: "macos:Tingting", rate: 205, pauseScale: 0.9, masteringPreset: "social" },
+    );
   });
 });

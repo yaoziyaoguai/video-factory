@@ -122,8 +122,8 @@ describe("broker-owned task definitions", () => {
     const review = taskPromptFor("visual-review");
 
     assert.equal(topic.version, "video-factory/topic-editor-v2");
-    assert.equal(script.version, "video-factory/screenwriter-v4");
-    assert.equal(director.version, "video-factory/director-v10");
+    assert.equal(script.version, "video-factory/screenwriter-v5");
+    assert.equal(director.version, "video-factory/director-v11");
     assert.equal(review.version, "video-factory/visual-review-v5");
     assert.match(review.outputRules.join("\n"), /不得为了通过审计而美化评分/);
     assert.match(topic.directive, /值得做视频/);

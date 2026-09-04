@@ -50,11 +50,25 @@ export class CandidateInboxStudio {
       ...normalizedTrends,
       ...seriesCandidates.map((candidate) => {
         const recommendation = decideEditorialFormat(candidate);
+        if (recommendation.verdict === "skip") {
+          return { ...candidate, editorialDecision: recommendation };
+        }
+        if (candidate.editorialDecision.verdict === "skip" || candidate.seriesSequence?.status === "blocked") {
+          return {
+            ...candidate,
+            editorialDecision: {
+              verdict: candidate.editorialDecision.verdict,
+              score: candidate.editorialDecision.score,
+              reasons: candidate.editorialDecision.reasons,
+              guardrails: candidate.editorialDecision.guardrails,
+            },
+          };
+        }
         return {
           ...candidate,
-          editorialDecision: candidate.editorialDecision?.recommendedTemplate
+          editorialDecision: candidate.editorialDecision.recommendedTemplate || !recommendation.recommendedTemplate
             ? candidate.editorialDecision
-            : { ...candidate.editorialDecision, recommendedTemplate: recommendation.recommendedTemplate! },
+            : { ...candidate.editorialDecision, recommendedTemplate: recommendation.recommendedTemplate },
         };
       }),
     ].filter((candidate) => !adoptedIds.has(candidate.id));

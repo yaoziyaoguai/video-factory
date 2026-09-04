@@ -42,6 +42,12 @@ describe("SeriesPlanner", () => {
       { status: "blocked", blockedByEpisodeNumber: 1 },
     ]);
     assert.equal(candidates[0]?.providerId, "series-roadmap-v2");
+    assert.match(candidates[0]?.hook ?? "", /第 1 集|可复核结果/);
+    assert.equal(candidates[0]?.evidence[0]?.source, "系列路线图「AI 下班实验室」第 1 集");
+    assert.equal(
+      candidates[0]?.evidence[0]?.evidenceUrl,
+      "https://video.wangjinkun333.me/topics?mode=series&candidate=series-series-1-episode-001",
+    );
     assert.match(candidates[0]?.visualPlan?.strategy ?? "", /真实桌面操作与生活空镜/);
   });
 });

@@ -18,15 +18,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, StudioReferenceVideo, StudioTemplate } from "../../shared/api.js";
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
+import { applyTemplateVoiceRecommendation } from "../../shared/template-voice-recommendation.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { VoiceStudio } from "./VoiceStudio.js";
 import { studioApi } from "../api.js";
-import { creatorFacingTechnicalText } from "../presentation.js";
+import { creatorFacingTechnicalText, providerLabel } from "../presentation.js";
 import { TemplateGallery } from "../templates/TemplateGallery.js";
 
 interface NewRunDialogProps {
   open: boolean;
   providers: StudioProvider[];
+  initialDataReady?: boolean;
   initialValues?: Partial<StudioProductionInput>;
   creatorSettings?: StudioCreatorSettings;
   onClose: () => void;
@@ -47,6 +49,14 @@ interface CapabilityDefinition {
   optional?: boolean;
 }
 
+interface InheritedSelectionIssue {
+  id: string;
+  label: string;
+  value: string;
+  reason: string;
+  action: string;
+}
+
 const CAPABILITIES: CapabilityDefinition[] = [
   { key: "script", capability: "script.draft", label: "脚本生成", role: "编剧", description: "结构、钩子与分镜文案", preferred: "codex-screenwriter-v1", icon: FileText },
   { key: "director", capability: "storyboard.plan", label: "导演方案", role: "导演", description: "统一全片视觉规则并逐镜决定画面", preferred: "api-visual-director-v1", icon: Clapperboard },
@@ -65,44 +75,36 @@ const RECIPES: Array<{
   recommended?: boolean;
 }> = [
   {
-    id: "economy-daily",
-    label: "经济日更",
-    description: "AI 导演在全部免费来源中逐镜决策",
+    id: "free-stock",
+    label: "仅免费画面",
+    description: "导演只使用已启用的免费图库或你主动允许的本地编辑画面",
     allowMeteredProviders: false,
     recommended: true,
   },
   {
-    id: "free-stock",
-    label: "全免费精搜",
-    description: "零计费，允许更广的免费素材池",
-    allowMeteredProviders: false,
-  },
-  {
     id: "keyshot-ai",
-    label: "效果均衡",
-    description: "允许 AI 选择付费关键镜头，每次生成图片或视频前确认",
-    allowMeteredProviders: true,
-  },
-  {
-    id: "cinematic-ai",
-    label: "开放精品生成",
-    description: "优先开放精品生成能力，每次生成图片或视频前确认",
+    label: "允许付费关键镜头",
+    description: "导演可建议生成关键图片或视频，每次调用前都会给出报价并等你确认",
     allowMeteredProviders: true,
   },
 ];
 
-export function NewRunDialog({ open, providers, initialValues, creatorSettings, onClose, onSubmit }: NewRunDialogProps) {
+function canonicalRecipeId(recipeId: RecipeId | undefined): RecipeId {
+  return recipeId === "keyshot-ai" || recipeId === "cinematic-ai" ? "keyshot-ai" : "free-stock";
+}
+
+export function NewRunDialog({ open, providers, initialDataReady = true, initialValues, creatorSettings, onClose, onSubmit }: NewRunDialogProps) {
   const defaults = useMemo(
     () => providerDefaults(providers, creatorSettings?.roleProviderDefaults),
     [creatorSettings?.roleProviderDefaults, providers],
   );
   const [bindings, setBindings] = useState<StudioProductionInput["providers"]>(defaults);
   const effectiveBindings = useMemo(
-    () => availableProviderBindings(bindings, defaults, providers),
-    [bindings, defaults, providers],
+    () => initialValues?.rework ? bindings : availableProviderBindings(bindings, defaults, providers),
+    [bindings, defaults, initialValues?.rework, providers],
   );
   const [activeKey, setActiveKey] = useState<BindingKey>("assets");
-  const [recipeId, setRecipeId] = useState<RecipeId>("economy-daily");
+  const [recipeId, setRecipeId] = useState<RecipeId>("free-stock");
   const [directorProfileId, setDirectorProfileId] = useState<StudioDirectorProfileId>("auto");
   const [platform, setPlatform] = useState("douyin");
   const [durationSeconds, setDurationSeconds] = useState(24);
@@ -113,6 +115,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   const [semanticRankEnabled, setSemanticRankEnabled] = useState(true);
   const [referenceVideo, setReferenceVideo] = useState<StudioReferenceVideo>();
   const releasedReferenceId = useRef<string | undefined>(undefined);
+  const voiceTouched = useRef(false);
+  const templateAddedEditorialSource = useRef(false);
   const [referenceUploading, setReferenceUploading] = useState(false);
   const [referenceError, setReferenceError] = useState<string>();
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -120,11 +124,14 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   const [error, setError] = useState<string>();
   const [templates, setTemplates] = useState<StudioTemplate[]>([]);
   const [templatesLoaded, setTemplatesLoaded] = useState(false);
+  const [templateLoading, setTemplateLoading] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState(
     initialValues?.template?.templateId
       ?? (initialValues?.editorial?.verdict === "produce_image_story" ? "photo-story" : "knowledge-explainer"),
   );
+  const [templateReplacementConfirmed, setTemplateReplacementConfirmed] = useState(false);
   const [templateError, setTemplateError] = useState<string>();
+  const [voiceSelectionAvailable, setVoiceSelectionAvailable] = useState<boolean>();
   const [rework, setRework] = useState<StudioProductionInput["rework"]>(initialValues?.rework);
   const initializedForOpen = useRef(false);
   const initializationRevision = useRef(0);
@@ -143,6 +150,12 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   const selectedMeteredSources = selectedAssetSources.filter((provider) => provider.billing === "metered");
   const selectedRecipe = RECIPES.find((recipe) => recipe.id === recipeId) ?? RECIPES[0]!;
   const selectedTemplate = templates.find((template) => template.id === selectedTemplateId);
+  const inheritedTemplateAvailable = !initialValues?.rework || !initialValues.template
+    || templates.some((template) => (
+      template.id === initialValues.template?.templateId
+      && template.version === initialValues.template.templateVersion
+      && template.status === "published"
+    ));
   const effectiveModelId = (provider: StudioProvider) => modelSelections[provider.id]
     ?? selectedTemplate?.modelDefaults?.[provider.id]
     ?? creatorSettings?.modelDefaults?.[provider.id]
@@ -150,6 +163,12 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
   const visualReviewProvider = providers.find((provider) => {
     return provider.capability === "quality.review.visual" && provider.id === effectiveBindings.visualReview && provider.available;
   }) ?? providers.find((provider) => provider.capability === "quality.review.visual" && provider.available);
+  const inheritedVisualReviewUnavailable = Boolean(initialValues?.rework && bindings.visualReview && !providers.some((provider) => (
+    provider.id === bindings.visualReview
+    && provider.capability === "quality.review.visual"
+    && provider.available
+    && provider.kind !== "test"
+  )));
   const referenceGrammarProvider = providers.find((provider) => {
     return provider.id === "codex-reference-grammar-v1" && provider.capability === "reference.grammar" && provider.available;
   });
@@ -174,6 +193,97 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     recipeId,
     allowMeteredProviders: hasMeteredCalls,
   };
+  const inheritedSelectionIssues = useMemo<InheritedSelectionIssue[]>(() => {
+    if (!initialValues?.rework) return [];
+    const issues: InheritedSelectionIssue[] = [];
+    if (templatesLoaded && (
+      !templates.some((template) => template.id === selectedTemplateId && template.status === "published")
+      || (!templateReplacementConfirmed && !inheritedTemplateAvailable)
+    )) {
+      issues.push({
+        id: "template",
+        label: "视频模板",
+        value: initialValues.template?.templateVersion === undefined
+          ? selectedTemplateId
+          : `${selectedTemplateId} v${initialValues.template.templateVersion}`,
+        reason: "上一版模板或对应版本当前已不是可用的正式模板",
+        action: "请在视频模板中明确选择替代模板",
+      });
+    }
+    for (const item of CAPABILITIES) {
+      const providerId = bindings[item.key];
+      if (!providerId && item.optional) continue;
+      const provider = providers.find((candidate) => candidate.id === providerId);
+      const reason = !provider
+        ? "当前能力目录中已不存在"
+        : provider.capability !== item.capability
+          ? `现在属于 ${provider.capability}，不能执行 ${item.capability}`
+          : provider.kind === "test"
+            ? "仅供测试，不能用于正式制作"
+            : !provider.available
+              ? creatorFacingTechnicalText(provider.requirement) ?? "当前未配置或暂不可用"
+              : undefined;
+      if (reason) {
+        issues.push({
+          id: `provider-${item.key}`,
+          label: `${item.role}能力`,
+          value: provider ? creatorProviderName(provider) : providerId || "未配置",
+          reason,
+          action: item.key === "voice" ? "请在声音导演中明确选择可用声音" : `请在${item.role}能力中明确选择替代项`,
+        });
+      }
+    }
+    for (const providerId of assetProviderIds) {
+      const provider = providers.find((candidate) => candidate.id === providerId);
+      const reason = !provider
+        ? "当前画面来源目录中已不存在"
+        : !isAssetSource(provider)
+          ? "现在不能作为画面来源"
+          : !provider.available
+            ? creatorFacingTechnicalText(provider.requirement) ?? "当前未配置或暂不可用"
+            : provider.billing === "metered" && !selectedRecipe.allowMeteredProviders
+              ? "当前选择的是仅免费画面策略"
+              : undefined;
+      if (reason) {
+        issues.push({
+          id: `source-${providerId}`,
+          label: "画面来源",
+          value: provider ? creatorProviderName(provider) : providerId,
+          reason,
+          action: "请调整画面来源，或重新选择允许付费关键镜头",
+        });
+      }
+    }
+    const selectedProviderIds = new Set([
+      ...Object.values(bindings).filter((providerId): providerId is string => Boolean(providerId)),
+      ...assetProviderIds,
+    ]);
+    for (const [providerId, modelId] of Object.entries(modelSelections)) {
+      if (!selectedProviderIds.has(providerId)) continue;
+      const provider = providers.find((candidate) => candidate.id === providerId);
+      if (!provider?.available) continue;
+      const model = provider.modelProfiles?.find((candidate) => candidate.id === modelId);
+      if (!model || !selectableModelsForCapability([model], provider.capability).length) {
+        issues.push({
+          id: `model-${providerId}`,
+          label: `${creatorProviderName(provider)} 模型`,
+          value: model?.label ?? modelId,
+          reason: !model ? "当前模型目录中已不存在" : "当前不可用或不再兼容这个制作步骤",
+          action: "请明确选择可用模型，或改为继承当前推荐模型",
+        });
+      }
+    }
+    if (voiceSelectionAvailable === false) {
+      issues.push({
+        id: "voice-profile",
+        label: "声音演员",
+        value: voiceDirection.profileId,
+        reason: "当前声音演员目录中已不存在或暂不可用",
+        action: "请在声音导演中明确选择替代声音",
+      });
+    }
+    return issues;
+  }, [assetProviderIds, bindings, inheritedTemplateAvailable, initialValues?.rework, initialValues?.template?.templateVersion, modelSelections, providers, selectedRecipe.allowMeteredProviders, selectedTemplateId, templateReplacementConfirmed, templates, templatesLoaded, voiceDirection.profileId, voiceSelectionAvailable]);
   const missingCapabilities = CAPABILITIES.filter((item) => {
     return !item.optional
       && !providers.some((provider) => provider.capability === item.capability && provider.available && provider.kind !== "test");
@@ -182,7 +292,41 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     ...missingCapabilities.map((item) => item.label),
     ...(assetProviderIds.length > 0 ? [] : ["导演画面来源"]),
     ...(roleAuditProvider ? [] : ["独立质量审计"]),
+    ...(voiceSelectionAvailable === false && !initialValues?.rework ? ["可用声音演员"] : []),
   ];
+  const productionBlocked = missingProductionRoles.length > 0 || inheritedSelectionIssues.length > 0;
+
+  async function readTemplateCatalog(revision: number, requestedTemplateId: string, preserveCurrentChoices: boolean) {
+    setTemplateLoading(true);
+    setTemplateError(undefined);
+    try {
+      const catalog = await studioApi.templates();
+      if (initializationRevision.current !== revision) return;
+      const published = catalog.templates.filter((template) => template.status === "published");
+      const availableTemplates = published;
+      if (availableTemplates.length === 0) throw new Error("模板目录中没有可用模板。");
+      setTemplates(availableTemplates);
+      if (initialValues?.rework) {
+        setSelectedTemplateId(requestedTemplateId);
+      } else {
+        const resolvedTemplate = availableTemplates.find((template) => template.id === requestedTemplateId) ?? availableTemplates[0]!;
+        setSelectedTemplateId(resolvedTemplate.id);
+        if (!preserveCurrentChoices && resolvedTemplate.id !== requestedTemplateId) {
+          setDurationSeconds(resolvedTemplate.durationSeconds);
+        }
+        if (!preserveCurrentChoices && !initialValues?.voiceDirection && !creatorVoiceWasCustomized(creatorSettings) && !voiceTouched.current) {
+          setVoiceDirection((current) => applyTemplateVoiceRecommendation(resolvedTemplate, current));
+        }
+      }
+      setTemplatesLoaded(true);
+    } catch (caught) {
+      if (initializationRevision.current !== revision) return;
+      setTemplatesLoaded(false);
+      setTemplateError(`无法读取模板目录：${caught instanceof Error ? caught.message : String(caught)}`);
+    } finally {
+      if (initializationRevision.current === revision) setTemplateLoading(false);
+    }
+  }
 
   useEffect(() => {
     if (!open) {
@@ -190,28 +334,37 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
       initializationRevision.current += 1;
       return;
     }
+    if (!initialDataReady) return;
     if (initializedForOpen.current) return;
     initializedForOpen.current = true;
+    voiceTouched.current = false;
     const revision = ++initializationRevision.current;
     const initialVoiceDirection = initialValues?.voiceDirection ?? creatorSettings?.voiceDirection ?? defaultVoiceDirection(providers);
     const requestedVoiceProvider = providerForVoiceProfile(initialVoiceDirection.profileId);
     const readyVoiceProvider = providers.find((provider) => {
       return provider.id === requestedVoiceProvider && provider.capability === "voice.synthesize" && provider.available && provider.kind !== "test";
     });
-    const resolvedVoiceDirection = readyVoiceProvider ? initialVoiceDirection : defaultVoiceDirection(providers);
+    const resolvedVoiceDirection = readyVoiceProvider || initialValues?.rework ? initialVoiceDirection : defaultVoiceDirection(providers);
     const initialBindings = {
       ...defaults,
       ...(initialValues?.providers ?? {}),
-      assets: "ai-shot-router-v1",
-      voice: providerForVoiceProfile(resolvedVoiceDirection.profileId),
+      assets: initialValues?.rework ? initialValues.providers?.assets ?? defaults.assets : "ai-shot-router-v1",
+      voice: initialValues?.rework
+        ? initialValues.providers?.voice ?? requestedVoiceProvider
+        : providerForVoiceProfile(resolvedVoiceDirection.profileId),
     };
-    const initialRecipe = imageStory && !initialValues?.rework
+    const initialRecipe = canonicalRecipeId(imageStory && !initialValues?.rework
       ? "free-stock"
-      : initialValues?.economics?.recipeId ?? creatorSettings?.defaultRecipeId ?? "economy-daily";
+      : initialValues?.economics?.recipeId ?? creatorSettings?.defaultRecipeId);
     const recipe = RECIPES.find((item) => item.id === initialRecipe) ?? RECIPES[0]!;
     const initialProfile = initialValues?.director?.profileId ?? creatorSettings?.productionDefaults?.directorProfileId ?? "auto";
-    const sourceIds = initialValues?.director?.assetProviderIds
+    const requestedTemplateId = initialValues?.template?.templateId
+      ?? (imageStory ? "photo-story" : initialValues?.editorial ? "trend-fact-brief" : "knowledge-explainer");
+    const inheritedOrRecommendedSourceIds = initialValues?.director?.assetProviderIds
       ?? sourceIdsForRecipe(recipe, providers, creatorSettings?.defaultAssetProviderId);
+    const sourceIds = requestedTemplateId === "photo-story"
+      ? includeLocalEditorialSource(inheritedOrRecommendedSourceIds, providers)
+      : inheritedOrRecommendedSourceIds;
     setBindings(initialBindings);
     setRecipeId(recipe.id);
     setDirectorProfileId(initialProfile);
@@ -231,33 +384,19 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     setActiveKey("assets");
     setAdvancedOpen(false);
     setError(undefined);
-    const requestedTemplateId = initialValues?.template?.templateId
-      ?? (imageStory ? "photo-story" : initialValues?.editorial ? "trend-fact-brief" : "knowledge-explainer");
     setSelectedTemplateId(requestedTemplateId);
     setTemplateError(undefined);
+    setTemplateLoading(false);
+    setVoiceSelectionAvailable(undefined);
     setRework(initialValues?.rework ? structuredClone(initialValues.rework) : undefined);
+    setTemplateReplacementConfirmed(false);
+    templateAddedEditorialSource.current = requestedTemplateId === "photo-story"
+      && !inheritedOrRecommendedSourceIds.includes("local-editorial-v1")
+      && sourceIds.includes("local-editorial-v1");
     setTemplates([]);
     setTemplatesLoaded(false);
-    void studioApi.templates()
-      .then((catalog) => {
-        if (initializationRevision.current !== revision) return;
-        const published = catalog.templates.filter((template) => template.status === "published");
-        if (published.length === 0) throw new Error("模板目录中没有已发布模板。");
-        setTemplates(published);
-        if (published.some((template) => template.id === requestedTemplateId)) {
-          setSelectedTemplateId(requestedTemplateId);
-        } else {
-          setSelectedTemplateId(published[0]!.id);
-          setDurationSeconds(published[0]!.durationSeconds);
-        }
-        setTemplatesLoaded(true);
-      })
-      .catch((caught) => {
-        if (initializationRevision.current === revision) {
-          setTemplateError(`无法读取模板目录：${caught instanceof Error ? caught.message : String(caught)} 请重试后再开始制作。`);
-        }
-      });
-  }, [creatorSettings, defaults, imageStory, initialValues, open, providers]);
+    void readTemplateCatalog(revision, requestedTemplateId, false);
+  }, [creatorSettings, defaults, imageStory, initialDataReady, initialValues, open, providers]);
 
   useEffect(() => {
     if (!open || !referenceVideo) return;
@@ -269,9 +408,35 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
 
   if (!open) return null;
 
+  if (!initialDataReady && !initializedForOpen.current) {
+    return (
+      <div className="dialog-backdrop" role="presentation">
+        <section ref={dialogRef} className="run-dialog recipe-dialog" role="dialog" aria-modal="true" aria-labelledby="new-run-loading-title" aria-busy="true" tabIndex={-1}>
+          <header className="dialog-header recipe-dialog-header">
+            <div>
+              <p className="eyebrow">制作方案</p>
+              <h2 id="new-run-loading-title">正在准备新制作</h2>
+            </div>
+            <button className="icon-button" type="button" onClick={onClose} title="关闭" aria-label="关闭新建制作">
+              <X aria-hidden="true" size={19} />
+            </button>
+          </header>
+          <div className="page-loading">正在读取制作配置...</div>
+        </section>
+      </div>
+    );
+  }
+
   function applyRecipe(nextId: RecipeId) {
     const recipe = RECIPES.find((item) => item.id === nextId) ?? RECIPES[0]!;
-    const sourceIds = sourceIdsForRecipe(recipe, providers);
+    if (imageStory && recipe.allowMeteredProviders) return;
+    const baseSourceIds = sourceIdsForRecipe(recipe, providers);
+    const sourceIds = selectedTemplateId === "photo-story"
+      ? includeLocalEditorialSource(baseSourceIds, providers)
+      : baseSourceIds;
+    templateAddedEditorialSource.current = selectedTemplateId === "photo-story"
+      && !baseSourceIds.includes("local-editorial-v1")
+      && sourceIds.includes("local-editorial-v1");
     setRecipeId(nextId);
     setBindings((current) => ({ ...current, assets: "ai-shot-router-v1" }));
     setAssetProviderIds(sourceIds);
@@ -284,8 +449,39 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     if (activeKey === "visualReview") setVisualReviewEnabled(true);
   }
 
+  function disableInheritedVisualReview() {
+    setVisualReviewEnabled(false);
+    setBindings((current) => {
+      const next = { ...current };
+      delete next.visualReview;
+      return next;
+    });
+  }
+
+  function selectTemplate(template: StudioTemplate) {
+    setSelectedTemplateId(template.id);
+    setTemplateReplacementConfirmed(Boolean(initialValues?.rework));
+    setDurationSeconds(template.durationSeconds);
+    setAssetProviderIds((current) => {
+      if (template.id === "photo-story") {
+        const next = includeLocalEditorialSource(current, providers);
+        templateAddedEditorialSource.current = !current.includes("local-editorial-v1") && next.includes("local-editorial-v1");
+        return next;
+      }
+      if (templateAddedEditorialSource.current) {
+        templateAddedEditorialSource.current = false;
+        return current.filter((id) => id !== "local-editorial-v1");
+      }
+      return current;
+    });
+    if (!initialValues?.rework && !initialValues?.voiceDirection && !creatorVoiceWasCustomized(creatorSettings) && !voiceTouched.current) {
+      setVoiceDirection((current) => applyTemplateVoiceRecommendation(template, current));
+    }
+  }
+
   function toggleAssetProvider(provider: StudioProvider) {
     if (!provider.available || (provider.billing === "metered" && !selectedRecipe.allowMeteredProviders)) return;
+    if (provider.id === "local-editorial-v1" && selectedTemplateId === "photo-story") return;
     setAssetProviderIds((current) => {
       if (current.includes(provider.id)) {
         return current.length === 1 ? current : current.filter((id) => id !== provider.id);
@@ -329,7 +525,10 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
     setSubmitting(true);
     setError(undefined);
     try {
-      if (!templatesLoaded || !templates.some((template) => template.id === selectedTemplateId)) {
+      if (inheritedSelectionIssues.length > 0) {
+        throw new Error("上一版仍有失效配置，请明确选择替代项后再开始制作。");
+      }
+      if (!templatesLoaded || !templates.some((template) => template.id === selectedTemplateId && template.status === "published")) {
         throw new Error(templateError ?? "模板目录尚未加载完成，请稍后重试。");
       }
       const selectedTemplate = templates.find((template) => template.id === selectedTemplateId)!;
@@ -359,13 +558,18 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
         voiceDirection,
         template: {
           templateId: selectedTemplateId,
-          ...(initialValues?.template?.templateId === selectedTemplateId && initialValues.template.templateVersion !== undefined
+          ...(initialValues?.template?.templateId === selectedTemplateId
+            && initialValues.template.templateVersion !== undefined
+            && !templateReplacementConfirmed
+            && inheritedTemplateAvailable
             ? { templateVersion: initialValues.template.templateVersion }
             : {}),
           runOverrides: {
             durationSeconds,
             ...(initialValues?.template?.templateId === selectedTemplateId
               && initialValues.template.templateVersion !== undefined
+              && !templateReplacementConfirmed
+              && inheritedTemplateAvailable
               ? {}
               : { automationLevel: selectedTemplate.automationLevel }),
           },
@@ -395,11 +599,11 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
           <div>
             <p className="eyebrow">制作方案</p>
             <h2 id="new-run-title">{rework ? "调整方案后重新制作" : "新建制作"}</h2>
-            <p>{rework ? "已继承上一版方案；下面的修改要求会真正交给对应制作步骤执行。" : "先定内容与画面方案；图片和视频按实际方案报价，声音与审片不打断制作。"}</p>
+            <p>{rework ? "已继承上一版方案；下面的修改要求会真正交给对应制作步骤执行。" : "先定内容与画面方案；图片和视频按实际方案报价。声音与审片不弹现金报价，但失败或质量问题会停在对应步骤。"}</p>
           </div>
           <div className="dialog-budget" aria-label="费用方式">
             <span>{meteredSelected ? "图片 / 视频按实际方案报价" : "图片 / 视频无现金报价"}</span>
-            <strong>{meteredSelected ? "逐项人工确认" : "不中断制作"}</strong>
+            <strong>{meteredSelected ? "逐项人工确认" : "无需现金确认"}</strong>
           </div>
           <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭" aria-label="关闭新建制作">
             <X aria-hidden="true" size={19} />
@@ -417,18 +621,36 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 <TemplateGallery
                   templates={templates}
                   selectedId={selectedTemplateId}
-                  onSelect={(template) => {
-                    setSelectedTemplateId(template.id);
-                    setDurationSeconds(template.durationSeconds);
-                  }}
+                  onSelect={selectTemplate}
                 />
               ) : (
-                <div className="template-loading" aria-live="polite">
+                <div className="template-loading" role={templateError ? "alert" : "status"} aria-live={templateError ? "assertive" : "polite"}>
                   <strong>{selectedTemplateId === "photo-story" ? "证据图解" : "正在准备推荐模板"}</strong>
-                  <span>{templateError ?? "正在读取模板目录..."}</span>
+                  <span>{templateError ?? (templateLoading ? "正在读取模板目录..." : "模板目录尚未读取。")}</span>
+                  {templateError ? <button
+                    className="button button-ghost"
+                    type="button"
+                    disabled={templateLoading}
+                    onClick={() => void readTemplateCatalog(initializationRevision.current, selectedTemplateId, true)}
+                  >{templateLoading ? "正在重新读取..." : "重新读取模板"}</button> : null}
                 </div>
               )}
             </section>
+            {inheritedSelectionIssues.length > 0 ? <section className="rework-selection-alert" role="alert" aria-live="assertive" aria-labelledby="rework-selection-alert-title">
+              <div>
+                <AlertCircle aria-hidden="true" size={18} />
+                <div><strong id="rework-selection-alert-title">上一版有 {inheritedSelectionIssues.length} 项已失效，暂不能开工</strong><span>系统保留了上一版原值，没有替你静默更换。请逐项明确选择替代方案。</span></div>
+              </div>
+              <ul>{inheritedSelectionIssues.map((issue) => <li key={issue.id}>
+                <strong>{issue.label}：{issue.value}</strong>
+                <span>{issue.reason}；{issue.action}</span>
+              </li>)}</ul>
+              {inheritedSelectionIssues.some((issue) => issue.id.startsWith("source-")) ? <button className="button button-ghost" type="button" onClick={() => {
+                setAssetProviderIds(sourceIdsForRecipe(selectedRecipe, providers));
+                setAdvancedOpen(true);
+                setActiveKey("assets");
+              }}>用当前策略的可用来源替换</button> : null}
+            </section> : null}
             <section className="brief-section" aria-labelledby="brief-section-title">
               <div className="compact-section-heading">
                 <div><span>01</span><h3 id="brief-section-title">内容简报</h3></div>
@@ -456,7 +678,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                   </select>
                 </label>
                 <label className="field field-compact">
-                  <span>视频时长</span>
+                  <span>目标时长</span>
                   <select name="durationSeconds" value={String(durationSeconds)} onChange={(event) => setDurationSeconds(Number(event.target.value))}>
                     {![20, 24, 30, 36, 40, 42, 45, 60].includes(durationSeconds) ? <option value={durationSeconds}>{durationSeconds} 秒</option> : null}
                     <option value="20">20 秒</option>
@@ -551,7 +773,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 </label>
                 {referenceVideo ? <button className="icon-button reference-video-remove" type="button" title="删除参考视频" aria-label="删除参考视频" disabled={referenceUploading} onClick={() => void removeReferenceVideo()}><X aria-hidden="true" size={17} /></button> : null}
               </div>
-              <p className="reference-style-note"><Film aria-hidden="true" size={16} /><span><strong>{referenceGrammarProvider?.label ?? "参考视频分析当前不可用"}</strong>只提炼节奏、构图、运镜、色彩、转场和声音结构；开工后原片作为私密运行输入留档，不进入发布包，分析结果可预览和编辑。</span></p>
+              <p className="reference-style-note"><Film aria-hidden="true" size={16} /><span><strong>{referenceGrammarProvider ? creatorProviderName(referenceGrammarProvider) : "参考视频分析当前不可用"}</strong>只提炼节奏、构图、运镜、色彩、转场和声音结构；开工后原片作为私密运行输入留档，不进入发布包，分析结果可预览和编辑。</span></p>
               {referenceError ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />{referenceError}</p> : null}
             </section>
 
@@ -563,13 +785,16 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
               <fieldset className="recipe-options">
                 <legend className="sr-only">制作配方</legend>
                 {RECIPES.map((recipe) => {
-                  const available = recipeAvailable(recipe, providers);
+                  const lockedByEditorial = imageStory && recipe.allowMeteredProviders;
+                  const available = !lockedByEditorial && recipeAvailable(recipe, providers);
                   return (
                   <label key={recipe.id} className={available ? "recipe-option" : "recipe-option is-disabled"}>
                     <input type="radio" name="recipe" value={recipe.id} checked={recipeId === recipe.id} disabled={!available} onChange={() => applyRecipe(recipe.id)} />
                     <span className="recipe-option-body">
                       <span className="recipe-name">{recipe.recommended ? <Check aria-hidden="true" size={14} /> : <Sparkles aria-hidden="true" size={14} />}<strong>{recipe.label}</strong></span>
-                      <small>{available ? recipe.description : `${recipe.description} · 需要先配置对应能力`}</small>
+                      <small>{lockedByEditorial
+                        ? `${recipe.description} · 图解类选题只使用来源画面和本地编辑画面`
+                        : available ? recipe.description : `${recipe.description} · 需要先配置对应能力`}</small>
                     </span>
                   </label>
                   );
@@ -585,9 +810,13 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
               <div className="production-role-grid">
                 {CAPABILITIES.map((item) => {
                   const candidates = roleProviderCandidates(item, providers);
-                  const selected = providers.find((provider) => provider.id === effectiveBindings[item.key]);
+                  const requestedProviderId = effectiveBindings[item.key];
+                  const selected = providers.find((provider) => provider.id === requestedProviderId);
                   const Icon = item.icon;
                   const models = selectableModelsForCapability(selected?.modelProfiles, item.capability);
+                  const selectedModelId = selected ? modelSelections[selected.id] : undefined;
+                  const inheritedProviderUnavailable = Boolean(requestedProviderId && !candidates.some((provider) => provider.id === requestedProviderId));
+                  const inheritedModelUnavailable = Boolean(selectedModelId && !models.some((model) => model.id === selectedModelId));
                   return <article className={selected?.available ? "production-role" : "production-role is-unavailable"} key={item.key}>
                     <header>
                       <span className="production-role-icon"><Icon aria-hidden="true" size={17} /></span>
@@ -598,8 +827,8 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                       <span>{item.role}能力</span>
                       <select
                         aria-label={`${item.role}能力`}
-                        value={selected?.id ?? ""}
-                        disabled={item.key === "voice" || candidates.length < 2}
+                        value={requestedProviderId ?? ""}
+                        disabled={item.key === "voice" || (candidates.length < 2 && !inheritedProviderUnavailable)}
                         onChange={(event) => {
                           const provider = providers.find((candidate) => candidate.id === event.target.value);
                           if (!provider) return;
@@ -607,29 +836,37 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                           if (item.key === "visualReview") setVisualReviewEnabled(true);
                         }}
                       >
-                        {!selected ? <option value="">未配置</option> : null}
-                        {candidates.map((provider) => <option value={provider.id} key={provider.id}>{provider.label}</option>)}
+                        {!requestedProviderId ? <option value="">未配置</option> : null}
+                        {inheritedProviderUnavailable ? <option value={requestedProviderId} disabled>上一版：{selected ? creatorProviderName(selected) : requestedProviderId}（不可用）</option> : null}
+                        {candidates.map((provider) => <option value={provider.id} key={provider.id}>{creatorProviderName(provider)}</option>)}
                       </select>
                     </label>
                     {models.length > 0 && selected ? <label className="field production-role-model">
                       <span>{item.role}本次模型</span>
                       <select
                         aria-label={`${item.role}本次模型`}
-                        value={modelSelections[selected.id] ?? ""}
+                        value={selectedModelId ?? ""}
                         onChange={(event) => setModelSelections((current) => withModelSelection(current, selected.id, event.target.value))}
                       >
                         <option value="">继承推荐：{effectiveModelId(selected) ?? "由系统按当前配置选择"}</option>
+                        {inheritedModelUnavailable && selectedModelId ? <option value={selectedModelId} disabled>上一版：{selectedModelId}（不可用）</option> : null}
                         {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                       </select>
+                      {(item.key === "script" || item.key === "director" || item.key === "visualReview") && models.length > 1
+                        ? <small>你选的是首选；仅在连接、超时、限流或服务不可用时，才按兼容候选顺序接管。</small>
+                        : null}
                     </label> : <p>{item.key === "voice" ? "音色与语速在下方声音导演中调整。" : selected?.description ?? item.description}</p>}
                     {item.key === "assets" ? <div className="production-role-source-models">
                       <strong>本次画面来源与模型</strong>
                       {selectedAssetSources.map((provider) => {
                         const models = selectableModelsForCapability(provider.modelProfiles, provider.capability);
+                        const selectedModelId = modelSelections[provider.id];
+                        const inheritedModelUnavailable = Boolean(selectedModelId && !models.some((model) => model.id === selectedModelId));
                         return <label className="field" key={provider.id}>
-                        <span>{provider.label}</span>
-                        {models.length ? <select aria-label={`${provider.label}开工模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => withModelSelection(current, provider.id, event.target.value))}>
-                          <option value="">推荐默认：{effectiveModelId(provider) ?? "自动选择"}</option>
+                        <span>{creatorProviderName(provider)}</span>
+                        {models.length ? <select aria-label={`${creatorProviderName(provider)}开工模型`} value={selectedModelId ?? ""} onChange={(event) => setModelSelections((current) => withModelSelection(current, provider.id, event.target.value))}>
+                          <option value="">使用推荐：{effectiveModelId(provider) ?? "自动选择"}</option>
+                          {inheritedModelUnavailable && selectedModelId ? <option value={selectedModelId} disabled>上一版：{selectedModelId}（不可用）</option> : null}
                           {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                         </select> : <small>{providerBillingLabel(provider)}</small>}
                       </label>;})}
@@ -641,14 +878,14 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                           ? "画面方案本身不收费 · 按实际生成需求报价 · 生成前逐笔人工确认"
                           : "画面方案本身不收费 · 当前方案不调用付费生成"
                         : `${providerBillingLabel(selected)} · ${effectiveModelId(selected) ?? "不使用模型"}`
-                      : "尚未配置可执行能力"}</small>
+                      : "尚未选择制作方式"}</small>
                   </article>;
                 })}
               </div>
               <div className={roleAuditProvider ? "production-auditor" : "production-auditor is-unavailable"}>
                 <span><ScanSearch aria-hidden="true" size={18} /></span>
-                <div><strong>{roleAuditProvider?.label ?? "独立质量审计未接通"}</strong><small>由独立 AI 逐步检查输入、交付格式和后续使用是否一致。</small></div>
-                <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "实际使用模型"} · 深度质量审计 · 最多三轮` : "开工前请先恢复 Codex 审计能力"}</em>
+                <div><strong>{roleAuditProvider ? creatorProviderName(roleAuditProvider) : "独立质量审计未接通"}</strong><small>由独立 AI 逐步检查输入、交付格式和后续使用是否一致。</small></div>
+                <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "实际使用模型"} · 深度质量审计 · 最多三轮` : "开工前请先恢复独立质量审计能力"}</em>
               </div>
             </section>
 
@@ -676,7 +913,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                       >
                         <span className="stage-index">{String(index + 1).padStart(2, "0")}</span>
                         <Icon aria-hidden="true" size={17} />
-                        <span><strong>{item.label}<em>{item.role}</em></strong><small>{selected?.label ?? "未配置"}</small></span>
+                        <span><strong>{item.label}<em>{item.role}</em></strong><small>{selected ? creatorProviderName(selected) : "未配置"}</small></span>
                         <ChevronRight aria-hidden="true" size={16} />
                       </button>
                     );
@@ -704,7 +941,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                         />
                         <span className="provider-choice-main">
                           <span className="provider-choice-title">
-                            <strong>{provider.label}</strong>
+                            <strong>{creatorProviderName(provider)}</strong>
                             <span className={provider.billing === "metered" ? "cost-tag is-metered" : "cost-tag"}>
                               {providerBillingLabel(provider)}
                             </span>
@@ -716,7 +953,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                           {provider.available ? <Check aria-hidden="true" size={15} /> : <AlertCircle aria-hidden="true" size={15} />}
                           {provider.available ? "可用" : provider.status === "planned" ? "待接入" : "待配置"}
                         </span>
-                        {!provider.available && provider.requirement ? <small className="provider-requirement">{provider.requirement}</small> : null}
+                        {!provider.available && provider.requirement ? <small className="provider-requirement">{creatorFacingTechnicalText(provider.requirement)}</small> : null}
                       </label>
                     );
                   })}
@@ -733,6 +970,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                     const checked = assetProviderIds.includes(provider.id);
                     const disabled = !provider.available
                       || (provider.billing === "metered" && !selectedRecipe.allowMeteredProviders)
+                      || (provider.id === "local-editorial-v1" && selectedTemplateId === "photo-story")
                       || (checked && assetProviderIds.length === 1);
                     return <label key={provider.id} className={checked ? "asset-source-option is-selected" : "asset-source-option"}>
                       <input
@@ -741,7 +979,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                         disabled={disabled}
                         onChange={() => toggleAssetProvider(provider)}
                       />
-                      <span><strong>{provider.label}</strong><small>{creatorFacingTechnicalText(provider.description) ?? "由系统按当前配置使用"}</small></span>
+                      <span><strong>{creatorProviderName(provider)}</strong><small>{creatorFacingTechnicalText(provider.description) ?? "由系统按当前配置使用"}</small></span>
                       <em>{providerBillingLabel(provider)}</em>
                     </label>;
                   })}
@@ -751,14 +989,14 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                   {selectedAssetSources.filter((provider) => selectableModelsForCapability(provider.modelProfiles, provider.capability).length).map((provider) => {
                     const selectedModel = provider.modelProfiles?.find((model) => model.id === effectiveModelId(provider));
                     return <label className="field" key={provider.id}>
-                      <span>{provider.label}</span>
-                      <select aria-label={`${provider.label} 本次模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => {
+                      <span>{creatorProviderName(provider)}</span>
+                      <select aria-label={`${creatorProviderName(provider)} 本次模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => {
                         const next = { ...current };
                         if (event.target.value) next[provider.id] = event.target.value;
                         else delete next[provider.id];
                         return next;
                       })}>
-                        <option value="">继承默认：{effectiveModelId(provider) ?? "自动选择"}</option>
+                        <option value="">使用推荐：{effectiveModelId(provider) ?? "自动选择"}</option>
                         {selectableModelsForCapability(provider.modelProfiles, provider.capability).map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                       </select>
                       <small>{selectedModel?.description}{selectedModel?.estimatedCnyPerClip !== undefined ? ` · 当前模型参考单价约 ¥${formatMoney(selectedModel.estimatedCnyPerClip)}/镜头，实际以逐项报价为准` : ""}</small>
@@ -771,6 +1009,9 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
             <VoiceStudio
               sectionLabel="05"
               value={voiceDirection}
+              preserveUnavailableSelection={Boolean(initialValues?.rework)}
+              onSelectionAvailabilityChange={setVoiceSelectionAvailable}
+              onUserChange={() => { voiceTouched.current = true; }}
               onChange={(next, providerId) => {
                 setVoiceDirection(next);
                 setBindings((current) => ({ ...current, voice: providerId }));
@@ -797,16 +1038,21 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
                 />
                 <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片</strong></span>
                 <small>{visualReviewProvider
-                  ? `${visualReviewProvider.label} · 抽帧审查，不上传音轨`
+                  ? `${creatorProviderName(visualReviewProvider)} · 抽帧审查，不上传音轨`
                   : "ZAI 视觉审片服务当前不可用，本次不会运行视觉审片"}</small>
               </label>
+              {inheritedVisualReviewUnavailable ? <button
+                className="button button-ghost"
+                type="button"
+                onClick={disableInheritedVisualReview}
+              >本次停用视觉审片</button> : null}
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>
               <div className="budget-control">
                 <span><strong>费用确认方式</strong></span>
                 <small>{[
                   meteredSelected ? "图片和视频按实际方案逐项报价，人工确认后才执行" : "图片和视频不会产生现金报价",
-                  automaticVoiceProvider ? "配音自动记入成本账，不中断制作" : "",
-                  subscriptionVisualReview ? "视觉审片使用订阅额度，不产生现金报价" : "",
+                  automaticVoiceProvider ? "配音自动记入成本账，不弹现金报价；失败会停在配音步骤" : "",
+                  subscriptionVisualReview ? "视觉审片使用订阅额度，不产生现金报价；质量问题会停在审片步骤" : "",
                 ].filter(Boolean).join("；")}</small>
               </div>
             </section>
@@ -820,7 +1066,7 @@ export function NewRunDialog({ open, providers, initialValues, creatorSettings, 
             <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
             <button className="button button-primary" type="button" onClick={(event) => {
               if (event.currentTarget.form?.reportValidity()) void submit(event.currentTarget.form);
-            }} disabled={submitting || referenceUploading || !templatesLoaded || missingProductionRoles.length > 0} data-tour="production-start">
+            }} disabled={submitting || referenceUploading || !templatesLoaded || productionBlocked} data-tour="production-start">
               <Check aria-hidden="true" size={17} />
               {submitting ? "正在创建..." : "开始制作"}
             </button>
@@ -841,6 +1087,15 @@ function defaultVoiceDirection(providers: StudioProvider[]): StudioProductionInp
     pauseScale: 1,
     masteringPreset: "natural",
   };
+}
+
+function creatorVoiceWasCustomized(settings?: StudioCreatorSettings): boolean {
+  if (!settings) return false;
+  if (settings.voiceDirectionCustomized !== undefined) return settings.voiceDirectionCustomized;
+  return settings.voiceDirection.profileId !== "macos:Tingting"
+    || settings.voiceDirection.rate !== 185
+    || settings.voiceDirection.pauseScale !== 1
+    || settings.voiceDirection.masteringPreset !== "natural";
 }
 
 function providerDefaults(
@@ -941,6 +1196,11 @@ function sourceIdsForRecipe(
   return metered ? [...free, metered.id] : free;
 }
 
+function includeLocalEditorialSource(sourceIds: string[], providers: StudioProvider[]): string[] {
+  const localEditorial = providers.find((provider) => provider.id === "local-editorial-v1" && provider.available && isAssetSource(provider));
+  return localEditorial && !sourceIds.includes(localEditorial.id) ? [...sourceIds, localEditorial.id] : sourceIds;
+}
+
 function isAssetSource(provider: StudioProvider): boolean {
   return provider.capability === "asset.prepare" && provider.kind !== "test" && provider.id !== "ai-shot-router-v1";
 }
@@ -1001,4 +1261,9 @@ function providerBillingLabel(provider: StudioProvider): string {
   return provider.estimatedCnyPerClip === undefined
     ? "待估价"
     : `约 ¥${formatMoney(provider.estimatedCnyPerClip)}/${unit}`;
+}
+
+function creatorProviderName(provider: StudioProvider): string {
+  const normalized = providerLabel(provider.id);
+  return !normalized || normalized === provider.id ? provider.label : normalized;
 }
