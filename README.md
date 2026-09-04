@@ -144,6 +144,7 @@ feature branch -> Pull Request -> GitHub Actions -> Alibaba ECS
 - [项目演进摘要](docs/HISTORY.md)
 - [当前费用与严格素材验收记录](docs/loops/022-spend-approval-and-strict-assets-results.md)
 - [爆款选题、返工继承与创作者语言记录](docs/loops/023-viral-selection-rework-and-creator-language.md)
+- [发布前严格审计与云端验收记录](docs/loops/024-pre-landing-audit-and-cloud-acceptance.md)
 
 历史实现计划、过期视觉方案和一次性验收报告不再保留在当前工作树；需要考古时从 Git 历史读取，清理前基线为 `2d4f842b160801925115acbae9d1e536079334c6`。
 

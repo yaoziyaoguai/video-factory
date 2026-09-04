@@ -42,6 +42,7 @@ import type {
   StudioTemplateCatalog,
   StudioTemplateCloneInput,
   StudioTemplateCreateInput,
+  StudioTemplateDeletion,
   StudioTemplateMutation,
   StudioTemplateExperimentScorecard,
   StudioProductionInput,
@@ -245,6 +246,15 @@ export class StudioService {
   }
   createTemplate(input: StudioTemplateCreateInput): Promise<StudioTemplateMutation> {
     return this.templateMutation(() => this.templates.create(input));
+  }
+  reviseTemplate(id: string, expectedRevision: number): Promise<StudioTemplateMutation> {
+    return this.templateMutation(() => this.templates.revise(id, expectedRevision));
+  }
+  deleteTemplate(id: string, expectedRevision: number): Promise<StudioTemplateDeletion> {
+    return this.templateMutation(() => this.templates.delete(id, expectedRevision));
+  }
+  restoreBuiltInTemplate(id: string, expectedRevision: number): Promise<StudioTemplateMutation> {
+    return this.templateMutation(() => this.templates.restoreBuiltIn(id, expectedRevision));
   }
   async saveTemplateDraft(input: StudioTemplate, expectedRevision: number): Promise<StudioTemplateMutation> {
     const { builtIn: _builtIn, ...template } = input;
@@ -483,14 +493,8 @@ export class StudioService {
       !isRecord(input.models)
       || Object.values(input.models).some((modelId) => typeof modelId !== "string")
     )) return roleConfiguredInput;
-    const explicitModels = (input.models as Record<string, string> | undefined) ?? {};
-    const selected = selectedModelProviderIds(roleConfiguredInput);
-    const inherited = Object.fromEntries(Object.entries(settings.modelDefaults ?? {}).filter(([providerId]) => selected.has(providerId)));
-    const models = { ...inherited, ...explicitModels };
-    const modelSelectionSources = Object.fromEntries(Object.keys(models).map((providerId) => [
-      providerId,
-      providerId in explicitModels ? "run_override" : "global_default",
-    ]));
+    const models = (input.models as Record<string, string> | undefined) ?? {};
+    const modelSelectionSources = Object.fromEntries(Object.keys(models).map((providerId) => [providerId, "run_override"]));
     return {
       ...roleConfiguredInput,
       ...(Object.keys(models).length ? { models, modelSelectionSources } : {}),
@@ -681,7 +685,7 @@ export class StudioService {
     await this.series.reconcileRuns(snapshots);
   }
 
-  private async templateMutation(operation: () => Promise<StudioTemplateMutation>): Promise<StudioTemplateMutation> {
+  private async templateMutation<T extends StudioTemplateMutation | StudioTemplateDeletion>(operation: () => Promise<T>): Promise<T> {
     try {
       return await operation();
     } catch (error) {
@@ -758,20 +762,9 @@ function boundedCanonText(value: unknown): string | undefined {
 }
 
 function isTemplateInputError(message: string): boolean {
-  return /^(template |id |version |status |name |description |category |platforms |durationSeconds |automationLevel |storyStructure|shotSlots|visualSystem|soundSystem|qualityRules|capabilityRequirements|costPolicy)|Template '.+' (was not found|already exists)|A built-in template|Only a draft template|Draft template/.test(message);
+  return /^(template |id |version |status |name |description |category |platforms |durationSeconds |automationLevel|storyStructure|shotSlots|visualSystem|soundSystem|qualityRules|capabilityRequirements|costPolicy)|Template '.+' (was not found|already exists|already has an editable draft)|A published built-in template|Built-in template|Only a draft template|Draft template/.test(message);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function selectedModelProviderIds(input: Record<string, unknown>): Set<string> {
-  const selected = new Set<string>();
-  if (isRecord(input.providers)) {
-    for (const value of Object.values(input.providers)) if (typeof value === "string") selected.add(value);
-  }
-  if (isRecord(input.director) && Array.isArray(input.director.assetProviderIds)) {
-    for (const value of input.director.assetProviderIds) if (typeof value === "string") selected.add(value);
-  }
-  return selected;
 }

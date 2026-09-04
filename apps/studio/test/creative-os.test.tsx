@@ -10,6 +10,7 @@ import { OpportunityDialog } from "../src/client/components/OpportunityDialog.js
 import { OpportunityRail } from "../src/client/components/OpportunityRail.js";
 import { ProductionStrip } from "../src/client/components/ProductionStrip.js";
 import { SeriesDialog } from "../src/client/components/SeriesDialog.js";
+import { TopicEntryWorkspace } from "../src/client/components/TopicEntryWorkspace.js";
 import { ExperimentsPage } from "../src/client/pages/ExperimentsPage.js";
 import { ProductionPage } from "../src/client/pages/ProductionPage.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
@@ -360,6 +361,7 @@ describe("Creative OS", () => {
     await user.type(screen.getByLabelText("系列名称"), "AI 下班实验室");
     await user.type(screen.getByLabelText("系列承诺"), "每集验证一个普通人真能用上的 AI 方法。");
     await user.type(screen.getByLabelText("目标受众"), "普通上班族");
+    expect(screen.queryByRole("option", { name: "视频号" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "创建系列" }));
 
     expect(create).toHaveBeenCalledWith(expect.objectContaining({
@@ -370,6 +372,73 @@ describe("Creative OS", () => {
       tone: "克制、具体、有结论",
     }));
     expect(await screen.findByRole("option", { name: /AI 下班实验室/ })).toBeInTheDocument();
+  });
+
+  it("keeps a legacy unsupported series readable but blocks new production", () => {
+    const legacySeries: StudioSeries = {
+      id: "series-legacy-platform",
+      name: "旧视频号系列",
+      premise: "保留历史路线图",
+      audience: "旧观众",
+      platform: "shipinhao",
+      category: "lifestyle",
+      track: "legacy-channel",
+      pillars: ["旧主题", "旧复盘"],
+      tone: "具体",
+      visualStyle: "生活实拍",
+      status: "active",
+      revision: 1,
+      currentSeason: { number: 1, title: "第一季", arc: "历史内容" },
+      bible: { rules: ["保留历史"], recurringElements: [], forbiddenChanges: [] },
+      canon: { revision: 0, facts: [] },
+      episodes: [{
+        id: "legacy-episode-1",
+        seriesId: "series-legacy-platform",
+        episodeNumber: 1,
+        seasonNumber: 1,
+        arc: "历史内容",
+        pillar: "旧主题",
+        title: "历史单集",
+        viewerPromise: "保留可读",
+        hook: "历史开场",
+        payoff: "历史结论",
+        canonBaseRevision: 0,
+        status: "planned",
+        continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: [], canonChecks: [] },
+        planning: { source: "rules", role: "系列总编", auditRole: "独立质量审计", auditStatus: "passed", auditIterations: 1, providerId: "rules", modelId: "deterministic", promptVersion: "test" },
+        createdAt: "2026-08-24T09:00:00.000Z",
+        updatedAt: "2026-08-24T09:00:00.000Z",
+      }],
+      nextEpisodeNumber: 1,
+      createdAt: "2026-08-24T09:00:00.000Z",
+      updatedAt: "2026-08-24T09:00:00.000Z",
+    };
+
+    render(<MemoryRouter><TopicEntryWorkspace
+      initialMode="series"
+      selectedSeriesId={legacySeries.id}
+      inbox={inbox([])}
+      series={[legacySeries]}
+      historicalRuns={[]}
+      loading={{}}
+      trendMeta={{ platformCount: 0, candidateCount: 0 }}
+      seriesAuditReady
+      onRetry={vi.fn()}
+      onRefreshTrends={vi.fn()}
+      onAdopt={vi.fn()}
+      onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()}
+      onUpdateSeriesEpisode={vi.fn()}
+      onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()}
+      onViewProductionRecords={vi.fn()}
+      onManual={vi.fn()}
+      onImport={vi.fn()}
+    /></MemoryRouter>);
+
+    expect(screen.getByText(/这个历史系列使用的首发平台已不再支持新制作/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "历史单集" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /请先迁移到支持的平台/ })).toBeDisabled();
   });
 
   it("exposes the four real workspaces in the primary navigation", async () => {
@@ -487,6 +556,26 @@ describe("Creative OS", () => {
     await user.click(await screen.findByRole("button", { name: "新建制作" }));
 
     expect(screen.getByRole("combobox", { name: "目标时长" })).toHaveValue("45");
+  });
+
+  it("uses the creator target platform instead of the opportunity source platform", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([{ ...opportunity, platform: "guokr" }]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "free-stock",
+      topicStrategy: { customInstruction: "优先可拍题材。" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "bilibili", durationSeconds: 24 },
+    });
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    await user.click(await screen.findByRole("button", { name: "新建制作" }));
+
+    expect(screen.getByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
   });
 
   it("presents an executable visual plan for every topic without fake stock frames", () => {
@@ -804,16 +893,65 @@ describe("Creative OS", () => {
     const adopt = vi.spyOn(studioApi, "adoptCandidate").mockResolvedValue({ ...opportunity, id: reviewCandidate.id });
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByText("1 条证据 · 1 个独立源（需 1 个）")).toBeInTheDocument();
+    expect(await screen.findByText("1 条证据 · 1 个有效来源域名（需 1 个）")).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: `采用候选 ${reviewCandidate.title}` }));
     expect(screen.getByRole("dialog", { name: "采用前核验证据" })).toBeInTheDocument();
     await user.click(screen.getByRole("checkbox", { name: /我已打开原始来源/ }));
     await user.click(screen.getByRole("button", { name: "确认核验并采用" }));
     expect(adopt).toHaveBeenCalledWith(reviewCandidate.id, { origin: "trend", verificationConfirmed: true });
 
+    await user.click(screen.getByRole("button", { name: /未入选 1/ }));
     await user.click(screen.getByRole("button", { name: `查看${blockedCandidate.title}` }));
     expect(screen.getByRole("button", { name: `采用候选 ${blockedCandidate.title}` })).toBeDisabled();
     expect(screen.getByText(/至少需要 2 个独立来源/)).toBeInTheDocument();
+  });
+
+  it("shows only the editorial shortlist by default and ranks it by the editorial score", async () => {
+    const user = userEvent.setup();
+    const editorialWinner: StudioCandidateInboxItem = {
+      ...candidate(33, "technology"),
+      id: "trend-editorial-winner",
+      title: "总编高分候选",
+      score: { ...candidate(33, "technology").score, final: 42 },
+      editorialDecision: { verdict: "produce_video", score: 93, reasons: ["观看价值明确。"], guardrails: ["核验结果。"] },
+    };
+    const rejectedRawWinner: StudioCandidateInboxItem = {
+      ...candidate(34, "technology"),
+      id: "trend-raw-winner",
+      title: "原始分高但未入选",
+      score: { ...candidate(34, "technology").score, final: 99 },
+      editorialDecision: { verdict: "skip", score: 0, reasons: ["没有越过生产门槛。"], guardrails: ["重做选题。"] },
+    };
+    render(<MemoryRouter><TopicEntryWorkspace
+      initialMode="trend"
+      selectedSeriesId={undefined}
+      inbox={inbox([rejectedRawWinner, editorialWinner])}
+      series={[]}
+      historicalRuns={[]}
+      loading={{}}
+      trendMeta={{ platformCount: 1, candidateCount: 2 }}
+      onRetry={vi.fn()}
+      onRefreshTrends={vi.fn()}
+      onAdopt={vi.fn()}
+      onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()}
+      onUpdateSeriesEpisode={vi.fn()}
+      onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()}
+      onViewProductionRecords={vi.fn()}
+      onManual={vi.fn()}
+      onImport={vi.fn()}
+    /></MemoryRouter>);
+
+    expect(screen.getByRole("button", { name: `查看${editorialWinner.title}` })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `查看${rejectedRawWinner.title}` })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("总编评分 93 分")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /未入选 1/ }));
+
+    expect(screen.getByRole("button", { name: `查看${rejectedRawWinner.title}` })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `查看${editorialWinner.title}` })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("总编评分 0 分")).toBeInTheDocument();
   });
 
   it("removes duplicate-key evidence from the previous candidate after switching rows", async () => {
@@ -1162,7 +1300,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section")).toHaveAttribute("data-active", "true");
   });
 
-  it("persists voice and visual choices as production defaults", async () => {
+  it("persists voice and creation choices while presenting model recommendations", async () => {
     const user = userEvent.setup();
     const readyProviders: StudioProvider[] = [
       ...providers,
@@ -1240,9 +1378,10 @@ describe("Creative OS", () => {
     expect(within(editorialGroup!).getByText("本地编辑画面")).toBeInTheDocument();
 
     await user.click(screen.getByRole("link", { name: "画面来源" }));
-    await user.selectOptions(screen.getByRole("combobox", { name: "MiniMax 视频生成 首选模型" }), "MiniMax-H3");
-    await user.click(screen.getByRole("button", { name: "保存画面模型" }));
-    expect(update).toHaveBeenLastCalledWith({ modelDefaults: { "minimax-video-v1": "MiniMax-H3" } });
+    expect(screen.queryByRole("combobox", { name: "MiniMax 视频生成 首选模型" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存画面模型" })).not.toBeInTheDocument();
+    expect(within(generatedVideoGroup!).getByText("MiniMax Hailuo 2.3")).toBeInTheDocument();
+    expect(within(generatedVideoGroup!).getByText("可用替补：MiniMax H3")).toBeInTheDocument();
 
     await user.selectOptions(screen.getByRole("combobox", { name: "默认导演角色" }), "documentary-observer");
     await user.selectOptions(screen.getByRole("combobox", { name: "默认目标平台" }), "bilibili");
@@ -1331,15 +1470,17 @@ describe("Creative OS", () => {
     expect(screen.queryByRole("combobox", { name: "画面执行首选能力" })).not.toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "配音执行首选能力" })).not.toBeInTheDocument();
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧首选能力" }), "codex-screenwriter-v1");
-    await user.selectOptions(screen.getByRole("combobox", { name: "AI 编剧首选模型" }), "gpt-5.6-sol");
+    expect(screen.queryByRole("combobox", { name: "AI 编剧首选模型" })).not.toBeInTheDocument();
+    const roleSection = screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section");
+    expect(within(roleSection!).getByText("GPT-5.6 Terra")).toBeInTheDocument();
+    expect(within(roleSection!).getByText("故障替补：GPT-5.6 Sol")).toBeInTheDocument();
     expect(screen.getByText("独立质量审计")).toBeInTheDocument();
     expect(screen.getByText("独立复核 · 最多三轮")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));
 
-    expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
+    expect(update).toHaveBeenLastCalledWith({
       roleProviderDefaults: expect.objectContaining({ script: "codex-screenwriter-v1" }),
-      modelDefaults: expect.objectContaining({ "codex-screenwriter-v1": "gpt-5.6-sol" }),
-    }));
+    });
   });
 });
 

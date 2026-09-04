@@ -193,6 +193,10 @@ describe("Studio client", () => {
 
   it("applies a calibrated content voice preset as one coherent direction", async () => {
     const user = userEvent.setup();
+    vi.spyOn(studioApi, "voices").mockResolvedValue([
+      { id: "macos:Tingting", providerId: "macos-say-v1", label: "Tingting", locale: "zh-CN", engine: "macos", curated: true },
+      { id: "macos:Meijia", providerId: "macos-say-v1", label: "Meijia", locale: "zh-CN", engine: "macos", curated: true },
+    ]);
     const onChange = vi.fn();
     render(<VoiceStudio
       value={{ profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" }}
@@ -202,7 +206,7 @@ describe("Studio client", () => {
     await user.click(await screen.findByRole("button", { name: /人物纪实/ }));
 
     expect(onChange).toHaveBeenLastCalledWith({
-      profileId: "macos:Tingting",
+      profileId: "macos:Meijia",
       rate: 170,
       pauseScale: 1.2,
       masteringPreset: "intimate",
@@ -221,9 +225,10 @@ describe("Studio client", () => {
 
   it("presents production state and the next human action in a scannable queue", async () => {
     const user = userEvent.setup();
+    const failed = { ...runSummary, id: "run-3", title: "生成失败、等待处理", status: "failed" as const };
     render(
       <MemoryRouter>
-        <ProductionQueue runs={[runSummary, { ...runSummary, id: "run-2", title: "已经完成的内容", status: "succeeded" }]} loading={false} onCreate={() => undefined} />
+        <ProductionQueue runs={[runSummary, { ...runSummary, id: "run-2", title: "已经完成的内容", status: "succeeded" }, failed]} loading={false} onCreate={() => undefined} />
       </MemoryRouter>,
     );
 
@@ -232,7 +237,9 @@ describe("Studio client", () => {
     expect(screen.getByText(runSummary.title)).toBeInTheDocument();
     expect(screen.getAllByText("等你审片").length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: /进入审片/ })[0]).toHaveAttribute("href", "/projects/run-1");
+    expect(screen.getByText("待你处理", { selector: ".project-edition span" }).closest("div")).toHaveTextContent("2");
     await user.click(screen.getByRole("button", { name: "筛选：待你处理" }));
+    expect(screen.getByText("生成失败、等待处理")).toBeInTheDocument();
     expect(screen.queryByText("已经完成的内容")).not.toBeInTheDocument();
   });
 
@@ -385,6 +392,27 @@ describe("Studio client", () => {
     expect(screen.getByRole("combobox", { name: "目标时长" })).toHaveValue("30");
     expect(screen.getByRole("radio", { name: /仅免费画面/ })).toBeChecked();
     expect(screen.getByRole("combobox", { name: "导演角色" })).toHaveValue("documentary-observer");
+  });
+
+  it("does not submit an unsupported initial platform behind a visually different option", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<NewRunDialog
+      open
+      providers={providers}
+      initialValues={{ platform: "guokr" }}
+      onClose={() => undefined}
+      onSubmit={onSubmit}
+    />);
+
+    expect(screen.getByRole("combobox", { name: "目标平台" })).toHaveValue("");
+    await user.type(screen.getByLabelText("视频标题"), "平台边界测试");
+    await user.type(screen.getByLabelText("内容角度"), "验证来源平台不会进入成片配置");
+    await user.type(screen.getByLabelText("目标受众"), "内容创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("请选择目标平台");
   });
 
   it("shows only two real visual strategies and maps a legacy cinematic default to paid key shots", async () => {
@@ -703,19 +731,28 @@ describe("Studio client", () => {
 
   it("keeps invalid rework selections visible and blocked until the creator explicitly replaces each one", async () => {
     const user = userEvent.setup();
-    const providersWithDirectorModel = providers.map((provider) => provider.id === "api-visual-director-v1" ? {
-      ...provider,
-      defaultModelId: "director-current",
-      modelProfiles: [{
-        id: "director-current",
-        providerId: provider.id,
-        providerFamily: "openai",
-        label: "当前导演模型",
-        description: "当前可用",
+    const providersWithDirectorModel = [
+      ...providers.map((provider) => provider.id === "api-visual-director-v1" ? {
+        ...provider,
+        defaultModelId: "director-current",
+        modelProfiles: [{
+          id: "director-current",
+          providerId: provider.id,
+          providerFamily: "openai",
+          label: "当前导演模型",
+          description: "当前可用",
+          available: true,
+          taskTypes: ["text" as const],
+        }],
+      } : provider),
+      {
+        id: "retired-script-v1",
+        capability: "asset.prepare",
+        label: "已转为画面执行的旧能力",
         available: true,
-        taskTypes: ["text" as const],
-      }],
-    } : provider);
+        kind: "external",
+      } satisfies StudioProvider,
+    ];
     render(<NewRunDialog
       open
       providers={providersWithDirectorModel}
@@ -750,11 +787,19 @@ describe("Studio client", () => {
 
     const alertTitle = await screen.findByText(/上一版有 \d+ 项已失效，暂不能开工/);
     const alert = alertTitle.closest("section")!;
-    expect(alert).toHaveTextContent("retired-template");
-    expect(alert).toHaveTextContent("retired-script-v1");
-    expect(alert).toHaveTextContent("retired-stock-v1");
-    expect(alert).toHaveTextContent("retired-director-model");
-    await waitFor(() => expect(alert).toHaveTextContent("macos:Retired"));
+    expect(alert).toHaveTextContent("上一版模板");
+    expect(alert).toHaveTextContent("已转为画面执行的旧能力");
+    expect(alert).toHaveTextContent("现在用于画面素材，不能继续作为编剧");
+    expect(alert).toHaveTextContent("上一版画面来源");
+    expect(alert).toHaveTextContent("上一版模型");
+    await waitFor(() => expect(alert).toHaveTextContent("上一版声音演员"));
+    expect(alert).not.toHaveTextContent("retired-template");
+    expect(alert).not.toHaveTextContent("retired-script-v1");
+    expect(alert).not.toHaveTextContent("retired-stock-v1");
+    expect(alert).not.toHaveTextContent("retired-director-model");
+    expect(alert).not.toHaveTextContent("macos:Retired");
+    expect(alert).not.toHaveTextContent("asset.prepare");
+    expect(alert).not.toHaveTextContent("script.draft");
     expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
 
     await user.click(screen.getByRole("radio", { name: /知识解释/ }));
@@ -809,19 +854,21 @@ describe("Studio client", () => {
     expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
   });
 
-  it("requires an explicit replacement when the exact published rework template version is unavailable", async () => {
+  it("reuses the source snapshot when only a newer published version of the rework template is listed", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const latestTemplate = template("historical-template", "历史模板新版");
     vi.mocked(studioApi.templates).mockResolvedValueOnce({
       storeRevision: 3,
-      templates: [template("historical-template", "历史模板新版"), template("knowledge-explainer", "知识解释")],
+      templates: [latestTemplate, template("knowledge-explainer", "知识解释")],
+      productionTemplates: [latestTemplate, template("knowledge-explainer", "知识解释")],
     });
     render(<NewRunDialog
       open
       providers={providers}
       initialValues={{
         title: "旧模板版本返工",
-        angle: "明确选择当前正式版本",
+        angle: "沿用原制作的模板快照",
         audience: "内容创作者",
         template: { templateId: "historical-template", templateVersion: 2 },
         providers: {
@@ -846,17 +893,15 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
-    expect(await screen.findByText(/上一版有 1 项已失效，暂不能开工/)).toBeInTheDocument();
-    expect(screen.getByText(/historical-template v2/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
-
-    await user.click(screen.getByRole("radio", { name: /历史模板新版/ }));
-    await waitFor(() => expect(screen.queryByText(/上一版有.*项已失效/)).not.toBeInTheDocument());
+    expect(await screen.findByRole("radio", { name: /历史模板新版/ })).toBeChecked();
+    expect(screen.queryByText(/上一版有.*项已失效/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       template: {
         templateId: "historical-template",
-        runOverrides: { durationSeconds: 24, automationLevel: "assisted" },
+        templateVersion: 2,
+        runOverrides: { durationSeconds: 24 },
       },
     }));
   });
@@ -1683,7 +1728,7 @@ describe("Studio client", () => {
     const rework = {
       sourceRunId: "run-rejected-1",
       sourceRunRevision: 8,
-      rejectionReason: "第三镜文字遮挡主体，画面风格也与前两镜不一致。",
+      rejectionReason: "第三镜文字遮挡主体，应进入 manualReplacement。",
       nodeInstructions: {
         script: "缩短第三镜旁白，保留前两镜原文。",
         visualDirection: "第三镜沿用前两镜的自然纪实风格并留出字幕安全区。",
@@ -1694,8 +1739,8 @@ describe("Studio client", () => {
         timecodeMs: 8_500,
         scenePosition: 3,
         category: "text_interference",
-        description: "素材自带文字与字幕重叠。",
-        suggestion: "换成无字母片并保持人物方向一致。",
+        description: "素材自带文字与字幕重叠，应进入 manualReplacement。",
+        suggestion: "换成无字母片并保持人物方向一致，不要暴露 manualReplacement。",
         targetNodeIds: ["visual-direction", "assets"] as Array<"visual-direction" | "assets">,
       }],
       previousScript: { scenes: [{ position: 3, narration: "旧旁白" }] },
@@ -1760,7 +1805,9 @@ describe("Studio client", () => {
     />);
 
     expect(await screen.findByRole("heading", { name: "调整方案后重新制作" })).toBeInTheDocument();
-    expect(screen.getByText("素材自带文字与字幕重叠。")).toBeInTheDocument();
+    expect(screen.getByText("第三镜文字遮挡主体，应进入 人工补充素材。")).toBeInTheDocument();
+    expect(screen.getByText("素材自带文字与字幕重叠，应进入 人工补充素材。")).toBeInTheDocument();
+    expect(screen.queryByText(/manualReplacement/i)).not.toBeInTheDocument();
     const assetInstruction = screen.getByRole("textbox", { name: "画面素材修改要求" });
     expect(assetInstruction).toHaveValue(rework.nodeInstructions.assets);
     expect(screen.getByRole("combobox", { name: "编剧本次模型" })).toHaveValue("gpt-primary");
@@ -2070,7 +2117,7 @@ describe("Studio client", () => {
           output: { report: {
             recommendation: "revise",
             confidence: 0.87,
-            summary: "画面语义与导演方案不一致，需要修改后再审。",
+            summary: "画面语义与导演方案不一致，应进入 manualReplacement 后再审。",
             scores: { composition: 65, continuity: 41, pacing: 54, legibility: 62, safety: 84 },
             findings: [{ severity: "major", message: "开场缺少关键动作。" }],
           } },
@@ -2083,7 +2130,8 @@ describe("Studio client", () => {
 
     expect(screen.getByText("视觉审片建议修改后再审")).toBeInTheDocument();
     expect(screen.getByText("请完整观看成片，确认内容和节奏。")).toBeInTheDocument();
-    expect(screen.getAllByText("画面语义与导演方案不一致，需要修改后再审。").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("画面语义与导演方案不一致，应进入 人工补充素材 后再审。").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/manualReplacement/i)).not.toBeInTheDocument();
     expect(screen.getByText((_, element) => element?.textContent === "连续性 41")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "按审片建议打回" })).toBeInTheDocument();
 
@@ -2648,7 +2696,9 @@ describe("Studio client", () => {
     expect(screen.getByText(/provider-task-1/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "调整方案后重新制作" })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "核对付费任务" }));
+    expect(screen.getByText("已找到可恢复的付费任务")).toBeInTheDocument();
+    expect(screen.getByText(/不会创建新任务或新增报价/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "继续获取原任务结果" }));
     expect(reconcile).toHaveBeenCalledWith("assets", { outcome: "resume_original" });
   });
 
@@ -2686,11 +2736,11 @@ describe("Studio client", () => {
       onReconcilePaidNode={reconcile}
     />);
 
-    expect(screen.getByText("需要人工核对账单")).toBeInTheDocument();
+    expect(screen.getByText("这次请求是否扣费还不确定")).toBeInTheDocument();
     expect(screen.getByText("尚无服务商任务编号")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "调整方案后重新制作" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "核对付费任务" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "继续获取原任务结果" })).not.toBeInTheDocument();
     await userEvent.type(screen.getByLabelText("服务商任务编号"), "provider-task-recovered");
     await userEvent.click(screen.getByRole("button", { name: "录入编号并核对原任务" }));
     expect(reconcile).toHaveBeenCalledWith("assets", {
@@ -2714,7 +2764,27 @@ describe("Studio client", () => {
         nodeId: "assets",
         operationId: "paid-operation-1",
         requiresManualReconciliation: true,
-        items: [],
+        items: [{
+          operationId: "paid-operation-1",
+          itemRequestId: "paid-scene-2",
+          quoteItemId: "scene-2",
+          scenePosition: 2,
+          executorProviderId: "ai-shot-router-v1",
+          providerId: "seedance-video-v1",
+          modelId: "seedance-v1",
+          state: "unknown",
+          estimatedCostCny: 2.4,
+        }, {
+          operationId: "paid-operation-1",
+          itemRequestId: "paid-scene-3",
+          quoteItemId: "scene-3",
+          scenePosition: 3,
+          executorProviderId: "ai-shot-router-v1",
+          providerId: "seedance-video-v1",
+          modelId: "seedance-v1",
+          state: "submitted",
+          estimatedCostCny: 2.4,
+        }],
       }}
       decisionPending={false}
       onDecision={async () => undefined}
@@ -2724,6 +2794,7 @@ describe("Studio client", () => {
     />);
 
     await userEvent.click(screen.getByRole("radio", { name: "已扣费" }));
+    await userEvent.selectOptions(screen.getByLabelText("本次核对镜头"), "paid-scene-3");
     await userEvent.type(screen.getByLabelText("实际费用（可选）"), "2.40");
     await userEvent.type(screen.getByLabelText("核对记录"), "已在服务商控制台核实账单。 ");
     const submit = screen.getByRole("button", { name: "确认已扣费并登记" });
@@ -2733,6 +2804,7 @@ describe("Studio client", () => {
 
     expect(reconcile).toHaveBeenCalledWith("assets", {
       outcome: "confirmed_charged",
+      itemRequestId: "paid-scene-3",
       actualCostCny: 2.4,
       note: "已在服务商控制台核实账单。",
     });
@@ -2782,7 +2854,7 @@ describe("Studio client", () => {
     />);
 
     expect(screen.getByText("Seedance · Seedance 1")).toBeInTheDocument();
-    expect(screen.getByText(/只会为明确失败或尚未执行的镜头生成新报价/)).toBeInTheDocument();
+    expect(screen.getByText(/只会重新计算明确失败或尚未提交的镜头/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "为未完成镜头重新报价" }));
     expect(reconcile).toHaveBeenCalledWith("assets", { outcome: "requote" });
   });
@@ -2910,7 +2982,12 @@ describe("Studio client", () => {
     expect(await screen.findByText("预计 ¥8.40，最高 ¥8.40 · 最多 1 次")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "这份报价不合适" }));
     const rejectionDialog = screen.getByRole("dialog", { name: "保存费用反馈" });
-    await userEvent.type(within(rejectionDialog).getByRole("spinbutton", { name: "希望下一版控制在多少元（可选）" }), "3");
+    await userEvent.type(within(rejectionDialog).getByRole("spinbutton", { name: "下一版降本目标（可选）" }), "8.4");
+    await userEvent.click(within(rejectionDialog).getByRole("button", { name: "保存反馈" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("下一版降本目标必须低于当前报价 ¥8.40");
+    expect(reject).not.toHaveBeenCalled();
+    await userEvent.clear(within(rejectionDialog).getByRole("spinbutton", { name: "下一版降本目标（可选）" }));
+    await userEvent.type(within(rejectionDialog).getByRole("spinbutton", { name: "下一版降本目标（可选）" }), "3");
     await userEvent.type(within(rejectionDialog).getByRole("textbox", { name: "具体调整意见（可选）" }), "只保留一个关键生成镜头，其余使用图库。");
     await userEvent.click(within(rejectionDialog).getByRole("button", { name: "保存反馈" }));
 
@@ -2928,6 +3005,7 @@ describe("Studio client", () => {
     await userEvent.click(screen.getByRole("button", { name: "检查并确认" }));
     await userEvent.click(screen.getByRole("button", { name: "确认并执行" }));
     expect(authorize).toHaveBeenCalledWith("run-1", "assets", {
+      spendPlanId: "quote-lower",
       inputVersionIds: ["director-v2"],
       providerId: "ai-shot-router-v1",
       modelId: "seedance-v1",
@@ -2987,7 +3065,7 @@ describe("Studio client", () => {
       <Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes>
     </MemoryRouter>);
 
-    await userEvent.click(await screen.findByRole("button", { name: "核对付费任务" }));
+    await userEvent.click(await screen.findByRole("button", { name: "继续获取原任务结果" }));
     expect(reconcile).toHaveBeenCalledWith("run-1", "assets", {
       expectedRunRevision: 3,
       reconciliationId: expect.any(String),
@@ -3054,11 +3132,11 @@ describe("Studio client", () => {
       <Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes>
     </MemoryRouter>);
 
-    await userEvent.click(await screen.findByRole("button", { name: "核对付费任务" }));
+    await userEvent.click(await screen.findByRole("button", { name: "继续获取原任务结果" }));
     await waitFor(() => expect(runRequest).toHaveBeenCalledTimes(2), { timeout: 2_000 });
     rejectFirst(new Error("response lost after submission"));
     await screen.findByText("response lost after submission");
-    await userEvent.click(screen.getByRole("button", { name: "核对付费任务" }));
+    await userEvent.click(screen.getByRole("button", { name: "继续获取原任务结果" }));
     await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2));
 
     const firstInput = reconcile.mock.calls[0]?.[2];

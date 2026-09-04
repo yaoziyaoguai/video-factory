@@ -1,4 +1,5 @@
 import { Check, Clock3, Film, Gauge, WalletCards } from "lucide-react";
+import { useEffect, useRef } from "react";
 import type { StudioTemplate } from "../../shared/api.js";
 
 interface TemplateGalleryProps {
@@ -8,6 +9,12 @@ interface TemplateGalleryProps {
 }
 
 export function TemplateGallery({ templates, selectedId, onSelect }: TemplateGalleryProps) {
+  const selectedCard = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!window.matchMedia?.("(max-width: 700px)").matches) return;
+    selectedCard.current?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+  }, [selectedId]);
+
   return (
     <div className="template-gallery" role="radiogroup" aria-label="视频模板">
       {templates.map((template) => {
@@ -19,6 +26,7 @@ export function TemplateGallery({ templates, selectedId, onSelect }: TemplateGal
             type="button"
             role="radio"
             aria-checked={selected}
+            ref={selected ? selectedCard : undefined}
             onClick={() => onSelect(template)}
           >
             <span className={`template-art template-art-${template.category}`} aria-hidden="true">

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { platformLabel, providerLabel, providerModelLabel } from "../presentation.js";
+import { creatorFacingTechnicalText, platformLabel, providerLabel, providerModelLabel } from "../presentation.js";
 import { NodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 
@@ -149,10 +149,10 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 <AlertTriangle aria-hidden="true" size={18} />
                 <h2>需要你的判断</h2>
               </div>
-              <p>{run.activeIntervention.reason}</p>
+              <p>{creatorFacingTechnicalText(run.activeIntervention.reason)}</p>
               {visualReviewRequiresRevision && visualReview ? <div className="agent-review-decision">
                 <strong>视觉审片建议修改后再审</strong>
-                <p>{visualReview.summary}</p>
+                <p>{creatorFacingTechnicalText(visualReview.summary)}</p>
                 <div className="agent-review-facts">
                   {visualReview.lowestScores.map((score) => <span key={score.key}>{score.label} <strong>{score.value}</strong></span>)}
                   <span><strong>{visualReview.findingCount}</strong> 项问题</span>
@@ -315,6 +315,7 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
   const [note, setNote] = useState("");
   const [actualCost, setActualCost] = useState("");
   const [manualConfirmed, setManualConfirmed] = useState(false);
+  const [selectedItemRequestId, setSelectedItemRequestId] = useState("");
   const outcome = summary.recommendedOutcome === "resume_original" || summary.recommendedOutcome === "requote"
     ? summary.recommendedOutcome
     : undefined;
@@ -322,6 +323,16 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
     (item.state === "submitted" || item.state === "unknown") && !item.taskId
   ));
   const canAttachTaskId = missingTaskItems.length === 1;
+  const manuallyResolvableItems = summary.nodeId === "assets"
+    ? summary.items.filter((item) => (
+        (item.state === "submitted" || item.state === "unknown") && !item.taskId
+        || item.state === "provider_succeeded" && !item.taskId
+      ))
+    : [];
+  const selectedManualItemRequestId = manuallyResolvableItems.some((item) => item.itemRequestId === selectedItemRequestId)
+    ? selectedItemRequestId
+    : manuallyResolvableItems[0]?.itemRequestId ?? "";
+  const requiresItemSelection = summary.nodeId === "assets" && summary.items.length > 0;
   const parsedActualCost = actualCost.trim() ? Number(actualCost) : undefined;
   const actualCostValid = parsedActualCost === undefined || (Number.isFinite(parsedActualCost) && parsedActualCost >= 0);
   const isRunLevelVoiceCall = summary.nodeId === "voice" && summary.items.length === 0;
@@ -356,10 +367,10 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
     </section>;
   }
   const title = summary.requiresManualReconciliation
-    ? "需要人工核对账单"
+    ? "这次请求是否扣费还不确定"
     : outcome === "requote"
-      ? "需要重新报价"
-      : "原付费任务可继续核对";
+      ? "未完成的画面需要重新报价"
+      : "已找到可恢复的付费任务";
   return <section className={`paid-operation-panel${summary.requiresManualReconciliation ? " requires-manual" : ""}`} aria-label="付费任务证据">
     <header><strong>{title}</strong><small>{isRunLevelVoiceCall ? "一次配音调用" : `${summary.items.length} 个镜头`}</small></header>
     <div className="paid-operation-items">
@@ -370,11 +381,19 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
         <small>{paidOperationCostLabel(item)}</small>
       </article>)}
     </div>
-    {summary.requiresManualReconciliation
-      ? <p>{isRunLevelVoiceCall
-        ? "系统不会自动重试。请在配音服务商控制台按本次调用记录与账单核对，再登记核对结果。"
-        : "系统不会自动重试。请到服务商控制台按任务编号核对任务与账单，再登记核对结果。"}</p>
-      : outcome === "requote" ? <p>只会为明确失败或尚未执行的镜头生成新报价；已完成和待核对镜头不会再次创建任务。</p> : <p>继续查询并下载原服务商任务，不会创建新任务或新增报价。</p>}
+    {summary.requiresManualReconciliation ? <div className="paid-operation-explanation">
+      <p><strong>发生了什么：</strong>{isRunLevelVoiceCall ? "请求发出后连接中断，系统没有收到明确结果。" : "服务商可能已经收到请求，但系统没有拿到足够的任务证据。"}</p>
+      <p><strong>为什么需要核对：</strong>直接重试可能产生重复任务和重复扣费，所以系统已经停住。</p>
+      <p><strong>下一步：</strong>{isRunLevelVoiceCall ? "请在配音服务商控制台按本次调用记录与账单核对，再登记结果。" : "请到服务商控制台核对任务与账单；找到任务编号时可先录入并继续获取原结果。"}</p>
+    </div> : outcome === "requote" ? <div className="paid-operation-explanation">
+      <p><strong>发生了什么：</strong>画面准备没有完成，但现有证据表明没有未知的付费任务需要核账。</p>
+      <p><strong>为什么重新报价：</strong>只会重新计算明确失败或尚未提交的镜头；已经完成的付费任务不会重复创建。</p>
+      <p><strong>下一步：</strong>检查失败镜头的画面来源，再为未完成镜头生成新报价。</p>
+    </div> : <div className="paid-operation-explanation">
+      <p><strong>发生了什么：</strong>服务商已经受理任务，但结果没有完整回到本次制作。</p>
+      <p><strong>为什么可以恢复：</strong>系统保留了原任务编号，会继续查询并下载原结果，不会创建新任务或新增报价。</p>
+      <p><strong>下一步：</strong>继续获取原任务结果。</p>
+    </div>}
     {summary.requiresManualReconciliation && onReconcile ? <div className="paid-reconciliation-controls">
       {canAttachTaskId ? <div className="paid-task-id-control">
         <label className="field field-wide">
@@ -390,6 +409,19 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
       </div> : null}
       <fieldset className="paid-manual-resolution" disabled={busy}>
         <legend>服务商账单核对结果</legend>
+        {requiresItemSelection ? <label className="field field-wide">
+          <span>本次核对镜头</span>
+          <select
+            value={selectedManualItemRequestId}
+            onChange={(event) => setSelectedItemRequestId(event.target.value)}
+            disabled={manuallyResolvableItems.length === 0}
+          >
+            {manuallyResolvableItems.length === 0 ? <option value="">没有可人工结算的镜头</option> : null}
+            {manuallyResolvableItems.map((item) => <option key={item.itemRequestId} value={item.itemRequestId}>
+              镜头 {item.scenePosition} · {paidProviderIdentity(providers, item.providerId, item.modelId)}
+            </option>)}
+          </select>
+        </label> : null}
         <div className="paid-manual-options">
           <label><input type="radio" name={`paid-outcome-${summary.nodeId}`} checked={manualOutcome === "confirmed_not_charged"} onChange={() => setManualOutcome("confirmed_not_charged")} />未扣费</label>
           <label><input type="radio" name={`paid-outcome-${summary.nodeId}`} checked={manualOutcome === "confirmed_charged"} onChange={() => setManualOutcome("confirmed_charged")} />已扣费</label>
@@ -406,11 +438,13 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
         <button
           className={`button ${manualOutcome === "confirmed_charged" ? "button-danger" : "button-primary"}`}
           type="button"
-          disabled={!manualOutcome || !note.trim() || !manualConfirmed || !actualCostValid}
+          disabled={!manualOutcome || !note.trim() || !manualConfirmed || !actualCostValid
+            || (requiresItemSelection && !selectedManualItemRequestId)}
           onClick={() => {
             if (!manualOutcome) return;
             void onReconcile(summary.nodeId, {
               outcome: manualOutcome,
+              ...(requiresItemSelection ? { itemRequestId: selectedManualItemRequestId } : {}),
               note: note.trim(),
               ...(manualOutcome === "confirmed_charged" && parsedActualCost !== undefined
                 ? { actualCostCny: parsedActualCost }
@@ -425,7 +459,7 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
       type="button"
       disabled={busy}
       onClick={() => void onReconcile(summary.nodeId, { outcome })}
-    >{outcome === "requote" ? <><RotateCcw aria-hidden="true" size={16} />为未完成镜头重新报价</> : <><Activity aria-hidden="true" size={16} />核对付费任务</>}</button> : null}
+    >{outcome === "requote" ? <><RotateCcw aria-hidden="true" size={16} />为未完成镜头重新报价</> : <><Activity aria-hidden="true" size={16} />继续获取原任务结果</>}</button> : null}
   </section>;
 }
 
@@ -545,8 +579,8 @@ function SceneRevisionFinding({ finding, busy, onSeek, onSubmit }: {
     <button className="scene-finding-seek" type="button" onClick={onSeek}>
       {finding.scenePosition ? `镜头 ${finding.scenePosition}` : "未定位镜头"} · {timecode}
     </button>
-    <p>{finding.description}</p>
-    <small>{finding.suggestion}</small>
+    <p>{creatorFacingTechnicalText(finding.description)}</p>
+    <small>{creatorFacingTechnicalText(finding.suggestion)}</small>
     {sourceOptions.length > 0 ? <div className="scene-revision-controls">
       <label className="field">
         <span>用已有镜头替换</span>

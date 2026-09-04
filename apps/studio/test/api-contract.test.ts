@@ -207,6 +207,7 @@ describe("series API contracts", () => {
     assert.throws(() => parseStudioSeriesInput({ ...base, track: "AI 下班" }), /系列标识/);
     assert.throws(() => parseStudioSeriesInput({ ...base, releaseCadence: "daily" }), /更新频率/);
     assert.throws(() => parseStudioSeriesInput({ ...base, targetEpisodeCount: 101 }), /最多支持 100 集/);
+    assert.throws(() => parseStudioSeriesInput({ ...base, platform: "shipinhao" }), /首发平台只支持抖音、小红书或哔哩哔哩/);
   });
 });
 

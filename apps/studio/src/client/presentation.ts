@@ -140,6 +140,14 @@ export function humanizeCreativeText(value: string): string {
 export function creatorFacingTechnicalText(value?: string): string | undefined {
   if (!value) return undefined;
   return value
+    .replace(/VideoFactory generated script; human review required before publishing\.?/gi, "AI 生成脚本；发布前需要人工核对事实与表述。")
+    .replace(/License snapshot is stored per scene asset in this plan\.?/gi, "本方案按镜头保存了每项素材的授权记录。")
+    .replace(/Asset rights require review\.?/gi, "素材使用权需要人工核对。")
+    .replace(/Locally generated narration; verify the selected voice provider terms\.?/gi, "本机生成的配音；发布前需核对所选配音服务的使用条款。")
+    .replace(/VideoFactory voice timeline metadata\.?/gi, "配音时间轴记录。")
+    .replace(/Composite output; see the linked asset and voiceover plans for source terms\.?/gi, "合成成片；素材与配音的来源条款请查看关联的画面和配音方案。")
+    .replace(/VideoFactory render metadata\.?/gi, "成片渲染记录。")
+    .replace(/VideoFactory technical review result\.?/gi, "机器质检结果。")
     .replace(/Immutable execution trace containing the exact prompt, prompt pack, provider, and model; no credentials are stored\.?/gi, "保存了本次使用的提示、配置、服务和模型，不包含任何密钥。")
     .replace(/AI-directed per-shot asset plan with actual provider provenance\.?/gi, "按导演逐镜方案生成的画面清单，并保留每个镜头的实际来源。")
     .replace(/External generation task IDs retained for audit\.?/gi, "保留生成任务编号，便于核对服务状态与账单。")
@@ -159,6 +167,7 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/\bManifest\b/gi, "资源清单")
     .replace(/\bFallback\b/gi, "备用方案")
     .replace(/\btaskId\b/gi, "任务编号")
+    .replace(/manualReplacement/gi, "人工补充素材")
     .replace(/primary\s+服务\s+timed\s+out/gi, "首选服务响应超时")
     .replace(/服务\s+timed\s+out/gi, "服务响应超时")
     .replace(/服务\s+unavailable/gi, "服务暂时不可用")

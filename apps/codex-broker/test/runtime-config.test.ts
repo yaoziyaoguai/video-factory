@@ -4,6 +4,7 @@ import { CodexExecutor } from "../src/codex-executor.js";
 import { createBrokerExecutor } from "../src/executor-factory.js";
 import { brokerRuntimeConfigFromEnv } from "../src/runtime-config.js";
 import { ZaiCodePlanExecutor } from "../src/zai-code-plan-executor.js";
+import { BROKER_TASK_KINDS } from "../src/task-definitions.js";
 
 describe("brokerRuntimeConfigFromEnv", () => {
   it("selects fixed OpenAI and ZAI profiles without retaining the ZAI key", () => {
@@ -12,7 +13,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
       profileId: "openai",
       providerId: "openai",
       modelId: "gpt-5.6-sol",
-      taskKinds: ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
+      taskKinds: BROKER_TASK_KINDS,
     });
     assert.equal(openai.profile.model, "gpt-5.6-sol");
     assert.equal(openai.auditModel, "gpt-5.6-sol");
@@ -73,7 +74,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
       { fetchFn },
     );
     assert.ok(zai instanceof ZaiCodePlanExecutor);
-    assert.deepEqual(zai.identity.taskKinds, ["director-plan", "script-draft", "visual-review"]);
+    assert.deepEqual(zai.identity.taskKinds, BROKER_TASK_KINDS);
 
     const openai = createBrokerExecutor(brokerRuntimeConfigFromEnv({}), {});
     assert.ok(openai instanceof CodexExecutor);

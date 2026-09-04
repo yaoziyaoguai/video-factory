@@ -43,6 +43,20 @@ describe("ProductionBrief", () => {
     });
   });
 
+  it("rejects a trend source platform as the production target platform", () => {
+    assert.throws(
+      () => pipeline.parseBrief({ ...validBrief, platform: "guokr" }),
+      /platform must be one of/,
+    );
+  });
+
+  it("migrates a historical source platform to the executable production default", () => {
+    const persisted = pipeline.parsePersistedBrief({ ...validBrief, platform: "guokr" });
+
+    assert.equal(persisted.platform, "douyin");
+    assert.equal(pipeline.parseBrief(persisted).platform, "douyin");
+  });
+
   it("preserves bounded node-level rework instructions and prior creative documents", () => {
     const parsed = pipeline.parseBrief({
       ...validBrief,

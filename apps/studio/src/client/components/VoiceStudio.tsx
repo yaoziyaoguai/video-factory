@@ -176,7 +176,18 @@ export function VoiceStudio({
                 key={preset.id}
                 type="button"
                 aria-pressed={selectedPreset?.id === preset.id}
-                onClick={() => update({ ...direction, rate: preset.rate, pauseScale: preset.pauseScale, masteringPreset: preset.masteringPreset }, selected)}
+                onClick={() => {
+                  const recommendedVoice = preset.preferredProfileIds
+                    .map((profileId) => voices.find((voice) => voice.id === profileId))
+                    .find((voice) => voice !== undefined) ?? selected;
+                  update({
+                    ...direction,
+                    profileId: recommendedVoice?.id ?? direction.profileId,
+                    rate: preset.rate,
+                    pauseScale: preset.pauseScale,
+                    masteringPreset: preset.masteringPreset,
+                  }, recommendedVoice);
+                }}
               ><strong>{preset.label}</strong><small>{preset.description}</small></button>)}</div>
             </div>
             <button className="voice-advanced-toggle" type="button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((current) => !current)}>

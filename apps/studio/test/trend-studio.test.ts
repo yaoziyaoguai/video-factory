@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -105,6 +105,7 @@ describe("TrendStudio", () => {
       });
       assert.deepEqual(await first.listCandidates(), cached);
       assert.equal(firstCalls, 1);
+      assert.equal(JSON.parse(await readFile(cachePath, "utf8")).schemaVersion, 3);
 
       let restartedCalls = 0;
       const restarted = new TrendStudio({
@@ -128,7 +129,7 @@ describe("TrendStudio", () => {
     const refreshed = [{ id: "trend-current", title: "当前规则候选" }] as StudioTrendCandidate[];
     try {
       await writeFile(cachePath, JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         cachedAt: "2026-08-26T08:00:00.000Z",
         values: [{ id: "trend-obsolete", title: "旧规则候选" }],
       }), "utf8");

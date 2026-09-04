@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, ChevronDown, CircleDollarSign, FilePenLine, Pause, Save, Settings2, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, CircleDollarSign, Clock3, FilePenLine, Pause, Save, Settings2, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
@@ -94,10 +94,12 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const hasStructuredOutput = node.output !== undefined || effectiveOutput(node) !== undefined;
   const outputReadOnly = READ_ONLY_OUTPUT_NODE_IDS.has(node.id);
   const nodeReadOnly = READ_ONLY_NODE_IDS.has(node.id);
-  const canEdit = !outputReadOnly && (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
-  const canEditInput = !nodeReadOnly && effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
+  const paidRecoveryLocked = nodes.some((candidate) => candidate.outcomeUncertain === true);
+  const canEdit = !paidRecoveryLocked && !outputReadOnly && (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
+  const canEditInput = !paidRecoveryLocked && !nodeReadOnly && effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
   const fallbackReason = useMemo(() => agentFallbackReason(execution), [execution]);
+  const executionTiming = useMemo(() => executionTimingDetails(receipt), [receipt]);
   const modelBackupUsed = (execution?.actualModelIds?.length ?? 0) > 1;
   const fallbackHeading = modelBackupUsed
     ? "首选模型暂时不可用，已使用替补模型"
@@ -239,6 +241,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     setError(undefined);
     try {
       await onAuthorize(node.id, {
+        spendPlanId: node.spendPlan.id,
         inputVersionIds: [...node.spendPlan.inputVersionIds],
         providerId: node.spendPlan.providerId,
         modelId: node.spendPlan.modelId,
@@ -256,7 +259,11 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     setError(undefined);
     const target = targetEstimatedCostCny.trim() ? Number(targetEstimatedCostCny) : undefined;
     if (target !== undefined && (!Number.isFinite(target) || target < 0 || target > 100_000)) {
-      setError("希望下一版控制的费用必须在 0 到 100000 元之间。");
+      setError("下一版降本目标必须在 0 到 100000 元之间。");
+      return;
+    }
+    if (target !== undefined && target >= node.spendPlan.estimatedCostCny) {
+      setError(`下一版降本目标必须低于当前报价 ¥${node.spendPlan.estimatedCostCny.toFixed(2)}。`);
       return;
     }
     try {
@@ -303,8 +310,18 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           providers={providers}
           runStatus={runStatus}
           busy={busy}
+          paidRecoveryLocked={paidRecoveryLocked}
           onSave={(input) => onConfigure(node.id, input)}
         /> : null}
+        {executionTiming ? <details className="node-execution-timing">
+          <summary><Clock3 aria-hidden="true" size={15} /><span><strong>这一步为什么用了这些时间</strong><small>{executionTiming.summary}</small></span><ChevronDown aria-hidden="true" size={15} /></summary>
+          <div>
+            <p>内容先生成，再由独立模型做质量审计；审计未通过时会按意见修订。只有首选模型暂时不可用时，才会切换到替补模型。</p>
+            <div className="node-evidence-row">
+              {executionTiming.items.map((item) => <span key={item.label}><b>{item.label}</b>{item.value}</span>)}
+            </div>
+          </div>
+        </details> : null}
         {canRequestPause ? <div className="node-pause-edit">
           <span>{pauseRequested ? "已请求暂停；当前任务安全结束后会停在下一步开始前。" : "想修改这一步？系统会先让当前任务安全结束，再停下来。"}</span>
           <button className="button button-ghost" type="button" disabled={pauseBusy || pauseRequested} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{pauseRequested ? "等待暂停" : "暂停后修改"}</button>
@@ -365,7 +382,12 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <section ref={spendDialogRef} role="dialog" aria-modal="true" aria-label="确认本次费用" tabIndex={-1}>
           <CircleDollarSign aria-hidden="true" size={24} />
           <h3>确认执行 {node.label}</h3>
-          <p>这次授权只对下面已经审阅的输入版本、{providerModelLabel(providers.find((provider) => provider.id === node.spendPlan?.providerId), node.spendPlan.modelId)} 和本次最高授权额 ¥{node.spendPlan.maxCostCny.toFixed(2)} 有效。任何内容、模型、报价或重试次数变化都会让授权自动失效。</p>
+          <p>这次授权只对下面已经审阅的输入版本、{node.spendPlan.items?.length
+            ? `报价中列出的 ${node.spendPlan.items.length} 个画面任务`
+            : providerModelLabel(providers.find((provider) => provider.id === node.spendPlan?.providerId), node.spendPlan.modelId)}和本次最高授权额 ¥{node.spendPlan.maxCostCny.toFixed(2)} 有效。任何内容、模型、报价或重试次数变化都会让授权自动失效。</p>
+          {node.spendPlan.items?.length ? <div className="spend-input-versions" aria-label="本次授权的画面任务">
+            {node.spendPlan.items.map((item) => <div key={item.id}><span><strong>{item.label} · {providerLabel(item.providerId) ?? "画面服务"}</strong><small>{providerModelLabel(providers.find((provider) => provider.id === item.providerId), item.modelId)} · ¥{item.estimatedCostCny.toFixed(2)}</small></span></div>)}
+          </div> : null}
           <div className="spend-input-versions" aria-label="本次付费所使用的上游版本">
             {spendInputs.map((input) => <div key={input.versionId}><span><strong>{input.role} · {input.label}</strong><small>{input.source === "human" ? "人工版本" : "自动版本"}</small></span></div>)}
           </div>
@@ -383,7 +405,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             <option value="plan_not_approved">前面的画面方案不认可</option>
             <option value="other">其他原因</option>
           </select></label>
-          <label className="field"><span>希望下一版控制在多少元（可选，0 表示只用免费画面）</span><input aria-label="希望下一版控制在多少元（可选）" type="number" min={0} max={100000} step={0.01} value={targetEstimatedCostCny} onChange={(event) => setTargetEstimatedCostCny(event.target.value)} /></label>
+          <label className="field"><span>下一版优先尝试降到多少元（可选；达不到仍会给你新报价）</span><input aria-label="下一版降本目标（可选）" type="number" min={0} max={100000} step={0.01} value={targetEstimatedCostCny} onChange={(event) => setTargetEstimatedCostCny(event.target.value)} /></label>
           <label className="field"><span>具体调整意见（可选）</span><textarea aria-label="具体调整意见（可选）" rows={3} maxLength={1000} value={spendRejectionNote} onChange={(event) => setSpendRejectionNote(event.target.value)} /></label>
           <div><button className="button button-ghost" type="button" onClick={() => setRejectingSpend(false)}>返回检查</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void rejectSpend()}>保存反馈</button></div>
         </section>
@@ -581,11 +603,12 @@ function configuredAssetProviderIds(nodes: StudioNode[]): string[] {
     : [];
 }
 
-function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, onSave }: {
+function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, paidRecoveryLocked, onSave }: {
   node: StudioNode;
   providers: StudioProvider[];
   runStatus: StudioRunStatus;
   busy: boolean;
+  paidRecoveryLocked: boolean;
   onSave: (input: StudioNodeExecutionConfigurationInput) => Promise<void>;
 }) {
   const configuration = node.executionConfiguration!;
@@ -595,7 +618,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([...(configuration.assetProviderIds ?? [])]);
   const [error, setError] = useState<string>();
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
-  const canEdit = providers.length > 0 && !terminal && runStatus !== "running" && node.status !== "running";
+  const canEdit = !paidRecoveryLocked && providers.length > 0 && !terminal && runStatus !== "running" && node.status !== "running";
   const capability = configurableNodeCapability(node.id);
   const roleProviders = capability
     ? providers.filter((provider) => provider.available && provider.kind !== "test" && provider.capability === capability)
@@ -877,4 +900,69 @@ function agentFallbackReason(
   if (typeof reason !== "string" || !reason.trim()) return undefined;
   if (execution?.parameters?.agentLoop !== "failed" && receiptReason === undefined) return undefined;
   return creatorFacingTechnicalText(reason.trim()) ?? reason.trim();
+}
+
+function executionTimingDetails(
+  receipt: StudioNode["executionReceipt"] | undefined,
+): { summary: string; items: Array<{ label: string; value: string }> } | undefined {
+  if (!receipt) return undefined;
+  const parameters = receipt.parameters ?? {};
+  const totalMs = elapsedReceiptMs(receipt.startedAt, receipt.finishedAt);
+  const providerWaitMs = timingParameter(parameters.providerWaitMs);
+  const firstOutputEventMs = timingParameter(parameters.firstOutputEventMs);
+  const toolMs = timingParameter(parameters.toolMs);
+  const providerValidationMs = timingParameter(parameters.providerValidationMs);
+  const producerMs = timingParameter(parameters.producerMs);
+  const auditMs = timingParameter(parameters.auditMs);
+  const loopValidationMs = timingParameter(parameters.loopValidationMs);
+  const modelCallCount = nonNegativeIntegerParameter(parameters.modelCallCount);
+  const retryCount = nonNegativeIntegerParameter(parameters.retryCount);
+  if ([providerWaitMs, firstOutputEventMs, toolMs, providerValidationMs, producerMs, auditMs, loopValidationMs]
+    .every((value) => value === undefined)
+    && modelCallCount === undefined
+    && retryCount === undefined) return undefined;
+
+  const items = [
+    totalMs === undefined ? undefined : { label: "步骤总耗时", value: formatDuration(totalMs) },
+    providerWaitMs === undefined ? undefined : { label: "最终模型等待", value: formatDuration(providerWaitMs) },
+    firstOutputEventMs === undefined ? undefined : { label: "首次响应", value: formatDuration(firstOutputEventMs) },
+    producerMs === undefined ? undefined : { label: "内容生成累计", value: formatDuration(producerMs) },
+    auditMs === undefined ? undefined : { label: "独立审计累计", value: formatDuration(auditMs) },
+    toolMs === undefined ? undefined : { label: "工具处理", value: formatDuration(toolMs) },
+    providerValidationMs === undefined && loopValidationMs === undefined
+      ? undefined
+      : { label: "结果校验", value: formatDuration((providerValidationMs ?? 0) + (loopValidationMs ?? 0)) },
+    modelCallCount === undefined ? undefined : { label: "模型调用", value: `${modelCallCount} 次` },
+    retryCount === undefined ? undefined : { label: "自动重试", value: `${retryCount} 次` },
+  ].filter((item): item is { label: string; value: string } => item !== undefined);
+  const summary = [
+    totalMs === undefined ? undefined : `共 ${formatDuration(totalMs)}`,
+    modelCallCount === undefined ? undefined : `${modelCallCount} 次模型调用`,
+    retryCount && retryCount > 0 ? `${retryCount} 次自动重试` : undefined,
+  ].filter(Boolean).join(" · ");
+  return { summary: summary || "可查看各阶段耗时", items };
+}
+
+function timingParameter(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
+}
+
+function nonNegativeIntegerParameter(value: unknown): number | undefined {
+  return Number.isInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
+}
+
+function elapsedReceiptMs(startedAt: string, finishedAt: string): number | undefined {
+  const started = Date.parse(startedAt);
+  const finished = Date.parse(finishedAt);
+  return Number.isFinite(started) && Number.isFinite(finished) && finished >= started
+    ? finished - started
+    : undefined;
+}
+
+function formatDuration(milliseconds: number): string {
+  if (milliseconds < 1_000) return `${milliseconds} 毫秒`;
+  if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 1 : 0)} 秒`;
+  const minutes = Math.floor(milliseconds / 60_000);
+  const seconds = Math.round((milliseconds % 60_000) / 1_000);
+  return seconds === 0 ? `${minutes} 分钟` : `${minutes} 分 ${seconds} 秒`;
 }

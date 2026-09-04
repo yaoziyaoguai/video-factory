@@ -161,8 +161,18 @@ describe("readZaiCodexProviderSettings", () => {
       profileId: "zai",
       providerId: "zai-bigmodel-api",
       modelId: "glm-5.3",
-      taskKinds: ["director-plan", "script-draft", "visual-review"],
-      taskModels: { "script-draft": "glm-5.3", "director-plan": "glm-5.3", "visual-review": "glm-5.3-flash" },
+      taskKinds: ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
+      taskModels: {
+        "topic-ideas": "glm-5.3",
+        "series-roadmap": "glm-5.3",
+        "director-plan": "glm-5.3",
+        "script-draft": "glm-5.3",
+        "publish-copy": "glm-5.3",
+        "asset-rank": "glm-5.3-flash",
+        "reference-grammar": "glm-5.3-flash",
+        "visual-review": "glm-5.3-flash",
+        "role-audit": "glm-5.3-flash",
+      },
     };
     const server = http.createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
@@ -217,20 +227,20 @@ describe("auditedRoleCandidateAvailability", () => {
     ), { codex: true, zai: false });
   });
 
-  it("selects only ZAI when ZAI owns production and OpenAI owns the independent audit", () => {
+  it("selects only ZAI when ZAI owns both production and independent audit", () => {
     assert.deepEqual(auditedRoleCandidateAvailability(
       { available: true, taskKinds: ["role-audit"] },
-      { available: true, taskKinds: ["script-draft"] },
+      { available: true, taskKinds: ["script-draft", "role-audit"] },
       "script-draft",
     ), { codex: false, zai: true });
   });
 
-  it("selects both healthy producers and rejects both without an independent audit", () => {
+  it("selects only providers that own both the producer and audit tasks", () => {
     assert.deepEqual(auditedRoleCandidateAvailability(
       { available: true, taskKinds: ["director-plan", "role-audit"] },
       { available: true, taskKinds: ["director-plan"] },
       "director-plan",
-    ), { codex: true, zai: true });
+    ), { codex: true, zai: false });
     assert.deepEqual(auditedRoleCandidateAvailability(
       { available: true, taskKinds: ["director-plan"] },
       { available: true, taskKinds: ["director-plan"] },
@@ -265,14 +275,14 @@ describe("buildProviderCatalog codex fallback", () => {
     ]);
   });
 
-  it("keeps unaudited role producers unavailable during a capability-expanding rollout", () => {
+  it("keeps every role unavailable until one provider owns production and audit", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },
       {},
       { available: true, reason: "", taskKinds: ["topic-ideas", "script-draft"] },
     );
 
-    assert.equal(providers.find((provider) => provider.id === "api-topic-editor-v1")?.available, true);
+    assert.equal(providers.find((provider) => provider.id === "api-topic-editor-v1")?.available, false);
     assert.equal(providers.find((provider) => provider.id === "codex-screenwriter-v1")?.available, false);
     const director = providers.find((provider) => provider.id === "api-visual-director-v1");
     assert.equal(director?.available, false);
@@ -361,7 +371,7 @@ describe("buildProviderCatalog codex fallback", () => {
     }
   });
 
-  it("keeps the shot router available when ZAI directs and OpenAI only audits", () => {
+  it("keeps the shot router unavailable when production and audit are split across providers", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },
       {},
@@ -379,8 +389,8 @@ describe("buildProviderCatalog codex fallback", () => {
       },
     );
 
-    assert.equal(providers.find((provider) => provider.id === "api-visual-director-v1")?.available, true);
-    assert.equal(providers.find((provider) => provider.id === "ai-shot-router-v1")?.available, true);
+    assert.equal(providers.find((provider) => provider.id === "api-visual-director-v1")?.available, false);
+    assert.equal(providers.find((provider) => provider.id === "ai-shot-router-v1")?.available, false);
   });
 
   it("keeps configured metered models unavailable when the production runtime is missing", () => {
@@ -445,7 +455,7 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.match(glm?.description ?? "", /Code Plan/);
   });
 
-  it("does not advertise GLM visual review without an independent Codex role auditor", () => {
+  it("does not advertise GLM visual review without its own independent audit task", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },
       {},
@@ -457,7 +467,7 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.equal(glm?.available, false);
     assert.equal(glm?.modelProfiles?.[0]?.available, false);
     assert.match(glm?.requirement ?? "", /role-audit/);
-    assert.match(glm?.requirement ?? "", /独立 Codex Agent/);
+    assert.match(glm?.requirement ?? "", /独立质量复核/);
   });
 
   it("shows the configured GLM visual-review model instead of a hard-coded model", () => {

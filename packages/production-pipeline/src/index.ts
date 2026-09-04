@@ -39,6 +39,8 @@ export type { CodexBridgeClientOptions, CodexTaskExecution, CodexTaskKind, Codex
 export type { AgentLoopTrace, AgentLoopIterationTrace, RoleAudit, RoleAuditIssue } from "./codex-chat.js";
 export { RoleAgentLoopError, runRoleAgentLoop, validateRoleAudit } from "./role-agent-loop.js";
 export { fallbackRequestId, isModelProviderFailure, publicModelFailure } from "./model-fallback.js";
+export { FallbackCodexTaskClient } from "./fallback-task-client.js";
+export type { FallbackTaskClientCandidate, FallbackTaskClientOptions } from "./fallback-task-client.js";
 export { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
 export type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 export { CodexReferenceGrammarAgent, fallbackShotGrammar, validateShotGrammar } from "./reference-grammar.js";

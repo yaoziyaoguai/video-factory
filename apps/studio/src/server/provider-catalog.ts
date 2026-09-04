@@ -98,11 +98,17 @@ export function buildProviderCatalog(
   const zaiModelForTask = (taskKind: string) => zaiCodex.taskModels?.[taskKind]?.trim() || zaiTextModelId;
   const zaiModelId = zaiCodex.taskModels?.["visual-review"]?.trim() || resolveZaiVisualReviewModelId(environment);
   const zaiModelLabel = zaiModelId === "glm-5.3-flash" ? "GLM-5.3-Flash" : zaiModelId;
-  const independentAuditAvailable = supportsTask(codex, "role-audit");
-  const codexRoleAvailable = (taskKind: string) => supportsTask(codex, taskKind) && independentAuditAvailable;
-  const zaiRoleAvailable = (taskKind: string) => supportsTask(zaiCodex, taskKind) && independentAuditAvailable;
-  const roleModelProfiles = (providerId: string, taskKind: string) => [
-    ...codexProfiles(providerId, taskKind, "text", independentAuditAvailable).map((model) => ({
+  const codexAuditAvailable = supportsTask(codex, "role-audit");
+  const zaiAuditAvailable = supportsTask(zaiCodex, "role-audit");
+  const codexRoleAvailable = (taskKind: string) => supportsTask(codex, taskKind) && codexAuditAvailable;
+  const zaiRoleAvailable = (taskKind: string) => supportsTask(zaiCodex, taskKind) && zaiAuditAvailable;
+  const roleModelProfiles = (
+    providerId: string,
+    taskKind: string,
+    taskType: "text" | "visual-review" = "text",
+    runtimeAvailable = true,
+  ) => [
+    ...codexProfiles(providerId, taskKind, taskType, runtimeAvailable && codexAuditAvailable).map((model) => ({
       ...model,
       recommended: codexRoleAvailable(taskKind),
     })),
@@ -112,28 +118,27 @@ export function buildProviderCatalog(
         zaiModelForTask(taskKind) === "glm-5.3" ? "GLM-5.3" : zaiModelForTask(taskKind),
         providerId,
         "zai-bigmodel",
-        zaiRoleAvailable(taskKind),
-        "智谱 Coding Plan 文本模型；首选模型发生连接、超时、限流、容量或服务不可用时可作为候选，业务校验失败不会触发切换。",
+        runtimeAvailable && zaiRoleAvailable(taskKind),
+        "智谱 Coding Plan 模型；首选模型发生连接、超时、限流、容量或服务不可用时可作为候选，业务校验失败不会触发切换。",
       ),
       recommended: !codexRoleAvailable(taskKind) && zaiRoleAvailable(taskKind),
+      taskTypes: [taskType],
     },
   ];
   const roleRequirement = (taskKind: string) => codexRoleAvailable(taskKind) || zaiRoleAvailable(taskKind)
-    ? "至少一个已通过健康检查的兼容文本模型可用。"
-    : !independentAuditAvailable
-      ? `编剧和视觉导演的输出必须经过独立 Codex Agent 质量复核。${codexRequirement("role-audit")}`
-      : `Codex：${codexRequirement(taskKind)} ZAI：${zaiCodexRequirementFor(taskKind)}`;
+    ? "至少一个能同时完成生产与独立质量复核的模型服务可用。"
+    : `OpenAI：${codexRequirement(taskKind)} ${codexRequirement("role-audit")} ZAI：${zaiCodexRequirementFor(taskKind)} ${zaiCodexRequirementFor("role-audit")}`;
   const zaiVisualProducerAvailable = supportsTask(zaiCodex, "visual-review");
   const codexVisualProducerAvailable = supportsTask(codex, "visual-review");
   const zaiVisualReviewAvailable = runtime.python
     && runtime.ffmpeg
     && runtime.ffprobe
     && zaiVisualProducerAvailable
-    && independentAuditAvailable;
+    && zaiAuditAvailable;
   const zaiVisualReviewRequirement = !zaiVisualProducerAvailable
     ? zaiCodexRequirement
-    : !independentAuditAvailable
-      ? `GLM 审片意见必须经过独立 Codex Agent 质量复核。${codexRequirement("role-audit")}`
+    : !zaiAuditAvailable
+      ? `GLM 审片意见必须经过独立质量复核。${zaiCodexRequirementFor("role-audit")}`
       : zaiCodexRequirement;
 
   return [
@@ -141,29 +146,29 @@ export function buildProviderCatalog(
       id: "api-topic-editor-v1",
       capability: "topic.intelligence",
       label: "Codex 选题总编",
-      available: supportsTask(codex, "topic-ideas"),
+      available: codexRoleAvailable("topic-ideas") || zaiRoleAvailable("topic-ideas"),
       kind: "external",
       billing: "subscription",
       description: "通过宿主机 Codex 把实时热点转译为可拍摄、可连载的中文短视频角度；失败时回退到确定性评分。",
       modes: ["热点理解", "选题提案", "结构化输出"],
       latency: "seconds",
-      defaultModelId: modelForTask("topic-ideas"),
-      modelProfiles: codexProfiles("api-topic-editor-v1", "topic-ideas"),
-      requirement: codexRequirement("topic-ideas"),
+      defaultModelId: codexRoleAvailable("topic-ideas") ? modelForTask("topic-ideas") : zaiModelForTask("topic-ideas"),
+      modelProfiles: roleModelProfiles("api-topic-editor-v1", "topic-ideas"),
+      requirement: roleRequirement("topic-ideas"),
     }),
     provider({
       id: "codex-series-showrunner-v1",
       capability: "series.plan",
       label: "Codex 系列主理人",
-      available: supportsTask(codex, "series-roadmap"),
+      available: codexRoleAvailable("series-roadmap") || zaiRoleAvailable("series-roadmap"),
       kind: "external",
       billing: "subscription",
       description: "维护 Series Bible、Canon 与集间承接，规划长期路线并在单集开拍前重新绿灯审计。",
       modes: ["系列圣经", "连续性", "单集绿灯", "三轮自审"],
       latency: "seconds",
-      defaultModelId: modelForTask("series-roadmap"),
-      modelProfiles: codexProfiles("codex-series-showrunner-v1", "series-roadmap"),
-      requirement: codexRequirement("series-roadmap"),
+      defaultModelId: codexRoleAvailable("series-roadmap") ? modelForTask("series-roadmap") : zaiModelForTask("series-roadmap"),
+      modelProfiles: roleModelProfiles("codex-series-showrunner-v1", "series-roadmap"),
+      requirement: roleRequirement("series-roadmap"),
     }),
     provider({
       id: "python-template-v1",
@@ -208,34 +213,35 @@ export function buildProviderCatalog(
       id: "codex-reference-grammar-v1",
       capability: "reference.grammar",
       label: "Codex 参考视频分析",
-      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && supportsTask(codex, "reference-grammar"),
+      available: runtime.python && runtime.ffmpeg && runtime.ffprobe
+        && (codexRoleAvailable("reference-grammar") || zaiRoleAvailable("reference-grammar")),
       kind: "external",
       billing: "subscription",
       description: "安全抽取参考视频关键帧，只提炼节奏、构图、运镜、色彩、转场和声音结构等风格规则。",
       modes: ["关键帧分析", "镜头语法", "可编辑规则", "订阅能力"],
       latency: "seconds",
-      defaultModelId: modelForTask("reference-grammar"),
-      modelProfiles: codexProfiles(
+      defaultModelId: codexRoleAvailable("reference-grammar") ? modelForTask("reference-grammar") : zaiModelForTask("reference-grammar"),
+      modelProfiles: roleModelProfiles(
         "codex-reference-grammar-v1",
         "reference-grammar",
         "text",
         runtime.python && runtime.ffmpeg && runtime.ffprobe,
       ),
-      requirement: codexRequirement("reference-grammar"),
+      requirement: roleRequirement("reference-grammar"),
     }),
     provider({
       id: "codex-asset-ranker-v1",
       capability: "asset.rank.semantic",
       label: "Codex 候选画面排序",
-      available: supportsTask(codex, "asset-rank"),
+      available: codexRoleAvailable("asset-rank") || zaiRoleAvailable("asset-rank"),
       kind: "external",
       billing: "subscription",
       description: "在下载前依据逐镜意图重排图库候选；不可用时保留确定性原始排序。",
       modes: ["候选排序", "逐项理由", "人工锁定", "订阅能力"],
       latency: "seconds",
-      defaultModelId: modelForTask("asset-rank"),
-      modelProfiles: codexProfiles("codex-asset-ranker-v1", "asset-rank"),
-      requirement: codexRequirement("asset-rank"),
+      defaultModelId: codexRoleAvailable("asset-rank") ? modelForTask("asset-rank") : zaiModelForTask("asset-rank"),
+      modelProfiles: roleModelProfiles("codex-asset-ranker-v1", "asset-rank"),
+      requirement: roleRequirement("asset-rank"),
     }),
     provider({
       id: "ai-shot-router-v1",
@@ -511,7 +517,7 @@ export function buildProviderCatalog(
       id: "codex-visual-review-v1",
       capability: "quality.review.visual",
       label: "Codex 视觉审片",
-      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && codexVisualProducerAvailable && independentAuditAvailable,
+      available: runtime.python && runtime.ffmpeg && runtime.ffprobe && codexVisualProducerAvailable && codexAuditAvailable,
       kind: "external",
       billing: "subscription",
       description: "从成片中安全抽取最多 12 张关键帧，由服务器 Codex 检查构图、连续性、节奏、文字可读性与内容安全。",
@@ -522,11 +528,11 @@ export function buildProviderCatalog(
         "codex-visual-review-v1",
         "visual-review",
         "visual-review",
-        runtime.python && runtime.ffmpeg && runtime.ffprobe && independentAuditAvailable,
+        runtime.python && runtime.ffmpeg && runtime.ffprobe && codexAuditAvailable,
       ),
       requirement: !codexVisualProducerAvailable
         ? codexRequirement("visual-review")
-        : !independentAuditAvailable
+        : !codexAuditAvailable
           ? `Codex 审片意见必须经过独立质量复核。${codexRequirement("role-audit")}`
           : codexRequirement("visual-review"),
     }),
@@ -534,29 +540,29 @@ export function buildProviderCatalog(
       id: "codex-publish-copy-v1",
       capability: "publish.copy",
       label: "Codex 发行编辑",
-      available: supportsTask(codex, "publish-copy"),
+      available: codexRoleAvailable("publish-copy") || zaiRoleAvailable("publish-copy"),
       kind: "external",
       billing: "subscription",
       description: "人工终审通过后为成片生成平台标题、描述与话题标签；不可用时发布包回退使用简报标题并如实标注来源。",
       modes: ["平台标题", "发布描述", "话题标签"],
       latency: "seconds",
-      defaultModelId: modelForTask("publish-copy"),
-      modelProfiles: codexProfiles("codex-publish-copy-v1", "publish-copy"),
-      requirement: codexRequirement("publish-copy"),
+      defaultModelId: codexRoleAvailable("publish-copy") ? modelForTask("publish-copy") : zaiModelForTask("publish-copy"),
+      modelProfiles: roleModelProfiles("codex-publish-copy-v1", "publish-copy"),
+      requirement: roleRequirement("publish-copy"),
     }),
     provider({
       id: "codex-role-auditor-v1",
       capability: "role.audit",
       label: "Codex 独立质量审计",
-      available: supportsTask(codex, "role-audit"),
+      available: codexAuditAvailable || zaiAuditAvailable,
       kind: "external",
       billing: "subscription",
       description: "与生产角色隔离，逐条核对上下文、角色合同和下游边界；发现阻断问题时要求原角色修订。",
       modes: ["独立会话", "xhigh 推理", "最多三轮", "阻断门禁"],
       latency: "seconds",
-      defaultModelId: modelForTask("role-audit"),
-      modelProfiles: codexProfiles("codex-role-auditor-v1", "role-audit"),
-      requirement: codexRequirement("role-audit"),
+      defaultModelId: codexAuditAvailable ? modelForTask("role-audit") : zaiModelForTask("role-audit"),
+      modelProfiles: roleModelProfiles("codex-role-auditor-v1", "role-audit"),
+      requirement: roleRequirement("role-audit"),
     }),
   ];
 }

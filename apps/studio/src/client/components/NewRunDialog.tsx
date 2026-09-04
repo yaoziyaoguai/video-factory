@@ -89,6 +89,12 @@ const RECIPES: Array<{
   },
 ];
 
+const PRODUCTION_PLATFORMS = ["douyin", "xiaohongshu", "bilibili"] as const;
+
+function isProductionPlatform(value: string | undefined): value is typeof PRODUCTION_PLATFORMS[number] {
+  return PRODUCTION_PLATFORMS.some((platform) => platform === value);
+}
+
 function canonicalRecipeId(recipeId: RecipeId | undefined): RecipeId {
   return recipeId === "keyshot-ai" || recipeId === "cinematic-ai" ? "keyshot-ai" : "free-stock";
 }
@@ -153,12 +159,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const inheritedTemplateAvailable = !initialValues?.rework || !initialValues.template
     || templates.some((template) => (
       template.id === initialValues.template?.templateId
-      && template.version === initialValues.template.templateVersion
       && template.status === "published"
     ));
   const effectiveModelId = (provider: StudioProvider) => modelSelections[provider.id]
     ?? selectedTemplate?.modelDefaults?.[provider.id]
-    ?? creatorSettings?.modelDefaults?.[provider.id]
     ?? provider.defaultModelId;
   const visualReviewProvider = providers.find((provider) => {
     return provider.capability === "quality.review.visual" && provider.id === effectiveBindings.visualReview && provider.available;
@@ -204,8 +208,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         id: "template",
         label: "视频模板",
         value: initialValues.template?.templateVersion === undefined
-          ? selectedTemplateId
-          : `${selectedTemplateId} v${initialValues.template.templateVersion}`,
+          ? "上一版模板"
+          : `上一版模板 v${initialValues.template.templateVersion}`,
         reason: "上一版模板或对应版本当前已不是可用的正式模板",
         action: "请在视频模板中明确选择替代模板",
       });
@@ -217,7 +221,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       const reason = !provider
         ? "当前能力目录中已不存在"
         : provider.capability !== item.capability
-          ? `现在属于 ${provider.capability}，不能执行 ${item.capability}`
+          ? `现在用于${productionStepLabel(provider.capability)}，不能继续作为${item.role}`
           : provider.kind === "test"
             ? "仅供测试，不能用于正式制作"
             : !provider.available
@@ -227,7 +231,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         issues.push({
           id: `provider-${item.key}`,
           label: `${item.role}能力`,
-          value: provider ? creatorProviderName(provider) : providerId || "未配置",
+          value: provider ? creatorProviderName(provider) : "上一版选择",
           reason,
           action: item.key === "voice" ? "请在声音导演中明确选择可用声音" : `请在${item.role}能力中明确选择替代项`,
         });
@@ -248,7 +252,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         issues.push({
           id: `source-${providerId}`,
           label: "画面来源",
-          value: provider ? creatorProviderName(provider) : providerId,
+          value: provider ? creatorProviderName(provider) : "上一版画面来源",
           reason,
           action: "请调整画面来源，或重新选择允许付费关键镜头",
         });
@@ -267,7 +271,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         issues.push({
           id: `model-${providerId}`,
           label: `${creatorProviderName(provider)} 模型`,
-          value: model?.label ?? modelId,
+          value: model?.label ?? "上一版模型",
           reason: !model ? "当前模型目录中已不存在" : "当前不可用或不再兼容这个制作步骤",
           action: "请明确选择可用模型，或改为继承当前推荐模型",
         });
@@ -277,7 +281,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       issues.push({
         id: "voice-profile",
         label: "声音演员",
-        value: voiceDirection.profileId,
+        value: "上一版声音演员",
         reason: "当前声音演员目录中已不存在或暂不可用",
         action: "请在声音导演中明确选择替代声音",
       });
@@ -302,7 +306,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     try {
       const catalog = await studioApi.templates();
       if (initializationRevision.current !== revision) return;
-      const published = catalog.templates.filter((template) => template.status === "published");
+      const published = (catalog.productionTemplates ?? catalog.templates).filter((template) => template.status === "published");
       const availableTemplates = published;
       if (availableTemplates.length === 0) throw new Error("模板目录中没有可用模板。");
       setTemplates(availableTemplates);
@@ -368,7 +372,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setBindings(initialBindings);
     setRecipeId(recipe.id);
     setDirectorProfileId(initialProfile);
-    setPlatform(initialValues?.platform ?? creatorSettings?.productionDefaults?.platform ?? "douyin");
+    const initialPlatform = initialValues?.platform ?? creatorSettings?.productionDefaults?.platform ?? "douyin";
+    setPlatform(isProductionPlatform(initialPlatform) ? initialPlatform : "");
     setDurationSeconds(initialValues?.durationSeconds ?? creatorSettings?.productionDefaults?.durationSeconds ?? 24);
     setAssetProviderIds(sourceIds);
     // 只有用户或入口明确指定的模型才属于本次覆盖。全局/模板默认值由服务端按优先级解析。
@@ -528,6 +533,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       if (inheritedSelectionIssues.length > 0) {
         throw new Error("上一版仍有失效配置，请明确选择替代项后再开始制作。");
       }
+      if (!isProductionPlatform(platform)) {
+        throw new Error("请选择目标平台后再开始制作。");
+      }
       if (!templatesLoaded || !templates.some((template) => template.id === selectedTemplateId && template.status === "published")) {
         throw new Error(templateError ?? "模板目录尚未加载完成，请稍后重试。");
       }
@@ -672,6 +680,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <label className="field field-compact">
                   <span>目标平台</span>
                   <select name="platform" value={platform} onChange={(event) => setPlatform(event.target.value)}>
+                    {!platform ? <option value="" disabled>请选择目标平台</option> : null}
                     <option value="douyin">抖音</option>
                     <option value="xiaohongshu">小红书</option>
                     <option value="bilibili">哔哩哔哩</option>
@@ -706,12 +715,12 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <div><span>返工</span><h3 id="rework-brief-title">按反馈修改</h3></div>
                 <small>已预填到对应制作步骤，可在开工前调整</small>
               </div>
-              {rework.rejectionReason ? <div className="rework-rejection-note"><strong>本次重做原因</strong><span>{rework.rejectionReason}</span></div> : null}
+              {rework.rejectionReason ? <div className="rework-rejection-note"><strong>本次重做原因</strong><span>{creatorFacingTechnicalText(rework.rejectionReason)}</span></div> : null}
               {rework.findings.length > 0 ? <div className="rework-finding-list" aria-label="需要处理的问题">
                 {rework.findings.map((finding, index) => <article className="rework-finding" key={`${finding.timecodeMs}-${finding.category}-${index}`}>
                   <header><strong>{finding.scenePosition ? `第 ${finding.scenePosition} 镜` : "全片"}</strong><span>{formatTimecode(finding.timecodeMs)}</span><em>{reworkFindingCategoryLabel(finding.category)}</em></header>
-                  <p>{finding.description}</p>
-                  <small>建议：{finding.suggestion}</small>
+                  <p>{creatorFacingTechnicalText(finding.description)}</p>
+                  <small>建议：{creatorFacingTechnicalText(finding.suggestion)}</small>
                 </article>)}
               </div> : null}
               <div className="rework-instruction-grid">
@@ -1057,8 +1066,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               </div>
             </section>
 
-            {missingProductionRoles.length > 0 ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />缺少正式生产能力：{missingProductionRoles.join("、")}。请先在素材与模型中完成配置。</p> : null}
-            {error ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
+            {missingProductionRoles.length > 0 ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />缺少正式生产能力：{missingProductionRoles.join("、")}。请先在创作设置中完成配置。</p> : null}
+            {error ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
           </div>
 
           <footer className="dialog-actions recipe-dialog-actions">
@@ -1075,6 +1084,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       </section>
     </div>
   );
+}
+
+function productionStepLabel(capability: string): string {
+  return CAPABILITIES.find((item) => item.capability === capability)?.label ?? "其他制作步骤";
 }
 
 function defaultVoiceDirection(providers: StudioProvider[]): StudioProductionInput["voiceDirection"] {

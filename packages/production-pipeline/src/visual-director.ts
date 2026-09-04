@@ -9,7 +9,11 @@ import type { ProductionBlueprint } from "@video-factory/template-core";
 import type { CodexTaskExecution } from "./codex-chat.js";
 import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { ShotGrammar } from "./reference-grammar.js";
-import { assetReuseSourceScenePosition } from "./generative-asset-worker.js";
+import {
+  assetReuseSourceScenePosition,
+  normalizeVideoGenerationDurationSeconds,
+  type VideoGenerationDurationBounds,
+} from "./generative-asset-worker.js";
 
 export const DIRECTOR_PLAN_VERSION = "video-factory/director-plan-v1" as const;
 
@@ -118,6 +122,7 @@ export interface VisualBible {
 
 export interface ShotDecision {
   scenePosition: number;
+  reuseFromScenePosition?: number;
   narrativeRole: string;
   authenticityPolicy: ShotAuthenticityPolicy;
   preferredProviderId: string;
@@ -157,6 +162,7 @@ export interface VisualDirectorPlanValidation {
   generativeProviderIds: string[];
   providerDeliveryTypes?: Record<string, VisualAssetDeliveryType[]>;
   estimatedCnyPerClip: Record<string, number>;
+  selectedVideoModelDurationBounds?: Record<string, VideoGenerationDurationBounds>;
   economics: VisualDirectorEconomics;
 }
 
@@ -210,6 +216,9 @@ export interface VisualDirectorAgentInput {
     strengths: string[];
     constraints: string[];
     estimatedCnyPerClip: number;
+    selectedModelId?: string;
+    minDurationSeconds?: number;
+    maxDurationSeconds?: number;
   }>;
   economics: VisualDirectorEconomics;
   selectedModelId?: string;
@@ -312,8 +321,12 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
     const rationale = text(shot.rationale, `shots[${index}].rationale`);
     assertSelectedProviderIsExecutable(rationale, `shots[${index}].rationale`);
     const query = text(shot.query, `shots[${index}].query`);
+    const reuseFromScenePosition = shot.reuseFromScenePosition === undefined
+      ? undefined
+      : integer(shot.reuseFromScenePosition, `shots[${index}].reuseFromScenePosition`);
     return {
       scenePosition,
+      ...(reuseFromScenePosition !== undefined ? { reuseFromScenePosition } : {}),
       narrativeRole: text(shot.narrativeRole, `shots[${index}].narrativeRole`),
       authenticityPolicy,
       preferredProviderId,
@@ -354,7 +367,10 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       rationale,
       continuityNote: text(shot.continuityNote, `shots[${index}].continuityNote`),
       confidence: bounded(shot.confidence, `shots[${index}].confidence`, 0, 1),
-      estimatedCostCny: assetReuseSourceScenePosition({ query }) === undefined
+      estimatedCostCny: assetReuseSourceScenePosition({
+        ...(reuseFromScenePosition !== undefined ? { reuseFromScenePosition } : {}),
+        query,
+      }) === undefined
         ? serverCost(preferredProviderId, options.estimatedCnyPerClip)
         : 0,
     };
@@ -364,11 +380,40 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
     throw new Error("Director plan must cover every script scene exactly once.");
   }
 
+  const shotsByPosition = new Map(shots.map((shot) => [shot.scenePosition, shot]));
+  for (const shot of shots) {
+    const reuseFrom = assetReuseSourceScenePosition(shot);
+    if (reuseFrom === undefined) continue;
+    const { root, links } = resolveReuseRoot(shot, shotsByPosition);
+    const invalidLink = links.find(({ scene, source }) => source.scenePosition >= scene.scenePosition);
+    if (invalidLink) {
+      throw new Error(
+        `Director plan scene ${invalidLink.scene.scenePosition} must reuse an earlier scene, `
+        + `received ${invalidLink.source.scenePosition}.`,
+      );
+    }
+    shot.reuseFromScenePosition = root.scenePosition;
+    const rootDuration = options.sceneDurations?.[root.scenePosition];
+    const targetDuration = options.sceneDurations?.[shot.scenePosition];
+    const durationBounds = options.selectedVideoModelDurationBounds?.[root.preferredProviderId];
+    const generatedDuration = rootDuration === undefined
+      ? durationBounds?.maxDurationSeconds
+      : normalizeVideoGenerationDurationSeconds(rootDuration, durationBounds);
+    if (root.deliveryType === "generated_video"
+      && generatedDuration !== undefined
+      && targetDuration !== undefined
+      && targetDuration > generatedDuration) {
+      throw new Error(
+        `Director plan scene ${shot.scenePosition} reuses generated video from root scene ${root.scenePosition}, `
+        + `but that source only creates ${generatedDuration}s and the reused scene requires ${targetDuration}s.`,
+      );
+    }
+  }
+
   const paidShots = shots.filter((shot) => shot.estimatedCostCny > 0);
   if (paidShots.length > 0 && !options.economics.allowMeteredProviders) {
     throw new Error("Director plan selected a metered provider while paid providers are disabled.");
   }
-
   return {
     version: DIRECTOR_PLAN_VERSION,
     requestedProfileId,
@@ -377,6 +422,29 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
     visualBible,
     shots,
   };
+}
+
+function resolveReuseRoot(
+  shot: ShotDecision,
+  shotsByPosition: ReadonlyMap<number, ShotDecision>,
+): { root: ShotDecision; links: Array<{ scene: ShotDecision; source: ShotDecision }> } {
+  const visited = new Set<number>([shot.scenePosition]);
+  const links: Array<{ scene: ShotDecision; source: ShotDecision }> = [];
+  let current = shot;
+  while (true) {
+    const reuseFrom = assetReuseSourceScenePosition(current);
+    if (reuseFrom === undefined) return { root: current, links };
+    if (visited.has(reuseFrom)) {
+      throw new Error(`Director plan contains a reuse cycle involving scene ${reuseFrom}.`);
+    }
+    const source = shotsByPosition.get(reuseFrom);
+    if (!source) {
+      throw new Error(`Director plan scene ${current.scenePosition} has missing reuse source scene ${reuseFrom}.`);
+    }
+    visited.add(reuseFrom);
+    links.push({ scene: current, source });
+    current = source;
+  }
 }
 
 function profileId(value: unknown, field: string, allowAuto: boolean): ProductionDirectorProfileId {

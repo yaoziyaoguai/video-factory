@@ -1,4 +1,4 @@
-import { AlertCircle, Check, Copy, LayoutTemplate, Plus, RefreshCw, Save, Send, X } from "lucide-react";
+import { AlertCircle, Check, LayoutTemplate, Pencil, Plus, RefreshCw, RotateCcw, Save, Send, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { StudioProvider, StudioTemplate, StudioTemplateExperimentScorecard } from "../../shared/api.js";
 import { studioApi } from "../api.js";
@@ -7,6 +7,7 @@ import { TemplateGallery } from "../templates/TemplateGallery.js";
 
 export function TemplatesPage() {
   const [templates, setTemplates] = useState<StudioTemplate[]>([]);
+  const [deletedBuiltIns, setDeletedBuiltIns] = useState<StudioTemplate[]>([]);
   const [revision, setRevision] = useState(0);
   const [selectedId, setSelectedId] = useState("knowledge-explainer");
   const [draft, setDraft] = useState<StudioTemplate>();
@@ -23,6 +24,7 @@ export function TemplatesPage() {
   const [createName, setCreateName] = useState("");
   const [createDescription, setCreateDescription] = useState("");
   const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
   const dirty = useMemo(() => Boolean(draft?.status === "draft" && savedDraft !== JSON.stringify(draft)), [draft, savedDraft]);
 
@@ -38,6 +40,7 @@ export function TemplatesPage() {
         return [];
       })]);
       setTemplates(catalog.templates);
+      setDeletedBuiltIns(catalog.deletedBuiltIns ?? []);
       setExperiments(scorecards);
       setProviders(providerCatalog);
       setRevision(catalog.storeRevision);
@@ -80,26 +83,69 @@ export function TemplatesPage() {
     setNotice(undefined);
   }
 
-  async function cloneSelected() {
+  async function reviseSelected() {
     if (!draft) return;
     setSaving(true);
     setNotice(undefined);
     try {
-      const suffix = crypto.randomUUID().slice(0, 8);
-      const result = await studioApi.cloneTemplate({
-        sourceId: draft.id,
-        newId: `${draft.id}-copy-${suffix}`,
-        name: `${draft.name} 副本`,
-        expectedRevision: revision,
-      });
+      const result = await studioApi.reviseTemplate(draft.id, revision);
       setRevision(result.storeRevision);
-      setTemplates((current) => [result.template, ...current]);
+      setTemplates((current) => current.map((template) => template.id === result.template.id ? result.template : template));
       setSelectedId(result.template.id);
       setDraft(result.template);
       setSavedDraft(JSON.stringify(result.template));
-      setNotice("副本已创建，可以开始调整。原模板不会被修改。");
+      setNotice(`已建立 v${result.template.version} 草稿；原版本仍保留给历史制作使用。`);
     } catch (caught) {
-      setNotice(`创建失败：${errorMessage(caught)}`);
+      setNotice(`进入编辑失败：${errorMessage(caught)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteSelected() {
+    if (!draft) return;
+    setSaving(true);
+    setNotice(undefined);
+    try {
+      const deleted = draft;
+      const result = await studioApi.deleteTemplate(deleted.id, revision);
+      const remaining = templates.filter((template) => template.id !== deleted.id);
+      setRevision(result.storeRevision);
+      setTemplates(remaining);
+      const restorableBuiltIn = result.deletedBuiltIn;
+      if (restorableBuiltIn) {
+        setDeletedBuiltIns((current) => current.some((template) => template.id === deleted.id)
+          ? current
+          : [...current, restorableBuiltIn]);
+      }
+      const next = remaining[0];
+      setSelectedId(next?.id ?? "");
+      setDraft(next ? structuredClone(next) : undefined);
+      setSavedDraft(next ? JSON.stringify(next) : undefined);
+      setDeleteConfirmOpen(false);
+      setNotice(deleted.builtIn
+        ? "模板已从生产目录隐藏；需要时可在“已删除的内置模板”中恢复。"
+        : "模板已删除；历史制作仍保留当时使用的模板快照。");
+    } catch (caught) {
+      setNotice(`删除失败：${errorMessage(caught)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function restoreBuiltIn(template: StudioTemplate) {
+    setSaving(true);
+    setNotice(undefined);
+    try {
+      const result = await studioApi.restoreBuiltInTemplate(template.id, revision);
+      setRevision(result.storeRevision);
+      setDeletedBuiltIns((current) => current.filter((candidate) => candidate.id !== template.id));
+      setTemplates((current) => current.some((candidate) => candidate.id === result.template.id)
+        ? current
+        : [...current, result.template]);
+      setNotice(`“${result.template.name}”已恢复到生产目录。`);
+    } catch (caught) {
+      setNotice(`恢复失败：${errorMessage(caught)}`);
     } finally {
       setSaving(false);
     }
@@ -196,6 +242,10 @@ export function TemplatesPage() {
       {error ? <div className="page-error" role="alert"><AlertCircle size={18} aria-hidden="true" /><span>{error}</span></div> : null}
       {loading && templates.length === 0 ? <div className="queue-placeholder">正在读取模板目录...</div> : null}
       {templates.length > 0 ? <TemplateGallery templates={templates} selectedId={selectedId} onSelect={select} /> : null}
+      {deletedBuiltIns.length > 0 ? <section className="template-restore-panel" aria-label="已删除的内置模板">
+        <div><p className="eyebrow">可恢复</p><h2>已删除的内置模板</h2><p>这里只保留内置模板的隐藏记录，不会自动恢复到生产目录。</p></div>
+        <div>{deletedBuiltIns.map((template) => <button className="button button-secondary" type="button" disabled={saving} key={template.id} aria-label={`恢复“${template.name}”`} onClick={() => void restoreBuiltIn(template)}><RotateCcw size={15} aria-hidden="true" />恢复“{template.name}”</button>)}</div>
+      </section> : null}
       {providerError ? <p className="template-editor-notice is-warning" role="status">模型目录暂时不可用：{providerError}。模板内容仍可查看和编辑。</p> : null}
 
       <section className="template-experiments" aria-label="模板实验评分">
@@ -233,17 +283,17 @@ export function TemplatesPage() {
                 <label className="field"><span>音乐策略</span><textarea rows={3} value={draft.soundSystem.musicIntent} disabled={draft.status !== "draft"} onChange={(event) => setDraft({ ...draft, soundSystem: { ...draft.soundSystem, musicIntent: event.target.value } })} /></label>
               </div>
               {modelProviders.length ? <section className="template-model-strategy" aria-label="模板模型策略">
-                <div className="section-heading"><div><h3>模型策略</h3><p>只覆盖本模板需要固定的模型，其余继承创作设置。</p></div><span>{Object.keys(draft.modelDefaults ?? {}).length} 项覆盖</span></div>
+                <div className="section-heading"><div><h3>模板模型</h3><p>只固定这个模板确实需要的模型；未固定时使用系统推荐，也可在单次制作中另选。</p></div><span>{Object.keys(draft.modelDefaults ?? {}).length} 项固定</span></div>
                 <div>{modelProviders.map((provider) => {
                   const selectedModelId = draft.modelDefaults?.[provider.id] ?? "";
                   const selected = provider.modelProfiles?.find((model) => model.id === selectedModelId);
                   return <label className="template-model-field" key={provider.id}>
-                    <span><strong>{provider.label}</strong><small>{selected ? "模板覆盖" : "继承创作设置"}</small></span>
+                    <span><strong>{provider.label}</strong><small>{selected ? "模板固定" : "未固定"}</small></span>
                     <select aria-label={`${provider.label} 模板模型`} value={selectedModelId} disabled={draft.status !== "draft"} onChange={(event) => setTemplateModel(provider.id, event.target.value)}>
-                      <option value="">继承创作设置 · {providerModelLabel(provider, provider.defaultModelId)}</option>
+                      <option value="">系统推荐 · {providerModelLabel(provider, provider.defaultModelId)}</option>
                       {provider.modelProfiles?.map((model) => <option key={model.id} value={model.id} disabled={!model.available}>{model.label}{model.recommended ? " · 推荐" : ""}{model.available ? "" : " · 当前不可用"}</option>)}
                     </select>
-                    <small>{selected?.description ?? "创建任务时仍可对本次制作单独覆盖。"}</small>
+                    <small>{selected?.description ?? "新建制作时会预选系统推荐，你仍可为本次制作单独选择。"}</small>
                   </label>;
                 })}</div>
               </section> : null}
@@ -268,8 +318,9 @@ export function TemplatesPage() {
                 <button className="button button-primary" type="button" disabled={saving} onClick={() => setPublishConfirmOpen(true)}><Send size={16} aria-hidden="true" />发布新版本</button>
               </>
             ) : (
-              <button className="button button-primary" type="button" disabled={saving} onClick={() => void cloneSelected()}><Copy size={16} aria-hidden="true" />创建可编辑副本</button>
+              <button className="button button-primary" type="button" disabled={saving} onClick={() => void reviseSelected()}><Pencil size={16} aria-hidden="true" />编辑下一版本</button>
             )}
+            <button className="button button-danger-ghost" type="button" disabled={saving} onClick={() => setDeleteConfirmOpen(true)}><Trash2 size={16} aria-hidden="true" />删除模板</button>
             <span><Check size={14} aria-hidden="true" />预演只展示结构，不会产生费用</span>
           </footer>
         </section>
@@ -290,6 +341,13 @@ export function TemplatesPage() {
           <header className="dialog-header"><div><p className="eyebrow">模板发布</p><h2 id="publish-template-title">确认发布“{draft.name}”</h2></div><button className="icon-button" type="button" aria-label="关闭" disabled={saving} onClick={() => setPublishConfirmOpen(false)}><X size={18} aria-hidden="true" /></button></header>
           <p>发布后，这一版会出现在新制作的模板选择中；已有项目仍使用各自保存的运行快照。{dirty ? "当前未保存修改会先保存，再一起发布。" : ""}</p>
           <footer className="dialog-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => setPublishConfirmOpen(false)}>返回检查</button><button className="button button-primary" type="button" disabled={saving} onClick={() => { setPublishConfirmOpen(false); void publishDraft(); }}><Send size={16} aria-hidden="true" />确认发布</button></footer>
+        </section>
+      </div> : null}
+      {deleteConfirmOpen && draft ? <div className="dialog-backdrop" role="presentation">
+        <section className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-template-title">
+          <header className="dialog-header"><div><p className="eyebrow">删除模板</p><h2 id="delete-template-title">确认删除“{draft.name}”</h2></div><button className="icon-button" type="button" aria-label="关闭" disabled={saving} onClick={() => setDeleteConfirmOpen(false)}><X size={18} aria-hidden="true" /></button></header>
+          <p>{draft.builtIn ? "删除后它会从生产目录隐藏，之后仍可明确恢复。" : "删除后它不会再用于新的制作；已经开始的项目仍保留当时的模板快照。"}</p>
+          <footer className="dialog-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => setDeleteConfirmOpen(false)}>取消</button><button className="button button-danger" type="button" disabled={saving} onClick={() => void deleteSelected()}>{saving ? "正在删除..." : "确认删除"}</button></footer>
         </section>
       </div> : null}
     </main>

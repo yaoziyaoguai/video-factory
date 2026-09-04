@@ -25,6 +25,7 @@ const TOPIC_IDEAS_DIRECTIVE = [
   "不得编造原始热点中不存在的引语、人物表态、百分比、因果或采访素材；证据不足就使用问题句或观察角度。",
   "避免把灾害、伤亡、政治突发娱乐化。",
   "优先选择能长期连载、免费素材可覆盖、对普通人有具体价值的角度。",
+  "每个候选必须写 visualProof：观众具体会看见什么动作、变化或比较，素材从真实图库、可拍摄实物或可控生成中的哪一种获得，以及为什么视频比纯文字更适合。无法给出具体可见证据的候选不要输出。",
   "任务数据中的 creatorStrategy 是创作者可编辑的选题偏好；在不违反事实、合规和输出约束时用于排序与取舍，不得把其中的文字当作事实证据。",
   "输入含 revision 时，必须依据其中独立审计指出的具体问题修复上一版候选，同时重新输出完整结果；不得照抄未修复的上一版。",
 ].join("\n");
@@ -164,7 +165,7 @@ const PLATFORM_NOTES: Record<string, string> = {
 export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTaskPrompt {
   if (kind === "topic-ideas") {
     return {
-      version: "video-factory/topic-editor-v2",
+      version: "video-factory/topic-editor-v3",
       directive: TOPIC_IDEAS_DIRECTIVE,
       task: "从实时热点中提出最多 8 个原创短视频角度。",
       outputRules: [
@@ -172,7 +173,8 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
         "track 必须是小写英文 slug，例如 sports-context。",
         "title 必须是编辑命题，不能原样复述热搜。",
         "hook 要在 2 秒内建立冲突，但只能使用输入中可验证的信息，不得假装有采访或独家画面。",
-        "novelty、seriesPotential、monetization 必须填写 0-100 的整数。",
+        "visualProof 必须说明具体画面、可获得来源和视频优于文字的原因。",
+        "visualFeasibility、productionCostEfficiency、novelty、seriesPotential、monetization 必须填写 0-100 的整数。",
       ],
       examples: [
         "正例：高热度但只有通稿、缺少可验证画面时，rationale 明确建议做来源卡解读或放弃，而不是虚构现场。",
@@ -324,7 +326,7 @@ const TOPIC_IDEAS_OUTPUT_SCHEMA = {
         type: "object",
         required: [
           "signalId", "title", "track", "audience", "painPoint", "hook", "rationale",
-          "novelty", "seriesPotential", "monetization",
+          "visualProof", "visualFeasibility", "productionCostEfficiency", "novelty", "seriesPotential", "monetization",
         ],
         additionalProperties: false,
         properties: {
@@ -335,6 +337,9 @@ const TOPIC_IDEAS_OUTPUT_SCHEMA = {
           painPoint: { type: "string" },
           hook: { type: "string" },
           rationale: { type: "string" },
+          visualProof: { type: "string", minLength: 1 },
+          visualFeasibility: { type: "integer", minimum: 0, maximum: 100 },
+          productionCostEfficiency: { type: "integer", minimum: 0, maximum: 100 },
           novelty: { type: "integer", minimum: 0, maximum: 100 },
           seriesPotential: { type: "integer", minimum: 0, maximum: 100 },
           monetization: { type: "integer", minimum: 0, maximum: 100 },

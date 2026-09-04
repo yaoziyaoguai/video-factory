@@ -238,7 +238,9 @@ describe("CodexVisualDirectorAgent", () => {
       execution: "下游素材执行器直接复用已解析的更早镜头母片，不会重新搜索、生成或计费。",
       constraints: [
         "N 只能引用更早且可成功解析的导演镜头。",
-        "复用保持相同媒体内容，不会产生新的动作、光线变化或画面状态。",
+        "多级复用始终解析到同一个根母片，不能形成循环。",
+        "复用从母片开头使用相同媒体内容，不会产生新的动作、光线变化、后续片段或画面状态。",
+        "生成视频母片的真实长度按所选模型的最短/最长时长和整数秒规则归一化；复用镜头不得更长。",
       ],
     });
     assert.deepEqual(Object.keys(auditPayload.context.upstreamFacts.scenes[0]!).sort(), [
@@ -300,6 +302,36 @@ describe("CodexVisualDirectorAgent", () => {
     const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => plan) });
 
     await assert.rejects(() => agent.plan(directorInput()), /not in the enabled asset pool/);
+  });
+
+  it("keeps the creator cost target as planning feedback instead of a hidden hard limit", async () => {
+    const input = directorInput();
+    input.assetProviders = [{
+      id: "seedream-image-v1",
+      label: "Seedream",
+      billing: "metered",
+      modes: ["AI 图片"],
+      deliveryTypes: ["generated_image"],
+      strengths: ["解释性画面"],
+      constraints: ["不得作为事实证据"],
+      estimatedCnyPerClip: 6,
+    }];
+    input.economics = { allowMeteredProviders: true };
+    input.costFeedback = [
+      { reason: "too_expensive", previousEstimatedCostCny: 10, targetEstimatedCostCny: 5 },
+      { reason: "too_expensive", previousEstimatedCostCny: 12, targetEstimatedCostCny: 10 },
+    ];
+    const plan = validPlan();
+    const shot = (plan.shots as Array<Record<string, unknown>>)[0]!;
+    shot.preferredProviderId = "seedream-image-v1";
+    shot.deliveryType = "generated_image";
+    const client = new CapturingCodexClient(() => plan);
+    const agent = new CodexVisualDirectorAgent({ client });
+
+    const result = await agent.plan(input);
+
+    assert.equal(result.shots[0]?.estimatedCostCny, 6);
+    assert.deepEqual((client.calls[0]?.payload as { costFeedback?: unknown }).costFeedback, input.costFeedback);
   });
 
   it("rejects element animation assigned to a static editorial card", async () => {

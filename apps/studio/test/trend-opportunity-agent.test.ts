@@ -123,7 +123,7 @@ describe("TrendOpportunityAgent", () => {
     assert.match(payload.strategy ?? "", /内容定位：替普通人解释技术变化/);
     assert.match(payload.strategy ?? "", /核心受众：关注 AI 但不想看营销稿的职场人/);
     assert.match(payload.strategy ?? "", /优先题材：\n真实工作影响\n可复现实验/);
-    assert.match(payload.strategy ?? "", /至少需要两个相互独立、可打开的原始来源/);
+    assert.match(payload.strategy ?? "", /至少需要两个不同域名的有效原始来源链接/);
     assert.match(payload.strategy ?? "", /必须能在 30 秒内兑现标题承诺/);
     assert.equal((payload.strategy ?? "").length <= 6_000, true);
   });
@@ -148,7 +148,7 @@ describe("TrendOpportunityAgent", () => {
     await model.generate(signals, { customInstruction: "" });
 
     const payload = codexClient.calls[0]!.payload as { strategy?: string };
-    assert.match(payload.strategy ?? "", /至少需要两个相互独立、可打开的原始来源/);
+    assert.match(payload.strategy ?? "", /至少需要两个不同域名的有效原始来源链接/);
   });
 
   it("keeps the final custom rule after all bounded strategy fields", async () => {
@@ -212,6 +212,9 @@ describe("TrendOpportunityAgent", () => {
         painPoint: "工具很多，却没有减少疲惫",
         hook: "真正偷走你下班时间的，可能不是加班。",
         rationale: "热点有规模，且能转化为低成本生活实验。",
+        visualProof: "实拍同一位上班族整理日程前后的操作和时间对比，动作变化比文字解释更直观。",
+        visualFeasibility: 91,
+        productionCostEfficiency: 94,
         novelty: 0.85,
         seriesPotential: 0.88,
         monetization: 0.72,
@@ -231,6 +234,9 @@ describe("TrendOpportunityAgent", () => {
     assert.equal(candidate?.score.novelty, 85);
     assert.equal(candidate?.score.seriesPotential, 88);
     assert.equal(candidate?.score.monetization, 72);
+    assert.equal(candidate?.score.visualFeasibility, 91);
+    assert.equal(candidate?.score.productionCostEfficiency, 94);
+    assert.match(candidate?.rationale ?? "", /可见画面：实拍同一位上班族整理日程前后的操作和时间对比/);
     assert.equal(candidate?.evidence[0]?.evidenceUrl, "https://example.com/ai");
     assert.equal(candidate?.generatedAt, "2026-08-24T08:05:00.000Z");
   });
@@ -267,12 +273,12 @@ describe("TrendOpportunityAgent", () => {
     const candidates = await agent.listCandidates();
 
     assert.equal(requestedLimit, 160);
-    assert.equal(candidates.length, 12);
+    assert.equal(candidates.length, 1);
     assert.equal(candidates.some((candidate) => candidate.providerId === "api-topic-editor-v1"), true);
-    assert.equal(candidates.some((candidate) => candidate.providerId === "trend-heuristic-v1"), true);
+    assert.equal(candidates.some((candidate) => candidate.providerId === "trend-heuristic-v1"), false);
   });
 
-  it("reserves a portfolio slot for a grounded model idea even when many rule scores are higher", async () => {
+  it("does not drown a grounded model idea in higher-scoring rule filler", async () => {
     const crowdedSignals = Array.from({ length: 60 }, (_, index): StudioTrendSignal => ({
       id: `crowded-${index}`,
       sourceId: "dailyhot",
@@ -302,7 +308,7 @@ describe("TrendOpportunityAgent", () => {
 
     const candidates = await agent.listCandidates();
 
-    assert.equal(candidates.length, 12);
+    assert.equal(candidates.length, 1);
     assert.equal(candidates.some((candidate) => candidate.providerId === "api-topic-editor-v1"), true);
   });
 

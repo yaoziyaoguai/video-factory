@@ -36,6 +36,10 @@ export interface CodexTaskTrace {
   fallbackReason?: string;
   attemptedModelIds?: string[];
   modelCandidateAttempts?: ModelCandidateAttempt[];
+  providerWaitMs?: number;
+  firstOutputEventMs?: number;
+  toolMs?: number;
+  validationMs?: number;
 }
 
 export interface CodexTaskSession {
@@ -45,6 +49,25 @@ export interface CodexTaskSession {
 
 export type CodexBridgeFailureStage = "not_accepted" | "completed_failure" | "uncertain";
 export type CodexBridgeFailureKind = "model_provider_transient";
+
+export type ModelProviderFailureCategory =
+  | "authentication"
+  | "invalid_request"
+  | "rate_limited"
+  | "service_unavailable"
+  | "timeout"
+  | "network"
+  | "invalid_output"
+  | "execution_failed";
+
+export interface ModelProviderFailureDetails {
+  category: ModelProviderFailureCategory;
+  reasonCode: string;
+  providerId: string;
+  modelId: string;
+  providerWaitMs?: number;
+  requestIdHash?: string;
+}
 
 export interface RoleAuditIssue {
   severity: "advisory" | "blocking";
@@ -88,6 +111,10 @@ export interface AgentLoopTrace {
   modelCallCount?: number;
   producerModelCallCount?: number;
   auditModelCallCount?: number;
+  producerMs?: number;
+  auditMs?: number;
+  validationMs?: number;
+  retryCount?: number;
   iterations: AgentLoopIterationTrace[];
   pendingCandidate?: AgentLoopPendingCandidateTrace;
 }
@@ -109,15 +136,21 @@ const DEFAULT_RETRY_DELAY_MS = 500;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
 
 export class CodexBridgeError extends Error {
+  readonly creatorMessage: string;
+  readonly failureDetails: ModelProviderFailureDetails | undefined;
+
   constructor(
     message: string,
     readonly transient: boolean,
     readonly stage: CodexBridgeFailureStage = transient ? "not_accepted" : "uncertain",
     readonly statusCode?: number,
     readonly failureKind?: CodexBridgeFailureKind,
+    failureDetails?: ModelProviderFailureDetails,
   ) {
     super(message);
     this.name = "CodexBridgeError";
+    this.failureDetails = failureDetails;
+    this.creatorMessage = creatorMessageFor(message, failureDetails, statusCode, failureKind);
   }
 }
 
@@ -236,12 +269,14 @@ export class CodexBridgeClient {
         const retryable = status === 503;
         const notAccepted = retryable || isUnknownRoleSessionRejection(status, raw);
         const failureKind = bridgeFailureKind(raw);
+        const failureDetails = bridgeFailureDetails(raw);
         reject(new CodexBridgeError(
           `Codex bridge returned HTTP ${status}.${errorDetail(raw)}`,
           retryable,
           notAccepted ? "not_accepted" : status === 422 ? "completed_failure" : "uncertain",
           status,
           failureKind,
+          failureDetails,
         ));
         return;
       }
@@ -305,6 +340,10 @@ function parseTrace(value: unknown): CodexTaskTrace {
     throw new CodexBridgeError("Codex bridge trace is invalid.", false);
   }
   const modelCandidateAttempts = parseModelCandidateAttempts(trace.modelCandidateAttempts);
+  const providerWaitMs = optionalDurationMs(trace.providerWaitMs, "providerWaitMs");
+  const firstOutputEventMs = optionalDurationMs(trace.firstOutputEventMs, "firstOutputEventMs");
+  const toolMs = optionalDurationMs(trace.toolMs, "toolMs");
+  const validationMs = optionalDurationMs(trace.validationMs, "validationMs");
   return {
     taskKind: trace.taskKind as CodexTaskKind,
     promptVersion: trace.promptVersion,
@@ -326,7 +365,19 @@ function parseTrace(value: unknown): CodexTaskTrace {
       ? { attemptedModelIds: [...new Set(trace.attemptedModelIds)] as string[] }
       : {}),
     ...(modelCandidateAttempts ? { modelCandidateAttempts } : {}),
+    ...(providerWaitMs !== undefined ? { providerWaitMs } : {}),
+    ...(firstOutputEventMs !== undefined ? { firstOutputEventMs } : {}),
+    ...(toolMs !== undefined ? { toolMs } : {}),
+    ...(validationMs !== undefined ? { validationMs } : {}),
   };
+}
+
+function optionalDurationMs(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new CodexBridgeError(`Codex bridge trace ${field} is invalid.`, false);
+  }
+  return Number(value);
 }
 
 function parseModelCandidateAttempts(value: unknown): ModelCandidateAttempt[] | undefined {
@@ -420,6 +471,77 @@ function bridgeFailureKind(raw: string): CodexBridgeFailureKind | undefined {
     return body.failureKind === "model_provider_transient" ? body.failureKind : undefined;
   } catch {
     return undefined;
+  }
+}
+
+const MODEL_PROVIDER_FAILURE_CATEGORIES = new Set<ModelProviderFailureCategory>([
+  "authentication",
+  "invalid_request",
+  "rate_limited",
+  "service_unavailable",
+  "timeout",
+  "network",
+  "invalid_output",
+  "execution_failed",
+]);
+
+function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefined {
+  try {
+    const body = JSON.parse(raw) as Record<string, unknown>;
+    const value = body.failureDetails;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const details = value as Record<string, unknown>;
+    if (!MODEL_PROVIDER_FAILURE_CATEGORIES.has(details.category as ModelProviderFailureCategory)
+      || !isBoundedIdentifier(details.reasonCode, 128)
+      || !isBoundedIdentifier(details.providerId, 128)
+      || !isBoundedIdentifier(details.modelId, 128)
+      || (details.providerWaitMs !== undefined && optionalDurationMs(details.providerWaitMs, "providerWaitMs") === undefined)
+      || (details.requestIdHash !== undefined
+        && (typeof details.requestIdHash !== "string" || !/^[a-f0-9]{64}$/.test(details.requestIdHash)))) {
+      return undefined;
+    }
+    return {
+      category: details.category as ModelProviderFailureCategory,
+      reasonCode: details.reasonCode as string,
+      providerId: details.providerId as string,
+      modelId: details.modelId as string,
+      ...(details.providerWaitMs !== undefined ? { providerWaitMs: Number(details.providerWaitMs) } : {}),
+      ...(typeof details.requestIdHash === "string" ? { requestIdHash: details.requestIdHash } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isBoundedIdentifier(value: unknown, maxLength: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLength && !/[\r\n\t]/.test(value);
+}
+
+function creatorMessageFor(
+  message: string,
+  details: ModelProviderFailureDetails | undefined,
+  statusCode: number | undefined,
+  failureKind: CodexBridgeFailureKind | undefined,
+): string {
+  switch (details?.category) {
+    case "rate_limited":
+      return "模型请求过多，请稍后重试或选择其他模型。";
+    case "timeout":
+      return "模型调用超时，请重试或选择其他模型。";
+    case "service_unavailable":
+    case "network":
+      return "模型暂时不可用，请重试或选择其他模型。";
+    case "authentication":
+      return "模型服务配置需要检查。";
+    default:
+      if (statusCode === 429) return "模型请求过多，请稍后重试或选择其他模型。";
+      if (statusCode === 408 || /timed?\s*out|timeout/i.test(message)) {
+        return "模型调用超时，请重试或选择其他模型。";
+      }
+      if (statusCode === 503 || failureKind === "model_provider_transient") {
+        return "模型暂时不可用，请重试或选择其他模型。";
+      }
+      return "模型没有完成此步骤，请重试或选择其他模型。";
   }
 }
 

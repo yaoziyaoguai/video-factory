@@ -116,7 +116,6 @@ export function ResourcesPage() {
   });
   const [defaultRecipeId, setDefaultRecipeId] = useState<StudioProductionRecipeId>("free-stock");
   const [roleProviderDefaults, setRoleProviderDefaults] = useState<StudioRoleProviderDefaults>({});
-  const [modelDefaults, setModelDefaults] = useState<Record<string, string>>({});
   const [productionDefaults, setProductionDefaults] = useState<StudioProductionDefaults>(DEFAULT_STUDIO_PRODUCTION_DEFAULTS);
   const [topicStrategy, setTopicStrategy] = useState<StudioTopicStrategy>(DEFAULT_STUDIO_TOPIC_STRATEGY);
 
@@ -166,7 +165,6 @@ export function ResourcesPage() {
         setVoiceDirection(value.voiceDirection);
         setDefaultRecipeId(canonicalRecipeId(value.defaultRecipeId));
         setRoleProviderDefaults(value.roleProviderDefaults ?? {});
-        setModelDefaults(value.modelDefaults ?? {});
         setProductionDefaults(value.productionDefaults ?? DEFAULT_STUDIO_PRODUCTION_DEFAULTS);
         setTopicStrategy({ ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...value.topicStrategy });
       })
@@ -203,7 +201,6 @@ export function ResourcesPage() {
       if (patch.voiceDirection) setVoiceDirection(updated.voiceDirection);
       if (patch.defaultRecipeId) setDefaultRecipeId(canonicalRecipeId(updated.defaultRecipeId));
       if (patch.roleProviderDefaults) setRoleProviderDefaults(updated.roleProviderDefaults ?? {});
-      if (patch.modelDefaults) setModelDefaults(updated.modelDefaults ?? {});
       if (patch.productionDefaults) setProductionDefaults(updated.productionDefaults);
       if (patch.topicStrategy) setTopicStrategy({ ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...updated.topicStrategy });
       setSettingsNotice(successMessage);
@@ -224,10 +221,8 @@ export function ResourcesPage() {
     ? canonicalRecipeId(settings.defaultRecipeId) !== defaultRecipeId
       || !sameProductionDefaults(settings.productionDefaults, productionDefaults)
     : false;
-  const modelHasChanges = settings ? !sameStringRecord(settings.modelDefaults, modelDefaults) : false;
   const roleHasChanges = settings
     ? !sameStringRecord(settings.roleProviderDefaults, roleProviderDefaults)
-      || modelHasChanges
     : false;
   const topicHasChanges = settings ? !sameTopicStrategy({ ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...settings.topicStrategy }, topicStrategy) : false;
   const topicStrategyComplete = Boolean(
@@ -317,7 +312,7 @@ export function ResourcesPage() {
             <label className="field"><span>核心观众</span><input required aria-label="核心观众" maxLength={500} value={topicStrategy.targetAudience ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, targetAudience: event.target.value }))} /><small>必填。写真实处境和认知需求，不写“所有人”。</small></label>
             <label className="field"><span>优先寻找</span><textarea required aria-label="优先题材" rows={5} maxLength={1000} value={topicStrategy.preferredDirections ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, preferredDirections: event.target.value }))} /><small>必填。每行一个方向；它决定总编主动寻找什么。</small></label>
             <label className="field"><span>明确避开</span><textarea required aria-label="避开题材" rows={5} maxLength={1000} value={topicStrategy.excludedDirections ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, excludedDirections: event.target.value }))} /><small>必填。每行一个红线；不适合做成视频的热点应直接放弃。</small></label>
-            <label className="field"><span>进入推荐前的来源标准</span><select aria-label="候选来源标准" value={topicStrategy.sourcePolicy ?? "primary_or_two_independent"} onChange={(event) => setTopicStrategy((current) => ({ ...current, sourcePolicy: event.target.value as NonNullable<StudioTopicStrategy["sourcePolicy"]> }))}><option value="primary_or_two_independent">至少两个独立且可打开的来源</option><option value="traceable_source">至少一个可打开的来源</option></select><small>这是实际准入条件；高风险事实仍会要求额外核验。</small></label>
+            <label className="field"><span>进入推荐前的来源标准</span><select aria-label="候选来源标准" value={topicStrategy.sourcePolicy ?? "primary_or_two_independent"} onChange={(event) => setTopicStrategy((current) => ({ ...current, sourcePolicy: event.target.value as NonNullable<StudioTopicStrategy["sourcePolicy"]> }))}><option value="primary_or_two_independent">不少于两个不同域名的有效链接</option><option value="traceable_source">至少一个格式有效的原始链接</option></select><small>系统会校验链接格式、来源域名和非搜索结果页；高风险事实仍会要求人工打开核验。</small></label>
             <label className="field"><span>其他具体原则</span><textarea aria-label="其他选题原则" rows={3} maxLength={2000} value={topicStrategy.customInstruction} onChange={(event) => setTopicStrategy((current) => ({ ...current, customInstruction: event.target.value }))} placeholder="例如：优先能在 30 秒内通过实验或前后对比兑现承诺的题材" /><small>只补充上面没有覆盖的具体判断，不要重复系统底线。</small></label>
           </div>
           <div className="configuration-save-row"><span>{!topicStrategyComplete ? "请先补全四项必填规则" : topicHasChanges ? "有未保存的总编规则" : "总编规则已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !topicHasChanges || !topicStrategyComplete} onClick={() => void saveDefaults({ topicStrategy: normalizeTopicStrategy(topicStrategy) }, "总编规则已保存，下一次刷新候选时生效。") }><Save aria-hidden="true" size={16} />{topicHasChanges ? "保存总编规则" : "已保存"}</button></div>
@@ -382,21 +377,13 @@ export function ResourcesPage() {
             <div className="provider-ledger">{group.providers.map((provider) => <ProviderRow
               key={provider.id}
               provider={provider}
-              selectedModelId={modelDefaults[provider.id]}
-              onModelChange={(modelId) => setModelDefaults((current) => {
-                const next = { ...current };
-                if (modelId) next[provider.id] = modelId;
-                else delete next[provider.id];
-                return next;
-              })}
             />)}</div>
           </section>)}</div>
-          {settings ? <div className="configuration-save-row foundation-save-row"><span>{modelHasChanges ? "有未保存的画面模型调整" : "首选模型已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !modelHasChanges} onClick={() => void saveDefaults({ modelDefaults }, "画面首选模型已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{modelHasChanges ? "保存画面模型" : "已保存"}</button></div> : null}
         </>}
       </section>
 
       <section id="production-roles" className="resource-section foundation-registry" data-resource-section data-active={activeSection === "production-roles" ? "true" : undefined}>
-        <ResourceHeading eyebrow="岗位与模型" title="按角色配置生产能力" meta="先决定谁来做，再决定这个角色使用哪个模型" />
+        <ResourceHeading eyebrow="制作角色" title="按角色配置生产能力" meta="这里只选择服务能力；具体模型在新建制作与费用确认时决定" />
         {providerLoading ? <div className="region-loading">正在读取制作能力...</div> : providerError ? null : (
           <>
             <div className="role-configuration-grid" aria-label="制作角色配置">
@@ -407,9 +394,7 @@ export function ResourcesPage() {
                   definition={definition}
                   providers={providers}
                   selectedProvider={selected}
-                  selectedModelId={selected ? modelDefaults[selected.id] : undefined}
                   onProviderChange={(providerId) => setRoleProviderDefaults((current) => ({ ...current, [definition.key]: providerId }))}
-                  onModelChange={(providerId, modelId) => setModelDefaults((current) => withStringSelection(current, providerId, modelId))}
                 />;
               })}
             </div>
@@ -419,7 +404,7 @@ export function ResourcesPage() {
             </div>
           </>
         )}
-        {settings ? <div className="configuration-save-row foundation-save-row"><span>{roleHasChanges ? "有未保存的角色或模型调整" : "角色配置已同步"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !roleHasChanges} onClick={() => void saveDefaults({ roleProviderDefaults, modelDefaults }, "角色与模型默认值已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{roleHasChanges ? "保存角色配置" : "已保存"}</button></div> : null}
+        {settings ? <div className="configuration-save-row foundation-save-row"><span>{roleHasChanges ? "有未保存的角色调整" : "角色配置已同步"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !roleHasChanges} onClick={() => void saveDefaults({ roleProviderDefaults }, "角色能力已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{roleHasChanges ? "保存角色配置" : "已保存"}</button></div> : null}
       </section>
 
       <section id="resource-manifest" className="resource-section resource-manifest-section" data-resource-section data-active={activeSection === "resource-manifest" ? "true" : undefined} data-tour="resource-manifest">
@@ -547,25 +532,21 @@ function ResourceError({ title, message, retry }: { title: string; message: stri
   return <div className="page-error" role="alert"><AlertCircle aria-hidden="true" size={18} /><span><strong>{title}</strong>{message}</span><button className="icon-button" type="button" onClick={() => void retry()} title="重试"><RefreshCw aria-hidden="true" size={17} /></button></div>;
 }
 
-function ProviderRow({ provider, selectedModelId, onModelChange }: {
-  provider: StudioProvider;
-  selectedModelId: string | undefined;
-  onModelChange: (modelId: string) => void;
-}) {
+function ProviderRow({ provider }: { provider: StudioProvider }) {
   const ready = isProductionReady(provider);
   const Icon = provider.billing === "free" ? Film : Sparkles;
   const availableModels = provider.modelProfiles?.filter((model) => model.available) ?? [];
   const catalogModels = provider.modelProfiles ?? [];
-  const staleSelection = selectedModelId && !catalogModels.some((model) => model.id === selectedModelId)
-    ? selectedModelId
-    : undefined;
-  const activeModel = provider.modelProfiles?.find((model) => model.id === (selectedModelId ?? provider.defaultModelId));
+  const activeModel = availableModels.find((model) => model.id === provider.defaultModelId)
+    ?? availableModels.find((model) => model.recommended)
+    ?? availableModels[0];
+  const backupModels = availableModels.filter((model) => model.id !== activeModel?.id);
   const estimate = activeModel?.estimatedCnyPerClip ?? provider.estimatedCnyPerClip;
   return (
     <article className="provider-ledger-row">
       <span className="provider-ledger-icon"><Icon aria-hidden="true" size={18} /></span>
       <div><strong>{creatorProviderLabel(provider)}</strong><small>{creatorFacingTechnicalText(provider.description) ?? "由系统按当前配置使用"}</small>{!ready && provider.requirement ? <small className="provider-requirement">{creatorFacingTechnicalText(provider.requirement)}</small> : null}</div>
-      <div className="provider-model-cell">{catalogModels.length || selectedModelId ? <label className="provider-model-select"><small>新制作首选模型</small><select aria-label={`${creatorProviderLabel(provider)} 首选模型`} value={selectedModelId ?? ""} disabled={!availableModels.length} onChange={(event) => onModelChange(event.target.value)}><option value="">服务推荐：{providerModelLabel(provider, provider.defaultModelId)}</option>{staleSelection ? <option value={staleSelection} disabled>旧选择已失效</option> : null}{catalogModels.map((model) => <option key={model.id} value={model.id} disabled={!model.available}>{model.label}{model.recommended ? " · 推荐" : ""}{model.available ? "" : " · 待配置"}</option>)}</select></label> : (provider.modes ?? []).slice(0, 3).map((mode) => creatorFacingTechnicalText(mode)).join(" · ")}</div>
+      <div className="provider-model-cell">{catalogModels.length ? <div className="provider-model-select"><small>系统推荐</small><strong>{activeModel?.label ?? providerModelLabel(provider, provider.defaultModelId)}</strong>{backupModels.length ? <small>可用替补：{backupModels.map((model) => model.label).join("、")}</small> : null}</div> : (provider.modes ?? []).slice(0, 3).map((mode) => creatorFacingTechnicalText(mode)).join(" · ")}</div>
       <strong className={`provider-cost${provider.billing === "metered" ? " is-metered" : ""}`}>{billingLabel(provider.billing)}{estimate !== undefined ? ` · 约 ¥${formatCost(estimate)}/${provider.billingUnit === "run" ? "条" : "镜头"}` : ""}</strong>
       <span className={ready ? "ledger-state is-ready" : "ledger-state"}>{providerReadinessLabel(provider, ready)}</span>
       <span className="provider-family-label">{creatorFacingProviderKind(provider)}</span>
@@ -607,17 +588,18 @@ function creatorProviderLabel(provider: StudioProvider): string {
   return !normalized || normalized === provider.id ? provider.label : normalized;
 }
 
-function RoleProviderCard({ definition, providers, selectedProvider, selectedModelId, onProviderChange, onModelChange }: {
+function RoleProviderCard({ definition, providers, selectedProvider, onProviderChange }: {
   definition: ProductionRoleDefinition;
   providers: StudioProvider[];
   selectedProvider: StudioProvider | undefined;
-  selectedModelId: string | undefined;
   onProviderChange: (providerId: string) => void;
-  onModelChange: (providerId: string, modelId: string) => void;
 }) {
   const candidates = providers.filter((provider) => provider.capability === definition.capability && provider.kind !== "test");
   const models = selectedProvider?.modelProfiles?.filter((model) => model.available) ?? [];
-  const activeModel = selectedProvider?.modelProfiles?.find((model) => model.id === (selectedModelId ?? selectedProvider.defaultModelId));
+  const activeModel = models.find((model) => model.id === selectedProvider?.defaultModelId)
+    ?? models.find((model) => model.recommended)
+    ?? models[0];
+  const backupModels = models.filter((model) => model.id !== activeModel?.id);
   const ready = Boolean(selectedProvider && isProductionReady(selectedProvider));
   return <article className={ready ? "role-configuration" : "role-configuration is-unavailable"}>
     <header>
@@ -642,13 +624,7 @@ function RoleProviderCard({ definition, providers, selectedProvider, selectedMod
           {candidates.map((provider) => <option key={provider.id} value={provider.id} disabled={!isProductionReady(provider)}>{creatorProviderLabel(provider)}{isProductionReady(provider) ? "" : " · 不可用"}</option>)}
         </select>
       </label>
-      {selectedProvider && models.length > 0 ? <label className="field">
-        <span>首选模型</span>
-        <select aria-label={`${creatorProviderLabel(selectedProvider)}首选模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(selectedProvider.id, event.target.value)}>
-          <option value="">服务推荐：{providerModelLabel(selectedProvider, selectedProvider.defaultModelId)}</option>
-          {models.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
-        </select>
-      </label> : <div className="role-runtime-summary"><span>当前执行</span><strong>{activeModel?.label ?? selectedProvider?.label ?? "尚未配置"}</strong></div>}
+      <div className="role-runtime-summary"><span>系统推荐</span><strong>{activeModel?.label ?? selectedProvider?.label ?? "尚未配置"}</strong>{backupModels.length ? <span>故障替补：{backupModels.map((model) => model.label).join("、")}</span> : null}</div>
       {candidates.filter((provider) => provider.id !== selectedProvider?.id && isProductionReady(provider)).length > 0
         ? <p className="role-fallback-note">其余可用能力只在首选服务故障时依次接管，不会与首选同时重复生成。</p>
         : null}
@@ -701,13 +677,6 @@ function roleModeLabel(mode: ProductionRoleDefinition["mode"]): string {
   if (mode === "agent") return "AI 创作 · 最多三轮质量修订";
   if (mode === "model") return "模型审片";
   return "确定性工具";
-}
-
-function withStringSelection(current: Record<string, string>, key: string, value: string): Record<string, string> {
-  const next = { ...current };
-  if (value) next[key] = value;
-  else delete next[key];
-  return next;
 }
 
 function formatCost(value: number): string {

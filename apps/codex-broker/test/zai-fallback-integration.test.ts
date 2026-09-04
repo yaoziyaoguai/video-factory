@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { it } from "node:test";
 import {
+  CodexBridgeError,
   CodexBridgeClient,
   FallbackScreenwriterAgent,
   type CodexTaskExecution,
@@ -88,6 +89,61 @@ it("falls back after a ZAI upstream outage crosses the broker boundary", async (
       },
       { modelId: "gpt-5.6-sol", providerId: "openai", outcome: "succeeded" },
     ]);
+  } finally {
+    await broker.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("does not fall back after a generic ZAI HTTP 500 crosses the broker boundary", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "video-factory-zai-generic-500-"));
+  const socketPath = path.join(directory, "worker.sock");
+  const zai = new ZaiCodePlanExecutor({
+    env: { ZAI_BIGMODEL_API_KEY: "test-only-zai-key" },
+    fetchFn: async () => new Response(JSON.stringify({ error: { code: "1300" } }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    }),
+  });
+  const broker = new CodexBrokerServer({ socketPath, executor: zai });
+  await broker.start();
+  try {
+    const client = new CodexBridgeClient({ socketPath, maxAttempts: 1 });
+    const glm: ScreenwriterAgent = {
+      id: "codex-screenwriter-v1",
+      modelId: "glm-5.3",
+      draft: async (input) => client.runTask("script-draft", { brief: input.brief }, "zai-generic-500-chain"),
+      draftDetailed: async (input) => client.runTaskDetailed("script-draft", { brief: input.brief }, "zai-generic-500-chain"),
+    };
+    let backupCalls = 0;
+    const openai: ScreenwriterAgent = {
+      id: "codex-screenwriter-v1",
+      modelId: "gpt-5.6-sol",
+      draft: async () => ({ scenes: [] }),
+      draftDetailed: async () => {
+        backupCalls += 1;
+        return { output: { scenes: [] } };
+      },
+    };
+    const candidates = new FallbackScreenwriterAgent({
+      candidates: [
+        { agent: glm, providerId: "zai-bigmodel-api" },
+        { agent: openai, providerId: "openai" },
+      ],
+    });
+
+    await assert.rejects(
+      () => candidates.draftDetailed({ brief, selectedModelId: "glm-5.3" }),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexBridgeError);
+        assert.equal(error.statusCode, 422);
+        assert.equal(error.failureKind, undefined);
+        assert.equal(error.failureDetails?.category, "execution_failed");
+        assert.equal(error.failureDetails?.reasonCode, "1300");
+        return true;
+      },
+    );
+    assert.equal(backupCalls, 0);
   } finally {
     await broker.close();
     await rm(directory, { recursive: true, force: true });

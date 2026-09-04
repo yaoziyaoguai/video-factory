@@ -160,6 +160,48 @@ describe("node production workspaces", () => {
     expect(within(configuration).getByRole("button", { name: "保存选择" })).toBeInTheDocument();
   });
 
+  it("explains real model, audit, validation, and retry timings without exposing the prompt", async () => {
+    const node: StudioNode = {
+      ...succeededNode,
+      executionReceipt: {
+        ...succeededNode.executionReceipt!,
+        parameters: {
+          ...succeededNode.executionReceipt!.parameters,
+          providerWaitMs: 12_340,
+          firstOutputEventMs: 410,
+          providerValidationMs: 7,
+          producerMs: 12_600,
+          auditMs: 8_200,
+          loopValidationMs: 14,
+          modelCallCount: 2,
+          retryCount: 1,
+        },
+        startedAt: "2026-08-27T00:00:00.000Z",
+        finishedAt: "2026-08-27T00:00:21.000Z",
+      },
+    };
+
+    render(<NodeWorkspace
+      node={node}
+      runStatus="succeeded"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    await userEvent.click(screen.getByText("这一步为什么用了这些时间"));
+    expect(screen.getByText("步骤总耗时").parentElement).toHaveTextContent("21 秒");
+    expect(screen.getByText("最终模型等待").parentElement).toHaveTextContent("12 秒");
+    expect(screen.getByText("首次响应").parentElement).toHaveTextContent("410 毫秒");
+    expect(screen.getByText("内容生成累计").parentElement).toHaveTextContent("13 秒");
+    expect(screen.getByText("独立审计累计").parentElement).toHaveTextContent("8.2 秒");
+    expect(screen.getByText("结果校验").parentElement).toHaveTextContent("21 毫秒");
+    expect(screen.getByText("模型调用").parentElement).toHaveTextContent("2 次");
+    expect(screen.getByText("自动重试").parentElement).toHaveTextContent("1 次");
+    expect(screen.queryByText(/Prompt Pack|screenwriter-v2/)).not.toBeInTheDocument();
+  });
+
   it("lets a paused node replace an unavailable inherited provider", async () => {
     const onConfigure = vi.fn(async () => undefined);
     const providers: StudioProvider[] = [{
@@ -1019,6 +1061,7 @@ describe("node production workspaces", () => {
     await userEvent.click(screen.getByRole("button", { name: "确认并执行" }));
 
     expect(onAuthorize).toHaveBeenCalledWith("assets", {
+      spendPlanId: "plan-1",
       inputVersionIds: ["script-v2"],
       providerId: "hailuo-video-v1",
       modelId: "MiniMax-Hailuo-02",
@@ -1063,13 +1106,19 @@ describe("node production workspaces", () => {
     />);
 
     expect(screen.getByText("镜头 1 · Seedance 视频生成 · Seedance 1")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "检查并确认" }));
+    const authorizationDialog = screen.getByRole("dialog", { name: "确认本次费用" });
+    expect(authorizationDialog).toHaveTextContent("报价中列出的 2 个画面任务");
+    expect(within(authorizationDialog).getByText("镜头 1 · Seedance 视频生成")).toBeInTheDocument();
+    expect(authorizationDialog).not.toHaveTextContent("未识别模型");
+    await userEvent.click(within(authorizationDialog).getByRole("button", { name: "返回检查" }));
     await userEvent.click(screen.getByRole("button", { name: "这份报价不合适" }));
     const dialog = screen.getByRole("dialog", { name: "保存费用反馈" });
     expect(within(dialog).getByRole("heading", { name: "把这份报价退回导演" })).toBeInTheDocument();
     expect(within(dialog).getByText(/新方案会重新报价并再次等待你确认/)).toBeInTheDocument();
     expect(dialog).not.toHaveTextContent(/Agent|Provider|broker|schema|manifest|fallback|taskId|director-v1/i);
-    await userEvent.clear(within(dialog).getByRole("spinbutton", { name: "希望下一版控制在多少元（可选）" }));
-    await userEvent.type(within(dialog).getByRole("spinbutton", { name: "希望下一版控制在多少元（可选）" }), "0");
+    await userEvent.clear(within(dialog).getByRole("spinbutton", { name: "下一版降本目标（可选）" }));
+    await userEvent.type(within(dialog).getByRole("spinbutton", { name: "下一版降本目标（可选）" }), "0");
     await userEvent.type(within(dialog).getByRole("textbox", { name: "具体调整意见（可选）" }), "第二镜优先改用真实图库。");
     await userEvent.click(within(dialog).getByRole("button", { name: "保存反馈" }));
 
@@ -1200,6 +1249,49 @@ describe("node production workspaces", () => {
     expect(screen.queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
   });
 
+  it("does not offer upstream edits while a downstream paid result is uncertain", () => {
+    const scriptNode = {
+      ...succeededNode,
+      executionConfiguration: {
+        providerId: "codex-screenwriter-v1",
+        modelSelections: {},
+      },
+    };
+    const uncertainAssetNode: StudioNode = {
+      id: "assets",
+      label: "画面素材",
+      role: "素材制片",
+      status: "failed",
+      outcomeUncertain: true,
+      artifactIds: [],
+      qualityGateResults: [],
+    };
+    render(<NodeWorkspace
+      node={scriptNode}
+      nodes={[scriptNode, uncertainAssetNode]}
+      providers={[{
+        id: "codex-screenwriter-v1",
+        capability: "script.draft",
+        label: "AI 编剧",
+        available: true,
+        kind: "external",
+        billing: "subscription",
+      }]}
+      runStatus="failed"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onInputOverride={async () => undefined}
+      onConfigure={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    expect(screen.queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑输入" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "调整" })).not.toBeInTheDocument();
+  });
+
+
   it("renders aggregate cost and links each video to its detail page", () => {
     const dashboard: CostDto = {
       currency: "CNY",
@@ -1212,10 +1304,12 @@ describe("node production workspaces", () => {
 
     expect(screen.getByRole("heading", { name: "每一笔费用都能追到制作步骤" })).toBeInTheDocument();
     expect(screen.getByText("已批准报价合计")).toBeInTheDocument();
+    expect(screen.getByText("待确认是否扣费")).toBeInTheDocument();
+    expect(screen.getByText("按实际服务")).toBeInTheDocument();
     expect(screen.queryByText("授权上限")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: /付费成片/ })).toHaveAttribute("href", "/projects/run-1");
     expect(screen.getAllByText("¥3.00").length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/1 笔待核对/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/1 笔待确认/).length).toBeGreaterThan(0);
   });
 
   it("distinguishes subscription retries from failed metered calls", async () => {

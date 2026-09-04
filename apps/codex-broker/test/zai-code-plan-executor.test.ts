@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
-import { codexExecutorProfileFor, parseTaskRequest } from "../src/codex-executor.js";
+import { CodexExecutorError, codexExecutorProfileFor, parseTaskRequest } from "../src/codex-executor.js";
+import { BROKER_TASK_KINDS } from "../src/task-definitions.js";
 import { ZaiCodePlanExecutor } from "../src/zai-code-plan-executor.js";
 
 const API_KEY = "test-only-zai-key";
+const ZAI_CHAT_COMPLETIONS_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 const ZAI_CODING_PLAN_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
 
 function scriptDraftTask() {
@@ -146,6 +148,39 @@ function validReport(): Record<string, unknown> {
   };
 }
 
+function roleAuditTask(withImage: boolean) {
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]);
+  return parseTaskRequest({
+    protocolVersion: "video-factory/codex-bridge-v2",
+    kind: "role-audit",
+    payload: {
+      role: "screenwriter",
+      iteration: 1,
+      criteria: ["开头必须在三秒内兑现观众承诺"],
+      context: { title: "下班后先做一件事" },
+      candidate: { hook: "先放下手机。" },
+      ...(withImage ? {
+        images: [{
+          imageIndex: 1,
+          sha256: createHash("sha256").update(jpeg).digest("hex"),
+          jpegBase64: jpeg.toString("base64"),
+        }],
+      } : {}),
+    },
+  }, codexExecutorProfileFor("zai").identity);
+}
+
+function validRoleAudit(): Record<string, unknown> {
+  return {
+    version: "video-factory/role-audit-v1",
+    verdict: "pass",
+    score: 90,
+    summary: "候选交付满足本轮验收标准。",
+    issues: [],
+    repairInstructions: [],
+  };
+}
+
 describe("ZaiCodePlanExecutor", () => {
   it("does not fall through to the ambient process credential when an environment is injected", () => {
     const previous = process.env.ZAI_BIGMODEL_API_KEY;
@@ -229,12 +264,15 @@ describe("ZaiCodePlanExecutor", () => {
   it("sends script drafting to the ZAI Coding Plan endpoint with glm-5.3", async () => {
     let capturedUrl = "";
     let capturedBody: Record<string, unknown> | undefined;
+    let clock = 2_000;
     const output = validScriptDraft();
     const executor = new ZaiCodePlanExecutor({
       env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      now: () => clock,
       fetchFn: async (input, init) => {
         capturedUrl = String(input);
         capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        clock = 2_041;
         return new Response(JSON.stringify({
           choices: [{ message: { content: JSON.stringify(output) } }],
         }), { status: 200 });
@@ -250,6 +288,10 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(result.trace?.providerId, "zai-bigmodel-api");
     assert.equal(result.trace?.modelId, "glm-5.3");
     assert.equal(result.trace?.taskKind, "script-draft");
+    assert.equal(result.trace?.providerWaitMs, 41);
+    assert.equal(result.trace?.firstOutputEventMs, 41);
+    assert.equal(result.trace?.toolMs, 0);
+    assert.equal(result.trace?.validationMs, 0);
   });
 
   it("sends director planning to the ZAI Coding Plan endpoint with glm-5.3", async () => {
@@ -278,15 +320,63 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(result.trace?.taskKind, "director-plan");
   });
 
-  it("rejects topic ideation before it can bypass the ZAI profile allowlist", () => {
-    assert.throws(
-      () => parseTaskRequest({
-        protocolVersion: "video-factory/codex-bridge-v2",
-        kind: "topic-ideas",
-        payload: { signals: [] },
-      }, codexExecutorProfileFor("zai").identity),
-      /task kind 'topic-ideas' is not allowed for broker profile 'zai'/,
-    );
+  it("sends a role audit without images to Coding Plan with the text model", async () => {
+    let capturedUrl = "";
+    let capturedBody: Record<string, unknown> | undefined;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async (input, init) => {
+        capturedUrl = String(input);
+        capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(validRoleAudit()) } }],
+        }), { status: 200 });
+      },
+    });
+
+    const result = await executor.runTask(roleAuditTask(false));
+
+    assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
+    assert.equal(capturedBody?.model, "glm-5.3");
+    assert.equal(typeof (capturedBody?.messages as Array<{ content: unknown }>)[0]?.content, "string");
+    assert.equal(result.trace?.modelId, "glm-5.3");
+  });
+
+  it("sends a role audit with images to Chat Completions with the visual model", async () => {
+    let capturedUrl = "";
+    let capturedBody: Record<string, unknown> | undefined;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async (input, init) => {
+        capturedUrl = String(input);
+        capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(validRoleAudit()) } }],
+        }), { status: 200 });
+      },
+    });
+
+    const result = await executor.runTask(roleAuditTask(true));
+
+    assert.equal(capturedUrl, ZAI_CHAT_COMPLETIONS_URL);
+    assert.equal(capturedBody?.model, "glm-5.3-flash");
+    const content = (capturedBody?.messages as Array<{ content: unknown }>)[0]?.content;
+    assert.ok(Array.isArray(content));
+    assert.equal(content[0]?.type, "text");
+    assert.equal(content[1]?.type, "image_url");
+    assert.equal(result.trace?.modelId, "glm-5.3-flash");
+  });
+
+  it("advertises every broker task with the configured text and visual models", () => {
+    const executor = new ZaiCodePlanExecutor({ env: { ZAI_BIGMODEL_API_KEY: API_KEY } });
+
+    assert.deepEqual(executor.identity.taskKinds, BROKER_TASK_KINDS);
+    for (const kind of BROKER_TASK_KINDS) {
+      const expected = ["asset-rank", "reference-grammar", "visual-review"].includes(kind)
+        ? "glm-5.3-flash"
+        : "glm-5.3";
+      assert.equal(executor.identity.taskModels?.[kind], expected);
+    }
   });
 
   it("does not expose API error bodies or the credential", async () => {
@@ -305,6 +395,83 @@ describe("ZaiCodePlanExecutor", () => {
         assert.match(error.message, /HTTP 429 \(code 1308\)/);
         assert.doesNotMatch(error.message, new RegExp(API_KEY));
         assert.doesNotMatch(error.message, /upstream echoed/);
+        return true;
+      },
+    );
+  });
+
+  it("keeps safe structured diagnostics for a non-2xx provider response", async () => {
+    const upstreamRequestId = "zai-upstream-request-secret";
+    let clock = 1_000;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      now: () => clock,
+      fetchFn: async () => {
+        clock = 1_037;
+        return new Response(
+          JSON.stringify({ error: { code: "1308", message: `private response ${API_KEY}` } }),
+          { status: 429, headers: { "x-request-id": upstreamRequestId } },
+        );
+      },
+    });
+
+    await assert.rejects(
+      () => executor.runTask(scriptDraftTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.deepEqual(error.details, {
+          category: "rate_limited",
+          reasonCode: "1308",
+          requestIdHash: createHash("sha256").update(upstreamRequestId).digest("hex"),
+          providerId: "zai-bigmodel-api",
+          modelId: "glm-5.3",
+          providerWaitMs: 37,
+        });
+        const serialized = JSON.stringify(error.details);
+        assert.doesNotMatch(serialized, new RegExp(API_KEY));
+        assert.doesNotMatch(serialized, /private response|zai-upstream-request-secret/);
+        return true;
+      },
+    );
+  });
+
+  it("does not classify a generic HTTP 500 response as transient", async () => {
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => new Response(
+        JSON.stringify({ error: { code: "execution_failed" } }),
+        { status: 500 },
+      ),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(scriptDraftTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.transient, false);
+        assert.equal(error.details?.category, "execution_failed");
+        assert.equal(error.details?.reasonCode, "http_500");
+        return true;
+      },
+    );
+  });
+
+  it("classifies an explicit service-unavailable error code as transient", async () => {
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => new Response(
+        JSON.stringify({ error: { code: "service_unavailable" } }),
+        { status: 500 },
+      ),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(scriptDraftTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.transient, true);
+        assert.equal(error.details?.category, "service_unavailable");
+        assert.equal(error.details?.reasonCode, "service_unavailable");
         return true;
       },
     );
@@ -345,7 +512,13 @@ describe("ZaiCodePlanExecutor", () => {
         env: { ZAI_BIGMODEL_API_KEY: API_KEY },
         fetchFn: responseFor({ summary: "missing required fields" }),
       }).runTask(visualReviewTask()),
-      /does not match visual-review schema/,
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.match(error.message, /does not match visual-review schema/);
+        assert.equal(error.details?.category, "invalid_output");
+        assert.equal(error.details?.reasonCode, "output_contract");
+        return true;
+      },
     );
 
     const lateFinding = validReport();
@@ -361,7 +534,38 @@ describe("ZaiCodePlanExecutor", () => {
         env: { ZAI_BIGMODEL_API_KEY: API_KEY },
         fetchFn: responseFor(lateFinding),
       }).runTask(visualReviewTask()),
-      /timecodeMs exceeds payload.durationMs/,
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.match(error.message, /timecodeMs exceeds payload.durationMs/);
+        assert.equal(error.details?.category, "invalid_output");
+        assert.equal(error.details?.reasonCode, "timecode_out_of_bounds");
+        return true;
+      },
+    );
+  });
+
+  it("classifies non-JSON model output without retaining the response body", async () => {
+    const privateOutput = `not-json-${API_KEY}`;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => new Response(JSON.stringify({
+        choices: [{ message: { content: privateOutput } }],
+      }), { status: 200 }),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(scriptDraftTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.details?.category, "invalid_output");
+        assert.equal(error.details?.reasonCode, "invalid_json");
+        assert.equal(error.details?.providerId, "zai-bigmodel-api");
+        assert.equal(error.details?.modelId, "glm-5.3");
+        assert.equal(typeof error.details?.providerWaitMs, "number");
+        assert.doesNotMatch(JSON.stringify(error.details), new RegExp(API_KEY));
+        assert.doesNotMatch(JSON.stringify(error.details), /not-json/);
+        return true;
+      },
     );
   });
 

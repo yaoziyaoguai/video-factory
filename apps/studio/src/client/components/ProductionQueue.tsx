@@ -240,6 +240,7 @@ function needsAction(run: StudioRunSummary): boolean {
   return run.status === "needs_human"
     || run.status === "awaiting_spend_approval"
     || run.status === "approval_invalidated"
+    || run.status === "failed"
     || run.status === "stale";
 }
 

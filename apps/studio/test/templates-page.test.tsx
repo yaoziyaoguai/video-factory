@@ -7,10 +7,11 @@ import type { StudioTemplate } from "../src/shared/api.js";
 
 const published = template("knowledge-explainer", "知识解释", "published", true);
 const draft = template("my-series", "我的系列", "draft", false);
+const deleted = template("photo-story", "证据图解", "published", true);
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 3, templates: [draft, published] });
+  vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 3, templates: [draft, published], deletedBuiltIns: [deleted] });
   vi.spyOn(studioApi, "templateExperiments").mockResolvedValue([]);
   vi.spyOn(studioApi, "providers").mockResolvedValue([{
     id: "ark-seedance-video-v1",
@@ -26,6 +27,12 @@ beforeEach(() => {
     ],
   }]);
   vi.spyOn(studioApi, "saveTemplateDraft").mockImplementation(async (value) => ({ storeRevision: 4, template: value }));
+  vi.spyOn(studioApi, "reviseTemplate").mockResolvedValue({
+    storeRevision: 4,
+    template: { ...published, version: 2, status: "draft", builtIn: true },
+  });
+  vi.spyOn(studioApi, "deleteTemplate").mockResolvedValue({ storeRevision: 4 });
+  vi.spyOn(studioApi, "restoreBuiltInTemplate").mockResolvedValue({ storeRevision: 4, template: deleted });
   vi.spyOn(studioApi, "createTemplate").mockImplementation(async (input) => ({
     storeRevision: 4,
     template: { ...draft, id: input.id, name: input.name, description: input.description ?? "默认说明" },
@@ -73,19 +80,33 @@ describe("TemplatesPage", () => {
     expect(confirm).toHaveBeenCalledTimes(2);
   });
 
-  it("uses collision-resistant clone ids", async () => {
+  it("opens a published template as the next editable version under the same id", async () => {
     const user = userEvent.setup();
-    const clone = vi.spyOn(studioApi, "cloneTemplate").mockImplementation(async (input) => ({
-      storeRevision: 4,
-      template: { ...published, id: input.newId, name: input.name, status: "draft", builtIn: false },
-    }));
-    vi.spyOn(crypto, "randomUUID").mockReturnValue("12345678-1234-4123-8123-123456789abc");
     render(<TemplatesPage />);
 
     await screen.findByRole("heading", { name: "知识解释" });
-    await user.click(screen.getByRole("button", { name: "创建可编辑副本" }));
+    await user.click(screen.getByRole("button", { name: "编辑下一版本" }));
 
-    expect(clone).toHaveBeenCalledWith(expect.objectContaining({ newId: "knowledge-explainer-copy-12345678" }));
+    expect(studioApi.reviseTemplate).toHaveBeenCalledWith("knowledge-explainer", 3);
+    expect(screen.getByLabelText("模板名称")).toBeEnabled();
+    expect(screen.getByText("knowledge · v2")).toBeInTheDocument();
+  });
+
+  it("deletes only after confirmation and exposes an explicit built-in restore action", async () => {
+    const user = userEvent.setup();
+    render(<TemplatesPage />);
+
+    await screen.findByRole("heading", { name: "知识解释" });
+    expect(screen.getByRole("button", { name: "恢复“证据图解”" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "删除模板" }));
+    expect(studioApi.deleteTemplate).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("dialog", { name: "确认删除“知识解释”" });
+    await user.click(within(dialog).getByRole("button", { name: "确认删除" }));
+
+    expect(studioApi.deleteTemplate).toHaveBeenCalledWith("knowledge-explainer", 3);
+    expect(await screen.findByDisplayValue("我的系列")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "恢复“证据图解”" }));
+    expect(studioApi.restoreBuiltInTemplate).toHaveBeenCalledWith("photo-story", 4);
   });
 
   it("stores a template model override without hard-coding it into the provider", async () => {

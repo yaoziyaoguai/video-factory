@@ -314,6 +314,118 @@ describe("metered video generation adapters", () => {
     ]);
   });
 
+  it("keeps polling the accepted MiniMax task when file retrieval has a transient network failure", async () => {
+    const requests: string[] = [];
+    let queryCalls = 0;
+    let retrieveCalls = 0;
+    const adapter = new MiniMaxVideoAdapter({
+      apiKey: "test-key",
+      model: "MiniMax-Hailuo-2.3",
+      modelProtocols: { "MiniMax-Hailuo-2.3": "v1" },
+      fetch: async (url, init) => {
+        const target = String(url);
+        requests.push(`${init?.method ?? "GET"} ${target}`);
+        if (init?.method === "POST") {
+          return jsonResponse({ task_id: "minimax-network-task", base_resp: { status_code: 0 } });
+        }
+        if (target.includes("/query/video_generation")) {
+          queryCalls += 1;
+          return jsonResponse({
+            status: "Success",
+            file_id: "minimax-network-file",
+            base_resp: { status_code: 0 },
+          });
+        }
+        retrieveCalls += 1;
+        if (retrieveCalls === 1) throw new TypeError("fetch failed");
+        return jsonResponse({
+          file: { download_url: "https://example.com/recovered.mp4" },
+          base_resp: { status_code: 0 },
+        });
+      },
+      sleep: async () => undefined,
+      pollIntervalMs: 0,
+      timeoutMs: 100,
+    });
+
+    const result = await adapter.generate({ prompt: "网络恢复测试", durationSeconds: 6, ratio: "9:16" });
+
+    assert.equal(result.taskId, "minimax-network-task");
+    assert.equal(result.videoUrl, "https://example.com/recovered.mp4");
+    assert.equal(requests.filter((request) => request.startsWith("POST ")).length, 1);
+    assert.equal(queryCalls, 2);
+    assert.equal(retrieveCalls, 2);
+  });
+
+  it("bounds a stuck MiniMax v1 query by the accepted task polling deadline", async () => {
+    const requests: string[] = [];
+    const progress: string[] = [];
+    const adapter = new MiniMaxVideoAdapter({
+      apiKey: "test-key",
+      model: "MiniMax-Hailuo-2.3",
+      modelProtocols: { "MiniMax-Hailuo-2.3": "v1" },
+      fetch: async (url, init) => {
+        requests.push(`${init?.method ?? "GET"} ${String(url)}`);
+        if (init?.method === "POST") {
+          return jsonResponse({ task_id: "minimax-stuck-v1", base_resp: { status_code: 0 } });
+        }
+        return new Promise<Response>(() => undefined);
+      },
+      pollIntervalMs: 0,
+      timeoutMs: 5,
+    });
+
+    const outcome = await Promise.race([
+      adapter.generate(
+        { prompt: "查询卡死测试", durationSeconds: 6, ratio: "9:16" },
+        (event) => { progress.push(event.status); },
+      ).then(() => "resolved", (error: unknown) => error instanceof Error ? error.message : String(error)),
+      new Promise<string>((resolve) => setTimeout(() => resolve("still pending"), 50)),
+    ]);
+
+    assert.match(outcome, /MiniMax task 'minimax-stuck-v1' timed out/);
+    assert.equal(requests.filter((request) => request.startsWith("POST ")).length, 1);
+    assert.equal(progress.at(-1), "unknown");
+  });
+
+  it("fails an invalid MiniMax v1 download URL without polling the terminal task again", async () => {
+    const requests: string[] = [];
+    const adapter = new MiniMaxVideoAdapter({
+      apiKey: "test-key",
+      model: "MiniMax-Hailuo-2.3",
+      modelProtocols: { "MiniMax-Hailuo-2.3": "v1" },
+      fetch: async (url, init) => {
+        const target = String(url);
+        requests.push(`${init?.method ?? "GET"} ${target}`);
+        if (init?.method === "POST") {
+          return jsonResponse({ task_id: "minimax-invalid-url", base_resp: { status_code: 0 } });
+        }
+        if (target.includes("/query/video_generation")) {
+          return jsonResponse({
+            status: "Success",
+            file_id: "minimax-invalid-file",
+            base_resp: { status_code: 0 },
+          });
+        }
+        return jsonResponse({
+          file: { download_url: "not a URL" },
+          base_resp: { status_code: 0 },
+        });
+      },
+      sleep: async () => undefined,
+      pollIntervalMs: 0,
+      timeoutMs: 100,
+    });
+
+    await assert.rejects(
+      () => adapter.generate({ prompt: "非法地址测试", durationSeconds: 6, ratio: "9:16" }),
+      /Invalid URL|must use HTTP or HTTPS/,
+    );
+    assert.equal(requests.filter((request) => request.includes("/query/video_generation")).length, 1);
+    assert.equal(requests.filter((request) => request.includes("/files/retrieve")).length, 1);
+    assert.equal(requests.filter((request) => request.startsWith("POST ")).length, 1);
+  });
+
   it("routes MiniMax H3 through the V2 multimodal protocol", async () => {
     const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const responses = [
@@ -370,6 +482,85 @@ describe("metered video generation adapters", () => {
       ratio: "9:16",
       modelId: "MiniMax-Unknown",
     }), /not allowed/);
+  });
+
+  it("keeps polling the accepted MiniMax H3 task after a transient query failure without another POST", async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    let queryCalls = 0;
+    const adapter = new MiniMaxVideoAdapter({
+      apiKey: "test-key",
+      model: "MiniMax-H3",
+      modelProtocols: { "MiniMax-H3": "v2" },
+      fetch: async (url, init) => {
+        const target = String(url);
+        const method = init?.method ?? "GET";
+        requests.push({ url: target, method });
+        if (method === "POST") return jsonResponse({ task_id: "h3-network-task" });
+        queryCalls += 1;
+        if (queryCalls === 1) throw new TypeError("fetch failed");
+        return jsonResponse({
+          task: {
+            id: "h3-network-task",
+            status: "succeeded",
+            content: { url: "https://example.com/h3-recovered.mp4" },
+          },
+        });
+      },
+      sleep: async () => undefined,
+      pollIntervalMs: 0,
+      timeoutMs: 100,
+    });
+
+    const result = await adapter.generate({
+      prompt: "H3 查询断线恢复测试",
+      durationSeconds: 5,
+      ratio: "9:16",
+    });
+
+    assert.equal(result.taskId, "h3-network-task");
+    assert.equal(result.videoUrl, "https://example.com/h3-recovered.mp4");
+    assert.equal(requests.filter(({ method }) => method === "POST").length, 1);
+    assert.equal(queryCalls, 2);
+    assert.deepEqual(
+      requests.filter(({ method }) => method === "GET").map(({ url }) => url),
+      [
+        "https://api.minimaxi.com/v2/query/video_generation/h3-network-task",
+        "https://api.minimaxi.com/v2/query/video_generation/h3-network-task",
+      ],
+    );
+  });
+
+  it("bounds a stuck MiniMax H3 response body by the accepted task polling deadline", async () => {
+    const requests: string[] = [];
+    const progress: string[] = [];
+    const adapter = new MiniMaxVideoAdapter({
+      apiKey: "test-key",
+      model: "MiniMax-H3",
+      modelProtocols: { "MiniMax-H3": "v2" },
+      fetch: async (url, init) => {
+        requests.push(`${init?.method ?? "GET"} ${String(url)}`);
+        if (init?.method === "POST") return jsonResponse({ task_id: "minimax-stuck-v2" });
+        return {
+          ok: true,
+          status: 200,
+          text: async () => new Promise<string>(() => undefined),
+        } as Response;
+      },
+      pollIntervalMs: 0,
+      timeoutMs: 5,
+    });
+
+    const outcome = await Promise.race([
+      adapter.generate(
+        { prompt: "响应读取卡死测试", durationSeconds: 5, ratio: "9:16" },
+        (event) => { progress.push(event.status); },
+      ).then(() => "resolved", (error: unknown) => error instanceof Error ? error.message : String(error)),
+      new Promise<string>((resolve) => setTimeout(() => resolve("still pending"), 50)),
+    ]);
+
+    assert.match(outcome, /MiniMax H3 task 'minimax-stuck-v2' timed out/);
+    assert.equal(requests.filter((request) => request.startsWith("POST ")).length, 1);
+    assert.equal(progress.at(-1), "unknown");
   });
 
   it("surfaces MiniMax application-level errors returned with HTTP 200", async () => {

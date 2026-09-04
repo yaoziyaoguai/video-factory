@@ -34,6 +34,7 @@ import { CandidateVerificationDialog } from "./CandidateVerificationDialog.js";
 import { SeriesEpisodeDialog } from "./SeriesEpisodeDialog.js";
 
 type EntryMode = StudioCandidateOrigin | "custom";
+type TrendDeskView = "shortlist" | "produce_video" | "produce_image_story" | "not_selected";
 
 interface TopicEntryWorkspaceProps {
   initialMode?: EntryMode;
@@ -66,7 +67,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const mode = props.initialMode ?? "trend";
   const [category, setCategory] = useState<StudioTopicCategory | "all">("all");
   const [platform, setPlatform] = useState("all");
-  const [verdict, setVerdict] = useState<StudioEditorialVerdict | "all">("all");
+  const [deskView, setDeskView] = useState<TrendDeskView>("shortlist");
   const [selectedId, setSelectedId] = useState(props.initialSelectedId ?? "");
   const [verificationCandidate, setVerificationCandidate] = useState<StudioCandidateInboxItem>();
 
@@ -74,14 +75,17 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const seriesItems = mode === "series" && props.selectedSeriesId
     ? modeItems.filter((item) => item.seriesId === props.selectedSeriesId)
     : modeItems;
-  const categoryCounts = countCategories(seriesItems);
+  const deskItems = seriesItems.filter((item) => matchesDeskView(item, deskView));
+  const categoryCounts = countCategories(deskItems);
   const verdictCounts = countVerdicts(seriesItems);
   const platforms = [...new Set(seriesItems.map((item) => item.platform))];
-  const visibleItems = seriesItems
+  const shortlistCount = seriesItems.filter(isShortlisted).length;
+  const notSelectedCount = seriesItems.length - shortlistCount;
+  const visibleItems = deskItems
     .filter((item) => category === "all" || item.category === category)
     .filter((item) => platform === "all" || item.platform === platform)
-    .filter((item) => verdict === "all" || item.editorialDecision.verdict === verdict);
-  const hasActiveFilters = category !== "all" || platform !== "all" || verdict !== "all";
+    .sort((left, right) => right.editorialDecision.score - left.editorialDecision.score || left.title.localeCompare(right.title, "zh-CN"));
+  const hasActiveFilters = category !== "all" || platform !== "all" || deskView !== "shortlist";
   const selected = visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0];
   const selectedSeries = props.series.find((item) => item.id === props.selectedSeriesId) ?? props.series[0];
   const candidateMode = mode === "trend" || mode === "series" ? mode : "trend";
@@ -99,7 +103,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   useEffect(() => {
     setCategory("all");
     setPlatform("all");
-    setVerdict("all");
+    setDeskView("shortlist");
     setSelectedId(props.initialSelectedId ?? "");
   }, [mode, props.initialSelectedId, props.selectedSeriesId]);
 
@@ -155,19 +159,20 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             <>
               <div className="candidate-filters" aria-label="候选筛选">
                 <div className="verdict-filter" aria-label="生产建议">
-                  <button type="button" className={verdict === "all" ? "is-active" : ""} onClick={() => setVerdict("all")}>全部建议 <span>{seriesItems.length}</span></button>
-                  {(["produce_video", "produce_image_story", "skip"] as const).map((item) => (
-                    <button key={item} type="button" className={verdict === item ? "is-active" : ""} disabled={!verdictCounts[item]} onClick={() => setVerdict(item)}>{editorialVerdictLabel(item)} <span>{verdictCounts[item] ?? 0}</span></button>
+                  <button type="button" className={deskView === "shortlist" ? "is-active" : ""} onClick={() => setDeskView("shortlist")}>推荐开拍 <span>{shortlistCount}</span></button>
+                  {(["produce_video", "produce_image_story"] as const).map((item) => (
+                    <button key={item} type="button" className={deskView === item ? "is-active" : ""} disabled={!verdictCounts[item]} onClick={() => setDeskView(item)}>{editorialVerdictLabel(item)} <span>{verdictCounts[item] ?? 0}</span></button>
                   ))}
+                  <button type="button" className={deskView === "not_selected" ? "is-active" : ""} disabled={!notSelectedCount} onClick={() => setDeskView("not_selected")}>未入选 <span>{notSelectedCount}</span></button>
                 </div>
                 <div className="category-filter" aria-label="内容分类">
-                  <button type="button" className={category === "all" ? "is-active" : ""} onClick={() => setCategory("all")}>全部 <span>{seriesItems.length}</span></button>
+                  <button type="button" className={category === "all" ? "is-active" : ""} onClick={() => setCategory("all")}>全部 <span>{deskItems.length}</span></button>
                   {(mode === "trend" ? CATEGORY_ORDER : CATEGORY_ORDER.filter((item) => categoryCounts[item])).map((item) => (
                     <button key={item} type="button" className={category === item ? "is-active" : ""} disabled={!categoryCounts[item]} onClick={() => setCategory(item)}>{TOPIC_CATEGORY_LABELS[item]} <span>{categoryCounts[item] ?? 0}</span></button>
                   ))}
                 </div>
                 <label className="platform-filter"><span>平台</span><select value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">全部平台</option>{platforms.map((item) => <option key={item} value={item}>{platformLabel(item)}</option>)}</select></label>
-                {hasActiveFilters ? <button className="candidate-clear-filters" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setVerdict("all"); }}>清除筛选</button> : null}
+                {hasActiveFilters ? <button className="candidate-clear-filters" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("shortlist"); }}>清除筛选</button> : null}
               </div>
               {visibleItems.length > 0 ? (
                 <div className="candidate-inbox-body">
@@ -176,13 +181,13 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                       <button key={item.id} type="button" className={`candidate-row${selected?.id === item.id ? " is-active" : ""}`} aria-label={`查看${item.title}`} onClick={() => setSelectedId(item.id)}>
                         <span className="candidate-number">{String(index + 1).padStart(2, "0")}</span>
                         <span className="candidate-row-copy"><small>{TOPIC_CATEGORY_LABELS[item.category]} · {platformLabel(item.platform)} · {editorialVerdictLabel(item.editorialDecision.verdict)}</small><strong>{item.title}</strong><span>{item.hook}</span></span>
-                        <span className="candidate-score"><small>制作潜力</small>{Math.round(item.score.final)}</span>
+                        <span className="candidate-score"><small>总编评分</small>{Math.round(item.editorialDecision.score)}</span>
                       </button>
                     ))}
                   </div>
                   {selected ? <CandidateDetail item={selected} adopting={props.adoptingId === selected.id} disabled={props.adoptingId !== undefined} onAdopt={() => adopt(selected)} /> : null}
                 </div>
-              ) : <div className="filtered-empty"><BookOpenText aria-hidden="true" size={22} /><span>当前筛选下没有候选。</span>{hasActiveFilters ? <button className="button button-secondary" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setVerdict("all"); }}>清除筛选</button> : null}</div>}
+              ) : <div className="filtered-empty"><BookOpenText aria-hidden="true" size={22} /><span>{deskView === "shortlist" ? "选题总编本轮没有推荐开拍的候选。" : "当前筛选下没有候选。"}</span>{hasActiveFilters ? <button className="button button-secondary" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("shortlist"); }}>清除筛选</button> : null}</div>}
             </>
           )}
         </div>
@@ -245,6 +250,7 @@ function SeriesRoadmap({
   const needsGreenlight = selectedEpisode?.planning.auditStatus !== "passed";
   const auditAvailabilityPending = needsGreenlight && seriesAuditReady === undefined;
   const auditUnavailable = needsGreenlight && seriesAuditReady === false;
+  const unsupportedProductionPlatform = !isProductionPlatform(series.platform);
   const linkedRunIds = new Set(series.episodes.flatMap((episode) => episode.runId ? [episode.runId] : []));
   const allLegacyCandidates = historicalRuns.filter((run) => run.status === "succeeded" && !linkedRunIds.has(run.id));
   const likelyLegacyCandidates = selectedEpisode
@@ -282,6 +288,10 @@ function SeriesRoadmap({
           <div><dt>固定规则</dt><dd>{series.bible.rules.slice(0, 2).join("；")}</dd></div>
         </dl>
       </section>
+
+      {unsupportedProductionPlatform ? (
+        <p className="series-lock-note" role="alert"><ShieldAlert aria-hidden="true" size={15} />这个历史系列使用的首发平台已不再支持新制作。请点击右上角“新建系列”，选择抖音、小红书或哔哩哔哩后迁移内容；原路线图仍可查看。</p>
+      ) : null}
 
       <div className="series-roadmap-body">
         <ol className="series-episode-list" aria-label="本季单集路线图">
@@ -326,7 +336,7 @@ function SeriesRoadmap({
             {selectedEpisode.status === "planned" ? (
               <div className="series-episode-actions">
                 <button className="button button-secondary" type="button" disabled={adoptingId !== undefined} onClick={() => setEditing(true)}><PencilLine aria-hidden="true" size={16} />编辑路线图</button>
-                <button className="button button-primary" type="button" disabled={!mayAdopt || adoptingId !== undefined || auditAvailabilityPending || auditUnavailable} onClick={() => selectedCandidate && void onAdopt(selectedCandidate)}>{adoptingId === selectedEpisode.id ? "正在复核..." : blockedBy ? `完成第 ${blockedBy} 集后解锁` : auditAvailabilityPending ? "正在确认复核能力" : auditUnavailable ? "开拍前复核未就绪" : needsGreenlight ? "先复核，再进入制作" : "采用本集并进入制作"}<ArrowRight aria-hidden="true" size={16} /></button>
+                <button className="button button-primary" type="button" disabled={!mayAdopt || adoptingId !== undefined || auditAvailabilityPending || auditUnavailable || unsupportedProductionPlatform} onClick={() => selectedCandidate && void onAdopt(selectedCandidate)}>{adoptingId === selectedEpisode.id ? "正在复核..." : unsupportedProductionPlatform ? "请先迁移到支持的平台" : blockedBy ? `完成第 ${blockedBy} 集后解锁` : auditAvailabilityPending ? "正在确认复核能力" : auditUnavailable ? "开拍前复核未就绪" : needsGreenlight ? "先复核，再进入制作" : "采用本集并进入制作"}<ArrowRight aria-hidden="true" size={16} /></button>
               </div>
             ) : isMigrationPendingEpisode(selectedEpisode) ? (
               <section className="series-legacy-recovery" aria-label="恢复历史单集">
@@ -417,6 +427,10 @@ function isMigrationPendingEpisode(episode: StudioSeries["episodes"][number]): b
   return episode.status === "paused" && !episode.runId && episode.planning.providerId === "series-store-migration-v2";
 }
 
+function isProductionPlatform(platform: string): boolean {
+  return platform === "douyin" || platform === "xiaohongshu" || platform === "bilibili";
+}
+
 function seriesEpisodeTitle(episode: StudioSeries["episodes"][number]): string {
   return isMigrationPendingEpisode(episode)
     ? `第 ${episode.episodeNumber} 集 · 历史成片待恢复`
@@ -451,7 +465,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt }: { item: StudioCa
   const blocked = item.verification.status === "blocked" || skipped;
   return (
     <article className="candidate-detail" aria-labelledby="candidate-detail-title">
-      <header><span>{item.origin === "series" ? `${item.seriesName} · 第 ${item.episodeNumber} 集` : `${TOPIC_CATEGORY_LABELS[item.category]}观察`}</span><strong aria-label={`制作潜力 ${Math.round(item.score.final)} 分`}><small>制作潜力</small>{Math.round(item.score.final)}</strong></header>
+      <header><span>{item.origin === "series" ? `${item.seriesName} · 第 ${item.episodeNumber} 集` : `${TOPIC_CATEGORY_LABELS[item.category]}观察`}</span><strong aria-label={`总编评分 ${Math.round(item.editorialDecision.score)} 分`}><small>总编评分</small>{Math.round(item.editorialDecision.score)}</strong></header>
       <h3 id="candidate-detail-title">{item.title}</h3>
       <blockquote>{item.hook}</blockquote>
       <p>{item.rationale}</p>
@@ -475,7 +489,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt }: { item: StudioCa
         <span title={item.providerId}><Sparkles aria-hidden="true" size={13} />{proposalSourceLabel(item.providerId)}</span>
       </div>
       <details className="candidate-score-explainer">
-        <summary>这条候选为什么是 {Math.round(item.score.final)} 分</summary>
+        <summary>总编评分依据 · {Math.round(item.editorialDecision.score)} 分</summary>
         <div>
           <span>受众 {Math.round(item.score.audienceReach)}</span>
           <span>画面 {Math.round(item.score.visualFeasibility)}</span>
@@ -487,10 +501,22 @@ function CandidateDetail({ item, adopting, disabled, onAdopt }: { item: StudioCa
         <p>总分综合内容机会与制作可行性；风险分越低越安全。证据强度表示当前信号热度或排名，不等同于事实可信度。</p>
       </details>
       <div className="candidate-evidence"><span>原始证据</span>{item.evidence.slice(0, 2).map((evidence, index) => evidence.evidenceUrl ? <a key={`${item.id}-${index}`} href={evidence.evidenceUrl} target="_blank" rel="noreferrer"><strong>{evidence.keyword}</strong><small>{evidence.source} · 强度 {evidence.strength}</small></a> : <div key={`${item.id}-${index}`}><strong>{evidence.keyword}</strong><small>{evidence.source} · 强度 {evidence.strength}</small></div>)}</div>
-      <div className={`candidate-verification is-${item.verification.status}`}><ShieldAlert aria-hidden="true" size={15} /><span><strong>{blocked ? "证据不足，暂不可采用" : item.verification.status === "review_required" ? "采用前需要你核验" : "可进入制作区"}</strong><small>{item.verification.reasons[0]}</small></span><output>{item.evidence.length} 条证据 · {item.verification.independentSources} 个独立源（需 {item.verification.requiredSources} 个）</output></div>
+      <div className={`candidate-verification is-${item.verification.status}`}><ShieldAlert aria-hidden="true" size={15} /><span><strong>{blocked ? "证据不足，暂不可采用" : item.verification.status === "review_required" ? "采用前需要你核验" : "可进入制作区"}</strong><small>{item.verification.reasons[0]}</small></span><output>{item.evidence.length} 条证据 · {item.verification.independentSources} 个有效来源域名（需 {item.verification.requiredSources} 个）</output></div>
       <button className="button button-primary candidate-adopt" data-tour="candidate-adopt" type="button" aria-label={`采用候选 ${item.title}`} disabled={disabled || blocked} onClick={() => void onAdopt()}>{adopting ? "正在采用..." : skipped ? "当前不建议生产" : item.verification.status === "blocked" ? "等待补充来源" : item.verification.status === "review_required" ? "核验后采用" : "采用到制作区"}<ArrowRight aria-hidden="true" size={16} /></button>
     </article>
   );
+}
+
+function isShortlisted(item: StudioCandidateInboxItem): boolean {
+  return item.editorialDecision.verdict !== "skip"
+    && item.verification.status !== "blocked"
+    && item.seriesSequence?.status !== "blocked";
+}
+
+function matchesDeskView(item: StudioCandidateInboxItem, view: TrendDeskView): boolean {
+  if (view === "shortlist") return isShortlisted(item);
+  if (view === "not_selected") return !isShortlisted(item);
+  return isShortlisted(item) && item.editorialDecision.verdict === view;
 }
 
 function editorialVerdictLabel(verdict: StudioEditorialVerdict): string {

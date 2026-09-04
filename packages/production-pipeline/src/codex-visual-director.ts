@@ -82,7 +82,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
       criteria: [
         "视觉圣经与题材、观众承诺、模板和参考语法一致",
         "每镜头的动作、逐秒节拍、构图、声音与验收条件可真实执行",
-        "素材 Provider、交付类型和能力约束完全匹配；方案费用可真实报价，费用反馈只作为重规划偏好",
+        "素材 Provider、交付类型和能力约束完全匹配；方案费用可真实报价，费用反馈用于优先降低成本，无法达到目标时仍须给出可执行方案供创作者决定",
         "相邻镜头连续性成立，生成式画面不被伪装为事实证据",
         "系列视觉母题、角色/声音锚点、canon 与前后集连续性得到保持",
         "返工时只处理分配给 visual-direction 的 findingId；当前节点可以说明已落实修改，但不得宣称问题已经复验通过",
@@ -217,7 +217,9 @@ function visualDirectorAuditContext(
         execution: "下游素材执行器直接复用已解析的更早镜头母片，不会重新搜索、生成或计费。",
         constraints: [
           "N 只能引用更早且可成功解析的导演镜头。",
-          "复用保持相同媒体内容，不会产生新的动作、光线变化或画面状态。",
+          "多级复用始终解析到同一个根母片，不能形成循环。",
+          "复用从母片开头使用相同媒体内容，不会产生新的动作、光线变化、后续片段或画面状态。",
+          "生成视频母片的真实长度按所选模型的最短/最长时长和整数秒规则归一化；复用镜头不得更长。",
         ],
       },
       assetProviders: input.assetProviders.map((provider) => ({
@@ -228,6 +230,9 @@ function visualDirectorAuditContext(
         strengths: provider.strengths,
         constraints: provider.constraints,
         estimatedCnyPerClip: provider.estimatedCnyPerClip,
+        ...(provider.selectedModelId ? { selectedModelId: provider.selectedModelId } : {}),
+        ...(provider.minDurationSeconds !== undefined ? { minDurationSeconds: provider.minDurationSeconds } : {}),
+        ...(provider.maxDurationSeconds !== undefined ? { maxDurationSeconds: provider.maxDurationSeconds } : {}),
       })),
       economics: input.economics,
     },
@@ -248,6 +253,16 @@ function validationFor(input: VisualDirectorAgentInput): VisualDirectorPlanValid
     ),
     estimatedCnyPerClip: Object.fromEntries(
       input.assetProviders.map((provider): [string, number] => [provider.id, provider.estimatedCnyPerClip]),
+    ),
+    selectedVideoModelDurationBounds: Object.fromEntries(
+      input.assetProviders.flatMap((provider): Array<[string, { minDurationSeconds: number; maxDurationSeconds: number }]> => (
+        provider.minDurationSeconds === undefined || provider.maxDurationSeconds === undefined
+          ? []
+          : [[provider.id, {
+              minDurationSeconds: provider.minDurationSeconds,
+              maxDurationSeconds: provider.maxDurationSeconds,
+            }]]
+      )),
     ),
     economics: input.economics,
   };

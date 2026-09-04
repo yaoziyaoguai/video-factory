@@ -78,7 +78,9 @@ export class CandidateInboxStudio {
       .filter((item) => !query.categories?.length || query.categories.includes(item.category))
       .filter((item) => !query.platforms?.length || query.platforms.includes(item.platform))
       .filter((item) => !query.verdicts?.length || query.verdicts.includes(item.editorialDecision.verdict))
-      .sort((left, right) => right.score.final - left.score.final || left.title.localeCompare(right.title, "zh-CN"));
+      .sort((left, right) => Number(isShortlisted(right)) - Number(isShortlisted(left))
+        || right.editorialDecision.score - left.editorialDecision.score
+        || left.title.localeCompare(right.title, "zh-CN"));
     const limit = Math.max(1, Math.min(200, Math.floor(query.limit ?? 100)));
     return { items: filtered.slice(0, limit), facets, generatedAt: this.now().toISOString() };
   }
@@ -205,7 +207,7 @@ function candidateVerification(
       status: "blocked",
       independentSources,
       requiredSources: 2,
-      reasons: ["当前总编规则要求至少 2 个独立且可打开的来源，补齐前不会进入制作推荐。"],
+      reasons: ["当前总编规则要求至少 2 个不同域名的有效原始来源链接，补齐前不会进入制作推荐。"],
     };
   }
   if (effectiveSourcePolicy === "traceable_source" && linkedSources < 1) {
@@ -213,7 +215,7 @@ function candidateVerification(
       status: "blocked",
       independentSources,
       requiredSources: 1,
-      reasons: ["当前总编规则要求至少 1 个可打开的原始来源，补齐前不会进入制作推荐。"],
+      reasons: ["当前总编规则要求至少 1 个格式有效的原始来源链接，补齐前不会进入制作推荐。"],
     };
   }
   if (risk === "high" && (independentSources < 2 || linkedSources < 2)) {
@@ -221,7 +223,7 @@ function candidateVerification(
       status: "blocked",
       independentSources,
       requiredSources: 2,
-      reasons: ["高风险热点至少需要 2 个独立来源和可打开的原始链接。"],
+      reasons: ["高风险热点至少需要 2 个不同域名的有效原始来源链接。"],
     };
   }
   if (risk === "high" || risk === "review") {
@@ -238,6 +240,12 @@ function candidateVerification(
     requiredSources: 1,
     reasons: ["常规风险候选，可进入制作区继续核验。"],
   };
+}
+
+function isShortlisted(item: StudioCandidateInboxItem): boolean {
+  return item.editorialDecision.verdict !== "skip"
+    && item.verification.status !== "blocked"
+    && item.seriesSequence?.status !== "blocked";
 }
 
 function traceableEvidenceIdentity(evidence: StudioOpportunityEvidence): string {

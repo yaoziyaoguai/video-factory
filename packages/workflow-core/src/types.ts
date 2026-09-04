@@ -300,6 +300,7 @@ export interface SpendQuote {
 }
 
 export interface SpendAuthorizationDraft {
+  spendPlanId: string;
   nodeId: string;
   inputVersionIds: string[];
   providerId: string;

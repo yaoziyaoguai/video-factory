@@ -115,6 +115,10 @@ describe("CodexBridgeClient", () => {
       prompt: "Prompt Pack: video-factory/screenwriter-v2\nactual prompt",
       providerId: "openai",
       modelId: "gpt-5.4",
+      providerWaitMs: 12_340,
+      firstOutputEventMs: 410,
+      toolMs: 0,
+      validationMs: 7,
       attemptedModelIds: ["glm-5.3", "gpt-5.4"],
       modelCandidateAttempts: [{
         modelId: "glm-5.3",
@@ -362,7 +366,16 @@ describe("CodexBridgeClient", () => {
   it("preserves an accepted transient provider classification without replaying the request", async () => {
     const bridge = await startBridge((_request, response) => {
       respondWithJson(response, 422, {
-        error: "Codex task failed transiently: the model service is temporarily unavailable.",
+        error: "The selected model is temporarily unavailable.",
+        failureKind: "model_provider_transient",
+        failureDetails: {
+          category: "rate_limited",
+          reasonCode: "1308",
+          requestIdHash: "a".repeat(64),
+          providerId: "zai-bigmodel-api",
+          modelId: "glm-5.3",
+          providerWaitMs: 37,
+        },
       });
     });
     try {
@@ -373,7 +386,17 @@ describe("CodexBridgeClient", () => {
         assert.equal(error.transient, false);
         assert.equal(error.stage, "completed_failure");
         assert.equal(error.statusCode, 422);
-        assert.match(error.message, /failed transiently.*temporarily unavailable/i);
+        assert.match(error.message, /temporarily unavailable/i);
+        assert.equal(error.creatorMessage, "模型请求过多，请稍后重试或选择其他模型。");
+        assert.deepEqual(error.failureDetails, {
+          category: "rate_limited",
+          reasonCode: "1308",
+          requestIdHash: "a".repeat(64),
+          providerId: "zai-bigmodel-api",
+          modelId: "glm-5.3",
+          providerWaitMs: 37,
+        });
+        assert.doesNotMatch(error.creatorMessage, /Agent|Codex bridge|host-only broker|socket/i);
         return true;
       });
       assert.equal(bridge.requests.length, 1);

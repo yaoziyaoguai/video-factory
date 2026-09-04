@@ -321,6 +321,46 @@ describe("CostStudio", () => {
     assert.equal(detail?.lines[0]?.meteredFailedAttemptCount, 1);
   });
 
+  it("attributes a routed media charge to the provider and model that actually generated it", async () => {
+    const studio = new CostStudio(async () => ([{
+      id: "run-routed-seedream",
+      executionReceipts: [{
+        id: "asset-router",
+        nodeId: "assets",
+        providerId: "ai-shot-router-v1",
+        modelId: "router-v1",
+        actualModelIds: ["doubao-seedream-4-0-250828"],
+        billing: "metered",
+        status: "succeeded",
+        spendAuthorizationId: "authorization-routed",
+        startedAt: "2026-08-28T12:00:00.000Z",
+        estimatedCostCny: 1.75,
+        authorizedCostCny: 2,
+        actualCostCny: 1.75,
+        actualCostSource: "configured_rate",
+        meteredAttemptCount: 1,
+      }],
+      spendAuthorizations: [{
+        id: "authorization-routed",
+        nodeId: "assets",
+        providerId: "ai-shot-router-v1",
+        modelId: "router-v1",
+        maxCostCny: 2,
+      }],
+    }]));
+
+    const dashboard = await studio.dashboard();
+    const detail = await studio.runDetail("run-routed-seedream");
+
+    assert.equal(dashboard.byProvider.find((item) => item.providerId === "seedream-image-v1")?.actualCostCny, 1.75);
+    assert.equal(dashboard.byProvider.some((item) => item.providerId === "ai-shot-router-v1"), false);
+    assert.equal(detail?.lines[0]?.providerId, "seedream-image-v1");
+    assert.equal(detail?.lines[0]?.modelId, "doubao-seedream-4-0-250828");
+    assert.equal(detail?.totals.actualCostCny, 1.75);
+    assert.equal(detail?.totals.authorizedCostCny, 2);
+    assert.equal(detail?.totals.meteredCalls, 1);
+  });
+
   it("does not infer a historical receipt failure from the node's latest status", async () => {
     const studio = new CostStudio(async () => ([{
       id: "run-5",

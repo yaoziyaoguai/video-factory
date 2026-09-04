@@ -57,16 +57,19 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
     if (!receipt) return [];
     const id = text(receipt.id) || `${text(receipt.nodeId)}:${text(receipt.startedAt)}:${index}`;
     const nodeId = text(receipt.nodeId);
-    const providerId = text(receipt.providerId);
-    const modelId = text(receipt.modelId) || text(receipt.model) || "unknown";
+    const receiptProviderId = text(receipt.providerId);
+    const receiptModelId = text(receipt.modelId) || text(receipt.model) || "unknown";
     const startedAt = text(receipt.startedAt);
-    if (!id || !nodeId || !providerId || !startedAt) return [];
+    if (!id || !nodeId || !receiptProviderId || !startedAt) return [];
+    const { providerId, modelId } = actualMediaAttribution(receipt, receiptProviderId, receiptModelId);
     const billing = billingType(receipt.billing);
     const receiptAuthorizationId = text(receipt.spendAuthorizationId);
     const authorization = [...authorizations].reverse().find((value) => {
       if (!isRecord(value)) return false;
       if (receiptAuthorizationId) return value.id === receiptAuthorizationId;
-      return value.nodeId === nodeId && value.providerId === providerId && (value.modelId === modelId || value.modelId === undefined);
+      return value.nodeId === nodeId
+        && value.providerId === receiptProviderId
+        && (value.modelId === receiptModelId || value.modelId === undefined);
     });
     const actualCost = nonNegativeNumber(receipt.actualCostCny);
     const actualCostSource = receipt.actualCostSource === "provider_reported" || receipt.actualCostSource === "configured_rate"
@@ -131,6 +134,34 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
     }];
   }).sort((left, right) => left.startedAt.localeCompare(right.startedAt));
   return { runId: run.id, title, totals: totals(lines), lines };
+}
+
+function actualMediaAttribution(
+  receipt: Record<string, unknown>,
+  providerId: string,
+  modelId: string,
+): { providerId: string; modelId: string } {
+  if (providerId !== "ai-shot-router-v1" || !Array.isArray(receipt.actualModelIds)) {
+    return { providerId, modelId };
+  }
+  const actualModelIds = [...new Set(receipt.actualModelIds.map(text).filter(Boolean))];
+  const providers = actualModelIds.map(actualMediaProviderId);
+  if (actualModelIds.length === 0 || providers.some((value) => value === undefined)) {
+    return { providerId, modelId };
+  }
+  const uniqueProviders = [...new Set(providers as string[])];
+  if (uniqueProviders.length !== 1) return { providerId, modelId };
+  return { providerId: uniqueProviders[0]!, modelId: actualModelIds.join("、") };
+}
+
+function actualMediaProviderId(modelId: string): string | undefined {
+  if (["seedream-image-v1", "seedance-video-v1", "hailuo-video-v1", "wan-video-v1"].includes(modelId)) return modelId;
+  const normalized = modelId.toLocaleLowerCase();
+  if (normalized.startsWith("doubao-seedream-")) return "seedream-image-v1";
+  if (normalized.startsWith("doubao-seedance-") || normalized.includes("seedance")) return "seedance-video-v1";
+  if (normalized.startsWith("minimax-hailuo-") || normalized.startsWith("minimax-h3") || normalized.includes("hailuo")) return "hailuo-video-v1";
+  if (normalized.startsWith("wan")) return "wan-video-v1";
+  return undefined;
 }
 
 function uncertainReceipt(value: unknown, authorizations: unknown[]): Record<string, unknown>[] {

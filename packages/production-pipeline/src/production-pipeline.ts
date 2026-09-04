@@ -114,6 +114,7 @@ export interface ProductionPaidNodeReconciliationDraft {
   expectedRunRevision: number;
   reconciliationId: string;
   outcome: "resume_original" | "requote" | "confirmed_not_charged" | "confirmed_charged";
+  itemRequestId?: string;
   taskId?: string;
   actor?: string;
   note?: string;
@@ -150,6 +151,7 @@ interface PaidNodeReconciliationRecord {
   reconciliationId: string;
   nodeId: string;
   outcome: ProductionPaidNodeReconciliationDraft["outcome"];
+  itemRequestId?: string;
   taskId?: string;
   actor?: string;
   note?: string;
@@ -255,6 +257,14 @@ function withPersistedBrief(
   brief: ProductionBrief,
 ): WorkflowRun<ProductionBrief> {
   return { ...run, initialInput: brief };
+}
+
+function withExecutableBrief(
+  run: WorkflowRun<ProductionBrief>,
+  brief: ProductionBrief,
+): WorkflowRun<ProductionBrief> {
+  parseBrief(brief);
+  return withPersistedBrief(run, brief);
 }
 
 const INTERRUPTED_RUN_ERROR = "应用重启中断了这次制作，请重新发起制作。已完成的产物仍保留在本次记录中。";
@@ -424,10 +434,14 @@ export class ProductionPipeline {
         await this.store.update<ProductionBrief>(run.id, async (current) => {
           const finishedAt = this.clock();
           const runningNodeIndex = current.nodeRuns.findIndex((node) => node.status === "running");
+          const pendingNodeIndex = runningNodeIndex < 0
+            ? current.nodeRuns.findIndex((node) => node.status === "pending")
+            : -1;
+          const activeNodeIndex = runningNodeIndex >= 0 ? runningNodeIndex : pendingNodeIndex;
           const nodeRuns = current.nodeRuns.map((node) => ({ ...node }));
-          if (runningNodeIndex >= 0) {
-            const interruptedNode = nodeRuns[runningNodeIndex]!;
-            nodeRuns[runningNodeIndex] = {
+          if (activeNodeIndex >= 0) {
+            const interruptedNode = nodeRuns[activeNodeIndex]!;
+            nodeRuns[activeNodeIndex] = {
               ...interruptedNode,
               status: "failed",
               interrupted: true,
@@ -600,7 +614,7 @@ export class ProductionPipeline {
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
         shouldPause: () => this.consumePauseRequest(runId),
       });
-      return runner.resume(this.createWorkflow(brief, decision), withPersistedBrief(previous, brief), decision);
+      return runner.resume(this.createWorkflow(brief, decision), withExecutableBrief(previous, brief), decision);
     }, listener);
   }
 
@@ -616,7 +630,7 @@ export class ProductionPipeline {
         clock: this.clock,
         idFactory: this.idFactory,
       });
-      return runner.applyNodeOverride(this.createWorkflow(brief), withPersistedBrief(previous, brief), effectiveOverride);
+      return runner.applyNodeOverride(this.createWorkflow(brief), withExecutableBrief(previous, brief), effectiveOverride);
     });
   }
 
@@ -639,7 +653,12 @@ export class ProductionPipeline {
     const scenes = parseDirectorScenes(script.scenes);
     const plan = validateVisualDirectorPlan(
       JSON.parse(await readFile(submittedPath, "utf8")) as unknown,
-      visualDirectorPlanValidation(currentBrief, scenes, this.options.assetProviders ?? []),
+      visualDirectorPlanValidation(
+        currentBrief,
+        scenes,
+        this.options.assetProviders ?? [],
+        this.options.providerRuntimeMetadata ?? [],
+      ),
     );
 
     const attempt = await reserveAttemptDirectory(path.join(
@@ -685,7 +704,7 @@ export class ProductionPipeline {
         clock: this.clock,
         idFactory: this.idFactory,
       });
-      return runner.applyNodeInputOverride(this.createWorkflow(brief), withPersistedBrief(previous, brief), override);
+      return runner.applyNodeInputOverride(this.createWorkflow(brief), withExecutableBrief(previous, brief), override);
     });
   }
 
@@ -834,7 +853,7 @@ export class ProductionPipeline {
         clock: this.clock,
         idFactory: this.idFactory,
       });
-      const revised = runner.applyNodeRevision(definition, withPersistedBrief(previous, brief), {
+      const revised = runner.applyNodeRevision(definition, withExecutableBrief(previous, brief), {
         nodeId: "assets",
         actor: draft.actor.trim(),
         output: {
@@ -924,7 +943,7 @@ export class ProductionPipeline {
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
         shouldPause: () => this.consumePauseRequest(runId),
       });
-      return runner.authorizeSpend(this.createWorkflow(brief), withPersistedBrief(previous, brief), authorization);
+      return runner.authorizeSpend(this.createWorkflow(brief), withExecutableBrief(previous, brief), authorization);
     }, listener);
   }
 
@@ -963,6 +982,11 @@ export class ProductionPipeline {
         || (waitingNode.status !== "awaiting_spend_approval" && waitingNode.status !== "approval_invalidated")) {
         throw new Error("Spend rejection does not match the active quote.");
       }
+      if (rejection.reason === "too_expensive"
+        && rejection.targetEstimatedCostCny !== undefined
+        && rejection.targetEstimatedCostCny >= plan.estimatedCostCny) {
+        throw new Error("Spend rejection target estimate must be lower than the active quote.");
+      }
       const nextBrief = parseBrief({
         ...brief,
         spendFeedback: [
@@ -990,7 +1014,7 @@ export class ProductionPipeline {
       });
       const stale = runner.applyExecutionConfigurationOverride(
         this.createWorkflow(nextBrief),
-        withPersistedBrief(previous, brief),
+        withExecutableBrief(previous, brief),
         { nodeId: "visual-direction", actor: rejection.rejectedBy.trim(), initialInput: nextBrief },
       );
       return stale;
@@ -1015,7 +1039,7 @@ export class ProductionPipeline {
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
         shouldPause: () => this.consumePauseRequest(runId),
       });
-      return runner.resumeStale(this.createWorkflow(brief), withPersistedBrief(previous, brief));
+      return runner.resumeStale(this.createWorkflow(brief), withExecutableBrief(previous, brief));
     }, listener);
   }
 
@@ -1043,6 +1067,13 @@ export class ProductionPipeline {
       throw new Error("A provider task id can only resume the original paid operation.");
     }
     const manualResolution = draft.outcome === "confirmed_not_charged" || draft.outcome === "confirmed_charged";
+    const itemRequestId = draft.itemRequestId?.trim();
+    if (draft.itemRequestId !== undefined && (!itemRequestId || itemRequestId.length > 256)) {
+      throw new Error("Paid reconciliation item request id must contain between 1 and 256 characters.");
+    }
+    if (itemRequestId && (draft.nodeId !== "assets" || !manualResolution)) {
+      throw new Error("A paid item can only be selected when manually reconciling an asset operation.");
+    }
     const actor = draft.actor?.trim();
     const note = draft.note?.trim();
     if (manualResolution && (!actor || actor.length > 160)) {
@@ -1074,6 +1105,7 @@ export class ProductionPipeline {
         existingRecord.reconciliationId !== draft.reconciliationId.trim()
         || existingRecord.nodeId !== draft.nodeId
         || existingRecord.outcome !== draft.outcome
+        || existingRecord.itemRequestId !== itemRequestId
         || existingRecord.taskId !== taskId
         || existingRecord.expectedRunRevision !== draft.expectedRunRevision
         || existingRecord.actor !== actor
@@ -1124,6 +1156,35 @@ export class ProductionPipeline {
       let voiceOperation = operationId && draft.nodeId === "voice"
         ? await readPaidVoiceOperation(nodeDirectory, operationId)
         : undefined;
+      let manualAssetItem: PaidAssetLedgerItemSummary | undefined;
+      let manualAssetItemAlreadyResolved = false;
+      if (manualResolution && draft.nodeId === "assets" && items.length > 0) {
+        if (!itemRequestId) {
+          throw new Error("人工核对素材账单时必须选择一个具体镜头，不能整批标记。");
+        }
+        const matchingItems = items.filter((item) => item.itemRequestId === itemRequestId);
+        if (matchingItems.length !== 1) {
+          throw new Error(`Paid reconciliation item '${itemRequestId}' does not uniquely identify an item in the active operation.`);
+        }
+        const matchingItem = matchingItems[0]!;
+        manualAssetItem = matchingItem;
+        const expectedResolutionError = draft.outcome === "confirmed_charged"
+          ? confirmedChargedAssetItemError(draft.reconciliationId.trim())
+          : confirmedNotChargedAssetItemError(draft.reconciliationId.trim());
+        manualAssetItemAlreadyResolved = Boolean(existingRecord
+          && matchingItem.state === "terminal_failed"
+          && (existingRecord.actualCostCny === undefined
+            ? matchingItem.actualCostCny === undefined
+            : matchingItem.actualCostCny === roundCurrency(existingRecord.actualCostCny))
+          && matchingItem.error === expectedResolutionError);
+        if (!manualAssetItemAlreadyResolved && !paidAssetItemNeedsManualReconciliation(matchingItem)) {
+          throw new Error(
+            `Paid item '${itemRequestId}' has a recoverable result or is not awaiting manual charge reconciliation.`,
+          );
+        }
+      } else if (itemRequestId) {
+        throw new Error(`Paid reconciliation item '${itemRequestId}' is not present in the active operation.`);
+      }
       let resumeOriginalOperation = false;
       if (draft.outcome === "resume_original" || draft.outcome === "requote") {
         if (!operationId) {
@@ -1146,7 +1207,7 @@ export class ProductionPipeline {
             && !item.taskId
             && (!taskId || item.itemRequestId !== missingTaskItems[0]?.itemRequestId)
           ) || (
-            item.state === "provider_succeeded" && (!item.taskId || !item.resultUrl)
+            item.state === "provider_succeeded" && !item.taskId
           ));
           if (missingQueryableTask) {
             throw new PaidOperationManualReconciliationError(draft.nodeId, items);
@@ -1173,16 +1234,25 @@ export class ProductionPipeline {
         }
       }
       const confirmedActualCostCny = draft.outcome === "confirmed_charged"
-        ? draft.actualCostCny ?? originalPaidEstimate(previous, previousNode)
+        ? draft.actualCostCny
+          ?? manualAssetItem?.estimatedCostCny
+          ?? originalPaidEstimate(previous, previousNode)
         : undefined;
       if (draft.outcome === "confirmed_charged" && confirmedActualCostCny === undefined) {
         throw new Error("Paid reconciliation actual cost is required because the original estimate is unavailable.");
       }
+      const settlementActualCostSource = (
+        draft.outcome === "confirmed_charged" && draft.actualCostCny !== undefined
+        || previousNode.executionReceipt?.actualCostSource === "provider_reported"
+      )
+        ? "provider_reported"
+        : "configured_rate";
       const reconciliationRecord: PaidNodeReconciliationRecord = existingRecord ?? {
         version: "video-factory/paid-reconciliation-v1",
         reconciliationId: draft.reconciliationId.trim(),
         nodeId: draft.nodeId,
         outcome: draft.outcome,
+        ...(itemRequestId ? { itemRequestId } : {}),
         ...(taskId ? { taskId } : {}),
         ...(actor ? { actor } : {}),
         ...(note ? { note } : {}),
@@ -1196,7 +1266,19 @@ export class ProductionPipeline {
         await this.assertExecutionLease(lease);
         await writePaidNodeReconciliationRecord(recordPath, reconciliationRecord);
       }
-      if (draft.outcome === "confirmed_charged") {
+      if (draft.outcome === "confirmed_charged" && manualAssetItem && operationId) {
+        if (!manualAssetItemAlreadyResolved) {
+          await this.assertExecutionLease(lease);
+          await markPaidAssetItemCharged(
+            nodeDirectory,
+            operationId,
+            manualAssetItem.itemRequestId,
+            reconciliationRecord.reconciliationId,
+            confirmedActualCostCny!,
+          );
+        }
+        items = (await inspectPaidAssetLedger(nodeDirectory)).filter((item) => item.operationId === operationId);
+      } else if (draft.outcome === "confirmed_charged") {
         const result = applyConfirmedChargedResolution(
           previous,
           draft.nodeId,
@@ -1220,9 +1302,16 @@ export class ProductionPipeline {
         await this.assertExecutionLease(lease);
         items = await attachPaidAssetTaskId(nodeDirectory, operationId, taskId, items);
       }
-      if (draft.outcome === "confirmed_not_charged" && operationId && items.length > 0) {
-        await this.assertExecutionLease(lease);
-        await markPaidAssetItemsNotCharged(nodeDirectory, operationId);
+      if (draft.outcome === "confirmed_not_charged" && operationId && manualAssetItem) {
+        if (!manualAssetItemAlreadyResolved) {
+          await this.assertExecutionLease(lease);
+          await markPaidAssetItemNotCharged(
+            nodeDirectory,
+            operationId,
+            manualAssetItem.itemRequestId,
+            reconciliationRecord.reconciliationId,
+          );
+        }
         items = (await inspectPaidAssetLedger(nodeDirectory)).filter((item) => item.operationId === operationId);
       }
       if (draft.outcome === "confirmed_not_charged" && voiceOperation) {
@@ -1230,37 +1319,80 @@ export class ProductionPipeline {
         voiceOperation = await markPaidVoiceItemsNotCharged(nodeDirectory, voiceOperation);
         resumeOriginalOperation = true;
       }
+      if (manualAssetItem && items.some((item) => (
+        item.itemRequestId !== manualAssetItem.itemRequestId
+        && (
+          (item.state === "submitted" || item.state === "unknown") && Boolean(item.taskId)
+          || item.state === "provider_succeeded" && Boolean(item.taskId) && !item.resultUrl
+        )
+      ))) {
+        resumeOriginalOperation = true;
+      }
       const retrySource = structuredClone(previous);
       const settlement = draft.nodeId === "assets"
         ? paidAssetSettlement(items)
         : draft.nodeId === "voice" && voiceOperation
           ? paidVoiceSettlement(voiceOperation)
-          : { actualCostCny: 0, meteredAttemptCount: 0 };
+          : { actualCostCny: 0, meteredAttemptCount: 0, meteredFailedAttemptCount: 0 };
       settlePaidOperationReceipt(
         retrySource,
         draft.nodeId,
         operationId,
         settlement.actualCostCny,
         settlement.meteredAttemptCount,
+        settlement.meteredFailedAttemptCount,
         this.clock(),
+        settlementActualCostSource,
       );
       const retryNode = retrySource.nodeRuns.find((node) => node.nodeId === draft.nodeId)!;
-      delete retryNode.outcomeUncertain;
+      const remainingManualAssetItems = manualAssetItem
+        ? items.filter((item) => paidAssetItemNeedsManualReconciliation(item))
+        : [];
+      if (remainingManualAssetItems.length > 0) {
+        const authorizationId = retryNode.spendAuthorizationId;
+        if (authorizationId) {
+          const consumed = (retrySource.consumedSpendAuthorizationIds ??= []);
+          if (!consumed.includes(authorizationId)) consumed.push(authorizationId);
+        }
+        delete retryNode.spendAuthorizationId;
+        retryNode.status = "failed";
+        retryNode.operationRequestId = operationId!;
+        retryNode.outcomeUncertain = true;
+        retryNode.interrupted = true;
+        retrySource.revision += 1;
+        retrySource.status = "failed";
+        retrySource.finishedAt = this.clock();
+        await this.assertExecutionLease(lease);
+        await this.store.save(retrySource, previous.revision);
+        await this.assertExecutionLease(lease);
+        await writePaidNodeReconciliationRecord(recordPath, {
+          ...reconciliationRecord,
+          status: "completed",
+          resultingRunRevision: retrySource.revision,
+        });
+        return retrySource;
+      }
       if (resumeOriginalOperation) {
         retryNode.interrupted = true;
       } else {
+        delete retryNode.outcomeUncertain;
         delete retryNode.interrupted;
         delete retryNode.operationRequestId;
       }
 
       const brief = parsePersistedBrief(retrySource.initialInput);
       let persisted = false;
+      let persistedRevision = previous.revision;
       const checkpoint = async (run: WorkflowRun<ProductionBrief>) => {
         await this.assertExecutionLease(lease);
-        if (!persisted) {
-          await this.store.save(run, previous.revision);
+        if (run.revision === persistedRevision + 1) {
+          await this.store.save(run, persistedRevision);
           persisted = true;
+          persistedRevision = run.revision;
           return;
+        }
+        if (run.revision !== persistedRevision) {
+          throw new StaleRunRevisionError(run.id, run.revision, persistedRevision);
         }
         await this.store.checkpoint(run);
       };
@@ -1271,11 +1403,78 @@ export class ProductionPipeline {
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
         shouldPause: () => this.consumePauseRequest(runId),
       });
-      const result = await runner.retryFailedNode(
+      let result = await runner.retryFailedNode(
         this.createWorkflow(brief),
-        withPersistedBrief(retrySource, brief),
+        withExecutableBrief(retrySource, brief),
         draft.nodeId,
+        resumeOriginalOperation ? { resumeUncertainOperation: true } : undefined,
       );
+      if (draft.nodeId === "assets" && operationId && resumeOriginalOperation) {
+        items = (await inspectPaidAssetLedger(nodeDirectory)).filter((item) => item.operationId === operationId);
+        const hasManualTerminalItem = items.some((item) => (
+          item.state === "terminal_failed"
+          && item.error?.startsWith("Manual reconciliation '")
+        ));
+        const unresolvedItems = items.filter((item) => (
+          item.state === "submitted"
+          || item.state === "unknown"
+          || item.state === "provider_succeeded" && (!item.taskId || !item.resultUrl)
+        ));
+        const recoveryNode = result.nodeRuns.find((node) => node.nodeId === draft.nodeId);
+        if (unresolvedItems.length > 0 && recoveryNode?.status === "failed") {
+          const lockedNode = recoveryNode;
+          const updatedSettlement = paidAssetSettlement(items);
+          settlePaidOperationReceipt(
+            result,
+            draft.nodeId,
+            operationId,
+            updatedSettlement.actualCostCny,
+            updatedSettlement.meteredAttemptCount,
+            updatedSettlement.meteredFailedAttemptCount,
+            this.clock(),
+            settlementActualCostSource,
+          );
+          lockedNode.status = "failed";
+          lockedNode.operationRequestId = operationId;
+          lockedNode.outcomeUncertain = true;
+          lockedNode.interrupted = true;
+          result.status = "failed";
+          result.finishedAt ??= this.clock();
+          await this.assertExecutionLease(lease);
+          await this.store.checkpoint(result);
+        } else if (hasManualTerminalItem && unresolvedItems.length === 0 && recoveryNode?.status === "failed") {
+          const completedRecoveryNode = recoveryNode;
+          const readyForRequote = items.length > 0 && items.every((item) => (
+            item.state === "materialized"
+            || item.state === "provider_succeeded" && Boolean(item.taskId) && Boolean(item.resultUrl)
+            || item.state === "terminal_failed"
+          ));
+          if (!completedRecoveryNode || completedRecoveryNode.status !== "failed" || !readyForRequote) {
+            throw new Error("Paid asset recovery did not reach a safe state for a new quote.");
+          }
+          const requoteSource = structuredClone(result);
+          const updatedSettlement = paidAssetSettlement(items);
+          settlePaidOperationReceipt(
+            requoteSource,
+            draft.nodeId,
+            operationId,
+            updatedSettlement.actualCostCny,
+            updatedSettlement.meteredAttemptCount,
+            updatedSettlement.meteredFailedAttemptCount,
+            this.clock(),
+            settlementActualCostSource,
+          );
+          const requoteNode = requoteSource.nodeRuns.find((node) => node.nodeId === draft.nodeId)!;
+          delete requoteNode.outcomeUncertain;
+          delete requoteNode.interrupted;
+          delete requoteNode.operationRequestId;
+          result = await runner.retryFailedNode(
+            this.createWorkflow(brief),
+            withExecutableBrief(requoteSource, brief),
+            draft.nodeId,
+          );
+        }
+      }
       if (!persisted) {
         await this.assertExecutionLease(lease);
         await this.store.save(result, previous.revision);
@@ -1325,20 +1524,14 @@ export class ProductionPipeline {
       nodeDirectory,
     )).filter((item) => item.operationId === operationId);
     const effectiveItems = isTrustedPreSubmissionAssetRejection(node, ledgerItems)
-      ? ledgerItems.map((item) => item.state === "unknown" && !item.taskId
-        ? { ...item, state: "terminal_failed" as const, actualCostCny: undefined, actualCostSource: undefined }
-        : item)
+      ? ledgerItems.map((item) => {
+          if (item.state !== "unknown" || item.taskId) return item;
+          const { actualCostCny: _actualCostCny, actualCostSource: _actualCostSource, ...rest } = item;
+          return { ...rest, state: "terminal_failed" as const };
+        })
       : ledgerItems;
-    const requiresManualReconciliation = effectiveItems.length === 0 || effectiveItems.some((item) => (
-      (item.state === "submitted" || item.state === "unknown") && !item.taskId
-    ) || (
-      item.state === "provider_succeeded" && (!item.taskId || !item.resultUrl)
-    ));
-    const resumeOriginalOperation = effectiveItems.some((item) => (
-      item.state === "submitted"
-      || item.state === "provider_succeeded"
-      || item.state === "unknown"
-    )) || effectiveItems.every((item) => item.state === "materialized");
+    const requiresManualReconciliation = paidAssetOperationNeedsManualReconciliation(effectiveItems);
+    const resumeOriginalOperation = canResumePaidAssetOperation(effectiveItems);
     return {
       nodeId,
       operationId,
@@ -1383,7 +1576,7 @@ export class ProductionPipeline {
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
         shouldPause: () => this.consumePauseRequest(runId),
       });
-      return runner.retryFailedNode(this.createWorkflow(brief), withPersistedBrief(previous, brief), nodeId);
+      return runner.retryFailedNode(this.createWorkflow(brief), withExecutableBrief(previous, brief), nodeId);
     }, listener);
   }
 
@@ -1406,7 +1599,7 @@ export class ProductionPipeline {
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
         shouldPause: () => this.consumePauseRequest(runId),
       });
-      return runner.resumePaused(this.createWorkflow(brief), withPersistedBrief(previous, brief));
+      return runner.resumePaused(this.createWorkflow(brief), withExecutableBrief(previous, brief));
     }, listener);
   }
 
@@ -1526,14 +1719,22 @@ export class ProductionPipeline {
       if (!screenwriterAgent || screenwriterAgent.id !== brief.providers.script) {
         throw new Error(`Script provider '${brief.providers.script}' is not configured.`);
       }
-      registry.register(new ScreenwriterProvider(screenwriterAgent));
+      registry.register(new ScreenwriterProvider(
+        screenwriterAgent,
+        brief.models?.[brief.providers.script],
+        modelSourceFor(brief, brief.providers.script),
+      ));
     }
     if (brief.director) {
       const directorAgent = this.options.directorAgent;
       if (!directorAgent || directorAgent.id !== brief.providers.director) {
         throw new Error(`Director provider '${brief.providers.director}' is not configured.`);
       }
-      registry.register(new VisualDirectorProvider(directorAgent));
+      registry.register(new VisualDirectorProvider(
+        directorAgent,
+        brief.models?.[brief.providers.director],
+        modelSourceFor(brief, brief.providers.director),
+      ));
     }
     if (brief.providers.visualReview) {
       const visualReviewAgent = [
@@ -2248,17 +2449,20 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   readonly label = "Codex 视觉导演";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly configurationSource = "system_default" as const;
   readonly parameters = { promptPack: "video-factory/director-v11" };
 
-  constructor(private readonly agent: VisualDirectorAgent) {}
+  constructor(
+    private readonly agent: VisualDirectorAgent,
+    private readonly selectedModelId: string | undefined,
+    readonly configurationSource: ExecutionConfigurationSource,
+  ) {}
 
   get id(): string {
     return this.agent.id;
   }
 
   get modelId(): string {
-    return this.agent.modelId ?? "codex-default";
+    return this.selectedModelId ?? this.agent.modelId ?? "codex-default";
   }
 
   async run(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<unknown>> {
@@ -2273,17 +2477,20 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTask
   readonly label = "Codex 编剧";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly configurationSource = "system_default" as const;
   readonly parameters = { promptPack: "video-factory/screenwriter-v5" };
 
-  constructor(private readonly agent: ScreenwriterAgent) {}
+  constructor(
+    private readonly agent: ScreenwriterAgent,
+    private readonly selectedModelId: string | undefined,
+    readonly configurationSource: ExecutionConfigurationSource,
+  ) {}
 
   get id(): string {
     return this.agent.id;
   }
 
   get modelId(): string {
-    return this.agent.modelId ?? "codex-default";
+    return this.selectedModelId ?? this.agent.modelId ?? "codex-default";
   }
 
   async run(input: ScreenwriterAgentInput): Promise<CodexTaskExecution<unknown>> {
@@ -2585,6 +2792,11 @@ function directorNode(
       const assetProviders = currentDirection.assetProviderIds.map((id) => {
         const provider = catalog.get(id);
         if (!provider) throw new Error(`Asset provider '${id}' is not available to the AI director.`);
+        const selectedVideoModel = selectedVideoModelRuntime(
+          currentBrief,
+          provider.id,
+          options.providerRuntimeMetadata ?? [],
+        );
         return {
           id: provider.id,
           label: provider.label,
@@ -2594,6 +2806,11 @@ function directorNode(
           strengths: [...(provider.strengths ?? provider.modes)],
           constraints: [...(provider.constraints ?? [])],
           estimatedCnyPerClip: provider.estimatedCnyPerClip ?? 0,
+          ...(selectedVideoModel ? {
+            selectedModelId: selectedVideoModel.modelId,
+            minDurationSeconds: selectedVideoModel.minDurationSeconds,
+            maxDurationSeconds: selectedVideoModel.maxDurationSeconds,
+          } : {}),
         };
       });
       const provider = context.resolveProvider<VisualDirectorAgentInput, CodexTaskExecution<unknown>>({
@@ -2685,7 +2902,12 @@ function directorNode(
       }
       const plan = validateVisualDirectorPlan(
         execution.output,
-        visualDirectorPlanValidation(currentBrief, scenes, options.assetProviders ?? []),
+        visualDirectorPlanValidation(
+          currentBrief,
+          scenes,
+          options.assetProviders ?? [],
+          options.providerRuntimeMetadata ?? [],
+        ),
       );
       const planPath = path.join(attempt.directory, "director_plan.json");
       const content = `${JSON.stringify(plan, null, 2)}\n`;
@@ -2707,7 +2929,7 @@ function directorNode(
       return {
         status: "succeeded",
         output: { directorPlanPath: planPath },
-        ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, "Codex 视觉导演", "subscription", execution.agentLoop) } : {}),
+        ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, "Codex 视觉导演", "subscription", execution.agentLoop, provider.configurationSource) } : {}),
         artifacts: [fileArtifact(
           "storyboard",
           planPath,
@@ -2860,7 +3082,7 @@ function screenwriterNode(
       return {
         status: "succeeded",
         output: { scriptPath, canonFacts: draft.canonFacts ?? [] },
-        ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, "Codex 编剧", "subscription", execution.agentLoop) } : {}),
+        ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, "Codex 编剧", "subscription", execution.agentLoop, provider.configurationSource) } : {}),
         artifacts: [fileArtifact(
           "script",
           scriptPath,
@@ -3054,6 +3276,7 @@ function visualDirectorPlanValidation(
   brief: ProductionBrief,
   scenes: VisualDirectorAgentInput["scenes"],
   catalog: VisualAssetProviderCapability[],
+  runtimeMetadata: ProductionProviderRuntimeMetadata[] = [],
 ): Parameters<typeof validateVisualDirectorPlan>[1] {
   const direction = brief.director;
   if (!direction) throw new Error("AI director configuration is incomplete.");
@@ -3074,8 +3297,35 @@ function visualDirectorPlanValidation(
     estimatedCnyPerClip: Object.fromEntries(
       selectedProviders.map((provider) => [provider.id, provider.estimatedCnyPerClip ?? 0]),
     ),
+    selectedVideoModelDurationBounds: Object.fromEntries(
+      selectedProviders.flatMap((provider): Array<[string, { minDurationSeconds: number; maxDurationSeconds: number }]> => {
+        const selected = selectedVideoModelRuntime(brief, provider.id, runtimeMetadata);
+        return selected ? [[provider.id, {
+          minDurationSeconds: selected.minDurationSeconds,
+          maxDurationSeconds: selected.maxDurationSeconds,
+        }]] : [];
+      }),
+    ),
     economics: { allowMeteredProviders: brief.economics.allowMeteredProviders },
   };
+}
+
+function selectedVideoModelRuntime(
+  brief: ProductionBrief,
+  providerId: string,
+  runtimeMetadata: ProductionProviderRuntimeMetadata[],
+): { modelId: string; minDurationSeconds: number; maxDurationSeconds: number } | undefined {
+  const provider = runtimeMetadata.find((candidate) => candidate.id === providerId);
+  if (!provider?.modelProfiles?.length) return undefined;
+  const modelId = brief.models?.[providerId] ?? provider.modelId;
+  const profile = provider.modelProfiles.find((candidate) => candidate.modelId === modelId);
+  return profile?.minDurationSeconds === undefined || profile.maxDurationSeconds === undefined
+    ? undefined
+    : {
+        modelId,
+        minDurationSeconds: profile.minDurationSeconds,
+        maxDurationSeconds: profile.maxDurationSeconds,
+      };
 }
 
 function visualStrategy(value: unknown): VisualDirectorAgentInput["scenes"][number]["visualStrategy"] {
@@ -3985,6 +4235,7 @@ function modelTraceReceipt(
   providerLabel: string,
   billing: "subscription" | "metered",
   loop?: AgentLoopTrace,
+  configurationSource: ExecutionConfigurationSource = "system_default",
 ): NodeExecutionReceiptDraft {
   return {
     providerId: trace.providerId,
@@ -3992,10 +4243,14 @@ function modelTraceReceipt(
     modelId: trace.modelId,
     transport: "unix_socket",
     billing,
-    configurationSource: "system_default",
+    configurationSource,
     parameters: {
       promptPack: trace.promptVersion,
       ...(trace.reasoningEffort ? { reasoningEffort: trace.reasoningEffort } : {}),
+      ...(trace.providerWaitMs !== undefined ? { providerWaitMs: trace.providerWaitMs } : {}),
+      ...(trace.firstOutputEventMs !== undefined ? { firstOutputEventMs: trace.firstOutputEventMs } : {}),
+      ...(trace.toolMs !== undefined ? { toolMs: trace.toolMs } : {}),
+      ...(trace.validationMs !== undefined ? { providerValidationMs: trace.validationMs } : {}),
       ...(loop ? {
         agentLoop: loop.status,
         agentLoopIterations: loop.iterations.length,
@@ -4003,6 +4258,10 @@ function modelTraceReceipt(
         modelCallCount: Math.max(1, loop.modelCallCount ?? loop.iterations.length * 2 + (loop.pendingCandidate ? 1 : 0)),
         producerModelCallCount: loop.producerModelCallCount ?? loop.iterations.length + (loop.pendingCandidate ? 1 : 0),
         auditModelCallCount: loop.auditModelCallCount ?? loop.iterations.length,
+        ...(loop.producerMs !== undefined ? { producerMs: loop.producerMs } : {}),
+        ...(loop.auditMs !== undefined ? { auditMs: loop.auditMs } : {}),
+        ...(loop.validationMs !== undefined ? { loopValidationMs: loop.validationMs } : {}),
+        ...(loop.retryCount !== undefined ? { retryCount: loop.retryCount } : {}),
       } : {}),
     },
     ...(trace.fallbackFromModelId ? { fallbackReason: trace.fallbackReason ?? `首选模型 ${trace.fallbackFromModelId} 调用失败，已切换候选模型。` } : {}),
@@ -4517,7 +4776,13 @@ async function failedAgentLoopNodeResult(options: {
     parentArtifactIds: options.parentArtifactIds,
   });
   const receipt = options.error.lastTrace
-    ? modelTraceReceipt(options.error.lastTrace, options.providerLabel, options.provider.billing === "metered" ? "metered" : "subscription", options.error.agentLoop)
+    ? modelTraceReceipt(
+        options.error.lastTrace,
+        options.providerLabel,
+        options.provider.billing === "metered" ? "metered" : "subscription",
+        options.error.agentLoop,
+        options.provider.configurationSource ?? "system_default",
+      )
     : {
         providerId: options.provider.id,
         providerLabel: options.providerLabel,
@@ -4656,6 +4921,10 @@ async function persistModelTrace(options: {
     ...(options.trace.modelCandidateAttempts?.length
       ? { modelCandidateAttempts: options.trace.modelCandidateAttempts }
       : {}),
+    ...(options.trace.providerWaitMs !== undefined ? { providerWaitMs: options.trace.providerWaitMs } : {}),
+    ...(options.trace.firstOutputEventMs !== undefined ? { firstOutputEventMs: options.trace.firstOutputEventMs } : {}),
+    ...(options.trace.toolMs !== undefined ? { toolMs: options.trace.toolMs } : {}),
+    ...(options.trace.validationMs !== undefined ? { validationMs: options.trace.validationMs } : {}),
     prompt: options.trace.prompt,
   };
   const content = `${JSON.stringify(payload, null, 2)}\n`;
@@ -5136,6 +5405,11 @@ async function readPaidNodeReconciliationRecord(pathname: string): Promise<PaidN
     || typeof value.reconciliationId !== "string"
     || typeof value.nodeId !== "string"
     || !["resume_original", "requote", "confirmed_not_charged", "confirmed_charged"].includes(String(value.outcome))
+    || (value.itemRequestId !== undefined && (
+      typeof value.itemRequestId !== "string"
+      || !value.itemRequestId
+      || value.itemRequestId.length > 256
+    ))
     || (value.taskId !== undefined && (typeof value.taskId !== "string" || !value.taskId || value.taskId.length > 256))
     || (value.actor !== undefined && (typeof value.actor !== "string" || !value.actor || value.actor.length > 160))
     || (value.note !== undefined && (typeof value.note !== "string" || !value.note || value.note.length > 2_000))
@@ -5153,6 +5427,10 @@ async function readPaidNodeReconciliationRecord(pathname: string): Promise<PaidN
     || (!manualResolution && (value.actor !== undefined || value.note !== undefined || value.actualCostCny !== undefined))
     || (value.outcome === "confirmed_charged" && typeof value.actualCostCny !== "number")
     || (value.outcome !== "confirmed_charged" && value.reportedActualCostCny !== undefined)
+    || (value.itemRequestId !== undefined && (
+      value.nodeId !== "assets"
+      || (value.outcome !== "confirmed_charged" && value.outcome !== "confirmed_not_charged")
+    ))
     || (value.outcome !== "resume_original" && value.taskId !== undefined)
     || !Number.isInteger(value.expectedRunRevision)
     || (value.status !== "in_progress" && value.status !== "completed")
@@ -5259,7 +5537,9 @@ function settlePaidOperationReceipt(
   operationId: string | undefined,
   actualCostCny: number,
   meteredAttemptCount: number,
+  meteredFailedAttemptCount: number,
   reconciledAt: string,
+  actualCostSource: "provider_reported" | "configured_rate" = "configured_rate",
 ): void {
   const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId)!;
   const receipts = (run.executionReceipts ??= []);
@@ -5294,9 +5574,9 @@ function settlePaidOperationReceipt(
     status: "failed",
     estimatedCostCny: originalPaidEstimate(run, node) ?? actualCostCny,
     actualCostCny: roundCurrency(actualCostCny),
-    actualCostSource: "configured_rate",
+    actualCostSource,
     meteredAttemptCount,
-    meteredFailedAttemptCount: 0,
+    meteredFailedAttemptCount,
     ...(operationId ? { requestId: operationId } : {}),
     ...(authorizationId ? { spendAuthorizationId: authorizationId } : {}),
     ...(authorization ? { authorizedCostCny: authorization.maxCostCny } : {}),
@@ -5311,11 +5591,15 @@ function settlePaidOperationReceipt(
 function paidAssetSettlement(items: PaidAssetLedgerItemSummary[]): {
   actualCostCny: number;
   meteredAttemptCount: number;
+  meteredFailedAttemptCount: number;
 } {
   const billedItems = items.filter((item) => !item.carriedForwardFromItemRequestId && (
     item.state === "materialized"
     || item.state === "provider_succeeded" && Boolean(item.taskId) && Boolean(item.resultUrl)
     || item.state === "submitted" && Boolean(item.taskId) && item.actualCostCny !== undefined
+    || item.state === "terminal_failed"
+      && item.actualCostCny !== undefined
+      && (Boolean(item.taskId) || isManuallyConfirmedChargedAssetItem(item))
   ));
   return {
     actualCostCny: roundCurrency(billedItems.reduce(
@@ -5323,12 +5607,40 @@ function paidAssetSettlement(items: PaidAssetLedgerItemSummary[]): {
       0,
     )),
     meteredAttemptCount: billedItems.length,
+    meteredFailedAttemptCount: billedItems.filter((item) => item.state === "terminal_failed").length,
   };
+}
+
+function paidAssetOperationNeedsManualReconciliation(items: readonly PaidAssetLedgerItemSummary[]): boolean {
+  return items.length === 0 || items.some((item) => (
+    (item.state === "submitted" || item.state === "unknown") && !item.taskId
+  ) || (
+    item.state === "provider_succeeded" && !item.taskId
+  ));
+}
+
+function isManuallyConfirmedChargedAssetItem(item: PaidAssetLedgerItemSummary): boolean {
+  return item.error?.includes("confirmed that this provider task was charged without a recoverable result.") === true;
+}
+
+function paidAssetItemNeedsManualReconciliation(item: PaidAssetLedgerItemSummary): boolean {
+  return (item.state === "submitted" || item.state === "unknown") && !item.taskId
+    || item.state === "provider_succeeded" && !item.taskId;
+}
+
+function canResumePaidAssetOperation(items: readonly PaidAssetLedgerItemSummary[]): boolean {
+  if (paidAssetOperationNeedsManualReconciliation(items)) return false;
+  return items.some((item) => (
+    item.state === "submitted"
+    || item.state === "provider_succeeded"
+    || item.state === "unknown"
+  )) || items.every((item) => item.state === "materialized");
 }
 
 function paidVoiceSettlement(operation: PaidVoiceOperationLedger): {
   actualCostCny: number;
   meteredAttemptCount: number;
+  meteredFailedAttemptCount: number;
 } {
   const hasMaterializedAudio = operation.items.some((item) => item.state === "materialized");
   return {
@@ -5336,6 +5648,7 @@ function paidVoiceSettlement(operation: PaidVoiceOperationLedger): {
       ? roundCurrency(operation.actualCostCny ?? operation.estimatedCostCny)
       : 0,
     meteredAttemptCount: hasMaterializedAudio ? 1 : 0,
+    meteredFailedAttemptCount: 0,
   };
 }
 
@@ -5464,7 +5777,16 @@ async function attachPaidAssetTaskId(
   return (await inspectPaidAssetLedger(nodeDirectory)).filter((candidate) => candidate.operationId === operationId);
 }
 
-async function markPaidAssetItemsNotCharged(nodeDirectory: string, operationId: string): Promise<void> {
+function confirmedNotChargedAssetItemError(reconciliationId: string): string {
+  return `Manual reconciliation '${reconciliationId}' confirmed that this provider task was not charged.`;
+}
+
+async function markPaidAssetItemNotCharged(
+  nodeDirectory: string,
+  operationId: string,
+  itemRequestId: string,
+  reconciliationId: string,
+): Promise<void> {
   const pathname = path.join(
     nodeDirectory,
     ".generation-operations",
@@ -5481,17 +5803,81 @@ async function markPaidAssetItemsNotCharged(nodeDirectory: string, operationId: 
     || !Array.isArray(ledger.items)) {
     throw new Error("Paid operation ledger is incompatible or corrupted.");
   }
-  for (const candidate of ledger.items) {
-    if (!isObjectRecord(candidate)) throw new Error("Paid operation ledger is incompatible or corrupted.");
-    if (candidate.state === "submitted"
-      || candidate.state === "unknown"
-      || candidate.state === "provider_succeeded" && (!candidate.taskId || !candidate.resultUrl)) {
-      candidate.state = "terminal_failed";
-      candidate.error = "Manual reconciliation confirmed that this provider task was not charged.";
-      delete candidate.actualCostCny;
-      delete candidate.actualCostSource;
-    }
+  const matches = ledger.items.filter((candidate): candidate is Record<string, unknown> => (
+    isObjectRecord(candidate) && candidate.itemRequestId === itemRequestId
+  ));
+  if (matches.length !== 1) {
+    throw new Error(`Paid reconciliation item '${itemRequestId}' does not uniquely identify an item in the active operation.`);
   }
+  const item = matches[0]!;
+  const resolutionError = confirmedNotChargedAssetItemError(reconciliationId);
+  if (item.state === "terminal_failed"
+    && item.actualCostCny === undefined
+    && item.error === resolutionError) {
+    return;
+  }
+  if (!paidAssetItemNeedsManualReconciliation(item as unknown as PaidAssetLedgerItemSummary)) {
+    throw new Error(`Paid item '${itemRequestId}' changed while confirming its not-charged outcome.`);
+  }
+  item.state = "terminal_failed";
+  item.error = resolutionError;
+  delete item.actualCostCny;
+  delete item.actualCostSource;
+  ledger.completed = false;
+  await writeJsonRecordAtomically(pathname, ledger);
+}
+
+function confirmedChargedAssetItemError(reconciliationId: string): string {
+  return `Manual reconciliation '${reconciliationId}' confirmed that this provider task was charged without a recoverable result.`;
+}
+
+async function markPaidAssetItemCharged(
+  nodeDirectory: string,
+  operationId: string,
+  itemRequestId: string,
+  reconciliationId: string,
+  actualCostCny: number,
+): Promise<void> {
+  const pathname = path.join(
+    nodeDirectory,
+    ".generation-operations",
+    `${createHash("sha256").update(operationId).digest("hex")}.json`,
+  );
+  const ledger = JSON.parse(await readFile(pathname, "utf8")) as {
+    version?: unknown;
+    operationId?: unknown;
+    completed?: unknown;
+    items?: unknown;
+  };
+  if (ledger.version !== "video-factory/paid-operation-v2"
+    || ledger.operationId !== operationId
+    || !Array.isArray(ledger.items)) {
+    throw new Error("Paid operation ledger is incompatible or corrupted.");
+  }
+  const matches = ledger.items.filter((candidate): candidate is Record<string, unknown> => (
+    isObjectRecord(candidate) && candidate.itemRequestId === itemRequestId
+  ));
+  if (matches.length !== 1) {
+    throw new Error(`Paid reconciliation item '${itemRequestId}' does not uniquely identify an item in the active operation.`);
+  }
+  const item = matches[0]!;
+  const resolutionError = confirmedChargedAssetItemError(reconciliationId);
+  if (item.state === "terminal_failed"
+    && item.actualCostCny === actualCostCny
+    && item.error === resolutionError) {
+    return;
+  }
+  if (!paidAssetItemNeedsManualReconciliation(item as unknown as PaidAssetLedgerItemSummary)) {
+    throw new Error(`Paid item '${itemRequestId}' changed while confirming its charged outcome.`);
+  }
+  item.state = "terminal_failed";
+  item.actualCostCny = roundCurrency(actualCostCny);
+  item.actualCostSource = "configured_rate";
+  item.error = resolutionError;
+  delete item.resultUrl;
+  delete item.localPath;
+  delete item.sha256;
+  delete item.sizeBytes;
   ledger.completed = false;
   await writeJsonRecordAtomically(pathname, ledger);
 }

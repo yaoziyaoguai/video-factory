@@ -115,7 +115,7 @@ describe("buildRoleAgentAssembly", () => {
         "director-plan": "gpt-director",
         "visual-review": "gpt-review",
       }),
-      zaiCodexSettings: settings("zai", ["script-draft", "director-plan", "visual-review"], {
+      zaiCodexSettings: settings("zai", ["script-draft", "director-plan", "visual-review", "role-audit"], {
         "script-draft": "glm-writer",
         "director-plan": "glm-director",
         "visual-review": "glm-review",
@@ -132,20 +132,17 @@ describe("buildRoleAgentAssembly", () => {
   });
 
   it("runs the assembled OpenAI screenwriter through its GLM backup after a transient outage", async () => {
-    const openai = new ControlledCodexClient("openai", "gpt-writer", (kind) => {
-      if (kind === "script-draft") {
-        throw new CodexBridgeError("OpenAI service temporarily unavailable.", true, "not_accepted", 503);
-      }
-      if (kind === "role-audit") return passingAudit;
-      throw new Error(`Unexpected OpenAI task ${kind}`);
+    const openai = new ControlledCodexClient("openai", "gpt-writer", () => {
+      throw new CodexBridgeError("OpenAI service temporarily unavailable.", true, "not_accepted", 503);
     });
     const zai = new ControlledCodexClient("zai-bigmodel-api", "glm-writer", (kind) => {
       if (kind === "script-draft") return validDraft();
+      if (kind === "role-audit") return passingAudit;
       throw new Error(`Unexpected ZAI task ${kind}`);
     });
     const result = buildRoleAgentAssembly({
       codexSettings: settings("openai", ["script-draft", "role-audit"], { "script-draft": "gpt-writer" }),
-      zaiCodexSettings: settings("zai", ["script-draft"], { "script-draft": "glm-writer" }),
+      zaiCodexSettings: settings("zai", ["script-draft", "role-audit"], { "script-draft": "glm-writer", "role-audit": "glm-writer" }),
       codexClient: openai,
       zaiCodexClient: zai,
       reviewMedia,
@@ -164,8 +161,8 @@ describe("buildRoleAgentAssembly", () => {
     });
 
     assert.ok(execution);
-    assert.deepEqual(openai.calls, ["script-draft", "role-audit"]);
-    assert.deepEqual(zai.calls, ["script-draft"]);
+    assert.deepEqual(openai.calls, ["script-draft"]);
+    assert.deepEqual(zai.calls, ["script-draft", "role-audit"]);
     assert.equal(execution.trace?.modelId, "glm-writer");
     assert.equal(execution.trace?.fallbackFromModelId, "gpt-writer");
     assert.deepEqual(execution.trace?.attemptedModelIds, ["gpt-writer", "glm-writer"]);
@@ -185,7 +182,7 @@ describe("buildRoleAgentAssembly", () => {
     });
     const result = buildRoleAgentAssembly({
       codexSettings: settings("openai", ["visual-review", "role-audit"], { "visual-review": "gpt-review" }),
-      zaiCodexSettings: settings("zai", ["visual-review"], { "visual-review": "glm-review" }),
+      zaiCodexSettings: settings("zai", ["visual-review", "role-audit"], { "visual-review": "glm-review", "role-audit": "glm-review" }),
       codexClient: openai,
       zaiCodexClient: zai,
       reviewMedia,
@@ -219,15 +216,15 @@ describe("buildRoleAgentAssembly", () => {
     assert.deepEqual(result.visualReviewAgents.map((agent) => agent.modelId), ["gpt-default"]);
   });
 
-  it("uses ZAI for production roles only when an independent OpenAI auditor exists", () => {
+  it("uses ZAI production roles with ZAI independent audits when OpenAI is unavailable", () => {
     const result = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["role-audit"], { "role-audit": "gpt-auditor" }),
-      zaiCodexSettings: settings("zai", ["script-draft", "director-plan", "visual-review"], {
+      codexSettings: unavailable,
+      zaiCodexSettings: settings("zai", ["script-draft", "director-plan", "visual-review", "role-audit"], {
         "script-draft": "glm-writer",
         "director-plan": "glm-director",
         "visual-review": "glm-review",
+        "role-audit": "glm-auditor",
       }),
-      codexClient: client,
       zaiCodexClient: client,
       reviewMedia,
       environment: {},

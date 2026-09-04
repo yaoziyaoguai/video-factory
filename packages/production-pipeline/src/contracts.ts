@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 export const BRIEF_PROTOCOL_VERSION = "video-factory/brief-v1" as const;
 export const WORKER_PROTOCOL_VERSION = "video-factory/worker-v1" as const;
+const PRODUCTION_PLATFORMS = ["douyin", "xiaohongshu", "bilibili"] as const;
 
 export interface ProductionProviderBindings {
   script: string;
@@ -256,7 +257,7 @@ export function parseBrief(value: unknown): ProductionBrief {
     audience: requireString(value.audience, "audience"),
     nicheSlug: requireString(value.nicheSlug, "nicheSlug"),
     durationSeconds: Number(durationSeconds),
-    platform: requireString(value.platform, "platform"),
+    platform: requireProductionPlatform(value.platform),
     reviewMode: value.reviewMode,
     ...(templateSnapshot ? { templateSnapshot } : {}),
     providers: {
@@ -606,21 +607,38 @@ function parseModelSelections(value: unknown): Record<string, string> {
 
 export function parsePersistedBrief(value: unknown): ProductionBrief {
   const migrated = migratePersistedReworkFindingIds(migratePersistedReferenceVideo(value));
+  const persistedPlatform = isRecord(migrated) && typeof migrated.platform === "string"
+    ? migrated.platform.trim()
+    : undefined;
+  const legacyPlatform = persistedPlatform && !PRODUCTION_PLATFORMS.some((platform) => platform === persistedPlatform)
+    ? persistedPlatform
+    : undefined;
+  // 旧版曾把内容来源平台写进发布平台。来源值无法可靠反推发布目标，统一迁移到产品默认的抖音，
+  // 让历史制作可以继续返工、核账和完成发布，而不是保留一个所有写操作都会拒绝的值。
+  const strictInput = legacyPlatform && isRecord(migrated) ? { ...migrated, platform: "douyin" } : migrated;
   try {
-    return parseBrief(migrated);
+    return parseBrief(strictInput);
   } catch (strictError) {
-    if (!isRecord(migrated) || !isRecord(migrated.providers) || !isRecord(migrated.voiceDirection)) throw strictError;
-    const providerId = migrated.providers.voice;
-    const profileId = migrated.voiceDirection.profileId;
+    if (!isRecord(strictInput) || !isRecord(strictInput.providers) || !isRecord(strictInput.voiceDirection)) throw strictError;
+    const providerId = strictInput.providers.voice;
+    const profileId = strictInput.voiceDirection.profileId;
     if (typeof providerId !== "string" || typeof profileId !== "string") throw strictError;
     if (voiceProviderForProfile(profileId) === providerId) throw strictError;
     const compatibleProfileId = persistedVoiceProfileForProvider(providerId);
     if (!compatibleProfileId) throw strictError;
     return parseBrief({
-      ...migrated,
-      voiceDirection: { ...migrated.voiceDirection, profileId: compatibleProfileId },
+      ...strictInput,
+      voiceDirection: { ...strictInput.voiceDirection, profileId: compatibleProfileId },
     });
   }
+}
+
+function requireProductionPlatform(value: unknown): string {
+  const platform = requireString(value, "platform");
+  if (!PRODUCTION_PLATFORMS.some((candidate) => candidate === platform)) {
+    throw new Error(`platform must be one of: ${PRODUCTION_PLATFORMS.join(", ")}.`);
+  }
+  return platform;
 }
 
 function migratePersistedReworkFindingIds(value: unknown): unknown {
