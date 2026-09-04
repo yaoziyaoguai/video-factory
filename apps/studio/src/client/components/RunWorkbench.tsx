@@ -40,11 +40,12 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const previewRef = useRef<HTMLVideoElement>(null);
   const rejectDialogRef = useDialogFocus<HTMLElement>(rejecting, () => setRejecting(false), decisionPending);
   const approveDialogRef = useDialogFocus<HTMLElement>(approving, () => setApproving(false), decisionPending);
+  const readOnly = run.continuation?.supported === false;
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
   const creatorNodes = run.nodes.filter((node) => nodeHasCreatorContent(node, run));
-  const activeSpendNode = creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
+  const activeSpendNode = readOnly ? undefined : creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
   const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id);
-  const showReviewSurface = Boolean(video?.contentUrl || run.activeIntervention || isStoppedStatus(run.status));
+  const showReviewSurface = Boolean(readOnly || video?.contentUrl || run.activeIntervention || isStoppedStatus(run.status));
   const uncertainPaidNode = run.nodes.find((node) => node.outcomeUncertain === true);
   const visiblePaidNodeSummary = paidNodeSummary?.nodeId === uncertainPaidNode?.id ? paidNodeSummary : undefined;
   const visualReview = visualReviewDecision(run);
@@ -60,6 +61,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
     runStatus={run.status}
     artifacts={run.artifacts.filter((artifact) => node.artifactIds.includes(artifact.id) || artifact.producerNodeId === node.id)}
     busy={nodeMutationPending}
+    readOnly={readOnly}
     pauseBusy={pausePending}
     pauseRequested={run.pauseRequested === true}
     {...(onRequestPause ? { onRequestPause } : {})}
@@ -143,7 +145,14 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
         </section>
 
         <aside className="review-panel" aria-label="审片与产物" data-tour="run-review">
-          {run.activeIntervention ? (
+          {readOnly ? (
+            <section className="run-state-panel" role="status">
+              <p className="eyebrow">历史制作记录</p>
+              <h2>这条旧版制作仅供查看</h2>
+              <p>{run.continuation?.reason}</p>
+              {onRestart ? <button className="button button-primary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
+            </section>
+          ) : run.activeIntervention ? (
             <section className="intervention-panel">
               <div className="attention-heading">
                 <AlertTriangle aria-hidden="true" size={18} />
@@ -209,6 +218,9 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 <p className="eyebrow">停在 {run.failure.nodeLabel}</p>
                 <h2>{run.failure.nodeLabel}没有完成</h2>
                 <p className="run-failure-summary">{run.failure.summary}</p>
+                {(["asset-source-review", "visual-review"].includes(run.failure.nodeId) || /源素材视觉预检/.test(run.failure.technicalDetail ?? "")) && run.failure.technicalDetail
+                  ? <p className="run-failure-summary"><strong>失败原因：</strong>{creatorFacingTechnicalText(run.failure.technicalDetail)}</p>
+                  : null}
                 <div className="run-failure-impact">
                   <strong>{run.resultAvailability?.label ?? "前序结果已保留"}</strong>
                   <span>{run.failure.impact}</span>
@@ -229,7 +241,8 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 {...(onReconcilePaidNode ? { onReconcile: onReconcilePaidNode } : {})}
               /> : null}
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />多平台发布</button> : null}
-              {run.status === "failed" && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && failedNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(failedNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />重试失败步骤</button> : null}
+              {run.status === "succeeded" && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
+              {run.status === "failed" && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && failedNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(failedNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤"}</button> : null}
               {(run.status === "failed" || run.status === "rejected") && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
               {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />{isCostReplan ? "按降本意见重新规划并报价" : "按人工版本继续生成"}</button> : null}
               {run.status === "paused" && onResumePaused ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onResumePaused()}><Play aria-hidden="true" size={16} />继续自动制作</button> : null}

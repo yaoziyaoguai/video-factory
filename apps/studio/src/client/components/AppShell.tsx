@@ -5,6 +5,7 @@ import type { StudioRunSummary } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { GuideDock } from "../onboarding/GuideDock.js";
 import { useCreatorTour } from "../onboarding/use-creator-tour.js";
+import { statusLabel } from "./StatusBadge.js";
 
 export function AppShell({ children, username, onLogout }: { children: ReactNode; username?: string; onLogout?(): Promise<void> }) {
   const [healthy, setHealthy] = useState<boolean>();
@@ -162,7 +163,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
                 <NavLink key={run.id} to={`/projects/${run.id}`} onClick={closeSearch}>
                   <span><Clapperboard aria-hidden="true" size={16} /></span>
                   <strong>{run.title}</strong>
-                  <small>{run.status === "succeeded" ? "已完成" : "制作中"}</small>
+                  <small>{statusLabel(run.status)}</small>
                 </NavLink>
               ))}
               {matchingDestinations.length ? <p>功能</p> : null}

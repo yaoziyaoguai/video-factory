@@ -91,6 +91,9 @@ describe("TrendOpportunityAgent", () => {
       { id: "signal-ai", platform: "douyin", rank: 2, title: "普通人开始用 AI 管理下班后的时间", heat: 9_800_000 },
       { id: "signal-weather", platform: "weibo", rank: 1, title: "台风路径发生变化", heat: null },
     ]);
+    const auditPayload = codexClient.calls[1]!.payload as { context: { roleScope: { owns: string[] } } };
+    assert.equal(auditPayload.context.roleScope.owns.includes("ideas.audience"), true);
+    assert.equal(auditPayload.context.roleScope.owns.includes("ideas.painPoint"), true);
   });
 
   it("turns the structured creator strategy into a bounded self-contained editorial instruction", async () => {

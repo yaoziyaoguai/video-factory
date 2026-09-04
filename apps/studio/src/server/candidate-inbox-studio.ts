@@ -194,7 +194,7 @@ export class CandidateInboxStudio {
   }
 }
 
-function candidateVerification(
+export function candidateVerification(
   risk: StudioCandidateInboxItem["risk"],
   evidence: StudioCandidateInboxItem["evidence"],
   sourcePolicy?: StudioTopicStrategy["sourcePolicy"],
@@ -239,6 +239,43 @@ function candidateVerification(
     independentSources,
     requiredSources: 1,
     reasons: ["常规风险候选，可进入制作区继续核验。"],
+  };
+}
+
+export function reviewTrendOpportunityAgainstCurrentPolicy(
+  opportunity: StudioOpportunity,
+  sourcePolicy?: StudioTopicStrategy["sourcePolicy"],
+  now = new Date(),
+): StudioOpportunity {
+  if (opportunity.origin !== "trend") return opportunity;
+  const collectedAt = opportunity.evidence
+    .map((item) => item.collectedAt)
+    .filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)))
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
+  const risk = topicRiskLevel(opportunity.title);
+  const currentVerification = candidateVerification(risk, opportunity.evidence, sourcePolicy);
+  const verification = currentVerification.status === "review_required" && opportunity.verification?.status === "verified"
+    ? { ...currentVerification, status: "verified" as const, reasons: opportunity.verification.reasons }
+    : currentVerification;
+  const category = opportunity.category ?? classifyTopicCategory(opportunity.title, opportunity.track);
+  return {
+    ...opportunity,
+    category,
+    verification,
+    editorialDecision: decideEditorialFormat({
+      origin: "trend",
+      title: opportunity.title,
+      track: opportunity.track,
+      category,
+      freshness: topicFreshness(collectedAt, now),
+      risk,
+      verification,
+      score: opportunity.score,
+      audience: opportunity.audience,
+      painPoint: opportunity.painPoint,
+      hook: opportunity.hook,
+      evidence: opportunity.evidence,
+    }),
   };
 }
 

@@ -305,7 +305,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     };
     const baseline = await this.options.fallback.run(baselineRequest);
     if (baseline.status !== "succeeded") {
-      return baseline;
+      return zeroMeteredAttemptFailure(baseline);
     }
     const planPath = requiredString(baseline.output?.assetPlanPath, "assetPlanPath");
     const plan = requiredRecord(JSON.parse(await readFile(planPath, "utf8")), "Asset plan");
@@ -579,7 +579,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
 
     const baseline = await this.options.fallback.run(structuredClone(request));
     if (baseline.status !== "succeeded") {
-      return baseline;
+      return zeroMeteredAttemptFailure(baseline);
     }
     if (generatedRoutes.length === 0) {
       await assertCompletedWorkerResponse(request, baseline);
@@ -860,6 +860,20 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     }
     return undefined;
   }
+}
+
+function zeroMeteredAttemptFailure(response: WorkerResponse): WorkerResponse {
+  // 免费素材预检发生在付费 adapter 之前；显式零次计费让 workflow 能安全清除 outcomeUncertain。
+  return {
+    ...response,
+    diagnostics: {
+      ...(response.diagnostics ?? {}),
+      actualCostCny: 0,
+      actualCostSource: "configured_rate",
+      meteredAttemptCount: 0,
+      meteredFailedAttemptCount: 0,
+    },
+  };
 }
 
 export function estimateVideoGenerationCostCny(
@@ -1248,7 +1262,7 @@ function promptClause(label: string, value: string | undefined): string {
 
 function sanitizePrompt(value: string): string {
   // AIGC 披露由渲染与发布链路负责，不能反向污染生成模型的画面提示词。
-  const forbidden = /审批|预算|版权|工作流|授权|付费|费用|合规|AIGC|(?:AI\s*生成|人工智能生成).*(?:标识|披露)|平台(?:声明|披露)|文件(?:标记|标识)|成片.*(?:标识|披露)|(?:Seedream|Seedance|MiniMax|Hailuo|Wanxiang|Provider).*(?:标识|披露)|水印.*(?:保留|清晰|裁切|遮挡|移除)/i;
+  const forbidden = /审批|预算|版权|工作流|授权|付费|费用|合规|AIGC|(?:AI\s*(?:生成|内容)|人工智能生成|生成式镜头).*(?:标识|声明|披露)|平台(?:声明|披露)|文件(?:标记|标识)|成片.*(?:标识|声明|披露)|(?:Seedream|Seedance|MiniMax|Hailuo|Wanxiang|Provider).*(?:标识|声明|披露)|水印.*(?:保留|清晰|裁切|遮挡|移除)/i;
   return value
     .split(/[。；;\n]+/)
     .map((part) => part.trim())

@@ -1,3 +1,5 @@
+import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -5,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from video_factory.domain import Scene
-from video_factory.renderer import director_overlay_labels, font_resource, render_scene_clip, wrap_text_by_pixels as wrap_caption_text
+from video_factory.renderer import font_resource, render_asset_video, render_scene_clip, wrap_text_by_pixels as wrap_caption_text, write_caption_overlay, write_scene_frames
 from video_factory.stock_assets import local_card_content, local_card_semantic_style, local_card_spec, local_card_style, wrap_text_by_pixels as wrap_card_text
 
 
@@ -133,17 +135,98 @@ class VisualRenderingTest(unittest.TestCase):
         self.assertNotIn("门禁", " ".join([card["kicker"], card["title"], card["status"]]))
         self.assertNotIn("待证据核验", " ".join([card["kicker"], card["title"], card["status"]]))
 
-    def test_stock_overlay_uses_only_director_requested_visible_labels(self):
-        manifest = {
-            "slides": [
-                {"visual_prompt": "三行标签“来源”“原文”“适用范围”"},
-                {"visual_prompt": "补上“来源”“原文”“适用范围”"},
-            ],
-        }
-        scene = {"visual_prompt": "手机上方叠加已完成的三项核验条"}
-        route = {"director_shot": {"successCriteria": ["点击前有完整三项完成状态叠加区。"]}}
+    def test_caption_overlay_ignores_project_scene_and_director_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene = {"position": 1, "text": "杯壁出现水珠。", "visual_prompt": "叠加“湿空气”“低于露点”"}
+            for style in ("subtitle", "editorial"):
+                with self.subTest(style=style):
+                    first_path = write_caption_overlay(
+                        {"title": "内部项目 A", "slides": [scene]},
+                        scene,
+                        root,
+                        360,
+                        640,
+                        style=style,
+                        director_route={
+                            "director_shot": {
+                                "subject": "Provider AIGC gate",
+                                "successCriteria": ["显示“杯壁冷”与 Agent 审片状态"],
+                            },
+                        },
+                    )
+                    first_overlay = first_path.read_bytes()
+                    second_path = write_caption_overlay(
+                        {"title": "另一个项目", "slides": [scene, {"position": 2}]},
+                        scene,
+                        root,
+                        360,
+                        640,
+                        style=style,
+                        director_route={"director_shot": {}},
+                    )
 
-        self.assertEqual(director_overlay_labels(manifest, scene, route), ["来源 · 已完成", "原文 · 已完成", "适用范围 · 已完成"])
+                    self.assertEqual(first_overlay, second_path.read_bytes())
+
+    def test_caption_overlay_preserves_main_subtitle_and_first_scene_aigc_disclosure(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = {"title": "不会显示的项目名", "slides": [{}, {}]}
+            # 使用所有 CI 字体都能区分的拉丁字符，避免缺少 CJK 字形时两句字幕都渲染成相同方框。
+            first_scene = {"position": 1, "text": "Condensation forms."}
+            second_scene = {"position": 2, "text": "Condensation forms."}
+            changed_subtitle = {"position": 2, "text": "Water comes from air."}
+
+            first_path = write_caption_overlay(manifest, first_scene, root, 360, 640)
+            first_image = Image.open(first_path).convert("RGBA")
+            second_path = write_caption_overlay(manifest, second_scene, root, 360, 640)
+            second_image = Image.open(second_path).convert("RGBA")
+            second_overlay = second_path.read_bytes()
+            changed_path = write_caption_overlay(manifest, changed_subtitle, root, 360, 640)
+
+            self.assertIsNotNone(first_image.getchannel("A").crop((0, 0, 220, 140)).getbbox())
+            self.assertIsNone(second_image.getchannel("A").crop((0, 0, 220, 140)).getbbox())
+            self.assertNotEqual(second_overlay, changed_path.read_bytes())
+
+    def test_script_frame_ignores_project_scene_and_director_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "first").mkdir()
+            (root / "second").mkdir()
+            first_frames = write_scene_frames(
+                {
+                    "title": "内部项目 A",
+                    "slides": [{
+                        "position": 2,
+                        "duration": 3.0,
+                        "text": "杯壁出现水珠。",
+                        "visual_strategy": "Provider route",
+                        "visual_prompt": "显示 Agent gate 与 AIGC 状态",
+                    }],
+                },
+                root / "first",
+                360,
+                640,
+            )
+            second_frames = write_scene_frames(
+                {
+                    "title": "另一个项目",
+                    "slides": [{
+                        "position": 8,
+                        "duration": 3.0,
+                        "text": "杯壁出现水珠。",
+                        "visual_strategy": "stock",
+                        "visual_prompt": "无文字真实画面",
+                    }],
+                },
+                root / "second",
+                360,
+                640,
+            )
+
+            self.assertEqual(first_frames[0][0].read_bytes(), second_frames[0][0].read_bytes())
 
     def test_cjk_wrapping_keeps_closing_punctuation_with_the_previous_line(self):
         draw = FixedWidthDraw()
@@ -216,6 +299,66 @@ class VisualRenderingTest(unittest.TestCase):
         video_filter = command[command.index("-filter_complex") + 1]
         self.assertNotIn("-stream_loop", command)
         self.assertIn("setpts=0.510638*PTS", video_filter)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_24_second_render_contains_exactly_720_video_frames(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            asset_path = root / "asset.png"
+            Image.new("RGB", (180, 320), "#334155").save(asset_path)
+            manifest_path = root / "render_manifest.json"
+            durations = [3.01] * 7 + [2.93]
+            slides = [
+                {
+                    "position": position,
+                    "duration": duration,
+                    "text": f"第 {position} 个镜头。",
+                    "visual_prompt": "无文字真实画面",
+                }
+                for position, duration in enumerate(durations, start=1)
+            ]
+            manifest_path.write_text(
+                json.dumps({"title": "精确时长", "slides": slides, "output_file": str(root / "final.mp4")}),
+                encoding="utf-8",
+            )
+            asset_plan = {
+                "scene_assets": [
+                    {
+                        "scene_position": position,
+                        "provider": "pexels",
+                        "media_type": "image",
+                        "local_path": str(asset_path),
+                    }
+                    for position in range(1, 9)
+                ]
+            }
+
+            output_path = render_asset_video(manifest_path, root, asset_plan, resolution="180x320")
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-count_frames",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=duration,nb_frames,nb_read_frames",
+                    "-of",
+                    "json",
+                    str(output_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            stream = json.loads(result.stdout)["streams"][0]
+
+        self.assertEqual(stream["duration"], "24.000000")
+        self.assertEqual(stream["nb_frames"], "720")
+        self.assertEqual(stream["nb_read_frames"], "720")
 
 
 if __name__ == "__main__":

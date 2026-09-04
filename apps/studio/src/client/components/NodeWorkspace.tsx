@@ -2,6 +2,7 @@ import { AlertTriangle, Check, ChevronDown, CircleDollarSign, Clock3, FilePenLin
 import { useEffect, useMemo, useState } from "react";
 import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
+import { studioApi } from "../api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
@@ -15,6 +16,7 @@ interface NodeWorkspaceProps {
   runStatus: StudioRunStatus;
   artifacts: StudioArtifact[];
   busy: boolean;
+  readOnly?: boolean;
   pauseBusy?: boolean;
   pauseRequested?: boolean;
   onRequestPause?: () => Promise<void>;
@@ -25,8 +27,8 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, artifacts, busy, pauseBusy = false, pauseRequested = false, onRequestPause, onOverride, onInputOverride = async () => undefined, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
-  const shouldOpenForAttention = node.status === "awaiting_spend_approval" || node.status === "approval_invalidated";
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, artifacts, busy, readOnly = false, pauseBusy = false, pauseRequested = false, onRequestPause, onOverride, onInputOverride = async () => undefined, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
+  const shouldOpenForAttention = node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
   const [editing, setEditing] = useState(false);
@@ -95,8 +97,8 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const outputReadOnly = READ_ONLY_OUTPUT_NODE_IDS.has(node.id);
   const nodeReadOnly = READ_ONLY_NODE_IDS.has(node.id);
   const paidRecoveryLocked = nodes.some((candidate) => candidate.outcomeUncertain === true);
-  const canEdit = !paidRecoveryLocked && !outputReadOnly && (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
-  const canEditInput = !paidRecoveryLocked && !nodeReadOnly && effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
+  const canEdit = !readOnly && !paidRecoveryLocked && !outputReadOnly && (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
+  const canEditInput = !readOnly && !paidRecoveryLocked && !nodeReadOnly && effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
   const fallbackReason = useMemo(() => agentFallbackReason(execution), [execution]);
   const executionTiming = useMemo(() => executionTimingDetails(receipt), [receipt]);
@@ -120,7 +122,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     [effectiveInputVersion, node, nodes],
   );
   const hasReviewableInput = hasEditableInput || inputSources.length > 0;
-  const canRequestPause = runStatus === "running" && node.status === "succeeded" && (hasDelivery || hasReviewableInput) && onRequestPause !== undefined;
+  const canRequestPause = !readOnly && runStatus === "running" && node.status === "succeeded" && (hasDelivery || hasReviewableInput) && onRequestPause !== undefined;
 
   useEffect(() => {
     if (!editing) setDraft(pretty(documentPreview ?? node.output ?? effectiveOutput(node) ?? {}));
@@ -154,13 +156,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     const controller = new AbortController();
     setDocumentLoading(true);
     setDocumentError(undefined);
-    void fetch(editableArtifact.contentUrl, {
-      headers: { accept: "application/json" },
-      signal: controller.signal,
-    }).then(async (response) => {
-      if (!response.ok) throw new Error(`读取失败（HTTP ${response.status}）`);
-      return response.json() as Promise<unknown>;
-    }).then((content) => {
+    void studioApi.resourceJson(editableArtifact.contentUrl, controller.signal).then((content) => {
       setDocumentPreview(content);
       setDocumentLoading(false);
     }).catch((caught: unknown) => {
@@ -299,6 +295,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <ChevronDown className="node-workspace-chevron" aria-hidden="true" size={17} />
       </summary>
       <div className="node-workspace-body">
+        {readOnly ? <p className="node-workspace-warning"><AlertTriangle aria-hidden="true" size={16} />旧版工作流结果只读；要继续修改，请基于这版重新制作。</p> : null}
         {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
           <strong>{agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
           {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{humanizeCreativeText(node.agentLoopProgress.latestAudit.summary)}</span> : <span>正在生成本轮方案，完成后由独立 AI 做质量审计。</span>}
@@ -310,6 +307,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           providers={providers}
           runStatus={runStatus}
           busy={busy}
+          readOnly={readOnly}
           paidRecoveryLocked={paidRecoveryLocked}
           onSave={(input) => onConfigure(node.id, input)}
         /> : null}
@@ -351,7 +349,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         {node.spendPlan ? (
           <section className="spend-gate" aria-label={`${node.label}费用确认`}>
             <div><CircleDollarSign aria-hidden="true" size={20} /><span><strong>执行前费用确认</strong><small>预计 ¥{node.spendPlan.estimatedCostCny.toFixed(2)}，最高 ¥{node.spendPlan.maxCostCny.toFixed(2)} · 最多 {node.spendPlan.maxAttempts} 次</small>{node.spendPlan.items?.map((item) => <small key={item.id}><span>{item.label} · {providerLabel(item.providerId) ?? "画面服务"} · {providerModelLabel(providers.find((provider) => provider.id === item.providerId), item.modelId)}</span> · ¥{item.estimatedCostCny.toFixed(2)}</small>)}</span></div>
-            {node.spendAuthorizationId ? <span className="spend-authorized"><ShieldCheck aria-hidden="true" size={15} />已授权</span> : (
+            {node.spendAuthorizationId ? <span className="spend-authorized"><ShieldCheck aria-hidden="true" size={15} />已授权</span> : readOnly ? <small>历史报价仅供查看</small> : (
               <div className="spend-gate-actions">{node.id === "assets" ? <button className="button button-ghost" type="button" disabled={busy} onClick={() => setRejectingSpend(true)}>这份报价不合适</button> : null}<button className="button button-primary" type="button" disabled={busy} onClick={() => setAuthorizing(true)}><ShieldCheck aria-hidden="true" size={16} />检查并确认</button></div>
             )}
           </section>
@@ -484,7 +482,7 @@ const EDITABLE_ARTIFACT_KIND: Record<string, string> = {
   "publish-package": "publish_package",
 };
 
-const READ_ONLY_NODE_IDS = new Set(["render", "technical-review", "final-review"]);
+const READ_ONLY_NODE_IDS = new Set(["asset-source-review", "render", "technical-review", "final-review"]);
 const READ_ONLY_OUTPUT_NODE_IDS = new Set([...READ_ONLY_NODE_IDS, "assets", "voice"]);
 
 const INPUT_SOURCE_BY_FIELD: Record<string, string> = {
@@ -603,11 +601,12 @@ function configuredAssetProviderIds(nodes: StudioNode[]): string[] {
     : [];
 }
 
-function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, paidRecoveryLocked, onSave }: {
+function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, readOnly, paidRecoveryLocked, onSave }: {
   node: StudioNode;
   providers: StudioProvider[];
   runStatus: StudioRunStatus;
   busy: boolean;
+  readOnly: boolean;
   paidRecoveryLocked: boolean;
   onSave: (input: StudioNodeExecutionConfigurationInput) => Promise<void>;
 }) {
@@ -618,7 +617,8 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, pa
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([...(configuration.assetProviderIds ?? [])]);
   const [error, setError] = useState<string>();
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
-  const canEdit = !paidRecoveryLocked && providers.length > 0 && !terminal && runStatus !== "running" && node.status !== "running";
+  const failedRecovery = runStatus === "failed" && node.status === "failed";
+  const canEdit = !readOnly && !paidRecoveryLocked && providers.length > 0 && (!terminal || failedRecovery) && runStatus !== "running" && node.status !== "running";
   const capability = configurableNodeCapability(node.id);
   const roleProviders = capability
     ? providers.filter((provider) => provider.available && provider.kind !== "test" && provider.capability === capability)
@@ -676,6 +676,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, pa
             allowMeteredProviders: meteredSources.length > 0,
           },
         } : {}),
+        ...(failedRecovery ? { confirmTerminalEdit: true } : {}),
       });
       setEditing(false);
     } catch (caught) {
@@ -732,6 +733,7 @@ function configurableNodeCapability(nodeId: string): string | undefined {
   return {
     script: "script.draft",
     "visual-direction": "storyboard.plan",
+    "asset-source-review": "quality.review.visual",
     voice: "voice.synthesize",
     "visual-review": "quality.review.visual",
   }[nodeId];

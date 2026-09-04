@@ -14,6 +14,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import type {
   StudioLocalCapability,
   StudioCreatorSettings,
@@ -24,6 +25,7 @@ import type {
   StudioRoleProviderDefaults,
   StudioPublishTarget,
   StudioResourceManifest,
+  StudioResourceReviewInput,
   StudioTrendService,
   StudioTrendSignal,
   StudioTrendSource,
@@ -209,6 +211,11 @@ export function ResourcesPage() {
     } finally {
       setSettingsSaving(false);
     }
+  }
+
+  async function reviewResource(input: Omit<StudioResourceReviewInput, "expectedRevision">) {
+    const updated = await studioApi.reviewResource({ ...input, expectedRevision: resourceManifest?.reviewRevision ?? 0 });
+    setResourceManifest(updated);
   }
 
   const visualProviders = useMemo(() => providers.filter((provider) => provider.capability === "asset.prepare" || provider.capability === "avatar.generate"), [providers]);
@@ -418,7 +425,7 @@ export function ResourcesPage() {
           {resourceManifest.reconstructedRunCount ? <p className="resource-manifest-legacy" role="status">有 {resourceManifest.reconstructedRunCount} 条发生过付费调用但未完成清单的任务，已从现存产物保守恢复并全部标记为待复核。</p> : null}
           {resourceManifest.unreadableManifestCount ? <p className="resource-manifest-legacy" role="status">有 {resourceManifest.unreadableManifestCount} 条资源清单损坏或不可信，已隔离；其余任务仍可正常查看。</p> : null}
           {resourceManifest.truncatedRunCount ? <p className="resource-manifest-legacy" role="status">当前仅汇总最近 500 条制作，另有 {resourceManifest.truncatedRunCount} 条较早记录未进入本页统计。</p> : null}
-          <ManifestRunGroups groups={reviewableManifestRuns.slice(0, manifestLimit)} />
+          <ManifestRunGroups groups={reviewableManifestRuns.slice(0, manifestLimit)} onReview={reviewResource} />
           {reviewableManifestItems.length === 0 ? <div className="resource-manifest-empty"><ListChecks aria-hidden="true" size={18} /><span>完成一条真实制作后，入片素材会在这里等待核对。</span></div> : null}
           {reviewableManifestRuns.length > manifestLimit ? <button className="button button-secondary" type="button" onClick={() => setManifestLimit((current) => current + 8)}>显示更多素材视频（还剩 {reviewableManifestRuns.length - manifestLimit} 条）</button> : null}
           {productionRecordItems.length ? <details className="resource-manifest-records">
@@ -466,15 +473,16 @@ function resourceItemLabel(item: StudioResourceManifest["items"][number]): strin
   return "制作资源";
 }
 
-function ManifestLedger({ items, record = false }: { items: StudioResourceManifest["items"]; record?: boolean }) {
+function ManifestLedger({ items, record = false, onReview }: { items: StudioResourceManifest["items"]; record?: boolean; onReview?: (input: Omit<StudioResourceReviewInput, "expectedRevision">) => Promise<void> }) {
   return <div className="resource-manifest-ledger" aria-label={record ? "制作记录明细" : "素材来源与授权明细"}>
     {items.map((item) => {
       const sourceUrl = externalResourceUrl(item.sourceUrl);
       return <article key={`${item.runId}:${item.id}`}>
         <span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span>
         <div><strong>{creatorFacingTechnicalText(item.creator) ?? resourceItemLabel(item)}</strong><small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small><p>{creatorFacingTechnicalText(item.licenseNote) ?? (record ? "保留这条记录用于追溯制作过程。" : "缺少授权说明，需要人工确认。")}</p></div>
-        <span className={record || item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{record ? "制作记录" : item.reviewStatus === "recorded" ? "已记录" : "待确认"}</span>
+        <span className={record || item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{record ? "制作记录" : item.reviewDecision?.action === "confirmed" ? "已确认可用" : item.reviewDecision?.action === "rejected" ? "已驳回" : item.reviewStatus === "recorded" ? "已记录" : "待确认"}</span>
         {sourceUrl ? <a href={sourceUrl} target="_blank" rel="noreferrer" title="核验资源来源"><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
+        {!record && onReview ? <ResourceReviewActions item={item} onReview={onReview} /> : null}
       </article>;
     })}
   </div>;
@@ -503,7 +511,7 @@ function groupManifestItems(items: StudioResourceManifest["items"]): ManifestRun
   return [...groups.values()];
 }
 
-function ManifestRunGroups({ groups, record = false }: { groups: ManifestRunGroup[]; record?: boolean }) {
+function ManifestRunGroups({ groups, record = false, onReview }: { groups: ManifestRunGroup[]; record?: boolean; onReview?: (input: Omit<StudioResourceReviewInput, "expectedRevision">) => Promise<void> }) {
   return <div className="resource-manifest-runs" aria-label={record ? "按视频整理的制作记录" : "按视频整理的素材记录"}>
     {groups.map((group) => {
       const needsReview = group.items.filter((item) => item.reviewStatus !== "recorded").length;
@@ -512,9 +520,30 @@ function ManifestRunGroups({ groups, record = false }: { groups: ManifestRunGrou
           <span><strong>{group.runTitle}</strong><small>{group.items.length} 项{!record && needsReview ? ` · ${needsReview} 项待确认` : ""}</small></span>
           <b>展开</b>
         </summary>
-        <ManifestLedger items={group.items} record={record} />
+        <ManifestLedger items={group.items} record={record} {...(onReview ? { onReview } : {})} />
       </details>;
     })}
+  </div>;
+}
+
+function ResourceReviewActions({ item, onReview }: { item: StudioResourceManifest["items"][number]; onReview: (input: Omit<StudioResourceReviewInput, "expectedRevision">) => Promise<void> }) {
+  const [rejecting, setRejecting] = useState(false);
+  const [note, setNote] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string>();
+  const submit = async (action: "confirmed" | "rejected") => {
+    setPending(true); setError(undefined);
+    try { await onReview({ runId: item.runId, itemId: item.id, action, ...(note.trim() ? { note: note.trim() } : {}) }); setRejecting(false); }
+    catch (caught) { setError(errorMessage(caught)); }
+    finally { setPending(false); }
+  };
+  if (item.reviewDecision?.action === "rejected") return <div><Link to={`/projects/${item.runId}`}>打开原制作，点击“基于这版重新制作”</Link>{item.reviewDecision.note ? <small>{item.reviewDecision.note}</small> : null}</div>;
+  if (item.reviewStatus === "recorded") return null;
+  return <div>
+    <button type="button" disabled={pending} onClick={() => void submit("confirmed")}>确认可用</button>
+    <button type="button" disabled={pending} onClick={() => setRejecting(true)}>驳回</button>
+    {rejecting ? <div><label><span>驳回原因</span><input value={note} onChange={(event) => setNote(event.target.value)} /></label><button type="button" disabled={pending || !note.trim()} onClick={() => void submit("rejected")}>确认驳回</button></div> : null}
+    {error ? <small role="alert">{error}</small> : null}
   </div>;
 }
 

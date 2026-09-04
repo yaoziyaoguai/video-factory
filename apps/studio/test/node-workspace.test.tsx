@@ -348,6 +348,67 @@ describe("node production workspaces", () => {
     });
   });
 
+  it("lets a failed source-visual gate switch its review service without rerunning paid assets", async () => {
+    const onConfigure = vi.fn(async () => undefined);
+    const providers: StudioProvider[] = [
+      {
+        id: "glm-visual-review-v1",
+        capability: "quality.review.visual",
+        label: "GLM 视觉审片",
+        available: true,
+        kind: "external",
+        billing: "subscription",
+        defaultModelId: "glm-review",
+        modelProfiles: [{ id: "glm-review", providerId: "glm-visual-review-v1", providerFamily: "zai", label: "GLM Review", description: "视觉审片", available: true, taskTypes: ["visual-review"] }],
+      },
+      {
+        id: "codex-visual-review-v1",
+        capability: "quality.review.visual",
+        label: "Codex 视觉审片",
+        available: true,
+        kind: "external",
+        billing: "subscription",
+        defaultModelId: "gpt-review",
+        modelProfiles: [{ id: "gpt-review", providerId: "codex-visual-review-v1", providerFamily: "openai", label: "GPT Review", description: "视觉审片", available: true, taskTypes: ["visual-review"] }],
+      },
+    ];
+    const node: StudioNode = {
+      id: "asset-source-review",
+      label: "生成画面预检",
+      role: "视觉审片员",
+      status: "failed",
+      error: "源素材视觉预检服务暂时不可用。",
+      artifactIds: [],
+      qualityGateResults: [],
+      executionConfiguration: {
+        providerId: "glm-visual-review-v1",
+        modelSelections: { "glm-visual-review-v1": "glm-review" },
+      },
+    };
+
+    render(<NodeWorkspace
+      node={node}
+      providers={providers}
+      runStatus="failed"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onConfigure={onConfigure}
+      onAuthorize={async () => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "调整" }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "制作方式" }), "codex-visual-review-v1");
+    expect(screen.getByRole("combobox", { name: "首选模型" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+    expect(onConfigure).toHaveBeenCalledWith("asset-source-review", {
+      providerId: "codex-visual-review-v1",
+      modelSelections: { "codex-visual-review-v1": null },
+      confirmTerminalEdit: true,
+    });
+  });
+
   it("shows and removes an unavailable inherited asset source", async () => {
     const onConfigure = vi.fn(async () => undefined);
     const providers: StudioProvider[] = [{
@@ -638,6 +699,42 @@ describe("node production workspaces", () => {
     expect(screen.queryByText("api-visual-director-v1")).not.toBeInTheDocument();
     expect(screen.queryByText("模板默认")).not.toBeInTheDocument();
     expect(screen.queryByText(/director-v6/)).not.toBeInTheDocument();
+  });
+
+  it("lets a failed visual review select another model before recovery", async () => {
+    const onConfigure = vi.fn(async () => undefined);
+    const provider: StudioProvider = {
+      id: "glm-visual-review-v1",
+      capability: "quality.review.visual",
+      label: "GLM 视觉审片",
+      available: true,
+      kind: "external",
+      modelProfiles: [
+        { id: "glm-old", providerId: "glm-visual-review-v1", providerFamily: "glm", label: "GLM Old", description: "视觉审片", available: true, taskTypes: ["visual-review"] },
+        { id: "glm-new", providerId: "glm-visual-review-v1", providerFamily: "glm", label: "GLM New", description: "视觉审片", available: true, taskTypes: ["visual-review"] },
+      ],
+    };
+    const node: StudioNode = {
+      id: "visual-review",
+      label: "视觉审片",
+      role: "视觉审片员",
+      status: "failed",
+      error: "HTTP 500 upstream failed",
+      artifactIds: [],
+      qualityGateResults: [],
+      executionConfiguration: { providerId: provider.id, modelSelections: { [provider.id]: "glm-old" } },
+    };
+    render(<NodeWorkspace node={node} providers={[provider]} runStatus="failed" artifacts={[]} busy={false} onOverride={async () => undefined} onConfigure={onConfigure} onAuthorize={async () => undefined} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "调整" }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: /^首选模型/ }), "glm-new");
+    await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+    expect(onConfigure).toHaveBeenCalledWith("visual-review", {
+      providerId: provider.id,
+      modelSelections: { [provider.id]: "glm-new" },
+      confirmTerminalEdit: true,
+    });
   });
 
   it("keeps billing internals out of the creative editor", () => {

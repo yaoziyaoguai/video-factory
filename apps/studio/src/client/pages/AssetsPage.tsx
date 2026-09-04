@@ -85,7 +85,7 @@ export function AssetsPage() {
   }, [collectionAssets, filter, origin, provider, query]);
 
   const originOptions = [...new Set(collectionAssets.map((asset) => asset.origin))];
-  const providerOptions = [...new Set(collectionAssets.map((asset) => asset.providerId))].sort((left, right) => left.localeCompare(right));
+  const providerOptions = providerFilterOptions(collectionAssets);
   const hasFilters = filter !== "all" || origin !== "all" || provider !== "all" || Boolean(query.trim());
   const clearFilters = () => {
     setFilter("all");
@@ -157,7 +157,7 @@ export function AssetsPage() {
         </div>
         <div className="asset-library-refiners">
           <label><span className="sr-only">素材来源类型</span><select value={origin} onChange={(event) => setOrigin(event.target.value as "all" | StudioAssetOrigin)}><option value="all">全部来源</option>{originOptions.map((item) => <option key={item} value={item}>{originLabel(item)}</option>)}</select></label>
-          <label><span className="sr-only">素材提供方</span><select value={provider} onChange={(event) => setProvider(event.target.value)}><option value="all">全部提供方</option>{providerOptions.map((item) => <option key={item} value={item}>{providerLabel(item) ?? "其他制作服务"}</option>)}</select></label>
+          <label><span className="sr-only">素材提供方</span><select value={provider} onChange={(event) => setProvider(event.target.value)}><option value="all">全部提供方</option>{providerOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
           <label className="asset-library-search"><Search aria-hidden="true" size={16} /><span className="sr-only">搜索素材</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索画面、标签或作品" /></label>
         </div>
       </section>
@@ -188,6 +188,7 @@ export function AssetsPage() {
 
 function groupAssetsByWork(assets: StudioIndexedAsset[], runs: StudioRunSummary[]): Array<{ key: string; runId?: string; runTitle: string; items: Array<{ asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage }> }> {
   const groups = new Map<string, { key: string; runId?: string; runTitle: string; items: Array<{ asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage }> }>();
+  const seenAssetRuns = new Set<string>();
   for (const asset of assets) {
     if (!asset.usages.length) {
       const group = groups.get("unassigned") ?? { key: "unassigned", runTitle: "未归属项目", items: [] };
@@ -195,6 +196,9 @@ function groupAssetsByWork(assets: StudioIndexedAsset[], runs: StudioRunSummary[
       groups.set("unassigned", group);
     }
     for (const usage of asset.usages) {
+      const assetRunKey = `${asset.key}\u0000${usage.runId}`;
+      if (seenAssetRuns.has(assetRunKey)) continue;
+      seenAssetRuns.add(assetRunKey);
       const group = groups.get(usage.runId) ?? { key: usage.runId, runId: usage.runId, runTitle: usage.runTitle, items: [] };
       group.items.push({ asset, usage });
       groups.set(usage.runId, group);
@@ -220,7 +224,7 @@ function AssetCard({ asset, usage, grouped = false }: { asset: StudioIndexedAsse
       {metadata.length ? <ul className="asset-metadata" aria-label="素材规格">{metadata.map((item) => <li key={item}>{item}</li>)}</ul> : null}
       {asset.tags.length ? <div className="asset-tags">{asset.tags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
       <footer>
-        <span>{grouped ? (resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已归档" : "未归属") : asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已归档" : "未归属"}</span>
+        <span>{grouped ? (resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已关联制作" : "未归属") : asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已关联制作" : "未归属"}</span>
         <div>{resolvedUsage ? <Link to={`/projects/${resolvedUsage.runId}`}>查看作品</Link> : null}{asset.sourceUrl ? <a href={asset.sourceUrl} target="_blank" rel="noreferrer" aria-label="查看素材原始来源"><ExternalLink aria-hidden="true" size={14} /></a> : null}</div>
       </footer>
     </div>
@@ -254,6 +258,35 @@ function assetCount(assets: StudioIndexedAsset[], filter: AssetFilter): number {
 
 function isCreativeAsset(asset: StudioIndexedAsset): boolean {
   return asset.origin !== "final_render" && ["video", "image", "audio"].includes(asset.mediaKind);
+}
+
+function providerFilterOptions(assets: StudioIndexedAsset[]): Array<{ id: string; label: string }> {
+  const ids = [...new Set(assets.map((asset) => asset.providerId))].sort((left, right) => left.localeCompare(right));
+  const baseLabels = ids.map((id) => providerLabel(id) ?? "其他制作服务");
+  const counts = new Map<string, number>();
+  for (const label of baseLabels) counts.set(label, (counts.get(label) ?? 0) + 1);
+  const candidates = ids.map((id, index) => {
+    const baseLabel = baseLabels[index]!;
+    if ((counts.get(baseLabel) ?? 0) < 2) return { id, baseLabel, label: baseLabel };
+    const related = assets.filter((asset) => asset.providerId === id);
+    const suffix = [...new Set(related.map(providerAssetSuffix))].join("与") || "制作资源";
+    return { id, baseLabel, label: `${baseLabel} · ${suffix}` };
+  });
+  const candidateCounts = new Map<string, number>();
+  for (const item of candidates) candidateCounts.set(item.label, (candidateCounts.get(item.label) ?? 0) + 1);
+  return candidates.map((item) => ({
+    id: item.id,
+    label: (candidateCounts.get(item.label) ?? 0) > 1 ? `${item.label} · ${item.id}` : item.label,
+  }));
+}
+
+function providerAssetSuffix(asset: StudioIndexedAsset): string {
+  if (asset.mediaKind === "audio") return "声音";
+  if (asset.mediaKind === "video") return asset.origin === "final_render" ? "成片" : "视频";
+  if (asset.mediaKind === "image") return "图片";
+  if (asset.mediaKind === "document") return "制作记录";
+  if (asset.mediaKind === "font") return "字体";
+  return "其他资源";
 }
 
 function assetTitle(asset: StudioIndexedAsset, usage = asset.usages.at(-1)): string {

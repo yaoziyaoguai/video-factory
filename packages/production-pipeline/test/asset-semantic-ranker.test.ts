@@ -67,6 +67,8 @@ describe("asset semantic ranking", () => {
     assert.deepEqual(calls.map((call) => call.kind), ["asset-rank", "role-audit", "asset-rank", "role-audit"]);
     assert.equal("revision" in (calls[2]!.payload as Record<string, unknown>), true);
     const auditImages = (calls[1]!.payload as { images: Array<Record<string, unknown>> }).images;
+    const auditCriteria = (calls[1]!.payload as { criteria: string[] }).criteria;
+    assert.match(auditCriteria.join("\n"), /核心主体、物体和动作.*不得通过审计/);
     assert.equal(auditImages.length, 2);
     assert.deepEqual(auditImages.map((image) => [image.imageIndex, image.provider, image.assetId]), [[1, "pexels", "first"], [2, "pixabay", "second"]]);
     assert.equal(typeof auditImages[0]?.jpegBase64, "string");

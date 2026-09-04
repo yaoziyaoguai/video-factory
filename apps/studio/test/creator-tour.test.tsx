@@ -191,6 +191,24 @@ describe("creator tour routing", () => {
     expect(config?.steps?.some((step) => step.element === '[data-tour="project-queue"]')).toBe(true);
   });
 
+  it("explains how to recover a failed run in the page tour", () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    render(
+      <MemoryRouter initialEntries={["/projects/run-1"]}>
+        <AppShell><div data-tour="run-header">失败的制作</div></AppShell>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "打开创作向导" })[0]!);
+    fireEvent.click(screen.getByRole("button", { name: "讲解当前页面" }));
+
+    const config = driverMock.factory.mock.calls[0]?.[0];
+    const runHeader = config?.steps?.find((step) => step.element === '[data-tour="run-header"]');
+    expect(runHeader?.popover?.description).toMatch(/查看真实原因/);
+    expect(runHeader?.popover?.description).toMatch(/选择其他模型或调整配置后重试/);
+    expect(runHeader?.popover?.description).toMatch(/待重新生成/);
+  });
+
   it("includes the real candidate adoption action in the complete walkthrough", () => {
     expect(driverMock.factory).not.toHaveBeenCalled();
     render(

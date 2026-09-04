@@ -9,6 +9,7 @@ import {
   PaidOperationManualReconciliationError,
   parseBrief,
   parsePersistedBrief,
+  productionWorkflowVersion,
   RunLockedError,
   StaleRunRevisionError,
   type DispatchedProductionRun,
@@ -45,6 +46,7 @@ import {
 } from "../shared/api.js";
 import { modelSupportsCapability } from "../shared/model-compatibility.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
+import type { RejectedVisualResource } from "./resource-governance-studio.js";
 import { validateNodeOverrideOutput } from "./node-output-validator.js";
 import type { RunArchiveRepository } from "./run-archive-store.js";
 import { buildRunObservability, nodeActionLabel } from "./run-observability.js";
@@ -120,6 +122,7 @@ export interface ProductionStudioOptions {
   archiveStore: RunArchiveRepository;
   now?: () => Date;
   resolveTemplateSnapshot?: (input: unknown, brief: ProductionBrief) => Promise<ProductionTemplateSnapshot>;
+  loadRejectedVisualResources?: (runId: string) => Promise<RejectedVisualResource[]>;
 }
 
 export class ProductionStartDispatchedError extends Error {
@@ -137,6 +140,7 @@ const WORKFLOW_NODES: Array<{ id: string; label: string; role: string }> = [
   { id: "asset-candidates", label: "候选素材", role: "素材研究员" },
   { id: "asset-semantic-rank", label: "候选画面排序", role: "选片" },
   { id: "assets", label: "画面", role: "素材导演" },
+  { id: "asset-source-review", label: "生成画面预检", role: "视觉审片员" },
   { id: "voice", label: "配音", role: "声音导演" },
   { id: "render", label: "渲染", role: "剪辑师" },
   { id: "technical-review", label: "机器质检", role: "技术质检" },
@@ -204,13 +208,21 @@ export class ProductionStudio {
       if (hasCode(error, "ENOENT")) return undefined;
       throw error;
     }
-    if (run.status !== "failed" && run.status !== "rejected") {
-      throw new StudioConflictError("只有失败或已打回的制作才能生成返工草稿。");
+    const terminalSource = run.status === "failed" || run.status === "rejected" || run.status === "succeeded";
+    const stoppedLegacySource = !supportsRunContinuation(run) && run.status !== "running";
+    if (!terminalSource && !stoppedLegacySource) {
+      throw new StudioConflictError("只有失败、已打回或已完成的制作才能生成新版本草稿。");
+    }
+    if (run.nodeRuns.some((node) => node.outcomeUncertain)) {
+      throw new StudioConflictError("这条制作还有付费结果尚未核对，完成账单核对后才能重新制作。");
     }
     const detail = this.toDetail(run);
+    const rejectedResources = this.options.loadRejectedVisualResources
+      ? await this.options.loadRejectedVisualResources(run.id)
+      : [];
     const rejectionReason = [...run.decisions].reverse().find((decision) => decision.action === "reject")?.note
-      ?? detail.failure?.summary;
-    const findings = reworkFindings(detail);
+      ?? (rejectedResources.length ? `${rejectedResources.length} 项入片素材未通过授权审核，必须替换后重新核验。` : detail.failure?.summary);
+    const findings = [...reworkFindings(detail), ...resourceReworkFindings(run.id, rejectedResources)];
     const previousScript = await this.readReworkDocument(run, "script", "script");
     const previousDirectorPlan = await this.readReworkDocument(run, "visual-direction", "storyboard");
     // 历史运行可能把热点来源误存成目标平台；返工页仍需打开，让创作者明确重选。
@@ -471,10 +483,16 @@ export class ProductionStudio {
     if (source.revision !== brief.rework.sourceRunRevision) {
       throw new StudioConflictError("原制作在返工草稿打开后发生了变化，请重新读取审片建议。");
     }
-    if (source.status !== "failed" && source.status !== "rejected") {
-      throw new StudioConflictError("只有失败或已打回的制作才能作为返工来源。");
+    if (source.status !== "failed" && source.status !== "rejected" && source.status !== "succeeded") {
+      throw new StudioConflictError("只有失败、已打回或已完成的制作才能作为新版本来源。");
     }
-    const canonicalFindings = reworkFindings(this.toDetail(source));
+    const rejectedResources = this.options.loadRejectedVisualResources
+      ? await this.options.loadRejectedVisualResources(source.id)
+      : [];
+    const canonicalFindings = [
+      ...reworkFindings(this.toDetail(source)),
+      ...resourceReworkFindings(source.id, rejectedResources),
+    ];
     if (!isDeepStrictEqual(brief.rework.findings, canonicalFindings)) {
       throw new StudioConflictError("审片问题已经变化或被修改，请重新读取原制作的返工草稿。");
     }
@@ -1160,6 +1178,18 @@ export class ProductionStudio {
 
   private async assertProvidersAvailable(brief: ProductionBrief): Promise<void> {
     const providers = await this.options.listProviders();
+    const selectedVisualSources = new Set([
+      ...(brief.director?.assetProviderIds ?? []),
+      ...(brief.providers.assets === "ai-shot-router-v1" ? [] : [brief.providers.assets]),
+    ]);
+    const usesMeteredVisualSource = providers.some((provider) => (
+      selectedVisualSources.has(provider.id)
+      && provider.capability === "asset.prepare"
+      && provider.billing === "metered"
+    ));
+    if (usesMeteredVisualSource && !brief.providers.visualReview) {
+      throw new StudioInputError("付费图片和视频必须启用视觉审片，不能跳过生成素材的文字与画面一致性检查。");
+    }
     const selectedProviderIds = new Set([
       brief.providers.script,
       ...(brief.providers.director ? [brief.providers.director] : []),
@@ -1245,7 +1275,8 @@ export class ProductionStudio {
 async function withAgentLoopProgress(detail: StudioRunDetail, workspaceRoot: string): Promise<StudioRunDetail> {
   const nodes = await Promise.all(detail.nodes.map(async (node) => {
     const progress = await loadAgentLoopProgress(workspaceRoot, detail.id, node.id);
-    return progress ? { ...node, agentLoopProgress: progress } : node;
+    const activeProgress = progress && ["producing", "auditing", "repairing"].includes(progress.phase);
+    return progress && (!activeProgress || node.status === "running") ? { ...node, agentLoopProgress: progress } : node;
   }));
   const active = nodes.find((node) => node.id === detail.currentAction?.nodeId)
     ?? nodes.find((node) => node.status === "running");
@@ -1531,6 +1562,7 @@ function toRunSummary(run: WorkflowRun<ProductionBrief>): StudioRunSummary {
     startedAt: run.startedAt,
     ...(run.finishedAt ? { finishedAt: run.finishedAt } : {}),
     currentNodeId,
+    workflowNodeIds: visibleWorkflowNodes(run).map((node) => node.id),
     ...(run.status === "needs_human"
       ? { nextAction: "review" as const }
       : run.status === "awaiting_spend_approval" || run.status === "approval_invalidated"
@@ -1562,6 +1594,26 @@ function activeRunNodeId(run: WorkflowRun<ProductionBrief>): string {
     ?? "brief";
 }
 
+function visibleWorkflowNodes(run: WorkflowRun<ProductionBrief>): Array<{ id: string; label: string; role: string }> {
+  const workflowNodes = run.initialInput.director
+    ? WORKFLOW_NODES
+    : WORKFLOW_NODES.filter((item) => item.id !== "visual-direction");
+  const semanticNodes = run.initialInput.workflowFeatures?.assetSemanticRank
+    ? workflowNodes
+    : workflowNodes.filter((item) => item.id !== "asset-candidates" && item.id !== "asset-semantic-rank");
+  const referenceNodes = run.initialInput.workflowFeatures?.referenceGrammar
+    ? semanticNodes
+    : semanticNodes.filter((item) => item.id !== "reference-grammar");
+  const sourceReviewWasPlanned = run.nodeRuns.some((node) => node.nodeId === "asset-source-review")
+    || (run.executionPlan ?? []).some((plan) => plan.nodeId === "asset-source-review");
+  const sourceReviewNodes = sourceReviewWasPlanned
+    ? referenceNodes
+    : referenceNodes.filter((item) => item.id !== "asset-source-review");
+  return run.initialInput.providers.visualReview
+    ? sourceReviewNodes
+    : sourceReviewNodes.filter((item) => item.id !== "visual-review");
+}
+
 function toRunDetail(
   run: WorkflowRun<ProductionBrief>,
   options: { now: string; historicalNodeDurations: Record<string, number[]> },
@@ -1581,18 +1633,7 @@ function toRunDetail(
   }));
   const nodeRuns = new Map(run.nodeRuns.map((node) => [node.nodeId, node]));
   const executionPlans = new Map((run.executionPlan ?? []).map((plan) => [plan.nodeId, plan]));
-  const workflowNodes = run.initialInput.director
-    ? WORKFLOW_NODES
-    : WORKFLOW_NODES.filter((item) => item.id !== "visual-direction");
-  const semanticNodes = run.initialInput.workflowFeatures?.assetSemanticRank
-    ? workflowNodes
-    : workflowNodes.filter((item) => item.id !== "asset-candidates" && item.id !== "asset-semantic-rank");
-  const referenceNodes = run.initialInput.workflowFeatures?.referenceGrammar
-    ? semanticNodes
-    : semanticNodes.filter((item) => item.id !== "reference-grammar");
-  const visibleNodes = run.initialInput.providers.visualReview
-    ? referenceNodes
-    : referenceNodes.filter((item) => item.id !== "visual-review");
+  const visibleNodes = visibleWorkflowNodes(run);
   const nodes = visibleNodes.map(({ id, label, role }): StudioNode => {
     const node = nodeRuns.get(id);
     const plannedExecution = executionPlans.get(id);
@@ -1698,6 +1739,7 @@ function toRunDetail(
     videoAvailable: Boolean(videoArtifactId),
     publishPackageAvailable: Boolean(publishPackageArtifactId),
   });
+  const continuationSupported = supportsRunContinuation(run);
   return {
     ...toRunSummary(run),
     revision: run.revision,
@@ -1712,7 +1754,18 @@ function toRunDetail(
     ...(activeIntervention ? { activeIntervention } : {}),
     ...(videoArtifactId ? { videoArtifactId } : {}),
     ...(publishPackageArtifactId ? { publishPackageArtifactId } : {}),
+    continuation: continuationSupported
+      ? { supported: true }
+      : {
+          supported: false,
+          reason: "这条制作来自旧版工作流，只能查看现有结果。若要继续调整，请基于这版重新制作。",
+        },
   };
+}
+
+function supportsRunContinuation(run: WorkflowRun<ProductionBrief>): boolean {
+  return run.workflowId === "daily-production"
+    && run.workflowVersion === productionWorkflowVersion(run.initialInput);
 }
 
 function nodeExecutionConfiguration(
@@ -1757,15 +1810,21 @@ function collectNodeDurationHistory(runs: WorkflowRun<ProductionBrief>[]): Recor
 }
 
 function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
-  const node = run.nodes.find((candidate) => candidate.id === "visual-review");
-  const sourceReviewVersionId = node?.outputState?.effectiveVersionId ?? "legacy-output";
-  const effectiveOutput = node?.outputState?.versions.find(
-    (version) => version.id === node.outputState?.effectiveVersionId,
-  )?.output ?? node?.output;
-  if (!isRecord(effectiveOutput)) return [];
-  const report = isRecord(effectiveOutput.report) ? effectiveOutput.report : effectiveOutput;
-  if (!Array.isArray(report.findings)) return [];
-  return report.findings.flatMap((value, findingIndex): StudioReworkFinding[] => {
+  const reports = ["visual-review", "asset-source-review", "assets"].flatMap((nodeId) => {
+    const node = run.nodes.find((candidate) => candidate.id === nodeId);
+    const versionId = node?.outputState?.effectiveVersionId ?? "legacy-output";
+    const effectiveOutput = node?.outputState?.versions.find(
+      (version) => version.id === node.outputState?.effectiveVersionId,
+    )?.output ?? node?.output;
+    if (!isRecord(effectiveOutput)) return [];
+    const report = nodeId === "assets"
+      ? effectiveOutput.sourceVisualReview
+      : isRecord(effectiveOutput.report) ? effectiveOutput.report : effectiveOutput;
+    return isRecord(report) && Array.isArray(report.findings)
+      ? [{ nodeId, versionId, findings: report.findings }]
+      : [];
+  });
+  return reports.flatMap(({ nodeId, versionId, findings }) => findings.flatMap((value, findingIndex): StudioReworkFinding[] => {
     if (!isRecord(value) || !Number.isInteger(value.timecodeMs) || Number(value.timecodeMs) < 0) return [];
     const description = typeof value.description === "string" && value.description.trim()
       ? value.description.trim()
@@ -1775,9 +1834,14 @@ function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
       : "重新设计该镜头并验证修改结果。";
     const category = typeof value.category === "string" && value.category.trim() ? value.category.trim() : "other";
     const scenePosition = Number(value.scenePosition);
-    const targetNodeIds: StudioReworkFinding["targetNodeIds"] = /节奏|叙事|旁白|文案|pacing|narrative|script|voice/i.test(`${category} ${description} ${suggestion}`)
-      ? ["script", "visual-direction", "assets"]
-      : ["visual-direction", "assets"];
+    const explicitTarget = value.targetNodeId === "visual-direction" || value.targetNodeId === "assets"
+      ? value.targetNodeId
+      : undefined;
+    const targetNodeIds: StudioReworkFinding["targetNodeIds"] = explicitTarget
+      ? [explicitTarget]
+      : /节奏|叙事|旁白|文案|pacing|narrative|script|voice/i.test(`${category} ${description} ${suggestion}`)
+        ? ["script", "visual-direction", "assets"]
+        : ["visual-direction", "assets"];
     const normalizedFinding = {
       timecodeMs: Number(value.timecodeMs),
       ...(Number.isInteger(scenePosition) && scenePosition > 0 ? { scenePosition } : {}),
@@ -1788,11 +1852,32 @@ function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
     };
     const findingId = `vf_${createHash("sha256").update(JSON.stringify({
       sourceRunId: run.id,
-      sourceReviewVersionId,
+      sourceReviewNodeId: nodeId,
+      sourceReviewVersionId: versionId,
       findingIndex,
       finding: normalizedFinding,
     })).digest("hex").slice(0, 24)}`;
     return [{ findingId, ...normalizedFinding }];
+  }));
+}
+
+function resourceReworkFindings(runId: string, resources: RejectedVisualResource[]): StudioReworkFinding[] {
+  return resources.map((resource): StudioReworkFinding => {
+    const normalizedFinding = {
+      timecodeMs: resource.scenePosition ? Math.max(0, (resource.scenePosition - 1) * 4_000) : 0,
+      ...(resource.scenePosition ? { scenePosition: resource.scenePosition } : {}),
+      category: "resource_rights",
+      description: `素材“${resource.label}”未通过授权审核。`,
+      suggestion: `${resource.note}；替换为授权明确的素材并重新核验。`,
+      targetNodeIds: ["assets"] as StudioReworkFinding["targetNodeIds"],
+    };
+    const findingId = `vf_${createHash("sha256").update(JSON.stringify({
+      sourceRunId: runId,
+      resourceItemId: resource.itemId,
+      providerId: resource.providerId,
+      finding: normalizedFinding,
+    })).digest("hex").slice(0, 24)}`;
+    return { findingId, ...normalizedFinding };
   });
 }
 
@@ -1806,7 +1891,9 @@ function buildReworkNodeInstructions(
     .filter((finding) => finding.targetNodeIds.includes(nodeId))
     .map((finding) => {
       const location = finding.scenePosition
-        ? `镜头 ${finding.scenePosition} · ${formatReworkTimecode(finding.timecodeMs)}`
+        ? finding.category === "resource_rights"
+          ? `镜头 ${finding.scenePosition}`
+          : `镜头 ${finding.scenePosition} · ${formatReworkTimecode(finding.timecodeMs)}`
         : formatReworkTimecode(finding.timecodeMs);
       return `- ${location}：${finding.description}；修改为：${finding.suggestion}`;
     });
@@ -1888,6 +1975,7 @@ const NODE_PROVIDER_FIELDS: Partial<Record<string, keyof ProductionBrief["provid
   script: "script",
   "visual-direction": "director",
   assets: "assets",
+  "asset-source-review": "visualReview",
   voice: "voice",
   render: "render",
   "technical-review": "technicalReview",

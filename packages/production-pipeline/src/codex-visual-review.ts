@@ -11,7 +11,7 @@ import {
 } from "./model-fallback.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
-export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v5|role-audit-v1|visual-review-validator-v1";
+export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v6|role-audit-v1|visual-review-validator-v2";
 
 export interface VisualReviewFramePayload {
   timecodeMs: number;
@@ -34,7 +34,9 @@ export interface VisualReviewMediaPayload {
 }
 
 export interface VisualReviewAgentInput {
-  videoPath: string;
+  videoPath?: string;
+  assetPlanPath?: string;
+  reviewStage?: "source_assets" | "rendered_video";
   runRoot: string;
   scriptPath?: string;
   directorPlanPath?: string;
@@ -47,7 +49,8 @@ export interface VisualReviewAgentInput {
 
 export interface VisualReviewMediaPreprocessor {
   prepare(input: {
-    videoPath: string;
+    videoPath?: string;
+    assetPlanPath?: string;
     runRoot: string;
     renderManifestPath?: string;
   }): Promise<VisualReviewMediaPayload>;
@@ -68,6 +71,7 @@ export type VisualReviewExecution = CodexTaskExecution<VisualReviewReport> & {
 export interface VisualReviewFinding {
   timecodeMs: number;
   scenePosition?: number;
+  targetNodeId?: "visual-direction" | "assets";
   category: "composition" | "continuity" | "pacing" | "legibility" | "safety" | "other";
   severity: "info" | "warning" | "critical";
   description: string;
@@ -271,6 +275,9 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
       criteria: [
         "每条问题必须由对应时间码的画面证据支持，不得把稀疏关键帧看不到的声音或连续运动当作已证事实",
         "逐项核对脚本可见动作、导演成功条件、镜头时长与渲染清单，不得只凭整体观感打分",
+        "核心主体、物体或动作对象与对应镜头要求不符时必须判定返修；环境相似不能代替目标物体，并须定位到具体镜头与 assets 或 visual-direction",
+        "除脚本主字幕和渲染清单明确的 AIGC 披露外，任何可读字、标签、比例标记或水印都必须判定返修并定位到具体镜头与责任节点",
+        "当 reviewContext.reviewStage=source_assets 时，画面尚未叠加主字幕或 AIGC 披露；除导演明确选择 editorial_card 的正式内容外，任何可读文字、水印、比例标记或内部工作流术语都必须阻断进入渲染",
         "构图、连续性、节奏、可读性和安全五项评分必须与 findings 的严重程度及 recommendation 自洽",
         "抽样覆盖不足、缺帧或上下文缺失必须降低 confidence 并明确证据边界，不得虚构画面细节",
         "审片报告只判断当前成片并给出可执行修复建议；不得擅自改写脚本、导演方案或掩盖需要人工终审的问题",
@@ -428,10 +435,12 @@ async function buildReviewContext(
     input.scriptPath ? readRunJson(input.runRoot, input.scriptPath, "script") : undefined,
     input.directorPlanPath ? readRunJson(input.runRoot, input.directorPlanPath, "director plan") : undefined,
     input.renderManifestPath ? readRunJson(input.runRoot, input.renderManifestPath, "render manifest") : undefined,
+    input.assetPlanPath ? readRunJson(input.runRoot, input.assetPlanPath, "asset plan") : undefined,
   ]);
-  const [script, directorPlan, renderManifest] = entries;
-  if (!script && !directorPlan && !renderManifest && !sampling) return undefined;
+  const [script, directorPlan, renderManifest, assetPlan] = entries;
+  if (!script && !directorPlan && !renderManifest && !assetPlan && !sampling && !input.reviewStage) return undefined;
   const context = {
+    ...(input.reviewStage ? { reviewStage: input.reviewStage } : {}),
     ...(sampling ? { sampling: {
       ...sampling,
       phases: sampling.mode === "scene_triplets" ? ["opening", "middle", "closing"] : sampling.mode === "hook_and_scene_midpoints" ? ["hook", "midpoint"] : ["keyframe"],
@@ -442,6 +451,7 @@ async function buildReviewContext(
     ...(script ? { script: compactScript(script) } : {}),
     ...(directorPlan ? { directorPlan: compactDirectorPlan(directorPlan) } : {}),
     ...(renderManifest ? { renderManifest: compactRenderManifest(renderManifest) } : {}),
+    ...(assetPlan ? { assetPlan: compactAssetPlan(assetPlan) } : {}),
   };
   if (Buffer.byteLength(JSON.stringify(context), "utf8") > 128 * 1024) {
     throw new Error("Visual review context exceeds 131072 bytes after compaction.");
@@ -475,6 +485,37 @@ function compactRenderManifest(value: Record<string, unknown>): Record<string, u
   return pick(value, ["title", "duration_target", "resolution", "slides", "visual_quality", "probe", "aigc"]);
 }
 
+function compactAssetPlan(value: Record<string, unknown>): Record<string, unknown> {
+  const sceneAssets = Array.isArray(value.scene_assets)
+    ? value.scene_assets.flatMap((item) => {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
+      const asset = item as Record<string, unknown>;
+      const directorShot = typeof asset.director_shot === "object"
+        && asset.director_shot !== null
+        && !Array.isArray(asset.director_shot)
+        ? pick(asset.director_shot as Record<string, unknown>, [
+            "scenePosition", "preferredProviderId", "deliveryType",
+          ])
+        : undefined;
+      return [{
+        ...pick(asset, [
+          "scene_position", "provider", "provider_id", "asset_id", "media_type", "width", "height",
+          "duration", "query", "reuse_from_scene_position", "preferred_provider_id",
+        ]),
+        ...(directorShot && Object.keys(directorShot).length ? { director_shot: directorShot } : {}),
+      }];
+    })
+    : [];
+  const directorRouting = Array.isArray(value.director_routing)
+    ? value.director_routing.flatMap((item) => typeof item === "object" && item !== null && !Array.isArray(item)
+      ? [pick(item as Record<string, unknown>, [
+          "scene_position", "actual_provider_id", "requested_media_type", "query", "reuse_from_scene_position",
+        ])]
+      : [])
+    : [];
+  return { scene_assets: sceneAssets, ...(directorRouting.length ? { director_routing: directorRouting } : {}) };
+}
+
 function pick(value: Record<string, unknown>, keys: string[]): Record<string, unknown> {
   return Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]));
 }
@@ -498,12 +539,14 @@ export function validateVisualReviewReport(value: unknown, durationMs: number): 
     const category = enumValue(finding.category, ["composition", "continuity", "pacing", "legibility", "safety", "other"] as const, "category");
     const severity = enumValue(finding.severity, ["info", "warning", "critical"] as const, "severity");
     const scenePosition = finding.scenePosition;
-    if (scenePosition !== undefined && (!Number.isInteger(scenePosition) || Number(scenePosition) < 1)) {
+    if (!Number.isInteger(scenePosition) || Number(scenePosition) < 1) {
       throw new Error("Visual review finding scene position is invalid.");
     }
+    const targetNodeId = enumValue(finding.targetNodeId, ["visual-direction", "assets"] as const, "targetNodeId");
     return {
       timecodeMs: Number(timecodeMs),
-      ...(scenePosition !== undefined ? { scenePosition: Number(scenePosition) } : {}),
+      scenePosition: Number(scenePosition),
+      targetNodeId,
       category,
       severity,
       description: text(finding.description, "description"),

@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import { buildStudioApp, type StudioServicePort } from "../src/server/app.js";
 import { StudioConflictError } from "../src/server/studio-service.js";
 import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
-import type { StudioOpportunity, StudioPaidReconciliationInput, StudioRunDetail } from "../src/shared/api.js";
+import type { StudioOpportunity, StudioPaidReconciliationInput, StudioResourceReviewInput, StudioRunDetail } from "../src/shared/api.js";
 
 function runDetail(status: StudioRunDetail["status"] = "needs_human"): StudioRunDetail {
   return {
@@ -217,6 +217,59 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
 }
 
 describe("Studio API", () => {
+  it("records resource reviews with the authenticated actor and validates revisions", async () => {
+    const calls: Array<{ input: StudioResourceReviewInput; actor: string }> = [];
+    const manifest = await fakeService().resourceManifest();
+    const app = buildStudioApp({
+      service: fakeService({
+        reviewResource: async (input, actor) => {
+          calls.push({ input, actor });
+          if (input.expectedRevision === 9) throw new StudioConflictError("授权审核已被其他操作更新，请刷新后重试。");
+          return { ...manifest, reviewRevision: input.expectedRevision + 1 };
+        },
+      }),
+      auth: {
+        username: "owner",
+        passwordHash: "scrypt:v1:dGVzdC1zYWx0:pmeouWD7DazLps4NKXPdmS3_gNAeOnnMRDfJz9l6RvU",
+        sessionSecret: "test-session-secret-that-is-long-enough",
+        secureCookie: true,
+      },
+    });
+    const login = await app.inject({ method: "POST", url: "/api/auth/login", payload: { username: "owner", password: "correct horse battery staple" } });
+    const headers = { cookie: String(login.headers["set-cookie"]), "x-video-factory-request": "studio" };
+
+    const recorded = await app.inject({
+      method: "POST",
+      url: "/api/resource-manifest/reviews",
+      headers,
+      payload: { runId: "run-1", itemId: "asset-1", expectedRevision: 3, action: "confirmed" },
+    });
+    const missingNote = await app.inject({
+      method: "POST",
+      url: "/api/resource-manifest/reviews",
+      headers,
+      payload: { runId: "run-1", itemId: "asset-1", expectedRevision: 4, action: "rejected" },
+    });
+    const stale = await app.inject({
+      method: "POST",
+      url: "/api/resource-manifest/reviews",
+      headers,
+      payload: { runId: "run-1", itemId: "asset-1", expectedRevision: 9, action: "rejected", note: "授权条件不满足" },
+    });
+
+    assert.equal(recorded.statusCode, 200);
+    assert.equal(recorded.json().reviewRevision, 4);
+    assert.equal(missingNote.statusCode, 400);
+    assert.match(missingNote.json().error, /填写原因/);
+    assert.equal(stale.statusCode, 409);
+    assert.match(stale.json().error, /刷新后重试/);
+    assert.deepEqual(calls, [
+      { input: { runId: "run-1", itemId: "asset-1", expectedRevision: 3, action: "confirmed" }, actor: "owner" },
+      { input: { runId: "run-1", itemId: "asset-1", expectedRevision: 9, action: "rejected", note: "授权条件不满足" }, actor: "owner" },
+    ]);
+    await app.close();
+  });
+
   it("scopes opportunities and runs by a validated creation origin", async () => {
     const opportunityOrigins: Array<string | undefined> = [];
     const runOrigins: Array<string | undefined> = [];

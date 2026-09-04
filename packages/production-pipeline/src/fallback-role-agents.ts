@@ -17,11 +17,17 @@ interface RoleCandidate<TAgent> {
 
 export interface FallbackScreenwriterAgentOptions {
   candidates: Array<RoleCandidate<ScreenwriterAgent>>;
+  totalTimeoutMs?: number;
+  now?: () => number;
 }
 
 export interface FallbackVisualDirectorAgentOptions {
   candidates: Array<RoleCandidate<VisualDirectorAgent>>;
+  totalTimeoutMs?: number;
+  now?: () => number;
 }
+
+const DEFAULT_TEXT_AGENT_TOTAL_TIMEOUT_MS = 660_000;
 
 export class ModelCandidatesExhaustedError extends Error {
   readonly attempts: ModelCandidateAttempt[];
@@ -45,11 +51,15 @@ export class ModelCandidatesExhaustedError extends Error {
 export class FallbackScreenwriterAgent implements ScreenwriterAgent {
   readonly id: string;
   readonly modelId: string;
+  private readonly totalTimeoutMs: number;
+  private readonly now: () => number;
 
   constructor(private readonly options: FallbackScreenwriterAgentOptions) {
     const first = validateCandidates(options.candidates, "screenwriter");
     this.id = first.agent.id;
     this.modelId = requiredModelId(first.agent);
+    this.totalTimeoutMs = positiveTimeout(options.totalTimeoutMs);
+    this.now = options.now ?? Date.now;
   }
 
   async draft(input: ScreenwriterAgentInput): Promise<unknown> {
@@ -57,10 +67,11 @@ export class FallbackScreenwriterAgent implements ScreenwriterAgent {
   }
 
   async draftDetailed(input: ScreenwriterAgentInput): Promise<CodexTaskExecution<unknown>> {
+    const boundedInput = withWallClockDeadline(input, this.totalTimeoutMs, this.now);
     return runCandidates(
       this.options.candidates,
       input.selectedModelId,
-      input,
+      boundedInput,
       (agent, candidateInput) => agent.draftDetailed
         ? agent.draftDetailed(candidateInput)
         : agent.draft(candidateInput).then((output) => ({ output })),
@@ -71,11 +82,15 @@ export class FallbackScreenwriterAgent implements ScreenwriterAgent {
 export class FallbackVisualDirectorAgent implements VisualDirectorAgent {
   readonly id: string;
   readonly modelId: string;
+  private readonly totalTimeoutMs: number;
+  private readonly now: () => number;
 
   constructor(private readonly options: FallbackVisualDirectorAgentOptions) {
     const first = validateCandidates(options.candidates, "visual director");
     this.id = first.agent.id;
     this.modelId = requiredModelId(first.agent);
+    this.totalTimeoutMs = positiveTimeout(options.totalTimeoutMs);
+    this.now = options.now ?? Date.now;
   }
 
   async plan(input: VisualDirectorAgentInput): Promise<unknown> {
@@ -83,10 +98,11 @@ export class FallbackVisualDirectorAgent implements VisualDirectorAgent {
   }
 
   async planDetailed(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<unknown>> {
+    const boundedInput = withWallClockDeadline(input, this.totalTimeoutMs, this.now);
     return runCandidates(
       this.options.candidates,
       input.selectedModelId,
-      input,
+      boundedInput,
       (agent, candidateInput) => agent.planDetailed
         ? agent.planDetailed(candidateInput)
         : agent.plan(candidateInput).then((output) => ({ output })),
@@ -200,6 +216,23 @@ function requiredModelId(agent: { modelId?: string }): string {
   const modelId = agent.modelId?.trim();
   if (!modelId) throw new Error("Model fallback candidate is missing its model id.");
   return modelId;
+}
+
+function positiveTimeout(value: number | undefined): number {
+  const timeoutMs = value ?? DEFAULT_TEXT_AGENT_TOTAL_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error("Text agent totalTimeoutMs must be a positive integer.");
+  }
+  return timeoutMs;
+}
+
+function withWallClockDeadline<TInput extends { wallClockDeadlineAtMs?: number }>(
+  input: TInput,
+  totalTimeoutMs: number,
+  now: () => number,
+): TInput {
+  const deadline = input.wallClockDeadlineAtMs ?? now() + totalTimeoutMs;
+  return { ...input, wallClockDeadlineAtMs: deadline };
 }
 
 function inputForCandidate<TInput extends {

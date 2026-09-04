@@ -342,6 +342,8 @@ interface NodeExecutionBase<TOutput = unknown> {
   artifacts?: ArtifactDraft[];
   receipt?: NodeExecutionReceiptDraft;
   error?: string;
+  // 计费执行已成功落定，但同一节点内的免费后置检查失败时，不应误锁为付费结果未知。
+  providerOutcomeKnown?: boolean;
 }
 
 export type NodeExecutionResult<TOutput = unknown> =

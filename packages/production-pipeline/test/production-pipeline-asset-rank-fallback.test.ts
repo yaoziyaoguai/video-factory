@@ -135,7 +135,7 @@ describe("ProductionPipeline semantic ranking fallback", () => {
           const output = deterministicAssetRanking(report);
           const trace = {
             taskKind: "asset-rank",
-            promptVersion: "video-factory/asset-rank-v1",
+            promptVersion: "video-factory/asset-rank-v2",
             prompt: "fixture",
             providerId: "openai-codex-subscription",
             modelId: "gpt-5.4-mini",

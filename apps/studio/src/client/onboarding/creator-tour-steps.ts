@@ -230,7 +230,7 @@ const RUN_TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="run-header"]',
     popover: {
       title: "这是这条视频的制作详情",
-      description: "标题旁的状态决定现在要做什么：制作中就等待，等你审片就做人工终审，已完成就取发布包或做多平台发布。",
+      description: "标题旁的状态决定现在要做什么：制作中就等待，等你审片就做人工终审；失败时先查看真实原因，选择其他模型或调整配置后重试；待重新生成时确认修改后继续，已完成就取发布包或做多平台发布。",
       side: "bottom",
       align: "start",
     },

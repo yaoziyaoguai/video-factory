@@ -31,6 +31,8 @@ const report = {
   scores: { composition: 84, continuity: 82, pacing: 78, legibility: 72, safety: 96 },
   findings: [{
     timecodeMs: 3_000,
+    scenePosition: 1,
+    targetNodeId: "assets",
     category: "legibility",
     severity: "warning",
     description: "字幕行数偏多。",
@@ -103,6 +105,55 @@ describe("CodexVisualReviewAgent", () => {
     assert.equal((reviewContext.script as Record<string, unknown>).viewerPromise, "看见窗边光线变化");
     assert.deepEqual((reviewContext.directorPlan as Record<string, unknown>).shots, [{ scenePosition: 1, temporalBeats: ["[0s-2s] 拉开窗帘"], successCriteria: ["杯沿变亮"] }]);
     assert.deepEqual((reviewContext.renderManifest as Record<string, unknown>).slides, [{ scene_position: 1, duration: 6 }]);
+  });
+
+  it("identifies director-approved editorial cards while keeping undeclared text blocked and private paths hidden", async () => {
+    const runRoot = await mkdtemp(path.join(tmpdir(), "video-factory-source-review-context-"));
+    const assetPlanPath = path.join(runRoot, "asset_plan.json");
+    await writeFile(assetPlanPath, JSON.stringify({
+      scene_assets: [{
+        scene_position: 1,
+        provider: "seedream",
+        asset_id: "asset-1",
+        media_type: "image",
+        duration: 4,
+        query: "cold drink condensation",
+        preferred_provider_id: "local-editorial-v1",
+        director_shot: {
+          scenePosition: 1,
+          preferredProviderId: "local-editorial-v1",
+          deliveryType: "editorial_card",
+          internalPrompt: "must not leak",
+        },
+        local_path: "/private/secret/generated.png",
+        source_url: "https://signed.example/secret-token",
+      }, {
+        scene_position: 2,
+        provider: "local",
+        asset_id: "undeclared-text-card",
+        media_type: "image",
+        duration: 4,
+        query: "local text card without director approval",
+      }],
+    }));
+    let payload: unknown;
+    const agent = new CodexVisualReviewAgent({
+      media: { prepare: async () => media },
+      client: { runTask: async (_kind, input) => {
+        payload = input;
+        return report;
+      } },
+    });
+
+    await agent.review({ assetPlanPath, reviewStage: "source_assets", runRoot });
+
+    const serialized = JSON.stringify(payload);
+    const reviewContext = (payload as { reviewContext: Record<string, unknown> }).reviewContext;
+    assert.equal(reviewContext.reviewStage, "source_assets");
+    assert.match(serialized, /cold drink condensation/);
+    assert.match(serialized, /editorial_card/);
+    assert.match(serialized, /undeclared-text-card/);
+    assert.doesNotMatch(serialized, /private\/secret|secret-token|signed\.example|must not leak/);
   });
 
   it("sends only the bounded preprocessed frame payload and validates the report", async () => {
@@ -194,6 +245,8 @@ describe("CodexVisualReviewAgent", () => {
     assert.equal(execution.agentLoop?.iterations.length, 2);
     assert.deepEqual(calls.map((call) => call.kind), ["visual-review", "role-audit", "visual-review", "role-audit"]);
     assert.equal(calls[2]?.payload.revision !== undefined, true);
+    assert.match((calls[1]?.payload.criteria as string[]).join("\n"), /核心主体、物体或动作对象.*必须判定返修/);
+    assert.match((calls[1]?.payload.criteria as string[]).join("\n"), /任何可读字、标签、比例标记或水印.*必须判定返修/);
     assert.deepEqual(execution.output, repairedReport);
   });
 
@@ -762,19 +815,34 @@ describe("CodexVisualReviewAgent", () => {
     );
   });
 
-  it("preserves a validated scene position on each localized finding", () => {
+  it("preserves validated scene and repair ownership on each localized finding", () => {
     const localized = validateVisualReviewReport({
       ...report,
-      findings: [{ ...report.findings[0], scenePosition: 2 }],
+      findings: [{ ...report.findings[0], scenePosition: 2, targetNodeId: "assets" }],
     }, 6_000);
 
     assert.equal(localized.findings[0]?.scenePosition, 2);
+    assert.equal(localized.findings[0]?.targetNodeId, "assets");
     assert.throws(
       () => validateVisualReviewReport({
         ...report,
         findings: [{ ...report.findings[0], scenePosition: 0 }],
       }, 6_000),
       /scene position is invalid/,
+    );
+    assert.throws(
+      () => validateVisualReviewReport({
+        ...report,
+        findings: [{ ...report.findings[0], scenePosition: undefined }],
+      }, 6_000),
+      /scene position is invalid/,
+    );
+    assert.throws(
+      () => validateVisualReviewReport({
+        ...report,
+        findings: [{ ...report.findings[0], targetNodeId: undefined }],
+      }, 6_000),
+      /targetNodeId is invalid/,
     );
   });
 

@@ -6,6 +6,7 @@ export const RUN_NODE_LABELS: Record<string, string> = {
   "asset-candidates": "候选素材",
   "asset-semantic-rank": "候选画面排序",
   assets: "画面",
+  "asset-source-review": "生成画面预检",
   voice: "配音",
   render: "渲染",
   "technical-review": "机器质检",

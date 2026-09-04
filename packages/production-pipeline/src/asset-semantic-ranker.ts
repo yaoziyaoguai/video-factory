@@ -81,7 +81,7 @@ interface AssetRankThumbnail {
 const MAX_RANK_THUMBNAILS = 12;
 const MAX_THUMBNAIL_BYTES = 512 * 1024;
 const THUMBNAIL_HOSTS = new Set(["images.pexels.com", "cdn.pixabay.com"]);
-export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v1|role-audit-v1|asset-ranking-validator-v1";
+export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v2|role-audit-v1|asset-ranking-validator-v1";
 
 export class CodexAssetSemanticRanker implements AssetSemanticRanker {
   readonly id: string;
@@ -108,6 +108,7 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
         "逐镜候选完整保留，排名和原始排名均连续且没有重复",
         "排序理由引用可见证据或明确承认证据不足，不根据 URL、作者或素材 ID 臆测",
         "主体、环境、动作、景别、构图与连续性优先于单纯分辨率和素材源质量分",
+        "首选候选的核心主体、物体和动作必须与该镜导演意图一致；环境相似或动作相关不能替代核心对象匹配，没有合格候选时不得通过审计",
         "没有把候选锁定，也没有新增、删除或替换候选素材",
       ],
       maxIterations: this.options.maxReviewIterations ?? 3,

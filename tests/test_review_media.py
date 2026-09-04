@@ -13,6 +13,7 @@ from video_factory.review_media import (
     MAX_FRAME_BYTES,
     MAX_TOTAL_FRAME_BYTES,
     _select_render_timeline_timestamps,
+    prepare_asset_review_media,
     prepare_review_media,
 )
 
@@ -22,6 +23,54 @@ FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None and shutil.which("ffprobe"
 
 @unittest.skipUnless(FFMPEG_AVAILABLE, "FFmpeg and ffprobe are required")
 class ReviewMediaTest(unittest.TestCase):
+    def test_prepares_every_source_asset_before_rendering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "run-1"
+            assets_dir = run_root / "assets"
+            assets_dir.mkdir(parents=True)
+            first = assets_dir / "scene-1.png"
+            second = assets_dir / "scene-2.png"
+            Image.new("RGB", (320, 480), "red").save(first)
+            Image.new("RGB", (320, 480), "blue").save(second)
+            plan_path = assets_dir / "asset_plan.json"
+            plan_path.write_text(json.dumps({
+                "scene_assets": [
+                    {"scene_position": 1, "duration": 4, "media_type": "image", "local_path": str(first)},
+                    {"scene_position": 2, "duration": 6, "media_type": "image", "local_path": str(second)},
+                ],
+            }), encoding="utf-8")
+
+            manifest_path = prepare_asset_review_media(plan_path, run_root)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(manifest["durationMs"], 10_000)
+            self.assertEqual(manifest["sampling"]["sceneCount"], 2)
+            self.assertEqual([frame["scenePosition"] for frame in manifest["frames"]], [1, 2])
+            self.assertEqual([frame["timestampMs"] for frame in manifest["frames"]], [2_000, 7_000])
+            self.assertEqual([frame["phase"] for frame in manifest["frames"]], ["midpoint", "midpoint"])
+            for frame in manifest["frames"]:
+                assert_manifest_image(run_root, frame)
+
+    def test_rejects_source_assets_outside_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_root = root / "run-1"
+            run_root.mkdir()
+            outside = root / "outside.png"
+            Image.new("RGB", (16, 16), "red").save(outside)
+            plan_path = run_root / "asset_plan.json"
+            plan_path.write_text(json.dumps({
+                "scene_assets": [{
+                    "scene_position": 1,
+                    "duration": 4,
+                    "media_type": "image",
+                    "local_path": str(outside),
+                }],
+            }), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "asset local_path must stay within run_root"):
+                prepare_asset_review_media(plan_path, run_root)
+
     def test_prepares_deterministic_run_relative_review_media(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_root = Path(tmp) / "run-1"

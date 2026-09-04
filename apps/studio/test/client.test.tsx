@@ -38,6 +38,15 @@ const providers: StudioProvider[] = [
   { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立质量审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
 ];
 
+const subscriptionVisualReviewProvider: StudioProvider = {
+  id: "glm-visual-review-v1",
+  capability: "quality.review.visual",
+  label: "GLM-5.3-Flash 视觉审片",
+  available: true,
+  kind: "external",
+  billing: "subscription",
+};
+
 function template(id: string, name: string): StudioTemplate {
   return {
     id,
@@ -243,6 +252,22 @@ describe("Studio client", () => {
     expect(screen.queryByText("已经完成的内容")).not.toBeInTheDocument();
   });
 
+  it("renders historical production progress from that run's actual workflow", () => {
+    const historical = {
+      ...runSummary,
+      workflowNodeIds: ["brief", "script", "visual-direction", "assets", "voice", "render", "technical-review", "visual-review", "final-review"],
+    };
+    const { container } = render(
+      <MemoryRouter>
+        <ProductionQueue runs={[historical]} loading={false} onCreate={() => undefined} />
+      </MemoryRouter>,
+    );
+
+    const progress = container.querySelector(".project-progress");
+    expect(progress?.querySelectorAll("span")).toHaveLength(historical.workflowNodeIds.length);
+    expect(progress?.querySelector('[title="生成画面预检"]')).not.toBeInTheDocument();
+  });
+
   it("keeps the mobile production create icon visible on its primary background", () => {
     const css = readFileSync(resolve(process.cwd(), "src/client/studio-v3.css"), "utf8");
 
@@ -418,7 +443,7 @@ describe("Studio client", () => {
   it("shows only two real visual strategies and maps a legacy cinematic default to paid key shots", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-    const providersWithPaidVisuals: StudioProvider[] = [...providers, {
+    const providersWithPaidVisuals: StudioProvider[] = [...providers, subscriptionVisualReviewProvider, {
       id: "seedance-video-v1",
       capability: "asset.prepare",
       label: "火山方舟视频",
@@ -442,6 +467,8 @@ describe("Studio client", () => {
 
     expect(screen.getAllByRole("radio", { name: /(?:仅免费画面|允许付费关键镜头)/ })).toHaveLength(2);
     expect(screen.getByRole("radio", { name: /允许付费关键镜头/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeDisabled();
     expect(screen.queryByText("经济日更")).not.toBeInTheDocument();
     expect(screen.queryByText("开放精品生成")).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("视频标题"), "旧配方映射到真实策略");
@@ -451,6 +478,7 @@ describe("Studio client", () => {
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
+      providers: expect.objectContaining({ visualReview: "glm-visual-review-v1" }),
     }));
   });
 
@@ -965,7 +993,7 @@ describe("Studio client", () => {
   it("adds editorial layout capability when photo-story is selected manually", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-    const providersWithPaidVisuals: StudioProvider[] = [...providers, {
+    const providersWithPaidVisuals: StudioProvider[] = [...providers, subscriptionVisualReviewProvider, {
       id: "seedance-video-v1",
       capability: "asset.prepare",
       label: "火山方舟视频",
@@ -981,6 +1009,8 @@ describe("Studio client", () => {
     expect(screen.getByRole("checkbox", { name: /本地编辑画面/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /本地编辑画面/ })).toBeDisabled();
     await user.click(screen.getByRole("radio", { name: /允许付费关键镜头/ }));
+    expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeDisabled();
     expect(screen.getByRole("checkbox", { name: /本地编辑画面/ })).toBeChecked();
     await user.click(screen.getByRole("radio", { name: /知识解释/ }));
     expect(screen.getByRole("checkbox", { name: /本地编辑画面/ })).not.toBeChecked();
@@ -992,6 +1022,7 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("button", { name: "开始制作" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      providers: expect.objectContaining({ visualReview: "glm-visual-review-v1" }),
       director: expect.objectContaining({ assetProviderIds: expect.arrayContaining(["local-editorial-v1"]) }),
     }));
   });
@@ -1202,7 +1233,7 @@ describe("Studio client", () => {
   it("does not ask for a video-wide ceiling when updating the selected model", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-    const providersWithModels: StudioProvider[] = [...providers, {
+    const providersWithModels: StudioProvider[] = [...providers, subscriptionVisualReviewProvider, {
       id: "seedance-video-v1",
       capability: "asset.prepare",
       label: "火山方舟视频",
@@ -1219,6 +1250,8 @@ describe("Studio client", () => {
     render(<NewRunDialog open providers={providersWithModels} onClose={() => undefined} onSubmit={onSubmit} />);
 
     await user.click(screen.getByRole("radio", { name: /允许付费关键镜头/ }));
+    expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeDisabled();
     await user.click(screen.getByText("更多：素材来源与制作细节"));
     await user.selectOptions(screen.getByRole("combobox", { name: "Seedance 视频生成 本次模型" }), "premium-model");
 
@@ -1230,6 +1263,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      providers: expect.objectContaining({ visualReview: "glm-visual-review-v1" }),
       economics: {
         recipeId: "keyshot-ai",
         allowMeteredProviders: true,
@@ -1440,6 +1474,7 @@ describe("Studio client", () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const configuredProviders: StudioProvider[] = [
       ...providers,
+      subscriptionVisualReviewProvider,
       {
         id: "seedance-video-v1",
         capability: "asset.prepare",
@@ -1458,6 +1493,8 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("内容角度"), "用一个关键镜头建立情绪转折");
     await user.type(screen.getByLabelText("目标受众"), "普通上班族");
     await user.click(screen.getByRole("radio", { name: /允许付费关键镜头/ }));
+    expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeDisabled();
     await user.click(screen.getByText("更多：素材来源与制作细节"));
 
     expect(screen.getByRole("checkbox", { name: /Seedance 视频生成/ })).toBeChecked();
@@ -1468,7 +1505,11 @@ describe("Studio client", () => {
     expect(screen.getByLabelText("费用方式")).toHaveTextContent(/按实际方案报价.*逐项人工确认/);
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      providers: expect.objectContaining({ assets: "ai-shot-router-v1", director: "api-visual-director-v1" }),
+      providers: expect.objectContaining({
+        assets: "ai-shot-router-v1",
+        director: "api-visual-director-v1",
+        visualReview: "glm-visual-review-v1",
+      }),
       director: expect.objectContaining({
         profileId: "auto",
         assetProviderIds: expect.arrayContaining(["pexels-stock-v1", "seedance-video-v1"]),
@@ -1479,6 +1520,30 @@ describe("Studio client", () => {
       },
     }));
     expect(onSubmit.mock.calls[0]?.[0].director?.assetProviderIds).not.toContain("local-editorial-v1");
+  });
+
+  it("blocks paid visual production when no visual-review provider is available", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const providersWithoutVisualReview: StudioProvider[] = [...providers, {
+      id: "seedance-video-v1",
+      capability: "asset.prepare",
+      label: "Seedance 关键镜头",
+      available: true,
+      kind: "external",
+      billing: "metered",
+      estimatedCnyPerClip: 3.5,
+    }];
+    render(<NewRunDialog open providers={providersWithoutVisualReview} onClose={() => undefined} onSubmit={onSubmit} />);
+
+    await user.type(screen.getByLabelText("视频标题"), "付费画面必须审片");
+    await user.type(screen.getByLabelText("内容角度"), "验证缺少审片能力时不能开工");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("radio", { name: /允许付费关键镜头/ }));
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("付费图片和视频必须先启用可用的视觉审片");
   });
 
   it("prefills an editable production brief from a selected opportunity", () => {
@@ -1732,7 +1797,7 @@ describe("Studio client", () => {
       nodeInstructions: {
         script: "缩短第三镜旁白，保留前两镜原文。",
         visualDirection: "第三镜沿用前两镜的自然纪实风格并留出字幕安全区。",
-        assets: "只替换第三镜，禁止使用带字素材和说明卡。",
+        assets: "只替换第三镜；没有合格素材时进入 manualReplacement，禁止使用带字素材和说明卡。",
       },
       findings: [{
         findingId: "vf_0123456789abcdef01234567",
@@ -1809,7 +1874,7 @@ describe("Studio client", () => {
     expect(screen.getByText("素材自带文字与字幕重叠，应进入 人工补充素材。")).toBeInTheDocument();
     expect(screen.queryByText(/manualReplacement/i)).not.toBeInTheDocument();
     const assetInstruction = screen.getByRole("textbox", { name: "画面素材修改要求" });
-    expect(assetInstruction).toHaveValue(rework.nodeInstructions.assets);
+    expect(assetInstruction).toHaveValue("只替换第三镜；没有合格素材时进入 人工补充素材，禁止使用带字素材和说明卡。");
     expect(screen.getByRole("combobox", { name: "编剧本次模型" })).toHaveValue("gpt-primary");
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "glm-backup");
     await user.clear(assetInstruction);
@@ -1829,6 +1894,8 @@ describe("Studio client", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
       rework: expect.objectContaining({
         sourceRunId: "run-rejected-1",
+        rejectionReason: rework.rejectionReason,
+        findings: rework.findings,
         previousScript: rework.previousScript,
         previousDirectorPlan: rework.previousDirectorPlan,
         nodeInstructions: expect.objectContaining({
@@ -2144,6 +2211,28 @@ describe("Studio client", () => {
     expect(approve).toBeEnabled();
     await user.click(approve);
     expect(onDecision).toHaveBeenCalledWith({ action: "approve", note: "覆盖视觉审片建议：已逐帧复核，当前版本符合本次发布要求" });
+  });
+
+  it("keeps an older workflow read-only and offers a new production instead of broken review actions", async () => {
+    const user = userEvent.setup();
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const onRestart = vi.fn();
+    const reason = "这条制作来自旧版工作流，只能查看现有结果。若要继续调整，请基于这版重新制作。";
+
+    render(<RunWorkbench
+      run={{ ...runDetail, continuation: { supported: false, reason } }}
+      decisionPending={false}
+      onDecision={onDecision}
+      onRestart={onRestart}
+    />);
+
+    expect(screen.getByRole("heading", { name: "这条旧版制作仅供查看" })).toBeInTheDocument();
+    expect(screen.getByText(reason)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批准进入发布包" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打回" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "基于这版重新制作" }));
+    expect(onRestart).toHaveBeenCalledOnce();
+    expect(onDecision).not.toHaveBeenCalled();
   });
 
   it("submits a localized scene revision and seeks the preview to the finding", async () => {
@@ -2592,6 +2681,61 @@ describe("Studio client", () => {
     expect(screen.getByText("技术诊断")).toBeInTheDocument();
   });
 
+  it("shows the real visual-review failure reason and a retry action", () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    render(<RunWorkbench
+      run={{
+        ...withoutIntervention,
+        status: "failed",
+        failure: {
+          nodeId: "visual-review",
+          nodeLabel: "视觉审片",
+          category: "node_failure",
+          summary: "视觉审片员没有完成视觉审片",
+          impact: "成片已保留。",
+          retryable: true,
+          recoveryActions: ["选择可用模型后重试"],
+          savedNodeCount: 8,
+          technicalDetail: "上游视觉模型返回空结果",
+        },
+        nodes: withoutIntervention.nodes.map((node, index) => index === 0 ? { ...node, id: "visual-review", label: "视觉审片", status: "failed" } : node),
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onRetryFailedNode={async () => undefined}
+    />);
+
+    expect(screen.getByText((_, element) => element?.textContent === "失败原因：上游视觉模型返回空结果")).toBeVisible();
+    expect(screen.getByRole("button", { name: "重试视觉审片" })).toBeInTheDocument();
+  });
+
+  it("shows a source-asset review failure reason on the main failure panel", () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    const reason = "源素材视觉预检服务暂时不可用。已保留生成结果，请切换视觉审片模型。";
+    render(<RunWorkbench
+      run={{
+        ...withoutIntervention,
+        status: "failed",
+        failure: {
+          nodeId: "assets",
+          nodeLabel: "画面",
+          category: "node_failure",
+          summary: "生成画面的视觉预检没有完成，已保留本轮画面结果",
+          impact: "配音尚未开始。",
+          retryable: true,
+          recoveryActions: ["在画面步骤切换视觉审片服务或模型后重试"],
+          savedNodeCount: 3,
+          technicalDetail: reason,
+        },
+        nodes: withoutIntervention.nodes.map((node, index) => index === 0 ? { ...node, id: "assets", label: "画面", status: "failed" } : node),
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+    />);
+
+    expect(screen.getByText((_, element) => element?.textContent === `失败原因：${reason}`)).toBeVisible();
+  });
+
   it("shows an explicit regenerate action instead of pretending a stale run is active", async () => {
     const regenerate = vi.fn(async () => undefined);
     const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
@@ -2640,6 +2784,20 @@ describe("Studio client", () => {
 
     expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "调整方案后重新制作" })).toBeInTheDocument();
+  });
+
+  it("offers an approved production as the source of a new version", async () => {
+    const restart = vi.fn();
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    render(<RunWorkbench
+      run={{ ...withoutIntervention, status: "succeeded" }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onRestart={restart}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "基于这版重新制作" }));
+    expect(restart).toHaveBeenCalledOnce();
   });
 
   it("shows paid task evidence and reconciles it instead of offering a blind retry", async () => {

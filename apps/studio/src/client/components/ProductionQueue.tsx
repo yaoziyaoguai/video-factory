@@ -155,7 +155,7 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
                   </div>
                   <h3>{run.title}</h3>
                   <div className="project-folio-state"><StatusBadge status={run.status} /><span>{runNodeLabel(run.currentNodeId)}</span></div>
-                  <RunProgress currentNodeId={run.currentNodeId} status={run.status} />
+                  <RunProgress currentNodeId={run.currentNodeId} status={run.status} {...(run.workflowNodeIds ? { workflowNodeIds: run.workflowNodeIds } : {})} />
                   <div className="project-folio-actions">
                     <Link className="project-folio-action" to={`/projects/${run.id}`} aria-label={runAction(run) ? `${actionLabel(runAction(run)!)}：${run.title}` : `查看制作：${run.title}`}>
                       {runAction(run) ? actionLabel(runAction(run)!) : run.status === "succeeded" ? "查看成片" : "打开制作记录"}
@@ -265,11 +265,12 @@ function runAction(run: StudioRunSummary): StudioRunSummary["nextAction"] {
   return isTerminal(run) ? undefined : run.nextAction;
 }
 
-function RunProgress({ currentNodeId, status }: Pick<StudioRunSummary, "currentNodeId" | "status">) {
-  const currentIndex = Math.max(RUN_NODE_ORDER.indexOf(currentNodeId), 0);
+function RunProgress({ currentNodeId, status, workflowNodeIds }: Pick<StudioRunSummary, "currentNodeId" | "status" | "workflowNodeIds">) {
+  const nodeOrder = workflowNodeIds?.length ? workflowNodeIds : RUN_NODE_ORDER;
+  const currentIndex = Math.max(nodeOrder.indexOf(currentNodeId), 0);
   return (
     <div className="project-progress" aria-label={`当前工序：${runNodeLabel(currentNodeId)}`}>
-      {RUN_NODE_ORDER.map((nodeId, index) => {
+      {nodeOrder.map((nodeId, index) => {
         const state = status === "succeeded" || index < currentIndex
           ? "complete"
           : index === currentIndex

@@ -152,6 +152,63 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(response.artifacts.some((artifact) => artifact.kind === "media_asset"), true);
   });
 
+  it("reports zero metered attempts when free stock preflight fails before paid generation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-free-stock-preflight-"));
+    const scriptPath = path.join(root, "script.json");
+    const directorPlanPath = path.join(root, "director_plan.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "stock", visual_prompt: "社区早餐摊" },
+      { position: 2, duration: 5, visual_strategy: "generated", visual_prompt: "蒸汽升起的早餐特写" },
+    ] }));
+    await writeFile(directorPlanPath, JSON.stringify({ shots: [{
+      scenePosition: 1,
+      preferredProviderId: "pexels-stock-v1",
+      deliveryType: "stock_video",
+      query: "community breakfast stall",
+    }, {
+      scenePosition: 2,
+      preferredProviderId: "seedance-video-v1",
+      deliveryType: "generated_video",
+      generationPrompt: "蒸汽升起的早餐特写",
+    }] }));
+    let paidCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: {
+        run: async (request) => ({
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          commandId: String(request.commandId),
+          status: "failed",
+          artifacts: [],
+          error: { code: "STOCK_PREFLIGHT_FAILED", message: "Pexels credentials are unavailable." },
+        }),
+      },
+      adapters: [{
+        estimatedCnyPerClip: 3.5,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => {
+            paidCalls += 1;
+            return { providerId: "seedance-video-v1", taskId: "must-not-run", videoUrl: "https://example.com/no.mp4" };
+          },
+        },
+      }],
+    });
+
+    const response = await subject.run(routedWorkerRequest(
+      scriptPath,
+      directorPlanPath,
+      path.join(root, "attempt-1"),
+      1,
+      4,
+    ));
+
+    assert.equal(response.status, "failed");
+    assert.equal(paidCalls, 0);
+    assert.equal(response.diagnostics?.actualCostCny, 0);
+    assert.equal(response.diagnostics?.meteredAttemptCount, 0);
+    assert.equal(response.diagnostics?.meteredFailedAttemptCount, 0);
+  });
+
   it("adds the no-rendered-text constraint for a direct image provider", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-direct-image-"));
     const scriptPath = path.join(root, "script.json");
@@ -1005,6 +1062,7 @@ describe("GenerativeAssetWorkerClient", () => {
             "蒸汽持续可见",
             "食物主体不变形",
             "成片中 Seedream 素材的 AIGC 标识清晰可见且未被裁切、遮挡或移除",
+            "所有生成式镜头保留清晰可见的 AI 内容声明标识",
           ],
           rationale: "付费只用于无法精准检索的核心特写",
         },

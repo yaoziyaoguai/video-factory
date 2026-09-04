@@ -890,6 +890,146 @@ describe("WorkflowRunner", () => {
     assert.equal(failed.nodeRuns[0]?.executionReceipt?.meteredAttemptCount, 0);
   });
 
+  it("keeps a metered quality rejection definitive after the provider succeeded", async () => {
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "paid-image",
+      label: "Paid image",
+      modelId: "image-v1",
+      capability: "asset.prepare",
+      transport: "http_api",
+      billing: "metered",
+      estimatedCostCny: 0.25,
+      maxCostCny: 0.25,
+      maxAttempts: 1,
+      run: () => ({ image: "scene.png" }),
+    });
+    const definition: WorkflowDefinition = {
+      id: "paid-asset-quality-rejection",
+      name: "Paid asset quality rejection",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "paid-image",
+        mode: "automatic",
+        execute: async (input, context) => {
+          await context.resolveProvider({
+            capability: "asset.prepare",
+            providerId: "paid-image",
+          }).run(input, context);
+          return {
+            status: "rejected",
+            output: { image: "scene.png", sourceVisualReview: { recommendation: "reject" } },
+            error: "source visual review rejected the generated image",
+            receipt: {
+              providerId: "paid-image",
+              providerLabel: "Paid image",
+              modelId: "image-v1",
+              transport: "http_api",
+              billing: "metered",
+              estimatedCostCny: 0.25,
+              actualCostCny: 0.25,
+              actualCostSource: "provider_reported",
+              meteredAttemptCount: 1,
+              meteredFailedAttemptCount: 0,
+            },
+          };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+    const awaitingApproval = await runner.run(definition, {});
+    const plan = awaitingApproval.nodeRuns[0]?.spendPlan;
+    assert.ok(plan);
+
+    const rejected = await runner.authorizeSpend(definition, awaitingApproval, {
+      spendPlanId: plan.id,
+      nodeId: plan.nodeId,
+      inputVersionIds: plan.inputVersionIds,
+      providerId: plan.providerId,
+      modelId: plan.modelId,
+      maxCostCny: plan.maxCostCny,
+      maxAttempts: plan.maxAttempts,
+      approvedBy: "producer",
+    });
+
+    assert.equal(rejected.status, "rejected");
+    assert.equal(rejected.nodeRuns[0]?.status, "rejected");
+    assert.equal(rejected.nodeRuns[0]?.outcomeUncertain, undefined);
+    assert.equal(rejected.nodeRuns[0]?.executionReceipt?.actualCostCny, 0.25);
+    assert.equal(rejected.nodeRuns[0]?.executionReceipt?.meteredFailedAttemptCount, 0);
+  });
+
+  it("does not make a settled paid result uncertain when a free post-check fails", async () => {
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "paid-image",
+      label: "Paid image",
+      modelId: "image-v1",
+      capability: "asset.prepare",
+      transport: "http_api",
+      billing: "metered",
+      estimatedCostCny: 0.25,
+      maxCostCny: 0.25,
+      maxAttempts: 1,
+      run: () => ({ image: "scene.png" }),
+    });
+    const definition: WorkflowDefinition = {
+      id: "paid-asset-post-check-failure",
+      name: "Paid asset post-check failure",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "paid-image",
+        mode: "automatic",
+        execute: async (input, context) => {
+          await context.resolveProvider({ capability: "asset.prepare", providerId: "paid-image" }).run(input, context);
+          return {
+            status: "failed",
+            providerOutcomeKnown: true,
+            output: { image: "scene.png" },
+            error: "free visual review unavailable",
+            receipt: {
+              providerId: "paid-image",
+              providerLabel: "Paid image",
+              modelId: "image-v1",
+              transport: "http_api",
+              billing: "metered",
+              estimatedCostCny: 0.25,
+              actualCostCny: 0.25,
+              actualCostSource: "provider_reported",
+              meteredAttemptCount: 1,
+              meteredFailedAttemptCount: 0,
+            },
+          };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+    const awaitingApproval = await runner.run(definition, {});
+    const plan = awaitingApproval.nodeRuns[0]?.spendPlan;
+    assert.ok(plan);
+
+    const failed = await runner.authorizeSpend(definition, awaitingApproval, {
+      spendPlanId: plan.id,
+      nodeId: plan.nodeId,
+      inputVersionIds: plan.inputVersionIds,
+      providerId: plan.providerId,
+      modelId: plan.modelId,
+      maxCostCny: plan.maxCostCny,
+      maxAttempts: plan.maxAttempts,
+      approvedBy: "producer",
+    });
+
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.nodeRuns[0]?.outcomeUncertain, undefined);
+    assert.equal(failed.nodeRuns[0]?.executionReceipt?.actualCostCny, 0.25);
+  });
+
   it("allows retry when an authorized node fails before invoking its metered provider", async () => {
     let providerCalls = 0;
     const registry = new ProviderRegistry();

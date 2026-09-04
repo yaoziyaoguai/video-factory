@@ -123,9 +123,13 @@ describe("broker-owned task definitions", () => {
 
     assert.equal(topic.version, "video-factory/topic-editor-v3");
     assert.equal(script.version, "video-factory/screenwriter-v5");
-    assert.equal(director.version, "video-factory/director-v11");
-    assert.equal(review.version, "video-factory/visual-review-v5");
+    assert.equal(director.version, "video-factory/director-v13");
+    assert.equal(review.version, "video-factory/visual-review-v6");
     assert.match(review.outputRules.join("\n"), /不得为了通过审计而美化评分/);
+    assert.match(review.directive, /任何可读字.*不得 recommendation=approve/);
+    assert.match(review.directive, /只有导演明确选择 deliveryType=editorial_card.*其他镜头出现任何可读文字.*必须阻断/);
+    assert.match(review.directive, /主体、物体、动作.*不得 recommendation=approve/);
+    assert.match(review.outputRules.join("\n"), /scenePosition.*targetNodeId/);
     assert.match(topic.directive, /值得做视频/);
     assert.match(script.directive, /观众承诺/);
     assert.match(script.directive, /5 到 24/);
@@ -148,6 +152,10 @@ describe("broker-owned task definitions", () => {
     assert.match(director.directive, /只允许引用更早镜头/);
     assert.match(director.directive, /不会重新搜索、生成或计费/);
     assert.match(director.directive, /不会产生新的动作、光线变化或画面状态/);
+    const rank = taskPromptFor("asset-rank");
+    assert.equal(rank.version, "video-factory/asset-rank-v2");
+    assert.match(rank.directive, /主体、物体、动作.*硬门槛/);
+    assert.match(rank.directive, /没有候选.*不得.*通过/);
     assert.match(director.directive, /没有可执行的免费或复用方案.*保留可执行的付费镜头.*重新报价/);
     assert.doesNotMatch(director.directive, /付费镜头上限是硬边界/);
     assert.doesNotMatch(director.directive, /costPolicy/);
@@ -239,6 +247,8 @@ describe("broker-owned task definitions", () => {
         ...valid,
         findings: [{
           timecodeMs: 0,
+          scenePosition: 1,
+          targetNodeId: "assets",
           category: "unknown",
           severity: "warning",
           description: "问题",
@@ -257,12 +267,24 @@ describe("broker-owned task definitions", () => {
       ...valid,
       findings: [{
         timecodeMs: 100,
+        scenePosition: 1,
+        targetNodeId: "assets",
         category: "continuity",
         severity: "warning",
         description: "镜头重复",
         suggestion: "更换素材",
       }],
     }) ?? "", /cannot approve/);
+    assert.match(outputValidationErrorFor("visual-review", {
+      ...valid,
+      findings: [{
+        timecodeMs: 100,
+        category: "other",
+        severity: "warning",
+        description: "第 8 镜没有杯子。",
+        suggestion: "替换素材。",
+      }],
+    }) ?? "", /scenePosition|required property/);
   });
 
   it("rejects broken scene ordering and duplicate director routes", () => {

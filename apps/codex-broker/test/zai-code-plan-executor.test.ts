@@ -138,6 +138,8 @@ function validReport(): Record<string, unknown> {
     },
     findings: [{
       timecodeMs: 0,
+      scenePosition: 1,
+      targetNodeId: "assets",
       category: "legibility",
       severity: "warning",
       description: "浅色字幕与背景对比不足。",
@@ -259,6 +261,25 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(result.trace?.modelId, "glm-5.3-flash-preview");
     assert.equal(executor.identity.modelId, "glm-5.3");
     assert.equal(executor.identity.taskModels?.["visual-review"], "glm-5.3-flash-preview");
+  });
+
+  it("normalizes xhigh to max for glm-5.3-flash requests and traces", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      effort: "xhigh",
+      fetchFn: async (_input, init) => {
+        capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(validReport()) } }],
+        }), { status: 200 });
+      },
+    });
+
+    const result = await executor.runTask(visualReviewTask());
+
+    assert.equal(capturedBody?.reasoning_effort, "max");
+    assert.equal(result.trace?.reasoningEffort, "max");
   });
 
   it("sends script drafting to the ZAI Coding Plan endpoint with glm-5.3", async () => {
@@ -477,6 +498,27 @@ describe("ZaiCodePlanExecutor", () => {
     );
   });
 
+  it("does not classify an explicit invalid-request response as transient", async () => {
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => new Response(
+        JSON.stringify({ error: { code: "invalid_request" } }),
+        { status: 503 },
+      ),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(scriptDraftTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.transient, false);
+        assert.equal(error.details?.category, "invalid_request");
+        assert.equal(error.details?.reasonCode, "invalid_request");
+        return true;
+      },
+    );
+  });
+
   it("does not let a stalled HTTP error body occupy the broker request timeout", async () => {
     const executor = new ZaiCodePlanExecutor({
       env: { ZAI_BIGMODEL_API_KEY: API_KEY },
@@ -524,6 +566,8 @@ describe("ZaiCodePlanExecutor", () => {
     const lateFinding = validReport();
     lateFinding.findings = [{
       timecodeMs: 10_001,
+      scenePosition: 1,
+      targetNodeId: "assets",
       category: "other",
       severity: "warning",
       description: "时间码超界。",

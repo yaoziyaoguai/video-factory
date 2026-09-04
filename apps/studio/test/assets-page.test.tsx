@@ -40,7 +40,7 @@ describe("AssetsPage", () => {
             reuseStatus: "ready",
             category: "visual",
             kind: "scene_video",
-            providerId: "pexels-stock-v1",
+            providerId: "local-editorial-v1",
             contentUrl: "/api/runs/run-1/artifacts/render/content",
             contentType: "video/mp4",
             width: 1080,
@@ -75,6 +75,17 @@ describe("AssetsPage", () => {
                 scenePosition: 1,
                 selectedInFinal: true,
               },
+              {
+                runId: "run-1",
+                runTitle: "窗边一杯水",
+                itemId: "visual-2",
+                providerId: "pexels-stock-v1",
+                commercialUse: "provider_terms",
+                attributionRequirement: "provider_terms",
+                reviewStatus: "recorded",
+                scenePosition: 2,
+                selectedInFinal: true,
+              },
             ],
           },
           {
@@ -84,7 +95,7 @@ describe("AssetsPage", () => {
             reuseStatus: "not_reusable",
             category: "voice",
             kind: "voiceover",
-            providerId: "minimax-tts-v1",
+            providerId: "local",
             tags: ["夜晚", "书房"],
             commercialUse: "provider_terms",
             attributionRequirement: "provider_terms",
@@ -150,10 +161,13 @@ describe("AssetsPage", () => {
     expect(await screen.findByRole("heading", { level: 3, name: "清晨饮水 · 镜头 2" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 1" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "夜晚书房" })).toBeInTheDocument();
-    expect(screen.getByText("MiniMax 中文配音")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "本地编辑画面 · 声音" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "本地编辑画面 · 视频" })).toBeInTheDocument();
+    expect(screen.getByLabelText("素材提供方")).not.toHaveTextContent(/local-editorial-v1|\blocal\b/);
     expect(screen.getByRole("button", { name: /历史制作.*窗边一杯水/ })).toHaveAttribute("aria-expanded", "false");
     await user.click(screen.getByRole("button", { name: /历史制作.*窗边一杯水/ }));
     expect(screen.getByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 1" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 2" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("窗边一杯水 · 镜头 1 预览")).toHaveAttribute("src", "/api/runs/run-1/artifacts/render/content#t=0.1");
     expect(screen.getByText("镜头 2")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /制作 · 1 项素材/ })).toHaveLength(3);
@@ -165,6 +179,8 @@ describe("AssetsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /声音/ }));
     expect(await screen.findByRole("heading", { level: 3, name: "夜晚书房" })).toBeInTheDocument();
+    expect(screen.getByText("已关联制作")).toBeInTheDocument();
+    expect(screen.queryByText("已归档")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 1" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "成片与记录" }));

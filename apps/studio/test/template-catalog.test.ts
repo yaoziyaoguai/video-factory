@@ -53,4 +53,15 @@ describe("template catalog", () => {
       { profileId: "macos:Tingting", rate: 205, pauseScale: 0.9, masteringPreset: "social" },
     );
   });
+
+  it("keeps generated knowledge-explainer source images text-free", () => {
+    const template = BUILTIN_TEMPLATES.find((candidate) => candidate.id === "knowledge-explainer")!;
+    const exampleSetup = template.shotSlots.find((slot) => slot.id === "knowledge-example-setup")!;
+    const legibilityRule = template.qualityRules.find((rule) => rule.id === "knowledge-legible")!;
+
+    assert.match(exampleSetup.purpose, /无字母图/);
+    assert.match(exampleSetup.purpose, /后期字幕|确定性图形/);
+    assert.match(legibilityRule.label, /生成母图不得绘制文字/);
+    assert.match(legibilityRule.label, /后期字幕|确定性图形/);
+  });
 });

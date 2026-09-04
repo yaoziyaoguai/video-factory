@@ -103,7 +103,7 @@ export type {
   WorkerArtifactDescriptor,
   WorkerResponse,
 } from "./python-worker-client.js";
-export { PaidOperationManualReconciliationError, ProductionPipeline } from "./production-pipeline.js";
+export { PaidOperationManualReconciliationError, ProductionPipeline, productionWorkflowVersion } from "./production-pipeline.js";
 export type {
   DispatchedProductionRun,
   ProductionPaidNodeSummary,

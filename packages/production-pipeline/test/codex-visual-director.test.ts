@@ -152,6 +152,8 @@ describe("CodexVisualDirectorAgent", () => {
   });
 
   it("routes stateless ZAI production and independent OpenAI audit to separate clients", async () => {
+    const input = directorInput();
+    input.assetProviders[0]!.constraints.push("成片必须保留 AIGC 标识");
     const firstPlan = validPlan();
     const repairedPlan = validPlan();
     repairedPlan.profileRationale = "都市夜景、人物动作与冷暖光对照共同兑现观众承诺。";
@@ -194,7 +196,7 @@ describe("CodexVisualDirectorAgent", () => {
       sessionMode: "stateless",
     });
 
-    const execution = await agent.planDetailed({ ...directorInput(), selectedModelId: "glm-5.3" });
+    const execution = await agent.planDetailed({ ...input, selectedModelId: "glm-5.3" });
 
     assert.equal(execution.agentLoop?.status, "passed");
     assert.deepEqual(producerClient.calls.map(({ kind }) => kind), ["director-plan", "director-plan"]);
@@ -220,6 +222,7 @@ describe("CodexVisualDirectorAgent", () => {
       context: {
         upstreamFacts: { scenes: Array<Record<string, unknown>> };
         currentRoleContract: Record<string, unknown>;
+        downstreamBoundary: string;
       };
     };
     const contract = auditPayload.context.currentRoleContract;
@@ -243,6 +246,11 @@ describe("CodexVisualDirectorAgent", () => {
         "生成视频母片的真实长度按所选模型的最短/最长时长和整数秒规则归一化；复用镜头不得更长。",
       ],
     });
+    assert.deepEqual(
+      (contract.assetProviders as Array<{ constraints: string[] }>)[0]?.constraints,
+      ["不包含真实人物动作或现场环境"],
+    );
+    assert.match(String(auditPayload.context.downstreamBoundary), /AIGC.*渲染与发布/);
     assert.deepEqual(Object.keys(auditPayload.context.upstreamFacts.scenes[0]!).sort(), [
       "duration",
       "failureConditions",
