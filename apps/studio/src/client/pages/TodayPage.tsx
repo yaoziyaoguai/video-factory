@@ -393,7 +393,9 @@ export function TodayPage() {
         angle: selected.hook,
         audience: selected.audience,
         nicheSlug: selected.track,
-        platform: selected.platform,
+        platform: selected.origin === "trend"
+          ? creatorSettings?.productionDefaults.platform ?? "douyin"
+          : selected.platform,
         durationSeconds: creatorSettings?.productionDefaults.durationSeconds ?? 24,
         ...(selected.editorialDecision?.verdict !== "skip" && selected.editorialDecision ? {
           editorial: {
@@ -430,13 +432,17 @@ function isPendingSeriesProduction(
   selectedSeriesId: string | undefined,
 ): boolean {
   if (!selectedSeriesId || opportunity.seriesId !== selectedSeriesId || !opportunity.episodeNumber) return false;
-  const episode = series
-    .find((item) => item.id === selectedSeriesId)
-    ?.episodes.find((item) => item.episodeNumber === opportunity.episodeNumber);
+  const selectedSeries = series.find((item) => item.id === selectedSeriesId);
+  if (!selectedSeries || !isProductionPlatform(selectedSeries.platform)) return false;
+  const episode = selectedSeries.episodes.find((item) => item.episodeNumber === opportunity.episodeNumber);
   return episode?.status === "selected"
     && episode.opportunityId === opportunity.id
     && episode.runId === undefined
     && episode.runReservation === undefined;
+}
+
+function isProductionPlatform(platform: string): boolean {
+  return platform === "douyin" || platform === "xiaohongshu" || platform === "bilibili";
 }
 
 function isPendingProduction(

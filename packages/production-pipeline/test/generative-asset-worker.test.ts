@@ -5,6 +5,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import {
+  ProviderRegistry,
+  WorkflowRunner,
+  type WorkflowDefinition,
+} from "@video-factory/workflow-core";
+import {
   GenerativeAssetWorkerClient,
   ProviderRequestRejectedError,
   WORKER_PROTOCOL_VERSION,
@@ -117,7 +122,12 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(fallback.calls.length, 1);
     assert.equal((fallback.calls[0]?.parameters as Record<string, unknown>).provider, "ai-router");
     assert.equal(typeof (fallback.calls[0]?.input as Record<string, unknown>).directorPlanPath, "string");
-    assert.deepEqual(generated, ["雨夜地铁里的疲惫上班族", "清晨站台上的列车进站"]);
+    assert.equal(generated.length, 2);
+    assert.match(generated[0]!, /^雨夜地铁里的疲惫上班族\n/);
+    assert.match(generated[1]!, /^清晨站台上的列车进站\n/);
+    for (const prompt of generated) {
+      assert.match(prompt, /不得出现任何可读文字.*乱码.*内部制作术语/);
+    }
     const plan = JSON.parse(await readFile(String(response.output?.assetPlanPath), "utf8"));
     assert.equal(plan.scene_assets[0].provider, "seedance-video-v1");
     assert.equal(plan.scene_assets[0].asset_id, "task-1");
@@ -140,6 +150,42 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(response.artifacts.some((artifact) => artifact.provenance.sourceUrl === "local://video-factory/card"), false);
     assert.equal(response.artifacts.some((artifact) => artifact.kind === "generation_jobs"), true);
     assert.equal(response.artifacts.some((artifact) => artifact.kind === "media_asset"), true);
+  });
+
+  it("adds the no-rendered-text constraint for a direct image provider", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-direct-image-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 4, visual_strategy: "generated", visual_prompt: "宣纸上的水墨山峰" },
+    ] }));
+    let generatedPrompt = "";
+    const imageAdapter: ImageGenerationAdapter = {
+      providerId: "seedream-image-v1",
+      generate: async (request) => {
+        generatedPrompt = request.prompt;
+        return {
+          providerId: "seedream-image-v1",
+          taskId: "direct-image-task",
+          imageUrl: "https://example.com/direct-image.png",
+        };
+      },
+    };
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [],
+      imageAdapters: [{ adapter: imageAdapter, estimatedCnyPerImage: 0.25 }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("generated-image", { headers: { "content-type": "image/png" } }),
+    });
+    const request = workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1);
+    request.parameters.providerId = "seedream-image-v1";
+    request.parameters.provider = "seedream";
+
+    const response = await subject.run(request);
+
+    assert.equal(response.status, "succeeded");
+    assert.match(generatedPrompt, /^宣纸上的水墨山峰\n/);
+    assert.match(generatedPrompt, /不得出现任何可读文字.*乱码.*内部制作术语/);
   });
 
   it("refuses direct paid shots without a current spend authorization", async () => {
@@ -333,7 +379,7 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(second.diagnostics?.meteredAttemptCount, 0);
   });
 
-  it("queries a timed-out submitted task by taskId instead of creating it again", async () => {
+  it("queries a provider-succeeded task with no result URL by taskId instead of creating it again", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-reconcile-query-"));
     const scriptPath = path.join(root, "script.json");
     await writeFile(scriptPath, JSON.stringify({ scenes: [
@@ -376,6 +422,15 @@ describe("GenerativeAssetWorkerClient", () => {
 
     const first = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1));
     assert.equal(first.status, "failed");
+    const ledgerPath = path.join(
+      root,
+      ".generation-operations",
+      `${createHash("sha256").update("command-1").digest("hex")}.json`,
+    );
+    const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+    ledger.items[0].state = "provider_succeeded";
+    delete ledger.items[0].resultUrl;
+    await writeFile(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
     const second = await subject.run({
       ...workerRequest(scriptPath, path.join(root, "attempt-2"), 1, 1),
       attempt: 2,
@@ -384,6 +439,185 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(second.status, "succeeded");
     assert.equal(createCalls, 1);
     assert.equal(queryCalls, 1);
+    assert.equal(second.diagnostics?.actualCostCny, 0);
+    assert.equal(second.diagnostics?.meteredAttemptCount, 0);
+  });
+
+  it("does not count a failed reconciliation query as a new metered attempt", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-reconcile-timeout-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "继续查询已付费任务" },
+    ] }));
+    let createCalls = 0;
+    let queryCalls = 0;
+    const adapter: VideoGenerationAdapter = {
+      providerId: "seedance-video-v1",
+      generate: async (_request, onProgress) => {
+        createCalls += 1;
+        await onProgress?.({ providerId: "seedance-video-v1", taskId: "submitted-task-timeout", status: "submitted" });
+        await onProgress?.({
+          providerId: "seedance-video-v1",
+          taskId: "submitted-task-timeout",
+          status: "unknown",
+          error: "initial polling timeout",
+        });
+        throw new Error("initial polling timeout");
+      },
+      reconcile: async (taskId, _request, onProgress) => {
+        queryCalls += 1;
+        await onProgress?.({ providerId: "seedance-video-v1", taskId, status: "running" });
+        await onProgress?.({
+          providerId: "seedance-video-v1",
+          taskId,
+          status: "unknown",
+          error: "reconciliation polling timeout",
+        });
+        throw new Error("reconciliation polling timeout");
+      },
+    };
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{ adapter, estimatedCnyPerClip: 1 }],
+    });
+
+    const first = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1));
+    assert.equal(first.status, "failed");
+    assert.equal(first.diagnostics?.meteredAttemptCount, 1);
+    const second = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-2"), 0, 0),
+      attempt: 2,
+    });
+
+    assert.equal(second.status, "failed");
+    assert.equal(createCalls, 1);
+    assert.equal(queryCalls, 1);
+    assert.equal(second.diagnostics?.actualCostCny, 0);
+    assert.equal(second.diagnostics?.meteredAttemptCount, 0);
+    assert.equal(second.diagnostics?.meteredFailedAttemptCount, 0);
+    const jobs = JSON.parse(await readFile(String(second.output?.generationJobsPath), "utf8"));
+    assert.equal(jobs.jobs[0].carriedForward, true);
+    assert.equal(jobs.jobs[0].actualCostCny, undefined);
+    assert.equal(jobs.jobs[0].actualCostSource, undefined);
+  });
+
+  it("completes an existing paid task through WorkflowRunner as a zero-cost recovery", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-runner-reconcile-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "恢复原付费任务" },
+    ] }));
+    const operationId = "existing-paid-operation";
+    let createCalls = 0;
+    let reconcileCalls = 0;
+    const adapter = {
+      providerId: "seedance-video-v1",
+      generate: async (_request: Parameters<VideoGenerationAdapter["generate"]>[0], onProgress?: Parameters<VideoGenerationAdapter["generate"]>[1]) => {
+        createCalls += 1;
+        await onProgress?.({ providerId: "seedance-video-v1", taskId: "existing-paid-task", status: "submitted" });
+        await onProgress?.({ providerId: "seedance-video-v1", taskId: "existing-paid-task", status: "unknown", error: "polling connection lost" });
+        throw new Error("polling connection lost");
+      },
+      reconcile: async (taskId: string) => {
+        reconcileCalls += 1;
+        assert.equal(taskId, "existing-paid-task");
+        return {
+          providerId: "seedance-video-v1",
+          taskId,
+          status: "succeeded" as const,
+          videoUrl: "https://example.com/existing-paid-task.mp4",
+        };
+      },
+    } as VideoGenerationAdapter & {
+      reconcile(taskId: string): Promise<{
+        providerId: string;
+        taskId: string;
+        status: "succeeded";
+        videoUrl: string;
+      }>;
+    };
+    const worker = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{ adapter, estimatedCnyPerClip: 1 }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("recovered-video", { headers: { "content-type": "video/mp4" } }),
+    });
+    const firstRequest = workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1);
+    firstRequest.commandId = operationId;
+    const first = await worker.run(firstRequest);
+    assert.equal(first.status, "failed");
+
+    const providers = new ProviderRegistry();
+    providers.register({
+      id: "seedance-video-v1",
+      label: "Seedance",
+      modelId: "seedance-video-v1",
+      capability: "asset.prepare",
+      transport: "http_api",
+      billing: "metered",
+      estimatedCostCny: 1,
+      maxCostCny: 1,
+      maxAttempts: 1,
+      quoteSpend: () => ({ estimatedCostCny: 0, maxCostCny: 0, requiresAuthorization: false }),
+      run: () => { throw new Error("The custom node executor must own the worker call."); },
+    });
+    const definition: WorkflowDefinition = {
+      id: "recover-existing-paid-task",
+      name: "Recover existing paid task",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "seedance-video-v1",
+        mode: "automatic",
+        execute: async (_input, context) => {
+          const request = workerRequest(scriptPath, path.join(root, "attempt-2"), 0, 0);
+          request.commandId = String(context.operationRequestId);
+          request.runId = context.runId;
+          request.attempt = 2;
+          const response = await worker.run(request);
+          assert.equal(response.status, "succeeded");
+          return {
+            status: "succeeded" as const,
+            output: response.output,
+            receipt: {
+              providerId: "seedance-video-v1",
+              providerLabel: "Seedance",
+              modelId: "seedance-video-v1",
+              transport: "http_api" as const,
+              billing: "metered" as const,
+              estimatedCostCny: Number(response.diagnostics?.estimatedCostCny ?? 0),
+              actualCostCny: Number(response.diagnostics?.actualCostCny ?? 0),
+              actualCostSource: "configured_rate" as const,
+              meteredAttemptCount: Number(response.diagnostics?.meteredAttemptCount ?? 0),
+              meteredFailedAttemptCount: Number(response.diagnostics?.meteredFailedAttemptCount ?? 0),
+            },
+          };
+        },
+      }],
+    };
+    let nextId = 0;
+    const runner = new WorkflowRunner({
+      providers,
+      idFactory: (prefix) => prefix.endsWith("-operation") ? operationId : `${prefix}-${++nextId}`,
+    });
+
+    const completed = await runner.run(definition, {});
+
+    assert.equal(completed.status, "succeeded");
+    assert.equal(createCalls, 1);
+    assert.equal(reconcileCalls, 1);
+    assert.equal(completed.nodeRuns[0]?.executionReceipt?.billing, "free");
+    assert.equal(completed.nodeRuns[0]?.executionReceipt?.actualCostCny, 0);
+    assert.equal(completed.nodeRuns[0]?.executionReceipt?.meteredAttemptCount, 0);
+    const recoveredLedger = JSON.parse(await readFile(
+      path.join(root, ".generation-operations", `${createHash("sha256").update(operationId).digest("hex")}.json`),
+      "utf8",
+    ));
+    assert.equal(recoveredLedger.items[0].state, "materialized");
+    assert.equal(recoveredLedger.items[0].taskId, "existing-paid-task");
+    assert.equal(recoveredLedger.items[0].actualCostCny, 1);
   });
 
   it("preserves successful paid items and creates only failed or unstarted items under a new operation", async () => {
@@ -402,10 +636,11 @@ describe("GenerativeAssetWorkerClient", () => {
         adapter: {
           providerId: "seedance-video-v1",
           generate: async (request, onProgress) => {
-            const count = (calls.get(request.prompt) ?? 0) + 1;
-            calls.set(request.prompt, count);
-            const taskId = `${request.prompt}-task-${count}`;
-            if (request.prompt === "镜头二" && count === 1) {
+            const scenePrompt = request.prompt.split("\n", 1)[0]!;
+            const count = (calls.get(scenePrompt) ?? 0) + 1;
+            calls.set(scenePrompt, count);
+            const taskId = `${scenePrompt}-task-${count}`;
+            if (scenePrompt === "镜头二" && count === 1) {
               await onProgress?.({
                 providerId: "seedance-video-v1",
                 taskId,
@@ -807,6 +1042,7 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.match(generated[0]!, /\[0s-2s\]/);
     assert.match(generated[0]!, /可见动作：白色蒸汽/);
     assert.match(generated[0]!, /必须实现：蒸汽持续可见/);
+    assert.match(generated[0]!, /不得出现任何可读文字.*乱码.*内部制作术语/);
     assert.doesNotMatch(generated[0]!, /预算|审批|版权|工作流/);
     assert.doesNotMatch(generated[0]!, /Seedream|AIGC|标识|裁切|遮挡|移除/);
     const plan = JSON.parse(await readFile(String(response.output?.assetPlanPath), "utf8"));

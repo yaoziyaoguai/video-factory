@@ -299,7 +299,7 @@ describe("CandidateInboxStudio", () => {
         rationale: "公共议题缺少可安全生成的连续现场，采用来源画面、数据和少量获授权实景更可信。",
       },
     );
-    await assert.rejects(() => inbox.adopt(highRisk.id, { origin: "trend", verificationConfirmed: true }), /至少 2 个独立且可打开的来源/);
+    await assert.rejects(() => inbox.adopt(highRisk.id, { origin: "trend", verificationConfirmed: true }), /至少 2 个不同域名的有效原始来源链接/);
     await assert.rejects(() => inbox.adopt(review.id, { origin: "trend" }), /确认核验/);
     const adopted = await inbox.adopt(review.id, { origin: "trend", verificationConfirmed: true });
     assert.equal(adopted.verification?.status, "verified");
@@ -373,7 +373,7 @@ describe("CandidateInboxStudio", () => {
 
     assert.equal(strict?.verification.status, "blocked");
     assert.equal(strict?.editorialDecision.verdict, "skip");
-    assert.match(strict?.verification.reasons[0] ?? "", /至少 2 个独立且可打开的来源/);
+    assert.match(strict?.verification.reasons[0] ?? "", /至少 2 个不同域名的有效原始来源链接/);
     assert.equal(relaxed?.verification.status, "ready");
   });
 
@@ -396,6 +396,48 @@ describe("CandidateInboxStudio", () => {
 
     assert.equal(candidate?.verification.status, "blocked");
     assert.equal(candidate?.verification.requiredSources, 2);
+  });
+
+  it("orders shortlisted candidates by the editorial decision and keeps rejected candidates behind them", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-editorial-order-inbox-"));
+    const opportunities = new OpportunityStudio({
+      opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
+    });
+    const series = new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) });
+    const editorialWinner = {
+      ...trendCandidate,
+      id: "trend-editorial-winner",
+      title: "总编高分候选",
+      score: { ...trendCandidate.score, final: 41 },
+      editorialDecision: { verdict: "produce_video" as const, score: 94, reasons: ["值得开拍。"], guardrails: ["核验结果。"] },
+    };
+    const editorialRunnerUp = {
+      ...trendCandidate,
+      id: "trend-editorial-runner-up",
+      title: "总编次高分候选",
+      score: { ...trendCandidate.score, final: 96 },
+      editorialDecision: { verdict: "produce_video" as const, score: 72, reasons: ["可以开拍。"], guardrails: ["核验结果。"] },
+    };
+    const rejectedRawWinner = {
+      ...trendCandidate,
+      id: "trend-rejected-raw-winner",
+      title: "原始分高但未入选",
+      score: { ...trendCandidate.score, final: 100 },
+      editorialDecision: { verdict: "skip" as const, score: 0, reasons: ["不值得开拍。"], guardrails: ["重做选题。"] },
+    };
+    const inbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [rejectedRawWinner, editorialRunnerUp, editorialWinner] },
+      series,
+      opportunities,
+    });
+
+    const listed = await inbox.list({ origins: ["trend"] });
+
+    assert.deepEqual(listed.items.map((item) => item.id), [
+      editorialWinner.id,
+      editorialRunnerUp.id,
+      rejectedRawWinner.id,
+    ]);
   });
 
   it("does not treat search-result pages as original sources", async () => {
@@ -421,7 +463,7 @@ describe("CandidateInboxStudio", () => {
     const [candidate] = (await inbox.list({ origins: ["trend"] })).items;
 
     assert.equal(candidate?.verification.status, "blocked");
-    assert.match(candidate?.verification.reasons[0] ?? "", /可打开的原始来源/);
+    assert.match(candidate?.verification.reasons[0] ?? "", /格式有效的原始来源链接/);
   });
 
   it("can adopt a candidate the user saw just before a background trend refresh", async () => {

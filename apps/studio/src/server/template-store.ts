@@ -6,6 +6,8 @@ import { parseProductionTemplate, type ProductionTemplate, type ProductionTempla
 interface StoredTemplates {
   revision: number;
   templates: ProductionTemplateInput[];
+  tombstones: string[];
+  qaOnlyTemplateIds: string[];
 }
 
 const STALE_LOCK_MS = 2 * 60 * 1000;
@@ -13,6 +15,8 @@ const STALE_LOCK_MS = 2 * 60 * 1000;
 export interface TemplateStoreSnapshot {
   storeRevision: number;
   templates: ProductionTemplate[];
+  publishedTemplates: ProductionTemplate[];
+  deletedBuiltIns: ProductionTemplate[];
 }
 
 export interface TemplateMutationResult {
@@ -40,26 +44,71 @@ export class JsonTemplateStore {
 
   async list(): Promise<TemplateStoreSnapshot> {
     const state = await this.load();
+    const tombstones = new Set(state.tombstones);
     const custom = state.templates
       .map((template) => parseProductionTemplate(template))
+      .filter((template) => !state.qaOnlyTemplateIds.includes(template.id))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.version - left.version);
-    return { storeRevision: state.revision, templates: [...this.builtIns, ...custom] };
+    const visibleBuiltIns = this.builtIns.filter((template) => !tombstones.has(template.id));
+    const latest = new Map(visibleBuiltIns.map((template) => [template.id, template]));
+    const published = new Map(visibleBuiltIns.map((template) => [template.id, template]));
+    for (const template of custom) {
+      const current = latest.get(template.id);
+      if (!current || template.version > current.version
+        || (template.version === current.version && this.builtIns.includes(current))) {
+        latest.set(template.id, template);
+      }
+      const currentPublished = published.get(template.id);
+      if (template.status === "published" && (
+        !currentPublished
+        || template.version > currentPublished.version
+        || (template.version === currentPublished.version && this.builtIns.includes(currentPublished))
+      )) {
+        published.set(template.id, template);
+      }
+    }
+    const builtInOrder = this.builtIns.map((template) => template.id);
+    return {
+      storeRevision: state.revision,
+      templates: [
+        ...builtInOrder.map((id) => latest.get(id)!).filter(Boolean),
+        ...custom.filter((template) => !this.builtInIds.has(template.id) && latest.get(template.id) === template),
+      ],
+      publishedTemplates: [
+        ...builtInOrder.map((id) => published.get(id)!).filter(Boolean),
+        ...custom.filter((template) => !this.builtInIds.has(template.id) && published.get(template.id) === template),
+      ],
+      deletedBuiltIns: this.builtIns.filter((template) => tombstones.has(template.id)),
+    };
   }
 
   async get(id: string, version?: number): Promise<ProductionTemplate | undefined> {
-    const snapshot = await this.list();
-    return snapshot.templates.find((template) => template.id === id && (version === undefined || template.version === version));
+    const state = await this.load();
+    if (state.tombstones.includes(id) || state.qaOnlyTemplateIds.includes(id)) return undefined;
+    return [
+      ...state.templates.map((template) => parseProductionTemplate(template)),
+      ...this.builtIns,
+    ]
+      .filter((template) => template.id === id && (version === undefined || template.version === version))
+      .sort((left, right) => right.version - left.version)[0];
   }
 
   async getPublished(id: string, version?: number): Promise<ProductionTemplate | undefined> {
-    const snapshot = await this.list();
-    return snapshot.templates
+    const state = await this.load();
+    if (state.tombstones.includes(id) || state.qaOnlyTemplateIds.includes(id)) return undefined;
+    return [
+      ...state.templates.map((template) => parseProductionTemplate(template)),
+      ...this.builtIns,
+    ]
       .filter((template) => template.id === id && template.status === "published" && (version === undefined || template.version === version))
       .sort((left, right) => right.version - left.version)[0];
   }
 
   async clone(sourceId: string, newId: string, name: string, expectedRevision: number): Promise<TemplateMutationResult> {
     return this.mutate(expectedRevision, (state) => {
+      if (state.tombstones.includes(sourceId) || state.qaOnlyTemplateIds.includes(sourceId)) {
+        throw new Error(`Template '${sourceId}' was not found.`);
+      }
       const source = [...state.templates.map((item) => parseProductionTemplate(item)), ...this.builtIns]
         .find((template) => template.id === sourceId);
       if (!source) throw new Error(`Template '${sourceId}' was not found.`);
@@ -81,22 +130,83 @@ export class JsonTemplateStore {
     });
   }
 
-  async create(input: ProductionTemplateInput, expectedRevision: number): Promise<TemplateMutationResult> {
+  async create(
+    input: ProductionTemplateInput,
+    expectedRevision: number,
+    visibility: "production" | "qa" = "production",
+  ): Promise<TemplateMutationResult> {
     return this.mutate(expectedRevision, (state) => {
       if (this.builtInIds.has(input.id) || state.templates.some((template) => template.id === input.id)) {
         throw new Error(`Template '${input.id}' already exists.`);
       }
       const draft = parseProductionTemplate({ ...clone(input), status: "draft" });
       state.templates.unshift(clone(draft));
+      if (visibility === "qa") state.qaOnlyTemplateIds.push(draft.id);
       return draft;
     });
   }
 
+  async revise(id: string, expectedRevision: number): Promise<TemplateMutationResult> {
+    return this.mutate(expectedRevision, (state) => {
+      if (state.tombstones.includes(id) || state.qaOnlyTemplateIds.includes(id)) throw new Error(`Template '${id}' was not found.`);
+      const versions = [
+        ...state.templates.map((template) => parseProductionTemplate(template)).filter((template) => template.id === id),
+        ...this.builtIns.filter((template) => template.id === id),
+      ];
+      const source = versions.sort((left, right) => right.version - left.version)[0];
+      if (!source) throw new Error(`Template '${id}' was not found.`);
+      if (versions.some((template) => template.status === "draft")) {
+        throw new Error(`Template '${id}' already has an editable draft.`);
+      }
+      const timestamp = this.now();
+      const draft = parseProductionTemplate({
+        ...clone(source),
+        version: source.version + 1,
+        status: "draft",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      state.templates.unshift(clone(draft));
+      return draft;
+    });
+  }
+
+  async delete(id: string, expectedRevision: number): Promise<TemplateMutationResult> {
+    return this.mutate(expectedRevision, (state) => {
+      if (state.tombstones.includes(id)) throw new Error(`Template '${id}' was not found.`);
+      const source = [
+        ...state.templates.map((template) => parseProductionTemplate(template)),
+        ...this.builtIns,
+      ]
+        .filter((template) => template.id === id)
+        .sort((left, right) => right.version - left.version)[0];
+      if (!source) throw new Error(`Template '${id}' was not found.`);
+      state.templates = state.templates.filter((template) => template.id !== id);
+      state.qaOnlyTemplateIds = state.qaOnlyTemplateIds.filter((templateId) => templateId !== id);
+      if (this.builtInIds.has(id)) state.tombstones.push(id);
+      return source;
+    });
+  }
+
+  async restoreBuiltIn(id: string, expectedRevision: number): Promise<TemplateMutationResult> {
+    return this.mutate(expectedRevision, (state) => {
+      const template = this.builtIns.find((candidate) => candidate.id === id);
+      if (!template) throw new Error(`Built-in template '${id}' was not found.`);
+      if (!state.tombstones.includes(id)) throw new Error(`Built-in template '${id}' is not deleted.`);
+      state.tombstones = state.tombstones.filter((templateId) => templateId !== id);
+      return template;
+    });
+  }
+
   async saveDraft(input: ProductionTemplateInput, expectedRevision: number): Promise<TemplateMutationResult> {
-    if (this.builtInIds.has(input.id)) throw new Error("A built-in template cannot be edited in place; clone it first.");
     return this.mutate(expectedRevision, (state) => {
       const index = state.templates.findIndex((template) => template.id === input.id && template.version === input.version);
-      if (index < 0) throw new Error(`Template '${input.id}' version ${input.version} was not found.`);
+      if (index < 0) {
+        if (this.builtIns.some((template) => template.id === input.id && template.version === input.version)) {
+          throw new Error("A published built-in template cannot be edited directly; revise it first.");
+        }
+        throw new Error(`Template '${input.id}' version ${input.version} was not found.`);
+      }
       if (state.templates[index]!.status !== "draft") throw new Error("Only a draft template can be edited.");
       const draft = parseProductionTemplate({ ...clone(input), status: "draft", updatedAt: this.now() });
       state.templates[index] = clone(draft);
@@ -105,11 +215,14 @@ export class JsonTemplateStore {
   }
 
   async publish(id: string, expectedRevision: number): Promise<TemplateMutationResult> {
-    if (this.builtInIds.has(id)) throw new Error("A built-in template is already published.");
     return this.mutate(expectedRevision, (state) => {
       const index = state.templates.findIndex((template) => template.id === id && template.status === "draft");
       if (index < 0) throw new Error(`Draft template '${id}' was not found.`);
-      const latestVersion = Math.max(0, ...state.templates.filter((template) => template.id === id && template.status === "published").map((template) => template.version));
+      const latestVersion = Math.max(
+        0,
+        ...this.builtIns.filter((template) => template.id === id).map((template) => template.version),
+        ...state.templates.filter((template) => template.id === id && template.status === "published").map((template) => template.version),
+      );
       const published = parseProductionTemplate({
         ...clone(state.templates[index]!),
         version: Math.max(state.templates[index]!.version, latestVersion + 1),
@@ -141,12 +254,23 @@ export class JsonTemplateStore {
       if (!isRecord(input) || !Number.isInteger(input.revision) || Number(input.revision) < 0 || !Array.isArray(input.templates)) {
         throw new Error("Stored template catalog is invalid.");
       }
+      const templates = input.templates.map((template) => clone(parseProductionTemplate(template)));
+      const qaOnlyTemplateIds = input.qaOnlyTemplateIds === undefined
+        ? []
+        : parseTemplateIds(input.qaOnlyTemplateIds, "qaOnlyTemplateIds");
       return {
         revision: Number(input.revision),
-        templates: input.templates.map((template) => clone(parseProductionTemplate(template))),
+        templates,
+        tombstones: input.tombstones === undefined
+          ? []
+          : parseTemplateIds(input.tombstones, "tombstones"),
+        qaOnlyTemplateIds: [...new Set([
+          ...qaOnlyTemplateIds,
+          ...templates.filter(isLegacyBrowserAcceptanceTemplate).map((template) => template.id),
+        ])],
       };
     } catch (error) {
-      if (hasCode(error, "ENOENT")) return { revision: 0, templates: [] };
+      if (hasCode(error, "ENOENT")) return { revision: 0, templates: [], tombstones: [], qaOnlyTemplateIds: [] };
       throw error;
     }
   }
@@ -238,4 +362,20 @@ function hasCode(error: unknown, code: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseTemplateIds(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`Stored template catalog ${field} is invalid.`);
+  const ids = value.map((item) => {
+    if (typeof item !== "string" || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(item)) {
+      throw new Error(`Stored template catalog ${field} is invalid.`);
+    }
+    return item;
+  });
+  return [...new Set(ids)];
+}
+
+function isLegacyBrowserAcceptanceTemplate(template: ProductionTemplateInput): boolean {
+  return template.name.startsWith("夜间验收·")
+    && template.description === "用于验证模板编辑、保存与发布流程，不调用付费模型。";
 }

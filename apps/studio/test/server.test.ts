@@ -112,6 +112,9 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     getTemplate: async () => undefined,
     createTemplate: async () => { throw new Error("not configured"); },
     cloneTemplate: async () => { throw new Error("not configured"); },
+    reviseTemplate: async () => { throw new Error("not configured"); },
+    deleteTemplate: async () => { throw new Error("not configured"); },
+    restoreBuiltInTemplate: async () => { throw new Error("not configured"); },
     saveTemplateDraft: async () => { throw new Error("not configured"); },
     publishTemplate: async () => { throw new Error("not configured"); },
     listPublishTargets: async () => [],
@@ -282,9 +285,24 @@ describe("Studio API", () => {
     }) });
 
     const response = await app.inject({ method: "POST", url: "/api/templates", payload: { id: "city-portrait", name: "城市人物", expectedRevision: 0 } });
+    const qaOnly = await app.inject({
+      method: "POST",
+      url: "/api/templates",
+      payload: { id: "qa-template-flow", name: "模板验收", catalogVisibility: "qa", expectedRevision: 1 },
+    });
+    const invalidVisibility = await app.inject({
+      method: "POST",
+      url: "/api/templates",
+      payload: { id: "hidden-template", name: "错误目录", catalogVisibility: "hidden", expectedRevision: 2 },
+    });
 
     assert.equal(response.statusCode, 201);
-    assert.deepEqual(calls, [{ id: "city-portrait", name: "城市人物", expectedRevision: 0 }]);
+    assert.equal(qaOnly.statusCode, 201);
+    assert.equal(invalidVisibility.statusCode, 400);
+    assert.deepEqual(calls, [
+      { id: "city-portrait", name: "城市人物", expectedRevision: 0 },
+      { id: "qa-template-flow", name: "模板验收", catalogVisibility: "qa", expectedRevision: 1 },
+    ]);
     await app.close();
   });
 
@@ -377,7 +395,7 @@ describe("Studio API", () => {
       applyNodeOverride: async (_runId, nodeId, input, actor) => { calls.push(`override:${nodeId}:${String((input.output as { hook?: string }).hook)}:${actor}`); return runDetail("stale"); },
       applyNodeInputOverride: async (_runId, nodeId, input, actor) => { calls.push(`input:${nodeId}:${String((input.input as { title?: string }).title)}:${actor}`); return runDetail("stale"); },
       applyNodeExecutionConfiguration: async (_runId, nodeId, input, actor) => { calls.push(`config:${nodeId}:${input.modelSelections?.["hailuo-video-v1"]}:${input.economics?.allowMeteredProviders}:${actor}`); return runDetail("stale"); },
-      authorizeSpend: async (_runId, nodeId, input, approvedBy) => { calls.push(`spend:${nodeId}:${input.modelId}:${approvedBy}`); return runDetail("running"); },
+      authorizeSpend: async (_runId, nodeId, input, approvedBy) => { calls.push(`spend:${nodeId}:${input.spendPlanId}:${input.modelId}:${approvedBy}`); return runDetail("running"); },
       requestPause: async () => { calls.push("pause"); return { ...runDetail("running"), pauseRequested: true }; },
       resumePaused: async () => { calls.push("resume"); return runDetail("running"); },
       resumeStale: async () => { calls.push("regenerate"); return runDetail("running"); },
@@ -397,7 +415,8 @@ describe("Studio API", () => {
     const override = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/override", payload: { actor: "editor", output: { hook: "人工钩子" } } });
     const inputOverride = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/input-override", payload: { actor: "forged", input: { title: "人工题目" } } });
     const configuration = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/assets/execution-configuration", payload: { actor: "forged", modelSelections: { "hailuo-video-v1": "MiniMax-H3" }, assetProviderIds: ["local-editorial-v1", "hailuo-video-v1"], economics: { allowMeteredProviders: true, maxPaidShots: 2, maxCostCny: 8 } } });
-    const spend = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/assets/spend-authorizations", payload: { inputVersionIds: ["version-1"], providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02", maxCostCny: 3, maxAttempts: 1, approvedBy: "owner" } });
+    const spend = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/assets/spend-authorizations", payload: { spendPlanId: "plan-1", inputVersionIds: ["version-1"], providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02", maxCostCny: 3, maxAttempts: 1, approvedBy: "owner" } });
+    const missingSpendPlan = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/assets/spend-authorizations", payload: { inputVersionIds: ["version-1"], providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02", maxCostCny: 3, maxAttempts: 1 } });
     const pause = await app.inject({ method: "POST", url: "/api/runs/run-1/pause" });
     const resume = await app.inject({ method: "POST", url: "/api/runs/run-1/resume" });
     const regenerate = await app.inject({ method: "POST", url: "/api/runs/run-1/regenerate-stale" });
@@ -415,6 +434,7 @@ describe("Studio API", () => {
     assert.equal(inputOverride.statusCode, 200);
     assert.equal(configuration.statusCode, 200);
     assert.equal(spend.statusCode, 200);
+    assert.equal(missingSpendPlan.statusCode, 400);
     assert.equal(pause.statusCode, 200);
     assert.equal(pause.json().pauseRequested, true);
     assert.equal(resume.statusCode, 200);
@@ -422,7 +442,7 @@ describe("Studio API", () => {
     assert.equal(retry.statusCode, 200);
     assert.equal(paidItems.statusCode, 200);
     assert.equal(reconcile.statusCode, 200);
-    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "config:assets:MiniMax-H3:true:studio-owner", "spend:assets:MiniMax-Hailuo-02:studio-owner", "pause", "resume", "regenerate", "retry:voice", "inspect-paid:run-1:assets", "reconcile-paid:run-1:assets:1:reconcile-assets-1:resume_original"]);
+    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "config:assets:MiniMax-H3:true:studio-owner", "spend:assets:plan-1:MiniMax-Hailuo-02:studio-owner", "pause", "resume", "regenerate", "retry:voice", "inspect-paid:run-1:assets", "reconcile-paid:run-1:assets:1:reconcile-assets-1:resume_original"]);
     await app.close();
   });
 
@@ -443,6 +463,7 @@ describe("Studio API", () => {
         expectedRunRevision: 3,
         reconciliationId: "manual-charge-1",
         outcome: "confirmed_charged",
+        itemRequestId: "paid-scene-2",
         note: "Provider 控制台显示任务已计费。",
         actualCostCny: 2.4,
         actor: "forged-client-actor",
@@ -464,6 +485,7 @@ describe("Studio API", () => {
         expectedRunRevision: 3,
         reconciliationId: "manual-charge-1",
         outcome: "confirmed_charged",
+        itemRequestId: "paid-scene-2",
         note: "Provider 控制台显示任务已计费。",
         actualCostCny: 2.4,
       },
@@ -588,6 +610,56 @@ describe("Studio API", () => {
     assert.equal(invalid.statusCode, 400);
     assert.equal(invalidDraft.statusCode, 400);
     assert.match(invalidDraft.json().error, /模板参数不正确/);
+    await app.close();
+  });
+
+  it("revises, explicitly deletes, and restores templates through revision-protected routes", async () => {
+    const calls: string[] = [];
+    const template = { ...BUILTIN_TEMPLATES[0]!, builtIn: true };
+    const app = buildStudioApp({ service: fakeService({
+      reviseTemplate: async (id, expectedRevision) => {
+        calls.push(`revise:${id}:${expectedRevision}`);
+        return { storeRevision: 4, template: { ...template, version: 3, status: "draft", builtIn: false } };
+      },
+      deleteTemplate: async (id, expectedRevision) => {
+        calls.push(`delete:${id}:${expectedRevision}`);
+        return { storeRevision: 5 };
+      },
+      restoreBuiltInTemplate: async (id, expectedRevision) => {
+        calls.push(`restore:${id}:${expectedRevision}`);
+        return { storeRevision: 6, template };
+      },
+    }) });
+
+    const revised = await app.inject({
+      method: "POST",
+      url: "/api/templates/trend-fact-brief/revise",
+      headers: { "x-video-factory-request": "studio" },
+      payload: { expectedRevision: 3 },
+    });
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/templates/trend-fact-brief",
+      headers: { "x-video-factory-request": "studio" },
+      payload: { expectedRevision: 4 },
+    });
+    const restored = await app.inject({
+      method: "POST",
+      url: "/api/templates/trend-fact-brief/restore",
+      headers: { "x-video-factory-request": "studio" },
+      payload: { expectedRevision: 5 },
+    });
+
+    assert.equal(revised.statusCode, 201);
+    assert.equal(revised.json().template.version, 3);
+    assert.equal(deleted.statusCode, 200);
+    assert.deepEqual(deleted.json(), { storeRevision: 5 });
+    assert.equal(restored.statusCode, 201);
+    assert.deepEqual(calls, [
+      "revise:trend-fact-brief:3",
+      "delete:trend-fact-brief:4",
+      "restore:trend-fact-brief:5",
+    ]);
     await app.close();
   });
 

@@ -7,6 +7,7 @@ import {
   ModelCandidatesExhaustedError,
   RoleAgentLoopError,
   isModelProviderFailure,
+  runRoleAgentLoop,
   type CodexTaskExecution,
   type ScreenwriterAgent,
   type ScreenwriterAgentInput,
@@ -194,6 +195,48 @@ describe("FallbackScreenwriterAgent", () => {
     assert.equal(backupCalls, 0);
   });
 
+  it("preserves every attempt when a transient primary reaches a terminal backup", async () => {
+    const terminalBackupError = new Error("Script draft scenes must be an array.");
+    const fallback = new FallbackScreenwriterAgent({
+      candidates: [
+        {
+          providerId: "openai",
+          agent: agent("gpt-quality", async () => { throw providerFailure("gpt-quality"); }),
+        },
+        {
+          providerId: "zai-bigmodel-api",
+          agent: agent("glm-5.3", async () => { throw terminalBackupError; }),
+        },
+      ],
+    });
+
+    await assert.rejects(
+      () => fallback.draftDetailed(input),
+      (error: unknown) => {
+        assert.ok(error instanceof ModelCandidatesExhaustedError);
+        assert.equal(error.cause, terminalBackupError);
+        assert.deepEqual(error.failures.map((failure) => failure.modelId), ["gpt-quality", "glm-5.3"]);
+        assert.deepEqual(error.attempts, [
+          {
+            modelId: "gpt-quality",
+            providerId: "openai",
+            outcome: "failed",
+            failureStage: "not_accepted",
+            failureReason: "服务端错误（HTTP 503）",
+          },
+          {
+            modelId: "glm-5.3",
+            providerId: "zai-bigmodel-api",
+            outcome: "failed",
+            failureStage: "transport",
+            failureReason: "调用失败",
+          },
+        ]);
+        return true;
+      },
+    );
+  });
+
   it("rejects an unavailable selected model even when only one candidate exists", async () => {
     const fallback = new FallbackScreenwriterAgent({
       candidates: [{ providerId: "openai", agent: agent("gpt-quality", async () => successful("gpt-quality")) }],
@@ -278,47 +321,137 @@ describe("FallbackScreenwriterAgent", () => {
     assert.equal(execution.trace?.modelId, "glm-backup");
   });
 
-  it("does not switch producer models when an accepted candidate is waiting for an unavailable audit", async () => {
-    let backupCalls = 0;
-    const auditFailure = new CodexBridgeError(
+  for (const [label, auditFailure] of [
+    ["HTTP 503", new CodexBridgeError(
       "Codex bridge returned HTTP 503 while auditing.",
       true,
       "not_accepted",
       503,
-    );
-    const pendingCandidate = successful("glm-5.3").output;
+    )],
+    ["timeout", new CodexBridgeError(
+      "role audit request timed out after 300000ms",
+      false,
+      "uncertain",
+    )],
+  ] as const) {
+    it(`keeps the produced candidate and switches only the audit after ${label}`, async () => {
+      let primaryProducerCalls = 0;
+      let primaryAuditCalls = 0;
+      let backupProducerCalls = 0;
+      let backupAuditCalls = 0;
+      const checkpointState = new Map<string, unknown>();
+      const checkpointFactory = (modelId: string) => ({
+        key: `checkpoint-${modelId}`,
+        load: async () => checkpointState.get(modelId),
+        save: async (value: unknown) => { checkpointState.set(modelId, structuredClone(value)); },
+      });
+      const fallback = new FallbackScreenwriterAgent({
+        candidates: [
+          {
+            providerId: "openai",
+            agent: agent("gpt-primary", async (candidateInput) => runRoleAgentLoop({
+              role: "编剧",
+              contractVersion: "screenwriter-test-v1",
+              criteria: ["结构完整"],
+              maxIterations: 1,
+              produce: async () => {
+                primaryProducerCalls += 1;
+                return successful("gpt-primary");
+              },
+              audit: async () => {
+                primaryAuditCalls += 1;
+                throw auditFailure;
+              },
+              validate: (value) => value as { scenes: unknown[] },
+              ...(candidateInput.agentLoopCheckpoint ? { checkpoint: candidateInput.agentLoopCheckpoint } : {}),
+            })),
+          },
+          {
+            providerId: "zai-bigmodel-api",
+            agent: agent("glm-5.3", async (candidateInput) => runRoleAgentLoop({
+              role: "编剧",
+              contractVersion: "screenwriter-test-v1",
+              criteria: ["结构完整"],
+              maxIterations: 1,
+              produce: async () => {
+                backupProducerCalls += 1;
+                throw new Error("backup producer must not run");
+              },
+              audit: async () => {
+                backupAuditCalls += 1;
+                return {
+                  output: {
+                    version: "video-factory/role-audit-v1",
+                    verdict: "pass",
+                    score: 96,
+                    summary: "替补审计通过",
+                    issues: [],
+                    repairInstructions: [],
+                  },
+                  trace: {
+                    taskKind: "role-audit",
+                    promptVersion: "fallback-test-v1",
+                    prompt: "bounded audit prompt",
+                    providerId: "zai-bigmodel-api",
+                    modelId: "glm-5.3",
+                  },
+                };
+              },
+              validate: (value) => value as { scenes: unknown[] },
+              ...(candidateInput.agentLoopCheckpoint ? { checkpoint: candidateInput.agentLoopCheckpoint } : {}),
+            })),
+          },
+        ],
+      });
+
+      const execution = await fallback.draftDetailed({ ...input, agentLoopCheckpointForModel: checkpointFactory });
+
+      assert.deepEqual(execution.output, { scenes: [] });
+      assert.equal(primaryProducerCalls, 1);
+      assert.equal(primaryAuditCalls, 1);
+      assert.equal(backupProducerCalls, 0);
+      assert.equal(backupAuditCalls, 1);
+      assert.equal(execution.agentLoop?.iterations[0]?.candidateTrace?.modelId, "gpt-primary");
+      assert.equal(execution.agentLoop?.iterations[0]?.auditTrace?.modelId, "glm-5.3");
+      assert.deepEqual(execution.trace?.attemptedModelIds, ["gpt-primary", "glm-5.3"]);
+      assert.equal((checkpointState.get("glm-5.3") as { status?: string }).status, "passed");
+    });
+  }
+
+  it("does not switch audit providers for a malformed audit result", async () => {
+    let backupCalls = 0;
     const fallback = new FallbackScreenwriterAgent({
       candidates: [
         {
-          providerId: "zai-bigmodel-api",
-          agent: agent("glm-5.3", async () => {
-            throw new RoleAgentLoopError("Independent audit is unavailable.", {
+          providerId: "openai",
+          agent: agent("gpt-primary", async () => {
+            throw new RoleAgentLoopError("Independent audit returned malformed output.", {
               version: "video-factory/agent-loop-v1",
               role: "编剧",
               contractVersion: "screenwriter-test-v1",
               criteria: ["结构完整"],
               status: "failed",
-              maxIterations: 3,
+              maxIterations: 1,
               iterations: [],
               pendingCandidate: {
                 iteration: 1,
-                candidate: pendingCandidate,
+                candidate: { scenes: [] },
                 candidateHash: "a".repeat(64),
               },
-            }, undefined, auditFailure);
+            }, undefined, new Error("response schema validation failed"));
           }),
         },
         {
-          providerId: "openai",
-          agent: agent("gpt-backup", async () => {
+          providerId: "zai-bigmodel-api",
+          agent: agent("glm-5.3", async () => {
             backupCalls += 1;
-            return successful("gpt-backup");
+            return successful("glm-5.3");
           }),
         },
       ],
     });
 
-    await assert.rejects(() => fallback.draftDetailed(input), /audit is unavailable/i);
+    await assert.rejects(() => fallback.draftDetailed(input), /malformed output/i);
     assert.equal(backupCalls, 0);
   });
 

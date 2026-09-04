@@ -16,7 +16,7 @@ export { BROKER_TASK_KINDS } from "./task-definitions.js";
 export type { BrokerTaskKind } from "./task-definitions.js";
 
 const OPENAI_TASK_KINDS = ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"] as const;
-export const ZAI_TASK_KINDS = ["director-plan", "script-draft", "visual-review"] as const satisfies readonly BrokerTaskKind[];
+export const ZAI_TASK_KINDS = [...BROKER_TASK_KINDS] as const satisfies readonly BrokerTaskKind[];
 export const DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID = "glm-5.3-flash";
 export const DEFAULT_ZAI_TEXT_MODEL_ID = "glm-5.3";
 
@@ -127,10 +127,36 @@ const DATA_ISOLATION_NOTICE = [
 ].join("");
 
 export class CodexExecutorError extends Error {
-  constructor(message: string, readonly transient: boolean, options?: ErrorOptions) {
+  readonly details: CodexExecutorFailureDetails | undefined;
+
+  constructor(message: string, readonly transient: boolean, options?: CodexExecutorErrorOptions) {
     super(message, options);
     this.name = "CodexExecutorError";
+    this.details = options?.details;
   }
+}
+
+export type CodexExecutorFailureCategory =
+  | "authentication"
+  | "invalid_request"
+  | "rate_limited"
+  | "service_unavailable"
+  | "timeout"
+  | "network"
+  | "invalid_output"
+  | "execution_failed";
+
+export interface CodexExecutorFailureDetails {
+  category: CodexExecutorFailureCategory;
+  reasonCode: string;
+  providerId: string;
+  modelId: string;
+  providerWaitMs?: number;
+  requestIdHash?: string;
+}
+
+interface CodexExecutorErrorOptions extends ErrorOptions {
+  details?: CodexExecutorFailureDetails;
 }
 
 export interface TopicIdeasPayload {
@@ -324,6 +350,7 @@ export interface CodexExecutorOptions {
   maxOutputBytes?: number;
   spawnFn?: SpawnFunction;
   killGroup?: (pid: number) => void;
+  now?: () => number;
 }
 
 export interface CodexExecutionOptions {
@@ -353,6 +380,10 @@ export interface CodexTaskTrace {
   fallbackFromModelId?: string;
   fallbackReason?: string;
   attemptedModelIds?: string[];
+  providerWaitMs?: number;
+  firstOutputEventMs?: number;
+  toolMs?: number;
+  validationMs?: number;
 }
 
 export function parseTaskRequest(
@@ -543,6 +574,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
   private readonly maxOutputBytes: number;
   private readonly spawnProcess: SpawnFunction;
   private readonly killGroup: (pid: number) => void;
+  private readonly now: () => number;
 
   constructor(options: CodexExecutorOptions) {
     this.codexBin = options.codexBin ?? "codex";
@@ -559,6 +591,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
     this.spawnProcess = options.spawnFn
       ?? ((command, args, spawnOptions) => defaultSpawn(command, args, spawnOptions));
     this.killGroup = options.killGroup ?? defaultKillGroup;
+    this.now = options.now ?? Date.now;
   }
 
   get identity(): CodexExecutorIdentity {
@@ -603,6 +636,10 @@ export class CodexExecutor implements BrokerTaskExecutor {
           providerId: this.identity.providerId,
           modelId: model ?? this.identity.modelId,
           ...(reasoningEffort ? { reasoningEffort } : {}),
+          providerWaitMs: execution.providerWaitMs,
+          ...(execution.firstOutputEventMs !== undefined ? { firstOutputEventMs: execution.firstOutputEventMs } : {}),
+          toolMs: 0,
+          validationMs: execution.validationMs,
         },
         ...(execution.sessionId ? { sessionId: execution.sessionId } : {}),
       };
@@ -616,7 +653,13 @@ export class CodexExecutor implements BrokerTaskExecutor {
     taskDir: string,
     prompt: string,
     options: CodexExecutionOptions,
-  ): Promise<{ output: string; sessionId?: string }> {
+  ): Promise<{
+    output: string;
+    sessionId?: string;
+    providerWaitMs: number;
+    firstOutputEventMs?: number;
+    validationMs: number;
+  }> {
     const workspaceDir = path.join(taskDir, "workspace");
     const lastMessagePath = path.join(taskDir, "last-message.txt");
     const schemaPath = path.join(taskDir, "output-schema.json");
@@ -643,6 +686,8 @@ export class CodexExecutor implements BrokerTaskExecutor {
       stdio: "pipe",
       detached: true,
     });
+    const providerStartedAt = this.now();
+    let firstOutputAt: number | undefined;
 
     let timedOut = false;
     let cancelled = false;
@@ -659,7 +704,9 @@ export class CodexExecutor implements BrokerTaskExecutor {
       timedOut = true;
       terminate();
     }, this.timeoutMs);
-    const stdoutPromise = collectText(child.stdout, MAX_STDOUT_BYTES);
+    const stdoutPromise = collectText(child.stdout, MAX_STDOUT_BYTES, () => {
+      firstOutputAt ??= this.now();
+    });
     const stderrPromise = collectText(child.stderr, DEFAULT_MAX_STDERR_BYTES);
     const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       child.on("error", (error) => reject(new CodexExecutorError(
@@ -681,6 +728,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
     }
+    const providerFinishedAt = this.now();
     if (cancelled) {
       throw new CodexExecutorError("Codex task was cancelled because its client disconnected.", true);
     }
@@ -697,6 +745,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
       );
     }
 
+    const validationStartedAt = this.now();
     let outputSize: number;
     try {
       outputSize = (await stat(lastMessagePath)).size;
@@ -733,7 +782,15 @@ export class CodexExecutor implements BrokerTaskExecutor {
     const sessionId = options.persistSession || options.sessionId
       ? codexSessionIdFromJsonl(stdout) ?? options.sessionId
       : undefined;
-    return { output, ...(sessionId ? { sessionId } : {}) };
+    return {
+      output,
+      ...(sessionId ? { sessionId } : {}),
+      providerWaitMs: elapsedMilliseconds(providerStartedAt, providerFinishedAt),
+      ...(firstOutputAt !== undefined
+        ? { firstOutputEventMs: elapsedMilliseconds(providerStartedAt, firstOutputAt) }
+        : {}),
+      validationMs: elapsedMilliseconds(validationStartedAt, this.now()),
+    };
   }
 
   private effortFor(kind: BrokerTaskKind): string | undefined {
@@ -751,11 +808,23 @@ export class CodexExecutor implements BrokerTaskExecutor {
 // argv 唯一构建点。spawn 不经过 shell，因此 --config KEY=VALUE 不需要引号转义。
 // 以下 flags 已在 ECS 的 codex exec --help 实测验证：-s/--sandbox、-C/--cd、exec resume、
 // --ignore-user-config、--ignore-rules、--output-schema、--json、-o/--output-last-message、
-// --skip-git-repo-check、--disable。即使任务数据发生提示注入，模型也拿不到 shell 工具；
+// --skip-git-repo-check、--disable。0.149.1 与 0.153.0-alpha.5 均实测识别下列 feature；
+// 即使任务数据发生提示注入，模型也拿不到 shell、custom exec 或 web search 工具；
 // read-only sandbox 仍作为第二道操作系统边界保留。
 // CODEX_HOME 由 systemd unit 指向隔离目录，auth.json 是指向真实登录态的只读链接；
 // argv 只负责 --ignore-user-config/--ignore-rules 与每任务临时目录；
 // 该目录刻意不是 Git 仓库，必须显式跳过 repo 信任检查，否则 codex exec 以退出码 1 拒绝运行。
+const MODEL_ONLY_DISABLED_FEATURES = [
+  "shell_tool",
+  "unified_exec",
+  "code_mode",
+  "code_mode_host",
+  "standalone_web_search",
+  "web_search_request",
+  "web_search_cached",
+  "search_tool",
+] as const;
+
 export function buildCodexExecCommand(input: {
   codexBin: string;
   workspaceDir: string;
@@ -777,8 +846,7 @@ export function buildCodexExecCommand(input: {
         "--all",
         "--ignore-user-config",
         "--ignore-rules",
-        "--disable", "shell_tool",
-        "--disable", "unified_exec",
+        ...MODEL_ONLY_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
         "--skip-git-repo-check",
         "--config", "sandbox_mode=\"read-only\"",
         "--output-schema", input.schemaPath,
@@ -802,8 +870,7 @@ export function buildCodexExecCommand(input: {
       ...(input.persistSession ? [] : ["--ephemeral"]),
       "--ignore-user-config",
       "--ignore-rules",
-      "--disable", "shell_tool",
-      "--disable", "unified_exec",
+      ...MODEL_ONLY_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
       "--skip-git-repo-check",
       "--cd", input.workspaceDir,
       "--output-schema", input.schemaPath,
@@ -1008,18 +1075,27 @@ function parseOutputJson(output: string): unknown {
   }
 }
 
-async function collectText(stream: Readable | null, maxBytes: number): Promise<string> {
+async function collectText(stream: Readable | null, maxBytes: number, onFirstData?: () => void): Promise<string> {
   if (!stream) return "";
   const chunks: Buffer[] = [];
   let received = 0;
+  let sawData = false;
   return new Promise((resolve, reject) => {
     stream.on("data", (chunk: Buffer) => {
+      if (!sawData) {
+        sawData = true;
+        onFirstData?.();
+      }
       received += chunk.length;
       if (received <= maxBytes) chunks.push(chunk);
     });
     stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     stream.on("error", reject);
   });
+}
+
+function elapsedMilliseconds(startedAt: number, finishedAt: number): number {
+  return Math.max(0, Math.round(finishedAt - startedAt));
 }
 
 function defaultKillGroup(pid: number): void {

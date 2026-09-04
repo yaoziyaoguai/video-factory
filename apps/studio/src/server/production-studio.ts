@@ -8,6 +8,7 @@ import type { ProductionTemplateSnapshot } from "@video-factory/template-core";
 import {
   PaidOperationManualReconciliationError,
   parseBrief,
+  parsePersistedBrief,
   RunLockedError,
   StaleRunRevisionError,
   type DispatchedProductionRun,
@@ -212,7 +213,8 @@ export class ProductionStudio {
     const findings = reworkFindings(detail);
     const previousScript = await this.readReworkDocument(run, "script", "script");
     const previousDirectorPlan = await this.readReworkDocument(run, "visual-direction", "storyboard");
-    const brief = parseBrief(run.initialInput);
+    // 历史运行可能把热点来源误存成目标平台；返工页仍需打开，让创作者明确重选。
+    const brief = parsePersistedBrief(run.initialInput);
     const reworkScriptProviderId = brief.providers.script === "codex-screenwriter-v1"
       ? brief.providers.script
       : (await this.options.listProviders()).some((provider) => (
@@ -299,6 +301,10 @@ export class ProductionStudio {
         if (active) {
           throw new StudioConflictError(`“${active.initialInput.title}”仍在运行或等待确认，结束流程后才能归档。`);
         }
+        const uncertain = runs.find((run) => run.nodeRuns.some((node) => node.outcomeUncertain));
+        if (uncertain) {
+          throw new StudioConflictError(`“${uncertain.initialInput.title}”还有付费结果尚未核对，完成任务与账单核对后才能归档。`);
+        }
         await this.options.archiveStore.archive(uniqueIds, (this.options.now ?? (() => new Date()))().toISOString());
       });
     } catch (error) {
@@ -330,6 +336,9 @@ export class ProductionStudio {
         const current = await this.loadRequiredRun(runId);
         if (!isTerminalRun(current.status)) {
           throw new StudioConflictError("这条制作仍在运行或等待确认，结束流程后才能删除。");
+        }
+        if (current.nodeRuns.some((node) => node.outcomeUncertain)) {
+          throw new StudioConflictError("这条制作还有付费结果尚未核对，完成任务与账单核对后才能永久删除。");
         }
         const archived = await this.options.archiveStore.list();
         if (!archived[runId]) {
@@ -650,6 +659,9 @@ export class ProductionStudio {
     if (isTerminalRun(current.status) && input.confirmTerminalEdit !== true) {
       throw new StudioConflictError("这条制作已经结束。请明确确认创建人工修订版后再保存。");
     }
+    if (current.nodeRuns.some((candidate) => candidate.outcomeUncertain)) {
+      throw new StudioConflictError("这条制作还有付费结果尚未核对，暂时不能修改内容。请先完成任务与账单核对。");
+    }
     const node = current.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
     if (!node) throw new StudioInputError(`没有找到制作步骤“${nodeId}”。`);
     const editsOutput = input.output !== undefined;
@@ -727,6 +739,9 @@ export class ProductionStudio {
     if (isTerminalRun(current.status) && input.confirmTerminalEdit !== true) {
       throw new StudioConflictError("这条制作已经结束。请明确确认创建人工修订版后再保存输入。");
     }
+    if (current.nodeRuns.some((candidate) => candidate.outcomeUncertain)) {
+      throw new StudioConflictError("这条制作还有付费结果尚未核对，暂时不能修改输入。请先完成任务与账单核对。");
+    }
     if (!current.nodeRuns.some((candidate) => candidate.nodeId === nodeId)) {
       throw new StudioInputError(`没有找到制作步骤“${nodeId}”。`);
     }
@@ -770,7 +785,10 @@ export class ProductionStudio {
     if (isTerminalRun(current.status) && input.confirmTerminalEdit !== true) {
       throw new StudioConflictError("这条制作已经结束。请明确确认重新生成后再修改执行配置。");
     }
-    const currentBrief = parseBrief(current.initialInput);
+    if (current.nodeRuns.some((candidate) => candidate.outcomeUncertain)) {
+      throw new StudioConflictError("这条制作还有付费结果尚未核对，暂时不能修改模型或画面来源。请先完成任务与账单核对。");
+    }
+    const currentBrief = parsePersistedBrief(current.initialInput);
     const updatedBrief = applyNodeExecutionConfiguration(currentBrief, nodeId, input);
     await this.assertProvidersAvailable(updatedBrief);
     try {
@@ -919,7 +937,8 @@ export class ProductionStudio {
     const plan = current.nodeRuns.find((node) => node.nodeId === nodeId)?.spendPlan;
     if (!plan) throw new StudioConflictError("这个节点当前没有待确认的费用计划，请刷新页面后重试。");
     if (
-      input.providerId !== plan.providerId
+      input.spendPlanId !== plan.id
+      || input.providerId !== plan.providerId
       || input.modelId !== plan.modelId
       || input.maxCostCny !== plan.maxCostCny
       || input.maxAttempts !== plan.maxAttempts
@@ -930,6 +949,7 @@ export class ProductionStudio {
     }
     try {
       const authorization: SpendAuthorizationDraft = {
+        spendPlanId: plan.id,
         nodeId,
         inputVersionIds: [...plan.inputVersionIds],
         providerId: plan.providerId,
@@ -972,6 +992,13 @@ export class ProductionStudio {
     if (!plan || plan.id !== input.spendPlanId
       || (node.status !== "awaiting_spend_approval" && node.status !== "approval_invalidated")) {
       throw new StudioConflictError("费用报价或上游版本已经变化，请重新检查后再反馈。");
+    }
+    if (
+      input.reason === "too_expensive"
+      && input.targetEstimatedCostCny !== undefined
+      && input.targetEstimatedCostCny >= plan.estimatedCostCny
+    ) {
+      throw new StudioInputError("降本目标必须低于当前报价。");
     }
     const rejection: ProductionSpendRejectionDraft = {
       nodeId,
@@ -1069,6 +1096,7 @@ export class ProductionStudio {
         expectedRunRevision: input.expectedRunRevision,
         reconciliationId: input.reconciliationId,
         outcome: input.outcome,
+        ...(input.itemRequestId ? { itemRequestId: input.itemRequestId } : {}),
         ...(input.taskId ? { taskId: input.taskId } : {}),
         ...(manualResolution ? { actor } : {}),
         ...(input.note ? { note: input.note } : {}),
@@ -1846,6 +1874,7 @@ function productionInputMessage(error: unknown): string {
     return "所选音色与配音能力不一致，请重新选择音色。";
   }
   if (message.includes("durationSeconds")) return "成片时长必须是 20 到 180 秒之间的整数。";
+  if (message.includes("platform must be one of")) return "目标平台只支持抖音、小红书或哔哩哔哩，请重新选择。";
   if (message.includes("reviewMode")) return "人工终审设置无效。";
   if (message.includes("protocolVersion")) return "制作参数版本不受支持，请刷新页面后重试。";
   if (/\b(title|angle|audience|nicheSlug|platform)\b/.test(message)) return "请完整填写标题、内容角度、目标受众、系列标识和平台。";

@@ -1,6 +1,12 @@
 import type { CodexTaskExecution, ModelCandidateAttempt } from "./codex-chat.js";
 import type { ScreenwriterAgent, ScreenwriterAgentInput } from "./codex-screenwriter.js";
-import { failedModelCandidateAttempt, isModelProviderFailure, publicModelFailure } from "./model-fallback.js";
+import {
+  failedModelCandidateAttempt,
+  isModelProviderFailure,
+  isTransientRoleAuditProviderFailure,
+  publicModelFailure,
+} from "./model-fallback.js";
+import type { AgentLoopTrace } from "./codex-chat.js";
 import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { VisualDirectorAgent, VisualDirectorAgentInput } from "./visual-director.js";
 
@@ -103,22 +109,29 @@ async function runCandidates<
 ): Promise<CodexTaskExecution<unknown>> {
   const ordered = orderCandidates(candidates, selectedModelId);
   const failures: Array<{ modelId: string; providerId: string; error: unknown }> = [];
+  let resumeFrom: AgentLoopTrace | undefined;
   for (const [position, candidate] of ordered.entries()) {
     const modelId = requiredModelId(candidate.agent);
-    const candidateInput = inputForCandidate(input, modelId, position);
+    const candidateInput = inputForCandidate(input, modelId, position, resumeFrom);
     try {
       const execution = await execute(candidate.agent, candidateInput);
       if (!execution.trace) {
         throw new Error(`Model candidate '${modelId}' completed without an immutable execution trace.`);
       }
-      const actualModelIds = execution.trace.attemptedModelIds ?? [execution.trace.modelId];
+      const recoveredAuditTrace = resumeFrom
+        ? execution.agentLoop?.iterations.at(-1)?.auditTrace
+        : undefined;
+      const resultTrace = recoveredAuditTrace ?? execution.trace;
+      const actualModelIds = resultTrace.attemptedModelIds ?? [resultTrace.modelId];
       return {
         ...execution,
         trace: {
-          ...execution.trace,
+          ...resultTrace,
           ...(position > 0 ? {
             fallbackFromModelId: requiredModelId(ordered[0]!.agent),
-            fallbackReason: `前 ${position} 个候选模型调用失败，已自动切换。`,
+            fallbackReason: resumeFrom
+              ? "首选模型的独立审计暂时失败，已保留候选并切换兼容审计模型。"
+              : `前 ${position} 个候选模型调用失败，已自动切换。`,
           } : {}),
           attemptedModelIds: [...new Set([
             ...failures.map((failure) => failure.modelId),
@@ -131,8 +144,8 @@ async function runCandidates<
               failure.providerId,
             )),
             {
-              modelId: execution.trace.modelId,
-              providerId: execution.trace.providerId,
+              modelId: resultTrace.modelId,
+              providerId: resultTrace.providerId,
               outcome: "succeeded" as const,
             },
           ],
@@ -140,7 +153,15 @@ async function runCandidates<
       };
     } catch (error) {
       failures.push({ modelId: requiredModelId(candidate.agent), providerId: candidate.providerId, error });
-      if (!isModelProviderFailure(error)) throw error;
+      if (isTransientRoleAuditProviderFailure(error)) {
+        resumeFrom = error.agentLoop;
+        if (position === ordered.length - 1) throw new ModelCandidatesExhaustedError(failures);
+        continue;
+      }
+      if (!isModelProviderFailure(error)) {
+        if (failures.length > 1) throw new ModelCandidatesExhaustedError(failures);
+        throw error;
+      }
       if (position === ordered.length - 1) throw new ModelCandidatesExhaustedError(failures);
     }
   }
@@ -185,17 +206,43 @@ function inputForCandidate<TInput extends {
   selectedModelId?: string;
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
   agentLoopCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
-}>(input: TInput, modelId: string, position: number): TInput {
+}>(input: TInput, modelId: string, position: number, resumeFrom?: AgentLoopTrace): TInput {
   const {
     selectedModelId: _selectedModelId,
     agentLoopCheckpoint: primaryCheckpoint,
     agentLoopCheckpointForModel,
     ...rest
   } = input;
-  const checkpoint = agentLoopCheckpointForModel?.(modelId)
+  const baseCheckpoint = agentLoopCheckpointForModel?.(modelId)
     ?? (position === 0 ? primaryCheckpoint : undefined);
+  const checkpoint = resumeFrom
+    ? auditFallbackCheckpoint(baseCheckpoint, modelId, resumeFrom)
+    : baseCheckpoint;
   return {
     ...rest,
     ...(checkpoint ? { agentLoopCheckpoint: checkpoint } : {}),
   } as TInput;
+}
+
+function auditFallbackCheckpoint(
+  checkpoint: RoleAgentLoopCheckpoint | undefined,
+  modelId: string,
+  resumeFrom: AgentLoopTrace,
+): RoleAgentLoopCheckpoint {
+  if (checkpoint) {
+    return {
+      key: checkpoint.key,
+      ...(checkpoint.restartExhausted !== undefined ? { restartExhausted: checkpoint.restartExhausted } : {}),
+      resumeFrom,
+      load: () => checkpoint.load(),
+      save: (value) => checkpoint.save(value),
+    };
+  }
+  let stored: unknown;
+  return {
+    key: `audit-fallback:${modelId}:${resumeFrom.pendingCandidate!.candidateHash}`,
+    resumeFrom,
+    load: async () => stored,
+    save: async (value) => { stored = structuredClone(value); },
+  };
 }

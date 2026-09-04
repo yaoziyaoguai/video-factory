@@ -29,6 +29,7 @@ export interface RoleAgentLoopOptions<TOutput> {
   }): Promise<CodexTaskExecution<unknown>>;
   validate(value: unknown): TOutput;
   checkpoint?: RoleAgentLoopCheckpoint;
+  now?: () => number;
 }
 
 export type RoleAgentRevision<TOutput> =
@@ -58,6 +59,8 @@ interface RoleRepairFeedback {
 export interface RoleAgentLoopCheckpoint {
   key: string;
   restartExhausted?: boolean;
+  // 仅供兼容模型接管独立审计；候选与语义轮次可恢复，Provider 会话和请求标识不可跨模型复用。
+  resumeFrom?: AgentLoopTrace;
   load(): Promise<unknown | undefined>;
   save(value: unknown): Promise<void>;
 }
@@ -110,6 +113,9 @@ interface PersistedLoopState {
   attemptedRequestIds: string[];
   sessions: Partial<Record<"produce" | "audit", CodexTaskSession>>;
   phaseAttempts: Record<"produce" | "audit", number>;
+  phaseDurationsMs: Record<"produce" | "audit", number>;
+  validationMs: number;
+  retriedRequestIds: string[];
 }
 
 export async function runRoleAgentLoop<TOutput>(
@@ -128,6 +134,7 @@ export async function runRoleAgentLoop<TOutput>(
   }
 
   const state = await restoreCheckpoint(options);
+  await resumePendingAudit(options, state);
   if (state.status === "exhausted"
     && state.completed.length < options.maxIterations
     && (state.pendingCandidate !== undefined || state.validationFailure !== undefined)) {
@@ -141,7 +148,7 @@ export async function runRoleAgentLoop<TOutput>(
     && !state.pendingCandidate) {
     state.pendingCandidate = {
       iteration: 1,
-      candidate: options.validate(options.initialCandidate),
+      candidate: timedValidate(options, state, options.initialCandidate),
     };
     await persistCheckpoint(options, state);
   }
@@ -159,7 +166,7 @@ export async function runRoleAgentLoop<TOutput>(
 
   const lastCompleted = state.completed.at(-1);
   let revision: { candidate: TOutput; audit: RoleAudit } | undefined = lastCompleted
-    ? { candidate: options.validate(lastCompleted.candidate), audit: lastCompleted.audit }
+    ? { candidate: timedValidate(options, state, lastCompleted.candidate), audit: lastCompleted.audit }
     : undefined;
   let validationRevision = state.validationFailure;
   let previousCandidate = lastCompleted ? JSON.stringify(revision!.candidate) : "";
@@ -168,7 +175,7 @@ export async function runRoleAgentLoop<TOutput>(
     let candidateExecution: CodexTaskExecution<unknown>;
     let candidate: TOutput;
     if (state.pendingCandidate?.iteration === iteration) {
-      candidate = options.validate(state.pendingCandidate.candidate);
+      candidate = timedValidate(options, state, state.pendingCandidate.candidate);
       candidateExecution = {
         output: candidate,
         ...(state.pendingCandidate.candidateTrace ? { trace: state.pendingCandidate.candidateTrace } : {}),
@@ -184,7 +191,7 @@ export async function runRoleAgentLoop<TOutput>(
           throw await failedLoopError(error, options, state, iterations, state.completed.at(-1)?.candidateTrace);
         }
         try {
-          candidate = options.validate(candidateExecution.output);
+          candidate = timedValidate(options, state, candidateExecution.output);
           break;
         } catch (error) {
           structuredOutputAttempts += 1;
@@ -200,8 +207,8 @@ export async function runRoleAgentLoop<TOutput>(
           if (structuredOutputAttempts >= MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN) {
             throw await failedLoopError(
               new Error(
-                `${options.role} Agent returned malformed output twice in semantic round ${iteration}; `
-                + `the semantic audit round was not consumed and can resume from its checkpoint. ${validationRevision.validationError}`,
+                `${options.role}连续两次返回了无法使用的结果；本轮质量审计尚未消耗，`
+                + `可从已保存进度继续。${validationRevision.validationError}`,
               ),
               options,
               state,
@@ -225,7 +232,7 @@ export async function runRoleAgentLoop<TOutput>(
     if (iteration > 1 && candidateFingerprint === previousCandidate) {
       state.status = "exhausted";
       throw await failedLoopError(
-        new Error(`${options.role} Agent repeated an unchanged candidate after repair feedback.`),
+        new Error(`${options.role}按修改建议重做后内容没有变化。`),
         options,
         state,
         iterations,
@@ -253,7 +260,7 @@ export async function runRoleAgentLoop<TOutput>(
         throw await failedLoopError(error, options, state, iterations, candidateExecution.trace);
       }
       try {
-        audit = validateRoleAudit(auditExecution.output);
+        audit = timedValidateAudit(options, state, auditExecution.output);
         break;
       } catch (error) {
         structuredAuditAttempts += 1;
@@ -263,8 +270,8 @@ export async function runRoleAgentLoop<TOutput>(
         if (structuredAuditAttempts >= MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN) {
           throw await failedLoopError(
             new Error(
-              `Independent ${options.role} audit returned malformed output twice in semantic round ${iteration}; `
-              + `the semantic audit round was not consumed and can resume from its checkpoint. ${publicValidationError(error)}`,
+              `${options.role}的独立审计连续两次返回了无法使用的结果；本轮质量审计尚未消耗，`
+              + `可从已保存进度继续。${publicValidationError(error)}`,
             ),
             options,
             state,
@@ -303,12 +310,70 @@ export async function runRoleAgentLoop<TOutput>(
   const finalAudit = iterations.at(-1)?.audit;
   state.status = "exhausted";
   throw await failedLoopError(
-    new Error(`${options.role} Agent did not pass its independent audit after ${options.maxIterations} iterations.${finalAudit ? ` ${finalAudit.summary}` : ""}`),
+    new Error(`${options.role}经过 ${options.maxIterations} 轮修改后仍未通过独立审计。${finalAudit ? ` ${finalAudit.summary}` : ""}`),
     options,
     state,
     iterations,
     state.completed.at(-1)?.candidateTrace,
   );
+}
+
+async function resumePendingAudit<TOutput>(
+  options: RoleAgentLoopOptions<TOutput>,
+  state: PersistedLoopState,
+): Promise<void> {
+  const resume = options.checkpoint?.resumeFrom;
+  if (!resume || state.completed.length > 0 || state.pendingCandidate || state.validationFailure) return;
+  if (resume.status !== "failed"
+    || !resume.pendingCandidate
+    || resume.role !== options.role
+    || resume.contractVersion !== options.contractVersion
+    || resume.maxIterations !== options.maxIterations
+    || JSON.stringify(resume.criteria) !== JSON.stringify(options.criteria)
+    || resume.pendingCandidate.iteration !== resume.iterations.length + 1) {
+    throw new Error("Agent loop audit fallback checkpoint is incompatible with this role.");
+  }
+
+  state.completed = resume.iterations.map((entry, index) => {
+    if (entry.iteration !== index + 1) {
+      throw new Error("Agent loop audit fallback iterations are not contiguous.");
+    }
+    return {
+      iteration: entry.iteration,
+      candidate: timedValidate(options, state, entry.candidate),
+      ...(entry.candidateTrace ? { candidateTrace: structuredClone(entry.candidateTrace) } : {}),
+      audit: validateRoleAudit(entry.audit),
+      ...(entry.auditTrace ? { auditTrace: structuredClone(entry.auditTrace) } : {}),
+    };
+  });
+  state.pendingCandidate = {
+    iteration: resume.pendingCandidate.iteration,
+    candidate: timedValidate(options, state, resume.pendingCandidate.candidate),
+    ...(resume.pendingCandidate.candidateTrace
+      ? { candidateTrace: structuredClone(resume.pendingCandidate.candidateTrace) }
+      : {}),
+  };
+  state.phaseAttempts = {
+    produce: resume.producerModelCallCount ?? state.completed.length + 1,
+    audit: resume.auditModelCallCount ?? state.completed.length + 1,
+  };
+  state.phaseDurationsMs = {
+    produce: resume.producerMs ?? 0,
+    audit: resume.auditMs ?? 0,
+  };
+  state.validationMs += resume.validationMs ?? 0;
+  const priorModelCalls = resume.modelCallCount
+    ?? state.phaseAttempts.produce + state.phaseAttempts.audit;
+  // 旧请求标识不应发送给新的 Provider；这里只保留计数占位，保证审计账本不会少记已经发生的调用。
+  state.attemptedRequestIds = Array.from(
+    { length: priorModelCalls },
+    (_, index) => `resumed-model-call-${index + 1}`,
+  );
+  state.retriedRequestIds = Array.from(
+    { length: resume.retryCount ?? 0 },
+    (_, index) => `resumed-retry-${index + 1}`,
+  );
+  await persistCheckpoint(options, state);
 }
 
 async function failedLoopError<TOutput>(
@@ -318,7 +383,9 @@ async function failedLoopError<TOutput>(
   iterations: AgentLoopTrace["iterations"],
   lastTrace?: CodexTaskExecution["trace"],
 ): Promise<RoleAgentLoopError> {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = error instanceof CodexBridgeError
+    ? error.creatorMessage
+    : error instanceof Error ? error.message : String(error);
   await persistCheckpoint(options, state);
   return new RoleAgentLoopError(
     message,
@@ -332,6 +399,10 @@ async function failedLoopError<TOutput>(
       modelCallCount: state.attemptedRequestIds.length,
       producerModelCallCount: state.phaseAttempts.produce,
       auditModelCallCount: state.phaseAttempts.audit,
+      producerMs: state.phaseDurationsMs.produce,
+      auditMs: state.phaseDurationsMs.audit,
+      validationMs: state.validationMs,
+      retryCount: state.retriedRequestIds.length,
       iterations,
       ...(state.pendingCandidate ? {
         pendingCandidate: {
@@ -362,6 +433,9 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
     attemptedRequestIds: [],
     sessions: {},
     phaseAttempts: { produce: 0, audit: 0 },
+    phaseDurationsMs: { produce: 0, audit: 0 },
+    validationMs: 0,
+    retriedRequestIds: [],
   });
   if (!options.checkpoint) return fresh();
   const loaded = await options.checkpoint.load();
@@ -445,6 +519,14 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
     phaseAttempts: legacyV3 || legacyV4 || legacyV5
       ? inferredPhaseAttempts(completed, pendingCandidate)
       : structuredClone(candidate.phaseAttempts!),
+    phaseDurationsMs: isPhaseDurations(candidate.phaseDurationsMs)
+      ? structuredClone(candidate.phaseDurationsMs)
+      : { produce: 0, audit: 0 },
+    validationMs: isDuration(candidate.validationMs) ? candidate.validationMs : 0,
+    retriedRequestIds: Array.isArray(candidate.retriedRequestIds)
+      && candidate.retriedRequestIds.every((requestId) => typeof requestId === "string")
+      ? [...candidate.retriedRequestIds]
+      : [],
     ...(pendingCandidate ? { pendingCandidate } : {}),
     ...(validationFailure ? { validationFailure } : {}),
   };
@@ -472,7 +554,7 @@ function completedExecution<TOutput>(
   if (!final || final.audit.verdict !== "pass") throw new Error("Agent loop checkpoint has no passing result.");
   const finalTrace = final.candidateTrace ?? final.auditTrace;
   return {
-    output: options.validate(final.candidate),
+    output: timedValidate(options, state, final.candidate),
     ...(finalTrace ? { trace: finalTrace } : {}),
     agentLoop: {
       version: "video-factory/agent-loop-v1",
@@ -484,6 +566,10 @@ function completedExecution<TOutput>(
       modelCallCount: state.attemptedRequestIds.length,
       producerModelCallCount: state.phaseAttempts.produce,
       auditModelCallCount: state.phaseAttempts.audit,
+      producerMs: state.phaseDurationsMs.produce,
+      auditMs: state.phaseDurationsMs.audit,
+      validationMs: state.validationMs,
+      retryCount: state.retriedRequestIds.length,
       iterations,
     },
   };
@@ -518,10 +604,10 @@ async function executeOperation<TOutput>(
     if (!state.attemptedRequestIds.includes(requestId)
       && attemptLimit !== undefined
       && state.phaseAttempts[phase] >= attemptLimit) {
-      throw new Error(`${options.role} Agent exceeded the ${phase} model-call limit of ${attemptLimit}.`);
+      throw new Error(`${options.role}的${phase === "audit" ? "独立审计" : "内容生成"}调用已达到本轮上限 ${attemptLimit} 次。`);
     }
     try {
-      const result = await executeTrackedOperation(options, state, requestId, session, phase, execute);
+      const result = await executeTrackedOperation(options, state, requestId, session, phase, generation > 0, execute);
       if (result.session) {
         if (result.session.key !== session.key) throw new Error("Agent loop received a mismatched task session key.");
         if (session.handle && result.session.handle !== session.handle) {
@@ -547,7 +633,7 @@ async function executeOperation<TOutput>(
         await persistCheckpoint(options, state);
         const phaseLabel = phase === "audit" ? "独立审计" : "内容生成";
         throw new Error(
-          `${options.role} Agent 的${phaseLabel}基础设施失败，尚未消耗语义审计轮次；候选和会话检查点已保留，可直接重试。${publicValidationError(error)}`,
+          `${options.role}的${phaseLabel}暂时失败，尚未消耗质量审计轮次；当前内容和进度已保留，可直接重试。${error.creatorMessage}`,
           { cause: error },
         );
       }
@@ -594,14 +680,22 @@ async function executeTrackedOperation<TOutput>(
   requestId: string,
   session: CodexTaskSession,
   phase: "produce" | "audit",
+  isRetry: boolean,
   execute: (operation: { requestId: string; session: CodexTaskSession }) => Promise<CodexTaskExecution<unknown>>,
 ): Promise<CodexTaskExecution<unknown>> {
   if (!state.attemptedRequestIds.includes(requestId)) {
     state.attemptedRequestIds.push(requestId);
     state.phaseAttempts[phase] += 1;
+    if (isRetry) state.retriedRequestIds.push(requestId);
     await persistCheckpoint(options, state);
   }
-  return execute({ requestId, session });
+  const startedAt = nowMs(options);
+  try {
+    return await execute({ requestId, session });
+  } finally {
+    state.phaseDurationsMs[phase] += elapsedMs(startedAt, nowMs(options));
+    await persistCheckpoint(options, state);
+  }
 }
 
 function producerRevision<TOutput>(
@@ -649,6 +743,52 @@ function isPhaseAttempts(value: unknown): value is PersistedLoopState["phaseAtte
   return Object.keys(record).length === 2
     && Number.isInteger(record.produce) && Number(record.produce) >= 0
     && Number.isInteger(record.audit) && Number(record.audit) >= 0;
+}
+
+function isPhaseDurations(value: unknown): value is PersistedLoopState["phaseDurationsMs"] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).length === 2
+    && isDuration(record.produce)
+    && isDuration(record.audit);
+}
+
+function isDuration(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function timedValidate<TOutput>(
+  options: RoleAgentLoopOptions<TOutput>,
+  state: PersistedLoopState,
+  value: unknown,
+): TOutput {
+  const startedAt = nowMs(options);
+  try {
+    return options.validate(value);
+  } finally {
+    state.validationMs += elapsedMs(startedAt, nowMs(options));
+  }
+}
+
+function timedValidateAudit<TOutput>(
+  options: RoleAgentLoopOptions<TOutput>,
+  state: PersistedLoopState,
+  value: unknown,
+): RoleAudit {
+  const startedAt = nowMs(options);
+  try {
+    return validateRoleAudit(value);
+  } finally {
+    state.validationMs += elapsedMs(startedAt, nowMs(options));
+  }
+}
+
+function nowMs<TOutput>(options: RoleAgentLoopOptions<TOutput>): number {
+  return (options.now ?? Date.now)();
+}
+
+function elapsedMs(startedAt: number, finishedAt: number): number {
+  return Math.max(0, Math.round(finishedAt - startedAt));
 }
 
 function operationRequestId(

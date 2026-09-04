@@ -21,6 +21,20 @@ describe("TemplateGallery", () => {
     await user.click(screen.getByRole("radio", { name: /照片故事/ }));
     expect(onSelect).toHaveBeenCalledWith(templates[1]);
   });
+
+  it("scrolls the selected template fully into view on a mobile gallery", () => {
+    const scrollIntoView = vi.fn();
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    const { rerender } = render(<TemplateGallery templates={templates} selectedId="knowledge-explainer" onSelect={vi.fn()} />);
+    scrollIntoView.mockClear();
+
+    rerender(<TemplateGallery templates={templates} selectedId="photo-story" onSelect={vi.fn()} />);
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "nearest", inline: "nearest" });
+    vi.unstubAllGlobals();
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+  });
 });
 
 function template(

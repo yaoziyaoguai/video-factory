@@ -61,6 +61,7 @@ import {
   type StudioTemplateCatalog,
   type StudioTemplateCloneInput,
   type StudioTemplateCreateInput,
+  type StudioTemplateDeletion,
   type StudioTemplateMutation,
   type StudioTemplateExperimentScorecard,
   type StudioNodeInputOverrideInput,
@@ -86,6 +87,9 @@ export interface StudioServicePort {
   getTemplate(id: string, version?: number): Promise<StudioTemplate | undefined>;
   cloneTemplate(input: StudioTemplateCloneInput): Promise<StudioTemplateMutation>;
   createTemplate(input: StudioTemplateCreateInput): Promise<StudioTemplateMutation>;
+  reviseTemplate(id: string, expectedRevision: number): Promise<StudioTemplateMutation>;
+  deleteTemplate(id: string, expectedRevision: number): Promise<StudioTemplateDeletion>;
+  restoreBuiltInTemplate(id: string, expectedRevision: number): Promise<StudioTemplateMutation>;
   saveTemplateDraft(input: StudioTemplate, expectedRevision: number): Promise<StudioTemplateMutation>;
   publishTemplate(id: string, expectedRevision: number): Promise<StudioTemplateMutation>;
   listTrendSources(): Promise<StudioTrendSource[]>;
@@ -211,6 +215,30 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   });
   app.post("/api/templates", async (request, reply) => {
     return reply.code(201).send(await options.service.createTemplate(parseTemplateCreateInput(request.body)));
+  });
+  app.post<{ Params: { templateId: string } }>("/api/templates/:templateId/revise", async (request, reply) => {
+    requireSafeRouteId(request.params.templateId, "模板编号");
+    const body = requireRecord(request.body, "模板请求");
+    return reply.code(201).send(await options.service.reviseTemplate(
+      request.params.templateId,
+      requireNonNegativeInteger(body.expectedRevision, "expectedRevision"),
+    ));
+  });
+  app.delete<{ Params: { templateId: string } }>("/api/templates/:templateId", async (request) => {
+    requireSafeRouteId(request.params.templateId, "模板编号");
+    const body = requireRecord(request.body, "模板请求");
+    return options.service.deleteTemplate(
+      request.params.templateId,
+      requireNonNegativeInteger(body.expectedRevision, "expectedRevision"),
+    );
+  });
+  app.post<{ Params: { templateId: string } }>("/api/templates/:templateId/restore", async (request, reply) => {
+    requireSafeRouteId(request.params.templateId, "模板编号");
+    const body = requireRecord(request.body, "模板请求");
+    return reply.code(201).send(await options.service.restoreBuiltInTemplate(
+      request.params.templateId,
+      requireNonNegativeInteger(body.expectedRevision, "expectedRevision"),
+    ));
   });
   app.put<{ Params: { templateId: string } }>("/api/templates/:templateId/draft", async (request) => {
     requireSafeRouteId(request.params.templateId, "模板编号");
@@ -709,10 +737,15 @@ function parseTemplateCreateInput(value: unknown): StudioTemplateCreateInput {
   const id = requireText(input.id, "id");
   if (!/^[a-z0-9][a-z0-9-]{1,63}$/.test(id)) throw new StudioInputError("模板编号必须使用小写字母、数字和连字符。");
   const description = input.description === undefined ? undefined : requireText(input.description, "description");
+  const catalogVisibility = input.catalogVisibility === undefined ? undefined : requireText(input.catalogVisibility, "catalogVisibility");
+  if (catalogVisibility !== undefined && catalogVisibility !== "production" && catalogVisibility !== "qa") {
+    throw new StudioInputError("模板目录用途无效。");
+  }
   return {
     id,
     name: requireText(input.name, "name"),
     ...(description ? { description } : {}),
+    ...(catalogVisibility ? { catalogVisibility: catalogVisibility as "production" | "qa" } : {}),
     expectedRevision: requireNonNegativeInteger(input.expectedRevision, "expectedRevision"),
   };
 }
@@ -822,6 +855,7 @@ function parseSpendAuthorizationInput(value: unknown): StudioSpendAuthorizationI
     throw new StudioInputError("输入版本清单格式不正确。");
   }
   return {
+    spendPlanId: requireText(input.spendPlanId, "费用报价编号"),
     inputVersionIds: [...input.inputVersionIds] as string[],
     providerId: requireText(input.providerId, "providerId"),
     modelId: requireText(input.modelId, "modelId"),
@@ -869,6 +903,11 @@ function parsePaidReconciliationInput(value: unknown): StudioPaidReconciliationI
     throw new StudioInputError("服务任务编号只能用于核对原任务。");
   }
   const manualResolution = input.outcome === "confirmed_not_charged" || input.outcome === "confirmed_charged";
+  const itemRequestId = input.itemRequestId === undefined ? undefined : requireText(input.itemRequestId, "待核对镜头编号");
+  if (itemRequestId && itemRequestId.length > 256) throw new StudioInputError("待核对镜头编号最多 256 个字符。");
+  if (itemRequestId && !manualResolution) {
+    throw new StudioInputError("待核对镜头只能用于人工确认账单结论。");
+  }
   const note = input.note === undefined ? undefined : requireText(input.note, "人工核对记录");
   if (manualResolution && !note) throw new StudioInputError("人工核对记录不能为空。");
   if (note && note.length > 2_000) throw new StudioInputError("人工核对记录最多 2000 个字符。");
@@ -883,6 +922,7 @@ function parsePaidReconciliationInput(value: unknown): StudioPaidReconciliationI
     expectedRunRevision: Number(input.expectedRunRevision),
     reconciliationId,
     outcome: input.outcome,
+    ...(itemRequestId ? { itemRequestId } : {}),
     ...(taskId ? { taskId } : {}),
     ...(note ? { note } : {}),
     ...(actualCostCny !== undefined ? { actualCostCny } : {}),

@@ -121,7 +121,7 @@ describe("broker-owned task definitions", () => {
     const director = taskPromptFor("director-plan");
     const review = taskPromptFor("visual-review");
 
-    assert.equal(topic.version, "video-factory/topic-editor-v2");
+    assert.equal(topic.version, "video-factory/topic-editor-v3");
     assert.equal(script.version, "video-factory/screenwriter-v5");
     assert.equal(director.version, "video-factory/director-v11");
     assert.equal(review.version, "video-factory/visual-review-v5");
@@ -309,6 +309,9 @@ describe("broker-owned task definitions", () => {
         painPoint: "下班后仍然疲惫",
         hook: "钩子",
         rationale: "理由",
+        visualProof: "拍摄下班后用工具整理日程前后的可见对比，来自可复现实拍，动作变化比文字描述更直观。",
+        visualFeasibility: 85,
+        productionCostEfficiency: 90,
         novelty: 80,
         seriesPotential: 70,
         monetization: 60,
@@ -320,6 +323,12 @@ describe("broker-owned task definitions", () => {
     }), "string");
     assert.equal(typeof outputValidationErrorFor("topic-ideas", {
       ideas: [{ ...valid.ideas[0], monetization: 101 }],
+    }), "string");
+    assert.equal(typeof outputValidationErrorFor("topic-ideas", {
+      ideas: [{ ...valid.ideas[0], visualProof: undefined }],
+    }), "string");
+    assert.equal(typeof outputValidationErrorFor("topic-ideas", {
+      ideas: [{ ...valid.ideas[0], visualProof: "" }],
     }), "string");
   });
 

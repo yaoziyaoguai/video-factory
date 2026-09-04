@@ -16,6 +16,7 @@ import {
   type CodexExecutorProfile,
   type ValidatedTask,
 } from "../src/codex-executor.js";
+import { BROKER_TASK_KINDS } from "../src/task-definitions.js";
 
 class ScriptedExecutor extends CodexExecutor {
   readonly calls: ValidatedTask[] = [];
@@ -237,7 +238,7 @@ describe("CodexBrokerServer routes", () => {
       assert.equal(report.profileId, "openai");
       assert.equal(report.providerId, "openai");
       assert.equal(report.modelId, "codex-default");
-      assert.deepEqual(report.taskKinds, ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"]);
+      assert.deepEqual(report.taskKinds, BROKER_TASK_KINDS);
       assert.equal(report.active, 0);
       assert.equal(report.queued, 0);
       assert.equal(report.capacity, 1);
@@ -270,7 +271,7 @@ describe("CodexBrokerServer routes", () => {
       assert.equal(report.profileId, "zai");
       assert.equal(report.providerId, "zai-bigmodel-api");
       assert.equal(report.modelId, "glm-5.3");
-      assert.deepEqual(report.taskKinds, ["director-plan", "script-draft", "visual-review"]);
+      assert.deepEqual(report.taskKinds, BROKER_TASK_KINDS);
 
       const response = await brokerRequest(broker.socketPath, {
         method: "POST",
@@ -674,7 +675,22 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
         call += 1;
         if (call === 1) throw new CodexExecutorError("codex timed out after 1ms.", true);
         if (call === 2) throw new CodexExecutorError("Codex output is not valid JSON.", false);
-        if (call === 3) throw new CodexExecutorError("Authorization: Bearer eyJhbGciOi-secret OPENAI_API_KEY=plain-secret", false);
+        if (call === 3) {
+          throw new CodexExecutorError(
+            "Authorization: Bearer eyJhbGciOi-secret OPENAI_API_KEY=plain-secret",
+            false,
+            {
+              details: {
+                category: "invalid_request",
+                reasonCode: "1308",
+                requestIdHash: "a".repeat(64),
+                providerId: "zai-bigmodel-api",
+                modelId: "glm-5.3",
+                providerWaitMs: 37,
+              },
+            },
+          );
+        }
         throw new Error("unexpected executor crash");
       },
     });
@@ -684,7 +700,8 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       });
       assert.equal(transient.status, 422);
       assert.equal(transient.headers["retry-after"], undefined);
-      assert.match(JSON.parse(transient.body).error, /transiently/);
+      assert.match(JSON.parse(transient.body).error, /timed out/i);
+      assert.doesNotMatch(transient.body, /Agent|Codex bridge|host-only broker|socket/i);
       assert.equal(JSON.parse(transient.body).failureKind, "model_provider_transient");
       assert.doesNotMatch(transient.body, /SECRET-PAYLOAD-MARKER/);
 
@@ -701,13 +718,22 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       });
       assert.equal(credentialDiagnostic.status, 422);
       assert.doesNotMatch(credentialDiagnostic.body, /Bearer|eyJhbGci|OPENAI_API_KEY|plain-secret/);
-      assert.match(JSON.parse(credentialDiagnostic.body).error, /host-only broker log/);
+      assert.equal(JSON.parse(credentialDiagnostic.body).error, "The model could not complete this step.");
+      assert.deepEqual(JSON.parse(credentialDiagnostic.body).failureDetails, {
+        category: "invalid_request",
+        reasonCode: "1308",
+        requestIdHash: "a".repeat(64),
+        providerId: "zai-bigmodel-api",
+        modelId: "glm-5.3",
+        providerWaitMs: 37,
+      });
+      assert.doesNotMatch(credentialDiagnostic.body, /Agent|Codex bridge|host-only broker|socket/i);
 
       const unknown = await brokerRequest(broker.socketPath, {
         method: "POST", path: "/v1/tasks", body: topicTaskBody("unknown"),
       });
       assert.equal(unknown.status, 500);
-      assert.match(JSON.parse(unknown.body).error, /failed to run the task/);
+      assert.equal(JSON.parse(unknown.body).error, "The model service could not complete this step.");
       assert.equal(JSON.parse(unknown.body).failureKind, undefined);
       assert.doesNotMatch(unknown.body, /SECRET-PAYLOAD-MARKER/);
 
@@ -734,7 +760,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       });
 
       assert.equal(response.status, 422);
-      assert.match(JSON.parse(response.body).error, /failed transiently.*temporarily unavailable/i);
+      assert.match(JSON.parse(response.body).error, /temporarily unavailable/i);
       assert.doesNotMatch(response.body, /429|Too Many Requests|OPENAI_API_KEY|host-secret/);
     } finally {
       await broker.close();

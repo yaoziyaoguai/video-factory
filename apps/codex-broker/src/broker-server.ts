@@ -10,6 +10,7 @@ import {
   type BrokerTaskExecutor,
   type CodexTaskTrace,
   type CodexExecutionOptions,
+  type CodexExecutorFailureDetails,
   type ValidatedTask,
 } from "./codex-executor.js";
 
@@ -29,6 +30,7 @@ export type TaskOutcome =
     status: 400 | 409 | 413 | 422 | 503 | 500;
     message: string;
     failureKind?: "model_provider_transient";
+    failureDetails?: CodexExecutorFailureDetails;
   };
 
 interface QueuedTask {
@@ -332,7 +334,11 @@ export class CodexBrokerServer {
     this.sendJson(
       response,
       outcome.status,
-      { error: outcome.message, ...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}) },
+      {
+        error: outcome.message,
+        ...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}),
+        ...(outcome.failureDetails ? { failureDetails: outcome.failureDetails } : {}),
+      },
       outcome.status === 503 ? DEFAULT_RETRY_AFTER_SECONDS : undefined,
     );
   }
@@ -668,11 +674,12 @@ function failureOutcome(error: unknown): TaskOutcome {
     return {
       ok: false,
       status: 422,
-      message: `Codex task failed${error.transient ? " transiently" : ""}: ${publicExecutorMessage(error.message, error.transient)}`,
+      message: publicExecutorMessage(error.message, error.transient),
       ...(error.transient ? { failureKind: "model_provider_transient" as const } : {}),
+      ...(error.details ? { failureDetails: error.details } : {}),
     };
   }
-  return { ok: false, status: 500, message: "Codex broker failed to run the task." };
+  return { ok: false, status: 500, message: "The model service could not complete this step." };
 }
 
 function publicExecutorMessage(message: string, transient = false): string {
@@ -685,7 +692,7 @@ function publicExecutorMessage(message: string, transient = false): string {
   if (message === "Codex finished without writing an output file.") return "the model did not return a result.";
   if (message.startsWith("Codex prompt exceeds ")) return "the task context exceeded the configured size limit.";
   if (message.startsWith("Codex task kind ")) return "the requested role is unavailable on this model profile.";
-  return "the model execution failed; inspect the host-only broker log for diagnostics.";
+  return "The model could not complete this step.";
 }
 
 function busyOutcome(): TaskOutcome {

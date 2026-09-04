@@ -44,10 +44,10 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
   const codexDirector = codexClient && directorAvailability.codex
     ? new CodexVisualDirectorAgent({ client: codexClient, modelId: codexModelFor("director-plan") })
     : undefined;
-  const glmDirector = zaiCodexClient && codexClient && directorAvailability.zai
+  const glmDirector = zaiCodexClient && directorAvailability.zai
     ? new CodexVisualDirectorAgent({
         client: zaiCodexClient,
-        auditClient: codexClient,
+        auditClient: zaiCodexClient,
         modelId: zaiModelFor("director-plan"),
         sessionMode: "stateless",
       })
@@ -59,10 +59,10 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
   const codexScreenwriter = codexClient && screenwriterAvailability.codex
     ? new CodexScreenwriterAgent({ client: codexClient, modelId: codexModelFor("script-draft") })
     : undefined;
-  const glmScreenwriter = zaiCodexClient && codexClient && screenwriterAvailability.zai
+  const glmScreenwriter = zaiCodexClient && screenwriterAvailability.zai
     ? new CodexScreenwriterAgent({
         client: zaiCodexClient,
-        auditClient: codexClient,
+        auditClient: zaiCodexClient,
         modelId: zaiModelFor("script-draft"),
         sessionMode: "stateless",
       })
@@ -79,10 +79,10 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
         modelId: codexModelFor("visual-review"),
       })
     : undefined;
-  const glmReview = zaiCodexClient && codexClient && reviewAvailability.zai
+  const glmReview = zaiCodexClient && reviewAvailability.zai
     ? new CodexVisualReviewAgent({
         client: zaiCodexClient,
-        auditClient: codexClient,
+        auditClient: zaiCodexClient,
         media: options.reviewMedia,
         providerId: "glm-visual-review-v1",
         modelId: zaiCodexSettings.taskModels?.["visual-review"] || resolveZaiVisualReviewModelId(options.environment),

@@ -91,6 +91,31 @@ describe("role agent loop audit boundary", () => {
     assert.notEqual(requestIds[3], requestIds[5]);
   });
 
+  it("reports real producer, audit, validation, and retry timings", async () => {
+    let clock = 0;
+    let produceCalls = 0;
+    const result = await runRoleAgentLoop<{ title: string }>({
+      role: "编剧",
+      contractVersion: "screenwriter-timing-v1",
+      criteria: ["标题具体"],
+      maxIterations: 1,
+      now: () => clock++,
+      produce: async () => ({
+        output: ++produceCalls === 1 ? { invalid: true } : { title: "具体标题" },
+      }),
+      audit: async () => ({ output: passingAudit() }),
+      validate: titleCandidate,
+    });
+
+    assert.equal(produceCalls, 2);
+    assert.equal(result.agentLoop?.producerMs, 2);
+    assert.equal(result.agentLoop?.auditMs, 1);
+    assert.equal(result.agentLoop?.validationMs, 4);
+    assert.equal(result.agentLoop?.retryCount, 1);
+    assert.equal("inferenceMs" in (result.agentLoop ?? {}), false);
+    assert.equal("ttftMs" in (result.agentLoop ?? {}), false);
+  });
+
   it("never rotates an accepted request with an uncertain broker outcome", async () => {
     let stored: unknown;
     const failedRequestIds = new Set<string>();
@@ -117,8 +142,8 @@ describe("role agent loop audit boundary", () => {
       validate: titleCandidate,
     });
 
-    await assert.rejects(execute, /outcome is uncertain/);
-    await assert.rejects(execute, /outcome is uncertain/);
+    await assert.rejects(execute, /模型没有完成此步骤/);
+    await assert.rejects(execute, /模型没有完成此步骤/);
     assert.equal(requestIds.length, 2);
     assert.equal(requestIds[0], requestIds[1]);
   });
@@ -198,11 +223,11 @@ describe("role agent loop audit boundary", () => {
       validate: titleCandidate,
     });
 
-    await assert.rejects(execute, /did not pass/);
+    await assert.rejects(execute, /仍未通过独立审计/);
     assert.equal(produceCalls, 3);
     assert.equal(auditCalls, 3);
 
-    await assert.rejects(execute, /did not pass/);
+    await assert.rejects(execute, /仍未通过独立审计/);
     assert.equal(produceCalls, 3);
     assert.equal(auditCalls, 3);
 
@@ -338,7 +363,7 @@ describe("role agent loop audit boundary", () => {
       validate: titleCandidate,
     });
 
-    await assert.rejects(execute, /审计基础设施失败.*尚未消耗语义审计轮次/);
+    await assert.rejects(execute, /独立审计暂时失败.*尚未消耗质量审计轮次/);
     assert.equal(auditCalls, 1);
     assert.equal((stored as { status?: string }).status, "running");
     assert.equal((stored as { phaseAttempts?: { audit: number } }).phaseAttempts?.audit, 1);
@@ -449,7 +474,7 @@ describe("role agent loop audit boundary", () => {
       validate: titleCandidate,
     });
 
-    await assert.rejects(execute, /semantic audit round was not consumed/);
+    await assert.rejects(execute, /本轮质量审计尚未消耗/);
     (stored as { status: string }).status = "exhausted";
 
     const resumed = await execute();

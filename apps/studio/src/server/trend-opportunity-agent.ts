@@ -17,7 +17,7 @@ import type {
 import { planVisualDirection } from "../shared/visual-plan.js";
 import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
 
-const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v2|role-audit-v1|topic-ideas-validator-v1";
+const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v3|role-audit-v1|topic-ideas-validator-v1";
 
 export interface TrendSignalPort {
   listSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
@@ -31,6 +31,9 @@ export interface TrendModelIdea {
   painPoint: string;
   hook: string;
   rationale: string;
+  visualProof?: string;
+  visualFeasibility?: number;
+  productionCostEfficiency?: number;
   novelty: number;
   seriesPotential: number;
   monetization: number;
@@ -76,12 +79,8 @@ export class TrendOpportunityAgent {
         }
         if (modelCandidates.size > 0) {
           const selectedByModel = [...modelCandidates.values()].sort(byFinalScore).slice(0, 8);
-          const selectedSignalIds = new Set(modelCandidates.keys());
-          const ruleCandidates = signalGroups
-            .filter((group) => !selectedSignalIds.has(group[0]!.id))
-            .map((group) => this.fromSignal(group, strategy))
-            .sort((left, right) => byStrategyThenFinal(left, right, strategy));
-          return selectCandidatePortfolio(selectedByModel, ruleCandidates, TREND_CANDIDATE_LIMIT);
+          // 模型给出的数量就是总编愿意负责的短名单；规则候选不能为了凑数混进推荐。
+          return selectCandidatePortfolio(selectedByModel, [], TREND_CANDIDATE_LIMIT);
         }
       } catch {
         // 模型是增强节点；不可用时仍需稳定输出可追溯的规则候选。
@@ -108,8 +107,16 @@ export class TrendOpportunityAgent {
       audience: grounded.audience,
       painPoint: grounded.painPoint,
       hook: grounded.hook,
-      rationale: grounded.rationale,
+      rationale: grounded.visualProof
+        ? `${grounded.rationale} 可见画面：${grounded.visualProof}`
+        : grounded.rationale,
       providerId: this.options.model!.id,
+      ...(idea.visualFeasibility === undefined ? {} : {
+        visualFeasibility: idea.visualProof !== undefined && !grounded.visualProof
+          ? 45
+          : normalizePercent(idea.visualFeasibility),
+      }),
+      ...(idea.productionCostEfficiency === undefined ? {} : { productionCostEfficiency: normalizePercent(idea.productionCostEfficiency) }),
       novelty: allZero ? 64 : scores[0]!,
       seriesPotential: allZero ? 72 : scores[1]!,
       monetization: allZero ? 52 : scores[2]!,
@@ -157,6 +164,8 @@ export class TrendOpportunityAgent {
     novelty: number;
     monetization: number;
     seriesPotential: number;
+    visualFeasibility?: number;
+    productionCostEfficiency?: number;
   }): StudioTrendCandidate {
     const strength = Math.max(20, Math.min(100, 100 - input.signal.rank));
     const risk = complianceRisk(input.signal.title);
@@ -175,8 +184,8 @@ export class TrendOpportunityAgent {
         collectedAt: signal.collectedAt,
       })),
       audienceReach: input.signal.heat ? Math.min(100, 65 + Math.log10(Math.max(1, input.signal.heat)) * 4.5) : strength,
-      visualFeasibility: risk >= 60 ? 52 : 82,
-      productionCostEfficiency: risk >= 60 ? 58 : 88,
+      visualFeasibility: risk >= 60 ? 52 : normalizePercent(input.visualFeasibility ?? 82),
+      productionCostEfficiency: risk >= 60 ? 58 : normalizePercent(input.productionCostEfficiency ?? 88),
       novelty: input.novelty,
       monetization: input.monetization,
       seriesPotential: input.seriesPotential,
@@ -257,11 +266,11 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         criteria,
         context: {
           roleScope: {
-            owns: ["ideas.signalId", "ideas.track", "ideas.title", "ideas.hook", "ideas.rationale", "ideas scores"],
+            owns: ["ideas.signalId", "ideas.track", "ideas.title", "ideas.hook", "ideas.rationale", "ideas.visualProof", "ideas scores"],
             doesNotOwn: ["热点原始事实", "新闻核验结果", "脚本与成片"],
           },
           upstreamFacts: request,
-          currentRoleContract: { maxIdeas: 8, everyIdeaMustReferenceOneSignal: true, scoresAreIntegersFromZeroToOneHundred: true },
+          currentRoleContract: { maxIdeas: 8, everyIdeaMustReferenceOneSignal: true, everyIdeaMustExplainVisibleEvidence: true, scoresAreIntegersFromZeroToOneHundred: true },
           downstreamBoundary: "只提出可生产的原创角度；不得补写热点中不存在的事实，也不得要求脚本或成片已经生成。",
         },
         candidate,
@@ -286,8 +295,8 @@ function formatTopicStrategy(strategy: StudioTopicStrategy): string {
     strategy.preferredDirections ? `优先题材：\n${strategy.preferredDirections}` : undefined,
     strategy.excludedDirections ? `明确避开：\n${strategy.excludedDirections}` : undefined,
     strategy.sourcePolicy === "traceable_source"
-      ? "来源标准：至少保留一个可打开的原始来源；高风险事实仍需额外核验。"
-      : "来源标准：至少需要两个相互独立、可打开的原始来源才进入制作推荐。",
+      ? "来源标准：至少保留一个格式有效的原始来源链接；高风险事实仍需额外核验。"
+      : "来源标准：至少需要两个不同域名的有效原始来源链接才进入制作推荐。",
     strategy.customInstruction ? `补充原则：${strategy.customInstruction}` : undefined,
   ].filter((value): value is string => Boolean(value)).join("\n\n").slice(0, 6_000);
 }
@@ -341,6 +350,9 @@ function parseModelIdea(value: unknown): TrendModelIdea[] {
     painPoint: item.painPoint as string,
     hook: item.hook as string,
     rationale: item.rationale as string,
+    ...(typeof item.visualProof === "string" && item.visualProof.trim() ? { visualProof: item.visualProof } : {}),
+    ...(item.visualFeasibility !== undefined ? { visualFeasibility: number(item.visualFeasibility) } : {}),
+    ...(item.productionCostEfficiency !== undefined ? { productionCostEfficiency: number(item.productionCostEfficiency) } : {}),
     novelty: number(item.novelty),
     seriesPotential: number(item.seriesPotential),
     monetization: number(item.monetization),
@@ -398,7 +410,7 @@ function groundModelIdea(idea: TrendModelIdea, signal: StudioTrendSignal): Trend
   const riskLevel = topicRiskLevel(signal.title);
   const sensitive = riskLevel !== "low";
   const titleUnsafe = unsupportedClaim(idea.title, signal.title, sourceNumbers);
-  const bodyUnsafe = sensitive || [idea.audience, idea.painPoint, idea.hook, idea.rationale]
+  const bodyUnsafe = sensitive || [idea.audience, idea.painPoint, idea.hook, idea.rationale, idea.visualProof ?? ""]
     .some((value) => unsupportedClaim(value, signal.title, sourceNumbers));
   const title = sensitive || titleUnsafe || !isEditoriallyDistinct(idea.title, signal.title)
     ? groundedEditorialTitle(signal.title, idea.track)
@@ -419,6 +431,7 @@ function groundModelIdea(idea: TrendModelIdea, signal: StudioTrendSignal): Trend
       : bodyUnsafe || titleUnsafe
       ? `模型提出“${title}”角度；系统已移除原始信号不支持的数字、引语或采访假设，进入选题池前仍需人工核验。`
       : `模型提出“${title}”角度；系统仅保留原始榜单能够支持的 hook，进入选题池前仍需人工核验。`,
+    visualProof: bodyUnsafe ? "" : clean(idea.visualProof ?? "", ""),
   };
 }
 

@@ -7,6 +7,7 @@ import {
   CodexAssetSemanticRanker,
   CodexReferenceGrammarAgent,
   CodexPublishCopyWriter,
+  FallbackCodexTaskClient,
   ProductionPipeline,
 } from "@video-factory/production-pipeline";
 import { buildStudioApp } from "./app.js";
@@ -49,7 +50,6 @@ const [codexSettings, zaiCodexSettings] = await Promise.all([
   readZaiCodexProviderSettings(process.env),
 ]);
 const codexModelId = codexSettings.modelId || process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
-const codexModelFor = (taskKind: string) => codexSettings.taskModels?.[taskKind] || codexModelId;
 // 单并发 broker 中，21 分钟覆盖一个 10 分钟在途任务、一个完整执行和传输余量；
 // 生产任务会插队尚未开始的热点任务，客户端仍不重放已受理任务。
 const codexClient = codexSettings.available
@@ -58,10 +58,37 @@ const codexClient = codexSettings.available
 const zaiCodexClient = zaiCodexSettings.available
   ? new CodexBridgeClient({ socketPath: zaiCodexSettings.socketPath, timeoutMs: 1_260_000 })
   : undefined;
-const publishCopyWriter = codexClient ? new CodexPublishCopyWriter({ client: codexClient }) : undefined;
-const assetSemanticRanker = codexClient ? new CodexAssetSemanticRanker({
-  client: codexClient,
-  modelId: codexModelFor("asset-rank"),
+const auditedTaskCandidates = [
+  ...(codexClient && codexSettings.taskKinds.includes("role-audit") ? [{
+    client: codexClient,
+    providerId: "openai",
+    modelId: codexModelId,
+    taskKinds: codexSettings.taskKinds,
+    ...(codexSettings.taskModels ? { taskModels: codexSettings.taskModels } : {}),
+  }] : []),
+  ...(zaiCodexClient && zaiCodexSettings.taskKinds.includes("role-audit") ? [{
+    client: zaiCodexClient,
+    providerId: "zai-bigmodel-api",
+    modelId: zaiCodexSettings.modelId,
+    taskKinds: zaiCodexSettings.taskKinds,
+    sessionMode: "stateless" as const,
+    ...(zaiCodexSettings.taskModels ? { taskModels: zaiCodexSettings.taskModels } : {}),
+  }] : []),
+];
+const auditedTaskClient = auditedTaskCandidates.length > 0
+  ? new FallbackCodexTaskClient({ candidates: auditedTaskCandidates })
+  : undefined;
+const auditedTaskReady = (taskKind: string) => auditedTaskCandidates.some((candidate) => candidate.taskKinds.includes(taskKind));
+const auditedModelFor = (taskKind: string) => {
+  const candidate = auditedTaskCandidates.find((item) => item.taskKinds.includes(taskKind));
+  return candidate?.taskModels?.[taskKind] || candidate?.modelId || "codex-default";
+};
+const publishCopyWriter = auditedTaskClient && auditedTaskReady("publish-copy")
+  ? new CodexPublishCopyWriter({ client: auditedTaskClient })
+  : undefined;
+const assetSemanticRanker = auditedTaskClient && auditedTaskReady("asset-rank") ? new CodexAssetSemanticRanker({
+  client: auditedTaskClient,
+  modelId: auditedModelFor("asset-rank"),
 }) : undefined;
 const reviewMedia = new PythonReviewMediaPreprocessor({
   repositoryRoot,
@@ -69,10 +96,10 @@ const reviewMedia = new PythonReviewMediaPreprocessor({
   pythonCommand: resolveProductionPython(repositoryRoot, process.env),
   environment: process.env,
 });
-const referenceGrammarAgent = codexClient ? new CodexReferenceGrammarAgent({
-  client: codexClient,
+const referenceGrammarAgent = auditedTaskClient && auditedTaskReady("reference-grammar") ? new CodexReferenceGrammarAgent({
+  client: auditedTaskClient,
   media: reviewMedia,
-  modelId: codexModelFor("reference-grammar"),
+  modelId: auditedModelFor("reference-grammar"),
 }) : undefined;
 const { screenwriterAgent, directorAgent, visualReviewAgents } = buildRoleAgentAssembly({
   codexSettings,
@@ -116,16 +143,18 @@ const service = new StudioService({
     modelId: zaiCodexSettings.modelId,
     ...(zaiCodexSettings.taskModels ? { taskModels: zaiCodexSettings.taskModels } : {}),
   },
-  ...(codexClient ? {
+  ...(auditedTaskClient && auditedTaskReady("series-roadmap") ? {
     seriesPlanningAgent: new CodexSeriesPlanningAgent(
-      codexClient,
+      auditedTaskClient,
       3,
       path.join(workspaceRoot, "checkpoints", "series-showrunner"),
     ),
+  } : {}),
+  ...(auditedTaskClient && auditedTaskReady("topic-ideas") ? {
     trendAgent: new TrendOpportunityAgent({
       signals: new TrendGateway({ environment: process.env }),
       model: new CodexTopicIdeaModel(
-        codexClient,
+        auditedTaskClient,
         3,
         path.join(workspaceRoot, "checkpoints", "topic-editor"),
       ),

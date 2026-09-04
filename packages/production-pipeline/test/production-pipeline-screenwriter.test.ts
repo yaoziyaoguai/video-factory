@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import {
+  FallbackScreenwriterAgent,
   ProductionPipeline,
   RoleAgentLoopError,
   runRoleAgentLoop,
@@ -256,9 +257,10 @@ describe("ProductionPipeline codex screenwriter", () => {
     const { agent, inputs } = stubAgent(() => scriptDraft);
     const pipeline = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent });
 
-    await pipeline.start({
+    const run = await pipeline.start({
       ...brief,
       models: { "codex-screenwriter-v1": "glm-5.3" },
+      modelSelectionSources: { "codex-screenwriter-v1": "run_override" },
     });
 
     const input = inputs[0];
@@ -269,6 +271,43 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.notEqual(selectedCheckpoint.key, backupCheckpoint.key);
     assert.notEqual(selectedCheckpoint.key, input.agentLoopCheckpoint?.key);
     assert.equal(input.agentLoopCheckpointForModel("glm-5.3").key, selectedCheckpoint.key);
+    const plan = run.executionPlan?.find(({ nodeId }) => nodeId === "script");
+    assert.equal(plan?.modelId, "glm-5.3");
+    assert.equal(plan?.configurationSource, "run_override");
+  });
+
+  it("keeps the selected model in a pre-trace failure receipt without calling its backup", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-pre-trace-failure-"));
+    const calls: string[] = [];
+    const candidate = (modelId: string): ScreenwriterAgent => ({
+      id: "codex-screenwriter-v1",
+      modelId,
+      draft: async () => scriptDraft,
+      draftDetailed: async () => {
+        calls.push(modelId);
+        if (modelId === "glm-5.3") throw new Error("prompt validation stopped before transport");
+        throw new Error("backup must not run");
+      },
+    });
+    const agent = new FallbackScreenwriterAgent({
+      candidates: [
+        { agent: candidate("gpt-5.6-sol"), providerId: "openai" },
+        { agent: candidate("glm-5.3"), providerId: "zai-bigmodel-api" },
+      ],
+    });
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent });
+
+    const run = await pipeline.start({
+      ...brief,
+      models: { "codex-screenwriter-v1": "glm-5.3" },
+      modelSelectionSources: { "codex-screenwriter-v1": "run_override" },
+    });
+
+    assert.deepEqual(calls, ["glm-5.3"]);
+    const node = run.nodeRuns.find(({ nodeId }) => nodeId === "script");
+    assert.equal(node?.status, "failed");
+    assert.equal(node?.executionReceipt?.modelId, "glm-5.3");
+    assert.equal(node?.executionReceipt?.configurationSource, "run_override");
   });
 
   it("starts a fresh agent loop after an explicit retry of an exhausted node", async () => {
@@ -438,6 +477,10 @@ describe("ProductionPipeline codex screenwriter", () => {
           fallbackFromModelId: "glm-5.3",
           fallbackReason: "首选模型连接失败，已自动切换。",
           attemptedModelIds: ["glm-5.3", "gpt-5.4"],
+          providerWaitMs: 12_340,
+          firstOutputEventMs: 410,
+          toolMs: 0,
+          validationMs: 7,
           modelCandidateAttempts: [{
             modelId: "glm-5.3",
             providerId: "zai-bigmodel-api",
@@ -457,6 +500,13 @@ describe("ProductionPipeline codex screenwriter", () => {
           criteria: ["标题具体"],
           status: "passed",
           maxIterations: 2,
+          modelCallCount: 2,
+          producerModelCallCount: 1,
+          auditModelCallCount: 1,
+          producerMs: 12_600,
+          auditMs: 8_200,
+          validationMs: 14,
+          retryCount: 1,
           iterations: [{
             iteration: 1,
             candidate: scriptDraft,
@@ -511,6 +561,10 @@ describe("ProductionPipeline codex screenwriter", () => {
         providerId: "openai",
         outcome: "succeeded",
       }],
+      providerWaitMs: 12_340,
+      firstOutputEventMs: 410,
+      toolMs: 0,
+      validationMs: 7,
       prompt: "Prompt Pack: video-factory/screenwriter-v2\nactual prompt",
     });
     const loopArtifact = run.artifacts.find((artifact) => artifact.kind === "agent_loop_trace");
@@ -522,6 +576,13 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.equal(scriptNode?.executionReceipt?.parameters?.agentLoopIterations, 1);
     assert.equal(scriptNode?.executionReceipt?.parameters?.auditReasoningEffort, "xhigh");
     assert.equal(scriptNode?.executionReceipt?.parameters?.modelCallCount, 2);
+    assert.equal(scriptNode?.executionReceipt?.parameters?.providerWaitMs, 12_340);
+    assert.equal(scriptNode?.executionReceipt?.parameters?.firstOutputEventMs, 410);
+    assert.equal(scriptNode?.executionReceipt?.parameters?.providerValidationMs, 7);
+    assert.equal(scriptNode?.executionReceipt?.parameters?.producerMs, 12_600);
+    assert.equal(scriptNode?.executionReceipt?.parameters?.auditMs, 8_200);
+    assert.equal(scriptNode?.executionReceipt?.parameters?.loopValidationMs, 14);
+    assert.equal(scriptNode?.executionReceipt?.parameters?.retryCount, 1);
     assert.equal(scriptNode?.executionReceipt?.fallbackReason, "首选模型连接失败，已自动切换。");
     assert.deepEqual(scriptNode?.executionReceipt?.actualModelIds, ["glm-5.3", "gpt-5.4"]);
     const generatedVersion = scriptNode?.outputState?.versions.find((version) => version.source === "generated");

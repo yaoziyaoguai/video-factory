@@ -52,10 +52,9 @@ export function auditedRoleCandidateAvailability(
   zai: Pick<CodexProviderSettings, "available" | "taskKinds">,
   taskKind: string,
 ): { codex: boolean; zai: boolean } {
-  const independentAuditReady = supportsBrokerTasks(codex, "role-audit");
   return {
-    codex: independentAuditReady && supportsBrokerTasks(codex, taskKind),
-    zai: independentAuditReady && supportsBrokerTasks(zai, taskKind),
+    codex: supportsBrokerTasks(codex, taskKind, "role-audit"),
+    zai: supportsBrokerTasks(zai, taskKind, "role-audit"),
   };
 }
 
@@ -123,7 +122,7 @@ export async function readZaiCodexProviderSettings(
   return readProviderSettings(resolveZaiCodexSocketPath(environment), {
     profileId: "zai",
     providerId: "zai-bigmodel-api",
-    taskKinds: ["director-plan", "script-draft", "visual-review"],
+    taskKinds: ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
   }, options);
 }
 

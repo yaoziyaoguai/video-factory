@@ -9,6 +9,7 @@ import {
   FallbackVisualReviewAgent,
   RoleAgentLoopError,
   VisualReviewFallbackError,
+  runRoleAgentLoop,
   validateVisualReviewReport,
   type CodexTaskKind,
   type VisualReviewAgent,
@@ -310,7 +311,7 @@ describe("CodexVisualReviewAgent", () => {
 
     await assert.rejects(
       () => agent.reviewDetailed({ videoPath: "/run/final.mp4", runRoot: "/run" }),
-      /produce model-call limit of 1/,
+      /内容生成调用已达到本轮上限 1 次/,
     );
     assert.equal(producerCalls, 1);
   });
@@ -437,6 +438,112 @@ describe("CodexVisualReviewAgent", () => {
       providerId: "openai",
       outcome: "succeeded",
     }]);
+  });
+
+  it("keeps a produced visual report and switches only the independent audit after a transient failure", async () => {
+    let primaryProducerCalls = 0;
+    let primaryAuditCalls = 0;
+    let backupProducerCalls = 0;
+    let backupAuditCalls = 0;
+    const candidateInputs: VisualReviewAgentInput[] = [];
+    const checkpointState = new Map<string, unknown>();
+    const checkpointFactory = (modelId: string) => ({
+      key: `checkpoint-${modelId}`,
+      load: async () => checkpointState.get(modelId),
+      save: async (value: unknown) => { checkpointState.set(modelId, structuredClone(value)); },
+    });
+    const primary: VisualReviewAgent = {
+      id: "codex-visual-review-v1",
+      modelId: "gpt-primary",
+      review: async () => validateVisualReviewReport(report, media.durationMs),
+      reviewDetailed: async (input) => {
+        candidateInputs.push(input);
+        return runRoleAgentLoop({
+          role: "视觉审片员",
+          contractVersion: "visual-review-test-v1",
+          criteria: ["忠于画面证据"],
+          maxIterations: 1,
+          produce: async () => {
+            primaryProducerCalls += 1;
+            return {
+              output: report,
+              trace: {
+                taskKind: "visual-review",
+                promptVersion: "visual-review-test-v1",
+                prompt: "bounded review prompt",
+                providerId: "openai",
+                modelId: "gpt-primary",
+              },
+            };
+          },
+          audit: async () => {
+            primaryAuditCalls += 1;
+            throw new CodexBridgeError("Visual review audit returned HTTP 503.", true, "not_accepted", 503);
+          },
+          validate: (value) => validateVisualReviewReport(value, media.durationMs),
+          ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
+        });
+      },
+    };
+    const backup: VisualReviewAgent = {
+      id: "codex-visual-review-v1",
+      modelId: "glm-backup",
+      review: async () => validateVisualReviewReport(report, media.durationMs),
+      reviewDetailed: async (input) => {
+        candidateInputs.push(input);
+        return runRoleAgentLoop({
+          role: "视觉审片员",
+          contractVersion: "visual-review-test-v1",
+          criteria: ["忠于画面证据"],
+          maxIterations: 1,
+          produce: async () => {
+            backupProducerCalls += 1;
+            throw new Error("backup producer must not run");
+          },
+          audit: async () => {
+            backupAuditCalls += 1;
+            return {
+              output: passingAudit,
+              trace: {
+                taskKind: "role-audit",
+                promptVersion: "visual-review-test-v1",
+                prompt: "bounded audit prompt",
+                providerId: "zai-bigmodel-api",
+                modelId: "glm-backup",
+              },
+            };
+          },
+          validate: (value) => validateVisualReviewReport(value, media.durationMs),
+          ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
+        });
+      },
+    };
+    const fallback = new FallbackVisualReviewAgent({
+      primary,
+      primaryProviderId: "openai",
+      backups: [{ agent: backup, providerId: "zai-bigmodel-api" }],
+    });
+
+    const execution = await fallback.reviewDetailed({
+      videoPath: "/run/final.mp4",
+      runRoot: "/run",
+      requestId: "visual-review-operation",
+      agentLoopCheckpointForModel: checkpointFactory,
+    });
+
+    assert.deepEqual(execution.output, report);
+    assert.equal(primaryProducerCalls, 1);
+    assert.equal(primaryAuditCalls, 1);
+    assert.equal(backupProducerCalls, 0);
+    assert.equal(backupAuditCalls, 1);
+    assert.notEqual(candidateInputs[0]?.requestId, candidateInputs[1]?.requestId);
+    assert.equal(candidateInputs[1]?.agentLoopCheckpoint?.key, "checkpoint-glm-backup");
+    assert.ok(candidateInputs[1]?.agentLoopCheckpoint?.resumeFrom?.pendingCandidate);
+    assert.equal(execution.agentLoop?.iterations[0]?.candidateTrace?.modelId, "gpt-primary");
+    assert.equal(execution.agentLoop?.iterations[0]?.auditTrace?.modelId, "glm-backup");
+    assert.equal(execution.executedProviderId, "zai-bigmodel-api");
+    assert.equal(execution.executedModelId, "glm-backup");
+    assert.deepEqual(execution.attemptedModelIds, ["gpt-primary", "glm-backup"]);
   });
 
   it("places the explicitly selected visual model first and can fall back in reverse provider order", async () => {

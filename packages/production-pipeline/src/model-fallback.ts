@@ -8,6 +8,16 @@ const TRANSIENT_MODEL_FAILURE_PATTERN = /(?:request|operation|model|service|role
 
 export function isModelProviderFailure(error: unknown): boolean {
   if (error instanceof RoleAgentLoopError && error.agentLoop.pendingCandidate) return false;
+  return hasTransientModelProviderFailure(error);
+}
+
+export function isTransientRoleAuditProviderFailure(error: unknown): error is RoleAgentLoopError {
+  return error instanceof RoleAgentLoopError
+    && error.agentLoop.pendingCandidate !== undefined
+    && hasTransientModelProviderFailure(error.sourceError);
+}
+
+function hasTransientModelProviderFailure(error: unknown): boolean {
   for (const candidate of errorChain(error)) {
     if (!(candidate instanceof CodexBridgeError)) continue;
     if (TERMINAL_MODEL_FAILURE_PATTERN.test(candidate.message)) return false;

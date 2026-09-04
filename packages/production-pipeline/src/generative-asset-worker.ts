@@ -40,6 +40,11 @@ export interface VideoGenerationRuntimeProfile {
   estimatedCnyPerSecondByResolution?: Record<string, number>;
 }
 
+export type VideoGenerationDurationBounds = Pick<
+  VideoGenerationRuntimeProfile,
+  "minDurationSeconds" | "maxDurationSeconds"
+>;
+
 export interface ImageGenerationAdapterBinding {
   adapter: ImageGenerationAdapter;
   estimatedCnyPerImage: number;
@@ -328,15 +333,21 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       };
       jobs.push(job);
       try {
-        const resumedExistingTask = ledgerItem?.state === "provider_succeeded" || ledgerItem?.state === "materialized";
-        const generated = ledgerItem?.state === "provider_succeeded"
+        const prompt = compileDirectGenerationPrompt(scene);
+        const resumedExistingTask = isExistingPaidTask(ledgerItem);
+        if (resumedExistingTask || ledgerItem?.carriedForwardFromItemRequestId) {
+          job.carriedForward = true;
+          delete job.actualCostCny;
+          delete job.actualCostSource;
+        }
+        const generated = ledgerItem?.state === "provider_succeeded" && ledgerItem.resultUrl
           ? acceptedResultFromLedger(ledgerItem)
           : ledgerItem?.state === "materialized"
             ? acceptedResultFromLedger(ledgerItem)
             : await generatePaidAssetItem({
                 binding,
                 scene,
-                prompt: scene.visualPrompt,
+                prompt,
                 job,
                 jobs,
                 jobsPath,
@@ -347,8 +358,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
                 allowCreate: openedLedger?.created !== false,
               });
         applyAcceptedTask(job, generated.taskId, sceneCost);
-        if (resumedExistingTask || ledgerItem?.carriedForwardFromItemRequestId) {
-          job.carriedForward = true;
+        if (job.carriedForward) {
           delete job.actualCostCny;
           delete job.actualCostSource;
         }
@@ -401,6 +411,10 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       } catch (error) {
         job.status = "failed";
         job.error = error instanceof Error ? error.message : String(error);
+        if (job.carriedForward) {
+          delete job.actualCostCny;
+          delete job.actualCostSource;
+        }
         await writeJobs(jobsPath, jobs);
         if (ledgerPath && openedLedger && ledgerItem) {
           ledgerItem.error = job.error;
@@ -613,8 +627,13 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       jobs.push(job);
       try {
         const prompt = compileGenerationPrompt(providerId, route, scene);
-        const resumedExistingTask = ledgerItem?.state === "provider_succeeded" || ledgerItem?.state === "materialized";
-        const generated = ledgerItem?.state === "provider_succeeded"
+        const resumedExistingTask = isExistingPaidTask(ledgerItem);
+        if (resumedExistingTask || ledgerItem?.carriedForwardFromItemRequestId) {
+          job.carriedForward = true;
+          delete job.actualCostCny;
+          delete job.actualCostSource;
+        }
+        const generated = ledgerItem?.state === "provider_succeeded" && ledgerItem.resultUrl
           ? acceptedResultFromLedger(ledgerItem)
           : ledgerItem?.state === "materialized"
             ? acceptedResultFromLedger(ledgerItem)
@@ -632,8 +651,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
                 allowCreate: openedLedger?.created !== false,
               });
         applyAcceptedTask(job, generated.taskId, sceneCost);
-        if (resumedExistingTask || ledgerItem?.carriedForwardFromItemRequestId) {
-          job.carriedForward = true;
+        if (job.carriedForward) {
           delete job.actualCostCny;
           delete job.actualCostSource;
         }
@@ -686,6 +704,10 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       } catch (error) {
         job.status = "failed";
         job.error = error instanceof Error ? error.message : String(error);
+        if (job.carriedForward) {
+          delete job.actualCostCny;
+          delete job.actualCostSource;
+        }
         await writeJobs(jobsPath, jobs);
         if (ledgerPath && openedLedger && ledgerItem) {
           ledgerItem.error = job.error;
@@ -845,9 +867,7 @@ export function estimateVideoGenerationCostCny(
   estimatedCnyPerClip: number,
   profile?: VideoGenerationRuntimeProfile,
 ): number {
-  const minimum = profile?.minDurationSeconds ?? 4;
-  const maximum = profile?.maxDurationSeconds ?? 15;
-  const durationSeconds = Math.max(minimum, Math.min(maximum, Math.round(sceneDurationSeconds)));
+  const durationSeconds = normalizeVideoGenerationDurationSeconds(sceneDurationSeconds, profile);
   const resolution = preferredResolution(profile?.resolutions);
   const perSecond = resolution
     ? profile?.estimatedCnyPerSecondByResolution?.[resolution]
@@ -885,16 +905,33 @@ function generationRequest(
   prompt = scene.visualPrompt,
   profile?: VideoGenerationRuntimeProfile,
 ): VideoGenerationRequest {
-  const minimum = profile?.minDurationSeconds ?? 4;
-  const maximum = profile?.maxDurationSeconds ?? 15;
   const resolution = preferredResolution(profile?.resolutions);
   return {
     prompt,
-    durationSeconds: Math.max(minimum, Math.min(maximum, Math.round(scene.duration))),
+    durationSeconds: normalizeVideoGenerationDurationSeconds(scene.duration, profile),
     ratio: "9:16",
     ...(resolution ? { resolution } : {}),
     ...(profile ? { generateAudio: false } : {}),
   };
+}
+
+export function normalizeVideoGenerationDurationSeconds(
+  sceneDurationSeconds: number,
+  bounds?: VideoGenerationDurationBounds,
+): number {
+  if (!Number.isFinite(sceneDurationSeconds) || sceneDurationSeconds <= 0) {
+    throw new Error("Video generation scene duration must be a positive number.");
+  }
+  const minimum = bounds?.minDurationSeconds ?? 4;
+  const maximum = bounds?.maxDurationSeconds ?? 15;
+  if (!Number.isInteger(minimum)
+    || !Number.isInteger(maximum)
+    || minimum < 2
+    || maximum > 15
+    || minimum > maximum) {
+    throw new Error("Video generation duration bounds are invalid.");
+  }
+  return Math.max(minimum, Math.min(maximum, Math.round(sceneDurationSeconds)));
 }
 
 function preferredResolution(resolutions: string[] | undefined): VideoGenerationRequest["resolution"] | undefined {
@@ -1146,10 +1183,20 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
   });
 }
 
+const NO_RENDERED_TEXT_CONSTRAINT = "画面中不得出现任何可读文字、字幕、标题、界面、标牌、徽标、水印、乱码或内部制作术语；所有文字与披露只由后期叠加。";
+
+function compileDirectGenerationPrompt(scene: ScriptScene): string {
+  return withNoRenderedTextConstraint(sanitizePrompt(scene.visualPrompt));
+}
+
+function withNoRenderedTextConstraint(prompt: string): string {
+  return [prompt, NO_RENDERED_TEXT_CONSTRAINT].filter(Boolean).join("\n");
+}
+
 function compileGenerationPrompt(providerId: string, route: RoutedShot, scene: ScriptScene): string {
   const hasShotSpec = Boolean(route.subject || route.environment || route.visibleAction || route.temporalBeats.length
     || route.shotSize || route.camera || route.lighting || route.negativeConstraints.length || route.successCriteria.length);
-  if (!hasShotSpec) return sanitizePrompt(route.generationPrompt || scene.visualPrompt);
+  if (!hasShotSpec) return withNoRenderedTextConstraint(sanitizePrompt(route.generationPrompt || scene.visualPrompt));
 
   const timeline = route.temporalBeats.map(sanitizePrompt).filter(Boolean);
   const directorExecution = sanitizePrompt(route.generationPrompt);
@@ -1172,6 +1219,7 @@ function compileGenerationPrompt(providerId: string, route: RoutedShot, scene: S
       ...common,
       ...(success.length ? [`必须实现：${success.join("；")}`] : []),
       ...(negative.length ? [`避免：${negative.join("；")}`] : []),
+      NO_RENDERED_TEXT_CONSTRAINT,
     ].join("\n");
   }
   if (providerId === "hailuo-video-v1" || providerId === "wan-video-v1") {
@@ -1181,6 +1229,7 @@ function compileGenerationPrompt(providerId: string, route: RoutedShot, scene: S
       ...(timeline.length ? [`动作时间线：${timeline.join("；")}`] : []),
       ...(success.length ? [`画面验收：${success.join("；")}`] : []),
       ...(negative.length ? [`负面约束：${negative.join("；")}`] : []),
+      NO_RENDERED_TEXT_CONSTRAINT,
     ].join("\n");
   }
   return [
@@ -1188,6 +1237,7 @@ function compileGenerationPrompt(providerId: string, route: RoutedShot, scene: S
     ...common,
     ...(success.length ? [`画面验收：${success.join("；")}`] : []),
     ...(negative.length ? [`负面约束：${negative.join("；")}`] : []),
+    NO_RENDERED_TEXT_CONSTRAINT,
   ].join("\n");
 }
 
@@ -1827,7 +1877,7 @@ async function generatePaidAssetItem(options: {
   };
   if (
     ledgerItem
-    && (ledgerItem.state === "submitted" || ledgerItem.state === "unknown")
+    && (ledgerItem.state === "submitted" || ledgerItem.state === "unknown" || ledgerItem.state === "provider_succeeded")
     && ledgerItem.taskId
     && options.binding.reconcile
   ) {
@@ -1845,7 +1895,7 @@ async function generatePaidAssetItem(options: {
     return reconciled;
   }
   if (ledgerItem && ledgerItem.state !== "prepared") {
-    if (ledgerItem.state === "submitted" || ledgerItem.state === "unknown") {
+    if (ledgerItem.state === "submitted" || ledgerItem.state === "unknown" || ledgerItem.state === "provider_succeeded") {
       throw new Error(
         `Paid item '${ledgerItem.itemRequestId}' has an unresolved provider outcome and cannot be created again.`,
       );
@@ -1892,6 +1942,15 @@ async function generatePaidAssetItem(options: {
     }
     throw error;
   }
+}
+
+function isExistingPaidTask(item: PaidAssetOperationItem | undefined): boolean {
+  return Boolean(item?.taskId) && (
+    item?.state === "submitted"
+    || item?.state === "unknown"
+    || item?.state === "provider_succeeded"
+    || item?.state === "materialized"
+  );
 }
 
 function acceptedResultFromLedger(item: PaidAssetOperationItem): { taskId: string; url: string } {

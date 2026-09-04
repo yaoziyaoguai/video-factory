@@ -96,6 +96,181 @@ describe("validateVisualDirectorPlan", () => {
     assert.deepEqual(result.shots.map((item) => item.estimatedCostCny), [5.5, 0]);
   });
 
+  it("rejects generated-video reuse that promises more footage than the source scene creates", () => {
+    assert.throws(() => validateVisualDirectorPlan(
+      plan([
+        { ...shot(1, "seedance-video-v1"), temporalBeats: ["[0s-2s] 建立母片", "[2s-4s] 完成母片"] },
+        {
+          ...shot(2, "seedance-video-v1"),
+          authenticityPolicy: "illustrative",
+          query: "REUSE_ONLY scene 1 final segment",
+          temporalBeats: ["[0s-3s] 复用前段", "[3s-6s] 复用后段"],
+        },
+      ]),
+      {
+        scenePositions: [1, 2],
+        sceneDurations: { 1: 4, 2: 6 },
+        allowedProviderIds: ["seedance-video-v1"],
+        generativeProviderIds: ["seedance-video-v1"],
+        providerDeliveryTypes: { "seedance-video-v1": ["generated_video"] },
+        estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
+        economics,
+      },
+    ), /reuses generated video from root scene 1.*only creates 4s.*requires 6s/);
+  });
+
+  it("resolves indirect reuse to the generated root and applies the selected model duration limit", () => {
+    const result = validateVisualDirectorPlan(
+      plan([
+        {
+          ...shot(1, "seedance-video-v1"),
+          temporalBeats: ["[0s-6s] 建立母片", "[6s-12s] 完成母片"],
+        },
+        {
+          ...shot(2, "seedance-video-v1"),
+          authenticityPolicy: "illustrative",
+          query: "REUSE_ONLY scene 1 locked master crop",
+          temporalBeats: ["[0s-2s] 复用根母片前段", "[2s-4s] 保持同一画面"],
+        },
+        {
+          ...shot(3, "seedance-video-v1"),
+          authenticityPolicy: "illustrative",
+          query: "REUSE_ONLY scene 2 locked master crop",
+          temporalBeats: ["[0s-2s] 继续复用", "[2s-5s] 保持同一画面"],
+        },
+      ]),
+      {
+        scenePositions: [1, 2, 3],
+        sceneDurations: { 1: 12, 2: 4, 3: 5 },
+        allowedProviderIds: ["seedance-video-v1"],
+        generativeProviderIds: ["seedance-video-v1"],
+        providerDeliveryTypes: { "seedance-video-v1": ["generated_video"] },
+        estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
+        selectedVideoModelDurationBounds: {
+          "seedance-video-v1": { minDurationSeconds: 4, maxDurationSeconds: 5 },
+        },
+        economics,
+      },
+    );
+
+    assert.equal(result.shots[1]?.reuseFromScenePosition, 1);
+    assert.equal(result.shots[2]?.reuseFromScenePosition, 1);
+  });
+
+  it("rejects reuse longer than the selected model can actually generate", () => {
+    assert.throws(() => validateVisualDirectorPlan(
+      plan([
+        {
+          ...shot(1, "seedance-video-v1"),
+          temporalBeats: ["[0s-6s] 建立母片", "[6s-12s] 完成母片"],
+        },
+        {
+          ...shot(2, "seedance-video-v1"),
+          authenticityPolicy: "illustrative",
+          query: "REUSE_ONLY scene 1 locked master crop",
+          temporalBeats: ["[0s-3s] 复用根母片前段", "[3s-7s] 保持同一画面"],
+        },
+      ]),
+      {
+        scenePositions: [1, 2],
+        sceneDurations: { 1: 12, 2: 7 },
+        allowedProviderIds: ["seedance-video-v1"],
+        generativeProviderIds: ["seedance-video-v1"],
+        providerDeliveryTypes: { "seedance-video-v1": ["generated_video"] },
+        estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
+        selectedVideoModelDurationBounds: {
+          "seedance-video-v1": { minDurationSeconds: 4, maxDurationSeconds: 5 },
+        },
+        economics,
+      },
+    ), /scene 2 reuses generated video from root scene 1.*only creates 5s.*requires 7s/);
+  });
+
+  it("uses the rounded provider request duration when validating generated-video reuse", () => {
+    assert.throws(() => validateVisualDirectorPlan(
+      plan([
+        {
+          ...shot(1, "seedance-video-v1"),
+          temporalBeats: ["[0s-2s] 建立母片", "[2s-4.4s] 完成母片"],
+        },
+        {
+          ...shot(2, "seedance-video-v1"),
+          authenticityPolicy: "illustrative",
+          query: "REUSE_ONLY scene 1 locked master crop",
+          temporalBeats: ["[0s-2s] 复用根母片前段", "[2s-4.2s] 保持同一画面"],
+        },
+      ]),
+      {
+        scenePositions: [1, 2],
+        sceneDurations: { 1: 4.4, 2: 4.2 },
+        allowedProviderIds: ["seedance-video-v1"],
+        generativeProviderIds: ["seedance-video-v1"],
+        providerDeliveryTypes: { "seedance-video-v1": ["generated_video"] },
+        estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
+        selectedVideoModelDurationBounds: {
+          "seedance-video-v1": { minDurationSeconds: 4, maxDurationSeconds: 15 },
+        },
+        economics,
+      },
+    ), /only creates 4s.*requires 4.2s/);
+  });
+
+  it("allows reuse of the extra footage produced by a model minimum duration", () => {
+    const result = validateVisualDirectorPlan(
+      plan([
+        {
+          ...shot(1, "seedance-video-v1"),
+          temporalBeats: ["[0s-2s] 建立母片", "[2s-4s] 完成母片"],
+        },
+        {
+          ...shot(2, "seedance-video-v1"),
+          authenticityPolicy: "illustrative",
+          query: "REUSE_ONLY scene 1 locked master crop",
+          temporalBeats: ["[0s-2s] 复用根母片前段", "[2s-5s] 保持同一画面"],
+        },
+      ]),
+      {
+        scenePositions: [1, 2],
+        sceneDurations: { 1: 4, 2: 5 },
+        allowedProviderIds: ["seedance-video-v1"],
+        generativeProviderIds: ["seedance-video-v1"],
+        providerDeliveryTypes: { "seedance-video-v1": ["generated_video"] },
+        estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
+        selectedVideoModelDurationBounds: {
+          "seedance-video-v1": { minDurationSeconds: 6, maxDurationSeconds: 6 },
+        },
+        economics,
+      },
+    );
+
+    assert.equal(result.shots[1]?.reuseFromScenePosition, 1);
+  });
+
+  it("rejects a cyclic REUSE_ONLY chain explicitly", () => {
+    assert.throws(() => validateVisualDirectorPlan(
+      plan([
+        {
+          ...shot(1, "seedance-video-v1"),
+          authenticityPolicy: "illustrative",
+          query: "REUSE_ONLY scene 2",
+        },
+        {
+          ...shot(2, "seedance-video-v1"),
+          authenticityPolicy: "illustrative",
+          query: "REUSE_ONLY scene 1",
+        },
+      ]),
+      {
+        scenePositions: [1, 2],
+        allowedProviderIds: ["seedance-video-v1"],
+        generativeProviderIds: ["seedance-video-v1"],
+        providerDeliveryTypes: { "seedance-video-v1": ["generated_video"] },
+        estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
+        economics,
+      },
+    ), /reuse cycle involving scene/);
+  });
+
   it("rejects missing, duplicate, unknown and evidence-generation routes", () => {
     const options: VisualDirectorPlanValidation = {
       scenePositions: [1, 2],

@@ -406,6 +406,8 @@ export class WorkflowRunner {
     if (previousNodeRun.status === "running") {
       throw new Error(`Node '${override.nodeId}' cannot be overridden while it is running.`);
     }
+    const descendants = descendantNodeIds(definition.nodes, override.nodeId);
+    assertNoUncertainPaidOutcomeInvalidated(previousRun, new Set([override.nodeId, ...descendants]));
 
     const run = cloneWorkflowRun(previousRun);
     const nodeRun = run.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId)!;
@@ -483,7 +485,6 @@ export class WorkflowRunner {
       versions: [...outputState.versions, version],
     };
 
-    const descendants = descendantNodeIds(definition.nodes, node.id);
     for (const descendant of run.nodeRuns) {
       if (!descendants.has(descendant.nodeId)) {
         continue;
@@ -548,6 +549,8 @@ export class WorkflowRunner {
     if (previousNodeRun.status === "running") {
       throw new Error(`Node '${override.nodeId}' input cannot be overridden while it is running.`);
     }
+    const descendants = descendantNodeIds(definition.nodes, override.nodeId);
+    assertNoUncertainPaidOutcomeInvalidated(previousRun, new Set([override.nodeId, ...descendants]));
 
     const run = cloneWorkflowRun(previousRun);
     const nodeRun = run.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId)!;
@@ -611,7 +614,6 @@ export class WorkflowRunner {
     delete nodeRun.interrupted;
     if (nodeRun.outputState) nodeRun.outputState.stale = true;
 
-    const descendants = descendantNodeIds(definition.nodes, node.id);
     for (const descendant of run.nodeRuns) {
       if (!descendants.has(descendant.nodeId)) continue;
       descendant.status = "stale";
@@ -742,11 +744,12 @@ export class WorkflowRunner {
     if (previousNodeRun?.outcomeUncertain) {
       throw new Error(`Node '${override.nodeId}' has an uncertain paid-provider outcome and cannot be reconfigured.`);
     }
+    const descendants = descendantNodeIds(definition.nodes, override.nodeId);
+    assertNoUncertainPaidOutcomeInvalidated(previousRun, new Set([override.nodeId, ...descendants]));
 
     const run = cloneWorkflowRun(previousRun);
     run.initialInput = structuredClone(override.initialInput);
     const target = run.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId);
-    const descendants = descendantNodeIds(definition.nodes, override.nodeId);
     const invalidatedNodeIds = new Set([override.nodeId, ...descendants]);
 
     if (target) markNodeExecutionStale(target, false);
@@ -987,6 +990,7 @@ export class WorkflowRunner {
     definition: WorkflowDefinition,
     previousRun: WorkflowRun<TInitialInput>,
     nodeId: string,
+    options: { resumeUncertainOperation?: boolean } = {},
   ): Promise<WorkflowRun<TInitialInput>> {
     validateWorkflowDefinition(definition);
     if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
@@ -999,7 +1003,14 @@ export class WorkflowRunner {
     if (!failedNode || failedNode.status !== "failed" || !definition.nodes.some((node) => node.id === nodeId)) {
       throw new Error(`Node '${nodeId}' is not the failed node.`);
     }
-    if (failedNode.outcomeUncertain) {
+    if (options.resumeUncertainOperation && !(
+      failedNode.outcomeUncertain
+      && failedNode.interrupted
+      && failedNode.operationRequestId
+    )) {
+      throw new Error(`Node '${nodeId}' is not an interrupted uncertain operation that can be resumed.`);
+    }
+    if (failedNode.outcomeUncertain && !options.resumeUncertainOperation) {
       throw new Error(`Node '${nodeId}' has an uncertain paid-provider outcome and cannot be retried before reconciliation.`);
     }
 
@@ -1020,7 +1031,7 @@ export class WorkflowRunner {
       if (!consumed.includes(retryNode.spendAuthorizationId)) consumed.push(retryNode.spendAuthorizationId);
     }
     delete retryNode.spendAuthorizationId;
-    delete retryNode.interrupted;
+    if (!preserveInterruptedOperation) delete retryNode.interrupted;
     if (!preserveInterruptedOperation) delete retryNode.operationRequestId;
     if (retryNode.outputState) retryNode.outputState.stale = true;
 
@@ -1155,6 +1166,7 @@ export class WorkflowRunner {
     nodeRun.status = "running";
     nodeRun.startedAt = context.now();
     nodeRun.operationRequestId ??= context.nextId(`${context.runId}-${node.id}-operation`);
+    const resumingInterruptedOperation = nodeRun.interrupted === true;
     delete nodeRun.interrupted;
 
     await onStarted(nodeRun);
@@ -1164,6 +1176,7 @@ export class WorkflowRunner {
     let meteredAttemptCount = 0;
     let spendAuthorizationExemptProviderId: string | undefined;
     let automaticMeteredProvider: Pick<Provider, "id" | "modelId"> | undefined;
+    let resumingInterruptedMeteredOperation = false;
     try {
       const publicContext = context.publicContext();
       const derivedInput = node.getInput ? node.getInput(publicContext) : (context.initialInput as TInput);
@@ -1173,6 +1186,7 @@ export class WorkflowRunner {
       if (provider) {
         receiptDraft = providerReceiptDraft(provider);
       }
+      resumingInterruptedMeteredOperation = resumingInterruptedOperation && provider?.billing === "metered";
       if (provider?.billing === "metered") {
         validateMeteredProvider(provider);
         const approvalPolicy = approvalPolicyFor(provider);
@@ -1231,8 +1245,10 @@ export class WorkflowRunner {
         };
       }
       validateReceiptCosts(receiptDraft, authorization, automaticMeteredProvider);
-      if (status !== "failed" || isDefinitiveZeroAttemptFailure(receiptDraft)) {
+      if (status !== "failed" || (isDefinitiveZeroAttemptFailure(receiptDraft) && !resumingInterruptedMeteredOperation)) {
         delete nodeRun.outcomeUncertain;
+      } else if (resumingInterruptedMeteredOperation) {
+        nodeRun.outcomeUncertain = true;
       }
 
       for (const draft of result.artifacts ?? []) {
@@ -1296,7 +1312,10 @@ export class WorkflowRunner {
       nodeRun.status = "failed";
       nodeRun.error = error instanceof Error ? error.message : String(error);
       nodeRun.finishedAt = context.now();
-      if ((authorization || automaticMeteredProvider) && meteredAttemptCount > 0) nodeRun.outcomeUncertain = true;
+      if (resumingInterruptedMeteredOperation
+        || (authorization || automaticMeteredProvider) && meteredAttemptCount > 0) {
+        nodeRun.outcomeUncertain = true;
+      }
       if (!nodeRun.executionReceipt) {
         if (automaticMeteredProvider && receiptDraft.billing === "metered") {
           receiptDraft = {
@@ -1602,6 +1621,7 @@ function authorizationMatchesPlan(
   plan: SpendPlan,
 ): boolean {
   return isValidSpendAuthorizationScope(authorization)
+    && authorization.spendPlanId === plan.id
     && authorization.nodeId === plan.nodeId
     && authorization.providerId === plan.providerId
     && authorization.modelId === plan.modelId
@@ -1795,7 +1815,9 @@ function validateSpendAuthorizationDraft(draft: SpendAuthorizationDraft): void {
 }
 
 function isValidSpendAuthorizationScope(draft: SpendAuthorizationDraft): boolean {
-  return typeof draft.nodeId === "string"
+  return typeof draft.spendPlanId === "string"
+    && Boolean(draft.spendPlanId)
+    && typeof draft.nodeId === "string"
     && Boolean(draft.nodeId)
     && Array.isArray(draft.inputVersionIds)
     && draft.inputVersionIds.every((id) => typeof id === "string" && Boolean(id))
@@ -2190,6 +2212,20 @@ function descendantNodeIds(nodes: NodeDefinition[], rootNodeId: string): Set<str
     pending.push(...(dependents.get(nodeId) ?? []));
   }
   return descendants;
+}
+
+function assertNoUncertainPaidOutcomeInvalidated(
+  run: WorkflowRun,
+  invalidatedNodeIds: ReadonlySet<string>,
+): void {
+  const uncertainNode = run.nodeRuns.find((nodeRun) => (
+    invalidatedNodeIds.has(nodeRun.nodeId) && nodeRun.outcomeUncertain
+  ));
+  if (uncertainNode) {
+    throw new Error(
+      `Node '${uncertainNode.nodeId}' has an uncertain paid-provider outcome and must be reconciled before changing its inputs or dependencies.`,
+    );
+  }
 }
 
 async function evaluateQualityGates<TOutput>(

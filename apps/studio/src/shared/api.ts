@@ -483,7 +483,7 @@ export interface StudioSeriesInput {
   name: string;
   premise: string;
   audience: string;
-  platform: string;
+  platform: StudioProductionDefaults["platform"];
   category: StudioTopicCategory;
   track: string;
   pillars: string[];
@@ -861,6 +861,7 @@ export interface StudioNodeExecutionConfigurationInput {
 }
 
 export interface StudioSpendAuthorizationInput {
+  spendPlanId: string;
   inputVersionIds: string[];
   providerId: string;
   modelId: string;
@@ -912,6 +913,7 @@ export interface StudioPaidReconciliationInput {
   expectedRunRevision: number;
   reconciliationId: string;
   outcome: "resume_original" | "requote" | "confirmed_not_charged" | "confirmed_charged";
+  itemRequestId?: string;
   taskId?: string;
   note?: string;
   actualCostCny?: number;
@@ -959,6 +961,8 @@ export interface StudioTemplate extends ProductionTemplateInput {
 export interface StudioTemplateCatalog {
   storeRevision: number;
   templates: StudioTemplate[];
+  productionTemplates?: StudioTemplate[];
+  deletedBuiltIns?: StudioTemplate[];
 }
 
 export interface StudioTemplateSelection {
@@ -978,12 +982,18 @@ export interface StudioTemplateCreateInput {
   id: string;
   name: string;
   description?: string;
+  catalogVisibility?: "production" | "qa";
   expectedRevision: number;
 }
 
 export interface StudioTemplateMutation {
   storeRevision: number;
   template: StudioTemplate;
+}
+
+export interface StudioTemplateDeletion {
+  storeRevision: number;
+  deletedBuiltIn?: StudioTemplate;
 }
 
 export interface StudioResourceManifestItem {
@@ -1770,11 +1780,15 @@ export function parseStudioSeriesInput(value: unknown): StudioSeriesInput {
   if (targetEpisodeCount !== undefined && targetEpisodeCount > 100) {
     throw new StudioInputError("目标集数最多支持 100 集。");
   }
+  const platform = requiredTrimmedString(input.platform, "首发平台");
+  if (platform !== "douyin" && platform !== "xiaohongshu" && platform !== "bilibili") {
+    throw new StudioInputError("首发平台只支持抖音、小红书或哔哩哔哩。");
+  }
   return {
     name: requiredTrimmedString(input.name, "系列名称"),
     premise: requiredTrimmedString(input.premise, "系列承诺"),
     audience: requiredTrimmedString(input.audience, "目标受众"),
-    platform: requiredTrimmedString(input.platform, "首发平台"),
+    platform,
     category: category as StudioTopicCategory,
     track,
     pillars,

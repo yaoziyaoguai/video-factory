@@ -10,6 +10,7 @@ import type {
   StudioTemplateCatalog,
   StudioTemplateCloneInput,
   StudioTemplateCreateInput,
+  StudioTemplateDeletion,
   StudioTemplateMutation,
 } from "../shared/api.js";
 import { JsonTemplateStore } from "./template-store.js";
@@ -27,6 +28,8 @@ export class TemplateStudio {
     return {
       storeRevision: snapshot.storeRevision,
       templates: snapshot.templates.map((template) => this.toDto(template)),
+      productionTemplates: snapshot.publishedTemplates.map((template) => this.toDto(template)),
+      deletedBuiltIns: snapshot.deletedBuiltIns.map((template) => this.toDto(template)),
     };
   }
 
@@ -78,7 +81,26 @@ export class TemplateStudio {
       ],
       createdAt: timestamp,
       updatedAt: timestamp,
-    }, input.expectedRevision);
+    }, input.expectedRevision, input.catalogVisibility ?? "production");
+    return { storeRevision: result.storeRevision, template: this.toDto(result.template) };
+  }
+
+  async revise(id: string, expectedRevision: number): Promise<StudioTemplateMutation> {
+    const result = await this.store.revise(id, expectedRevision);
+    return { storeRevision: result.storeRevision, template: this.toDto(result.template) };
+  }
+
+  async delete(id: string, expectedRevision: number): Promise<StudioTemplateDeletion> {
+    const result = await this.store.delete(id, expectedRevision);
+    const deletedBuiltIn = BUILTIN_TEMPLATES.find((template) => template.id === id);
+    return {
+      storeRevision: result.storeRevision,
+      ...(deletedBuiltIn ? { deletedBuiltIn: this.toDto(deletedBuiltIn) } : {}),
+    };
+  }
+
+  async restoreBuiltIn(id: string, expectedRevision: number): Promise<StudioTemplateMutation> {
+    const result = await this.store.restoreBuiltIn(id, expectedRevision);
     return { storeRevision: result.storeRevision, template: this.toDto(result.template) };
   }
 
@@ -116,8 +138,7 @@ export class TemplateStudio {
   private toDto(template: ProductionTemplateInput): StudioTemplate {
     return {
       ...structuredClone(template),
-      builtIn: template.status === "published"
-        && BUILTIN_TEMPLATES.some((candidate) => candidate.id === template.id && candidate.version === template.version),
+      builtIn: BUILTIN_TEMPLATES.some((candidate) => candidate.id === template.id),
     };
   }
 }

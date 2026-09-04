@@ -38,6 +38,7 @@ import type {
   StudioTemplateCatalog,
   StudioTemplateCloneInput,
   StudioTemplateCreateInput,
+  StudioTemplateDeletion,
   StudioTemplateMutation,
   StudioTemplateExperimentScorecard,
   StudioNodeOverrideInput,
@@ -53,11 +54,17 @@ import type {
 
 const MAX_PENDING_START_REQUESTS = 32;
 const pendingStartKeys = new Map<string, string>();
+const AUTHENTICATION_LOST_EVENT = "video-factory:authentication-lost";
 
 export type StudioAuthSession =
   | { enabled: false; authenticated: true }
   | { enabled: true; authenticated: false }
   | { enabled: true; authenticated: true; username: string };
+
+export function subscribeToAuthenticationLoss(listener: () => void): () => void {
+  globalThis.addEventListener?.(AUTHENTICATION_LOST_EVENT, listener);
+  return () => globalThis.removeEventListener?.(AUTHENTICATION_LOST_EVENT, listener);
+}
 
 export const studioApi = {
   authSession: () => requestJson<StudioAuthSession>("/api/auth/session"),
@@ -152,6 +159,30 @@ export const studioApi = {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   }),
+  reviseTemplate: (templateId: string, expectedRevision: number) => requestJson<StudioTemplateMutation>(
+    `/api/templates/${encodeURIComponent(templateId)}/revise`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedRevision }),
+    },
+  ),
+  deleteTemplate: (templateId: string, expectedRevision: number) => requestJson<StudioTemplateDeletion>(
+    `/api/templates/${encodeURIComponent(templateId)}`,
+    {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedRevision }),
+    },
+  ),
+  restoreBuiltInTemplate: (templateId: string, expectedRevision: number) => requestJson<StudioTemplateMutation>(
+    `/api/templates/${encodeURIComponent(templateId)}/restore`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedRevision }),
+    },
+  ),
   saveTemplateDraft: (template: StudioTemplate, expectedRevision: number) => requestJson<StudioTemplateMutation>(
     `/api/templates/${encodeURIComponent(template.id)}/draft`,
     {
@@ -328,6 +359,7 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, studioRequest(init));
   const body = await response.json().catch(() => undefined) as { error?: string } | undefined;
   if (!response.ok) {
+    notifyAuthenticationLoss(url, response.status);
     throw new Error(userFacingApiError(body?.error, response.status));
   }
   return body as T;
@@ -337,6 +369,7 @@ async function requestEmpty(url: string, init?: RequestInit): Promise<void> {
   const response = await fetch(url, studioRequest(init));
   if (response.ok) return;
   const body = await response.json().catch(() => undefined) as { error?: string } | undefined;
+  notifyAuthenticationLoss(url, response.status);
   throw new Error(userFacingApiError(body?.error, response.status));
 }
 
@@ -344,9 +377,15 @@ async function requestObjectUrl(url: string, init: RequestInit): Promise<string>
   const response = await fetch(url, studioRequest(init));
   if (!response.ok) {
     const body = await response.json().catch(() => undefined) as { error?: string } | undefined;
+    notifyAuthenticationLoss(url, response.status);
     throw new Error(userFacingApiError(body?.error, response.status));
   }
   return URL.createObjectURL(await response.blob());
+}
+
+function notifyAuthenticationLoss(url: string, status: number): void {
+  if (status !== 401 || url === "/api/auth/login") return;
+  globalThis.dispatchEvent?.(new Event(AUTHENTICATION_LOST_EVENT));
 }
 
 function studioRequest(init: RequestInit | undefined): RequestInit | undefined {

@@ -1,6 +1,6 @@
 import { ArrowRight, Clapperboard, LoaderCircle, LockKeyhole } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { studioApi, type StudioAuthSession } from "../api.js";
+import { studioApi, subscribeToAuthenticationLoss, type StudioAuthSession } from "../api.js";
 
 interface AuthenticatedStudio {
   username?: string;
@@ -20,6 +20,10 @@ export function AuthGate({ children }: { children: (studio: AuthenticatedStudio)
     }
   };
   useEffect(() => { void load(); }, []);
+  useEffect(() => subscribeToAuthenticationLoss(() => {
+    setLoadError("");
+    setSession({ enabled: true, authenticated: false });
+  }), []);
 
   if (loadError) {
     return (

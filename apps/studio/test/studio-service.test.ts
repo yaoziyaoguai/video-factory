@@ -670,6 +670,27 @@ describe("StudioService", () => {
     assert.deepEqual(pipeline.maintenanceLeaseCalls, [["run-1"], ["run-1"], ["run-1"], ["run-1"]]);
   });
 
+  it("blocks archiving and permanently deleting runs with an uncertain paid result", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-uncertain-paid-archive-"));
+    const run = waitingRun(workspaceRoot);
+    run.status = "failed";
+    run.nodeRuns[0] = { ...run.nodeRuns[0]!, status: "failed", outcomeUncertain: true };
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(() => service.archiveRuns(["run-1"]), /付费结果尚未核对/);
+    delete pipeline.run.nodeRuns[0]!.outcomeUncertain;
+    await service.archiveRuns(["run-1"]);
+
+    pipeline.run.nodeRuns[0]!.outcomeUncertain = true;
+    await assert.rejects(() => service.deleteRun("run-1"), /付费结果尚未核对/);
+    assert.equal(pipeline.removedRunId, undefined);
+
+    delete pipeline.run.nodeRuns[0]!.outcomeUncertain;
+    await service.deleteRun("run-1");
+    assert.equal(pipeline.removedRunId, "run-1");
+  });
+
   it("maps persisted runs to queue and detail DTOs", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -1489,6 +1510,7 @@ describe("StudioService", () => {
       expectedRunRevision: 7,
       reconciliationId: "confirm-charge-assets-7",
       outcome: "confirmed_charged",
+      itemRequestId: "paid-scene-2",
       note: "Provider 控制台确认已扣费。",
       actualCostCny: 2.4,
     }, "billing-reviewer");
@@ -1498,6 +1520,7 @@ describe("StudioService", () => {
       expectedRunRevision: 7,
       reconciliationId: "confirm-charge-assets-7",
       outcome: "confirmed_charged",
+      itemRequestId: "paid-scene-2",
       actor: "billing-reviewer",
       note: "Provider 控制台确认已扣费。",
       actualCostCny: 2.4,
@@ -1603,6 +1626,18 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 0);
   });
 
+  it("rejects a source platform before dispatching a production run", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-platform-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(
+      () => service.startRun({ ...brief, platform: "guokr" }, "invalid-platform-request-1"),
+      /目标平台只支持抖音、小红书或哔哩哔哩/,
+    );
+    assert.equal(pipeline.dispatchCount, 0);
+  });
+
   it("rejects different parameters that reuse an in-flight idempotency key", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-in-flight-idempotency-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -1622,7 +1657,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
-  it("replays the original start after global model defaults change", async () => {
+  it("does not let legacy global model defaults change a new or replayed start", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-model-idempotency-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const environment = {
@@ -1638,7 +1673,7 @@ describe("StudioService", () => {
     };
 
     const first = await service.startRun(input, "model-default-request-1");
-    assert.equal((pipeline.lastInput as ProductionBrief).models?.["seedance-video-v1"], "doubao-seedance-2-5-260628");
+    assert.equal((pipeline.lastInput as ProductionBrief).models?.["seedance-video-v1"], undefined);
     await service.updateCreatorSettings({ modelDefaults: { "seedance-video-v1": "doubao-seedance-2-0-260128" } });
     const restarted = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment });
 
@@ -1705,7 +1740,7 @@ describe("StudioService", () => {
     assert.equal((await migratedDefault.getCreatorSettings()).voiceDirectionCustomized, false);
   });
 
-  it("inherits a missing production role and its model from creator defaults", async () => {
+  it("inherits a missing production role without inheriting the legacy global model default", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-role-default-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({
@@ -1731,8 +1766,8 @@ describe("StudioService", () => {
 
     const dispatched = pipeline.lastInput as ProductionBrief;
     assert.equal(dispatched.providers.script, "codex-screenwriter-v1");
-    assert.equal(dispatched.models?.["codex-screenwriter-v1"], "gpt-5.6-sol");
-    assert.equal(dispatched.modelSelectionSources?.["codex-screenwriter-v1"], "global_default");
+    assert.equal(dispatched.models?.["codex-screenwriter-v1"], undefined);
+    assert.equal(dispatched.modelSelectionSources?.["codex-screenwriter-v1"], undefined);
   });
 
   it("replays a referenced start after the persisted node safely releases its temporary upload", async () => {
@@ -1893,7 +1928,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
-  it("resolves model defaults as global, then template, then explicit run override", async () => {
+  it("resolves model choices from the template, then an explicit run override", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const environment = {
@@ -2240,6 +2275,67 @@ describe("StudioService", () => {
     assert.equal(pipeline.lastOverride?.actor, "trusted-owner");
   });
 
+  it("blocks every edit path until an uncertain paid result is reconciled", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-uncertain-edit-"));
+    const run = waitingRun(workspaceRoot);
+    run.status = "failed";
+    run.nodeRuns.unshift({
+      nodeId: "script",
+      status: "succeeded",
+      output: { hook: "旧钩子" },
+      inputState: {
+        effectiveVersionId: "script-input-1",
+        stale: false,
+        versions: [{
+          id: "script-input-1",
+          source: "derived",
+          value: { title: "旧题目" },
+          upstreamVersionIds: [],
+          createdAt: "2026-08-27T00:00:00.000Z",
+          createdBy: "workflow:script",
+          schemaVersion: "1",
+        }],
+      },
+      artifactIds: [],
+      qualityGateResults: [],
+    });
+    run.nodeRuns.push({
+      nodeId: "assets",
+      status: "failed",
+      outcomeUncertain: true,
+      operationRequestId: "paid-operation-1",
+      artifactIds: [],
+      qualityGateResults: [],
+    });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(
+      () => service.applyNodeOverride("run-1", "script", {
+        output: { hook: "新钩子" },
+        confirmTerminalEdit: true,
+      }, "trusted-owner"),
+      /先完成任务与账单核对/,
+    );
+    await assert.rejects(
+      () => service.applyNodeInputOverride("run-1", "script", {
+        input: { title: "新题目" },
+        confirmTerminalEdit: true,
+      }, "trusted-owner"),
+      /先完成任务与账单核对/,
+    );
+    await assert.rejects(
+      () => service.applyNodeExecutionConfiguration("run-1", "script", {
+        providerId: "codex-screenwriter-v1",
+        modelSelections: {},
+        confirmTerminalEdit: true,
+      }, "trusted-owner"),
+      /先完成任务与账单核对/,
+    );
+    assert.equal(pipeline.lastOverride, undefined);
+    assert.equal(pipeline.lastInputOverride, undefined);
+  });
+
   it("rejects a stale spend confirmation and authorizes only the current server plan", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const run = waitingRun(workspaceRoot);
@@ -2265,6 +2361,20 @@ describe("StudioService", () => {
 
     await assert.rejects(
       () => service.authorizeSpend("run-1", "assets", {
+        spendPlanId: "plan-stale",
+        inputVersionIds: ["script-human-v2"],
+        providerId: "hailuo-video-v1",
+        modelId: "MiniMax-Hailuo-02",
+        maxCostCny: 3,
+        maxAttempts: 1,
+      }, "trusted-owner"),
+      /费用计划或上游版本已经变化/,
+    );
+    assert.equal(pipeline.lastAuthorization, undefined);
+
+    await assert.rejects(
+      () => service.authorizeSpend("run-1", "assets", {
+        spendPlanId: "plan-current",
         inputVersionIds: ["script-generated-v1"],
         providerId: "hailuo-video-v1",
         modelId: "MiniMax-Hailuo-02",
@@ -2276,6 +2386,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.lastAuthorization, undefined);
 
     await service.authorizeSpend("run-1", "assets", {
+      spendPlanId: "plan-current",
       inputVersionIds: ["script-human-v2"],
       providerId: "hailuo-video-v1",
       modelId: "MiniMax-Hailuo-02",
@@ -2283,6 +2394,7 @@ describe("StudioService", () => {
       maxAttempts: 1,
     }, "trusted-owner");
     assert.deepEqual(pipeline.lastAuthorization, {
+      spendPlanId: "plan-current",
       nodeId: "assets",
       inputVersionIds: ["script-human-v2"],
       providerId: "hailuo-video-v1",
@@ -2315,6 +2427,24 @@ describe("StudioService", () => {
     });
     const pipeline = new FakePipeline(run);
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(
+      () => service.rejectSpend("run-1", "assets", {
+        spendPlanId: "plan-current",
+        reason: "too_expensive",
+        targetEstimatedCostCny: 4.8,
+      }, "trusted-owner"),
+      /降本目标必须低于当前报价/,
+    );
+    await assert.rejects(
+      () => service.rejectSpend("run-1", "assets", {
+        spendPlanId: "plan-current",
+        reason: "too_expensive",
+        targetEstimatedCostCny: 5,
+      }, "trusted-owner"),
+      /降本目标必须低于当前报价/,
+    );
+    assert.equal(pipeline.lastSpendRejection, undefined);
 
     await service.rejectSpend("run-1", "assets", {
       spendPlanId: "plan-current",

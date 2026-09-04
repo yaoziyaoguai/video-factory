@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CodexExecutorError,
   DEFAULT_ZAI_TEXT_MODEL_ID,
@@ -8,6 +9,7 @@ import {
   type BrokerTaskExecutor,
   type CodexExecutionOptions,
   type CodexExecutionResult,
+  type CodexExecutorFailureDetails,
   type CodexExecutorIdentity,
   type ValidatedTask,
 } from "./codex-executor.js";
@@ -16,6 +18,7 @@ import {
   outputSchemaFor,
   outputValidationErrorFor,
   taskPromptFor,
+  type BrokerTaskKind,
 } from "./task-definitions.js";
 
 const ZAI_CHAT_COMPLETIONS_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
@@ -24,12 +27,16 @@ const DEFAULT_TIMEOUT_MS = 285_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES = 16 * 1024;
 const ERROR_RESPONSE_READ_TIMEOUT_MS = 250;
+const IMAGE_TASK_KINDS = new Set<BrokerTaskKind>(["asset-rank", "reference-grammar", "visual-review"]);
+const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
+const TRANSIENT_ERROR_CODE_PATTERN = /^(?:temporarily[_-]unavailable|(?:service|model|capacity)[_-](?:temporarily[_-])?unavailable|(?:insufficient|exhausted|unavailable)[_-](?:model[_-])?capacity|(?:(?:model|capacity)[_-])?overload(?:ed)?)$/i;
 
 export interface ZaiCodePlanExecutorOptions {
   env?: NodeJS.ProcessEnv;
   fetchFn?: typeof fetch;
   effort?: string;
   timeoutMs?: number;
+  now?: () => number;
 }
 
 export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
@@ -40,6 +47,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
   private readonly timeoutMs: number;
   private readonly textModelId: string;
   private readonly visualModelId: string;
+  private readonly now: () => number;
 
   constructor(options: ZaiCodePlanExecutorOptions = {}) {
     const environment = options.env ?? process.env;
@@ -51,7 +59,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
       taskKinds: [...ZAI_TASK_KINDS],
       taskModels: Object.fromEntries(ZAI_TASK_KINDS.map((kind) => [
         kind,
-        kind === "visual-review" ? this.visualModelId : this.textModelId,
+        IMAGE_TASK_KINDS.has(kind) ? this.visualModelId : this.textModelId,
       ])),
     };
     this.apiKey = environment.ZAI_BIGMODEL_API_KEY?.trim() ?? "";
@@ -59,6 +67,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     this.fetchFn = options.fetchFn ?? fetch;
     this.effort = options.effort ?? "max";
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.now = options.now ?? Date.now;
   }
 
   async runTask(
@@ -79,6 +88,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     const timeout = setTimeout(() => controller.abort(new Error("timeout")), this.timeoutMs);
     const images = taskImages(task);
     const modelId = images.length > 0 ? this.visualModelId : this.textModelId;
+    const requestStartedAt = this.now();
 
     try {
       const response = await this.fetchFn(images.length > 0 ? ZAI_CHAT_COMPLETIONS_URL : ZAI_CODING_PLAN_URL, {
@@ -113,20 +123,43 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
         const code = await readErrorCode(response);
         throw new CodexExecutorError(
           `ZAI Chat Completion returned HTTP ${response.status}${code ? ` (code ${code})` : ""}.`,
-          response.status === 408 || response.status === 429 || response.status >= 500,
+          isTransientProviderFailure(response.status, code),
+          {
+            details: {
+              category: failureCategoryFor(response.status, code),
+              reasonCode: code ?? `http_${response.status}`,
+              ...requestIdHashFor(response),
+              providerId: this.identity.providerId,
+              modelId,
+              providerWaitMs: elapsedMs(requestStartedAt, this.now()),
+            },
+          },
         );
       }
       const raw = await readBoundedResponse(response);
-      const content = responseContent(raw);
+      const providerWaitMs = elapsedMs(requestStartedAt, this.now());
+      const validationStartedAt = this.now();
+      const content = responseContent(raw, (reasonCode) => invalidOutputDetails(
+        this.identity.providerId,
+        modelId,
+        providerWaitMs,
+        reasonCode,
+      ));
       const output = stripCodeFence(content);
       let parsed: unknown;
       try {
         parsed = JSON.parse(output);
       } catch {
-        throw new CodexExecutorError("ZAI Chat Completion output is not valid JSON.", false);
+        throw new CodexExecutorError("ZAI Chat Completion output is not valid JSON.", false, {
+          details: invalidOutputDetails(this.identity.providerId, modelId, providerWaitMs, "invalid_json"),
+        });
       }
       const validationError = outputValidationErrorFor(task.kind, parsed);
-      if (validationError !== undefined) throw new CodexExecutorError(`ZAI output does not match ${task.kind} schema: ${validationError}`, false);
+      if (validationError !== undefined) {
+        throw new CodexExecutorError(`ZAI output does not match ${task.kind} schema: ${validationError}`, false, {
+          details: invalidOutputDetails(this.identity.providerId, modelId, providerWaitMs, "output_contract"),
+        });
+      }
       const visualFindings = task.kind === "visual-review"
         ? (parsed as { findings: Array<{ timecodeMs: number }> }).findings
         : [];
@@ -135,6 +168,9 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
         throw new CodexExecutorError(
           "ZAI output does not match visual-review schema: finding timecodeMs exceeds payload.durationMs.",
           false,
+          {
+            details: invalidOutputDetails(this.identity.providerId, modelId, providerWaitMs, "timecode_out_of_bounds"),
+          },
         );
       }
       return {
@@ -146,6 +182,10 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
           providerId: this.identity.providerId,
           modelId,
           reasoningEffort: this.effort,
+          providerWaitMs,
+          firstOutputEventMs: providerWaitMs,
+          toolMs: 0,
+          validationMs: elapsedMs(validationStartedAt, this.now()),
         },
       };
     } catch (error) {
@@ -156,12 +196,65 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
           ? "ZAI Code Plan task was cancelled because its client disconnected."
           : `ZAI Code Plan request ${controller.signal.aborted ? "timed out" : "could not connect"}.`,
         true,
+        {
+          details: {
+            category: controller.signal.aborted ? "timeout" : "network",
+            reasonCode: controller.signal.aborted ? "request_timeout" : "connection_failed",
+            providerId: this.identity.providerId,
+            modelId,
+            providerWaitMs: elapsedMs(requestStartedAt, this.now()),
+          },
+        },
       );
     } finally {
       clearTimeout(timeout);
       options.signal?.removeEventListener("abort", abort);
     }
   }
+}
+
+function failureCategoryFor(status: number, code: string | undefined): "authentication" | "invalid_request" | "rate_limited" | "service_unavailable" | "execution_failed" {
+  if (status === 401 || status === 403) return "authentication";
+  if (status === 429) return "rate_limited";
+  if (status === 502 || status === 503 || status === 504 || isExplicitTransientCode(code)) return "service_unavailable";
+  if (status === 400 || status === 404 || status === 409 || status === 422) return "invalid_request";
+  return "execution_failed";
+}
+
+function isTransientProviderFailure(status: number, code: string | undefined): boolean {
+  return TRANSIENT_HTTP_STATUSES.has(status) || isExplicitTransientCode(code);
+}
+
+function isExplicitTransientCode(code: string | undefined): boolean {
+  return code !== undefined && TRANSIENT_ERROR_CODE_PATTERN.test(code);
+}
+
+function requestIdHashFor(response: Response): { requestIdHash?: string } {
+  const requestId = ["x-request-id", "x-zhipu-request-id", "x-requestid", "request-id", "x-trace-id"]
+    .map((name) => response.headers.get(name)?.trim())
+    .find((value): value is string => Boolean(value));
+  return requestId
+    ? { requestIdHash: createHash("sha256").update(requestId).digest("hex") }
+    : {};
+}
+
+function elapsedMs(startedAt: number, finishedAt: number): number {
+  return Math.max(0, Math.round(finishedAt - startedAt));
+}
+
+function invalidOutputDetails(
+  providerId: string,
+  modelId: string,
+  providerWaitMs: number,
+  reasonCode: "invalid_json" | "output_contract" | "timecode_out_of_bounds",
+): CodexExecutorFailureDetails {
+  return {
+    category: "invalid_output",
+    reasonCode,
+    providerId,
+    modelId,
+    providerWaitMs,
+  };
 }
 
 
@@ -247,23 +340,33 @@ function responseErrorCode(raw: string): string | undefined {
   if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0) {
     return String(candidate);
   }
-  if (typeof candidate === "string" && /^\d{3,8}$/.test(candidate)) return candidate;
+  if (typeof candidate === "string"
+    && (/^\d{3,8}$/.test(candidate) || isExplicitTransientCode(candidate))) return candidate;
   return undefined;
 }
 
-function responseContent(raw: string): string {
+function responseContent(
+  raw: string,
+  failureDetails: (reasonCode: "invalid_json" | "output_contract") => CodexExecutorFailureDetails,
+): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new CodexExecutorError("ZAI Chat Completion returned a non-JSON response.", false);
+    throw new CodexExecutorError("ZAI Chat Completion returned a non-JSON response.", false, {
+      details: failureDetails("invalid_json"),
+    });
   }
   if (!isRecord(parsed) || !Array.isArray(parsed.choices)) {
-    throw new CodexExecutorError("ZAI Chat Completion response is missing choices.", false);
+    throw new CodexExecutorError("ZAI Chat Completion response is missing choices.", false, {
+      details: failureDetails("output_contract"),
+    });
   }
   const choice = parsed.choices[0];
   if (!isRecord(choice) || !isRecord(choice.message) || typeof choice.message.content !== "string") {
-    throw new CodexExecutorError("ZAI Chat Completion response is missing message content.", false);
+    throw new CodexExecutorError("ZAI Chat Completion response is missing message content.", false, {
+      details: failureDetails("output_contract"),
+    });
   }
   return choice.message.content;
 }

@@ -564,6 +564,7 @@ describe("WorkflowRunner", () => {
       const plan = paused.nodeRuns[0]?.spendPlan;
       assert.ok(plan);
       return runner.authorizeSpend(definition, paused, {
+        spendPlanId: plan.id,
         nodeId: plan.nodeId,
         inputVersionIds: plan.inputVersionIds,
         providerId: plan.providerId,
@@ -617,6 +618,7 @@ describe("WorkflowRunner", () => {
     assert.ok(plan);
 
     const failed = await runner.authorizeSpend(definition, paused, {
+      spendPlanId: plan.id,
       nodeId: plan.nodeId,
       inputVersionIds: plan.inputVersionIds,
       providerId: plan.providerId,
@@ -664,6 +666,7 @@ describe("WorkflowRunner", () => {
     const firstPlan = firstPause.nodeRuns.find((node) => node.nodeId === "voice")?.spendPlan;
     assert.ok(firstPlan);
     const failed = await runner.authorizeSpend(definition, firstPause, {
+      spendPlanId: firstPlan.id,
       nodeId: firstPlan.nodeId,
       inputVersionIds: firstPlan.inputVersionIds,
       providerId: firstPlan.providerId,
@@ -677,6 +680,41 @@ describe("WorkflowRunner", () => {
     assert.ok(failedNode?.operationRequestId);
     await assert.rejects(() => runner.retryFailedNode(definition, failed, "voice"), /uncertain paid-provider outcome/);
     await assert.rejects(() => runner.retryFailedNode(definition, failed, "voice"), /uncertain paid-provider outcome/);
+    assert.throws(
+      () => runner.applyNodeOverride(definition, failed, {
+        nodeId: "voice",
+        actor: "producer",
+        output: { audio: "replacement.mp3" },
+        allowTerminalEdit: true,
+      }),
+      /uncertain paid-provider outcome/,
+    );
+    assert.throws(
+      () => runner.applyNodeInputOverride(definition, failed, {
+        nodeId: "voice",
+        actor: "producer",
+        input: { text: "replacement" },
+        allowTerminalEdit: true,
+      }),
+      /uncertain paid-provider outcome/,
+    );
+    assert.throws(
+      () => runner.applyNodeOverride(definition, failed, {
+        nodeId: "script",
+        actor: "producer",
+        output: { text: "replacement" },
+        allowTerminalEdit: true,
+      }),
+      /uncertain paid-provider outcome/,
+    );
+    assert.throws(
+      () => runner.applyExecutionConfigurationOverride(definition, failed, {
+        nodeId: "script",
+        actor: "producer",
+        initialInput: {},
+      }),
+      /uncertain paid-provider outcome/,
+    );
     const staleAfterUpstreamEdit = {
       ...failed,
       status: "stale" as const,
@@ -888,6 +926,7 @@ describe("WorkflowRunner", () => {
     const plan = paused.nodeRuns[0]?.spendPlan;
     assert.ok(plan);
     const failed = await runner.authorizeSpend(definition, paused, {
+      spendPlanId: plan.id,
       nodeId: plan.nodeId,
       inputVersionIds: plan.inputVersionIds,
       providerId: plan.providerId,
@@ -905,6 +944,7 @@ describe("WorkflowRunner", () => {
 
   it("reuses the persisted external operation id when retrying an interrupted node", async () => {
     const observed: Array<string | undefined> = [];
+    const checkpoints: WorkflowRun[] = [];
     const registry = new ProviderRegistry();
     registry.register({
       id: "idempotent-provider",
@@ -968,6 +1008,7 @@ describe("WorkflowRunner", () => {
         finishedAt: "2026-08-30T00:01:00.000Z",
         operationRequestId: "persisted-operation-id",
         interrupted: true,
+        outcomeUncertain: true,
         artifactIds: [],
         qualityGateResults: [],
         error: "interrupted",
@@ -995,15 +1036,131 @@ describe("WorkflowRunner", () => {
       decisions: [],
     };
 
-    const retried = await new WorkflowRunner({ providers: registry }).retryFailedNode(definition, interrupted, "voice");
+    const runner = new WorkflowRunner({
+      providers: registry,
+      checkpoint: (run) => { checkpoints.push(structuredClone(run)); },
+    });
+    await assert.rejects(
+      () => runner.retryFailedNode(definition, interrupted, "voice"),
+      /uncertain paid-provider outcome/,
+    );
+    const retried = await runner.retryFailedNode(
+      definition,
+      interrupted,
+      "voice",
+      { resumeUncertainOperation: true },
+    );
 
     assert.equal(retried.status, "succeeded");
     assert.deepEqual(observed, ["persisted-operation-id"]);
+    assert.equal(checkpoints.find((run) => run.nodeRuns[0]?.status === "pending")?.nodeRuns[0]?.outcomeUncertain, true);
+    assert.equal(checkpoints.find((run) => run.nodeRuns[0]?.status === "pending")?.nodeRuns[0]?.interrupted, true);
+    assert.equal(checkpoints.find((run) => run.nodeRuns[0]?.status === "running")?.nodeRuns[0]?.outcomeUncertain, true);
     assert.equal(retried.nodeRuns[0]?.interrupted, undefined);
+    assert.equal(retried.nodeRuns[0]?.outcomeUncertain, undefined);
     assert.equal(retried.executionReceipts?.length, 1);
     assert.equal(retried.executionReceipts?.[0]?.status, "succeeded");
     assert.equal(retried.executionReceipts?.[0]?.actualCostCny, 0.1);
     assert.equal(retried.executionReceipts?.[0]?.actualCostSource, "configured_rate");
+  });
+
+  it("keeps a resumed interrupted operation locked when reconciliation fails without a new provider attempt", async () => {
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "idempotent-provider",
+      label: "Idempotent provider",
+      modelId: "voice-v1",
+      capability: "voice.synthesize",
+      transport: "http_api",
+      billing: "metered",
+      estimatedCostCny: 0.1,
+      maxCostCny: 0.1,
+      maxAttempts: 1,
+      quoteSpend: () => ({
+        estimatedCostCny: 0,
+        maxCostCny: 0,
+        requiresAuthorization: false,
+      }),
+      run: () => ({ rejected: true }),
+    });
+    const definition: WorkflowDefinition = {
+      id: "retry-interrupted-node-failed-reconciliation",
+      name: "Retry interrupted node with failed reconciliation",
+      version: "1.0.0",
+      nodes: [{
+        id: "voice",
+        label: "Voice",
+        capability: "voice.synthesize",
+        providerId: "idempotent-provider",
+        mode: "automatic",
+        execute: async (input, context) => {
+          await context.resolveProvider({
+            capability: "voice.synthesize",
+            providerId: "idempotent-provider",
+          }).run(input, context);
+          return {
+            status: "failed",
+            error: "provider task query failed",
+            receipt: {
+              providerId: "idempotent-provider",
+              providerLabel: "Idempotent provider",
+              modelId: "voice-v1",
+              transport: "http_api",
+              billing: "metered",
+              estimatedCostCny: 0.1,
+              actualCostCny: 0,
+              actualCostSource: "configured_rate",
+              meteredAttemptCount: 0,
+              meteredFailedAttemptCount: 0,
+            },
+          };
+        },
+      }],
+    };
+    const interrupted: WorkflowRun = {
+      id: "run-interrupted-query-failure",
+      revision: 1,
+      workflowId: definition.id,
+      workflowVersion: definition.version,
+      status: "failed",
+      initialInput: {},
+      startedAt: "2026-08-30T00:00:00.000Z",
+      finishedAt: "2026-08-30T00:01:00.000Z",
+      nodeRuns: [{
+        nodeId: "voice",
+        status: "failed",
+        startedAt: "2026-08-30T00:00:00.000Z",
+        finishedAt: "2026-08-30T00:01:00.000Z",
+        operationRequestId: "persisted-operation-id",
+        interrupted: true,
+        artifactIds: [],
+        qualityGateResults: [],
+        error: "interrupted",
+      }],
+      artifacts: [],
+      interventions: [],
+      decisions: [],
+    };
+    const runner = new WorkflowRunner({ providers: registry });
+
+    const failed = await runner.retryFailedNode(definition, interrupted, "voice");
+
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.nodeRuns[0]?.operationRequestId, "persisted-operation-id");
+    assert.equal(failed.nodeRuns[0]?.outcomeUncertain, true);
+    assert.equal(failed.nodeRuns[0]?.executionReceipt?.meteredAttemptCount, 0);
+    await assert.rejects(
+      () => runner.retryFailedNode(definition, failed, "voice"),
+      /uncertain paid-provider outcome/,
+    );
+    assert.throws(
+      () => runner.applyExecutionConfigurationOverride(definition, failed, {
+        nodeId: "voice",
+        initialInput: {},
+        actor: "owner",
+      }),
+      /uncertain paid-provider outcome/,
+    );
   });
 
   it("records actual cost and fails the node when reported spending exceeds authorization", async () => {
@@ -1055,6 +1212,7 @@ describe("WorkflowRunner", () => {
       const plan = paused.nodeRuns[0]?.spendPlan;
       assert.ok(plan);
       const run = await runner.authorizeSpend(definition, paused, {
+        spendPlanId: plan.id,
         nodeId: plan.nodeId,
         inputVersionIds: plan.inputVersionIds,
         providerId: plan.providerId,
@@ -1132,6 +1290,7 @@ describe("WorkflowRunner", () => {
     assert.ok(plan);
 
     const failed = await runner.authorizeSpend(definition, paused, {
+      spendPlanId: plan.id,
       nodeId: plan.nodeId,
       inputVersionIds: plan.inputVersionIds,
       providerId: plan.providerId,
@@ -1276,6 +1435,7 @@ describe("WorkflowRunner", () => {
     assert.ok(plan);
 
     const failed = await runner.authorizeSpend(definition, paused, {
+      spendPlanId: plan.id,
       nodeId: plan.nodeId,
       inputVersionIds: plan.inputVersionIds,
       providerId: plan.providerId,
@@ -1332,6 +1492,7 @@ describe("WorkflowRunner", () => {
     assert.ok(plan);
 
     const failed = await runner.authorizeSpend(definition, paused, {
+      spendPlanId: plan.id,
       nodeId: plan.nodeId,
       inputVersionIds: plan.inputVersionIds,
       providerId: plan.providerId,
@@ -2185,6 +2346,22 @@ describe("WorkflowRunner", () => {
     assert.ok(plan);
     await assert.rejects(
       () => runner.authorizeSpend(definition, paused, {
+        spendPlanId: "stale-spend-plan",
+        nodeId: plan.nodeId,
+        inputVersionIds: plan.inputVersionIds,
+        providerId: plan.providerId,
+        modelId: plan.modelId,
+        maxCostCny: plan.maxCostCny,
+        maxAttempts: plan.maxAttempts,
+        approvedBy: "producer",
+      }),
+      /does not match the active plan/,
+    );
+    assert.equal(paidCalls, 0);
+
+    await assert.rejects(
+      () => runner.authorizeSpend(definition, paused, {
+        spendPlanId: plan.id,
         nodeId: plan.nodeId,
         inputVersionIds: plan.inputVersionIds,
         providerId: plan.providerId,
@@ -2198,6 +2375,7 @@ describe("WorkflowRunner", () => {
     assert.equal(paidCalls, 0);
 
     const resumed = await runner.authorizeSpend(definition, paused, {
+      spendPlanId: plan.id,
       nodeId: plan.nodeId,
       inputVersionIds: plan.inputVersionIds,
       providerId: plan.providerId,
@@ -2280,6 +2458,7 @@ describe("WorkflowRunner", () => {
     const originalPlan = structuredClone(plan);
     itemCostCny = 1.5;
     const invalidated = await runner.authorizeSpend(definition, paused, {
+      spendPlanId: plan.id,
       nodeId: plan.nodeId,
       inputVersionIds: plan.inputVersionIds,
       providerId: plan.providerId,
@@ -2480,6 +2659,7 @@ describe("WorkflowRunner", () => {
     registry.replace(provider("automatic"));
 
     await assert.rejects(() => runner.authorizeSpend(definition, paused, {
+      spendPlanId: plan.id,
       nodeId: plan.nodeId,
       inputVersionIds: plan.inputVersionIds,
       providerId: plan.providerId,
@@ -2629,6 +2809,7 @@ describe("WorkflowRunner", () => {
     assert.ok(plan);
 
     const completed = await runner.authorizeSpend(definition, paused, {
+      spendPlanId: plan.id,
       nodeId: plan.nodeId,
       inputVersionIds: plan.inputVersionIds,
       providerId: plan.providerId,
@@ -2727,6 +2908,7 @@ describe("WorkflowRunner", () => {
     assert.ok(plan);
 
     const completed = await runner.authorizeSpend(definition, paused, {
+      spendPlanId: plan.id,
       nodeId: plan.nodeId,
       inputVersionIds: plan.inputVersionIds,
       providerId: plan.providerId,
@@ -2794,6 +2976,7 @@ describe("WorkflowRunner", () => {
       const plan = paused.nodeRuns.find((node) => node.nodeId === "render")?.spendPlan;
       assert.ok(plan);
       const authorization = {
+        spendPlanId: plan.id,
         nodeId: plan.nodeId,
         inputVersionIds: plan.inputVersionIds,
         providerId: plan.providerId,
@@ -2934,6 +3117,7 @@ describe("WorkflowRunner", () => {
     assert.ok(firstPlan);
 
     const secondPause = await runner.authorizeSpend(definition, firstPause, {
+      spendPlanId: firstPlan.id,
       nodeId: firstPlan.nodeId,
       inputVersionIds: firstPlan.inputVersionIds,
       providerId: firstPlan.providerId,
@@ -2967,6 +3151,7 @@ describe("WorkflowRunner", () => {
 
     await assert.rejects(
       () => runner.authorizeSpend(definition, secondPause, {
+        spendPlanId: firstPlan.id,
         nodeId: firstPlan.nodeId,
         inputVersionIds: firstPlan.inputVersionIds,
         providerId: firstPlan.providerId,
@@ -2979,6 +3164,7 @@ describe("WorkflowRunner", () => {
     );
 
     const completed = await runner.authorizeSpend(definition, secondPause, {
+      spendPlanId: secondPlan.id,
       nodeId: secondPlan.nodeId,
       inputVersionIds: secondPlan.inputVersionIds,
       providerId: secondPlan.providerId,

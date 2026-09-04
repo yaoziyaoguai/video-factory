@@ -18,4 +18,23 @@ describe("creator-facing presentation labels", () => {
     const creatorCopy = "我的 Provider 不是故事主角，Agent 也不是标题。";
     expect(humanizeCreativeText(creatorCopy)).toBe(creatorCopy);
   });
+
+  it("translates persisted worker provenance into clear Chinese", () => {
+    expect(creatorFacingTechnicalText("VideoFactory generated script; human review required before publishing."))
+      .toBe("AI 生成脚本；发布前需要人工核对事实与表述。");
+    expect(creatorFacingTechnicalText("License snapshot is stored per scene asset in this plan."))
+      .toBe("本方案按镜头保存了每项素材的授权记录。");
+    expect(creatorFacingTechnicalText("Asset rights require review."))
+      .toBe("素材使用权需要人工核对。");
+    expect(creatorFacingTechnicalText("Locally generated narration; verify the selected voice provider terms."))
+      .toBe("本机生成的配音；发布前需核对所选配音服务的使用条款。");
+    expect(creatorFacingTechnicalText("VideoFactory voice timeline metadata."))
+      .toBe("配音时间轴记录。");
+    expect(creatorFacingTechnicalText("Composite output; see the linked asset and voiceover plans for source terms."))
+      .toBe("合成成片；素材与配音的来源条款请查看关联的画面和配音方案。");
+    expect(creatorFacingTechnicalText("VideoFactory render metadata."))
+      .toBe("成片渲染记录。");
+    expect(creatorFacingTechnicalText("VideoFactory technical review result."))
+      .toBe("机器质检结果。");
+  });
 });

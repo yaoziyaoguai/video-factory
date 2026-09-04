@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { CodexBridgeClient, CodexTaskExecution, ModelCandidateAttempt } from "./codex-chat.js";
+import type { AgentLoopTrace, CodexBridgeClient, CodexTaskExecution, ModelCandidateAttempt } from "./codex-chat.js";
 import {
   failedModelCandidateAttempt,
   fallbackRequestId,
   isModelProviderFailure,
+  isTransientRoleAuditProviderFailure,
   publicModelFailure,
 } from "./model-fallback.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
@@ -156,22 +157,30 @@ export class FallbackVisualReviewAgent implements VisualReviewAgent {
     ];
     const candidates = orderVisualReviewCandidates(configuredCandidates, input.selectedModelId);
     const failures: Array<{ modelId: string; providerId: string; error: unknown }> = [];
+    let resumeFrom: AgentLoopTrace | undefined;
     for (const [position, candidate] of candidates.entries()) {
-      const candidateInput = visualReviewInputForCandidate(input, candidate.agent.modelId, position);
+      const candidateInput = visualReviewInputForCandidate(input, candidate.agent.modelId, position, resumeFrom);
       try {
         const execution = await runVisualReviewAgent(candidate.agent, candidateInput);
         if (!execution.trace) {
           throw new Error(`Visual review model candidate '${candidate.agent.modelId}' completed without an immutable execution trace.`);
         }
-        const executedProviderId = execution.trace?.providerId ?? candidate.agent.id;
-        const executedModelId = execution.trace?.modelId ?? candidate.agent.modelId;
+        const recoveredAuditTrace = resumeFrom
+          ? execution.agentLoop?.iterations.at(-1)?.auditTrace
+          : undefined;
+        if (resumeFrom && !recoveredAuditTrace) {
+          throw new Error(`Visual review audit fallback model '${candidate.agent.modelId}' completed without an immutable audit trace.`);
+        }
+        const resultTrace = recoveredAuditTrace ?? execution.trace;
+        const executedProviderId = resultTrace.providerId ?? candidate.agent.id;
+        const executedModelId = resultTrace.modelId ?? candidate.agent.modelId;
         const modelCandidateAttempts = [
           ...failures.map((failure) => failedModelCandidateAttempt(
             failure.error,
             failure.modelId,
             failure.providerId,
           )),
-          ...(execution.trace?.modelCandidateAttempts ?? [{
+          ...(resultTrace.modelCandidateAttempts ?? [{
             modelId: executedModelId,
             providerId: executedProviderId,
             outcome: "succeeded" as const,
@@ -179,7 +188,7 @@ export class FallbackVisualReviewAgent implements VisualReviewAgent {
         ];
         const attemptedModelIds = [...new Set([
           ...failures.map((failure) => failure.modelId),
-          ...(execution.trace?.attemptedModelIds ?? [executedModelId]),
+          ...(resultTrace.attemptedModelIds ?? [executedModelId]),
         ])];
         return {
           ...execution,
@@ -188,23 +197,31 @@ export class FallbackVisualReviewAgent implements VisualReviewAgent {
           executedModelId,
           ...(position > 0 ? {
             fallbackFromProviderId: candidates[0]!.providerId,
-            fallbackReason: `前 ${position} 个候选模型调用失败，已自动切换到 ${executedModelId}。`,
+            fallbackReason: resumeFrom
+              ? `独立审计暂时失败，已保留审片候选并切换到 ${executedModelId}。`
+              : `前 ${position} 个候选模型调用失败，已自动切换到 ${executedModelId}。`,
           } : {}),
           attemptedModelIds,
-          ...(execution.trace ? {
-            trace: {
-              ...execution.trace,
-              ...(position > 0 ? {
-                fallbackFromModelId: candidates[0]!.agent.modelId,
-                fallbackReason: `前 ${position} 个候选模型调用失败，已自动切换。`,
-              } : {}),
-              attemptedModelIds,
-              modelCandidateAttempts,
-            },
-          } : {}),
+          trace: {
+            ...resultTrace,
+            ...(position > 0 ? {
+              fallbackFromModelId: candidates[0]!.agent.modelId,
+              fallbackReason: resumeFrom
+                ? "首选模型的独立审计暂时失败，已保留审片候选并切换兼容审计模型。"
+                : `前 ${position} 个候选模型调用失败，已自动切换。`,
+            } : {}),
+            attemptedModelIds,
+            modelCandidateAttempts,
+          },
         };
       } catch (error) {
         failures.push({ modelId: candidate.agent.modelId, providerId: candidate.providerId, error });
+        if (isTransientRoleAuditProviderFailure(error)) {
+          if (this.options.shouldFallback && !this.options.shouldFallback(error)) throw error;
+          resumeFrom = error.agentLoop;
+          if (position === candidates.length - 1) throw new VisualReviewFallbackError(failures);
+          continue;
+        }
         if (!(this.options.shouldFallback ?? isModelProviderFailure)(error)) throw error;
         if (position === candidates.length - 1) throw new VisualReviewFallbackError(failures);
       }
@@ -358,6 +375,7 @@ function visualReviewInputForCandidate(
   input: VisualReviewAgentInput,
   modelId: string,
   position: number,
+  resumeFrom?: AgentLoopTrace,
 ): VisualReviewAgentInput {
   const {
     selectedModelId: _selectedModelId,
@@ -365,14 +383,40 @@ function visualReviewInputForCandidate(
     agentLoopCheckpointForModel,
     ...inputWithoutCheckpoint
   } = input;
-  const checkpoint = agentLoopCheckpointForModel?.(modelId)
+  const baseCheckpoint = agentLoopCheckpointForModel?.(modelId)
     ?? (position === 0 ? primaryCheckpoint : undefined);
+  const checkpoint = resumeFrom
+    ? visualReviewAuditFallbackCheckpoint(baseCheckpoint, modelId, resumeFrom)
+    : baseCheckpoint;
   return {
     ...inputWithoutCheckpoint,
     ...(input.requestId
       ? { requestId: position === 0 ? input.requestId : fallbackRequestId(input.requestId, modelId, position) }
       : {}),
     ...(checkpoint ? { agentLoopCheckpoint: checkpoint } : {}),
+  };
+}
+
+function visualReviewAuditFallbackCheckpoint(
+  checkpoint: RoleAgentLoopCheckpoint | undefined,
+  modelId: string,
+  resumeFrom: AgentLoopTrace,
+): RoleAgentLoopCheckpoint {
+  if (checkpoint) {
+    return {
+      key: checkpoint.key,
+      ...(checkpoint.restartExhausted !== undefined ? { restartExhausted: checkpoint.restartExhausted } : {}),
+      resumeFrom,
+      load: () => checkpoint.load(),
+      save: (value) => checkpoint.save(value),
+    };
+  }
+  let stored: unknown;
+  return {
+    key: `visual-audit-fallback:${modelId}:${resumeFrom.pendingCandidate!.candidateHash}`,
+    resumeFrom,
+    load: async () => stored,
+    save: async (value) => { stored = structuredClone(value); },
   };
 }
 

@@ -50,6 +50,20 @@ interface AsyncAdapterOptions {
   timeoutMs?: number;
 }
 
+class RetryableProviderTransportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RetryableProviderTransportError";
+  }
+}
+
+class ProviderPollingDeadlineError extends RetryableProviderTransportError {
+  constructor() {
+    super("Video provider request exceeded the polling deadline.");
+    this.name = "ProviderPollingDeadlineError";
+  }
+}
+
 export interface SeedanceVideoAdapterOptions extends AsyncAdapterOptions {
   baseUrl?: string;
   allowedModels?: string[];
@@ -207,31 +221,47 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     taskId: string,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt <= this.timeoutMs) {
-      const queryUrl = new URL(`${this.apiRoot}/v1/query/video_generation`);
-      queryUrl.searchParams.set("task_id", taskId);
-      const task = await requestJson(this.fetch, queryUrl.toString(), { headers: authHeaders(this.options.apiKey) });
-      assertMiniMaxSuccess(task);
-      const status = requiredString(task.status, "MiniMax task status");
-      if (status === "Success") {
-        const fileId = requiredString(task.file_id, "MiniMax file id");
-        const fileUrl = new URL(`${this.apiRoot}/v1/files/retrieve`);
-        fileUrl.searchParams.set("file_id", fileId);
-        const retrieved = await requestJson(this.fetch, fileUrl.toString(), { headers: authHeaders(this.options.apiKey) });
-        assertMiniMaxSuccess(retrieved);
-        const file = requiredRecord(retrieved.file, "MiniMax file");
-        const videoUrl = requiredHttpUrl(file.download_url, "MiniMax video URL");
-        await onProgress?.({ providerId: this.providerId, taskId, status: "succeeded", videoUrl });
-        return { providerId: this.providerId, taskId, videoUrl };
+    const deadline = Date.now() + this.timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const queryUrl = new URL(`${this.apiRoot}/v1/query/video_generation`);
+        queryUrl.searchParams.set("task_id", taskId);
+        const task = await requestJsonBeforeDeadline(
+          this.fetch,
+          queryUrl.toString(),
+          { headers: authHeaders(this.options.apiKey) },
+          deadline,
+        );
+        assertMiniMaxSuccess(task);
+        const status = requiredString(task.status, "MiniMax task status");
+        if (status === "Success") {
+          const fileId = requiredString(task.file_id, "MiniMax file id");
+          const fileUrl = new URL(`${this.apiRoot}/v1/files/retrieve`);
+          fileUrl.searchParams.set("file_id", fileId);
+          const retrieved = await requestJsonBeforeDeadline(
+            this.fetch,
+            fileUrl.toString(),
+            { headers: authHeaders(this.options.apiKey) },
+            deadline,
+          );
+          assertMiniMaxSuccess(retrieved);
+          const file = requiredRecord(retrieved.file, "MiniMax file");
+          const videoUrl = requiredHttpUrl(file.download_url, "MiniMax video URL");
+          await onProgress?.({ providerId: this.providerId, taskId, status: "succeeded", videoUrl });
+          return { providerId: this.providerId, taskId, videoUrl };
+        }
+        if (status === "Fail") {
+          const message = miniMaxError(task, `MiniMax task '${taskId}' failed.`);
+          await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
+          throw new Error(message);
+        }
+      } catch (error) {
+        // 已取得 taskId 后，查询或取文件的临时断线可以安全重试；绝不重新提交生成请求。
+        if (!(error instanceof RetryableProviderTransportError)) throw error;
       }
-      if (status === "Fail") {
-        const message = miniMaxError(task, `MiniMax task '${taskId}' failed.`);
-        await onProgress?.({ providerId: this.providerId, taskId, status: "failed", error: message });
-        throw new Error(message);
-      }
+      if (Date.now() >= deadline) break;
       await onProgress?.({ providerId: this.providerId, taskId, status: "running" });
-      await this.sleep(this.pollIntervalMs);
+      await this.sleep(Math.min(this.pollIntervalMs, Math.max(0, deadline - Date.now())));
     }
     const message = `MiniMax task '${taskId}' timed out after ${this.timeoutMs}ms.`;
     await onProgress?.({ providerId: this.providerId, taskId, status: "unknown", error: message });
@@ -264,13 +294,24 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     taskId: string,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt <= this.timeoutMs) {
-      const response = await requestJson(
-        this.fetch,
-        `${this.apiRoot}/v2/query/video_generation/${encodeURIComponent(taskId)}`,
-        { headers: authHeaders(this.options.apiKey) },
-      );
+    const deadline = Date.now() + this.timeoutMs;
+    while (Date.now() < deadline) {
+      let response: Record<string, unknown>;
+      try {
+        response = await requestJsonBeforeDeadline(
+          this.fetch,
+          `${this.apiRoot}/v2/query/video_generation/${encodeURIComponent(taskId)}`,
+          { headers: authHeaders(this.options.apiKey) },
+          deadline,
+        );
+      } catch (error) {
+        // 任务已受理后，只重试原 taskId 的查询；创建请求绝不能重放。
+        if (!(error instanceof RetryableProviderTransportError)) throw error;
+        if (Date.now() >= deadline) break;
+        await onProgress?.({ providerId: this.providerId, taskId, status: "running" });
+        await this.sleep(Math.min(this.pollIntervalMs, Math.max(0, deadline - Date.now())));
+        continue;
+      }
       const task = requiredRecord(response.task, "MiniMax H3 task");
       const status = requiredString(task.status, "MiniMax H3 task status");
       if (status === "succeeded") {
@@ -285,7 +326,7 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
         throw new Error(message);
       }
       await onProgress?.({ providerId: this.providerId, taskId, status: "running" });
-      await this.sleep(this.pollIntervalMs);
+      await this.sleep(Math.min(this.pollIntervalMs, Math.max(0, deadline - Date.now())));
     }
     const message = `MiniMax H3 task '${taskId}' timed out after ${this.timeoutMs}ms.`;
     await onProgress?.({ providerId: this.providerId, taskId, status: "unknown", error: message });
@@ -471,6 +512,35 @@ async function requestJson(fetcher: FetchLike, url: string, init: RequestInit): 
     );
   }
   return requiredRecord(value, "Video provider response");
+}
+
+async function requestJsonBeforeDeadline(
+  fetcher: FetchLike,
+  url: string,
+  init: RequestInit,
+  deadline: number,
+): Promise<Record<string, unknown>> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) throw new ProviderPollingDeadlineError();
+
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new ProviderPollingDeadlineError());
+    }, remainingMs);
+  });
+  const request = requestJson(fetcher, url, { ...init, signal: controller.signal }).catch((error: unknown) => {
+    if (controller.signal.aborted) throw new ProviderPollingDeadlineError();
+    if (error instanceof TypeError) throw new RetryableProviderTransportError(error.message);
+    throw error;
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function authHeaders(apiKey: string): Record<string, string> {
