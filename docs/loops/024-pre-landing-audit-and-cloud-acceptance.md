@@ -56,6 +56,10 @@ ZAI executor 把所有 `status >= 500` 标为瞬态故障，导致通用执行�
 
 Python worker 保存的配音、时间轴、成片和机器质检 provenance 使用英文固定文案。素材库展开历史任务时，展示层没有将这些稳定值转成创作者可读的中文，导致“来源与授权”混入内部英文说明。应只在展示层精确映射，保留持久化审计记录原文。
 
+### VF-CA-026 — ZAI 能力扩展后部署健康检查仍使用旧任务清单
+
+PR #28 将 ZAI Broker 从 3 类任务扩展到完整任务集，但 `restart_brokers` 仍按旧的 `director-plan,script-draft,visual-review` 精确校验。GitHub Actions run `33891067594` 中新 Broker 正常启动，却因健康响应包含更多任务而被误判不可用并触发安全回滚。部署校验已同步为完整任务合同，并增加回归断言。
+
 ## Verification Plan
 
 1. 每个 finding 增加最窄回归测试并通过。
