@@ -410,6 +410,7 @@ describe("CandidateInboxStudio", () => {
         evidence: [
           { ...trendCandidate.evidence[0]!, source: "微博搜索", evidenceUrl: "https://s.weibo.com/weibo?q=%23AI%23" },
           { ...trendCandidate.evidence[0]!, source: "百度搜索", evidenceUrl: "https://www.baidu.com/s?wd=AI" },
+          { ...trendCandidate.evidence[0]!, source: "快手搜索", evidenceUrl: "https://www.kuaishou.com/search/video?searchKey=AI" },
         ],
       }] },
       series,

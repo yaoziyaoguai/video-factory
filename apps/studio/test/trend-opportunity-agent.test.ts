@@ -441,7 +441,7 @@ describe("TrendOpportunityAgent", () => {
     assert.match(decision.reasons.join(" "), /标题没有形成可判断的具体问题/);
   });
 
-  it("keeps a specific traceable rule fallback producible when the semantic model returns no ideas", async () => {
+  it("keeps a specific traceable rule fallback out of production when the semantic model returns no ideas", async () => {
     let modelCalls = 0;
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => [signals[0]!] },
@@ -466,8 +466,8 @@ describe("TrendOpportunityAgent", () => {
 
     assert.equal(modelCalls, 2);
     assert.equal(candidate?.providerId, "trend-heuristic-v1");
-    assert.equal(decision.verdict, "produce_video");
-    assert.equal(decision.recommendedTemplate?.id, "trend-fact-brief");
+    assert.equal(decision.verdict, "skip");
+    assert.match(decision.reasons.join(" "), /规则保底候选|选题总编/);
   });
 
   it("still applies creator positioning, audience, preferences, and exclusions in rule fallback", async () => {

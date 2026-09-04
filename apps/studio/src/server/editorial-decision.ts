@@ -13,6 +13,7 @@ import { BUILTIN_TEMPLATES } from "./template-catalog.js";
 
 export interface EditorialDecisionInput {
   origin: StudioCandidateOrigin;
+  providerId?: string;
   title: string;
   track: string;
   category: StudioTopicCategory;
@@ -50,6 +51,15 @@ export function decideEditorialFormat(input: EditorialDecisionInput): StudioEdit
       score: 0,
       reasons: [`选题尚未达到视频生产门槛：${readinessIssues.join("；")}。`],
       guardrails: ["先补齐明确受众、具体痛点、两秒开场承诺和可追溯证据，再重新评估制作形式。"],
+    };
+  }
+
+  if (input.providerId === "trend-heuristic-v1") {
+    return {
+      verdict: "skip",
+      score: 0,
+      reasons: ["当前只是热点规则保底候选，还没有经过选题总编形成具体、可拍的创作角度。"],
+      guardrails: ["等待选题总编恢复，或由创作者补齐明确受众、观看收益、两秒钩子和可执行视频形态后再评估。"],
     };
   }
 

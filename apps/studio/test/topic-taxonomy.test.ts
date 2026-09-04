@@ -29,6 +29,8 @@ describe("topic taxonomy", () => {
     assert.equal(topicRiskLevel("为什么要往死里扫黄"), "review");
     assert.equal(topicRiskLevel("癌症疫苗来了"), "review");
     assert.equal(topicRiskLevel("自动驾驶违法由车企担责，修订草案提请审议"), "review");
+    assert.equal(topicRiskLevel("抗战胜利81周年"), "review");
+    assert.equal(classifyTopicCategory("抗战胜利81周年"), "society");
     assert.equal(topicRiskLevel("全国政协副主席陈武逝世"), "high");
     assert.equal(topicRiskLevel("年轻人重新学习做饭"), "low");
   });
