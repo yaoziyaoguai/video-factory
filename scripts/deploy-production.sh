@@ -270,7 +270,8 @@ restart_brokers() {
   fi
   if [[ "$zai_broker_enabled" -eq 1 ]]; then
     if ! systemctl restart "$zai_broker_service" \
-      || ! wait_for_broker_health "$zai_broker_socket" 20 zai zai-bigmodel-api director-plan,script-draft,visual-review; then
+      || ! wait_for_broker_health "$zai_broker_socket" 20 zai zai-bigmodel-api \
+        topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
       echo "Configured ZAI Code Plan broker is unavailable; refusing a partial deployment." >&2
       failed=1
     fi

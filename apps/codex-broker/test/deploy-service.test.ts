@@ -304,7 +304,7 @@ case " $* " in
         if [ "$DEPLOY_SCENARIO" = "broker-identity" ] && [ "$current_release" != "$TEST_PREVIOUS_RELEASE" ]; then
           echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"openai","providerId":"openai","modelId":"gpt-test","taskKinds":["director-plan","script-draft","visual-review"],"taskModels":{"director-plan":"gpt-test","script-draft":"gpt-test","visual-review":"gpt-test"}}'
         else
-          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"zai","providerId":"zai-bigmodel-api","modelId":"glm-5.3","taskKinds":["director-plan","script-draft","visual-review"],"taskModels":{"director-plan":"glm-5.3","script-draft":"glm-5.3","visual-review":"glm-5.3-flash"}}'
+          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"zai","providerId":"zai-bigmodel-api","modelId":"glm-5.3","taskKinds":["topic-ideas","series-roadmap","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"glm-5.3","series-roadmap":"glm-5.3","director-plan":"glm-5.3","script-draft":"glm-5.3","publish-copy":"glm-5.3","asset-rank":"glm-5.3-flash","reference-grammar":"glm-5.3-flash","visual-review":"glm-5.3-flash","role-audit":"glm-5.3"}}'
         fi
         ;;
       *)
@@ -736,6 +736,10 @@ exit 42
     assert.match(deploy, /health\.profileId === process\.env\.EXPECTED_BROKER_PROFILE/);
     assert.match(deploy, /health\.providerId === process\.env\.EXPECTED_BROKER_PROVIDER/);
     assert.match(deploy, /expectedKinds\.every\(\(kind\) => typeof taskModels\[kind\] === "string"/);
+    assert.match(
+      deploy,
+      /wait_for_broker_health "\$zai_broker_socket" 20 zai zai-bigmodel-api \\\n\s+topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit/,
+    );
   });
 
   it("uses authenticated GET readiness probes that cannot submit billable content", async () => {
