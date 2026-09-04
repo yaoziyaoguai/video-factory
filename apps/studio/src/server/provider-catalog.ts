@@ -127,7 +127,7 @@ export function buildProviderCatalog(
   ];
   const roleRequirement = (taskKind: string) => codexRoleAvailable(taskKind) || zaiRoleAvailable(taskKind)
     ? "至少一个能同时完成生产与独立质量复核的模型服务可用。"
-    : `OpenAI：${codexRequirement(taskKind)} ${codexRequirement("role-audit")} ZAI：${zaiCodexRequirementFor(taskKind)} ${zaiCodexRequirementFor("role-audit")}`;
+    : `OpenAI：${uniqueRequirements(codexRequirement(taskKind), codexRequirement("role-audit"))} ZAI：${uniqueRequirements(zaiCodexRequirementFor(taskKind), zaiCodexRequirementFor("role-audit"))}`;
   const zaiVisualProducerAvailable = supportsTask(zaiCodex, "visual-review");
   const codexVisualProducerAvailable = supportsTask(codex, "visual-review");
   const zaiVisualReviewAvailable = runtime.python
@@ -668,6 +668,10 @@ export function buildTrendSourceCatalog(
 function supportsTask(availability: CodexCatalogAvailability, taskKind: string): boolean {
   return availability.available
     && (availability.taskKinds === undefined || availability.taskKinds.includes(taskKind));
+}
+
+function uniqueRequirements(...requirements: string[]): string {
+  return [...new Set(requirements)].join(" ");
 }
 
 function providerTaskRequirement(

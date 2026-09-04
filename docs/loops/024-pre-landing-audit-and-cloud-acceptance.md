@@ -60,11 +60,33 @@ Python worker 保存的配音、时间轴、成片和机器质检 provenance 使
 
 PR #28 将 ZAI Broker 从 3 类任务扩展到完整任务集，但部署脚本有两处仍按旧的 `director-plan,script-draft,visual-review` 精确校验。GitHub Actions run `33891067594` 在 Broker 首次启动后误判；修复该处后的 run `33893336946` 又在应用启动后的二次检查误判，并暴露回滚旧版 Broker 仍需接受三任务合同。候选和部署后二次检查现精确要求完整任务集；回滚则验证旧版三项基础能力并允许新版超集，保证跨合同版本恢复。
 
+### VF-CA-027 至 VF-CA-041 — 云端广度测试与真实成片问题
+
+云端继续暴露了登录态失真、素材 Provider 重名、旧选题绕过新门禁、失败节点仍显示运行中、搜索状态错误、帮助文案缺少失败态、热点刷新状态不可见、授权清单不可操作、QA 模板泄露、素材状态用词错误、GLM-5.3-Flash 推理强度不兼容、AIGC 披露混入导演门禁、源素材文字污染、24 秒成片多一帧，以及图库主体/动作不匹配等问题。逐条复现证据保存在 `output/playwright/cloud-qa/acceptance-journal.md`。
+
+### VF-CA-042 — 返工草稿泄露内部字段名
+
+审片建议已能按目标节点预填，但早期数据中的 `manualReplacement` 会原样进入返工弹窗。展示入口现统一转换为“人工补充素材”，不修改底层审计记录。
+
+### VF-CA-043 — 选题总编合同自相矛盾导致数轮无效审计
+
+真实热点刷新耗时约 461 秒。根因不是单纯模型慢：输出 Schema 要求 `audience`、`painPoint`，但角色拥有字段漏掉两者，独立审计会反复要求删除必填字段。合同现将两字段归还给选题总编，并升级 checkpoint key，避免恢复旧的冲突状态。
+
+## Consolidated Local Resolution
+
+- 返工继承不可变模板、标题、角度、受众、时长、声音、画面来源和节点模型；视觉 finding 以 `targetNodeId` 精确预填到脚本、导演方案或素材节点。
+- 图片与视频仍逐镜报价、逐次人工批准；没有全局或单视频硬费用上限。拒绝报价只记录降本反馈，用户主动重新规划后才调用导演。
+- 生成、图库、复用失败不再产生说明卡；只有导演明确选择 `editorial_card` 才允许正式卡片。
+- 生成素材在渲染前增加独立的 `asset-source-review` 文字污染、主体和动作一致性门禁；失败保留已生成画面，只重试免费预检，不会启动配音、渲染或再次调用付费画面模型。
+- 24 秒、30fps 的渲染输出固定为 720 帧，移除项目名、Scene 编号、导演字段和自动标签，只保留正式字幕与首镜 AIGC 披露。
+- 文本和视觉模型按节点首选模型及健康候选池执行；只有已分类的连接、超时、限流、容量或明确服务不可用错误触发 backup。GLM-5.3-Flash 将不支持的 `xhigh` 规范化为 `max`。
+- 素材授权审核、500 条以上待审记录、失败/登录/搜索/帮助状态、模板 CRUD 和 QA 模板迁移均增加了行为回归测试。
+
 ## Verification Plan
 
 1. 每个 finding 增加最窄回归测试并通过。
 2. 运行 `make test`、生产 build、部署脚本语法与 `git diff --check`。
-3. 更新 README、现行指南、History 与 Graphify 增量图。
+3. 更新 README、现行指南与验收 journal。本轮 `graphify update` 已一次成功完成；按用户要求不继续排查或重跑 Graphify。
 4. 重启本地 Studio，完成桌面与 390×844 移动端真实点击，检查 console 与所有固定文案。
 5. 提交分支、创建 PR，等待 GitHub Actions 全绿后合并 `main`，由 Actions 部署阿里云。
 6. 在云端重复桌面与移动端点击，并制作一条合理小额付费视频。
@@ -72,4 +94,8 @@ PR #28 将 ZAI Broker 从 3 类任务扩展到完整任务集，但部署脚本�
 
 ## Completion Evidence
 
-尚待本轮修复、完整门禁、本地点击、部署与云端成片验收后填写。
+- 正确的 Studio 测试入口与仓库级 `npm test` 已完整通过；最新一轮包含 Studio Vitest 249/249、Broker 112/112、production build 与 package smoke 3/3，Pipeline 仅保留 1 个显式真实 E2E 跳过。
+- `make test-py` 已通过：Python 104/104。
+- 本地桌面与 390×844 移动端完成真实点击：返工继承与建议预填、模型/素材切换、模板增删改、选题策略、声音预设、素材库按作品展开、搜索与移动端横向布局均通过；浏览器 console 无 error。
+- `git diff --check` 已通过。
+- 尚待：最终只读 diff 审计、提交推送、GitHub Actions 部署，以及云端桌面/移动端和一条真实付费视频的最终验收。完成前本 Loop 保持 `in progress`。

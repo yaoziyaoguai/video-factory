@@ -30,6 +30,7 @@ const ERROR_RESPONSE_READ_TIMEOUT_MS = 250;
 const IMAGE_TASK_KINDS = new Set<BrokerTaskKind>(["asset-rank", "reference-grammar", "visual-review"]);
 const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
 const TRANSIENT_ERROR_CODE_PATTERN = /^(?:temporarily[_-]unavailable|(?:service|model|capacity)[_-](?:temporarily[_-])?unavailable|(?:insufficient|exhausted|unavailable)[_-](?:model[_-])?capacity|(?:(?:model|capacity)[_-])?overload(?:ed)?)$/i;
+const INVALID_REQUEST_ERROR_CODE_PATTERN = /^(?:invalid|bad)[_-](?:request|parameter|argument)$/i;
 
 export interface ZaiCodePlanExecutorOptions {
   env?: NodeJS.ProcessEnv;
@@ -88,6 +89,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     const timeout = setTimeout(() => controller.abort(new Error("timeout")), this.timeoutMs);
     const images = taskImages(task);
     const modelId = images.length > 0 ? this.visualModelId : this.textModelId;
+    const reasoningEffort = zaiReasoningEffort(modelId, this.effort);
     const requestStartedAt = this.now();
 
     try {
@@ -110,7 +112,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
             ] : prompt,
           }],
           thinking: { type: "enabled", clear_thinking: false },
-          reasoning_effort: this.effort,
+          reasoning_effort: reasoningEffort,
           temperature: 1,
           top_p: 0.95,
           max_tokens: 8_192,
@@ -181,7 +183,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
           prompt,
           providerId: this.identity.providerId,
           modelId,
-          reasoningEffort: this.effort,
+          reasoningEffort,
           providerWaitMs,
           firstOutputEventMs: providerWaitMs,
           toolMs: 0,
@@ -215,6 +217,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
 
 function failureCategoryFor(status: number, code: string | undefined): "authentication" | "invalid_request" | "rate_limited" | "service_unavailable" | "execution_failed" {
   if (status === 401 || status === 403) return "authentication";
+  if (isExplicitInvalidRequestCode(code)) return "invalid_request";
   if (status === 429) return "rate_limited";
   if (status === 502 || status === 503 || status === 504 || isExplicitTransientCode(code)) return "service_unavailable";
   if (status === 400 || status === 404 || status === 409 || status === 422) return "invalid_request";
@@ -222,11 +225,20 @@ function failureCategoryFor(status: number, code: string | undefined): "authenti
 }
 
 function isTransientProviderFailure(status: number, code: string | undefined): boolean {
+  if (isExplicitInvalidRequestCode(code)) return false;
   return TRANSIENT_HTTP_STATUSES.has(status) || isExplicitTransientCode(code);
 }
 
 function isExplicitTransientCode(code: string | undefined): boolean {
   return code !== undefined && TRANSIENT_ERROR_CODE_PATTERN.test(code);
+}
+
+function isExplicitInvalidRequestCode(code: string | undefined): boolean {
+  return code !== undefined && INVALID_REQUEST_ERROR_CODE_PATTERN.test(code);
+}
+
+function zaiReasoningEffort(modelId: string, effort: string): string {
+  return modelId.startsWith("glm-5.3-flash") && effort === "xhigh" ? "max" : effort;
 }
 
 function requestIdHashFor(response: Response): { requestIdHash?: string } {
@@ -341,7 +353,7 @@ function responseErrorCode(raw: string): string | undefined {
     return String(candidate);
   }
   if (typeof candidate === "string"
-    && (/^\d{3,8}$/.test(candidate) || isExplicitTransientCode(candidate))) return candidate;
+    && (/^\d{3,8}$/.test(candidate) || isExplicitTransientCode(candidate) || isExplicitInvalidRequestCode(candidate))) return candidate;
   return undefined;
 }
 

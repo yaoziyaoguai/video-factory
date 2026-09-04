@@ -1245,7 +1245,9 @@ export class WorkflowRunner {
         };
       }
       validateReceiptCosts(receiptDraft, authorization, automaticMeteredProvider);
-      if (status !== "failed" || (isDefinitiveZeroAttemptFailure(receiptDraft) && !resumingInterruptedMeteredOperation)) {
+      if (status !== "failed"
+        || result.providerOutcomeKnown === true
+        || (isDefinitiveZeroAttemptFailure(receiptDraft) && !resumingInterruptedMeteredOperation)) {
         delete nodeRun.outcomeUncertain;
       } else if (resumingInterruptedMeteredOperation) {
         nodeRun.outcomeUncertain = true;

@@ -113,20 +113,24 @@ const PUBLISH_COPY_DIRECTIVE = [
 ].join("\n");
 
 const VISUAL_REVIEW_DIRECTIVE = [
-  "你是短视频成片的视觉审片员。必须对照输入中的脚本、导演意图和时间线，再依据按时间顺序附带的 JPEG 帧与时间码判断。",
+  "你是短视频视觉审片员。reviewContext.reviewStage=source_assets 时审查渲染前的逐镜源素材；否则审查最终成片。必须对照输入中的脚本、导演意图和时间线，再依据按时间顺序附带的 JPEG 帧与时间码判断。",
   "重点检查意图兑现、前六秒留存、构图、视觉连续性、节奏与变化、文字可读性和内容安全；看不到或无法确认的内容必须降低 confidence，不得臆测。",
   "必须先读取 reviewContext.sampling 与每帧 scenePosition/phase 映射。只有 mode=scene_triplets 时，才把同一镜头的 opening、middle、closing 三帧作为一组判断状态推进。",
   "mode=hook_and_scene_midpoints 或 scene_change_keyframes 时属于稀疏证据：逐场核对已覆盖镜头，但不得声称每镜都有三帧，也不得因未采样状态本身判定镜头失败。",
   "必须核对 visible_action、success_criteria、导演 successCriteria 与实际可见画面；在证据覆盖范围内发现反向变化、状态不变、主体跳变或意图不符时，才留下对应 finding。",
+  "主体、物体、动作与对应镜头的脚本和导演要求一致是硬门槛；核心主体或物体缺失、被其他物体替代、动作对象错误时必须留下 warning 或 critical finding，不得 recommendation=approve。",
+  "生成素材或成片中，除脚本明确的主字幕和渲染清单明确的确定性 AIGC 披露外，任何可读字、标签、比例标记或水印都属于素材污染；必须留下 warning 或 critical finding，不得 recommendation=approve。不要把生成画面里的 9:16、A/B、终点等文字误当作制作提示而忽略。",
+  "source_assets 阶段尚未叠加主字幕或 AIGC 披露：只有导演明确选择 deliveryType=editorial_card 的正式卡片内容可以含预期文字；其他镜头出现任何可读文字、水印、比例标记或内部工作流术语都必须阻断进入配音与渲染。",
   "采样帧不能证明逐帧运动绝对流畅，也不能证明音效存在或口型同步；应降低相关 confidence，但不得仅因此自动给出 revise。音频由独立声音质检负责。",
   "只要存在 critical、任一评分低于 60、或任一场景的核心成功条件未确认，就不得 recommendation=approve。",
-  "每条 finding 必须绑定输入范围内的 timecodeMs，并给出可执行的修改建议。",
+  "每条 finding 必须绑定输入范围内的 timecodeMs 和 scenePosition，并用 targetNodeId 精确指向 assets 或 visual-direction；建议必须说明替换/重生成哪一镜素材，或修改哪一镜导演约束，不能只写泛化评价。",
   "recommendation 只能是 approve、revise 或 reject；只输出 JSON 对象，不要输出解释文字或 Markdown。",
 ].join("\n");
 
 const ASSET_RANK_DIRECTIVE = [
   "你是短视频制作流程里的语义选片师。输入是导演镜头意图、图库候选元数据，以及部分候选的严格映射缩略图；只负责重排候选，不得新增、删除或替换候选。",
   "优先判断主体、环境、可见动作、景别、构图与连续性是否匹配；分辨率和竖屏适配只作为基础质量因素，不能替代语义匹配。",
+  "主体、物体、动作与导演意图完整一致是首选候选的硬门槛，不能用环境相似、画质较高或动作大致相关代替；例如要求检查冷饮杯水珠时，触摸结露窗户不算匹配。没有候选同时满足核心主体、物体和动作时，本角色审计不得通过排序结果，必须具体指出对应镜头缺少可用候选。",
   "有缩略图时必须结合 imageIndex 映射观察实际画面；没有缩略图时必须降低 semanticScore，并在 rationale 中明确不确定性，不得根据 URL、作者名或素材 ID 臆测画面。",
   "同一镜头的候选必须得到从 1 开始且不重复的 rank；originalRank、provider 和 assetId 必须原样保留。",
   "输入含 revision 时，必须依据其中独立审计指出的具体问题修复上一版候选，同时重新输出完整结果；不得照抄未修复的上一版。",
@@ -233,13 +237,13 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
   }
   if (kind === "visual-review") {
     return {
-      version: "video-factory/visual-review-v5",
+      version: "video-factory/visual-review-v6",
       directive: VISUAL_REVIEW_DIRECTIVE,
       task: "按时间顺序审查附带的关键帧并生成严格结构化视觉审片报告。",
       outputRules: [
         "顶层必须完整包含 version、summary、scores、findings、confidence、recommendation；version 必须固定为 video-factory/visual-review-v1。",
         "scores 必须完整包含 composition、continuity、pacing、legibility、safety，不得省略字段或增加字段。",
-        "findings 中每项必须完整包含 timecodeMs、category、severity、description、suggestion。",
+        "findings 中每项必须完整包含 timecodeMs、scenePosition、targetNodeId、category、severity、description、suggestion；targetNodeId 只能是 assets 或 visual-direction。",
         "finding.category 只能是 composition、continuity、pacing、legibility、safety、other；severity 只能是 info、warning、critical。",
         "scores 的五项评分必须是 0 到 100 的整数。",
         "confidence 必须是 0 到 1 之间的数字。",
@@ -271,7 +275,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
   }
   if (kind === "asset-rank") {
     return {
-      version: "video-factory/asset-rank-v1",
+      version: "video-factory/asset-rank-v2",
       directive: ASSET_RANK_DIRECTIVE,
       task: "依据逐镜意图重排现有图库候选，并给出可审计的逐项理由。",
       outputRules: [
@@ -298,7 +302,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
     };
   }
   return {
-    version: "video-factory/director-v11",
+    version: "video-factory/director-v13",
     directive: DIRECTOR_PLAN_DIRECTIVE,
     task: "生成视觉圣经和逐镜素材路由。",
     outputRules: [
@@ -535,10 +539,12 @@ const VISUAL_REVIEW_OUTPUT_SCHEMA = {
       maxItems: 50,
       items: {
         type: "object",
-        required: ["timecodeMs", "category", "severity", "description", "suggestion"],
+        required: ["timecodeMs", "scenePosition", "targetNodeId", "category", "severity", "description", "suggestion"],
         additionalProperties: false,
         properties: {
           timecodeMs: { type: "integer", minimum: 0 },
+          scenePosition: { type: "integer", minimum: 1 },
+          targetNodeId: { type: "string", enum: ["assets", "visual-direction"] },
           category: {
             type: "string",
             enum: ["composition", "continuity", "pacing", "legibility", "safety", "other"],

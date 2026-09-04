@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import type { WorkflowRun } from "@video-factory/workflow-core";
 import type { ProductionBrief } from "@video-factory/production-pipeline";
 import { ResourceGovernanceStudio } from "../src/server/resource-governance-studio.js";
+import { StudioInputError } from "../src/shared/api.js";
 
 describe("ResourceGovernanceStudio", () => {
   it("aggregates persisted resource manifests and evidence-based template scorecards", async () => {
@@ -69,6 +70,110 @@ describe("ResourceGovernanceStudio", () => {
     assert.equal(knowledge?.metrics.hookClarity, null);
     assert.equal(knowledge?.metrics.costEfficiency, null);
     assert.equal(knowledge?.metrics.finalApprovalRate, 100);
+  });
+
+  it("persists revision-protected review decisions without changing the source manifest", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-resource-reviews-"));
+    const manifestPath = path.join(workspaceRoot, "resource_manifest.json");
+    await writeFile(manifestPath, JSON.stringify({
+      version: "video-factory/resource-manifest-v1",
+      runId: "run-1",
+      items: [{ id: "asset-1", category: "visual", kind: "media_asset", providerId: "seedream-image-v1", commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "needs_review" }],
+    }));
+    const run = completedRun(manifestPath);
+    const first = new ResourceGovernanceStudio(workspaceRoot, async () => [run]);
+    await assert.rejects(
+      () => first.review({ runId: "run-1", itemId: "asset-1", expectedRevision: 0, action: "rejected" }, "owner"),
+      (error: unknown) => error instanceof StudioInputError && /填写原因/.test(error.message),
+    );
+    const confirmed = await first.review({ runId: "run-1", itemId: "asset-1", expectedRevision: 0, action: "confirmed" }, "owner");
+    assert.equal(confirmed.reviewRevision, 1);
+    assert.equal(confirmed.needsReviewCount, 0);
+    assert.equal(confirmed.items[0]?.reviewDecision?.action, "confirmed");
+    assert.match(await readFile(manifestPath, "utf8"), /"reviewStatus":"needs_review"/);
+
+    const restarted = new ResourceGovernanceStudio(workspaceRoot, async () => [run]);
+    assert.equal((await restarted.manifest()).items[0]?.reviewStatus, "recorded");
+    await writeFile(manifestPath, JSON.stringify({
+      version: "video-factory/resource-manifest-v1",
+      runId: "run-1",
+      items: [{ id: "asset-1", category: "visual", kind: "media_asset", providerId: "seedream-image-v1", licenseNote: "授权条件已变化", commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "needs_review" }],
+    }));
+    assert.equal((await restarted.manifest()).items[0]?.reviewStatus, "needs_review");
+    assert.equal((await restarted.manifest()).items[0]?.reviewDecision, undefined);
+    const attempts = await Promise.allSettled([
+      restarted.review({ runId: "run-1", itemId: "asset-1", expectedRevision: 1, action: "rejected", note: "来源不满足商用要求" }, "owner-a"),
+      new ResourceGovernanceStudio(workspaceRoot, async () => [run]).review({ runId: "run-1", itemId: "asset-1", expectedRevision: 1, action: "confirmed" }, "owner-b"),
+    ]);
+    assert.equal(attempts.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(attempts.filter((result) => result.status === "rejected").length, 1);
+  });
+
+  it("holds the production lease while recording a resource rejection and exposes it to rework", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-resource-review-lease-"));
+    const manifestPath = path.join(workspaceRoot, "resource_manifest.json");
+    await writeFile(manifestPath, JSON.stringify({
+      version: "video-factory/resource-manifest-v1",
+      runId: "run-1",
+      items: [{ id: "scene:2:seedream", category: "visual", kind: "generated_image", providerId: "seedream-image-v1", creator: "第二镜生成图", scenePosition: 2, commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "needs_review" }],
+    }));
+    let leasedRunId: string | undefined;
+    let leaseActive = false;
+    let requireLease = true;
+    const studio = new ResourceGovernanceStudio(
+      workspaceRoot,
+      async () => {
+        if (requireLease) assert.equal(leaseActive, true);
+        return [completedRun(manifestPath)];
+      },
+      () => new Date("2026-09-05T00:00:00.000Z"),
+      async (runId, action) => {
+        leasedRunId = runId;
+        leaseActive = true;
+        try { return await action(); } finally { leaseActive = false; }
+      },
+    );
+
+    await studio.review({ runId: "run-1", itemId: "scene:2:seedream", expectedRevision: 0, action: "rejected", note: "人物肖像授权不明确" }, "owner");
+    requireLease = false;
+    const rejected = await studio.rejectedVisualItems("run-1");
+
+    assert.equal(leasedRunId, "run-1");
+    assert.deepEqual(rejected, [{ itemId: "scene:2:seedream", providerId: "seedream-image-v1", label: "第二镜生成图", note: "人物肖像授权不明确", scenePosition: 2 }]);
+  });
+
+  it("keeps every pending review reachable beyond the 500-item detail window", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-resource-review-window-"));
+    const manifestPath = path.join(workspaceRoot, "resource_manifest.json");
+    const items = Array.from({ length: 501 }, (_, index) => ({ id: `asset-${index}`, category: "visual", kind: "media_asset", providerId: "seedream-image-v1", commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "needs_review" }));
+    await writeFile(manifestPath, JSON.stringify({ version: "video-factory/resource-manifest-v1", runId: "run-1", items }));
+    const studio = new ResourceGovernanceStudio(workspaceRoot, async () => [completedRun(manifestPath)]);
+
+    const manifest = await studio.manifest();
+    assert.equal(manifest.items.length, 501);
+    assert.equal(manifest.truncatedItemCount, 0);
+    assert.equal(await studio.needsReviewCount("run-1"), 501);
+    await studio.review({ runId: "run-1", itemId: "asset-500", expectedRevision: 0, action: "confirmed" }, "owner");
+    assert.equal(await studio.needsReviewCount("run-1"), 500);
+  });
+
+  it("fails closed when a persisted review decision is malformed", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-resource-review-invalid-"));
+    const manifestPath = path.join(workspaceRoot, "resource_manifest.json");
+    await writeFile(manifestPath, JSON.stringify({
+      version: "video-factory/resource-manifest-v1",
+      runId: "run-1",
+      items: [{ id: "asset-1", category: "visual", kind: "media_asset", providerId: "seedream-image-v1", commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "needs_review" }],
+    }));
+    await mkdir(path.join(workspaceRoot, "resource-governance"), { recursive: true });
+    await writeFile(path.join(workspaceRoot, "resource-governance", "reviews.json"), JSON.stringify({
+      version: 1,
+      revision: 1,
+      decisions: { "run-1\u0000asset-1": { action: "confirmed" } },
+    }));
+    const studio = new ResourceGovernanceStudio(workspaceRoot, async () => [completedRun(manifestPath)]);
+
+    await assert.rejects(() => studio.manifest(), /授权审核账本格式无效/);
   });
 
   it("does not count stale review evidence or an invalidated historical approval", async () => {

@@ -10,8 +10,12 @@ import type {
   StudioIndexedAsset,
   StudioResourceManifest,
   StudioResourceManifestItem,
+  StudioResourceReviewInput,
   StudioTemplateExperimentScorecard,
 } from "../shared/api.js";
+import { StudioInputError } from "../shared/api.js";
+import { ResourceReviewStore } from "./resource-review-store.js";
+import { StudioNotFoundError } from "./studio-errors.js";
 
 const EXPERIMENT_TEMPLATES = [
   ["trend-fact-brief", "热点事实简报"],
@@ -25,12 +29,27 @@ interface StoredManifest {
   items: Array<Omit<StudioResourceManifestItem, "runId" | "runTitle" | "contentUrl">>;
 }
 
+export interface RejectedVisualResource {
+  itemId: string;
+  providerId: string;
+  label: string;
+  note: string;
+  scenePosition?: number;
+}
+
 export class ResourceGovernanceStudio {
+  private readonly reviews: ResourceReviewStore;
+  private readonly withRunLease: <T>(runId: string, action: () => Promise<T>) => Promise<T>;
+
   constructor(
     private readonly workspaceRoot: string,
     private readonly listRuns: () => Promise<WorkflowRun<ProductionBrief>[]>,
     private readonly now: () => Date = () => new Date(),
-  ) {}
+    withRunLease?: <T>(runId: string, action: () => Promise<T>) => Promise<T>,
+  ) {
+    this.reviews = new ResourceReviewStore(path.join(workspaceRoot, "resource-governance", "reviews.json"));
+    this.withRunLease = withRunLease ?? (async <T>(_runId: string, action: () => Promise<T>) => action());
+  }
 
   async manifest(): Promise<StudioResourceManifest> {
     const allRuns = await this.listRuns();
@@ -64,13 +83,20 @@ export class ResourceGovernanceStudio {
         }
       }
     }
+    const reviewSnapshot = await this.reviews.snapshot();
+    const effectiveItems = items.map((item) => applyReviewDecision(item, reviewSnapshot.decisions[reviewKey(item.runId, item.id)]));
     const categories: StudioResourceManifest["categories"] = { visual: 0, voice: 0, font: 0, document: 0, other: 0 };
-    for (const item of items) categories[item.category] += 1;
-    const visibleItems = items.slice(0, 500);
+    for (const item of effectiveItems) categories[item.category] += 1;
+    const pendingItems = effectiveItems.filter((item) => requiresRightsReview(item) && item.reviewStatus === "needs_review");
+    const visibleItems = [
+      ...pendingItems,
+      ...effectiveItems.filter((item) => !pendingItems.includes(item)).slice(0, Math.max(0, 500 - pendingItems.length)),
+    ];
     return {
+      reviewRevision: reviewSnapshot.revision,
       generatedAt: this.now().toISOString(),
       totalItems: items.length,
-      needsReviewCount: items.filter((item) => item.reviewStatus === "needs_review").length,
+      needsReviewCount: pendingItems.length,
       legacyRunsWithoutManifest,
       reconstructedRunCount,
       unreadableManifestCount,
@@ -78,8 +104,75 @@ export class ResourceGovernanceStudio {
       truncatedItemCount: Math.max(0, items.length - visibleItems.length),
       categories,
       items: visibleItems,
-      assetIndex: buildAssetIndex(items),
+      assetIndex: buildAssetIndex(effectiveItems),
     };
+  }
+
+  async review(input: StudioResourceReviewInput, actor: string): Promise<StudioResourceManifest> {
+    return this.withRunLease(input.runId, () => this.reviewUnderLease(input, actor));
+  }
+
+  private async reviewUnderLease(input: StudioResourceReviewInput, actor: string): Promise<StudioResourceManifest> {
+    const run = (await this.listRuns()).find((candidate) => candidate.id === input.runId);
+    if (!run) throw new StudioNotFoundError("没有找到这条制作记录。");
+    const item = (await this.itemsForRun(run))?.find((candidate) => candidate.id === input.itemId);
+    if (!item) throw new StudioNotFoundError("没有找到这项素材授权记录。");
+    if (input.action === "rejected" && !input.note?.trim()) throw new StudioInputError("驳回授权时必须填写原因。");
+    await this.reviews.record(reviewKey(input.runId, input.itemId), {
+      action: input.action,
+      reviewedAt: this.now().toISOString(),
+      reviewedBy: actor,
+      fingerprint: reviewFingerprint(item),
+      ...(input.note?.trim() ? { note: input.note.trim() } : {}),
+    }, input.expectedRevision);
+    return this.manifest();
+  }
+
+  async rejectedVisualItems(runId: string): Promise<RejectedVisualResource[]> {
+    const run = (await this.listRuns()).find((candidate) => candidate.id === runId);
+    if (!run) throw new StudioNotFoundError("没有找到这条制作记录。");
+    const items = await this.itemsForRun(run);
+    if (!items) return [];
+    const snapshot = await this.reviews.snapshot();
+    return items.flatMap((item): RejectedVisualResource[] => {
+      const effective = applyReviewDecision(item, snapshot.decisions[reviewKey(item.runId, item.id)]);
+      if (effective.category !== "visual" || effective.reviewDecision?.action !== "rejected" || !effective.reviewDecision.note) return [];
+      return [{
+        itemId: effective.id,
+        providerId: effective.providerId,
+        label: effective.creator ?? effective.kind,
+        note: effective.reviewDecision.note,
+        ...(effective.scenePosition ? { scenePosition: effective.scenePosition } : {}),
+      }];
+    });
+  }
+
+  async needsReviewCount(runId: string): Promise<number | undefined> {
+    const run = (await this.listRuns()).find((candidate) => candidate.id === runId);
+    if (!run) throw new StudioNotFoundError("没有找到这条制作记录。");
+    const items = await this.itemsForRun(run);
+    if (!items) return undefined;
+    const snapshot = await this.reviews.snapshot();
+    return items.map((item) => applyReviewDecision(item, snapshot.decisions[reviewKey(item.runId, item.id)]))
+      .filter((item) => requiresRightsReview(item) && item.reviewStatus === "needs_review").length;
+  }
+
+  private async itemsForRun(run: WorkflowRun<ProductionBrief>): Promise<StudioResourceManifestItem[] | undefined> {
+    const artifact = [...run.artifacts].reverse().find((candidate) => candidate.kind === "resource_manifest" && candidate.uri);
+    if (artifact?.uri) {
+      try {
+        const manifest = await this.readManifest(artifact.uri, run.id);
+        return manifest.items.map((item) => ({
+          ...item,
+          runId: run.id,
+          runTitle: run.initialInput.title,
+          ...resourceContentUrl(run, item.id, item.sha256),
+        }));
+      } catch {
+        return hasMeteredExecution(run) ? reconstructManifestItems(run) : undefined;
+      }
+    }
+    return hasMeteredExecution(run) ? reconstructManifestItems(run) : undefined;
   }
 
   async templateExperiments(): Promise<StudioTemplateExperimentScorecard[]> {
@@ -143,6 +236,31 @@ export class ResourceGovernanceStudio {
       items: parsed.items.map((item, index) => parseManifestItem(item, index)),
     };
   }
+}
+
+function reviewKey(runId: string, itemId: string): string { return `${runId}\u0000${itemId}`; }
+function reviewFingerprint(item: StudioResourceManifestItem): string {
+  return JSON.stringify([
+    item.providerId,
+    item.sha256 ?? "",
+    item.sourceUrl ?? "",
+    item.kind,
+    item.licenseNote ?? "",
+    item.commercialUse,
+    item.attributionRequirement,
+  ]);
+}
+function applyReviewDecision(item: StudioResourceManifestItem, decision: import("./resource-review-store.js").ResourceReviewDecision | undefined): StudioResourceManifestItem {
+  if (!decision || decision.fingerprint !== reviewFingerprint(item)) return item;
+  return {
+    ...item,
+    reviewStatus: decision.action === "confirmed" ? "recorded" : "needs_review",
+    reviewDecision: { action: decision.action, reviewedAt: decision.reviewedAt, reviewedBy: decision.reviewedBy, ...(decision.note ? { note: decision.note } : {}) },
+  };
+}
+
+function requiresRightsReview(item: StudioResourceManifestItem): boolean {
+  return item.category === "visual" || item.category === "voice" || item.category === "font";
 }
 
 function hasCurrentFinalApproval(run: WorkflowRun<ProductionBrief>): boolean {

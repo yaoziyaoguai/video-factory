@@ -133,6 +133,36 @@ describe("FallbackScreenwriterAgent", () => {
     ]);
   });
 
+  it("shares one wall-clock deadline across every text model candidate", async () => {
+    let now = 1_000;
+    const deadlines: Array<number | undefined> = [];
+    const fallback = new FallbackScreenwriterAgent({
+      totalTimeoutMs: 600,
+      now: () => now,
+      candidates: [
+        {
+          providerId: "openai",
+          agent: agent("gpt-primary", async (candidateInput) => {
+            deadlines.push(candidateInput.wallClockDeadlineAtMs);
+            now = 1_400;
+            throw providerFailure("gpt-primary");
+          }),
+        },
+        {
+          providerId: "zai-bigmodel-api",
+          agent: agent("glm-backup", async (candidateInput) => {
+            deadlines.push(candidateInput.wallClockDeadlineAtMs);
+            return successful("glm-backup");
+          }),
+        },
+      ],
+    });
+
+    await fallback.draftDetailed(input);
+
+    assert.deepEqual(deadlines, [1_600, 1_600]);
+  });
+
   it("switches from OpenAI to GLM after an accepted transient provider outage", async () => {
     const calls: string[] = [];
     const fallback = new FallbackScreenwriterAgent({

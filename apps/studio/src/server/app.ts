@@ -35,6 +35,7 @@ import {
   type StudioProvider,
   type StudioReworkDraft,
   type StudioResourceManifest,
+  type StudioResourceReviewInput,
   type StudioReferenceVideo,
   type StudioPublishBatch,
   type StudioPublishInput,
@@ -84,6 +85,7 @@ export interface StudioServicePort {
   listTemplates(): Promise<StudioTemplateCatalog>;
   templateExperiments(): Promise<StudioTemplateExperimentScorecard[]>;
   resourceManifest(): Promise<StudioResourceManifest>;
+  reviewResource?(input: StudioResourceReviewInput, actor: string): Promise<StudioResourceManifest>;
   getTemplate(id: string, version?: number): Promise<StudioTemplate | undefined>;
   cloneTemplate(input: StudioTemplateCloneInput): Promise<StudioTemplateMutation>;
   createTemplate(input: StudioTemplateCreateInput): Promise<StudioTemplateMutation>;
@@ -202,6 +204,13 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   app.get("/api/templates", async () => options.service.listTemplates());
   app.get("/api/template-experiments", async () => options.service.templateExperiments());
   app.get("/api/resource-manifest", async () => options.service.resourceManifest());
+  app.post("/api/resource-manifest/reviews", async (request) => {
+    if (!options.service.reviewResource) throw new StudioInputError("当前环境没有启用素材授权审核。");
+    return options.service.reviewResource(
+      parseResourceReviewInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
   app.get<{ Params: { templateId: string }; Querystring: { version?: string } }>("/api/templates/:templateId", async (request, reply) => {
     requireSafeRouteId(request.params.templateId, "模板编号");
     const version = request.query.version === undefined ? undefined : Number(request.query.version);
@@ -948,6 +957,19 @@ function parseRunBatchInput(value: unknown): string[] {
     throw new StudioInputError("制作记录编号格式不正确。");
   }
   return [...new Set(input.runIds as string[])];
+}
+
+function parseResourceReviewInput(value: unknown): StudioResourceReviewInput {
+  const input = requireRecord(value, "素材授权审核请求");
+  const runId = requireText(input.runId, "制作记录编号");
+  const itemId = requireText(input.itemId, "素材编号");
+  if (!SAFE_ROUTE_ID.test(runId) || itemId.length > 256) throw new StudioInputError("素材授权审核编号格式不正确。");
+  if (!Number.isSafeInteger(input.expectedRevision) || Number(input.expectedRevision) < 0) throw new StudioInputError("授权审核版本不正确。");
+  if (input.action !== "confirmed" && input.action !== "rejected") throw new StudioInputError("授权审核动作不正确。");
+  const note = typeof input.note === "string" ? input.note.trim() : "";
+  if (note.length > 2_000) throw new StudioInputError("授权审核说明不能超过 2000 个字符。");
+  if (input.action === "rejected" && !note) throw new StudioInputError("驳回授权时必须填写原因。");
+  return { runId, itemId, expectedRevision: Number(input.expectedRevision), action: input.action, ...(note ? { note } : {}) };
 }
 
 function parseCreationOrigin(value: string | undefined): "trend" | "series" | "manual" | undefined {

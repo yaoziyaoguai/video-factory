@@ -237,6 +237,29 @@ describe("run observability", () => {
     expect(result.failure?.impact).toContain("成片已保留");
   });
 
+  it("explains a source-asset visual gate failure as a review failure with an editable recovery", () => {
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:02:00.000Z",
+      now: "2026-08-30T10:02:00.000Z",
+      nodes: [
+        node("script", "脚本", "succeeded"),
+        node("assets", "画面", "failed", { error: "源素材视觉预检服务暂时不可用。已保留生成结果，请重试素材步骤或更换视觉审片模型。" }),
+        node("voice", "配音", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure).toMatchObject({
+      nodeId: "assets",
+      summary: "生成画面的视觉预检没有完成，已保留本轮画面结果",
+      retryable: true,
+    });
+    expect(result.failure?.recoveryActions).toContain("在画面步骤切换视觉审片服务或模型后重试");
+  });
+
   it("does not ask for billing reconciliation when a zero-attempt receipt proves rejection before submission", () => {
     const result = buildRunObservability({
       status: "failed",

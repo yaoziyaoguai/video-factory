@@ -78,7 +78,7 @@ export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = [
       { id: "knowledge-question", beatId: "misconception", purpose: "冻结关键动作并提出唯一核心问题", durationSeconds: 3, allowedCapabilities: visualCapabilities(), manualReplacement: true },
       { id: "knowledge-cause", beatId: "mechanism", purpose: "用一个对象或关系图显露真正起作用的变量", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
       { id: "knowledge-chain", beatId: "mechanism", purpose: "连续展示原因如何推动结果，禁止堆术语", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
-      { id: "knowledge-example-setup", beatId: "worked-example", purpose: "换到真实案例并标出输入条件", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-example-setup", beatId: "worked-example", purpose: "换到真实案例，用无字母图呈现条件；条件说明由后期字幕或确定性图形承担", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
       { id: "knowledge-example-change", beatId: "worked-example", purpose: "只改变一个变量，展示结果随之变化", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
       { id: "knowledge-rule", beatId: "transfer", purpose: "把因果链压缩成一句可复述判断规则", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
       { id: "knowledge-use", beatId: "transfer", purpose: "回到开场场景，用新规则做出更好的选择", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
@@ -88,7 +88,7 @@ export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = [
     qualityRules: [
       { id: "knowledge-one-model", label: "全片只围绕一个可验证的核心因果模型", dimension: "factual", required: true, threshold: 92 },
       { id: "knowledge-example-proves", label: "例子必须真正验证模型而非仅作装饰", dimension: "artistic", required: true, threshold: 88 },
-      { id: "knowledge-legible", label: "术语、标记和关键操作在手机画幅清晰可读", dimension: "technical", required: true, threshold: 90 },
+      { id: "knowledge-legible", label: "生成母图不得绘制文字；术语、条件与标注由后期字幕或确定性图形清晰呈现", dimension: "technical", required: true, threshold: 90 },
       { id: "knowledge-transfer", label: "结尾必须给出可迁移的判断而非口号", dimension: "platform", required: true, threshold: 86 },
     ],
   }),

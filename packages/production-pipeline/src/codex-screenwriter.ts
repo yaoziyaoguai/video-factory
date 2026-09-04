@@ -1,4 +1,4 @@
-import { CodexBridgeClient, type CodexTaskExecution } from "./codex-chat.js";
+import { CodexBridgeClient, requestOptionsForDeadline, type CodexTaskExecution } from "./codex-chat.js";
 import type { ProductionBlueprint } from "@video-factory/template-core";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { ProductionReworkFinding, ProductionSeriesContext } from "./contracts.js";
@@ -53,6 +53,7 @@ export interface ScreenwriterAgentInput {
   selectedModelId?: string;
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
   agentLoopCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
+  wallClockDeadlineAtMs?: number;
 }
 
 export interface ScreenwriterAgent {
@@ -114,7 +115,12 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
   async draft(input: ScreenwriterAgentInput): Promise<ScriptDraft> {
     this.assertSelectedModel(input.selectedModelId);
     validateScreenwriterTarget(input);
-    const rawDraft = await this.client.runTask("script-draft", { brief: input.brief });
+    const rawDraft = await this.client.runTask(
+      "script-draft",
+      { brief: input.brief },
+      undefined,
+      requestOptionsForDeadline(input.wallClockDeadlineAtMs),
+    );
     return validateScriptDraft(rawDraft, {
       durationSeconds: input.brief.durationSeconds,
       requireCanonFacts: Boolean(input.brief.seriesContext),
@@ -141,7 +147,7 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
       produce: (revision, { requestId, session }) => this.client.runTaskDetailed("script-draft", {
         brief: input.brief,
         ...(revision ? { revision } : {}),
-      }, requestId, this.sessionMode === "stateless" ? undefined : session),
+      }, requestId, this.sessionMode === "stateless" ? undefined : session, requestOptionsForDeadline(input.wallClockDeadlineAtMs)),
       audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => auditClient.runTaskDetailed("role-audit", {
         role,
         iteration,
@@ -149,7 +155,7 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
         context: screenwriterAuditContext(input.brief),
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
-      }, requestId, this.sessionMode === "stateless" ? undefined : session),
+      }, requestId, this.sessionMode === "stateless" ? undefined : session, requestOptionsForDeadline(input.wallClockDeadlineAtMs)),
       validate: (value) => validateScriptDraft(value, {
         durationSeconds: input.brief.durationSeconds,
         requireCanonFacts: Boolean(input.brief.seriesContext),

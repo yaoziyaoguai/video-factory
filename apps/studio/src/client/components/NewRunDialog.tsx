@@ -138,7 +138,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [templateReplacementConfirmed, setTemplateReplacementConfirmed] = useState(false);
   const [templateError, setTemplateError] = useState<string>();
   const [voiceSelectionAvailable, setVoiceSelectionAvailable] = useState<boolean>();
-  const [rework, setRework] = useState<StudioProductionInput["rework"]>(initialValues?.rework);
+  const [rework, setRework] = useState<StudioProductionInput["rework"]>(() => creatorFacingRework(initialValues?.rework));
   const initializedForOpen = useRef(false);
   const initializationRevision = useRef(0);
   const dialogRef = useDialogFocus<HTMLElement>(open, onClose, submitting);
@@ -182,7 +182,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const semanticRankCompatible = Boolean(effectiveBindings.director && effectiveBindings.assets === "ai-shot-router-v1");
   const effectiveSemanticRank = semanticRankCompatible && semanticRankEnabled;
   const meteredSelected = selectedMeteredSources.length > 0 && selectedRecipe.allowMeteredProviders;
-  const subscriptionVisualReview = visualReviewEnabled && visualReviewProvider?.billing === "subscription"
+  const visualReviewRequired = meteredSelected;
+  const effectiveVisualReviewEnabled = visualReviewRequired || visualReviewEnabled;
+  const subscriptionVisualReview = effectiveVisualReviewEnabled && visualReviewProvider?.billing === "subscription"
     ? visualReviewProvider
     : undefined;
   const automaticVoiceProvider = providers.find((provider) => {
@@ -393,7 +395,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setTemplateError(undefined);
     setTemplateLoading(false);
     setVoiceSelectionAvailable(undefined);
-    setRework(initialValues?.rework ? structuredClone(initialValues.rework) : undefined);
+    setRework(creatorFacingRework(initialValues?.rework));
     setTemplateReplacementConfirmed(false);
     templateAddedEditorialSource.current = requestedTemplateId === "photo-story"
       && !inheritedOrRecommendedSourceIds.includes("local-editorial-v1")
@@ -539,9 +541,12 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       if (!templatesLoaded || !templates.some((template) => template.id === selectedTemplateId && template.status === "published")) {
         throw new Error(templateError ?? "模板目录尚未加载完成，请稍后重试。");
       }
+      if (visualReviewRequired && !visualReviewProvider) {
+        throw new Error("付费图片和视频必须先启用可用的视觉审片；请检查视觉审片服务，或改用免费画面来源。");
+      }
       const selectedTemplate = templates.find((template) => template.id === selectedTemplateId)!;
       const providersForRun: StudioProductionInput["providers"] = { ...effectiveBindings };
-      if (visualReviewEnabled && visualReviewProvider) providersForRun.visualReview = visualReviewProvider.id;
+      if (effectiveVisualReviewEnabled && visualReviewProvider) providersForRun.visualReview = visualReviewProvider.id;
       else delete providersForRun.visualReview;
       const selectedProviderIds = new Set([
         ...Object.values(providersForRun).filter((providerId): providerId is string => Boolean(providerId)),
@@ -1033,11 +1038,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <span><Sparkles aria-hidden="true" size={17} /><strong>AI 候选画面排序</strong></span>
                 <small>{semanticRankCompatible ? "先预览图库候选并给出逐镜排序；失败时保留素材源原顺序，下载前仍可人工调整" : "需要先启用 AI 视觉导演与逐镜画面选择"}</small>
               </label>
-              <label className={visualReviewEnabled ? "visual-review-control is-enabled" : "visual-review-control"}>
+              <label className={effectiveVisualReviewEnabled ? "visual-review-control is-enabled" : "visual-review-control"}>
                 <input
                   type="checkbox"
-                  checked={visualReviewEnabled && Boolean(visualReviewProvider)}
-                  disabled={!visualReviewProvider}
+                  checked={effectiveVisualReviewEnabled && Boolean(visualReviewProvider)}
+                  disabled={!visualReviewProvider || visualReviewRequired}
                   onChange={(event) => {
                     setVisualReviewEnabled(event.target.checked);
                     if (event.target.checked && visualReviewProvider) {
@@ -1047,10 +1052,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 />
                 <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片</strong></span>
                 <small>{visualReviewProvider
-                  ? `${creatorProviderName(visualReviewProvider)} · 抽帧审查，不上传音轨`
+                  ? `${creatorProviderName(visualReviewProvider)} · 抽帧审查，不上传音轨${visualReviewRequired ? "；付费画面必须启用" : ""}`
                   : "ZAI 视觉审片服务当前不可用，本次不会运行视觉审片"}</small>
               </label>
-              {inheritedVisualReviewUnavailable ? <button
+              {inheritedVisualReviewUnavailable && !visualReviewRequired ? <button
                 className="button button-ghost"
                 type="button"
                 onClick={disableInheritedVisualReview}
@@ -1220,6 +1225,21 @@ function isAssetSource(provider: StudioProvider): boolean {
 
 function isAutomaticAssetSource(provider: StudioProvider): boolean {
   return isAssetSource(provider) && provider.id !== "local-editorial-v1";
+}
+
+function creatorFacingRework(
+  rework: StudioProductionInput["rework"] | undefined,
+): StudioProductionInput["rework"] | undefined {
+  if (!rework) return undefined;
+  const draft = structuredClone(rework);
+  const present = (value: string) => creatorFacingTechnicalText(value) ?? value;
+  // 审片事实参与服务端完整性校验，展示时转换即可，不能改写后再提交。
+  draft.nodeInstructions = {
+    script: present(draft.nodeInstructions.script),
+    visualDirection: present(draft.nodeInstructions.visualDirection),
+    assets: present(draft.nodeInstructions.assets),
+  };
+  return draft;
 }
 
 function requiredString(data: FormData, key: string): string {

@@ -17,7 +17,7 @@ import type {
 import { planVisualDirection } from "../shared/visual-plan.js";
 import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
 
-const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v3|role-audit-v1|topic-ideas-validator-v1";
+const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v3|role-audit-v1|topic-ideas-validator-v1|complete-role-scope-v1";
 
 export interface TrendSignalPort {
   listSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
@@ -266,7 +266,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         criteria,
         context: {
           roleScope: {
-            owns: ["ideas.signalId", "ideas.track", "ideas.title", "ideas.hook", "ideas.rationale", "ideas.visualProof", "ideas scores"],
+            owns: ["ideas.signalId", "ideas.track", "ideas.title", "ideas.audience", "ideas.painPoint", "ideas.hook", "ideas.rationale", "ideas.visualProof", "ideas scores"],
             doesNotOwn: ["热点原始事实", "新闻核验结果", "脚本与成片"],
           },
           upstreamFacts: request,

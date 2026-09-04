@@ -20,6 +20,7 @@ import type {
   StudioProvider,
   StudioReworkDraft,
   StudioResourceManifest,
+  StudioResourceReviewInput,
   StudioReferenceVideo,
   StudioPublishBatch,
   StudioPublishInput,
@@ -60,7 +61,7 @@ import type {
 import { StudioInputError } from "../shared/api.js";
 import { RunLockedError } from "@video-factory/production-pipeline";
 import { CapabilityStudio } from "./capability-studio.js";
-import { CandidateInboxStudio } from "./candidate-inbox-studio.js";
+import { CandidateInboxStudio, reviewTrendOpportunityAgainstCurrentPolicy } from "./candidate-inbox-studio.js";
 import { CostStudio } from "./cost-studio.js";
 import { JsonCreatorSettingsStore, type CreatorSettingsRepository } from "./creator-settings-store.js";
 import type { LocalCapabilityService } from "./local-capabilities.js";
@@ -181,12 +182,28 @@ export class StudioService {
       new JsonTemplateStore(path.join(options.workspaceRoot, "templates", "templates.json"), BUILTIN_TEMPLATES),
       now,
     );
+    this.resourceGovernance = new ResourceGovernanceStudio(
+      options.workspaceRoot,
+      () => options.pipeline.list(),
+      now,
+      async (runId, action) => {
+        try {
+          return await options.pipeline.withRunMaintenanceLease([runId], action);
+        } catch (error) {
+          if (error instanceof RunLockedError || (error instanceof Error && /locked by another writer/.test(error.message))) {
+            throw new StudioConflictError("这条制作正在执行、编辑或发布，请等待当前操作结束后再审核素材授权。");
+          }
+          throw error;
+        }
+      },
+    );
     this.production = new ProductionStudio({
       workspaceRoot: options.workspaceRoot,
       pipeline: options.pipeline,
       listProviders: () => this.capabilities.listProviders(),
       archiveStore: options.runArchive ?? new JsonRunArchiveStore(path.join(options.workspaceRoot, "archive", "runs.json")),
       now,
+      loadRejectedVisualResources: (runId) => this.resourceGovernance.rejectedVisualItems(runId),
       resolveTemplateSnapshot: async (input, brief) => {
         const rawTemplate = isRecord(input) ? input.template : undefined;
         return this.templates.resolveForRun({
@@ -205,6 +222,7 @@ export class StudioService {
         if (!resource) return undefined;
         return JSON.parse(await readFile(resource.path, "utf8")) as unknown;
       },
+      loadEffectiveResourceReviewCount: (runId) => this.resourceGovernance.needsReviewCount(runId),
       withRunLease: async (runId, action) => {
         try {
           return await options.pipeline.withRunMaintenanceLease([runId], action);
@@ -220,7 +238,6 @@ export class StudioService {
       now,
     });
     this.referenceVideos = new ReferenceVideoStore(path.join(options.workspaceRoot, "uploads", "reference-videos"), now);
-    this.resourceGovernance = new ResourceGovernanceStudio(options.workspaceRoot, () => options.pipeline.list(), now);
   }
 
   health(): Promise<StudioHealth> { return this.capabilities.health(); }
@@ -240,6 +257,7 @@ export class StudioService {
   listTemplates(): Promise<StudioTemplateCatalog> { return this.templates.list(); }
   templateExperiments(): Promise<StudioTemplateExperimentScorecard[]> { return this.resourceGovernance.templateExperiments(); }
   resourceManifest(): Promise<StudioResourceManifest> { return this.resourceGovernance.manifest(); }
+  reviewResource(input: StudioResourceReviewInput, actor = "studio-owner"): Promise<StudioResourceManifest> { return this.resourceGovernance.review(input, actor); }
   getTemplate(id: string, version?: number): Promise<StudioTemplate | undefined> { return this.templates.get(id, version); }
   cloneTemplate(input: StudioTemplateCloneInput): Promise<StudioTemplateMutation> {
     return this.templateMutation(() => this.templates.clone(input));
@@ -312,11 +330,18 @@ export class StudioService {
 
   async listOpportunities(origin?: "trend" | "series" | "manual"): Promise<StudioOpportunity[]> {
     const opportunities = await this.opportunities.list();
+    const sourcePolicy = (await this.creatorSettings.get()).topicStrategy.sourcePolicy;
+    const currentOpportunities = opportunities.map((item) => reviewTrendOpportunityAgainstCurrentPolicy(item, sourcePolicy));
     return origin
-      ? opportunities.filter((item) => origin === "manual" ? item.origin === "manual" || item.origin === undefined : item.origin === origin)
-      : opportunities;
+      ? currentOpportunities.filter((item) => origin === "manual" ? item.origin === "manual" || item.origin === undefined : item.origin === origin)
+      : currentOpportunities;
   }
-  getOpportunity(opportunityId: string): Promise<StudioOpportunity | undefined> { return this.opportunities.get(opportunityId); }
+  async getOpportunity(opportunityId: string): Promise<StudioOpportunity | undefined> {
+    const opportunity = await this.opportunities.get(opportunityId);
+    if (!opportunity) return undefined;
+    const sourcePolicy = (await this.creatorSettings.get()).topicStrategy.sourcePolicy;
+    return reviewTrendOpportunityAgainstCurrentPolicy(opportunity, sourcePolicy);
+  }
   createOpportunity(input: StudioOpportunityInput): Promise<StudioOpportunity> {
     if (input.origin === "series" || input.origin === "trend") {
       throw new StudioInputError("热点与系列机会只能从对应候选入口采用，不能由通用表单伪造来源。");
@@ -367,6 +392,7 @@ export class StudioService {
       return replay;
     }
     const configuredInput = await this.withCreatorDefaults(input);
+    await this.assertOpportunityReadyForProduction(configuredInput);
     if (isRecord(configuredInput) && isRecord(configuredInput.creationContext)
       && configuredInput.creationContext.origin === "series") {
       await this.reconcileSeriesRuns();
@@ -434,6 +460,20 @@ export class StudioService {
         }
       }
       throw error;
+    }
+  }
+
+  private async assertOpportunityReadyForProduction(input: unknown): Promise<void> {
+    if (!isRecord(input) || !isRecord(input.creationContext) || input.creationContext.origin !== "trend") return;
+    const opportunityId = typeof input.creationContext.opportunityId === "string" ? input.creationContext.opportunityId : "";
+    const opportunity = opportunityId ? await this.getOpportunity(opportunityId) : undefined;
+    if (!opportunity) throw new StudioInputError("没有找到与这次制作对应的热点机会，请返回热点选题重新选择。");
+    if (opportunity.origin !== "trend") return;
+    if (opportunity.verification?.status === "blocked") {
+      throw new StudioInputError(opportunity.verification.reasons[0] ?? "这条热点不再满足当前来源标准，请补齐来源后重新评估。");
+    }
+    if (opportunity.editorialDecision?.verdict === "skip") {
+      throw new StudioInputError(opportunity.editorialDecision.reasons[0] ?? "这条热点不再满足当前视频制作标准，请重新评估选题。");
     }
   }
 

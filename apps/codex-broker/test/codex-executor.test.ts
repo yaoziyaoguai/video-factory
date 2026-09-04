@@ -256,6 +256,8 @@ function visualReviewOutput(): Record<string, unknown> {
     },
     findings: [{
       timecodeMs: 0,
+      scenePosition: 1,
+      targetNodeId: "assets",
       category: "legibility",
       severity: "warning",
       description: "字幕与背景对比不足。",

@@ -25,7 +25,12 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
     label,
     available: providers.some((provider) => provider.capability === capability && provider.available && provider.kind !== "test"),
   }));
-  const productionReady = !providerError && capabilities.every((item) => item.available);
+  const topicBlockReason = opportunity.verification?.status === "blocked"
+    ? opportunity.verification.reasons[0] ?? "来源证据未达到当前标准。"
+    : opportunity.editorialDecision?.verdict === "skip"
+      ? opportunity.editorialDecision.reasons[0] ?? "当前选题不建议进入制作。"
+      : undefined;
+  const productionReady = !providerError && !topicBlockReason && capabilities.every((item) => item.available);
   const hasTopicAgent = providers.some((provider) => provider.capability === "topic.intelligence" && provider.available && provider.kind !== "test");
   const topicIntelligenceCopy = opportunity.origin === "trend"
     ? "热点转译、制作潜力判断与来源核验由 AI 选题总编完成"
@@ -72,10 +77,11 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
       </div>
 
       <div className="director-actions">
+        {topicBlockReason ? <p className="director-inline-error">这条历史选题不再满足当前制作标准：{topicBlockReason}</p> : null}
         <button className="button button-director" type="button" onClick={onProduce} disabled={!productionReady} data-tour="create-production">
           新建制作<ArrowRight aria-hidden="true" size={17} />
         </button>
-        {!productionReady ? <Link className="director-resource-link" to="/resources">查看缺失能力</Link> : null}
+        {!productionReady && !topicBlockReason ? <Link className="director-resource-link" to="/resources">查看缺失能力</Link> : null}
       </div>
     </aside>
   );

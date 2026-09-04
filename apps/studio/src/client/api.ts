@@ -21,6 +21,7 @@ import type {
   StudioPublishTarget,
   StudioProvider,
   StudioResourceManifest,
+  StudioResourceReviewInput,
   StudioReferenceVideo,
   StudioReworkDraft,
   StudioRunDetail,
@@ -82,6 +83,10 @@ export const studioApi = {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
+  }),
+  resourceJson: (contentUrl: string, signal?: AbortSignal) => requestJson<unknown>(contentUrl, {
+    headers: { accept: "application/json" },
+    ...(signal ? { signal } : {}),
   }),
   settings: () => requestJson<StudioCreatorSettings>("/api/settings"),
   updateSettings: (input: StudioCreatorSettingsPatch) => requestJson<StudioCreatorSettings>("/api/settings", {
@@ -146,6 +151,11 @@ export const studioApi = {
   templates: () => requestJson<StudioTemplateCatalog>("/api/templates"),
   templateExperiments: () => requestJson<StudioTemplateExperimentScorecard[]>("/api/template-experiments"),
   resourceManifest: () => requestJson<StudioResourceManifest>("/api/resource-manifest"),
+  reviewResource: (input: StudioResourceReviewInput) => requestJson<StudioResourceManifest>("/api/resource-manifest/reviews", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  }),
   template: (templateId: string, version?: number) => requestJson<StudioTemplate>(
     `/api/templates/${encodeURIComponent(templateId)}${version === undefined ? "" : `?version=${version}`}`,
   ),

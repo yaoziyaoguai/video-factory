@@ -58,6 +58,36 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
     }
   });
 
+  it("uses the fixed source-asset mode before rendering", async () => {
+    const harness = await createHarness();
+    try {
+      const jpeg = makeJpeg(64);
+      const assetPlanPath = path.join(harness.runRoot, "assets", "asset_plan.json");
+      await mkdir(path.dirname(assetPlanPath), { recursive: true });
+      await writeFile(assetPlanPath, "{}", "utf8");
+      await writeFrame(harness, "review_media/frame.jpg", jpeg);
+      await writeManifest(harness, [frame("review_media/frame.jpg", 100, jpeg)]);
+
+      await harness.preprocessor.prepare({ assetPlanPath, runRoot: harness.runRoot });
+
+      assert.deepEqual(
+        (await readFile(harness.capturePath, "utf8")).trim().split("\n"),
+        [
+          "-m",
+          "video_factory.review_media",
+          "--asset-plan",
+          assetPlanPath,
+          "--run-root",
+          harness.runRoot,
+          "--max-frames",
+          "24",
+        ],
+      );
+    } finally {
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
   it("preserves the manifest's actual sparse sampling mode and frame mapping", async () => {
     const harness = await createHarness();
     try {

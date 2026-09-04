@@ -47,6 +47,10 @@ export interface CodexTaskSession {
   handle?: string;
 }
 
+export interface CodexTaskRequestOptions {
+  timeoutMs?: number;
+}
+
 export type CodexBridgeFailureStage = "not_accepted" | "completed_failure" | "uncertain";
 export type CodexBridgeFailureKind = "model_provider_transient";
 
@@ -183,8 +187,13 @@ export class CodexBridgeClient {
 
   // 至多执行一次：仅连接层 ENOENT/ECONNREFUSED 与 HTTP 503（队列拒绝，未受理）按指数退避有界重试；
   // 超时与执行期失败直接上抛，绝不重放已受理的任务。
-  async runTask(kind: CodexTaskKind, payload: unknown, requestId?: string): Promise<unknown> {
-    return (await this.runTaskDetailed(kind, payload, requestId)).output;
+  async runTask(
+    kind: CodexTaskKind,
+    payload: unknown,
+    requestId?: string,
+    requestOptions?: CodexTaskRequestOptions,
+  ): Promise<unknown> {
+    return (await this.runTaskDetailed(kind, payload, requestId, undefined, requestOptions)).output;
   }
 
   async runTaskDetailed(
@@ -192,6 +201,7 @@ export class CodexBridgeClient {
     payload: unknown,
     requestId: string = randomUUID(),
     session?: CodexTaskSession,
+    requestOptions: CodexTaskRequestOptions = {},
   ): Promise<CodexTaskExecution> {
     if (!isCodexTaskKind(kind)) {
       throw new CodexBridgeError(`Unsupported codex task kind '${String(kind)}'.`, false);
@@ -207,20 +217,28 @@ export class CodexBridgeClient {
       payload,
       ...(session ? { sessionKey: session.key, ...(session.handle ? { sessionHandle: session.handle } : {}) } : {}),
     });
+    const requestTimeoutMs = requestOptions.timeoutMs === undefined
+      ? this.timeoutMs
+      : positiveRequestTimeout(requestOptions.timeoutMs);
+    const deadlineAtMs = Date.now() + requestTimeoutMs;
     let lastError: CodexBridgeError | undefined;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       try {
-        return await this.send(body, session?.key);
+        const remainingMs = deadlineAtMs - Date.now();
+        if (remainingMs <= 0) throw requestDeadlineError(requestTimeoutMs);
+        return await this.send(body, session?.key, remainingMs);
       } catch (error) {
         if (!(error instanceof CodexBridgeError) || !error.transient || attempt === this.maxAttempts) throw error;
         lastError = error;
-        await this.sleep(this.retryDelayMs * 2 ** (attempt - 1));
+        const retryDelayMs = this.retryDelayMs * 2 ** (attempt - 1);
+        if (retryDelayMs >= deadlineAtMs - Date.now()) throw requestDeadlineError(requestTimeoutMs);
+        await this.sleep(retryDelayMs);
       }
     }
     throw lastError ?? new CodexBridgeError("Codex bridge request failed.", false);
   }
 
-  private send(body: string, sessionKey?: string): Promise<CodexTaskExecution> {
+  private send(body: string, sessionKey: string | undefined, timeoutMs: number): Promise<CodexTaskExecution> {
     return new Promise((resolve, reject) => {
       const request = http.request({
         socketPath: this.options.socketPath,
@@ -230,11 +248,11 @@ export class CodexBridgeClient {
           "content-type": "application/json",
           "content-length": String(Buffer.byteLength(body)),
         },
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
       }, (response) => {
         this.consume(response, request, sessionKey, resolve, reject);
       });
-      request.on("error", (error) => reject(mapTransportError(error, this.options.socketPath, this.timeoutMs)));
+      request.on("error", (error) => reject(mapTransportError(error, this.options.socketPath, timeoutMs)));
       request.end(body);
     });
   }
@@ -287,6 +305,27 @@ export class CodexBridgeClient {
       }
     });
   }
+}
+
+export function requestOptionsForDeadline(deadlineAtMs: number | undefined): CodexTaskRequestOptions | undefined {
+  if (deadlineAtMs === undefined) return undefined;
+  if (!Number.isSafeInteger(deadlineAtMs) || deadlineAtMs < 1) {
+    throw new CodexBridgeError("Text agent wall-clock deadline is invalid.", false, "not_accepted");
+  }
+  const timeoutMs = deadlineAtMs - Date.now();
+  if (timeoutMs <= 0) throw requestDeadlineError(0);
+  return { timeoutMs };
+}
+
+function positiveRequestTimeout(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new CodexBridgeError("Codex bridge request timeout must be a positive integer.", false, "not_accepted");
+  }
+  return value;
+}
+
+function requestDeadlineError(timeoutMs: number): CodexBridgeError {
+  return new CodexBridgeError(`Text agent wall-clock deadline exhausted after ${timeoutMs}ms.`, false, "not_accepted");
 }
 
 function parseEnvelope(raw: string, sessionKey?: string): CodexTaskExecution {

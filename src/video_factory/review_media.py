@@ -129,6 +129,140 @@ def prepare_review_media(
     return output_dir / "review_media_manifest.json"
 
 
+def prepare_asset_review_media(
+    asset_plan_path: Path,
+    run_root: Path,
+    max_frames: int = MAX_FRAMES,
+) -> Path:
+    """Create bounded evidence frames from every materialized source asset."""
+    root = Path(run_root).expanduser().resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("run_root must be a directory")
+    if not isinstance(max_frames, int) or isinstance(max_frames, bool) or not 1 <= max_frames <= MAX_FRAMES:
+        raise ValueError(f"max_frames must be an integer between 1 and {MAX_FRAMES}")
+
+    plan_path = _resolve_run_file(asset_plan_path, root, "asset_plan_path")
+    if plan_path.stat().st_size > 512 * 1024:
+        raise ValueError("asset plan exceeds 524288 bytes")
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("asset plan must be valid UTF-8 JSON") from error
+    assets = plan.get("scene_assets") if isinstance(plan, dict) else None
+    if not isinstance(assets, list) or not assets or len(assets) > max_frames:
+        raise ValueError("asset plan must contain one reviewable asset per scene within the frame limit")
+
+    normalized_assets = []
+    seen_positions = set()
+    for index, asset in enumerate(assets):
+        if not isinstance(asset, dict):
+            raise ValueError(f"asset plan scene {index + 1} must be an object")
+        scene_position = asset.get("scene_position")
+        if isinstance(scene_position, bool) or not isinstance(scene_position, int) or scene_position < 1:
+            raise ValueError(f"asset plan scene {index + 1} position is invalid")
+        if scene_position in seen_positions:
+            raise ValueError(f"asset plan scene position {scene_position} is duplicated")
+        seen_positions.add(scene_position)
+        duration = asset.get("duration")
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
+            raise ValueError(f"asset plan scene {scene_position} duration is invalid")
+        media_path = _resolve_run_file(Path(str(asset.get("local_path") or "")), root, "asset local_path")
+        media_type = str(asset.get("media_type") or "").strip().lower()
+        if media_type not in {"image", "video"}:
+            raise ValueError(f"asset plan scene {scene_position} media_type is invalid")
+        normalized_assets.append({
+            "scenePosition": scene_position,
+            "durationMs": max(1, int(round(float(duration) * 1000))),
+            "mediaPath": media_path,
+            "mediaType": media_type,
+        })
+
+    _require_media_tools()
+    sample_counts = [1] * len(normalized_assets)
+    remaining = max_frames - len(normalized_assets)
+    video_indexes = [index for index, asset in enumerate(normalized_assets) if asset["mediaType"] == "video"]
+    for _round in range(2):
+        for index in video_indexes:
+            if remaining == 0:
+                break
+            sample_counts[index] += 1
+            remaining -= 1
+
+    total_duration_ms = sum(asset["durationMs"] for asset in normalized_assets)
+    output_dir = root / "asset_review_media"
+    _assert_confined(output_dir, root, "asset review media output")
+    if output_dir.is_symlink() or (output_dir.exists() and not output_dir.is_dir()):
+        raise ValueError("asset review media output must be a real directory within run_root")
+    stage = Path(tempfile.mkdtemp(prefix=".asset-review-media-", dir=str(root)))
+    try:
+        frames_dir = stage / "frames"
+        frames_dir.mkdir()
+        frame_entries = []
+        frame_paths = []
+        timeline_timestamps = []
+        total_frame_bytes = 0
+        cursor_ms = 0
+        for asset_index, asset in enumerate(normalized_assets):
+            count = sample_counts[asset_index]
+            phases = {
+                1: [(0.5, "midpoint")],
+                2: [(0.15, "opening"), (0.85, "closing")],
+                3: [(0.15, "opening"), (0.5, "middle"), (0.85, "closing")],
+            }[count]
+            source_duration_ms = None
+            if asset["mediaType"] == "video":
+                source_duration_ms = max(1, int(round(float(_probe_video(asset["mediaPath"])["duration"]) * 1000)))
+            for phase_index, (fraction, phase) in enumerate(phases):
+                timestamp_ms = min(total_duration_ms - 1, cursor_ms + int(round(asset["durationMs"] * fraction)))
+                filename = f"scene-{asset['scenePosition']:02d}-{phase_index:02d}.jpg"
+                frame_path = frames_dir / filename
+                if source_duration_ms is None:
+                    _copy_image_frame(asset["mediaPath"], frame_path)
+                else:
+                    source_timestamp_ms = min(source_duration_ms - 1, max(0, int(round(source_duration_ms * fraction))))
+                    _extract_frame(asset["mediaPath"], source_timestamp_ms, frame_path)
+                _bound_jpeg(frame_path, MAX_FRAME_BYTES)
+                frame_size = frame_path.stat().st_size
+                total_frame_bytes += frame_size
+                if frame_size > MAX_FRAME_BYTES or total_frame_bytes > MAX_TOTAL_FRAME_BYTES:
+                    raise RuntimeError("asset review frames exceed the safe visual-review boundary")
+                frame_paths.append(frame_path)
+                timeline_timestamps.append(timestamp_ms)
+                entry = _image_entry(
+                    frame_path,
+                    f"asset_review_media/frames/{filename}",
+                    timestamp_ms=timestamp_ms,
+                )
+                entry.update({"scenePosition": asset["scenePosition"], "phase": phase})
+                frame_entries.append(entry)
+            cursor_ms += asset["durationMs"]
+
+        contact_sheet_path = stage / "contact_sheet.jpg"
+        _write_contact_sheet(frame_paths, timeline_timestamps, contact_sheet_path)
+        manifest = {
+            "version": MANIFEST_VERSION,
+            "durationMs": total_duration_ms,
+            "sampling": {
+                "mode": "hook_and_scene_midpoints",
+                "sceneCount": len(normalized_assets),
+                "coveredScenePositions": sorted(seen_positions),
+                "missingScenePositions": [],
+            },
+            "frames": frame_entries,
+            "contactSheet": _image_entry(contact_sheet_path, "asset_review_media/contact_sheet.jpg"),
+        }
+        manifest_path = stage / "review_media_manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _publish_directory(stage, output_dir)
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    return output_dir / "review_media_manifest.json"
+
+
 def _sampling_metadata(samples: List[dict], scene_count: Optional[int], has_render_manifest: bool) -> dict:
     if not has_render_manifest:
         return {"mode": "scene_change_keyframes"}
@@ -153,29 +287,35 @@ def _sampling_metadata(samples: List[dict], scene_count: Optional[int], has_rend
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Prepare bounded visual-review frames for one VideoFactory run.")
-    parser.add_argument("--video", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--video")
+    source.add_argument("--asset-plan")
     parser.add_argument("--run-root", required=True)
     parser.add_argument("--max-frames", type=int, default=MAX_FRAMES)
     parser.add_argument("--render-manifest")
     args = parser.parse_args(argv)
-    manifest = prepare_review_media(
-        Path(args.video),
-        Path(args.run_root),
-        args.max_frames,
-        Path(args.render_manifest) if args.render_manifest else None,
+    manifest = (
+        prepare_asset_review_media(Path(args.asset_plan), Path(args.run_root), args.max_frames)
+        if args.asset_plan
+        else prepare_review_media(
+            Path(args.video),
+            Path(args.run_root),
+            args.max_frames,
+            Path(args.render_manifest) if args.render_manifest else None,
+        )
     )
     print(json.dumps({"manifestPath": str(manifest)}, ensure_ascii=False))
     return 0
 
 
-def _resolve_run_file(path: Path, root: Path) -> Path:
+def _resolve_run_file(path: Path, root: Path, field: str = "video_path") -> Path:
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
         candidate = root / candidate
     resolved = candidate.resolve(strict=True)
-    _assert_confined(resolved, root, "video_path")
+    _assert_confined(resolved, root, field)
     if not resolved.is_file():
-        raise ValueError("video_path must be a file")
+        raise ValueError(f"{field} must be a file")
     return resolved
 
 
@@ -431,6 +571,19 @@ def _extract_frame(video_path: Path, timestamp_ms: int, output_path: Path) -> No
     )
     if not output_path.is_file() or output_path.stat().st_size == 0:
         raise RuntimeError(f"FFmpeg did not produce a frame at {timestamp_ms}ms")
+
+
+def _copy_image_frame(source_path: Path, output_path: Path) -> None:
+    try:
+        with Image.open(source_path) as source:
+            image = ImageOps.contain(
+                source.convert("RGB"),
+                (FRAME_MAX_WIDTH, FRAME_MAX_HEIGHT),
+                Image.Resampling.LANCZOS,
+            )
+            image.save(output_path, format="JPEG", quality=82, optimize=False, progressive=False, subsampling=2)
+    except (OSError, ValueError) as error:
+        raise ValueError(f"asset image is not reviewable: {source_path.name}") from error
 
 
 def _bound_jpeg(path: Path, max_bytes: int) -> None:

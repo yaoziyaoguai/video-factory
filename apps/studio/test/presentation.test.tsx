@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel } from "../src/client/presentation.js";
+import { RUN_NODE_ORDER, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, runNodeLabel } from "../src/client/presentation.js";
 
 describe("creator-facing presentation labels", () => {
   it("does not expose internal provider ids or director routing codes", () => {
@@ -8,6 +8,12 @@ describe("creator-facing presentation labels", () => {
     expect(providerModelLabel(undefined, "internal-model-id")).toBe("未识别模型");
     expect(humanizeCreativeText("knowledge-failed-intuition：generated_image，REUSE_ONLY scene 2"))
       .toBe("打破直觉：AI 图片生成，复用镜头 2");
+  });
+
+  it("places the source-asset gate between paid visuals and voice", () => {
+    expect(runNodeLabel("asset-source-review")).toBe("生成画面预检");
+    expect(RUN_NODE_ORDER.indexOf("asset-source-review")).toBe(RUN_NODE_ORDER.indexOf("assets") + 1);
+    expect(RUN_NODE_ORDER.indexOf("voice")).toBe(RUN_NODE_ORDER.indexOf("asset-source-review") + 1);
   });
 
   it("turns system diagnostics into creator language without rewriting creative copy", () => {

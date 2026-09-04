@@ -243,6 +243,7 @@ function productionNodeIds(brief: ProductionBrief): string[] {
     ...(brief.director ? ["visual-direction"] : []),
     ...(brief.workflowFeatures?.assetSemanticRank ? ["asset-candidates", "asset-semantic-rank"] : []),
     "assets",
+    ...(brief.providers.visualReview ? ["asset-source-review"] : []),
     "voice",
     "render",
     "technical-review",
@@ -250,6 +251,24 @@ function productionNodeIds(brief: ProductionBrief): string[] {
     "final-review",
     "publish-package",
   ];
+}
+
+export function productionWorkflowVersion(
+  brief: Pick<ProductionBrief, "providers" | "workflowFeatures" | "director">,
+): string {
+  return brief.providers.visualReview
+    ? brief.workflowFeatures?.referenceGrammar
+      ? "1.7.0"
+      : brief.workflowFeatures?.assetSemanticRank
+        ? "1.6.0"
+        : "1.5.0"
+    : brief.workflowFeatures?.referenceGrammar
+      ? "1.4.0"
+      : brief.workflowFeatures?.assetSemanticRank
+        ? "1.3.0"
+        : brief.director
+          ? "1.1.0"
+          : "1.0.0";
 }
 
 function withPersistedBrief(
@@ -1870,12 +1889,13 @@ export class ProductionPipeline {
         }),
         "素材导演",
       ),
+      ...(brief.providers.visualReview ? [sourceAssetVisualReviewNode(brief, this.runsRoot)] : []),
       workerNode(
         "voice",
         "Synthesize voice",
         "voice.synthesize",
         brief.providers.voice,
-        ["script", "assets"],
+        ["script", brief.providers.visualReview ? "asset-source-review" : "assets"],
         ["script", "assets"],
         (context) => ({
           scriptPath: outputPath(context, "script", "scriptPath"),
@@ -2108,7 +2128,9 @@ export class ProductionPipeline {
             resourceManifest: {
               version: resourceManifest.version,
               itemCount: resourceManifest.items.length,
-              needsReviewCount: resourceManifest.items.filter((item) => item.reviewStatus === "needs_review").length,
+              needsReviewCount: resourceManifest.items.filter((item) => (
+                requiresRightsReviewCategory(item.category) && item.reviewStatus === "needs_review"
+              )).length,
             },
             artifacts: currentArtifacts.map(publishArtifactDescriptor),
           };
@@ -2161,7 +2183,7 @@ export class ProductionPipeline {
     return {
       id: "daily-production",
       name: "Daily short-video production",
-      version: brief.workflowFeatures?.referenceGrammar ? "1.4.0" : brief.workflowFeatures?.assetSemanticRank ? "1.3.0" : brief.providers.visualReview ? "1.2.0" : brief.director ? "1.1.0" : "1.0.0",
+      version: productionWorkflowVersion(brief),
       nodes,
     };
   }
@@ -2449,7 +2471,7 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   readonly label = "Codex 视觉导演";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly parameters = { promptPack: "video-factory/director-v11" };
+  readonly parameters = { promptPack: "video-factory/director-v13" };
 
   constructor(
     private readonly agent: VisualDirectorAgent,
@@ -2515,7 +2537,7 @@ class VisualReviewProvider implements Provider<VisualReviewAgentInput, VisualRev
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
   get approvalPolicy(): ApprovalPolicy { return this.metadata?.approvalPolicy ?? "none"; }
   get configurationSource(): ExecutionConfigurationSource { return "system_default"; }
-  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v5", agentLoopMaxIterations: 3, independentAudit: true }; }
+  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v6", agentLoopMaxIterations: 3, independentAudit: true }; }
   get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number { return roundCurrency((this.metadata?.estimatedCostCny ?? 0) * this.maxAttempts); }
   get maxAttempts(): number { return Math.max(3, this.metadata?.maxAttempts ?? 3); }
@@ -3442,6 +3464,157 @@ function validateVisualReviewInput(
   return request;
 }
 
+function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): NodeDefinition {
+  const providerId = brief.providers.visualReview;
+  if (!providerId) throw new Error("Source asset visual review provider is missing.");
+  return {
+    id: "asset-source-review",
+    label: "Source asset visual review",
+    role: "生成画面预检",
+    capability: "quality.review.visual",
+    providerId,
+    mode: "automatic",
+    dependsOn: ["assets"],
+    getInput: (context) => ({
+      assetPlanPath: outputPath(context, "assets", "assetPlanPath"),
+      reviewStage: "source_assets",
+      runRoot: path.join(runsRoot, context.runId),
+      scriptPath: outputPath(context, "script", "scriptPath"),
+      ...(brief.director ? { directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath") } : {}),
+      ...(brief.models?.[providerId] ? { selectedModelId: brief.models[providerId] } : {}),
+    }),
+    validateInputOverride: (input) => validateSourceAssetVisualReviewInput(input, Boolean(brief.director)),
+    execute: async (input, context) => {
+      const request = validateSourceAssetVisualReviewInput(input, Boolean(brief.director));
+      const provider = context.resolveProvider<VisualReviewAgentInput, VisualReviewExecution>({
+        capability: "quality.review.visual",
+        providerId,
+      });
+      const parentArtifactIds = context.artifacts
+        .filter((artifact) => artifact.producer && ["script", "visual-direction", "assets"].includes(artifact.producer.nodeId))
+        .map((artifact) => artifact.id);
+      const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "asset-source-review"));
+      let execution: VisualReviewExecution;
+      try {
+        execution = await provider.run({
+          ...request,
+          agentLoopCheckpoint: nodeAgentLoopCheckpoint(
+            runsRoot,
+            context.runId,
+            "asset-source-review",
+            request,
+            VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+          ),
+          agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
+            runsRoot,
+            context.runId,
+            "asset-source-review",
+            request,
+            VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+            modelId,
+          ),
+        }, context);
+      } catch (error) {
+        if (error instanceof RoleAgentLoopError) {
+          const failed = await failedAgentLoopNodeResult({
+            error,
+            attemptDirectory: attempt.directory,
+            nodeId: "asset-source-review",
+            attempt: attempt.attempt,
+            parentArtifactIds,
+            provider,
+            providerLabel: provider.label ?? "生成画面预检",
+          });
+          return { ...failed, error: `源素材视觉预检没有完成：${failed.error}` };
+        }
+        if (error instanceof VisualReviewFallbackError) {
+          const failed = await failedModelCandidatesNodeResult({
+            error,
+            taskKind: "visual-review",
+            attemptDirectory: attempt.directory,
+            nodeId: "asset-source-review",
+            attempt: attempt.attempt,
+            parentArtifactIds,
+            provider,
+            providerLabel: provider.label ?? "生成画面预检",
+          });
+          return { ...failed, error: `源素材视觉预检没有完成：${failed.error}` };
+        }
+        return {
+          status: "failed",
+          providerOutcomeKnown: true,
+          error: "源素材视觉预检服务暂时不可用。已保留生成结果，请重试生成画面预检或更换视觉审片模型。",
+        };
+      }
+
+      const reportPath = path.join(attempt.directory, "source_visual_review.json");
+      const reportContent = `${JSON.stringify(execution.output, null, 2)}\n`;
+      await writeTextAtomically(reportPath, reportContent);
+      const reportArtifact = fileArtifact(
+        "review_report",
+        reportPath,
+        reportContent,
+        "application/json",
+        "video-factory/source-asset-visual-review-v1",
+        "asset-source-review",
+        parentArtifactIds,
+        execution.executedProviderId ?? execution.trace?.providerId ?? provider.id,
+        "Free source-asset visual gate completed before voice synthesis and rendering.",
+        attempt.attempt,
+      );
+      const traceArtifact = await persistModelTrace({
+        trace: execution.trace,
+        attemptDirectory: attempt.directory,
+        nodeId: "asset-source-review",
+        attempt: attempt.attempt,
+        parentArtifactIds,
+      });
+      const loopArtifact = await persistAgentLoopTrace({
+        loop: execution.agentLoop,
+        attemptDirectory: attempt.directory,
+        nodeId: "asset-source-review",
+        attempt: attempt.attempt,
+        parentArtifactIds,
+      });
+      const output = { sourceVisualReviewPath: reportPath, report: execution.output };
+      const result = {
+        output,
+        ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, provider.label ?? "生成画面预检", "subscription", execution.agentLoop, provider.configurationSource) } : {}),
+        artifacts: [reportArtifact, traceArtifact, loopArtifact].filter((artifact): artifact is ArtifactDraft => Boolean(artifact)),
+      };
+      return execution.output.recommendation === "approve" && execution.output.findings.length === 0
+        ? { ...result, status: "succeeded" }
+        : { ...result, status: "rejected", error: sourceAssetReviewFailureMessage(execution.output) };
+    },
+    validateOverride: (output) => validatePathOutput(output, "sourceVisualReviewPath", "asset-source-review"),
+  };
+}
+
+function validateSourceAssetVisualReviewInput(value: unknown, directorEnabled: boolean): VisualReviewAgentInput {
+  const input = requireOutputRecord(value, "source asset visual review input");
+  const request: VisualReviewAgentInput = {
+    assetPlanPath: requiredOutputString(input, "assetPlanPath"),
+    reviewStage: "source_assets",
+    runRoot: requiredOutputString(input, "runRoot"),
+    scriptPath: requiredOutputString(input, "scriptPath"),
+  };
+  if (directorEnabled) request.directorPlanPath = requiredOutputString(input, "directorPlanPath");
+  if (input.selectedModelId !== undefined) request.selectedModelId = requiredOutputString(input, "selectedModelId");
+  return request;
+}
+
+function sourceAssetReviewFailureMessage(report: VisualReviewReport): string {
+  const findings = report.findings.slice(0, 3).map((finding) => (
+    `${finding.scenePosition ? `镜头 ${finding.scenePosition}` : "未定位镜头"}：${finding.description}`
+  ));
+  return [
+    "源素材视觉预检未通过，系统已在配音和渲染前停止，不会自动再次调用付费画面模型。",
+    report.summary,
+    ...findings,
+    "请调整导演方案或画面 Provider，重新报价并确认后再生成。",
+  ].filter(Boolean).join(" ");
+}
+
 function validatePublishPackageInput(value: unknown): {
   scriptPath: string;
   brief: Pick<ProductionBrief, "title" | "angle" | "audience" | "nicheSlug" | "platform">;
@@ -3673,7 +3846,7 @@ function assetSemanticRankNode(
       transport: "unix_socket",
       billing: "subscription",
       configurationSource: "system_default",
-      parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v1" },
+      parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v2" },
       estimatedCostCny: 0,
     } : {
       providerId: "deterministic-quality-v1",
@@ -3738,7 +3911,7 @@ function assetSemanticRankNode(
                 transport: "unix_socket",
                 billing: "subscription",
                 configurationSource: "system_default",
-                parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v1" },
+                parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v2" },
               },
               providerLabel: "Codex 候选画面排序",
             });
@@ -5332,6 +5505,10 @@ function resourceCategory(kind: string, contentType?: string, producerNodeId?: s
   if (kind === "media_asset" || kind === "render" || contentType?.startsWith("video/") || contentType?.startsWith("image/")) return "visual";
   if (contentType === "application/json" || kind.endsWith("_plan") || kind.endsWith("_report")) return "document";
   return "other";
+}
+
+function requiresRightsReviewCategory(category: ProductionResourceManifestItem["category"]): boolean {
+  return category === "visual" || category === "voice" || category === "font";
 }
 
 function uniqueResourceItems(items: ProductionResourceManifestItem[]): ProductionResourceManifestItem[] {

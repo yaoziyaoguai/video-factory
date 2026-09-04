@@ -250,6 +250,19 @@ describe("auditedRoleCandidateAvailability", () => {
 });
 
 describe("buildProviderCatalog codex fallback", () => {
+  it("does not repeat the same unavailable reason for production and audit tasks", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      { available: false, reason: "OpenAI broker unavailable" },
+      { available: false, reason: "ZAI broker unavailable" },
+    );
+
+    const requirement = providers.find((provider) => provider.id === "api-visual-director-v1")?.requirement ?? "";
+    assert.equal(requirement.match(/OpenAI broker unavailable/g)?.length, 1);
+    assert.equal(requirement.match(/ZAI broker unavailable/g)?.length, 1);
+  });
+
   it("shows reviewed video model catalogs before provider credentials are configured", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },

@@ -1,4 +1,4 @@
-import { CodexBridgeClient, type CodexTaskExecution } from "./codex-chat.js";
+import { CodexBridgeClient, requestOptionsForDeadline, type CodexTaskExecution } from "./codex-chat.js";
 import {
   VISUAL_DIRECTOR_PROFILES,
   validateVisualDirectorPlan,
@@ -25,7 +25,7 @@ export interface CodexVisualDirectorAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
-export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v12|role-audit-v2|director-validator-v2";
+export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v13|role-audit-v2|director-validator-v2";
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
 export class CodexVisualDirectorAgent implements VisualDirectorAgent {
@@ -60,17 +60,27 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
   // 模型输出为 unknown：先经 validateVisualDirectorPlan 硬校验，malformed/不合法直接抛错，没有任何 fallback。
   async plan(input: VisualDirectorAgentInput): Promise<VisualDirectorPlan> {
     this.assertSelectedModel(input.selectedModelId);
-    const { agentLoopCheckpoint: _checkpoint, selectedModelId: _selectedModelId, ...directorInput } = input;
+    const {
+      agentLoopCheckpoint: _checkpoint,
+      selectedModelId: _selectedModelId,
+      wallClockDeadlineAtMs,
+      ...directorInput
+    } = input;
     const rawPlan = await this.client.runTask("director-plan", {
       directorProfiles: VISUAL_DIRECTOR_PROFILES,
       ...directorInput,
-    });
+    }, undefined, requestOptionsForDeadline(wallClockDeadlineAtMs));
     return validateVisualDirectorPlan(rawPlan, validationFor(input));
   }
 
   async planDetailed(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<VisualDirectorPlan>> {
     this.assertSelectedModel(input.selectedModelId);
-    const { agentLoopCheckpoint, selectedModelId: _selectedModelId, ...directorInput } = input;
+    const {
+      agentLoopCheckpoint,
+      selectedModelId: _selectedModelId,
+      wallClockDeadlineAtMs,
+      ...directorInput
+    } = input;
     const basePayload = {
       directorProfiles: VISUAL_DIRECTOR_PROFILES,
       ...directorInput,
@@ -91,7 +101,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
       produce: (revision, { requestId, session }) => this.client.runTaskDetailed("director-plan", {
         ...basePayload,
         ...(revision ? { revision } : {}),
-      }, requestId, this.sessionMode === "stateless" ? undefined : session),
+      }, requestId, this.sessionMode === "stateless" ? undefined : session, requestOptionsForDeadline(wallClockDeadlineAtMs)),
       audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => auditClient.runTaskDetailed("role-audit", {
         role,
         iteration,
@@ -99,7 +109,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
         context: visualDirectorAuditContext(directorInput, candidate),
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
-      }, requestId, this.sessionMode === "stateless" ? undefined : session),
+      }, requestId, this.sessionMode === "stateless" ? undefined : session, requestOptionsForDeadline(wallClockDeadlineAtMs)),
       validate: (value) => validateVisualDirectorPlan(value, validationFor(input)),
       ...(agentLoopCheckpoint ? { checkpoint: agentLoopCheckpoint } : {}),
     });
@@ -228,7 +238,7 @@ function visualDirectorAuditContext(
         billing: provider.billing,
         deliveryTypes: provider.deliveryTypes,
         strengths: provider.strengths,
-        constraints: provider.constraints,
+        constraints: provider.constraints.filter((constraint) => !isDownstreamDisclosureConstraint(constraint)),
         estimatedCnyPerClip: provider.estimatedCnyPerClip,
         ...(provider.selectedModelId ? { selectedModelId: provider.selectedModelId } : {}),
         ...(provider.minDurationSeconds !== undefined ? { minDurationSeconds: provider.minDurationSeconds } : {}),
@@ -236,8 +246,12 @@ function visualDirectorAuditContext(
       })),
       economics: input.economics,
     },
-    downstreamBoundary: "审查镜头计划是否能被已声明 Provider 执行；不得要求当前节点提供尚未生成或下载的真实画面。",
+    downstreamBoundary: "审查镜头计划是否能被已声明 Provider 执行；不得要求当前节点提供尚未生成或下载的真实画面。AIGC 标识、内容声明、文件标记与平台披露由渲染与发布链路负责，不得成为视觉圣经或逐镜计划的通过条件。",
   };
+}
+
+function isDownstreamDisclosureConstraint(value: string): boolean {
+  return /AIGC|(?:AI\s*生成|AI\s*内容|人工智能生成|生成式镜头).*(?:标识|声明|披露)|平台(?:声明|披露)|文件(?:标记|标识)|成片.*(?:标识|声明|披露)|水印.*(?:保留|清晰|裁切|遮挡|移除)/i.test(value);
 }
 
 function validationFor(input: VisualDirectorAgentInput): VisualDirectorPlanValidation {

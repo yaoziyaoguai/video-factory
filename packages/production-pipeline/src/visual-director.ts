@@ -230,6 +230,7 @@ export interface VisualDirectorAgentInput {
   }>;
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
   agentLoopCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
+  wallClockDeadlineAtMs?: number;
 }
 
 export interface VisualAssetProviderCapability {

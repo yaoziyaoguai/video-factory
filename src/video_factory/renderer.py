@@ -1,5 +1,4 @@
 import json
-import re
 import shutil
 import subprocess
 import textwrap
@@ -17,6 +16,7 @@ FONT_CANDIDATES = [
     Path("/usr/share/fonts/noto/NotoSansCJK-Regular.ttc"),
     Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
 ]
+RENDER_FPS = 30
 
 
 def ffmpeg_available() -> bool:
@@ -124,6 +124,7 @@ def render_script_video(
     frames = write_scene_frames(manifest, frames_dir, width, height)
     concat_path = write_concat_file(output_dir / "concat.txt", frames)
     output_file = Path(str(manifest["output_file"]))
+    frame_count = sum(timeline_frame_counts(manifest["slides"]))
 
     audio_input = render_audio_input(manifest)
     temporary_output = output_file.with_name(f"{output_file.stem}.partial{output_file.suffix}")
@@ -144,6 +145,8 @@ def render_script_video(
         "-vf",
         f"fps=30,format=yuv420p,scale={width}:{height}",
         "-shortest",
+        "-frames:v",
+        str(frame_count),
         "-c:v",
         "libx264",
         "-preset",
@@ -199,7 +202,8 @@ def render_asset_video(
     }
     clips = []
     scene_commands = []
-    for scene in manifest["slides"]:
+    frame_counts = timeline_frame_counts(manifest["slides"])
+    for scene, frame_count in zip(manifest["slides"], frame_counts):
         asset = scene_assets[int(scene["position"])]
         caption_style = "editorial" if asset.get("provider") == "local" else "subtitle"
         caption_path = write_caption_overlay(
@@ -211,7 +215,15 @@ def render_asset_video(
             style=caption_style,
             director_route=director_routes.get(int(scene["position"])),
         )
-        clip_path, command = render_scene_clip(scene, asset, caption_path, clips_dir, width, height)
+        clip_path, command = render_scene_clip(
+            scene,
+            asset,
+            caption_path,
+            clips_dir,
+            width,
+            height,
+            frame_count=frame_count,
+        )
         clips.append(clip_path)
         scene_commands.append(command)
 
@@ -234,6 +246,8 @@ def render_asset_video(
         "-map",
         "1:a:0",
         "-shortest",
+        "-frames:v",
+        str(sum(frame_counts)),
         "-c:v",
         "copy",
         "-c:a",
@@ -284,7 +298,6 @@ def write_caption_overlay(
     draw = ImageDraw.Draw(image)
     margin = max(56, width // 13)
     if style == "editorial":
-        label_font = load_font(ImageFont, max(24, width // 38))
         body_font, body_lines = fit_multiline(
             draw,
             scene["text"],
@@ -297,15 +310,8 @@ def write_caption_overlay(
         )
         body_height = multiline_height(draw, body_lines, body_font, 12)
         body_y = height - max(116, height // 16) - body_height
-        label_y = body_y - max(54, height // 42)
-        panel_top = max(int(height * 0.69), label_y - 42)
+        panel_top = max(int(height * 0.69), body_y - 42)
         draw.rectangle((0, panel_top, width, height), fill=(7, 12, 23, 248))
-        draw.text(
-            (margin, label_y),
-            f"旁白  {int(scene['position']):02d}/{len(manifest['slides']):02d}",
-            font=label_font,
-            fill=(250, 204, 21, 235),
-        )
         draw_stroked_multiline(
             draw,
             body_lines,
@@ -320,7 +326,6 @@ def write_caption_overlay(
         image.save(caption_path)
         return caption_path
 
-    title_font = load_font(ImageFont, max(24, width // 42))
     body_font, body_lines = fit_multiline(
         draw,
         scene["text"],
@@ -333,18 +338,8 @@ def write_caption_overlay(
     )
     body_height = multiline_height(draw, body_lines, body_font, 12)
     body_y = height - max(96, height // 20) - body_height
-    title_y = body_y - max(58, height // 36)
 
-    draw_bottom_scrim(draw, width, height, max(0, title_y - 96), height)
-    draw_director_labels(draw, ImageFont, director_overlay_labels(manifest, scene, director_route), width)
-    draw.text(
-        (margin, title_y),
-        f"{manifest['title']}  {int(scene['position']):02d}/{len(manifest['slides']):02d}",
-        font=title_font,
-        fill=(219, 234, 254, 232),
-        stroke_width=2,
-        stroke_fill=(2, 6, 23, 190),
-    )
+    draw_bottom_scrim(draw, width, height, max(0, body_y - 96), height)
     draw_stroked_multiline(
         draw,
         body_lines,
@@ -360,49 +355,6 @@ def write_caption_overlay(
     return caption_path
 
 
-def director_overlay_labels(manifest: dict, scene: dict, director_route: Optional[dict]) -> list[str]:
-    if not isinstance(director_route, dict):
-        return []
-    shot = director_route.get("director_shot")
-    if not isinstance(shot, dict):
-        shot = {}
-    values = [str(scene.get("visual_prompt") or "")]
-    for key in ("subject", "visibleAction", "continuityNote"):
-        values.append(str(shot.get(key) or ""))
-    for key in ("successCriteria", "referenceRequirements"):
-        items = shot.get(key)
-        if isinstance(items, list):
-            values.extend(str(item) for item in items if isinstance(item, str))
-    joined = " ".join(values)
-    labels = quoted_overlay_text(joined)
-    complete_state = "三项完成" in joined or ("三项核验" in joined and "完成" in joined)
-    if complete_state:
-        historical = " ".join(str(item.get("visual_prompt") or "") for item in manifest.get("slides", []) if isinstance(item, dict))
-        recurring = [label for label in quoted_overlay_text(historical) if 1 <= len(label) <= 6 and historical.count(f"“{label}”") >= 2]
-        labels = recurring[:3] or labels
-        return [f"{label} · 已完成" for label in labels[:3]]
-    return labels[:3]
-
-
-def quoted_overlay_text(text: str) -> list[str]:
-    values = re.findall(r"[“\"]([^”\"]{1,24})[”\"]", text)
-    return list(dict.fromkeys(value.strip() for value in values if value.strip()))
-
-
-def draw_director_labels(draw, ImageFont, labels: list[str], width: int) -> None:
-    if not labels:
-        return
-    font = load_font(ImageFont, max(26, width // 32))
-    x = max(56, width // 13)
-    y = 180
-    for label in labels:
-        box = draw.textbbox((0, 0), label, font=font)
-        item_width = min(width - x * 2, box[2] - box[0] + 56)
-        draw.rounded_rectangle((x, y, x + item_width, y + 72), radius=34, fill=(8, 15, 28, 205), outline=(255, 255, 255, 72), width=2)
-        draw.text((x + 28, y + 17), label, font=font, fill=(255, 255, 255, 244))
-        y += 88
-
-
 def render_scene_clip(
     scene: dict,
     asset: dict,
@@ -410,8 +362,10 @@ def render_scene_clip(
     clips_dir: Path,
     width: int,
     height: int,
+    frame_count: Optional[int] = None,
 ) -> tuple[Path, list[str]]:
     duration = float(scene["duration"])
+    resolved_frame_count = frame_count if frame_count is not None else round(duration * RENDER_FPS)
     asset_path = Path(str(asset["local_path"]))
     clip_path = clips_dir / f"scene_{scene['position']:02d}.mp4"
     if asset["media_type"] == "video":
@@ -458,14 +412,15 @@ def render_scene_clip(
             f"[0:v]{background_filter}[bg];"
             f"[bg][1:v]overlay=0:0,"
             f"drawbox=x=0:y={height - 10}:w='min(iw,iw*t/{duration:.3f})':h=10:"
-            "color=white@0.72:t=fill,format=yuv420p[v]"
+            "color=white@0.72:t=fill,"
+            "tpad=stop_mode=clone:stop_duration=1,format=yuv420p[v]"
         ),
         "-map",
         "[v]",
-        "-t",
-        f"{duration:.3f}",
         "-r",
-        "30",
+        str(RENDER_FPS),
+        "-frames:v",
+        str(resolved_frame_count),
         "-an",
         "-c:v",
         "libx264",
@@ -477,6 +432,19 @@ def render_scene_clip(
     ]
     subprocess.run(command, check=True, capture_output=True, text=True)
     return clip_path, command
+
+
+def timeline_frame_counts(scenes: list[dict]) -> list[int]:
+    # 按累计时间切分帧边界，避免每个镜头独立取整后让整片多帧或少帧。
+    elapsed_seconds = 0.0
+    previous_boundary = 0
+    frame_counts: list[int] = []
+    for scene in scenes:
+        elapsed_seconds += float(scene["duration"])
+        boundary = round(elapsed_seconds * RENDER_FPS)
+        frame_counts.append(boundary - previous_boundary)
+        previous_boundary = boundary
+    return frame_counts
 
 
 def is_generated_video_asset(asset: dict) -> bool:
@@ -517,35 +485,23 @@ def write_scene_frames(manifest: dict, frames_dir: Path, width: int, height: int
     except ImportError as error:
         raise RuntimeError("Pillow is required for MP4 rendering. Install project dependencies first.") from error
 
-    title_font = load_font(ImageFont, max(42, width // 20))
     body_font = load_font(ImageFont, max(52, width // 17))
-    note_font = load_font(ImageFont, max(28, width // 38))
     palette = [
-        ("#111827", "#f9fafb", "#60a5fa"),
-        ("#172554", "#eff6ff", "#facc15"),
-        ("#14532d", "#f0fdf4", "#fb7185"),
-        ("#3b0764", "#faf5ff", "#34d399"),
-        ("#431407", "#fff7ed", "#93c5fd"),
+        ("#111827", "#f9fafb"),
+        ("#172554", "#eff6ff"),
+        ("#14532d", "#f0fdf4"),
+        ("#3b0764", "#faf5ff"),
+        ("#431407", "#fff7ed"),
     ]
     frames: list[tuple[Path, float]] = []
     scenes = manifest["slides"]
 
     for index, scene in enumerate(scenes):
-        background, text_color, accent = palette[index % len(palette)]
+        background, text_color = palette[index % len(palette)]
         image = Image.new("RGB", (width, height), background)
         draw = ImageDraw.Draw(image)
         margin = max(64, width // 11)
 
-        draw.text((margin, margin), f"Scene {scene['position']}", font=note_font, fill=accent)
-        draw_multiline(
-            draw,
-            manifest["title"],
-            (margin, margin + 72),
-            title_font,
-            text_color,
-            width - margin * 2,
-            line_spacing=16,
-        )
         body_y = height // 3
         draw_multiline(
             draw,
@@ -555,16 +511,6 @@ def write_scene_frames(manifest: dict, frames_dir: Path, width: int, height: int
             text_color,
             width - margin * 2,
             line_spacing=24,
-        )
-        footer = f"{scene['visual_strategy']} | {scene['visual_prompt']}"
-        draw_multiline(
-            draw,
-            footer,
-            (margin, height - margin * 3),
-            note_font,
-            accent,
-            width - margin * 2,
-            line_spacing=12,
         )
         draw_aigc_badge(draw, ImageFont, width, scene)
 

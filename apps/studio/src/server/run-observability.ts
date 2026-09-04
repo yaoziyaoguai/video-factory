@@ -12,7 +12,7 @@ import type {
 
 const PHASES: Array<{ id: StudioRunPhaseId; label: string; nodeIds: string[] }> = [
   { id: "planning", label: "策划定稿", nodeIds: ["brief", "script", "reference-grammar", "visual-direction"] },
-  { id: "assets", label: "素材筹备", nodeIds: ["asset-candidates", "asset-semantic-rank", "assets"] },
+  { id: "assets", label: "素材筹备", nodeIds: ["asset-candidates", "asset-semantic-rank", "assets", "asset-source-review"] },
   { id: "composition", label: "声音与剪辑", nodeIds: ["voice", "render"] },
   { id: "review", label: "审片质检", nodeIds: ["technical-review", "visual-review", "final-review"] },
   { id: "delivery", label: "交付发布", nodeIds: ["publish-package"] },
@@ -26,6 +26,7 @@ const NODE_ACTIONS: Record<string, string> = {
   "asset-candidates": "正在检索并整理可用素材候选",
   "asset-semantic-rank": "正在按镜头语义、可信度与成本排序素材",
   assets: "正在组织逐镜画面并核对素材来源",
+  "asset-source-review": "正在检查生成画面的文字、主体与动作一致性",
   voice: "正在生成配音并校准语速、停连和响度",
   render: "正在合成画面、声音、字幕与转场",
   "technical-review": "正在检查画幅、音量、字幕和文件完整性",
@@ -223,6 +224,14 @@ function isDefinitiveZeroAttemptFailure(node: StudioNode): boolean {
 
 function normalizeFailure(raw: string, node: StudioNode, provider?: string): Pick<StudioRunFailure, "category" | "summary" | "retryable" | "recoveryActions"> {
   const service = provider ?? node.role ?? node.label;
+  if (/源素材视觉预检/.test(raw)) {
+    return {
+      category: /timeout|timed out|超时/i.test(raw) ? "provider_timeout" : "node_failure",
+      summary: "生成画面的视觉预检没有完成，已保留本轮画面结果",
+      retryable: true,
+      recoveryActions: ["在画面步骤切换视觉审片服务或模型后重试", "若服务暂时不可用，可稍后重试画面步骤"],
+    };
+  }
   if (/\b429\b|rate.?limit|too many requests|quota/i.test(raw)) {
     return {
       category: "provider_capacity",

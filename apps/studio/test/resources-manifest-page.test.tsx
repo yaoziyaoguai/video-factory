@@ -199,6 +199,34 @@ describe("ResourcesPage source and rights section", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 190, pauseScale: 1, masteringPreset: "natural" },
     });
   });
+
+  it("confirms or rejects pending rights and links rejected items back to production", async () => {
+    const user = userEvent.setup();
+    const base: StudioResourceManifest = {
+      reviewRevision: 3,
+      generatedAt: "2026-09-04T00:00:00.000Z", totalItems: 2, needsReviewCount: 2,
+      legacyRunsWithoutManifest: 0, reconstructedRunCount: 0, unreadableManifestCount: 0, truncatedRunCount: 0, truncatedItemCount: 0,
+      categories: { visual: 2, voice: 0, font: 0, document: 0, other: 0 },
+      items: ["confirm", "reject"].map((id) => ({ id, runId: "run-1", runTitle: "示例视频", category: "visual" as const, kind: "media_asset", providerId: "seedream-image-v1", commercialUse: "provider_terms" as const, attributionRequirement: "provider_terms" as const, reviewStatus: "needs_review" as const })),
+      assetIndex: { version: "video-factory/asset-index-v1", totalAssets: 0, duplicateUses: 0, reusableCount: 0, needsReviewCount: 0, facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} }, assets: [] },
+    };
+    stubResourcePage(base);
+    const review = vi.spyOn(studioApi, "reviewResource").mockImplementation(async (input) => ({
+      ...base,
+      reviewRevision: input.expectedRevision + 1,
+      needsReviewCount: 1,
+      items: base.items.map((item) => item.id === input.itemId ? { ...item, reviewStatus: input.action === "confirmed" ? "recorded" as const : "needs_review" as const, reviewDecision: { action: input.action, reviewedAt: "2026-09-04T01:00:00.000Z", reviewedBy: "owner", ...(input.note ? { note: input.note } : {}) } } : item),
+    }));
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+    await user.click(await screen.findByText("示例视频", { selector: "summary strong" }));
+    await user.click(screen.getAllByRole("button", { name: "确认可用" })[0]!);
+    expect(review).toHaveBeenCalledWith(expect.objectContaining({ itemId: "confirm", expectedRevision: 3, action: "confirmed" }));
+
+    await user.click(screen.getByRole("button", { name: "驳回" }));
+    await user.type(screen.getByRole("textbox", { name: "驳回原因" }), "缺少商用授权");
+    await user.click(screen.getByRole("button", { name: "确认驳回" }));
+    expect(await screen.findByRole("link", { name: "打开原制作，点击“基于这版重新制作”" })).toHaveAttribute("href", "/projects/run-1");
+  });
 });
 
 function stubResourcePage(resourceManifest: StudioResourceManifest) {

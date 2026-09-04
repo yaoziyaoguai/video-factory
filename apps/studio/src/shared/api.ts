@@ -597,6 +597,7 @@ export interface StudioRunSummary {
   startedAt: string;
   finishedAt?: string;
   currentNodeId: string;
+  workflowNodeIds?: string[];
   nextAction?: "review" | "confirm_spend" | "regenerate";
   videoContentUrl?: string;
   archivedAt?: string;
@@ -691,6 +692,10 @@ export interface StudioRunDetail extends StudioRunSummary {
   videoArtifactId?: string;
   publishPackageArtifactId?: string;
   pauseRequested?: boolean;
+  continuation?: {
+    supported: boolean;
+    reason?: string;
+  };
 }
 
 export interface StudioNode {
@@ -1019,6 +1024,15 @@ export interface StudioResourceManifestItem {
   query?: string;
   semanticTags?: string[];
   selectedInFinal?: boolean;
+  reviewDecision?: { action: "confirmed" | "rejected"; reviewedAt: string; reviewedBy: string; note?: string };
+}
+
+export interface StudioResourceReviewInput {
+  runId: string;
+  itemId: string;
+  expectedRevision: number;
+  action: "confirmed" | "rejected";
+  note?: string;
 }
 
 export type StudioAssetMediaKind = "video" | "image" | "audio" | "document" | "font" | "other";
@@ -1084,6 +1098,7 @@ export interface StudioAssetIndex {
 }
 
 export interface StudioResourceManifest {
+  reviewRevision?: number;
   generatedAt: string;
   totalItems: number;
   needsReviewCount: number;

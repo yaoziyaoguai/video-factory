@@ -487,6 +487,19 @@ describe("Creative OS", () => {
     expect(await screen.findByRole("link", { name: /窗边一杯水的六秒光影/ })).toHaveAttribute("href", "/projects/run-1");
   });
 
+  it("shows the real run status in global search", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
+    vi.spyOn(studioApi, "runs").mockResolvedValue([{ ...runningRun, title: "失败的制作", status: "failed" }]);
+    render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
+
+    await user.click(screen.getByRole("button", { name: "搜索项目、模板或功能" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目、模板或功能" }), "失败的制作");
+
+    expect(await screen.findByRole("link", { name: /失败的制作/ })).toHaveTextContent("失败");
+    expect(screen.getByRole("link", { name: /失败的制作/ })).not.toHaveTextContent("制作中");
+  });
+
   it("closes global search with Escape, clears it, and restores focus", async () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
@@ -536,6 +549,32 @@ describe("Creative OS", () => {
 
     rerender(<MemoryRouter><DirectorPanel opportunity={{ ...opportunity, origin: "series" }} providers={topicProviders} onProduce={() => undefined} /></MemoryRouter>);
     expect(screen.getByText("系列选题、连续性检查与开拍前复核由 AI 系列总编完成")).toBeInTheDocument();
+  });
+
+  it("blocks production when a historical trend no longer meets the current editorial gate", () => {
+    render(<MemoryRouter><DirectorPanel
+      opportunity={{
+        ...opportunity,
+        verification: {
+          status: "blocked",
+          independentSources: 1,
+          requiredSources: 2,
+          reasons: ["当前总编规则要求至少 2 个不同域名的有效原始来源链接。"],
+        },
+        editorialDecision: {
+          verdict: "skip",
+          score: 0,
+          reasons: ["证据门槛未满足。"],
+          guardrails: ["补齐来源后再评估。"],
+        },
+      }}
+      providers={providers}
+      onProduce={() => undefined}
+    /></MemoryRouter>);
+
+    expect(screen.getByRole("button", { name: "新建制作" })).toBeDisabled();
+    expect(screen.getByText(/这条历史选题不再满足当前制作标准/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "查看缺失能力" })).not.toBeInTheDocument();
   });
 
   it("carries the configured default duration into an adopted opportunity", async () => {

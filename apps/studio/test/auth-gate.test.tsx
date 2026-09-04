@@ -45,4 +45,21 @@ describe("AuthGate", () => {
 
     expect(await screen.findByRole("heading", { name: "回到创作现场" })).toBeInTheDocument();
   });
+
+  it("returns to login when concurrent artifact reads both report 401", async () => {
+    vi.spyOn(studioApi, "authSession").mockResolvedValue({ enabled: true, authenticated: true, username: "owner" });
+    render(<AuthGate>{({ username }) => <div>制作路由 {username}</div>}</AuthGate>);
+    expect(await screen.findByText("制作路由 owner")).toBeInTheDocument();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: "请先登录 VideoFactory。" }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    )));
+
+    await Promise.allSettled([
+      studioApi.resourceJson("/api/runs/run-1/artifacts/a/content"),
+      studioApi.resourceJson("/api/runs/run-1/artifacts/b/content"),
+    ]);
+
+    expect(await screen.findByRole("heading", { name: "回到创作现场" })).toBeInTheDocument();
+  });
 });

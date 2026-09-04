@@ -137,6 +137,44 @@ describe("PublishingStudio", () => {
     assert.match(readiness.checks.find((check) => check.id === "rights")?.detail ?? "", /2 项.*待授权复核/);
   });
 
+  it("uses the effective review ledger for the rights publishing gate", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-review-ledger-"));
+    const confirmed = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => completedRun,
+      loadPublishPackage: async () => ({ ...(await loadPublishPackage()), resourceManifest: { needsReviewCount: 1 } }),
+      loadEffectiveResourceReviewCount: async () => 0,
+      publishers: [],
+    });
+    assert.equal((await confirmed.readiness("run-1")).checks.find((check) => check.id === "rights")?.status, "passed");
+
+    const rejected = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => completedRun,
+      loadPublishPackage,
+      loadEffectiveResourceReviewCount: async () => 1,
+      publishers: [],
+    });
+    const rights = (await rejected.readiness("run-1")).checks.find((check) => check.id === "rights");
+    assert.equal(rights?.status, "blocked");
+    assert.match(rights?.detail ?? "", /1 项.*待授权复核/);
+  });
+
+  it("falls back to the immutable package review count when the live manifest is unavailable", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-review-fallback-"));
+    const subject = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => completedRun,
+      loadPublishPackage: async () => ({ ...(await loadPublishPackage()), resourceManifest: { needsReviewCount: 2 } }),
+      loadEffectiveResourceReviewCount: async () => undefined,
+      publishers: [],
+    });
+
+    const rights = (await subject.readiness("run-1")).checks.find((check) => check.id === "rights");
+    assert.equal(rights?.status, "blocked");
+    assert.match(rights?.detail ?? "", /2 项.*待授权复核/);
+  });
+
   it("fails closed when a legacy publish package has no artifact snapshot", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
     const subject = new PublishingStudio({

@@ -1,5 +1,6 @@
 import { Clapperboard, LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
+import { studioApi } from "../api.js";
 import { STUDIO_DIRECTOR_PROFILES } from "../../shared/director-profiles.js";
 import { providerLabel } from "../presentation.js";
 
@@ -36,11 +37,8 @@ export function DirectorPlanPanel({ contentUrl }: DirectorPlanPanelProps) {
     const controller = new AbortController();
     setPlan(undefined);
     setError(undefined);
-    void fetch(contentUrl, { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return parseDirectorPlan(await response.json());
-      })
+    void studioApi.resourceJson(contentUrl, controller.signal)
+      .then((content) => parseDirectorPlan(content))
       .then(setPlan)
       .catch((caught: unknown) => {
         if ((caught as Error).name !== "AbortError") setError("导演方案暂时无法读取，可从产物列表下载原始文件。");

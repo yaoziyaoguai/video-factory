@@ -34,6 +34,7 @@ export interface PublishingStudioOptions {
   workspaceRoot: string;
   getRun: (runId: string) => Promise<StudioRunDetail | undefined>;
   loadPublishPackage: (run: StudioRunDetail) => Promise<unknown>;
+  loadEffectiveResourceReviewCount?: (runId: string) => Promise<number | undefined>;
   withRunLease?: <T>(runId: string, action: () => Promise<T>) => Promise<T>;
   publishers?: PlatformPublisher[];
   targets?: StudioPublishTarget[];
@@ -61,7 +62,10 @@ export class PublishingStudio {
   async readiness(runId: string): Promise<StudioPublishReadiness> {
     const run = await this.requiredRun(runId);
     const publishPackage = await this.options.loadPublishPackage(run);
-    const checks = complianceChecks(run, publishPackage);
+    const effectiveResourceReviewCount = this.options.loadEffectiveResourceReviewCount
+      ? await this.options.loadEffectiveResourceReviewCount(runId)
+      : undefined;
+    const checks = complianceChecks(run, publishPackage, effectiveResourceReviewCount);
     return {
       runId,
       ready: !checks.some((check) => check.status === "blocked"),
@@ -249,7 +253,7 @@ export function buildPublishTargetCatalog(): StudioPublishTarget[] {
   ];
 }
 
-function complianceChecks(run: StudioRunDetail, publishPackage: unknown): StudioPublishCheck[] {
+function complianceChecks(run: StudioRunDetail, publishPackage: unknown, effectiveResourceReviewCount?: number): StudioPublishCheck[] {
   const checks: StudioPublishCheck[] = [];
   const humanApproved = run.decisions.some((decision) => decision.action === "approve");
   checks.push(run.status === "succeeded" && Boolean(run.publishPackageArtifactId) && humanApproved
@@ -282,9 +286,13 @@ function complianceChecks(run: StudioRunDetail, publishPackage: unknown): Studio
     ? { id: "rights", label: "素材授权记录", status: "blocked", detail: "当前发布包缺少素材快照，无法确认使用的是哪一版素材，请重新生成发布包。" }
     : !resourceReview
       ? { id: "rights", label: "素材授权记录", status: "blocked", detail: "当前发布包缺少结构化授权检查结果，请重新生成发布包。" }
-    : humanReplacements.length > 0
-    ? { id: "rights", label: "素材授权记录", status: "blocked", detail: `${humanReplacements.length} 个人工替换素材仍需确认版权、肖像与商用范围，确认机制完成前不能发布。` }
-    : resourceReview.needsReviewCount > 0
+    : effectiveResourceReviewCount !== undefined && effectiveResourceReviewCount > 0
+      ? { id: "rights", label: "素材授权记录", status: "blocked", detail: `${effectiveResourceReviewCount} 项当前资源仍标记为待授权复核，不能发布。` }
+    : effectiveResourceReviewCount === 0
+      ? { id: "rights", label: "素材授权记录", status: "passed", detail: "当前入片素材均已记录来源或通过人工授权核对。" }
+    : effectiveResourceReviewCount === undefined && humanReplacements.length > 0
+      ? { id: "rights", label: "素材授权记录", status: "blocked", detail: `${humanReplacements.length} 个人工替换素材仍需确认版权、肖像与商用范围，确认机制完成前不能发布。` }
+    : effectiveResourceReviewCount === undefined && resourceReview.needsReviewCount > 0
       ? { id: "rights", label: "素材授权记录", status: "blocked", detail: `${resourceReview.needsReviewCount} 项当前资源仍标记为待授权复核，不能发布。` }
     : unlicensed.length === 0
       ? { id: "rights", label: "素材授权记录", status: "passed", detail: "当前发布包内的素材均保留授权或来源说明。" }

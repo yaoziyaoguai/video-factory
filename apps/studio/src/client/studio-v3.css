@@ -230,6 +230,7 @@ body { background: var(--canvas); }
 .studio-v3 .model-state strong { color: var(--blue); }
 .studio-v3 .model-state small { color: #696e80; }
 .studio-v3 .button-director { color: #ffffff; background: var(--blue); border-color: var(--blue); }
+.studio-v3 .button-director:disabled { color: #777b85; background: #e7e9ed; border-color: #d8dbe1; box-shadow: none; opacity: 1; }
 .studio-v3 .director-resource-link { color: var(--blue); }
 
 .studio-v3 .run-table, .studio-v3 .provider-table, .studio-v3 .resource-pulse,

@@ -28,6 +28,7 @@ class SequencedCodexClient extends CodexBridgeClient {
     payload: unknown;
     requestId: string;
     session: CodexTaskExecution["session"];
+    requestOptions: { timeoutMs?: number } | undefined;
   }> = [];
 
   constructor(
@@ -43,8 +44,9 @@ class SequencedCodexClient extends CodexBridgeClient {
     payload: unknown,
     requestId: string,
     session?: CodexTaskExecution["session"],
+    requestOptions?: { timeoutMs?: number },
   ): Promise<CodexTaskExecution> {
-    this.calls.push({ kind, payload, requestId, session: structuredClone(session) });
+    this.calls.push({ kind, payload, requestId, session: structuredClone(session), requestOptions });
     const output = this.responses.shift();
     if (output === undefined) throw new Error("missing sequenced response");
     return {
@@ -187,6 +189,28 @@ describe("CodexScreenwriterAgent", () => {
       nicheSlug: "life-avoidance",
     });
     assert.deepEqual((auditClient.calls[1]!.payload as Record<string, unknown>).previousAudit, repairAudit);
+  });
+
+  it("passes the remaining shared wall-clock budget to producer and audit calls", async () => {
+    const client = new SequencedCodexClient([validDraft(), {
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 90,
+      summary: "通过。",
+      issues: [],
+      repairInstructions: [],
+    }]);
+    const deadline = Date.now() + 1_000;
+    const agent = new CodexScreenwriterAgent({ client });
+
+    await agent.draftDetailed({ ...screenwriterInput(), wallClockDeadlineAtMs: deadline });
+
+    assert.equal(client.calls.length, 2);
+    for (const call of client.calls) {
+      assert.ok((call.requestOptions?.timeoutMs ?? 0) > 0);
+      assert.ok((call.requestOptions?.timeoutMs ?? 0) <= 1_000);
+      assert.equal("wallClockDeadlineAtMs" in (call.payload as Record<string, unknown>), false);
+    }
   });
 
   it("allows three audit and repair rounds by default", async () => {

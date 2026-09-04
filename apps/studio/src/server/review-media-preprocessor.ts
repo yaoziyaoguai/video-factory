@@ -22,13 +22,14 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
   constructor(private readonly options: PythonReviewMediaPreprocessorOptions) {}
 
   async prepare(input: {
-    videoPath: string;
+    videoPath?: string;
+    assetPlanPath?: string;
     runRoot: string;
     renderManifestPath?: string;
   }): Promise<VisualReviewMediaPayload> {
     const command = [
       "-m", "video_factory.review_media",
-      "--video", input.videoPath,
+      ...(input.assetPlanPath ? ["--asset-plan", input.assetPlanPath] : ["--video", requiredVideoPath(input.videoPath)]),
       "--run-root", input.runRoot,
       "--max-frames", String(MAX_REVIEW_FRAMES),
       ...(input.renderManifestPath ? ["--render-manifest", input.renderManifestPath] : []),
@@ -87,6 +88,11 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
     const sampling = parseSampling(manifest.sampling, frames);
     return { durationMs: Number(manifest.durationMs), frames, ...(sampling ? { sampling } : {}) };
   }
+}
+
+function requiredVideoPath(value: string | undefined): string {
+  if (!value) throw new Error("Visual-review preprocessing requires a video or asset plan.");
+  return value;
 }
 
 function parseSampling(
