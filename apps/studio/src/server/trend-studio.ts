@@ -147,7 +147,7 @@ export class TrendStudio {
         throw new Error("热点刷新没有返回候选，已保留上一版缓存。");
       }
       const cachedAt = this.options.now().toISOString();
-      await this.persistCache({ schemaVersion: 1, cachedAt, values });
+      await this.persistCache({ schemaVersion: 2, cachedAt, values });
       // 只有持久化生命周期结束后才发布新缓存，避免调用方看到新值时后台仍在改文件。
       this.candidateCache = { expiresAt: Date.parse(cachedAt) + (this.options.cacheTtlMs ?? DAILY_CACHE_TTL_MS), values };
       this.nextAutomaticRefreshAt = 0;
@@ -202,7 +202,7 @@ const DAILY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const AUTOMATIC_REFRESH_RETRY_MS = 60 * 60 * 1000;
 
 interface PersistedCandidateCache {
-  schemaVersion: 1;
+  schemaVersion: 2;
   cachedAt: string;
   values: StudioTrendCandidate[];
 }
@@ -210,7 +210,7 @@ interface PersistedCandidateCache {
 function isPersistedCandidateCache(value: unknown): value is PersistedCandidateCache {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  return record.schemaVersion === 1
+  return record.schemaVersion === 2
     && typeof record.cachedAt === "string"
     && Number.isFinite(Date.parse(record.cachedAt))
     && Array.isArray(record.values);

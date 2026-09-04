@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -117,6 +117,33 @@ describe("TrendStudio", () => {
       });
       assert.deepEqual(await restarted.listCandidates(), cached);
       assert.equal(restartedCalls, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects caches written by an older candidate contract", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-old-trend-cache-"));
+    const cachePath = path.join(root, "candidates.json");
+    const refreshed = [{ id: "trend-current", title: "当前规则候选" }] as StudioTrendCandidate[];
+    try {
+      await writeFile(cachePath, JSON.stringify({
+        schemaVersion: 1,
+        cachedAt: "2026-08-26T08:00:00.000Z",
+        values: [{ id: "trend-obsolete", title: "旧规则候选" }],
+      }), "utf8");
+      let calls = 0;
+      const studio = new TrendStudio({
+        repositoryRoot: "/repo",
+        cachePath,
+        environment: {},
+        now: () => new Date("2026-08-26T09:00:00.000Z"),
+        trendGateway: { listServices: async () => [], listSignals: async () => [] },
+        trendAgent: { listCandidates: async () => { calls += 1; return refreshed; } },
+      });
+
+      assert.deepEqual(await studio.listCandidates(), refreshed);
+      assert.equal(calls, 1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

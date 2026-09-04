@@ -105,6 +105,14 @@ describe("editorial production decision", () => {
     assert.match(decision.reasons.join(" "), /受众|痛点|开场|证据/);
   });
 
+  it("does not promote an unaudited rule fallback to a production recommendation", () => {
+    const decision = decideEditorialFormat({ ...base, providerId: "trend-heuristic-v1" });
+
+    assert.equal(decision.verdict, "skip");
+    assert.equal(decision.score, 0);
+    assert.match(decision.reasons.join(" "), /规则保底候选|选题总编/);
+  });
+
   it("does not let a series label bypass viral readiness, risk, visual feasibility, or the video gate", () => {
     const vague = decideEditorialFormat({
       ...base,

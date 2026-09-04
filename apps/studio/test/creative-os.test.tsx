@@ -816,6 +816,37 @@ describe("Creative OS", () => {
     expect(screen.getByText(/至少需要 2 个独立来源/)).toBeInTheDocument();
   });
 
+  it("removes duplicate-key evidence from the previous candidate after switching rows", async () => {
+    const user = userEvent.setup();
+    const first = {
+      ...candidate(41, "technology"),
+      evidence: [
+        { source: "newsnow", platform: "weibo", keyword: "同名信号", strength: 99, evidenceUrl: "https://example.com/old-a" },
+        { source: "newsnow", platform: "weibo", keyword: "同名信号", strength: 98, evidenceUrl: "https://example.com/old-b" },
+      ],
+    } satisfies StudioCandidateInboxItem;
+    const second = {
+      ...candidate(42, "society"),
+      evidence: [
+        { source: "dailyhot", platform: "thepaper", keyword: "当前证据一", strength: 96, evidenceUrl: "https://example.com/current-a" },
+        { source: "newsnow", platform: "toutiao", keyword: "当前证据二", strength: 94, evidenceUrl: "https://example.com/current-b" },
+      ],
+    } satisfies StudioCandidateInboxItem;
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([first, second]));
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    expect(await screen.findAllByText("同名信号")).toHaveLength(2);
+    await user.click(screen.getByRole("button", { name: `查看${second.title}` }));
+
+    expect(screen.queryByText("同名信号")).not.toBeInTheDocument();
+    expect(screen.getByText("当前证据一")).toBeInTheDocument();
+    expect(screen.getByText("当前证据二")).toBeInTheDocument();
+  });
+
   it("shows an actionable error when adopting an agent candidate fails", async () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);

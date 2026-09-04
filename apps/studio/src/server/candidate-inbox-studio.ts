@@ -248,6 +248,7 @@ function traceableEvidenceIdentity(evidence: StudioOpportunityEvidence): string 
     const searchPage = hostname === "s.weibo.com"
       || (hostname === "baidu.com" && url.pathname === "/s")
       || hostname === "search.bilibili.com"
+      || (hostname === "kuaishou.com" && url.pathname.startsWith("/search/"))
       || hostname === "so.toutiao.com"
       || (hostname === "douyin.com" && url.pathname.startsWith("/search"))
       || (hostname === "zhihu.com" && url.pathname.startsWith("/search"))
