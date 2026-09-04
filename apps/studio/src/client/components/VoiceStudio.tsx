@@ -1,11 +1,15 @@
 import { ChevronDown, LoaderCircle, Mic2, Minus, Play, Plus, Volume2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { StudioVoiceDirection, StudioVoiceProfile } from "../../shared/api.js";
+import { VOICE_PRESETS } from "../../shared/template-voice-recommendation.js";
 import { studioApi } from "../api.js";
 
 interface VoiceStudioProps {
   value: StudioVoiceDirection;
   onChange: (value: StudioVoiceDirection, providerId: string) => void;
+  onUserChange?: () => void;
+  preserveUnavailableSelection?: boolean;
+  onSelectionAvailabilityChange?: (available: boolean) => void;
   title?: string;
   sectionLabel?: string;
 }
@@ -21,14 +25,16 @@ const RECOMMENDED_VOICES = new Set([
   "minimax:female-chengshu",
 ]);
 type VoiceFilter = "recommended" | "female" | "male" | "cloud" | "system";
-const VOICE_PRESETS = [
-  { id: "explainer", label: "知识讲解", description: "清楚、有推进感，不像播报", rate: 190, pauseScale: 1, masteringPreset: "social" },
-  { id: "documentary", label: "人物纪实", description: "留出情绪和画面呼吸", rate: 170, pauseScale: 1.2, masteringPreset: "intimate" },
-  { id: "news", label: "热点快讯", description: "信息密度高，咬字优先", rate: 205, pauseScale: 0.9, masteringPreset: "social" },
-  { id: "lifestyle", label: "生活清单", description: "自然亲近，节奏不过满", rate: 185, pauseScale: 1, masteringPreset: "natural" },
-] as const satisfies ReadonlyArray<{ id: string; label: string; description: string; rate: number; pauseScale: number; masteringPreset: StudioVoiceDirection["masteringPreset"] }>;
 
-export function VoiceStudio({ value, onChange, title = "声音导演", sectionLabel = "04" }: VoiceStudioProps) {
+export function VoiceStudio({
+  value,
+  onChange,
+  onUserChange,
+  preserveUnavailableSelection = false,
+  onSelectionAvailabilityChange,
+  title = "声音导演",
+  sectionLabel = "04",
+}: VoiceStudioProps) {
   const [voices, setVoices] = useState<StudioVoiceProfile[]>([]);
   const [direction, setDirection] = useState(value);
   const [loading, setLoading] = useState(true);
@@ -66,19 +72,27 @@ export function VoiceStudio({ value, onChange, title = "声音导演", sectionLa
       if (!active) return;
       setVoices(items);
       setLoading(false);
-      if (!items.some((voice) => voice.id === direction.profileId) && items[0]) {
-        update({ ...direction, profileId: items[0].id }, items[0]);
-      }
     }).catch((caught) => {
       if (!active) return;
       setError(caught instanceof Error ? caught.message : String(caught));
       setLoading(false);
+      onSelectionAvailabilityChange?.(false);
     });
     return () => { active = false; };
   }, []);
+  useEffect(() => {
+    if (loading) return;
+    const selectionAvailable = voices.some((voice) => voice.id === direction.profileId);
+    onSelectionAvailabilityChange?.(selectionAvailable);
+    if (!selectionAvailable && voices[0] && !preserveUnavailableSelection) {
+      update({ ...direction, profileId: voices[0].id }, voices[0], false);
+    }
+  }, [direction.profileId, loading, preserveUnavailableSelection, voices]);
 
-  function update(next: StudioVoiceDirection, profile = voices.find((voice) => voice.id === next.profileId)) {
+  function update(next: StudioVoiceDirection, profile = voices.find((voice) => voice.id === next.profileId), userInitiated = true) {
+    if (userInitiated) onUserChange?.();
     setDirection(next);
+    onSelectionAvailabilityChange?.(Boolean(profile));
     onChange(next, profile?.providerId ?? "macos-say-v1");
   }
 

@@ -50,6 +50,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const visualReview = visualReviewDecision(run);
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
   const assetVersionId = run.nodes.find((node) => node.id === "assets")?.outputState?.effectiveVersionId;
+  const isCostReplan = run.status === "stale" && hasDirectorCostFeedback(run);
 
   const renderNodeWorkspace = (node: StudioRunDetail["nodes"][number]) => <NodeWorkspace
     key={node.id}
@@ -82,7 +83,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
     <main className="page run-page">
       <header className="run-header" data-tour="run-header">
         <div>
-          <p className="eyebrow">{platformLabel(run.platform)} · {run.durationSeconds} 秒 · 版本 {run.revision}</p>
+          <p className="eyebrow">{platformLabel(run.platform)} · 目标 {run.durationSeconds} 秒 · 版本 {run.revision}</p>
           <h1>{run.title}</h1>
           <p className="page-summary">{run.angle} · {run.audience}</p>
         </div>
@@ -230,7 +231,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />多平台发布</button> : null}
               {run.status === "failed" && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && failedNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(failedNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />重试失败步骤</button> : null}
               {(run.status === "failed" || run.status === "rejected") && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
-              {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />按人工版本继续生成</button> : null}
+              {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />{isCostReplan ? "按降本意见重新规划并报价" : "按人工版本继续生成"}</button> : null}
               {run.status === "paused" && onResumePaused ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onResumePaused()}><Play aria-hidden="true" size={16} />继续自动制作</button> : null}
             </section>
           )}
@@ -431,7 +432,7 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
 type StudioPaidReconciliationDraft = Omit<StudioPaidReconciliationInput, "expectedRunRevision" | "reconciliationId">;
 
 function paidProviderName(providerId: string): string {
-  return (providerLabel(providerId) ?? providerId).replace(/ (?:视频|图片)生成$/, "");
+  return (providerLabel(providerId) ?? "画面服务").replace(/ (?:视频|图片)生成$/, "");
 }
 
 function paidProviderIdentity(providers: StudioProvider[], providerId: string, modelId: string): string {
@@ -593,6 +594,16 @@ function isStoppedStatus(status: StudioRunDetail["status"]): boolean {
   return status === "succeeded" || status === "failed" || status === "rejected" || status === "paused" || status === "stale";
 }
 
+function hasDirectorCostFeedback(run: StudioRunDetail): boolean {
+  const director = run.nodes.find((node) => node.id === "visual-direction");
+  const effectiveInput = director?.inputState?.versions.find(
+    (version) => version.id === director.inputState?.effectiveVersionId,
+  )?.value;
+  if (typeof effectiveInput !== "object" || effectiveInput === null || Array.isArray(effectiveInput)) return false;
+  const costFeedback = (effectiveInput as Record<string, unknown>).costFeedback;
+  return Array.isArray(costFeedback) ? costFeedback.length > 0 : typeof costFeedback === "object" && costFeedback !== null;
+}
+
 function failedNodeId(run: StudioRunDetail): string | undefined {
   return run.nodes.find((node) => node.status === "failed")?.id;
 }
@@ -667,6 +678,9 @@ function runStateMessage(run: StudioRunDetail): string {
   }
   if (run.status === "awaiting_spend_approval") return "即将生成付费图片或视频，请先检查前面的内容、模型和本次报价。";
   if (run.status === "approval_invalidated") return "输入、模型、报价或重试次数发生了变化，之前的费用确认已失效，请重新检查。";
+  if (run.status === "stale" && hasDirectorCostFeedback(run)) {
+    return "你已把上一份画面报价退回导演，降本意见已经保存。继续后会先调整方案，再给你一份新报价。";
+  }
   if (run.status === "stale") return "上游内容已被人工修改，后续旧结果不会继续使用，需要重新生成。";
   if (run.status === "paused") return "制作已经安全暂停。现在可以修改已完成角色的输入或交付；不修改也可以直接继续。";
   if (run.pauseRequested) return "已请求暂停；当前步骤会先安全完成，系统将在下一步开始前停下。";

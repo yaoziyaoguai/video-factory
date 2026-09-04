@@ -35,9 +35,10 @@ export {
   CodexBridgeClient,
   CodexBridgeError,
 } from "./codex-chat.js";
-export type { CodexBridgeClientOptions, CodexTaskExecution, CodexTaskKind, CodexTaskSession, CodexTaskTrace } from "./codex-chat.js";
+export type { CodexBridgeClientOptions, CodexTaskExecution, CodexTaskKind, CodexTaskSession, CodexTaskTrace, ModelCandidateAttempt } from "./codex-chat.js";
 export type { AgentLoopTrace, AgentLoopIterationTrace, RoleAudit, RoleAuditIssue } from "./codex-chat.js";
 export { RoleAgentLoopError, runRoleAgentLoop, validateRoleAudit } from "./role-agent-loop.js";
+export { fallbackRequestId, isModelProviderFailure, publicModelFailure } from "./model-fallback.js";
 export { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
 export type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 export { CodexReferenceGrammarAgent, fallbackShotGrammar, validateShotGrammar } from "./reference-grammar.js";
@@ -65,8 +66,10 @@ export type {
   AssetSemanticRanking,
   CodexAssetSemanticRankerOptions,
 } from "./asset-semantic-ranker.js";
-export { CodexVisualReviewAgent, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, validateVisualReviewReport } from "./codex-visual-review.js";
-export type { CodexVisualReviewAgentOptions, VisualReviewAgent, VisualReviewAgentInput, VisualReviewExecution, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport } from "./codex-visual-review.js";
+export { CodexVisualReviewAgent, FallbackVisualReviewAgent, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateVisualReviewReport } from "./codex-visual-review.js";
+export type { CodexVisualReviewAgentOptions, FallbackVisualReviewAgentOptions, VisualReviewAgent, VisualReviewAgentInput, VisualReviewExecution, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport } from "./codex-visual-review.js";
+export { FallbackScreenwriterAgent, FallbackVisualDirectorAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
+export type { FallbackScreenwriterAgentOptions, FallbackVisualDirectorAgentOptions } from "./fallback-role-agents.js";
 export { CodexVisualDirectorAgent } from "./codex-visual-director.js";
 export type { CodexVisualDirectorAgentOptions } from "./codex-visual-director.js";
 export {

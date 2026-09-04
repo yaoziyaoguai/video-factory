@@ -36,7 +36,7 @@ import {
   type AssetSemanticRanker,
 } from "./asset-semantic-ranker.js";
 import { REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION, fallbackShotGrammar, validateShotGrammar, type ReferenceGrammarAgent, type ReferenceGrammarExecution, type ShotGrammar } from "./reference-grammar.js";
-import type { AgentLoopTrace, CodexTaskExecution, CodexTaskTrace } from "./codex-chat.js";
+import type { AgentLoopTrace, CodexTaskExecution, CodexTaskKind, CodexTaskTrace, ModelCandidateAttempt } from "./codex-chat.js";
 import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
 import { RoleAgentLoopError } from "./role-agent-loop.js";
 import {
@@ -48,9 +48,10 @@ import {
   type VideoGenerationRuntimeProfile,
 } from "./generative-asset-worker.js";
 import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
+import { ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
-import { VISUAL_REVIEW_AGENT_CONTRACT_VERSION, validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport } from "./codex-visual-review.js";
-import { parseBrief, parsePersistedBrief, parseProductionSeriesContext, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
+import { VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport } from "./codex-visual-review.js";
+import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
 import { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
 import type { WorkerResponse } from "./python-worker-client.js";
 import {
@@ -607,13 +608,72 @@ export class ProductionPipeline {
     return this.runPersistedTransition(runId, async (previous) => {
       await verifyNodeOverrideBoundary(this.store.runDirectory(runId), override);
       const brief = parsePersistedBrief(previous.initialInput);
+      const effectiveOverride = override.nodeId === "visual-direction"
+        ? await this.prepareVisualDirectionOverride(previous, override)
+        : override;
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
         clock: this.clock,
         idFactory: this.idFactory,
       });
-      return runner.applyNodeOverride(this.createWorkflow(brief), withPersistedBrief(previous, brief), override);
+      return runner.applyNodeOverride(this.createWorkflow(brief), withPersistedBrief(previous, brief), effectiveOverride);
     });
+  }
+
+  private async prepareVisualDirectionOverride(
+    previous: WorkflowRun<ProductionBrief>,
+    override: NodeOverrideDraft,
+  ): Promise<NodeOverrideDraft> {
+    const workflowBrief = parsePersistedBrief(previous.initialInput);
+    const currentBrief = currentEffectiveBriefFromRun(previous, workflowBrief);
+    const direction = currentBrief.director;
+    if (!direction) throw new Error("Visual direction is not enabled for this run.");
+
+    const submittedOutput = validatePathOutput(override.output, "directorPlanPath", "visual-direction");
+    const submittedPath = requiredOutputString(submittedOutput, "directorPlanPath");
+    const scriptPath = requiredOutputString(
+      previous.nodeRuns.find((node) => node.nodeId === "script")?.output,
+      "scriptPath",
+    );
+    const script = JSON.parse(await readFile(scriptPath, "utf8")) as { scenes?: unknown };
+    const scenes = parseDirectorScenes(script.scenes);
+    const plan = validateVisualDirectorPlan(
+      JSON.parse(await readFile(submittedPath, "utf8")) as unknown,
+      visualDirectorPlanValidation(currentBrief, scenes, this.options.assetProviders ?? []),
+    );
+
+    const attempt = await reserveAttemptDirectory(path.join(
+      this.store.runDirectory(previous.id),
+      "nodes",
+      "visual-direction",
+      "manual-overrides",
+    ));
+    const planPath = path.join(attempt.directory, "director_plan.json");
+    const content = `${JSON.stringify(plan, null, 2)}\n`;
+    await writeTextAtomically(planPath, content);
+    const parentArtifactIds = previous.artifacts
+      .filter((artifact) => artifact.producer?.nodeId === "script" && artifact.uri !== undefined
+        && path.resolve(artifact.uri) === path.resolve(scriptPath))
+      .map((artifact) => artifact.id);
+    const validatedArtifact = fileArtifact(
+      "storyboard",
+      planPath,
+      content,
+      "application/json",
+      "video-factory/director-plan-v1",
+      "visual-direction",
+      parentArtifactIds,
+      "human-validated-director-plan-v1",
+      "Human-edited director plan validated and repriced by the server.",
+      attempt.attempt,
+    );
+    const effectiveOverride = {
+      ...override,
+      output: { ...submittedOutput, directorPlanPath: planPath },
+      artifacts: [...(override.artifacts ?? []), validatedArtifact],
+    };
+    await verifyNodeOverrideBoundary(this.store.runDirectory(previous.id), effectiveOverride);
+    return effectiveOverride;
   }
 
   async applyNodeInputOverride(runId: string, override: NodeInputOverrideDraft): Promise<WorkflowRun<ProductionBrief>> {
@@ -1559,7 +1619,16 @@ export class ProductionPipeline {
       },
       ...(brief.providers.script === "codex-screenwriter-v1"
         ? [screenwriterNode(brief, this.options.screenwriterAgent, this.runsRoot, options.allowUnavailableProviders === true)]
-        : [workerNode("script", "Draft script", "script.draft", brief.providers.script, ["brief"], ["brief"], () => ({ brief }), "编剧")]),
+        : [workerNode(
+            "script",
+            "Draft script",
+            "script.draft",
+            brief.providers.script,
+            ["brief"],
+            ["brief"],
+            (context) => ({ brief: currentEffectiveBriefFromContext(context, brief) }),
+            "编剧",
+          )]),
       ...(brief.workflowFeatures?.referenceGrammar ? [referenceGrammarNode(brief, this.options, this.runsRoot)] : []),
       ...(brief.director ? [directorNode(brief, this.options, this.runsRoot)] : []),
       ...(brief.workflowFeatures?.assetSemanticRank ? [
@@ -1696,21 +1765,25 @@ export class ProductionPipeline {
         capability: "publish.package",
         mode: "automatic",
         dependsOn: ["final-review"],
-        getInput: (context) => ({
-          scriptPath: outputPath(context, "script", "scriptPath"),
-          brief: {
-            title: brief.title,
-            angle: brief.angle,
-            audience: brief.audience,
-            nicheSlug: brief.nicheSlug,
-            platform: brief.platform,
-          },
-        }),
+        getInput: (context) => {
+          const currentBrief = currentEffectiveBriefFromContext(context, brief);
+          return {
+            scriptPath: outputPath(context, "script", "scriptPath"),
+            brief: {
+              title: currentBrief.title,
+              angle: currentBrief.angle,
+              audience: currentBrief.audience,
+              nicheSlug: currentBrief.nicheSlug,
+              platform: currentBrief.platform,
+            },
+          };
+        },
         validateInputOverride: (input) => validatePublishPackageInput(input),
         execute: async (input, context) => {
           const packageInput = validatePublishPackageInput(input);
-          const publishBrief: ProductionBrief = { ...brief, ...packageInput.brief };
-          const currentArtifacts = await currentArtifactsForPackaging(context, brief);
+          const currentBrief = currentEffectiveBriefFromContext(context, brief);
+          const publishBrief: ProductionBrief = { ...currentBrief, ...packageInput.brief };
+          const currentArtifacts = await currentArtifactsForPackaging(context, currentBrief);
           await verifyStoredArtifacts(currentArtifacts);
           const artifactIds = currentArtifacts.map((artifact) => artifact.id);
           const scriptParentIds = currentArtifacts
@@ -2176,7 +2249,7 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
   readonly configurationSource = "system_default" as const;
-  readonly parameters = { promptPack: "video-factory/director-v10" };
+  readonly parameters = { promptPack: "video-factory/director-v11" };
 
   constructor(private readonly agent: VisualDirectorAgent) {}
 
@@ -2201,7 +2274,7 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTask
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
   readonly configurationSource = "system_default" as const;
-  readonly parameters = { promptPack: "video-factory/screenwriter-v4" };
+  readonly parameters = { promptPack: "video-factory/screenwriter-v5" };
 
   constructor(private readonly agent: ScreenwriterAgent) {}
 
@@ -2498,6 +2571,9 @@ function directorNode(
       ...(brief.workflowFeatures?.referenceGrammar ? { referenceGrammarPath: requiredOutputString(input, "referenceGrammarPath") } : {}),
     }),
     execute: async (input, context) => {
+      const currentBrief = currentEffectiveBriefFromContext(context, brief);
+      const currentDirection = currentBrief.director;
+      if (!currentDirection) throw new Error("AI director configuration is incomplete.");
       const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "visual-direction"));
       const scriptPath = requiredOutputString(input, "scriptPath");
       const script = JSON.parse(await readFile(scriptPath, "utf8")) as { scenes?: unknown };
@@ -2506,7 +2582,7 @@ function directorNode(
         : undefined;
       const scenes = parseDirectorScenes(script.scenes);
       const catalog = new Map((options.assetProviders ?? []).map((provider) => [provider.id, provider]));
-      const assetProviders = direction.assetProviderIds.map((id) => {
+      const assetProviders = currentDirection.assetProviderIds.map((id) => {
         const provider = catalog.get(id);
         if (!provider) throw new Error(`Asset provider '${id}' is not available to the AI director.`);
         return {
@@ -2524,7 +2600,7 @@ function directorNode(
         capability: "storyboard.plan",
         providerId,
       });
-      const costFeedback = brief.spendFeedback?.slice(-10).reverse().map((feedback) => ({
+      const costFeedback = currentBrief.spendFeedback?.slice(-10).reverse().map((feedback) => ({
         reason: feedback.reason,
         previousEstimatedCostCny: feedback.previousEstimatedCostCny,
         ...(feedback.targetEstimatedCostCny !== undefined
@@ -2532,7 +2608,7 @@ function directorNode(
           : {}),
         ...(feedback.note ? { note: feedback.note } : {}),
       }));
-      const directorEconomics = { allowMeteredProviders: brief.economics.allowMeteredProviders };
+      const directorEconomics = { allowMeteredProviders: currentBrief.economics.allowMeteredProviders };
       const parentArtifactIds = context.artifacts
         .filter((artifact) => artifact.producer && ["script", "reference-grammar"].includes(artifact.producer.nodeId))
         .map((artifact) => artifact.id);
@@ -2540,35 +2616,45 @@ function directorNode(
       try {
         execution = await provider.run({
           brief: {
-            title: brief.title,
-            angle: brief.angle,
-            audience: brief.audience,
-            platform: brief.platform,
-            durationSeconds: brief.durationSeconds,
-            requestedProfileId: direction.profileId,
-            ...(brief.templateSnapshot ? { templateBlueprint: brief.templateSnapshot.resolvedBlueprint } : {}),
-            ...(brief.editorial ? { editorial: brief.editorial } : {}),
+            title: currentBrief.title,
+            angle: currentBrief.angle,
+            audience: currentBrief.audience,
+            platform: currentBrief.platform,
+            durationSeconds: currentBrief.durationSeconds,
+            requestedProfileId: currentDirection.profileId,
+            ...(currentBrief.templateSnapshot ? { templateBlueprint: currentBrief.templateSnapshot.resolvedBlueprint } : {}),
+            ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
             ...(referenceGrammar ? { referenceGrammar } : {}),
-            ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
-            ...(brief.rework ? {
+            ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
+            ...(currentBrief.rework ? {
               rework: {
-                sourceRunId: brief.rework.sourceRunId,
-                visualDirectionInstruction: brief.rework.nodeInstructions.visualDirection,
-                assetInstruction: brief.rework.nodeInstructions.assets,
-                ...(brief.rework.previousDirectorPlan ? { previousDirectorPlan: brief.rework.previousDirectorPlan } : {}),
+                sourceRunId: currentBrief.rework.sourceRunId,
+                visualDirectionInstruction: currentBrief.rework.nodeInstructions.visualDirection,
+                assetInstruction: currentBrief.rework.nodeInstructions.assets,
+                findings: currentBrief.rework.findings.filter((finding) => finding.targetNodeIds.includes("visual-direction")),
+                ...(currentBrief.rework.previousDirectorPlan ? { previousDirectorPlan: currentBrief.rework.previousDirectorPlan } : {}),
               },
             } : {}),
           },
           scenes,
           assetProviders,
           economics: directorEconomics,
+          ...(currentBrief.models?.[providerId] ? { selectedModelId: currentBrief.models[providerId] } : {}),
           ...(costFeedback?.length ? { costFeedback } : {}),
           agentLoopCheckpoint: nodeAgentLoopCheckpoint(
             runsRoot,
             context.runId,
             "visual-direction",
-            { brief, scenes, assetProviders, economics: directorEconomics, ...(costFeedback?.length ? { costFeedback } : {}), ...(referenceGrammar ? { referenceGrammar } : {}) },
+            { brief: currentBrief, scenes, assetProviders, economics: directorEconomics, ...(costFeedback?.length ? { costFeedback } : {}), ...(referenceGrammar ? { referenceGrammar } : {}) },
             VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
+          ),
+          agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
+            runsRoot,
+            context.runId,
+            "visual-direction",
+            { brief: currentBrief, scenes, assetProviders, economics: directorEconomics, ...(costFeedback?.length ? { costFeedback } : {}), ...(referenceGrammar ? { referenceGrammar } : {}) },
+            VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
+            modelId,
           ),
         }, context);
       } catch (error) {
@@ -2583,20 +2669,24 @@ function directorNode(
             providerLabel: "Codex 视觉导演",
           });
         }
+        if (error instanceof ModelCandidatesExhaustedError) {
+          return failedModelCandidatesNodeResult({
+            error,
+            taskKind: "director-plan",
+            attemptDirectory: attempt.directory,
+            nodeId: "visual-direction",
+            attempt: attempt.attempt,
+            parentArtifactIds,
+            provider,
+            providerLabel: "Codex 视觉导演",
+          });
+        }
         throw error;
       }
-      const selectedCatalog = direction.assetProviderIds.map((id) => catalog.get(id)!);
-      const plan = validateVisualDirectorPlan(execution.output, {
-        scenePositions: scenes.map((scene) => scene.position),
-        sceneDurations: Object.fromEntries(scenes.map((scene) => [scene.position, scene.duration])),
-        allowedProviderIds: direction.assetProviderIds,
-        generativeProviderIds: selectedCatalog.filter((provider) => provider.generative).map((provider) => provider.id),
-        providerDeliveryTypes: Object.fromEntries(
-          selectedCatalog.map((provider) => [provider.id, [...provider.deliveryTypes]]),
-        ),
-        estimatedCnyPerClip: Object.fromEntries(selectedCatalog.map((provider) => [provider.id, provider.estimatedCnyPerClip ?? 0])),
-        economics: directorEconomics,
-      });
+      const plan = validateVisualDirectorPlan(
+        execution.output,
+        visualDirectorPlanValidation(currentBrief, scenes, options.assetProviders ?? []),
+      );
       const planPath = path.join(attempt.directory, "director_plan.json");
       const content = `${JSON.stringify(plan, null, 2)}\n`;
       await writeTextAtomically(planPath, content);
@@ -2665,7 +2755,13 @@ function screenwriterNode(
     providerId,
     mode: "automatic",
     dependsOn: ["brief"],
-    getInput: (context) => ({ brief: screenwriterBrief(parseBrief(context.outputs.get("brief"))) }),
+    getInput: (context) => {
+      const currentBrief = currentEffectiveBriefFromContext(context, brief);
+      return {
+        brief: screenwriterBrief(currentBrief),
+        ...(currentBrief.models?.[providerId] ? { selectedModelId: currentBrief.models[providerId] } : {}),
+      };
+    },
     validateInputOverride: (input) => validateScreenwriterInput(input),
     execute: async (input, context) => {
       const request = validateScreenwriterInput(input);
@@ -2687,6 +2783,14 @@ function screenwriterNode(
             "script",
             request,
             SCREENWRITER_AGENT_CONTRACT_VERSION,
+          ),
+          agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
+            runsRoot,
+            context.runId,
+            "script",
+            request,
+            SCREENWRITER_AGENT_CONTRACT_VERSION,
+            modelId,
           ),
         }, context);
       } catch (error) {
@@ -2714,6 +2818,18 @@ function screenwriterNode(
             provider,
             providerLabel: "Codex 编剧",
             ...(preserved ? { output: preserved.output, additionalArtifacts: [preserved.artifact] } : {}),
+          });
+        }
+        if (error instanceof ModelCandidatesExhaustedError) {
+          return failedModelCandidatesNodeResult({
+            error,
+            taskKind: "script-draft",
+            attemptDirectory: attempt.directory,
+            nodeId: "script",
+            attempt: attempt.attempt,
+            parentArtifactIds,
+            provider,
+            providerLabel: "Codex 编剧",
           });
         }
         throw error;
@@ -2934,6 +3050,34 @@ function parseDirectorScenes(value: unknown): VisualDirectorAgentInput["scenes"]
   });
 }
 
+function visualDirectorPlanValidation(
+  brief: ProductionBrief,
+  scenes: VisualDirectorAgentInput["scenes"],
+  catalog: VisualAssetProviderCapability[],
+): Parameters<typeof validateVisualDirectorPlan>[1] {
+  const direction = brief.director;
+  if (!direction) throw new Error("AI director configuration is incomplete.");
+  const providersById = new Map(catalog.map((provider) => [provider.id, provider]));
+  const selectedProviders = direction.assetProviderIds.map((id) => {
+    const provider = providersById.get(id);
+    if (!provider) throw new Error(`Asset provider '${id}' is not available to the AI director.`);
+    return provider;
+  });
+  return {
+    scenePositions: scenes.map((scene) => scene.position),
+    sceneDurations: Object.fromEntries(scenes.map((scene) => [scene.position, scene.duration])),
+    allowedProviderIds: direction.assetProviderIds,
+    generativeProviderIds: selectedProviders.filter((provider) => provider.generative).map((provider) => provider.id),
+    providerDeliveryTypes: Object.fromEntries(
+      selectedProviders.map((provider) => [provider.id, [...provider.deliveryTypes]]),
+    ),
+    estimatedCnyPerClip: Object.fromEntries(
+      selectedProviders.map((provider) => [provider.id, provider.estimatedCnyPerClip ?? 0]),
+    ),
+    economics: { allowMeteredProviders: brief.economics.allowMeteredProviders },
+  };
+}
+
 function visualStrategy(value: unknown): VisualDirectorAgentInput["scenes"][number]["visualStrategy"] {
   return value === "stock" || value === "image" || value === "generated" || value === "local" ? value : "stock";
 }
@@ -2962,6 +3106,7 @@ function screenwriterBrief(brief: ProductionBrief): ScreenwriterAgentInput["brie
       rework: {
         sourceRunId: brief.rework.sourceRunId,
         instruction: brief.rework.nodeInstructions.script,
+        findings: brief.rework.findings.filter((finding) => finding.targetNodeIds.includes("script")),
         ...(brief.rework.previousScript ? { previousScript: brief.rework.previousScript } : {}),
       },
     } : {}),
@@ -2972,7 +3117,11 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
   const input = requireOutputRecord(value, "script input");
   const rawBrief = requireOutputRecord(input.brief, "script input brief");
   if (rawBrief.protocolVersion === "video-factory/brief-v1") {
-    return { brief: screenwriterBrief(parseBrief(rawBrief)) };
+    const parsed = parseBrief(rawBrief);
+    return {
+      brief: screenwriterBrief(parsed),
+      ...(parsed.models?.[parsed.providers.script] ? { selectedModelId: parsed.models[parsed.providers.script] } : {}),
+    };
   }
   const durationSeconds = Number(rawBrief.durationSeconds);
   if (!Number.isInteger(durationSeconds) || durationSeconds < 20 || durationSeconds > 180) {
@@ -3006,15 +3155,23 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
   }
   if (rawBrief.rework !== undefined) {
     const rework = requireOutputRecord(rawBrief.rework, "script input rework");
+    const findings = parseProductionReworkFindings(rework.findings, "script input rework.findings");
+    if (findings.some((finding) => !finding.targetNodeIds.includes("script"))) {
+      throw new Error("script input rework.findings must only contain findings assigned to script.");
+    }
     brief.rework = {
       sourceRunId: requiredOutputString(rework, "sourceRunId"),
       instruction: requiredOutputString(rework, "instruction"),
+      findings,
       ...(rework.previousScript === undefined
         ? {}
         : { previousScript: requireOutputRecord(rework.previousScript, "script input rework.previousScript") }),
     };
   }
-  return { brief };
+  const selectedModelId = input.selectedModelId === undefined
+    ? undefined
+    : requiredOutputString(input, "selectedModelId");
+  return { brief, ...(selectedModelId ? { selectedModelId } : {}) };
 }
 
 function validateVisualReviewInput(
@@ -3029,6 +3186,9 @@ function validateVisualReviewInput(
     renderManifestPath: requiredOutputString(input, "renderManifestPath"),
   };
   if (directorEnabled) request.directorPlanPath = requiredOutputString(input, "directorPlanPath");
+  if (input.selectedModelId !== undefined) {
+    request.selectedModelId = requiredOutputString(input, "selectedModelId");
+  }
   return request;
 }
 
@@ -3087,6 +3247,7 @@ function visualReviewNode(
       scriptPath: outputPath(context, "script", "scriptPath"),
       ...(brief.director ? { directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath") } : {}),
       renderManifestPath: outputPath(context, "render", "renderManifestPath"),
+      ...(brief.models?.[providerId] ? { selectedModelId: brief.models[providerId] } : {}),
     }),
     validateInputOverride: (input) => validateVisualReviewInput(input, Boolean(brief.director)),
     execute: async (input, context) => {
@@ -3103,6 +3264,7 @@ function visualReviewNode(
       try {
         execution = await provider.run({
           ...request,
+          ...(brief.models?.[providerId] ? { selectedModelId: brief.models[providerId] } : {}),
           agentLoopCheckpoint: nodeAgentLoopCheckpoint(
             runsRoot,
             context.runId,
@@ -3110,11 +3272,31 @@ function visualReviewNode(
             request,
             VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
           ),
+          agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
+            runsRoot,
+            context.runId,
+            "visual-review",
+            request,
+            VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+            modelId,
+          ),
         }, context);
       } catch (error) {
         if (error instanceof RoleAgentLoopError) {
           return failedAgentLoopNodeResult({
             error,
+            attemptDirectory: attempt.directory,
+            nodeId: "visual-review",
+            attempt: attempt.attempt,
+            parentArtifactIds,
+            provider,
+            providerLabel: provider.label ?? "视觉审片",
+          });
+        }
+        if (error instanceof VisualReviewFallbackError) {
+          return failedModelCandidatesNodeResult({
+            error,
+            taskKind: "visual-review",
             attemptDirectory: attempt.directory,
             nodeId: "visual-review",
             attempt: attempt.attempt,
@@ -3158,9 +3340,9 @@ function visualReviewNode(
           durationMs: execution.inspectedDurationMs ?? brief.durationSeconds * 1_000,
         },
         receipt: {
-          providerId: execution.trace?.providerId ?? provider.id,
-          providerLabel: provider.label ?? provider.id,
-          modelId: execution.trace?.modelId ?? provider.modelId ?? provider.id,
+          providerId: execution.executedProviderId ?? execution.trace?.providerId ?? provider.id,
+          providerLabel: execution.executedProviderLabel ?? provider.label ?? provider.id,
+          modelId: execution.executedModelId ?? execution.trace?.modelId ?? provider.modelId ?? provider.id,
           transport: provider.transport ?? "unix_socket",
           billing: provider.billing ?? "subscription",
           configurationSource: provider.configurationSource ?? "system_default",
@@ -3186,6 +3368,9 @@ function visualReviewNode(
           } : {}),
           ...(execution.requestId ? { requestId: execution.requestId } : {}),
           ...(meteredAttemptCount !== undefined ? { meteredAttemptCount } : {}),
+          ...(execution.fallbackFromProviderId ? { fallbackFromProviderId: execution.fallbackFromProviderId } : {}),
+          ...(execution.fallbackReason ? { fallbackReason: execution.fallbackReason } : {}),
+          ...(execution.attemptedModelIds?.length ? { actualModelIds: execution.attemptedModelIds } : {}),
         },
         artifacts: [fileArtifact(
           "review_report",
@@ -3820,6 +4005,8 @@ function modelTraceReceipt(
         auditModelCallCount: loop.auditModelCallCount ?? loop.iterations.length,
       } : {}),
     },
+    ...(trace.fallbackFromModelId ? { fallbackReason: trace.fallbackReason ?? `首选模型 ${trace.fallbackFromModelId} 调用失败，已切换候选模型。` } : {}),
+    ...(trace.attemptedModelIds?.length ? { actualModelIds: trace.attemptedModelIds } : {}),
   };
 }
 
@@ -3871,6 +4058,40 @@ function validateBriefInputOverride(value: unknown, workflowBrief: ProductionBri
     throw new Error("Brief provider, budget, voice, director, or review configuration requires starting a new run.");
   }
   return parsed;
+}
+
+function currentEffectiveBriefFromRun(
+  run: WorkflowRun<ProductionBrief>,
+  workflowBrief: ProductionBrief,
+): ProductionBrief {
+  return mergeCurrentBrief(
+    run.nodeRuns.find((node) => node.nodeId === "brief")?.output,
+    workflowBrief,
+  );
+}
+
+function currentEffectiveBriefFromContext(
+  context: WorkflowContext,
+  workflowBrief: ProductionBrief,
+): ProductionBrief {
+  return mergeCurrentBrief(context.outputs.get("brief"), workflowBrief);
+}
+
+function mergeCurrentBrief(value: unknown, workflowBrief: ProductionBrief): ProductionBrief {
+  const current = parseBrief(value);
+  return parseBrief({
+    ...current,
+    providers: workflowBrief.providers,
+    models: workflowBrief.models,
+    modelSelectionSources: workflowBrief.modelSelectionSources,
+    workflowFeatures: workflowBrief.workflowFeatures,
+    referenceVideo: workflowBrief.referenceVideo,
+    director: workflowBrief.director,
+    economics: workflowBrief.economics,
+    voiceDirection: workflowBrief.voiceDirection,
+    reviewMode: workflowBrief.reviewMode,
+    spendFeedback: workflowBrief.spendFeedback,
+  });
 }
 
 function validatePathOutput(output: unknown, field: string, nodeId: string): Record<string, unknown> {
@@ -4335,6 +4556,84 @@ async function failedAgentLoopNodeResult(options: {
   };
 }
 
+async function failedModelCandidatesNodeResult(options: {
+  error: Error & { attempts: ModelCandidateAttempt[] };
+  taskKind: CodexTaskKind;
+  attemptDirectory: string;
+  nodeId: string;
+  attempt: number;
+  parentArtifactIds: string[];
+  provider: Pick<Provider, "transport" | "billing" | "configurationSource" | "parameters">;
+  providerLabel: string;
+}): Promise<NodeExecutionResult<Record<string, unknown>>> {
+  const attempts = options.error.attempts;
+  const finalAttempt = attempts.at(-1);
+  if (!finalAttempt || attempts.some((attempt) => attempt.outcome !== "failed")) {
+    throw new Error("Model candidate exhaustion must contain at least one failed attempt.");
+  }
+  const traceArtifact = await persistModelCandidateFailureTrace({
+    taskKind: options.taskKind,
+    attempts,
+    attemptDirectory: options.attemptDirectory,
+    nodeId: options.nodeId,
+    attempt: options.attempt,
+    parentArtifactIds: options.parentArtifactIds,
+  });
+  return {
+    status: "failed",
+    error: options.error.message,
+    receipt: {
+      providerId: finalAttempt.providerId,
+      providerLabel: options.providerLabel,
+      modelId: finalAttempt.modelId,
+      transport: options.provider.transport ?? "unix_socket",
+      billing: options.provider.billing ?? "subscription",
+      configurationSource: options.provider.configurationSource ?? "system_default",
+      parameters: { ...(options.provider.parameters ?? {}) },
+      actualModelIds: attempts.map(({ modelId }) => modelId),
+      fallbackReason: options.error.message,
+      ...(attempts.length > 1 ? { fallbackFromProviderId: attempts[0]!.providerId } : {}),
+    },
+    artifacts: [traceArtifact],
+  };
+}
+
+async function persistModelCandidateFailureTrace(options: {
+  taskKind: CodexTaskKind;
+  attempts: ModelCandidateAttempt[];
+  attemptDirectory: string;
+  nodeId: string;
+  attempt: number;
+  parentArtifactIds: string[];
+}): Promise<ArtifactDraft> {
+  const finalAttempt = options.attempts.at(-1);
+  if (!finalAttempt) throw new Error("Model candidate failure trace requires at least one attempt.");
+  const tracePath = path.join(options.attemptDirectory, "model_candidate_failures.json");
+  const payload = {
+    version: "video-factory/model-candidate-failures-v1",
+    taskKind: options.taskKind,
+    status: "failed",
+    attemptedModelIds: options.attempts.map(({ modelId }) => modelId),
+    modelCandidateAttempts: options.attempts,
+  };
+  const content = `${JSON.stringify(payload, null, 2)}\n`;
+  await writeTextAtomically(tracePath, content);
+  const artifact = fileArtifact(
+    "model_trace",
+    tracePath,
+    content,
+    "application/json",
+    "video-factory/model-candidate-failures-v1",
+    options.nodeId,
+    options.parentArtifactIds,
+    finalAttempt.providerId,
+    "Ordered public model-candidate failure trace; raw errors and unavailable prompts are not stored.",
+    options.attempt,
+  );
+  artifact.provenance = { ...artifact.provenance, model: finalAttempt.modelId };
+  return artifact;
+}
+
 async function persistModelTrace(options: {
   trace: CodexTaskTrace | undefined;
   attemptDirectory: string;
@@ -4351,6 +4650,12 @@ async function persistModelTrace(options: {
     providerId: options.trace.providerId,
     modelId: options.trace.modelId,
     ...(options.trace.reasoningEffort ? { reasoningEffort: options.trace.reasoningEffort } : {}),
+    ...(options.trace.fallbackFromModelId ? { fallbackFromModelId: options.trace.fallbackFromModelId } : {}),
+    ...(options.trace.fallbackReason ? { fallbackReason: options.trace.fallbackReason } : {}),
+    ...(options.trace.attemptedModelIds?.length ? { attemptedModelIds: options.trace.attemptedModelIds } : {}),
+    ...(options.trace.modelCandidateAttempts?.length
+      ? { modelCandidateAttempts: options.trace.modelCandidateAttempts }
+      : {}),
     prompt: options.trace.prompt,
   };
   const content = `${JSON.stringify(payload, null, 2)}\n`;
@@ -4440,9 +4745,10 @@ function nodeAgentLoopCheckpoint(
   nodeId: string,
   input: unknown,
   contractVersion: string,
+  modelId?: string,
 ): ReturnType<typeof fileRoleAgentLoopCheckpoint> {
   // 同一制作内沿用 running checkpoint；人工重试 exhausted 节点时开启新 cycle，避免回放旧失败终态。
-  const key = roleAgentCheckpointKey({ runId, nodeId, input, contractVersion });
+  const key = roleAgentCheckpointKey({ runId, nodeId, input, contractVersion, ...(modelId ? { modelId } : {}) });
   return fileRoleAgentLoopCheckpoint(
     path.join(runsRoot, runId, "nodes", nodeId, "agent-loop-checkpoints", `${key}.json`),
     key,

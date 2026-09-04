@@ -74,13 +74,18 @@ export function DirectorPlanPanel({ contentUrl }: DirectorPlanPanelProps) {
             <div>
               <strong>{shot.narrativeRole}<em>{authenticityLabel(shot.authenticityPolicy)}</em></strong>
               <p>{shot.rationale}</p>
-              <small>{providerLabel(shot.preferredProviderId) ?? shot.preferredProviderId} · {shot.continuityNote}</small>
+              <small>{creatorProviderLabel(shot.preferredProviderId)} · {shot.continuityNote}</small>
             </div>
           </article>
         ))}
       </div>
     </section>
   );
+}
+
+function creatorProviderLabel(providerId: string): string {
+  const label = providerLabel(providerId);
+  return label ?? "未识别的画面来源";
 }
 
 function parseDirectorPlan(value: unknown): DirectorPlanView {

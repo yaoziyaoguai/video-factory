@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { CodexBridgeClient, CodexTaskExecution } from "./codex-chat.js";
+import type { CodexBridgeClient, CodexTaskExecution, ModelCandidateAttempt } from "./codex-chat.js";
+import {
+  failedModelCandidateAttempt,
+  fallbackRequestId,
+  isModelProviderFailure,
+  publicModelFailure,
+} from "./model-fallback.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
 export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v5|role-audit-v1|visual-review-validator-v1";
@@ -33,7 +39,9 @@ export interface VisualReviewAgentInput {
   directorPlanPath?: string;
   renderManifestPath?: string;
   requestId?: string;
+  selectedModelId?: string;
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
+  agentLoopCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
 }
 
 export interface VisualReviewMediaPreprocessor {
@@ -48,6 +56,12 @@ export type VisualReviewExecution = CodexTaskExecution<VisualReviewReport> & {
   requestId?: string;
   inspectedDurationMs?: number;
   sampling?: VisualReviewMediaPayload["sampling"];
+  executedProviderId?: string;
+  executedProviderLabel?: string;
+  executedModelId?: string;
+  fallbackFromProviderId?: string;
+  fallbackReason?: string;
+  attemptedModelIds?: string[];
 };
 
 export interface VisualReviewFinding {
@@ -86,6 +100,119 @@ export interface CodexVisualReviewAgentOptions {
   maxProducerCalls?: number;
 }
 
+export interface FallbackVisualReviewAgentOptions {
+  primary: VisualReviewAgent;
+  primaryProviderId: string;
+  backups: Array<{ agent: VisualReviewAgent; label?: string; providerId: string }>;
+  shouldFallback?: (error: unknown) => boolean;
+}
+
+export class VisualReviewFallbackError extends Error {
+  readonly attempts: ModelCandidateAttempt[];
+
+  constructor(readonly failures: Array<{ modelId: string; providerId: string; error: unknown }>) {
+    super(
+      `视觉审片的 ${failures.length} 个候选模型均未能完成：`
+      + failures.map((failure, index) => `${index + 1}. ${failure.modelId} ${publicModelFailure(failure.error)}`).join("；")
+      + "。",
+      failures.at(-1)?.error instanceof Error ? { cause: failures.at(-1)!.error } : undefined,
+    );
+    this.name = "VisualReviewFallbackError";
+    this.attempts = failures.map((failure) => failedModelCandidateAttempt(
+      failure.error,
+      failure.modelId,
+      failure.providerId,
+    ));
+  }
+}
+
+export class FallbackVisualReviewAgent implements VisualReviewAgent {
+  readonly id: string;
+  readonly modelId: string;
+
+  constructor(private readonly options: FallbackVisualReviewAgentOptions) {
+    if (options.backups.length === 0) throw new Error("Visual review fallback requires at least one backup candidate.");
+    if (![options.primaryProviderId, ...options.backups.map(({ providerId }) => providerId)].every((providerId) => providerId.trim())) {
+      throw new Error("Visual review candidates must include an explicit broker provider id.");
+    }
+    if (new Set([options.primary.modelId, ...options.backups.map(({ agent }) => agent.modelId)]).size !== options.backups.length + 1) {
+      throw new Error("Visual review fallback candidates must use distinct models.");
+    }
+    this.id = options.primary.id;
+    this.modelId = options.primary.modelId;
+  }
+
+  async review(input: VisualReviewAgentInput): Promise<VisualReviewReport> {
+    return (await this.reviewDetailed(input)).output;
+  }
+
+  async reviewDetailed(input: VisualReviewAgentInput): Promise<VisualReviewExecution> {
+    const configuredCandidates = [
+      {
+        agent: this.options.primary,
+        providerId: this.options.primaryProviderId,
+      },
+      ...this.options.backups,
+    ];
+    const candidates = orderVisualReviewCandidates(configuredCandidates, input.selectedModelId);
+    const failures: Array<{ modelId: string; providerId: string; error: unknown }> = [];
+    for (const [position, candidate] of candidates.entries()) {
+      const candidateInput = visualReviewInputForCandidate(input, candidate.agent.modelId, position);
+      try {
+        const execution = await runVisualReviewAgent(candidate.agent, candidateInput);
+        if (!execution.trace) {
+          throw new Error(`Visual review model candidate '${candidate.agent.modelId}' completed without an immutable execution trace.`);
+        }
+        const executedProviderId = execution.trace?.providerId ?? candidate.agent.id;
+        const executedModelId = execution.trace?.modelId ?? candidate.agent.modelId;
+        const modelCandidateAttempts = [
+          ...failures.map((failure) => failedModelCandidateAttempt(
+            failure.error,
+            failure.modelId,
+            failure.providerId,
+          )),
+          ...(execution.trace?.modelCandidateAttempts ?? [{
+            modelId: executedModelId,
+            providerId: executedProviderId,
+            outcome: "succeeded" as const,
+          }]),
+        ];
+        const attemptedModelIds = [...new Set([
+          ...failures.map((failure) => failure.modelId),
+          ...(execution.trace?.attemptedModelIds ?? [executedModelId]),
+        ])];
+        return {
+          ...execution,
+          executedProviderId,
+          ...(candidate.label ? { executedProviderLabel: candidate.label } : {}),
+          executedModelId,
+          ...(position > 0 ? {
+            fallbackFromProviderId: candidates[0]!.providerId,
+            fallbackReason: `前 ${position} 个候选模型调用失败，已自动切换到 ${executedModelId}。`,
+          } : {}),
+          attemptedModelIds,
+          ...(execution.trace ? {
+            trace: {
+              ...execution.trace,
+              ...(position > 0 ? {
+                fallbackFromModelId: candidates[0]!.agent.modelId,
+                fallbackReason: `前 ${position} 个候选模型调用失败，已自动切换。`,
+              } : {}),
+              attemptedModelIds,
+              modelCandidateAttempts,
+            },
+          } : {}),
+        };
+      } catch (error) {
+        failures.push({ modelId: candidate.agent.modelId, providerId: candidate.providerId, error });
+        if (!(this.options.shouldFallback ?? isModelProviderFailure)(error)) throw error;
+        if (position === candidates.length - 1) throw new VisualReviewFallbackError(failures);
+      }
+    }
+    throw new VisualReviewFallbackError(failures);
+  }
+}
+
 export class CodexVisualReviewAgent implements VisualReviewAgent {
   readonly id: string;
   readonly modelId: string;
@@ -102,6 +229,9 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
   }
 
   async reviewDetailed(input: VisualReviewAgentInput): Promise<VisualReviewExecution> {
+    if (input.selectedModelId && input.selectedModelId !== this.modelId) {
+      throw new Error(`Selected model '${input.selectedModelId}' is not available for visual review.`);
+    }
     const { payload, sampling } = await this.preparePayload(input);
     const client = this.options.client;
     const requestId = normalizedRequestId(input.requestId);
@@ -203,6 +333,47 @@ function visualReviewAuditContext(payload: VisualReviewMediaPayload): Record<str
 
 function normalizedRequestId(value: string | undefined): string | undefined {
   return value ? `visual-${createHash("sha256").update(value).digest("hex")}` : undefined;
+}
+
+async function runVisualReviewAgent(
+  agent: VisualReviewAgent,
+  input: VisualReviewAgentInput,
+): Promise<VisualReviewExecution> {
+  return agent.reviewDetailed
+    ? agent.reviewDetailed(input)
+    : { output: await agent.review(input) };
+}
+
+function orderVisualReviewCandidates(
+  candidates: Array<{ agent: VisualReviewAgent; label?: string; providerId: string }>,
+  selectedModelId: string | undefined,
+): Array<{ agent: VisualReviewAgent; label?: string; providerId: string }> {
+  if (!selectedModelId) return candidates;
+  const selected = candidates.find((candidate) => candidate.agent.modelId === selectedModelId);
+  if (!selected) throw new Error(`Selected model '${selectedModelId}' is not available for visual review.`);
+  return [selected, ...candidates.filter((candidate) => candidate !== selected)];
+}
+
+function visualReviewInputForCandidate(
+  input: VisualReviewAgentInput,
+  modelId: string,
+  position: number,
+): VisualReviewAgentInput {
+  const {
+    selectedModelId: _selectedModelId,
+    agentLoopCheckpoint: primaryCheckpoint,
+    agentLoopCheckpointForModel,
+    ...inputWithoutCheckpoint
+  } = input;
+  const checkpoint = agentLoopCheckpointForModel?.(modelId)
+    ?? (position === 0 ? primaryCheckpoint : undefined);
+  return {
+    ...inputWithoutCheckpoint,
+    ...(input.requestId
+      ? { requestId: position === 0 ? input.requestId : fallbackRequestId(input.requestId, modelId, position) }
+      : {}),
+    ...(checkpoint ? { agentLoopCheckpoint: checkpoint } : {}),
+  };
 }
 
 async function buildReviewContext(

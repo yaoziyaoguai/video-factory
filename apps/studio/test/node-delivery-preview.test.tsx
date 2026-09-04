@@ -126,6 +126,16 @@ describe("NodeDeliveryPreview", () => {
     expect(screen.queryByText("stock")).not.toBeInTheDocument();
   });
 
+  it("calls a director's provider choice a visual source instead of an internal capability", () => {
+    render(<NodeDeliveryPreview nodeId="visual-direction" value={{
+      shots: [{ purpose: "建立现场", preferredProviderId: "pexels-stock-v1" }],
+    }} />);
+
+    expect(screen.getByText("首选画面来源")).toBeInTheDocument();
+    expect(screen.queryByText("首选画面能力")).not.toBeInTheDocument();
+    expect(screen.getByText("Pexels 图库")).toBeInTheDocument();
+  });
+
   it("hides rendered asset metadata and translates internal creative terms", () => {
     const { container } = render(<NodeDeliveryPreview nodeId="assets" value={{
       scene_assets: [{ scene_position: 1, media_type: "video", width: 720, height: 1280 }],
@@ -136,8 +146,8 @@ describe("NodeDeliveryPreview", () => {
       }],
     }} />);
 
-    expect(screen.getByText(/提问镜头\s*使用 AI 视频生成/)).toBeInTheDocument();
-    expect(screen.getByText(/本地编辑能力/)).toBeInTheDocument();
+    expect(screen.getByText("提问镜头 使用 AI 视频生成，其他镜头交给本地编辑画面。")).toBeInTheDocument();
+    expect(container).not.toHaveTextContent("Provider");
     expect(container).not.toHaveTextContent("media type");
     expect(container).not.toHaveTextContent("720");
     expect(container).not.toHaveTextContent("1280");

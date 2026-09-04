@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
-import { catalogModelLabel, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
+import { catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
@@ -98,9 +98,13 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const canEditInput = !nodeReadOnly && effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
   const fallbackReason = useMemo(() => agentFallbackReason(execution), [execution]);
+  const modelBackupUsed = (execution?.actualModelIds?.length ?? 0) > 1;
+  const fallbackHeading = modelBackupUsed
+    ? "首选模型暂时不可用，已使用替补模型"
+    : "智能复核未完成，已使用基础方案";
   const capability = useMemo(() => fallbackReason
-    ? `智能复核未完成，已使用基础方案 · ${fallbackReason}`
-    : creatorCapabilityLabel(execution, node.spendPlan, providers), [execution, fallbackReason, node.spendPlan, providers]);
+    ? `${fallbackHeading} · ${fallbackReason}`
+    : creatorCapabilityLabel(execution, node.spendPlan, providers), [execution, fallbackHeading, fallbackReason, node.spendPlan, providers]);
   const assetProviderIds = useMemo(() => configuredAssetProviderIds(nodes), [nodes]);
   const editableAssetProviders = useMemo(
     () => providers.filter((provider) => assetProviderIds.includes(provider.id)),
@@ -290,9 +294,9 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       <div className="node-workspace-body">
         {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
           <strong>{agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
-          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{node.agentLoopProgress.latestAudit.summary}</span> : <span>正在生成本轮方案，完成后由独立 AI 做质量审计。</span>}
+          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{humanizeCreativeText(node.agentLoopProgress.latestAudit.summary)}</span> : <span>正在生成本轮方案，完成后由独立 AI 做质量审计。</span>}
         </div> : null}
-        {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>智能复核未完成，已使用基础方案</strong>：{fallbackReason}</span></p> : null}
+        {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>{fallbackHeading}</strong>：{fallbackReason}</span></p> : null}
         {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />这一步的结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成。</p> : null}
         {node.executionConfiguration ? <NodeExecutionConfigurationEditor
           node={node}
@@ -345,7 +349,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
                 {artifact.contentType?.startsWith("video/")
                   ? <video aria-label={`素材 ${index + 1} 画面预览`} src={artifact.contentUrl} controls playsInline preload="metadata" />
                   : <img alt={`素材 ${index + 1} 画面预览`} src={artifact.contentUrl} loading="lazy" />}
-                <figcaption><span>素材 {index + 1}</span><small>{providerLabel(artifact.providerId) ?? artifact.providerId ?? "素材来源未记录"}</small></figcaption>
+                <figcaption><span>素材 {index + 1}</span><small>{providerLabel(artifact.providerId) ?? "素材来源未记录"}</small></figcaption>
               </figure>)}
             </div>
           </div> : null}
@@ -363,7 +367,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           <h3>确认执行 {node.label}</h3>
           <p>这次授权只对下面已经审阅的输入版本、{providerModelLabel(providers.find((provider) => provider.id === node.spendPlan?.providerId), node.spendPlan.modelId)} 和本次最高授权额 ¥{node.spendPlan.maxCostCny.toFixed(2)} 有效。任何内容、模型、报价或重试次数变化都会让授权自动失效。</p>
           <div className="spend-input-versions" aria-label="本次付费所使用的上游版本">
-            {spendInputs.map((input) => <div key={input.versionId}><span><strong>{input.role} · {input.label}</strong><small>{input.source === "human" ? "人工版本" : "自动版本"}</small></span><code>{shortId(input.versionId)}</code></div>)}
+            {spendInputs.map((input) => <div key={input.versionId}><span><strong>{input.role} · {input.label}</strong><small>{input.source === "human" ? "人工版本" : "自动版本"}</small></span></div>)}
           </div>
           <div><button className="button button-ghost" type="button" onClick={() => setAuthorizing(false)}>返回检查</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void authorize()}>确认并执行</button></div>
         </section>
@@ -388,7 +392,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <section ref={terminalDialogRef} role="dialog" aria-modal="true" aria-labelledby={`terminal-edit-${node.id}`} tabIndex={-1}>
           <AlertTriangle aria-hidden="true" size={24} />
           <h3 id={`terminal-edit-${node.id}`}>创建已结束制作的人工修订版？</h3>
-          <p>这不会在后台自动调用付费能力。保存后，后续结果会标为过期，只有你再次点击重新生成才会继续。</p>
+          <p>这不会在后台自动调用付费服务。保存后，后续结果会标为过期，只有你再次点击重新生成才会继续。</p>
           <div><button className="button button-ghost" type="button" onClick={() => setTerminalOverride(undefined)}>取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride(true, terminalOverride)}>确认创建修订版</button></div>
         </section>
       </div> : null}
@@ -396,7 +400,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <section ref={terminalInputDialogRef} role="dialog" aria-modal="true" aria-labelledby={`terminal-input-edit-${node.id}`} tabIndex={-1}>
           <AlertTriangle aria-hidden="true" size={24} />
           <h3 id={`terminal-input-edit-${node.id}`}>创建已结束制作的人工输入版本？</h3>
-          <p>保存后，本步骤和全部后续结果会过期；系统不会自动调用任何付费能力。</p>
+          <p>保存后，本步骤和全部后续结果会过期；系统不会自动调用任何付费服务。</p>
           <div><button className="button button-ghost" type="button" onClick={() => setTerminalInputOverride(undefined)}>取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveInputOverride(true, terminalInputOverride)}>确认创建输入版本</button></div>
         </section>
       </div> : null}
@@ -597,10 +601,19 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
     ? providers.filter((provider) => provider.available && provider.kind !== "test" && provider.capability === capability)
     : [];
   const selectedProvider = providers.find((provider) => provider.id === providerId);
+  const inheritedProviderUnavailable = node.id !== "assets"
+    && !roleProviders.some((provider) => provider.id === providerId);
+  const hasAlternativeRoleProvider = roleProviders.some((provider) => provider.id !== providerId);
   const assetSources = providers.filter((provider) => provider.available
     && provider.kind !== "test"
     && provider.capability === "asset.prepare"
     && provider.id !== "ai-shot-router-v1");
+  const inheritedUnavailableAssetSources = assetProviderIds
+    .filter((id) => !assetSources.some((provider) => provider.id === id))
+    .map((id) => ({
+      id,
+      label: providers.find((provider) => provider.id === id)?.label ?? providerLabel(id) ?? "已停用的画面来源",
+    }));
   const selectedAssetSources = assetSources.filter((provider) => assetProviderIds.includes(provider.id));
   const meteredSources = selectedAssetSources.filter((provider) => provider.billing === "metered");
   const selectedProviderModels = selectedProvider
@@ -614,10 +627,10 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
     setAssetProviderIds([...(configuration.assetProviderIds ?? [])]);
   }, [configuration, editing]);
 
-  function updateAssetSource(provider: StudioProvider, enabled: boolean) {
+  function updateAssetSource(assetProviderId: string, enabled: boolean) {
     const next = enabled
-      ? [...new Set([...assetProviderIds, provider.id])]
-      : assetProviderIds.filter((id) => id !== provider.id);
+      ? [...new Set([...assetProviderIds, assetProviderId])]
+      : assetProviderIds.filter((id) => id !== assetProviderId);
     setAssetProviderIds(next);
   }
 
@@ -647,30 +660,36 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
     }
   }
 
-  return <section className="node-execution-config" aria-label={`${node.role ?? node.label}本次执行配置`}>
+  return <section className="node-execution-config" aria-label={`${node.role ?? node.label}本次制作选择`}>
     <header>
       <span><Settings2 aria-hidden="true" size={16} /></span>
-      <div><strong>本次执行配置</strong><small>{editing ? "保存后继续制作才会生效，旧费用确认会自动失效" : executionConfigurationSummary(node, providers)}</small></div>
+      <div><strong>本次制作选择</strong><small>{editing ? "保存后继续制作才会生效，旧费用确认会自动失效" : executionConfigurationSummary(node, providers)}</small></div>
       {canEdit && !editing ? <button className="button button-ghost" type="button" onClick={() => setEditing(true)}>调整</button> : null}
     </header>
     {editing ? <div className="node-execution-config-editor">
       {node.id !== "assets" ? <>
-        <label className="field"><span>执行能力</span><select value={providerId} disabled={node.id === "voice" || roleProviders.length < 2} onChange={(event) => setProviderId(event.target.value)}>
+        <label className="field"><span>制作方式</span><select value={providerId} disabled={node.id === "voice" || !hasAlternativeRoleProvider} onChange={(event) => setProviderId(event.target.value)}>
+          {inheritedProviderUnavailable ? <option value={providerId} disabled>{selectedProvider?.label ?? providerLabel(providerId) ?? "未识别的制作服务"}（已失效）</option> : null}
           {roleProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
         </select></label>
-        {selectedProviderModels.length ? <label className="field"><span>本次模型</span><select value={modelSelections[providerId] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, [providerId]: event.target.value }))}>
-          <option value="">推荐模型：{providerModelLabel(selectedProvider, selectedProvider?.defaultModelId)}</option>
+        {selectedProviderModels.length ? <label className="field"><span>首选模型</span><select value={modelSelections[providerId] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, [providerId]: event.target.value }))}>
+          <option value="">使用推荐：{providerModelLabel(selectedProvider, selectedProvider?.defaultModelId)}</option>
           {selectedProviderModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
-        </select></label> : null}
+        </select>{["script", "visual-direction", "visual-review"].includes(node.id) && selectedProviderModels.length > 1
+          ? <small>当前选择会优先使用；只有这个模型暂时无法使用时，才会依次尝试其他可用模型。</small>
+          : null}</label> : null}
       </> : <>
         <div className="node-asset-source-options">
+          {inheritedUnavailableAssetSources.map((provider) => <article key={provider.id} className="is-selected">
+            <label><input type="checkbox" checked onChange={(event) => updateAssetSource(provider.id, event.target.checked)} /><span><strong>{provider.label}</strong><small>已失效 · 取消选择后保存</small></span></label>
+          </article>)}
           {assetSources.map((provider) => {
             const selected = assetProviderIds.includes(provider.id);
             const compatibleModels = selectableModelsForCapability(provider.modelProfiles, provider.capability);
             return <article key={provider.id} className={selected ? "is-selected" : ""}>
-              <label><input type="checkbox" checked={selected} onChange={(event) => updateAssetSource(provider, event.target.checked)} /><span><strong>{provider.label}</strong><small>{provider.billing === "metered" ? "按镜头计费" : "免费来源"}</small></span></label>
+              <label><input type="checkbox" checked={selected} onChange={(event) => updateAssetSource(provider.id, event.target.checked)} /><span><strong>{provider.label}</strong><small>{provider.billing === "metered" ? "按镜头计费" : "免费来源"}</small></span></label>
               {selected && compatibleModels.length ? <select aria-label={`${provider.label}模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, [provider.id]: event.target.value }))}>
-                <option value="">推荐默认：{providerModelLabel(provider, provider.defaultModelId)}</option>
+                <option value="">使用推荐：{providerModelLabel(provider, provider.defaultModelId)}</option>
                 {compatibleModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
               </select> : null}
             </article>;
@@ -681,7 +700,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, on
         </div> : null}
       </>}
       {error ? <p className="node-workspace-error" role="alert">{error}</p> : null}
-      <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => { setError(undefined); setEditing(false); }}>取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void save()}><Save aria-hidden="true" size={15} />保存配置</button></footer>
+      <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => { setError(undefined); setEditing(false); }}>取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void save()}><Save aria-hidden="true" size={15} />保存选择</button></footer>
     </div> : null}
   </section>;
 }
@@ -698,7 +717,7 @@ function configurableNodeCapability(nodeId: string): string | undefined {
 function executionConfigurationSummary(node: StudioNode, providers: StudioProvider[]): string {
   const configuration = node.executionConfiguration!;
   if (node.id === "assets") {
-    const sources = (configuration.assetProviderIds ?? []).map((id) => providers.find((provider) => provider.id === id)?.label ?? id);
+    const sources = (configuration.assetProviderIds ?? []).map((id) => providers.find((provider) => provider.id === id)?.label ?? providerLabel(id) ?? "未识别的画面来源");
     const budget = configuration.economics?.allowMeteredProviders
       ? " · 按实际方案报价 · 执行前逐笔确认"
       : " · 当前不调用付费生成";
@@ -706,7 +725,7 @@ function executionConfigurationSummary(node: StudioNode, providers: StudioProvid
   }
   const provider = providers.find((candidate) => candidate.id === configuration.providerId);
   const modelId = configuration.modelSelections[configuration.providerId] ?? provider?.defaultModelId;
-  return `${provider?.label ?? configuration.providerId} · ${providerModelLabel(provider, modelId)}`;
+  return `${providerLabel(provider?.id) ?? provider?.label ?? "未识别的制作服务"} · ${providerModelLabel(provider, modelId)}`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -767,7 +786,7 @@ function creatorDraftValidationError(nodeId: string, value: unknown, requireMode
     if (bibleError) return bibleError;
     return firstCollectionItemError(draft.shots, "镜头计划", [
       ["narrativeRole", "镜头任务"],
-      ["preferredProviderId", "首选画面能力"],
+      ["preferredProviderId", "首选画面来源"],
       ["query", "素材检索词"],
       ["generationPrompt", "生成提示"],
       ["rationale", "选择理由"],
@@ -828,10 +847,6 @@ function inputSourceLabel(source: "derived" | "human" | "reconstructed" | undefi
   return "由上游自动派生";
 }
 
-function shortId(value: string | undefined): string | undefined {
-  return value && value.length > 14 ? `${value.slice(0, 6)}…${value.slice(-5)}` : value;
-}
-
 function creatorCapabilityLabel(
   execution: StudioNode["executionReceipt"] | StudioNode["plannedExecution"] | undefined,
   spendPlan: StudioNode["spendPlan"],
@@ -843,10 +858,10 @@ function creatorCapabilityLabel(
   const reasoningEffort = execution?.parameters?.reasoningEffort;
   const loopIterations = execution?.parameters?.agentLoopIterations;
   const auditEffort = execution?.parameters?.auditReasoningEffort;
-  const providerName = providerLabel(providerId) ?? execution?.providerLabel ?? providerId;
+  const providerName = providerLabel(providerId) ?? execution?.providerLabel ?? "未识别的制作服务";
   const modelName = catalogModelLabel(providers, modelId);
   return [
-    `本次使用 ${providerName}${modelId === providerId || modelName === providerName ? "" : ` · ${modelName}`}`,
+    `本次使用 ${providerName}${!modelName || modelId === providerId || modelName === providerName ? "" : ` · ${modelName}`}`,
     typeof reasoningEffort === "string" ? reasoningEffortLabel(reasoningEffort) : undefined,
     typeof loopIterations === "number" ? `AI 创作与独立质量审计 · ${loopIterations}/3 轮` : undefined,
     typeof auditEffort === "string" ? `质量复核：${reasoningEffortLabel(auditEffort)}` : undefined,
@@ -861,5 +876,5 @@ function agentFallbackReason(
   const reason = typeof parameterReason === "string" ? parameterReason : receiptReason;
   if (typeof reason !== "string" || !reason.trim()) return undefined;
   if (execution?.parameters?.agentLoop !== "failed" && receiptReason === undefined) return undefined;
-  return reason.trim();
+  return creatorFacingTechnicalText(reason.trim()) ?? reason.trim();
 }

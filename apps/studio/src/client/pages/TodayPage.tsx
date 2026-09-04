@@ -45,6 +45,7 @@ export function TodayPage() {
   const [productionDialogOpen, setProductionDialogOpen] = useState(false);
   const [opportunitiesLoading, setOpportunitiesLoading] = useState(true);
   const [providersLoading, setProvidersLoading] = useState(true);
+  const [settingsLoading, setSettingsLoading] = useState(true);
   const [runsLoading, setRunsLoading] = useState(true);
   const [trendLoading, setTrendLoading] = useState(true);
   const [seriesLoading, setSeriesLoading] = useState(true);
@@ -159,6 +160,7 @@ export function TodayPage() {
     const origin = entryMode === "custom" ? "manual" : entryMode;
     setOpportunitiesLoading(true);
     setProvidersLoading(true);
+    setSettingsLoading(true);
     setRunsLoading(true);
     setOpportunitiesError(undefined);
     setProvidersError(undefined);
@@ -170,7 +172,7 @@ export function TodayPage() {
       }).catch((caught: unknown) => setOpportunitiesError(errorMessage(caught))).finally(() => setOpportunitiesLoading(false)),
       studioApi.providers().then(setProviders).catch((caught: unknown) => setProvidersError(errorMessage(caught))).finally(() => setProvidersLoading(false)),
       studioApi.runs(entryMode === "series" ? undefined : origin).then(setRuns).catch((caught: unknown) => setRunsError(errorMessage(caught))).finally(() => setRunsLoading(false)),
-      studioApi.settings().then(setCreatorSettings).catch(() => undefined),
+      studioApi.settings().then(setCreatorSettings).catch(() => undefined).finally(() => setSettingsLoading(false)),
     ]);
   }, [entryMode]);
 
@@ -386,7 +388,7 @@ export function TodayPage() {
 
       <OpportunityDialog open={opportunityDialogOpen} initialMode={opportunityDialogMode} onClose={() => setOpportunityDialogOpen(false)} onSubmit={createOpportunity} />
       <SeriesDialog open={seriesDialogOpen} onClose={() => setSeriesDialogOpen(false)} onSubmit={createSeries} />
-      <NewRunDialog open={productionDialogOpen} providers={providers} {...(creatorSettings ? { creatorSettings } : {})} {...(selected ? { initialValues: {
+      <NewRunDialog open={productionDialogOpen} providers={providers} initialDataReady={!providersLoading && !settingsLoading} {...(creatorSettings ? { creatorSettings } : {})} {...(selected ? { initialValues: {
         title: selected.title,
         angle: selected.hook,
         audience: selected.audience,

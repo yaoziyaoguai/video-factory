@@ -354,7 +354,7 @@ describe("parseTaskRequest", () => {
     }
   });
 
-  it("accepts data-only payloads and bounded repair context for producer tasks", () => {
+  it("accepts data-only payloads and bounded repair context for producer tasks", async () => {
     const topicInput = topicRequest();
     topicInput.payload.revision = { candidate: { ideas: [] }, audit: { repairInstructions: ["补充观众收益"] } };
     const topic = parseTaskRequest(topicInput);
@@ -388,6 +388,15 @@ describe("parseTaskRequest", () => {
     (reworkInput.payload.brief as Record<string, unknown>).rework = {
       sourceRunId: "run-rejected-1",
       instruction: "保留前两镜，只把第三镜的白纸改写为无字 A4 打印纸。",
+      findings: [{
+        findingId: "vf_0123456789abcdef01234567",
+        timecodeMs: 8_000,
+        scenePosition: 3,
+        category: "text_interference",
+        description: "画面文字干扰字幕。",
+        suggestion: "换用无字母片。",
+        targetNodeIds: ["script"],
+      }],
       previousScript: { viewerPromise: "解释灯光为什么会改变纸面颜色", scenes: [{ position: 1 }] },
     };
     const reworkScript = parseTaskRequest(reworkInput);
@@ -396,6 +405,43 @@ describe("parseTaskRequest", () => {
     assert.deepEqual(reworkScript.payload.brief.rework, (reworkInput.payload.brief as Record<string, unknown>).rework);
     assert.match(buildTaskPrompt(reworkScript), /保留前两镜/);
     assert.match(buildTaskPrompt(reworkScript), /previousScript/);
+    assert.match(buildTaskPrompt(reworkScript), /vf_0123456789abcdef01234567/);
+
+    const wrongTargetRework = scriptRequest();
+    (wrongTargetRework.payload.brief as Record<string, unknown>).rework = {
+      sourceRunId: "run-rejected-1",
+      instruction: "只修改脚本问题。",
+      findings: [{
+        findingId: "vf_aaaaaaaaaaaaaaaaaaaaaaaa",
+        timecodeMs: 4_000,
+        category: "composition",
+        description: "构图不完整。",
+        suggestion: "重新构图。",
+        targetNodeIds: ["visual-direction", "assets"],
+      }],
+    };
+    await assert.rejects(
+      async () => parseTaskRequest(wrongTargetRework),
+      (error: unknown) => assertTerminal(error, /not assigned to script/),
+    );
+
+    const directorRework = directorRequest();
+    (directorRework.payload.brief as Record<string, unknown>).rework = {
+      sourceRunId: "run-rejected-1",
+      visualDirectionInstruction: "只修改构图。",
+      assetInstruction: "执行新路由。",
+      findings: [{
+        findingId: "vf_bbbbbbbbbbbbbbbbbbbbbbbb",
+        timecodeMs: 4_000,
+        category: "composition",
+        description: "构图不完整。",
+        suggestion: "重新构图。",
+        targetNodeIds: ["visual-direction", "assets"],
+      }],
+    };
+    const parsedDirectorRework = parseTaskRequest(directorRework);
+    assert.equal(parsedDirectorRework.kind, "director-plan");
+    assert.match(buildTaskPrompt(parsedDirectorRework), /vf_bbbbbbbbbbbbbbbbbbbbbbbb/);
 
     const publishInput = publishCopyRequest();
     publishInput.payload.revision = { candidate: { title: "旧标题" }, audit: { repairInstructions: ["删除夸张承诺"] } };
@@ -566,8 +612,8 @@ describe("buildCodexExecCommand", () => {
     assert.deepEqual(zai.identity, {
       profileId: "zai",
       providerId: "zai-bigmodel-api",
-      modelId: "glm-5.3-flash",
-      taskKinds: ["visual-review"],
+      modelId: "glm-5.3",
+      taskKinds: ["director-plan", "script-draft", "visual-review"],
     });
     assert.equal(zai.model, undefined);
     assert.equal("apiKey" in zai, false);
@@ -1036,11 +1082,11 @@ describe("CodexExecutor.runTask", () => {
       {
         name: "non-zero exit",
         behavior: ({ child }) => {
-          child.stderr.end("model backend unavailable");
+          child.stderr.end("authentication failed: invalid API key");
           child.stdout.end();
           child.emit("close", 1, null);
         },
-        pattern: /code 1.*model backend unavailable/,
+        pattern: /code 1.*authentication failed.*invalid API key/,
       },
       {
         name: "structured stdout error",
@@ -1065,6 +1111,24 @@ describe("CodexExecutor.runTask", () => {
           child.emit("close", 1, null);
         },
         pattern: /code 1.*Session not found: \[redacted-session\]/,
+      },
+      {
+        name: "configuration diagnostic",
+        behavior: ({ child }) => {
+          child.stderr.end("configuration error: the selected model is not configured");
+          child.stdout.end();
+          child.emit("close", 1, null);
+        },
+        pattern: /code 1.*configuration error/,
+      },
+      {
+        name: "content policy diagnostic",
+        behavior: ({ child }) => {
+          child.stderr.end("content policy violation");
+          child.stdout.end();
+          child.emit("close", 1, null);
+        },
+        pattern: /code 1.*content policy violation/,
       },
       {
         name: "empty output",
@@ -1110,6 +1174,37 @@ describe("CodexExecutor.runTask", () => {
       await assert.rejects(
         () => executor.runTask(parseTaskRequest(topicRequest())),
         (error: unknown) => assertTerminal(error, expectation.pattern),
+      );
+      assert.deepEqual(await readdir(workspaceRoot), []);
+    }
+  });
+
+  it("preserves confirmed provider throttling and capacity exits as transient failures", async () => {
+    const diagnostics = [
+      "HTTP 429 Too Many Requests",
+      "rate limit exceeded; retry later",
+      "the model service is overloaded",
+      "no available capacity for this model",
+      "service temporarily unavailable",
+    ];
+    for (const diagnostic of diagnostics) {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
+      const executor = new CodexExecutor({
+        workspaceRoot,
+        spawnFn: fakeSpawn(({ child }) => {
+          child.stdout.end();
+          child.stderr.end(diagnostic);
+          child.emit("close", 1, null);
+        }),
+      });
+
+      await assert.rejects(
+        () => executor.runTask(parseTaskRequest(topicRequest())),
+        (error: unknown) => {
+          assert.ok(error instanceof CodexExecutorError);
+          assert.equal(error.transient, true, diagnostic);
+          return true;
+        },
       );
       assert.deepEqual(await readdir(workspaceRoot), []);
     }

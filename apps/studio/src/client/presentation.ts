@@ -49,13 +49,14 @@ export function providerLabel(providerId?: string): string | undefined {
     "inline:publish-package": "本地发布编排",
     "video-factory-ts-v1": "VideoFactory 本地编排",
     "python-template-v1": "本地模板脚本",
-    "codex-screenwriter-v1": "Codex 编剧",
-    "api-visual-director-v1": "Codex 视觉导演",
-    "codex-reference-grammar-v1": "Codex 参考视频分析",
-    "codex-asset-ranker-v1": "Codex 候选画面排序",
+    "codex-screenwriter-v1": "AI 编剧",
+    "api-visual-director-v1": "AI 视觉导演",
+    "codex-reference-grammar-v1": "AI 参考视频分析",
+    "codex-asset-ranker-v1": "AI 候选画面排序",
     "asset-candidate-search-v1": "图库候选搜索",
-    "codex-publish-copy-v1": "Codex 发行编辑",
+    "codex-publish-copy-v1": "AI 发行编辑",
     "ai-shot-router-v1": "AI 逐镜选择画面来源",
+    "human-editor": "人工编辑",
     "local-editorial-v1": "本地编辑画面",
     "pexels-stock-v1": "Pexels 图库",
     "pixabay-stock-v1": "Pixabay 图库",
@@ -66,16 +67,16 @@ export function providerLabel(providerId?: string): string | undefined {
     "macos-say-v1": "macOS 系统配音",
     "python-ffmpeg-v1": "FFmpeg 本地渲染",
     "python-technical-review-v1": "本地机器质检",
-    "codex-visual-review-v1": "Codex 视觉审片",
+    "codex-visual-review-v1": "AI 视觉审片",
     "glm-visual-review-v1": "GLM-5.3-Flash 视觉审片",
-    openai: "Codex",
+    openai: "AI 创作服务",
     pexels: "Pexels 图库",
     pixabay: "Pixabay 图库",
     local: "本地编辑画面",
     minimax: "MiniMax",
     "minimax-tts-v1": "MiniMax 中文配音",
     seedance: "Seedance",
-  } as Record<string, string>)[providerId] ?? providerId;
+  } as Record<string, string>)[providerId];
 }
 
 export function providerModelLabel(
@@ -83,7 +84,7 @@ export function providerModelLabel(
   modelId?: string,
 ): string {
   if (!modelId) return "自动选择";
-  return provider?.modelProfiles?.find((model) => model.id === modelId)?.label ?? modelId;
+  return provider?.modelProfiles?.find((model) => model.id === modelId)?.label ?? "未识别模型";
 }
 
 export function catalogModelLabel(providers: Array<{ modelProfiles?: Array<{ id: string; label: string }> }>, modelId?: string): string | undefined {
@@ -92,11 +93,19 @@ export function catalogModelLabel(providers: Array<{ modelProfiles?: Array<{ id:
     const label = provider.modelProfiles?.find((model) => model.id === modelId)?.label;
     if (label) return label;
   }
-  return modelId;
+  return undefined;
 }
 
 export function humanizeCreativeText(value: string): string {
   return value
+    .replace(/knowledge-failed-intuition/gi, "打破直觉")
+    .replace(/knowledge-question/gi, "明确问题")
+    .replace(/knowledge-cause/gi, "解释原因")
+    .replace(/knowledge-chain/gi, "补全因果")
+    .replace(/knowledge-example-setup/gi, "建立验证条件")
+    .replace(/knowledge-example-change/gi, "展示变量变化")
+    .replace(/knowledge-rule/gi, "提炼判断规则")
+    .replace(/knowledge-use/gi, "落地操作")
     .replace(/^question\s*\/\s*shot-question\s*[：:]?\s*/i, "提问钩子：")
     .replace(/^model\s*\/\s*shot-model\s*[：:]?\s*/i, "原理说明：")
     .replace(/^example\s*\/\s*shot-example\s*[：:]?\s*/i, "实例验证：")
@@ -110,18 +119,20 @@ export function humanizeCreativeText(value: string): string {
     .replace(/asset\.generate\.video/gi, "AI 视频生成")
     .replace(/asset\.generate\.image/gi, "AI 图片生成")
     .replace(/asset\.search/gi, "图库检索")
+    .replace(/\bgenerated_image\b/gi, "AI 图片生成")
+    .replace(/\bgenerated_video\b/gi, "AI 视频生成")
+    .replace(/\bstock_video\b/gi, "图库实拍视频")
+    .replace(/\beditorial_card\b/gi, "主动排版画面")
+    .replace(/\bon_screen_text\b/gi, "屏幕文字")
+    .replace(/REUSE_ONLY\s+scene\s+(\d+)/gi, "复用镜头 $1")
+    .replace(/\bblocking\b/gi, "必须修改的问题")
+    .replace(/\bAIGC\b/gi, "AI 内容声明")
+    .replace(/AI 编剧短视频结构/g, "提问—解释—验证—结论")
     .replace(/manualReplacement/gi, "人工补充素材")
     .replace(/\bmeasured\b/gi, "舒缓克制")
     .replace(/\bmedium\b/gi, "适中")
     .replace(/\bfast\b/gi, "明快")
     .replace(/\bslow\b/gi, "舒缓")
-    .replace(/本地\s+Provider/gi, "本地编辑能力")
-    .replace(/本地编辑\s+Provider/gi, "本地编辑能力")
-    .replace(/\bProvider\b/g, "素材能力")
-    .replace(/素材能力\s+的能力/g, "素材能力")
-    .replace(/本地编辑能力\s+的能力/g, "本地编辑能力")
-    .replace(/本地编辑\s+素材能力/g, "本地编辑能力")
-    .replace(/符合\s*素材能力\s*强项/g, "发挥所选画面能力的强项")
     .replace(/合同约束/g, "创作约束")
     .replace(/\s+(提问镜头|原理镜头|验证镜头|结论镜头)\s+/g, "$1");
 }
@@ -134,10 +145,24 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/External generation task IDs retained for audit\.?/gi, "保留生成任务编号，便于核对服务状态与账单。")
     .replace(/AI-generated (?:image|video) selected by the director plan; review terms, likeness rights, and AIGC disclosure\.?/gi, "由导演方案选中的 AI 画面；发布前需核对使用条款、肖像权和 AI 内容声明。")
     .replace(/AI-generated (?:image|video); review provider terms, likeness rights, and AIGC disclosure before publishing\.?/gi, "AI 生成画面；发布前需核对使用条款、肖像权和 AI 内容声明。")
+    .replace(/AI-generated script; facts and claims require human review before publication\.?/gi, "AI 生成脚本；发布前需要人工核对事实与表述。")
+    .replace(/Independent role audit and bounded repair history; credentials and hidden reasoning are not stored\.?/gi, "保存独立质量复核与最多三轮修订记录，不包含密钥或模型内部推理。")
+    .replace(/Preview-only candidate metadata; no media was downloaded by this node\.?/gi, "只保存候选素材信息，这一步没有下载素材。")
+    .replace(/Candidate ranking only; no source media was downloaded or altered\.?/gi, "只保存候选排序结果，没有下载或修改原始素材。")
     .replace(/Series Bible/gi, "系列设定")
     .replace(/\bCanon\b/gi, "已确认内容")
+    .replace(/\bCodex\b/gi, "AI")
     .replace(/\bAgent\b/gi, "AI")
     .replace(/\bProvider\b/gi, "服务")
+    .replace(/\bBroker\b/gi, "AI 服务")
+    .replace(/\bSchema\b/gi, "数据格式")
+    .replace(/\bManifest\b/gi, "资源清单")
+    .replace(/\bFallback\b/gi, "备用方案")
+    .replace(/\btaskId\b/gi, "任务编号")
+    .replace(/primary\s+服务\s+timed\s+out/gi, "首选服务响应超时")
+    .replace(/服务\s+timed\s+out/gi, "服务响应超时")
+    .replace(/服务\s+unavailable/gi, "服务暂时不可用")
+    .replace(/\b[a-z][a-z0-9]*(?:[-_.:][a-z0-9]+)+-v\d+\b/gi, "内部能力")
     .replace(/\bMCP\b/gi, "标准接口")
     .replace(/\bCode Plan\b/gi, "订阅额度")
     .replace(/\bTTS API\b/gi, "云端配音服务")
@@ -164,7 +189,7 @@ export function reasoningEffortLabel(value: unknown): string {
 
 export function proposalSourceLabel(providerId: string): string {
   if (providerId === "series-planner-v1") return "系列策划器";
-  if (providerId === "api-topic-editor-v1") return "Codex 选题总编";
+  if (providerId === "api-topic-editor-v1") return "AI 选题总编";
   if (providerId.includes("heuristic") || providerId.includes("deterministic")) return "本地规则提案";
   return "API 总编提案";
 }

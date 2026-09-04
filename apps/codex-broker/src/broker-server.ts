@@ -24,7 +24,12 @@ const STALE_PROBE_TIMEOUT_MS = 500;
 
 export type TaskOutcome =
   | { ok: true; output: string; trace?: CodexTaskTrace; sessionId?: string; sessionHandle?: string }
-  | { ok: false; status: 400 | 409 | 413 | 422 | 503 | 500; message: string };
+  | {
+    ok: false;
+    status: 400 | 409 | 413 | 422 | 503 | 500;
+    message: string;
+    failureKind?: "model_provider_transient";
+  };
 
 interface QueuedTask {
   task: ValidatedTask;
@@ -327,7 +332,7 @@ export class CodexBrokerServer {
     this.sendJson(
       response,
       outcome.status,
-      { error: outcome.message },
+      { error: outcome.message, ...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}) },
       outcome.status === 503 ? DEFAULT_RETRY_AFTER_SECONDS : undefined,
     );
   }
@@ -663,14 +668,16 @@ function failureOutcome(error: unknown): TaskOutcome {
     return {
       ok: false,
       status: 422,
-      message: `Codex task failed${error.transient ? " transiently" : ""}: ${publicExecutorMessage(error.message)}`,
+      message: `Codex task failed${error.transient ? " transiently" : ""}: ${publicExecutorMessage(error.message, error.transient)}`,
+      ...(error.transient ? { failureKind: "model_provider_transient" as const } : {}),
     };
   }
   return { ok: false, status: 500, message: "Codex broker failed to run the task." };
 }
 
-function publicExecutorMessage(message: string): string {
+function publicExecutorMessage(message: string, transient = false): string {
   if (/timed out after \d+ms\./.test(message)) return "the model timed out.";
+  if (transient) return "the model service is temporarily unavailable.";
   if (message === "Codex output is not valid JSON.") return "the model returned invalid JSON.";
   if (message === "Codex produced an empty output.") return "the model returned an empty result.";
   if (message.startsWith("Codex output does not match ")) return "the model result did not satisfy its output contract.";

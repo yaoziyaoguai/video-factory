@@ -73,7 +73,7 @@ const FIELD_LABELS: Record<string, string> = {
   direction: "表演指示",
   pause_scale: "停顿强度",
   mastering_preset: "声音质感",
-  provider: "声音能力",
+  provider: "配音方式",
   rendered: "渲染完成",
   resolution: "画面尺寸",
   visual_quality: "画面质量",
@@ -117,7 +117,7 @@ const FIELD_LABELS: Record<string, string> = {
   visual_prompt: "画面提示",
   purpose: "镜头目的",
   source: "来源",
-  provider_id: "能力",
+  provider_id: "画面来源",
   asset_type: "素材类型",
   query: "检索词",
   prompt: "生成提示",
@@ -132,7 +132,7 @@ const FIELD_LABELS: Record<string, string> = {
   authenticityPolicy: "真实度要求",
   scenePosition: "镜头序号",
   scene_position: "镜头序号",
-  preferredProviderId: "首选画面能力",
+  preferredProviderId: "首选画面来源",
   subject: "主体",
   description: "问题说明",
   suggestion: "修改建议",
@@ -157,7 +157,7 @@ const FIELD_LABELS: Record<string, string> = {
   narrativeArc: "叙事弧线",
   canonFacts: "拟写入系列正史的事实",
   review: "本轮审片结论",
-  fallbackReason: "回退原因",
+  fallbackReason: "智能排序未完成的原因",
   quality_checks: "脚本自检",
   hashtags: "建议话题",
   slides: "画面页",
@@ -165,8 +165,8 @@ const FIELD_LABELS: Record<string, string> = {
   findings: "审片发现",
   artifacts: "发布产物",
   economics: "画面来源策略",
-  director: "导演配置",
-  voiceDirection: "声音配置",
+  director: "导演设定",
+  voiceDirection: "配音设定",
   visualBible: "全片视觉规则",
   mastering: "声音处理",
   audio: "音频检查",
@@ -317,7 +317,7 @@ function AssetRoutingPreview({ routes }: { routes: unknown[] }) {
           <div><strong>镜头 {scene}</strong><small>{formatScalar(route.query)}</small></div>
           <span>{formatScalar(route.actual_provider_id ?? route.actual_provider, "provider")}</span>
         </header>
-        {isScalar(route.rationale) && route.rationale ? <p>{formatScalar(route.rationale)}</p> : null}
+        {isScalar(route.rationale) && route.rationale ? <p>{formatAssetRoutingRationale(route.rationale)}</p> : null}
         {candidates.length ? <div className="asset-candidate-strip">{candidates.slice(0, 6).map((candidate, candidateIndex) => (
           <AssetCandidate candidate={candidate} index={candidateIndex} key={candidateIndex} />
         ))}</div> : <div className="asset-candidate-empty">{emptyCandidateMessage(route)}</div>}
@@ -364,6 +364,13 @@ function emptyCandidateMessage(route: Record<string, unknown>): string {
   if (provider === "local") return "本镜头当前采用本地编辑画面，没有图库候选。";
   if (route.generation_pending === true) return "本镜头计划使用生成式素材；生成前仍需人工确认成本与提示词。";
   return "本次任务没有保存可公开预览的候选素材；旧任务仍可在完整交付中核验实际来源。";
+}
+
+function formatAssetRoutingRationale(value: unknown): string {
+  const formatted = formatScalar(value);
+  return typeof value === "string"
+    ? formatted.replace(/本地\s+Provider/gi, "本地编辑画面")
+    : formatted;
 }
 
 function AssetCandidate({ candidate, index }: { candidate: unknown; index: number }) {
@@ -456,7 +463,10 @@ function formatScalar(value: unknown, key?: string): string {
   if (typeof value === "boolean") return value ? "是" : "否";
   if (value === null || value === undefined || value === "") return "未填写";
   if (key === "platform" && typeof value === "string") return platformLabel(value);
-  if ((key === "provider" || key === "provider_id" || key === "preferredProviderId") && typeof value === "string") return providerLabel(value) ?? value;
+  if ((key === "provider" || key === "provider_id" || key === "preferredProviderId") && typeof value === "string") {
+    const label = providerLabel(value);
+    return label ?? "未识别的制作服务";
+  }
   if (key === "reviewMode" && value === "manual") return "人工终审";
   if (key === "recommendation" && typeof value === "string") return ({ approve: "通过", revise: "修改后再审", reject: "不通过" } as Record<string, string>)[value] ?? value;
   if (key === "severity" && typeof value === "string") return ({ info: "提示", low: "轻微", medium: "需关注", warning: "需修改", high: "高风险", critical: "严重" } as Record<string, string>)[value] ?? value;

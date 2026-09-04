@@ -4,9 +4,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import {
+  CodexBridgeError,
   CodexVisualReviewAgent,
+  FallbackVisualReviewAgent,
+  RoleAgentLoopError,
+  VisualReviewFallbackError,
   validateVisualReviewReport,
   type CodexTaskKind,
+  type VisualReviewAgent,
+  type VisualReviewAgentInput,
   type VisualReviewMediaPayload,
 } from "../src/index.js";
 
@@ -43,6 +49,24 @@ const passingAudit = {
 } as const;
 
 describe("CodexVisualReviewAgent", () => {
+  it("rejects a stale selected model before preprocessing media for a single configured agent", async () => {
+    let mediaCalls = 0;
+    const agent = new CodexVisualReviewAgent({
+      modelId: "gpt-current",
+      media: { prepare: async () => {
+        mediaCalls += 1;
+        return media;
+      } },
+      client: { runTask: async () => report },
+    });
+
+    await assert.rejects(
+      () => agent.reviewDetailed({ videoPath: "/run/final.mp4", runRoot: "/run", selectedModelId: "gpt-offline" }),
+      /is not available for visual review/,
+    );
+    assert.equal(mediaCalls, 0);
+  });
+
   it("reviews frames against the editable script, director intent, and render timeline", async () => {
     const runRoot = await mkdtemp(path.join(tmpdir(), "video-factory-review-context-"));
     const scriptPath = path.join(runRoot, "script.json");
@@ -339,6 +363,285 @@ describe("CodexVisualReviewAgent", () => {
 
     assert.equal(agent.id, "future-visual-review-v1");
     assert.equal(agent.modelId, "future-vision-model");
+  });
+
+  it("uses an isolated backup model only after an eligible provider failure", async () => {
+    const primaryInputs: VisualReviewAgentInput[] = [];
+    const backupInputs: VisualReviewAgentInput[] = [];
+    const primary: VisualReviewAgent = {
+      id: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async (input) => {
+        primaryInputs.push(input);
+        throw new CodexBridgeError("Codex bridge returned HTTP 503.", false, "uncertain", 503);
+      },
+    };
+    const backup: VisualReviewAgent = {
+      id: "codex-visual-review-v1",
+      modelId: "gpt-backup",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async (input) => {
+        backupInputs.push(input);
+        return {
+          output: validateVisualReviewReport(report, media.durationMs),
+          ...(input.requestId ? { requestId: input.requestId } : {}),
+          trace: {
+            taskKind: "visual-review",
+            promptVersion: "visual-review-test-v1",
+            prompt: "bounded test prompt",
+            providerId: "openai",
+            modelId: "gpt-backup",
+          },
+        };
+      },
+    };
+    const checkpoints = new Map<string, unknown>();
+    const checkpointFactory = (modelId: string) => {
+      const checkpoint = { key: `checkpoint-${modelId}`, load: async () => undefined, save: async () => undefined };
+      checkpoints.set(modelId, checkpoint);
+      return checkpoint;
+    };
+    const agent = new FallbackVisualReviewAgent({
+      primary,
+      primaryProviderId: "zai-bigmodel-api",
+      backups: [{ agent: backup, label: "Codex 视觉审片", providerId: "openai" }],
+    });
+
+    const execution = await agent.reviewDetailed({
+      videoPath: "/run/final.mp4",
+      runRoot: "/run",
+      requestId: "node-operation",
+      agentLoopCheckpointForModel: checkpointFactory,
+    });
+
+    assert.equal(primaryInputs.length, 1);
+    assert.equal(backupInputs.length, 1);
+    assert.equal(primaryInputs[0]?.agentLoopCheckpoint, checkpoints.get("glm-5.3-flash"));
+    assert.equal(backupInputs[0]?.agentLoopCheckpoint, checkpoints.get("gpt-backup"));
+    assert.match(String(backupInputs[0]?.requestId), /^backup-[a-f0-9]{64}$/);
+    assert.notEqual(backupInputs[0]?.requestId, primaryInputs[0]?.requestId);
+    assert.equal(execution.executedProviderId, "openai");
+    assert.equal(execution.executedProviderLabel, "Codex 视觉审片");
+    assert.equal(execution.executedModelId, "gpt-backup");
+    assert.equal(execution.fallbackFromProviderId, "zai-bigmodel-api");
+    assert.deepEqual(execution.attemptedModelIds, ["glm-5.3-flash", "gpt-backup"]);
+    assert.deepEqual(execution.trace?.modelCandidateAttempts, [{
+      modelId: "glm-5.3-flash",
+      providerId: "zai-bigmodel-api",
+      outcome: "failed",
+      failureStage: "uncertain",
+      failureReason: "服务端错误（HTTP 503）",
+    }, {
+      modelId: "gpt-backup",
+      providerId: "openai",
+      outcome: "succeeded",
+    }]);
+  });
+
+  it("places the explicitly selected visual model first and can fall back in reverse provider order", async () => {
+    const calls: string[] = [];
+    const primary: VisualReviewAgent = {
+      id: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+      review: async () => validateVisualReviewReport(report, media.durationMs),
+      reviewDetailed: async () => {
+        calls.push("glm-5.3-flash");
+        return {
+          output: validateVisualReviewReport(report, media.durationMs),
+          trace: {
+            taskKind: "visual-review",
+            promptVersion: "visual-review-test-v1",
+            prompt: "bounded test prompt",
+            providerId: "zai-bigmodel-api",
+            modelId: "glm-5.3-flash",
+          },
+        };
+      },
+    };
+    const backup: VisualReviewAgent = {
+      id: "codex-visual-review-v1",
+      modelId: "gpt-vision",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async () => {
+        calls.push("gpt-vision");
+        throw new CodexBridgeError("Codex bridge returned HTTP 429.", false, "not_accepted", 429);
+      },
+    };
+    const agent = new FallbackVisualReviewAgent({
+      primary,
+      primaryProviderId: "zai-bigmodel-api",
+      backups: [{ agent: backup, providerId: "openai" }],
+    });
+
+    const execution = await agent.reviewDetailed({
+      videoPath: "/run/final.mp4",
+      runRoot: "/run",
+      selectedModelId: "gpt-vision",
+    });
+
+    assert.deepEqual(calls, ["gpt-vision", "glm-5.3-flash"]);
+    assert.equal(execution.executedModelId, "glm-5.3-flash");
+    assert.equal(execution.executedProviderLabel, undefined);
+    assert.equal(execution.fallbackFromProviderId, "openai");
+    assert.deepEqual(execution.attemptedModelIds, ["gpt-vision", "glm-5.3-flash"]);
+  });
+
+  it("does not mask a valid semantic audit failure with the backup model", async () => {
+    let backupCalls = 0;
+    const primary: VisualReviewAgent = {
+      id: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async () => {
+        throw new RoleAgentLoopError("Visual report did not pass its audit.", {
+          version: "video-factory/agent-loop-v1",
+          role: "视觉审片员",
+          contractVersion: "visual-review-test-v1",
+          criteria: ["忠于画面证据"],
+          status: "failed",
+          maxIterations: 3,
+          iterations: [],
+        });
+      },
+    };
+    const backup: VisualReviewAgent = {
+      id: "codex-visual-review-v1",
+      modelId: "gpt-backup",
+      review: async () => {
+        backupCalls += 1;
+        return validateVisualReviewReport(report, media.durationMs);
+      },
+    };
+    const agent = new FallbackVisualReviewAgent({
+      primary,
+      primaryProviderId: "zai-bigmodel-api",
+      backups: [{ agent: backup, providerId: "openai" }],
+    });
+
+    await assert.rejects(
+      () => agent.reviewDetailed({ videoPath: "/run/final.mp4", runRoot: "/run" }),
+      /did not pass its audit/,
+    );
+    assert.equal(backupCalls, 0);
+  });
+
+  it("reports both provider failures without leaking their raw diagnostics", async () => {
+    const primary: VisualReviewAgent = {
+      id: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async () => {
+        throw new CodexBridgeError("Codex bridge returned HTTP 503. secret-primary", false, "uncertain", 503);
+      },
+    };
+    const backup: VisualReviewAgent = {
+      id: "codex-visual-review-v1",
+      modelId: "gpt-backup",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async () => {
+        throw new CodexBridgeError("Codex bridge returned HTTP 429. secret-backup", false, "not_accepted", 429);
+      },
+    };
+    const agent = new FallbackVisualReviewAgent({
+      primary,
+      primaryProviderId: "zai-bigmodel-api",
+      backups: [{ agent: backup, providerId: "openai" }],
+    });
+
+    await assert.rejects(
+      () => agent.reviewDetailed({ videoPath: "/run/final.mp4", runRoot: "/run" }),
+      (error: unknown) => {
+        assert.ok(error instanceof VisualReviewFallbackError);
+        assert.match(error.message, /1\. glm-5\.3-flash 服务端错误（HTTP 503）/);
+        assert.match(error.message, /2\. gpt-backup 请求过多/);
+        assert.doesNotMatch(error.message, /secret-primary|secret-backup/);
+        assert.deepEqual(error.attempts, [
+          {
+            modelId: "glm-5.3-flash",
+            providerId: "zai-bigmodel-api",
+            outcome: "failed",
+            failureStage: "uncertain",
+            failureReason: "服务端错误（HTTP 503）",
+          },
+          {
+            modelId: "gpt-backup",
+            providerId: "openai",
+            outcome: "failed",
+            failureStage: "not_accepted",
+            failureReason: "请求过多",
+          },
+        ]);
+        return true;
+      },
+    );
+  });
+
+  it("continues through multiple visual candidates until one succeeds", async () => {
+    const calls: string[] = [];
+    const failing = (modelId: string): VisualReviewAgent => ({
+      id: `${modelId}-reviewer`,
+      modelId,
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async () => {
+        calls.push(modelId);
+        throw new CodexBridgeError(`Codex bridge returned HTTP 503 for ${modelId}.`, true, "not_accepted", 503);
+      },
+    });
+    const final: VisualReviewAgent = {
+      id: "final-reviewer",
+      modelId: "vision-third",
+      review: async () => validateVisualReviewReport(report, media.durationMs),
+      reviewDetailed: async () => {
+        calls.push("vision-third");
+        return {
+          output: validateVisualReviewReport(report, media.durationMs),
+          trace: {
+            taskKind: "visual-review",
+            promptVersion: "visual-review-test-v1",
+            prompt: "bounded test prompt",
+            providerId: "third-provider",
+            modelId: "vision-third",
+          },
+        };
+      },
+    };
+    const fallback = new FallbackVisualReviewAgent({
+      primary: failing("vision-first"),
+      primaryProviderId: "provider-first",
+      backups: [
+        { agent: failing("vision-second"), providerId: "provider-second" },
+        { agent: final, providerId: "third-provider" },
+      ],
+    });
+
+    const execution = await fallback.reviewDetailed({ videoPath: "/run/final.mp4", runRoot: "/run" });
+
+    assert.deepEqual(calls, ["vision-first", "vision-second", "vision-third"]);
+    assert.equal(execution.executedModelId, "vision-third");
+    assert.deepEqual(execution.attemptedModelIds, ["vision-first", "vision-second", "vision-third"]);
+  });
+
+  it("rejects visual candidates without explicit broker provider identities", () => {
+    const primary: VisualReviewAgent = {
+      id: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+      review: async () => validateVisualReviewReport(report, media.durationMs),
+    };
+    const backup: VisualReviewAgent = {
+      id: "codex-visual-review-v1",
+      modelId: "gpt-backup",
+      review: async () => validateVisualReviewReport(report, media.durationMs),
+    };
+
+    assert.throws(
+      () => new FallbackVisualReviewAgent({
+        primary,
+        primaryProviderId: "",
+        backups: [{ agent: backup, providerId: "openai" }],
+      }),
+      /broker provider id/i,
+    );
   });
 
   it("rejects findings outside the inspected video and malformed scores", () => {

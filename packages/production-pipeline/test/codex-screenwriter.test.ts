@@ -23,14 +23,28 @@ class CapturingCodexClient extends CodexBridgeClient {
 }
 
 class SequencedCodexClient extends CodexBridgeClient {
-  readonly calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
+  readonly calls: Array<{
+    kind: CodexTaskKind;
+    payload: unknown;
+    requestId: string;
+    session: CodexTaskExecution["session"];
+  }> = [];
 
-  constructor(private readonly responses: unknown[]) {
+  constructor(
+    private readonly responses: unknown[],
+    private readonly providerId = "openai",
+    private readonly modelId = "gpt-5.6-sol",
+  ) {
     super({ socketPath: "/nonexistent/vf-codex.sock", sleep: async () => {} });
   }
 
-  async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
-    this.calls.push({ kind, payload });
+  async runTaskDetailed(
+    kind: CodexTaskKind,
+    payload: unknown,
+    requestId: string,
+    session?: CodexTaskExecution["session"],
+  ): Promise<CodexTaskExecution> {
+    this.calls.push({ kind, payload, requestId, session: structuredClone(session) });
     const output = this.responses.shift();
     if (output === undefined) throw new Error("missing sequenced response");
     return {
@@ -39,9 +53,9 @@ class SequencedCodexClient extends CodexBridgeClient {
         taskKind: kind,
         promptVersion: `test/${kind}`,
         prompt: `prompt:${kind}`,
-        providerId: "openai",
-        modelId: "gpt-5.6-sol",
-        reasoningEffort: "xhigh",
+        providerId: this.providerId,
+        modelId: this.modelId,
+        reasoningEffort: this.providerId === "openai" ? "xhigh" : "high",
       },
     };
   }
@@ -77,7 +91,18 @@ function validDraft(): { scenes: Array<Record<string, unknown>> } {
 }
 
 describe("CodexScreenwriterAgent", () => {
-  it("runs an independent critic and repairs the draft before exposing it downstream", async () => {
+  it("rejects a stale selected model before calling a single configured agent", async () => {
+    const client = new CapturingCodexClient(() => validDraft());
+    const agent = new CodexScreenwriterAgent({ client, modelId: "gpt-current" });
+
+    await assert.rejects(
+      () => agent.draft({ ...screenwriterInput(), selectedModelId: "gpt-offline" }),
+      /is not available for screenwriting/,
+    );
+    assert.equal(client.calls.length, 0);
+  });
+
+  it("routes stateless ZAI production and independent OpenAI audit to separate clients", async () => {
     const first = validDraft();
     const repaired = validDraft();
     repaired.scenes[0]!.narration = "别眨眼，先看结果。";
@@ -97,14 +122,31 @@ describe("CodexScreenwriterAgent", () => {
       issues: [],
       repairInstructions: [],
     };
-    const client = new SequencedCodexClient([first, repairAudit, repaired, passAudit]);
-    const agent = new CodexScreenwriterAgent({ client, maxReviewIterations: 2 });
+    const producerClient = new SequencedCodexClient(
+      [first, repaired],
+      "zai-bigmodel-api",
+      "glm-5.3",
+    );
+    const auditClient = new SequencedCodexClient(
+      [repairAudit, passAudit],
+      "openai",
+      "gpt-5.6-sol",
+    );
+    const agent = new CodexScreenwriterAgent({
+      client: producerClient,
+      auditClient,
+      maxReviewIterations: 2,
+      modelId: "glm-5.3",
+      sessionMode: "stateless",
+    });
 
-    const execution = await agent.draftDetailed(screenwriterInput());
+    const execution = await agent.draftDetailed({ ...screenwriterInput(), selectedModelId: "glm-5.3" });
 
     assert.equal(execution.output.scenes[0]?.narration, "别眨眼，先看结果。");
-    assert.deepEqual(client.calls.map((call) => call.kind), ["script-draft", "role-audit", "script-draft", "role-audit"]);
-    const repairPayload = client.calls[2]!.payload as Record<string, unknown>;
+    assert.deepEqual(producerClient.calls.map((call) => call.kind), ["script-draft", "script-draft"]);
+    assert.deepEqual(auditClient.calls.map((call) => call.kind), ["role-audit", "role-audit"]);
+    assert.deepEqual(producerClient.calls.map((call) => call.session), [undefined, undefined]);
+    const repairPayload = producerClient.calls[1]!.payload as Record<string, unknown>;
     const revision = repairPayload.revision as Record<string, unknown>;
     assert.equal(revision.mode, "repair-bootstrap");
     assert.deepEqual(revision.candidate, first);
@@ -118,8 +160,20 @@ describe("CodexScreenwriterAgent", () => {
     assert.equal(execution.agentLoop?.iterations.length, 2);
     assert.equal(execution.agentLoop?.iterations[0]?.audit.verdict, "repair");
     assert.equal(execution.agentLoop?.iterations[1]?.audit.verdict, "pass");
+    assert.deepEqual(
+      execution.agentLoop?.iterations.map((iteration) => [
+        iteration.candidateTrace?.providerId,
+        iteration.candidateTrace?.modelId,
+        iteration.auditTrace?.providerId,
+        iteration.auditTrace?.modelId,
+      ]),
+      [
+        ["zai-bigmodel-api", "glm-5.3", "openai", "gpt-5.6-sol"],
+        ["zai-bigmodel-api", "glm-5.3", "openai", "gpt-5.6-sol"],
+      ],
+    );
 
-    const firstAuditPayload = client.calls[1]!.payload as Record<string, unknown>;
+    const firstAuditPayload = auditClient.calls[0]!.payload as Record<string, unknown>;
     const auditContext = firstAuditPayload.context as Record<string, unknown>;
     assert.equal("brief" in auditContext, false);
     assert.deepEqual(auditContext.roleScope, {
@@ -132,7 +186,7 @@ describe("CodexScreenwriterAgent", () => {
       audience: "普通上班族",
       nicheSlug: "life-avoidance",
     });
-    assert.deepEqual((client.calls[3]!.payload as Record<string, unknown>).previousAudit, repairAudit);
+    assert.deepEqual((auditClient.calls[1]!.payload as Record<string, unknown>).previousAudit, repairAudit);
   });
 
   it("allows three audit and repair rounds by default", async () => {

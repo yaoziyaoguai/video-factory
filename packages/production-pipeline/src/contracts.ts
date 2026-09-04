@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export const BRIEF_PROTOCOL_VERSION = "video-factory/brief-v1" as const;
 export const WORKER_PROTOCOL_VERSION = "video-factory/worker-v1" as const;
 
@@ -68,6 +70,7 @@ export interface ProductionEditorialDirection {
 }
 
 export interface ProductionReworkFinding {
+  findingId: string;
   timecodeMs: number;
   scenePosition?: number;
   category: string;
@@ -292,34 +295,7 @@ function parseReworkContext(value: unknown): ProductionReworkContext | undefined
     visualDirection: boundedReworkText(instructions.visualDirection, "rework.nodeInstructions.visualDirection"),
     assets: boundedReworkText(instructions.assets, "rework.nodeInstructions.assets"),
   };
-  if (!Array.isArray(input.findings) || input.findings.length > 50) {
-    throw new Error("rework.findings must contain at most 50 entries.");
-  }
-  const allowedTargets = new Set(["script", "visual-direction", "assets"]);
-  const findings = input.findings.map((entry, index): ProductionReworkFinding => {
-    const finding = requireRecord(entry, `rework.findings[${index}]`);
-    const timecodeMs = boundedNumber(finding.timecodeMs, `rework.findings[${index}].timecodeMs`, 0, 10_800_000, true);
-    const scenePosition = finding.scenePosition === undefined
-      ? undefined
-      : boundedNumber(finding.scenePosition, `rework.findings[${index}].scenePosition`, 1, 10_000, true);
-    if (!Array.isArray(finding.targetNodeIds) || finding.targetNodeIds.length === 0 || finding.targetNodeIds.length > 3) {
-      throw new Error(`rework.findings[${index}].targetNodeIds is invalid.`);
-    }
-    const targetNodeIds = [...new Set(finding.targetNodeIds.map((target, targetIndex) => {
-      if (typeof target !== "string" || !allowedTargets.has(target)) {
-        throw new Error(`rework.findings[${index}].targetNodeIds[${targetIndex}] is invalid.`);
-      }
-      return target as ProductionReworkFinding["targetNodeIds"][number];
-    }))];
-    return {
-      timecodeMs,
-      ...(scenePosition === undefined ? {} : { scenePosition }),
-      category: boundedReworkText(finding.category, `rework.findings[${index}].category`, 120),
-      description: boundedReworkText(finding.description, `rework.findings[${index}].description`),
-      suggestion: boundedReworkText(finding.suggestion, `rework.findings[${index}].suggestion`),
-      targetNodeIds,
-    };
-  });
+  const findings = parseProductionReworkFindings(input.findings);
   const rejectionReason = input.rejectionReason === undefined
     ? undefined
     : boundedReworkText(input.rejectionReason, "rework.rejectionReason");
@@ -332,6 +308,47 @@ function parseReworkContext(value: unknown): ProductionReworkContext | undefined
     ...(input.previousScript === undefined ? {} : { previousScript: boundedReworkDocument(input.previousScript, "rework.previousScript") }),
     ...(input.previousDirectorPlan === undefined ? {} : { previousDirectorPlan: boundedReworkDocument(input.previousDirectorPlan, "rework.previousDirectorPlan") }),
   };
+}
+
+export function parseProductionReworkFindings(
+  value: unknown,
+  field = "rework.findings",
+): ProductionReworkFinding[] {
+  if (!Array.isArray(value) || value.length > 50) {
+    throw new Error(`${field} must contain at most 50 entries.`);
+  }
+  const allowedTargets = new Set(["script", "visual-direction", "assets"]);
+  const findingIds = new Set<string>();
+  return value.map((entry, index): ProductionReworkFinding => {
+    const itemField = `${field}[${index}]`;
+    const finding = requireRecord(entry, itemField);
+    const findingId = requireString(finding.findingId, `${itemField}.findingId`);
+    if (!/^vf_[a-f0-9]{24}$/.test(findingId)) throw new Error(`${itemField}.findingId is invalid.`);
+    if (findingIds.has(findingId)) throw new Error(`${itemField}.findingId must be unique within the rework.`);
+    findingIds.add(findingId);
+    const timecodeMs = boundedNumber(finding.timecodeMs, `${itemField}.timecodeMs`, 0, 10_800_000, true);
+    const scenePosition = finding.scenePosition === undefined
+      ? undefined
+      : boundedNumber(finding.scenePosition, `${itemField}.scenePosition`, 1, 10_000, true);
+    if (!Array.isArray(finding.targetNodeIds) || finding.targetNodeIds.length === 0 || finding.targetNodeIds.length > 3) {
+      throw new Error(`${itemField}.targetNodeIds is invalid.`);
+    }
+    const targetNodeIds = [...new Set(finding.targetNodeIds.map((target, targetIndex) => {
+      if (typeof target !== "string" || !allowedTargets.has(target)) {
+        throw new Error(`${itemField}.targetNodeIds[${targetIndex}] is invalid.`);
+      }
+      return target as ProductionReworkFinding["targetNodeIds"][number];
+    }))];
+    return {
+      findingId,
+      timecodeMs,
+      ...(scenePosition === undefined ? {} : { scenePosition }),
+      category: boundedReworkText(finding.category, `${itemField}.category`, 120),
+      description: boundedReworkText(finding.description, `${itemField}.description`),
+      suggestion: boundedReworkText(finding.suggestion, `${itemField}.suggestion`),
+      targetNodeIds,
+    };
+  });
 }
 
 function boundedReworkText(value: unknown, field: string, maxLength = 6_000): string {
@@ -588,7 +605,7 @@ function parseModelSelections(value: unknown): Record<string, string> {
 }
 
 export function parsePersistedBrief(value: unknown): ProductionBrief {
-  const migrated = migratePersistedReferenceVideo(value);
+  const migrated = migratePersistedReworkFindingIds(migratePersistedReferenceVideo(value));
   try {
     return parseBrief(migrated);
   } catch (strictError) {
@@ -604,6 +621,29 @@ export function parsePersistedBrief(value: unknown): ProductionBrief {
       voiceDirection: { ...migrated.voiceDirection, profileId: compatibleProfileId },
     });
   }
+}
+
+function migratePersistedReworkFindingIds(value: unknown): unknown {
+  if (!isRecord(value) || !isRecord(value.rework) || !Array.isArray(value.rework.findings)) return value;
+  const sourceRunId = value.rework.sourceRunId;
+  const sourceRunRevision = value.rework.sourceRunRevision;
+  if (typeof sourceRunId !== "string" || !Number.isSafeInteger(sourceRunRevision)) return value;
+  return {
+    ...value,
+    rework: {
+      ...value.rework,
+      findings: value.rework.findings.map((finding, findingIndex) => {
+        if (!isRecord(finding) || finding.findingId !== undefined) return finding;
+        const findingId = `vf_${createHash("sha256").update(JSON.stringify({
+          sourceRunId,
+          sourceReviewVersionId: `legacy-revision-${sourceRunRevision}`,
+          findingIndex,
+          finding,
+        })).digest("hex").slice(0, 24)}`;
+        return { findingId, ...finding };
+      }),
+    },
+  };
 }
 
 function migratePersistedReferenceVideo(value: unknown): unknown {

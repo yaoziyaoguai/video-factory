@@ -379,7 +379,11 @@ describe("StudioService", () => {
           finishedAt: base.startedAt,
           artifactIds: [],
           qualityGateResults: [],
-          output: { report: { findings: [{ timecodeMs: 8_000, scenePosition: 3, category: "typography", description: "文字遮挡主体。", suggestion: "换用无字母片。" }] } },
+          output: { report: { findings: [
+            { timecodeMs: 4_000, scenePosition: 2, category: "pacing", description: "旁白信息过密，画面来不及承接。", suggestion: "精简第二镜旁白并留出动作停顿。" },
+            { timecodeMs: 8_000, scenePosition: 3, category: "typography", description: "文字遮挡主体。", suggestion: "换用无字母片。" },
+            { timecodeMs: 12_000, scenePosition: 4, category: "composition", description: "主体被裁切到画面边缘。", suggestion: "换成主体完整居中的镜头。" },
+          ] } },
         },
       ],
       artifacts: [
@@ -410,15 +414,34 @@ describe("StudioService", () => {
     const service = new StudioService({ workspaceRoot, pipeline: new FakePipeline(rejectedRun), commandAvailable: allCommandsAvailable, environment: {} });
 
     const draft = await service.reworkDraft("run-1");
+    const sameDraft = await service.reworkDraft("run-1");
 
     assert.equal(draft?.input.rework?.sourceRunRevision, 12);
     assert.equal(draft?.input.director?.profileId, "documentary-observer");
     assert.equal(draft?.input.models?.["seedance-video-v1"], "doubao-seedance-2-5-260628");
+    assert.deepEqual(
+      draft?.input.rework?.findings.map(({ findingId }) => findingId),
+      sameDraft?.input.rework?.findings.map(({ findingId }) => findingId),
+    );
+    assert.equal(new Set(draft?.input.rework?.findings.map(({ findingId }) => findingId)).size, 3);
+    assert.ok(draft?.input.rework?.findings.every(({ findingId }) => /^vf_[a-f0-9]{24}$/.test(findingId)));
+    assert.match(draft?.input.rework?.nodeInstructions.script ?? "", /旁白信息过密，画面来不及承接/);
+    assert.match(draft?.input.rework?.nodeInstructions.script ?? "", /精简第二镜旁白并留出动作停顿/);
+    assert.doesNotMatch(draft?.input.rework?.nodeInstructions.script ?? "", /主体被裁切到画面边缘|换成主体完整居中的镜头/);
     assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /文字遮挡主体/);
+    assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /主体被裁切到画面边缘/);
+    assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /换成主体完整居中的镜头/);
     assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /不得用说明卡/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /旁白信息过密，画面来不及承接/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /精简第二镜旁白并留出动作停顿/);
     assert.match(draft?.input.rework?.nodeInstructions.script ?? "", /本次重做原因/);
     assert.deepEqual(draft?.input.rework?.previousScript, { viewerPromise: "原版承诺", scenes: [{ position: 1 }] });
     assert.deepEqual(draft?.inheritedNodeIds, ["brief", "script", "visual-direction", "visual-review"]);
+
+    const tampered = structuredClone(draft!.input);
+    tampered.providers.script = "codex-screenwriter-v1";
+    tampered.rework!.findings[0]!.description = "用户尝试改写审片事实";
+    await assert.rejects(() => service.startRun(tampered), /审片问题已经变化或被修改/);
   });
 
   it("reuses the rejected run's immutable template snapshot when the rework keeps that version", async () => {
@@ -1623,6 +1646,65 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
+  it("persists voice customization provenance and migrates legacy non-default voices", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-voice-provenance-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    assert.equal((await service.getCreatorSettings()).voiceDirectionCustomized, false);
+    await service.updateCreatorSettings({
+      voiceDirection: { profileId: "macos:Tingting", rate: 190, pauseScale: 1, masteringPreset: "social" },
+    });
+    const restarted = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+    assert.equal((await restarted.getCreatorSettings()).voiceDirectionCustomized, true);
+
+    const legacyRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-legacy-voice-"));
+    const settingsDirectory = path.join(legacyRoot, "settings");
+    await mkdir(settingsDirectory, { recursive: true });
+    await writeFile(path.join(settingsDirectory, "creator-settings.json"), JSON.stringify({
+      version: 1,
+      settings: {
+        voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 0.9, masteringPreset: "social" },
+        defaultRecipeId: "economy-daily",
+        roleProviderDefaults: {},
+        modelDefaults: {},
+        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        topicStrategy: { customInstruction: "" },
+      },
+    }), "utf8");
+    const migrated = new StudioService({
+      workspaceRoot: legacyRoot,
+      pipeline: new FakePipeline(waitingRun(legacyRoot)),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+
+    assert.equal((await migrated.getCreatorSettings()).voiceDirectionCustomized, true);
+
+    const legacyDefaultRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-legacy-default-voice-"));
+    const defaultSettingsDirectory = path.join(legacyDefaultRoot, "settings");
+    await mkdir(defaultSettingsDirectory, { recursive: true });
+    await writeFile(path.join(defaultSettingsDirectory, "creator-settings.json"), JSON.stringify({
+      version: 1,
+      settings: {
+        voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+        defaultRecipeId: "economy-daily",
+        roleProviderDefaults: {},
+        modelDefaults: {},
+        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        topicStrategy: { customInstruction: "" },
+      },
+    }), "utf8");
+    const migratedDefault = new StudioService({
+      workspaceRoot: legacyDefaultRoot,
+      pipeline: new FakePipeline(waitingRun(legacyDefaultRoot)),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+
+    assert.equal((await migratedDefault.getCreatorSettings()).voiceDirectionCustomized, false);
+  });
+
   it("inherits a missing production role and its model from creator defaults", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-role-default-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -1635,7 +1717,7 @@ describe("StudioService", () => {
         available: true,
         reason: "",
         modelId: "gpt-5.6-sol",
-        taskKinds: ["script-draft"],
+        taskKinds: ["script-draft", "role-audit"],
       },
     });
     await service.updateCreatorSettings({
@@ -1656,7 +1738,7 @@ describe("StudioService", () => {
   it("replays a referenced start after the persisted node safely releases its temporary upload", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-reference-idempotency-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
-    const availability = { available: true, reason: "", taskKinds: ["reference-grammar", "director-plan"] };
+    const availability = { available: true, reason: "", taskKinds: ["reference-grammar", "director-plan", "role-audit"] };
     const firstService = new StudioService({
       workspaceRoot,
       pipeline,

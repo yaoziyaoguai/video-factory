@@ -13,6 +13,7 @@ export function ProductionPage() {
   const [creatorSettings, setCreatorSettings] = useState<StudioCreatorSettings>();
   const [runsLoading, setRunsLoading] = useState(true);
   const [providersLoading, setProvidersLoading] = useState(true);
+  const [settingsLoading, setSettingsLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [runsError, setRunsError] = useState<string>();
   const [providersError, setProvidersError] = useState<string>();
@@ -20,12 +21,13 @@ export function ProductionPage() {
   const load = useCallback(async () => {
     setRunsLoading(true);
     setProvidersLoading(true);
+    setSettingsLoading(true);
     setRunsError(undefined);
     setProvidersError(undefined);
     await Promise.all([
       studioApi.runs().then(setRuns).catch((caught: unknown) => setRunsError(errorMessage(caught))).finally(() => setRunsLoading(false)),
       studioApi.providers().then(setProviders).catch((caught: unknown) => setProvidersError(errorMessage(caught))).finally(() => setProvidersLoading(false)),
-      studioApi.settings().then(setCreatorSettings).catch(() => undefined),
+      studioApi.settings().then(setCreatorSettings).catch(() => undefined).finally(() => setSettingsLoading(false)),
     ]);
   }, []);
 
@@ -71,7 +73,7 @@ export function ProductionPage() {
         </div>
       ) : null}
       <ProductionQueue runs={runs} loading={runsLoading} {...(runsError ? { error: runsError } : {})} onRetry={() => void load()} onCreate={() => setDialogOpen(true)} onArchive={archive} onRestore={restore} onDelete={remove} />
-      <NewRunDialog open={dialogOpen} providers={providersLoading ? [] : providers} {...(creatorSettings ? { creatorSettings } : {})} onClose={() => setDialogOpen(false)} onSubmit={start} />
+      <NewRunDialog open={dialogOpen} providers={providersLoading ? [] : providers} initialDataReady={!providersLoading && !settingsLoading} {...(creatorSettings ? { creatorSettings } : {})} onClose={() => setDialogOpen(false)} onSubmit={start} />
     </>
   );
 }

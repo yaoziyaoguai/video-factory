@@ -6,6 +6,7 @@ import {
   TrendOpportunityAgent,
   type TrendIdeaModel,
 } from "../src/server/trend-opportunity-agent.js";
+import { decideEditorialFormat } from "../src/server/editorial-decision.js";
 import type { StudioTrendSignal } from "../src/shared/api.js";
 
 const signals: StudioTrendSignal[] = [
@@ -408,6 +409,65 @@ describe("TrendOpportunityAgent", () => {
 
     assert.equal(candidates[0]?.providerId, "trend-heuristic-v1");
     assert.match(candidates[0]?.rationale ?? "", /排名/);
+  });
+
+  it("does not let a vague rule fallback become producible when the semantic model fails", async () => {
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [{
+        id: "signal-vague",
+        sourceId: "dailyhot",
+        platform: "douyin",
+        title: "今日热搜来了",
+        rank: 1,
+        heat: 9_900_000,
+        collectedAt: "2026-08-24T08:00:00.000Z",
+        url: "https://example.com/vague",
+      }] },
+      model: { id: "api-topic-editor-v1", generate: async () => { throw new Error("model offline"); } },
+    });
+
+    const [candidate] = await agent.listCandidates();
+    const decision = decideEditorialFormat({
+      ...candidate!,
+      origin: "trend",
+      category: candidate!.category!,
+      freshness: "live",
+      risk: "low",
+      verification: { status: "ready", independentSources: 1, requiredSources: 1, reasons: ["来源可打开。"] },
+    });
+
+    assert.equal(candidate?.providerId, "trend-heuristic-v1");
+    assert.equal(decision.verdict, "skip");
+    assert.match(decision.reasons.join(" "), /标题没有形成可判断的具体问题/);
+  });
+
+  it("keeps a specific traceable rule fallback producible when the semantic model returns no ideas", async () => {
+    let modelCalls = 0;
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [signals[0]!] },
+      model: {
+        id: "api-topic-editor-v1",
+        generate: async () => {
+          modelCalls += 1;
+          return [];
+        },
+      },
+    });
+
+    const [candidate] = await agent.listCandidates();
+    const decision = decideEditorialFormat({
+      ...candidate!,
+      origin: "trend",
+      category: candidate!.category!,
+      freshness: "live",
+      risk: "low",
+      verification: { status: "ready", independentSources: 1, requiredSources: 1, reasons: ["来源可打开。"] },
+    });
+
+    assert.equal(modelCalls, 2);
+    assert.equal(candidate?.providerId, "trend-heuristic-v1");
+    assert.equal(decision.verdict, "produce_video");
+    assert.equal(decision.recommendedTemplate?.id, "trend-fact-brief");
   });
 
   it("still applies creator positioning, audience, preferences, and exclusions in rule fallback", async () => {

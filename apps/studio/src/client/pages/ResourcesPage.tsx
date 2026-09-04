@@ -30,32 +30,19 @@ import type {
   StudioTopicStrategy,
   StudioVoiceDirection,
 } from "../../shared/api.js";
+import {
+  DEFAULT_STUDIO_PRODUCTION_DEFAULTS,
+  DEFAULT_STUDIO_TOPIC_STRATEGY,
+} from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { VoiceStudio } from "../components/VoiceStudio.js";
 import { creatorFacingTechnicalText, providerLabel, providerModelLabel } from "../presentation.js";
 
 const SERVICE_STATUS = { ready: "在线", degraded: "受限", stopped: "离线" } as const;
-const DEFAULT_PRODUCTION_DEFAULTS: StudioProductionDefaults = {
-  directorProfileId: "auto",
-  reviewMode: "manual",
-  platform: "douyin",
-  durationSeconds: 24,
-};
-
 const RECIPE_OPTIONS: Array<{ id: StudioProductionRecipeId; label: string }> = [
-  { id: "economy-daily", label: "经济日更" },
-  { id: "free-stock", label: "全免费精搜" },
-  { id: "keyshot-ai", label: "效果均衡" },
-  { id: "cinematic-ai", label: "开放精品生成" },
+  { id: "free-stock", label: "仅免费画面" },
+  { id: "keyshot-ai", label: "允许付费关键镜头" },
 ];
-const DEFAULT_TOPIC_STRATEGY: StudioTopicStrategy = {
-  positioning: "把复杂热点转成普通人能看懂、能验证、看完有收获的短视频。",
-  targetAudience: "希望快速理解新事物，但反感标题党和空泛说教的中文短视频用户。",
-  preferredDirections: "真实生活影响\n可实证的方法或变化\n有清楚反差、过程或结论\n能发展成系列",
-  excludedDirections: "只有热度、没有新角度\n无法找到可靠画面或事实来源\n消费灾难、伤亡或未经证实的争议\n只能靠大段说明卡讲清",
-  sourcePolicy: "primary_or_two_independent",
-  customInstruction: "优先考虑 24–45 秒内能兑现观众承诺的题材。",
-};
 const RESOURCE_SECTION_IDS = [
   "creation-defaults",
   "topic-strategy",
@@ -111,7 +98,8 @@ export function ResourcesPage() {
   const [providerLoading, setProviderLoading] = useState(true);
   const [trendLoading, setTrendLoading] = useState(true);
   const [providerError, setProviderError] = useState<string>();
-  const [manifestLimit, setManifestLimit] = useState(16);
+  const [manifestLimit, setManifestLimit] = useState(8);
+  const [manifestRecordLimit, setManifestRecordLimit] = useState(8);
   const [trendError, setTrendError] = useState<string>();
   const [serviceError, setServiceError] = useState<string>();
   const [publishError, setPublishError] = useState<string>();
@@ -126,11 +114,11 @@ export function ResourcesPage() {
     pauseScale: 1,
     masteringPreset: "natural",
   });
-  const [defaultRecipeId, setDefaultRecipeId] = useState<StudioProductionRecipeId>("economy-daily");
+  const [defaultRecipeId, setDefaultRecipeId] = useState<StudioProductionRecipeId>("free-stock");
   const [roleProviderDefaults, setRoleProviderDefaults] = useState<StudioRoleProviderDefaults>({});
   const [modelDefaults, setModelDefaults] = useState<Record<string, string>>({});
-  const [productionDefaults, setProductionDefaults] = useState<StudioProductionDefaults>(DEFAULT_PRODUCTION_DEFAULTS);
-  const [topicStrategy, setTopicStrategy] = useState<StudioTopicStrategy>(DEFAULT_TOPIC_STRATEGY);
+  const [productionDefaults, setProductionDefaults] = useState<StudioProductionDefaults>(DEFAULT_STUDIO_PRODUCTION_DEFAULTS);
+  const [topicStrategy, setTopicStrategy] = useState<StudioTopicStrategy>(DEFAULT_STUDIO_TOPIC_STRATEGY);
 
   useEffect(() => {
     const syncSection = () => setActiveSection(resourceSectionFromHash());
@@ -176,11 +164,11 @@ export function ResourcesPage() {
       .then((value) => {
         setSettings(value);
         setVoiceDirection(value.voiceDirection);
-        setDefaultRecipeId(value.defaultRecipeId);
+        setDefaultRecipeId(canonicalRecipeId(value.defaultRecipeId));
         setRoleProviderDefaults(value.roleProviderDefaults ?? {});
         setModelDefaults(value.modelDefaults ?? {});
-        setProductionDefaults(value.productionDefaults ?? DEFAULT_PRODUCTION_DEFAULTS);
-        setTopicStrategy({ ...DEFAULT_TOPIC_STRATEGY, ...value.topicStrategy });
+        setProductionDefaults(value.productionDefaults ?? DEFAULT_STUDIO_PRODUCTION_DEFAULTS);
+        setTopicStrategy({ ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...value.topicStrategy });
       })
       .catch((error) => {
         setSettings(undefined);
@@ -213,11 +201,11 @@ export function ResourcesPage() {
       const updated = await studioApi.updateSettings(patch);
       setSettings(updated);
       if (patch.voiceDirection) setVoiceDirection(updated.voiceDirection);
-      if (patch.defaultRecipeId) setDefaultRecipeId(updated.defaultRecipeId);
+      if (patch.defaultRecipeId) setDefaultRecipeId(canonicalRecipeId(updated.defaultRecipeId));
       if (patch.roleProviderDefaults) setRoleProviderDefaults(updated.roleProviderDefaults ?? {});
       if (patch.modelDefaults) setModelDefaults(updated.modelDefaults ?? {});
       if (patch.productionDefaults) setProductionDefaults(updated.productionDefaults);
-      if (patch.topicStrategy) setTopicStrategy({ ...DEFAULT_TOPIC_STRATEGY, ...updated.topicStrategy });
+      if (patch.topicStrategy) setTopicStrategy({ ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...updated.topicStrategy });
       setSettingsNotice(successMessage);
     } catch (caught) {
       setSettingsNotice(`保存失败：${errorMessage(caught)}`);
@@ -233,7 +221,7 @@ export function ResourcesPage() {
   const readyServices = services.filter((service) => service.status === "ready").length;
   const voiceHasChanges = settings ? !sameVoiceDirection(settings.voiceDirection, voiceDirection) : false;
   const productionHasChanges = settings
-    ? settings.defaultRecipeId !== defaultRecipeId
+    ? canonicalRecipeId(settings.defaultRecipeId) !== defaultRecipeId
       || !sameProductionDefaults(settings.productionDefaults, productionDefaults)
     : false;
   const modelHasChanges = settings ? !sameStringRecord(settings.modelDefaults, modelDefaults) : false;
@@ -241,7 +229,7 @@ export function ResourcesPage() {
     ? !sameStringRecord(settings.roleProviderDefaults, roleProviderDefaults)
       || modelHasChanges
     : false;
-  const topicHasChanges = settings ? !sameTopicStrategy({ ...DEFAULT_TOPIC_STRATEGY, ...settings.topicStrategy }, topicStrategy) : false;
+  const topicHasChanges = settings ? !sameTopicStrategy({ ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...settings.topicStrategy }, topicStrategy) : false;
   const topicStrategyComplete = Boolean(
     topicStrategy.positioning?.trim()
     && topicStrategy.targetAudience?.trim()
@@ -250,6 +238,15 @@ export function ResourcesPage() {
   );
   const readyFoundation = foundationProviders.filter(isProductionReady).length;
   const usablePublishTargets = publishTargets.filter((target) => target.status === "ready" || target.status === "manual_only").length;
+  const reviewableManifestItems = useMemo(() => resourceManifest?.items.filter((item) => (
+    item.category === "visual" || item.category === "voice" || item.category === "font"
+  )) ?? [], [resourceManifest]);
+  const productionRecordItems = useMemo(() => resourceManifest?.items.filter((item) => (
+    item.category === "document" || item.category === "other"
+  )) ?? [], [resourceManifest]);
+  const reviewableManifestRuns = useMemo(() => groupManifestItems(reviewableManifestItems), [reviewableManifestItems]);
+  const productionRecordRuns = useMemo(() => groupManifestItems(productionRecordItems), [productionRecordItems]);
+  const reviewableNeedsReviewCount = reviewableManifestItems.filter((item) => item.reviewStatus === "needs_review").length;
 
   return (
     <main className="page resources-page" data-active-section={activeSection}>
@@ -293,7 +290,7 @@ export function ResourcesPage() {
         {settingsError ? <ResourceError title="创作默认值读取失败" message={settingsError} retry={load} /> : !settings ? <div className="region-loading">正在读取创作默认值...</div> : <div className="configuration-sheet">
           <div className="configuration-intro">
             <Settings2 aria-hidden="true" size={22} />
-            <div><strong>先定创作习惯，再开始生产</strong><p>默认使用人工终审和经济日更；图片、视频生成会按实际导演方案逐项报价并等待人工确认。</p><small>运行底座 {capabilities.filter((item) => item.state === "ready").length}/{capabilities.length} 项就绪</small></div>
+            <div><strong>先定创作习惯，再开始生产</strong><p>默认使用人工终审和仅免费画面；启用付费关键镜头后，图片、视频会按实际导演方案逐项报价并等待人工确认。</p><small>运行底座 {capabilities.filter((item) => item.state === "ready").length}/{capabilities.length} 项就绪</small></div>
           </div>
           <div className="configuration-fields">
             <label className="field"><span>画面来源策略</span><select aria-label="默认画面来源策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
@@ -394,7 +391,7 @@ export function ResourcesPage() {
               })}
             />)}</div>
           </section>)}</div>
-          {settings ? <div className="configuration-save-row foundation-save-row"><span>{modelHasChanges ? "有未保存的画面模型调整" : "推荐模型已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !modelHasChanges} onClick={() => void saveDefaults({ modelDefaults }, "画面推荐模型已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{modelHasChanges ? "保存画面模型" : "已保存"}</button></div> : null}
+          {settings ? <div className="configuration-save-row foundation-save-row"><span>{modelHasChanges ? "有未保存的画面模型调整" : "首选模型已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !modelHasChanges} onClick={() => void saveDefaults({ modelDefaults }, "画面首选模型已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{modelHasChanges ? "保存画面模型" : "已保存"}</button></div> : null}
         </>}
       </section>
 
@@ -426,29 +423,24 @@ export function ResourcesPage() {
       </section>
 
       <section id="resource-manifest" className="resource-section resource-manifest-section" data-resource-section data-active={activeSection === "resource-manifest" ? "true" : undefined} data-tour="resource-manifest">
-        <ResourceHeading eyebrow="权利与来源" title="资源追溯清单" meta={resourceManifest ? `${resourceManifest.totalItems} 项资源 · ${resourceManifest.needsReviewCount} 项待复核` : "逐条记录来源、作者与授权状态"} />
+        <ResourceHeading eyebrow="发布前核对" title="素材来源与授权" meta={resourceManifest ? `${reviewableManifestItems.length} 项素材 · ${reviewableNeedsReviewCount} 项待确认` : "核对画面、声音、字体和最终成片"} />
         {manifestError ? <ResourceError title="资源清单读取失败" message={manifestError} retry={load} /> : !resourceManifest ? <div className="region-loading">正在汇总资源清单...</div> : <>
           <div className="resource-manifest-summary" aria-label="资源分类统计">
-            {(["visual", "voice", "font", "document", "other"] as const).map((category) => <div key={category}><span>{resourceCategoryLabel(category)}</span><strong>{resourceManifest.categories[category]}</strong></div>)}
-            <div className={resourceManifest.needsReviewCount ? "needs-review" : ""}><span>待复核</span><strong>{resourceManifest.needsReviewCount}</strong></div>
+            {(["visual", "voice", "font"] as const).map((category) => <div key={category}><span>{resourceCategoryLabel(category)}</span><strong>{reviewableManifestItems.filter((item) => item.category === category).length}</strong></div>)}
+            <div className={reviewableNeedsReviewCount ? "needs-review" : ""}><span>待确认</span><strong>{reviewableNeedsReviewCount}</strong></div>
           </div>
           {resourceManifest.legacyRunsWithoutManifest ? <p className="resource-manifest-legacy">有 {resourceManifest.legacyRunsWithoutManifest} 条旧任务生成于资源清单上线前，不会补写或伪造历史授权信息。</p> : null}
           {resourceManifest.reconstructedRunCount ? <p className="resource-manifest-legacy" role="status">有 {resourceManifest.reconstructedRunCount} 条发生过付费调用但未完成清单的任务，已从现存产物保守恢复并全部标记为待复核。</p> : null}
           {resourceManifest.unreadableManifestCount ? <p className="resource-manifest-legacy" role="status">有 {resourceManifest.unreadableManifestCount} 条资源清单损坏或不可信，已隔离；其余任务仍可正常查看。</p> : null}
           {resourceManifest.truncatedRunCount ? <p className="resource-manifest-legacy" role="status">当前仅汇总最近 500 条制作，另有 {resourceManifest.truncatedRunCount} 条较早记录未进入本页统计。</p> : null}
-          <div className="resource-manifest-ledger" aria-label="资源清单明细">
-            {resourceManifest.items.slice(0, manifestLimit).map((item) => {
-              const sourceUrl = externalResourceUrl(item.sourceUrl);
-              return <article key={`${item.runId}:${item.id}`}>
-                <span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span>
-                <div><strong>{item.creator ?? resourceItemLabel(item)}</strong><small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small><p>{creatorFacingTechnicalText(item.licenseNote) ?? "缺少授权说明，需要人工复核。"}</p></div>
-                <span className={item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{item.reviewStatus === "recorded" ? "已记录" : "待复核"}</span>
-                {sourceUrl ? <a href={sourceUrl} target="_blank" rel="noreferrer" title="核验资源来源"><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
-              </article>;
-            })}
-            {resourceManifest.items.length === 0 ? <div className="resource-manifest-empty"><ListChecks aria-hidden="true" size={18} /><span>首条完成制作会在这里生成资源清单。</span></div> : null}
-          </div>
-          {resourceManifest.items.length > manifestLimit ? <button className="button button-secondary" type="button" onClick={() => setManifestLimit((current) => current + 16)}>显示更多资源（还剩 {resourceManifest.items.length - manifestLimit} 项）</button> : null}
+          <ManifestRunGroups groups={reviewableManifestRuns.slice(0, manifestLimit)} />
+          {reviewableManifestItems.length === 0 ? <div className="resource-manifest-empty"><ListChecks aria-hidden="true" size={18} /><span>完成一条真实制作后，入片素材会在这里等待核对。</span></div> : null}
+          {reviewableManifestRuns.length > manifestLimit ? <button className="button button-secondary" type="button" onClick={() => setManifestLimit((current) => current + 8)}>显示更多素材视频（还剩 {reviewableManifestRuns.length - manifestLimit} 条）</button> : null}
+          {productionRecordItems.length ? <details className="resource-manifest-records">
+            <summary><span><strong>制作过程记录</strong><small>脚本、方案和质检报告默认收起，不混入授权待办</small></span><b>{productionRecordItems.length} 项</b></summary>
+            <ManifestRunGroups groups={productionRecordRuns.slice(0, manifestRecordLimit)} record />
+            {productionRecordRuns.length > manifestRecordLimit ? <button className="button button-secondary" type="button" onClick={() => setManifestRecordLimit((current) => current + 8)}>显示更多制作记录（还剩 {productionRecordRuns.length - manifestRecordLimit} 条）</button> : null}
+          </details> : null}
         </>}
       </section>
 
@@ -489,6 +481,58 @@ function resourceItemLabel(item: StudioResourceManifest["items"][number]): strin
   return "制作资源";
 }
 
+function ManifestLedger({ items, record = false }: { items: StudioResourceManifest["items"]; record?: boolean }) {
+  return <div className="resource-manifest-ledger" aria-label={record ? "制作记录明细" : "素材来源与授权明细"}>
+    {items.map((item) => {
+      const sourceUrl = externalResourceUrl(item.sourceUrl);
+      return <article key={`${item.runId}:${item.id}`}>
+        <span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span>
+        <div><strong>{creatorFacingTechnicalText(item.creator) ?? resourceItemLabel(item)}</strong><small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small><p>{creatorFacingTechnicalText(item.licenseNote) ?? (record ? "保留这条记录用于追溯制作过程。" : "缺少授权说明，需要人工确认。")}</p></div>
+        <span className={record || item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{record ? "制作记录" : item.reviewStatus === "recorded" ? "已记录" : "待确认"}</span>
+        {sourceUrl ? <a href={sourceUrl} target="_blank" rel="noreferrer" title="核验资源来源"><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
+      </article>;
+    })}
+  </div>;
+}
+
+type ManifestRunGroup = {
+  runId: string;
+  runTitle: string;
+  items: StudioResourceManifest["items"];
+};
+
+function groupManifestItems(items: StudioResourceManifest["items"]): ManifestRunGroup[] {
+  const groups = new Map<string, ManifestRunGroup>();
+  for (const item of items) {
+    const existing = groups.get(item.runId);
+    if (existing) {
+      existing.items.push(item);
+      continue;
+    }
+    groups.set(item.runId, {
+      runId: item.runId,
+      runTitle: item.runTitle,
+      items: [item],
+    });
+  }
+  return [...groups.values()];
+}
+
+function ManifestRunGroups({ groups, record = false }: { groups: ManifestRunGroup[]; record?: boolean }) {
+  return <div className="resource-manifest-runs" aria-label={record ? "按视频整理的制作记录" : "按视频整理的素材记录"}>
+    {groups.map((group) => {
+      const needsReview = group.items.filter((item) => item.reviewStatus !== "recorded").length;
+      return <details className="resource-manifest-run" key={group.runId}>
+        <summary>
+          <span><strong>{group.runTitle}</strong><small>{group.items.length} 项{!record && needsReview ? ` · ${needsReview} 项待确认` : ""}</small></span>
+          <b>展开</b>
+        </summary>
+        <ManifestLedger items={group.items} record={record} />
+      </details>;
+    })}
+  </div>;
+}
+
 function externalResourceUrl(value?: string): string | undefined {
   if (!value) return undefined;
   try {
@@ -520,12 +564,12 @@ function ProviderRow({ provider, selectedModelId, onModelChange }: {
   return (
     <article className="provider-ledger-row">
       <span className="provider-ledger-icon"><Icon aria-hidden="true" size={18} /></span>
-      <div><strong>{provider.label}</strong><small>{creatorFacingTechnicalText(provider.description) ?? "由系统按当前配置使用"}</small>{!ready && provider.requirement ? <small className="provider-requirement">{creatorFacingTechnicalText(provider.requirement)}</small> : null}</div>
-      <div className="provider-model-cell">{catalogModels.length || selectedModelId ? <label className="provider-model-select"><small>新制作推荐模型</small><select aria-label={`${provider.label} 推荐模型`} value={selectedModelId ?? ""} disabled={!availableModels.length} onChange={(event) => onModelChange(event.target.value)}><option value="">服务推荐：{providerModelLabel(provider, provider.defaultModelId)}</option>{staleSelection ? <option value={staleSelection} disabled>已失效：{staleSelection}</option> : null}{catalogModels.map((model) => <option key={model.id} value={model.id} disabled={!model.available}>{model.label}{model.recommended ? " · 推荐" : ""}{model.available ? "" : " · 待配置"}</option>)}</select></label> : (provider.modes ?? []).slice(0, 3).map((mode) => creatorFacingTechnicalText(mode)).join(" · ")}</div>
+      <div><strong>{creatorProviderLabel(provider)}</strong><small>{creatorFacingTechnicalText(provider.description) ?? "由系统按当前配置使用"}</small>{!ready && provider.requirement ? <small className="provider-requirement">{creatorFacingTechnicalText(provider.requirement)}</small> : null}</div>
+      <div className="provider-model-cell">{catalogModels.length || selectedModelId ? <label className="provider-model-select"><small>新制作首选模型</small><select aria-label={`${creatorProviderLabel(provider)} 首选模型`} value={selectedModelId ?? ""} disabled={!availableModels.length} onChange={(event) => onModelChange(event.target.value)}><option value="">服务推荐：{providerModelLabel(provider, provider.defaultModelId)}</option>{staleSelection ? <option value={staleSelection} disabled>旧选择已失效</option> : null}{catalogModels.map((model) => <option key={model.id} value={model.id} disabled={!model.available}>{model.label}{model.recommended ? " · 推荐" : ""}{model.available ? "" : " · 待配置"}</option>)}</select></label> : (provider.modes ?? []).slice(0, 3).map((mode) => creatorFacingTechnicalText(mode)).join(" · ")}</div>
       <strong className={`provider-cost${provider.billing === "metered" ? " is-metered" : ""}`}>{billingLabel(provider.billing)}{estimate !== undefined ? ` · 约 ¥${formatCost(estimate)}/${provider.billingUnit === "run" ? "条" : "镜头"}` : ""}</strong>
       <span className={ready ? "ledger-state is-ready" : "ledger-state"}>{providerReadinessLabel(provider, ready)}</span>
       <span className="provider-family-label">{creatorFacingProviderKind(provider)}</span>
-      {provider.docsUrl ? <a className="provider-doc-link" href={provider.docsUrl} target="_blank" rel="noreferrer" title={`${provider.label} 文档`}><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
+      {provider.docsUrl ? <a className="provider-doc-link" href={provider.docsUrl} target="_blank" rel="noreferrer" title={`${creatorProviderLabel(provider)} 文档`}><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
     </article>
   );
 }
@@ -558,6 +602,11 @@ function creatorFacingProviderKind(provider: StudioProvider): string {
   return "创作能力";
 }
 
+function creatorProviderLabel(provider: StudioProvider): string {
+  const normalized = providerLabel(provider.id);
+  return !normalized || normalized === provider.id ? provider.label : normalized;
+}
+
 function RoleProviderCard({ definition, providers, selectedProvider, selectedModelId, onProviderChange, onModelChange }: {
   definition: ProductionRoleDefinition;
   providers: StudioProvider[];
@@ -578,28 +627,31 @@ function RoleProviderCard({ definition, providers, selectedProvider, selectedMod
     <p>{definition.responsibility}</p>
     {definition.selectable === false && definition.configurationAnchor ? <div className="role-linked-configuration">
       <span>当前角色能力</span>
-      <strong>{selectedProvider?.label ?? "尚未配置"}</strong>
+      <strong>{selectedProvider ? creatorProviderLabel(selectedProvider) : "尚未配置"}</strong>
       <a href={`#${definition.configurationAnchor}`}>{definition.configurationLabel}<ArrowUpRight aria-hidden="true" size={14} /></a>
     </div> : <>
       <label className="field">
-        <span>{definition.label}默认能力</span>
+        <span>{definition.label}首选能力</span>
         <select
-          aria-label={`${definition.label}默认能力`}
+          aria-label={`${definition.label}首选能力`}
           value={selectedProvider?.id ?? ""}
           disabled={candidates.filter(isProductionReady).length < 2}
           onChange={(event) => onProviderChange(event.target.value)}
         >
           {!selectedProvider ? <option value="">未配置</option> : null}
-          {candidates.map((provider) => <option key={provider.id} value={provider.id} disabled={!isProductionReady(provider)}>{provider.label}{isProductionReady(provider) ? "" : " · 不可用"}</option>)}
+          {candidates.map((provider) => <option key={provider.id} value={provider.id} disabled={!isProductionReady(provider)}>{creatorProviderLabel(provider)}{isProductionReady(provider) ? "" : " · 不可用"}</option>)}
         </select>
       </label>
       {selectedProvider && models.length > 0 ? <label className="field">
-        <span>默认模型</span>
-        <select aria-label={`${selectedProvider.label}默认模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(selectedProvider.id, event.target.value)}>
-          <option value="">服务默认：{providerModelLabel(selectedProvider, selectedProvider.defaultModelId)}</option>
+        <span>首选模型</span>
+        <select aria-label={`${creatorProviderLabel(selectedProvider)}首选模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(selectedProvider.id, event.target.value)}>
+          <option value="">服务推荐：{providerModelLabel(selectedProvider, selectedProvider.defaultModelId)}</option>
           {models.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
         </select>
-      </label> : <div className="role-runtime-summary"><span>当前执行</span><strong>{activeModel?.label ?? selectedProvider?.defaultModelId ?? selectedProvider?.label ?? "尚未配置"}</strong></div>}
+      </label> : <div className="role-runtime-summary"><span>当前执行</span><strong>{activeModel?.label ?? selectedProvider?.label ?? "尚未配置"}</strong></div>}
+      {candidates.filter((provider) => provider.id !== selectedProvider?.id && isProductionReady(provider)).length > 0
+        ? <p className="role-fallback-note">其余可用能力只在首选服务故障时依次接管，不会与首选同时重复生成。</p>
+        : null}
     </>}
     <footer><span>{selectedProvider ? billingLabel(selectedProvider.billing) : "无可用能力"}</span><strong>{selectedProvider ? providerReadinessLabel(selectedProvider, ready) : "需要配置"}</strong></footer>
   </article>;
@@ -610,7 +662,7 @@ function AutomaticAgentRole({ label, provider }: { label: string; provider: Stud
   const model = provider?.modelProfiles?.find((item) => item.id === provider.defaultModelId)?.label ?? provider?.defaultModelId;
   return <article className={ready ? "automatic-agent-role" : "automatic-agent-role is-unavailable"}>
     <span className="service-light" />
-    <div><strong>{label}</strong><small>{provider?.label ?? "尚未配置"}</small></div>
+    <div><strong>{label}</strong><small>{provider ? creatorProviderLabel(provider) : "尚未配置"}</small></div>
     <em>{provider ? automaticRoleSummary(provider.capability) : model ?? "等待能力接入"}</em>
   </article>;
 }
@@ -738,6 +790,10 @@ function sameVoiceDirection(left: StudioVoiceDirection, right: StudioVoiceDirect
     && left.rate === right.rate
     && left.pauseScale === right.pauseScale
     && left.masteringPreset === right.masteringPreset;
+}
+
+function canonicalRecipeId(recipeId: StudioProductionRecipeId): StudioProductionRecipeId {
+  return recipeId === "keyshot-ai" || recipeId === "cinematic-ai" ? "keyshot-ai" : "free-stock";
 }
 
 function sameProductionDefaults(left: StudioProductionDefaults | undefined, right: StudioProductionDefaults): boolean {

@@ -11,6 +11,7 @@ import { runRoleAgentLoop } from "./role-agent-loop.js";
 
 export interface CodexVisualDirectorAgentOptions {
   client?: CodexBridgeClient;
+  auditClient?: Pick<CodexBridgeClient, "runTaskDetailed">;
   socketPath?: string;
   timeoutMs?: number;
   maxAttempts?: number;
@@ -18,23 +19,28 @@ export interface CodexVisualDirectorAgentOptions {
   sleep?: (milliseconds: number) => Promise<void>;
   maxReviewIterations?: number;
   modelId?: string;
+  sessionMode?: "stateful" | "stateless";
 }
 
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
-export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v11|role-audit-v2|director-validator-v2";
+export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v12|role-audit-v2|director-validator-v2";
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
 export class CodexVisualDirectorAgent implements VisualDirectorAgent {
   readonly id = "api-visual-director-v1";
   readonly modelId: string;
   private readonly client: CodexBridgeClient;
+  private readonly auditClient: Pick<CodexBridgeClient, "runTaskDetailed"> | undefined;
   private readonly maxReviewIterations: number;
+  private readonly sessionMode: "stateful" | "stateless";
 
   constructor(options: CodexVisualDirectorAgentOptions) {
     this.modelId = options.modelId?.trim() || "codex-default";
+    this.auditClient = options.auditClient;
     this.maxReviewIterations = options.maxReviewIterations ?? 3;
+    this.sessionMode = options.sessionMode ?? "stateful";
     if (options.client) {
       this.client = options.client;
     } else {
@@ -53,7 +59,8 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
 
   // 模型输出为 unknown：先经 validateVisualDirectorPlan 硬校验，malformed/不合法直接抛错，没有任何 fallback。
   async plan(input: VisualDirectorAgentInput): Promise<VisualDirectorPlan> {
-    const { agentLoopCheckpoint: _checkpoint, ...directorInput } = input;
+    this.assertSelectedModel(input.selectedModelId);
+    const { agentLoopCheckpoint: _checkpoint, selectedModelId: _selectedModelId, ...directorInput } = input;
     const rawPlan = await this.client.runTask("director-plan", {
       directorProfiles: VISUAL_DIRECTOR_PROFILES,
       ...directorInput,
@@ -62,11 +69,13 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
   }
 
   async planDetailed(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<VisualDirectorPlan>> {
-    const { agentLoopCheckpoint, ...directorInput } = input;
+    this.assertSelectedModel(input.selectedModelId);
+    const { agentLoopCheckpoint, selectedModelId: _selectedModelId, ...directorInput } = input;
     const basePayload = {
       directorProfiles: VISUAL_DIRECTOR_PROFILES,
       ...directorInput,
     };
+    const auditClient = this.auditClient ?? this.client;
     return runRoleAgentLoop({
       role: "导演",
       contractVersion: VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
@@ -76,23 +85,30 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
         "素材 Provider、交付类型和能力约束完全匹配；方案费用可真实报价，费用反馈只作为重规划偏好",
         "相邻镜头连续性成立，生成式画面不被伪装为事实证据",
         "系列视觉母题、角色/声音锚点、canon 与前后集连续性得到保持",
+        "返工时只处理分配给 visual-direction 的 findingId；当前节点可以说明已落实修改，但不得宣称问题已经复验通过",
       ],
       maxIterations: this.maxReviewIterations,
       produce: (revision, { requestId, session }) => this.client.runTaskDetailed("director-plan", {
         ...basePayload,
         ...(revision ? { revision } : {}),
-      }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => this.client.runTaskDetailed("role-audit", {
+      }, requestId, this.sessionMode === "stateless" ? undefined : session),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => auditClient.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
         context: visualDirectorAuditContext(directorInput, candidate),
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
-      }, requestId, session),
+      }, requestId, this.sessionMode === "stateless" ? undefined : session),
       validate: (value) => validateVisualDirectorPlan(value, validationFor(input)),
       ...(agentLoopCheckpoint ? { checkpoint: agentLoopCheckpoint } : {}),
     });
+  }
+
+  private assertSelectedModel(selectedModelId: string | undefined): void {
+    if (selectedModelId && selectedModelId !== this.modelId) {
+      throw new Error(`Selected model '${selectedModelId}' is not available for visual direction.`);
+    }
   }
 }
 
@@ -121,6 +137,9 @@ function visualDirectorAuditContext(
         requestedProfileId: brief.requestedProfileId,
         ...(brief.editorial ? { editorial: brief.editorial } : {}),
         ...(brief.rework ? { rework: brief.rework } : {}),
+        ...(brief.rework ? {
+          verificationBoundary: "findingId 仅追踪修改要求；只有后续视觉审片的新报告批准后才算 verified，当前导演审计不得宣称已复验。",
+        } : {}),
         ...(template ? {
           template: {
             automationLevel: template.automationLevel,

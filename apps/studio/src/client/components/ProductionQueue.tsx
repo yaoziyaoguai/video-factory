@@ -146,7 +146,7 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
                   ) : (
                     <div className="project-preview-placeholder" aria-hidden="true"><Clapperboard size={22} /><strong>{String(index + 1).padStart(2, "0")}</strong></div>
                   )}
-                  <span>{run.durationSeconds} 秒</span>
+                  <span>目标 {run.durationSeconds} 秒</span>
                 </div>
                 <div className="project-folio-copy">
                   <div className="project-folio-meta">

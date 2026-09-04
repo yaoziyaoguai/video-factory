@@ -1,6 +1,7 @@
 import {
   PRODUCTION_DIRECTOR_PROFILE_IDS,
   type ProductionDirectorProfileId,
+  type ProductionReworkFinding,
   type ProductionSeriesContext,
   type ProductionSpendFeedbackReason,
 } from "./contracts.js";
@@ -183,6 +184,7 @@ export interface VisualDirectorAgentInput {
       sourceRunId: string;
       visualDirectionInstruction: string;
       assetInstruction: string;
+      findings: ProductionReworkFinding[];
       previousDirectorPlan?: Record<string, unknown>;
     };
   };
@@ -210,6 +212,7 @@ export interface VisualDirectorAgentInput {
     estimatedCnyPerClip: number;
   }>;
   economics: VisualDirectorEconomics;
+  selectedModelId?: string;
   costFeedback?: Array<{
     reason: ProductionSpendFeedbackReason;
     previousEstimatedCostCny: number;
@@ -217,6 +220,7 @@ export interface VisualDirectorAgentInput {
     note?: string;
   }>;
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
+  agentLoopCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
 }
 
 export interface VisualAssetProviderCapability {

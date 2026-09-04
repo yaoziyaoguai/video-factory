@@ -171,7 +171,7 @@ describe("NodeStructuredEditor", () => {
 
     expect(screen.getByRole("combobox", { name: "指定风格" })).toHaveDisplayValue("自动匹配");
     expect(screen.getByRole("combobox", { name: "导演风格" })).toHaveDisplayValue("几何秩序");
-    expect(screen.getByRole("combobox", { name: "首选画面能力" })).toHaveDisplayValue("Pexels 图库");
+    expect(screen.getByRole("combobox", { name: "首选画面来源" })).toHaveDisplayValue("Pexels 图库");
     expect(screen.getByRole("option", { name: "MiniMax 视频生成" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Seedance 视频生成" })).not.toBeInTheDocument();
     expect(screen.getByDisplayValue("几何秩序 匹配本片")).toBeInTheDocument();
@@ -204,7 +204,7 @@ describe("NodeStructuredEditor", () => {
       onChange={onChange}
     />);
 
-    await userEvent.setup().selectOptions(screen.getByRole("combobox", { name: "首选画面能力" }), "hailuo-video-v1");
+    await userEvent.setup().selectOptions(screen.getByRole("combobox", { name: "首选画面来源" }), "hailuo-video-v1");
     expect(onChange).toHaveBeenCalledWith({
       shots: [expect.objectContaining({
         authenticityPolicy: "illustrative",

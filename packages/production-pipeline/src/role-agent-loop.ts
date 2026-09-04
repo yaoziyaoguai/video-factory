@@ -67,8 +67,9 @@ export class RoleAgentLoopError extends Error {
     message: string,
     readonly agentLoop: AgentLoopTrace,
     readonly lastTrace?: CodexTaskExecution["trace"],
+    readonly sourceError?: unknown,
   ) {
-    super(message);
+    super(message, sourceError instanceof Error ? { cause: sourceError } : undefined);
     this.name = "RoleAgentLoopError";
   }
 }
@@ -342,6 +343,7 @@ async function failedLoopError<TOutput>(
       } : {}),
     },
     lastTrace,
+    error,
   );
 }
 
@@ -546,6 +548,7 @@ async function executeOperation<TOutput>(
         const phaseLabel = phase === "audit" ? "独立审计" : "内容生成";
         throw new Error(
           `${options.role} Agent 的${phaseLabel}基础设施失败，尚未消耗语义审计轮次；候选和会话检查点已保留，可直接重试。${publicValidationError(error)}`,
+          { cause: error },
         );
       }
       state.failedOperationRequestIds[operationKey] = requestId;

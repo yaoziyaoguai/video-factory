@@ -56,6 +56,7 @@ describe("ProductionBrief", () => {
           assets: "只替换第三镜，其他母片保持不变。",
         },
         findings: [{
+          findingId: "vf_0123456789abcdef01234567",
           timecodeMs: 8_500,
           scenePosition: 3,
           category: "text_interference",
@@ -72,6 +73,32 @@ describe("ProductionBrief", () => {
     assert.equal(parsed.rework?.nodeInstructions.assets, "只替换第三镜，其他母片保持不变。");
     assert.deepEqual(parsed.rework?.findings[0]?.targetNodeIds, ["visual-direction", "assets"]);
     assert.deepEqual(parsed.rework?.previousScript, { viewerPromise: "解释真实原因" });
+    assert.throws(() => pipeline.parseBrief({
+      ...validBrief,
+      rework: {
+        sourceRunId: "run-rejected-1",
+        sourceRunRevision: 17,
+        nodeInstructions: { script: "修改", visualDirection: "修改", assets: "修改" },
+        findings: [
+          {
+            findingId: "vf_0123456789abcdef01234567",
+            timecodeMs: 1_000,
+            category: "pacing",
+            description: "节奏慢",
+            suggestion: "缩短",
+            targetNodeIds: ["script"],
+          },
+          {
+            findingId: "vf_0123456789abcdef01234567",
+            timecodeMs: 2_000,
+            category: "pacing",
+            description: "仍然慢",
+            suggestion: "继续缩短",
+            targetNodeIds: ["script"],
+          },
+        ],
+      },
+    }), /findingId must be unique/);
     assert.throws(() => pipeline.parseBrief({
       ...validBrief,
       rework: {
@@ -139,6 +166,29 @@ describe("ProductionBrief", () => {
     assert.deepEqual(parsed.seriesContext?.continuity.inheritedFromPrevious, [
       "第一集正式交接：方法 A 只适合单人任务。",
     ]);
+  });
+
+  it("assigns stable IDs only while reading historical persisted rework findings", () => {
+    const legacy = {
+      ...validBrief,
+      rework: {
+        sourceRunId: "run-legacy-rework",
+        sourceRunRevision: 3,
+        nodeInstructions: { script: "修改", visualDirection: "修改", assets: "修改" },
+        findings: [{
+          timecodeMs: 1_000,
+          category: "pacing",
+          description: "节奏慢",
+          suggestion: "缩短",
+          targetNodeIds: ["script"],
+        }],
+      },
+    };
+    assert.throws(() => pipeline.parseBrief(legacy), /findingId/);
+    const first = pipeline.parsePersistedBrief(legacy);
+    const second = pipeline.parsePersistedBrief(legacy);
+    assert.match(first.rework!.findings[0]!.findingId, /^vf_[a-f0-9]{24}$/);
+    assert.equal(first.rework!.findings[0]!.findingId, second.rework!.findings[0]!.findingId);
   });
 
   it("preserves bounded per-provider model selections without treating a model as a provider", () => {

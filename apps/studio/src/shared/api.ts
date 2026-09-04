@@ -82,6 +82,7 @@ export type StudioRoleProviderDefaults = Partial<Record<StudioProductionRoleBind
 
 export interface StudioCreatorSettings {
   voiceDirection: StudioVoiceDirection;
+  voiceDirectionCustomized?: boolean;
   defaultRecipeId: StudioProductionRecipeId;
   defaultAssetProviderId?: string;
   roleProviderDefaults?: StudioRoleProviderDefaults;
@@ -98,6 +99,22 @@ export interface StudioTopicStrategy {
   sourcePolicy?: "primary_or_two_independent" | "traceable_source";
   customInstruction: string;
 }
+
+export const DEFAULT_STUDIO_PRODUCTION_DEFAULTS: StudioProductionDefaults = {
+  directorProfileId: "auto",
+  reviewMode: "manual",
+  platform: "douyin",
+  durationSeconds: 24,
+};
+
+export const DEFAULT_STUDIO_TOPIC_STRATEGY: StudioTopicStrategy = {
+  positioning: "把复杂热点转成普通人能看懂、能验证、看完有收获的短视频。",
+  targetAudience: "希望快速理解新事物，但反感标题党和空泛说教的中文短视频用户。",
+  preferredDirections: "真实生活影响\n可实证的方法或变化\n有清楚反差、过程或结论\n能发展成系列",
+  excludedDirections: "只有热度、没有新角度\n无法找到可靠画面或事实来源\n消费灾难、伤亡或未经证实的争议\n只能靠大段说明卡讲清",
+  sourcePolicy: "primary_or_two_independent",
+  customInstruction: "优先考虑 24–45 秒内能兑现观众承诺的题材。",
+};
 
 export interface StudioCreatorSettingsPatch {
   voiceDirection?: StudioVoiceDirection;
@@ -733,7 +750,9 @@ export interface StudioNodeExecutionPlan {
   billing: StudioBillingType;
   configurationSource?: "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
   parameters?: Record<string, string | number | boolean | string[]>;
+  fallbackFromProviderId?: string;
   fallbackReason?: string;
+  actualModelIds?: string[];
   estimatedCostCny?: number;
   snapshotSource: "created" | "reconstructed";
 }
@@ -782,6 +801,7 @@ export interface StudioNodeExecutionReceipt {
   billing: StudioBillingType;
   configurationSource?: "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
   parameters?: Record<string, string | number | boolean | string[]>;
+  fallbackFromProviderId?: string;
   fallbackReason?: string;
   status: "succeeded" | "failed" | "rejected" | "needs_human";
   estimatedCostCny?: number;
@@ -1148,6 +1168,7 @@ export interface StudioCostRunDetail extends StudioCostRunSummary {
 }
 
 export interface StudioReworkFinding {
+  findingId: string;
   timecodeMs: number;
   scenePosition?: number;
   category: string;
