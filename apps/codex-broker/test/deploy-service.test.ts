@@ -303,6 +303,8 @@ case " $* " in
         current_release="$(readlink "$TEST_BROKER_CURRENT")"
         if [ "$DEPLOY_SCENARIO" = "broker-identity" ] && [ "$current_release" != "$TEST_PREVIOUS_RELEASE" ]; then
           echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"openai","providerId":"openai","modelId":"gpt-test","taskKinds":["director-plan","script-draft","visual-review"],"taskModels":{"director-plan":"gpt-test","script-draft":"gpt-test","visual-review":"gpt-test"}}'
+        elif [ "$current_release" = "$TEST_PREVIOUS_RELEASE" ]; then
+          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"zai","providerId":"zai-bigmodel-api","modelId":"glm-5.3","taskKinds":["director-plan","script-draft","visual-review"],"taskModels":{"director-plan":"glm-5.3","script-draft":"glm-5.3","visual-review":"glm-5.3-flash"}}'
         else
           echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"zai","providerId":"zai-bigmodel-api","modelId":"glm-5.3","taskKinds":["topic-ideas","series-roadmap","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"glm-5.3","series-roadmap":"glm-5.3","director-plan":"glm-5.3","script-draft":"glm-5.3","publish-copy":"glm-5.3","asset-rank":"glm-5.3-flash","reference-grammar":"glm-5.3-flash","visual-review":"glm-5.3-flash","role-audit":"glm-5.3"}}'
         fi
@@ -378,6 +380,7 @@ function assertFullDeployRollback(result: DeployFailureResult, expectAppRollback
   assert.match(result.zaiUnit, /Description=old-zai/);
   assert.doesNotMatch(result.zaiUnit, /Description=new-zai/);
   assert.match(result.stderr, /Deployment failed; restoring the application and all configured brokers/);
+  assert.doesNotMatch(result.stderr, /Rollback did not fully recover every component/);
   assert.match(result.trace, /systemctl:restart vf-codex-broker/);
   assert.match(result.trace, /systemctl:restart vf-zai-codex-broker/);
   if (expectAppRollback) {
@@ -667,7 +670,7 @@ exit 42
     assert.match(script, /^app_mutated=0$/m);
     assert.match(script, /^app_mutated=1$/m);
     assert.match(script, /rollback_broker \|\| failed=1[\s\S]*video-factory:rollback/);
-    assert.match(script, /restart_brokers\(\) \{\n  local failed=0/);
+    assert.match(script, /restart_brokers\(\) \{[\s\S]*?local [^\n]*failed=0/);
     assert.match(script, /systemctl restart "\$broker_service"/);
     assert.match(script, /systemctl restart "\$zai_broker_service"/);
     assert.match(script, /Configured ZAI Code Plan broker is unavailable; refusing a partial deployment/);
@@ -736,9 +739,12 @@ exit 42
     assert.match(deploy, /health\.profileId === process\.env\.EXPECTED_BROKER_PROFILE/);
     assert.match(deploy, /health\.providerId === process\.env\.EXPECTED_BROKER_PROVIDER/);
     assert.match(deploy, /expectedKinds\.every\(\(kind\) => typeof taskModels\[kind\] === "string"/);
+    assert.match(deploy, /EXPECTED_BROKER_ALLOW_EXTRA_KINDS/);
+    assert.match(deploy, /allowExtraKinds \|\| expectedKinds\.length === actualKinds\.length/);
+    assert.match(deploy, /restart_brokers director-plan,script-draft,visual-review 1/);
     assert.match(
       deploy,
-      /wait_for_broker_health "\$zai_broker_socket" 20 zai zai-bigmodel-api \\\n\s+topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit/,
+      /broker_health "\$zai_broker_socket" zai zai-bigmodel-api \\\n\s+topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit/,
     );
   });
 

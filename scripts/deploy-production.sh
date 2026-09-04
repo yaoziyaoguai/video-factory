@@ -203,24 +203,26 @@ wait_for_health() {
 }
 
 broker_health() {
-  local socket="$1" expected_profile="$2" expected_provider="$3" expected_kinds="$4" health_json
+  local socket="$1" expected_profile="$2" expected_provider="$3" expected_kinds="$4" allow_extra_kinds="${5:-0}" health_json
   health_json="$(curl --fail --silent --max-time 5 --unix-socket "$socket" http://localhost/health)" || return 1
   BROKER_HEALTH_JSON="$health_json" \
     EXPECTED_BROKER_PROFILE="$expected_profile" \
     EXPECTED_BROKER_PROVIDER="$expected_provider" \
     EXPECTED_BROKER_KINDS="$expected_kinds" \
+    EXPECTED_BROKER_ALLOW_EXTRA_KINDS="$allow_extra_kinds" \
     "$broker_root/bin/node" --eval '
       try {
         const health = JSON.parse(process.env.BROKER_HEALTH_JSON ?? "");
         const expectedKinds = (process.env.EXPECTED_BROKER_KINDS ?? "").split(",").filter(Boolean);
         const actualKinds = Array.isArray(health.taskKinds) ? health.taskKinds : [];
+        const allowExtraKinds = process.env.EXPECTED_BROKER_ALLOW_EXTRA_KINDS === "1";
         const taskModels = health.taskModels;
         const identityMatches = health.protocolVersion === "video-factory/codex-bridge-v2"
           && health.profileId === process.env.EXPECTED_BROKER_PROFILE
           && health.providerId === process.env.EXPECTED_BROKER_PROVIDER
           && typeof health.modelId === "string" && health.modelId.length > 0;
-        const kindsMatch = expectedKinds.length === actualKinds.length
-          && expectedKinds.every((kind) => actualKinds.includes(kind));
+        const kindsMatch = expectedKinds.every((kind) => actualKinds.includes(kind))
+          && (allowExtraKinds || expectedKinds.length === actualKinds.length);
         const modelsMatch = taskModels && typeof taskModels === "object" && !Array.isArray(taskModels)
           && expectedKinds.every((kind) => typeof taskModels[kind] === "string" && taskModels[kind].length > 0);
         const zaiModelsMatch = process.env.EXPECTED_BROKER_PROFILE !== "zai"
@@ -234,9 +236,9 @@ broker_health() {
 }
 
 wait_for_broker_health() {
-  local socket="$1" attempts="$2" expected_profile="$3" expected_provider="$4" expected_kinds="$5" count
+  local socket="$1" attempts="$2" expected_profile="$3" expected_provider="$4" expected_kinds="$5" allow_extra_kinds="${6:-0}" count
   for count in $(seq 1 "$attempts"); do
-    if broker_health "$socket" "$expected_profile" "$expected_provider" "$expected_kinds"; then
+    if broker_health "$socket" "$expected_profile" "$expected_provider" "$expected_kinds" "$allow_extra_kinds"; then
       return 0
     fi
     sleep 2
@@ -262,7 +264,8 @@ install_broker_units_from_release() {
 }
 
 restart_brokers() {
-  local failed=0
+  local zai_expected_kinds="${1:-topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit}"
+  local zai_allow_extra_kinds="${2:-0}" failed=0
   if ! systemctl restart "$broker_service" \
     || ! wait_for_broker_health "$broker_socket" 20 openai openai \
       topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
@@ -271,7 +274,7 @@ restart_brokers() {
   if [[ "$zai_broker_enabled" -eq 1 ]]; then
     if ! systemctl restart "$zai_broker_service" \
       || ! wait_for_broker_health "$zai_broker_socket" 20 zai zai-bigmodel-api \
-        topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
+        "$zai_expected_kinds" "$zai_allow_extra_kinds"; then
       echo "Configured ZAI Code Plan broker is unavailable; refusing a partial deployment." >&2
       failed=1
     fi
@@ -310,7 +313,7 @@ rollback_broker() {
     echo "No previous broker unit is available for rollback." >&2
     return 1
   fi
-  restart_brokers
+  restart_brokers director-plan,script-draft,visual-review 1
 }
 
 rollback() {
@@ -442,7 +445,7 @@ if ! broker_health "$broker_socket" openai openai \
   exit 1
 fi
 if [[ "$zai_broker_enabled" -eq 1 ]] && ! broker_health "$zai_broker_socket" zai zai-bigmodel-api \
-  director-plan,script-draft,visual-review; then
+  topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
   echo "ZAI Code Plan broker became unhealthy after the app deployment." >&2
   exit 1
 fi
