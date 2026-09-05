@@ -1113,7 +1113,7 @@ describe("StudioService", () => {
         ...brief,
         providers: { ...brief.providers, assets: "pexels-stock-v1" },
       }),
-      /PEXELS_API_KEY/,
+      /需要连接 Pexels 图库服务/,
     );
   });
 
