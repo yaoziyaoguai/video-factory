@@ -29,7 +29,7 @@ export type TaskOutcome =
     ok: false;
     status: 400 | 409 | 413 | 422 | 503 | 500;
     message: string;
-    failureKind?: "model_provider_transient";
+    failureKind?: "model_provider_transient" | "model_provider_no_output";
     failureDetails?: CodexExecutorFailureDetails;
   };
 
@@ -670,12 +670,13 @@ async function writeSessionRecord(recordPath: string, record: SessionRecord): Pr
 
 function failureOutcome(error: unknown): TaskOutcome {
   if (error instanceof CodexExecutorError) {
+    const failureKind = error.failureKind ?? (error.transient ? "model_provider_transient" as const : undefined);
     // 任务已受理后的失败（含执行超时）一律 422：客户端不重放，任务至多执行一次。
     return {
       ok: false,
       status: 422,
       message: publicExecutorMessage(error.message, error.transient),
-      ...(error.transient ? { failureKind: "model_provider_transient" as const } : {}),
+      ...(failureKind ? { failureKind } : {}),
       ...(error.details ? { failureDetails: error.details } : {}),
     };
   }

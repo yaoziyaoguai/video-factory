@@ -191,7 +191,7 @@ describe("CodexScreenwriterAgent", () => {
     assert.deepEqual((auditClient.calls[1]!.payload as Record<string, unknown>).previousAudit, repairAudit);
   });
 
-  it("passes the remaining shared wall-clock budget to producer and audit calls", async () => {
+  it("uses the shared wall-clock deadline as an admission gate without shortening accepted operations", async () => {
     const client = new SequencedCodexClient([validDraft(), {
       version: "video-factory/role-audit-v1",
       verdict: "pass",
@@ -207,8 +207,7 @@ describe("CodexScreenwriterAgent", () => {
 
     assert.equal(client.calls.length, 2);
     for (const call of client.calls) {
-      assert.ok((call.requestOptions?.timeoutMs ?? 0) > 0);
-      assert.ok((call.requestOptions?.timeoutMs ?? 0) <= 1_000);
+      assert.equal(call.requestOptions, undefined);
       assert.equal("wallClockDeadlineAtMs" in (call.payload as Record<string, unknown>), false);
     }
   });

@@ -405,6 +405,29 @@ describe("CodexBridgeClient", () => {
     }
   });
 
+  it("preserves a completed no-output classification without replaying the request", async () => {
+    const bridge = await startBridge((_request, response) => {
+      respondWithJson(response, 422, {
+        error: "the model did not return a result.",
+        failureKind: "model_provider_no_output",
+      });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, maxAttempts: 3, sleep: async () => {} });
+
+      await assert.rejects(() => client.runTask("script-draft", {}), (error: unknown) => {
+        assert.ok(error instanceof CodexBridgeError);
+        assert.equal(error.transient, false);
+        assert.equal(error.stage, "completed_failure");
+        assert.equal(error.failureKind, "model_provider_no_output");
+        return true;
+      });
+      assert.equal(bridge.requests.length, 1);
+    } finally {
+      await bridge.close();
+    }
+  });
+
   it("does not retry terminal 4xx responses", async () => {
     const bridge = await startBridge((_request, response) => {
       respondWithJson(response, 400, { error: "unsupported task kind" });

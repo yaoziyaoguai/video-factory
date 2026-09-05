@@ -304,6 +304,7 @@ describe("ZaiCodePlanExecutor", () => {
 
     assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
     assert.equal(capturedBody?.model, "glm-5.3");
+    assert.equal(capturedBody?.reasoning_effort, "high");
     assert.equal(typeof (capturedBody?.messages as Array<{ content: unknown }>)[0]?.content, "string");
     assert.deepEqual(JSON.parse(result.output), output);
     assert.equal(result.trace?.providerId, "zai-bigmodel-api");
@@ -514,6 +515,27 @@ describe("ZaiCodePlanExecutor", () => {
         assert.equal(error.transient, false);
         assert.equal(error.details?.category, "invalid_request");
         assert.equal(error.details?.reasonCode, "invalid_request");
+        return true;
+      },
+    );
+  });
+
+  it("classifies an empty successful response as provider no-output", async () => {
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => new Response(JSON.stringify({
+        choices: [{ message: { content: "" } }],
+      }), { status: 200 }),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(scriptDraftTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.transient, false);
+        assert.equal(error.failureKind, "model_provider_no_output");
+        assert.equal(error.details?.category, "execution_failed");
+        assert.equal(error.details?.reasonCode, "no_output");
         return true;
       },
     );

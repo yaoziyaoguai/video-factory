@@ -766,6 +766,108 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       await broker.close();
     }
   });
+
+  it("durably preserves and replays a completed no-output failure for downstream candidate fallback", async () => {
+    let calls = 0;
+    const broker = await startBroker({
+      durableIdempotency: true,
+      script: () => {
+        calls += 1;
+        throw new CodexExecutorError(
+          "Codex produced an empty output.",
+          false,
+          { failureKind: "model_provider_no_output" },
+        );
+      },
+    });
+    try {
+      const body = topicTaskBody("no-output");
+      const requestId = String((JSON.parse(body) as { requestId: string }).requestId);
+      const response = await brokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body,
+      });
+
+      assert.equal(response.status, 422);
+      assert.equal(JSON.parse(response.body).error, "the model returned an empty result.");
+      assert.equal(JSON.parse(response.body).failureKind, "model_provider_no_output");
+      const record = JSON.parse(await readFile(path.join(
+        broker.directory,
+        "idempotency",
+        `${createHash("sha256").update(requestId).digest("hex")}.json`,
+      ), "utf8")) as { version: number; state: string; outcome: Record<string, unknown> };
+      assert.equal(record.version, 2);
+      assert.equal(record.state, "completed");
+      assert.equal(record.outcome.ok, false);
+      assert.equal(record.outcome.status, 422);
+      assert.equal(record.outcome.failureKind, "model_provider_no_output");
+
+      const replayed = await brokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body,
+      });
+      assert.equal(replayed.status, 422);
+      assert.equal(JSON.parse(replayed.body).failureKind, "model_provider_no_output");
+      assert.equal(calls, 1);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("keeps a legacy completed failure immutable and requires a new requestId for recovery", async () => {
+    let calls = 0;
+    const broker = await startBroker({
+      durableIdempotency: true,
+      script: () => {
+        calls += 1;
+        throw new CodexExecutorError(
+          "Codex produced an empty output.",
+          false,
+          { failureKind: "model_provider_no_output" },
+        );
+      },
+    });
+    try {
+      const oldBody = JSON.parse(topicTaskBody("legacy-no-output")) as Record<string, unknown>;
+      const task = parseTaskRequest(oldBody, codexExecutorProfileFor("openai").identity);
+      const digest = createHash("sha256").update(JSON.stringify({
+        identity: codexExecutorProfileFor("openai").identity,
+        task,
+      })).digest("hex");
+      const recordPath = path.join(
+        broker.directory,
+        "idempotency",
+        `${createHash("sha256").update(String(oldBody.requestId)).digest("hex")}.json`,
+      );
+      const legacyRecord = `${JSON.stringify({
+        version: 1,
+        requestId: oldBody.requestId,
+        digest,
+        state: "completed",
+        outcome: { ok: false, status: 422, message: "The model could not complete this step." },
+      }, null, 2)}\n`;
+      await mkdir(path.dirname(recordPath), { recursive: true });
+      await writeFile(recordPath, legacyRecord, "utf8");
+
+      const replayed = await brokerRequest(broker.socketPath, {
+        method: "POST", path: "/v1/tasks", body: JSON.stringify(oldBody),
+      });
+      assert.equal(replayed.status, 422);
+      assert.equal(JSON.parse(replayed.body).failureKind, undefined);
+      assert.equal(calls, 0);
+      assert.equal(await readFile(recordPath, "utf8"), legacyRecord);
+
+      const recovered = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: JSON.stringify({ ...oldBody, requestId: "recovered-no-output" }),
+      });
+      assert.equal(recovered.status, 422);
+      assert.equal(JSON.parse(recovered.body).failureKind, "model_provider_no_output");
+      assert.equal(calls, 1);
+      assert.equal(await readFile(recordPath, "utf8"), legacyRecord);
+    } finally {
+      await broker.close();
+    }
+  });
 });
 
 describe("CodexBrokerServer queue", () => {

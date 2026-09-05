@@ -14,7 +14,7 @@ export function CostDashboard({ dashboard }: { dashboard: StudioCostDashboard })
       </div>
       <div className="cost-run-table">
         <header><strong>视频明细</strong><span>{dashboard.runs.length} 条制作</span></header>
-        {dashboard.runs.length ? dashboard.runs.map((run) => <Link to={`/projects/${run.runId}`} key={run.runId}><span><strong>{run.title}</strong><small>{run.totals.meteredCalls} 次已确认计费调用 · {run.totals.failedMeteredCalls} 次明确失败 · {run.totals.actualPendingCount} 笔待确认是否扣费</small></span><b>{actualCostLabel(run.totals)}</b></Link>) : <p>产生制作调用后，这里会按视频汇总。</p>}
+        {dashboard.runs.length ? dashboard.runs.map((run) => <Link to={`/projects/${run.runId}`} key={run.runId}><span><strong>{run.title}</strong><small>{run.totals.meteredCalls} 次按量调用 · {run.totals.failedMeteredCalls} 次明确失败 · {run.totals.actualPendingCount} 笔待确认是否扣费</small></span><b>{actualCostLabel(run.totals)}</b></Link>) : <p>产生制作调用后，这里会按视频汇总。</p>}
       </div>
     </section>
   );
@@ -71,7 +71,7 @@ function CostRanking({ title, groups, kind }: { title: string; groups: StudioCos
   return <section className="cost-ranking"><header><strong>{title}</strong><span>{groups.length} 项</span></header>{groups.length ? groups.map((group) => {
     const amount = group.actualCostCny || group.estimatedCostCny;
     const label = kind === "provider" ? providerLabel(group.id) ?? group.label : runNodeLabel(group.id);
-    return <div key={group.id}><span><b>{label}</b><small>{group.calls} 次已确认</small></span><i><span style={{ width: `${Math.max(4, amount / max * 100)}%` }} /></i><strong>{group.actualPendingCount > 0 ? `¥${group.actualCostCny.toFixed(2)} + ${group.actualPendingCount} 笔待确认` : `¥${group.actualCostCny.toFixed(2)}`}</strong></div>;
+    return <div key={group.id}><span><b>{label}</b><small>{group.calls} 次执行</small></span><i><span style={{ width: `${Math.max(4, amount / max * 100)}%` }} /></i><strong>{group.actualPendingCount > 0 ? `¥${group.actualCostCny.toFixed(2)} + ${group.actualPendingCount} 笔待确认` : `¥${group.actualCostCny.toFixed(2)}`}</strong></div>;
   }) : <p>暂无调用数据</p>}</section>;
 }
 

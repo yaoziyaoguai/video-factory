@@ -1258,6 +1258,90 @@ describe("CodexExecutor.runTask", () => {
     }
   });
 
+  it("classifies a completed model turn with no result for candidate fallback", async () => {
+    for (const diagnostic of ["The model could not complete this step.", "model returned no output"]) {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-no-output-"));
+      const executor = new CodexExecutor({
+        workspaceRoot,
+        spawnFn: fakeSpawn(({ child }) => {
+          child.stdout.end(`${JSON.stringify({ type: "turn.failed", error: { message: diagnostic } })}\n`);
+          child.stderr.end();
+          child.emit("close", 1, null);
+        }),
+      });
+
+      await assert.rejects(
+        () => executor.runTask(parseTaskRequest(topicRequest())),
+        (error: unknown) => {
+          assert.ok(error instanceof CodexExecutorError);
+          assert.equal(error.transient, false);
+          assert.equal(error.failureKind, "model_provider_no_output");
+          return true;
+        },
+      );
+      assert.deepEqual(await readdir(workspaceRoot), []);
+    }
+  });
+
+  it("lets terminal stderr override a generic no-output event", async () => {
+    for (const diagnostic of [
+      "authentication failed: invalid API key",
+      "content policy violation",
+      "invalid_json_schema: required field is missing",
+    ]) {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-terminal-priority-"));
+      const executor = new CodexExecutor({
+        workspaceRoot,
+        spawnFn: fakeSpawn(({ child }) => {
+          child.stdout.end(`${JSON.stringify({
+            type: "turn.failed",
+            error: { message: "The model could not complete this step." },
+          })}\n`);
+          child.stderr.end(diagnostic);
+          child.emit("close", 1, null);
+        }),
+      });
+
+      await assert.rejects(
+        () => executor.runTask(parseTaskRequest(topicRequest())),
+        (error: unknown) => {
+          assert.ok(error instanceof CodexExecutorError);
+          assert.equal(error.transient, false);
+          assert.equal(error.failureKind, undefined);
+          return true;
+        },
+      );
+      assert.deepEqual(await readdir(workspaceRoot), []);
+    }
+  });
+
+  it("lets an earlier terminal event override a later generic no-output event", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-terminal-event-priority-"));
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      spawnFn: fakeSpawn(({ child }) => {
+        child.stdout.end([
+          JSON.stringify({ type: "error", message: "content policy violation" }),
+          JSON.stringify({ type: "turn.failed", error: { message: "The model could not complete this step." } }),
+          "",
+        ].join("\n"));
+        child.stderr.end();
+        child.emit("close", 1, null);
+      }),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(parseTaskRequest(topicRequest())),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.transient, false);
+        assert.equal(error.failureKind, undefined);
+        return true;
+      },
+    );
+    assert.deepEqual(await readdir(workspaceRoot), []);
+  });
+
   it("marks spawn errors as transient", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-"));
     const executor = new CodexExecutor({

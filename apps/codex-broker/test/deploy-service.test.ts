@@ -402,7 +402,7 @@ describe("ZAI systemd service sample", () => {
 
     assert.match(service, /^User=vf-zai-codex$/m);
     assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_PROFILE=zai$/m);
-    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_EFFORT=xhigh$/m);
+    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_EFFORT=high$/m);
     assert.match(service, /^EnvironmentFile=\/etc\/video-factory\/zai-codex-broker\.env$/m);
     assert.match(service, /stat -c %%U:%%G \/etc\/video-factory\/zai-codex-broker\.env/);
     assert.match(service, /stat -c %%a \/etc\/video-factory\/zai-codex-broker\.env/);
@@ -649,7 +649,7 @@ exit 42
     );
 
     assert.match(script, /default_codex_model=gpt-5\.6-sol/);
-    assert.match(script, /default_codex_effort=xhigh/);
+    assert.match(script, /default_codex_effort=high/);
     assert.match(script, /default_codex_audit_effort=xhigh/);
     assert.match(script, /default_codex_audit_model=gpt-5\.6-sol/);
     assert.match(script, /VIDEO_FACTORY_CODEX_MODEL:-\$existing_codex_model/);
