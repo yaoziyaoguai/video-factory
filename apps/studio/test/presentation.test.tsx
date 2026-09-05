@@ -4,6 +4,9 @@ import { RUN_NODE_ORDER, creatorFacingTechnicalText, humanizeCreativeText, provi
 describe("creator-facing presentation labels", () => {
   it("does not expose internal provider ids or director routing codes", () => {
     expect(providerLabel("human-editor")).toBe("人工编辑");
+    expect(providerLabel("human-editor-private-state")).toBe("人工编辑记录");
+    expect(providerLabel("human-validated-director-plan-v1")).toBe("人工确认导演方案");
+    expect(providerLabel("multiple")).toBe("多来源制作记录");
     expect(providerLabel("unknown-provider-v1")).toBeUndefined();
     expect(providerModelLabel(undefined, "internal-model-id")).toBe("未识别模型");
     expect(humanizeCreativeText("knowledge-failed-intuition：generated_image，REUSE_ONLY scene 2"))
@@ -23,6 +26,20 @@ describe("creator-facing presentation labels", () => {
 
     const creatorCopy = "我的 Provider 不是故事主角，Agent 也不是标题。";
     expect(humanizeCreativeText(creatorCopy)).toBe(creatorCopy);
+  });
+
+  it("hides internal actor and local service connection details", () => {
+    const diagnostics = [
+      "studio-owner：需要宿主机 Codex bridge 服务正在监听，并将 VIDEO_FACTORY_CODEX_SOCKET_PATH 指向该 Unix socket。 当前：未找到 Codex bridge socket '/run/video-factory-codex/worker.sock'；请确认宿主机 broker 已启动。",
+      "需要 ZAI Code Plan broker 正在监听，并将 VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH 指向该 Unix socket。 当前：未找到 Codex bridge socket '/run/video-factory-zai-codex/worker.sock'；请确认宿主机 broker 已启动。",
+    ];
+
+    for (const diagnostic of diagnostics) {
+      const technical = creatorFacingTechnicalText(diagnostic);
+      expect(technical).toContain("AI 创作服务尚未连接");
+      expect(technical).not.toMatch(/studio-owner|VIDEO_FACTORY_|\/run\/video-factory|socket|宿主机|bridge|broker/i);
+    }
+    expect(creatorFacingTechnicalText(diagnostics[0])).toContain("由你确认");
   });
 
   it("translates persisted worker provenance into clear Chinese", () => {

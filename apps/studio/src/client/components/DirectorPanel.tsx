@@ -1,7 +1,7 @@
 import { ArrowRight, CheckCircle2, CircleDashed, WandSparkles } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { StudioOpportunity, StudioProvider } from "../../shared/api.js";
-import { platformLabel } from "../presentation.js";
+import { opportunityProductionBlockReason, platformLabel } from "../presentation.js";
 
 interface DirectorPanelProps {
   opportunity: StudioOpportunity;
@@ -25,11 +25,7 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
     label,
     available: providers.some((provider) => provider.capability === capability && provider.available && provider.kind !== "test"),
   }));
-  const topicBlockReason = opportunity.verification?.status === "blocked"
-    ? opportunity.verification.reasons[0] ?? "来源证据未达到当前标准。"
-    : opportunity.editorialDecision?.verdict === "skip"
-      ? opportunity.editorialDecision.reasons[0] ?? "当前选题不建议进入制作。"
-      : undefined;
+  const topicBlockReason = opportunityProductionBlockReason(opportunity);
   const productionReady = !providerError && !topicBlockReason && capabilities.every((item) => item.available);
   const hasTopicAgent = providers.some((provider) => provider.capability === "topic.intelligence" && provider.available && provider.kind !== "test");
   const topicIntelligenceCopy = opportunity.origin === "trend"

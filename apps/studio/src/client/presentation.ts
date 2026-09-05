@@ -1,3 +1,5 @@
+import type { StudioOpportunity } from "../shared/api.js";
+
 export const RUN_NODE_LABELS: Record<string, string> = {
   brief: "内容简报",
   script: "脚本",
@@ -48,6 +50,9 @@ export function providerLabel(providerId?: string): string | undefined {
     "inline:brief": "VideoFactory 制片",
     "inline:final-review": "人工终审",
     "inline:publish-package": "本地发布编排",
+    "human-editor-private-state": "人工编辑记录",
+    "human-validated-director-plan-v1": "人工确认导演方案",
+    multiple: "多来源制作记录",
     "video-factory-ts-v1": "VideoFactory 本地编排",
     "python-template-v1": "本地模板脚本",
     "codex-screenwriter-v1": "AI 编剧",
@@ -141,6 +146,8 @@ export function humanizeCreativeText(value: string): string {
 export function creatorFacingTechnicalText(value?: string): string | undefined {
   if (!value) return undefined;
   return value
+    .replace(/\bstudio-owner\b/gi, "由你确认")
+    .replace(/需要[^。]*VIDEO_FACTORY_[A-Z0-9_]+[^。]*。?\s*当前：[^。]*。?/gi, "AI 创作服务尚未连接，请到“创作设置 → 制作分工”检查服务状态。")
     .replace(/VideoFactory generated script; human review required before publishing\.?/gi, "AI 生成脚本；发布前需要人工核对事实与表述。")
     .replace(/License snapshot is stored per scene asset in this plan\.?/gi, "本方案按镜头保存了每项素材的授权记录。")
     .replace(/Asset rights require review\.?/gi, "素材使用权需要人工核对。")
@@ -187,6 +194,18 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/本地生成/g, "在本机生成")
     .replace(/异步生成/g, "后台生成")
     .replace(/统一任务协议/g, "统一调用");
+}
+
+export function opportunityProductionBlockReason(
+  opportunity: Pick<StudioOpportunity, "verification" | "editorialDecision">,
+): string | undefined {
+  if (opportunity.verification?.status === "blocked") {
+    return opportunity.verification.reasons[0] ?? "来源证据未达到当前标准。";
+  }
+  if (opportunity.editorialDecision?.verdict === "skip") {
+    return opportunity.editorialDecision.reasons[0] ?? "当前选题不建议进入制作。";
+  }
+  return undefined;
 }
 
 export function reasoningEffortLabel(value: unknown): string {

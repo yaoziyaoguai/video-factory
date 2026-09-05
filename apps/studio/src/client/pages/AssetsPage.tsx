@@ -23,7 +23,7 @@ import type {
   StudioRunSummary,
 } from "../../shared/api.js";
 import { studioApi } from "../api.js";
-import { providerLabel } from "../presentation.js";
+import { creatorFacingTechnicalText, providerLabel } from "../presentation.js";
 
 type AssetFilter = "all" | StudioAssetMediaKind | "reusable" | "needs_review";
 type AssetCollection = "creative" | "records";
@@ -215,14 +215,16 @@ function groupAssetsByWork(assets: StudioIndexedAsset[], runs: StudioRunSummary[
 function AssetCard({ asset, usage, grouped = false }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; grouped?: boolean }) {
   const resolvedUsage = usage ?? asset.usages.at(-1);
   const metadata = assetMetadata(asset);
+  const creator = creatorFacingTechnicalText(asset.creator);
+  const visibleTags = asset.tags.filter((tag) => tag !== "studio-owner" && tag !== asset.creator);
   return <article className="asset-card">
     <AssetPreview asset={asset} usage={resolvedUsage} />
     <div className="asset-card-copy">
       <header><span>{originLabel(asset.origin)} · {mediaKindLabel(asset.mediaKind)}</span><b className={`reuse-${asset.reuseStatus}`}>{reuseStatusLabel(asset.reuseStatus)}</b></header>
       <h3>{assetTitle(asset, resolvedUsage)}</h3>
-      <p className="asset-provider">{providerLabel(asset.providerId) ?? "其他制作服务"}{asset.creator ? ` · ${asset.creator}` : ""}</p>
+      <p className="asset-provider">{providerLabel(asset.providerId) ?? "其他制作服务"}{creator ? ` · ${creator}` : ""}</p>
       {metadata.length ? <ul className="asset-metadata" aria-label="素材规格">{metadata.map((item) => <li key={item}>{item}</li>)}</ul> : null}
-      {asset.tags.length ? <div className="asset-tags">{asset.tags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
+      {visibleTags.length ? <div className="asset-tags">{visibleTags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
       <footer>
         <span>{grouped ? (resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已关联制作" : "未归属") : asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已关联制作" : "未归属"}</span>
         <div>{resolvedUsage ? <Link to={`/projects/${resolvedUsage.runId}`}>查看作品</Link> : null}{asset.sourceUrl ? <a href={asset.sourceUrl} target="_blank" rel="noreferrer" aria-label="查看素材原始来源"><ExternalLink aria-hidden="true" size={14} /></a> : null}</div>
@@ -274,10 +276,13 @@ function providerFilterOptions(assets: StudioIndexedAsset[]): Array<{ id: string
   });
   const candidateCounts = new Map<string, number>();
   for (const item of candidates) candidateCounts.set(item.label, (candidateCounts.get(item.label) ?? 0) + 1);
-  return candidates.map((item) => ({
-    id: item.id,
-    label: (candidateCounts.get(item.label) ?? 0) > 1 ? `${item.label} · ${item.id}` : item.label,
-  }));
+  const occurrences = new Map<string, number>();
+  return candidates.map((item) => {
+    if ((candidateCounts.get(item.label) ?? 0) < 2) return { id: item.id, label: item.label };
+    const occurrence = (occurrences.get(item.label) ?? 0) + 1;
+    occurrences.set(item.label, occurrence);
+    return { id: item.id, label: `${item.label}（${occurrence}）` };
+  });
 }
 
 function providerAssetSuffix(asset: StudioIndexedAsset): string {

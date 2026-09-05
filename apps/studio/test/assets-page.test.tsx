@@ -119,7 +119,8 @@ describe("AssetsPage", () => {
             category: "document",
             kind: "script",
             providerId: "codex-screenwriter-v1",
-            tags: ["未归属"],
+            creator: "studio-owner",
+            tags: ["studio-owner", "未归属"],
             commercialUse: "self_owned",
             attributionRequirement: "not_required",
             reviewStatus: "recorded",
@@ -185,6 +186,8 @@ describe("AssetsPage", () => {
 
     await user.click(screen.getByRole("button", { name: "成片与记录" }));
     expect(screen.getByRole("heading", { level: 3, name: "制作文档" })).toBeInTheDocument();
+    expect(screen.getByText("AI 编剧 · 由你确认")).toBeInTheDocument();
+    expect(screen.queryByText("studio-owner")).not.toBeInTheDocument();
     expect(screen.getAllByText("未归属").length).toBeGreaterThan(0);
     expect(screen.queryByText(/作品素材包/)).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { level: 3, name: "夜晚书房" })).not.toBeInTheDocument();
