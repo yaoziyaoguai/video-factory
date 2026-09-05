@@ -150,6 +150,8 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/需要[^。]*VIDEO_FACTORY_[A-Z0-9_]+[^。]*。?\s*当前：[^。]*。?/gi, "AI 创作服务尚未连接，请到“创作设置 → 制作分工”检查服务状态。")
     .replace(/Pexels free stock license; review current provider license before publishing\.?/gi, "Pexels 免费图库素材；发布前需核对当前授权条款。")
     .replace(/Pixabay Content License; cache API responses for 24h and avoid systematic mass downloads\.?/gi, "Pixabay 内容许可；接口结果最多缓存 24 小时，禁止系统性批量下载。")
+    .replace(/Human-selected media retained with immutable bytes and run-local provenance\.?/gi, "保留人工选中的原始素材，并记录本次制作中的来源信息。")
+    .replace(/Human-edited derivative retained as an immutable revision\.?/gi, "保留人工编辑后的素材版本，便于追溯修改记录。")
     .replace(/VideoFactory generated script; human review required before publishing\.?/gi, "AI 生成脚本；发布前需要人工核对事实与表述。")
     .replace(/License snapshot is stored per scene asset in this plan\.?/gi, "本方案按镜头保存了每项素材的授权记录。")
     .replace(/Asset rights require review\.?/gi, "素材使用权需要人工核对。")
