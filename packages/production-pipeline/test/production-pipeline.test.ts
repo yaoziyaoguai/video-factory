@@ -146,6 +146,77 @@ async function assertCandidateFailureTrace(
 }
 
 describe("ProductionPipeline", () => {
+  it("uses the newly selected script model when regenerating a failed node", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-script-model-switch-"));
+    const calls: string[] = [];
+    const screenwriterAgent = new pipeline.FallbackScreenwriterAgent({
+      candidates: [{
+        providerId: "openai",
+        agent: {
+          id: "codex-screenwriter-v1",
+          modelId: "gpt-5.6-sol",
+          draft: async () => { throw new Error("OpenAI candidate is unavailable."); },
+          draftDetailed: async () => {
+            calls.push("gpt-5.6-sol");
+            throw new Error("OpenAI candidate is unavailable.");
+          },
+        },
+      }, {
+        providerId: "zai-bigmodel-api",
+        agent: {
+          id: "codex-screenwriter-v1",
+          modelId: "glm-5.3",
+          draft: async () => { throw new Error("Detailed draft must be used."); },
+          draftDetailed: async () => {
+            calls.push("glm-5.3");
+            return {
+              output: {
+                scenes: [1, 2, 3].map((position) => ({
+                  position,
+                  narration: `第 ${position} 幕`,
+                  duration: 10,
+                  visual_strategy: "stock",
+                  visual_prompt: `第 ${position} 幕可见动作`,
+                  search_terms: [`scene ${position}`],
+                })),
+              },
+              trace: {
+                taskKind: "script-draft" as const,
+                promptVersion: "model-switch-test-v1",
+                prompt: "bounded test prompt",
+                providerId: "zai-bigmodel-api",
+                modelId: "glm-5.3",
+              },
+            };
+          },
+        },
+      }],
+    });
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      screenwriterAgent,
+    });
+
+    const failed = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, script: "codex-screenwriter-v1" },
+    });
+    assert.equal(failed.status, "failed");
+    assert.deepEqual(calls, ["gpt-5.6-sol"]);
+
+    const stale = await subject.applyNodeExecutionConfiguration(failed.id, "script", {
+      ...failed.initialInput,
+      models: { "codex-screenwriter-v1": "glm-5.3" },
+      modelSelectionSources: { "codex-screenwriter-v1": "node_override" },
+    }, "owner");
+    const resumed = await subject.resumeStale(stale.id);
+
+    assert.equal(resumed.status, "needs_human");
+    assert.deepEqual(calls, ["gpt-5.6-sol", "glm-5.3"]);
+    assert.equal(resumed.nodeRuns.find((node) => node.nodeId === "script")?.executionReceipt?.modelId, "glm-5.3");
+  });
+
   it("persists every failed screenwriter model instead of reporting only the preferred model", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-exhausted-"));
     const failingAgent = (modelId: string, error: Error): pipeline.ScreenwriterAgent => ({
@@ -1858,6 +1929,128 @@ describe("ProductionPipeline", () => {
     assert.equal(node?.status, "failed");
     assert.equal(node?.executionReceipt?.modelId, "glm-5.3");
     assert.equal(node?.executionReceipt?.configurationSource, "run_override");
+  });
+
+  it("uses the newly selected director model when regenerating a failed node", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-director-model-switch-"));
+    const calls: string[] = [];
+    const directorAgent = new pipeline.FallbackVisualDirectorAgent({
+      candidates: [{
+        providerId: "openai",
+        agent: {
+          id: "api-visual-director-v1",
+          modelId: "gpt-5.6-terra",
+          plan: async () => { throw new Error("OpenAI director is unavailable."); },
+          planDetailed: async () => {
+            calls.push("gpt-5.6-terra");
+            throw new Error("OpenAI director is unavailable.");
+          },
+        },
+      }, {
+        providerId: "zai-bigmodel-api",
+        agent: {
+          id: "api-visual-director-v1",
+          modelId: "glm-5.3",
+          plan: async () => { throw new Error("Detailed plan must be used."); },
+          planDetailed: async (input) => {
+            calls.push("glm-5.3");
+            return {
+              output: {
+                version: "video-factory/director-plan-v1" as const,
+                requestedProfileId: input.brief.requestedProfileId,
+                resolvedProfileId: "documentary-observer",
+                profileRationale: "generated-by-glm-5.3",
+                visualBible: {
+                  narrativeApproach: "逐镜解释",
+                  pacing: "稳定",
+                  composition: "主体居中",
+                  camera: "固定机位",
+                  color: "自然色",
+                  continuity: "统一光线",
+                  sound: "环境声",
+                },
+                shots: input.scenes.map((scene) => ({
+                  scenePosition: scene.position,
+                  narrativeRole: "解释",
+                  authenticityPolicy: "illustrative" as const,
+                  preferredProviderId: "local-editorial-v1",
+                  deliveryType: "editorial_card" as const,
+                  alternativeProviderIds: [],
+                  temporalBeats: [
+                    `[0s-${scene.duration / 2}s] 建立信息`,
+                    `[${scene.duration / 2}s-${scene.duration}s] 保持可读`,
+                  ],
+                  query: scene.visualPrompt,
+                  generationPrompt: scene.visualPrompt,
+                  rationale: "导演明确选择正式编辑卡片。",
+                  continuityNote: "保持相同版式。",
+                  confidence: 0.8,
+                  estimatedCostCny: 0,
+                })),
+              },
+              trace: {
+                taskKind: "director-plan" as const,
+                promptVersion: "director-model-switch-test-v1",
+                prompt: "bounded director prompt",
+                providerId: "zai-bigmodel-api",
+                modelId: "glm-5.3",
+              },
+            };
+          },
+        },
+      }],
+    });
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      directorAgent,
+      assetProviders: [{
+        id: "local-editorial-v1",
+        label: "本地编辑卡片",
+        billing: "free",
+        modes: ["本地"],
+        deliveryTypes: ["editorial_card"],
+      }],
+    });
+
+    const failed = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      models: { "api-visual-director-v1": "gpt-5.6-terra" },
+      modelSelectionSources: { "api-visual-director-v1": "run_override" },
+      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+    });
+    assert.equal(failed.status, "failed");
+    assert.deepEqual(calls, ["gpt-5.6-terra"]);
+
+    const stale = await subject.applyNodeExecutionConfiguration(failed.id, "visual-direction", {
+      ...failed.initialInput,
+      models: { ...failed.initialInput.models, "api-visual-director-v1": "glm-5.3" },
+      modelSelectionSources: {
+        ...failed.initialInput.modelSelectionSources,
+        "api-visual-director-v1": "node_override",
+      },
+    }, "owner");
+    assert.equal(stale.nodeRuns.find(({ nodeId }) => nodeId === "visual-direction")?.status, "stale");
+    assert.equal(stale.initialInput.models?.["api-visual-director-v1"], "glm-5.3");
+
+    const resumed = await subject.resumeStale(stale.id);
+
+    assert.deepEqual(calls, ["gpt-5.6-terra", "glm-5.3"]);
+    const plan = resumed.executionPlan?.find(({ nodeId }) => nodeId === "visual-direction");
+    assert.equal(plan?.modelId, "glm-5.3");
+    assert.equal(plan?.configurationSource, "node_override");
+    const node = resumed.nodeRuns.find(({ nodeId }) => nodeId === "visual-direction");
+    assert.equal(node?.status, "succeeded");
+    assert.equal(node?.executionReceipt?.providerId, "zai-bigmodel-api");
+    assert.equal(node?.executionReceipt?.modelId, "glm-5.3");
+    assert.equal(node?.executionReceipt?.configurationSource, "node_override");
+    assert.deepEqual(node?.executionReceipt?.actualModelIds, ["glm-5.3"]);
+    const persistedPlan = JSON.parse(await readFile(
+      String((node?.output as Record<string, unknown>).directorPlanPath),
+      "utf8",
+    )) as { profileRationale?: string };
+    assert.equal(persistedPlan.profileRationale, "generated-by-glm-5.3");
   });
 
   it("runs an AI director before assets and passes its per-shot plan to the router", async () => {

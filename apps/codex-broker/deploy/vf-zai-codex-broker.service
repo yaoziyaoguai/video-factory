@@ -17,7 +17,7 @@ ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %%a /etc/video-factory/z
 ExecStartPre=/usr/bin/bash -c '! /usr/bin/grep -q "^ZAI_API_KEY" /etc/video-factory/zai-codex-broker.env'
 UnsetEnvironment=ZAI_API_KEY
 Environment=VIDEO_FACTORY_CODEX_PROFILE=zai
-Environment=VIDEO_FACTORY_CODEX_EFFORT=xhigh
+Environment=VIDEO_FACTORY_CODEX_EFFORT=high
 Environment=VIDEO_FACTORY_CODEX_SOCKET_PATH=/run/video-factory-zai-codex/worker.sock
 Environment=VIDEO_FACTORY_CODEX_WORKSPACE_ROOT=/var/lib/video-factory-zai-codex/workspace
 Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=285000

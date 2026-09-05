@@ -83,8 +83,8 @@ function redactDiagnosticSecrets(value: string): string {
     );
 }
 
-function structuredCodexError(stdout: string): string | undefined {
-  const messages = stdout.split(/\r?\n/).flatMap((line) => {
+function structuredCodexErrors(stdout: string): string[] {
+  return stdout.split(/\r?\n/).flatMap((line) => {
     if (!line.trim()) return [];
     try {
       const event = JSON.parse(line) as { type?: unknown; message?: unknown; error?: { message?: unknown } };
@@ -99,7 +99,10 @@ function structuredCodexError(stdout: string): string | undefined {
       return [];
     }
   });
-  return messages.at(-1);
+}
+
+function structuredCodexError(stdout: string): string | undefined {
+  return structuredCodexErrors(stdout).at(-1);
 }
 
 function codexFailureExcerpt(stdout: string, stderr: string): string {
@@ -112,12 +115,24 @@ function codexFailureExcerpt(stdout: string, stderr: string): string {
 
 const TERMINAL_CODEX_EXIT_PATTERN = /\b(?:unauthori[sz]ed|forbidden|authentication|authorization|invalid api key|missing api key|credential(?:s)?|configuration error|invalid configuration|invalid[_ -]?json[_ -]?schema|invalid json|output (?:schema|contract)|content (?:policy|filter|moderation)|policy violation|prompt rejected)\b/i;
 const TRANSIENT_CODEX_EXIT_PATTERN = /(?:\b(?:http\s*)?429\b|\btoo many requests\b|\brate[ _-]?limit(?:ed|ing)?\b|\boverload(?:ed|ing)?\b|\bno available (?:model )?capacity\b|\b(?:insufficient|exhausted|unavailable) (?:model )?capacity\b|\bcapacity (?:is )?(?:unavailable|exhausted)\b|\b(?:service|server|model|backend)(?: is)? (?:temporarily )?unavailable\b|\btemporarily unavailable\b)/i;
+const NO_OUTPUT_CODEX_EXIT_PATTERN = /\b(?:the )?model could not complete this step\b|\bmodel (?:returned|produced) no (?:output|result)\b/i;
 
 function isTransientCodexExit(stdout: string, stderr: string): boolean {
-  const diagnostic = structuredCodexError(stdout) ?? stderr;
+  const diagnostics = codexFailureDiagnostics(stdout, stderr);
   // 只有能明确归因到服务限流或容量的退出才允许换候选；其余非零退出保持 terminal。
-  if (TERMINAL_CODEX_EXIT_PATTERN.test(diagnostic)) return false;
-  return TRANSIENT_CODEX_EXIT_PATTERN.test(diagnostic);
+  if (diagnostics.some((diagnostic) => TERMINAL_CODEX_EXIT_PATTERN.test(diagnostic))) return false;
+  return diagnostics.some((diagnostic) => TRANSIENT_CODEX_EXIT_PATTERN.test(diagnostic));
+}
+
+function isNoOutputCodexExit(stdout: string, stderr: string): boolean {
+  const diagnostics = codexFailureDiagnostics(stdout, stderr);
+  return !diagnostics.some((diagnostic) => TERMINAL_CODEX_EXIT_PATTERN.test(diagnostic))
+    && diagnostics.some((diagnostic) => NO_OUTPUT_CODEX_EXIT_PATTERN.test(diagnostic));
+}
+
+function codexFailureDiagnostics(stdout: string, stderr: string): string[] {
+  return [...structuredCodexErrors(stdout), stderr]
+    .filter((diagnostic): diagnostic is string => Boolean(diagnostic?.trim()));
 }
 
 const DATA_ISOLATION_NOTICE = [
@@ -128,11 +143,13 @@ const DATA_ISOLATION_NOTICE = [
 
 export class CodexExecutorError extends Error {
   readonly details: CodexExecutorFailureDetails | undefined;
+  readonly failureKind: "model_provider_transient" | "model_provider_no_output" | undefined;
 
   constructor(message: string, readonly transient: boolean, options?: CodexExecutorErrorOptions) {
     super(message, options);
     this.name = "CodexExecutorError";
     this.details = options?.details;
+    this.failureKind = options?.failureKind;
   }
 }
 
@@ -157,6 +174,7 @@ export interface CodexExecutorFailureDetails {
 
 interface CodexExecutorErrorOptions extends ErrorOptions {
   details?: CodexExecutorFailureDetails;
+  failureKind?: "model_provider_transient" | "model_provider_no_output";
 }
 
 export interface TopicIdeasPayload {
@@ -742,6 +760,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
       throw new CodexExecutorError(
         `Codex exited with code ${exit.code}${exit.signal ? ` (signal ${exit.signal})` : ""}.${excerpt ? ` ${excerpt}` : ""}`,
         isTransientCodexExit(stdout, stderr),
+        isNoOutputCodexExit(stdout, stderr) ? { failureKind: "model_provider_no_output" } : undefined,
       );
     }
 
@@ -750,14 +769,18 @@ export class CodexExecutor implements BrokerTaskExecutor {
     try {
       outputSize = (await stat(lastMessagePath)).size;
     } catch {
-      throw new CodexExecutorError("Codex finished without writing an output file.", false);
+      throw new CodexExecutorError("Codex finished without writing an output file.", false, {
+        failureKind: "model_provider_no_output",
+      });
     }
     if (outputSize > this.maxOutputBytes) {
       throw new CodexExecutorError(`Codex output exceeds ${this.maxOutputBytes} bytes.`, false);
     }
     const output = await readFile(lastMessagePath, "utf8");
     if (!output.trim()) {
-      throw new CodexExecutorError("Codex produced an empty output.", false);
+      throw new CodexExecutorError("Codex produced an empty output.", false, {
+        failureKind: "model_provider_no_output",
+      });
     }
     const parsedOutput = parseOutputJson(output);
     if (task.kind === "visual-review" || task.kind === "role-audit" || task.kind === "series-roadmap") {

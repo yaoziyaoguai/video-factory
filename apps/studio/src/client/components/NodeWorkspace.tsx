@@ -47,8 +47,14 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const [documentError, setDocumentError] = useState<string>();
   const [terminalOverride, setTerminalOverride] = useState<StudioNodeOverrideInput>();
   const [terminalInputOverride, setTerminalInputOverride] = useState<StudioNodeInputOverrideInput>();
-  const spendDialogRef = useDialogFocus<HTMLElement>(authorizing, () => setAuthorizing(false), busy);
-  const spendRejectionDialogRef = useDialogFocus<HTMLElement>(rejectingSpend, () => setRejectingSpend(false), busy);
+  const spendDialogRef = useDialogFocus<HTMLElement>(authorizing, () => {
+    setError(undefined);
+    setAuthorizing(false);
+  }, busy);
+  const spendRejectionDialogRef = useDialogFocus<HTMLElement>(rejectingSpend, () => {
+    setError(undefined);
+    setRejectingSpend(false);
+  }, busy);
   const terminalDialogRef = useDialogFocus<HTMLElement>(terminalOverride !== undefined, () => setTerminalOverride(undefined), busy);
   const terminalInputDialogRef = useDialogFocus<HTMLElement>(terminalInputOverride !== undefined, () => setTerminalInputOverride(undefined), busy);
   const receipt = node.executionReceipt;
@@ -104,7 +110,9 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const executionTiming = useMemo(() => executionTimingDetails(receipt), [receipt]);
   const modelBackupUsed = (execution?.actualModelIds?.length ?? 0) > 1;
   const fallbackHeading = modelBackupUsed
-    ? "首选模型暂时不可用，已使用替补模型"
+    ? receipt?.status === "succeeded"
+      ? "首选模型暂时不可用，替补模型已完成"
+      : "已尝试替补模型，但本步骤仍未完成"
     : "智能复核未完成，已使用基础方案";
   const capability = useMemo(() => fallbackReason
     ? `${fallbackHeading} · ${fallbackReason}`
@@ -350,7 +358,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           <section className="spend-gate" aria-label={`${node.label}费用确认`}>
             <div><CircleDollarSign aria-hidden="true" size={20} /><span><strong>执行前费用确认</strong><small>预计 ¥{node.spendPlan.estimatedCostCny.toFixed(2)}，最高 ¥{node.spendPlan.maxCostCny.toFixed(2)} · 最多 {node.spendPlan.maxAttempts} 次</small>{node.spendPlan.items?.map((item) => <small key={item.id}><span>{item.label} · {providerLabel(item.providerId) ?? "画面服务"} · {providerModelLabel(providers.find((provider) => provider.id === item.providerId), item.modelId)}</span> · ¥{item.estimatedCostCny.toFixed(2)}</small>)}</span></div>
             {node.spendAuthorizationId ? <span className="spend-authorized"><ShieldCheck aria-hidden="true" size={15} />已授权</span> : readOnly ? <small>历史报价仅供查看</small> : (
-              <div className="spend-gate-actions">{node.id === "assets" ? <button className="button button-ghost" type="button" disabled={busy} onClick={() => setRejectingSpend(true)}>这份报价不合适</button> : null}<button className="button button-primary" type="button" disabled={busy} onClick={() => setAuthorizing(true)}><ShieldCheck aria-hidden="true" size={16} />检查并确认</button></div>
+              <div className="spend-gate-actions">{node.id === "assets" ? <button className="button button-ghost" type="button" disabled={busy} onClick={() => { setError(undefined); setRejectingSpend(true); }}>这份报价不合适</button> : null}<button className="button button-primary" type="button" disabled={busy} onClick={() => { setError(undefined); setAuthorizing(true); }}><ShieldCheck aria-hidden="true" size={16} />检查并确认</button></div>
             )}
           </section>
         ) : null}
@@ -389,7 +397,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           <div className="spend-input-versions" aria-label="本次付费所使用的上游版本">
             {spendInputs.map((input) => <div key={input.versionId}><span><strong>{input.role} · {input.label}</strong><small>{input.source === "human" ? "人工版本" : "自动版本"}</small></span></div>)}
           </div>
-          <div><button className="button button-ghost" type="button" onClick={() => setAuthorizing(false)}>返回检查</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void authorize()}>确认并执行</button></div>
+          <div><button className="button button-ghost" type="button" onClick={() => { setError(undefined); setAuthorizing(false); }}>返回检查</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void authorize()}>确认并执行</button></div>
         </section>
       </div> : null}
       {rejectingSpend && node.spendPlan ? <div className="node-confirm-layer" role="presentation">
@@ -403,9 +411,9 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             <option value="plan_not_approved">前面的画面方案不认可</option>
             <option value="other">其他原因</option>
           </select></label>
-          <label className="field"><span>下一版优先尝试降到多少元（可选；达不到仍会给你新报价）</span><input aria-label="下一版降本目标（可选）" type="number" min={0} max={100000} step={0.01} value={targetEstimatedCostCny} onChange={(event) => setTargetEstimatedCostCny(event.target.value)} /></label>
-          <label className="field"><span>具体调整意见（可选）</span><textarea aria-label="具体调整意见（可选）" rows={3} maxLength={1000} value={spendRejectionNote} onChange={(event) => setSpendRejectionNote(event.target.value)} /></label>
-          <div><button className="button button-ghost" type="button" onClick={() => setRejectingSpend(false)}>返回检查</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void rejectSpend()}>保存反馈</button></div>
+          <label className="field"><span>下一版优先尝试降到多少元（可选；达不到仍会给你新报价）</span><input aria-label="下一版降本目标（可选）" type="number" min={0} max={100000} step={0.01} value={targetEstimatedCostCny} onChange={(event) => { setError(undefined); setTargetEstimatedCostCny(event.target.value); }} /></label>
+          <label className="field"><span>具体调整意见（可选）</span><textarea aria-label="具体调整意见（可选）" rows={3} maxLength={1000} value={spendRejectionNote} onChange={(event) => { setError(undefined); setSpendRejectionNote(event.target.value); }} /></label>
+          <div><button className="button button-ghost" type="button" onClick={() => { setError(undefined); setRejectingSpend(false); }}>返回检查</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void rejectSpend()}>保存反馈</button></div>
         </section>
       </div> : null}
       {terminalOverride !== undefined ? <div className="node-confirm-layer" role="presentation">
@@ -919,6 +927,13 @@ function executionTimingDetails(
   const loopValidationMs = timingParameter(parameters.loopValidationMs);
   const modelCallCount = nonNegativeIntegerParameter(parameters.modelCallCount);
   const retryCount = nonNegativeIntegerParameter(parameters.retryCount);
+  const fallbackCandidateCount = Math.max(0, (receipt.actualModelIds?.length ?? 1) - 1);
+  const fallbackAndDispatchMs = fallbackCandidateCount > 0
+    && totalMs !== undefined
+    && producerMs !== undefined
+    && auditMs !== undefined
+    ? Math.max(0, totalMs - producerMs - auditMs)
+    : undefined;
   if ([providerWaitMs, firstOutputEventMs, toolMs, providerValidationMs, producerMs, auditMs, loopValidationMs]
     .every((value) => value === undefined)
     && modelCallCount === undefined
@@ -930,16 +945,19 @@ function executionTimingDetails(
     firstOutputEventMs === undefined ? undefined : { label: "首次响应", value: formatDuration(firstOutputEventMs) },
     producerMs === undefined ? undefined : { label: "内容生成累计", value: formatDuration(producerMs) },
     auditMs === undefined ? undefined : { label: "独立审计累计", value: formatDuration(auditMs) },
+    fallbackAndDispatchMs === undefined ? undefined : { label: "替补前等待与调度", value: formatDuration(fallbackAndDispatchMs) },
     toolMs === undefined ? undefined : { label: "工具处理", value: formatDuration(toolMs) },
     providerValidationMs === undefined && loopValidationMs === undefined
       ? undefined
       : { label: "结果校验", value: formatDuration((providerValidationMs ?? 0) + (loopValidationMs ?? 0)) },
-    modelCallCount === undefined ? undefined : { label: "模型调用", value: `${modelCallCount} 次` },
+    fallbackCandidateCount > 0 ? { label: "候选切换", value: `${fallbackCandidateCount} 次` } : undefined,
+    modelCallCount === undefined ? undefined : { label: fallbackCandidateCount > 0 ? "最终模型调用" : "模型调用", value: `${modelCallCount} 次` },
     retryCount === undefined ? undefined : { label: "自动重试", value: `${retryCount} 次` },
   ].filter((item): item is { label: string; value: string } => item !== undefined);
   const summary = [
     totalMs === undefined ? undefined : `共 ${formatDuration(totalMs)}`,
-    modelCallCount === undefined ? undefined : `${modelCallCount} 次模型调用`,
+    fallbackCandidateCount > 0 ? `${fallbackCandidateCount} 次候选切换` : undefined,
+    modelCallCount === undefined ? undefined : `${modelCallCount} 次${fallbackCandidateCount > 0 ? "最终" : ""}模型调用`,
     retryCount && retryCount > 0 ? `${retryCount} 次自动重试` : undefined,
   ].filter(Boolean).join(" · ");
   return { summary: summary || "可查看各阶段耗时", items };

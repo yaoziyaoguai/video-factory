@@ -2488,9 +2488,14 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   }
 
   async run(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<unknown>> {
+    const { selectedModelId: _staleSelectedModelId, ...currentInput } = input;
+    const configuredInput = {
+      ...currentInput,
+      ...(this.selectedModelId ? { selectedModelId: this.selectedModelId } : {}),
+    };
     return this.agent.planDetailed
-      ? this.agent.planDetailed(input)
-      : { output: await this.agent.plan(input) };
+      ? this.agent.planDetailed(configuredInput)
+      : { output: await this.agent.plan(configuredInput) };
   }
 }
 
@@ -2516,9 +2521,14 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTask
   }
 
   async run(input: ScreenwriterAgentInput): Promise<CodexTaskExecution<unknown>> {
+    const { selectedModelId: _staleSelectedModelId, ...currentInput } = input;
+    const configuredInput = {
+      ...currentInput,
+      ...(this.selectedModelId ? { selectedModelId: this.selectedModelId } : {}),
+    };
     return this.agent.draftDetailed
-      ? this.agent.draftDetailed(input)
-      : { output: await this.agent.draft(input) };
+      ? this.agent.draftDetailed(configuredInput)
+      : { output: await this.agent.draft(configuredInput) };
   }
 }
 

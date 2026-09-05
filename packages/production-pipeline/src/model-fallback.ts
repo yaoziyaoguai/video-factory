@@ -21,7 +21,14 @@ function hasTransientModelProviderFailure(error: unknown): boolean {
   for (const candidate of errorChain(error)) {
     if (!(candidate instanceof CodexBridgeError)) continue;
     if (TERMINAL_MODEL_FAILURE_PATTERN.test(candidate.message)) return false;
-    if (candidate.failureKind === "model_provider_transient") return true;
+    if (candidate.failureDetails?.category === "authentication"
+      || candidate.failureDetails?.category === "invalid_request"
+      || candidate.failureDetails?.category === "invalid_output") return false;
+    if (candidate.failureDetails?.category === "rate_limited"
+      || candidate.failureDetails?.category === "service_unavailable"
+      || candidate.failureDetails?.category === "timeout"
+      || candidate.failureDetails?.category === "network") return true;
+    if (candidate.failureKind === "model_provider_transient" || candidate.failureKind === "model_provider_no_output") return true;
     if (candidate.statusCode !== undefined) {
       if (candidate.statusCode === 408 || candidate.statusCode === 429) return true;
       if (candidate.statusCode === 502 || candidate.statusCode === 503 || candidate.statusCode === 504) return true;
@@ -37,6 +44,7 @@ export function publicModelFailure(error: unknown): string {
   if (/timed out/i.test(message)) return "调用超时";
   if (/rate limit|HTTP 429/i.test(message)) return "请求过多";
   if (/temporarily unavailable|role is unavailable/i.test(message)) return "暂时不可用";
+  if (bridgeError?.failureKind === "model_provider_no_output") return "未返回结果";
   if (/socket .* failed|ECONN|ENOENT|could not connect/i.test(message)) return "连接失败";
   if (bridgeError?.statusCode !== undefined) return `服务端错误（HTTP ${bridgeError.statusCode}）`;
   if (error instanceof RoleAgentLoopError && error.agentLoop.iterations.length > 0) return "质量审计未通过";

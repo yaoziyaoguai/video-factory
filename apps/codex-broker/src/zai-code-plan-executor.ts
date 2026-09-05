@@ -66,7 +66,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     this.apiKey = environment.ZAI_BIGMODEL_API_KEY?.trim() ?? "";
     if (!this.apiKey) throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
     this.fetchFn = options.fetchFn ?? fetch;
-    this.effort = options.effort ?? "max";
+    this.effort = options.effort ?? "high";
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.now = options.now ?? Date.now;
   }
@@ -147,6 +147,18 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
         providerWaitMs,
         reasonCode,
       ));
+      if (content === undefined || !content.trim()) {
+        throw new CodexExecutorError("ZAI Chat Completion returned an empty result.", false, {
+          failureKind: "model_provider_no_output",
+          details: {
+            category: "execution_failed",
+            reasonCode: "no_output",
+            providerId: this.identity.providerId,
+            modelId,
+            providerWaitMs,
+          },
+        });
+      }
       const output = stripCodeFence(content);
       let parsed: unknown;
       try {
@@ -238,7 +250,7 @@ function isExplicitInvalidRequestCode(code: string | undefined): boolean {
 }
 
 function zaiReasoningEffort(modelId: string, effort: string): string {
-  return modelId.startsWith("glm-5.3-flash") && effort === "xhigh" ? "max" : effort;
+  return modelId.startsWith("glm-5.3-flash") ? "max" : effort;
 }
 
 function requestIdHashFor(response: Response): { requestIdHash?: string } {
@@ -360,7 +372,7 @@ function responseErrorCode(raw: string): string | undefined {
 function responseContent(
   raw: string,
   failureDetails: (reasonCode: "invalid_json" | "output_contract") => CodexExecutorFailureDetails,
-): string {
+): string | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -375,8 +387,14 @@ function responseContent(
     });
   }
   const choice = parsed.choices[0];
-  if (!isRecord(choice) || !isRecord(choice.message) || typeof choice.message.content !== "string") {
+  if (!isRecord(choice) || !isRecord(choice.message)) {
     throw new CodexExecutorError("ZAI Chat Completion response is missing message content.", false, {
+      details: failureDetails("output_contract"),
+    });
+  }
+  if (choice.message.content === undefined || choice.message.content === null) return undefined;
+  if (typeof choice.message.content !== "string") {
+    throw new CodexExecutorError("ZAI Chat Completion response has invalid message content.", false, {
       details: failureDetails("output_contract"),
     });
   }

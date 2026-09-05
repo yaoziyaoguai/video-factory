@@ -202,6 +202,34 @@ describe("node production workspaces", () => {
     expect(screen.queryByText(/Prompt Pack|screenwriter-v2/)).not.toBeInTheDocument();
   });
 
+  it("separates fallback wait from the final model timing and call count", async () => {
+    const node: StudioNode = {
+      ...succeededNode,
+      executionReceipt: {
+        ...succeededNode.executionReceipt!,
+        actualModelIds: ["glm-5.3", "gpt-5.6-sol"],
+        fallbackReason: "前 1 个候选模型调用失败，已自动切换。",
+        parameters: {
+          ...succeededNode.executionReceipt!.parameters,
+          providerWaitMs: 12_000,
+          producerMs: 60_000,
+          auditMs: 20_000,
+          modelCallCount: 2,
+        },
+        startedAt: "2026-08-27T00:00:00.000Z",
+        finishedAt: "2026-08-27T00:03:00.000Z",
+      },
+    };
+
+    render(<NodeWorkspace node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+
+    await userEvent.click(screen.getByText("这一步为什么用了这些时间"));
+    expect(screen.getByText("替补前等待与调度").parentElement).toHaveTextContent("1 分 40 秒");
+    expect(screen.getByText("候选切换").parentElement).toHaveTextContent("1 次");
+    expect(screen.getByText("最终模型调用").parentElement).toHaveTextContent("2 次");
+    expect(screen.queryByText(/^模型调用$/)).not.toBeInTheDocument();
+  });
+
   it("lets a paused node replace an unavailable inherited provider", async () => {
     const onConfigure = vi.fn(async () => undefined);
     const providers: StudioProvider[] = [{
@@ -668,9 +696,29 @@ describe("node production workspaces", () => {
     const { container } = render(<NodeWorkspace node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     const summary = container.querySelector("summary");
-    expect(summary).toHaveTextContent("首选模型暂时不可用，已使用替补模型");
+    expect(summary).toHaveTextContent("首选模型暂时不可用，替补模型已完成");
     expect(summary).not.toHaveTextContent("已使用基础方案");
-    expect(screen.getByRole("alert")).toHaveTextContent(`首选模型暂时不可用，已使用替补模型：${fallbackReason}`);
+    expect(screen.getByRole("alert")).toHaveTextContent(`首选模型暂时不可用，替补模型已完成：${fallbackReason}`);
+  });
+
+  it("does not describe attempted backup models as successful when every candidate failed", () => {
+    const fallbackReason = "2 个候选模型均未能完成。";
+    const node: StudioNode = {
+      ...succeededNode,
+      status: "failed",
+      executionReceipt: {
+        ...succeededNode.executionReceipt!,
+        status: "failed",
+        fallbackReason,
+        actualModelIds: ["glm-5.3", "gpt-5.6-sol"],
+      },
+    };
+    const { container } = render(<NodeWorkspace node={node} runStatus="failed" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+
+    const summary = container.querySelector("summary");
+    expect(summary).toHaveTextContent("已尝试替补模型，但本步骤仍未完成");
+    expect(summary).not.toHaveTextContent("替补模型已完成");
+    expect(screen.getByRole("alert")).toHaveTextContent(`已尝试替补模型，但本步骤仍未完成：${fallbackReason}`);
   });
 
   it("shows the immutable planned provider and model before a node executes", async () => {
@@ -1214,10 +1262,17 @@ describe("node production workspaces", () => {
     expect(within(dialog).getByRole("heading", { name: "把这份报价退回导演" })).toBeInTheDocument();
     expect(within(dialog).getByText(/新方案会重新报价并再次等待你确认/)).toBeInTheDocument();
     expect(dialog).not.toHaveTextContent(/Agent|Provider|broker|schema|manifest|fallback|taskId|director-v1/i);
-    await userEvent.clear(within(dialog).getByRole("spinbutton", { name: "下一版降本目标（可选）" }));
-    await userEvent.type(within(dialog).getByRole("spinbutton", { name: "下一版降本目标（可选）" }), "0");
-    await userEvent.type(within(dialog).getByRole("textbox", { name: "具体调整意见（可选）" }), "第二镜优先改用真实图库。");
+    await userEvent.type(within(dialog).getByRole("spinbutton", { name: "下一版降本目标（可选）" }), "4.8");
     await userEvent.click(within(dialog).getByRole("button", { name: "保存反馈" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("下一版降本目标必须低于当前报价 ¥4.80");
+    await userEvent.click(within(dialog).getByRole("button", { name: "返回检查" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "这份报价不合适" }));
+    const reopenedDialog = screen.getByRole("dialog", { name: "保存费用反馈" });
+    await userEvent.clear(within(reopenedDialog).getByRole("spinbutton", { name: "下一版降本目标（可选）" }));
+    await userEvent.type(within(reopenedDialog).getByRole("spinbutton", { name: "下一版降本目标（可选）" }), "0");
+    await userEvent.type(within(reopenedDialog).getByRole("textbox", { name: "具体调整意见（可选）" }), "第二镜优先改用真实图库。");
+    await userEvent.click(within(reopenedDialog).getByRole("button", { name: "保存反馈" }));
 
     expect(onRejectSpend).toHaveBeenCalledWith("assets", {
       spendPlanId: "plan-1",
@@ -1393,7 +1448,10 @@ describe("node production workspaces", () => {
     const dashboard: CostDto = {
       currency: "CNY",
       totals: { estimatedCostCny: 2.4, authorizedCostCny: 3, actualCostCny: 0, actualPendingCount: 1, meteredCalls: 1, subscriptionCalls: 2, freeCalls: 3, failedMeteredCalls: 0 },
-      byProvider: [{ id: "hailuo-video-v1", providerId: "hailuo-video-v1", label: "MiniMax", calls: 1, estimatedCostCny: 2.4, actualCostCny: 0, actualPendingCount: 1 }],
+      byProvider: [
+        { id: "hailuo-video-v1", providerId: "hailuo-video-v1", label: "MiniMax", calls: 1, estimatedCostCny: 2.4, actualCostCny: 0, actualPendingCount: 1 },
+        { id: "local-render", providerId: "local-render", label: "本地渲染", calls: 2, estimatedCostCny: 0, actualCostCny: 0, actualPendingCount: 0 },
+      ],
       byNode: [{ id: "assets", nodeId: "assets", label: "画面", calls: 1, estimatedCostCny: 2.4, actualCostCny: 0, actualPendingCount: 1 }],
       runs: [{ runId: "run-1", title: "付费成片", totals: { estimatedCostCny: 2.4, authorizedCostCny: 3, actualCostCny: 0, actualPendingCount: 1, meteredCalls: 1, subscriptionCalls: 2, freeCalls: 3, failedMeteredCalls: 0 } }],
     };
@@ -1407,6 +1465,10 @@ describe("node production workspaces", () => {
     expect(screen.getByRole("link", { name: /付费成片/ })).toHaveAttribute("href", "/projects/run-1");
     expect(screen.getAllByText("¥3.00").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/1 笔待确认/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("1 次执行").length).toBeGreaterThan(0);
+    expect(screen.getByText("2 次执行")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /付费成片/ })).toHaveTextContent("1 次按量调用");
+    expect(screen.queryByText(/次已确认/)).not.toBeInTheDocument();
   });
 
   it("distinguishes subscription retries from failed metered calls", async () => {

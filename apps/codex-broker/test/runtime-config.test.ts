@@ -17,7 +17,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
     });
     assert.equal(openai.profile.model, "gpt-5.6-sol");
     assert.equal(openai.auditModel, "gpt-5.6-sol");
-    assert.equal(openai.effort, "xhigh");
+    assert.equal(openai.effort, "high");
     assert.equal(openai.auditEffort, "xhigh");
 
     const fakeSecret = "test-only-secret-not-for-a-real-request";
@@ -39,6 +39,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
       ZAI_TEXT_MODEL_ID: "glm-5.3-preview",
     });
     assert.equal(customZai.profile.identity.modelId, "glm-5.3-preview");
+    assert.equal(customZai.effort, "high");
   });
 
   it("allows the host to configure production and deep-review models independently", () => {

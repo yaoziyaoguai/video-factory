@@ -72,9 +72,11 @@ bash scripts/setup-codex-broker-host.sh
 
 `scripts/deploy-production.sh` 会从候选镜像原子提取 broker 制品到 `/opt/video-factory/codex-broker/releases/<时间戳>` 并翻转 `current` 符号链接，同时安装该版本的 OpenAI 与 ZAI systemd unit，再分别重启和检查两个 socket。两个 unit 都在切换前单独备份；应用、任一已配置 broker 或公共健康检查失败时，会拒绝部分可用的发布，并恢复部署前真实运行的两个 unit、broker release 与应用镜像。不能只从旧 release 取 unit，因为早期 release 尚未包含 ZAI unit。
 
-超时与重放策略：broker 单次模型任务默认 deadline 为 300s，可由 `VIDEO_FACTORY_CODEX_TIMEOUT_MS` 显式配置；Studio 客户端 deadline 为 1260s，用于覆盖单并发队列等待和同一角色最多 3 轮的多次任务。每个已受理的 `requestId` 不会因执行期失败或超时被客户端重放；仅连接层 ENOENT/ECONNREFUSED 与 503（队列满或停机、尚未受理）会做有界重试。Agent loop 的下一轮使用新的确定性 `requestId`，并在检查点中记录候选、审计和会话，基础设施失败不会静默消耗语义审计轮次。
+超时与重放策略：broker 单次模型任务默认 deadline 为 300s，可由 `VIDEO_FACTORY_CODEX_TIMEOUT_MS` 显式配置；Studio bridge 的单次请求 deadline 为 1260s，用于覆盖单并发队列等待和一次已经受理的完整模型任务。编剧、导演候选池另有 660s 的新阶段准入截止时间：截止后不再启动下一次生产或审计，但已经交给 durable broker 的同一 `requestId` 继续在 Studio bridge 单次 deadline 内有界等待，不能因为总预算刚好到期而把稍后完成的有效结果误判为失败。每个已受理的 `requestId` 不会因执行期失败或超时被客户端重放；仅连接层 ENOENT/ECONNREFUSED 与 503（队列满或停机、尚未受理）会做有界重试。Agent loop 的下一轮使用新的确定性 `requestId`，并在检查点中记录候选、审计和会话；结果不确定时继续用原 `requestId` 恢复，基础设施失败不会静默消耗语义审计轮次。
 
-模型切换发生在 Studio 的角色候选池，而不是 Broker 内部暗换模型。用户为节点选择一个首选模型，其余健康且合同兼容的模型按质量、稳定性与耗时形成候选顺序；只有连接、超时、限流、容量或模型不可用才继续下一个候选。输出结构错误、业务校验失败和审计返修必须停在当前模型。每个候选使用独立请求与会话边界，最终 trace 记录尝试顺序、失败原因和实际采用模型。
+模型切换发生在 Studio 的角色候选池，而不是 Broker 内部暗换模型。用户为节点选择一个首选模型，其余健康且合同兼容的模型按质量、稳定性与耗时形成候选顺序；只有连接、超时、限流、容量、模型不可用，或模型明确结束却没有返回结果时才继续下一个候选。鉴权、内容安全、无效请求、输出结构错误、业务校验失败和审计返修必须停在当前模型。每个候选使用独立请求与会话边界，最终 trace 记录尝试顺序、失败原因和实际采用模型。
+
+推理强度按任务职责分开：OpenAI 与 GLM-5.3 的普通文本生产默认使用 `high`，OpenAI 独立质量审计使用 `xhigh`；GLM-5.3-Flash 的带图审片固定映射为其支持的 `max`。这些是宿主机可配置的执行参数，不改变 Studio 中的模型候选顺序。
 
 systemd 加固说明：真实 `~/.codex` 整体只读；OpenAI Broker 使用 `/var/lib/video-factory-codex/codex-home` 保存 CLI 可变状态，其中 `auth.json` 只是指向真实登录凭据的只读链接。ZAI Broker 的 `ProtectSystem=strict` 保持不变，但必须允许写入 `/var/lib/video-factory-zai-codex` 与 `/run/video-factory-zai-codex`，否则模型结果虽已返回，幂等提交仍会因无法创建 `.video-factory/codex-idempotency` 而失败。应用容器只挂载两个 `/run` socket 目录，无法读取任何 Broker 状态目录或密钥。首次真实任务后仍需用 `journalctl -u vf-codex-broker -u vf-zai-codex-broker` 确认运行状态。
 

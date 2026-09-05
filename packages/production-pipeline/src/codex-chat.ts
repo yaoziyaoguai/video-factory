@@ -52,7 +52,7 @@ export interface CodexTaskRequestOptions {
 }
 
 export type CodexBridgeFailureStage = "not_accepted" | "completed_failure" | "uncertain";
-export type CodexBridgeFailureKind = "model_provider_transient";
+export type CodexBridgeFailureKind = "model_provider_transient" | "model_provider_no_output";
 
 export type ModelProviderFailureCategory =
   | "authentication"
@@ -312,9 +312,10 @@ export function requestOptionsForDeadline(deadlineAtMs: number | undefined): Cod
   if (!Number.isSafeInteger(deadlineAtMs) || deadlineAtMs < 1) {
     throw new CodexBridgeError("Text agent wall-clock deadline is invalid.", false, "not_accepted");
   }
-  const timeoutMs = deadlineAtMs - Date.now();
-  if (timeoutMs <= 0) throw requestDeadlineError(0);
-  return { timeoutMs };
+  if (deadlineAtMs <= Date.now()) throw requestDeadlineError(0);
+  // 这是新阶段的准入截止时间，不截断已经交给 durable broker 的同一 requestId。
+  // 已受理任务仍由客户端自身的单次超时有界等待，避免结果稍晚返回时被误判失败。
+  return undefined;
 }
 
 function positiveRequestTimeout(value: number): number {
@@ -507,7 +508,9 @@ function errorDetail(raw: string): string {
 function bridgeFailureKind(raw: string): CodexBridgeFailureKind | undefined {
   try {
     const body = JSON.parse(raw) as Record<string, unknown>;
-    return body.failureKind === "model_provider_transient" ? body.failureKind : undefined;
+    return body.failureKind === "model_provider_transient" || body.failureKind === "model_provider_no_output"
+      ? body.failureKind
+      : undefined;
   } catch {
     return undefined;
   }

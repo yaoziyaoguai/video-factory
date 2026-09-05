@@ -69,7 +69,7 @@ if [[ -f "$zai_env_file" ]] \
   mkdir -p "$zai_runtime_root" "$zai_workspace_root"
   env -u ZAI_BIGMODEL_API_KEY -u ZAI_API_KEY \
     VIDEO_FACTORY_CODEX_PROFILE=zai \
-    VIDEO_FACTORY_CODEX_EFFORT=xhigh \
+    VIDEO_FACTORY_CODEX_EFFORT=high \
     VIDEO_FACTORY_CODEX_SOCKET_PATH="$zai_socket_path" \
     VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="$zai_workspace_root" \
     node --env-file="$zai_env_file" apps/codex-broker/dist/main.js &

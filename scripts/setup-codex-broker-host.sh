@@ -17,7 +17,7 @@ unit_target=/etc/systemd/system/vf-codex-broker.service
 service=vf-codex-broker
 default_codex_model=gpt-5.6-sol
 default_codex_audit_model=gpt-5.6-sol
-default_codex_effort=xhigh
+default_codex_effort=high
 default_codex_audit_effort=xhigh
 
 fail() {
