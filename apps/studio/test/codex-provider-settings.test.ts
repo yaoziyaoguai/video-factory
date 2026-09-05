@@ -508,7 +508,35 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.equal(digitalHuman?.status, "planned");
     assert.equal(digitalHuman?.capability, "avatar.generate");
     assert.deepEqual(digitalHuman?.modelProfiles?.[0]?.taskTypes, ["digital-human"]);
-    assert.match(digitalHuman?.requirement ?? "", /AK\/SK/);
-    assert.match(digitalHuman?.requirement ?? "", /ARK_API_KEY 不能替代/);
+    assert.match(digitalHuman?.requirement ?? "", /火山引擎视觉内容生成服务与 OmniHuman 权限/);
+    assert.match(digitalHuman?.requirement ?? "", /普通方舟模型权限不能替代/);
+  });
+
+  it("describes creator-facing media setup without deployment variable names", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: true },
+      {},
+      { available: true, reason: "" },
+      { available: true, reason: "" },
+    );
+    const mediaProviderIds = [
+      "pexels-stock-v1",
+      "pixabay-stock-v1",
+      "seedream-image-v1",
+      "seedance-video-v1",
+      "hailuo-video-v1",
+      "wan-video-v1",
+      "minimax-tts-v1",
+      "volcengine-omnihuman-v1",
+    ];
+    const requirements = mediaProviderIds.map((providerId) => {
+      const provider = providers.find((candidate) => candidate.id === providerId);
+      assert.ok(provider, `missing provider ${providerId}`);
+      return provider.requirement ?? "";
+    });
+
+    assert.equal(requirements.every((requirement) => requirement.length > 0), true);
+    assert.doesNotMatch(requirements.join("\n"), /\b[A-Z][A-Z0-9_]*(?:API_KEY|MODEL_ID|WORKSPACE_ID|CNY_PER_CLIP)\b|AK\/SK/);
+    assert.match(requirements.join("\n"), /账号|图库服务/);
   });
 });

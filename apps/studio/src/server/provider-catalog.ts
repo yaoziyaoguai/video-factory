@@ -276,7 +276,7 @@ export function buildProviderCatalog(
       modes: ["实拍视频", "实拍图片", "9:16 搜索"],
       deliveryTypes: assetProviderDeliveryTypes("pexels-stock-v1"),
       latency: "seconds",
-      requirement: "需要 PEXELS_API_KEY",
+      requirement: "需要连接 Pexels 图库服务",
       docsUrl: "https://www.pexels.com/api/",
     }),
     provider({
@@ -289,7 +289,7 @@ export function buildProviderCatalog(
       modes: ["实拍视频", "实拍图片", "安全搜索"],
       deliveryTypes: assetProviderDeliveryTypes("pixabay-stock-v1"),
       latency: "seconds",
-      requirement: "需要 PIXABAY_API_KEY",
+      requirement: "需要连接 Pixabay 图库服务",
       docsUrl: "https://pixabay.com/api/docs/",
     }),
     provider({
@@ -319,7 +319,7 @@ export function buildProviderCatalog(
           estimatedCnyPerClip: seedreamSettings.estimatedCnyPerImage,
         }],
       } : {}),
-      requirement: "需要 ARK_API_KEY；模型与单图估价可用保守默认值覆盖",
+      requirement: "需要连接火山方舟账号；模型与单图估价未单独设置时使用已审核的保守默认值",
       docsUrl: "https://api.volcengine.com/api-docs/view?action=ImageGenerations&serviceCode=ark&version=2024-01-01",
     }),
     provider({
@@ -346,7 +346,7 @@ export function buildProviderCatalog(
           ? "当前推荐的方舟视频模型，适合精品关键镜头与受控小额验证。"
           : "同一方舟 API 下的可选视频模型，可按项目或节点覆盖默认值。",
       })),
-      requirement: "需要 ARK_API_KEY 和 SEEDANCE_ESTIMATED_CNY_PER_CLIP；模型可在页面配置",
+      requirement: "需要连接火山方舟账号，并为视频模型配置单镜头估价；模型可在页面选择",
       docsUrl: "https://www.volcengine.com/docs/82379/1520757?lang=zh",
     }),
     provider({
@@ -372,7 +372,7 @@ export function buildProviderCatalog(
           ? `${model.label} 按时长与分辨率计费，默认规格约 ¥${model.estimatedCnyPerSecond.toFixed(2)}/秒；执行前按实际镜头重新核算。`
           : "MiniMax Hailuo 固定规格视频模型；实际选中镜头逐项报价并等待人工确认。",
       })),
-      requirement: "需要 MINIMAX_API_KEY、MINIMAX_VIDEO_MODEL_ID 和 MINIMAX_ESTIMATED_CNY_PER_CLIP",
+      requirement: "需要连接 MiniMax 账号，选择已审核的视频模型，并配置单镜头估价",
       docsUrl: "https://platform.minimaxi.com/docs/api-reference/video-generation-v2-create",
     }),
     provider({
@@ -396,7 +396,7 @@ export function buildProviderCatalog(
         available: wanAvailable,
         description: "当前阿里云 Model Studio 视频模型，按镜头调用。",
       })),
-      requirement: "需要 DASHSCOPE_API_KEY、DASHSCOPE_WORKSPACE_ID、WAN_MODEL_ID 和 WAN_ESTIMATED_CNY_PER_CLIP",
+      requirement: "需要连接阿里云百炼账号及工作空间，选择已审核的视频模型，并配置单镜头估价",
       docsUrl: "https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference",
     }),
     plannedVideoProvider("kling-video-v1", "Kling 可灵", "可灵官方接口的模型目录与鉴权适配将在账号权限确认后启用。"),
@@ -417,7 +417,7 @@ export function buildProviderCatalog(
       billingUnit: "run",
       defaultModelId: environment.MINIMAX_TTS_MODEL_ID?.trim() || "speech-2.8-turbo",
       modelProfiles: [textModelProfile(environment.MINIMAX_TTS_MODEL_ID?.trim() || "speech-2.8-turbo", "MiniMax Speech 2.8 Turbo", "minimax-tts-v1", "minimax", miniMaxTtsAvailable, "云端中文配音模型；费用按一条视频的旁白保守估算。", positiveEstimate(environment.MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP, 0.5))],
-      requirement: "需要 MINIMAX_API_KEY，可选 MINIMAX_TTS_MODEL_ID",
+      requirement: "需要连接 MiniMax 账号；未单独选择配音模型时使用已审核的默认模型",
       docsUrl: "https://platform.minimaxi.com/docs/api-reference/speech-t2a-http",
     }),
     provider({
@@ -464,7 +464,7 @@ export function buildProviderCatalog(
         description: "火山视觉内容生成服务的单图音频驱动模型；接入后只在用户选择数字人口播模板时启用。",
         taskTypes: ["digital-human"],
       }],
-      requirement: "需要火山引擎 CV 服务 AK/SK、OmniHuman 权限和可供服务端拉取的图片/音频临时地址；现有 ARK_API_KEY 不能替代这些条件",
+      requirement: "需要开通火山引擎视觉内容生成服务与 OmniHuman 权限，并准备可访问的图片和音频地址；普通方舟模型权限不能替代",
       docsUrl: "https://api.volcengine.com/api-docs/?serviceCode=cv&version=2024-06-06",
     }),
     provider({
