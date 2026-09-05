@@ -170,22 +170,59 @@ describe("JsonTemplateStore", () => {
     assert.match(await readFile(file, "utf8"), /qaOnlyTemplateIds/);
   });
 
-  it("migrates the known legacy browser-acceptance templates out of the production catalog", async () => {
+  it("migrates the known legacy acceptance templates out of the production catalog", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-templates-"));
     const file = path.join(root, "templates.json");
     await writeFile(file, JSON.stringify({
       revision: 13,
-      templates: [{
-        ...structuredClone(BUILTIN_TEMPLATES[0]!),
-        id: "knowledge-explainer-copy-legacy",
-        name: "夜间验收·知识解释模板",
-        description: "用于验证模板编辑、保存与发布流程，不调用付费模型。",
-      }],
+      templates: [
+        {
+          ...structuredClone(BUILTIN_TEMPLATES[0]!),
+          id: "knowledge-explainer-copy-legacy",
+          name: "夜间验收·知识解释模板",
+          description: "用于验证模板编辑、保存与发布流程，不调用付费模型。",
+        },
+        {
+          ...structuredClone(BUILTIN_TEMPLATES[0]!),
+          id: "ranked-comparison-copy-72c5140c",
+          name: "榜单对比 QA 副本",
+          description: "用于验证模板编辑、模型覆盖与草稿保存，不用于正式生产。",
+        },
+        {
+          ...structuredClone(BUILTIN_TEMPLATES[0]!),
+          id: "custom-7b28591c-e3d",
+          name: "自定义模板 QA 验收",
+          description: "验证用户从空白创建模板、编辑结构与保存草稿。",
+        },
+        {
+          ...structuredClone(BUILTIN_TEMPLATES[0]!),
+          id: "creator-qa-notes",
+          name: "我的 QA 验收笔记",
+          description: "这是创作者自己的正常模板。",
+        },
+        {
+          ...structuredClone(BUILTIN_TEMPLATES[0]!),
+          id: "creator-ranked-comparison",
+          name: "榜单对比 QA 副本",
+          description: "这是创作者自己的榜单对比模板。",
+        },
+        {
+          ...structuredClone(BUILTIN_TEMPLATES[0]!),
+          id: "creator-custom-acceptance",
+          name: "自定义模板 QA 验收",
+          description: "这是创作者自己的自定义模板。",
+        },
+      ],
     }));
 
     const catalog = await new JsonTemplateStore(file, BUILTIN_TEMPLATES).list();
 
     assert.equal(catalog.templates.some((template) => template.id === "knowledge-explainer-copy-legacy"), false);
+    assert.equal(catalog.templates.some((template) => template.id === "ranked-comparison-copy-72c5140c"), false);
+    assert.equal(catalog.templates.some((template) => template.id === "custom-7b28591c-e3d"), false);
+    assert.equal(catalog.templates.some((template) => template.id === "creator-qa-notes"), true);
+    assert.equal(catalog.templates.some((template) => template.id === "creator-ranked-comparison"), true);
+    assert.equal(catalog.templates.some((template) => template.id === "creator-custom-acceptance"), true);
   });
 
   it("rejects stale writes and never edits a built-in in place", async () => {
