@@ -23,6 +23,7 @@ import { OpportunityRail } from "../components/OpportunityRail.js";
 import { ProductionStrip } from "../components/ProductionStrip.js";
 import { SeriesDialog } from "../components/SeriesDialog.js";
 import { TopicEntryWorkspace } from "../components/TopicEntryWorkspace.js";
+import { opportunityProductionBlockReason } from "../presentation.js";
 
 export function TodayPage() {
   const navigate = useNavigate();
@@ -196,14 +197,29 @@ export function TodayPage() {
       && isPendingProduction(item, entryMode, series, selectedSeriesId, runs)),
     [entryMode, opportunities, runs, selectedSeriesId, series],
   );
+  const startableOpportunities = useMemo(
+    () => entryMode === "trend"
+      ? visibleOpportunities.filter((item) => !opportunityProductionBlockReason(item))
+      : visibleOpportunities,
+    [entryMode, visibleOpportunities],
+  );
+  const blockedOpportunityCount = entryMode === "trend"
+    ? visibleOpportunities.length - startableOpportunities.length
+    : 0;
+  const displayedOpportunities = useMemo(
+    () => blockedOpportunityCount
+      ? [...startableOpportunities, ...visibleOpportunities.filter((item) => opportunityProductionBlockReason(item))]
+      : visibleOpportunities,
+    [blockedOpportunityCount, startableOpportunities, visibleOpportunities],
+  );
   const visibleRuns = useMemo(
     () => runs.filter((run) => matchesEntryOrigin(entryMode, run.creationOrigin)
       && (entryMode !== "series" || !selectedSeriesId || run.seriesId === selectedSeriesId)),
     [entryMode, runs, selectedSeriesId],
   );
   const selected = useMemo(
-    () => visibleOpportunities.find((item) => item.id === selectedId) ?? visibleOpportunities[0],
-    [selectedId, visibleOpportunities],
+    () => displayedOpportunities.find((item) => item.id === selectedId) ?? displayedOpportunities[0],
+    [displayedOpportunities, selectedId],
   );
   const selectedSeriesContext = useMemo(() => {
     if (!selected?.seriesId || !selected.episodeNumber) return undefined;
@@ -241,16 +257,22 @@ export function TodayPage() {
   const visibleCandidateCount = entryMode === "series" && selectedSeriesId
     ? (inbox?.items.filter((item) => item.seriesId === selectedSeriesId).length ?? 0)
     : (inbox?.facets.total ?? 0);
-  const dailyStatus = `${visibleCandidateCount} 条候选 · ${visibleOpportunities.length} 条制作机会 · ${visibleRuns.filter((run) => run.status === "succeeded").length} 条已完成`;
+  const completedCount = visibleRuns.filter((run) => run.status === "succeeded").length;
+  const dailyStatus = entryMode === "trend" && blockedOpportunityCount > 0
+    ? `${visibleCandidateCount} 条候选 · ${startableOpportunities.length} 条可开工 · ${blockedOpportunityCount} 条历史候选需补来源 · ${completedCount} 条已完成`
+    : `${visibleCandidateCount} 条候选 · ${startableOpportunities.length} 条制作机会 · ${completedCount} 条已完成`;
+  const onlyBlockedHistoricalTopics = entryMode === "trend"
+    && startableOpportunities.length === 0
+    && blockedOpportunityCount > 0;
   const seriesAuditReady = providersLoading
     ? undefined
     : !providersError && providers.some((provider) => provider.capability === "series.plan" && provider.available && provider.kind !== "test");
 
   useEffect(() => {
-    setSelectedId((current) => current && visibleOpportunities.some((item) => item.id === current)
+    setSelectedId((current) => current && displayedOpportunities.some((item) => item.id === current)
       ? current
-      : visibleOpportunities[0]?.id);
-  }, [visibleOpportunities]);
+      : displayedOpportunities[0]?.id);
+  }, [displayedOpportunities]);
 
   async function createOpportunity(input: StudioOpportunityInput) {
     const created = await studioApi.createOpportunity({ ...input, origin: input.origin ?? "manual" });
@@ -356,17 +378,17 @@ export function TodayPage() {
       <section ref={adoptedSectionRef} tabIndex={-1} className="adopted-opportunities" aria-labelledby="adopted-opportunities-title">
         <header>
           <div>
-            <p className="eyebrow">{entryMode === "series" ? "本集制作" : "待制作"}</p>
-            <h2 id="adopted-opportunities-title">{entryMode === "series" ? "本集制作准备" : "待制作机会"}</h2>
+            <p className="eyebrow">{entryMode === "series" ? "本集制作" : onlyBlockedHistoricalTopics ? "暂不可开工" : "待制作"}</p>
+            <h2 id="adopted-opportunities-title">{entryMode === "series" ? "本集制作准备" : onlyBlockedHistoricalTopics ? "历史候选需补来源" : "待制作机会"}</h2>
           </div>
           {entryMode === "series" && selected ? (
             <label className="series-production-selector">
               <span>待制作单集</span>
               <select aria-label="选择待制作单集" value={selected.id} onChange={(event) => setSelectedId(event.target.value)}>
-                {visibleOpportunities.map((item) => <option key={item.id} value={item.id}>E{String(item.episodeNumber ?? 0).padStart(2, "0")} · {item.title}</option>)}
+                {displayedOpportunities.map((item) => <option key={item.id} value={item.id}>E{String(item.episodeNumber ?? 0).padStart(2, "0")} · {item.title}</option>)}
               </select>
             </label>
-          ) : <span>{visibleOpportunities.length} 条</span>}
+          ) : <span>{blockedOpportunityCount > 0 ? `${startableOpportunities.length} 条可开工 · ${blockedOpportunityCount} 条需补来源` : `${startableOpportunities.length} 条`}</span>}
         </header>
         {opportunitiesLoading ? <div className="today-loading"><RadioTower aria-hidden="true" size={22} />正在读取制作机会...</div> : opportunitiesError ? (
           <div className="source-error-state" role="alert"><AlertCircle aria-hidden="true" size={22} /><div><p className="eyebrow">制作机会不可用</p><h2>机会读取失败</h2><p>{opportunitiesError}</p></div><button className="button button-secondary" type="button" onClick={() => void load()}><RefreshCw aria-hidden="true" size={16} />重试</button></div>
@@ -378,7 +400,7 @@ export function TodayPage() {
             </div>
           ) : (
             <div className="director-workspace">
-              <OpportunityRail opportunities={visibleOpportunities} selectedId={selected.id} onSelect={setSelectedId} onCreate={() => openOpportunityDialog("manual")} />
+              <OpportunityRail opportunities={displayedOpportunities} selectedId={selected.id} onSelect={setSelectedId} onCreate={() => openOpportunityDialog("manual")} />
               <OpportunityFocus key={selected.id} opportunity={selected} />
               <DirectorPanel opportunity={selected} providers={providers} {...(providersLoading || providersError ? { providerError: providersLoading ? "正在读取能力状态..." : `能力状态读取失败：${providersError}` } : {})} onProduce={openProductionDialog} />
             </div>

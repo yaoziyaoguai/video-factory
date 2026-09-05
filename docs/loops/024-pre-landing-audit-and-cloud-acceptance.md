@@ -72,6 +72,10 @@ PR #28 将 ZAI Broker 从 3 类任务扩展到完整任务集，但部署脚本�
 
 真实热点刷新耗时约 461 秒。根因不是单纯模型慢：输出 Schema 要求 `audience`、`painPoint`，但角色拥有字段漏掉两者，独立审计会反复要求删除必填字段。合同现将两字段归还给选题总编，并升级 checkpoint key，避免恢复旧的冲突状态。
 
+### VF-CA-044 — 返工弹窗泄露本地 AI 服务连接细节
+
+返工草稿会拼接服务端的真实不可用原因，其中包含 `VIDEO_FACTORY_*` 环境变量、Unix socket 路径及 `Codex bridge` / `ZAI Code Plan broker` 等内部术语。早期展示层只匹配并不存在的 `AI bridge` 文案，测试夹具也复制了这个错误假设。现改用服务端真实文案做回归，并按“环境变量连接要求 + 当前连接状态”的稳定结构统一转换为创作者可执行的配置提示。
+
 ## Consolidated Local Resolution
 
 - 返工继承不可变模板、标题、角度、受众、时长、声音、画面来源和节点模型；视觉 finding 以 `targetNodeId` 精确预填到脚本、导演方案或素材节点。
@@ -94,8 +98,9 @@ PR #28 将 ZAI Broker 从 3 类任务扩展到完整任务集，但部署脚本�
 
 ## Completion Evidence
 
-- 正确的 Studio 测试入口与仓库级 `npm test` 已完整通过；最新一轮包含 Studio Vitest 249/249、Broker 112/112、production build 与 package smoke 3/3，Pipeline 仅保留 1 个显式真实 E2E 跳过。
+- 正确的 Studio 测试入口与仓库级 `npm test` 已完整通过；最新一轮包含 Studio Vitest 251/251、Broker 112/112、production build 与 package smoke 3/3，Pipeline 403/404 通过，仅保留 1 个显式真实 E2E 跳过。
 - `make test-py` 已通过：Python 104/104。
-- 本地桌面与 390×844 移动端完成真实点击：返工继承与建议预填、模型/素材切换、模板增删改、选题策略、声音预设、素材库按作品展开、搜索与移动端横向布局均通过；浏览器 console 无 error。
+- 本地桌面与 390×844 移动端完成真实点击：返工继承与建议预填、模型/素材切换、模板增删改、选题策略、声音预设、素材库按作品展开、搜索与移动端横向布局均通过；最终复验覆盖六个主页面、制作筛选、素材展开、模板选择、来源授权、热点筛选、手动录入和返工弹窗，浏览器 console/page error 均为 0。
+- 返工弹窗使用真实 Codex/ZAI 不可用原因复验通过；页面显示“AI 创作服务尚未连接”，且不再包含 `VIDEO_FACTORY_*`、`/run/video-factory*`、socket、bridge、broker 或 `studio-owner`。
 - `git diff --check` 已通过。
 - 尚待：最终只读 diff 审计、提交推送、GitHub Actions 部署，以及云端桌面/移动端和一条真实付费视频的最终验收。完成前本 Loop 保持 `in progress`。

@@ -209,6 +209,39 @@ describe("Creative OS", () => {
     expect(screen.getByRole("link", { name: "查看制作记录" })).toHaveAttribute("href", "/projects");
   });
 
+  it("does not present policy-blocked historical topics as current production opportunities", async () => {
+    const blocked = {
+      ...opportunity,
+      id: "historical-blocked",
+      title: "缺少第二个独立来源的历史选题",
+      verification: {
+        status: "blocked" as const,
+        independentSources: 1,
+        requiredSources: 2,
+        reasons: ["当前总编规则要求至少 2 个不同域名的有效原始来源链接。"],
+      },
+      editorialDecision: {
+        verdict: "skip" as const,
+        score: 0,
+        reasons: ["证据门槛未满足。"],
+        guardrails: ["补齐来源后再评估。"],
+      },
+    };
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([blocked]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "历史候选需补来源" })).toBeInTheDocument();
+    expect(screen.getByText(/0 条可开工 · 1 条历史候选需补来源/)).toBeInTheDocument();
+    expect(screen.queryByText(/1 条制作机会/)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: blocked.title })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建制作" })).toBeDisabled();
+  });
+
   it("keeps all agent candidates visible beside persisted opportunities and filters by category", async () => {
     const user = userEvent.setup();
     const candidates = Array.from({ length: 8 }, (_, index) => candidate(index + 1, index < 5 ? "technology" : "society"));
