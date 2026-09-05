@@ -200,6 +200,18 @@ describe("JsonTemplateStore", () => {
           name: "我的 QA 验收笔记",
           description: "这是创作者自己的正常模板。",
         },
+        {
+          ...structuredClone(BUILTIN_TEMPLATES[0]!),
+          id: "creator-ranked-comparison",
+          name: "榜单对比 QA 副本",
+          description: "这是创作者自己的榜单对比模板。",
+        },
+        {
+          ...structuredClone(BUILTIN_TEMPLATES[0]!),
+          id: "creator-custom-acceptance",
+          name: "自定义模板 QA 验收",
+          description: "这是创作者自己的自定义模板。",
+        },
       ],
     }));
 
@@ -209,6 +221,8 @@ describe("JsonTemplateStore", () => {
     assert.equal(catalog.templates.some((template) => template.id === "ranked-comparison-copy-72c5140c"), false);
     assert.equal(catalog.templates.some((template) => template.id === "custom-7b28591c-e3d"), false);
     assert.equal(catalog.templates.some((template) => template.id === "creator-qa-notes"), true);
+    assert.equal(catalog.templates.some((template) => template.id === "creator-ranked-comparison"), true);
+    assert.equal(catalog.templates.some((template) => template.id === "creator-custom-acceptance"), true);
   });
 
   it("rejects stale writes and never edits a built-in in place", async () => {
