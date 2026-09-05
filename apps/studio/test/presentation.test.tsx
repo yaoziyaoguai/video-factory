@@ -43,6 +43,10 @@ describe("creator-facing presentation labels", () => {
   });
 
   it("translates persisted worker provenance into clear Chinese", () => {
+    expect(creatorFacingTechnicalText("从未完成任务恢复：Pexels free stock license; review current provider license before publishing."))
+      .toBe("从未完成任务恢复：Pexels 免费图库素材；发布前需核对当前授权条款。");
+    expect(creatorFacingTechnicalText("从未完成任务恢复：Pixabay Content License; cache API responses for 24h and avoid systematic mass downloads."))
+      .toBe("从未完成任务恢复：Pixabay 内容许可；接口结果最多缓存 24 小时，禁止系统性批量下载。");
     expect(creatorFacingTechnicalText("VideoFactory generated script; human review required before publishing."))
       .toBe("AI 生成脚本；发布前需要人工核对事实与表述。");
     expect(creatorFacingTechnicalText("License snapshot is stored per scene asset in this plan."))
