@@ -2382,6 +2382,7 @@ describe("ProductionPipeline", () => {
             targetNodeIds: ["visual-direction", "assets"],
           },
         ],
+        affectedScenePositions: [2],
         previousDirectorPlan: { version: "video-factory/director-plan-v1", shots: [{ scenePosition: 2 }] },
       },
       providers: {
@@ -2508,7 +2509,7 @@ describe("ProductionPipeline", () => {
     });
     const reworkDirectorInput = directorInput as pipeline.VisualDirectorAgentInput | undefined;
     assert.ok(reworkDirectorInput?.brief.rework);
-    assert.equal("affectedScenePositions" in reworkDirectorInput.brief.rework, false);
+    assert.deepEqual(reworkDirectorInput.brief.rework.affectedScenePositions, [1, 2]);
   });
 
   it("validates and reprices a human visual plan before invalidating the old asset approval", async () => {
@@ -6213,6 +6214,7 @@ describe("ProductionPipeline", () => {
           assets: "- 镜头 2：替换为修正版画面；保留未受影响母片。",
         },
         findings: [],
+        affectedScenePositions: [2],
         previousScript,
         previousDirectorPlan,
       },

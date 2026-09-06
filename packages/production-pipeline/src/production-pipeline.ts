@@ -1784,7 +1784,6 @@ export class ProductionPipeline {
     const assetReworkScenePositions = brief.rework
       ? reworkAffectedScenePositions({
         findings: brief.rework.findings,
-        instructions: `${brief.rework.nodeInstructions.visualDirection}\n${brief.rework.nodeInstructions.assets}`,
         ...(brief.rework.previousScript ? { previousScenes: brief.rework.previousScript.scenes } : {}),
         ...(brief.rework.previousDirectorPlan ? { previousShots: brief.rework.previousDirectorPlan.shots } : {}),
         // 工作流定义阶段脚本尚未生成：有 previousScript 时用它作 current 的保守下界（script 差异为 0），
@@ -2906,7 +2905,6 @@ function directorNode(
       const affectedScenePositions = currentBrief.rework
         ? reworkAffectedScenePositions({
           findings: currentBrief.rework.findings,
-          instructions: `${currentBrief.rework.nodeInstructions.visualDirection}\n${currentBrief.rework.nodeInstructions.assets}`,
           ...(currentBrief.rework.previousScript ? { previousScenes: currentBrief.rework.previousScript.scenes } : {}),
           ...(currentBrief.rework.previousDirectorPlan ? { previousShots: currentBrief.rework.previousDirectorPlan.shots } : {}),
           currentScenes: script.scenes,

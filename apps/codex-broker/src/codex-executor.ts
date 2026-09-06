@@ -1261,8 +1261,8 @@ function requireDirectorBrief(value: unknown): Record<string, unknown> {
 }
 
 function boundedScenePositions(value: unknown, field: string): number[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 100) {
-    throw new CodexExecutorError(`${field} must contain 1 to 100 scene positions.`, false);
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new CodexExecutorError(`${field} must contain at most 100 scene positions.`, false);
   }
   const positions = value.map((item, index) => {
     if (!Number.isInteger(item) || Number(item) < 1 || Number(item) > 10_000) {

@@ -704,7 +704,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <span>{issue.reason}；{issue.action}</span>
               </li>)}</ul>
               {inheritedSelectionIssues.some((issue) => issue.id.startsWith("source-")) ? <button className="button button-ghost" type="button" onClick={() => {
-                setAssetProviderIds(sourceIdsForRecipe(selectedRecipe, providers));
+                const sourceIds = sourceIdsForRecipe(selectedRecipe, providers);
+                setAssetProviderIds(selectedTemplateId === "photo-story"
+                  ? includeLocalEditorialSource(sourceIds, providers)
+                  : sourceIds);
                 setAdvancedOpen(true);
                 setActiveKey("assets");
               }}>用当前策略的可用来源替换</button> : null}
@@ -979,7 +982,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                           {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                         </select> : <small>{providerBillingLabel(provider)}</small>}
                       </label>;})}
-                      <button className="button button-ghost" type="button" onClick={() => { setAdvancedOpen(true); setActiveKey("assets"); }}>调整来源</button>
+                      <button className="button button-ghost" type="button" onClick={() => { setInheritedSettingsOpen(true); setAdvancedOpen(true); setActiveKey("assets"); }}>调整来源</button>
                     </div> : null}
                     <small className="production-role-billing">{selected
                       ? item.key === "assets"

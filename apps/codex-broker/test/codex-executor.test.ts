@@ -433,6 +433,7 @@ describe("parseTaskRequest", () => {
       sourceRunId: "run-rejected-1",
       visualDirectionInstruction: "只修改构图。",
       assetInstruction: "执行新路由。",
+      affectedScenePositions: [],
       findings: [{
         findingId: "vf_bbbbbbbbbbbbbbbbbbbbbbbb",
         timecodeMs: 4_000,
@@ -444,6 +445,11 @@ describe("parseTaskRequest", () => {
     };
     const parsedDirectorRework = parseTaskRequest(directorRework);
     assert.equal(parsedDirectorRework.kind, "director-plan");
+    const parsedDirectorBrief = parsedDirectorRework.payload.brief as Record<string, unknown>;
+    assert.deepEqual(
+      ((parsedDirectorBrief.rework as Record<string, unknown>).affectedScenePositions),
+      [],
+    );
     assert.match(buildTaskPrompt(parsedDirectorRework), /vf_bbbbbbbbbbbbbbbbbbbbbbbb/);
 
     const publishInput = publishCopyRequest();

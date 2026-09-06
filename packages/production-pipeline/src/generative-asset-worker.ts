@@ -994,18 +994,17 @@ export async function inspectReworkCarriedAssetScenePositions(
 
 export interface ReworkAffectedSceneScope {
   findings: unknown;
-  instructions: string;
   previousScenes?: unknown;
   previousShots?: unknown;
   currentScenes: unknown;
   currentShots?: unknown;
-  // 新版 Studio 由创作者显式确认该范围；字段缺失仅表示这是尚未迁移的旧 run，
-  // 需要使用兼容的自由文本解析。
+  // 新版 Studio 由创作者显式确认该范围；旧 run 缺少字段时无法可靠还原用户意图，
+  // 因此保守按全片处理。
   affectedScenePositions?: readonly number[];
 }
 
-// 导演节点与素材执行器共用的唯一影响闭包：finding 定位、无定位保守全片、script 逐镜差异、
-// 中文指令解析和 previous/current 方案中的 reference/REUSE 传递依赖都在这里展开，
+// 导演节点与素材执行器共用的唯一影响闭包：结构化范围、finding 定位、无定位保守全片、
+// script 逐镜差异和 previous/current 方案中的 reference/REUSE 传递依赖都在这里展开，
 // 下游不得再用另一套自然语言规则推导范围。
 export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): number[] {
   const currentSceneRecords = positionedRecords(scope.currentScenes, "position");
@@ -1031,54 +1030,14 @@ export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): n
       if (!isDeepStrictEqual(scene, previousSceneRecords.get(position))) affected.add(position);
     }
   }
-  const instructions = typeof scope.instructions === "string" ? scope.instructions : "";
-  // 新版 Studio 会让创作者在开工前显式确认镜头范围。只要结构化字段存在（包括空数组），
-  // 自由文本就只描述“怎么改”，不再暗中扩大付费范围；旧 run 没有该字段时才走兼容解析。
+  // 自由文本只描述“怎么改”，不再决定付费范围。旧 run 缺少结构化字段时，
+  // 任何局部推断都可能漏掉应重做镜头，因此 fail closed 为全部当前镜头。
   if (scope.affectedScenePositions === undefined) {
-    const complement = extractInstructionComplementScopes(instructions);
-    if (complement.unresolvedReference) {
-      return [...validPositions].sort((left, right) => left - right);
+    for (const position of validPositions) affected.add(position);
+  } else {
+    for (const position of scope.affectedScenePositions) {
+      if (Number.isInteger(position) && position > 0) affected.add(position);
     }
-    for (const excludedPositions of complement.excludedPositionSets) {
-      const excluded = new Set(excludedPositions);
-      for (const position of validPositions) {
-        if (!excluded.has(position)) affected.add(position);
-      }
-    }
-    if (instructionRequestsFullVisualRework(complement.remainingInstruction)) {
-      return [...validPositions].sort((left, right) => left - right);
-    }
-    // 旧 run 的全局人工要求不能被局部 finding 截断：只有能明确证明为局部的修改
-    // 才保持局部；含糊的全局视觉要求保守扩展到全部当前镜头。
-    if (instructionRequiresGlobalVisualScope(complement.remainingInstruction)) {
-      return [...validPositions].sort((left, right) => left - right);
-    }
-    for (const clause of splitInstructionClauses(complement.remainingInstruction)) {
-      const excepted = exceptionScopeReferences(clause);
-      if (excepted) {
-        if (excepted.unresolvedReference) {
-          return [...validPositions].sort((left, right) => left - right);
-        }
-        const excluded = new Set(excepted.positions);
-        for (const position of validPositions) {
-          if (!excluded.has(position)) affected.add(position);
-        }
-        continue;
-      }
-      if (INSTRUCTION_PRESERVATION_PATTERN.test(clause)) continue;
-      if (instructionNegatesEveryChangeAction(clause)) continue;
-      const extraction = extractSceneReferences(clause);
-      const mentioned = extraction.positions.filter((position) => validPositions.has(position));
-      if (extraction.unresolvedReference || (extraction.positions.length > 0 && mentioned.length === 0)) {
-        // 有镜头引用形态但序数无法解析，或解析出的镜头号全部不在当前脚本内：
-        // fail closed 保守全片，不能返回空 scope 后让全部母片失去继承。
-        return [...validPositions].sort((left, right) => left - right);
-      }
-      for (const position of mentioned) affected.add(position);
-    }
-  }
-  for (const position of scope.affectedScenePositions ?? []) {
-    if (Number.isInteger(position) && position > 0) affected.add(position);
   }
   expandAffectedDependencies(affected, scope.previousShots);
   expandAffectedDependencies(affected, scope.currentShots);
@@ -1109,232 +1068,6 @@ function shotDependencyPosition(shot: Record<string, unknown>): number | undefin
   return assetReuseSourceScenePosition({ query: shot.query });
 }
 
-function instructionRequestsFullVisualRework(instruction: string): boolean {
-  const action = "(?:重做|重新做|重制|重新制作|修改|改写|替换|重生|重新生成|调整)";
-  const scope = "(?:全片|整片|全部镜头|所有镜头)";
-  // “不要重做全片”“不重做整片”是否定全片而非要求全片返工；
-  // scope 前置形式中否定词不在连接词表内，天然无法匹配。
-  const negation = /(?:不要|不能|不得|别|无需|无须|不用|不需要|不必|不)$/;
-  for (const match of instruction.matchAll(new RegExp(`${action}\\s*${scope}`, "g"))) {
-    if (!negation.test(instruction.slice(0, match.index).trimEnd())) return true;
-  }
-  return new RegExp(`${scope}(?:画面|视觉|镜头|素材|方案)?\\s*(?:都|全部|需要|必须|一律)?\\s*${action}`).test(instruction);
-}
-
-const INSTRUCTION_PRESERVATION_PATTERN = /(?:保留|保持不变|保持原样|不改|无需修改|无需重做|维持|沿用)/;
-// 修改动作词只用于判断“是否提出了无法定位到镜头集合的修改要求”，不用于扩大提取出的镜头集合。
-const INSTRUCTION_CHANGE_ACTION_PATTERN = /(?:重做|重新做|重制|重新制作|重新生成|重生|重拍|修改|改写|改成|改为|更换|换成|改用|替换|调整|修正|统一|移除|删除|去掉|加上|增加|添加|改)/g;
-// 能证明指令为局部的引用：明确镜头集合（数字或中文序数）或显式指向既有受影响集合；
-// 引用目标本身不进入 affected 集合，修改主语仍由数字镜头号或 finding 定位。
-const INSTRUCTION_LOCAL_SCOPE_REFERENCE_PATTERN = /第\s*[零〇一二两三四五六七八九十百千]+\s*(?:镜头|场景|镜)|(?:镜头|场景)\s*[零〇一二两三四五六七八九十百千]|受影响|该镜头|相应镜头|问题镜头|下列问题|以下问题|已定位问题/;
-const INSTRUCTION_NEGATION_SUFFIX_PATTERN = /(?:不要|不能|不得|别|无需|无须|不用|不需要|不必|不)$/;
-const REWORK_REASON_PREFIX_PATTERN = /^本次重做原因\s*[:：]\s*/;
-
-// 局部判定与位置提取共享同一个解析器：一旦这里解析不出非空集合，
-// 上游必须 fail closed（保守全片），不能再出现“判定为局部但提取为空”的漂移。
-const CHINESE_NUMERAL_DIGITS: Record<string, number> = {
-  零: 0,
-  〇: 0,
-  一: 1,
-  二: 2,
-  两: 2,
-  三: 3,
-  四: 4,
-  五: 5,
-  六: 6,
-  七: 7,
-  八: 8,
-  九: 9,
-};
-const CHINESE_NUMERAL_UNITS: Record<string, number> = { 十: 10, 百: 100, 千: 1000 };
-const CHINESE_NUMERAL = "[零〇一二两三四五六七八九十百千]";
-const SCENE_REFERENCE_ITEM = `(?:[0-9]+|${CHINESE_NUMERAL}+)`;
-const SCENE_REFERENCE_LIST = `${SCENE_REFERENCE_ITEM}(?:\\s*[、和及与]\\s*(?:第\\s*)?${SCENE_REFERENCE_ITEM})*`;
-const SCENE_REFERENCE_SUFFIX_PATTERN = new RegExp(
-  `(?:第\\s*)?(${SCENE_REFERENCE_LIST})\\s*(?:镜头|场景|镜)`,
-  "g",
-);
-const SCENE_REFERENCE_PREFIX_PATTERN = new RegExp(
-  `(?:镜头|场景)\\s*(${SCENE_REFERENCE_LIST})`,
-  "g",
-);
-const SCENE_REFERENCE_RANGE_SUFFIX_PATTERN = new RegExp(
-  `(?:第\\s*)?(${SCENE_REFERENCE_ITEM})\\s*(?:到|至|[-—–~～])\\s*(?:第\\s*)?(${SCENE_REFERENCE_ITEM})\\s*(?:镜头|场景|镜)`,
-  "g",
-);
-const SCENE_REFERENCE_RANGE_PREFIX_PATTERN = new RegExp(
-  `(?:镜头|场景)\\s*(${SCENE_REFERENCE_ITEM})\\s*(?:到|至|[-—–~～])\\s*(?:第\\s*)?(${SCENE_REFERENCE_ITEM})(?:\\s*(?:镜头|场景|镜))?`,
-  "g",
-);
-// “与第 X 镜一致”“参考镜头 Y”里的镜头号是对照目标而不是修改主语，不进入 affected 集合。
-const SCENE_REFERENCE_TARGET_PREFIX = /(?:如同|参考|沿用|保持|对照|像)$/;
-const SCENE_REFERENCE_CONNECTOR_PREFIX = /(?:与|同|和|跟)$/;
-const SCENE_REFERENCE_RELATION_SUFFIX = /^\s*(?:一致|相同|一样)/;
-const INSTRUCTION_CHANGE_ACTION_TEST_PATTERN = /(?:重做|重新做|重制|重新制作|重新生成|重生|重拍|修改|改写|改成|改为|更换|换成|改用|替换|调整|修正|统一|移除|删除|去掉|加上|增加|添加)/;
-
-interface SceneReferenceExtraction {
-  positions: number[];
-  unresolvedReference: boolean;
-}
-
-function extractSceneReferences(clause: string): SceneReferenceExtraction {
-  const positions = new Set<number>();
-  let unresolvedReference = false;
-  const parseItem = (item: string): number | undefined => {
-    const normalizedItem = item.replace(/^第\s*/, "");
-    return /^[0-9]+$/.test(normalizedItem)
-      ? Number(normalizedItem)
-      : parseChineseSceneOrdinal(normalizedItem);
-  };
-  const consumeRange = (match: RegExpMatchArray): void => {
-    if (isComparisonTargetReference(clause, match)) return;
-    const start = parseItem(match[1]!);
-    const end = parseItem(match[2]!);
-    if (start === undefined || end === undefined || start < 1 || end < start) {
-      unresolvedReference = true;
-      return;
-    }
-    for (let position = start; position <= end; position += 1) positions.add(position);
-  };
-  for (const match of clause.matchAll(SCENE_REFERENCE_RANGE_SUFFIX_PATTERN)) consumeRange(match);
-  for (const match of clause.matchAll(SCENE_REFERENCE_RANGE_PREFIX_PATTERN)) consumeRange(match);
-  const consume = (match: RegExpMatchArray): void => {
-    if (isComparisonTargetReference(clause, match)) return;
-    for (const item of match[1]!.split(/\s*[、和及与]\s*/)) {
-      const position = parseItem(item);
-      if (typeof position !== "number" || !Number.isInteger(position) || position < 1) {
-        unresolvedReference = true;
-        continue;
-      }
-      positions.add(position);
-    }
-  };
-  for (const match of clause.matchAll(SCENE_REFERENCE_SUFFIX_PATTERN)) consume(match);
-  for (const match of clause.matchAll(SCENE_REFERENCE_PREFIX_PATTERN)) consume(match);
-  return { positions: [...positions], unresolvedReference };
-}
-
-function isComparisonTargetReference(clause: string, match: RegExpMatchArray): boolean {
-  const matchIndex = match.index ?? 0;
-  const prefix = clause.slice(0, matchIndex).trimEnd();
-  if (SCENE_REFERENCE_TARGET_PREFIX.test(prefix)) return true;
-  const connector = prefix.match(SCENE_REFERENCE_CONNECTOR_PREFIX)?.[0];
-  if (!connector) return false;
-  const beforeConnector = prefix.slice(0, -connector.length).trimEnd();
-  if (!beforeConnector) return true;
-  const suffix = clause.slice(matchIndex + match[0].length);
-  // “第二镜和第四镜改成近景”中的连接词属于并列主语；“第二镜改成与第一镜一致”
-  // 才把后一镜视作参照目标。
-  if (INSTRUCTION_CHANGE_ACTION_TEST_PATTERN.test(suffix)) return false;
-  return INSTRUCTION_CHANGE_ACTION_TEST_PATTERN.test(beforeConnector)
-    || SCENE_REFERENCE_RELATION_SUFFIX.test(suffix);
-}
-
-interface InstructionComplementScopes {
-  excludedPositionSets: number[][];
-  unresolvedReference: boolean;
-  remainingInstruction: string;
-}
-
-function extractInstructionComplementScopes(instruction: string): InstructionComplementScopes {
-  const action = "(?:重做|重新做|重制|重新制作|重新生成|重生|重拍|修改|改写|更换|替换|调整|修正|改)";
-  const patterns = [
-    new RegExp(`(?:除了|除)\\s*([^，,\\n。；]+?)\\s*(?:之外|以外|外)\\s*[，,]?\\s*(?:(?:其余|其他|剩余)(?:镜头|场景)?\\s*)?(?:都|全部|一律)?\\s*${action}`),
-    new RegExp(`(?:只\\s*)?(?:保留|留下)\\s*([^，,\\n。；]+?)\\s*[，,]\\s*(?:其余|其他|剩余)(?:镜头|场景)?\\s*(?:都|全部|一律)?\\s*${action}`),
-  ];
-  const excludedPositionSets: number[][] = [];
-  let unresolvedReference = false;
-  let remainingInstruction = instruction;
-  while (true) {
-    const matches = patterns.flatMap((pattern) => {
-      const match = pattern.exec(remainingInstruction);
-      return match ? [match] : [];
-    }).sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
-    const match = matches[0];
-    if (!match) break;
-    const extraction = extractSceneReferences(match[1] ?? "");
-    if (extraction.unresolvedReference || extraction.positions.length === 0) {
-      unresolvedReference = true;
-    } else {
-      excludedPositionSets.push(extraction.positions);
-    }
-    const index = match.index ?? 0;
-    remainingInstruction = `${remainingInstruction.slice(0, index)} ${remainingInstruction.slice(index + match[0].length)}`;
-  }
-  return { excludedPositionSets, unresolvedReference, remainingInstruction };
-}
-
-function exceptionScopeReferences(clause: string): SceneReferenceExtraction | undefined {
-  const match = clause.match(
-    /^(?:除了|除)\s*(.+?)\s*(?:之外|以外|外)\s*(?:其余|其他)?(?:镜头|场景)?\s*(?:都|全部|一律)?\s*(?:重做|重新做|重制|重新制作|重新生成|重生|重拍|修改|改写|更换|替换|调整|修正)/,
-  );
-  return match ? extractSceneReferences(match[1] ?? "") : undefined;
-}
-
-function splitInstructionClauses(instructions: string): string[] {
-  return instructions.split(/[\n。；，,]|(?:但是|但|不过|然而|而是|而(?=只)|并且|并|且)/);
-}
-
-function instructionNegatesEveryChangeAction(clause: string): boolean {
-  let foundChangeAction = false;
-  for (const match of clause.matchAll(INSTRUCTION_CHANGE_ACTION_PATTERN)) {
-    foundChangeAction = true;
-    if (!INSTRUCTION_NEGATION_SUFFIX_PATTERN.test(clause.slice(0, match.index).trimEnd())) return false;
-  }
-  return foundChangeAction;
-}
-
-// 按位值解析中文序数（支持到项目允许的镜头上限 9999）：“十二”是 12 而不是 2，
-// “一百零三”是 103；超出解析能力（万位及以上、 malformed 序列）返回 undefined，
-// 由调用方 fail closed。
-function parseChineseSceneOrdinal(value: string): number | undefined {
-  if (!value || !new RegExp(`^${CHINESE_NUMERAL}+$`).test(value)) return undefined;
-  let section = 0;
-  let digit = 0;
-  for (const character of value) {
-    const numeral = CHINESE_NUMERAL_DIGITS[character];
-    if (numeral !== undefined) {
-      // “二零三”“二三”这类无位值单位的数字串不是合法镜头序数。
-      if (digit !== 0) return undefined;
-      if (numeral !== 0) digit = numeral;
-      continue;
-    }
-    const unit = CHINESE_NUMERAL_UNITS[character];
-    if (unit === undefined) return undefined;
-    section += (digit || 1) * unit;
-    digit = 0;
-  }
-  const parsed = section + digit;
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 9_999) return undefined;
-  return parsed;
-}
-
-function instructionRequiresGlobalVisualScope(instructions: string): boolean {
-  for (const rawClause of splitInstructionClauses(instructions)) {
-    const clause = rawClause.trim().replace(REWORK_REASON_PREFIX_PATTERN, "");
-    if (!clause.trim()) continue;
-    if (INSTRUCTION_PRESERVATION_PATTERN.test(clause)) continue;
-    if (extractSceneReferences(clause).positions.length > 0) continue;
-    if (INSTRUCTION_LOCAL_SCOPE_REFERENCE_PATTERN.test(clause)) continue;
-    for (const match of clause.matchAll(INSTRUCTION_CHANGE_ACTION_PATTERN)) {
-      if (!INSTRUCTION_NEGATION_SUFFIX_PATTERN.test(clause.slice(0, match.index).trimEnd())) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-function reworkInstructions(rework: Record<string, unknown>): string {
-  if (isRecord(rework.nodeInstructions)) {
-    return [
-      typeof rework.nodeInstructions.visualDirection === "string" ? rework.nodeInstructions.visualDirection : "",
-      typeof rework.nodeInstructions.assets === "string" ? rework.nodeInstructions.assets : "",
-    ].join("\n");
-  }
-  return typeof rework.instruction === "string" ? rework.instruction : "";
-}
-
 async function findReworkCarryForwardItems(
   options: Partial<Pick<ReworkCarryForwardInspection, "runsRoot">>
     & Omit<ReworkCarryForwardInspection, "runsRoot">,
@@ -1350,11 +1083,10 @@ async function findReworkCarryForwardItems(
   }
 
   const routedShots = parseRoutedShots(options.currentDirectorPlan.shots);
-  // 与导演节点同一套统一影响闭包；persisted brief 的结构化 affectedScenePositions 既在
-  // 闭包内抑制系统含糊文案的全片扩展，也在下面做保守并集。
+  // 与导演节点使用同一套统一影响闭包；结构化 affectedScenePositions 决定用户选择，
+  // 旧 run 缺少该字段时由闭包保守按全片处理。
   const affectedScenes = new Set<number>(reworkAffectedScenePositions({
     findings: rework.findings,
-    instructions: reworkInstructions(rework),
     previousScenes: rework.previousScript.scenes,
     previousShots: rework.previousDirectorPlan.shots,
     currentScenes: options.currentScript.scenes,
@@ -1369,8 +1101,6 @@ async function findReworkCarryForwardItems(
       if (Number.isInteger(position) && position > 0) affectedScenes.add(position);
     }
   }
-  if (affectedScenes.size === 0) return [];
-
   const currentScenes = positionedRecords(options.currentScript.scenes, "position");
   const previousScenes = positionedRecords(rework.previousScript.scenes, "position");
   // 为什么不用整条 shot deepEqual：estimatedCostCny、confidence、rationale 等字段只影响

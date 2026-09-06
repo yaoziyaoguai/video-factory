@@ -939,6 +939,67 @@ describe("Studio client", () => {
     expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
   });
 
+  it("opens inherited settings and the asset source controls from the rework source shortcut", async () => {
+    const user = userEvent.setup();
+    renderReworkDialog({
+      sourceRunId: "run-adjust-rework-sources",
+      sourceRunRevision: 2,
+      affectedScenePositions: [2],
+      nodeInstructions: { script: "保持脚本。", visualDirection: "调整第二镜。", assets: "替换第二镜素材。" },
+      findings: [],
+      previousScript: { scenes: [{ position: 1 }, { position: 2 }] },
+      previousDirectorPlan: { shots: [{ scenePosition: 1 }, { scenePosition: 2 }] },
+    });
+
+    const inheritedToggle = await screen.findByRole("button", { name: /查看继承设置/ });
+    expect(inheritedToggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(screen.getByRole("button", { name: "调整来源" }));
+
+    expect(inheritedToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: /更多：素材来源与制作细节/ })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("checkbox", { name: /Pexels 图库/ })).toBeVisible();
+  });
+
+  it("keeps the editorial layout source when repairing invalid photo-story rework sources", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<NewRunDialog
+      open
+      providers={providers}
+      initialValues={{
+        title: "照片叙事返工",
+        angle: "替换已经失效的画面来源",
+        audience: "短视频创作者",
+        template: { templateId: "photo-story", templateVersion: 3 },
+        providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
+        director: { profileId: "auto", assetProviderIds: ["retired-stock-v1"] },
+        economics: { recipeId: "free-stock", allowMeteredProviders: false },
+        voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+        rework: {
+          sourceRunId: "run-photo-story-invalid-source",
+          sourceRunRevision: 3,
+          affectedScenePositions: [1],
+          nodeInstructions: { script: "保持脚本。", visualDirection: "保持照片叙事。", assets: "替换失效来源。" },
+          findings: [],
+        },
+      }}
+      onClose={() => undefined}
+      onSubmit={onSubmit}
+    />);
+
+    await user.click(await screen.findByRole("button", { name: "用当前策略的可用来源替换" }));
+    await waitFor(() => expect(screen.queryByText(/上一版有.*项已失效/)).not.toBeInTheDocument());
+    const start = screen.getByRole("button", { name: "开始制作" });
+    await waitFor(() => expect(start).toBeEnabled());
+    await user.click(start);
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      director: expect.objectContaining({
+        assetProviderIds: ["pexels-stock-v1", "local-editorial-v1"],
+      }),
+    }));
+  });
+
   it("preserves a historical rework template when the catalog can still identify it", async () => {
     const historicalTemplate = { ...template("historical-template", "历史模板"), version: 2 };
     vi.mocked(studioApi.templates).mockResolvedValueOnce({

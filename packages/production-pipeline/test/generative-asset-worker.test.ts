@@ -1357,7 +1357,7 @@ describe("GenerativeAssetWorkerClient", () => {
           sourceRunId,
           nodeInstructions: { visualDirection: "保留未受影响镜头。", assets: "只重做受影响镜头，其余保留母片。" },
           findings: [],
-          ...(affectedScenePositions.length ? { affectedScenePositions } : {}),
+          affectedScenePositions,
           previousScript: script,
           previousDirectorPlan: directorPlan,
         };
@@ -1369,6 +1369,28 @@ describe("GenerativeAssetWorkerClient", () => {
       },
     };
   }
+
+  it("carries every unchanged paid scene when the creator selects an explicit empty rework scope", async () => {
+    const { subject, getPaidCalls, reworkRequest } = await setupReferenceReworkSourceRun();
+    const { request, outputDir } = reworkRequest(0, []);
+
+    const response = await subject.run(request);
+
+    assert.equal(response.status, "succeeded");
+    assert.equal(getPaidCalls(), 4);
+    assert.equal(response.diagnostics?.estimatedCostCny, 0);
+    assert.equal(response.diagnostics?.actualCostCny, 0);
+    assert.equal(response.diagnostics?.meteredAttemptCount, 0);
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+    assert.deepEqual(jobs.jobs.map((job: { scenePosition: number; carriedForward?: boolean }) => (
+      [job.scenePosition, job.carriedForward === true]
+    )), [
+      [1, true],
+      [2, true],
+      [3, true],
+      [4, true],
+    ]);
+  });
 
   it("carries an unaffected multi-level reference chain across runs with one new paid call", async () => {
     const { root, subject, getPaidCalls, reworkRequest, readSourceLedger } = await setupReferenceReworkSourceRun();
@@ -3178,7 +3200,6 @@ describe("reworkAffectedScenePositions", () => {
   it("expands reference and REUSE_ONLY dependents into the director-facing affected closure", () => {
     const positions = reworkAffectedScenePositions({
       findings: [finding(1)],
-      instructions: "只重做镜头 1。",
       previousScenes: [scene(1), scene(2), scene(3)],
       previousShots: [
         { scenePosition: 1 },
@@ -3186,6 +3207,7 @@ describe("reworkAffectedScenePositions", () => {
         { scenePosition: 3, query: "REUSE_ONLY scene 2" },
       ],
       currentScenes: [scene(1), scene(2), scene(3)],
+      affectedScenePositions: [1],
     });
     assert.deepEqual(positions, [1, 2, 3]);
   });
@@ -3193,9 +3215,9 @@ describe("reworkAffectedScenePositions", () => {
   it("merges visual findings with script-only scene changes before the director runs", () => {
     const positions = reworkAffectedScenePositions({
       findings: [finding(2, ["visual-direction"])],
-      instructions: "保留原脚本。",
       previousScenes: [scene(1), scene(2), scene(3), scene(4)],
       currentScenes: [scene(1), scene(2), scene(3), scene(4, "重写后的第四幕")],
+      affectedScenePositions: [],
     });
     assert.deepEqual(positions, [2, 4]);
   });
@@ -3203,72 +3225,27 @@ describe("reworkAffectedScenePositions", () => {
   it("falls back to every current scene when a visual or asset finding cannot be located", () => {
     const positions = reworkAffectedScenePositions({
       findings: [finding(undefined)],
-      instructions: "只重做镜头 2。",
       previousScenes: [scene(1), scene(2)],
       currentScenes: [scene(1), scene(2)],
+      affectedScenePositions: [],
     });
     assert.deepEqual(positions, [1, 2]);
   });
 
-  it("derives scoped positions from real Chinese instructions without misreading negated full-video rework", () => {
+  it("falls back to every current scene when a legacy run lacks a structured scope", () => {
     const scenes = Array.from({ length: 8 }, (_, index) => scene(index + 1));
-    const unchanged = { previousScenes: scenes, currentScenes: scenes.map((entry) => structuredClone(entry)) };
-    const scoped = (instructions: string) => reworkAffectedScenePositions({
-      findings: [],
-      instructions,
-      ...unchanged,
-    });
-    assert.deepEqual(scoped("只替换镜头 4、6、7、8；第 4 镜注意主体一致。"), [4, 6, 7, 8]);
-    assert.deepEqual(scoped("不要重做全片，只改第 4 镜"), [4]);
-    assert.deepEqual(scoped("重做全片"), [1, 2, 3, 4, 5, 6, 7, 8]);
-    assert.deepEqual(scoped("保留全片风格，沿用所有镜头色调，只替换镜头 4"), [4]);
-  });
-
-  it("expands a global instruction that cannot be proven local to every current scene", () => {
-    const positions = reworkAffectedScenePositions({
-      findings: [finding(2)],
-      instructions: "统一把人物服装换成蓝色。",
-      previousScenes: [scene(1), scene(2), scene(3)],
-      currentScenes: [scene(1), scene(2), scene(3)],
-    });
-    assert.deepEqual(positions, [1, 2, 3]);
-  });
-
-  it("keeps Chinese-ordinal local instructions scoped without adopting their reference targets", () => {
     const positions = reworkAffectedScenePositions({
       findings: [],
-      instructions: "第二镜改成与第一镜一致的自然纪实构图。",
-      previousScenes: [scene(1), scene(2), scene(3)],
-      currentScenes: [scene(1), scene(2), scene(3)],
+      previousScenes: scenes,
+      currentScenes: scenes.map((entry) => structuredClone(entry)),
     });
-    assert.deepEqual(positions, [2]);
-
-    const twelveScenes = Array.from({ length: 12 }, (_, index) => scene(index + 1));
-    const scoped = (instructions: string) => reworkAffectedScenePositions({
-      findings: [],
-      instructions,
-      previousScenes: twelveScenes,
-      currentScenes: twelveScenes.map((entry) => structuredClone(entry)),
-    });
-    assert.deepEqual(scoped("第十二镜改成近景。"), [12]);
-    assert.deepEqual(scoped("第二、四镜改成自然纪实构图。"), [2, 4]);
-    assert.deepEqual(scoped("镜头 2、4 改成自然纪实构图。"), [2, 4]);
-    assert.deepEqual(scoped("第2、第4镜改成近景。"), [2, 4]);
-    assert.deepEqual(scoped("第二镜头和第四镜头改成近景。"), [2, 4]);
-    assert.deepEqual(scoped("镜头二跟镜头四改成近景。"), [2, 4]);
+    assert.deepEqual(positions, [1, 2, 3, 4, 5, 6, 7, 8]);
   });
 
   it("keeps Studio-generated technical-failure instructions inside their structured scene scope", () => {
     const scenes = [scene(1), scene(2), scene(3), scene(4)];
     const positions = reworkAffectedScenePositions({
       findings: [],
-      instructions: [
-        "本次重做原因：Scene 3 generation failed: provider rejected",
-        "以上一版导演方案为底稿，保留未被要求修改的全片视觉规则与镜头，只重做下列问题：",
-        "- 当前没有结构化视觉问题；依据本次重做原因定位并改写受影响镜头。",
-        "严格执行修订后的逐镜路由；保留未受影响母片，不得用说明卡掩盖失败：",
-        "- 只重新生成镜头 3；其余镜头保持原方案与连续性。",
-      ].join("\n"),
       previousScenes: scenes,
       currentScenes: scenes.map((entry) => structuredClone(entry)),
       affectedScenePositions: [3],
@@ -3278,10 +3255,9 @@ describe("reworkAffectedScenePositions", () => {
 
   it("treats an explicit scene selection as authoritative while preserving canonical safety expansion", () => {
     const scenes = [scene(1), scene(2), scene(3), scene(4)];
-    const selected = (affectedScenePositions: number[], instructions: string, overrides: Record<string, unknown> = {}) => (
+    const selected = (affectedScenePositions: number[], overrides: Record<string, unknown> = {}) => (
       reworkAffectedScenePositions({
         findings: [],
-        instructions,
         previousScenes: scenes,
         currentScenes: scenes.map((entry) => structuredClone(entry)),
         affectedScenePositions,
@@ -3289,14 +3265,14 @@ describe("reworkAffectedScenePositions", () => {
       })
     );
 
-    assert.deepEqual(selected([4], "重做全片，并把第1镜改成近景。"), [4]);
-    assert.deepEqual(selected([], "统一重做全片。"), []);
-    assert.deepEqual(selected([4], "只改第4镜。", { findings: [finding(2)] }), [2, 4]);
-    assert.deepEqual(selected([4], "只改第4镜。", { findings: [finding(undefined)] }), [1, 2, 3, 4]);
-    assert.deepEqual(selected([4], "只改第4镜。", {
+    assert.deepEqual(selected([4]), [4]);
+    assert.deepEqual(selected([]), []);
+    assert.deepEqual(selected([4], { findings: [finding(2)] }), [2, 4]);
+    assert.deepEqual(selected([4], { findings: [finding(undefined)] }), [1, 2, 3, 4]);
+    assert.deepEqual(selected([4], {
       currentScenes: [scene(1), scene(2), scene(3, "重写后的第三幕"), scene(4)],
     }), [3, 4]);
-    assert.deepEqual(selected([1], "只改第1镜。", {
+    assert.deepEqual(selected([1], {
       currentShots: [
         { scenePosition: 1 },
         { scenePosition: 2, referenceFromScenePosition: 1 },
@@ -3306,38 +3282,4 @@ describe("reworkAffectedScenePositions", () => {
     }), [1, 2, 3]);
   });
 
-  it("handles common mixed preservation, negation, bare-list and exception instructions", () => {
-    const scenes = [scene(1), scene(2), scene(3), scene(4)];
-    const scoped = (instructions: string) => reworkAffectedScenePositions({
-      findings: [],
-      instructions,
-      previousScenes: scenes,
-      currentScenes: scenes.map((entry) => structuredClone(entry)),
-    });
-
-    assert.deepEqual(scoped("2、4镜头改成近景"), [2, 4]);
-    assert.deepEqual(scoped("不需要重做全片，只改第2镜"), [2]);
-    assert.deepEqual(scoped("不必重做全片，只改第2镜"), [2]);
-    assert.deepEqual(scoped("保留镜头1但重做镜头2"), [2]);
-    assert.deepEqual(scoped("镜头1保持不变但把镜头2改成近景"), [2]);
-    assert.deepEqual(scoped("不要重做第2镜，只重做第4镜"), [4]);
-    assert.deepEqual(scoped("不要重做第2镜而只重做第4镜"), [4]);
-    assert.deepEqual(scoped("不要改第2镜，只改第4镜"), [4]);
-    assert.deepEqual(scoped("无需改第2镜，只改第4镜"), [4]);
-    assert.deepEqual(scoped("保留第2镜并重做第4镜"), [4]);
-    assert.deepEqual(scoped("第2镜保持不变并将第4镜重做"), [4]);
-    assert.deepEqual(scoped("除了第1镜之外都重做"), [2, 3, 4]);
-    assert.deepEqual(scoped("除第1和第3镜外都重做"), [2, 4]);
-    assert.deepEqual(scoped("除第1镜之外，其余都重做"), [2, 3, 4]);
-    assert.deepEqual(scoped("只保留第1镜，其他都重做"), [2, 3, 4]);
-    assert.deepEqual(scoped("第2到第4镜重做"), [2, 3, 4]);
-    assert.deepEqual(scoped("第2至第4镜重做"), [2, 3, 4]);
-    assert.deepEqual(scoped("镜头2-4重做"), [2, 3, 4]);
-  });
-
-  it("does not treat preservation-only or negated clauses as global rework requests", () => {
-    const unchanged = { previousScenes: [scene(1), scene(2)], currentScenes: [scene(1), scene(2)] };
-    assert.deepEqual(reworkAffectedScenePositions({ findings: [], instructions: "保留全片风格，沿用所有镜头色调。", ...unchanged }), []);
-    assert.deepEqual(reworkAffectedScenePositions({ findings: [], instructions: "不要重做全片。", ...unchanged }), []);
-  });
 });
