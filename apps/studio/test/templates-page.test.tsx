@@ -89,7 +89,9 @@ describe("TemplatesPage", () => {
 
     expect(studioApi.reviseTemplate).toHaveBeenCalledWith("knowledge-explainer", 3);
     expect(screen.getByLabelText("模板名称")).toBeEnabled();
-    expect(screen.getByText("knowledge · v2")).toBeInTheDocument();
+    expect(screen.getByText("知识讲解 · v2")).toBeInTheDocument();
+    expect(screen.queryByText(/knowledge/)).not.toBeInTheDocument();
+    expect(screen.getByText("当前编辑只修改模板结构，不会产生费用")).toBeInTheDocument();
   });
 
   it("deletes only after confirmation and exposes an explicit built-in restore action", async () => {

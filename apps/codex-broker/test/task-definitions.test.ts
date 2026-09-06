@@ -11,6 +11,8 @@ import {
 function validDirectorPlan() {
   const shot = {
     scenePosition: 1,
+    reuseFromScenePosition: null as number | null,
+    referenceFromScenePosition: null as number | null,
     narrativeRole: "hook",
     authenticityPolicy: "illustrative",
     preferredProviderId: "pexels-stock-v1",
@@ -123,7 +125,7 @@ describe("broker-owned task definitions", () => {
 
     assert.equal(topic.version, "video-factory/topic-editor-v3");
     assert.equal(script.version, "video-factory/screenwriter-v5");
-    assert.equal(director.version, "video-factory/director-v13");
+    assert.equal(director.version, "video-factory/director-v14");
     assert.equal(review.version, "video-factory/visual-review-v6");
     assert.match(review.outputRules.join("\n"), /不得为了通过审计而美化评分/);
     assert.match(review.directive, /任何可读字.*不得 recommendation=approve/);
@@ -149,13 +151,21 @@ describe("broker-owned task definitions", () => {
     assert.match(director.directive, /目标预计费用.*不是硬门禁/);
     assert.match(director.directive, /不得.*说明卡.*降级/);
     assert.match(director.directive, /REUSE_ONLY scene N/);
+    assert.match(director.directive, /reuseFromScenePosition=N/);
+    assert.match(director.directive, /referenceFromScenePosition=N/);
+    assert.match(director.directive, /supportsReferenceImage=true/);
+    assert.match(director.directive, /参考图生成会正常调用和报价/);
+    assert.match(director.directive, /不得只在 generationPrompt、continuityNote 等文字里描述参考关系/);
+    assert.match(director.directive, /未使用对应路由时输出 null/);
+    assert.match(director.directive, /独立生成且没有复用.*generated_image/);
     assert.match(director.directive, /只允许引用更早镜头/);
     assert.match(director.directive, /不会重新搜索、生成或计费/);
     assert.match(director.directive, /不会产生新的动作、光线变化或画面状态/);
     const rank = taskPromptFor("asset-rank");
     assert.equal(rank.version, "video-factory/asset-rank-v2");
     assert.match(rank.directive, /主体、物体、动作.*硬门槛/);
-    assert.match(rank.directive, /没有候选.*不得.*通过/);
+    assert.match(rank.directive, /已有候选.*没有任何.*不得.*通过/);
+    assert.match(rank.directive, /输入候选本来为空.*原样保留空数组/);
     assert.match(director.directive, /没有可执行的免费或复用方案.*保留可执行的付费镜头.*重新报价/);
     assert.doesNotMatch(director.directive, /付费镜头上限是硬边界/);
     assert.doesNotMatch(director.directive, /costPolicy/);
@@ -215,6 +225,34 @@ describe("broker-owned task definitions", () => {
     assert.ok(directorSchema.properties.shots.items.required.includes("negativeConstraints"));
     assert.ok(directorSchema.properties.shots.items.required.includes("successCriteria"));
     assert.ok(directorSchema.properties.shots.items.required.includes("deliveryType"));
+    assert.ok(directorSchema.properties.shots.items.required.includes("reuseFromScenePosition"));
+    assert.ok(directorSchema.properties.shots.items.required.includes("referenceFromScenePosition"));
+  });
+
+  it("validates structured reference-image routing fields", () => {
+    const referenced = validDirectorPlan();
+    referenced.shots[0]!.preferredProviderId = "seedream-image-v1";
+    referenced.shots[0]!.deliveryType = "generated_image";
+    referenced.shots[1]!.preferredProviderId = "seedream-image-v1";
+    referenced.shots[1]!.deliveryType = "generated_image";
+    referenced.shots[1]!.referenceFromScenePosition = 1;
+    assert.equal(outputValidationErrorFor("director-plan", referenced), undefined);
+
+    const futureReference = structuredClone(referenced);
+    futureReference.shots[0]!.referenceFromScenePosition = 2;
+    assert.match(outputValidationErrorFor("director-plan", futureReference) ?? "", /must reference an earlier scene/);
+
+    const reusedReference = structuredClone(referenced);
+    reusedReference.shots[1]!.reuseFromScenePosition = 1;
+    assert.match(outputValidationErrorFor("director-plan", reusedReference) ?? "", /cannot reference and reuse/);
+
+    const wrongDelivery = structuredClone(referenced);
+    wrongDelivery.shots[1]!.deliveryType = "stock_image";
+    assert.match(outputValidationErrorFor("director-plan", wrongDelivery) ?? "", /requires deliveryType generated_image/);
+
+    const invalidScalar = structuredClone(referenced) as unknown as { shots: Array<Record<string, unknown>> };
+    invalidScalar.shots[1]!.referenceFromScenePosition = "scene 1";
+    assert.match(outputValidationErrorFor("director-plan", invalidScalar) ?? "", /must be a finite number/);
   });
 
   it("rejects blank director execution prompts before they reach the production pipeline", () => {

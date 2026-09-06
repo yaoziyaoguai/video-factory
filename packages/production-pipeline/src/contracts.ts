@@ -84,6 +84,7 @@ export interface ProductionReworkContext {
   sourceRunId: string;
   sourceRunRevision: number;
   rejectionReason?: string;
+  affectedScenePositions?: number[];
   nodeInstructions: {
     script: string;
     visualDirection: string;
@@ -297,6 +298,7 @@ function parseReworkContext(value: unknown): ProductionReworkContext | undefined
     assets: boundedReworkText(instructions.assets, "rework.nodeInstructions.assets"),
   };
   const findings = parseProductionReworkFindings(input.findings);
+  const affectedScenePositions = parseReworkAffectedScenePositions(input.affectedScenePositions);
   const rejectionReason = input.rejectionReason === undefined
     ? undefined
     : boundedReworkText(input.rejectionReason, "rework.rejectionReason");
@@ -304,11 +306,26 @@ function parseReworkContext(value: unknown): ProductionReworkContext | undefined
     sourceRunId,
     sourceRunRevision,
     ...(rejectionReason ? { rejectionReason } : {}),
+    ...(affectedScenePositions !== undefined ? { affectedScenePositions } : {}),
     nodeInstructions,
     findings,
     ...(input.previousScript === undefined ? {} : { previousScript: boundedReworkDocument(input.previousScript, "rework.previousScript") }),
     ...(input.previousDirectorPlan === undefined ? {} : { previousDirectorPlan: boundedReworkDocument(input.previousDirectorPlan, "rework.previousDirectorPlan") }),
   };
+}
+
+function parseReworkAffectedScenePositions(value: unknown): number[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new Error("rework.affectedScenePositions must contain at most 100 entries.");
+  }
+  return [...new Set(value.map((position, index) => boundedNumber(
+    position,
+    `rework.affectedScenePositions[${index}]`,
+    1,
+    10_000,
+    true,
+  )))].sort((left, right) => left - right);
 }
 
 export function parseProductionReworkFindings(

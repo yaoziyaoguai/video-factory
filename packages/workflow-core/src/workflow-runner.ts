@@ -1245,7 +1245,12 @@ export class WorkflowRunner {
         };
       }
       validateReceiptCosts(receiptDraft, authorization, automaticMeteredProvider);
-      if (status !== "failed"
+      if (status === "failed" && receiptDraft.billing === "metered" && result.providerOutcomeKnown === false) {
+        // Provider 结果未知（如 create 请求已可能被受理但响应在 ECONNRESET/超时中丢失）：
+        // 无论回执是否呈现零次尝试，都不得删除 outcomeUncertain 去解锁重试，
+        // 账目只能由人工核账闭环。
+        nodeRun.outcomeUncertain = true;
+      } else if (status !== "failed"
         || result.providerOutcomeKnown === true
         || (isDefinitiveZeroAttemptFailure(receiptDraft) && !resumingInterruptedMeteredOperation)) {
         delete nodeRun.outcomeUncertain;

@@ -1322,6 +1322,7 @@ describe("Studio API", () => {
         },
       },
       inheritedNodeIds: ["brief", "script", "visual-direction", "visual-review"],
+      requiredAffectedScenePositions: [],
     };
     const app = buildStudioApp({ service: fakeService({
       reworkDraft: async (runId) => runId === "run-1"

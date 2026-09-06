@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { creatorFacingTechnicalText, platformLabel, providerLabel, providerModelLabel } from "../presentation.js";
+import { creatorFacingTechnicalText, platformLabel, providerLabel, catalogModelLabel } from "../presentation.js";
 import { NodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 
@@ -48,6 +48,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const showReviewSurface = Boolean(readOnly || video?.contentUrl || run.activeIntervention || isStoppedStatus(run.status));
   const uncertainPaidNode = run.nodes.find((node) => node.outcomeUncertain === true);
   const visiblePaidNodeSummary = paidNodeSummary?.nodeId === uncertainPaidNode?.id ? paidNodeSummary : undefined;
+  const uncertainPaidNodeProviderId = (uncertainPaidNode?.executionReceipt ?? uncertainPaidNode?.plannedExecution)?.providerId;
   const visualReview = visualReviewDecision(run);
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
   const assetVersionId = run.nodes.find((node) => node.id === "assets")?.outputState?.effectiveVersionId;
@@ -85,7 +86,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
     <main className="page run-page">
       <header className="run-header" data-tour="run-header">
         <div>
-          <p className="eyebrow">{platformLabel(run.platform)} · 目标 {run.durationSeconds} 秒 · 版本 {run.revision}</p>
+          <p className="eyebrow">{platformLabel(run.platform)} · 目标 {run.durationSeconds} 秒</p>
           <h1>{run.title}</h1>
           <p className="page-summary">{run.angle} · {run.audience}</p>
         </div>
@@ -121,7 +122,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
           {costDetail ? <span>成本 <strong>¥{costDetail.totals.actualCostCny.toFixed(2)}</strong>{costDetail.totals.actualPendingCount ? ` · ${costDetail.totals.actualPendingCount} 笔待回写` : ""}</span> : null}
           {connectionHeartbeatAt ? <span className="run-connection-live"><i aria-hidden="true" />制作服务连接刚刚确认</span> : null}
         </div> : null}
-        {activeNodeModel(run) ? <p className="run-active-provider">当前能力：{activeNodeModel(run)}</p> : null}
+        {activeNodeModel(run, providers) ? <p className="run-active-provider">当前能力：{activeNodeModel(run, providers)}</p> : null}
         {onRequestPause ? <button className="button button-ghost run-pause-button" type="button" disabled={pausePending || run.pauseRequested === true} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{run.pauseRequested ? "当前步骤完成后暂停" : "暂停后检查或修改"}</button> : null}
       </section> : null}
 
@@ -229,7 +230,6 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 <ul className="run-recovery-list">
                   {run.failure.recoveryActions.map((action) => <li key={action}>{action}</li>)}
                 </ul>
-                {run.failure.technicalDetail ? <details className="run-technical-diagnosis"><summary>技术诊断</summary><code>{run.failure.technicalDetail}</code></details> : null}
               </> : <>
                 <h2>当前状态</h2>
                 <p>{runStateMessage(run)}</p>
@@ -238,6 +238,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 summary={visiblePaidNodeSummary}
                 providers={providers}
                 busy={nodeMutationPending}
+                {...(uncertainPaidNodeProviderId ? { providerIdHint: uncertainPaidNodeProviderId } : {})}
                 {...(onReconcilePaidNode ? { onReconcile: onReconcilePaidNode } : {})}
               /> : null}
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />多平台发布</button> : null}
@@ -259,7 +260,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
         </div>
       </section> : null}
 
-      {costDetail ? <RunCostDetailPanel detail={costDetail} /> : null}
+      {costDetail ? <RunCostDetailPanel detail={costDetail} providers={providers} /> : null}
 
       {rejecting ? (
         <div className="dialog-backdrop" role="presentation">
@@ -317,9 +318,10 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   );
 }
 
-function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
+function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconcile }: {
   summary: StudioPaidNodeSummary;
   providers: StudioProvider[];
+  providerIdHint?: string;
   busy: boolean;
   onReconcile?: (nodeId: string, input: StudioPaidReconciliationDraft) => Promise<void>;
 }) {
@@ -338,7 +340,8 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
   const canAttachTaskId = missingTaskItems.length === 1;
   const manuallyResolvableItems = summary.nodeId === "assets"
     ? summary.items.filter((item) => (
-        (item.state === "submitted" || item.state === "unknown") && !item.taskId
+        item.manualReconciliationRequired === true
+        || (item.state === "submitted" || item.state === "unknown") && !item.taskId
         || item.state === "provider_succeeded" && !item.taskId
       ))
     : [];
@@ -349,10 +352,14 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
   const parsedActualCost = actualCost.trim() ? Number(actualCost) : undefined;
   const actualCostValid = parsedActualCost === undefined || (Number.isFinite(parsedActualCost) && parsedActualCost >= 0);
   const isRunLevelVoiceCall = summary.nodeId === "voice" && summary.items.length === 0;
+  const providerLookupBlocked = summary.items.some((item) => item.manualReconciliationRequired);
+  const consoleEntries = providerConsoleEntries(providers, summary.items.length
+    ? summary.items.map((item) => item.providerId)
+    : providerIdHint ? [providerIdHint] : []);
   if (isRunLevelVoiceCall && summary.requiresManualReconciliation && summary.failureKind === "terminal_failure") {
     return <section className="paid-operation-panel requires-manual" aria-label="配音恢复">
-      <header><strong>配音请求被明确拒绝</strong><small>本次不记账</small></header>
-      <p>服务商已经返回明确错误，不属于扣费结果未知。请先在下方修改音色、模型或服务配置，再以零费用结清本次失败并重新配音。</p>
+      <header><strong>配音请求被明确拒绝</strong><small>未扣费 · 不记入成本账</small></header>
+      <p>服务商事实：本次请求被服务商明确拒绝，未扣费。系统动作：这笔失败不会记入成本账。点击下方按钮会先按“未扣费”结清本次失败，再创建一条新的配音任务；请先在下方配音设置里修正音色、模型或服务配置。</p>
       {onReconcile ? <button
         className="button button-primary"
         type="button"
@@ -366,8 +373,8 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
   }
   if (isRunLevelVoiceCall && summary.requiresManualReconciliation && summary.failureKind === "unknown_outcome") {
     return <section className="paid-operation-panel requires-manual" aria-label="配音恢复">
-      <header><strong>配音连接中断</strong><small>自动记账</small></header>
-      <p>请求提交后连接中断，系统无法确认服务商是否已经计费，因此没有自动重放。为避免重复调用，本次会按原预估费用保守记账，再生成一条新的配音任务。</p>
+      <header><strong>配音连接中断</strong><small>按已扣费登记</small></header>
+      <p>请求提交后连接中断，系统无法确认服务商是否已经计费，因此没有自动重放。点击下方按钮会依次执行两项操作：先把上一笔配音按原预估费用登记到成本账，再创建一条新的配音任务继续制作；不点击就不会记账，也不会重试。</p>
       {onReconcile ? <button
         className="button button-primary"
         type="button"
@@ -376,11 +383,11 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
           outcome: "confirmed_charged",
           note: "自动配音提交后连接中断，结果无法确认；按原预估费用保守记账并创建新的配音任务。",
         })}
-      ><RotateCcw aria-hidden="true" size={16} />重新配音</button> : null}
+      ><RotateCcw aria-hidden="true" size={16} />登记上一笔费用，再重新配音</button> : null}
     </section>;
   }
   const title = summary.requiresManualReconciliation
-    ? "这次请求是否扣费还不确定"
+    ? providerLookupBlocked ? "原任务已无法自动查询" : "这次请求是否扣费还不确定"
     : outcome === "requote"
       ? "未完成的画面需要重新报价"
       : "已找到可恢复的付费任务";
@@ -395,9 +402,16 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
       </article>)}
     </div>
     {summary.requiresManualReconciliation ? <div className="paid-operation-explanation">
-      <p><strong>发生了什么：</strong>{isRunLevelVoiceCall ? "请求发出后连接中断，系统没有收到明确结果。" : "服务商可能已经收到请求，但系统没有拿到足够的任务证据。"}</p>
-      <p><strong>为什么需要核对：</strong>直接重试可能产生重复任务和重复扣费，所以系统已经停住。</p>
-      <p><strong>下一步：</strong>{isRunLevelVoiceCall ? "请在配音服务商控制台按本次调用记录与账单核对，再登记结果。" : "请到服务商控制台核对任务与账单；找到任务编号时可先录入并继续获取原结果。"}</p>
+      <p><strong>发生了什么：</strong>{providerLookupBlocked
+        ? "系统保留了服务商任务编号，但服务商已明确拒绝继续查询，无法再自动确认结果。"
+        : isRunLevelVoiceCall ? "请求发出后连接中断，系统没有收到明确结果。" : "服务商可能已经收到请求，但系统没有拿到足够的任务证据。"}</p>
+      <p><strong>为什么需要核对：</strong>直接重试可能产生重复任务和重复扣费，所以系统已经停住，不会自动重试或重新制作。</p>
+      <p><strong>下一步：</strong>{providerLookupBlocked
+        ? "请用页面显示的任务编号到服务商控制台核对结果和账单，再按真实情况登记“未扣费”或“已扣费”。"
+        : isRunLevelVoiceCall ? "请在配音服务商控制台按本次调用记录与账单核对，再登记结果。" : "请到服务商控制台核对任务与账单；找到任务编号时可先录入并继续查询原任务。"}</p>
+      <p><strong>核对入口：</strong>{consoleEntries.length
+        ? consoleEntries.map((entry, index) => <span key={entry.providerId}>{index > 0 ? "；" : ""}<a href={entry.consoleUrl} target="_blank" rel="noreferrer">打开{entry.label}控制台</a></span>)
+        : "这项能力没有配置可点击的服务商控制台入口，请联系管理员核对任务与账单。"}</p>
     </div> : outcome === "requote" ? <div className="paid-operation-explanation">
       <p><strong>发生了什么：</strong>画面准备没有完成，但现有证据表明没有未知的付费任务需要核账。</p>
       <p><strong>为什么重新报价：</strong>只会重新计算明确失败或尚未提交的镜头；已经完成的付费任务不会重复创建。</p>
@@ -418,10 +432,12 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
           type="button"
           disabled={busy || !taskId.trim()}
           onClick={() => void onReconcile(summary.nodeId, { outcome: "resume_original", taskId: taskId.trim() })}
-        ><Activity aria-hidden="true" size={16} />录入编号并核对原任务</button>
+        ><Activity aria-hidden="true" size={16} />录入编号并继续查询原任务</button>
+        <small>系统动作：只继续查询原任务，不会创建新任务，也不会产生新费用。</small>
       </div> : null}
       <fieldset className="paid-manual-resolution" disabled={busy}>
         <legend>服务商账单核对结果</legend>
+        <small>先在控制台确认服务商事实（未扣费、已扣费或仍需核对），再选择对应的系统动作：未扣费不会记入成本账；已扣费会按你填写的实际费用或原预估登记到成本账；仍需核对时用上方任务编号继续查询原任务。</small>
         {requiresItemSelection ? <label className="field field-wide">
           <span>本次核对镜头</span>
           <select
@@ -436,12 +452,12 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
           </select>
         </label> : null}
         <div className="paid-manual-options">
-          <label><input type="radio" name={`paid-outcome-${summary.nodeId}`} checked={manualOutcome === "confirmed_not_charged"} onChange={() => setManualOutcome("confirmed_not_charged")} />未扣费</label>
-          <label><input type="radio" name={`paid-outcome-${summary.nodeId}`} checked={manualOutcome === "confirmed_charged"} onChange={() => setManualOutcome("confirmed_charged")} />已扣费</label>
+          <label><input type="radio" name={`paid-outcome-${summary.nodeId}`} checked={manualOutcome === "confirmed_not_charged"} onChange={() => setManualOutcome("confirmed_not_charged")} />未扣费 · 不记入成本账</label>
+          <label><input type="radio" name={`paid-outcome-${summary.nodeId}`} checked={manualOutcome === "confirmed_charged"} onChange={() => setManualOutcome("confirmed_charged")} />已扣费 · 登记到成本账</label>
         </div>
         {manualOutcome === "confirmed_charged" ? <label className="field field-wide">
           <span>实际费用（可选）</span>
-          <input type="number" min="0" step="0.01" value={actualCost} onChange={(event) => setActualCost(event.target.value)} placeholder="留空则登记原预估费用" />
+          <input type="number" min="0" step="0.01" value={actualCost} onChange={(event) => setActualCost(event.target.value)} placeholder="留空则按原预估登记到成本账" />
         </label> : null}
         <label className="field field-wide">
           <span>核对记录</span>
@@ -464,7 +480,7 @@ function PaidOperationPanel({ summary, providers, busy, onReconcile }: {
                 : {}),
             });
           }}
-        >{manualOutcome === "confirmed_charged" ? "确认已扣费并登记" : "确认未扣费并继续处理"}</button>
+        >{manualOutcome === "confirmed_charged" ? "确认已扣费：登记到成本账" : "确认未扣费：不记入成本账"}</button>
       </fieldset>
     </div> : null}
     {!summary.requiresManualReconciliation && outcome && onReconcile ? <button
@@ -482,11 +498,31 @@ function paidProviderName(providerId: string): string {
   return (providerLabel(providerId) ?? "画面服务").replace(/ (?:视频|图片)生成$/, "");
 }
 
+interface ProviderConsoleEntry {
+  providerId: string;
+  label: string;
+  consoleUrl: string;
+}
+
+function providerConsoleEntries(providers: StudioProvider[], providerIds: Array<string | undefined>): ProviderConsoleEntry[] {
+  const seen = new Set<string>();
+  const entries: ProviderConsoleEntry[] = [];
+  for (const providerId of providerIds) {
+    if (!providerId || seen.has(providerId)) continue;
+    seen.add(providerId);
+    const provider = providers.find((candidate) => candidate.id === providerId);
+    const consoleUrl = provider?.consoleUrl?.trim();
+    // 控制台入口未在目录声明时不渲染空链接，改由文案引导联系管理员。
+    if (!consoleUrl) continue;
+    entries.push({ providerId, label: provider?.label ?? providerLabel(providerId) ?? "服务商", consoleUrl });
+  }
+  return entries;
+}
+
 function paidProviderIdentity(providers: StudioProvider[], providerId: string, modelId: string): string {
   const providerName = paidProviderName(providerId);
-  const provider = providers.find((candidate) => candidate.id === providerId);
-  if (modelId === providerId) return providerName;
-  const modelName = providerModelLabel(provider, modelId);
+  if (!modelId || modelId === providerId) return providerName;
+  const modelName = catalogModelLabel(providers, modelId) ?? "模型名称未记录";
   return modelName === providerName ? providerName : `${providerName} · ${modelName}`;
 }
 
@@ -673,11 +709,12 @@ function runningNodeLabel(run: StudioRunDetail): string {
   return current ? `${current.role ?? "制作角色"}正在处理${current.label}` : "系统正在推进制作";
 }
 
-function activeNodeModel(run: StudioRunDetail): string | undefined {
+function activeNodeModel(run: StudioRunDetail, providers: StudioProvider[]): string | undefined {
   const current = run.nodes.find((node) => node.id === run.currentAction?.nodeId)
     ?? run.nodes.find((node) => node.status === "running");
   const execution = current?.executionReceipt ?? current?.plannedExecution;
-  return execution ? `${execution.providerLabel} · ${execution.modelId}` : undefined;
+  if (!execution) return undefined;
+  return `${execution.providerLabel} · ${catalogModelLabel(providers, execution.modelId) ?? "模型名称未记录"}`;
 }
 
 function etaLabel(progress: NonNullable<StudioRunDetail["progress"]>): string {
@@ -714,7 +751,8 @@ function runStateMessage(run: StudioRunDetail): string {
     if (humanDecision) {
       return humanDecision.note ?? "成片已被人工打回，审片意见已保留。请回到今日机会重新发起制作。";
     }
-    return run.nodes.find((node) => node.status === "rejected")?.error
+    const rejectedReason = run.nodes.find((node) => node.status === "rejected")?.error;
+    return creatorFacingTechnicalText(rejectedReason)
       ?? "成片未通过机器质检，请查看质检报告后重新发起制作。";
   }
   if (run.status === "failed") {

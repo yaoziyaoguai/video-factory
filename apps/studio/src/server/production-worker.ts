@@ -15,13 +15,14 @@ import {
 import { readMeteredVideoProviderSettings } from "./video-provider-settings.js";
 import { readMeteredImageProviderSettings } from "./image-provider-settings.js";
 import { resolveZaiVisualReviewModelId } from "./codex-provider-settings.js";
-import { assetProviderDeliveryTypes } from "./provider-catalog.js";
+import { assetProviderDeliveryTypes, assetProviderSupportsReferenceImage } from "./provider-catalog.js";
 import { buildStudioChildEnvironment } from "./studio-child-environment.js";
 
 export interface ProductionWorkerOptions {
   repositoryRoot: string;
   pythonPath: string;
   environment: NodeJS.ProcessEnv;
+  runsRoot?: string;
 }
 
 export function buildProductionWorker(options: ProductionWorkerOptions): GenerativeAssetWorkerClient {
@@ -79,7 +80,12 @@ export function buildProductionWorker(options: ProductionWorkerOptions): Generat
     }),
     estimatedCnyPerImage: setting.estimatedCnyPerImage,
   }));
-  return new GenerativeAssetWorkerClient({ fallback, adapters, imageAdapters });
+  return new GenerativeAssetWorkerClient({
+    fallback,
+    adapters,
+    imageAdapters,
+    ...(options.runsRoot ? { runsRoot: options.runsRoot } : {}),
+  });
 }
 
 export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOptions, "environment">): VisualAssetProviderCapability[] {
@@ -127,8 +133,13 @@ export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOption
       id: setting.providerId,
       label: "Seedream 关键画面",
       billing: "metered",
-      modes: ["AI 图片", "9:16"],
+      modes: [
+        "AI 图片",
+        ...(assetProviderSupportsReferenceImage(setting.providerId, setting.model) ? ["参考图再生成"] : []),
+        "9:16",
+      ],
       deliveryTypes: assetProviderDeliveryTypes(setting.providerId),
+      supportsReferenceImage: assetProviderSupportsReferenceImage(setting.providerId, setting.model),
       strengths: ["解释性插画、抽象概念、无法检索到的关键静态画面与统一系列视觉"],
       constraints: ["合成内容不得作为事实证据", "人物、品牌与地标需要规避权利和误导风险", "成片必须保留 AIGC 标识"],
       estimatedCnyPerClip: setting.estimatedCnyPerImage,

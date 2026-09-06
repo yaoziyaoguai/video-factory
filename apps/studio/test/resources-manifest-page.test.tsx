@@ -227,6 +227,81 @@ describe("ResourcesPage source and rights section", () => {
     await user.click(screen.getByRole("button", { name: "确认驳回" }));
     expect(await screen.findByRole("link", { name: "打开原制作，点击“基于这版重新制作”" })).toHaveAttribute("href", "/projects/run-1");
   });
+
+  it("keeps administrator-only trend setup instructions off the creator settings page", async () => {
+    vi.spyOn(studioApi, "providers").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSources").mockResolvedValue([
+      {
+        id: "manual-research",
+        label: "人工研究",
+        kind: "native",
+        status: "ready",
+        description: "录入已经人工核验的热点、搜索词或评论信号。",
+        cadence: "随时",
+      },
+      {
+        id: "douyin-hotsearch",
+        label: "抖音官方热点",
+        kind: "native",
+        status: "needs_config",
+        description: "官方热点权限可作为后续数据源；当前版本尚未实现自动采集适配器。",
+        cadence: "约 2 小时",
+        requirement: "需要获批 hotsearch scope、配置授权，并实现官方热点采集适配器",
+      },
+      {
+        id: "dailyhot-import",
+        label: "DailyHotApi",
+        kind: "import",
+        status: "needs_config",
+        description: "本地统一 JSON / RSS 热榜接口，补充抖音、微博、快手、百度和垂类榜单。",
+        cadence: "建议 30-60 分钟",
+        requirement: "运行 make setup-local-trends",
+      },
+      {
+        id: "newrank-import",
+        label: "新榜数据",
+        kind: "commercial",
+        status: "manual_only",
+        description: "在商业数据合同确定前，以 CSV/JSON 导入保存来源边界。",
+        cadence: "按购买方案",
+        requirement: "需要商业数据授权",
+      },
+    ]);
+    vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSignals").mockResolvedValue([]);
+    vi.spyOn(studioApi, "localCapabilities").mockResolvedValue([
+      { id: "ffmpeg", label: "FFmpeg 音视频引擎", category: "runtime", state: "missing", evidence: "需要 ffmpeg 与 ffprobe" },
+      { id: "minimax-tts", label: "MiniMax 云端声音演员", category: "voice", state: "missing", evidence: "需要 MINIMAX_API_KEY" },
+    ]);
+    vi.spyOn(studioApi, "voices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "economy-daily",
+      roleProviderDefaults: {},
+      modelDefaults: {},
+      topicStrategy: { customInstruction: "" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+    vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
+
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    await screen.findByText("抖音官方热点");
+    expect(screen.getAllByText("该热点源尚未由管理员接入，请联系管理员")).toHaveLength(2);
+    expect(screen.getByText("需要商业数据授权")).toBeInTheDocument();
+    expect(screen.getAllByText("尚未接入")).toHaveLength(2);
+    const pageText = document.body.textContent ?? "";
+    expect(pageText).not.toMatch(/\bmake\b/i);
+    expect(pageText).not.toMatch(/\bscope\b/i);
+    expect(pageText).not.toContain("适配器");
+    expect(pageText).not.toContain("环境变量");
+    expect(pageText).not.toMatch(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9_]+)+\b/);
+    const environmentSummary = screen.getByText(/制作环境有 2 处未就绪/);
+    expect(environmentSummary).toHaveTextContent("成片合成、云端配音暂不可用或受限");
+    expect(environmentSummary).toHaveTextContent("无法自行解决时请联系管理员");
+    expect(screen.queryByText(/运行底座/)).not.toBeInTheDocument();
+  });
 });
 
 function stubResourcePage(resourceManifest: StudioResourceManifest) {

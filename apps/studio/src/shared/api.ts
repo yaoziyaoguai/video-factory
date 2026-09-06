@@ -158,6 +158,8 @@ export interface StudioProvider {
   estimatedCnyPerClip?: number;
   billingUnit?: "clip" | "run";
   docsUrl?: string;
+  /** 服务商控制台入口，用于人工核对付费任务与账单；与 API 文档入口（docsUrl）分开声明。 */
+  consoleUrl?: string;
   requirement?: string;
   defaultModelId?: string;
   modelProfiles?: StudioModelProfile[];
@@ -903,6 +905,7 @@ export interface StudioPaidOperationItem {
   actualCostCny?: number;
   actualCostSource?: "configured_rate";
   error?: string;
+  manualReconciliationRequired?: boolean;
 }
 
 export interface StudioPaidNodeSummary {
@@ -1206,6 +1209,7 @@ export interface StudioReworkContext {
   sourceRunId: string;
   sourceRunRevision: number;
   rejectionReason?: string;
+  affectedScenePositions?: number[];
   nodeInstructions: {
     script: string;
     visualDirection: string;
@@ -1219,6 +1223,7 @@ export interface StudioReworkContext {
 export interface StudioReworkDraft {
   input: StudioProductionInput;
   inheritedNodeIds: string[];
+  requiredAffectedScenePositions: number[];
 }
 
 export interface StudioProductionInput {

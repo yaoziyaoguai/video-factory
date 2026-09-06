@@ -890,6 +890,66 @@ describe("WorkflowRunner", () => {
     assert.equal(failed.nodeRuns[0]?.executionReceipt?.meteredAttemptCount, 0);
   });
 
+  it("does not unlock an explicitly unknown provider outcome even when the provisional receipt is zero", async () => {
+    const registry = new ProviderRegistry();
+    let calls = 0;
+    registry.register({
+      id: "automatic-paid-image",
+      label: "Automatic paid image",
+      modelId: "image-v1",
+      capability: "asset.prepare",
+      transport: "http_api",
+      billing: "metered",
+      approvalPolicy: "automatic",
+      estimatedCostCny: 0.25,
+      maxCostCny: 0.25,
+      maxAttempts: 1,
+      run: () => {
+        calls += 1;
+        return { accepted: true };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "automatic-paid-unknown-outcome",
+      name: "Automatic paid unknown outcome",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "automatic-paid-image",
+        mode: "automatic",
+        execute: async (input, context) => {
+          await context.resolveProvider({ capability: "asset.prepare", providerId: "automatic-paid-image" }).run(input, context);
+          return {
+            status: "failed",
+            providerOutcomeKnown: false,
+            error: "connection reset before task id",
+            receipt: {
+              providerId: "automatic-paid-image",
+              providerLabel: "Automatic paid image",
+              modelId: "image-v1",
+              transport: "http_api",
+              billing: "metered",
+              estimatedCostCny: 0.25,
+              actualCostCny: 0,
+              actualCostSource: "configured_rate",
+              meteredAttemptCount: 0,
+              meteredFailedAttemptCount: 0,
+            },
+          };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ providers: registry });
+
+    const failed = await runner.run(definition, {});
+
+    assert.equal(failed.nodeRuns[0]?.outcomeUncertain, true);
+    await assert.rejects(() => runner.retryFailedNode(definition, failed, "assets"), /uncertain paid-provider outcome/);
+    assert.equal(calls, 1);
+  });
+
   it("keeps a metered quality rejection definitive after the provider succeeded", async () => {
     const registry = new ProviderRegistry();
     registry.register({

@@ -428,7 +428,9 @@ describe("CodexVisualReviewAgent", () => {
       review: async () => { throw new Error("Detailed review must be used."); },
       reviewDetailed: async (input) => {
         primaryInputs.push(input);
-        throw new CodexBridgeError("Codex bridge returned HTTP 503.", false, "uncertain", 503);
+        // 只有确证发生在受理之前（stage=not_accepted 的 503 队列拒绝）才允许切换候选；
+        // stage=uncertain 的 503 可能在 durable broker 侧仍在执行，禁止启动 backup。
+        throw new CodexBridgeError("Codex bridge returned HTTP 503.", true, "not_accepted", 503);
       },
     };
     const backup: VisualReviewAgent = {
@@ -484,13 +486,68 @@ describe("CodexVisualReviewAgent", () => {
       modelId: "glm-5.3-flash",
       providerId: "zai-bigmodel-api",
       outcome: "failed",
-      failureStage: "uncertain",
+      failureStage: "not_accepted",
       failureReason: "服务端错误（HTTP 503）",
     }, {
       modelId: "gpt-backup",
       providerId: "openai",
       outcome: "succeeded",
     }]);
+  });
+
+  it("rethrows an uncertain provider failure without ever invoking the visual backup", async () => {
+    let backupCalls = 0;
+    // stage=uncertain 表示原请求可能已被 durable broker 受理并仍在执行；
+    // 此时启动 backup 会造成原任务与 backup 双跑，必须原样上抛且不得伪造 backup 成功。
+    const uncertainFailure = new CodexBridgeError(
+      "Codex bridge returned HTTP 503. socket /private/run/zai.sock detail secret-primary",
+      false,
+      "uncertain",
+      503,
+    );
+    const primary: VisualReviewAgent = {
+      id: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async () => { throw uncertainFailure; },
+    };
+    const backup: VisualReviewAgent = {
+      id: "codex-visual-review-v1",
+      modelId: "gpt-backup",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async () => {
+        backupCalls += 1;
+        return {
+          output: validateVisualReviewReport(report, media.durationMs),
+          trace: {
+            taskKind: "visual-review",
+            promptVersion: "visual-review-test-v1",
+            prompt: "bounded test prompt",
+            providerId: "openai",
+            modelId: "gpt-backup",
+          },
+        };
+      },
+    };
+    const agent = new FallbackVisualReviewAgent({
+      primary,
+      primaryProviderId: "zai-bigmodel-api",
+      backups: [{ agent: backup, label: "Codex 视觉审片", providerId: "openai" }],
+    });
+
+    await assert.rejects(
+      () => agent.reviewDetailed({ videoPath: "/run/final.mp4", runRoot: "/run", requestId: "node-operation" }),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexBridgeError);
+        assert.equal(error, uncertainFailure);
+        assert.equal(error.stage, "uncertain");
+        assert.equal(error.statusCode, 503);
+        assert.equal(error.creatorMessage, "模型暂时不可用，请重试或选择其他模型。");
+        assert.doesNotMatch(error.creatorMessage, /secret-primary|zai\.sock|\/private\/run/);
+        return true;
+      },
+    );
+    assert.equal(backupCalls, 0);
   });
 
   it("keeps a produced visual report and switches only the independent audit after a transient failure", async () => {
@@ -692,7 +749,9 @@ describe("CodexVisualReviewAgent", () => {
       modelId: "glm-5.3-flash",
       review: async () => { throw new Error("Detailed review must be used."); },
       reviewDetailed: async () => {
-        throw new CodexBridgeError("Codex bridge returned HTTP 503. secret-primary", false, "uncertain", 503);
+        // 两个候选都必须确证未受理（not_accepted），耗尽错误才有权聚合全部失败；
+        // uncertain 失败会在切换发生前原样上抛，永远不会进入该聚合。
+        throw new CodexBridgeError("Codex bridge returned HTTP 503. secret-primary", true, "not_accepted", 503);
       },
     };
     const backup: VisualReviewAgent = {
@@ -721,7 +780,7 @@ describe("CodexVisualReviewAgent", () => {
             modelId: "glm-5.3-flash",
             providerId: "zai-bigmodel-api",
             outcome: "failed",
-            failureStage: "uncertain",
+            failureStage: "not_accepted",
             failureReason: "服务端错误（HTTP 503）",
           },
           {

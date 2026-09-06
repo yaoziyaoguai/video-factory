@@ -439,6 +439,7 @@ describe("StudioService", () => {
     assert.match(draft?.input.rework?.nodeInstructions.script ?? "", /本次重做原因/);
     assert.deepEqual(draft?.input.rework?.previousScript, { viewerPromise: "原版承诺", scenes: [{ position: 1 }] });
     assert.deepEqual(draft?.inheritedNodeIds, ["brief", "script", "visual-direction", "visual-review"]);
+    assert.deepEqual(draft?.requiredAffectedScenePositions, [1]);
 
     const tampered = structuredClone(draft!.input);
     tampered.providers.script = "codex-screenwriter-v1";
@@ -488,6 +489,124 @@ describe("StudioService", () => {
     assert.deepEqual(finding?.targetNodeIds, ["assets"]);
     assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /第三镜换成无字素材并重新检查/);
     assert.doesNotMatch(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /画面烧入了不可接受的文字/);
+    assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /本轮结构化问题未直接指向导演方案/);
+    assert.doesNotMatch(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /当前没有结构化视觉问题/);
+  });
+
+  it("prefills the concrete failed-node reason instead of a generic rework summary", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-failed-node-rework-"));
+    const base = waitingRun(workspaceRoot);
+    const failedRun: WorkflowRun<ProductionBrief> = {
+      ...base,
+      status: "failed",
+      revision: 5,
+      decisions: [],
+      interventions: [],
+      nodeRuns: [{
+        nodeId: "asset-semantic-rank",
+        role: "候选画面复核",
+        status: "failed",
+        startedAt: base.startedAt,
+        finishedAt: base.finishedAt,
+        artifactIds: [],
+        qualityGateResults: [],
+        error: "8 个镜头的候选集合为空，需要回到素材来源补充候选。",
+      }],
+      artifacts: [],
+    };
+    const service = new StudioService({ workspaceRoot, pipeline: new FakePipeline(failedRun), commandAvailable: allCommandsAvailable, environment: {} });
+
+    const draft = await service.reworkDraft("run-1");
+
+    assert.match(draft?.input.rework?.rejectionReason ?? "", /8 个镜头的候选集合为空/);
+    assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /8 个镜头的候选集合为空/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /8 个镜头的候选集合为空/);
+    assert.doesNotMatch(draft?.input.rework?.rejectionReason ?? "", /候选画面复核没有完成候选画面排序/);
+  });
+
+  it("persists the exact failed asset scene instead of expanding a partial generation failure to the whole film", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-asset-failure-scope-"));
+    const jobsPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "assets", "attempt-1", "generation_jobs.json");
+    const jobsDocument = {
+      version: "video-factory/generation-jobs-v1",
+      jobs: [
+        { scenePosition: 1, providerId: "seedream-image-v1", status: "succeeded" },
+        { scenePosition: 2, providerId: "seedream-image-v1", status: "succeeded" },
+        { scenePosition: 3, providerId: "seedream-image-v1", status: "failed", error: "provider rejected" },
+      ],
+    };
+    await mkdir(path.dirname(jobsPath), { recursive: true });
+    await writeFile(jobsPath, `${JSON.stringify(jobsDocument)}\n`, "utf8");
+    const base = waitingRun(workspaceRoot);
+    const failedRun: WorkflowRun<ProductionBrief> = {
+      ...base,
+      status: "failed",
+      revision: 8,
+      decisions: [],
+      interventions: [],
+      nodeRuns: [{
+        nodeId: "assets",
+        status: "failed",
+        startedAt: base.startedAt,
+        finishedAt: base.finishedAt,
+        artifactIds: ["artifact-generation-jobs"],
+        qualityGateResults: [],
+        error: "Scene 3 generation failed: provider rejected",
+      }],
+      artifacts: [{
+        id: "artifact-generation-jobs",
+        kind: "generation_jobs",
+        uri: jobsPath,
+        createdAt: base.startedAt,
+        contentType: "application/json",
+        sizeBytes: Buffer.byteLength(JSON.stringify(jobsDocument)),
+        sha256: "d".repeat(64),
+        producer: { nodeId: "assets", attempt: 1 },
+        provenance: { providerId: "ai-shot-router-v1" },
+      }],
+    };
+    const service = new StudioService({ workspaceRoot, pipeline: new FakePipeline(failedRun), commandAvailable: allCommandsAvailable, environment: {} });
+
+    const draft = await service.reworkDraft("run-1");
+
+    assert.deepEqual(draft?.input.rework?.affectedScenePositions, [3]);
+    assert.deepEqual(draft?.requiredAffectedScenePositions, [3]);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /只重新生成镜头 3/);
+    assert.doesNotMatch(draft?.input.rework?.nodeInstructions.assets ?? "", /只替换本次重做原因涉及的素材/);
+
+    const tampered = structuredClone(draft!.input);
+    tampered.providers.script = "codex-screenwriter-v1";
+    tampered.rework!.affectedScenePositions = [2];
+    await assert.rejects(() => service.startRun(tampered), /返工范围不能移除审片或失败镜头/);
+  });
+
+  it("rejects a direct rework start while the source has an uncertain paid outcome", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-uncertain-rework-start-"));
+    const source = waitingRun(workspaceRoot);
+    source.status = "failed";
+    source.nodeRuns[0] = {
+      ...source.nodeRuns[0]!,
+      status: "failed",
+      outcomeUncertain: true,
+    };
+    const pipeline = new FakePipeline(source);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(() => service.startRun({
+      ...brief,
+      providers: { ...brief.providers, script: "codex-screenwriter-v1" },
+      rework: {
+        sourceRunId: "run-1",
+        sourceRunRevision: source.revision,
+        nodeInstructions: {
+          script: "按原审片意见调整脚本。",
+          visualDirection: "按原审片意见调整导演方案。",
+          assets: "按原审片意见重做素材。",
+        },
+        findings: [],
+      },
+    }), /付费结果尚未核对/);
+    assert.equal(pipeline.dispatchCount, 0);
   });
 
   it("creates a new-version draft from an approved production", async () => {
@@ -2034,7 +2153,7 @@ describe("StudioService", () => {
         ARK_API_KEY: "seedance-key",
         SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
         SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
-        SEEDREAM_MODEL_ID: "seedream-model",
+        SEEDREAM_MODEL_ID: "doubao-seedream-4-0-250828",
         SEEDREAM_ESTIMATED_CNY_PER_IMAGE: "0.25",
       },
     });
@@ -3266,7 +3385,7 @@ describe("StudioService", () => {
         ARK_API_KEY: "seedance-secret",
         SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
         SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5",
-        SEEDREAM_MODEL_ID: "seedream-model",
+        SEEDREAM_MODEL_ID: "doubao-seedream-4-0-250828",
         SEEDREAM_ESTIMATED_CNY_PER_IMAGE: "0.25",
       },
     });
@@ -3304,6 +3423,7 @@ describe("StudioService", () => {
     assert.equal(seedream?.billing, "metered");
     assert.equal(seedream?.estimatedCnyPerClip, 0.25);
     assert.equal(seedream?.status, "ready");
+    assert.ok(seedream?.modes?.includes("参考图再生成"));
     assert.equal(providers.find((provider) => provider.id === "kling-video-v1")?.status, "planned");
     assert.doesNotMatch(serialized, /secret-value/);
     assert.doesNotMatch(serialized, /seedance-secret/);

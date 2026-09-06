@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { StudioProvider, StudioTemplate, StudioTemplateExperimentScorecard } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { providerModelLabel } from "../presentation.js";
-import { TemplateGallery } from "../templates/TemplateGallery.js";
+import { TemplateGallery, templateCategoryLabel } from "../templates/TemplateGallery.js";
 
 export function TemplatesPage() {
   const [templates, setTemplates] = useState<StudioTemplate[]>([]);
@@ -269,7 +269,7 @@ export function TemplatesPage() {
         <section className="template-editor" aria-label="模板编辑器">
           <header className="template-editor-heading">
             <span><LayoutTemplate size={19} aria-hidden="true" /></span>
-            <div><p>{draft.category} · v{draft.version}</p><h2>{draft.name}</h2></div>
+            <div><p>{templateCategoryLabel(draft.category)} · v{draft.version}</p><h2>{draft.name}</h2></div>
             <strong>{draft.status === "draft" ? "草稿" : draft.builtIn ? "内置模板" : "已发布"}</strong>
           </header>
           <div className="template-editor-grid">
@@ -321,7 +321,7 @@ export function TemplatesPage() {
               <button className="button button-primary" type="button" disabled={saving} onClick={() => void reviseSelected()}><Pencil size={16} aria-hidden="true" />编辑下一版本</button>
             )}
             <button className="button button-danger-ghost" type="button" disabled={saving} onClick={() => setDeleteConfirmOpen(true)}><Trash2 size={16} aria-hidden="true" />删除模板</button>
-            <span><Check size={14} aria-hidden="true" />预演只展示结构，不会产生费用</span>
+            <span><Check size={14} aria-hidden="true" />当前编辑只修改模板结构，不会产生费用</span>
           </footer>
         </section>
       ) : null}

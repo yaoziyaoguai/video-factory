@@ -38,8 +38,9 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
     if (view === "archive") return searched;
     const filtered = searched.filter((run) => matchesFilter(run, filter));
     if (filter !== "all" || normalizedQuery) return filtered;
-    const active = filtered.filter((run) => !isTerminal(run));
-    const recentCompleted = filtered.filter(isTerminal).slice(0, 6);
+    // 待你处理的记录（含被打回的作品）不能被“最近完成”截断，否则会从默认视图消失。
+    const active = filtered.filter((run) => !isTerminal(run) || needsAction(run));
+    const recentCompleted = filtered.filter((run) => isTerminal(run) && !needsAction(run)).slice(0, 6);
     return [...active, ...recentCompleted];
   }, [archivedRuns, currentRuns, filter, query, view]);
   const displayedRuns = visibleRuns.slice(0, visibleCount);
@@ -241,7 +242,9 @@ function needsAction(run: StudioRunSummary): boolean {
     || run.status === "awaiting_spend_approval"
     || run.status === "approval_invalidated"
     || run.status === "failed"
-    || run.status === "stale";
+    || run.status === "stale"
+    // 被打回的作品要一直留在“待你处理”，直到创作者创建返工版本或主动归档。
+    || run.status === "rejected";
 }
 
 function matchesFilter(run: StudioRunSummary, filter: QueueFilter): boolean {
@@ -255,13 +258,18 @@ function isTerminal(run: StudioRunSummary): boolean {
   return run.status === "succeeded" || run.status === "failed" || run.status === "rejected";
 }
 
-function actionLabel(action: NonNullable<StudioRunSummary["nextAction"]>): string {
+type QueueAction = NonNullable<StudioRunSummary["nextAction"]> | "rework";
+
+function actionLabel(action: QueueAction): string {
   if (action === "confirm_spend") return "确认费用";
   if (action === "regenerate") return "确认后续生成";
+  if (action === "rework") return "调整方案后重新制作";
   return "进入审片";
 }
 
-function runAction(run: StudioRunSummary): StudioRunSummary["nextAction"] {
+function runAction(run: StudioRunSummary): QueueAction | undefined {
+  // 打回后的返工入口就是现有制作详情里的“调整方案后重新制作”，这里只负责把创作者送过去。
+  if (run.status === "rejected") return "rework";
   return isTerminal(run) ? undefined : run.nextAction;
 }
 

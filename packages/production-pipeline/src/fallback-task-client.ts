@@ -79,6 +79,8 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
         return failures.length > 0 ? withFallbackTrace(execution, failures, modelId, candidate.providerId) : execution;
       } catch (error) {
         failures.push({ modelId, providerId: candidate.providerId, error });
+        // isModelProviderFailure 对 stage=uncertain 一律返回 false：请求可能已被 durable broker
+        // 受理并仍在执行，绝不能为它生成新的 backup requestId（双跑风险），原样上抛。
         if (!isModelProviderFailure(error)) {
           if (failures.length > 1) throw new ModelCandidatesExhaustedError(failures);
           throw error;

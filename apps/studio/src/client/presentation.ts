@@ -146,6 +146,8 @@ export function humanizeCreativeText(value: string): string {
 export function creatorFacingTechnicalText(value?: string): string | undefined {
   if (!value) return undefined;
   return value
+    .replace(/已按\s+hook_and_scene_midpoints\s+的稀疏证据逐场核对。?/gi, "已按每个镜头的关键画面完成预检。")
+    .replace(/画面\s+Provider/gi, "画面服务")
     .replace(/\bstudio-owner\b/gi, "由你确认")
     .replace(/需要[^。]*VIDEO_FACTORY_[A-Z0-9_]+[^。]*。?\s*当前：[^。]*。?/gi, "AI 创作服务尚未连接，请到“创作设置 → 制作分工”检查服务状态。")
     .replace(/Pexels free stock license; review current provider license before publishing\.?/gi, "Pexels 免费图库素材；发布前需核对当前授权条款。")
@@ -179,6 +181,11 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/\bManifest\b/gi, "资源清单")
     .replace(/\bFallback\b/gi, "备用方案")
     .replace(/\btaskId\b/gi, "任务编号")
+    .replace(/\bblocking\b/gi, "必须修改的问题")
+    .replace(/\s*\bhook_and_scene_midpoints\b\s*/gi, "逐镜关键画面抽查")
+    .replace(/\s*\bscene_triplets\b\s*/gi, "逐镜首中尾抽查")
+    .replace(/\s*\bscene_change_keyframes\b\s*/gi, "场景变化关键画面抽查")
+    .replace(/\s*\bsource_assets\b\s*/gi, "生成画面")
     .replace(/manualReplacement/gi, "人工补充素材")
     .replace(/primary\s+服务\s+timed\s+out/gi, "首选服务响应超时")
     .replace(/服务\s+timed\s+out/gi, "服务响应超时")

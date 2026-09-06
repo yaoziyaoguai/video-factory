@@ -1239,7 +1239,7 @@ function requireDirectorBrief(value: unknown): Record<string, unknown> {
   const rework = requireRecord(brief.rework, "payload.brief.rework");
   assertExactKeys(
     rework,
-    ["sourceRunId", "visualDirectionInstruction", "assetInstruction", "findings", "previousDirectorPlan"],
+    ["sourceRunId", "visualDirectionInstruction", "assetInstruction", "findings", "affectedScenePositions", "previousDirectorPlan"],
     "payload.brief.rework",
   );
   const sourceRunId = requireReworkSourceRunId(rework.sourceRunId, "payload.brief.rework.sourceRunId");
@@ -1250,11 +1250,30 @@ function requireDirectorBrief(value: unknown): Record<string, unknown> {
       visualDirectionInstruction: boundedReworkInstruction(rework.visualDirectionInstruction, "payload.brief.rework.visualDirectionInstruction"),
       assetInstruction: boundedReworkInstruction(rework.assetInstruction, "payload.brief.rework.assetInstruction"),
       findings: requireReworkFindings(rework.findings, "visual-direction", "payload.brief.rework.findings"),
+      ...(rework.affectedScenePositions === undefined
+        ? {}
+        : { affectedScenePositions: boundedScenePositions(rework.affectedScenePositions, "payload.brief.rework.affectedScenePositions") }),
       ...(rework.previousDirectorPlan === undefined
         ? {}
         : { previousDirectorPlan: boundedRecord(rework.previousDirectorPlan, "payload.brief.rework.previousDirectorPlan", 150_000) }),
     },
   };
+}
+
+function boundedScenePositions(value: unknown, field: string): number[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 100) {
+    throw new CodexExecutorError(`${field} must contain 1 to 100 scene positions.`, false);
+  }
+  const positions = value.map((item, index) => {
+    if (!Number.isInteger(item) || Number(item) < 1 || Number(item) > 10_000) {
+      throw new CodexExecutorError(`${field}[${index}] must be an integer between 1 and 10000.`, false);
+    }
+    return Number(item);
+  });
+  if (new Set(positions).size !== positions.length) {
+    throw new CodexExecutorError(`${field} must not contain duplicate scene positions.`, false);
+  }
+  return positions;
 }
 
 function withoutLegacyCostPolicy(value: unknown, field: string): Record<string, unknown> {

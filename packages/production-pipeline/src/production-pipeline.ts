@@ -42,8 +42,10 @@ import { RoleAgentLoopError } from "./role-agent-loop.js";
 import {
   assetReuseSourceScenePosition,
   estimateVideoGenerationCostCny,
+  inspectReworkCarriedAssetScenePositions,
   inspectPaidAssetLedger,
   paidAssetSourceFingerprint,
+  reworkAffectedScenePositions,
   type PaidAssetLedgerItemSummary,
   type VideoGenerationRuntimeProfile,
 } from "./generative-asset-worker.js";
@@ -135,6 +137,7 @@ export interface ProductionPaidOperationItemSummary {
   actualCostCny?: number;
   actualCostSource?: "configured_rate";
   error?: string;
+  manualReconciliationRequired?: boolean;
 }
 
 export interface ProductionPaidNodeSummary {
@@ -1572,6 +1575,7 @@ export class ProductionPipeline {
         ...(item.actualCostCny !== undefined ? { actualCostCny: item.actualCostCny } : {}),
         ...(item.actualCostSource ? { actualCostSource: item.actualCostSource } : {}),
         ...(item.error ? { error: item.error } : {}),
+        ...(item.manualReconciliationRequired ? { manualReconciliationRequired: true } : {}),
       })),
     };
   }
@@ -1777,6 +1781,25 @@ export class ProductionPipeline {
     approvalDecision?: HumanDecisionDraft,
     options: { allowUnavailableProviders?: boolean } = {},
   ): WorkflowDefinition {
+    const assetReworkScenePositions = brief.rework
+      ? reworkAffectedScenePositions({
+        findings: brief.rework.findings,
+        instructions: `${brief.rework.nodeInstructions.visualDirection}\n${brief.rework.nodeInstructions.assets}`,
+        ...(brief.rework.previousScript ? { previousScenes: brief.rework.previousScript.scenes } : {}),
+        ...(brief.rework.previousDirectorPlan ? { previousShots: brief.rework.previousDirectorPlan.shots } : {}),
+        // 工作流定义阶段脚本尚未生成：有 previousScript 时用它作 current 的保守下界（script 差异为 0），
+        // 否则退回 previousDirectorPlan 的镜头位置作为有效镜头集合。
+        ...(brief.rework.previousScript
+          ? { currentScenes: brief.rework.previousScript.scenes }
+          : brief.rework.previousDirectorPlan
+            ? { currentScenes: shotsAsScenePositions(brief.rework.previousDirectorPlan.shots) }
+            : { currentScenes: [] }),
+        ...(brief.rework.previousDirectorPlan ? { currentShots: brief.rework.previousDirectorPlan.shots } : {}),
+        ...(brief.rework.affectedScenePositions !== undefined
+          ? { affectedScenePositions: brief.rework.affectedScenePositions }
+          : {}),
+      })
+      : [];
     const workerNode = (
       id: string,
       label: string,
@@ -1882,8 +1905,18 @@ export class ProductionPipeline {
           ...(brief.rework ? {
             rework: {
               sourceRunId: brief.rework.sourceRunId,
-              instruction: brief.rework.nodeInstructions.assets,
-              findings: brief.rework.findings.filter((finding) => finding.targetNodeIds.includes("assets")),
+              nodeInstructions: brief.rework.nodeInstructions,
+              // 素材节点只接收 visual-direction/assets 的 findings（与 reworkAffectedScenePositions
+              // 内部对 visual findings 的同一过滤语义）；script-only finding 不透传给素材，
+              // 其场景实际变化仍经 current/previous script 逐镜差异进入统一 affected 闭包。
+              findings: brief.rework.findings.filter((finding) => finding.targetNodeIds.some(
+                (target) => target === "visual-direction" || target === "assets",
+              )),
+              ...(assetReworkScenePositions.length || brief.rework.affectedScenePositions !== undefined
+                ? { affectedScenePositions: assetReworkScenePositions }
+                : {}),
+              ...(brief.rework.previousScript ? { previousScript: brief.rework.previousScript } : {}),
+              ...(brief.rework.previousDirectorPlan ? { previousDirectorPlan: brief.rework.previousDirectorPlan } : {}),
             },
           } : {}),
         }),
@@ -2235,6 +2268,13 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
       const sceneDurations = await readScriptSceneDurations(scriptPath);
       const directorPlan = requireOutputRecord(JSON.parse(await readFile(directorPlanPath, "utf8")), "director plan");
       if (!Array.isArray(directorPlan.shots)) throw new Error("Director plan shots must be an array before quoting assets.");
+      const carriedScenePositions = new Set(await inspectReworkCarriedAssetScenePositions({
+        runsRoot: this.runsRoot,
+        input,
+        currentScript: requireOutputRecord(JSON.parse(await readFile(scriptPath, "utf8")), "script"),
+        currentDirectorPlan: directorPlan,
+        modelSelections,
+      }));
       const items = directorPlan.shots.flatMap((entry, index) => {
         const shot = requireOutputRecord(entry, `director plan shot ${index + 1}`);
         const directorEstimatedCostCny = Number(shot.estimatedCostCny);
@@ -2248,7 +2288,7 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
         const reuseFromScenePosition = typeof shot.reuseFromScenePosition === "number"
           ? shot.reuseFromScenePosition
           : undefined;
-        if (assetReuseSourceScenePosition({
+        if (carriedScenePositions.has(scenePosition) || assetReuseSourceScenePosition({
           ...(reuseFromScenePosition !== undefined ? { reuseFromScenePosition } : {}),
           query: typeof shot.query === "string" ? shot.query : "",
         }) !== undefined || directorEstimatedCostCny === 0) return [];
@@ -2471,7 +2511,7 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   readonly label = "Codex 视觉导演";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly parameters = { promptPack: "video-factory/director-v13" };
+  readonly parameters = { promptPack: "video-factory/director-v14" };
 
   constructor(
     private readonly agent: VisualDirectorAgent,
@@ -2835,6 +2875,7 @@ function directorNode(
           billing: provider.billing,
           modes: [...provider.modes],
           deliveryTypes: [...provider.deliveryTypes],
+          supportsReferenceImage: provider.supportsReferenceImage ?? false,
           strengths: [...(provider.strengths ?? provider.modes)],
           constraints: [...(provider.constraints ?? [])],
           estimatedCnyPerClip: provider.estimatedCnyPerClip ?? 0,
@@ -2862,6 +2903,18 @@ function directorNode(
         .filter((artifact) => artifact.producer && ["script", "reference-grammar"].includes(artifact.producer.nodeId))
         .map((artifact) => artifact.id);
       let execution: CodexTaskExecution<unknown>;
+      const affectedScenePositions = currentBrief.rework
+        ? reworkAffectedScenePositions({
+          findings: currentBrief.rework.findings,
+          instructions: `${currentBrief.rework.nodeInstructions.visualDirection}\n${currentBrief.rework.nodeInstructions.assets}`,
+          ...(currentBrief.rework.previousScript ? { previousScenes: currentBrief.rework.previousScript.scenes } : {}),
+          ...(currentBrief.rework.previousDirectorPlan ? { previousShots: currentBrief.rework.previousDirectorPlan.shots } : {}),
+          currentScenes: script.scenes,
+          ...(currentBrief.rework.affectedScenePositions !== undefined
+            ? { affectedScenePositions: currentBrief.rework.affectedScenePositions }
+            : {}),
+        })
+        : [];
       try {
         execution = await provider.run({
           brief: {
@@ -2881,6 +2934,9 @@ function directorNode(
                 visualDirectionInstruction: currentBrief.rework.nodeInstructions.visualDirection,
                 assetInstruction: currentBrief.rework.nodeInstructions.assets,
                 findings: currentBrief.rework.findings.filter((finding) => finding.targetNodeIds.includes("visual-direction")),
+                ...(affectedScenePositions.length || currentBrief.rework.affectedScenePositions !== undefined
+                  ? { affectedScenePositions }
+                  : {}),
                 ...(currentBrief.rework.previousDirectorPlan ? { previousDirectorPlan: currentBrief.rework.previousDirectorPlan } : {}),
               },
             } : {}),
@@ -3326,6 +3382,9 @@ function visualDirectorPlanValidation(
     providerDeliveryTypes: Object.fromEntries(
       selectedProviders.map((provider) => [provider.id, [...provider.deliveryTypes]]),
     ),
+    referenceImageProviderIds: selectedProviders
+      .filter((provider) => provider.supportsReferenceImage)
+      .map((provider) => provider.id),
     estimatedCnyPerClip: Object.fromEntries(
       selectedProviders.map((provider) => [provider.id, provider.estimatedCnyPerClip ?? 0]),
     ),
@@ -3614,7 +3673,7 @@ function validateSourceAssetVisualReviewInput(value: unknown, directorEnabled: b
 }
 
 function sourceAssetReviewFailureMessage(report: VisualReviewReport): string {
-  const findings = report.findings.slice(0, 3).map((finding) => (
+  const findings = report.findings.map((finding) => (
     `${finding.scenePosition ? `镜头 ${finding.scenePosition}` : "未定位镜头"}：${finding.description}`
   ));
   return [
@@ -3883,7 +3942,10 @@ function assetSemanticRankNode(
       let trace: CodexTaskTrace | undefined;
       let agentLoop: AgentLoopTrace | undefined;
       let fallbackReason: string | undefined;
-      if (ranker) {
+      const hasCandidates = report.scenes.some((scene) => scene.candidates.length > 0);
+      if (!hasCandidates) {
+        ranking = deterministicAssetRanking(report, "本次没有图库候选需要排序，已跳过 AI 排序。");
+      } else if (ranker) {
         try {
           const execution = ranker.rankDetailed
             ? await ranker.rankDetailed(
@@ -4055,6 +4117,15 @@ function stringRecord(value: unknown, field: string): Record<string, string> {
     if (typeof item !== "string" || !item.trim()) throw new Error(`${field}.${key} must be a non-empty string.`);
     return [key, item.trim()];
   }));
+}
+
+function shotsAsScenePositions(shots: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(shots)) return [];
+  return shots.flatMap((shot): Array<Record<string, unknown>> => {
+    if (typeof shot !== "object" || shot === null || Array.isArray(shot)) return [];
+    const position = Number((shot as Record<string, unknown>).scenePosition);
+    return Number.isInteger(position) && position > 0 ? [{ position }] : [];
+  });
 }
 
 function modelSourceFor(brief: ProductionBrief, providerId: string): ExecutionConfigurationSource {
@@ -4318,8 +4389,17 @@ function workerResponseToNodeResult(
       ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
     },
   }));
+  const providerOutcomeKnown = response.diagnostics?.providerOutcomeKnown;
+  if (providerOutcomeKnown !== undefined && typeof providerOutcomeKnown !== "boolean") {
+    throw new Error("Worker diagnostics providerOutcomeKnown must be a boolean.");
+  }
   if (response.status === "failed") {
-    return { status: "failed", error, artifacts };
+    return {
+      status: "failed",
+      error,
+      artifacts,
+      ...(providerOutcomeKnown !== undefined ? { providerOutcomeKnown } : {}),
+    };
   }
   if (response.status === "rejected") {
     return {
@@ -5693,7 +5773,11 @@ function applyConfirmedChargedResolution(
   node.status = "failed";
   node.executionReceipt = receipt;
   node.finishedAt = reconciledAt;
-  node.error = "人工已确认计费，但该任务没有可恢复的素材；请调整方案后重新报价。";
+  // 恢复指令按 nodeId 表达：voice 已登记上一笔配音费用后没有可恢复的配音产物，
+  // 正确动作是重新创建配音任务；assets 保留“没有可恢复的素材、重新报价”语义。
+  node.error = nodeId === "voice"
+    ? "人工已确认计费，原配音费用已登记；请重新创建配音任务。"
+    : "人工已确认计费，但该任务没有可恢复的素材；请调整方案后重新报价。";
   delete node.outcomeUncertain;
   delete node.interrupted;
   delete node.operationRequestId;
@@ -5799,7 +5883,7 @@ function paidAssetSettlement(items: PaidAssetLedgerItemSummary[]): {
 }
 
 function paidAssetOperationNeedsManualReconciliation(items: readonly PaidAssetLedgerItemSummary[]): boolean {
-  return items.length === 0 || items.some((item) => (
+  return items.length === 0 || items.some((item) => item.manualReconciliationRequired === true || (
     (item.state === "submitted" || item.state === "unknown") && !item.taskId
   ) || (
     item.state === "provider_succeeded" && !item.taskId
@@ -5811,7 +5895,8 @@ function isManuallyConfirmedChargedAssetItem(item: PaidAssetLedgerItemSummary): 
 }
 
 function paidAssetItemNeedsManualReconciliation(item: PaidAssetLedgerItemSummary): boolean {
-  return (item.state === "submitted" || item.state === "unknown") && !item.taskId
+  return item.manualReconciliationRequired === true
+    || (item.state === "submitted" || item.state === "unknown") && !item.taskId
     || item.state === "provider_succeeded" && !item.taskId;
 }
 
@@ -6008,6 +6093,7 @@ async function markPaidAssetItemNotCharged(
   }
   item.state = "terminal_failed";
   item.error = resolutionError;
+  delete item.manualReconciliationRequired;
   delete item.actualCostCny;
   delete item.actualCostSource;
   ledger.completed = false;
@@ -6061,6 +6147,7 @@ async function markPaidAssetItemCharged(
   item.actualCostCny = roundCurrency(actualCostCny);
   item.actualCostSource = "configured_rate";
   item.error = resolutionError;
+  delete item.manualReconciliationRequired;
   delete item.resultUrl;
   delete item.localPath;
   delete item.sha256;

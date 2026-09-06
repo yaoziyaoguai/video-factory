@@ -23,6 +23,7 @@ import type {
   StudioCandidateInboxItem,
   StudioCandidateOrigin,
   StudioEditorialVerdict,
+  StudioOpportunity,
   StudioRunSummary,
   StudioSeries,
   StudioSeriesEpisodePlanInput,
@@ -59,6 +60,9 @@ interface TopicEntryWorkspaceProps {
   onViewProductionRecords: () => void;
   onManual: () => void;
   onImport: () => void;
+  trendRefreshPending?: boolean;
+  sourceBlockedOpportunities?: StudioOpportunity[];
+  onFocusSourceBlocked?: (opportunityId: string) => void;
 }
 
 const CATEGORY_ORDER = Object.keys(TOPIC_CATEGORY_LABELS) as StudioTopicCategory[];
@@ -81,6 +85,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const platforms = [...new Set(seriesItems.map((item) => item.platform))];
   const shortlistCount = seriesItems.filter(isShortlisted).length;
   const notSelectedCount = seriesItems.length - shortlistCount;
+  const notRecommendedCount = seriesItems.filter((item) => item.editorialDecision.verdict === "skip").length;
   const visibleItems = deskItems
     .filter((item) => category === "all" || item.category === category)
     .filter((item) => platform === "all" || item.platform === platform)
@@ -91,6 +96,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const candidateMode = mode === "trend" || mode === "series" ? mode : "trend";
   const modeLoading = props.loading[candidateMode] === true;
   const modeError = props.error?.[candidateMode];
+  const sourceBlockedOpportunities = props.sourceBlockedOpportunities ?? [];
 
   async function adopt(item: StudioCandidateInboxItem) {
     if (item.verification.status === "review_required") {
@@ -121,7 +127,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
               <div className="trend-refresh-status" aria-label="热点更新状态">
                 <span><i aria-hidden="true" />{modeLoading ? (modeItems.length > 0 ? "正在更新，当前仍可使用" : "正在读取") : "每日缓存"}</span>
                 <small>{trendStatusText(props.trendMeta)}</small>
-                <button className="icon-button" type="button" aria-label="立即刷新热点" title="立即刷新热点" disabled={modeLoading} onClick={props.onRefreshTrends}><RefreshCw aria-hidden="true" size={16} /></button>
+                <button className="icon-button" type="button" aria-label="立即刷新热点" title="立即刷新热点" disabled={modeLoading || props.trendRefreshPending === true} onClick={props.onRefreshTrends}><RefreshCw aria-hidden="true" size={16} /></button>
               </div>
             ) : mode === "series" ? (
               <div className="series-controls">
@@ -138,8 +144,22 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             <div className="candidate-loading"><RadioTower aria-hidden="true" size={24} /><div><h2>{mode === "trend" ? "正在生成今日提案" : "正在读取系列选题"}</h2><p>{mode === "trend" ? "AI 选题总编正在分析热点并形成提案，通常需要 1–3 分钟；系列和自定义创作仍可立即使用。" : "系列策划通常几秒内就会出现。"}</p></div>{mode === "trend" ? <button className="button button-secondary" type="button" onClick={props.onManual}>录入自己的选题</button> : null}</div>
           ) : mode === "series" && props.series.length === 0 ? (
             <div className="series-empty"><LibraryBig aria-hidden="true" size={28} /><div><h3>先创建一个可持续的系列</h3><p>定义受众、栏目承诺和内容支柱后，系统会给出连续编号的下一集候选。</p></div><button className="button button-primary" type="button" onClick={props.onCreateSeries}>创建第一个系列</button></div>
-          ) : mode === "trend" && modeItems.length === 0 ? (
-            <div className="series-empty"><RadioTower aria-hidden="true" size={28} /><div><h3>当前没有可用热点候选</h3><p>可能是热点来源暂时离线、还没有缓存，或选题总编没有发现真正值得制作的内容。可手动刷新，或录入已确认来源的研究结果。</p></div><button className="button button-primary" type="button" onClick={props.onManual}>手动录入</button><button className="button button-secondary" type="button" onClick={props.onImport}>导入 JSON</button></div>
+          ) : mode === "trend" && shortlistCount === 0 && deskView === "shortlist" ? (
+            <TrendRecoveryPanel
+              evaluatedCount={modeItems.length}
+              notRecommendedCount={notRecommendedCount}
+              notSelectedCount={notSelectedCount}
+              sourceBlockedCount={sourceBlockedOpportunities.length}
+              refreshing={modeLoading}
+              refreshPending={props.trendRefreshPending === true}
+              onRefresh={props.onRefreshTrends}
+              onManual={props.onManual}
+              onShowNotSelected={() => setDeskView("not_selected")}
+              onShowSourceBlocked={() => {
+                const firstSourceBlocked = sourceBlockedOpportunities[0];
+                if (firstSourceBlocked) props.onFocusSourceBlocked?.(firstSourceBlocked.id);
+              }}
+            />
           ) : mode === "series" && selectedSeries ? (
             <SeriesRoadmap
               series={selectedSeries}
@@ -171,7 +191,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                     <button key={item} type="button" className={category === item ? "is-active" : ""} disabled={!categoryCounts[item]} onClick={() => setCategory(item)}>{TOPIC_CATEGORY_LABELS[item]} <span>{categoryCounts[item] ?? 0}</span></button>
                   ))}
                 </div>
-                <label className="platform-filter"><span>平台</span><select value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">全部平台</option>{platforms.map((item) => <option key={item} value={item}>{platformLabel(item)}</option>)}</select></label>
+                <label className="platform-filter"><span>热点来源平台</span><select aria-label="热点来源平台" value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">全部来源平台</option>{platforms.map((item) => <option key={item} value={item}>{platformLabel(item)}</option>)}</select></label>
                 {hasActiveFilters ? <button className="candidate-clear-filters" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("shortlist"); }}>清除筛选</button> : null}
               </div>
               {visibleItems.length > 0 ? (
@@ -525,6 +545,47 @@ function editorialVerdictLabel(verdict: StudioEditorialVerdict): string {
     produce_image_story: "建议图文成片",
     skip: "暂不生产",
   }[verdict];
+}
+
+function TrendRecoveryPanel({
+  evaluatedCount,
+  notRecommendedCount,
+  notSelectedCount,
+  sourceBlockedCount,
+  refreshing,
+  refreshPending,
+  onRefresh,
+  onManual,
+  onShowNotSelected,
+  onShowSourceBlocked,
+}: {
+  evaluatedCount: number;
+  notRecommendedCount: number;
+  notSelectedCount: number;
+  sourceBlockedCount: number;
+  refreshing: boolean;
+  refreshPending: boolean;
+  onRefresh: () => void;
+  onManual: () => void;
+  onShowNotSelected: () => void;
+  onShowSourceBlocked: () => void;
+}) {
+  return (
+    <section className="trend-recovery" aria-label="热点恢复路径" data-tour="trend-recovery">
+      <div className="trend-recovery-copy">
+        <h3>这轮没有可直接开工的热点建议</h3>
+        <p>{evaluatedCount > 0 ? `选题总编本轮评估了 ${evaluatedCount} 条热点候选，其中 ${notRecommendedCount} 条未推荐。` : "本轮收件箱还没有任何已评估热点候选。"}</p>
+        {sourceBlockedCount > 0 ? <p className="trend-recovery-blocked">另有 {sourceBlockedCount} 条历史选题因来源核验被阻断。</p> : null}
+      </div>
+      <div className="trend-recovery-actions">
+        <button className="button button-primary" type="button" disabled={refreshing || refreshPending} onClick={onRefresh}><RefreshCw aria-hidden="true" size={16} />重新刷新热点</button>
+        <button className="button button-secondary" type="button" onClick={onManual}><PenLine aria-hidden="true" size={16} />录入自己的选题</button>
+        <Link className="button button-secondary" to="/topics?mode=series"><LibraryBig aria-hidden="true" size={16} />继续已有系列</Link>
+        {sourceBlockedCount > 0 ? <button className="button button-secondary" type="button" onClick={onShowSourceBlocked}><ShieldAlert aria-hidden="true" size={16} />查看缺来源的选题</button> : null}
+      </div>
+      {notSelectedCount > 0 ? <button className="trend-recovery-secondary" type="button" onClick={onShowNotSelected}>查看未入选（{notSelectedCount} 条）</button> : null}
+    </section>
+  );
 }
 
 function CustomEntry({ onManual, onImport }: { onManual: () => void; onImport: () => void }) {

@@ -220,11 +220,30 @@ export class ProductionStudio {
     const rejectedResources = this.options.loadRejectedVisualResources
       ? await this.options.loadRejectedVisualResources(run.id)
       : [];
+    const failedNodeError = [...run.nodeRuns].reverse().find((node) => node.status === "failed" && node.error)?.error;
+    const failedNodeReason = failedNodeError ? redactManagedPathText(failedNodeError) : undefined;
     const rejectionReason = [...run.decisions].reverse().find((decision) => decision.action === "reject")?.note
-      ?? (rejectedResources.length ? `${rejectedResources.length} 项入片素材未通过授权审核，必须替换后重新核验。` : detail.failure?.summary);
+      ?? (rejectedResources.length
+        ? `${rejectedResources.length} 项入片素材未通过授权审核，必须替换后重新核验。`
+        : failedNodeReason ?? detail.failure?.summary);
     const findings = [...reworkFindings(detail), ...resourceReworkFindings(run.id, rejectedResources)];
     const previousScript = await this.readReworkDocument(run, "script", "script");
     const previousDirectorPlan = await this.readReworkDocument(run, "visual-direction", "storyboard");
+    const failedAssetScenePositions = await this.failedAssetScenePositions(run);
+    const requiredAffectedScenePositions = recommendedReworkScenePositions({
+      findings,
+      failedAssetScenePositions,
+      previousScript,
+      previousDirectorPlan,
+      defaultToWholeFilm: false,
+    });
+    const affectedScenePositions = recommendedReworkScenePositions({
+      findings,
+      failedAssetScenePositions,
+      previousScript,
+      previousDirectorPlan,
+      defaultToWholeFilm: run.status === "rejected",
+    });
     // 历史运行可能把热点来源误存成目标平台；返工页仍需打开，让创作者明确重选。
     const brief = parsePersistedBrief(run.initialInput);
     const reworkScriptProviderId = brief.providers.script === "codex-screenwriter-v1"
@@ -240,8 +259,9 @@ export class ProductionStudio {
       sourceRunId: run.id,
       sourceRunRevision: run.revision,
       ...(rejectionReason ? { rejectionReason } : {}),
-      nodeInstructions: buildReworkNodeInstructions(findings, rejectionReason),
+      nodeInstructions: buildReworkNodeInstructions(findings, rejectionReason, affectedScenePositions),
       findings,
+      affectedScenePositions,
       ...(previousScript ? { previousScript } : {}),
       ...(previousDirectorPlan ? { previousDirectorPlan } : {}),
     };
@@ -280,6 +300,7 @@ export class ProductionStudio {
         ...(previousDirectorPlan ? ["visual-direction"] : []),
         ...(findings.length ? ["visual-review"] : []),
       ],
+      requiredAffectedScenePositions,
     };
   }
 
@@ -302,6 +323,23 @@ export class ProductionStudio {
     }
     if (!isRecord(document)) throw new StudioConflictError(`上一版${nodeId}交付格式不正确。`);
     return document;
+  }
+
+  private async failedAssetScenePositions(run: WorkflowRun<ProductionBrief>): Promise<number[]> {
+    const document = await this.readReworkDocument(run, "assets", "generation_jobs");
+    if (!document) return [];
+    if (document.version !== "video-factory/generation-jobs-v1" || !Array.isArray(document.jobs)) {
+      throw new StudioConflictError("上一版画面任务记录格式不正确，请先检查素材节点产物。");
+    }
+    const positions = document.jobs.flatMap((job): number[] => {
+      if (!isRecord(job) || job.status !== "failed") return [];
+      const position = Number(job.scenePosition);
+      if (!Number.isInteger(position) || position < 1 || position > 10_000) {
+        throw new StudioConflictError("上一版画面任务记录缺少有效镜头号，请先检查素材节点产物。");
+      }
+      return [position];
+    });
+    return [...new Set(positions)].sort((left, right) => left - right);
   }
 
   async archive(runIds: string[]): Promise<void> {
@@ -486,6 +524,9 @@ export class ProductionStudio {
     if (source.status !== "failed" && source.status !== "rejected" && source.status !== "succeeded") {
       throw new StudioConflictError("只有失败、已打回或已完成的制作才能作为新版本来源。");
     }
+    if (source.nodeRuns.some((node) => node.outcomeUncertain)) {
+      throw new StudioConflictError("这条制作还有付费结果尚未核对，完成账单核对后才能重新制作。");
+    }
     const rejectedResources = this.options.loadRejectedVisualResources
       ? await this.options.loadRejectedVisualResources(source.id)
       : [];
@@ -495,6 +536,40 @@ export class ProductionStudio {
     ];
     if (!isDeepStrictEqual(brief.rework.findings, canonicalFindings)) {
       throw new StudioConflictError("审片问题已经变化或被修改，请重新读取原制作的返工草稿。");
+    }
+    const [canonicalPreviousScript, canonicalPreviousDirectorPlan] = await Promise.all([
+      this.readReworkDocument(source, "script", "script"),
+      this.readReworkDocument(source, "visual-direction", "storyboard"),
+    ]);
+    if (!isDeepStrictEqual(brief.rework.previousScript, canonicalPreviousScript)
+      || !isDeepStrictEqual(brief.rework.previousDirectorPlan, canonicalPreviousDirectorPlan)) {
+      throw new StudioConflictError("上一版脚本或导演方案已经变化，请重新读取原制作的返工草稿。");
+    }
+    const canonicalAffectedScenePositions = await this.failedAssetScenePositions(source);
+    const submittedAffectedScenePositions = brief.rework.affectedScenePositions;
+    if (submittedAffectedScenePositions === undefined) {
+      if (canonicalAffectedScenePositions.length > 0) {
+        throw new StudioConflictError("失败镜头范围已经变化或被修改，请回到原制作重新读取返工草稿。");
+      }
+    } else {
+      const canonicalRequiredPositions = recommendedReworkScenePositions({
+        findings: canonicalFindings,
+        failedAssetScenePositions: canonicalAffectedScenePositions,
+        previousScript: canonicalPreviousScript,
+        previousDirectorPlan: canonicalPreviousDirectorPlan,
+        defaultToWholeFilm: false,
+      });
+      const submitted = new Set(submittedAffectedScenePositions);
+      if (canonicalRequiredPositions.some((position) => !submitted.has(position))) {
+        throw new StudioConflictError("返工范围不能移除审片或失败镜头，请重新读取审片建议后调整。");
+      }
+      const sceneUniverse = verifiedReworkScenePositions(canonicalPreviousScript, canonicalPreviousDirectorPlan);
+      const allowedWithoutUniverse = new Set(canonicalRequiredPositions);
+      if (sceneUniverse
+        ? submittedAffectedScenePositions.some((position) => !sceneUniverse.includes(position))
+        : submittedAffectedScenePositions.some((position) => !allowedWithoutUniverse.has(position))) {
+        throw new StudioConflictError("返工范围包含上一版中不存在的镜头，请重新读取原制作。");
+      }
     }
     const sourceSnapshot = parseBrief(source.initialInput).templateSnapshot;
     if (!sourceSnapshot || !isRecord(input) || !isRecord(input.template)) return undefined;
@@ -1881,9 +1956,49 @@ function resourceReworkFindings(runId: string, resources: RejectedVisualResource
   });
 }
 
+function verifiedReworkScenePositions(previousScript: unknown, previousDirectorPlan: unknown): number[] | undefined {
+  const fromDocument = (document: unknown, listKey: string, positionKey: string): number[] | undefined => {
+    if (!isRecord(document) || !Array.isArray(document[listKey])) return undefined;
+    const positions = document[listKey].map((entry) => isRecord(entry) ? Number(entry[positionKey]) : Number.NaN);
+    const sorted = [...positions].sort((left, right) => left - right);
+    return sorted.length > 0 && sorted.every((position, index) => Number.isInteger(position) && position === index + 1)
+      ? sorted
+      : undefined;
+  };
+  const scriptPositions = fromDocument(previousScript, "scenes", "position");
+  const directorPositions = fromDocument(previousDirectorPlan, "shots", "scenePosition");
+  if (scriptPositions && directorPositions) {
+    return isDeepStrictEqual(scriptPositions, directorPositions) ? scriptPositions : undefined;
+  }
+  return scriptPositions ?? directorPositions;
+}
+
+function recommendedReworkScenePositions(options: {
+  findings: StudioReworkFinding[];
+  failedAssetScenePositions: number[];
+  previousScript: unknown;
+  previousDirectorPlan: unknown;
+  defaultToWholeFilm: boolean;
+}): number[] {
+  const universe = verifiedReworkScenePositions(options.previousScript, options.previousDirectorPlan);
+  const affected = new Set(options.failedAssetScenePositions);
+  let requiresWholeFilm = false;
+  for (const finding of options.findings) {
+    if (!finding.targetNodeIds.some((nodeId) => nodeId === "visual-direction" || nodeId === "assets")) continue;
+    if (finding.scenePosition === undefined || universe && !universe.includes(finding.scenePosition)) {
+      requiresWholeFilm = true;
+    } else {
+      affected.add(finding.scenePosition);
+    }
+  }
+  if (universe && (requiresWholeFilm || options.defaultToWholeFilm && affected.size === 0)) return universe;
+  return [...affected].sort((left, right) => left - right);
+}
+
 function buildReworkNodeInstructions(
   findings: StudioReworkFinding[],
   rejectionReason?: string,
+  affectedScenePositions: number[] = [],
 ): { script: string; visualDirection: string; assets: string } {
   const rejection = rejectionReason ? `本次重做原因：${rejectionReason.trim()}\n` : "";
   const contentSafetyFailure = /内容安全|敏感|sensitive information/i.test(rejectionReason ?? "");
@@ -1900,6 +2015,9 @@ function buildReworkNodeInstructions(
   const scriptLines = linesFor("script");
   const visualLines = linesFor("visual-direction");
   const assetLines = linesFor("assets");
+  const failedAssetInstruction = affectedScenePositions.length
+    ? `- 只重新生成镜头 ${affectedScenePositions.join("、")}；其余镜头保持原方案与连续性。`
+    : "- 只替换本次重做原因涉及的素材，其余镜头保持连续性。";
   if (contentSafetyFailure && findings.length === 0) {
     return {
       script: `${rejection}以上一版脚本为底稿，保留旁白、事实和叙事结构；只把 visual_prompt 与 search_terms 中可能产生歧义的说法改成中性、具体、可见的物体和动作描述，不改写无关内容。`.trim(),
@@ -1909,8 +2027,8 @@ function buildReworkNodeInstructions(
   }
   return {
     script: `${rejection}以上一版脚本为底稿，保留未被要求修改的叙事与事实，只修改下列内容：\n${scriptLines.join("\n") || "- 当前没有定位到脚本文字问题；只根据本次重做原因做必要修改，不重写无关段落。"}`.trim(),
-    visualDirection: `${rejection}以上一版导演方案为底稿，保留未被要求修改的全片视觉规则与镜头，只重做下列问题：\n${visualLines.join("\n") || "- 当前没有结构化视觉问题；依据本次重做原因定位并改写受影响镜头。"}`.trim(),
-    assets: `${rejection}严格执行修订后的逐镜路由；保留未受影响母片，不得用说明卡、无关图库素材或内部术语掩盖失败：\n${assetLines.join("\n") || "- 只替换本次重做原因涉及的素材，其余镜头保持连续性。"}`.trim(),
+    visualDirection: `${rejection}以上一版导演方案为底稿，保留未被要求修改的全片视觉规则与镜头，只重做下列问题：\n${visualLines.join("\n") || (findings.length > 0 ? "- 本轮结构化问题未直接指向导演方案；仍按本次重做原因复核并改写受影响镜头。" : "- 当前没有结构化视觉问题；依据本次重做原因定位并改写受影响镜头。")}`.trim(),
+    assets: `${rejection}严格执行修订后的逐镜路由；保留未受影响母片，不得用说明卡、无关图库素材或内部术语掩盖失败：\n${assetLines.join("\n") || failedAssetInstruction}`.trim(),
   };
 }
 

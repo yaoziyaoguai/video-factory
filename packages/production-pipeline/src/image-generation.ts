@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { ProviderRequestRejectedError } from "./provider-request-error.js";
+import { providerHttpFailure } from "./provider-request-error.js";
 
 export type ImageAspectRatio = "9:16" | "16:9" | "1:1" | "3:4" | "4:3";
 
 export interface ImageGenerationRequest {
   prompt: string;
   ratio: ImageAspectRatio;
+  referenceImages?: [string, ...string[]];
 }
 
 export interface ImageGenerationResult {
@@ -24,6 +25,8 @@ export interface ImageGenerationProgress {
 
 export interface ImageGenerationAdapter {
   readonly providerId: string;
+  readonly modelId?: string;
+  readonly supportsReferenceImage?: boolean;
   generate(
     request: ImageGenerationRequest,
     onProgress?: (progress: ImageGenerationProgress) => Promise<void> | void,
@@ -41,12 +44,16 @@ export interface SeedreamImageAdapterOptions {
 
 export class SeedreamImageAdapter implements ImageGenerationAdapter {
   readonly providerId = "seedream-image-v1";
+  readonly modelId: string;
+  readonly supportsReferenceImage: boolean;
   private readonly baseUrl: string;
   private readonly fetch: FetchLike;
 
   constructor(private readonly options: SeedreamImageAdapterOptions) {
     if (!options.apiKey.trim()) throw new Error("Image generation apiKey is required.");
     if (!options.model.trim()) throw new Error("Image generation model is required.");
+    this.modelId = options.model.trim();
+    this.supportsReferenceImage = seedreamModelSupportsReferenceImage(this.modelId);
     this.baseUrl = (options.baseUrl ?? "https://ark.cn-beijing.volces.com/api/v3").replace(/\/+$/, "");
     this.fetch = options.fetch ?? fetch;
   }
@@ -56,6 +63,12 @@ export class SeedreamImageAdapter implements ImageGenerationAdapter {
     onProgress?: (progress: ImageGenerationProgress) => Promise<void> | void,
   ): Promise<ImageGenerationResult> {
     if (!request.prompt.trim()) throw new Error("Image generation prompt is required.");
+    const referenceImages = request.referenceImages?.map((value, index) => (
+      requiredReferenceImage(value, `Image generation referenceImages[${index}]`)
+    ));
+    if (request.referenceImages && referenceImages?.length === 0) {
+      throw new Error("Image generation referenceImages must include at least one image.");
+    }
     const response = await this.fetch(`${this.baseUrl}/images/generations`, {
       method: "POST",
       headers: {
@@ -63,8 +76,9 @@ export class SeedreamImageAdapter implements ImageGenerationAdapter {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: this.options.model,
+        model: this.modelId,
         prompt: request.prompt,
+        ...(referenceImages ? { image: referenceImages } : {}),
         size: imageSize(request.ratio),
         sequential_image_generation: "disabled",
         response_format: "url",
@@ -80,7 +94,8 @@ export class SeedreamImageAdapter implements ImageGenerationAdapter {
     }
     const record = requiredRecord(value, "Seedream response");
     if (!response.ok) {
-      throw new ProviderRequestRejectedError(
+      throw providerHttpFailure(
+        response.status,
         providerError(record, `Seedream request failed with status ${response.status}.`),
       );
     }
@@ -97,6 +112,26 @@ export class SeedreamImageAdapter implements ImageGenerationAdapter {
     await onProgress?.({ providerId: this.providerId, taskId, status: "succeeded", imageUrl });
     return { providerId: this.providerId, taskId, imageUrl };
   }
+}
+
+export function seedreamModelSupportsReferenceImage(modelId: string): boolean {
+  return modelId.trim() === "doubao-seedream-4-0-250828";
+}
+
+function requiredReferenceImage(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is missing.`);
+  const normalized = value.trim();
+  if (/^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/]+={0,2}$/i.test(normalized)) return normalized;
+  let url: URL;
+  try {
+    url = new URL(normalized);
+  } catch {
+    throw new Error(`${label} must be an HTTP(S) URL or image data URL.`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`${label} must be an HTTP(S) URL or image data URL.`);
+  }
+  return normalized;
 }
 
 function imageSize(ratio: ImageAspectRatio): string {
@@ -129,8 +164,15 @@ function requiredHttpUrl(value: unknown, label: string): string {
 function providerError(value: Record<string, unknown>, fallback: string): string {
   if (typeof value.error === "object" && value.error !== null && !Array.isArray(value.error)) {
     const message = (value.error as Record<string, unknown>).message;
-    if (typeof message === "string" && message.trim()) return message.trim();
+    if (typeof message === "string" && message.trim()) return safeProviderErrorText(message);
   }
-  if (typeof value.message === "string" && value.message.trim()) return value.message.trim();
+  if (typeof value.message === "string" && value.message.trim()) return safeProviderErrorText(value.message);
   return fallback;
+}
+
+function safeProviderErrorText(value: string): string {
+  return value
+    .replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, "[redacted image data]")
+    .trim()
+    .slice(0, 2_000);
 }

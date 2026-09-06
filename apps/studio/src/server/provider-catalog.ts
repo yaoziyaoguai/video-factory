@@ -14,6 +14,7 @@ import {
   reviewedVideoModelCatalog,
 } from "./video-provider-settings.js";
 import { readMeteredImageProviderSettings } from "./image-provider-settings.js";
+import { seedreamModelSupportsReferenceImage } from "@video-factory/production-pipeline";
 
 export interface ProviderRuntime {
   python: boolean;
@@ -46,6 +47,11 @@ export function assetProviderDeliveryTypes(providerId: string): AssetDeliveryTyp
   const deliveryTypes = ASSET_PROVIDER_DELIVERY_TYPES[providerId as keyof typeof ASSET_PROVIDER_DELIVERY_TYPES];
   if (!deliveryTypes) throw new Error(`Asset provider '${providerId}' is missing its delivery type declaration.`);
   return [...deliveryTypes];
+}
+
+export function assetProviderSupportsReferenceImage(providerId: string, modelId?: string): boolean {
+  if (providerId !== "seedream-image-v1") return false;
+  return modelId === undefined || seedreamModelSupportsReferenceImage(modelId);
 }
 
 export function buildProviderCatalog(
@@ -301,7 +307,14 @@ export function buildProviderCatalog(
       billing: "metered",
       status: seedreamAvailable ? "ready" : "needs_config",
       description: "火山方舟同步生成竖屏关键画面，适合解释性插画、概念视觉和系列统一风格。",
-      modes: ["文生图", "9:16", "单张关键画面"],
+      modes: [
+        "文生图",
+        ...(seedreamSettings && assetProviderSupportsReferenceImage("seedream-image-v1", seedreamSettings.model)
+          ? ["参考图再生成"]
+          : []),
+        "9:16",
+        "单张关键画面",
+      ],
       deliveryTypes: assetProviderDeliveryTypes("seedream-image-v1"),
       latency: "seconds",
       ...(seedreamSettings ? { estimatedCnyPerClip: seedreamSettings.estimatedCnyPerImage } : {}),
@@ -321,6 +334,7 @@ export function buildProviderCatalog(
       } : {}),
       requirement: "需要连接火山方舟账号；模型与单图估价未单独设置时使用已审核的保守默认值",
       docsUrl: "https://api.volcengine.com/api-docs/view?action=ImageGenerations&serviceCode=ark&version=2024-01-01",
+      consoleUrl: "https://console.volcengine.com/ark",
     }),
     provider({
       id: "seedance-video-v1",
@@ -348,6 +362,7 @@ export function buildProviderCatalog(
       })),
       requirement: "需要连接火山方舟账号，并为视频模型配置单镜头估价；模型可在页面选择",
       docsUrl: "https://www.volcengine.com/docs/82379/1520757?lang=zh",
+      consoleUrl: "https://console.volcengine.com/ark",
     }),
     provider({
       id: "hailuo-video-v1",
@@ -374,6 +389,7 @@ export function buildProviderCatalog(
       })),
       requirement: "需要连接 MiniMax 账号，选择已审核的视频模型，并配置单镜头估价",
       docsUrl: "https://platform.minimaxi.com/docs/api-reference/video-generation-v2-create",
+      consoleUrl: "https://platform.minimaxi.com/",
     }),
     provider({
       id: "wan-video-v1",
@@ -398,6 +414,7 @@ export function buildProviderCatalog(
       })),
       requirement: "需要连接阿里云百炼账号及工作空间，选择已审核的视频模型，并配置单镜头估价",
       docsUrl: "https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference",
+      consoleUrl: "https://bailian.console.aliyun.com/",
     }),
     plannedVideoProvider("kling-video-v1", "Kling 可灵", "可灵官方接口的模型目录与鉴权适配将在账号权限确认后启用。"),
     plannedVideoProvider("vidu-video-v1", "Vidu", "参考生视频、模板和口型能力将在统一生成任务协议上接入。"),
@@ -419,6 +436,7 @@ export function buildProviderCatalog(
       modelProfiles: [textModelProfile(environment.MINIMAX_TTS_MODEL_ID?.trim() || "speech-2.8-turbo", "MiniMax Speech 2.8 Turbo", "minimax-tts-v1", "minimax", miniMaxTtsAvailable, "云端中文配音模型；费用按一条视频的旁白保守估算。", positiveEstimate(environment.MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP, 0.5))],
       requirement: "需要连接 MiniMax 账号；未单独选择配音模型时使用已审核的默认模型",
       docsUrl: "https://platform.minimaxi.com/docs/api-reference/speech-t2a-http",
+      consoleUrl: "https://platform.minimaxi.com/",
     }),
     provider({
       id: "macos-say-v1",

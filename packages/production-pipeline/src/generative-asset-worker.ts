@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { isDeepStrictEqual } from "node:util";
 import type { WorkerArtifactDescriptor, WorkerResponse } from "./python-worker-client.js";
 import type {
   VideoGenerationAdapter,
@@ -63,6 +64,7 @@ export interface GenerativeAssetWorkerClientOptions {
   fallback: WorkerClient;
   adapters: VideoGenerationAdapterBinding[];
   imageAdapters?: ImageGenerationAdapterBinding[];
+  runsRoot?: string;
   fetch?: FetchLike;
   resolveHost?: ResolveHost;
   maxDownloadBytes?: number;
@@ -75,6 +77,8 @@ interface ScriptScene {
   visualStrategy: string;
   visualPrompt: string;
 }
+
+const METERED_CREATE_ATTEMPTED = Symbol("meteredCreateAttempted");
 
 interface GenerationJob {
   scenePosition: number;
@@ -89,6 +93,7 @@ interface GenerationJob {
   videoUrl?: string;
   imageUrl?: string;
   carriedForward?: boolean;
+  [METERED_CREATE_ATTEMPTED]?: boolean;
   error?: string;
 }
 
@@ -121,6 +126,7 @@ interface PaidAssetOperationItem {
   actualCostSource?: "configured_rate";
   carriedForwardFromItemRequestId?: string;
   error?: string;
+  manualReconciliationRequired?: boolean;
 }
 
 interface PaidAssetOperationLedger {
@@ -136,6 +142,7 @@ interface RoutedShot {
   providerIds: string[];
   deliveryType?: string;
   reuseFromScenePosition?: number;
+  referenceFromScenePosition?: number;
   query: string;
   generationPrompt: string;
   subject?: string;
@@ -151,6 +158,7 @@ interface RoutedShot {
 
 interface ResolvedAssetBinding {
   mediaType: "image" | "video";
+  supportsReferenceImage?: boolean;
   estimatedCnyPerAsset: number;
   estimateCny(scene: ScriptScene): number;
   modelId?: string;
@@ -158,6 +166,7 @@ interface ResolvedAssetBinding {
     scene: ScriptScene,
     prompt: string,
     onProgress: (progress: VideoGenerationProgress | ImageGenerationProgress) => Promise<void>,
+    referenceImages?: [string, ...string[]],
   ): Promise<{ taskId: string; url: string }>;
   reconcile?(
     taskId: string,
@@ -364,7 +373,14 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         }
         await writeJobs(jobsPath, jobs);
         if (ledgerItem?.state === "materialized") {
-          const materialized = await verifyMaterializedItem(ledgerItem);
+          const materialized = await materializeCarriedAsset(
+            ledgerItem,
+            outputDir,
+            scene.position,
+            providerId,
+            binding.mediaType,
+          );
+          if (ledgerPath && openedLedger) await writeGenerationLedger(ledgerPath, openedLedger.ledger);
           applySucceeded(job, generated.taskId, generated.url);
           replaceSceneAsset(plan, assets, scene, generated.taskId, materialized.path, providerId, binding.mediaType);
           mediaArtifacts.push(await describeFile(
@@ -410,19 +426,22 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         ));
       } catch (error) {
         job.status = "failed";
-        job.error = error instanceof Error ? error.message : String(error);
+        job.error = safeGenerationDiagnostic(error);
         if (job.carriedForward) {
           delete job.actualCostCny;
           delete job.actualCostSource;
         }
         await writeJobs(jobsPath, jobs);
         if (ledgerPath && openedLedger && ledgerItem) {
-          ledgerItem.error = job.error;
-          if (ledgerItem.resultUrl && ledgerItem.taskId) {
-            ledgerItem.state = "provider_succeeded";
+          if (!isManuallyReconciledTerminalItem(ledgerItem)) {
+            ledgerItem.error = job.error;
+            if (ledgerItem.resultUrl && ledgerItem.taskId) {
+              ledgerItem.state = "provider_succeeded";
+            }
           }
           await writeGenerationLedger(ledgerPath, openedLedger.ledger);
         }
+        if (openedLedger?.created === false) continue;
         break;
       }
     }
@@ -443,7 +462,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       ...meteredJobDiagnostics(jobs),
       ...actualModelDiagnostics(jobs),
       jobsPath,
-      ...(failedJob ? { failedScenes: 1 } : {}),
+      ...(failedJob ? { failedScenes: jobs.filter((job) => job.status === "failed").length } : {}),
     };
     if (!failedJob) assertCompletedAssetPlan(plan, scenes, undefined, jobs);
     await writeJsonAtomically(planPath, plan);
@@ -491,7 +510,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           code: "ASSET_GENERATION_FAILED",
           message: `Scene ${failedJob.scenePosition} generation failed: ${failedJob.error ?? "unknown provider error"}`,
         },
-        diagnostics,
+        diagnostics: {
+          ...diagnostics,
+          // 回执不得仍装成零次尝试：结果未知时由 WorkflowRunner 保留 outcomeUncertain，
+          // 交由人工核账闭环而不是解锁重试。
+          providerOutcomeKnown: ledgerProviderOutcomeKnown(openedLedger?.ledger),
+        },
       };
     }
     return {
@@ -527,6 +551,10 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const byScenePosition = new Map(routedShots.map((route) => [route.scenePosition, route]));
     const generatedRoutes = routedShots.flatMap((route) => {
       const reuseFrom = assetReuseSourceScenePosition(route);
+      const referenceFrom = route.referenceFromScenePosition;
+      if (reuseFrom !== undefined && referenceFrom !== undefined) {
+        throw new Error(`Scene ${route.scenePosition} cannot both reuse and reference another scene.`);
+      }
       if (reuseFrom !== undefined) {
         if (reuseFrom >= route.scenePosition || !byScenePosition.has(reuseFrom)) {
           throw new Error(`Scene ${route.scenePosition} must reuse an earlier director scene, received ${reuseFrom}.`);
@@ -535,6 +563,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       }
       const providerId = route.preferredProviderId;
       if (providerId === "local-editorial-v1") {
+        if (referenceFrom !== undefined) {
+          throw new Error(`Scene ${route.scenePosition} reference image requires a generated image route.`);
+        }
         if (route.deliveryType !== "editorial_card") {
           throw new Error(
             `Scene ${route.scenePosition} may use local-editorial-v1 only with deliveryType editorial_card.`,
@@ -542,7 +573,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         }
         return [];
       }
-      if (KNOWN_FREE_ASSET_PROVIDERS.has(providerId)) return [];
+      if (KNOWN_FREE_ASSET_PROVIDERS.has(providerId)) {
+        if (referenceFrom !== undefined) {
+          throw new Error(`Scene ${route.scenePosition} reference image requires a generated image route.`);
+        }
+        return [];
+      }
       if (!KNOWN_METERED_ASSET_PROVIDERS.has(providerId)) {
         throw new Error(`Provider '${providerId}' is not a recognized asset source.`);
       }
@@ -554,7 +590,24 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         throw new Error(`Provider '${providerId}' is not configured.`);
       }
       return [{ route, scene, providerId, ...(modelId ? { modelId } : {}), binding }];
-    });
+    }).sort((left, right) => left.scene.position - right.scene.position);
+    const generatedRouteByPosition = new Map(generatedRoutes.map((entry) => [entry.scene.position, entry]));
+    for (const entry of generatedRoutes) {
+      const referenceFrom = entry.route.referenceFromScenePosition;
+      if (referenceFrom === undefined) continue;
+      if (entry.binding.mediaType !== "image") {
+        throw new Error(`Scene ${entry.scene.position} reference image requires an image generation provider.`);
+      }
+      if (!entry.binding.supportsReferenceImage) {
+        throw new Error(`Scene ${entry.scene.position} selected image provider does not support reference images.`);
+      }
+      const source = generatedRouteByPosition.get(referenceFrom);
+      if (referenceFrom >= entry.scene.position || !source || source.binding.mediaType !== "image") {
+        throw new Error(
+          `Scene ${entry.scene.position} must reference an earlier generated image scene, received ${referenceFrom}.`,
+        );
+      }
+    }
     const operationId = requiredString(request.commandId, "commandId");
     const sourceFingerprint = await paidAssetSourceFingerprint([scriptPath, directorPlanPath]);
     const baseItems = generatedRoutes.map(({ route, scene, binding, providerId }) => createPaidAssetOperationItem(
@@ -565,9 +618,21 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       binding,
       compileGenerationPrompt(providerId, route, scene),
       sourceFingerprint,
+      route.referenceFromScenePosition === undefined
+        ? undefined
+        : { scenePosition: route.referenceFromScenePosition },
     ));
+    const reworkCarryForwardItems = await findReworkCarryForwardItems({
+      ...(this.options.runsRoot ? { runsRoot: this.options.runsRoot } : {}),
+      input,
+      currentScript: script,
+      currentDirectorPlan: directorPlan,
+      modelSelections: Object.fromEntries(generatedRoutes.map(({ providerId, binding }) => (
+        [providerId, binding.modelId ?? providerId]
+      ))),
+    });
     const preparedOperation = generatedRoutes.length
-      ? await preparePaidAssetOperation(outputDir, operationId, baseItems)
+      ? await preparePaidAssetOperation(outputDir, operationId, baseItems, reworkCarryForwardItems)
       : undefined;
     const estimatedCost = preparedOperation?.createCostCny ?? 0;
     if (estimatedCost > 0 && maxCostCny <= 0) {
@@ -615,7 +680,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
 
     for (const { route, scene, binding, providerId } of generatedRoutes) {
       const sceneCost = binding.estimateCny(scene);
-      const ledgerItem = openedLedger?.ledger.items.find((item) => item.scenePosition === scene.position);
+      let ledgerItem = openedLedger?.ledger.items.find((item) => item.scenePosition === scene.position);
       const job: GenerationJob = {
         scenePosition: scene.position,
         providerId,
@@ -627,6 +692,33 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       jobs.push(job);
       try {
         const prompt = compileGenerationPrompt(providerId, route, scene);
+        let referenceImages: [string, ...string[]] | undefined;
+        if (route.referenceFromScenePosition !== undefined && ledgerItem?.state !== "materialized") {
+          if (!openedLedger || !ledgerPath || !ledgerItem) {
+            throw new Error(`Scene ${scene.position} reference image operation ledger is unavailable.`);
+          }
+          const reference = await materializedReferenceImage(
+            openedLedger.ledger,
+            route.referenceFromScenePosition,
+          );
+          const referencedItem = createPaidAssetOperationItem(
+            operationId,
+            scene,
+            "ai-shot-router-v1",
+            providerId,
+            binding,
+            prompt,
+            sourceFingerprint,
+            { scenePosition: route.referenceFromScenePosition, imageSha256: reference.sha256 },
+          );
+          ledgerItem = await bindReferenceImageToLedger(
+            ledgerPath,
+            openedLedger.ledger,
+            ledgerItem,
+            referencedItem,
+          );
+          referenceImages = [reference.dataUrl];
+        }
         const resumedExistingTask = isExistingPaidTask(ledgerItem);
         if (resumedExistingTask || ledgerItem?.carriedForwardFromItemRequestId) {
           job.carriedForward = true;
@@ -649,6 +741,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
                 ledger: openedLedger?.ledger,
                 ledgerItem,
                 allowCreate: openedLedger?.created !== false,
+                ...(referenceImages ? { referenceImages } : {}),
               });
         applyAcceptedTask(job, generated.taskId, sceneCost);
         if (job.carriedForward) {
@@ -657,7 +750,14 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         }
         await writeJobs(jobsPath, jobs);
         if (ledgerItem?.state === "materialized") {
-          const materialized = await verifyMaterializedItem(ledgerItem);
+          const materialized = await materializeCarriedAsset(
+            ledgerItem,
+            outputDir,
+            scene.position,
+            providerId,
+            binding.mediaType,
+          );
+          if (ledgerPath && openedLedger) await writeGenerationLedger(ledgerPath, openedLedger.ledger);
           applySucceeded(job, generated.taskId, generated.url);
           replaceSceneAsset(plan, assets, scene, generated.taskId, materialized.path, providerId, binding.mediaType);
           mediaArtifacts.push(await describeFile(
@@ -703,17 +803,20 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         ));
       } catch (error) {
         job.status = "failed";
-        job.error = error instanceof Error ? error.message : String(error);
+        job.error = safeGenerationDiagnostic(error);
         if (job.carriedForward) {
           delete job.actualCostCny;
           delete job.actualCostSource;
         }
         await writeJobs(jobsPath, jobs);
         if (ledgerPath && openedLedger && ledgerItem) {
-          ledgerItem.error = job.error;
-          if (ledgerItem.resultUrl && ledgerItem.taskId) ledgerItem.state = "provider_succeeded";
+          if (!isManuallyReconciledTerminalItem(ledgerItem)) {
+            ledgerItem.error = job.error;
+            if (ledgerItem.resultUrl && ledgerItem.taskId) ledgerItem.state = "provider_succeeded";
+          }
           await writeGenerationLedger(ledgerPath, openedLedger.ledger);
         }
+        if (openedLedger?.created === false) continue;
         break;
       }
     }
@@ -735,7 +838,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       ...meteredJobDiagnostics(jobs),
       ...actualModelDiagnostics(jobs),
       jobsPath,
-      ...(failedJob ? { failedScenes: 1 } : {}),
+      ...(failedJob ? { failedScenes: jobs.filter((job) => job.status === "failed").length } : {}),
     };
     if (!failedJob) assertCompletedAssetPlan(plan, scenes, routedShots, jobs);
     await writeJsonAtomically(planPath, plan);
@@ -783,7 +886,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           code: "ASSET_GENERATION_FAILED",
           message: `Scene ${failedJob.scenePosition} generation failed: ${failedJob.error ?? "unknown provider error"}`,
         },
-        diagnostics,
+        diagnostics: {
+          ...diagnostics,
+          // 回执不得仍装成零次尝试：结果未知时由 WorkflowRunner 保留 outcomeUncertain，
+          // 交由人工核账闭环而不是解锁重试。
+          providerOutcomeKnown: ledgerProviderOutcomeKnown(openedLedger?.ledger),
+        },
       };
     }
     return {
@@ -848,12 +956,19 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     }
     const image = this.imageAdapters.get(providerId);
     if (image) {
+      const modelId = optionalString(image.adapter.modelId);
       return {
         mediaType: "image",
+        supportsReferenceImage: image.adapter.supportsReferenceImage ?? false,
         estimatedCnyPerAsset: image.estimatedCnyPerImage,
         estimateCny: () => image.estimatedCnyPerImage,
-        generate: async (_scene, prompt, onProgress) => {
-          const result = await image.adapter.generate({ prompt, ratio: "9:16" }, onProgress);
+        ...(modelId ? { modelId } : {}),
+        generate: async (_scene, prompt, onProgress, referenceImages) => {
+          const result = await image.adapter.generate({
+            prompt,
+            ratio: "9:16",
+            ...(referenceImages ? { referenceImages } : {}),
+          }, onProgress);
           return { taskId: result.taskId, url: result.imageUrl };
         },
       };
@@ -862,8 +977,551 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
   }
 }
 
+export interface ReworkCarryForwardInspection {
+  runsRoot: string;
+  input: Record<string, unknown>;
+  currentScript: Record<string, unknown>;
+  currentDirectorPlan: Record<string, unknown>;
+  modelSelections: Readonly<Record<string, string>>;
+}
+
+export async function inspectReworkCarriedAssetScenePositions(
+  options: ReworkCarryForwardInspection,
+): Promise<number[]> {
+  const items = await findReworkCarryForwardItems(options);
+  return [...new Set(items.map((item) => item.scenePosition))].sort((left, right) => left - right);
+}
+
+export interface ReworkAffectedSceneScope {
+  findings: unknown;
+  instructions: string;
+  previousScenes?: unknown;
+  previousShots?: unknown;
+  currentScenes: unknown;
+  currentShots?: unknown;
+  // 新版 Studio 由创作者显式确认该范围；字段缺失仅表示这是尚未迁移的旧 run，
+  // 需要使用兼容的自由文本解析。
+  affectedScenePositions?: readonly number[];
+}
+
+// 导演节点与素材执行器共用的唯一影响闭包：finding 定位、无定位保守全片、script 逐镜差异、
+// 中文指令解析和 previous/current 方案中的 reference/REUSE 传递依赖都在这里展开，
+// 下游不得再用另一套自然语言规则推导范围。
+export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): number[] {
+  const currentSceneRecords = positionedRecords(scope.currentScenes, "position");
+  const validPositions = new Set(currentSceneRecords.keys());
+  if (validPositions.size === 0) return [];
+  const visualFindings = (Array.isArray(scope.findings) ? scope.findings : []).filter((finding) => (
+    isRecord(finding)
+    && Array.isArray(finding.targetNodeIds)
+    && finding.targetNodeIds.some((target) => target === "visual-direction" || target === "assets")
+  ));
+  const affected = new Set<number>();
+  for (const finding of visualFindings) {
+    const position = Number(finding.scenePosition);
+    if (!Number.isInteger(finding.scenePosition) || finding.scenePosition === undefined) {
+      // 无法定位的返工问题保守按全片处理。
+      return [...validPositions].sort((left, right) => left - right);
+    }
+    if (position > 0) affected.add(position);
+  }
+  const previousSceneRecords = positionedRecords(scope.previousScenes, "position");
+  if (previousSceneRecords.size > 0) {
+    for (const [position, scene] of currentSceneRecords) {
+      if (!isDeepStrictEqual(scene, previousSceneRecords.get(position))) affected.add(position);
+    }
+  }
+  const instructions = typeof scope.instructions === "string" ? scope.instructions : "";
+  // 新版 Studio 会让创作者在开工前显式确认镜头范围。只要结构化字段存在（包括空数组），
+  // 自由文本就只描述“怎么改”，不再暗中扩大付费范围；旧 run 没有该字段时才走兼容解析。
+  if (scope.affectedScenePositions === undefined) {
+    const complement = extractInstructionComplementScopes(instructions);
+    if (complement.unresolvedReference) {
+      return [...validPositions].sort((left, right) => left - right);
+    }
+    for (const excludedPositions of complement.excludedPositionSets) {
+      const excluded = new Set(excludedPositions);
+      for (const position of validPositions) {
+        if (!excluded.has(position)) affected.add(position);
+      }
+    }
+    if (instructionRequestsFullVisualRework(complement.remainingInstruction)) {
+      return [...validPositions].sort((left, right) => left - right);
+    }
+    // 旧 run 的全局人工要求不能被局部 finding 截断：只有能明确证明为局部的修改
+    // 才保持局部；含糊的全局视觉要求保守扩展到全部当前镜头。
+    if (instructionRequiresGlobalVisualScope(complement.remainingInstruction)) {
+      return [...validPositions].sort((left, right) => left - right);
+    }
+    for (const clause of splitInstructionClauses(complement.remainingInstruction)) {
+      const excepted = exceptionScopeReferences(clause);
+      if (excepted) {
+        if (excepted.unresolvedReference) {
+          return [...validPositions].sort((left, right) => left - right);
+        }
+        const excluded = new Set(excepted.positions);
+        for (const position of validPositions) {
+          if (!excluded.has(position)) affected.add(position);
+        }
+        continue;
+      }
+      if (INSTRUCTION_PRESERVATION_PATTERN.test(clause)) continue;
+      if (instructionNegatesEveryChangeAction(clause)) continue;
+      const extraction = extractSceneReferences(clause);
+      const mentioned = extraction.positions.filter((position) => validPositions.has(position));
+      if (extraction.unresolvedReference || (extraction.positions.length > 0 && mentioned.length === 0)) {
+        // 有镜头引用形态但序数无法解析，或解析出的镜头号全部不在当前脚本内：
+        // fail closed 保守全片，不能返回空 scope 后让全部母片失去继承。
+        return [...validPositions].sort((left, right) => left - right);
+      }
+      for (const position of mentioned) affected.add(position);
+    }
+  }
+  for (const position of scope.affectedScenePositions ?? []) {
+    if (Number.isInteger(position) && position > 0) affected.add(position);
+  }
+  expandAffectedDependencies(affected, scope.previousShots);
+  expandAffectedDependencies(affected, scope.currentShots);
+  return [...affected].filter((position) => validPositions.has(position)).sort((left, right) => left - right);
+}
+
+function expandAffectedDependencies(affected: Set<number>, shots: unknown): void {
+  if (!Array.isArray(shots)) return;
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const shot of shots) {
+      if (!isRecord(shot)) continue;
+      const position = Number(shot.scenePosition);
+      const dependency = shotDependencyPosition(shot);
+      if (!Number.isInteger(position) || position < 1
+        || dependency === undefined || !affected.has(dependency) || affected.has(position)) continue;
+      affected.add(position);
+      expanded = true;
+    }
+  }
+}
+
+function shotDependencyPosition(shot: Record<string, unknown>): number | undefined {
+  const reference = Number(shot.referenceFromScenePosition);
+  if (Number.isInteger(reference) && reference >= 1) return reference;
+  if (typeof shot.query !== "string") return undefined;
+  return assetReuseSourceScenePosition({ query: shot.query });
+}
+
+function instructionRequestsFullVisualRework(instruction: string): boolean {
+  const action = "(?:重做|重新做|重制|重新制作|修改|改写|替换|重生|重新生成|调整)";
+  const scope = "(?:全片|整片|全部镜头|所有镜头)";
+  // “不要重做全片”“不重做整片”是否定全片而非要求全片返工；
+  // scope 前置形式中否定词不在连接词表内，天然无法匹配。
+  const negation = /(?:不要|不能|不得|别|无需|无须|不用|不需要|不必|不)$/;
+  for (const match of instruction.matchAll(new RegExp(`${action}\\s*${scope}`, "g"))) {
+    if (!negation.test(instruction.slice(0, match.index).trimEnd())) return true;
+  }
+  return new RegExp(`${scope}(?:画面|视觉|镜头|素材|方案)?\\s*(?:都|全部|需要|必须|一律)?\\s*${action}`).test(instruction);
+}
+
+const INSTRUCTION_PRESERVATION_PATTERN = /(?:保留|保持不变|保持原样|不改|无需修改|无需重做|维持|沿用)/;
+// 修改动作词只用于判断“是否提出了无法定位到镜头集合的修改要求”，不用于扩大提取出的镜头集合。
+const INSTRUCTION_CHANGE_ACTION_PATTERN = /(?:重做|重新做|重制|重新制作|重新生成|重生|重拍|修改|改写|改成|改为|更换|换成|改用|替换|调整|修正|统一|移除|删除|去掉|加上|增加|添加|改)/g;
+// 能证明指令为局部的引用：明确镜头集合（数字或中文序数）或显式指向既有受影响集合；
+// 引用目标本身不进入 affected 集合，修改主语仍由数字镜头号或 finding 定位。
+const INSTRUCTION_LOCAL_SCOPE_REFERENCE_PATTERN = /第\s*[零〇一二两三四五六七八九十百千]+\s*(?:镜头|场景|镜)|(?:镜头|场景)\s*[零〇一二两三四五六七八九十百千]|受影响|该镜头|相应镜头|问题镜头|下列问题|以下问题|已定位问题/;
+const INSTRUCTION_NEGATION_SUFFIX_PATTERN = /(?:不要|不能|不得|别|无需|无须|不用|不需要|不必|不)$/;
+const REWORK_REASON_PREFIX_PATTERN = /^本次重做原因\s*[:：]\s*/;
+
+// 局部判定与位置提取共享同一个解析器：一旦这里解析不出非空集合，
+// 上游必须 fail closed（保守全片），不能再出现“判定为局部但提取为空”的漂移。
+const CHINESE_NUMERAL_DIGITS: Record<string, number> = {
+  零: 0,
+  〇: 0,
+  一: 1,
+  二: 2,
+  两: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+  七: 7,
+  八: 8,
+  九: 9,
+};
+const CHINESE_NUMERAL_UNITS: Record<string, number> = { 十: 10, 百: 100, 千: 1000 };
+const CHINESE_NUMERAL = "[零〇一二两三四五六七八九十百千]";
+const SCENE_REFERENCE_ITEM = `(?:[0-9]+|${CHINESE_NUMERAL}+)`;
+const SCENE_REFERENCE_LIST = `${SCENE_REFERENCE_ITEM}(?:\\s*[、和及与]\\s*(?:第\\s*)?${SCENE_REFERENCE_ITEM})*`;
+const SCENE_REFERENCE_SUFFIX_PATTERN = new RegExp(
+  `(?:第\\s*)?(${SCENE_REFERENCE_LIST})\\s*(?:镜头|场景|镜)`,
+  "g",
+);
+const SCENE_REFERENCE_PREFIX_PATTERN = new RegExp(
+  `(?:镜头|场景)\\s*(${SCENE_REFERENCE_LIST})`,
+  "g",
+);
+const SCENE_REFERENCE_RANGE_SUFFIX_PATTERN = new RegExp(
+  `(?:第\\s*)?(${SCENE_REFERENCE_ITEM})\\s*(?:到|至|[-—–~～])\\s*(?:第\\s*)?(${SCENE_REFERENCE_ITEM})\\s*(?:镜头|场景|镜)`,
+  "g",
+);
+const SCENE_REFERENCE_RANGE_PREFIX_PATTERN = new RegExp(
+  `(?:镜头|场景)\\s*(${SCENE_REFERENCE_ITEM})\\s*(?:到|至|[-—–~～])\\s*(?:第\\s*)?(${SCENE_REFERENCE_ITEM})(?:\\s*(?:镜头|场景|镜))?`,
+  "g",
+);
+// “与第 X 镜一致”“参考镜头 Y”里的镜头号是对照目标而不是修改主语，不进入 affected 集合。
+const SCENE_REFERENCE_TARGET_PREFIX = /(?:如同|参考|沿用|保持|对照|像)$/;
+const SCENE_REFERENCE_CONNECTOR_PREFIX = /(?:与|同|和|跟)$/;
+const SCENE_REFERENCE_RELATION_SUFFIX = /^\s*(?:一致|相同|一样)/;
+const INSTRUCTION_CHANGE_ACTION_TEST_PATTERN = /(?:重做|重新做|重制|重新制作|重新生成|重生|重拍|修改|改写|改成|改为|更换|换成|改用|替换|调整|修正|统一|移除|删除|去掉|加上|增加|添加)/;
+
+interface SceneReferenceExtraction {
+  positions: number[];
+  unresolvedReference: boolean;
+}
+
+function extractSceneReferences(clause: string): SceneReferenceExtraction {
+  const positions = new Set<number>();
+  let unresolvedReference = false;
+  const parseItem = (item: string): number | undefined => {
+    const normalizedItem = item.replace(/^第\s*/, "");
+    return /^[0-9]+$/.test(normalizedItem)
+      ? Number(normalizedItem)
+      : parseChineseSceneOrdinal(normalizedItem);
+  };
+  const consumeRange = (match: RegExpMatchArray): void => {
+    if (isComparisonTargetReference(clause, match)) return;
+    const start = parseItem(match[1]!);
+    const end = parseItem(match[2]!);
+    if (start === undefined || end === undefined || start < 1 || end < start) {
+      unresolvedReference = true;
+      return;
+    }
+    for (let position = start; position <= end; position += 1) positions.add(position);
+  };
+  for (const match of clause.matchAll(SCENE_REFERENCE_RANGE_SUFFIX_PATTERN)) consumeRange(match);
+  for (const match of clause.matchAll(SCENE_REFERENCE_RANGE_PREFIX_PATTERN)) consumeRange(match);
+  const consume = (match: RegExpMatchArray): void => {
+    if (isComparisonTargetReference(clause, match)) return;
+    for (const item of match[1]!.split(/\s*[、和及与]\s*/)) {
+      const position = parseItem(item);
+      if (typeof position !== "number" || !Number.isInteger(position) || position < 1) {
+        unresolvedReference = true;
+        continue;
+      }
+      positions.add(position);
+    }
+  };
+  for (const match of clause.matchAll(SCENE_REFERENCE_SUFFIX_PATTERN)) consume(match);
+  for (const match of clause.matchAll(SCENE_REFERENCE_PREFIX_PATTERN)) consume(match);
+  return { positions: [...positions], unresolvedReference };
+}
+
+function isComparisonTargetReference(clause: string, match: RegExpMatchArray): boolean {
+  const matchIndex = match.index ?? 0;
+  const prefix = clause.slice(0, matchIndex).trimEnd();
+  if (SCENE_REFERENCE_TARGET_PREFIX.test(prefix)) return true;
+  const connector = prefix.match(SCENE_REFERENCE_CONNECTOR_PREFIX)?.[0];
+  if (!connector) return false;
+  const beforeConnector = prefix.slice(0, -connector.length).trimEnd();
+  if (!beforeConnector) return true;
+  const suffix = clause.slice(matchIndex + match[0].length);
+  // “第二镜和第四镜改成近景”中的连接词属于并列主语；“第二镜改成与第一镜一致”
+  // 才把后一镜视作参照目标。
+  if (INSTRUCTION_CHANGE_ACTION_TEST_PATTERN.test(suffix)) return false;
+  return INSTRUCTION_CHANGE_ACTION_TEST_PATTERN.test(beforeConnector)
+    || SCENE_REFERENCE_RELATION_SUFFIX.test(suffix);
+}
+
+interface InstructionComplementScopes {
+  excludedPositionSets: number[][];
+  unresolvedReference: boolean;
+  remainingInstruction: string;
+}
+
+function extractInstructionComplementScopes(instruction: string): InstructionComplementScopes {
+  const action = "(?:重做|重新做|重制|重新制作|重新生成|重生|重拍|修改|改写|更换|替换|调整|修正|改)";
+  const patterns = [
+    new RegExp(`(?:除了|除)\\s*([^，,\\n。；]+?)\\s*(?:之外|以外|外)\\s*[，,]?\\s*(?:(?:其余|其他|剩余)(?:镜头|场景)?\\s*)?(?:都|全部|一律)?\\s*${action}`),
+    new RegExp(`(?:只\\s*)?(?:保留|留下)\\s*([^，,\\n。；]+?)\\s*[，,]\\s*(?:其余|其他|剩余)(?:镜头|场景)?\\s*(?:都|全部|一律)?\\s*${action}`),
+  ];
+  const excludedPositionSets: number[][] = [];
+  let unresolvedReference = false;
+  let remainingInstruction = instruction;
+  while (true) {
+    const matches = patterns.flatMap((pattern) => {
+      const match = pattern.exec(remainingInstruction);
+      return match ? [match] : [];
+    }).sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
+    const match = matches[0];
+    if (!match) break;
+    const extraction = extractSceneReferences(match[1] ?? "");
+    if (extraction.unresolvedReference || extraction.positions.length === 0) {
+      unresolvedReference = true;
+    } else {
+      excludedPositionSets.push(extraction.positions);
+    }
+    const index = match.index ?? 0;
+    remainingInstruction = `${remainingInstruction.slice(0, index)} ${remainingInstruction.slice(index + match[0].length)}`;
+  }
+  return { excludedPositionSets, unresolvedReference, remainingInstruction };
+}
+
+function exceptionScopeReferences(clause: string): SceneReferenceExtraction | undefined {
+  const match = clause.match(
+    /^(?:除了|除)\s*(.+?)\s*(?:之外|以外|外)\s*(?:其余|其他)?(?:镜头|场景)?\s*(?:都|全部|一律)?\s*(?:重做|重新做|重制|重新制作|重新生成|重生|重拍|修改|改写|更换|替换|调整|修正)/,
+  );
+  return match ? extractSceneReferences(match[1] ?? "") : undefined;
+}
+
+function splitInstructionClauses(instructions: string): string[] {
+  return instructions.split(/[\n。；，,]|(?:但是|但|不过|然而|而是|而(?=只)|并且|并|且)/);
+}
+
+function instructionNegatesEveryChangeAction(clause: string): boolean {
+  let foundChangeAction = false;
+  for (const match of clause.matchAll(INSTRUCTION_CHANGE_ACTION_PATTERN)) {
+    foundChangeAction = true;
+    if (!INSTRUCTION_NEGATION_SUFFIX_PATTERN.test(clause.slice(0, match.index).trimEnd())) return false;
+  }
+  return foundChangeAction;
+}
+
+// 按位值解析中文序数（支持到项目允许的镜头上限 9999）：“十二”是 12 而不是 2，
+// “一百零三”是 103；超出解析能力（万位及以上、 malformed 序列）返回 undefined，
+// 由调用方 fail closed。
+function parseChineseSceneOrdinal(value: string): number | undefined {
+  if (!value || !new RegExp(`^${CHINESE_NUMERAL}+$`).test(value)) return undefined;
+  let section = 0;
+  let digit = 0;
+  for (const character of value) {
+    const numeral = CHINESE_NUMERAL_DIGITS[character];
+    if (numeral !== undefined) {
+      // “二零三”“二三”这类无位值单位的数字串不是合法镜头序数。
+      if (digit !== 0) return undefined;
+      if (numeral !== 0) digit = numeral;
+      continue;
+    }
+    const unit = CHINESE_NUMERAL_UNITS[character];
+    if (unit === undefined) return undefined;
+    section += (digit || 1) * unit;
+    digit = 0;
+  }
+  const parsed = section + digit;
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 9_999) return undefined;
+  return parsed;
+}
+
+function instructionRequiresGlobalVisualScope(instructions: string): boolean {
+  for (const rawClause of splitInstructionClauses(instructions)) {
+    const clause = rawClause.trim().replace(REWORK_REASON_PREFIX_PATTERN, "");
+    if (!clause.trim()) continue;
+    if (INSTRUCTION_PRESERVATION_PATTERN.test(clause)) continue;
+    if (extractSceneReferences(clause).positions.length > 0) continue;
+    if (INSTRUCTION_LOCAL_SCOPE_REFERENCE_PATTERN.test(clause)) continue;
+    for (const match of clause.matchAll(INSTRUCTION_CHANGE_ACTION_PATTERN)) {
+      if (!INSTRUCTION_NEGATION_SUFFIX_PATTERN.test(clause.slice(0, match.index).trimEnd())) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function reworkInstructions(rework: Record<string, unknown>): string {
+  if (isRecord(rework.nodeInstructions)) {
+    return [
+      typeof rework.nodeInstructions.visualDirection === "string" ? rework.nodeInstructions.visualDirection : "",
+      typeof rework.nodeInstructions.assets === "string" ? rework.nodeInstructions.assets : "",
+    ].join("\n");
+  }
+  return typeof rework.instruction === "string" ? rework.instruction : "";
+}
+
+async function findReworkCarryForwardItems(
+  options: Partial<Pick<ReworkCarryForwardInspection, "runsRoot">>
+    & Omit<ReworkCarryForwardInspection, "runsRoot">,
+): Promise<PaidAssetOperationItem[]> {
+  if (!options.runsRoot || !isRecord(options.input.rework)) return [];
+  const rework = options.input.rework;
+  const sourceRunId = optionalString(rework.sourceRunId);
+  if (!sourceRunId
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sourceRunId)
+    || !isRecord(rework.previousScript)
+    || !isRecord(rework.previousDirectorPlan)) {
+    return [];
+  }
+
+  const routedShots = parseRoutedShots(options.currentDirectorPlan.shots);
+  // 与导演节点同一套统一影响闭包；persisted brief 的结构化 affectedScenePositions 既在
+  // 闭包内抑制系统含糊文案的全片扩展，也在下面做保守并集。
+  const affectedScenes = new Set<number>(reworkAffectedScenePositions({
+    findings: rework.findings,
+    instructions: reworkInstructions(rework),
+    previousScenes: rework.previousScript.scenes,
+    previousShots: rework.previousDirectorPlan.shots,
+    currentScenes: options.currentScript.scenes,
+    currentShots: options.currentDirectorPlan.shots,
+    ...(Array.isArray(rework.affectedScenePositions)
+      ? { affectedScenePositions: rework.affectedScenePositions.map(Number) }
+      : {}),
+  }));
+  if (Array.isArray(rework.affectedScenePositions)) {
+    for (const value of rework.affectedScenePositions) {
+      const position = Number(value);
+      if (Number.isInteger(position) && position > 0) affectedScenes.add(position);
+    }
+  }
+  if (affectedScenes.size === 0) return [];
+
+  const currentScenes = positionedRecords(options.currentScript.scenes, "position");
+  const previousScenes = positionedRecords(rework.previousScript.scenes, "position");
+  // 为什么不用整条 shot deepEqual：estimatedCostCny、confidence、rationale 等字段只影响
+  // 展示与估算，费率调整会让执行语义完全相同的镜头被判为不可复用并重复付费生成；
+  // 因此这里改用执行语义指纹比较——即 parseRoutedShots 提取的字段（Provider 路由与
+  // 交付类型、query 与 generationPrompt、节拍/构图/光线等生成参数、reuse/reference 依赖），
+  // 而 script 场景内容仍按整场景严格比较，账本身份门禁（provider/model/source
+  // fingerprint/media type/duration/reference）仍由 preparePaidAssetOperation 把守。
+  const previousExecutionShots = previousExecutionShotsByPosition(rework.previousDirectorPlan);
+  const reusableScenes = new Set(routedShots.flatMap((shot) => {
+    if (affectedScenes.has(shot.scenePosition)
+      || !isDeepStrictEqual(currentScenes.get(shot.scenePosition), previousScenes.get(shot.scenePosition))
+      || !isDeepStrictEqual(shot, previousExecutionShots.get(shot.scenePosition))) {
+      return [];
+    }
+    return [shot.scenePosition];
+  }));
+  if (reusableScenes.size === 0) return [];
+
+  const sourceItems = await effectiveSourcePaidAssetItems(options.runsRoot, sourceRunId);
+  return safelyCarriableReworkItems(sourceItems, reusableScenes, routedShots, options.modelSelections);
+}
+
+// previous 计划若缺少执行语义必需字段则无法证明任何镜头可安全继承，fail closed 按新生成报价。
+function previousExecutionShotsByPosition(previousDirectorPlan: Record<string, unknown>): Map<number, RoutedShot> {
+  try {
+    return new Map(parseRoutedShots(previousDirectorPlan.shots).map((shot) => [shot.scenePosition, shot]));
+  } catch {
+    return new Map();
+  }
+}
+
+// 参考图生成的母片与独立生成母片一样可以跨 run 继承，但必须能证明引用链身份：
+// 引用源镜头同样可安全继承且为 materialized image，source item 记录的 referenceImageSha256
+// 与实际继承源的 SHA-256 一致，且与当前路由声明的 referenceFromScenePosition 相同。
+// 任何一项无法证明时 fail closed，按新生成报价。
+function safelyCarriableReworkItems(
+  sourceItems: PaidAssetOperationItem[],
+  reusableScenes: Set<number>,
+  routedShots: RoutedShot[],
+  modelSelections: Readonly<Record<string, string>>,
+): PaidAssetOperationItem[] {
+  const routedByPosition = new Map(routedShots.map((route) => [route.scenePosition, route]));
+  const carried: PaidAssetOperationItem[] = [];
+  const pending: PaidAssetOperationItem[] = [];
+  for (const item of sourceItems) {
+    if (!reusableScenes.has(item.scenePosition)) continue;
+    if (modelSelections[item.providerId] !== item.modelId) continue;
+    if (item.parameters.referenceFromScenePosition === undefined) {
+      carried.push(item);
+      continue;
+    }
+    pending.push(item);
+  }
+  const carriedByPosition = new Map(carried.map((item) => [item.scenePosition, item]));
+  // 多级引用链（1 -> 2 -> 3）按依赖可见顺序反复消化 pending reference items：
+  // 每成功继承一项就立即加入 carriedByPosition，让下一层可以看到刚被证明安全的源；
+  // 直到没有新进展为止。循环、缺失源或身份无法证明的条目最终留在 deferred 中不被继承，
+  // fail closed 按新生成报价，不得猜测。
+  let remaining = pending;
+  while (remaining.length > 0) {
+    const deferred: PaidAssetOperationItem[] = [];
+    let progressed = false;
+    for (const item of remaining) {
+      const referenceFrom = Number(item.parameters.referenceFromScenePosition);
+      const referenceSha256 = item.parameters.referenceImageSha256;
+      const source = carriedByPosition.get(referenceFrom);
+      if (typeof referenceSha256 !== "string"
+        || !Number.isInteger(referenceFrom) || referenceFrom < 1
+        || routedByPosition.get(item.scenePosition)?.referenceFromScenePosition !== referenceFrom
+        || !source
+        || source.parameters.mediaType !== "image"
+        || source.sha256 !== referenceSha256) {
+        deferred.push(item);
+        continue;
+      }
+      carried.push(item);
+      carriedByPosition.set(item.scenePosition, item);
+      progressed = true;
+    }
+    if (!progressed) break;
+    remaining = deferred;
+  }
+  return carried;
+}
+
+async function effectiveSourcePaidAssetItems(runsRoot: string, sourceRunId: string): Promise<PaidAssetOperationItem[]> {
+  let sourceRun: Record<string, unknown>;
+  try {
+    sourceRun = requiredRecord(
+      JSON.parse(await readFile(path.join(runsRoot, sourceRunId, "run.json"), "utf8")),
+      "Rework source run",
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  if (!Array.isArray(sourceRun.nodeRuns)) return [];
+  const assetNodes = sourceRun.nodeRuns.filter((value): value is Record<string, unknown> => (
+    isRecord(value) && value.nodeId === "assets"
+  ));
+  if (assetNodes.length !== 1) return [];
+  const assetNode = assetNodes[0]!;
+  const outputState = isRecord(assetNode.outputState) ? assetNode.outputState : undefined;
+  const operationId = optionalString(assetNode.operationRequestId);
+  if (!operationId) return [];
+  // 只有源 assets 节点存在 outcomeUncertain（恢复流程仍可能改写该账本）时，才禁止
+  // 根据不确定账本自动继承。节点已 failed 但结果确定（不存在 outcomeUncertain）时，
+  // 不再以整节点 succeeded / 整账本 completed 作为继承前提，改为按 ledger item 独立判定：
+  // terminal_failed、unknown、submitted 或真实文件无法通过 SHA-256/size 校验的条目一律不继承。
+  if (assetNode.outcomeUncertain === true) return [];
+  if (assetNode.status === "succeeded") {
+    // 成功节点保留原有输出新鲜度门禁，防止从已被后续版本替代的输出继承。
+    if (!outputState
+      || outputState.stale !== false
+      || typeof outputState.generatedVersionId !== "string"
+      || outputState.generatedVersionId !== outputState.effectiveVersionId) {
+      return [];
+    }
+  }
+  const ledgerPath = path.join(
+    runsRoot,
+    sourceRunId,
+    "nodes",
+    "assets",
+    ".generation-operations",
+    `${createHash("sha256").update(operationId).digest("hex")}.json`,
+  );
+  let ledger: PaidAssetOperationLedger;
+  try {
+    ledger = parsePaidAssetOperationLedger(JSON.parse(await readFile(ledgerPath, "utf8")), operationId);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const verified: PaidAssetOperationItem[] = [];
+  for (const item of ledger.items) {
+    if (item.state !== "materialized") continue;
+    try {
+      await verifyMaterializedItem(item);
+      verified.push(item);
+    } catch {
+      // 源文件缺失或身份变化时按新生成报价，不能承诺一次无法兑现的零费用继承。
+    }
+  }
+  return verified;
+}
+
 function zeroMeteredAttemptFailure(response: WorkerResponse): WorkerResponse {
-  // 免费素材预检发生在付费 adapter 之前；显式零次计费让 workflow 能安全清除 outcomeUncertain。
+  // 免费素材预检发生在付费 adapter 之前，没有任何付费 create 被跨越：
+  // 显式零次计费 + providerOutcomeKnown=true 让 workflow 能安全清除 outcomeUncertain。
   return {
     ...response,
     diagnostics: {
@@ -872,6 +1530,7 @@ function zeroMeteredAttemptFailure(response: WorkerResponse): WorkerResponse {
       actualCostSource: "configured_rate",
       meteredAttemptCount: 0,
       meteredFailedAttemptCount: 0,
+      providerOutcomeKnown: true,
     },
   };
 }
@@ -1149,11 +1808,22 @@ function meteredJobDiagnostics(jobs: GenerationJob[]): {
   meteredAttemptCount: number;
   meteredFailedAttemptCount: number;
 } {
-  const submittedJobs = jobs.filter((job) => !job.carriedForward && Boolean(job.taskId?.trim()));
+  const submittedJobs = jobs.filter((job) => job[METERED_CREATE_ATTEMPTED] === true);
   return {
     meteredAttemptCount: submittedJobs.length,
     meteredFailedAttemptCount: submittedJobs.filter((job) => job.status === "failed").length,
   };
+}
+
+// 就本地证据而言，Provider 结果已知当且仅当 ledger 中不存在任何停留在 unknown
+// （create 边界断连，结果可能已被受理）或 submitted（在途）状态的条目。
+function ledgerProviderOutcomeKnown(ledger: PaidAssetOperationLedger | undefined): boolean {
+  if (!ledger) return true;
+  return ledger.items.every((item) => item.state !== "unknown" && item.state !== "submitted");
+}
+
+function isManuallyReconciledTerminalItem(item: PaidAssetOperationItem): boolean {
+  return item.state === "terminal_failed" && item.error?.startsWith("Manual reconciliation '") === true;
 }
 
 function parseRoutedShots(value: unknown): RoutedShot[] {
@@ -1171,6 +1841,9 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
     const reuseFromScenePosition = shot.reuseFromScenePosition === undefined
       ? undefined
       : boundedInteger(shot.reuseFromScenePosition, `Director shot ${index + 1} reuseFromScenePosition`, 1, 10_000);
+    const referenceFromScenePosition = shot.referenceFromScenePosition === undefined
+      ? undefined
+      : boundedInteger(shot.referenceFromScenePosition, `Director shot ${index + 1} referenceFromScenePosition`, 1, 10_000);
     return {
       scenePosition: boundedInteger(shot.scenePosition, `Director shot ${index + 1} scenePosition`, 1, 10_000),
       preferredProviderId,
@@ -1180,6 +1853,7 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
       ],
       ...(deliveryType ? { deliveryType } : {}),
       ...(reuseFromScenePosition ? { reuseFromScenePosition } : {}),
+      ...(referenceFromScenePosition ? { referenceFromScenePosition } : {}),
       query: optionalString(shot.query) ?? "",
       generationPrompt: typeof shot.generationPrompt === "string" && shot.generationPrompt.trim()
         ? shot.generationPrompt.trim()
@@ -1287,7 +1961,7 @@ function applyProgress(
 ): void {
   job.taskId = progress.taskId;
   job.status = progress.status;
-  if (progress.error) job.error = progress.error;
+  if (progress.error) job.error = safeGenerationDiagnostic(progress.error);
   if (progress.taskId.trim()) {
     job.actualCostCny = roundMoney(configuredCostCny);
     job.actualCostSource = "configured_rate";
@@ -1598,11 +2272,14 @@ function createPaidAssetOperationItem(
   binding: ResolvedAssetBinding,
   prompt: string,
   sourceFingerprint: string,
+  reference?: { scenePosition: number; imageSha256?: string },
 ): PaidAssetOperationItem {
   const parameters = {
     mediaType: binding.mediaType,
     durationSeconds: binding.mediaType === "video" ? generationRequest(scene, prompt).durationSeconds : 1,
     ratio: "9:16",
+    ...(reference ? { referenceFromScenePosition: reference.scenePosition } : {}),
+    ...(reference?.imageSha256 ? { referenceImageSha256: reference.imageSha256 } : {}),
   };
   const modelId = binding.modelId ?? providerId;
   const inputFingerprint = createHash("sha256").update(JSON.stringify({
@@ -1636,6 +2313,7 @@ async function preparePaidAssetOperation(
   outputDir: string,
   operationId: string,
   items: PaidAssetOperationItem[],
+  reworkCarryForwardItems: PaidAssetOperationItem[] = [],
 ): Promise<{
   ledgerPath: string;
   items: PaidAssetOperationItem[];
@@ -1654,8 +2332,16 @@ async function preparePaidAssetOperation(
   }
 
   const previousItems = await previousPaidAssetItems(path.dirname(ledgerPath), operationId);
-  const carriedItems = items.map((item) => {
-    const candidates = previousItems.filter((candidate) => candidate.inputFingerprint === item.inputFingerprint);
+  const carriedItems: PaidAssetOperationItem[] = [];
+  for (const item of items) {
+    const previousCandidates = previousItems.filter((candidate) => (
+      candidate.inputFingerprint === item.inputFingerprint
+      || isMatchingReferencedPaidItem(candidate, item, carriedItems)
+    ));
+    const reworkCandidates = reworkCarryForwardItems.filter((candidate) => (
+      isMatchingReworkCarryForwardItem(candidate, item, carriedItems)
+    ));
+    const candidates = [...previousCandidates, ...reworkCandidates];
     const reusable = candidates.find((candidate) => candidate.state === "materialized")
       ?? candidates.find((candidate) => (
         candidate.state === "provider_succeeded"
@@ -1663,8 +2349,13 @@ async function preparePaidAssetOperation(
         && Boolean(candidate.resultUrl)
       ));
     if (reusable) {
-      return {
-        ...item,
+      const carriedBase = reworkCandidates.includes(reusable)
+        ? item
+        : reusable.inputFingerprint === item.inputFingerprint
+          ? item
+          : paidItemWithReferenceIdentity(operationId, item, reusable);
+      carriedItems.push({
+        ...carriedBase,
         state: reusable.state,
         ...(reusable.taskId ? { taskId: reusable.taskId } : {}),
         ...(reusable.resultUrl ? { resultUrl: reusable.resultUrl } : {}),
@@ -1674,9 +2365,10 @@ async function preparePaidAssetOperation(
         ...(reusable.actualCostCny !== undefined ? { actualCostCny: reusable.actualCostCny } : {}),
         ...(reusable.actualCostSource ? { actualCostSource: reusable.actualCostSource } : {}),
         carriedForwardFromItemRequestId: reusable.itemRequestId,
-      };
+      });
+      continue;
     }
-    const unresolved = candidates.find((candidate) => (
+    const unresolved = previousCandidates.find((candidate) => (
       candidate.state === "submitted"
       || candidate.state === "provider_succeeded"
       || candidate.state === "unknown"
@@ -1686,8 +2378,8 @@ async function preparePaidAssetOperation(
         `Paid item '${unresolved.itemRequestId}' still has an unresolved provider outcome and must be reconciled before a new create.`,
       );
     }
-    return item;
-  });
+    carriedItems.push(item);
+  }
   return {
     ledgerPath,
     items: carriedItems,
@@ -1699,7 +2391,83 @@ async function preparePaidAssetOperation(
   };
 }
 
-async function previousPaidAssetItems(directory: string, operationId: string): Promise<PaidAssetOperationItem[]> {
+function isMatchingReworkCarryForwardItem(
+  candidate: PaidAssetOperationItem,
+  prepared: PaidAssetOperationItem,
+  carriedItems: PaidAssetOperationItem[],
+): boolean {
+  const identityMatches = candidate.scenePosition === prepared.scenePosition
+    && candidate.executorProviderId === prepared.executorProviderId
+    && candidate.providerId === prepared.providerId
+    && candidate.modelId === prepared.modelId
+    && candidate.parameters.mediaType === prepared.parameters.mediaType
+    && candidate.parameters.durationSeconds === prepared.parameters.durationSeconds
+    && candidate.parameters.ratio === prepared.parameters.ratio;
+  if (!identityMatches) return false;
+  const preparedReference = prepared.parameters.referenceFromScenePosition;
+  const candidateReference = candidate.parameters.referenceFromScenePosition;
+  if (preparedReference === undefined) return candidateReference === undefined;
+  if (candidateReference !== preparedReference) return false;
+  const referenceSha256 = candidate.parameters.referenceImageSha256;
+  if (typeof referenceSha256 !== "string") return false;
+  // 引用源可以自身是 reference-derived（多级链）；只需它已在 carriedItems 中物化为 image 且 SHA-256 精确匹配。
+  return carriedItems.some((item) => (
+    item.scenePosition === candidateReference
+    && item.state === "materialized"
+    && item.parameters.mediaType === "image"
+    && item.sha256 === referenceSha256
+  ));
+}
+
+function paidItemWithReferenceIdentity(
+  operationId: string,
+  prepared: PaidAssetOperationItem,
+  reusable: PaidAssetOperationItem,
+): PaidAssetOperationItem {
+  const referenceImageSha256 = reusable.parameters.referenceImageSha256;
+  if (typeof referenceImageSha256 !== "string") return prepared;
+  const inputFingerprint = reusable.inputFingerprint;
+  return {
+    ...prepared,
+    inputFingerprint,
+    itemRequestId: `paid-item-${createHash("sha256")
+      .update(`${operationId}\0${inputFingerprint}`)
+      .digest("hex")
+      .slice(0, 24)}`,
+    parameters: {
+      ...prepared.parameters,
+      referenceImageSha256,
+    },
+  };
+}
+
+function isMatchingReferencedPaidItem(
+  candidate: PaidAssetOperationItem,
+  prepared: PaidAssetOperationItem,
+  carriedItems: PaidAssetOperationItem[],
+): boolean {
+  const referenceFromScenePosition = prepared.parameters.referenceFromScenePosition;
+  const referenceImageSha256 = candidate.parameters.referenceImageSha256;
+  if (typeof referenceFromScenePosition !== "number"
+    || typeof referenceImageSha256 !== "string"
+    || candidate.parameters.referenceFromScenePosition !== referenceFromScenePosition
+    || candidate.scenePosition !== prepared.scenePosition
+    || candidate.executorProviderId !== prepared.executorProviderId
+    || candidate.providerId !== prepared.providerId
+    || candidate.modelId !== prepared.modelId
+    || candidate.sourceFingerprint !== prepared.sourceFingerprint) {
+    return false;
+  }
+  return carriedItems.some((source) => (
+    source.scenePosition === referenceFromScenePosition
+    && source.sourceFingerprint === prepared.sourceFingerprint
+    && source.state === "materialized"
+    && source.parameters.mediaType === "image"
+    && source.sha256 === referenceImageSha256
+  ));
+}
+
+async function previousPaidAssetItems(directory: string, operationId?: string): Promise<PaidAssetOperationItem[]> {
   let names: string[];
   try {
     names = (await readdir(directory)).filter((name) => name.endsWith(".json")).sort();
@@ -1707,7 +2475,9 @@ async function previousPaidAssetItems(directory: string, operationId: string): P
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  const currentName = `${createHash("sha256").update(operationId).digest("hex")}.json`;
+  const currentName = operationId
+    ? `${createHash("sha256").update(operationId).digest("hex")}.json`
+    : undefined;
   const items: PaidAssetOperationItem[] = [];
   for (const name of names) {
     if (name === currentName) continue;
@@ -1751,6 +2521,7 @@ export interface PaidAssetLedgerItemSummary {
   actualCostSource?: "configured_rate";
   carriedForwardFromItemRequestId?: string;
   error?: string;
+  manualReconciliationRequired?: boolean;
 }
 
 export async function inspectPaidAssetLedger(
@@ -1796,6 +2567,7 @@ export async function inspectPaidAssetLedger(
         ? { carriedForwardFromItemRequestId: item.carriedForwardFromItemRequestId }
         : {}),
       ...(item.error ? { error: item.error } : {}),
+      ...(item.manualReconciliationRequired ? { manualReconciliationRequired: true } : {}),
       });
     }
   }
@@ -1845,14 +2617,62 @@ function paidOperationInputsMatch(
 ): boolean {
   return persisted.length === prepared.length && prepared.every((item, index) => {
     const candidate = persisted[index];
-    return candidate?.itemRequestId === item.itemRequestId
+    const exact = candidate?.itemRequestId === item.itemRequestId
       && candidate.inputFingerprint === item.inputFingerprint
       && candidate.scenePosition === item.scenePosition
       && candidate.executorProviderId === item.executorProviderId
       && candidate.providerId === item.providerId
       && candidate.modelId === item.modelId
       && candidate.sourceFingerprint === item.sourceFingerprint;
+    if (exact) return true;
+    if (!candidate || item.parameters.referenceImageSha256 !== undefined) return false;
+    return item.parameters.referenceFromScenePosition !== undefined
+      && candidate.parameters.referenceFromScenePosition === item.parameters.referenceFromScenePosition
+      && candidate.scenePosition === item.scenePosition
+      && candidate.executorProviderId === item.executorProviderId
+      && candidate.providerId === item.providerId
+      && candidate.modelId === item.modelId
+      && candidate.sourceFingerprint === item.sourceFingerprint;
   });
+}
+
+async function materializedReferenceImage(
+  ledger: PaidAssetOperationLedger,
+  scenePosition: number,
+): Promise<{ dataUrl: string; sha256: string }> {
+  const source = ledger.items.find((item) => item.scenePosition === scenePosition);
+  if (!source || source.state !== "materialized" || source.parameters.mediaType !== "image") {
+    throw new Error(`Reference scene ${scenePosition} does not have a materialized generated image.`);
+  }
+  const materialized = await verifyMaterializedItem(source);
+  const bytes = await readFile(materialized.path);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (sha256 !== source.sha256) {
+    throw new Error(`Reference scene ${scenePosition} no longer matches its recorded image identity.`);
+  }
+  return {
+    dataUrl: `data:${materialized.contentType};base64,${bytes.toString("base64")}`,
+    sha256,
+  };
+}
+
+async function bindReferenceImageToLedger(
+  ledgerPath: string,
+  ledger: PaidAssetOperationLedger,
+  current: PaidAssetOperationItem,
+  referenced: PaidAssetOperationItem,
+): Promise<PaidAssetOperationItem> {
+  if (current.inputFingerprint === referenced.inputFingerprint) return current;
+  if (current.state !== "prepared" || current.taskId || current.resultUrl) {
+    throw new Error(
+      `Paid item '${current.itemRequestId}' reference image no longer matches its persisted provider request.`,
+    );
+  }
+  const index = ledger.items.indexOf(current);
+  if (index < 0) throw new Error(`Paid item '${current.itemRequestId}' is missing from its operation ledger.`);
+  ledger.items[index] = referenced;
+  await writeGenerationLedger(ledgerPath, ledger);
+  return referenced;
 }
 
 async function generatePaidAssetItem(options: {
@@ -1867,12 +2687,14 @@ async function generatePaidAssetItem(options: {
   ledger: PaidAssetOperationLedger | undefined;
   ledgerItem: PaidAssetOperationItem | undefined;
   allowCreate: boolean;
+  referenceImages?: [string, ...string[]];
 }): Promise<{ taskId: string; url: string }> {
   const { ledgerItem } = options;
   const recordProgress = async (progress: VideoGenerationProgress | ImageGenerationProgress): Promise<void> => {
     applyProgress(options.job, progress, options.sceneCost);
     await writeJobs(options.jobsPath, options.jobs);
     if (!ledgerItem || !options.ledgerPath || !options.ledger) return;
+    delete ledgerItem.manualReconciliationRequired;
     ledgerItem.taskId = progress.taskId;
     ledgerItem.actualCostCny = roundMoney(options.sceneCost);
     ledgerItem.actualCostSource = "configured_rate";
@@ -1883,7 +2705,7 @@ async function generatePaidAssetItem(options: {
       ledgerItem.state = "provider_succeeded";
     } else if (progress.status === "failed") {
       ledgerItem.state = "terminal_failed";
-      if (progress.error) ledgerItem.error = progress.error;
+      if (progress.error) ledgerItem.error = safeGenerationDiagnostic(progress.error);
     } else {
       ledgerItem.state = "submitted";
     }
@@ -1895,15 +2717,26 @@ async function generatePaidAssetItem(options: {
     && ledgerItem.taskId
     && options.binding.reconcile
   ) {
-    const reconciled = await options.binding.reconcile(
-      ledgerItem.taskId,
-      options.scene,
-      options.prompt,
-      recordProgress,
-    );
+    let reconciled: { taskId: string; url: string };
+    try {
+      reconciled = await options.binding.reconcile(
+        ledgerItem.taskId,
+        options.scene,
+        options.prompt,
+        recordProgress,
+      );
+    } catch (error) {
+      if (error instanceof ProviderRequestRejectedError) {
+        ledgerItem.manualReconciliationRequired = true;
+        ledgerItem.error = safeGenerationDiagnostic(error);
+        if (options.ledgerPath && options.ledger) await writeGenerationLedger(options.ledgerPath, options.ledger);
+      }
+      throw error;
+    }
     ledgerItem.taskId = reconciled.taskId;
     ledgerItem.resultUrl = reconciled.url;
     ledgerItem.state = "provider_succeeded";
+    delete ledgerItem.manualReconciliationRequired;
     delete ledgerItem.error;
     if (options.ledgerPath && options.ledger) await writeGenerationLedger(options.ledgerPath, options.ledger);
     return reconciled;
@@ -1923,14 +2756,18 @@ async function generatePaidAssetItem(options: {
   }
   if (ledgerItem && options.ledgerPath && options.ledger) {
     ledgerItem.state = "unknown";
+    delete ledgerItem.manualReconciliationRequired;
     delete ledgerItem.error;
     await writeGenerationLedger(options.ledgerPath, options.ledger);
   }
+  // 这是本次 worker 真正越过 create 边界的证据；恢复/查询旧 taskId 不计作新付费尝试。
+  options.job[METERED_CREATE_ATTEMPTED] = true;
   try {
     const generated = await options.binding.generate(
       options.scene,
       options.prompt,
       recordProgress,
+      options.referenceImages,
     );
     if (ledgerItem && options.ledgerPath && options.ledger) {
       ledgerItem.taskId = generated.taskId;
@@ -1943,6 +2780,9 @@ async function generatePaidAssetItem(options: {
     }
     return generated;
   } catch (error) {
+    if (error instanceof ProviderRequestRejectedError && !ledgerItem?.taskId) {
+      delete options.job[METERED_CREATE_ATTEMPTED];
+    }
     if (ledgerItem && options.ledgerPath && options.ledger) {
       if (error instanceof ProviderRequestRejectedError && !ledgerItem.taskId) {
         ledgerItem.state = "terminal_failed";
@@ -1951,7 +2791,7 @@ async function generatePaidAssetItem(options: {
       } else if (ledgerItem.state !== "terminal_failed" && ledgerItem.state !== "submitted") {
         ledgerItem.state = "unknown";
       }
-      ledgerItem.error = error instanceof Error ? error.message : String(error);
+      ledgerItem.error = safeGenerationDiagnostic(error);
       await writeGenerationLedger(options.ledgerPath, options.ledger);
     }
     throw error;
@@ -1989,6 +2829,27 @@ async function verifyMaterializedItem(
     path: item.localPath,
     contentType: mediaType === "video" ? "video/mp4" : mediaContentTypeFromPath(item.localPath),
   };
+}
+
+async function materializeCarriedAsset(
+  item: PaidAssetOperationItem,
+  outputDir: string,
+  scenePosition: number,
+  providerId: string,
+  mediaType: "image" | "video",
+): Promise<{ path: string; contentType: string }> {
+  const source = await verifyMaterializedItem(item);
+  const extension = mediaType === "video" ? "mp4" : imageExtension(source.contentType);
+  const target = path.join(outputDir, `scene_${String(scenePosition).padStart(2, "0")}_${providerId}.${extension}`);
+  if (path.resolve(source.path) !== path.resolve(target)) {
+    await copyFile(source.path, target);
+  }
+  const identity = await fileIdentity(target);
+  if (identity.sha256 !== item.sha256 || identity.sizeBytes !== item.sizeBytes) {
+    throw new Error(`Paid item '${item.itemRequestId}' changed while it was carried into this rework.`);
+  }
+  item.localPath = target;
+  return { path: target, contentType: source.contentType };
 }
 
 function mediaContentTypeFromPath(value: string): string {
@@ -2043,6 +2904,18 @@ async function describeFile(
   };
 }
 
+function positionedRecords(value: unknown, positionField: string): Map<number, Record<string, unknown>> {
+  if (!Array.isArray(value)) return new Map();
+  return new Map(value.flatMap((entry): Array<[number, Record<string, unknown>]> => {
+    if (!isRecord(entry) || !Number.isInteger(entry[positionField])) return [];
+    return [[Number(entry[positionField]), entry]];
+  }));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function requiredRecord(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
@@ -2074,4 +2947,12 @@ function boundedNumber(value: unknown, label: string, minimum: number, maximum: 
 
 function roundMoney(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function safeGenerationDiagnostic(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, "[redacted image data]")
+    .trim()
+    .slice(0, 2_000);
 }

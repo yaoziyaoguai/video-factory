@@ -17,17 +17,29 @@ interface RoleCandidate<TAgent> {
 
 export interface FallbackScreenwriterAgentOptions {
   candidates: Array<RoleCandidate<ScreenwriterAgent>>;
+  /**
+   * 兼容保留的旧字段名：它只控制“新阶段准入窗口”，不是整个角色的硬 wall-clock 总耗时。
+   * 660 秒仅在启动新候选/新 agent-loop stage 之前被检查；已交给 durable broker 的请求仍按
+   * 客户端单次超时继续等待，不会被 Abort 强杀，也不会因此切换 Provider（at-most-once 优先）。
+   */
   totalTimeoutMs?: number;
   now?: () => number;
 }
 
 export interface FallbackVisualDirectorAgentOptions {
   candidates: Array<RoleCandidate<VisualDirectorAgent>>;
+  /**
+   * 兼容保留的旧字段名：它只控制“新阶段准入窗口”，不是整个角色的硬 wall-clock 总耗时。
+   * 660 秒仅在启动新候选/新 agent-loop stage 之前被检查；已交给 durable broker 的请求仍按
+   * 客户端单次超时继续等待，不会被 Abort 强杀，也不会因此切换 Provider（at-most-once 优先）。
+   */
   totalTimeoutMs?: number;
   now?: () => number;
 }
 
-const DEFAULT_TEXT_AGENT_TOTAL_TIMEOUT_MS = 660_000;
+// 默认的新阶段准入窗口（stage admission window）：只在启动新候选/新 agent-loop stage 前检查。
+// 它不截断已经交给 durable broker 的同一 requestId，也不是硬 SLA；真实耗时优化留给后续 trace 决策。
+const DEFAULT_TEXT_AGENT_STAGE_ADMISSION_WINDOW_MS = 660_000;
 
 export class ModelCandidatesExhaustedError extends Error {
   readonly attempts: ModelCandidateAttempt[];
@@ -51,14 +63,14 @@ export class ModelCandidatesExhaustedError extends Error {
 export class FallbackScreenwriterAgent implements ScreenwriterAgent {
   readonly id: string;
   readonly modelId: string;
-  private readonly totalTimeoutMs: number;
+  private readonly stageAdmissionWindowMs: number;
   private readonly now: () => number;
 
   constructor(private readonly options: FallbackScreenwriterAgentOptions) {
     const first = validateCandidates(options.candidates, "screenwriter");
     this.id = first.agent.id;
     this.modelId = requiredModelId(first.agent);
-    this.totalTimeoutMs = positiveTimeout(options.totalTimeoutMs);
+    this.stageAdmissionWindowMs = positiveStageAdmissionWindow(options.totalTimeoutMs);
     this.now = options.now ?? Date.now;
   }
 
@@ -67,7 +79,7 @@ export class FallbackScreenwriterAgent implements ScreenwriterAgent {
   }
 
   async draftDetailed(input: ScreenwriterAgentInput): Promise<CodexTaskExecution<unknown>> {
-    const boundedInput = withWallClockDeadline(input, this.totalTimeoutMs, this.now);
+    const boundedInput = withStageAdmissionDeadline(input, this.stageAdmissionWindowMs, this.now);
     return runCandidates(
       this.options.candidates,
       input.selectedModelId,
@@ -82,14 +94,14 @@ export class FallbackScreenwriterAgent implements ScreenwriterAgent {
 export class FallbackVisualDirectorAgent implements VisualDirectorAgent {
   readonly id: string;
   readonly modelId: string;
-  private readonly totalTimeoutMs: number;
+  private readonly stageAdmissionWindowMs: number;
   private readonly now: () => number;
 
   constructor(private readonly options: FallbackVisualDirectorAgentOptions) {
     const first = validateCandidates(options.candidates, "visual director");
     this.id = first.agent.id;
     this.modelId = requiredModelId(first.agent);
-    this.totalTimeoutMs = positiveTimeout(options.totalTimeoutMs);
+    this.stageAdmissionWindowMs = positiveStageAdmissionWindow(options.totalTimeoutMs);
     this.now = options.now ?? Date.now;
   }
 
@@ -98,7 +110,7 @@ export class FallbackVisualDirectorAgent implements VisualDirectorAgent {
   }
 
   async planDetailed(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<unknown>> {
-    const boundedInput = withWallClockDeadline(input, this.totalTimeoutMs, this.now);
+    const boundedInput = withStageAdmissionDeadline(input, this.stageAdmissionWindowMs, this.now);
     return runCandidates(
       this.options.candidates,
       input.selectedModelId,
@@ -170,10 +182,14 @@ async function runCandidates<
     } catch (error) {
       failures.push({ modelId: requiredModelId(candidate.agent), providerId: candidate.providerId, error });
       if (isTransientRoleAuditProviderFailure(error)) {
+        // 仅当审计请求能明确归类为可安全切换的瞬时故障（not_accepted 或 completed transient）时，
+        // 才允许带 checkpoint 切换审计 Provider；审计请求 outcome uncertain 时同样禁止切换。
         resumeFrom = error.agentLoop;
         if (position === ordered.length - 1) throw new ModelCandidatesExhaustedError(failures);
         continue;
       }
+      // isModelProviderFailure 对 stage=uncertain 一律返回 false：请求可能已被 durable broker
+      // 受理并仍在执行，绝不能用新的 backup requestId 启动下一个候选（双跑风险），原样上抛。
       if (!isModelProviderFailure(error)) {
         if (failures.length > 1) throw new ModelCandidatesExhaustedError(failures);
         throw error;
@@ -218,20 +234,23 @@ function requiredModelId(agent: { modelId?: string }): string {
   return modelId;
 }
 
-function positiveTimeout(value: number | undefined): number {
-  const timeoutMs = value ?? DEFAULT_TEXT_AGENT_TOTAL_TIMEOUT_MS;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
-    throw new Error("Text agent totalTimeoutMs must be a positive integer.");
+function positiveStageAdmissionWindow(value: number | undefined): number {
+  const windowMs = value ?? DEFAULT_TEXT_AGENT_STAGE_ADMISSION_WINDOW_MS;
+  if (!Number.isSafeInteger(windowMs) || windowMs < 1) {
+    throw new Error("Text agent stage admission window (options.totalTimeoutMs) must be a positive integer.");
   }
-  return timeoutMs;
+  return windowMs;
 }
 
-function withWallClockDeadline<TInput extends { wallClockDeadlineAtMs?: number }>(
+// 新阶段准入截止（stage admission deadline）：写入输入的 wallClockDeadlineAtMs 字段（字段名保持不变）。
+// 它只在启动新候选/新 agent-loop stage 之前被检查，不截断已交给 durable broker 的同一 requestId。
+// deadline 在整个候选池共享：一个候选失败后，后续候选不得重新获得完整准入窗口。
+function withStageAdmissionDeadline<TInput extends { wallClockDeadlineAtMs?: number }>(
   input: TInput,
-  totalTimeoutMs: number,
+  stageAdmissionWindowMs: number,
   now: () => number,
 ): TInput {
-  const deadline = input.wallClockDeadlineAtMs ?? now() + totalTimeoutMs;
+  const deadline = input.wallClockDeadlineAtMs ?? now() + stageAdmissionWindowMs;
   return { ...input, wallClockDeadlineAtMs: deadline };
 }
 

@@ -8,6 +8,99 @@ import { AssetsPage } from "../src/client/pages/AssetsPage.js";
 describe("AssetsPage", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("routes pending rights reviews to the official manifest section from both entry points", async () => {
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
+      generatedAt: "2026-09-06T08:00:00.000Z",
+      totalItems: 2,
+      needsReviewCount: 1,
+      legacyRunsWithoutManifest: 0,
+      reconstructedRunCount: 0,
+      unreadableManifestCount: 0,
+      truncatedRunCount: 0,
+      truncatedItemCount: 0,
+      categories: { visual: 2, voice: 0, font: 0, document: 0, other: 0 },
+      items: [],
+      assetIndex: {
+        version: "video-factory/asset-index-v1",
+        totalAssets: 2,
+        duplicateUses: 0,
+        reusableCount: 1,
+        needsReviewCount: 1,
+        facets: {
+          mediaKinds: { image: 2 },
+          origins: { stock: 2 },
+          providers: { "pexels-stock-v1": 2 },
+          reuseStatuses: { ready: 1, review_required: 1 },
+        },
+        assets: [
+          {
+            key: "sha256:pending-rights",
+            mediaKind: "image",
+            origin: "stock",
+            reuseStatus: "review_required",
+            category: "visual",
+            kind: "media_asset",
+            providerId: "pexels-stock-v1",
+            sourceUrl: "https://example.com/pending-source",
+            query: "授权待确认的图片",
+            tags: ["窗边"],
+            commercialUse: "provider_terms",
+            attributionRequirement: "provider_terms",
+            reviewStatus: "needs_review",
+            useCount: 1,
+            usages: [{
+              runId: "run-9",
+              runTitle: "使用待确认素材的作品",
+              itemId: "image-pending",
+              providerId: "pexels-stock-v1",
+              commercialUse: "provider_terms",
+              attributionRequirement: "provider_terms",
+              reviewStatus: "needs_review",
+            }],
+          },
+          {
+            key: "sha256:cleared",
+            mediaKind: "image",
+            origin: "stock",
+            reuseStatus: "ready",
+            category: "visual",
+            kind: "media_asset",
+            providerId: "pexels-stock-v1",
+            sourceUrl: "https://example.com/cleared-source",
+            query: "已确认的图片",
+            tags: [],
+            commercialUse: "provider_terms",
+            attributionRequirement: "provider_terms",
+            reviewStatus: "recorded",
+            useCount: 1,
+            usages: [{
+              runId: "run-9",
+              runTitle: "使用待确认素材的作品",
+              itemId: "image-cleared",
+              providerId: "pexels-stock-v1",
+              commercialUse: "provider_terms",
+              attributionRequirement: "provider_terms",
+              reviewStatus: "recorded",
+            }],
+          },
+        ],
+      },
+    });
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+
+    render(<MemoryRouter><AssetsPage /></MemoryRouter>);
+
+    const rightsSummaryLink = await screen.findByRole("link", { name: /授权待确认 1 项/ });
+    expect(rightsSummaryLink).toHaveAttribute("href", "/resources#resource-manifest");
+    expect(await screen.findByRole("link", { name: "去确认授权" })).toHaveAttribute("href", "/resources#resource-manifest");
+    expect(screen.getAllByRole("link", { name: "查看作品" })).toHaveLength(2);
+    const sourceLinks = screen.getAllByRole("link", { name: "查看素材原始来源" });
+    expect(sourceLinks).toHaveLength(2);
+    expect(sourceLinks.map((link) => link.getAttribute("href"))).toEqual(
+      expect.arrayContaining(["https://example.com/pending-source", "https://example.com/cleared-source"]),
+    );
+  });
+
   it("shows deduplicated indexed assets and filters without inventing content", async () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({

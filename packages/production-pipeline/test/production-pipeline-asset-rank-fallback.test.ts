@@ -7,6 +7,8 @@ import { describe, it } from "node:test";
 import { deterministicAssetRanking, ProductionPipeline, RoleAgentLoopError, type ProductionBrief, type WorkerResponse } from "../src/index.js";
 
 class CandidateWorker {
+  constructor(private readonly includeCandidates = true) {}
+
   async run(request: Record<string, unknown>): Promise<WorkerResponse> {
     const capability = String(request.capability);
     const outputDir = String(request.outputDir);
@@ -27,7 +29,9 @@ class CandidateWorker {
           scene_position: 1,
           intent: { subject: "通勤人群", visible_action: "进入车厢" },
           query: "city subway commute",
-          candidates: [{ provider: "pexels", provider_id: "pexels-stock-v1", asset_id: "clip-1", media_type: "video", width: 1080, height: 1920, duration: 8, preview_url: "https://images.pexels.com/photos/1/preview.jpg", source_url: "https://www.pexels.com/video/1", creator: "Fixture", license_note: "Fixture", query: "subway", score: 80 }],
+          candidates: this.includeCandidates
+            ? [{ provider: "pexels", provider_id: "pexels-stock-v1", asset_id: "clip-1", media_type: "video", width: 1080, height: 1920, duration: 8, preview_url: "https://images.pexels.com/photos/1/preview.jpg", source_url: "https://www.pexels.com/video/1", creator: "Fixture", license_note: "Fixture", query: "subway", score: 80 }]
+            : [],
         }],
       });
       await writeFile(candidateSearchPath, content);
@@ -39,6 +43,67 @@ class CandidateWorker {
 }
 
 describe("ProductionPipeline semantic ranking fallback", () => {
+  it("skips the model when the director produced no stock candidates", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rank-empty-"));
+    let modelCalls = 0;
+    const pipeline = new ProductionPipeline({
+      workspaceRoot,
+      worker: new CandidateWorker(false),
+      assetSemanticRanker: {
+        id: "codex-asset-ranker-v1",
+        modelId: "codex-default",
+        rank: async () => {
+          modelCalls += 1;
+          throw new Error("The ranking model must not run without candidates");
+        },
+        rankDetailed: async () => {
+          modelCalls += 1;
+          throw new Error("The ranking model must not run without candidates");
+        },
+      },
+      directorAgent: {
+        id: "api-visual-director-v1",
+        plan: async (input) => ({
+          version: "video-factory/director-plan-v1",
+          requestedProfileId: input.brief.requestedProfileId,
+          resolvedProfileId: "documentary-observer",
+          profileRationale: "使用生成画面。",
+          visualBible: { narrativeApproach: "观察", pacing: "紧凑", composition: "人物与环境", camera: "固定", color: "自然", continuity: "同一早晨", sound: "环境声" },
+          shots: input.scenes.map((scene) => ({
+            scenePosition: scene.position,
+            narrativeRole: "建立场景",
+            authenticityPolicy: "illustrative" as const,
+            preferredProviderId: "pexels-stock-v1",
+            deliveryType: "stock_video" as const,
+            alternativeProviderIds: [],
+            temporalBeats: ["[0s-3s] 保持主体清晰", "[3s-6s] 保持动作连续"],
+            query: "generated city commute",
+            generationPrompt: "生成通勤画面",
+            rationale: "没有图库候选时按导演计划生成。",
+            continuityNote: "保持清晨光线。",
+            confidence: 0.8,
+            estimatedCostCny: 0,
+          })),
+        }),
+      },
+      assetProviders: [
+        { id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] },
+        { id: "local-editorial-v1", label: "本地卡片", billing: "free", modes: ["本地"], deliveryTypes: ["editorial_card"] },
+      ],
+    });
+
+    const run = await pipeline.start(semanticBrief("没有图库候选的生成画面"));
+    const ranking = run.nodeRuns.find((node) => node.nodeId === "asset-semantic-rank");
+    assert.equal(modelCalls, 0);
+    assert.equal(ranking?.status, "succeeded", JSON.stringify(run.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
+    assert.equal(ranking?.executionReceipt?.providerId, "deterministic-quality-v1");
+    assert.equal(ranking?.executionReceipt?.fallbackFromProviderId, undefined);
+    assert.equal(ranking?.executionReceipt?.fallbackReason, undefined);
+    const output = ranking?.output as { ranking?: { fallbackReason?: string; scenes?: unknown[] } } | undefined;
+    assert.match(output?.ranking?.fallbackReason ?? "", /没有图库候选需要排序/);
+    assert.equal(output?.ranking?.scenes?.length, 1);
+  });
+
   it("records the failed model and reason in the immutable execution receipt", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rank-fallback-"));
     let auditFailure = false;

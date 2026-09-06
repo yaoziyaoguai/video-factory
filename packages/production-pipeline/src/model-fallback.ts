@@ -8,18 +8,27 @@ const TRANSIENT_MODEL_FAILURE_PATTERN = /(?:request|operation|model|service|role
 
 export function isModelProviderFailure(error: unknown): boolean {
   if (error instanceof RoleAgentLoopError && error.agentLoop.pendingCandidate) return false;
-  return hasTransientModelProviderFailure(error);
+  return hasFallbackEligibleProviderFailure(error);
 }
 
 export function isTransientRoleAuditProviderFailure(error: unknown): error is RoleAgentLoopError {
   return error instanceof RoleAgentLoopError
     && error.agentLoop.pendingCandidate !== undefined
-    && hasTransientModelProviderFailure(error.sourceError);
+    && hasFallbackEligibleProviderFailure(error.sourceError);
 }
 
-function hasTransientModelProviderFailure(error: unknown): boolean {
+// 只有“确证可以安全切换 Provider”的瞬时故障才返回 true。判定依据是 error chain 中第一个
+// CodexBridgeError；它的 stage 决定请求是否可能仍被 durable broker 执行：
+// - stage=uncertain：请求可能已被受理并仍在执行。无论 category=timeout/network、HTTP=408/503/504
+//   还是消息含 timeout，都不能作为切换依据，必须原样上抛（保留 failureStage=uncertain），
+//   由确定性 requestId/broker 幂等恢复，禁止在本层生成 backup requestId 造成双跑。
+// - stage=not_accepted：失败确证发生在受理之前；连接失败、限流、容量、服务不可用可切候选。
+// - stage=completed_failure：仅当能明确归类为允许 fallback 的瞬时 Provider 故障时才可切；
+//   invalid request/output/auth/业务/质量/审计失败一律禁止。
+function hasFallbackEligibleProviderFailure(error: unknown): boolean {
   for (const candidate of errorChain(error)) {
     if (!(candidate instanceof CodexBridgeError)) continue;
+    if (candidate.stage === "uncertain") return false;
     if (TERMINAL_MODEL_FAILURE_PATTERN.test(candidate.message)) return false;
     if (candidate.failureDetails?.category === "authentication"
       || candidate.failureDetails?.category === "invalid_request"

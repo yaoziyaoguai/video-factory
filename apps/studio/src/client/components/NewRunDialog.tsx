@@ -8,6 +8,7 @@ import {
   Film,
   Image,
   Mic2,
+  RefreshCw,
   ScanSearch,
   Sparkles,
   Upload,
@@ -15,7 +16,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, StudioReferenceVideo, StudioTemplate } from "../../shared/api.js";
+import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, StudioReferenceVideo, StudioReworkDraft, StudioReworkFinding, StudioTemplate } from "../../shared/api.js";
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { applyTemplateVoiceRecommendation } from "../../shared/template-voice-recommendation.js";
@@ -30,7 +31,11 @@ interface NewRunDialogProps {
   providers: StudioProvider[];
   initialDataReady?: boolean;
   initialValues?: Partial<StudioProductionInput>;
+  inheritedNodeIds?: StudioReworkDraft["inheritedNodeIds"];
+  requiredAffectedScenePositions?: StudioReworkDraft["requiredAffectedScenePositions"];
   creatorSettings?: StudioCreatorSettings;
+  settingsError?: string;
+  onRetrySettings?: () => void;
   onClose: () => void;
   onSubmit: (input: StudioProductionInput) => Promise<void>;
 }
@@ -99,7 +104,7 @@ function canonicalRecipeId(recipeId: RecipeId | undefined): RecipeId {
   return recipeId === "keyshot-ai" || recipeId === "cinematic-ai" ? "keyshot-ai" : "free-stock";
 }
 
-export function NewRunDialog({ open, providers, initialDataReady = true, initialValues, creatorSettings, onClose, onSubmit }: NewRunDialogProps) {
+export function NewRunDialog({ open, providers, initialDataReady = true, initialValues, inheritedNodeIds, requiredAffectedScenePositions, creatorSettings, settingsError, onRetrySettings, onClose, onSubmit }: NewRunDialogProps) {
   const defaults = useMemo(
     () => providerDefaults(providers, creatorSettings?.roleProviderDefaults),
     [creatorSettings?.roleProviderDefaults, providers],
@@ -126,6 +131,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [referenceUploading, setReferenceUploading] = useState(false);
   const [referenceError, setReferenceError] = useState<string>();
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [inheritedSettingsOpen, setInheritedSettingsOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
   const [templates, setTemplates] = useState<StudioTemplate[]>([]);
@@ -138,11 +144,21 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [templateReplacementConfirmed, setTemplateReplacementConfirmed] = useState(false);
   const [templateError, setTemplateError] = useState<string>();
   const [voiceSelectionAvailable, setVoiceSelectionAvailable] = useState<boolean>();
-  const [rework, setRework] = useState<StudioProductionInput["rework"]>(() => creatorFacingRework(initialValues?.rework));
+  const [rework, setRework] = useState<StudioProductionInput["rework"]>(() => creatorFacingRework(
+    initialValues?.rework,
+    requiredAffectedScenePositions,
+  ));
   const initializedForOpen = useRef(false);
   const initializationRevision = useRef(0);
   const dialogRef = useDialogFocus<HTMLElement>(open, onClose, submitting);
   const activeCapability = CAPABILITIES.find((item) => item.key === activeKey) ?? CAPABILITIES[1]!;
+  const groupedReworkFindings = useMemo(() => groupReworkFindingsByScene(rework?.findings), [rework?.findings]);
+  const reworkScope = useMemo(() => summarizeReworkScope(rework), [rework]);
+  const requiredReworkScenePositions = useMemo(() => requiredScenePositionsForRework(
+    initialValues?.rework,
+    requiredAffectedScenePositions,
+  ), [initialValues?.rework, requiredAffectedScenePositions]);
+  const reworkTargetStepLabels = useMemo(() => reworkFindingTargetStepLabels(groupedReworkFindings), [groupedReworkFindings]);
   const editorial = initialValues?.editorial;
   const imageStory = editorial?.verdict === "produce_image_story";
   const activeProviders = providers.filter((provider) => {
@@ -300,6 +316,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     ...(roleAuditProvider ? [] : ["独立质量审计"]),
     ...(voiceSelectionAvailable === false && !initialValues?.rework ? ["可用声音演员"] : []),
   ];
+  // 链接按现有分区优先：制作角色能力缺口落到制作分工；只剩画面来源缺口时落到画面来源分区，避免让创作者自己找。
+  const capabilitySettingsHref = missingCapabilities.length > 0 || !roleAuditProvider
+    || (voiceSelectionAvailable === false && !initialValues?.rework)
+    ? "/resources#production-roles"
+    : "/resources#visual-providers";
   const productionBlocked = missingProductionRoles.length > 0 || inheritedSelectionIssues.length > 0;
 
   async function readTemplateCatalog(revision: number, requestedTemplateId: string, preserveCurrentChoices: boolean) {
@@ -390,12 +411,13 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setReferenceError(undefined);
     setActiveKey("assets");
     setAdvancedOpen(false);
+    setInheritedSettingsOpen(false);
     setError(undefined);
     setSelectedTemplateId(requestedTemplateId);
     setTemplateError(undefined);
     setTemplateLoading(false);
     setVoiceSelectionAvailable(undefined);
-    setRework(creatorFacingRework(initialValues?.rework));
+    setRework(creatorFacingRework(initialValues?.rework, requiredAffectedScenePositions));
     setTemplateReplacementConfirmed(false);
     templateAddedEditorialSource.current = requestedTemplateId === "photo-story"
       && !inheritedOrRecommendedSourceIds.includes("local-editorial-v1")
@@ -403,7 +425,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setTemplates([]);
     setTemplatesLoaded(false);
     void readTemplateCatalog(revision, requestedTemplateId, false);
-  }, [creatorSettings, defaults, imageStory, initialDataReady, initialValues, open, providers]);
+  }, [creatorSettings, defaults, imageStory, initialDataReady, initialValues, open, providers, requiredAffectedScenePositions]);
 
   useEffect(() => {
     if (!open || !referenceVideo) return;
@@ -416,19 +438,27 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   if (!open) return null;
 
   if (!initialDataReady && !initializedForOpen.current) {
+    // 设置读取失败与仍在加载是两种不同状态：失败时允许打开查看原因并原地重读，但表单不初始化、不能提交。
+    const settingsFailed = Boolean(settingsError);
     return (
       <div className="dialog-backdrop" role="presentation">
-        <section ref={dialogRef} className="run-dialog recipe-dialog" role="dialog" aria-modal="true" aria-labelledby="new-run-loading-title" aria-busy="true" tabIndex={-1}>
+        <section ref={dialogRef} className="run-dialog recipe-dialog" role="dialog" aria-modal="true" aria-labelledby="new-run-loading-title" aria-busy={settingsFailed ? undefined : "true"} tabIndex={-1}>
           <header className="dialog-header recipe-dialog-header">
             <div>
               <p className="eyebrow">制作方案</p>
-              <h2 id="new-run-loading-title">正在准备新制作</h2>
+              <h2 id="new-run-loading-title">{settingsFailed ? "创作设置读取失败" : "正在准备新制作"}</h2>
             </div>
             <button className="icon-button" type="button" onClick={onClose} title="关闭" aria-label="关闭新建制作">
               <X aria-hidden="true" size={19} />
             </button>
           </header>
-          <div className="page-loading">正在读取制作配置...</div>
+          {settingsFailed ? (
+            <div className="page-error" role="alert">
+              <AlertCircle aria-hidden="true" size={18} />
+              <span>未能读取你的创作设置，为避免用错声音/平台/时长，暂未开工。{settingsError}</span>
+              {onRetrySettings ? <button className="button button-secondary" type="button" onClick={onRetrySettings}><RefreshCw aria-hidden="true" size={16} />重新读取</button> : null}
+            </div>
+          ) : <div className="page-loading">正在读取制作配置...</div>}
         </section>
       </div>
     );
@@ -612,7 +642,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
           <div>
             <p className="eyebrow">制作方案</p>
             <h2 id="new-run-title">{rework ? "调整方案后重新制作" : "新建制作"}</h2>
-            <p>{rework ? "已继承上一版方案；下面的修改要求会真正交给对应制作步骤执行。" : "先定内容与画面方案；图片和视频按实际方案报价。声音与审片不弹现金报价，但失败或质量问题会停在对应步骤。"}</p>
+            <p>{rework ? "已载入上一版可用设置；真实母片复用与最终方案仍需重新规划验证。下面的修改要求会真正交给对应制作步骤执行。" : "先定内容与画面方案；图片和视频按实际方案报价。声音与审片不弹现金报价，但失败或质量问题会停在对应步骤。"}</p>
           </div>
           <div className="dialog-budget" aria-label="费用方式">
             <span>{meteredSelected ? "图片 / 视频按实际方案报价" : "图片 / 视频无现金报价"}</span>
@@ -625,6 +655,115 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
 
         <form className="run-form recipe-form" onSubmit={(event) => event.preventDefault()} key={initialValues?.title ?? "blank-production"}>
           <div className="recipe-form-scroll">
+            {rework ? <section className="rework-brief-section" aria-labelledby="rework-scope-title" tabIndex={-1} data-dialog-initial-focus>
+              <div className="compact-section-heading">
+                <div><span>返工</span><h3 id="rework-scope-title">本轮变更范围</h3></div>
+                <small>先确认重做镜头，再填写怎么改</small>
+              </div>
+              {reworkScope?.fullScenePositions ? <>
+                <p className="rework-scope-guidance" id="rework-scope-guidance">勾选决定哪些镜头进入本轮画面重新规划与生成，并直接影响图片 / 视频报价。审片或失败记录明确要求的镜头标为必改，不能移除；下方文字只说明怎么改，不代替这里的镜头选择。</p>
+                <fieldset className="rework-scene-scope" aria-describedby="rework-scope-guidance">
+                  <legend className="sr-only">本轮要重新规划 / 生成的镜头</legend>
+                  <strong>本轮要重新规划 / 生成的镜头</strong>
+                  <div>{reworkScope.fullScenePositions.map((position) => {
+                    const required = requiredReworkScenePositions.includes(position);
+                    return (
+                      <label className={required ? "is-required" : undefined} key={position}>
+                        <input
+                          type="checkbox"
+                          aria-label={`第 ${position} 镜`}
+                          checked={reworkScope.adjustedScenePositions.includes(position)}
+                          disabled={required}
+                          onChange={() => setRework((current) => toggleReworkScene(current, position))}
+                        />
+                        <span>第 {position} 镜</span>
+                        {required ? <small aria-hidden="true">必改</small> : null}
+                      </label>
+                    );
+                  })}</div>
+                </fieldset>
+                <div className="rework-finding-list" aria-label="本轮变更范围摘要">
+                  <div className="rework-rejection-note"><strong>{reworkScope.adjustedScenePositions.length > 0
+                    ? `本轮选择 ${reworkScope.adjustedScenePositions.length} 个镜头：${reworkScope.adjustedScenePositions.join("、")}`
+                    : "本轮未选择需要重新规划 / 生成的镜头"}</strong></div>
+                  {reworkScope.plannedReuseScenePositions.length > 0 ? <div className="rework-rejection-note"><strong>其余 {reworkScope.plannedReuseScenePositions.length} 个镜头计划沿用：{reworkScope.plannedReuseScenePositions.join("、")}</strong></div> : null}
+                  <p className="rework-boundary-note">是否能直接复用上一版母片，以重新规划后的画面方案和真实报价为准。</p>
+                </div>
+              </> : <div className="rework-finding-list" aria-label="本轮变更范围摘要">
+                <div className="rework-rejection-note"><strong>全片需复核；具体重做范围以重新规划后的方案为准。</strong></div>
+                <p className="rework-boundary-note">上一版没有可验证的完整镜头全集，因此这里不会猜测镜头编号。重新规划确认范围后，再对实际需要生成的图片 / 视频报价。</p>
+              </div>}
+            </section> : null}
+            {inheritedSelectionIssues.length > 0 ? <section className="rework-selection-alert" role="alert" aria-live="assertive" aria-labelledby="rework-selection-alert-title">
+              <div>
+                <AlertCircle aria-hidden="true" size={18} />
+                <div><strong id="rework-selection-alert-title">上一版有 {inheritedSelectionIssues.length} 项已失效，暂不能开工</strong><span>系统保留了上一版原值，没有替你静默更换。请逐项明确选择替代方案。</span></div>
+              </div>
+              <ul>{inheritedSelectionIssues.map((issue) => <li key={issue.id}>
+                <strong>{issue.label}：{issue.value}</strong>
+                <span>{issue.reason}；{issue.action}</span>
+              </li>)}</ul>
+              {inheritedSelectionIssues.some((issue) => issue.id.startsWith("source-")) ? <button className="button button-ghost" type="button" onClick={() => {
+                setAssetProviderIds(sourceIdsForRecipe(selectedRecipe, providers));
+                setAdvancedOpen(true);
+                setActiveKey("assets");
+              }}>用当前策略的可用来源替换</button> : null}
+            </section> : null}
+            {rework ? <section className="rework-brief-section" aria-labelledby="rework-brief-title">
+              <div className="compact-section-heading">
+                <div><span>返工</span><h3 id="rework-brief-title">按反馈修改</h3></div>
+                <small>已预填到对应制作步骤，可在开工前调整</small>
+              </div>
+              {rework.rejectionReason ? <div className="rework-rejection-note"><strong>本次重做原因</strong><span>{creatorFacingTechnicalText(rework.rejectionReason)}</span></div> : null}
+              {groupedReworkFindings.sceneGroups.length > 0 || groupedReworkFindings.wholeFilmFindings.length > 0 ? <div className="rework-finding-list" aria-label="需要处理的问题">
+                {groupedReworkFindings.sceneGroups.map((group) => <article className="rework-finding" key={`scene-${group.scenePosition}`}>
+                  <header><strong>第 {group.scenePosition} 镜</strong><span>{group.findings.length} 个问题</span></header>
+                  {group.findings.map((sceneFinding) => <div className="rework-finding-item" key={sceneFinding.findingId}>
+                    <p>{reworkFindingCategoryLabel(sceneFinding.category)} · {formatTimecode(sceneFinding.timecodeMs)}</p>
+                    <p>{creatorFacingTechnicalText(sceneFinding.description)}</p>
+                    <small>建议：{creatorFacingTechnicalText(sceneFinding.suggestion)}</small>
+                  </div>)}
+                </article>)}
+                {groupedReworkFindings.wholeFilmFindings.length > 0 ? <article className="rework-finding" key="rework-whole-film">
+                  <header><strong>全片问题</strong><span>{groupedReworkFindings.wholeFilmFindings.length} 个问题</span></header>
+                  {groupedReworkFindings.wholeFilmFindings.map((sceneFinding) => <div className="rework-finding-item" key={sceneFinding.findingId}>
+                    <p>{reworkFindingCategoryLabel(sceneFinding.category)} · {formatTimecode(sceneFinding.timecodeMs)}</p>
+                    <p>{creatorFacingTechnicalText(sceneFinding.description)}</p>
+                    <small>建议：{creatorFacingTechnicalText(sceneFinding.suggestion)}</small>
+                  </div>)}
+                </article> : null}
+              </div> : null}
+              {reworkTargetStepLabels.length > 0 ? <p className="rework-boundary-note">审片反馈将预填到：{reworkTargetStepLabels.join("、")}。</p> : null}
+              <div className="rework-instruction-grid">
+                <label className="field">
+                  <span>脚本修改要求</span>
+                  <textarea required value={rework.nodeInstructions.script} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, script: event.target.value } } : current)} />
+                </label>
+                <label className="field">
+                  <span>导演方案修改要求</span>
+                  <textarea required value={rework.nodeInstructions.visualDirection} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, visualDirection: event.target.value } } : current)} />
+                </label>
+                <label className="field">
+                  <span>画面素材修改要求</span>
+                  <textarea required value={rework.nodeInstructions.assets} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, assets: event.target.value } } : current)} />
+                </label>
+              </div>
+              <p className="rework-boundary-note">{reworkBaselineSummary(rework)}</p>
+              <ul className="rework-boundary-note">
+                <li>{rework.previousScript ? "脚本：以上一版脚本为修改基线，并按审片反馈调整。" : "脚本：上一版脚本未产出，本轮需要重新生成脚本。"}</li>
+                <li>{rework.previousDirectorPlan ? "导演：以上一版导演方案为修改基线，按反馈复核所列镜头。" : "导演：上一版导演方案未产出，本轮需要重新规划画面方案。"}</li>
+                {inheritedNodeIds?.includes("template") ? <li>模板：已带入上一版模板快照，可在继承设置中沿用或更换。</li> : null}
+                <li>声音：声音设置已预填；脚本文字变化时，配音可能重新生成。</li>
+                <li>报价：下一轮会对实际需要重新生成的图片和视频逐项报价；最终项目和金额以费用确认页为准。</li>
+              </ul>
+              {inheritedNodeIds && inheritedNodeIds.length > 0 ? <p className="rework-boundary-note">已带入上一版基线资料：{inheritedNodeIds.map((nodeId) => REWORK_BASELINE_NODE_LABELS[nodeId] ?? nodeId).join("、")}；这些资料用于对照和预填，不代表声音成品或素材母片已经复用，也不代表免费。</p> : null}
+            </section> : null}
+            {rework ? <div className={inheritedSettingsOpen ? "advanced-production is-open" : "advanced-production"}>
+              <button className="advanced-production-toggle" type="button" aria-expanded={inheritedSettingsOpen} onClick={() => setInheritedSettingsOpen((current) => !current)}>
+                <span>查看继承设置</span><small>上一版预填与本轮可调整设置</small><ChevronDown aria-hidden="true" size={17} />
+              </button>
+            </div> : null}
+            <div hidden={Boolean(rework) && !inheritedSettingsOpen}>
             <section className="template-picker-section" aria-labelledby="template-picker-title">
               <div className="compact-section-heading">
                 <div><span>00</span><h3 id="template-picker-title">视频模板</h3></div>
@@ -649,21 +788,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 </div>
               )}
             </section>
-            {inheritedSelectionIssues.length > 0 ? <section className="rework-selection-alert" role="alert" aria-live="assertive" aria-labelledby="rework-selection-alert-title">
-              <div>
-                <AlertCircle aria-hidden="true" size={18} />
-                <div><strong id="rework-selection-alert-title">上一版有 {inheritedSelectionIssues.length} 项已失效，暂不能开工</strong><span>系统保留了上一版原值，没有替你静默更换。请逐项明确选择替代方案。</span></div>
-              </div>
-              <ul>{inheritedSelectionIssues.map((issue) => <li key={issue.id}>
-                <strong>{issue.label}：{issue.value}</strong>
-                <span>{issue.reason}；{issue.action}</span>
-              </li>)}</ul>
-              {inheritedSelectionIssues.some((issue) => issue.id.startsWith("source-")) ? <button className="button button-ghost" type="button" onClick={() => {
-                setAssetProviderIds(sourceIdsForRecipe(selectedRecipe, providers));
-                setAdvancedOpen(true);
-                setActiveKey("assets");
-              }}>用当前策略的可用来源替换</button> : null}
-            </section> : null}
             <section className="brief-section" aria-labelledby="brief-section-title">
               <div className="compact-section-heading">
                 <div><span>01</span><h3 id="brief-section-title">内容简报</h3></div>
@@ -672,7 +796,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               <div className="brief-fields">
                 <label className="field field-wide">
                   <span>视频标题</span>
-                  <input name="title" required data-dialog-initial-focus defaultValue={initialValues?.title ?? ""} placeholder="一句能让人停下来的具体承诺" />
+                  <input name="title" required data-dialog-initial-focus={rework ? undefined : true} defaultValue={initialValues?.title ?? ""} placeholder="一句能让人停下来的具体承诺" />
                 </label>
                 <label className="field field-wide">
                   <span>内容角度</span>
@@ -714,36 +838,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 </div>
               ) : null}
             </section>
-
-            {rework ? <section className="rework-brief-section" aria-labelledby="rework-brief-title">
-              <div className="compact-section-heading">
-                <div><span>返工</span><h3 id="rework-brief-title">按反馈修改</h3></div>
-                <small>已预填到对应制作步骤，可在开工前调整</small>
-              </div>
-              {rework.rejectionReason ? <div className="rework-rejection-note"><strong>本次重做原因</strong><span>{creatorFacingTechnicalText(rework.rejectionReason)}</span></div> : null}
-              {rework.findings.length > 0 ? <div className="rework-finding-list" aria-label="需要处理的问题">
-                {rework.findings.map((finding, index) => <article className="rework-finding" key={`${finding.timecodeMs}-${finding.category}-${index}`}>
-                  <header><strong>{finding.scenePosition ? `第 ${finding.scenePosition} 镜` : "全片"}</strong><span>{formatTimecode(finding.timecodeMs)}</span><em>{reworkFindingCategoryLabel(finding.category)}</em></header>
-                  <p>{creatorFacingTechnicalText(finding.description)}</p>
-                  <small>建议：{creatorFacingTechnicalText(finding.suggestion)}</small>
-                </article>)}
-              </div> : null}
-              <div className="rework-instruction-grid">
-                <label className="field">
-                  <span>脚本修改要求</span>
-                  <textarea required value={rework.nodeInstructions.script} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, script: event.target.value } } : current)} />
-                </label>
-                <label className="field">
-                  <span>导演方案修改要求</span>
-                  <textarea required value={rework.nodeInstructions.visualDirection} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, visualDirection: event.target.value } } : current)} />
-                </label>
-                <label className="field">
-                  <span>画面素材修改要求</span>
-                  <textarea required value={rework.nodeInstructions.assets} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, assets: event.target.value } } : current)} />
-                </label>
-              </div>
-              <p className="rework-boundary-note">上一版脚本和导演方案会作为修改基线带入；这些文字是待执行要求，不代表问题已经修好。</p>
-            </section> : null}
+            </div>
 
             <section className="director-casting-section" aria-labelledby="director-casting-title">
               <div className="compact-section-heading">
@@ -903,6 +998,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               </div>
             </section>
 
+            <div hidden={Boolean(rework) && !inheritedSettingsOpen}>
             <div className={advancedOpen ? "advanced-production is-open" : "advanced-production"}>
               <button className="advanced-production-toggle" type="button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((current) => !current)}>
                 <span>更多：素材来源与制作细节</span><small>需要时再展开</small><ChevronDown aria-hidden="true" size={17} />
@@ -1031,6 +1127,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 setBindings((current) => ({ ...current, voice: providerId }));
               }}
             />
+            </div>
 
             <section className="production-guardrails" aria-label="开工前检查">
               <label className={effectiveSemanticRank ? "visual-review-control is-enabled" : "visual-review-control"}>
@@ -1071,7 +1168,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               </div>
             </section>
 
-            {missingProductionRoles.length > 0 ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />缺少正式生产能力：{missingProductionRoles.join("、")}。请先在创作设置中完成配置。</p> : null}
+            {missingProductionRoles.length > 0 ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />缺少正式生产能力：{missingProductionRoles.join("、")}。请先在创作设置中完成配置。<a className="button button-ghost" href={capabilitySettingsHref}>打开创作设置</a></p> : null}
             {error ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
           </div>
 
@@ -1229,6 +1326,7 @@ function isAutomaticAssetSource(provider: StudioProvider): boolean {
 
 function creatorFacingRework(
   rework: StudioProductionInput["rework"] | undefined,
+  requiredAffectedScenePositions?: number[],
 ): StudioProductionInput["rework"] | undefined {
   if (!rework) return undefined;
   const draft = structuredClone(rework);
@@ -1239,7 +1337,249 @@ function creatorFacingRework(
     visualDirection: present(draft.nodeInstructions.visualDirection),
     assets: present(draft.nodeInstructions.assets),
   };
+  const fullScenePositions = verifiedReworkScenePositions(draft);
+  if (fullScenePositions) {
+    draft.affectedScenePositions = defaultReworkScenePositions(
+      draft,
+      fullScenePositions,
+      requiredAffectedScenePositions,
+    );
+  }
   return draft;
+}
+
+const REWORK_BASELINE_NODE_LABELS: Record<string, string> = {
+  brief: "需求简报",
+  template: "视频模板",
+  script: "上一版脚本",
+  "visual-direction": "上一版导演方案",
+  "visual-review": "视觉审片记录",
+};
+
+function isLegalScenePosition(position: unknown): position is number {
+  return typeof position === "number" && Number.isInteger(position) && position > 0;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// 排序后必须严格是 1..N：缺号或跳号都说明历史镜头集合不完整，不能用来推导“计划沿用”。
+function strictlyOrderedScenePositions(positions: number[]): number[] | undefined {
+  const sorted = [...positions].sort((left, right) => left - right);
+  return sorted.every((position, index) => position === index + 1) ? sorted : undefined;
+}
+
+function verifiedScenePositionsFromScript(previousScript: unknown): number[] | undefined {
+  if (!isPlainRecord(previousScript) || !Array.isArray(previousScript.scenes)) return undefined;
+  const positions: number[] = [];
+  const seen = new Set<number>();
+  for (const scene of previousScript.scenes) {
+    if (!isPlainRecord(scene)) return undefined;
+    const position = scene.position;
+    if (!isLegalScenePosition(position)) return undefined;
+    // 每个脚本镜头只有一个编号；重复编号说明历史数据不可靠，不能静默去重。
+    if (seen.has(position)) return undefined;
+    seen.add(position);
+    positions.push(position);
+  }
+  return positions.length > 0 ? strictlyOrderedScenePositions(positions) : undefined;
+}
+
+function verifiedScenePositionsFromDirectorPlan(previousDirectorPlan: unknown): number[] | undefined {
+  if (!isPlainRecord(previousDirectorPlan) || !Array.isArray(previousDirectorPlan.shots)) return undefined;
+  const positions: number[] = [];
+  const seen = new Set<number>();
+  for (const shot of previousDirectorPlan.shots) {
+    if (!isPlainRecord(shot)) return undefined;
+    const position = shot.scenePosition;
+    if (!isLegalScenePosition(position)) return undefined;
+    // 正常合同里每个脚本镜头只有一个 shot；重复镜头号不是合法的多 shot 同 scene。
+    if (seen.has(position)) return undefined;
+    seen.add(position);
+    positions.push(position);
+  }
+  return positions.length > 0 ? strictlyOrderedScenePositions(positions) : undefined;
+}
+
+function verifiedReworkScenePositions(
+  rework: StudioProductionInput["rework"] | undefined,
+): number[] | undefined {
+  if (!rework) return undefined;
+  const scriptPositions = verifiedScenePositionsFromScript(rework.previousScript);
+  const directorPositions = verifiedScenePositionsFromDirectorPlan(rework.previousDirectorPlan);
+  if (scriptPositions && directorPositions) {
+    return scriptPositions.length === directorPositions.length
+      && scriptPositions.every((position, index) => position === directorPositions[index])
+      ? scriptPositions
+      : undefined;
+  }
+  return scriptPositions ?? directorPositions;
+}
+
+function defaultReworkScenePositions(
+  rework: NonNullable<StudioProductionInput["rework"]>,
+  fullScenePositions: number[],
+  requiredAffectedScenePositions: number[] | undefined,
+): number[] {
+  const knownPositions = new Set(fullScenePositions);
+  const selected = new Set<number>();
+  for (const position of rework.affectedScenePositions ?? []) {
+    if (knownPositions.has(position)) selected.add(position);
+  }
+  for (const position of requiredAffectedScenePositions ?? []) {
+    if (knownPositions.has(position)) selected.add(position);
+  }
+  let hasUnlocatedFinding = false;
+  for (const finding of rework.findings ?? []) {
+    if (!isLegalScenePosition(finding.scenePosition) || !knownPositions.has(finding.scenePosition)) {
+      hasUnlocatedFinding = true;
+      continue;
+    }
+    selected.add(finding.scenePosition);
+  }
+  const explicitlyCleared = Array.isArray(rework.affectedScenePositions)
+    && rework.affectedScenePositions.length === 0;
+  if (hasUnlocatedFinding || (!explicitlyCleared && selected.size === 0)) {
+    return [...fullScenePositions];
+  }
+  return fullScenePositions.filter((position) => selected.has(position));
+}
+
+function requiredScenePositionsForRework(
+  rework: StudioProductionInput["rework"] | undefined,
+  requiredAffectedScenePositions: number[] | undefined,
+): number[] {
+  const fullScenePositions = verifiedReworkScenePositions(rework);
+  if (!rework || !fullScenePositions) return [];
+  const knownPositions = new Set(fullScenePositions);
+  const required = new Set<number>();
+  for (const position of requiredAffectedScenePositions ?? []) {
+    if (knownPositions.has(position)) required.add(position);
+  }
+  let hasUnlocatedRequiredFinding = false;
+  for (const finding of rework.findings ?? []) {
+    if (!finding.targetNodeIds.some((nodeId) => nodeId === "visual-direction" || nodeId === "assets")) continue;
+    if (!isLegalScenePosition(finding.scenePosition) || !knownPositions.has(finding.scenePosition)) {
+      hasUnlocatedRequiredFinding = true;
+      continue;
+    }
+    required.add(finding.scenePosition);
+  }
+  return hasUnlocatedRequiredFinding
+    ? [...fullScenePositions]
+    : fullScenePositions.filter((position) => required.has(position));
+}
+
+function toggleReworkScene(
+  rework: StudioProductionInput["rework"] | undefined,
+  position: number,
+): StudioProductionInput["rework"] | undefined {
+  if (!rework) return undefined;
+  const fullScenePositions = verifiedReworkScenePositions(rework);
+  if (!fullScenePositions?.includes(position)) return rework;
+  const selected = new Set(rework.affectedScenePositions ?? []);
+  if (selected.has(position)) selected.delete(position);
+  else selected.add(position);
+  return {
+    ...rework,
+    affectedScenePositions: fullScenePositions.filter((scenePosition) => selected.has(scenePosition)),
+  };
+}
+
+interface GroupedReworkFindings {
+  sceneGroups: Array<{ scenePosition: number; findings: StudioReworkFinding[] }>;
+  wholeFilmFindings: StudioReworkFinding[];
+}
+
+function groupReworkFindingsByScene(findings: StudioReworkFinding[] | undefined): GroupedReworkFindings {
+  const seenFindingIds = new Set<string>();
+  const uniqueFindings: StudioReworkFinding[] = [];
+  findings?.forEach((finding, index) => {
+    // 只按相同 findingId 去重；不同 finding 即使分类或描述相同也全部保留。
+    const identity = finding.findingId || `finding-${index}`;
+    if (seenFindingIds.has(identity)) return;
+    seenFindingIds.add(identity);
+    uniqueFindings.push(finding);
+  });
+  const sceneGroups = new Map<number, StudioReworkFinding[]>();
+  const wholeFilmFindings: StudioReworkFinding[] = [];
+  for (const finding of uniqueFindings) {
+    const position = finding.scenePosition;
+    if (!isLegalScenePosition(position)) {
+      wholeFilmFindings.push(finding);
+      continue;
+    }
+    const group = sceneGroups.get(position) ?? [];
+    group.push(finding);
+    sceneGroups.set(position, group);
+  }
+  return {
+    sceneGroups: [...sceneGroups.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([scenePosition, grouped]) => ({ scenePosition, findings: grouped })),
+    wholeFilmFindings,
+  };
+}
+
+interface ReworkScopeSummary {
+  adjustedScenePositions: number[];
+  fullScenePositions?: number[];
+  plannedReuseScenePositions: number[];
+}
+
+function summarizeReworkScope(
+  rework: StudioProductionInput["rework"] | undefined,
+): ReworkScopeSummary | undefined {
+  if (!rework) return undefined;
+  const fullScenePositions = verifiedReworkScenePositions(rework);
+  if (!fullScenePositions) return { adjustedScenePositions: [], plannedReuseScenePositions: [] };
+  const selected = new Set(rework.affectedScenePositions ?? []);
+  const adjustedScenePositions = fullScenePositions.filter((position) => selected.has(position));
+  return {
+    adjustedScenePositions,
+    fullScenePositions,
+    plannedReuseScenePositions: fullScenePositions.filter((position) => !adjustedScenePositions.includes(position)),
+  };
+}
+
+// 继承文案只承诺真实存在的上一版基线资料：早期节点失败的 rework 可能没有脚本或导演方案产物。
+function reworkBaselineSummary(rework: NonNullable<StudioProductionInput["rework"]>): string {
+  const suffix = "这些文字是待执行要求，不代表问题已经修好。";
+  if (rework.previousScript && rework.previousDirectorPlan) {
+    return `上一版脚本和导演方案会作为修改基线带入；${suffix}`;
+  }
+  if (rework.previousScript) {
+    return `上一版脚本会作为修改基线带入，本轮需要重新规划画面方案；${suffix}`;
+  }
+  if (rework.previousDirectorPlan) {
+    return `上一版导演方案会作为修改基线带入，本轮需要重新生成脚本；${suffix}`;
+  }
+  return `上一版未留下脚本和导演方案，本轮需要重新生成脚本并重新规划画面方案；${suffix}`;
+}
+
+const REWORK_FINDING_TARGET_NODE_ORDER = ["script", "visual-direction", "assets"] as const;
+
+const REWORK_FINDING_TARGET_NODE_LABELS: Record<string, string> = {
+  script: "脚本",
+  "visual-direction": "导演方案",
+  assets: "画面素材",
+};
+
+// 展示的影响步骤只来自去重后 findings 的 targetNodeIds 并集；不从 category、描述或关键词推断。
+function reworkFindingTargetStepLabels(grouped: GroupedReworkFindings): string[] {
+  const targeted = new Set<string>();
+  for (const group of grouped.sceneGroups) {
+    for (const finding of group.findings) {
+      for (const nodeId of finding.targetNodeIds ?? []) targeted.add(nodeId);
+    }
+  }
+  for (const finding of grouped.wholeFilmFindings) {
+    for (const nodeId of finding.targetNodeIds ?? []) targeted.add(nodeId);
+  }
+  return REWORK_FINDING_TARGET_NODE_ORDER
+    .filter((nodeId) => targeted.has(nodeId))
+    .map((nodeId) => REWORK_FINDING_TARGET_NODE_LABELS[nodeId]!);
 }
 
 function requiredString(data: FormData, key: string): string {

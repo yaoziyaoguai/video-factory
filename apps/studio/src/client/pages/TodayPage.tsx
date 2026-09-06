@@ -52,6 +52,7 @@ export function TodayPage() {
   const [seriesLoading, setSeriesLoading] = useState(true);
   const [opportunitiesError, setOpportunitiesError] = useState<string>();
   const [providersError, setProvidersError] = useState<string>();
+  const [settingsError, setSettingsError] = useState<string>();
   const [runsError, setRunsError] = useState<string>();
   const [trendError, setTrendError] = useState<string>();
   const [seriesError, setSeriesError] = useState<string>();
@@ -59,6 +60,7 @@ export function TodayPage() {
   const [adoptingCandidateId, setAdoptingCandidateId] = useState<string>();
   const [nextStepNotice, setNextStepNotice] = useState<string>();
   const [trendRefreshFinishedAt, setTrendRefreshFinishedAt] = useState<string>();
+  const [trendRefreshPending, setTrendRefreshPending] = useState(false);
   const adoptedSectionRef = useRef<HTMLElement>(null);
   const trendLoadingRef = useRef(false);
   const trendRefreshPollRef = useRef<number | undefined>(undefined);
@@ -77,27 +79,32 @@ export function TodayPage() {
         const status = await studioApi.trendCandidateRefreshStatus(refreshId);
         if (status.state === "succeeded") {
           const refreshedInbox = updateTrendInbox(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }));
+          setTrendError(undefined);
           setTrendRefreshFinishedAt(status.finishedAt ?? new Date().toISOString());
           const collectedCount = status.candidateCount ?? refreshedInbox.items.length;
           const decidedCount = Math.max(0, collectedCount - refreshedInbox.items.length);
           setNextStepNotice(decidedCount > 0
             ? `本次采集 ${collectedCount} 条，其中 ${decidedCount} 条已进入制作区；当前有 ${refreshedInbox.items.length} 条待判断。`
             : `热点候选已更新完成，当前有 ${refreshedInbox.items.length} 条待判断。`);
+          setTrendRefreshPending(false);
           return;
         }
         if (status.state === "failed") {
           setNextStepNotice(status.error ?? "热点更新失败，请稍后手动重试。");
+          setTrendRefreshPending(false);
           return;
         }
       } catch {
         nextFailures = consecutiveFailures + 1;
         if (nextFailures >= 3) {
           setNextStepNotice("暂时无法确认热点更新状态，当前缓存仍可使用；请稍后再试。");
+          setTrendRefreshPending(false);
           return;
         }
       }
       if (attempt >= 39) {
         setNextStepNotice("热点更新仍未完成，当前缓存可以继续使用；稍后可再次查看或手动刷新。");
+        setTrendRefreshPending(false);
         return;
       }
       trendRefreshPollRef.current = window.setTimeout(() => void poll(attempt + 1, nextFailures), trendRefreshPollDelay(attempt));
@@ -116,11 +123,17 @@ export function TodayPage() {
     setTrendError(undefined);
     try {
       if (forceRefresh) {
-        const receipt = await studioApi.refreshTrendCandidates();
-        setNextStepNotice(receipt.status === "already_running"
-          ? "热点后台更新已在进行，当前缓存仍可继续选择。"
-          : "热点后台更新已开始，当前缓存仍可继续选择。");
-        scheduleTrendRefreshPoll(receipt.refreshId);
+        setTrendRefreshPending(true);
+        try {
+          const receipt = await studioApi.refreshTrendCandidates();
+          setNextStepNotice(receipt.status === "already_running"
+            ? "热点后台更新已在进行，当前缓存仍可继续选择。"
+            : "热点后台更新已开始，当前缓存仍可继续选择。");
+          scheduleTrendRefreshPoll(receipt.refreshId);
+        } catch (refreshError) {
+          setTrendRefreshPending(false);
+          throw refreshError;
+        }
       }
       updateTrendInbox(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }));
     } catch (caught) {
@@ -165,6 +178,7 @@ export function TodayPage() {
     setRunsLoading(true);
     setOpportunitiesError(undefined);
     setProvidersError(undefined);
+    setSettingsError(undefined);
     setRunsError(undefined);
     await Promise.all([
       studioApi.opportunities(origin).then((nextOpportunities) => {
@@ -173,9 +187,23 @@ export function TodayPage() {
       }).catch((caught: unknown) => setOpportunitiesError(errorMessage(caught))).finally(() => setOpportunitiesLoading(false)),
       studioApi.providers().then(setProviders).catch((caught: unknown) => setProvidersError(errorMessage(caught))).finally(() => setProvidersLoading(false)),
       studioApi.runs(entryMode === "series" ? undefined : origin).then(setRuns).catch((caught: unknown) => setRunsError(errorMessage(caught))).finally(() => setRunsLoading(false)),
-      studioApi.settings().then(setCreatorSettings).catch(() => undefined).finally(() => setSettingsLoading(false)),
+      // 读取失败必须留下可见错误并阻断开工；成功返回（含未自定义的系统默认）才允许带入默认值。
+      studioApi.settings().then(setCreatorSettings).catch((caught: unknown) => setSettingsError(errorMessage(caught))).finally(() => setSettingsLoading(false)),
     ]);
   }, [entryMode]);
+
+  // 原地重读创作设置：成功后用服务端保存值解除阻塞，不要求刷新整页。
+  const retrySettings = useCallback(async () => {
+    setSettingsLoading(true);
+    setSettingsError(undefined);
+    try {
+      setCreatorSettings(await studioApi.settings());
+    } catch (caught: unknown) {
+      setSettingsError(errorMessage(caught));
+    } finally {
+      setSettingsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     void load();
@@ -212,6 +240,14 @@ export function TodayPage() {
       : visibleOpportunities,
     [blockedOpportunityCount, startableOpportunities, visibleOpportunities],
   );
+  const sourceBlockedOpportunities = useMemo(
+    () => entryMode === "trend"
+      ? visibleOpportunities.filter((item) => item.verification?.status === "blocked")
+      : [],
+    [entryMode, visibleOpportunities],
+  );
+  const sourceBlockedCount = sourceBlockedOpportunities.length;
+  const otherBlockedCount = Math.max(0, blockedOpportunityCount - sourceBlockedCount);
   const visibleRuns = useMemo(
     () => runs.filter((run) => matchesEntryOrigin(entryMode, run.creationOrigin)
       && (entryMode !== "series" || !selectedSeriesId || run.seriesId === selectedSeriesId)),
@@ -259,7 +295,7 @@ export function TodayPage() {
     : (inbox?.facets.total ?? 0);
   const completedCount = visibleRuns.filter((run) => run.status === "succeeded").length;
   const dailyStatus = entryMode === "trend" && blockedOpportunityCount > 0
-    ? `${visibleCandidateCount} 条候选 · ${startableOpportunities.length} 条可开工 · ${blockedOpportunityCount} 条历史候选需补来源 · ${completedCount} 条已完成`
+    ? `${visibleCandidateCount} 条候选 · ${startableOpportunities.length} 条可开工 · ${blockedTrendStatusText(sourceBlockedCount, otherBlockedCount)} · ${completedCount} 条已完成`
     : `${visibleCandidateCount} 条候选 · ${startableOpportunities.length} 条制作机会 · ${completedCount} 条已完成`;
   const onlyBlockedHistoricalTopics = entryMode === "trend"
     && startableOpportunities.length === 0
@@ -353,6 +389,14 @@ export function TodayPage() {
     navigate(`/projects/${result.runId}`);
   }
 
+  function focusSourceBlockedOpportunity(opportunityId: string) {
+    setSelectedId(opportunityId);
+    window.requestAnimationFrame(() => {
+      adoptedSectionRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+      adoptedSectionRef.current?.focus({ preventScroll: true });
+    });
+  }
+
   function openOpportunityDialog(mode: "manual" | "json") {
     setOpportunityDialogMode(mode);
     setOpportunityDialogOpen(true);
@@ -371,7 +415,14 @@ export function TodayPage() {
       {runsLoading ? <div className="region-loading">正在读取生产状态...</div> : runsError ? (
         <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={18} />生产状态读取失败：{runsError}</div>
       ) : <ProductionStrip runs={visibleRuns} />}
-      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
+      {settingsError ? (
+        <div className="inline-error" role="alert">
+          <AlertCircle aria-hidden="true" size={18} />
+          <span>未能读取你的创作设置，为避免用错声音/平台/时长，暂未开工。{settingsError}</span>
+          <button className="button button-secondary" type="button" onClick={() => void retrySettings()}><RefreshCw aria-hidden="true" size={16} />重新读取</button>
+        </div>
+      ) : null}
+      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} trendRefreshPending={trendRefreshPending} sourceBlockedOpportunities={sourceBlockedOpportunities} onFocusSourceBlocked={focusSourceBlockedOpportunity} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
       {candidateActionError ? <div className="inline-error topic-action-error" role="alert"><AlertCircle aria-hidden="true" size={18} />{candidateActionError}</div> : null}
       {nextStepNotice ? <div className="next-step-notice" role="status"><CheckCircle2 aria-hidden="true" size={18} /><strong>{nextStepNotice}</strong><button type="button" onClick={() => setNextStepNotice(undefined)} aria-label="关闭下一步提示">知道了</button></div> : null}
 
@@ -379,7 +430,7 @@ export function TodayPage() {
         <header>
           <div>
             <p className="eyebrow">{entryMode === "series" ? "本集制作" : onlyBlockedHistoricalTopics ? "暂不可开工" : "待制作"}</p>
-            <h2 id="adopted-opportunities-title">{entryMode === "series" ? "本集制作准备" : onlyBlockedHistoricalTopics ? "历史候选需补来源" : "待制作机会"}</h2>
+            <h2 id="adopted-opportunities-title">{entryMode === "series" ? "本集制作准备" : onlyBlockedHistoricalTopics ? (otherBlockedCount === 0 ? "历史候选需补来源" : "暂不可开工的选题") : "待制作机会"}</h2>
           </div>
           {entryMode === "series" && selected ? (
             <label className="series-production-selector">
@@ -388,7 +439,7 @@ export function TodayPage() {
                 {displayedOpportunities.map((item) => <option key={item.id} value={item.id}>E{String(item.episodeNumber ?? 0).padStart(2, "0")} · {item.title}</option>)}
               </select>
             </label>
-          ) : <span>{blockedOpportunityCount > 0 ? `${startableOpportunities.length} 条可开工 · ${blockedOpportunityCount} 条需补来源` : `${startableOpportunities.length} 条`}</span>}
+          ) : <span>{blockedOpportunityCount > 0 ? `${startableOpportunities.length} 条可开工 · ${blockedTrendCountText(sourceBlockedCount, otherBlockedCount)}` : `${startableOpportunities.length} 条`}</span>}
         </header>
         {opportunitiesLoading ? <div className="today-loading"><RadioTower aria-hidden="true" size={22} />正在读取制作机会...</div> : opportunitiesError ? (
           <div className="source-error-state" role="alert"><AlertCircle aria-hidden="true" size={22} /><div><p className="eyebrow">制作机会不可用</p><h2>机会读取失败</h2><p>{opportunitiesError}</p></div><button className="button button-secondary" type="button" onClick={() => void load()}><RefreshCw aria-hidden="true" size={16} />重试</button></div>
@@ -410,7 +461,7 @@ export function TodayPage() {
 
       <OpportunityDialog open={opportunityDialogOpen} initialMode={opportunityDialogMode} onClose={() => setOpportunityDialogOpen(false)} onSubmit={createOpportunity} />
       <SeriesDialog open={seriesDialogOpen} onClose={() => setSeriesDialogOpen(false)} onSubmit={createSeries} />
-      <NewRunDialog open={productionDialogOpen} providers={providers} initialDataReady={!providersLoading && !settingsLoading} {...(creatorSettings ? { creatorSettings } : {})} {...(selected ? { initialValues: {
+      <NewRunDialog open={productionDialogOpen} providers={providers} initialDataReady={!providersLoading && !settingsLoading && !settingsError} {...(creatorSettings ? { creatorSettings } : {})} {...(settingsError ? { settingsError } : {})} onRetrySettings={() => void retrySettings()} {...(selected ? { initialValues: {
         title: selected.title,
         angle: selected.hook,
         audience: selected.audience,
@@ -481,6 +532,18 @@ function isPendingProduction(
 
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
+}
+
+function blockedTrendStatusText(sourceBlockedCount: number, otherBlockedCount: number): string {
+  if (sourceBlockedCount > 0 && otherBlockedCount > 0) return `${sourceBlockedCount} 条需补来源 · ${otherBlockedCount} 条暂不建议生产`;
+  if (sourceBlockedCount > 0) return `${sourceBlockedCount} 条历史候选需补来源`;
+  return `${otherBlockedCount} 条历史选题暂不建议生产`;
+}
+
+function blockedTrendCountText(sourceBlockedCount: number, otherBlockedCount: number): string {
+  if (sourceBlockedCount > 0 && otherBlockedCount > 0) return `${sourceBlockedCount} 条需补来源 · ${otherBlockedCount} 条暂不建议生产`;
+  if (sourceBlockedCount > 0) return `${sourceBlockedCount} 条需补来源`;
+  return `${otherBlockedCount} 条暂不建议生产`;
 }
 
 function onlyOrigin(inbox: StudioCandidateInbox, origin: StudioCandidateInboxItem["origin"]): StudioCandidateInbox {

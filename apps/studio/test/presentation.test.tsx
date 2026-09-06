@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { RUN_NODE_ORDER, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, runNodeLabel } from "../src/client/presentation.js";
+import { buildProviderCatalog } from "../src/server/provider-catalog.js";
+import { RUN_NODE_ORDER, catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, runNodeLabel } from "../src/client/presentation.js";
 
 describe("creator-facing presentation labels", () => {
   it("does not expose internal provider ids or director routing codes", () => {
@@ -13,6 +14,26 @@ describe("creator-facing presentation labels", () => {
       .toBe("打破直觉：AI 图片生成，复用镜头 2");
   });
 
+  it("maps catalog model ids to labels and leaves unmapped ids to the caller", () => {
+    const providers = [{ modelProfiles: [{ id: "glm-5.3-flash", label: "GLM-5.3-Flash" }] }];
+    expect(catalogModelLabel(providers, "glm-5.3-flash")).toBe("GLM-5.3-Flash");
+    expect(catalogModelLabel(providers, "secret-internal-model")).toBeUndefined();
+    expect(catalogModelLabel(providers, undefined)).toBeUndefined();
+  });
+
+  it("declares official console entries only for metered providers that can require reconciliation", () => {
+    const catalog = buildProviderCatalog({ python: true, ffmpeg: true, ffprobe: true, say: true }, {});
+    const consoleUrl = (id: string) => catalog.find((provider) => provider.id === id)?.consoleUrl;
+    expect(consoleUrl("minimax-tts-v1")).toBe("https://platform.minimaxi.com/");
+    expect(consoleUrl("hailuo-video-v1")).toBe("https://platform.minimaxi.com/");
+    expect(consoleUrl("seedance-video-v1")).toBe("https://console.volcengine.com/ark");
+    expect(consoleUrl("seedream-image-v1")).toBe("https://console.volcengine.com/ark");
+    expect(consoleUrl("wan-video-v1")).toBe("https://bailian.console.aliyun.com/");
+    expect(consoleUrl("pexels-stock-v1")).toBeUndefined();
+    expect(consoleUrl("pixabay-stock-v1")).toBeUndefined();
+    expect(consoleUrl("kling-video-v1")).toBeUndefined();
+  });
+
   it("places the source-asset gate between paid visuals and voice", () => {
     expect(runNodeLabel("asset-source-review")).toBe("生成画面预检");
     expect(RUN_NODE_ORDER.indexOf("asset-source-review")).toBe(RUN_NODE_ORDER.indexOf("assets") + 1);
@@ -20,9 +41,9 @@ describe("creator-facing presentation labels", () => {
   });
 
   it("turns system diagnostics into creator language without rewriting creative copy", () => {
-    const technical = creatorFacingTechnicalText("Agent Provider Broker schema manifest fallback taskId api-visual-director-v1 primary provider timed out");
-    expect(technical).toBe("AI 服务 AI 服务 数据格式 资源清单 备用方案 任务编号 内部能力 首选服务响应超时");
-    expect(technical).not.toMatch(/Agent|Provider|Broker|schema|manifest|fallback|taskId|api-visual-director-v1/i);
+    const technical = creatorFacingTechnicalText("Agent Provider Broker schema manifest fallback taskId api-visual-director-v1 primary provider timed out blocking");
+    expect(technical).toBe("AI 服务 AI 服务 数据格式 资源清单 备用方案 任务编号 内部能力 首选服务响应超时 必须修改的问题");
+    expect(technical).not.toMatch(/Agent|Provider|Broker|schema|manifest|fallback|taskId|api-visual-director-v1|blocking/i);
 
     const creatorCopy = "我的 Provider 不是故事主角，Agent 也不是标题。";
     expect(humanizeCreativeText(creatorCopy)).toBe(creatorCopy);
@@ -40,6 +61,8 @@ describe("creator-facing presentation labels", () => {
       expect(technical).not.toMatch(/studio-owner|VIDEO_FACTORY_|\/run\/video-factory|socket|宿主机|bridge|broker/i);
     }
     expect(creatorFacingTechnicalText(diagnostics[0])).toContain("由你确认");
+    expect(creatorFacingTechnicalText("已按 hook_and_scene_midpoints 的稀疏证据逐场核对。请调整 source_assets 或画面 Provider。"))
+      .toBe("已按每个镜头的关键画面完成预检。请调整生成画面或画面服务。");
   });
 
   it("translates persisted worker provenance into clear Chinese", () => {

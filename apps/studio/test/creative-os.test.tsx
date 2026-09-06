@@ -16,7 +16,7 @@ import { ProductionPage } from "../src/client/pages/ProductionPage.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
 import { HomePage } from "../src/client/pages/HomePage.js";
 import { TodayPage } from "../src/client/pages/TodayPage.js";
-import type { StudioCandidateInboxItem, StudioOpportunity, StudioProvider, StudioRunSummary, StudioSeries, StudioTemplate, StudioTrendSource } from "../src/shared/api.js";
+import type { StudioCandidateInboxItem, StudioLocalCapability, StudioOpportunity, StudioProvider, StudioRunSummary, StudioSeries, StudioTemplate, StudioTrendSource } from "../src/shared/api.js";
 
 const opportunity: StudioOpportunity = {
   id: "opportunity-1",
@@ -132,6 +132,27 @@ function candidate(index: number, category: StudioCandidateInboxItem["category"]
   };
 }
 
+function unselectedCandidate(index: number, category: StudioCandidateInboxItem["category"] = "technology"): StudioCandidateInboxItem {
+  return {
+    ...candidate(index, category),
+    editorialDecision: { verdict: "skip", score: 0, reasons: ["没有越过生产门槛。"], guardrails: ["重做选题。"] },
+  };
+}
+
+function sourceBlockedOpportunity(id: string, title: string): StudioOpportunity {
+  return {
+    ...opportunity,
+    id,
+    title,
+    verification: {
+      status: "blocked" as const,
+      independentSources: 1,
+      requiredSources: 2,
+      reasons: ["当前总编规则要求至少 2 个不同域名的有效原始来源链接。"],
+    },
+  };
+}
+
 function inbox(items: StudioCandidateInboxItem[]) {
   return {
     items,
@@ -153,9 +174,13 @@ function inbox(items: StudioCandidateInboxItem[]) {
   };
 }
 
+let restoreScrollIntoView: (() => void) | undefined;
+
 afterEach(() => {
   vi.restoreAllMocks();
   window.history.replaceState(null, "", window.location.pathname);
+  restoreScrollIntoView?.();
+  restoreScrollIntoView = undefined;
 });
 
 describe("Creative OS", () => {
@@ -253,6 +278,7 @@ describe("Creative OS", () => {
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     expect(await screen.findByRole("heading", { name: "热点候选收件箱" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "这轮没有可直接开工的热点建议" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(8);
     expect(screen.getByRole("heading", { name: opportunity.title })).toBeInTheDocument();
     expect(screen.getByText("问题、因果模型与生活验证构成的解释视频")).toBeInTheDocument();
@@ -271,7 +297,11 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox(candidates));
     const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockResolvedValue({ refreshId: "refresh-1", status: "started", requestedAt: "2026-08-30T10:00:00.000Z" });
     vi.spyOn(studioApi, "trendCandidateRefreshStatus").mockResolvedValue({
-      refreshId: "refresh-1", state: "running", requestedAt: "2026-08-30T10:00:00.000Z",
+      refreshId: "refresh-1",
+      state: "succeeded",
+      requestedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:00:01.000Z",
+      candidateCount: 2,
     });
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
@@ -279,11 +309,75 @@ describe("Creative OS", () => {
     await waitFor(() => expect(screen.getByText(/2 个平台 · 2 条/)).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "游戏电竞 0" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "汽车 0" })).toBeDisabled();
+    const platformFilter = screen.getByRole("combobox", { name: "热点来源平台" });
+    expect(within(platformFilter).getByRole("option", { name: "全部来源平台" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "立即刷新热点" }));
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
     expect(await screen.findByText(/后台更新已开始/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "立即刷新热点" })).toBeEnabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "立即刷新热点" })).toBeEnabled(), { timeout: 4_000 });
+  });
+
+  it("keeps the trend refresh control disabled while the background refresh poll is still running", async () => {
+    const user = userEvent.setup();
+    const candidates = [candidate(1, "technology"), candidate(2, "society")];
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox(candidates));
+    const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockResolvedValue({ refreshId: "refresh-1", status: "started", requestedAt: "2026-08-30T10:00:00.000Z" });
+    const status = vi.spyOn(studioApi, "trendCandidateRefreshStatus").mockResolvedValue({
+      refreshId: "refresh-1", state: "running", requestedAt: "2026-08-30T10:00:00.000Z",
+    });
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    await screen.findAllByRole("button", { name: /查看候选提案/ });
+    const refreshButton = screen.getByRole("button", { name: "立即刷新热点" });
+    expect(refreshButton).toBeEnabled();
+
+    await user.click(refreshButton);
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(refreshButton).toBeDisabled();
+
+    status.mockResolvedValue({
+      refreshId: "refresh-1",
+      state: "succeeded",
+      requestedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:00:02.000Z",
+      candidateCount: 2,
+    });
+    await waitFor(() => expect(refreshButton).toBeEnabled(), { timeout: 4_000 });
+  });
+
+  it("keeps the recovery refresh action locked while the background refresh is still running", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockResolvedValue({ refreshId: "refresh-1", status: "started", requestedAt: "2026-08-30T10:00:00.000Z" });
+    const status = vi.spyOn(studioApi, "trendCandidateRefreshStatus").mockResolvedValue({
+      refreshId: "refresh-1", state: "running", requestedAt: "2026-08-30T10:00:00.000Z",
+    });
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    const recoveryRefresh = await screen.findByRole("button", { name: "重新刷新热点" });
+    expect(recoveryRefresh).toBeEnabled();
+
+    await user.click(recoveryRefresh);
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeDisabled();
+
+    status.mockResolvedValue({
+      refreshId: "refresh-1",
+      state: "succeeded",
+      requestedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:00:02.000Z",
+      candidateCount: 0,
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeEnabled(), { timeout: 4_000 });
   });
 
   it("distinguishes collected trend signals from candidates still waiting for a decision", async () => {
@@ -698,6 +792,71 @@ describe("Creative OS", () => {
     expect(screen.queryByRole("heading", { name: "还没有制作记录" })).not.toBeInTheDocument();
   });
 
+  it("shows a settings failure on the production page, blocks silent submission, and recovers with the saved values after an in-place retry", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "voices").mockResolvedValue([
+      { id: "macos:Tingting", providerId: "macos-say-v1", label: "Tingting", locale: "zh-CN", engine: "macos" },
+    ]);
+    vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 0, templates: [knowledgeTemplate()] });
+    const settingsRequest = vi.spyOn(studioApi, "settings")
+      .mockRejectedValueOnce(new Error("请求失败（500），请稍后重试。"))
+      .mockResolvedValueOnce({
+        voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+        defaultRecipeId: "free-stock",
+        topicStrategy: { customInstruction: "" },
+        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "bilibili", durationSeconds: 45 },
+      });
+    render(<MemoryRouter><ProductionPage /></MemoryRouter>);
+
+    await waitFor(() => expect(screen.getByText(/未能读取你的创作设置，为避免用错声音\/平台\/时长，暂未开工/)).toBeInTheDocument());
+    const productionHeader = screen.getByRole("heading", { name: "制作记录" }).closest("header");
+    expect(productionHeader).not.toBeNull();
+    await user.click(within(productionHeader!).getByRole("button", { name: "新建制作" }));
+    const dialog = screen.getByRole("dialog", { name: "创作设置读取失败" });
+    expect(within(dialog).queryByRole("button", { name: "开始制作" })).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "重新读取" }));
+    expect(settingsRequest).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
+    expect(screen.getByRole("combobox", { name: "目标时长" })).toHaveValue("45");
+    expect(screen.queryByText(/未能读取你的创作设置/)).not.toBeInTheDocument();
+  });
+
+  it("shows a settings failure on the today page, blocks silent submission, and recovers with the saved values after an in-place retry", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([opportunity]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    vi.spyOn(studioApi, "voices").mockResolvedValue([
+      { id: "macos:Tingting", providerId: "macos-say-v1", label: "Tingting", locale: "zh-CN", engine: "macos" },
+    ]);
+    vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 0, templates: [knowledgeTemplate()] });
+    const settingsRequest = vi.spyOn(studioApi, "settings")
+      .mockRejectedValueOnce(new Error("请求失败（500），请稍后重试。"))
+      .mockResolvedValueOnce({
+        voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+        defaultRecipeId: "free-stock",
+        topicStrategy: { customInstruction: "" },
+        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "bilibili", durationSeconds: 45 },
+      });
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    await waitFor(() => expect(screen.getByText(/未能读取你的创作设置，为避免用错声音\/平台\/时长，暂未开工/)).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "新建制作" }));
+    const dialog = screen.getByRole("dialog", { name: "创作设置读取失败" });
+    expect(within(dialog).queryByRole("button", { name: "开始制作" })).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "重新读取" }));
+    expect(settingsRequest).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
+    expect(screen.getByRole("combobox", { name: "目标时长" })).toHaveValue("45");
+    expect(screen.queryByText(/未能读取你的创作设置/)).not.toBeInTheDocument();
+  });
+
   it("shows real active production without inventing performance metrics", () => {
     render(<MemoryRouter><ProductionStrip runs={[runningRun]} /></MemoryRouter>);
 
@@ -707,7 +866,7 @@ describe("Creative OS", () => {
     expect(screen.queryByText(/播放量/)).not.toBeInTheDocument();
   });
 
-  it("uses a designed unconfigured state when no trend opportunities exist", async () => {
+  it("offers a real recovery path instead of a dead end when no trend candidate is startable", async () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
@@ -716,16 +875,155 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "当前没有可用热点候选" })).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "手动录入" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "导入 JSON" })).toBeInTheDocument();
-    expect(screen.getByText(/热点来源暂时离线/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "导入 JSON" }));
-    expect(screen.getByRole("tab", { name: "JSON 导入" })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument());
+    expect(screen.getByText(/本轮收件箱还没有任何已评估热点候选/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "查看缺来源的选题" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeEnabled();
+    expect(screen.getByRole("link", { name: "继续已有系列" })).toHaveAttribute("href", "/topics?mode=series");
+    await user.click(screen.getByRole("button", { name: "录入自己的选题" }));
+    expect(screen.getByRole("dialog", { name: "录入机会" })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "JSON 导入" }));
     expect(screen.getByRole("textbox", { name: /机会数据/ })).toHaveFocus();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "录入机会" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "导入 JSON" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "录入自己的选题" })).toHaveFocus();
+  });
+
+  it("shows the exact evaluated, unselected, and source-blocked counts with four recovery actions when the shortlist is empty", async () => {
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([
+      sourceBlockedOpportunity("historical-blocked-1", "第一条缺来源的历史选题"),
+      sourceBlockedOpportunity("historical-blocked-2", "第二条缺来源的历史选题"),
+      sourceBlockedOpportunity("historical-blocked-3", "第三条缺来源的历史选题"),
+    ]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    const evaluated = Array.from({ length: 12 }, (_, index) => unselectedCandidate(index + 1, index % 2 === 0 ? "technology" : "society"));
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox(evaluated));
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    expect(screen.getByText(/选题总编本轮评估了 12 条热点候选，其中 12 条未推荐/)).toBeInTheDocument();
+    expect(screen.getByText(/其中 12 条未推荐/)).toBeInTheDocument();
+    expect(screen.getByText(/3 条历史选题因来源核验被阻断/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "录入自己的选题" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "继续已有系列" })).toHaveAttribute("href", "/topics?mode=series");
+    expect(screen.getByRole("button", { name: "查看缺来源的选题" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "全部 0" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /科技 0/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /查看未入选（12 条）/ })).toBeInTheDocument();
+  });
+
+  it("keeps recommended but under-sourced candidates out of the un-recommended count while still listing them as unselected", async () => {
+    const user = userEvent.setup();
+    const underSourced = {
+      ...candidate(51, "technology"),
+      verification: { status: "blocked" as const, independentSources: 1, requiredSources: 2, reasons: ["高风险热点至少需要 2 个独立来源"] },
+    };
+    render(<MemoryRouter><TopicEntryWorkspace
+      initialMode="trend"
+      selectedSeriesId={undefined}
+      inbox={inbox([underSourced, unselectedCandidate(52), unselectedCandidate(53)])}
+      series={[]}
+      historicalRuns={[]}
+      loading={{}}
+      trendMeta={{ platformCount: 1, candidateCount: 3 }}
+      onRetry={vi.fn()}
+      onRefreshTrends={vi.fn()}
+      onAdopt={vi.fn()}
+      onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()}
+      onUpdateSeriesEpisode={vi.fn()}
+      onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()}
+      onViewProductionRecords={vi.fn()}
+      onManual={vi.fn()}
+      onImport={vi.fn()}
+    /></MemoryRouter>);
+
+    expect(screen.getByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    expect(screen.getByText(/选题总编本轮评估了 3 条热点候选，其中 2 条未推荐/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看未入选（3 条）" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "查看未入选（3 条）" }));
+
+    expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(3);
+    expect(screen.getByRole("button", { name: `查看${underSourced.title}` })).toBeInTheDocument();
+  });
+
+  it("selects and focuses the first source-blocked historical topic instead of editorial skips", async () => {
+    const user = userEvent.setup();
+    const scrollIntoView = vi.fn();
+    const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "scrollIntoView");
+    window.HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    restoreScrollIntoView = () => {
+      if (scrollIntoViewDescriptor) Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", scrollIntoViewDescriptor);
+      else delete (window.HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    };
+    const editorialSkipOnly = {
+      ...opportunity,
+      id: "historical-editorial-skip",
+      title: "仅因编辑判断未入选的历史选题",
+      editorialDecision: {
+        verdict: "skip" as const,
+        score: 0,
+        reasons: ["没有越过生产门槛。"],
+        guardrails: ["重做选题。"],
+      },
+    };
+    const firstBlocked = sourceBlockedOpportunity("historical-blocked-a", "第一条真实缺来源的历史选题");
+    const secondBlocked = sourceBlockedOpportunity("historical-blocked-b", "第二条真实缺来源的历史选题");
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([editorialSkipOnly, firstBlocked, secondBlocked]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    const adopt = vi.spyOn(studioApi, "adoptCandidate");
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    expect(screen.getByText(/2 条历史选题因来源核验被阻断/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看缺来源的选题" }));
+
+    const blockedSection = screen.getByRole("region", { name: "暂不可开工的选题" });
+    await waitFor(() => expect(blockedSection).toHaveFocus());
+    expect(scrollIntoView).toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: firstBlocked.title })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: editorialSkipOnly.title })).not.toBeInTheDocument();
+    expect(adopt).not.toHaveBeenCalled();
+  });
+
+  it("separates source-blocked historical topics from editorial skips instead of reporting one merged source gap", async () => {
+    const editorialSkipOnly = {
+      ...opportunity,
+      id: "historical-editorial-skip-mixed",
+      title: "仅因编辑判断未入选的历史选题",
+      editorialDecision: {
+        verdict: "skip" as const,
+        score: 0,
+        reasons: ["没有越过生产门槛。"],
+        guardrails: ["重做选题。"],
+      },
+    };
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([
+      editorialSkipOnly,
+      sourceBlockedOpportunity("historical-blocked-mixed-a", "第一条真实缺来源的历史选题"),
+      sourceBlockedOpportunity("historical-blocked-mixed-b", "第二条真实缺来源的历史选题"),
+    ]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    expect(screen.getByText(/另有 2 条历史选题因来源核验被阻断/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "暂不可开工的选题" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "历史候选需补来源" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/3 条需补来源/)).not.toBeInTheDocument();
+    expect(screen.getByText("0 条可开工 · 2 条需补来源 · 1 条暂不建议生产")).toBeInTheDocument();
+    expect(screen.getByText(/0 条候选 · 0 条可开工 · 2 条需补来源 · 1 条暂不建议生产 · 0 条已完成/)).toBeInTheDocument();
   });
 
   it("keeps the manual path usable while the local topic model is warming up", async () => {
@@ -741,6 +1039,67 @@ describe("Creative OS", () => {
     expect(screen.queryByRole("region", { name: "今天做一条视频" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "录入自己的选题" }));
     expect(screen.getByRole("dialog", { name: "录入机会" })).toBeInTheDocument();
+  });
+
+  it("keeps the hard trend error explicit while a cached refresh failure still offers recovery", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    const inboxApi = vi.spyOn(studioApi, "candidateInbox").mockRejectedValueOnce(new Error("热点服务超时"));
+    const { unmount } = render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    expect(await screen.findByText("热点候选暂时不可用")).toBeInTheDocument();
+    expect(screen.getByText("热点服务超时")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /重试/ })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "这轮没有可直接开工的热点建议" })).not.toBeInTheDocument();
+    unmount();
+
+    inboxApi.mockResolvedValue(inbox([unselectedCandidate(1), unselectedCandidate(2)]));
+    const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockRejectedValue(new Error("上游刷新失败"));
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重新刷新热点" }));
+    expect(await screen.findByText(/本次更新失败，继续展示上次缓存/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "录入自己的选题" })).toBeInTheDocument();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeEnabled();
+  });
+
+  it("clears the stale cache warning once the background refresh lands and the fresh inbox arrives", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    const inboxApi = vi.spyOn(studioApi, "candidateInbox")
+      .mockResolvedValueOnce(inbox([candidate(1, "technology")]))
+      .mockRejectedValueOnce(new Error("缓存读取闪断"))
+      .mockResolvedValue(inbox([candidate(1, "technology"), candidate(2, "society")]));
+    vi.spyOn(studioApi, "refreshTrendCandidates").mockResolvedValue({ refreshId: "refresh-1", status: "started", requestedAt: "2026-08-30T10:00:00.000Z" });
+    vi.spyOn(studioApi, "trendCandidateRefreshStatus").mockResolvedValue({
+      refreshId: "refresh-1",
+      state: "succeeded",
+      requestedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:00:01.000Z",
+      candidateCount: 2,
+    });
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    await screen.findAllByRole("button", { name: /查看候选提案/ });
+    const refreshButton = screen.getByRole("button", { name: "立即刷新热点" });
+    await user.click(refreshButton);
+    expect(await screen.findByText(/本次更新失败，继续展示上次缓存/)).toBeInTheDocument();
+    expect(refreshButton).toBeDisabled();
+    expect(inboxApi).toHaveBeenCalledTimes(2);
+
+    await waitFor(() => expect(screen.queryByText(/本次更新失败，继续展示上次缓存/)).not.toBeInTheDocument(), { timeout: 4_000 });
+    expect(screen.getByRole("button", { name: "立即刷新热点" })).toBeEnabled();
+    expect(inboxApi).toHaveBeenCalledTimes(3);
+    expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(2);
   });
 
   it("shows local series candidates while the trend model is still warming up", async () => {
@@ -972,7 +1331,7 @@ describe("Creative OS", () => {
     await user.click(screen.getByRole("button", { name: "确认核验并采用" }));
     expect(adopt).toHaveBeenCalledWith(reviewCandidate.id, { origin: "trend", verificationConfirmed: true });
 
-    await user.click(screen.getByRole("button", { name: /未入选 1/ }));
+    await user.click(screen.getByRole("button", { name: "查看未入选（1 条）" }));
     await user.click(screen.getByRole("button", { name: `查看${blockedCandidate.title}` }));
     expect(screen.getByRole("button", { name: `采用候选 ${blockedCandidate.title}` })).toBeDisabled();
     expect(screen.getByText(/至少需要 2 个独立来源/)).toBeInTheDocument();
@@ -1087,6 +1446,12 @@ describe("Creative OS", () => {
       },
     };
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([proposal]));
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "free-stock",
+      topicStrategy: { customInstruction: "" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
     vi.spyOn(studioApi, "adoptCandidate").mockRejectedValue(new Error("选题保存失败"));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
@@ -1110,6 +1475,12 @@ describe("Creative OS", () => {
       { id: "macos:Tingting", providerId: "macos-say-v1", label: "Tingting", locale: "zh-CN", engine: "macos" },
     ]);
     vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 0, templates: [knowledgeTemplate()] });
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "free-stock",
+      topicStrategy: { customInstruction: "" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
     const start = vi.spyOn(studioApi, "start").mockRejectedValue(new Error("制作创建失败"));
     const updateStatus = vi.spyOn(studioApi, "updateOpportunityStatus");
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
@@ -1319,6 +1690,103 @@ describe("Creative OS", () => {
     expect(screen.getAllByText("需要配置").length).toBeGreaterThan(0);
     expect(within(within(assetSection!).getByText("Seedance 视频生成").closest("article")!).getByText("已配置")).toBeInTheDocument();
     expect(screen.getByLabelText("NewsNow 内部服务已连接")).toBeInTheDocument();
+  });
+
+  it("presents unconnected trend sources as an administrator task and keeps the page free of internal operations language", async () => {
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "trendSources").mockResolvedValue([
+      ...trendSources,
+      {
+        id: "dailyhot-import",
+        label: "DailyHotApi",
+        kind: "import" as const,
+        status: "needs_config" as const,
+        description: "本地统一 JSON / RSS 热榜接口，补充抖音、微博、快手、百度和垂类榜单。",
+        cadence: "建议 30-60 分钟",
+        requirement: "运行 make setup-local-trends",
+      },
+      {
+        id: "newrank-import",
+        label: "新榜数据",
+        kind: "commercial" as const,
+        status: "manual_only" as const,
+        description: "在商业数据合同确定前，以 CSV/JSON 导入保存来源边界。",
+        cadence: "按购买方案",
+        requirement: "需要商业数据授权",
+      },
+    ]);
+    vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSignals").mockResolvedValue([]);
+    vi.spyOn(studioApi, "localCapabilities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "voices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "economy-daily",
+      roleProviderDefaults: {},
+      modelDefaults: {},
+      topicStrategy: { customInstruction: "优先可拍题材。" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+    vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    await screen.findByText("抖音官方热点");
+    expect(screen.getAllByText("该热点源尚未由管理员接入，请联系管理员")).toHaveLength(2);
+    expect(screen.getByText("需要商业数据授权")).toBeInTheDocument();
+    const pageText = document.body.textContent ?? "";
+    expect(pageText).not.toMatch(/\bmake\b/i);
+    expect(pageText).not.toMatch(/\bscope\b/i);
+    expect(pageText).not.toContain("适配器");
+    expect(pageText).not.toContain("环境变量");
+    expect(pageText).not.toMatch(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9_]+)+\b/);
+    expect(screen.queryByText(/运行底座/)).not.toBeInTheDocument();
+  });
+
+  it("describes the production environment by creative impact instead of an internal runtime count", async () => {
+    const capabilitiesApi = vi.spyOn(studioApi, "localCapabilities").mockResolvedValue([
+      { id: "python", label: "Python worker", category: "runtime", state: "ready", evidence: "项目 Python 3.11 与 Pillow 已通过烟雾测试" },
+      { id: "ffmpeg", label: "FFmpeg 音视频引擎", category: "runtime", state: "ready", evidence: "ffmpeg 与 ffprobe 均可用" },
+      { id: "docker", label: "Docker 本地服务", category: "runtime", state: "ready", evidence: "Docker CLI 已安装" },
+      { id: "macos-voices", label: "macOS 中文音色", category: "voice", state: "ready", evidence: "发现 3 个中文音色" },
+      { id: "minimax-tts", label: "MiniMax 云端声音演员", category: "voice", state: "ready", evidence: "已配置 8 个精选中文音色" },
+    ] satisfies StudioLocalCapability[]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "trendSources").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSignals").mockResolvedValue([]);
+    vi.spyOn(studioApi, "voices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "economy-daily",
+      roleProviderDefaults: {},
+      modelDefaults: {},
+      topicStrategy: { customInstruction: "优先可拍题材。" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+    vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
+
+    const { unmount } = render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    expect(await screen.findByText("制作环境已就绪：画面处理、配音和成片合成可以直接使用。")).toBeInTheDocument();
+    expect(screen.queryByText(/运行底座/)).not.toBeInTheDocument();
+    unmount();
+
+    capabilitiesApi.mockResolvedValue([
+      { id: "python", label: "Python worker", category: "runtime", state: "ready", evidence: "python3 可执行文件" },
+      { id: "ffmpeg", label: "FFmpeg 音视频引擎", category: "runtime", state: "missing", evidence: "需要 ffmpeg 与 ffprobe" },
+      { id: "docker", label: "Docker 本地服务", category: "runtime", state: "ready", evidence: "Docker CLI 已安装" },
+      { id: "macos-voices", label: "macOS 中文音色", category: "voice", state: "ready", evidence: "发现 3 个中文音色" },
+      { id: "minimax-tts", label: "MiniMax 云端声音演员", category: "voice", state: "missing", evidence: "需要 MINIMAX_API_KEY" },
+    ] satisfies StudioLocalCapability[]);
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    const summary = await screen.findByText(/制作环境有 2 处未就绪/);
+    expect(summary).toHaveTextContent("成片合成、云端配音暂不可用或受限");
+    expect(summary).toHaveTextContent("无法自行解决时请联系管理员");
+    expect(document.body.textContent ?? "").not.toContain("MINIMAX_API_KEY");
+    expect(screen.queryByText(/运行底座/)).not.toBeInTheDocument();
   });
 
   it("loads production configuration even when unrelated resource requests stall", async () => {

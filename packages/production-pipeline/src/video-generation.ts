@@ -1,4 +1,4 @@
-import { ProviderRequestRejectedError } from "./provider-request-error.js";
+import { ProviderRequestRejectedError, providerHttpFailure } from "./provider-request-error.js";
 
 export type VideoAspectRatio = "9:16" | "16:9" | "1:1" | "3:4" | "4:3";
 
@@ -507,7 +507,8 @@ async function requestJson(fetcher: FetchLike, url: string, init: RequestInit): 
     throw new Error(`Video provider returned invalid JSON with status ${response.status}.`);
   }
   if (!response.ok) {
-    throw new ProviderRequestRejectedError(
+    throw providerHttpFailure(
+      response.status,
       providerError(value, `Video provider request failed with status ${response.status}.`),
     );
   }

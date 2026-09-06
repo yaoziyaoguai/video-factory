@@ -227,10 +227,11 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
   }
 }
 
-function failureCategoryFor(status: number, code: string | undefined): "authentication" | "invalid_request" | "rate_limited" | "service_unavailable" | "execution_failed" {
+function failureCategoryFor(status: number, code: string | undefined): "authentication" | "invalid_request" | "rate_limited" | "service_unavailable" | "timeout" | "execution_failed" {
   if (status === 401 || status === 403) return "authentication";
   if (isExplicitInvalidRequestCode(code)) return "invalid_request";
   if (status === 429) return "rate_limited";
+  if (status === 408) return "timeout";
   if (status === 502 || status === 503 || status === 504 || isExplicitTransientCode(code)) return "service_unavailable";
   if (status === 400 || status === 404 || status === 409 || status === 422) return "invalid_request";
   return "execution_failed";

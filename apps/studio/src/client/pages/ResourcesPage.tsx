@@ -41,6 +41,14 @@ import { VoiceStudio } from "../components/VoiceStudio.js";
 import { creatorFacingTechnicalText, providerLabel, providerModelLabel } from "../presentation.js";
 
 const SERVICE_STATUS = { ready: "在线", degraded: "受限", stopped: "离线" } as const;
+const TREND_SOURCE_CONTACT_ADMIN_HINT = "该热点源尚未由管理员接入，请联系管理员";
+const LOCAL_CAPABILITY_IMPACT_LABELS: Record<string, string> = {
+  python: "画面与字幕处理",
+  ffmpeg: "成片合成",
+  docker: "本地热点服务",
+  "macos-voices": "本机中文配音",
+  "minimax-tts": "云端配音",
+};
 const RECIPE_OPTIONS: Array<{ id: StudioProductionRecipeId; label: string }> = [
   { id: "free-stock", label: "仅免费画面" },
   { id: "keyshot-ai", label: "允许付费关键镜头" },
@@ -292,7 +300,7 @@ export function ResourcesPage() {
         {settingsError ? <ResourceError title="创作默认值读取失败" message={settingsError} retry={load} /> : !settings ? <div className="region-loading">正在读取创作默认值...</div> : <div className="configuration-sheet">
           <div className="configuration-intro">
             <Settings2 aria-hidden="true" size={22} />
-            <div><strong>先定创作习惯，再开始生产</strong><p>默认使用人工终审和仅免费画面；启用付费关键镜头后，图片、视频会按实际导演方案逐项报价并等待人工确认。</p><small>运行底座 {capabilities.filter((item) => item.state === "ready").length}/{capabilities.length} 项就绪</small></div>
+            <div><strong>先定创作习惯，再开始生产</strong><p>默认使用人工终审和仅免费画面；启用付费关键镜头后，图片、视频会按实际导演方案逐项报价并等待人工确认。</p><small>{productionEnvironmentSummary(capabilities)}</small></div>
           </div>
           <div className="configuration-fields">
             <label className="field"><span>画面来源策略</span><select aria-label="默认画面来源策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
@@ -347,8 +355,8 @@ export function ResourcesPage() {
               {trendSources.filter((source) => source.status !== "ready").slice(0, 3).map((source) => (
                 <article key={source.id} className="service-row is-muted">
                   <span className="service-light is-degraded" />
-                  <div><strong>{source.label}</strong><small>{source.requirement ?? source.description}</small></div>
-                  <span>{source.status === "needs_config" ? "需要配置" : "人工"}</span>
+                  <div><strong>{source.label}</strong><small>{trendSourceStatusText(source)}</small></div>
+                  <span>{source.status === "needs_config" ? "尚未接入" : "人工"}</span>
                 </article>
               ))}
             </div>
@@ -754,6 +762,33 @@ function isProductionReady(provider: StudioProvider): boolean {
 
 function serviceKind(kind: StudioTrendService["kind"]): string {
   return kind === "collector" ? "采集与历史" : kind === "feed" ? "中文资讯订阅" : "榜单接口";
+}
+
+function containsInternalOperationsLanguage(value: string): boolean {
+  return /\bmake\s+\S+/i.test(value)
+    || /\bscope\b/i.test(value)
+    || value.includes("适配器")
+    || value.includes("环境变量")
+    || /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9_]+)+\b/.test(value);
+}
+
+function trendSourceStatusText(source: StudioTrendSource): string {
+  if (source.status === "needs_config") return TREND_SOURCE_CONTACT_ADMIN_HINT;
+  const text = creatorFacingTechnicalText(source.requirement) ?? source.description;
+  return containsInternalOperationsLanguage(text) ? TREND_SOURCE_CONTACT_ADMIN_HINT : text;
+}
+
+function productionEnvironmentSummary(capabilities: StudioLocalCapability[]): string {
+  if (capabilities.length === 0) {
+    return "制作环境状态未知，可先新建制作试用；遇到无法进入的步骤再联系管理员。";
+  }
+  const affected = [...new Set(capabilities
+    .filter((item) => item.state !== "ready")
+    .map((item) => LOCAL_CAPABILITY_IMPACT_LABELS[item.id] ?? "个别制作步骤"))];
+  if (affected.length === 0) {
+    return "制作环境已就绪：画面处理、配音和成片合成可以直接使用。";
+  }
+  return `制作环境有 ${affected.length} 处未就绪：${affected.join("、")}暂不可用或受限；其余创作能力不受影响，无法自行解决时请联系管理员。`;
 }
 
 function browserServiceUrl(value: string | undefined): string | undefined {

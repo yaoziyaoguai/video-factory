@@ -132,7 +132,7 @@ export function AssetsPage() {
         {collection === "creative" ? <>
           <div><Database aria-hidden="true" size={18} /><span>可直接复用<strong>{collectionStats.reusable}</strong></span></div>
           <div><Layers3 aria-hidden="true" size={18} /><span>跨作品使用<strong>{collectionStats.duplicateUses}</strong></span></div>
-          <div className={collectionStats.needsReview ? "needs-attention" : ""}><ShieldAlert aria-hidden="true" size={18} /><span>授权待确认<strong>{collectionStats.needsReview}</strong></span></div>
+          <div className={collectionStats.needsReview ? "needs-attention" : ""}><ShieldAlert aria-hidden="true" size={18} /><span><Link to="/resources#resource-manifest" aria-label={`去确认授权：授权待确认 ${collectionStats.needsReview} 项`}>授权待确认<strong>{collectionStats.needsReview}</strong></Link></span></div>
         </> : <>
           <div><FileText aria-hidden="true" size={18} /><span>制作文档<strong>{collectionStats.documents}</strong></span></div>
           <div><Film aria-hidden="true" size={18} /><span>最终成片<strong>{collectionStats.finalRenders}</strong></span></div>
@@ -227,7 +227,7 @@ function AssetCard({ asset, usage, grouped = false }: { asset: StudioIndexedAsse
       {visibleTags.length ? <div className="asset-tags">{visibleTags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
       <footer>
         <span>{grouped ? (resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已关联制作" : "未归属") : asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已关联制作" : "未归属"}</span>
-        <div>{resolvedUsage ? <Link to={`/projects/${resolvedUsage.runId}`}>查看作品</Link> : null}{asset.sourceUrl ? <a href={asset.sourceUrl} target="_blank" rel="noreferrer" aria-label="查看素材原始来源"><ExternalLink aria-hidden="true" size={14} /></a> : null}</div>
+        <div>{asset.reuseStatus === "review_required" ? <Link to="/resources#resource-manifest">去确认授权</Link> : null}{resolvedUsage ? <Link to={`/projects/${resolvedUsage.runId}`}>查看作品</Link> : null}{asset.sourceUrl ? <a href={asset.sourceUrl} target="_blank" rel="noreferrer" aria-label="查看素材原始来源"><ExternalLink aria-hidden="true" size={14} /></a> : null}</div>
       </footer>
     </div>
   </article>;

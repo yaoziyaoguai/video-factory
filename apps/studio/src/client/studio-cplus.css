@@ -2317,8 +2317,93 @@ body:has(.studio-v3) {
 .studio-v3 .category-filter button.is-active span { color: var(--muted); }
 .studio-v3 .candidate-score { color: var(--ink); background: transparent; }
 
+.studio-v3 .rework-scope-guidance {
+  margin: 0;
+  color: #5f6875;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.studio-v3 .rework-scene-scope {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 13px 14px;
+  background: #ffffff;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+}
+
+.studio-v3 .rework-scene-scope > strong { color: var(--ink); font-size: 12px; }
+.studio-v3 .rework-scene-scope > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.studio-v3 .rework-scene-scope label {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  color: var(--muted);
+  background: var(--paper-soft);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.studio-v3 .rework-scene-scope label:has(input:checked) {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: #bfcfff;
+}
+.studio-v3 .rework-scene-scope label.is-required { cursor: not-allowed; }
+.studio-v3 .rework-scene-scope label small { color: #825f1b; font-size: 9px; }
+.studio-v3 .rework-scene-scope input { margin: 0; accent-color: var(--accent); }
+
 @media (max-width: 700px) {
   .studio-v3 .home-intro h1 { font-size: 25px; font-weight: 520; }
   .studio-v3 :is(.page-header, .today-header, .run-header) h1 { font-size: 23px; font-weight: 520; }
   .studio-v3 .focus-heading h2 { font-size: 21px; }
+}
+
+/* 热点 0 shortlist 恢复面板：只作用于该面板与热点来源筛选入口，不改全局按钮体系。 */
+.studio-v3 .trend-recovery {
+  display: grid;
+  gap: 15px;
+  padding: 20px 22px 22px;
+  background: #fafbfc;
+  border-bottom: 1px solid var(--line-strong);
+}
+
+.studio-v3 .trend-recovery-copy { display: grid; max-width: 660px; gap: 6px; }
+.studio-v3 .trend-recovery-copy h3 { margin: 0; color: var(--ink); font-size: 18px; font-weight: 560; line-height: 1.45; }
+.studio-v3 .trend-recovery-copy p { margin: 0; color: #707781; font-size: 12px; line-height: 1.7; }
+.studio-v3 .trend-recovery-copy .trend-recovery-blocked { color: #825f1b; }
+
+.studio-v3 .trend-recovery-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(208px, 1fr));
+  gap: 10px;
+}
+
+.studio-v3 .trend-recovery-actions > .button,
+.studio-v3 .trend-recovery-actions > a.button { min-height: 44px; }
+
+.studio-v3 .trend-recovery-secondary {
+  justify-self: start;
+  min-height: 44px;
+  padding: 0 4px;
+  color: #5f6872;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+@media (max-width: 700px) {
+  .studio-v3 .trend-recovery { gap: 12px; padding: 16px 14px 18px; }
+  .studio-v3 .trend-recovery-actions { grid-template-columns: minmax(0, 1fr); }
+  .studio-v3 .platform-filter select { width: auto; min-width: 128px; }
 }

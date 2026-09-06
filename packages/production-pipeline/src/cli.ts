@@ -22,7 +22,7 @@ export interface CliDependencies {
 const EXPLICIT_EDITORIAL_DIRECTOR_ID = "explicit-editorial-director-v1";
 
 // 部署 smoke 必须显式经过导演路由，不能靠素材失败降级出卡片。
-const explicitEditorialDirector: VisualDirectorAgent = {
+export const explicitEditorialDirector: VisualDirectorAgent = {
   id: EXPLICIT_EDITORIAL_DIRECTOR_ID,
   modelId: "rules-v1",
   plan: async (input) => ({
@@ -63,7 +63,7 @@ const explicitEditorialDirector: VisualDirectorAgent = {
   }),
 };
 
-const localEditorialAssetProvider: VisualAssetProviderCapability = {
+export const localEditorialAssetProvider: VisualAssetProviderCapability = {
   id: "local-editorial-v1",
   label: "本地编辑卡片",
   billing: "free",
