@@ -4,6 +4,7 @@ import {
   type ProductionReworkFinding,
   type ProductionSeriesContext,
   type ProductionSpendFeedbackReason,
+  type ProductionVisualPlan,
 } from "./contracts.js";
 import type { ProductionBlueprint } from "@video-factory/template-core";
 import type { CodexTaskExecution } from "./codex-chat.js";
@@ -123,6 +124,7 @@ export interface VisualBible {
 export interface ShotDecision {
   scenePosition: number;
   reuseFromScenePosition?: number;
+  referenceFromScenePosition?: number;
   narrativeRole: string;
   authenticityPolicy: ShotAuthenticityPolicy;
   preferredProviderId: string;
@@ -161,6 +163,7 @@ export interface VisualDirectorPlanValidation {
   allowedProviderIds: string[];
   generativeProviderIds: string[];
   providerDeliveryTypes?: Record<string, VisualAssetDeliveryType[]>;
+  referenceImageProviderIds?: string[];
   estimatedCnyPerClip: Record<string, number>;
   selectedVideoModelDurationBounds?: Record<string, VideoGenerationDurationBounds>;
   economics: VisualDirectorEconomics;
@@ -184,6 +187,8 @@ export interface VisualDirectorAgentInput {
       reasons: string[];
       guardrails: string[];
     };
+    visualProof?: string;
+    visualPlan?: ProductionVisualPlan;
     referenceGrammar?: ShotGrammar;
     seriesContext?: ProductionSeriesContext;
     rework?: {
@@ -191,6 +196,7 @@ export interface VisualDirectorAgentInput {
       visualDirectionInstruction: string;
       assetInstruction: string;
       findings: ProductionReworkFinding[];
+      affectedScenePositions?: number[];
       previousDirectorPlan?: Record<string, unknown>;
     };
   };
@@ -213,6 +219,7 @@ export interface VisualDirectorAgentInput {
     billing: "free" | "metered";
     modes: string[];
     deliveryTypes: VisualAssetDeliveryType[];
+    supportsReferenceImage?: boolean;
     strengths: string[];
     constraints: string[];
     estimatedCnyPerClip: number;
@@ -239,6 +246,7 @@ export interface VisualAssetProviderCapability {
   billing: "free" | "metered";
   modes: string[];
   deliveryTypes: VisualAssetDeliveryType[];
+  supportsReferenceImage?: boolean;
   strengths?: string[];
   constraints?: string[];
   estimatedCnyPerClip?: number;
@@ -322,12 +330,40 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
     const rationale = text(shot.rationale, `shots[${index}].rationale`);
     assertSelectedProviderIsExecutable(rationale, `shots[${index}].rationale`);
     const query = text(shot.query, `shots[${index}].query`);
-    const reuseFromScenePosition = shot.reuseFromScenePosition === undefined
-      ? undefined
-      : integer(shot.reuseFromScenePosition, `shots[${index}].reuseFromScenePosition`);
+    const reuseFromScenePosition = optionalInteger(shot.reuseFromScenePosition, `shots[${index}].reuseFromScenePosition`);
+    const referenceFromScenePosition = optionalInteger(
+      shot.referenceFromScenePosition,
+      `shots[${index}].referenceFromScenePosition`,
+    );
+    const reuseSource = assetReuseSourceScenePosition({
+      ...(reuseFromScenePosition !== undefined ? { reuseFromScenePosition } : {}),
+      query,
+    });
+    if (referenceFromScenePosition !== undefined && reuseSource !== undefined) {
+      throw new Error(`Director plan scene ${scenePosition} cannot reference and reuse another scene at the same time.`);
+    }
+    if (referenceFromScenePosition !== undefined) {
+      if (referenceFromScenePosition >= scenePosition) {
+        throw new Error(
+          `Director plan scene ${scenePosition} must reference an earlier scene, received ${referenceFromScenePosition}.`,
+        );
+      }
+      if (deliveryType !== "generated_image") {
+        throw new Error(`Director plan scene ${scenePosition} can only use a reference image with generated_image.`);
+      }
+      const referenceCapableProviders = new Set(options.referenceImageProviderIds ?? []);
+      const unsupportedProvider = [preferredProviderId, ...alternativeProviderIds]
+        .find((id) => !referenceCapableProviders.has(id));
+      if (unsupportedProvider) {
+        throw new Error(
+          `Director plan scene ${scenePosition} provider '${unsupportedProvider}' does not support reference-image generation.`,
+        );
+      }
+    }
     return {
       scenePosition,
       ...(reuseFromScenePosition !== undefined ? { reuseFromScenePosition } : {}),
+      ...(referenceFromScenePosition !== undefined ? { referenceFromScenePosition } : {}),
       narrativeRole: text(shot.narrativeRole, `shots[${index}].narrativeRole`),
       authenticityPolicy,
       preferredProviderId,
@@ -368,10 +404,7 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       rationale,
       continuityNote: text(shot.continuityNote, `shots[${index}].continuityNote`),
       confidence: bounded(shot.confidence, `shots[${index}].confidence`, 0, 1),
-      estimatedCostCny: assetReuseSourceScenePosition({
-        ...(reuseFromScenePosition !== undefined ? { reuseFromScenePosition } : {}),
-        query,
-      }) === undefined
+      estimatedCostCny: reuseSource === undefined
         ? serverCost(preferredProviderId, options.estimatedCnyPerClip)
         : 0,
     };
@@ -383,6 +416,19 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
 
   const shotsByPosition = new Map(shots.map((shot) => [shot.scenePosition, shot]));
   for (const shot of shots) {
+    if (shot.referenceFromScenePosition !== undefined) {
+      const source = shotsByPosition.get(shot.referenceFromScenePosition);
+      if (!source) {
+        throw new Error(
+          `Director plan scene ${shot.scenePosition} has missing reference source scene ${shot.referenceFromScenePosition}.`,
+        );
+      }
+      if (source.deliveryType !== "generated_image" || assetReuseSourceScenePosition(source) !== undefined) {
+        throw new Error(
+          `Director plan scene ${shot.scenePosition} must reference an earlier generated_image scene that is not itself reused.`,
+        );
+      }
+    }
     const reuseFrom = assetReuseSourceScenePosition(shot);
     if (reuseFrom === undefined) continue;
     const { root, links } = resolveReuseRoot(shot, shotsByPosition);
@@ -527,6 +573,10 @@ function stringArray(value: unknown, field: string): string[] {
 
 function optionalText(value: unknown, field: string): string | undefined {
   return value === undefined ? undefined : text(value, field);
+}
+
+function optionalInteger(value: unknown, field: string): number | undefined {
+  return value === undefined || value === null ? undefined : integer(value, field);
 }
 
 function optionalStringArray(value: unknown, field: string, allowEmpty = false): string[] | undefined {

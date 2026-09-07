@@ -94,4 +94,37 @@ describe("JsonOpportunityStore", () => {
       (error: unknown) => error instanceof OpportunityStoreNotFoundError,
     );
   });
+
+  it("appends manual evidence additively with concurrent unions and untouched fields", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-opportunity-sources-"));
+    const filePath = path.join(root, "opportunities.json");
+    const store = new JsonOpportunityStore(filePath);
+    const created = await store.create({ ...record("trend-1", 80, "shortlisted"), origin: "trend" });
+    const before = await store.get("trend-1");
+
+    // 并发追加不同来源：写锁内取并集，互不覆盖。
+    await Promise.all([
+      store.appendEvidence("trend-1", [{ source: "manual-supplement", platform: "manual", keyword: "人工补充来源", strength: 60, evidenceUrl: "https://a.example.com/x", collectedAt: "2026-09-07T05:00:00.000Z" }], "2026-09-07T05:00:00.000Z"),
+      store.appendEvidence("trend-1", [{ source: "manual-supplement", platform: "manual", keyword: "人工补充来源", strength: 60, evidenceUrl: "https://b.example.org/y", collectedAt: "2026-09-07T05:00:01.000Z" }], "2026-09-07T05:00:01.000Z"),
+      // 同一 URL 重复提交只留一份。
+      store.appendEvidence("trend-1", [{ source: "manual-supplement", platform: "manual", keyword: "人工补充来源", strength: 60, evidenceUrl: "https://a.example.com/x", collectedAt: "2026-09-07T05:00:02.000Z" }], "2026-09-07T05:00:02.000Z"),
+    ]);
+
+    const after = await store.get("trend-1");
+    assert.deepEqual(
+      after!.candidate.evidence.map((item) => item.evidenceUrl ?? ""),
+      ["", "https://a.example.com/x", "https://b.example.org/y"],
+    );
+    // 只追加 evidence 与 updatedAt；status/score/scoreProvenance 与原字段保持不变。
+    assert.equal(after!.candidate.status, created.candidate.status);
+    assert.deepEqual(after!.candidate.score, before!.candidate.score);
+    assert.equal(after!.updatedAt, "2026-09-07T05:00:02.000Z");
+    const persisted = JSON.parse(await readFile(filePath, "utf8")) as { opportunities: OpportunityRecord[] };
+    assert.equal(persisted.opportunities[0]?.candidate.evidence.length, 3);
+
+    await assert.rejects(
+      () => store.appendEvidence("missing", [{ source: "manual-supplement", platform: "manual", keyword: "人工补充来源", strength: 60, evidenceUrl: "https://a.example.com/x" }], "2026-09-07T05:03:00.000Z"),
+      (error: unknown) => error instanceof OpportunityStoreNotFoundError,
+    );
+  });
 });

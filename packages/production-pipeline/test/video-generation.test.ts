@@ -684,7 +684,50 @@ describe("metered video generation adapters", () => {
     assert.equal(progress.at(-1), "unknown");
   });
 
-  it("surfaces non-success HTTP responses before polling", async () => {
+  it("keeps transient create HTTP failures uncertain for every video adapter", async () => {
+    const cases: Array<{ label: string; adapter: VideoGenerationAdapter }> = [{
+      label: "Seedance 502",
+      adapter: new SeedanceVideoAdapter({
+        apiKey: "test-key",
+        model: "test-seedance-model",
+        fetch: async () => jsonResponse({ error: { message: "upstream unavailable" } }, 502),
+      }),
+    }, {
+      label: "MiniMax v1 503",
+      adapter: new MiniMaxVideoAdapter({
+        apiKey: "test-key",
+        model: "MiniMax-Hailuo-2.3",
+        modelProtocols: { "MiniMax-Hailuo-2.3": "v1" },
+        fetch: async () => jsonResponse({ message: "service unavailable" }, 503),
+      }),
+    }, {
+      label: "MiniMax v2 502",
+      adapter: new MiniMaxVideoAdapter({
+        apiKey: "test-key",
+        model: "MiniMax-H3",
+        modelProtocols: { "MiniMax-H3": "v2" },
+        fetch: async () => jsonResponse({ message: "bad gateway" }, 502),
+      }),
+    }, {
+      label: "Wan 503",
+      adapter: new WanVideoAdapter({
+        apiKey: "test-key",
+        model: "test-wan-model",
+        workspaceId: "workspace-1",
+        fetch: async () => jsonResponse({ message: "service unavailable" }, 503),
+      }),
+    }];
+
+    for (const testCase of cases) {
+      await assert.rejects(
+        () => testCase.adapter.generate({ prompt: "测试请求错误", durationSeconds: 5, ratio: "9:16" }),
+        (error: unknown) => error instanceof Error && !(error instanceof ProviderRequestRejectedError),
+        testCase.label,
+      );
+    }
+  });
+
+  it("does not treat throttling as a definitive pre-submission rejection", async () => {
     const adapter = new SeedanceVideoAdapter({
       apiKey: "test-key",
       model: "test-seedance-model",
@@ -693,7 +736,9 @@ describe("metered video generation adapters", () => {
 
     await assert.rejects(
       () => adapter.generate({ prompt: "测试请求错误", durationSeconds: 5, ratio: "9:16" }),
-      (error: unknown) => error instanceof ProviderRequestRejectedError && /quota exceeded/.test(error.message),
+      (error: unknown) => error instanceof Error
+        && !(error instanceof ProviderRequestRejectedError)
+        && /quota exceeded/.test(error.message),
     );
   });
 });

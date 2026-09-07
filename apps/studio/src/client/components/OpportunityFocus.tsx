@@ -1,14 +1,18 @@
-import { ArrowUpRight, Clock3, Link2, Search, Target } from "lucide-react";
+import { AlertTriangle, ArrowUpRight, Clock3, Link2, Search, Target } from "lucide-react";
 import type { StudioOpportunity, StudioVisualSource } from "../../shared/api.js";
-import { planVisualDirection } from "../../shared/visual-plan.js";
+import { resolveOpportunityVisualPlan } from "../../shared/visual-plan.js";
 import { scoreSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
 
-export function OpportunityFocus({ opportunity }: { opportunity: StudioOpportunity }) {
-  const visualPlan = opportunity.visualPlan ?? planVisualDirection({
-    title: opportunity.title,
-    hook: opportunity.hook,
-    ...(opportunity.category ? { category: opportunity.category } : {}),
-  });
+interface OpportunityFocusProps {
+  opportunity: StudioOpportunity;
+  onSupplementSources?: () => void;
+}
+
+export function OpportunityFocus({ opportunity, onSupplementSources }: OpportunityFocusProps) {
+  const sourceBlocked = opportunity.verification?.status === "blocked";
+  // 展示与开工提交共用同一个 resolved plan：已保存计划永远是规范真相。
+  const visualPlan = resolveOpportunityVisualPlan(opportunity);
+  const recommendedTemplate = opportunity.editorialDecision?.recommendedTemplate?.name;
   return (
     <section className="opportunity-focus" aria-labelledby="opportunity-title" data-tour="opportunity-focus">
       <header className="focus-heading">
@@ -16,19 +20,29 @@ export function OpportunityFocus({ opportunity }: { opportunity: StudioOpportuni
           <p className="eyebrow">当前选题</p>
           <h2 id="opportunity-title">{opportunity.title}</h2>
           <p>{opportunity.painPoint}</p>
+          {sourceBlocked ? <div className="opportunity-readiness-warning" role="status">
+            <AlertTriangle aria-hidden="true" size={16} />
+            <span>
+              <strong>暂不可开工 · 来源还没达到制作标准</strong>
+              <small>{opportunity.verification?.reasons[0] ?? `目前只有 ${opportunity.verification?.independentSources ?? 0}/${opportunity.verification?.requiredSources ?? 2} 个独立来源。`}先补齐来源并重新核验，再决定是否投入制作。</small>
+              {onSupplementSources ? (
+                <button className="button button-secondary opportunity-supplement-sources" type="button" onClick={onSupplementSources}><Link2 aria-hidden="true" size={15} />补充原始来源</button>
+              ) : null}
+            </span>
+          </div> : null}
         </div>
         <div className="focus-score-block">
-          <div className="focus-score" aria-label={`机会总分 ${opportunity.score.final}`}>
+          <div className="focus-score" aria-label={`${sourceBlocked ? "历史机会评分" : "机会总分"} ${opportunity.score.final}`}>
             <strong>{Math.round(opportunity.score.final)}</strong>
-            <span>机会分</span>
+            <span>{sourceBlocked ? "历史分" : "机会分"}</span>
           </div>
-          <small>{scoreSourceLabel(opportunity.scoreProvenance.source)}<br />{formatScoreTime(opportunity.scoreProvenance.scoredAt)}</small>
+          <small>{sourceBlocked ? "历史内容潜力，仅供参考" : scoreSourceLabel(opportunity.scoreProvenance.source)}<br />{formatScoreTime(opportunity.scoreProvenance.scoredAt)}</small>
         </div>
       </header>
 
       <section className="visual-contact-sheet visual-plan" aria-label="镜头方向示意" data-tour="visual-direction">
           <header className="contact-sheet-heading">
-            <div><span>视觉方案 · A01</span><h2>可执行镜头计划</h2></div>
+            <div><span>{recommendedTemplate ? `推荐模板 · ${recommendedTemplate}` : "镜头方向预览"}</span><h2>{sourceBlocked ? "补齐来源后的镜头方向" : "可执行镜头计划"}</h2></div>
             <p>{visualPlan.strategy}</p>
           </header>
           <div className="visual-beat-list">
@@ -70,14 +84,14 @@ export function OpportunityFocus({ opportunity }: { opportunity: StudioOpportuni
         <div className="evidence-list">
           {opportunity.evidence.map((evidence, index) => (
             <article className="evidence-row" key={`${evidence.source}-${evidence.keyword}-${index}`}>
-              <span className="evidence-strength">{evidence.strength}</span>
+              <span className="evidence-strength" aria-label={isManualEvidence(evidence) ? "用户补充来源" : `信号强度 ${evidence.strength}`}>{isManualEvidence(evidence) ? "补" : evidence.strength}</span>
               <div>
-                <strong>{evidence.keyword}</strong>
+                <strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong>
                 <small><Clock3 aria-hidden="true" size={12} />{formatEvidenceTime(evidence.collectedAt)}</small>
               </div>
               {evidence.evidenceUrl ? (
                 <a href={evidence.evidenceUrl} target="_blank" rel="noreferrer" aria-label={`查看 ${evidence.source} 证据`}>
-                  <Link2 aria-hidden="true" size={14} />{evidence.source}<ArrowUpRight aria-hidden="true" size={13} />
+                  <Link2 aria-hidden="true" size={14} />{isManualEvidence(evidence) ? "用户补充" : evidence.source}<ArrowUpRight aria-hidden="true" size={13} />
                 </a>
               ) : <span className="evidence-source">{evidence.source}</span>}
             </article>
@@ -103,4 +117,8 @@ function formatEvidenceTime(value?: string): string {
 
 function formatScoreTime(value: string): string {
   return `评分于 ${new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value))}`;
+}
+
+function isManualEvidence(evidence: { source: string; platform: string }): boolean {
+  return evidence.source === "manual-supplement" || evidence.platform === "manual";
 }

@@ -105,6 +105,21 @@ describe("CodexScreenwriterAgent", () => {
   });
 
   it("routes stateless ZAI production and independent OpenAI audit to separate clients", async () => {
+    const input = screenwriterInput();
+    const visualProof = "两条真实标题的措辞差异可以直接并列核对。";
+    const visualPlan = {
+      strategy: "用来源标题并列和确定性标尺逐项核对。",
+      beats: [{
+        id: "headline-certainty-scale",
+        role: "证据钩子",
+        duration: "0-6 秒",
+        description: "左右并列真实标题，高亮“网传”和“正在核查”。",
+        searchQuery: "原始来源 标题 截图",
+        source: "local-card" as const,
+      }],
+    };
+    input.brief.visualProof = visualProof;
+    input.brief.visualPlan = visualPlan;
     const first = validDraft();
     const repaired = validDraft();
     repaired.scenes[0]!.narration = "别眨眼，先看结果。";
@@ -142,7 +157,7 @@ describe("CodexScreenwriterAgent", () => {
       sessionMode: "stateless",
     });
 
-    const execution = await agent.draftDetailed({ ...screenwriterInput(), selectedModelId: "glm-5.3" });
+    const execution = await agent.draftDetailed({ ...input, selectedModelId: "glm-5.3" });
 
     assert.equal(execution.output.scenes[0]?.narration, "别眨眼，先看结果。");
     assert.deepEqual(producerClient.calls.map((call) => call.kind), ["script-draft", "script-draft"]);
@@ -176,6 +191,9 @@ describe("CodexScreenwriterAgent", () => {
     );
 
     const firstAuditPayload = auditClient.calls[0]!.payload as Record<string, unknown>;
+    const firstProducerPayload = producerClient.calls[0]!.payload as { brief: ScreenwriterAgentInput["brief"] };
+    assert.equal(firstProducerPayload.brief.visualProof, visualProof);
+    assert.deepEqual(firstProducerPayload.brief.visualPlan, visualPlan);
     const auditContext = firstAuditPayload.context as Record<string, unknown>;
     assert.equal("brief" in auditContext, false);
     assert.deepEqual(auditContext.roleScope, {
@@ -187,6 +205,8 @@ describe("CodexScreenwriterAgent", () => {
       angle: "用三条具体动作减少下班后的决策消耗",
       audience: "普通上班族",
       nicheSlug: "life-avoidance",
+      visualProof,
+      visualPlan,
     });
     assert.deepEqual((auditClient.calls[1]!.payload as Record<string, unknown>).previousAudit, repairAudit);
   });

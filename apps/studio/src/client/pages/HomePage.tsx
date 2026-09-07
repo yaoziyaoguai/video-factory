@@ -4,6 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { StatusBadge } from "../components/StatusBadge.js";
+import { isHistoricalReadOnlyRun, runNeedsCreatorAction } from "../presentation.js";
 
 export function HomePage() {
   const navigate = useNavigate();
@@ -23,16 +24,17 @@ export function HomePage() {
     void load();
   }, [load]);
 
-  const currentRun = useMemo(() => runs.find(needsAttention)
-    ?? runs.find((run) => run.status === "running" || run.status === "pending")
+  // 活跃口径与 ProductionStrip/Queue 一致：历史只读 running/pending 不算自动制作，也不抢占继续工作位。
+  const currentRun = useMemo(() => runs.find(runNeedsCreatorAction)
+    ?? runs.find((run) => !isHistoricalReadOnlyRun(run) && (run.status === "running" || run.status === "pending"))
     ?? runs[0], [runs]);
   const overview = useMemo(() => {
     const current = runs.filter((run) => !run.archivedAt);
     return {
-      attention: current.filter(needsAttention).length,
-      active: current.filter((run) => run.status === "running" || run.status === "pending").length,
+      attention: current.filter(runNeedsCreatorAction).length,
+      active: current.filter((run) => !isHistoricalReadOnlyRun(run) && (run.status === "running" || run.status === "pending")).length,
       completed: current.filter((run) => run.status === "succeeded").length,
-      adjustment: current.filter((run) => run.status === "failed" || run.status === "rejected").length,
+      archived: runs.filter((run) => Boolean(run.archivedAt)).length,
     };
   }, [runs]);
 
@@ -53,7 +55,7 @@ export function HomePage() {
         <span><small>待你处理</small><strong>{overview.attention}</strong></span>
         <span><small>自动制作</small><strong>{overview.active}</strong></span>
         <span><small>已完成</small><strong>{overview.completed}</strong></span>
-        <span><small>需调整</small><strong>{overview.adjustment}</strong></span>
+        <span><small>已归档</small><strong>{overview.archived}</strong></span>
       </section> : null}
 
       {currentRun ? (
@@ -62,7 +64,7 @@ export function HomePage() {
           <div className="home-continuation-copy">
             <p className="eyebrow">继续上次工作</p>
             <h2 id="continue-title">{currentRun.title}</h2>
-            <div><StatusBadge status={currentRun.status} /><span>{continueMessage(currentRun)}</span></div>
+            <div><StatusBadge status={currentRun.status} {...(isHistoricalReadOnlyRun(currentRun) ? { label: "历史只读" } : {})} /><span>{continueMessage(currentRun)}</span></div>
           </div>
           {currentRun.videoContentUrl ? <video muted playsInline preload="metadata" src={`${currentRun.videoContentUrl}#t=0.1`} aria-hidden="true" /> : <div className="home-run-mark" aria-hidden="true"><Play size={24} /></div>}
           <Link className="button button-primary" to={`/projects/${currentRun.id}`}>{continueAction(currentRun)}<ArrowRight aria-hidden="true" size={16} /></Link>
@@ -96,14 +98,8 @@ export function HomePage() {
   );
 }
 
-function needsAttention(run: StudioRunSummary): boolean {
-  return run.status === "needs_human"
-    || run.status === "awaiting_spend_approval"
-    || run.status === "approval_invalidated"
-    || run.status === "stale";
-}
-
 function continueAction(run: StudioRunSummary): string {
+  if (isHistoricalReadOnlyRun(run)) return "基于这版重新制作";
   if (run.nextAction === "confirm_spend") return "确认费用";
   if (run.nextAction === "review") return "进入审片";
   if (run.nextAction === "regenerate") return "确认后继续";
@@ -113,6 +109,7 @@ function continueAction(run: StudioRunSummary): string {
 }
 
 function continueMessage(run: StudioRunSummary): string {
+  if (isHistoricalReadOnlyRun(run)) return "这是旧版制作记录；现有结果可以查看，继续调整会创建一个新版制作。";
   if (run.nextAction === "confirm_spend") return "下一步会产生费用，正在等你检查前面的内容。";
   if (run.nextAction === "review") return "成片已经准备好，正在等你完整观看和判断。";
   if (run.nextAction === "regenerate") return "人工修改已经保存，正在等你确认后续重新生成。";

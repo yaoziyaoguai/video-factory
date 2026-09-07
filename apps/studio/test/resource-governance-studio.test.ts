@@ -38,7 +38,17 @@ describe("ResourceGovernanceStudio", () => {
       }],
     }));
     const run = completedRun(manifestPath);
-    const studio = new ResourceGovernanceStudio(workspaceRoot, async () => [run], () => new Date("2026-08-28T12:00:00.000Z"));
+    let publishedTemplates = [
+      { id: "knowledge-explainer", name: "知识解释" },
+      { id: "custom-workflow", name: "自定义工作流" },
+    ];
+    const studio = new ResourceGovernanceStudio(
+      workspaceRoot,
+      async () => [run],
+      () => new Date("2026-08-28T12:00:00.000Z"),
+      undefined,
+      async () => publishedTemplates,
+    );
 
     const manifest = await studio.manifest();
     assert.equal(manifest.totalItems, 1);
@@ -62,6 +72,7 @@ describe("ResourceGovernanceStudio", () => {
     assert.equal(manifest.assetIndex.assets[0]?.tags.includes("pexels-stock-v1"), false);
 
     const scorecards = await studio.templateExperiments();
+    assert.deepEqual(scorecards.map((item) => item.templateId), ["knowledge-explainer", "custom-workflow"]);
     const knowledge = scorecards.find((item) => item.templateId === "knowledge-explainer");
     assert.equal(knowledge?.sampleSize, 1);
     assert.equal(knowledge?.metrics.narrativeCompleteness, 100);
@@ -70,6 +81,10 @@ describe("ResourceGovernanceStudio", () => {
     assert.equal(knowledge?.metrics.hookClarity, null);
     assert.equal(knowledge?.metrics.costEfficiency, null);
     assert.equal(knowledge?.metrics.finalApprovalRate, 100);
+    assert.equal(scorecards.find((item) => item.templateId === "custom-workflow")?.sampleSize, 0);
+
+    publishedTemplates = [{ id: "custom-workflow", name: "自定义工作流" }];
+    assert.deepEqual((await studio.templateExperiments()).map((item) => item.templateId), ["custom-workflow"]);
   });
 
   it("persists revision-protected review decisions without changing the source manifest", async () => {
@@ -107,6 +122,90 @@ describe("ResourceGovernanceStudio", () => {
     ]);
     assert.equal(attempts.filter((result) => result.status === "fulfilled").length, 1);
     assert.equal(attempts.filter((result) => result.status === "rejected").length, 1);
+  });
+
+  it("keeps test runs out of production template learning", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-template-purpose-"));
+    const production = completedRun(path.join(workspaceRoot, "production.json"), "run-production");
+    const testRun = completedRun(path.join(workspaceRoot, "test.json"), "run-test", "自动化验收记录");
+    testRun.initialInput.runPurpose = "test";
+    const studio = new ResourceGovernanceStudio(
+      workspaceRoot,
+      async () => [production, testRun],
+      undefined,
+      undefined,
+      async () => [{ id: "knowledge-explainer", name: "知识解释" }],
+    );
+
+    const scorecard = (await studio.templateExperiments())[0];
+
+    assert.equal(scorecard?.sampleSize, 1);
+    assert.equal(scorecard?.metrics.finalApprovalRate, 100);
+  });
+
+  it("deduplicates review work across reworks and inherits the latest matching decision", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-resource-review-rework-"));
+    const digest = "e".repeat(64);
+    const runs = await Promise.all([1, 2, 3].map(async (number) => {
+      const manifestPath = path.join(workspaceRoot, `resource_manifest_${number}.json`);
+      await writeFile(manifestPath, JSON.stringify({
+        version: "video-factory/resource-manifest-v1",
+        runId: `run-${number}`,
+        items: [{
+          id: `scene:${number}:seedream-image-v1`,
+          category: "visual",
+          kind: "generated_image",
+          providerId: "seedream-image-v1",
+          sourceUrl: "https://provider.example/jobs/shared-asset",
+          licenseNote: "Provider output terms apply.",
+          contentType: "image/png",
+          sha256: digest,
+          scenePosition: number,
+          commercialUse: "provider_terms",
+          attributionRequirement: "provider_terms",
+          reviewStatus: "needs_review",
+        }],
+      }));
+      return completedRun(manifestPath, `run-${number}`, `返工作品 ${number}`);
+    }));
+    const studio = new ResourceGovernanceStudio(
+      workspaceRoot,
+      async () => runs,
+      () => new Date("2026-09-07T10:00:00.000Z"),
+    );
+
+    const beforeReview = await studio.manifest();
+    assert.equal(beforeReview.items.length, 3);
+    assert.equal(beforeReview.needsReviewCount, 1);
+    assert.deepEqual(beforeReview.needsReviewItems?.map((item) => item.runId), ["run-1"]);
+
+    const rejected = await studio.review({
+      runId: "run-1",
+      itemId: "scene:1:seedream-image-v1",
+      expectedRevision: 0,
+      action: "rejected",
+      note: "授权条件不满足发布要求",
+    }, "owner-a");
+    assert.equal(rejected.needsReviewCount, 0);
+    assert.equal(rejected.needsReviewItems?.length, 0);
+    assert.equal(rejected.assetIndex.needsReviewCount, 0);
+    assert.equal(rejected.assetIndex.assets[0]?.reuseStatus, "not_reusable");
+    assert.ok(rejected.items.every((item) => item.reviewDecision?.action === "rejected"));
+
+    const confirmed = await new ResourceGovernanceStudio(
+      workspaceRoot,
+      async () => runs,
+      () => new Date("2026-09-07T11:00:00.000Z"),
+    ).review({
+      runId: "run-2",
+      itemId: "scene:2:seedream-image-v1",
+      expectedRevision: 1,
+      action: "confirmed",
+    }, "owner-b");
+    assert.equal(confirmed.needsReviewCount, 0);
+    assert.equal(confirmed.items.find((item) => item.runId === "run-1")?.reviewDecision?.action, "rejected");
+    assert.equal(confirmed.items.find((item) => item.runId === "run-2")?.reviewStatus, "recorded");
+    assert.equal(confirmed.items.find((item) => item.runId === "run-3")?.reviewDecision?.reviewedBy, "owner-b");
   });
 
   it("holds the production lease while recording a resource rejection and exposes it to rework", async () => {
@@ -185,12 +284,77 @@ describe("ResourceGovernanceStudio", () => {
     run.nodeRuns = run.nodeRuns.map((node) => node.nodeId === "visual-review"
       ? { ...node, status: "stale", outputState: { ...node.outputState!, stale: true } }
       : node.nodeId === "final-review" ? { ...node, status: "stale" } : node);
-    const studio = new ResourceGovernanceStudio(workspaceRoot, async () => [run]);
+    const studio = new ResourceGovernanceStudio(
+      workspaceRoot,
+      async () => [run],
+      undefined,
+      undefined,
+      async () => [{ id: "knowledge-explainer", name: "知识解释" }],
+    );
 
     const scorecard = (await studio.templateExperiments()).find((item) => item.templateId === "knowledge-explainer");
 
     assert.equal(scorecard?.metrics.visualMatch, null);
-    assert.equal(scorecard?.metrics.finalApprovalRate, 0);
+    assert.equal(scorecard?.metrics.finalApprovalRate, null);
+  });
+
+  it("uses only decided final reviews as the final approval rate denominator", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-template-review-rate-"));
+    const manifestPath = path.join(workspaceRoot, "resource_manifest.json");
+    await writeFile(manifestPath, JSON.stringify({ version: "video-factory/resource-manifest-v1", runId: "approved", items: [] }));
+    const approved = completedRun(manifestPath, "approved");
+    const rejected = completedRun(manifestPath, "rejected");
+    rejected.status = "rejected";
+    rejected.nodeRuns = rejected.nodeRuns.map((node) => node.nodeId === "final-review"
+      ? { ...node, status: "rejected" }
+      : node);
+    rejected.decisions = rejected.decisions.map((decision) => ({ ...decision, action: "reject" }));
+    const undecided = completedRun(manifestPath, "undecided");
+    undecided.status = "running";
+    undecided.nodeRuns = undecided.nodeRuns.map((node) => node.nodeId === "final-review"
+      ? { ...node, status: "pending" }
+      : node);
+    undecided.interventions = [];
+    undecided.decisions = [];
+    const sourceRejected = completedRun(manifestPath, "source-rejected");
+    const sourceIntervention = {
+      id: "source-intervention",
+      nodeId: "asset-source-review",
+      reason: "来源不适合入片",
+      requiredAction: "approve" as const,
+      options: ["approve", "reject"] as Array<"approve" | "reject">,
+      createdAt: "2026-08-28T10:00:20.000Z",
+    };
+    sourceRejected.status = "rejected";
+    sourceRejected.nodeRuns = [{
+      nodeId: "asset-source-review",
+      status: "rejected",
+      startedAt: sourceIntervention.createdAt,
+      finishedAt: "2026-08-28T10:00:25.000Z",
+      artifactIds: [],
+      qualityGateResults: [],
+      intervention: sourceIntervention,
+    }];
+    sourceRejected.interventions = [sourceIntervention];
+    sourceRejected.decisions = [{
+      id: "source-decision",
+      interventionId: sourceIntervention.id,
+      action: "reject",
+      actor: "owner",
+      createdAt: "2026-08-28T10:00:25.000Z",
+    }];
+    const studio = new ResourceGovernanceStudio(
+      workspaceRoot,
+      async () => [approved, rejected, undecided, sourceRejected],
+      undefined,
+      undefined,
+      async () => [{ id: "knowledge-explainer", name: "知识解释" }],
+    );
+
+    const scorecard = (await studio.templateExperiments())[0];
+
+    assert.equal(scorecard?.sampleSize, 4);
+    assert.equal(scorecard?.metrics.finalApprovalRate, 50);
   });
 
   it("isolates an untrusted manifest without hiding healthy runs", async () => {
@@ -216,19 +380,71 @@ describe("ResourceGovernanceStudio", () => {
     assert.equal(manifest.unreadableManifestCount, 1);
   });
 
-  it("conservatively recovers visible resources from a failed metered run without a manifest", async () => {
+  it("recovers rights evidence from a failed metered run without turning every artifact into review work", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-resources-"));
     const run = completedRun(path.join(workspaceRoot, "missing-manifest.json"));
     run.status = "failed";
-    run.artifacts = [{
-      id: "paid-video-1",
-      kind: "media_asset",
-      createdAt: "2026-08-28T10:00:30.000Z",
-      contentType: "video/mp4",
-      sha256: "a".repeat(64),
-      producer: { nodeId: "assets", attempt: 1 },
-      provenance: { providerId: "seedance-video-v1", licenseNote: "Provider output terms apply." },
-    }];
+    run.artifacts = [
+      {
+        id: "paid-video-1",
+        kind: "media_asset",
+        uri: path.join(workspaceRoot, "nodes", "assets", "attempt-1", "scene_07_seedance-video-v1.mp4"),
+        createdAt: "2026-08-28T10:00:30.000Z",
+        contentType: "video/mp4",
+        sha256: "a".repeat(64),
+        producer: { nodeId: "assets", attempt: 1 },
+        provenance: { providerId: "seedance-video-v1", licenseNote: "Provider output terms apply." },
+      },
+      {
+        id: "final-render",
+        kind: "render",
+        uri: path.join(workspaceRoot, "render.mp4"),
+        createdAt: "2026-08-28T10:00:31.000Z",
+        contentType: "video/mp4",
+        sha256: "b".repeat(64),
+        producer: { nodeId: "render", attempt: 1 },
+        provenance: { providerId: "python-ffmpeg-v1" },
+      },
+      {
+        id: "local-visual",
+        kind: "media_asset",
+        uri: path.join(workspaceRoot, "local.png"),
+        createdAt: "2026-08-28T10:00:32.000Z",
+        contentType: "image/png",
+        sha256: "c".repeat(64),
+        producer: { nodeId: "assets", attempt: 1 },
+        provenance: { providerId: "local-editorial-v1" },
+      },
+      {
+        id: "creator-reference",
+        kind: "reference_video",
+        uri: path.join(workspaceRoot, "reference.mp4"),
+        createdAt: "2026-08-28T10:00:33.000Z",
+        contentType: "video/mp4",
+        sha256: "d".repeat(64),
+        provenance: { providerId: "creator-upload", licenseNote: "Uploaded by creator." },
+      },
+      {
+        id: "manual-replacement",
+        kind: "human_media_revision",
+        uri: path.join(workspaceRoot, "replacement.png"),
+        createdAt: "2026-08-28T10:00:34.000Z",
+        contentType: "image/png",
+        sha256: "e".repeat(64),
+        producer: { nodeId: "assets", attempt: 1 },
+        provenance: { providerId: "human-editor", licenseNote: "Human-selected replacement." },
+      },
+      {
+        id: "missing-evidence",
+        kind: "media_asset",
+        uri: path.join(workspaceRoot, "unknown.png"),
+        createdAt: "2026-08-28T10:00:35.000Z",
+        contentType: "image/png",
+        sha256: "f".repeat(64),
+        producer: { nodeId: "assets", attempt: 1 },
+        provenance: { providerId: "unverified-media" },
+      },
+    ];
     run.executionReceipts = [{
       id: "receipt-paid-1",
       nodeId: "assets",
@@ -249,10 +465,43 @@ describe("ResourceGovernanceStudio", () => {
 
     assert.equal(manifest.reconstructedRunCount, 1);
     assert.equal(manifest.legacyRunsWithoutManifest, 0);
-    assert.equal(manifest.totalItems, 1);
-    assert.equal(manifest.items[0]?.providerId, "seedance-video-v1");
-    assert.equal(manifest.items[0]?.reviewStatus, "needs_review");
-    assert.equal(manifest.items[0]?.commercialUse, "review_required");
+    assert.equal(manifest.totalItems, 6);
+    assert.equal(manifest.needsReviewCount, 3);
+    assert.deepEqual(manifest.needsReviewItems?.map((item) => item.id), [
+      "reconstructed:creator-reference",
+      "reconstructed:manual-replacement",
+      "reconstructed:missing-evidence",
+    ]);
+    assert.equal(manifest.items.find((item) => item.id === "reconstructed:paid-video-1")?.reviewStatus, "recorded");
+    assert.equal(manifest.items.find((item) => item.id === "reconstructed:final-render")?.commercialUse, "self_owned");
+    assert.equal(manifest.items.find((item) => item.id === "reconstructed:local-visual")?.reviewStatus, "recorded");
+    assert.equal(manifest.items.find((item) => item.id === "reconstructed:creator-reference")?.reviewStatus, "needs_review");
+    assert.equal(manifest.items.find((item) => item.id === "reconstructed:manual-replacement")?.reviewStatus, "needs_review");
+    assert.equal(manifest.items.find((item) => item.id === "reconstructed:missing-evidence")?.reviewStatus, "needs_review");
+    assert.equal(manifest.items.find((item) => item.id === "reconstructed:paid-video-1")?.scenePosition, 7);
+    assert.equal(manifest.assetIndex.assets.find((item) => item.sha256 === "a".repeat(64))?.usages[0]?.scenePosition, 7);
+  });
+
+  it("recovers a legacy manifest scene from its explicit item identity without numbering unrelated items", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-resources-"));
+    const manifestPath = path.join(workspaceRoot, "legacy-resource-manifest.json");
+    await writeFile(manifestPath, JSON.stringify({
+      version: "video-factory/resource-manifest-v1",
+      runId: "run-legacy",
+      items: [
+        { id: "scene:6:pexels-stock-v1", category: "visual", kind: "scene_video", providerId: "pexels-stock-v1", commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "needs_review" },
+        { id: "artifact:unlocated", category: "visual", kind: "media_asset", providerId: "pexels-stock-v1", commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "needs_review" },
+      ],
+    }));
+    const studio = new ResourceGovernanceStudio(
+      workspaceRoot,
+      async () => [completedRun(manifestPath, "run-legacy", "旧制作")],
+    );
+
+    const manifest = await studio.manifest();
+
+    assert.equal(manifest.items.find((item) => item.id.startsWith("scene:"))?.scenePosition, 6);
+    assert.equal(manifest.items.find((item) => item.id === "artifact:unlocated")?.scenePosition, undefined);
   });
 
   it("deduplicates the same content across runs while retaining every usage", async () => {

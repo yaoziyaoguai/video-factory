@@ -3,10 +3,10 @@ import { describe, it } from "node:test";
 import { CostStudio } from "../src/server/cost-studio.js";
 
 describe("CostStudio", () => {
-  it("separates estimated, authorized, and actual spend across billing types", async () => {
+  it("keeps test-run spend in the ledger while separating billing types", async () => {
     const studio = new CostStudio(async () => ([{
       id: "run-1",
-      initialInput: { title: "第一条付费成片" },
+      initialInput: { title: "第一条付费成片", runPurpose: "test" },
       nodeRuns: [
         { nodeId: "script", role: "编剧", status: "succeeded" },
         { nodeId: "assets", role: "素材导演", status: "succeeded" },
@@ -359,6 +359,57 @@ describe("CostStudio", () => {
     assert.equal(detail?.totals.actualCostCny, 1.75);
     assert.equal(detail?.totals.authorizedCostCny, 2);
     assert.equal(detail?.totals.meteredCalls, 1);
+  });
+
+  it("attributes a legacy routed MiniMax receipt from its recorded model while keeping unknown cost pending", async () => {
+    const studio = new CostStudio(async () => ([{
+      id: "run-routed-legacy-minimax",
+      executionReceipts: [{
+        id: "legacy-asset-router",
+        nodeId: "assets",
+        providerId: "ai-shot-router-v1",
+        modelId: "MiniMax-Hailuo-2.3",
+        billing: "metered",
+        status: "succeeded",
+        requestId: "command-legacy-minimax",
+        startedAt: "2026-08-28T12:00:00.000Z",
+        estimatedCostCny: 2.4,
+      }],
+      spendAuthorizations: [],
+    }]));
+
+    const dashboard = await studio.dashboard();
+    const detail = await studio.runDetail("run-routed-legacy-minimax");
+
+    assert.equal(detail?.lines[0]?.providerId, "hailuo-video-v1");
+    assert.equal(detail?.lines[0]?.modelId, "MiniMax-Hailuo-2.3");
+    assert.equal(detail?.lines[0]?.actualCostCny, undefined);
+    assert.equal(detail?.lines[0]?.actualPending, true);
+    assert.equal(dashboard.byProvider.find((item) => item.providerId === "hailuo-video-v1")?.actualPendingCount, 1);
+    assert.equal(dashboard.byProvider.some((item) => item.providerId === "ai-shot-router-v1"), false);
+  });
+
+  it("keeps legacy routed receipts on the router when their model cannot identify one provider", async () => {
+    const studio = new CostStudio(async () => ([{
+      id: "run-routed-legacy-unknown",
+      executionReceipts: [{
+        id: "legacy-asset-router",
+        nodeId: "assets",
+        providerId: "ai-shot-router-v1",
+        modelId: "custom-router-selection",
+        billing: "metered",
+        status: "succeeded",
+        requestId: "command-legacy-unknown",
+        startedAt: "2026-08-28T12:00:00.000Z",
+        estimatedCostCny: 2.4,
+      }],
+      spendAuthorizations: [],
+    }]));
+
+    const detail = await studio.runDetail("run-routed-legacy-unknown");
+
+    assert.equal(detail?.lines[0]?.providerId, "ai-shot-router-v1");
+    assert.equal(detail?.lines[0]?.modelId, "custom-router-selection");
   });
 
   it("does not infer a historical receipt failure from the node's latest status", async () => {

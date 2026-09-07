@@ -43,7 +43,12 @@ const creatorSettings = new JsonCreatorSettingsStore(path.join(workspaceRoot, "s
 const pythonPath = process.env.PYTHONPATH
   ? `${path.join(repositoryRoot, "src")}${path.delimiter}${process.env.PYTHONPATH}`
   : path.join(repositoryRoot, "src");
-const worker = buildProductionWorker({ repositoryRoot, pythonPath, environment: process.env });
+const worker = buildProductionWorker({
+  repositoryRoot,
+  pythonPath,
+  environment: process.env,
+  runsRoot: path.join(workspaceRoot, "runs"),
+});
 // 启动时探测一次宿主机 Codex bridge；不可用时不创建任何 agent，保持规则与模板行为。
 const [codexSettings, zaiCodexSettings] = await Promise.all([
   readCodexProviderSettings(process.env),

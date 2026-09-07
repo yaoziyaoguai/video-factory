@@ -1,11 +1,17 @@
 import { scoreTopicCandidate } from "@video-factory/workflow-core";
 import type {
   StudioCandidateInboxItem,
+  StudioCandidateVerification,
+  StudioOpportunityEvidence,
   StudioSeriesEpisode,
   StudioSeriesEpisodePlanning,
 } from "../shared/api.js";
+import { manualSupplementEvidence, canonicalizeSourceUrl } from "../shared/api.js";
 import { planVisualDirection } from "../shared/visual-plan.js";
+import { decideEditorialFormat } from "./editorial-decision.js";
+import { traceableEvidenceIdentity } from "./candidate-inbox-studio.js";
 import type { SeriesRecord } from "./series-store.js";
+import { topicRiskLevel } from "./topic-taxonomy.js";
 
 export interface SeriesPlannerOptions {
   now?: () => Date;
@@ -122,6 +128,8 @@ export class SeriesPlanner {
   }
 
   private toCandidate(series: SeriesRecord, episode: StudioSeriesEpisode): StudioCandidateInboxItem {
+    const risk = topicRiskLevel(`${episode.title} ${episode.hook} ${episode.viewerPromise} ${episode.payoff}`);
+    const planningQuality = seriesPlanningQuality(episode);
     const candidate = scoreTopicCandidate(episode.id, {
       platform: series.platform,
       track: series.track,
@@ -136,38 +144,47 @@ export class SeriesPlanner {
         evidenceUrl: seriesRoadmapUrl(episode.id),
         collectedAt: episode.updatedAt,
       }],
-      audienceReach: 74,
-      visualFeasibility: 88,
-      productionCostEfficiency: 90,
-      novelty: 72,
-      monetization: 64,
-      seriesPotential: 96,
-      complianceRisk: 12,
+      audienceReach: planningQuality,
+      visualFeasibility: planningQuality,
+      productionCostEfficiency: Math.min(82, planningQuality + 6),
+      novelty: Math.max(55, planningQuality - 8),
+      monetization: 50,
+      seriesPotential: Math.min(92, planningQuality + 10),
+      complianceRisk: risk === "high" ? 72 : risk === "review" ? 60 : 12,
     });
     const blocker = blockingEpisode(series, episode);
+    const supplementEvidence = seriesEpisodeSupplementEvidence(episode);
+    const verification = seriesCandidateVerification(risk, supplementEvidence);
+    const editorialDecision = decideEditorialFormat({
+      origin: "series",
+      providerId: "series-roadmap-v2",
+      title: episode.title,
+      track: series.track,
+      category: series.category,
+      freshness: "evergreen",
+      risk,
+      verification,
+      score: candidate.score,
+      audience: series.audience,
+      painPoint: episode.viewerPromise,
+      hook: episode.hook,
+      evidence: candidate.evidence,
+    }, []);
     return {
       id: candidate.id,
       origin: "series",
       category: series.category,
       freshness: "evergreen",
-      risk: "low",
-      verification: {
-        status: "ready",
-        independentSources: 1,
-        requiredSources: 1,
-        reasons: ["单集来自已保存的系列圣经与持久化路线图。"],
-      },
-      editorialDecision: {
-        verdict: "produce_video",
-        score: blocker ? 76 : 93,
-        reasons: blocker
-          ? [`第 ${blocker.episodeNumber} 集尚未完成，当前单集保留在路线图中。`]
-          : ["单集承接本季篇章并有独立兑现，适合进入逐集生产。"],
-        guardrails: [
-          "必须遵守系列 canon 与连续性输入，不能为了单集钩子改写已建立事实。",
-          "每集必须产生新的验证、行动或结论，不能只复述栏目模板。",
-        ],
-      },
+      risk,
+      verification,
+      editorialDecision: blocker
+        ? {
+            ...editorialDecision,
+            score: Math.min(editorialDecision.score, 76),
+            reasons: [`第 ${blocker.episodeNumber} 集尚未完成，当前单集保留在路线图中。`],
+            guardrails: ["必须按集数顺序推进。", ...editorialDecision.guardrails],
+          }
+        : editorialDecision,
       seriesId: series.id,
       seriesName: series.name,
       episodeNumber: episode.episodeNumber,
@@ -183,7 +200,7 @@ export class SeriesPlanner {
       rationale: `第 ${episode.episodeNumber} 集属于“${episode.arc}”篇章；内容支柱为“${episode.pillar}”，结尾将写回下一集连续性记忆。`,
       providerId: "series-roadmap-v2",
       generatedAt: episode.updatedAt,
-      evidence: candidate.evidence,
+      evidence: [...candidate.evidence, ...supplementEvidence],
       score: candidate.score,
       visualPlan: planVisualDirection({
         title: episode.title,
@@ -193,6 +210,66 @@ export class SeriesPlanner {
       }),
     };
   }
+}
+
+// 人工补充来源只追加为 manual-supplement 证据；路线图 URL 本身不是独立原始来源，
+// 重复粘贴同一个也不会计入门槛。对比时用规范化形式，避免大小写/尾斜杠绕过。
+function seriesEpisodeSupplementEvidence(episode: StudioSeriesEpisode): StudioOpportunityEvidence[] {
+  const supplements = episode.supplementSources;
+  if (!supplements) return [];
+  const roadmapUrl = canonicalizeSourceUrl(seriesRoadmapUrl(episode.id));
+  return supplements.evidenceUrls
+    .filter((url) => url !== roadmapUrl)
+    .map((url) => manualSupplementEvidence(url, supplements.updatedAt));
+}
+
+function seriesCandidateVerification(
+  risk: StudioCandidateInboxItem["risk"],
+  supplementEvidence: StudioOpportunityEvidence[],
+): StudioCandidateVerification {
+  // 高风险/公共议题门槛只统计人工补充的可核验独立域名，不降低阈值，也不由路线图冒充。
+  const independentSources = new Set(supplementEvidence.map(traceableEvidenceIdentity).filter(Boolean)).size;
+  if (risk === "high") {
+    return independentSources >= 2
+      ? {
+          status: "review_required",
+          independentSources,
+          requiredSources: 2,
+          reasons: ["高风险公共题材已补齐独立原始来源，采用前需要人工查看并确认。"],
+        }
+      : {
+          status: "blocked",
+          independentSources,
+          requiredSources: 2,
+          reasons: ["高风险公共题材不能只依据系列路线图开拍，需要补齐至少 2 个独立原始来源。"],
+        };
+  }
+  if (risk === "review") {
+    return independentSources >= 1
+      ? {
+          status: "review_required",
+          independentSources,
+          requiredSources: 1,
+          reasons: ["公共议题单集已补充可打开的原始来源，采用前需要人工查看并确认。"],
+        }
+      : {
+          status: "blocked",
+          independentSources,
+          requiredSources: 1,
+          reasons: ["公共议题不能只依据系列路线图开拍，需要补充可打开的原始来源。"],
+        };
+  }
+  return {
+    status: "ready",
+    independentSources: 1,
+    requiredSources: 1,
+    reasons: ["单集来自已保存的系列圣经与持久化路线图。"],
+  };
+}
+
+function seriesPlanningQuality(episode: StudioSeriesEpisode): number {
+  if (episode.planning.auditStatus !== "passed" || !Number.isFinite(episode.planning.auditScore)) return 68;
+  return Math.max(0, Math.min(100, Math.round(episode.planning.auditScore!)));
 }
 
 function rulePlanning(): StudioSeriesEpisodePlanning {

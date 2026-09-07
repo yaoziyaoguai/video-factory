@@ -141,10 +141,12 @@ function actualMediaAttribution(
   providerId: string,
   modelId: string,
 ): { providerId: string; modelId: string } {
-  if (providerId !== "ai-shot-router-v1" || !Array.isArray(receipt.actualModelIds)) {
+  if (providerId !== "ai-shot-router-v1") {
     return { providerId, modelId };
   }
-  const actualModelIds = [...new Set(receipt.actualModelIds.map(text).filter(Boolean))];
+  const actualModelIds = Array.isArray(receipt.actualModelIds)
+    ? [...new Set(receipt.actualModelIds.map(text).filter(Boolean))]
+    : [modelId];
   const providers = actualModelIds.map(actualMediaProviderId);
   if (actualModelIds.length === 0 || providers.some((value) => value === undefined)) {
     return { providerId, modelId };

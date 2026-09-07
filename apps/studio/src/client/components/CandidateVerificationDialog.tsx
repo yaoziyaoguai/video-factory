@@ -29,7 +29,7 @@ export function CandidateVerificationDialog({ candidate, pending, onClose, onCon
             {candidate.evidence.map((evidence, index) => (
               <article key={`${evidence.source}-${index}`}>
                 <span>{String(index + 1).padStart(2, "0")}</span>
-                <div><strong>{evidence.keyword}</strong><small>{evidence.source} · 信号强度 {evidence.strength}</small></div>
+                <div><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong><small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${evidence.source} · 信号强度 ${evidence.strength}`}</small></div>
                 {evidence.evidenceUrl ? <a href={evidence.evidenceUrl} target="_blank" rel="noreferrer" aria-label={`打开来源 ${evidence.source}`}><ExternalLink aria-hidden="true" size={15} /></a> : <small>无链接</small>}
               </article>
             ))}
@@ -46,4 +46,8 @@ export function CandidateVerificationDialog({ candidate, pending, onClose, onCon
       </section>
     </div>
   );
+}
+
+function isManualEvidence(evidence: { source: string; platform: string }): boolean {
+  return evidence.source === "manual-supplement" || evidence.platform === "manual";
 }

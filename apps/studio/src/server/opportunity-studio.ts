@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { scoreTopicCandidate } from "@video-factory/workflow-core";
 import type {
+  StudioCandidateSourcesInput,
   StudioOpportunity,
   StudioOpportunityInput,
   StudioOpportunityStatus,
 } from "../shared/api.js";
+import { canonicalizeSourceUrl, manualSupplementEvidence } from "../shared/api.js";
 import { planVisualDirection } from "../shared/visual-plan.js";
 import {
   OpportunityStoreConflictError,
@@ -75,6 +77,7 @@ export class OpportunityStudio {
         ...(input.episodeNumber ? { episodeNumber: input.episodeNumber } : {}),
         ...(input.verification ? { verification: structuredClone(input.verification) } : {}),
         ...(input.editorialDecision ? { editorialDecision: structuredClone(input.editorialDecision) } : {}),
+        ...(input.visualProof ? { visualProof: input.visualProof } : {}),
         visualPlan,
       }));
     } catch (error) {
@@ -91,6 +94,43 @@ export class OpportunityStudio {
       if (error instanceof OpportunityStoreConflictError) throw new StudioConflictError(error.message);
       throw error;
     }
+  }
+
+  // 只有热点机会支持人工补充原始来源；只追加、幂等去重，不重算也不改写既有派生决策。
+  async appendEvidence(opportunityId: string, input: StudioCandidateSourcesInput): Promise<StudioOpportunity> {
+    const existing = await this.options.opportunities.get(opportunityId);
+    if (!existing) throw new StudioNotFoundError(`Opportunity '${opportunityId}' was not found.`);
+    if (existing.origin !== "trend") {
+      throw new StudioConflictError("只有热点选题支持补充原始来源。");
+    }
+    const known = new Set(existing.candidate.evidence
+      .map((item) => canonicalEvidenceKey(item.evidenceUrl))
+      .filter(Boolean));
+    const additions = [...new Set(input.evidenceUrls
+      .map((url) => canonicalizeSourceUrl(url)))]
+      .filter((url) => !known.has(url));
+    if (additions.length === 0) return toOpportunity(existing);
+    const timestamp = this.now().toISOString();
+    try {
+      return toOpportunity(await this.options.opportunities.appendEvidence(
+        opportunityId,
+        additions.map((url) => manualSupplementEvidence(url, timestamp)),
+        timestamp,
+      ));
+    } catch (error) {
+      if (error instanceof OpportunityStoreNotFoundError) throw new StudioNotFoundError(error.message);
+      if (error instanceof OpportunityStoreConflictError) throw new StudioConflictError(error.message);
+      throw error;
+    }
+  }
+}
+
+function canonicalEvidenceKey(evidenceUrl: string | undefined): string {
+  if (!evidenceUrl) return "";
+  try {
+    return canonicalizeSourceUrl(evidenceUrl);
+  } catch {
+    return "";
   }
 }
 
@@ -123,6 +163,7 @@ function toOpportunity(record: OpportunityRecord): StudioOpportunity {
     ...(record.episodeNumber ? { episodeNumber: record.episodeNumber } : {}),
     ...(record.verification ? { verification: structuredClone(record.verification) } : {}),
     ...(record.editorialDecision ? { editorialDecision: structuredClone(record.editorialDecision) } : {}),
+    ...(record.visualProof ? { visualProof: record.visualProof } : {}),
     visualPlan: structuredClone(visualPlan),
   };
 }

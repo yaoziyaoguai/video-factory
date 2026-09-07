@@ -890,6 +890,66 @@ describe("WorkflowRunner", () => {
     assert.equal(failed.nodeRuns[0]?.executionReceipt?.meteredAttemptCount, 0);
   });
 
+  it("does not unlock an explicitly unknown provider outcome even when the provisional receipt is zero", async () => {
+    const registry = new ProviderRegistry();
+    let calls = 0;
+    registry.register({
+      id: "automatic-paid-image",
+      label: "Automatic paid image",
+      modelId: "image-v1",
+      capability: "asset.prepare",
+      transport: "http_api",
+      billing: "metered",
+      approvalPolicy: "automatic",
+      estimatedCostCny: 0.25,
+      maxCostCny: 0.25,
+      maxAttempts: 1,
+      run: () => {
+        calls += 1;
+        return { accepted: true };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "automatic-paid-unknown-outcome",
+      name: "Automatic paid unknown outcome",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "automatic-paid-image",
+        mode: "automatic",
+        execute: async (input, context) => {
+          await context.resolveProvider({ capability: "asset.prepare", providerId: "automatic-paid-image" }).run(input, context);
+          return {
+            status: "failed",
+            providerOutcomeKnown: false,
+            error: "connection reset before task id",
+            receipt: {
+              providerId: "automatic-paid-image",
+              providerLabel: "Automatic paid image",
+              modelId: "image-v1",
+              transport: "http_api",
+              billing: "metered",
+              estimatedCostCny: 0.25,
+              actualCostCny: 0,
+              actualCostSource: "configured_rate",
+              meteredAttemptCount: 0,
+              meteredFailedAttemptCount: 0,
+            },
+          };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ providers: registry });
+
+    const failed = await runner.run(definition, {});
+
+    assert.equal(failed.nodeRuns[0]?.outcomeUncertain, true);
+    await assert.rejects(() => runner.retryFailedNode(definition, failed, "assets"), /uncertain paid-provider outcome/);
+    assert.equal(calls, 1);
+  });
+
   it("keeps a metered quality rejection definitive after the provider succeeded", async () => {
     const registry = new ProviderRegistry();
     registry.register({
@@ -3009,11 +3069,22 @@ describe("WorkflowRunner", () => {
     assert.equal(paidCalls, 0);
     assert.equal(updated.status, "stale");
     assert.equal(updated.nodeRuns[0]?.status, "stale");
+    assert.equal(updated.nodeRuns[0]?.inputState?.stale, true);
     assert.equal(updated.nodeRuns[0]?.spendPlan, undefined);
     assert.deepEqual(updated.spendAuthorizations, []);
     assert.equal(updated.executionPlan?.find((plan) => plan.nodeId === "assets")?.providerId, "video-b");
     assert.equal(updated.executionPlan?.find((plan) => plan.nodeId === "assets")?.modelId, "model-b");
     assert.equal(updated.executionPlan?.find((plan) => plan.nodeId === "assets")?.configurationSource, "node_override");
+
+    const replanned = await runner.resumeStale(definition("video-b"), updated);
+    const replannedInputState = replanned.nodeRuns[0]?.inputState;
+    assert.equal(replanned.status, "awaiting_spend_approval");
+    assert.equal(replannedInputState?.stale, false);
+    assert.deepEqual(
+      replannedInputState?.versions.find((version) => version.id === replannedInputState.effectiveVersionId)?.value,
+      { selected: "video-b" },
+    );
+    assert.equal(paidCalls, 0);
   });
 
   it("does not fabricate actual usage when a successful metered provider omits it", async () => {

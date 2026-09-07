@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { platformLabel, RUN_NODE_ORDER, runNodeLabel } from "../presentation.js";
+import { isHistoricalReadOnlyRun, platformLabel, RUN_NODE_ORDER, runNeedsCreatorAction, runNodeLabel } from "../presentation.js";
 
 interface ProductionQueueProps {
   runs: StudioRunSummary[];
@@ -38,15 +38,16 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
     if (view === "archive") return searched;
     const filtered = searched.filter((run) => matchesFilter(run, filter));
     if (filter !== "all" || normalizedQuery) return filtered;
-    const active = filtered.filter((run) => !isTerminal(run));
-    const recentCompleted = filtered.filter(isTerminal).slice(0, 6);
+    // 待你处理的记录（含被打回的作品）不能被“最近完成”截断，否则会从默认视图消失。
+    const active = filtered.filter((run) => !isTerminal(run) || runNeedsCreatorAction(run));
+    const recentCompleted = filtered.filter((run) => isTerminal(run) && !runNeedsCreatorAction(run)).slice(0, 6);
     return [...active, ...recentCompleted];
   }, [archivedRuns, currentRuns, filter, query, view]);
   const displayedRuns = visibleRuns.slice(0, visibleCount);
   const selectableRuns = visibleRuns.filter((run) => view === "archive" || isTerminal(run));
   const selectedRuns = selectableRuns.filter((run) => selectedIds.has(run.id));
-  const activeCount = currentRuns.filter((run) => run.status === "pending" || run.status === "running").length;
-  const reviewCount = currentRuns.filter(needsAction).length;
+  const activeCount = currentRuns.filter((run) => !isHistoricalReadOnlyRun(run) && (run.status === "pending" || run.status === "running")).length;
+  const reviewCount = currentRuns.filter(runNeedsCreatorAction).length;
   const finishedCount = currentRuns.filter((run) => run.status === "succeeded").length;
 
   useEffect(() => setVisibleCount(12), [filter, query, view]);
@@ -150,12 +151,12 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
                 </div>
                 <div className="project-folio-copy">
                   <div className="project-folio-meta">
-                    <span>{platformLabel(run.platform)} · 9:16</span>
+                    <span>{run.runPurpose === "test" ? "测试记录 · " : ""}{platformLabel(run.platform)} · 9:16</span>
                     <time dateTime={run.archivedAt ?? run.startedAt}>{run.archivedAt ? `归档于 ${formatTime(run.archivedAt)}` : formatTime(run.startedAt)}</time>
                   </div>
                   <h3>{run.title}</h3>
-                  <div className="project-folio-state"><StatusBadge status={run.status} /><span>{runNodeLabel(run.currentNodeId)}</span></div>
-                  <RunProgress currentNodeId={run.currentNodeId} status={run.status} {...(run.workflowNodeIds ? { workflowNodeIds: run.workflowNodeIds } : {})} />
+                  <div className="project-folio-state"><StatusBadge status={run.status} {...(isHistoricalReadOnlyRun(run) ? { label: "历史只读" } : {})} /><span>{isHistoricalReadOnlyRun(run) ? "旧版制作记录" : runNodeLabel(run.currentNodeId)}</span></div>
+                  {isHistoricalReadOnlyRun(run) ? null : <RunProgress currentNodeId={run.currentNodeId} status={run.status} {...(run.workflowNodeIds ? { workflowNodeIds: run.workflowNodeIds } : {})} />}
                   <div className="project-folio-actions">
                     <Link className="project-folio-action" to={`/projects/${run.id}`} aria-label={runAction(run) ? `${actionLabel(runAction(run)!)}：${run.title}` : `查看制作：${run.title}`}>
                       {runAction(run) ? actionLabel(runAction(run)!) : run.status === "succeeded" ? "查看成片" : "打开制作记录"}
@@ -236,18 +237,10 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
   }
 }
 
-function needsAction(run: StudioRunSummary): boolean {
-  return run.status === "needs_human"
-    || run.status === "awaiting_spend_approval"
-    || run.status === "approval_invalidated"
-    || run.status === "failed"
-    || run.status === "stale";
-}
-
 function matchesFilter(run: StudioRunSummary, filter: QueueFilter): boolean {
   return filter === "all"
-    || (filter === "active" && (run.status === "pending" || run.status === "running"))
-    || (filter === "review" && needsAction(run))
+    || (filter === "active" && !isHistoricalReadOnlyRun(run) && (run.status === "pending" || run.status === "running"))
+    || (filter === "review" && runNeedsCreatorAction(run))
     || (filter === "done" && isTerminal(run));
 }
 
@@ -255,13 +248,20 @@ function isTerminal(run: StudioRunSummary): boolean {
   return run.status === "succeeded" || run.status === "failed" || run.status === "rejected";
 }
 
-function actionLabel(action: NonNullable<StudioRunSummary["nextAction"]>): string {
+type QueueAction = NonNullable<StudioRunSummary["nextAction"]> | "rework" | "legacy_rework";
+
+function actionLabel(action: QueueAction): string {
   if (action === "confirm_spend") return "确认费用";
   if (action === "regenerate") return "确认后续生成";
+  if (action === "rework") return "调整方案后重新制作";
+  if (action === "legacy_rework") return "基于这版重新制作";
   return "进入审片";
 }
 
-function runAction(run: StudioRunSummary): StudioRunSummary["nextAction"] {
+function runAction(run: StudioRunSummary): QueueAction | undefined {
+  if (isHistoricalReadOnlyRun(run)) return "legacy_rework";
+  // 打回后的返工入口就是现有制作详情里的“调整方案后重新制作”，这里只负责把创作者送过去。
+  if (run.status === "rejected") return "rework";
   return isTerminal(run) ? undefined : run.nextAction;
 }
 

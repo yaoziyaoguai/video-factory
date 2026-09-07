@@ -751,8 +751,13 @@ export class WorkflowRunner {
     run.initialInput = structuredClone(override.initialInput);
     const target = run.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId);
     const invalidatedNodeIds = new Set([override.nodeId, ...descendants]);
+    const previousProviderId = previousRun.executionPlan?.find(
+      (plan) => plan.nodeId === override.nodeId,
+    )?.providerId ?? previousNodeRun?.executionReceipt?.providerId;
+    const providerChanged = previousProviderId !== undefined && previousProviderId !== node.providerId;
 
-    if (target) markNodeExecutionStale(target, false);
+    // Provider 的输入契约可能不同；切换 Provider 后必须重新派生输入，不能回放旧 Provider 的缓存形状。
+    if (target) markNodeExecutionStale(target, providerChanged);
     for (const candidate of run.nodeRuns) {
       if (descendants.has(candidate.nodeId)) markNodeExecutionStale(candidate, true);
     }
@@ -1245,7 +1250,12 @@ export class WorkflowRunner {
         };
       }
       validateReceiptCosts(receiptDraft, authorization, automaticMeteredProvider);
-      if (status !== "failed"
+      if (status === "failed" && receiptDraft.billing === "metered" && result.providerOutcomeKnown === false) {
+        // Provider 结果未知（如 create 请求已可能被受理但响应在 ECONNRESET/超时中丢失）：
+        // 无论回执是否呈现零次尝试，都不得删除 outcomeUncertain 去解锁重试，
+        // 账目只能由人工核账闭环。
+        nodeRun.outcomeUncertain = true;
+      } else if (status !== "failed"
         || result.providerOutcomeKnown === true
         || (isDefinitiveZeroAttemptFailure(receiptDraft) && !resumingInterruptedMeteredOperation)) {
         delete nodeRun.outcomeUncertain;

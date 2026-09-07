@@ -55,7 +55,7 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
     }}>
       <section ref={dialogRef} className="run-dialog series-dialog" role="dialog" aria-modal="true" aria-labelledby="series-dialog-title" tabIndex={-1}>
         <header className="dialog-header">
-          <div><p className="eyebrow">系列策划</p><h2 id="series-dialog-title">创建系列</h2><p>只填三项就能开始，系统会先补齐一套经济实用的制作默认值。</p></div>
+          <div><p className="eyebrow">系列策划</p><h2 id="series-dialog-title">创建系列</h2><p>只填三项就能开始，系统会先补齐一套适合这个系列的制作默认值。</p></div>
           <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
         <form

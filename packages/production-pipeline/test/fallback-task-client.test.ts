@@ -112,6 +112,57 @@ describe("FallbackCodexTaskClient", () => {
     assert.equal(zai.calls[1]?.session, undefined);
   });
 
+  it("still switches providers after a not_accepted service-unavailable rejection", async () => {
+    const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
+      throw new CodexBridgeError("Codex bridge returned HTTP 503.", true, "not_accepted", 503);
+    });
+    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const client = new FallbackCodexTaskClient({
+      candidates: [
+        { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
+        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["publish-copy"] },
+      ],
+    });
+
+    const result = await client.runTaskDetailed("publish-copy", {}, "publish-primary");
+
+    assert.deepEqual(result.trace?.modelCandidateAttempts?.map((attempt) => [
+      attempt.modelId,
+      attempt.outcome,
+      attempt.failureStage,
+    ]), [
+      ["gpt-5.6-sol", "failed", "not_accepted"],
+      ["glm-5.3", "succeeded", undefined],
+    ]);
+    assert.equal(openai.calls[0]?.requestId, "publish-primary");
+    assert.equal(zai.calls.length, 1);
+  });
+
+  it("does not generate a fallback requestId when the primary outcome is uncertain", async () => {
+    const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
+      throw new CodexBridgeError("request timed out after 285000ms; the task may still be executing", false, "uncertain");
+    });
+    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const client = new FallbackCodexTaskClient({
+      candidates: [
+        { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
+        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["publish-copy"] },
+      ],
+    });
+
+    await assert.rejects(
+      () => client.runTaskDetailed("publish-copy", {}, "publish-uncertain"),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexBridgeError);
+        assert.equal(error.stage, "uncertain");
+        return true;
+      },
+    );
+
+    assert.deepEqual(openai.calls, [{ kind: "publish-copy", requestId: "publish-uncertain" }]);
+    assert.equal(zai.calls.length, 0);
+  });
+
   it("does not switch providers for invalid output or business validation failures", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
       throw new CodexBridgeError("Output contract is invalid.", false, "completed_failure", 422);

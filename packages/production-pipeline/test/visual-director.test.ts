@@ -96,6 +96,91 @@ describe("validateVisualDirectorPlan", () => {
     assert.deepEqual(result.shots.map((item) => item.estimatedCostCny), [5.5, 0]);
   });
 
+  it("keeps reference-image generation distinct from zero-cost reuse", () => {
+    const generatedImage = (scenePosition: number) => ({
+      ...shot(scenePosition, "seedream-image-v1"),
+      authenticityPolicy: "illustrative" as const,
+      deliveryType: "generated_image" as const,
+    });
+    const result = validateVisualDirectorPlan(plan([
+      generatedImage(1),
+      { ...generatedImage(2), referenceFromScenePosition: 1 },
+    ]), {
+      scenePositions: [1, 2],
+      allowedProviderIds: ["seedream-image-v1"],
+      generativeProviderIds: ["seedream-image-v1"],
+      providerDeliveryTypes: { "seedream-image-v1": ["generated_image"] },
+      referenceImageProviderIds: ["seedream-image-v1"],
+      estimatedCnyPerClip: { "seedream-image-v1": 0.25 },
+      economics,
+    });
+
+    assert.equal(result.shots[1]?.referenceFromScenePosition, 1);
+    assert.equal(result.shots[1]?.reuseFromScenePosition, undefined);
+    assert.deepEqual(result.shots.map((item) => item.estimatedCostCny), [0.25, 0.25]);
+  });
+
+  it("rejects invalid reference-image routes", () => {
+    const generatedImage = (scenePosition: number) => ({
+      ...shot(scenePosition, "seedream-image-v1"),
+      authenticityPolicy: "illustrative" as const,
+      deliveryType: "generated_image" as const,
+    });
+    const options: VisualDirectorPlanValidation = {
+      scenePositions: [1, 2],
+      allowedProviderIds: ["seedream-image-v1"],
+      generativeProviderIds: ["seedream-image-v1"],
+      providerDeliveryTypes: { "seedream-image-v1": ["generated_image"] },
+      referenceImageProviderIds: ["seedream-image-v1"],
+      estimatedCnyPerClip: { "seedream-image-v1": 0.25 },
+      economics,
+    };
+
+    assert.throws(() => validateVisualDirectorPlan(plan([
+      { ...generatedImage(1), referenceFromScenePosition: 2 },
+      generatedImage(2),
+    ]), options), /must reference an earlier scene/);
+    assert.throws(() => validateVisualDirectorPlan(plan([
+      generatedImage(1),
+      { ...generatedImage(2), referenceFromScenePosition: 1, reuseFromScenePosition: 1 },
+    ]), options), /cannot reference and reuse/);
+    assert.throws(() => validateVisualDirectorPlan(plan([
+      generatedImage(1),
+      { ...generatedImage(2), referenceFromScenePosition: 1 },
+    ]), { ...options, referenceImageProviderIds: [] }), /does not support reference-image generation/);
+    assert.throws(() => validateVisualDirectorPlan(plan([
+      generatedImage(1),
+      {
+        ...generatedImage(2),
+        deliveryType: "stock_image",
+        referenceFromScenePosition: 1,
+      },
+    ]), {
+      ...options,
+      providerDeliveryTypes: { "seedream-image-v1": ["generated_image", "stock_image"] },
+    }), /only use a reference image with generated_image/);
+    assert.throws(() => validateVisualDirectorPlan(plan([
+      { ...shot(1, "seedance-video-v1"), authenticityPolicy: "illustrative" },
+      { ...generatedImage(2), referenceFromScenePosition: 1 },
+    ]), {
+      ...options,
+      allowedProviderIds: ["seedance-video-v1", "seedream-image-v1"],
+      generativeProviderIds: ["seedance-video-v1", "seedream-image-v1"],
+      providerDeliveryTypes: {
+        "seedance-video-v1": ["generated_video"],
+        "seedream-image-v1": ["generated_image"],
+      },
+    }), /must reference an earlier generated_image scene/);
+    assert.throws(() => validateVisualDirectorPlan(plan([
+      generatedImage(1),
+      { ...generatedImage(2), reuseFromScenePosition: 1 },
+      { ...generatedImage(3), referenceFromScenePosition: 2 },
+    ]), {
+      ...options,
+      scenePositions: [1, 2, 3],
+    }), /must reference an earlier generated_image scene that is not itself reused/);
+  });
+
   it("rejects generated-video reuse that promises more footage than the source scene creates", () => {
     assert.throws(() => validateVisualDirectorPlan(
       plan([

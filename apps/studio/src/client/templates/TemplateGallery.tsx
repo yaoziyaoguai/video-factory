@@ -1,4 +1,4 @@
-import { Check, Clock3, Film, Gauge, WalletCards } from "lucide-react";
+import { Check, Clock3, Film, Gauge, LayoutTemplate, WalletCards } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { StudioTemplate } from "../../shared/api.js";
 
@@ -37,9 +37,10 @@ export function TemplateGallery({ templates, selectedId, onSelect }: TemplateGal
               <span className="template-card-title"><strong>{template.name}</strong>{selected ? <Check size={15} aria-hidden="true" /> : null}</span>
               <small>{template.description}</small>
               <span className="template-card-meta">
+                <span><LayoutTemplate size={13} aria-hidden="true" />{templateCategoryLabel(template.category)}</span>
                 <span><Clock3 size={13} aria-hidden="true" />{template.durationSeconds} 秒</span>
                 <span><Gauge size={13} aria-hidden="true" />{automationLabel(template.automationLevel)}</span>
-                <span><WalletCards size={13} aria-hidden="true" />付费逐项确认</span>
+                <span><WalletCards size={13} aria-hidden="true" />产生付费画面时逐项确认</span>
               </span>
               <span className="template-beat-line">{template.storyStructure.map((beat) => beat.label).join(" / ")}</span>
             </span>
@@ -48,6 +49,21 @@ export function TemplateGallery({ templates, selectedId, onSelect }: TemplateGal
       })}
     </div>
   );
+}
+
+const TEMPLATE_CATEGORY_LABELS: Record<string, string> = {
+  trend: "热点事实",
+  knowledge: "知识讲解",
+  "evidence-story": "证据叙事",
+  demonstration: "实操演示",
+  documentary: "人物纪录",
+  comparison: "对比评测",
+  photo: "照片叙事",
+  custom: "自定义创作",
+};
+
+export function templateCategoryLabel(category: string): string {
+  return TEMPLATE_CATEGORY_LABELS[category] ?? "其他创作类型";
 }
 
 function templateFrame(category: StudioTemplate["category"]): string {

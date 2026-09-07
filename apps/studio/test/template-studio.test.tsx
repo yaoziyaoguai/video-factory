@@ -17,9 +17,19 @@ describe("TemplateGallery", () => {
 
     expect(screen.getByRole("radio", { name: /知识解释/ })).toHaveAttribute("aria-checked", "true");
     expect(screen.getAllByText("开场 / 解释 / 收束")).toHaveLength(2);
-    expect(screen.getAllByText("付费逐项确认")).toHaveLength(2);
+    expect(screen.getByText("知识讲解")).toBeInTheDocument();
+    expect(screen.getByText("照片叙事")).toBeInTheDocument();
+    expect(screen.getAllByText("产生付费画面时逐项确认")).toHaveLength(2);
     await user.click(screen.getByRole("radio", { name: /照片故事/ }));
     expect(onSelect).toHaveBeenCalledWith(templates[1]);
+  });
+
+  it("maps unknown template categories to a Chinese fallback instead of raw ids", () => {
+    const exotic = template("experimental-form", "实验形态", "mystery-genre", 50, "automatic");
+    render(<TemplateGallery templates={[exotic]} selectedId="experimental-form" onSelect={vi.fn()} />);
+
+    expect(screen.getByText("其他创作类型")).toBeInTheDocument();
+    expect(screen.queryByText(/mystery-genre/)).not.toBeInTheDocument();
   });
 
   it("scrolls the selected template fully into view on a mobile gallery", () => {

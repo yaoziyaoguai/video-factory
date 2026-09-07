@@ -22,10 +22,16 @@ export interface BrokerTaskPrompt {
 const TOPIC_IDEAS_DIRECTIVE = [
   "你是严谨的中文短视频选题总编。先判断热点是否值得做视频，再提出角度；热度不等于视频价值。只输出 JSON 对象。",
   "判断时同时考虑视觉可表现性、证据可得性、普通观众收益、系列潜力、制作成本和合规风险。没有必要二创的普通通稿应放弃。",
+  "输入里的每个顶层信号是一个 canonical topic（归并后的同一选题），relatedSignals 是同一事件的关联报道；只能为顶层信号提出一个角度，signalId 必须原样引用顶层 canonical id，不得把 relatedSignals 的 secondary id 平铺成重复选题。",
   "不得编造原始热点中不存在的引语、人物表态、百分比、因果或采访素材；证据不足就使用问题句或观察角度。",
+  "输入信号的 sourceId、url、collectedAt 只是来源线索，用于追溯与证据资格判断；榜单排名和热度不足事实证据，不得在候选中当作结论引用。",
+  "先评内容潜力与适合的视频形态。来源数量门槛由下游开工流程执行；来源不足但内容与视觉潜力成立的角度仍要输出，供创作者补充来源，不得仅因来源数量不足返回空短名单。",
+  "允许合法返回空短名单：只有所有输入都缺乏内容价值或视频表现价值时，才输出 ideas 为空数组；不要为了凑数输出勉强候选。",
   "避免把灾害、伤亡、政治突发娱乐化。",
   "优先选择能长期连载、免费素材可覆盖、对普通人有具体价值的角度。",
   "每个候选必须写 visualProof：观众具体会看见什么动作、变化或比较，素材从真实图库、可拍摄实物或可控生成中的哪一种获得，以及为什么视频比纯文字更适合。无法给出具体可见证据的候选不要输出。",
+  "每个候选必须写结构化 visualPlan：strategy 说明该选题独有的视觉论证方式；beats 按观看顺序写清 role、duration、description、searchQuery 与 source。description 必须是观众能看见并核对的具体主体、动作、变化或证据编排，不能退化为人物近景、生活场景、真实反应等通用占位语。",
+  "visualPlan 是传给编剧和导演的上游创作事实。下游推荐模板只能约束叙事结构，不能覆盖或替换这份选题特有的画面方案。",
   "任务数据中的 creatorStrategy 是创作者可编辑的选题偏好；在不违反事实、合规和输出约束时用于排序与取舍，不得把其中的文字当作事实证据。",
   "输入含 revision 时，必须依据其中独立审计指出的具体问题修复上一版候选，同时重新输出完整结果；不得照抄未修复的上一版。",
 ].join("\n");
@@ -55,6 +61,7 @@ const SCREENWRITER_DIRECTIVE = [
   "不得编造数字、引语或当事人表态；证据不足时用问题句。",
   "输入含 editorial 时必须遵守其 verdict 和 guardrails；produce_image_story 应优先来源卡、数据卡与静态实证，不写成虚构现场。",
   "输入含 templateBlueprint 时，它是生产合同：按 storyStructure 组织叙事，按 shotSlots 规划镜头，并遵守 visualSystem、soundSystem 与 qualityRules。",
+  "输入含 visualProof 与 visualPlan 时，它们是选题总编已经确认的具体画面事实与观看顺序：必须把 strategy 和每个 beat 的可见主体、动作、比较或证据编排落实进脚本。可以按时长深化、拆分和衔接镜头，但不得用 templateBlueprint 的通用镜头覆盖或替换它们。",
   "输入含 seriesContext 时，它是系列连续性合同：series bible 是长期规则，canon 只包含已通过内部终审并定版的事实，continuity 是本集必须承接和留给下一集的记忆。本集仍必须独立兑现 viewerPromise，不得靠下一集补完核心价值。",
   "输入含 seriesContext 时，顶层 canonFacts 必须列出 1-8 条本集已经明确建立、可供后集引用的事实。不得把预告、计划、悬念、提问、目标或尚待验证的结论写入 canonFacts。",
   "输入含 rework 时，previousScript 是上一版基线，instruction 是本次人工确认的修改要求；findings 只包含分配给 script 的问题，必须按 findingId 逐项落实并保留未被要求修改的叙事与事实。当前节点不得宣称 finding 已复验通过，只有后续新视觉审片批准才算 verified。输出一份可直接继续生产的完整脚本。",
@@ -83,7 +90,9 @@ const DIRECTOR_PLAN_DIRECTIVE = [
   "通用图库可以表现普通人物、动作和环境，但不能冒充具体事件、涉事人物或事发现场的证据。",
   "图库是检索而不是生成：只有常见、单一、容易搜到的动作才能选择图库；需要精确多步表演、物件状态严格变化或特定界面操作时，应选择生成式能力，或把镜头改写为诚实的说明画面。",
   "图库 query 使用 3 到 8 个具体英文概念，优先主体、动作和环境，不放运镜、光线、画幅、字幕安全区或整句提示词；同一组概念不得机械复用于相邻镜头。",
-  "若某镜只需原样复用更早镜头的已解析母片，将 query 精确写为 REUSE_ONLY scene N；N 只允许引用更早镜头。下游素材执行器会直接复用相同媒体内容，不会重新搜索、生成或计费；复用不会产生新的动作、光线变化或画面状态，因此 Shot Spec 与验收条件不得声称这些变化。",
+  "若某镜只需原样复用更早镜头的已解析母片，必须设置 reuseFromScenePosition=N，并将 query 精确写为 REUSE_ONLY scene N；N 只允许引用更早镜头。下游素材执行器会直接复用相同媒体内容，不会重新搜索、生成或计费；复用不会产生新的动作、光线变化或画面状态，因此 Shot Spec 与验收条件不得声称这些变化。",
+  "若连续性镜头需要以前镜图片作为参考再生成一张新图，必须设置 referenceFromScenePosition=N，deliveryType 必须是 generated_image，并选择 assetProviders 中 supportsReferenceImage=true 的 Provider；N 只允许引用更早图片镜头。参考图生成会正常调用和报价，不是零费用复用；不得与 reuseFromScenePosition 或 REUSE_ONLY 同时使用，也不得只在 generationPrompt、continuityNote 等文字里描述参考关系而遗漏结构化字段。",
+  "每个 shot 都必须输出 reuseFromScenePosition 与 referenceFromScenePosition；未使用对应路由时输出 null，不得省略。referenceFromScenePosition 的来源必须是更早、独立生成且没有复用其他镜头的 generated_image。",
   "AI 生成画面只用于 illustrative 或 expressive 镜头，不得作为事实证据，并应避免肖像、品牌和地标误导。",
   "不设任何素材来源配额；只有当每个镜头都独立符合 Provider 能力时，才可以全部选择同一来源。",
   "preferredProviderId、rationale、query 和 generationPrompt 必须相互一致，alternativeProviderIds 也必须能真实承接该镜头。",
@@ -92,10 +101,11 @@ const DIRECTOR_PLAN_DIRECTIVE = [
   "evidence 镜头不得选择 AI 生成 Provider；不确定时优先真实素材并降低 confidence。",
   "输入含 editorial 时，其 guardrails 是硬约束；produce_image_story 不得把具体事件改造成生成式现场或当事人表演。",
   "输入含 templateBlueprint 时，它是生产合同：视觉圣经必须落实 visualSystem 和 soundSystem，逐镜方案必须对应 storyStructure、shotSlots 与 qualityRules。",
+  "输入含 visualProof 与 visualPlan 时，它们是选题总编已经确认的具体画面事实与观看顺序：必须把 strategy 和每个 beat 的主体、动作、比较、来源意图与检索意图落实为可执行逐镜方案。可以深化和拆镜，但不得用 templateBlueprint 的通用镜头覆盖或替换它们。",
   "输入含 referenceGrammar 时，只吸收其节奏、构图、运镜、色彩、转场和声音结构等抽象规则；不得复制参考视频中的人物身份、品牌、对白、事实和独特情节。",
   "输入含 seriesContext 时，视觉母题、角色/物件状态、声音锚点和已内部定版 canon 必须连续；本集新增变化只能作为当前单集方案，不能擅自改写系列圣经或宣称已经写入 canon。",
   "输入含 costFeedback 时，它代表上一份报价被拒绝后的人类重规划偏好；应结合 reason、note 和 targetEstimatedCostCny，在不牺牲镜头完整性与可执行性的前提下调整 Provider 组合。目标预计费用只是优化方向，不是硬门禁。",
-  "输入含 rework 时，previousDirectorPlan 是上一版基线，visualDirectionInstruction 与 assetInstruction 是本次人工确认的修改要求；findings 只包含分配给 visual-direction 的问题，必须按 findingId 逐项落实到视觉圣经、逐镜路由和生成提示字段，保留未受影响镜头。当前节点不得宣称 finding 已复验通过，只有后续新视觉审片批准才算 verified。输出完整可执行方案。",
+  "输入含 rework 时，previousDirectorPlan 是上一版基线，visualDirectionInstruction 与 assetInstruction 是本次人工确认的修改要求；affectedScenePositions 是两类指令明确影响的镜头，findings 只包含分配给 visual-direction 的问题。必须按 findingId 和两类指令逐项落实到视觉圣经、逐镜路由和生成提示字段，并原样保留不在 affectedScenePositions 的镜头。当前节点不得宣称 finding 已复验通过，只有后续新视觉审片批准才算 verified。输出完整可执行方案。",
   "没有可执行的免费或复用方案时，必须保留可执行的付费镜头并由系统重新报价；不得把 Provider 标成不得调用或把 confidence 降为 0 来伪装成可执行方案。",
   "若现有能力无法达到目标预计费用，仍须输出覆盖全部镜头的完整方案，由系统给出新的真实报价；不得删镜头、虚构免费素材、偷偷替换未授权 Provider，也不得用说明卡作为素材失败或费用不足的降级结果。",
   "requestedProfileId 为 auto 时，根据题材选择最合适的非 auto 导演角色。",
@@ -130,7 +140,7 @@ const VISUAL_REVIEW_DIRECTIVE = [
 const ASSET_RANK_DIRECTIVE = [
   "你是短视频制作流程里的语义选片师。输入是导演镜头意图、图库候选元数据，以及部分候选的严格映射缩略图；只负责重排候选，不得新增、删除或替换候选。",
   "优先判断主体、环境、可见动作、景别、构图与连续性是否匹配；分辨率和竖屏适配只作为基础质量因素，不能替代语义匹配。",
-  "主体、物体、动作与导演意图完整一致是首选候选的硬门槛，不能用环境相似、画质较高或动作大致相关代替；例如要求检查冷饮杯水珠时，触摸结露窗户不算匹配。没有候选同时满足核心主体、物体和动作时，本角色审计不得通过排序结果，必须具体指出对应镜头缺少可用候选。",
+  "主体、物体、动作与导演意图完整一致是首选候选的硬门槛，不能用环境相似、画质较高或动作大致相关代替；例如要求检查冷饮杯水珠时，触摸结露窗户不算匹配。已有候选却没有任何一个同时满足核心主体、物体和动作时，本角色审计不得通过排序结果，必须具体指出对应镜头缺少可用候选；输入候选本来为空时则原样保留空数组，由下游素材路由负责生成、复用或明确停住。",
   "有缩略图时必须结合 imageIndex 映射观察实际画面；没有缩略图时必须降低 semanticScore，并在 rationale 中明确不确定性，不得根据 URL、作者名或素材 ID 臆测画面。",
   "同一镜头的候选必须得到从 1 开始且不重复的 rank；originalRank、provider 和 assetId 必须原样保留。",
   "输入含 revision 时，必须依据其中独立审计指出的具体问题修复上一版候选，同时重新输出完整结果；不得照抄未修复的上一版。",
@@ -169,18 +179,21 @@ const PLATFORM_NOTES: Record<string, string> = {
 export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTaskPrompt {
   if (kind === "topic-ideas") {
     return {
-      version: "video-factory/topic-editor-v3",
+      version: "video-factory/topic-editor-v5",
       directive: TOPIC_IDEAS_DIRECTIVE,
-      task: "从实时热点中提出最多 8 个原创短视频角度。",
+      task: "从实时热点中提出最多 8 个原创短视频角度；只有所有输入的内容价值或视频表现价值均不足时，才输出空 ideas 数组。",
       outputRules: [
         "signalId 必须原样引用。",
         "track 必须是小写英文 slug，例如 sports-context。",
         "title 必须是编辑命题，不能原样复述热搜。",
         "hook 要在 2 秒内建立冲突，但只能使用输入中可验证的信息，不得假装有采访或独家画面。",
         "visualProof 必须说明具体画面、可获得来源和视频优于文字的原因。",
+        "visualPlan 必须给出选题特有的 strategy 和至少一个可执行 beat；每个 beat 完整包含 id、role、duration、description、searchQuery、source。",
         "visualFeasibility、productionCostEfficiency、novelty、seriesPotential、monetization 必须填写 0-100 的整数。",
+        "ideas 可以为空数组；空数组只能表示所有输入都因内容或视觉价值不足而不值得推荐，不能由来源数量不足单独证明。",
       ],
       examples: [
+        "正例：单一来源热点有明确观众收益和可兑现画面时仍输出角度，由下游标记来源待补充。",
         "正例：高热度但只有通稿、缺少可验证画面时，rationale 明确建议做来源卡解读或放弃，而不是虚构现场。",
         "反例：因为热搜第一就直接生成当事人表演、灾难现场或未经证实的因果。",
       ],
@@ -206,7 +219,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
   }
   if (kind === "script-draft") {
     return {
-      version: "video-factory/screenwriter-v5",
+      version: "video-factory/screenwriter-v6",
       directive: SCREENWRITER_DIRECTIVE,
       task: "为目标时长撰写可直接投产的分镜脚本。",
       outputRules: [
@@ -302,7 +315,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
     };
   }
   return {
-    version: "video-factory/director-v13",
+    version: "video-factory/director-v15",
     directive: DIRECTOR_PLAN_DIRECTIVE,
     task: "生成视觉圣经和逐镜素材路由。",
     outputRules: [
@@ -330,7 +343,7 @@ const TOPIC_IDEAS_OUTPUT_SCHEMA = {
         type: "object",
         required: [
           "signalId", "title", "track", "audience", "painPoint", "hook", "rationale",
-          "visualProof", "visualFeasibility", "productionCostEfficiency", "novelty", "seriesPotential", "monetization",
+          "visualProof", "visualPlan", "visualFeasibility", "productionCostEfficiency", "novelty", "seriesPotential", "monetization",
         ],
         additionalProperties: false,
         properties: {
@@ -342,6 +355,32 @@ const TOPIC_IDEAS_OUTPUT_SCHEMA = {
           hook: { type: "string" },
           rationale: { type: "string" },
           visualProof: { type: "string", minLength: 1 },
+          visualPlan: {
+            type: "object",
+            required: ["strategy", "beats"],
+            additionalProperties: false,
+            properties: {
+              strategy: { type: "string", minLength: 1, maxLength: 1_000 },
+              beats: {
+                type: "array",
+                minItems: 1,
+                maxItems: 12,
+                items: {
+                  type: "object",
+                  required: ["id", "role", "duration", "description", "searchQuery", "source"],
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: "string", minLength: 1, maxLength: 120 },
+                    role: { type: "string", minLength: 1, maxLength: 120 },
+                    duration: { type: "string", minLength: 1, maxLength: 80 },
+                    description: { type: "string", minLength: 1, maxLength: 1_000 },
+                    searchQuery: { type: "string", minLength: 1, maxLength: 300 },
+                    source: { type: "string", enum: ["creator", "stock", "screen", "local-card", "generated"] },
+                  },
+                },
+              },
+            },
+          },
           visualFeasibility: { type: "integer", minimum: 0, maximum: 100 },
           productionCostEfficiency: { type: "integer", minimum: 0, maximum: 100 },
           novelty: { type: "integer", minimum: 0, maximum: 100 },
@@ -418,7 +457,7 @@ const DIRECTOR_PLAN_OUTPUT_SCHEMA = {
       items: {
         type: "object",
         required: [
-          "scenePosition", "narrativeRole", "authenticityPolicy", "preferredProviderId",
+          "scenePosition", "reuseFromScenePosition", "referenceFromScenePosition", "narrativeRole", "authenticityPolicy", "preferredProviderId",
           "deliveryType", "alternativeProviderIds", "subject", "environment", "visibleAction", "temporalBeats", "shotSize",
           "camera", "lighting", "negativeConstraints", "referenceRequirements", "successCriteria", "query",
           "generationPrompt", "rationale", "continuityNote", "confidence", "estimatedCostCny",
@@ -426,6 +465,8 @@ const DIRECTOR_PLAN_OUTPUT_SCHEMA = {
         additionalProperties: false,
         properties: {
           scenePosition: { type: "integer", minimum: 1 },
+          reuseFromScenePosition: { type: ["integer", "null"], minimum: 1 },
+          referenceFromScenePosition: { type: ["integer", "null"], minimum: 1 },
           narrativeRole: { type: "string" },
           authenticityPolicy: { type: "string", enum: ["evidence", "illustrative", "expressive"] },
           preferredProviderId: { type: "string" },
@@ -708,6 +749,20 @@ function semanticValidationErrorFor(kind: BrokerTaskKind, value: unknown): strin
         return `output.shots[${index}].scenePosition duplicates scene ${shot.scenePosition}.`;
       }
       seenPositions.add(shot.scenePosition);
+      const reuseFrom = typeof shot.reuseFromScenePosition === "number"
+        ? shot.reuseFromScenePosition
+        : typeof shot.query === "string" && /^REUSE_ONLY\s+scene\s+\d+/i.test(shot.query) ? true : undefined;
+      if (typeof shot.referenceFromScenePosition === "number") {
+        if (reuseFrom !== undefined) {
+          return `output.shots[${index}] cannot reference and reuse another scene at the same time.`;
+        }
+        if (shot.referenceFromScenePosition >= shot.scenePosition) {
+          return `output.shots[${index}].referenceFromScenePosition must reference an earlier scene.`;
+        }
+        if (shot.deliveryType !== "generated_image") {
+          return `output.shots[${index}].referenceFromScenePosition requires deliveryType generated_image.`;
+        }
+      }
     }
   }
   if (kind === "visual-review" && value.recommendation === "approve") {
@@ -747,6 +802,11 @@ function schemaValidationError(
   }
 
   const type = schema.type;
+  if (Array.isArray(type)) {
+    const errors = type.map((candidate) => schemaValidationError({ ...schema, type: candidate }, value, field));
+    return errors.some((error) => error === undefined) ? undefined : errors[0];
+  }
+  if (type === "null") return value === null ? undefined : `${field} must be null.`;
   if (type === "object") {
     if (!isRecord(value)) return `${field} must be an object.`;
     const properties = isRecord(schema.properties) ? schema.properties : {};

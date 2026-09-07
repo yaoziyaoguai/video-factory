@@ -1,4 +1,4 @@
-import type { StudioOpportunity } from "../shared/api.js";
+import type { StudioCandidateInboxItem, StudioOpportunity, StudioRunFailure, StudioRunSummary } from "../shared/api.js";
 
 export const RUN_NODE_LABELS: Record<string, string> = {
   brief: "内容简报",
@@ -21,6 +21,74 @@ export const RUN_NODE_ORDER = Object.keys(RUN_NODE_LABELS);
 
 export function runNodeLabel(nodeId: string): string {
   return RUN_NODE_LABELS[nodeId] ?? nodeId;
+}
+
+export function isHistoricalReadOnlyRun(run: Pick<StudioRunSummary, "continuation">): boolean {
+  return run.continuation?.supported === false;
+}
+
+export function runNeedsCreatorAction(run: Pick<StudioRunSummary, "status" | "continuation" | "archivedAt">): boolean {
+  if (run.archivedAt || isHistoricalReadOnlyRun(run)) return false;
+  return [
+    "needs_human",
+    "awaiting_spend_approval",
+    "approval_invalidated",
+    "failed",
+    "stale",
+    "rejected",
+  ].includes(run.status);
+}
+
+export interface SourceAssetReviewBreakdown {
+  conclusion: string[];
+  sceneFindings: string[];
+  preservedContent: string[];
+  nextSteps: string[];
+}
+
+export function sourceAssetReviewBreakdown(failure: StudioRunFailure): SourceAssetReviewBreakdown {
+  const detail = (creatorFacingTechnicalText(failure.technicalDetail) ?? "").replace(/\s+/g, " ").trim();
+  const sceneMarkers = [...detail.matchAll(/镜头\s*(\d+)[：:]\s*/g)];
+  const prefix = sceneMarkers.length > 0 ? detail.slice(0, sceneMarkers[0]!.index).trim() : detail;
+  const conclusion = uniqueText([
+    failure.summary,
+    ...splitSentences(prefix),
+  ]);
+  const sceneFindings: string[] = [];
+  const detailNextSteps: string[] = [];
+  for (const [index, marker] of sceneMarkers.entries()) {
+    const contentStart = (marker.index ?? 0) + marker[0].length;
+    const contentEnd = sceneMarkers[index + 1]?.index ?? detail.length;
+    let content = detail.slice(contentStart, contentEnd).trim();
+    if (index === sceneMarkers.length - 1) {
+      const nextStep = content.match(/(?:^|\s)(请(?:调整|切换|重新|先到)[\s\S]*)$/)?.[1]?.trim();
+      if (nextStep) {
+        content = content.slice(0, content.lastIndexOf(nextStep)).trim();
+        detailNextSteps.push(nextStep);
+      }
+    }
+    if (content) sceneFindings.push(`镜头 ${marker[1]}：${content}`);
+  }
+  return {
+    conclusion,
+    sceneFindings: uniqueText(sceneFindings),
+    preservedContent: uniqueText([
+      failure.impact,
+      `已保留前面 ${failure.savedNodeCount} 个步骤的结果`,
+    ]),
+    nextSteps: uniqueText([
+      ...detailNextSteps,
+      ...failure.recoveryActions.map((action) => creatorFacingTechnicalText(action) ?? action),
+    ]),
+  };
+}
+
+function splitSentences(value: string): string[] {
+  return value.match(/[^。！？!?]+[。！？!?]?/g)?.map((sentence) => sentence.trim()).filter(Boolean) ?? [];
+}
+
+function uniqueText(values: string[]): string[] {
+  return values.map((value) => value.trim()).filter((value, index, items) => value.length > 0 && items.indexOf(value) === index);
 }
 
 export function platformLabel(platform: string): string {
@@ -75,6 +143,7 @@ export function providerLabel(providerId?: string): string | undefined {
     "python-technical-review-v1": "本地机器质检",
     "codex-visual-review-v1": "AI 视觉审片",
     "glm-visual-review-v1": "GLM-5.3-Flash 视觉审片",
+    "codex-role-auditor-v1": "AI 独立质量复核",
     openai: "AI 创作服务",
     pexels: "Pexels 图库",
     pixabay: "Pixabay 图库",
@@ -146,6 +215,8 @@ export function humanizeCreativeText(value: string): string {
 export function creatorFacingTechnicalText(value?: string): string | undefined {
   if (!value) return undefined;
   return value
+    .replace(/已按\s+hook_and_scene_midpoints\s+的稀疏证据逐场核对。?/gi, "已按每个镜头的关键画面完成预检。")
+    .replace(/画面\s+Provider/gi, "画面服务")
     .replace(/\bstudio-owner\b/gi, "由你确认")
     .replace(/需要[^。]*VIDEO_FACTORY_[A-Z0-9_]+[^。]*。?\s*当前：[^。]*。?/gi, "AI 创作服务尚未连接，请到“创作设置 → 制作分工”检查服务状态。")
     .replace(/Pexels free stock license; review current provider license before publishing\.?/gi, "Pexels 免费图库素材；发布前需核对当前授权条款。")
@@ -171,6 +242,13 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/Candidate ranking only; no source media was downloaded or altered\.?/gi, "只保存候选排序结果，没有下载或修改原始素材。")
     .replace(/Series Bible/gi, "系列设定")
     .replace(/\bCanon\b/gi, "已确认内容")
+    .replace(/Codex\s*独立质量审计(?:\s*Agent)?/gi, "AI 独立质量复核")
+    .replace(/独立质量审计\s*Agent/gi, "AI 独立质量复核")
+    .replace(/独立质量审计/g, "独立质量复核")
+    .replace(/独立审计/g, "独立复核")
+    .replace(/质量审计/g, "质量复核")
+    .replace(/审计意见/g, "复核意见")
+    .replace(/审计结论/g, "复核结论")
     .replace(/\bCodex\b/gi, "AI")
     .replace(/\bAgent\b/gi, "AI")
     .replace(/\bProvider\b/gi, "服务")
@@ -179,6 +257,11 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/\bManifest\b/gi, "资源清单")
     .replace(/\bFallback\b/gi, "备用方案")
     .replace(/\btaskId\b/gi, "任务编号")
+    .replace(/\bblocking\b/gi, "必须修改的问题")
+    .replace(/\s*\bhook_and_scene_midpoints\b\s*/gi, "逐镜关键画面抽查")
+    .replace(/\s*\bscene_triplets\b\s*/gi, "逐镜首中尾抽查")
+    .replace(/\s*\bscene_change_keyframes\b\s*/gi, "场景变化关键画面抽查")
+    .replace(/\s*\bsource_assets\b\s*/gi, "生成画面")
     .replace(/manualReplacement/gi, "人工补充素材")
     .replace(/primary\s+服务\s+timed\s+out/gi, "首选服务响应超时")
     .replace(/服务\s+timed\s+out/gi, "服务响应超时")
@@ -209,7 +292,23 @@ export function opportunityProductionBlockReason(
   if (opportunity.editorialDecision?.verdict === "skip") {
     return opportunity.editorialDecision.reasons[0] ?? "当前选题不建议进入制作。";
   }
+  // produce 候选必须绑定当前生产目录中的推荐模板；目录变化后先等模板恢复或刷新重算。
+  if (opportunity.editorialDecision
+    && (opportunity.editorialDecision.verdict === "produce_video"
+      || opportunity.editorialDecision.verdict === "produce_image_story")
+    && !opportunity.editorialDecision.recommendedTemplate) {
+    return "推荐的生产模板当前不可用，请刷新重算或到模板目录确认后再开始制作。";
+  }
   return undefined;
+}
+
+// produce 候选必须绑定当前生产目录中的推荐模板，否则在候选阶段就不可采用。
+export function candidateTemplateUnavailable(
+  candidate: Pick<StudioCandidateInboxItem, "editorialDecision">,
+): boolean {
+  const verdict = candidate.editorialDecision.verdict;
+  return (verdict === "produce_video" || verdict === "produce_image_story")
+    && !candidate.editorialDecision.recommendedTemplate;
 }
 
 export function reasoningEffortLabel(value: unknown): string {

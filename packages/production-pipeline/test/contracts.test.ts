@@ -36,11 +36,43 @@ describe("ProductionBrief", () => {
     assert.equal(brief.protocolVersion, "video-factory/brief-v1");
     assert.equal(brief.providers.assets, "local-editorial-v1");
     assert.equal(brief.reviewMode, "manual");
+    assert.equal(brief.runPurpose, "production");
     assert.deepEqual(brief.voiceDirection, validBrief.voiceDirection);
     assert.deepEqual(brief.economics, {
       recipeId: "economy-daily",
       allowMeteredProviders: false,
     });
+  });
+
+  it("keeps test productions explicit and rejects unknown purposes", () => {
+    assert.equal(pipeline.parseBrief({ ...validBrief, runPurpose: "test" }).runPurpose, "test");
+    assert.throws(
+      () => pipeline.parseBrief({ ...validBrief, runPurpose: "quality-assurance" }),
+      /runPurpose must be 'production' or 'test'/,
+    );
+  });
+
+  it("preserves the adopted topic editor's visual evidence and concrete plan", () => {
+    const visualPlan = {
+      strategy: "用来源标题并列和确定性标尺逐项核对。",
+      beats: [{
+        id: "headline-certainty-scale",
+        role: "证据并列",
+        duration: "0-8 秒",
+        description: "左右并列真实标题，高亮“网传”和“正在核查”。",
+        searchQuery: "source headline screenshot certainty scale",
+        source: "screen",
+      }],
+    } as const;
+
+    const parsed = pipeline.parseBrief({
+      ...validBrief,
+      visualProof: "两条真实标题的措辞差异可以直接并列核对。",
+      visualPlan,
+    });
+
+    assert.equal(parsed.visualProof, "两条真实标题的措辞差异可以直接并列核对。");
+    assert.deepEqual(parsed.visualPlan, visualPlan);
   });
 
   it("rejects a trend source platform as the production target platform", () => {

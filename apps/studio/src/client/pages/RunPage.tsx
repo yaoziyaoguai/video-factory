@@ -399,7 +399,11 @@ export function RunPage() {
         open={restarting}
         providers={restartProviders}
         {...(restartSettings ? { creatorSettings: restartSettings } : {})}
-        {...(restartDraft ? { initialValues: restartDraft.input } : {})}
+        {...(restartDraft ? {
+          initialValues: restartDraft.input,
+          inheritedNodeIds: restartDraft.inheritedNodeIds,
+          requiredAffectedScenePositions: restartDraft.requiredAffectedScenePositions,
+        } : {})}
         onClose={() => setRestarting(false)}
         onSubmit={restartProduction}
       />

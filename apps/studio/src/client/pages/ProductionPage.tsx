@@ -17,6 +17,7 @@ export function ProductionPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [runsError, setRunsError] = useState<string>();
   const [providersError, setProvidersError] = useState<string>();
+  const [settingsError, setSettingsError] = useState<string>();
 
   const load = useCallback(async () => {
     setRunsLoading(true);
@@ -24,11 +25,26 @@ export function ProductionPage() {
     setSettingsLoading(true);
     setRunsError(undefined);
     setProvidersError(undefined);
+    setSettingsError(undefined);
     await Promise.all([
       studioApi.runs().then(setRuns).catch((caught: unknown) => setRunsError(errorMessage(caught))).finally(() => setRunsLoading(false)),
       studioApi.providers().then(setProviders).catch((caught: unknown) => setProvidersError(errorMessage(caught))).finally(() => setProvidersLoading(false)),
-      studioApi.settings().then(setCreatorSettings).catch(() => undefined).finally(() => setSettingsLoading(false)),
+      // 读取失败必须留下可见错误并阻断开工；成功返回（含未自定义的系统默认）才允许带入默认值。
+      studioApi.settings().then(setCreatorSettings).catch((caught: unknown) => setSettingsError(errorMessage(caught))).finally(() => setSettingsLoading(false)),
     ]);
+  }, []);
+
+  // 原地重读创作设置：成功后用服务端保存值解除阻塞，不要求刷新整页。
+  const retrySettings = useCallback(async () => {
+    setSettingsLoading(true);
+    setSettingsError(undefined);
+    try {
+      setCreatorSettings(await studioApi.settings());
+    } catch (caught: unknown) {
+      setSettingsError(errorMessage(caught));
+    } finally {
+      setSettingsLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -72,8 +88,15 @@ export function ProductionPage() {
           <button className="icon-button" type="button" onClick={() => void load()} title="重试"><RefreshCw aria-hidden="true" size={17} /></button>
         </div>
       ) : null}
+      {settingsError ? (
+        <div className="page-error" role="alert">
+          <AlertCircle aria-hidden="true" size={18} />
+          <span>未能读取你的创作设置，为避免用错声音/平台/时长，暂未开工。{settingsError}</span>
+          <button className="button button-secondary" type="button" onClick={() => void retrySettings()}><RefreshCw aria-hidden="true" size={16} />重新读取</button>
+        </div>
+      ) : null}
       <ProductionQueue runs={runs} loading={runsLoading} {...(runsError ? { error: runsError } : {})} onRetry={() => void load()} onCreate={() => setDialogOpen(true)} onArchive={archive} onRestore={restore} onDelete={remove} />
-      <NewRunDialog open={dialogOpen} providers={providersLoading ? [] : providers} initialDataReady={!providersLoading && !settingsLoading} {...(creatorSettings ? { creatorSettings } : {})} onClose={() => setDialogOpen(false)} onSubmit={start} />
+      <NewRunDialog open={dialogOpen} providers={providersLoading ? [] : providers} initialDataReady={!providersLoading && !settingsLoading && !settingsError} {...(creatorSettings ? { creatorSettings } : {})} {...(settingsError ? { settingsError } : {})} onRetrySettings={() => void retrySettings()} onClose={() => setDialogOpen(false)} onSubmit={start} />
     </>
   );
 }

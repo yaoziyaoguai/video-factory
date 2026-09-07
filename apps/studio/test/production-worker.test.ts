@@ -9,7 +9,7 @@ import {
 import { readMeteredImageProviderSettings } from "../src/server/image-provider-settings.js";
 import { readMeteredVideoProviderSettings } from "../src/server/video-provider-settings.js";
 import { buildStudioChildEnvironment } from "../src/server/studio-child-environment.js";
-import { assetProviderDeliveryTypes } from "../src/server/provider-catalog.js";
+import { assetProviderDeliveryTypes, assetProviderSupportsReferenceImage } from "../src/server/provider-catalog.js";
 
 describe("production Python runtime", () => {
   it("prefers an explicit runtime, then the verified project environment", () => {
@@ -54,6 +54,7 @@ describe("production provider runtime metadata", () => {
 
     for (const provider of providers) {
       assert.deepEqual(provider.deliveryTypes, assetProviderDeliveryTypes(provider.id));
+      assert.equal(provider.supportsReferenceImage ?? false, assetProviderSupportsReferenceImage(provider.id));
     }
   });
 
@@ -288,7 +289,7 @@ describe("metered image provider settings", () => {
   it("offers Seedream to the AI director as a metered image source", () => {
     const providers = buildDirectorAssetProviders({ environment: {
       ARK_API_KEY: "ark-key",
-      SEEDREAM_MODEL_ID: "seedream-model",
+      SEEDREAM_MODEL_ID: "doubao-seedream-4-0-250828",
       SEEDREAM_ESTIMATED_CNY_PER_IMAGE: "0.25",
     } });
 
@@ -296,12 +297,21 @@ describe("metered image provider settings", () => {
       id: "seedream-image-v1",
       label: "Seedream 关键画面",
       billing: "metered",
-      modes: ["AI 图片", "9:16"],
+      modes: ["AI 图片", "参考图再生成", "9:16"],
       deliveryTypes: ["generated_image"],
+      supportsReferenceImage: true,
       strengths: ["解释性插画、抽象概念、无法检索到的关键静态画面与统一系列视觉"],
       constraints: ["合成内容不得作为事实证据", "人物、品牌与地标需要规避权利和误导风险", "成片必须保留 AIGC 标识"],
       estimatedCnyPerClip: 0.25,
       generative: true,
     });
+
+    const unreviewed = buildDirectorAssetProviders({ environment: {
+      ARK_API_KEY: "ark-key",
+      SEEDREAM_MODEL_ID: "unreviewed-image-model",
+      SEEDREAM_ESTIMATED_CNY_PER_IMAGE: "0.25",
+    } }).find((provider) => provider.id === "seedream-image-v1");
+    assert.equal(unreviewed?.supportsReferenceImage, false);
+    assert.equal(unreviewed?.modes.includes("参考图再生成"), false);
   });
 });

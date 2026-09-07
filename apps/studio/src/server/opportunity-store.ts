@@ -20,6 +20,7 @@ export interface OpportunityRecord {
   episodeNumber?: number;
   verification?: StudioCandidateVerification;
   editorialDecision?: StudioEditorialDecision;
+  visualProof?: string;
   visualPlan?: StudioVisualPlan;
 }
 
@@ -28,6 +29,7 @@ export interface StudioOpportunityRepository {
   get(id: string): Promise<OpportunityRecord | undefined>;
   create(record: OpportunityRecord): Promise<OpportunityRecord>;
   updateStatus(id: string, status: TopicCandidate["status"], updatedAt: string): Promise<OpportunityRecord>;
+  appendEvidence(id: string, evidence: OpportunityRecord["candidate"]["evidence"], updatedAt: string): Promise<OpportunityRecord>;
 }
 
 interface OpportunityFile {
@@ -94,6 +96,35 @@ export class JsonOpportunityStore implements StudioOpportunityRepository {
         candidate: { ...current.candidate, status },
         updatedAt,
       };
+      file.opportunities[index] = updated;
+      await this.write(file);
+      return structuredClone(updated);
+    });
+  }
+
+  // 人工补充来源是 add-only mutation：只追加 evidence、刷新 updatedAt，
+  // 并发追加在写锁内取并集，status/score/scoreProvenance 等其他字段一概不动。
+  async appendEvidence(
+    id: string,
+    evidence: OpportunityRecord["candidate"]["evidence"],
+    updatedAt: string,
+  ): Promise<OpportunityRecord> {
+    return this.withWriteLock(async () => {
+      const file = await this.read();
+      const index = file.opportunities.findIndex((candidate) => candidate.candidate.id === id);
+      const current = file.opportunities[index];
+      if (!current) {
+        throw new OpportunityStoreNotFoundError(`Opportunity '${id}' was not found.`);
+      }
+      const existingKeys = new Set(current.candidate.evidence.map((item) => item.evidenceUrl ?? `${item.source}:${item.keyword}`));
+      const additions = evidence.filter((item) => !existingKeys.has(item.evidenceUrl ?? `${item.source}:${item.keyword}`));
+      const updated: OpportunityRecord = additions.length === 0
+        ? { ...current, updatedAt }
+        : {
+            ...current,
+            candidate: { ...current.candidate, evidence: [...current.candidate.evidence, ...structuredClone(additions)] },
+            updatedAt,
+          };
       file.opportunities[index] = updated;
       await this.write(file);
       return structuredClone(updated);

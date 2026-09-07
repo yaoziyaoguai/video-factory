@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   StudioInputError,
+  parseStudioCandidateSourcesInput,
   parseStudioCreatorSettingsPatch,
   parseStudioOpportunityInput,
   parseStudioOpportunityStatusInput,
@@ -9,6 +10,58 @@ import {
   parseStudioSeriesInput,
   parseStudioVoicePreviewInput,
 } from "../src/shared/api.js";
+
+describe("candidate source supplement API contracts", () => {
+  it("accepts 1 to 10 trimmed urls and canonicalizes fragments and duplicates", () => {
+    assert.deepEqual(parseStudioCandidateSourcesInput({
+      evidenceUrls: [
+        "  https://News.cn/news/a?b=1#frag  ",
+        "https://news.cn/news/a?b=1",
+        "http://people.com.cn:80/deep",
+      ],
+    }), {
+      evidenceUrls: [
+        "https://news.cn/news/a?b=1",
+        "http://people.com.cn/deep",
+      ],
+    });
+    assert.deepEqual(parseStudioCandidateSourcesInput({ evidenceUrls: ["https://news.cn/single"] }), {
+      evidenceUrls: ["https://news.cn/single"],
+    });
+  });
+
+  it("rejects empty or oversized batches and non-string entries", () => {
+    assert.throws(() => parseStudioCandidateSourcesInput({ evidenceUrls: [] }), /1 到 10 条/);
+    assert.throws(() => parseStudioCandidateSourcesInput({ evidenceUrls: Array.from({ length: 11 }, () => "https://news.cn/a") }), /1 到 10 条/);
+    assert.throws(() => parseStudioCandidateSourcesInput({ evidenceUrls: [42] }), /文本/);
+    assert.throws(() => parseStudioCandidateSourcesInput("nope"), /格式不正确/);
+    assert.throws(() => parseStudioCandidateSourcesInput({}), /格式不正确|1 到 10 条/);
+  });
+
+  it("rejects non-http schemes, credentials, and malformed or oversized urls", () => {
+    assert.throws(() => parseStudioCandidateSourcesInput({ evidenceUrls: ["ftp://example.com/file"] }), /http 或 https/);
+    assert.throws(() => parseStudioCandidateSourcesInput({ evidenceUrls: ["file:///etc/passwd"] }), /http 或 https/);
+    assert.throws(() => parseStudioCandidateSourcesInput({ evidenceUrls: ["https://user:pass@news.cn/a"] }), /用户名或密码/);
+    assert.throws(() => parseStudioCandidateSourcesInput({ evidenceUrls: ["https://news.cn/a", "   "] }), /不能为空/);
+    assert.throws(() => parseStudioCandidateSourcesInput({ evidenceUrls: ["not a url"] }), /格式不正确/);
+    assert.throws(() => parseStudioCandidateSourcesInput({ evidenceUrls: [`https://news.cn/${"a".repeat(2048)}`] }), /2048/);
+  });
+
+  it("rejects non-public and reserved example hosts without requesting them", () => {
+    for (const source of [
+      "http://localhost/a",
+      "http://127.0.0.1/a",
+      "http://10.0.0.1/a",
+      "http://169.254.169.254/latest/meta-data",
+      "http://[::1]/a",
+      "http://internal/a",
+      "https://source.example/report",
+      "https://example.com/report",
+    ]) {
+      assert.throws(() => parseStudioCandidateSourcesInput({ evidenceUrls: [source] }), /可公开访问的网站/);
+    }
+  });
+});
 
 describe("publishing API contracts", () => {
   it("accepts explicit multi-platform legal confirmations and rejects ambiguous requests", () => {

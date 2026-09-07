@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import os
 import shutil
@@ -878,13 +879,19 @@ class WorkerContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             script_path = root / "script.json"
-            script_path.write_text(json.dumps({"scenes": []}), encoding="utf-8")
+            script_path.write_text(json.dumps({"scenes": [
+                {"position": 1, "narration": "第一段", "duration": 2},
+                {"position": 2, "narration": "第二段", "duration": 2},
+            ]}), encoding="utf-8")
             output_dir = root / "voice"
             output_dir.mkdir()
             track_path = output_dir / "narration.m4a"
             track_path.write_bytes(b"audio")
             plan_path = output_dir / "voiceover_plan.json"
-            plan_path.write_text(json.dumps({"track_path": str(track_path)}), encoding="utf-8")
+            plan_path.write_text(json.dumps({
+                "track_path": str(track_path),
+                "scenes": [{"position": 1}, {"position": 2}],
+            }), encoding="utf-8")
             request = self.valid_request("voice.synthesize", output_dir)
             request["input"] = {"scriptPath": str(script_path)}
             request["parameters"] = {
@@ -902,8 +909,53 @@ class WorkerContractTest(unittest.TestCase):
             self.assertEqual(synthesize.call_args.kwargs.get("estimated_cost_cny"), 0.5)
             self.assertEqual(response["diagnostics"]["actualCostCny"], 0.5)
             self.assertEqual(response["diagnostics"]["actualCostSource"], "configured_rate")
-            self.assertEqual(response["diagnostics"]["meteredAttemptCount"], 1)
+            self.assertEqual(response["diagnostics"]["meteredAttemptCount"], 2)
             self.assertEqual(response["diagnostics"]["meteredFailedAttemptCount"], 0)
+
+    def test_minimax_voice_reports_a_definitive_provider_rejection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [
+                {"position": 1, "narration": "明确拒绝", "duration": 2},
+            ]}), encoding="utf-8")
+            output_dir = root / "nodes" / "voice" / "attempt-1"
+            request = self.valid_request("voice.synthesize", output_dir)
+            request["input"] = {"scriptPath": str(script_path)}
+            request["parameters"] = {
+                "providerId": "minimax-tts-v1",
+                "provider": "minimax",
+                "estimatedCostCny": 0.5,
+            }
+
+            def reject_with_ledger(**_kwargs):
+                ledger_path = output_dir.parent / ".voice-operations" / (
+                    hashlib.sha256(b"command-1").hexdigest() + ".json"
+                )
+                ledger_path.parent.mkdir(parents=True)
+                ledger_path.write_text(json.dumps({
+                    "version": "video-factory/paid-operation-v2",
+                    "operationId": "command-1",
+                    "completed": False,
+                    "providerId": "minimax-tts-v1",
+                    "modelId": "speech-2.8-turbo",
+                    "estimatedCostCny": 0.5,
+                    "items": [{
+                        "itemRequestId": "voice-scene-1",
+                        "state": "terminal_failed",
+                        "stateHistory": ["prepared", "unknown", "terminal_failed"],
+                    }],
+                }), encoding="utf-8")
+                raise RuntimeError("MiniMax speech synthesis failed: invalid request")
+
+            with patch("video_factory.worker.synthesize_voiceover_plan", side_effect=reject_with_ledger):
+                response = handle_request(request)
+
+            self.assertEqual(response["status"], "failed")
+            self.assertEqual(response["diagnostics"]["meteredAttemptCount"], 1)
+            self.assertEqual(response["diagnostics"]["meteredFailedAttemptCount"], 1)
+            self.assertEqual(response["diagnostics"]["actualCostCny"], 0)
+            self.assertTrue(response["diagnostics"]["providerOutcomeKnown"])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_kokoro_provider_requires_a_verified_isolated_runtime(self):

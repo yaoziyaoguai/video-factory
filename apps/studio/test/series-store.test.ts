@@ -150,6 +150,57 @@ describe("JsonSeriesStore", () => {
     );
   });
 
+  it("appends episode source supplements idempotently and only before adoption", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-supplement-store-"));
+    const store = new JsonSeriesStore(path.join(root, "series.json"));
+    await store.create(record());
+
+    const first = await store.appendEpisodeSources(
+      "series-1",
+      1,
+      ["https://news.example.cn/first", "https://police.example.cn/notice"],
+      "2026-08-24T09:00:00.000Z",
+    );
+    assert.equal(first.revision, 2);
+    assert.deepEqual(first.episodes[0]?.supplementSources, {
+      evidenceUrls: ["https://news.example.cn/first", "https://police.example.cn/notice"],
+      updatedAt: "2026-08-24T09:00:00.000Z",
+    });
+
+    // 重复保存同一 URL：幂等，不重写文件、不递增版本。
+    const deduped = await store.appendEpisodeSources(
+      "series-1",
+      1,
+      ["https://news.example.cn/first", "https://news.example.cn/second"],
+      "2026-08-24T09:05:00.000Z",
+    );
+    assert.equal(deduped.revision, 3);
+    assert.deepEqual(deduped.episodes[0]?.supplementSources?.evidenceUrls, [
+      "https://news.example.cn/first",
+      "https://police.example.cn/notice",
+      "https://news.example.cn/second",
+    ]);
+    const unchanged = await store.appendEpisodeSources(
+      "series-1",
+      1,
+      ["https://news.example.cn/first"],
+      "2026-08-24T09:06:00.000Z",
+    );
+    assert.equal(unchanged.revision, 3);
+    assert.equal(unchanged.episodes[0]?.supplementSources?.updatedAt, "2026-08-24T09:05:00.000Z");
+
+    // 已采用的单集不能再追加：补来源必须在开拍前完成。
+    await store.adoptEpisode("series-1", 1, "2026-08-24T09:10:00.000Z");
+    await assert.rejects(
+      () => store.appendEpisodeSources("series-1", 1, ["https://later.example.cn/x"], "2026-08-24T09:11:00.000Z"),
+      (error: unknown) => error instanceof SeriesStoreConflictError && /尚未采用的单集/.test(error.message),
+    );
+    await assert.rejects(
+      () => store.appendEpisodeSources("series-404", 1, ["https://later.example.cn/x"], "2026-08-24T09:11:00.000Z"),
+      (error: unknown) => error instanceof Error && /没有找到/.test(error.message),
+    );
+  });
+
   it("fails closed when an episode has not passed an independent greenlight audit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-series-greenlight-"));
     const store = new JsonSeriesStore(path.join(root, "series.json"));

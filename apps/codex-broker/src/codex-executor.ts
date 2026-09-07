@@ -229,6 +229,9 @@ export interface ScriptBrief {
   platform: string;
   durationSeconds: number;
   templateBlueprint?: Record<string, unknown>;
+  visualProof?: string;
+  visualPlan?: Record<string, unknown>;
+  seriesContext?: Record<string, unknown>;
   editorial?: {
     verdict: "produce_video" | "produce_image_story";
     reasons: string[];
@@ -1239,7 +1242,7 @@ function requireDirectorBrief(value: unknown): Record<string, unknown> {
   const rework = requireRecord(brief.rework, "payload.brief.rework");
   assertExactKeys(
     rework,
-    ["sourceRunId", "visualDirectionInstruction", "assetInstruction", "findings", "previousDirectorPlan"],
+    ["sourceRunId", "visualDirectionInstruction", "assetInstruction", "findings", "affectedScenePositions", "previousDirectorPlan"],
     "payload.brief.rework",
   );
   const sourceRunId = requireReworkSourceRunId(rework.sourceRunId, "payload.brief.rework.sourceRunId");
@@ -1250,11 +1253,30 @@ function requireDirectorBrief(value: unknown): Record<string, unknown> {
       visualDirectionInstruction: boundedReworkInstruction(rework.visualDirectionInstruction, "payload.brief.rework.visualDirectionInstruction"),
       assetInstruction: boundedReworkInstruction(rework.assetInstruction, "payload.brief.rework.assetInstruction"),
       findings: requireReworkFindings(rework.findings, "visual-direction", "payload.brief.rework.findings"),
+      ...(rework.affectedScenePositions === undefined
+        ? {}
+        : { affectedScenePositions: boundedScenePositions(rework.affectedScenePositions, "payload.brief.rework.affectedScenePositions") }),
       ...(rework.previousDirectorPlan === undefined
         ? {}
         : { previousDirectorPlan: boundedRecord(rework.previousDirectorPlan, "payload.brief.rework.previousDirectorPlan", 150_000) }),
     },
   };
+}
+
+function boundedScenePositions(value: unknown, field: string): number[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new CodexExecutorError(`${field} must contain at most 100 scene positions.`, false);
+  }
+  const positions = value.map((item, index) => {
+    if (!Number.isInteger(item) || Number(item) < 1 || Number(item) > 10_000) {
+      throw new CodexExecutorError(`${field}[${index}] must be an integer between 1 and 10000.`, false);
+    }
+    return Number(item);
+  });
+  if (new Set(positions).size !== positions.length) {
+    throw new CodexExecutorError(`${field} must not contain duplicate scene positions.`, false);
+  }
+  return positions;
 }
 
 function withoutLegacyCostPolicy(value: unknown, field: string): Record<string, unknown> {
@@ -1481,7 +1503,10 @@ function requireScriptBrief(value: unknown): ScriptBrief {
   const record = requireRecord(value, "payload.brief");
   assertExactKeys(
     record,
-    ["title", "angle", "audience", "nicheSlug", "platform", "durationSeconds", "templateBlueprint", "editorial", "rework"],
+    [
+      "title", "angle", "audience", "nicheSlug", "platform", "durationSeconds", "templateBlueprint",
+      "visualProof", "visualPlan", "seriesContext", "editorial", "rework",
+    ],
     "payload.brief",
   );
   const durationSeconds = record.durationSeconds;
@@ -1498,6 +1523,19 @@ function requireScriptBrief(value: unknown): ScriptBrief {
   };
   if (record.templateBlueprint !== undefined) {
     brief.templateBlueprint = withoutLegacyCostPolicy(record.templateBlueprint, "payload.brief.templateBlueprint");
+  }
+  if (record.visualProof !== undefined) {
+    const visualProof = requiredText(record.visualProof, "payload.brief.visualProof");
+    if (visualProof.length > 10_000) {
+      throw new CodexExecutorError("payload.brief.visualProof exceeds 10000 characters.", false);
+    }
+    brief.visualProof = visualProof;
+  }
+  if (record.visualPlan !== undefined) {
+    brief.visualPlan = boundedRecord(record.visualPlan, "payload.brief.visualPlan", 100_000);
+  }
+  if (record.seriesContext !== undefined) {
+    brief.seriesContext = boundedRecord(record.seriesContext, "payload.brief.seriesContext", 150_000);
   }
   if (record.editorial !== undefined) brief.editorial = requireEditorialBrief(record.editorial);
   if (record.rework !== undefined) brief.rework = requireScriptRework(record.rework);

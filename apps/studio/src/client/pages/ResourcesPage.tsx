@@ -41,6 +41,14 @@ import { VoiceStudio } from "../components/VoiceStudio.js";
 import { creatorFacingTechnicalText, providerLabel, providerModelLabel } from "../presentation.js";
 
 const SERVICE_STATUS = { ready: "在线", degraded: "受限", stopped: "离线" } as const;
+const TREND_SOURCE_CONTACT_ADMIN_HINT = "该热点源尚未由管理员接入，请联系管理员";
+const LOCAL_CAPABILITY_IMPACT_LABELS: Record<string, string> = {
+  python: "画面与字幕处理",
+  ffmpeg: "成片合成",
+  docker: "本地热点服务",
+  "macos-voices": "本机中文配音",
+  "minimax-tts": "云端配音",
+};
 const RECIPE_OPTIONS: Array<{ id: StudioProductionRecipeId; label: string }> = [
   { id: "free-stock", label: "仅免费画面" },
   { id: "keyshot-ai", label: "允许付费关键镜头" },
@@ -56,6 +64,7 @@ const RESOURCE_SECTION_IDS = [
   "publish-channels",
 ] as const;
 type ResourceSectionId = typeof RESOURCE_SECTION_IDS[number];
+type SettingsNotice = { kind: "success" | "error"; message: string };
 
 interface ProductionRoleDefinition {
   key: StudioProductionRoleBindingKey;
@@ -85,7 +94,7 @@ const AUTOMATIC_AGENT_ROLES = [
   { label: "参考片分析师", capability: "reference.grammar" },
   { label: "候选画面复核", capability: "asset.rank.semantic" },
   { label: "发行编辑", capability: "publish.copy" },
-  { label: "独立质量审计", capability: "role.audit" },
+  { label: "独立质量复核", capability: "role.audit" },
 ] as const;
 
 export function ResourcesPage() {
@@ -109,7 +118,7 @@ export function ResourcesPage() {
   const [settingsError, setSettingsError] = useState<string>();
   const [settings, setSettings] = useState<StudioCreatorSettings>();
   const [settingsSaving, setSettingsSaving] = useState(false);
-  const [settingsNotice, setSettingsNotice] = useState<string>();
+  const [settingsNotice, setSettingsNotice] = useState<SettingsNotice>();
   const [voiceDirection, setVoiceDirection] = useState<StudioVoiceDirection>({
     profileId: "macos:Tingting",
     rate: 185,
@@ -127,7 +136,16 @@ export function ResourcesPage() {
     return () => window.removeEventListener("hashchange", syncSection);
   }, []);
 
+  useEffect(() => {
+    if (settingsNotice?.kind !== "success") return;
+    const timer = window.setTimeout(() => {
+      setSettingsNotice((current) => current === settingsNotice ? undefined : current);
+    }, 4_000);
+    return () => window.clearTimeout(timer);
+  }, [settingsNotice]);
+
   function showSection(sectionId: ResourceSectionId) {
+    setSettingsNotice((current) => current?.kind === "success" ? undefined : current);
     setActiveSection(sectionId);
     window.history.replaceState(null, "", `#${sectionId}`);
     const reduceMotion = typeof window.matchMedia === "function"
@@ -205,9 +223,9 @@ export function ResourcesPage() {
       if (patch.roleProviderDefaults) setRoleProviderDefaults(updated.roleProviderDefaults ?? {});
       if (patch.productionDefaults) setProductionDefaults(updated.productionDefaults);
       if (patch.topicStrategy) setTopicStrategy({ ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...updated.topicStrategy });
-      setSettingsNotice(successMessage);
+      setSettingsNotice({ kind: "success", message: successMessage });
     } catch (caught) {
-      setSettingsNotice(`保存失败：${errorMessage(caught)}`);
+      setSettingsNotice({ kind: "error", message: `保存失败：${errorMessage(caught)}` });
     } finally {
       setSettingsSaving(false);
     }
@@ -240,15 +258,20 @@ export function ResourcesPage() {
   );
   const readyFoundation = foundationProviders.filter(isProductionReady).length;
   const usablePublishTargets = publishTargets.filter((target) => target.status === "ready" || target.status === "manual_only").length;
-  const reviewableManifestItems = useMemo(() => resourceManifest?.items.filter((item) => (
-    item.category === "visual" || item.category === "voice" || item.category === "font"
-  )) ?? [], [resourceManifest]);
+  const rightsManifestItems = useMemo(() => resourceManifest?.items.filter(isRightsManifestItem) ?? [], [resourceManifest]);
+  const needsReviewItems = useMemo(() => resourceManifest?.needsReviewItems
+    ?? rightsManifestItems.filter((item) => item.reviewStatus === "needs_review" && item.reviewDecision?.action !== "rejected"),
+  [resourceManifest?.needsReviewItems, rightsManifestItems]);
+  const reviewableManifestItems = useMemo(() => [
+    ...needsReviewItems,
+    ...rightsManifestItems.filter((item) => item.reviewDecision?.action === "rejected"),
+  ], [needsReviewItems, rightsManifestItems]);
   const productionRecordItems = useMemo(() => resourceManifest?.items.filter((item) => (
     item.category === "document" || item.category === "other"
   )) ?? [], [resourceManifest]);
   const reviewableManifestRuns = useMemo(() => groupManifestItems(reviewableManifestItems), [reviewableManifestItems]);
   const productionRecordRuns = useMemo(() => groupManifestItems(productionRecordItems), [productionRecordItems]);
-  const reviewableNeedsReviewCount = reviewableManifestItems.filter((item) => item.reviewStatus === "needs_review").length;
+  const reviewableNeedsReviewCount = resourceManifest?.needsReviewCount ?? needsReviewItems.length;
 
   return (
     <main className="page resources-page" data-active-section={activeSection}>
@@ -292,7 +315,7 @@ export function ResourcesPage() {
         {settingsError ? <ResourceError title="创作默认值读取失败" message={settingsError} retry={load} /> : !settings ? <div className="region-loading">正在读取创作默认值...</div> : <div className="configuration-sheet">
           <div className="configuration-intro">
             <Settings2 aria-hidden="true" size={22} />
-            <div><strong>先定创作习惯，再开始生产</strong><p>默认使用人工终审和仅免费画面；启用付费关键镜头后，图片、视频会按实际导演方案逐项报价并等待人工确认。</p><small>运行底座 {capabilities.filter((item) => item.state === "ready").length}/{capabilities.length} 项就绪</small></div>
+            <div><strong>先定创作习惯，再开始生产</strong><p>默认使用人工终审和仅免费画面；启用付费关键镜头后，图片、视频会按实际导演方案逐项报价并等待人工确认。</p><small>{productionEnvironmentSummary(capabilities)}</small></div>
           </div>
           <div className="configuration-fields">
             <label className="field"><span>画面来源策略</span><select aria-label="默认画面来源策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
@@ -306,12 +329,12 @@ export function ResourcesPage() {
           <div className="configuration-save-row"><span>{productionHasChanges ? "有未保存的创作默认值" : "当前默认值已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !productionHasChanges} onClick={() => void saveDefaults({ defaultRecipeId, productionDefaults }, "创作默认值已保存，将从下一条新制作生效。")}><Save aria-hidden="true" size={16} />{productionHasChanges ? "保存创作默认" : "已保存"}</button></div>
         </div>}
       </section>
-      {settingsNotice ? <p className="resource-settings-notice" role="status">{settingsNotice}</p> : null}
+      {settingsNotice ? <p className={`resource-settings-notice is-${settingsNotice.kind}`} role={settingsNotice.kind === "error" ? "alert" : "status"}>{settingsNotice.message}</p> : null}
 
       <section id="topic-strategy" className="resource-section topic-strategy-config" data-resource-section data-active={activeSection === "topic-strategy" ? "true" : undefined} data-tour="topic-strategy">
-        <ResourceHeading eyebrow="总编规则" title="什么题值得做" meta="热度只是信号；推荐必须同时有观众价值、可靠来源和可执行的视频形态" />
-        <div className="topic-rubric" aria-label="选题评分标准">
-          {[['受众相关', '18%', '是否与明确人群的真实处境相关'], ['系列价值', '18%', '能否连续生产而不是一次性追热'], ['可拍性', '14%', '是否有可靠素材和可见动作'], ['成本效率', '14%', '方案成本与画面价值是否匹配'], ['差异化', '14%', '是否提供通稿之外的新角度'], ['商业价值', '12%', '是否具备长期转化或合作空间'], ['合规安全', '10%', '事实、公共事件与平台风险']].map(([label, weight, detail]) => <article key={label}><span>{weight}</span><strong>{label}</strong><small>{detail}</small></article>)}
+        <ResourceHeading eyebrow="总编规则" title="什么题值得做" meta="系统综合判断下列准入条件；你只需维护账号定位、内容边界和来源标准，不需要调整评分权重" />
+        <div className="topic-rubric" aria-label="视频选题准入标准">
+          {[['明确观众收益', '必需', '说清谁会看，以及看完能解决什么具体问题'], ['前两秒钩子', '必需', '开场立即给出具体承诺或值得停留的理由'], ['画面不可替代', '必需', '有可见行动、对比或现场，而不只是把文字换成口播'], ['创作增量', '必需', '提供通稿之外的新解释、验证或选择依据'], ['可追溯来源', '必需', '事实能回到有效原始链接，并满足下方来源标准'], ['成本与价值匹配', '综合', '预计画面成本要与观看价值和制作必要性相称'], ['风险与形式匹配', '综合', '公共或高风险事件优先证据表达，不用生成画面虚构现场']].map(([label, gate, detail]) => <article key={label}><span>{gate}</span><strong>{label}</strong><small>{detail}</small></article>)}
         </div>
         <div className="topic-instruction-editor">
           <div className="topic-strategy-fields">
@@ -347,16 +370,16 @@ export function ResourcesPage() {
               {trendSources.filter((source) => source.status !== "ready").slice(0, 3).map((source) => (
                 <article key={source.id} className="service-row is-muted">
                   <span className="service-light is-degraded" />
-                  <div><strong>{source.label}</strong><small>{source.requirement ?? source.description}</small></div>
-                  <span>{source.status === "needs_config" ? "需要配置" : "人工"}</span>
+                  <div><strong>{source.label}</strong><small>{trendSourceStatusText(source)}</small></div>
+                  <span>{source.status === "needs_config" ? "尚未接入" : "人工"}</span>
                 </article>
               ))}
             </div>
             <ol className="live-signal-list" aria-label="已采集热点信号">
-              {signals.length > 0 ? signals.slice(0, 12).map((signal) => (
+              {signals.length > 0 ? signals.slice(0, 12).map((signal, index) => (
                 <li key={signal.id}>
-                  <span>{String(signal.rank).padStart(2, "0")}</span>
-                  <div><strong>{signal.title}</strong><small>{platformLabel(signal.platform)} · {sourceLabel(signal.sourceId)}</small></div>
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <div><strong>{signal.title}</strong><small>{platformLabel(signal.platform)} · {sourceLabel(signal.sourceId)} · 原榜第 {signal.rank}</small></div>
                   {signal.heat ? <output>{compactNumber(signal.heat)}</output> : null}
                   {signal.url ? <a href={signal.url} target="_blank" rel="noreferrer" title="查看原始热点"><ArrowUpRight aria-hidden="true" size={14} /></a> : null}
                 </li>
@@ -390,7 +413,7 @@ export function ResourcesPage() {
       </section>
 
       <section id="production-roles" className="resource-section foundation-registry" data-resource-section data-active={activeSection === "production-roles" ? "true" : undefined}>
-        <ResourceHeading eyebrow="制作角色" title="按角色配置生产能力" meta="这里只选择服务能力；具体模型在新建制作与费用确认时决定" />
+        <ResourceHeading eyebrow="制作角色" title="按角色配置生产能力" meta="文本模型在新建或返工时选择；只有付费图片、视频会在执行前逐镜报价并确认" />
         {providerLoading ? <div className="region-loading">正在读取制作能力...</div> : providerError ? null : (
           <>
             <div className="role-configuration-grid" aria-label="制作角色配置">
@@ -415,18 +438,18 @@ export function ResourcesPage() {
       </section>
 
       <section id="resource-manifest" className="resource-section resource-manifest-section" data-resource-section data-active={activeSection === "resource-manifest" ? "true" : undefined} data-tour="resource-manifest">
-        <ResourceHeading eyebrow="发布前核对" title="素材来源与授权" meta={resourceManifest ? `${reviewableManifestItems.length} 项素材 · ${reviewableNeedsReviewCount} 项待确认` : "核对画面、声音、字体和最终成片"} />
+        <ResourceHeading eyebrow="发布前核对" title="素材来源与授权" meta={resourceManifest ? `${rightsManifestItems.length} 项素材 · ${reviewableNeedsReviewCount} 项待确认` : "核对画面、声音、字体和最终成片"} />
         {manifestError ? <ResourceError title="资源清单读取失败" message={manifestError} retry={load} /> : !resourceManifest ? <div className="region-loading">正在汇总资源清单...</div> : <>
           <div className="resource-manifest-summary" aria-label="资源分类统计">
-            {(["visual", "voice", "font"] as const).map((category) => <div key={category}><span>{resourceCategoryLabel(category)}</span><strong>{reviewableManifestItems.filter((item) => item.category === category).length}</strong></div>)}
+            {(["visual", "voice", "font"] as const).map((category) => <div key={category}><span>{resourceCategoryLabel(category)}</span><strong>{rightsManifestItems.filter((item) => item.category === category).length}</strong></div>)}
             <div className={reviewableNeedsReviewCount ? "needs-review" : ""}><span>待确认</span><strong>{reviewableNeedsReviewCount}</strong></div>
           </div>
           {resourceManifest.legacyRunsWithoutManifest ? <p className="resource-manifest-legacy">有 {resourceManifest.legacyRunsWithoutManifest} 条旧任务生成于资源清单上线前，不会补写或伪造历史授权信息。</p> : null}
-          {resourceManifest.reconstructedRunCount ? <p className="resource-manifest-legacy" role="status">有 {resourceManifest.reconstructedRunCount} 条发生过付费调用但未完成清单的任务，已从现存产物保守恢复并全部标记为待复核。</p> : null}
+          {resourceManifest.reconstructedRunCount ? <p className="resource-manifest-legacy" role="status">有 {resourceManifest.reconstructedRunCount} 条发生过付费调用但未完成清单的任务，已按现存来源证据恢复；只有证据不足的素材需要确认。</p> : null}
           {resourceManifest.unreadableManifestCount ? <p className="resource-manifest-legacy" role="status">有 {resourceManifest.unreadableManifestCount} 条资源清单损坏或不可信，已隔离；其余任务仍可正常查看。</p> : null}
           {resourceManifest.truncatedRunCount ? <p className="resource-manifest-legacy" role="status">当前仅汇总最近 500 条制作，另有 {resourceManifest.truncatedRunCount} 条较早记录未进入本页统计。</p> : null}
           <ManifestRunGroups groups={reviewableManifestRuns.slice(0, manifestLimit)} onReview={reviewResource} />
-          {reviewableManifestItems.length === 0 ? <div className="resource-manifest-empty"><ListChecks aria-hidden="true" size={18} /><span>完成一条真实制作后，入片素材会在这里等待核对。</span></div> : null}
+          {reviewableManifestItems.length === 0 ? <div className="resource-manifest-empty"><ListChecks aria-hidden="true" size={18} /><span>当前没有需要确认或返工的素材。</span></div> : null}
           {reviewableManifestRuns.length > manifestLimit ? <button className="button button-secondary" type="button" onClick={() => setManifestLimit((current) => current + 8)}>显示更多素材视频（还剩 {reviewableManifestRuns.length - manifestLimit} 条）</button> : null}
           {productionRecordItems.length ? <details className="resource-manifest-records">
             <summary><span><strong>制作过程记录</strong><small>脚本、方案和质检报告默认收起，不混入授权待办</small></span><b>{productionRecordItems.length} 项</b></summary>
@@ -465,6 +488,10 @@ function resourceCategoryLabel(category: StudioResourceManifest["items"][number]
   return ({ visual: "画面", voice: "声音", font: "字体", document: "文档", other: "其他" } as const)[category];
 }
 
+function isRightsManifestItem(item: StudioResourceManifest["items"][number]): boolean {
+  return item.category === "visual" || item.category === "voice" || item.category === "font";
+}
+
 function resourceItemLabel(item: StudioResourceManifest["items"][number]): string {
   if (item.category === "visual") return item.contentType?.startsWith("image/") ? "图片画面" : "视频画面";
   if (item.category === "voice") return "配音音频";
@@ -478,14 +505,34 @@ function ManifestLedger({ items, record = false, onReview }: { items: StudioReso
     {items.map((item) => {
       const sourceUrl = externalResourceUrl(item.sourceUrl);
       return <article key={`${item.runId}:${item.id}`}>
-        <span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span>
-        <div><strong>{creatorFacingTechnicalText(item.creator) ?? resourceItemLabel(item)}</strong><small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small><p>{creatorFacingTechnicalText(item.licenseNote) ?? (record ? "保留这条记录用于追溯制作过程。" : "缺少授权说明，需要人工确认。")}</p></div>
-        <span className={record || item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{record ? "制作记录" : item.reviewDecision?.action === "confirmed" ? "已确认可用" : item.reviewDecision?.action === "rejected" ? "已驳回" : item.reviewStatus === "recorded" ? "已记录" : "待确认"}</span>
-        {sourceUrl ? <a href={sourceUrl} target="_blank" rel="noreferrer" title="核验资源来源"><ArrowUpRight aria-hidden="true" size={15} /></a> : <span />}
+        <ResourceItemPreview item={item} />
+        <div className="resource-manifest-copy"><div className="resource-item-heading"><span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span><strong>{item.scenePosition ? `第 ${item.scenePosition} 镜 · ` : ""}{creatorFacingTechnicalText(item.creator) ?? resourceItemLabel(item)}</strong></div><small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small>{!item.scenePosition ? <small className="resource-item-identity">未定位镜头 · 素材标识 {shortItemIdentifier(item.id)}</small> : null}<p>{creatorFacingTechnicalText(item.licenseNote) ?? (record ? "保留这条记录用于追溯制作过程。" : "缺少授权说明，需要人工确认。")}</p></div>
+        <span className={record || item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{record ? "制作记录" : item.reviewDecision?.action === "confirmed" ? "已确认可用" : item.reviewDecision?.action === "rejected" ? "需在原制作返工" : item.reviewStatus === "recorded" ? "已记录" : "待确认"}</span>
+        {sourceUrl ? <a className="resource-source-link" href={sourceUrl} target="_blank" rel="noreferrer" title="核验资源来源"><ArrowUpRight aria-hidden="true" size={15} /></a> : <span className="resource-source-link" />}
         {!record && onReview ? <ResourceReviewActions item={item} onReview={onReview} /> : null}
       </article>;
     })}
   </div>;
+}
+
+function ResourceItemPreview({ item }: { item: StudioResourceManifest["items"][number] }) {
+  const label = resourceItemIdentity(item);
+  if (item.contentUrl && item.contentType?.startsWith("image/")) {
+    return <div className="resource-item-preview"><img src={item.contentUrl} alt={`${label}素材缩略图`} loading="lazy" /><span>{label}</span></div>;
+  }
+  if (item.contentUrl && item.contentType?.startsWith("video/")) {
+    return <div className="resource-item-preview"><video src={`${item.contentUrl}#t=0.1`} aria-label={`${label}素材缩略图`} muted playsInline preload="metadata" /><span>{label}</span></div>;
+  }
+  return <div className="resource-item-preview is-placeholder"><Film aria-hidden="true" size={18} /><span>{label}</span></div>;
+}
+
+function resourceItemIdentity(item: StudioResourceManifest["items"][number]): string {
+  return item.scenePosition ? `第 ${item.scenePosition} 镜` : `素材 ${shortItemIdentifier(item.id)}`;
+}
+
+function shortItemIdentifier(value: string): string {
+  const token = value.replace(/[^a-zA-Z0-9]/g, "").slice(-8);
+  return token ? token.toLocaleUpperCase("en-US") : "未编号";
 }
 
 type ManifestRunGroup = {
@@ -514,16 +561,23 @@ function groupManifestItems(items: StudioResourceManifest["items"]): ManifestRun
 function ManifestRunGroups({ groups, record = false, onReview }: { groups: ManifestRunGroup[]; record?: boolean; onReview?: (input: Omit<StudioResourceReviewInput, "expectedRevision">) => Promise<void> }) {
   return <div className="resource-manifest-runs" aria-label={record ? "按视频整理的制作记录" : "按视频整理的素材记录"}>
     {groups.map((group) => {
-      const needsReview = group.items.filter((item) => item.reviewStatus !== "recorded").length;
+      const needsReview = group.items.filter((item) => item.reviewStatus === "needs_review" && item.reviewDecision?.action !== "rejected").length;
+      const rejected = group.items.filter((item) => item.reviewDecision?.action === "rejected").length;
       return <details className="resource-manifest-run" key={group.runId}>
-        <summary>
-          <span><strong>{group.runTitle}</strong><small>{group.items.length} 项{!record && needsReview ? ` · ${needsReview} 项待确认` : ""}</small></span>
-          <b>展开</b>
+        <summary aria-label={`查看“${group.runTitle}”（制作编号 ${shortRunId(group.runId)}）的${record ? "制作记录" : "素材明细"}`}>
+          <span><strong>{group.runTitle}</strong><small title={`完整制作编号 ${group.runId}`}>制作编号 {shortRunId(group.runId)} · {group.items.length} 项{!record && needsReview ? ` · ${needsReview} 项待确认` : ""}{!record && rejected ? ` · ${rejected} 项需返工` : ""}</small></span>
+          <b aria-hidden="true">展开</b>
         </summary>
         <ManifestLedger items={group.items} record={record} {...(onReview ? { onReview } : {})} />
       </details>;
     })}
   </div>;
+}
+
+function shortRunId(runId: string): string {
+  if (runId.length <= 12) return runId;
+  const finalSegment = runId.split("-").filter(Boolean).at(-1) ?? runId;
+  return finalSegment.length <= 12 ? finalSegment : finalSegment.slice(-12);
 }
 
 function ResourceReviewActions({ item, onReview }: { item: StudioResourceManifest["items"][number]; onReview: (input: Omit<StudioResourceReviewInput, "expectedRevision">) => Promise<void> }) {
@@ -537,12 +591,12 @@ function ResourceReviewActions({ item, onReview }: { item: StudioResourceManifes
     catch (caught) { setError(errorMessage(caught)); }
     finally { setPending(false); }
   };
-  if (item.reviewDecision?.action === "rejected") return <div><Link to={`/projects/${item.runId}`}>打开原制作，点击“基于这版重新制作”</Link>{item.reviewDecision.note ? <small>{item.reviewDecision.note}</small> : null}</div>;
+  if (item.reviewDecision?.action === "rejected") return <div className="resource-review-actions"><Link to={`/projects/${item.runId}`}>打开原制作，点击“基于这版重新制作”</Link>{item.reviewDecision.note ? <small>{item.reviewDecision.note}</small> : null}</div>;
   if (item.reviewStatus === "recorded") return null;
-  return <div>
-    <button type="button" disabled={pending} onClick={() => void submit("confirmed")}>确认可用</button>
-    <button type="button" disabled={pending} onClick={() => setRejecting(true)}>驳回</button>
-    {rejecting ? <div><label><span>驳回原因</span><input value={note} onChange={(event) => setNote(event.target.value)} /></label><button type="button" disabled={pending || !note.trim()} onClick={() => void submit("rejected")}>确认驳回</button></div> : null}
+  return <div className="resource-review-actions">
+    <button className="button button-secondary" type="button" disabled={pending} onClick={() => void submit("confirmed")}>确认可用</button>
+    <button className="button button-danger-ghost" type="button" disabled={pending} onClick={() => setRejecting(true)}>驳回</button>
+    {rejecting ? <div className="resource-review-reject"><label><span>驳回原因</span><input value={note} onChange={(event) => setNote(event.target.value)} /></label><button className="button button-danger" type="button" disabled={pending || !note.trim()} onClick={() => void submit("rejected")}>确认驳回</button></div> : null}
     {error ? <small role="alert">{error}</small> : null}
   </div>;
 }
@@ -754,6 +808,33 @@ function isProductionReady(provider: StudioProvider): boolean {
 
 function serviceKind(kind: StudioTrendService["kind"]): string {
   return kind === "collector" ? "采集与历史" : kind === "feed" ? "中文资讯订阅" : "榜单接口";
+}
+
+function containsInternalOperationsLanguage(value: string): boolean {
+  return /\bmake\s+\S+/i.test(value)
+    || /\bscope\b/i.test(value)
+    || value.includes("适配器")
+    || value.includes("环境变量")
+    || /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9_]+)+\b/.test(value);
+}
+
+function trendSourceStatusText(source: StudioTrendSource): string {
+  if (source.status === "needs_config") return TREND_SOURCE_CONTACT_ADMIN_HINT;
+  const text = creatorFacingTechnicalText(source.requirement) ?? source.description;
+  return containsInternalOperationsLanguage(text) ? TREND_SOURCE_CONTACT_ADMIN_HINT : text;
+}
+
+function productionEnvironmentSummary(capabilities: StudioLocalCapability[]): string {
+  if (capabilities.length === 0) {
+    return "制作环境状态未知，可先新建制作试用；遇到无法进入的步骤再联系管理员。";
+  }
+  const affected = [...new Set(capabilities
+    .filter((item) => item.state !== "ready")
+    .map((item) => LOCAL_CAPABILITY_IMPACT_LABELS[item.id] ?? "个别制作步骤"))];
+  if (affected.length === 0) {
+    return "制作环境已就绪：画面处理、配音和成片合成可以直接使用。";
+  }
+  return `制作环境有 ${affected.length} 处未就绪：${affected.join("、")}暂不可用或受限；其余创作能力不受影响，无法自行解决时请联系管理员。`;
 }
 
 function browserServiceUrl(value: string | undefined): string | undefined {

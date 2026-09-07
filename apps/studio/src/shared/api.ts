@@ -158,6 +158,8 @@ export interface StudioProvider {
   estimatedCnyPerClip?: number;
   billingUnit?: "clip" | "run";
   docsUrl?: string;
+  /** 服务商控制台入口，用于人工核对付费任务与账单；与 API 文档入口（docsUrl）分开声明。 */
+  consoleUrl?: string;
   requirement?: string;
   defaultModelId?: string;
   modelProfiles?: StudioModelProfile[];
@@ -274,6 +276,7 @@ export interface StudioTrendCandidate {
   painPoint: string;
   hook: string;
   rationale: string;
+  visualProof?: string;
   providerId: string;
   generatedAt: string;
   evidence: StudioOpportunityEvidence[];
@@ -417,6 +420,11 @@ export interface StudioSeriesEpisode {
   attemptRunIds?: string[];
   continuity: StudioSeriesEpisodeContinuity;
   planning: StudioSeriesEpisodePlanning;
+  // 公共议题单集的人工补充原始来源：只追加、持久化，用于重算来源门禁。
+  supplementSources?: {
+    evidenceUrls: string[];
+    updatedAt: string;
+  };
   createdAt: string;
   updatedAt: string;
   publishedAt?: string;
@@ -556,6 +564,7 @@ export interface StudioOpportunity {
   episodeNumber?: number;
   verification?: StudioCandidateVerification;
   editorialDecision?: StudioEditorialDecision;
+  visualProof?: string;
   visualPlan?: StudioVisualPlan;
 }
 
@@ -576,12 +585,20 @@ export interface StudioOpportunityInput {
   episodeNumber?: number;
   verification?: StudioCandidateVerification;
   editorialDecision?: StudioEditorialDecision;
+  visualProof?: string;
   visualPlan?: StudioVisualPlan;
 }
 
 export interface StudioCandidateAdoptionInput {
   origin: StudioCandidateOrigin;
   verificationConfirmed?: boolean;
+}
+
+export interface StudioCandidateSourcesInput {
+  evidenceUrls: string[];
+  // 候选补充必须显式声明入口，防止相同 candidateId 跨 trend/series 串改；
+  // 机会（opportunity）补充由机会自身身份限定，不需要该字段。
+  origin?: "trend" | "series";
 }
 
 export interface StudioOpportunityStatusInput {
@@ -597,7 +614,13 @@ export interface StudioRunSummary {
   startedAt: string;
   finishedAt?: string;
   currentNodeId: string;
+  runPurpose?: "production" | "test";
   workflowNodeIds?: string[];
+  finalReviewOutcome?: "approved" | "rejected";
+  continuation?: {
+    supported: boolean;
+    reason?: string;
+  };
   nextAction?: "review" | "confirm_spend" | "regenerate";
   videoContentUrl?: string;
   archivedAt?: string;
@@ -692,10 +715,6 @@ export interface StudioRunDetail extends StudioRunSummary {
   videoArtifactId?: string;
   publishPackageArtifactId?: string;
   pauseRequested?: boolean;
-  continuation?: {
-    supported: boolean;
-    reason?: string;
-  };
 }
 
 export interface StudioNode {
@@ -901,8 +920,9 @@ export interface StudioPaidOperationItem {
   estimatedCostCny: number;
   taskId?: string;
   actualCostCny?: number;
-  actualCostSource?: "configured_rate";
+  actualCostSource?: "provider_reported" | "configured_rate";
   error?: string;
+  manualReconciliationRequired?: boolean;
 }
 
 export interface StudioPaidNodeSummary {
@@ -1108,12 +1128,13 @@ export interface StudioResourceManifest {
   truncatedRunCount: number;
   truncatedItemCount: number;
   categories: Record<StudioResourceManifestItem["category"], number>;
+  needsReviewItems?: StudioResourceManifestItem[];
   items: StudioResourceManifestItem[];
   assetIndex: StudioAssetIndex;
 }
 
 export interface StudioTemplateExperimentScorecard {
-  templateId: "trend-fact-brief" | "knowledge-explainer" | "photo-story";
+  templateId: string;
   templateName: string;
   sampleSize: number;
   metrics: {
@@ -1206,6 +1227,7 @@ export interface StudioReworkContext {
   sourceRunId: string;
   sourceRunRevision: number;
   rejectionReason?: string;
+  affectedScenePositions?: number[];
   nodeInstructions: {
     script: string;
     visualDirection: string;
@@ -1219,6 +1241,7 @@ export interface StudioReworkContext {
 export interface StudioReworkDraft {
   input: StudioProductionInput;
   inheritedNodeIds: string[];
+  requiredAffectedScenePositions: number[];
 }
 
 export interface StudioProductionInput {
@@ -1230,12 +1253,15 @@ export interface StudioProductionInput {
   durationSeconds: number;
   platform: string;
   reviewMode: "manual" | "automatic";
+  runPurpose?: "production" | "test";
   template?: StudioTemplateSelection;
   editorial?: {
     verdict: "produce_video" | "produce_image_story";
     reasons: string[];
     guardrails: string[];
   };
+  visualProof?: string;
+  visualPlan?: StudioVisualPlan;
   seriesContext?: StudioSeriesProductionContext;
   creationContext?: {
     origin: "trend" | "series" | "manual";
@@ -1540,6 +1566,101 @@ export function parseStudioCandidateAdoptionInput(value: unknown): StudioCandida
   };
 }
 
+const MAX_SOURCE_URL_LENGTH = 2048;
+
+// 人工补充来源只做本地字符串规范化，绝不请求、HEAD 或探测远端，避免 SSRF。
+// 搜索结果页允许保存留档，但是否计入有效独立来源由来源门槛另行判断。
+export function parseStudioCandidateSourcesInput(value: unknown): StudioCandidateSourcesInput {
+  const input = requiredObject(value, "补充来源请求");
+  if (!Array.isArray(input.evidenceUrls) || input.evidenceUrls.length < 1 || input.evidenceUrls.length > 10) {
+    throw new StudioInputError("每次只能提交 1 到 10 条来源链接。");
+  }
+  if (input.evidenceUrls.some((item) => typeof item !== "string")) {
+    throw new StudioInputError("来源链接必须是文本。");
+  }
+  // 同一请求内按规范化形式去重，保证幂等提交不会重复入库。
+  const evidenceUrls = [...new Set(input.evidenceUrls.map((item) => {
+    const normalized = canonicalizeSourceUrl(item);
+    const hostname = new URL(normalized).hostname;
+    if (!isRoutableSourceHostname(hostname) || isReservedExampleHostname(hostname)) {
+      throw new StudioInputError("来源链接必须指向可公开访问的网站，不能使用本机、私网或示例地址。");
+    }
+    return normalized;
+  }))];
+  if (input.origin !== undefined && input.origin !== "trend" && input.origin !== "series") {
+    throw new StudioInputError("候选来源补充只支持热点或系列入口。");
+  }
+  return { evidenceUrls, ...(input.origin ? { origin: input.origin } : {}) };
+}
+
+export function canonicalizeSourceUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new StudioInputError("来源链接不能为空。");
+  if (trimmed.length > MAX_SOURCE_URL_LENGTH) {
+    throw new StudioInputError("单条来源链接不能超过 2048 个字符。");
+  }
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new StudioInputError("来源链接格式不正确。");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new StudioInputError("来源链接必须是 http 或 https 地址。");
+  }
+  if (url.username || url.password) {
+    throw new StudioInputError("来源链接不能携带用户名或密码。");
+  }
+  url.hash = "";
+  if ((url.protocol === "https:" && url.port === "443") || (url.protocol === "http:" && url.port === "80")) {
+    url.port = "";
+  }
+  return url.href;
+}
+
+// 这里只做纯字符串判断，不解析 DNS、也不访问远端；用于阻止显然不可公开核验的来源凑数。
+export function isRoutableSourceHostname(value: string): boolean {
+  const hostname = value.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!hostname || hostname.includes(":")) return false;
+  const ipv4 = hostname.split(".").map(Number);
+  if (ipv4.length === 4 && ipv4.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
+    const [first, second, third] = ipv4 as [number, number, number, number];
+    return !(first === 0
+      || first === 10
+      || first === 127
+      || first >= 224
+      || (first === 100 && second >= 64 && second <= 127)
+      || (first === 169 && second === 254)
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && second === 0 && third === 0)
+      || (first === 192 && second === 0 && third === 2)
+      || (first === 192 && second === 168)
+      || (first === 198 && (second === 18 || second === 19))
+      || (first === 198 && second === 51 && third === 100)
+      || (first === 203 && second === 0 && third === 113));
+  }
+  if (!hostname.includes(".")) return false;
+  return !["localhost", "local", "internal", "lan", "home"].some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
+}
+
+function isReservedExampleHostname(value: string): boolean {
+  const hostname = value.toLowerCase().replace(/\.$/, "");
+  return ["example.com", "example.net", "example.org", "test", "invalid", "example"]
+    .some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
+}
+
+// 人工补充来源在 evidence 里的统一形态：只追加、不覆盖原有信号；强度为 0，明确不冒充热度信号。
+export function manualSupplementEvidence(evidenceUrl: string, collectedAt: string): StudioOpportunityEvidence {
+  return {
+    source: "manual-supplement",
+    platform: "manual",
+    keyword: "人工补充来源",
+    strength: 0,
+    evidenceUrl,
+    collectedAt,
+  };
+}
+
 export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new StudioInputError("审片决定格式不正确。");
@@ -1697,6 +1818,10 @@ export function parseStudioOpportunityInput(value: unknown): StudioOpportunityIn
   const editorialDecision = input.editorialDecision === undefined
     ? undefined
     : parseEditorialDecision(input.editorialDecision);
+  const visualProof = optionalString(input.visualProof);
+  const visualPlan = input.visualPlan === undefined
+    ? undefined
+    : parseStudioVisualPlan(input.visualPlan);
 
   return {
     title: requiredTrimmedString(input.title, "标题"),
@@ -1714,7 +1839,37 @@ export function parseStudioOpportunityInput(value: unknown): StudioOpportunityIn
     ...(optionalString(input.seriesName) ? { seriesName: optionalString(input.seriesName)! } : {}),
     ...(episodeNumber ? { episodeNumber } : {}),
     ...(editorialDecision ? { editorialDecision } : {}),
+    ...(visualProof ? { visualProof } : {}),
+    ...(visualPlan ? { visualPlan } : {}),
   };
+}
+
+const VISUAL_SOURCES = new Set<StudioVisualSource>(["creator", "stock", "screen", "local-card", "generated"]);
+
+export function parseStudioVisualPlan(value: unknown): StudioVisualPlan {
+  const input = requiredObject(value, "具体画面方案");
+  if (!Array.isArray(input.beats) || input.beats.length < 1 || input.beats.length > 12) {
+    throw new StudioInputError("具体画面方案必须包含 1 到 12 个镜头节拍。");
+  }
+  const beats = input.beats.map((entry, index): StudioVisualBeat => {
+    const beat = requiredObject(entry, `第 ${index + 1} 个镜头节拍`);
+    const source = requiredTrimmedString(beat.source, `第 ${index + 1} 个镜头来源`);
+    if (!VISUAL_SOURCES.has(source as StudioVisualSource)) {
+      throw new StudioInputError(`第 ${index + 1} 个镜头来源无效。`);
+    }
+    return {
+      id: requiredTrimmedString(beat.id, `第 ${index + 1} 个镜头编号`),
+      role: requiredTrimmedString(beat.role, `第 ${index + 1} 个镜头作用`),
+      duration: requiredTrimmedString(beat.duration, `第 ${index + 1} 个镜头时段`),
+      description: requiredTrimmedString(beat.description, `第 ${index + 1} 个镜头画面`),
+      searchQuery: requiredTrimmedString(beat.searchQuery, `第 ${index + 1} 个镜头素材线索`),
+      source: source as StudioVisualSource,
+    };
+  });
+  if (new Set(beats.map((beat) => beat.id)).size !== beats.length) {
+    throw new StudioInputError("具体画面方案的镜头编号不能重复。");
+  }
+  return { strategy: requiredTrimmedString(input.strategy, "具体画面策略"), beats };
 }
 
 function parseEditorialDecision(value: unknown): StudioEditorialDecision {

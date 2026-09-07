@@ -47,13 +47,9 @@ export function VoiceStudio({
     () => voices.find((voice) => voice.id === direction.profileId),
     [direction.profileId, voices],
   );
-  const filteredVoices = useMemo(() => voices.filter((voice) => {
-    if (filter === "female") return voice.gender === "female";
-    if (filter === "male") return voice.gender === "male";
-    if (filter === "cloud") return voice.engine === "minimax";
-    if (filter === "system") return voice.engine === "macos";
-    return RECOMMENDED_VOICES.has(voice.id) || voice.id === direction.profileId;
-  }), [direction.profileId, filter, voices]);
+  const filteredVoices = useMemo(() => voices.filter((voice) => (
+    voice.id === direction.profileId || voiceMatchesFilter(voice, filter)
+  )), [direction.profileId, filter, voices]);
   const filterCounts = useMemo(() => ({
     recommended: voices.filter((voice) => RECOMMENDED_VOICES.has(voice.id) || voice.id === direction.profileId).length,
     female: voices.filter((voice) => voice.gender === "female").length,
@@ -64,6 +60,7 @@ export function VoiceStudio({
   const selectedPreset = VOICE_PRESETS.find((preset) => preset.rate === direction.rate
     && preset.pauseScale === direction.pauseScale
     && preset.masteringPreset === direction.masteringPreset);
+  const selectedOutsideFilter = filter !== "recommended" && selected && !voiceMatchesFilter(selected, filter);
 
   useEffect(() => setDirection(value), [value]);
   useEffect(() => {
@@ -136,6 +133,7 @@ export function VoiceStudio({
                 </button>
               ))}
             </div>
+            {selectedOutsideFilter ? <p className="voice-filter-note" role="status">当前所选声音“{selected.label}”不属于这个分类，仍保留显示；切换分类不会更改已选声音。</p> : null}
             <fieldset className="voice-cast">
               <legend className="sr-only">旁白音色</legend>
               {filteredVoices.map((voice) => (
@@ -235,6 +233,14 @@ export function VoiceStudio({
       {error ? <p className="form-error" role="alert">{error}</p> : null}
     </section>
   );
+}
+
+function voiceMatchesFilter(voice: StudioVoiceProfile, filter: VoiceFilter): boolean {
+  if (filter === "female") return voice.gender === "female";
+  if (filter === "male") return voice.gender === "male";
+  if (filter === "cloud") return voice.engine === "minimax";
+  if (filter === "system") return voice.engine === "macos";
+  return RECOMMENDED_VOICES.has(voice.id);
 }
 
 function masteringPresetLabel(preset: StudioVoiceDirection["masteringPreset"]): string {

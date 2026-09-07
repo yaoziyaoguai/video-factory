@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -17,6 +17,7 @@ import {
   type ImageGenerationAdapter,
   type WorkerResponse,
 } from "../src/index.js";
+import { reworkAffectedScenePositions } from "../src/generative-asset-worker.js";
 
 const resolvePublicHost = async (): Promise<string[]> => ["93.184.216.34"];
 
@@ -72,6 +73,48 @@ describe("GenerativeAssetWorkerClient", () => {
       () => subject.run(request),
       /local card without explicit editorial_card authorization/i,
     );
+  });
+
+  it("rejects a routed stock shot whose asset provider id reveals an unauthorized local card", async () => {
+    await assert.rejects(
+      () => runCraftedAssetPlan({ asset: { provider_id: "local-editorial-v1" } }),
+      /local card without explicit editorial_card authorization/i,
+    );
+  });
+
+  it("rejects a routed stock shot whose actual route provider reveals an unauthorized local card", async () => {
+    await assert.rejects(
+      () => runCraftedAssetPlan({ route: { actual_provider_id: "local-editorial-v1" } }),
+      /local card without explicit editorial_card authorization/i,
+    );
+  });
+
+  it("rejects a routed stock shot whose source URL is an unauthorized local-card subpath", async () => {
+    await assert.rejects(
+      () => runCraftedAssetPlan({ asset: { source_url: "local://video-factory/card/scene-01" } }),
+      /local card without explicit editorial_card authorization/i,
+    );
+  });
+
+  it("allows a local card only when the director explicitly selects editorial_card delivery", async () => {
+    const response = await runCraftedAssetPlan({
+      directorShot: {
+        preferredProviderId: "local-editorial-v1",
+        deliveryType: "editorial_card",
+      },
+      asset: {
+        provider: "local",
+        provider_id: "local-editorial-v1",
+        source_url: "local://video-factory/card/scene-01",
+      },
+      route: {
+        preferred_provider_id: "local-editorial-v1",
+        actual_provider_id: "local-editorial-v1",
+        actual_provider: "local",
+      },
+    });
+
+    assert.equal(response.status, "succeeded");
   });
 
   it("uses a pending scaffold instead of a local-card baseline for direct generation", async () => {
@@ -324,6 +367,103 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(providerCalls, 1);
   });
 
+  it("creates a newly quoted asset when a previous materialized file is missing", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-missing-materialized-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "丢失母片后重新生成" },
+    ] }));
+    let createCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => {
+            createCalls += 1;
+            return {
+              providerId: "seedance-video-v1",
+              taskId: `missing-materialized-${createCalls}`,
+              videoUrl: `https://example.com/missing-materialized-${createCalls}.mp4`,
+            };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response(`video-${createCalls}`, { headers: { "content-type": "video/mp4" } }),
+    });
+
+    const original = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1));
+    assert.equal(original.status, "succeeded");
+    const originalPlan = JSON.parse(await readFile(String(original.output?.assetPlanPath), "utf8"));
+    await rm(originalPlan.scene_assets[0].local_path);
+
+    const regenerated = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-2"), 1, 1),
+      commandId: "command-2",
+      attempt: 2,
+    });
+
+    assert.equal(regenerated.status, "succeeded");
+    assert.equal(createCalls, 2);
+    const regeneratedPlan = JSON.parse(await readFile(String(regenerated.output?.assetPlanPath), "utf8"));
+    assert.equal(await readFile(regeneratedPlan.scene_assets[0].local_path, "utf8"), "video-2");
+  });
+
+  it("does not carry forward a zero-byte materialized asset", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-zero-master-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "零字节母片不能复用" },
+    ] }));
+    let createCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => {
+            createCalls += 1;
+            return {
+              providerId: "seedance-video-v1",
+              taskId: `zero-master-${createCalls}`,
+              videoUrl: `https://example.com/zero-master-${createCalls}.mp4`,
+            };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response(`video-${createCalls}`, { headers: { "content-type": "video/mp4" } }),
+    });
+
+    const original = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1));
+    assert.equal(original.status, "succeeded");
+    const originalPlan = JSON.parse(await readFile(String(original.output?.assetPlanPath), "utf8"));
+    await writeFile(originalPlan.scene_assets[0].local_path, "");
+    const ledgerPath = path.join(
+      root,
+      ".generation-operations",
+      `${createHash("sha256").update("command-1").digest("hex")}.json`,
+    );
+    const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+    ledger.items[0].sha256 = createHash("sha256").update("").digest("hex");
+    ledger.items[0].sizeBytes = 0;
+    await writeFile(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+
+    const regenerated = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-2"), 1, 1),
+      commandId: "command-2",
+      attempt: 2,
+    });
+
+    assert.equal(regenerated.status, "succeeded");
+    assert.equal(createCalls, 2);
+    const regeneratedPlan = JSON.parse(await readFile(String(regenerated.output?.assetPlanPath), "utf8"));
+    assert.equal(await readFile(regeneratedPlan.scene_assets[0].local_path, "utf8"), "video-2");
+  });
+
   it("redownloads an accepted paid task without creating it again", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-reconcile-download-"));
     const scriptPath = path.join(root, "script.json");
@@ -381,6 +521,136 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(await readFile(plan.scene_assets[0].local_path, "utf8"), "recovered-video");
   });
 
+  it("refreshes an expired accepted result URL by task id before downloading it again", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-refresh-url-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "刷新已过期的下载地址" },
+    ] }));
+    const expiredUrl = "https://example.com/expired.mp4";
+    const refreshedUrl = "https://example.com/refreshed.mp4";
+    let createCalls = 0;
+    let reconcileCalls = 0;
+    const downloadedUrls: string[] = [];
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async (_request, onProgress) => {
+            createCalls += 1;
+            await onProgress?.({
+              providerId: "seedance-video-v1",
+              taskId: "accepted-task-with-expired-url",
+              status: "succeeded",
+              videoUrl: expiredUrl,
+            });
+            return {
+              providerId: "seedance-video-v1",
+              taskId: "accepted-task-with-expired-url",
+              videoUrl: expiredUrl,
+            };
+          },
+          reconcile: async (taskId) => {
+            reconcileCalls += 1;
+            assert.equal(taskId, "accepted-task-with-expired-url");
+            return { providerId: "seedance-video-v1", taskId, videoUrl: refreshedUrl };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async (input) => {
+        const url = String(input);
+        downloadedUrls.push(url);
+        return url === refreshedUrl
+          ? new Response("refreshed-video", { headers: { "content-type": "video/mp4" } })
+          : new Response("expired", { status: 403 });
+      },
+    });
+
+    const first = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1));
+    assert.equal(first.status, "failed");
+    const recovered = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-2"), 0, 0),
+      attempt: 2,
+    });
+
+    assert.equal(recovered.status, "succeeded");
+    assert.equal(createCalls, 1);
+    assert.equal(reconcileCalls, 1);
+    assert.deepEqual(downloadedUrls, [expiredUrl, refreshedUrl]);
+    const plan = JSON.parse(await readFile(String(recovered.output?.assetPlanPath), "utf8"));
+    assert.equal(await readFile(plan.scene_assets[0].local_path, "utf8"), "refreshed-video");
+    const ledger = JSON.parse(await readFile(path.join(
+      root,
+      ".generation-operations",
+      `${createHash("sha256").update("command-1").digest("hex")}.json`,
+    ), "utf8"));
+    assert.equal(ledger.items[0].resultUrl, refreshedUrl);
+    assert.equal(ledger.items[0].state, "materialized");
+  });
+
+  it("keeps an unmaterialized provider success uncertain and never creates it again", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-expired-requote-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "无法续查时重新生成" },
+    ] }));
+    let createCalls = 0;
+    const staleUrl = "https://example.com/stale-result.mp4";
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => {
+            createCalls += 1;
+            return {
+              providerId: "seedance-video-v1",
+              taskId: `paid-task-${createCalls}`,
+              videoUrl: createCalls === 1 ? staleUrl : "https://example.com/fresh-result.mp4",
+            };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async (input) => String(input) === staleUrl
+        ? new Response("expired", { status: 403 })
+        : new Response("fresh-video", { headers: { "content-type": "video/mp4" } }),
+    });
+
+    assert.equal((await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1))).status, "failed");
+    const recovery = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-2"), 0, 0),
+      attempt: 2,
+    });
+    assert.equal(recovery.status, "failed");
+    assert.equal(recovery.diagnostics?.providerOutcomeKnown, false);
+    const firstLedger = JSON.parse(await readFile(path.join(
+      root,
+      ".generation-operations",
+      `${createHash("sha256").update("command-1").digest("hex")}.json`,
+    ), "utf8"));
+    assert.equal(firstLedger.items[0].state, "provider_succeeded");
+    // 永久下载失败（403）：保留 taskId/resultUrl/费用与错误证据，但标记逐项人工核账可操作。
+    assert.equal(firstLedger.items[0].manualReconciliationRequired, true);
+    assert.equal(firstLedger.items[0].taskId, "paid-task-1");
+    assert.equal(firstLedger.items[0].resultUrl, staleUrl);
+    assert.match(firstLedger.items[0].error ?? "", /403|expired/i);
+    assert.notEqual(firstLedger.items[0].estimatedCostCny, undefined);
+
+    const nextOperation = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-3"), 1, 1),
+      commandId: "command-2",
+      attempt: 3,
+    });
+    assert.equal(nextOperation.status, "failed");
+    assert.equal(nextOperation.diagnostics?.providerOutcomeKnown, false);
+    assert.equal(createCalls, 1);
+  });
+
   it("carries an accepted paid task into a new authorized operation without creating it again", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-carry-accepted-"));
     const scriptPath = path.join(root, "script.json");
@@ -422,6 +692,14 @@ describe("GenerativeAssetWorkerClient", () => {
 
     const first = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1));
     assert.equal(first.status, "failed");
+    // 暂时失败（503）不标记人工核账：同任务恢复仍是首选路径。
+    const transientLedger = JSON.parse(await readFile(path.join(
+      root,
+      ".generation-operations",
+      `${createHash("sha256").update("command-1").digest("hex")}.json`,
+    ), "utf8"));
+    assert.equal(transientLedger.items[0].state, "provider_succeeded");
+    assert.equal("manualReconciliationRequired" in transientLedger.items[0], false);
 
     const second = await subject.run({
       ...workerRequest(scriptPath, path.join(root, "attempt-2"), 0, 0),
@@ -434,6 +712,73 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(downloadCalls, 2);
     assert.equal(second.diagnostics?.actualCostCny, 0);
     assert.equal(second.diagnostics?.meteredAttemptCount, 0);
+  });
+
+  it("does not resurrect a provider success superseded by a terminal lineage leaf", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-terminal-leaf-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "关闭旧任务后重新生成" },
+    ] }));
+    let createCalls = 0;
+    let downloadCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => {
+            createCalls += 1;
+            return {
+              providerId: "seedance-video-v1",
+              taskId: `lineage-task-${createCalls}`,
+              videoUrl: `https://example.com/lineage-${createCalls}.mp4`,
+            };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => {
+        downloadCalls += 1;
+        return downloadCalls === 1
+          ? new Response("temporary failure", { status: 503 })
+          : new Response(`video-${createCalls}`, { headers: { "content-type": "video/mp4" } });
+      },
+    });
+
+    const first = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1));
+    assert.equal(first.status, "failed");
+    const operationDirectory = path.join(root, ".generation-operations");
+    const firstLedgerPath = path.join(
+      operationDirectory,
+      `${createHash("sha256").update("command-1").digest("hex")}.json`,
+    );
+    const firstLedger = JSON.parse(await readFile(firstLedgerPath, "utf8"));
+    const ancestor = firstLedger.items[0];
+    await writeFile(path.join(operationDirectory, "terminal-descendant.json"), `${JSON.stringify({
+      version: "video-factory/paid-operation-v2",
+      operationId: "terminal-descendant-operation",
+      completed: false,
+      items: [{
+        ...ancestor,
+        itemRequestId: "terminal-descendant-item",
+        state: "terminal_failed",
+        carriedForwardFromItemRequestId: ancestor.itemRequestId,
+        error: "Manual reconciliation confirmed that the accepted result cannot be recovered.",
+      }],
+    }, null, 2)}\n`);
+
+    const regenerated = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-2"), 1, 1),
+      commandId: "command-2",
+      attempt: 2,
+    });
+
+    assert.equal(regenerated.status, "succeeded");
+    assert.equal(createCalls, 2);
+    const plan = JSON.parse(await readFile(String(regenerated.output?.assetPlanPath), "utf8"));
+    assert.equal(plan.scene_assets[0].asset_id, "lineage-task-2");
   });
 
   it("queries a provider-succeeded task with no result URL by taskId instead of creating it again", async () => {
@@ -500,6 +845,128 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(second.diagnostics?.meteredAttemptCount, 0);
   });
 
+  it("keeps a submitted task uncertain when its accepted result cannot be materialized", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-empty-recovery-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "续查后返回空文件" },
+    ] }));
+    let createCalls = 0;
+    let reconcileCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async (_request, onProgress) => {
+            createCalls += 1;
+            if (createCalls === 1) {
+              await onProgress?.({
+                providerId: "seedance-video-v1",
+                taskId: "submitted-empty-task",
+                status: "submitted",
+              });
+              throw new Error("polling connection lost");
+            }
+            return {
+              providerId: "seedance-video-v1",
+              taskId: "replacement-task",
+              videoUrl: "https://example.com/replacement.mp4",
+            };
+          },
+          reconcile: async (taskId) => {
+            reconcileCalls += 1;
+            assert.equal(taskId, "submitted-empty-task");
+            return {
+              providerId: "seedance-video-v1",
+              taskId,
+              videoUrl: "https://example.com/empty.mp4",
+            };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async (input) => new Response(
+        String(input).endsWith("empty.mp4") ? "" : "replacement-video",
+        { headers: { "content-type": "video/mp4" } },
+      ),
+    });
+
+    assert.equal((await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1))).status, "failed");
+    const recovery = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-2"), 0, 0),
+      attempt: 2,
+    });
+    assert.equal(recovery.status, "failed");
+    assert.equal(recovery.diagnostics?.providerOutcomeKnown, false);
+    assert.equal(createCalls, 1);
+    assert.equal(reconcileCalls, 1);
+    const ledgerPath = path.join(
+      root,
+      ".generation-operations",
+      `${createHash("sha256").update("command-1").digest("hex")}.json`,
+    );
+    const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+    assert.equal(ledger.items[0].state, "provider_succeeded");
+    assert.match(ledger.items[0].error, /empty body/i);
+
+    const regenerated = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-3"), 1, 1),
+      commandId: "command-2",
+      attempt: 3,
+    });
+    assert.equal(regenerated.status, "failed");
+    assert.equal(regenerated.diagnostics?.providerOutcomeKnown, false);
+    assert.equal(createCalls, 1);
+    assert.equal(reconcileCalls, 2);
+  });
+
+  it("keeps a create request without a returned task id uncertain and never submits it twice", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-create-reset-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "连接中断的付费画面" },
+    ] }));
+    let createCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => {
+            createCalls += 1;
+            throw Object.assign(new Error("connection reset before task id"), { code: "ECONNRESET" });
+          },
+        },
+      }],
+    });
+
+    const first = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1));
+
+    assert.equal(first.status, "failed");
+    assert.equal(first.diagnostics?.providerOutcomeKnown, false);
+    assert.equal(first.diagnostics?.meteredAttemptCount, 1);
+    assert.equal(createCalls, 1);
+    const ledgerPath = path.join(
+      root,
+      ".generation-operations",
+      `${createHash("sha256").update("command-1").digest("hex")}.json`,
+    );
+    const ledger = JSON.parse(await readFile(ledgerPath, "utf8")) as { items: Array<{ state: string; taskId?: string }> };
+    assert.deepEqual(ledger.items.map((item) => [item.state, item.taskId]), [["unknown", undefined]]);
+
+    const second = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-2"), 1, 1),
+      attempt: 2,
+    });
+
+    assert.equal(second.status, "failed");
+    assert.equal(second.diagnostics?.providerOutcomeKnown, false);
+    assert.equal(createCalls, 1);
+  });
+
   it("does not count a failed reconciliation query as a new metered attempt", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-reconcile-timeout-"));
     const scriptPath = path.join(root, "script.json");
@@ -556,6 +1023,133 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(jobs.jobs[0].carriedForward, true);
     assert.equal(jobs.jobs[0].actualCostCny, undefined);
     assert.equal(jobs.jobs[0].actualCostSource, undefined);
+  });
+
+  it("marks a definitively rejected task lookup for manual reconciliation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-reconcile-rejected-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "查询已提交任务" },
+    ] }));
+    let createCalls = 0;
+    let reconcileCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async (_request, onProgress) => {
+            createCalls += 1;
+            await onProgress?.({ providerId: "seedance-video-v1", taskId: "missing-task", status: "submitted" });
+            throw new Error("initial polling connection lost");
+          },
+          reconcile: async () => {
+            reconcileCalls += 1;
+            throw new ProviderRequestRejectedError("Provider lookup returned 404 for missing-task.");
+          },
+        },
+      }],
+    });
+
+    assert.equal((await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1))).status, "failed");
+    const resumed = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-2"), 0, 0),
+      attempt: 2,
+    });
+
+    assert.equal(resumed.status, "failed");
+    assert.equal(createCalls, 1);
+    assert.equal(reconcileCalls, 1);
+    assert.equal(resumed.diagnostics?.meteredAttemptCount, 0);
+    const ledgerPath = path.join(
+      root,
+      ".generation-operations",
+      `${createHash("sha256").update("command-1").digest("hex")}.json`,
+    );
+    const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+    assert.equal(ledger.items[0].state, "submitted");
+    assert.equal(ledger.items[0].taskId, "missing-task");
+    assert.equal(ledger.items[0].manualReconciliationRequired, true);
+  });
+
+  it("reconciles later submitted tasks after an earlier item was manually closed", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-mixed-reconcile-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "镜头一" },
+      { position: 2, duration: 5, visual_strategy: "generated", visual_prompt: "镜头二" },
+    ] }));
+    let createCalls = 0;
+    let reconcileCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async (_request, onProgress) => {
+            createCalls += 1;
+            const taskId = `created-task-${createCalls}`;
+            const videoUrl = `https://example.com/${taskId}.mp4`;
+            await onProgress?.({ providerId: "seedance-video-v1", taskId, status: "succeeded", videoUrl });
+            return { providerId: "seedance-video-v1", taskId, videoUrl };
+          },
+          reconcile: async (taskId) => {
+            reconcileCalls += 1;
+            return {
+              providerId: "seedance-video-v1",
+              taskId,
+              status: "succeeded",
+              videoUrl: `https://example.com/${taskId}-reconciled.mp4`,
+            };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("video", { headers: { "content-type": "video/mp4" } }),
+    });
+
+    const first = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 2, 2));
+    assert.equal(first.status, "succeeded");
+    const ledgerPath = path.join(
+      root,
+      ".generation-operations",
+      `${createHash("sha256").update("command-1").digest("hex")}.json`,
+    );
+    const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+    Object.assign(ledger.items[0], {
+      state: "terminal_failed",
+      error: "Manual reconciliation 'manual-not-charged' confirmed that this provider task was not charged.",
+    });
+    delete ledger.items[0].taskId;
+    delete ledger.items[0].resultUrl;
+    delete ledger.items[0].localPath;
+    delete ledger.items[0].sha256;
+    delete ledger.items[0].sizeBytes;
+    delete ledger.items[0].actualCostCny;
+    delete ledger.items[0].actualCostSource;
+    ledger.items[1].state = "submitted";
+    delete ledger.items[1].resultUrl;
+    delete ledger.items[1].localPath;
+    delete ledger.items[1].sha256;
+    delete ledger.items[1].sizeBytes;
+    await writeFile(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+
+    const resumed = await subject.run({
+      ...workerRequest(scriptPath, path.join(root, "attempt-2"), 0, 0),
+      attempt: 2,
+    });
+
+    assert.equal(resumed.status, "failed");
+    assert.equal(resumed.diagnostics?.providerOutcomeKnown, true);
+    assert.equal(resumed.diagnostics?.meteredAttemptCount, 0);
+    assert.equal(createCalls, 2);
+    assert.equal(reconcileCalls, 1);
+    const recoveredLedger = JSON.parse(await readFile(ledgerPath, "utf8"));
+    assert.equal(recoveredLedger.items[0].state, "terminal_failed");
+    assert.match(recoveredLedger.items[0].error, /^Manual reconciliation '/);
+    assert.equal(recoveredLedger.items[1].state, "materialized");
   });
 
   it("completes an existing paid task through WorkflowRunner as a zero-cost recovery", async () => {
@@ -741,10 +1335,586 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.deepEqual(Object.fromEntries(calls), { "镜头一": 1, "镜头二": 2, "镜头三": 1 });
     const secondPlan = JSON.parse(await readFile(String(second.output?.assetPlanPath), "utf8"));
     assert.equal(secondPlan.scene_assets[0].asset_id, "镜头一-task-1");
-    assert.equal(secondPlan.scene_assets[0].local_path, firstScenePath);
+    assert.equal(path.dirname(secondPlan.scene_assets[0].local_path), path.join(root, "attempt-2"));
+    assert.notEqual(secondPlan.scene_assets[0].local_path, firstScenePath);
     assert.equal(createHash("sha256").update(await readFile(secondPlan.scene_assets[0].local_path)).digest("hex"), firstSceneSha);
     assert.equal(second.diagnostics?.actualCostCny, 2);
     assert.equal(second.diagnostics?.meteredAttemptCount, 2);
+  });
+
+  it("carries unchanged independent images into a scoped rework without another paid call", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-rework-carry-"));
+    const runsRoot = path.join(root, "runs");
+    const sourceRunId = "run-source";
+    const currentRunId = "run-current";
+    const sourceOutputDir = path.join(runsRoot, sourceRunId, "nodes", "assets", "attempt-1");
+    const currentOutputDir = path.join(runsRoot, currentRunId, "nodes", "assets", "attempt-1");
+    await mkdir(sourceOutputDir, { recursive: true });
+    const script = { scenes: [1, 2].map((position) => ({
+      position,
+      duration: 4,
+      visual_strategy: "generated",
+      visual_prompt: `scene ${position}`,
+    })) };
+    const previousDirectorPlan = { shots: [
+      { scenePosition: 1, preferredProviderId: "seedream-image-v1", deliveryType: "generated_image", generationPrompt: "keep scene one" },
+      { scenePosition: 2, preferredProviderId: "seedream-image-v1", deliveryType: "generated_image", generationPrompt: "replace scene two" },
+    ] };
+    const currentDirectorPlan = structuredClone(previousDirectorPlan);
+    currentDirectorPlan.shots[1]!.generationPrompt = "fixed scene two";
+    const sourceScriptPath = path.join(root, "source-script.json");
+    const currentScriptPath = path.join(root, "current-script.json");
+    const sourceDirectorPath = path.join(root, "source-director.json");
+    const currentDirectorPath = path.join(root, "current-director.json");
+    await writeFile(sourceScriptPath, JSON.stringify(script));
+    await writeFile(currentScriptPath, JSON.stringify(script));
+    await writeFile(sourceDirectorPath, JSON.stringify(previousDirectorPlan));
+    await writeFile(currentDirectorPath, JSON.stringify(currentDirectorPlan));
+    let paidCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [],
+      imageAdapters: [{
+        estimatedCnyPerImage: 0.25,
+        adapter: {
+          providerId: "seedream-image-v1",
+          modelId: "doubao-seedream-4-0-250828",
+          generate: async () => {
+            paidCalls += 1;
+            return {
+              providerId: "seedream-image-v1",
+              taskId: `image-${paidCalls}`,
+              imageUrl: `https://example.com/image-${paidCalls}.png`,
+            };
+          },
+        },
+      }],
+      runsRoot,
+      resolveHost: resolvePublicHost,
+      fetch: async (url) => new Response(`bytes:${String(url)}`, { headers: { "content-type": "image/png" } }),
+    });
+
+    const firstRequest = routedWorkerRequest(sourceScriptPath, sourceDirectorPath, sourceOutputDir, 2, 0.5);
+    firstRequest.commandId = "source-operation";
+    firstRequest.runId = sourceRunId;
+    const first = await subject.run(firstRequest);
+    assert.equal(first.status, "succeeded");
+    assert.equal(paidCalls, 2);
+    const firstPlan = JSON.parse(await readFile(String(first.output?.assetPlanPath), "utf8"));
+    const sourceSceneOneBytes = await readFile(firstPlan.scene_assets[0].local_path);
+    await writeFile(path.join(runsRoot, sourceRunId, "run.json"), JSON.stringify({
+      revision: 1,
+      nodeRuns: [{
+        nodeId: "assets",
+        status: "succeeded",
+        operationRequestId: "source-operation",
+        outputState: {
+          generatedVersionId: "source-assets-v1",
+          effectiveVersionId: "source-assets-v1",
+          stale: false,
+        },
+      }],
+    }));
+    const operationDirectory = path.join(runsRoot, sourceRunId, "nodes", "assets", ".generation-operations");
+    const sourceLedger = JSON.parse(await readFile(path.join(
+      operationDirectory,
+      `${createHash("sha256").update("source-operation").digest("hex")}.json`,
+    ), "utf8"));
+    const stalePath = path.join(sourceOutputDir, "stale-scene-1.png");
+    const staleBytes = Buffer.from("stale-scene-one");
+    await writeFile(stalePath, staleBytes);
+    sourceLedger.operationId = "obsolete-operation";
+    sourceLedger.items[0].localPath = stalePath;
+    sourceLedger.items[0].sha256 = createHash("sha256").update(staleBytes).digest("hex");
+    sourceLedger.items[0].sizeBytes = staleBytes.byteLength;
+    await writeFile(path.join(operationDirectory, "000-obsolete.json"), JSON.stringify(sourceLedger));
+
+    const secondRequest = routedWorkerRequest(currentScriptPath, currentDirectorPath, currentOutputDir, 1, 0.25);
+    secondRequest.commandId = "rework-operation";
+    secondRequest.runId = currentRunId;
+    const secondInput = secondRequest.input as Record<string, unknown>;
+    secondInput.rework = {
+      sourceRunId,
+      sourceRunRevision: 1,
+      instruction: "严格执行修订后的逐镜路由；保留未受影响母片，只替换镜头 2。",
+      findings: [],
+      affectedScenePositions: [2],
+      previousScript: script,
+      previousDirectorPlan,
+    };
+    const second = await subject.run(secondRequest);
+
+    assert.equal(second.status, "succeeded");
+    assert.equal(paidCalls, 3);
+    assert.equal(second.diagnostics?.actualCostCny, 0.25);
+    assert.equal(second.diagnostics?.meteredAttemptCount, 1);
+    const jobs = JSON.parse(await readFile(path.join(currentOutputDir, "generation_jobs.json"), "utf8"));
+    assert.equal(jobs.jobs[0].scenePosition, 1);
+    assert.equal(jobs.jobs[0].carriedForward, true);
+    assert.equal(jobs.jobs[1].scenePosition, 2);
+    assert.equal(jobs.jobs[1].carriedForward, undefined);
+    const secondPlan = JSON.parse(await readFile(String(second.output?.assetPlanPath), "utf8"));
+    assert.equal(path.dirname(secondPlan.scene_assets[0].local_path), currentOutputDir);
+    assert.deepEqual(await readFile(secondPlan.scene_assets[0].local_path), sourceSceneOneBytes);
+
+    const advancedSourceRun = JSON.parse(await readFile(path.join(runsRoot, sourceRunId, "run.json"), "utf8"));
+    advancedSourceRun.revision = 2;
+    await writeFile(path.join(runsRoot, sourceRunId, "run.json"), JSON.stringify(advancedSourceRun));
+    const staleRevisionOutputDir = path.join(runsRoot, "run-stale-rework", "nodes", "assets", "attempt-1");
+    const staleRevisionRequest = routedWorkerRequest(
+      currentScriptPath,
+      currentDirectorPath,
+      staleRevisionOutputDir,
+      2,
+      0.5,
+    );
+    staleRevisionRequest.commandId = "stale-revision-rework-operation";
+    staleRevisionRequest.runId = "run-stale-rework";
+    (staleRevisionRequest.input as Record<string, unknown>).rework = {
+      ...secondInput.rework as Record<string, unknown>,
+      sourceRunRevision: 1,
+    };
+
+    const staleRevision = await subject.run(staleRevisionRequest);
+
+    assert.equal(staleRevision.status, "succeeded");
+    assert.equal(paidCalls, 5);
+    const staleJobs = JSON.parse(await readFile(path.join(staleRevisionOutputDir, "generation_jobs.json"), "utf8"));
+    assert.deepEqual(staleJobs.jobs.map((job: { carriedForward?: boolean }) => job.carriedForward), [undefined, undefined]);
+  });
+
+  it("carries materialized scenes from a partially failed source run and requotes only the failed scene", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-partial-failure-carry-"));
+    const runsRoot = path.join(root, "runs");
+    const sourceRunId = "run-source";
+    const currentRunId = "run-current";
+    const sourceOutputDir = path.join(runsRoot, sourceRunId, "nodes", "assets", "attempt-1");
+    const currentOutputDir = path.join(runsRoot, currentRunId, "nodes", "assets", "attempt-1");
+    await mkdir(sourceOutputDir, { recursive: true });
+    const script = { scenes: [1, 2, 3].map((position) => ({
+      position,
+      duration: 4,
+      visual_strategy: "generated",
+      visual_prompt: `scene ${position}`,
+    })) };
+    const directorPlan = { shots: [1, 2, 3].map((position) => ({
+      scenePosition: position,
+      preferredProviderId: "seedream-image-v1",
+      deliveryType: "generated_image",
+      generationPrompt: `scene ${position}`,
+    })) };
+    const scriptPath = path.join(root, "script.json");
+    const directorPlanPath = path.join(root, "director_plan.json");
+    await writeFile(scriptPath, JSON.stringify(script));
+    await writeFile(directorPlanPath, JSON.stringify(directorPlan));
+    const generatePrompts: string[] = [];
+    let paidCalls = 0;
+    const adapter: ImageGenerationAdapter = {
+      providerId: "seedream-image-v1",
+      modelId: "doubao-seedream-4-0-250828",
+      generate: async (request) => {
+        paidCalls += 1;
+        if (paidCalls === 3) {
+          // 源 run 的第三镜在提交前被 Provider 拒绝：terminal_failed，无不确定结果。
+          throw new ProviderRequestRejectedError("provider rejected scene 3 before submission");
+        }
+        generatePrompts.push(request.prompt);
+        return {
+          providerId: "seedream-image-v1",
+          taskId: `image-${paidCalls}`,
+          imageUrl: `https://example.com/image-${paidCalls}.png`,
+        };
+      },
+    };
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [],
+      imageAdapters: [{ estimatedCnyPerImage: 0.25, adapter }],
+      runsRoot,
+      resolveHost: resolvePublicHost,
+      fetch: async (url) => new Response(`bytes:${String(url)}`, { headers: { "content-type": "image/png" } }),
+    });
+
+    const firstRequest = routedWorkerRequest(scriptPath, directorPlanPath, sourceOutputDir, 3, 0.75);
+    firstRequest.commandId = "source-operation";
+    firstRequest.runId = sourceRunId;
+    const first = await subject.run(firstRequest);
+    assert.equal(first.status, "failed");
+    assert.equal(paidCalls, 3);
+    // 源 run：assets 节点 failed 但结果确定，不存在 outcomeUncertain。
+    await writeFile(path.join(runsRoot, sourceRunId, "run.json"), JSON.stringify({
+      revision: 1,
+      nodeRuns: [{
+        nodeId: "assets",
+        status: "failed",
+        operationRequestId: "source-operation",
+      }],
+    }));
+    const sourceLedger = JSON.parse(await readFile(path.join(
+      runsRoot,
+      sourceRunId,
+      "nodes",
+      "assets",
+      ".generation-operations",
+      `${createHash("sha256").update("source-operation").digest("hex")}.json`,
+    ), "utf8")) as { items: Array<{ scenePosition: number; state: string }> };
+    assert.deepEqual(sourceLedger.items.map((item) => [item.scenePosition, item.state]), [
+      [1, "materialized"],
+      [2, "materialized"],
+      [3, "terminal_failed"],
+    ]);
+
+    const promptsAfterSource = generatePrompts.length;
+    const secondRequest = routedWorkerRequest(scriptPath, directorPlanPath, currentOutputDir, 1, 0.25);
+    secondRequest.commandId = "rework-operation";
+    secondRequest.runId = currentRunId;
+    (secondRequest.input as Record<string, unknown>).rework = {
+      sourceRunId,
+      sourceRunRevision: 1,
+      instruction: "只重做镜头 3。",
+      findings: [],
+      affectedScenePositions: [3],
+      previousScript: script,
+      previousDirectorPlan: directorPlan,
+    };
+    const second = await subject.run(secondRequest);
+
+    assert.equal(second.status, "succeeded");
+    assert.equal(paidCalls, 4);
+    // 新报价仅含镜头 3：授权上限只有一张图的价钱，两镜被继承后不会超出。
+    assert.equal(second.diagnostics?.estimatedCostCny, 0.25);
+    assert.equal(second.diagnostics?.actualCostCny, 0.25);
+    assert.equal(second.diagnostics?.meteredAttemptCount, 1);
+    // Provider 只收到镜头 3 的重新生成请求。
+    const reworkPrompts = generatePrompts.slice(promptsAfterSource);
+    assert.equal(reworkPrompts.length, 1);
+    assert.match(reworkPrompts[0]!, /scene 3/);
+    const jobs = JSON.parse(await readFile(path.join(currentOutputDir, "generation_jobs.json"), "utf8"));
+    assert.deepEqual(jobs.jobs.map((job: { scenePosition: number; carriedForward?: boolean }) => (
+      [job.scenePosition, job.carriedForward === true]
+    )), [
+      [1, true],
+      [2, true],
+      [3, false],
+    ]);
+    const secondPlan = JSON.parse(await readFile(String(second.output?.assetPlanPath), "utf8"));
+    assert.equal(secondPlan.scene_assets.length, 3);
+  });
+
+  it("carries a shot whose only change is the current pricing rate", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-rate-only-rework-"));
+    const runsRoot = path.join(root, "runs");
+    const sourceRunId = "run-source";
+    const currentRunId = "run-current";
+    const sourceOutputDir = path.join(runsRoot, sourceRunId, "nodes", "assets", "attempt-1");
+    const currentOutputDir = path.join(runsRoot, currentRunId, "nodes", "assets", "attempt-1");
+    await mkdir(sourceOutputDir, { recursive: true });
+    const script = { scenes: [1, 2].map((position) => ({
+      position,
+      duration: 4,
+      visual_strategy: "generated",
+      visual_prompt: `scene ${position}`,
+    })) };
+    const previousDirectorPlan = { shots: [
+      {
+        scenePosition: 1,
+        preferredProviderId: "seedream-image-v1",
+        deliveryType: "generated_image",
+        generationPrompt: "keep scene one",
+        estimatedCostCny: 1,
+        confidence: 0.7,
+        rationale: "旧费率下的理由。",
+      },
+      {
+        scenePosition: 2,
+        preferredProviderId: "seedream-image-v1",
+        deliveryType: "generated_image",
+        generationPrompt: "replace scene two",
+        estimatedCostCny: 1,
+        confidence: 0.7,
+        rationale: "旧费率下的理由。",
+      },
+    ] };
+    // 当前费率翻倍：镜头 1 的唯一变化是服务端重算的 estimatedCostCny。镜头 2 才真正重做。
+    const currentDirectorPlan = structuredClone(previousDirectorPlan);
+    currentDirectorPlan.shots[0]!.estimatedCostCny = 2;
+    currentDirectorPlan.shots[1]!.estimatedCostCny = 2;
+    currentDirectorPlan.shots[1]!.generationPrompt = "fixed scene two";
+    const sourceScriptPath = path.join(root, "source-script.json");
+    const currentScriptPath = path.join(root, "current-script.json");
+    const sourceDirectorPath = path.join(root, "source-director.json");
+    const currentDirectorPath = path.join(root, "current-director.json");
+    await writeFile(sourceScriptPath, JSON.stringify(script));
+    await writeFile(currentScriptPath, JSON.stringify(script));
+    await writeFile(sourceDirectorPath, JSON.stringify(previousDirectorPlan));
+    await writeFile(currentDirectorPath, JSON.stringify(currentDirectorPlan));
+    let paidCalls = 0;
+    const adapter: ImageGenerationAdapter = {
+      providerId: "seedream-image-v1",
+      modelId: "doubao-seedream-4-0-250828",
+      generate: async () => {
+        paidCalls += 1;
+        return {
+          providerId: "seedream-image-v1",
+          taskId: `image-${paidCalls}`,
+          imageUrl: `https://example.com/image-${paidCalls}.png`,
+        };
+      },
+    };
+    const makeClient = (estimatedCnyPerImage: number) => new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [],
+      imageAdapters: [{ estimatedCnyPerImage, adapter }],
+      runsRoot,
+      resolveHost: resolvePublicHost,
+      fetch: async (url) => new Response(`bytes:${String(url)}`, { headers: { "content-type": "image/png" } }),
+    });
+    const sourceSubject = makeClient(1);
+
+    const firstRequest = routedWorkerRequest(sourceScriptPath, sourceDirectorPath, sourceOutputDir, 2, 2);
+    firstRequest.commandId = "source-operation";
+    firstRequest.runId = sourceRunId;
+    const first = await sourceSubject.run(firstRequest);
+    assert.equal(first.status, "succeeded");
+    assert.equal(paidCalls, 2);
+    await writeFile(path.join(runsRoot, sourceRunId, "run.json"), JSON.stringify({
+      revision: 1,
+      nodeRuns: [{
+        nodeId: "assets",
+        status: "succeeded",
+        operationRequestId: "source-operation",
+        outputState: {
+          generatedVersionId: "source-assets-v1",
+          effectiveVersionId: "source-assets-v1",
+          stale: false,
+        },
+      }],
+    }));
+
+    // 费率从 ¥1 调整为 ¥2 后的返工：镜头 1 的执行语义未变，不得重复生成。
+    const reworkSubject = makeClient(2);
+    const secondRequest = routedWorkerRequest(currentScriptPath, currentDirectorPath, currentOutputDir, 1, 2);
+    secondRequest.commandId = "rework-operation";
+    secondRequest.runId = currentRunId;
+    (secondRequest.input as Record<string, unknown>).rework = {
+      sourceRunId,
+      sourceRunRevision: 1,
+      instruction: "只重做镜头 2。",
+      findings: [],
+      affectedScenePositions: [2],
+      previousScript: script,
+      previousDirectorPlan,
+    };
+    const second = await reworkSubject.run(secondRequest);
+
+    assert.equal(second.status, "succeeded");
+    assert.equal(paidCalls, 3);
+    // 镜头 1 不进入新报价：授权上限只覆盖一张新费率的图。
+    assert.equal(second.diagnostics?.estimatedCostCny, 2);
+    assert.equal(second.diagnostics?.actualCostCny, 2);
+    assert.equal(second.diagnostics?.meteredAttemptCount, 1);
+    const jobs = JSON.parse(await readFile(path.join(currentOutputDir, "generation_jobs.json"), "utf8"));
+    assert.deepEqual(jobs.jobs.map((job: { scenePosition: number; carriedForward?: boolean }) => (
+      [job.scenePosition, job.carriedForward === true]
+    )), [
+      [1, true],
+      [2, false],
+    ]);
+  });
+
+  // 四镜源 run：镜头 1 独立图片、镜头 2 参考镜头 1 再生成、镜头 3 参考镜头 2 再生成、镜头 4 独立图片；
+  // 为返工继承测试提供真实物化的多级引用链源 ledger，避免复制多套完整账本。
+  async function setupReferenceReworkSourceRun() {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-reference-carry-"));
+    const runsRoot = path.join(root, "runs");
+    const sourceRunId = "run-source";
+    const sourceOutputDir = path.join(runsRoot, sourceRunId, "nodes", "assets", "attempt-1");
+    await mkdir(sourceOutputDir, { recursive: true });
+    const script = { scenes: [1, 2, 3, 4].map((position) => ({
+      position,
+      duration: 4,
+      visual_strategy: "generated",
+      visual_prompt: `scene ${position}`,
+    })) };
+    const directorPlan = { shots: [
+      { scenePosition: 1, preferredProviderId: "seedream-image-v1", generationPrompt: "master one" },
+      { scenePosition: 2, preferredProviderId: "seedream-image-v1", referenceFromScenePosition: 1, generationPrompt: "reference master one" },
+      { scenePosition: 3, preferredProviderId: "seedream-image-v1", referenceFromScenePosition: 2, generationPrompt: "reference master two" },
+      { scenePosition: 4, preferredProviderId: "seedream-image-v1", generationPrompt: "independent four" },
+    ] };
+    const scriptPath = path.join(root, "script.json");
+    const directorPlanPath = path.join(root, "director_plan.json");
+    await writeFile(scriptPath, JSON.stringify(script));
+    await writeFile(directorPlanPath, JSON.stringify(directorPlan));
+    let paidCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [],
+      imageAdapters: [{
+        estimatedCnyPerImage: 0.25,
+        adapter: {
+          providerId: "seedream-image-v1",
+          modelId: "doubao-seedream-4-0-250828",
+          supportsReferenceImage: true,
+          generate: async () => {
+            paidCalls += 1;
+            return {
+              providerId: "seedream-image-v1",
+              taskId: `image-${paidCalls}`,
+              imageUrl: `https://example.com/image-${paidCalls}.png`,
+            };
+          },
+        },
+      }],
+      runsRoot,
+      resolveHost: resolvePublicHost,
+      fetch: async (input) => new Response(`image:${String(input)}`, { headers: { "content-type": "image/png" } }),
+    });
+    const firstRequest = routedWorkerRequest(scriptPath, directorPlanPath, sourceOutputDir, 4, 1);
+    firstRequest.commandId = "source-operation";
+    firstRequest.runId = sourceRunId;
+    const first = await subject.run(firstRequest);
+    assert.equal(first.status, "succeeded");
+    assert.equal(paidCalls, 4);
+    await writeFile(path.join(runsRoot, sourceRunId, "run.json"), JSON.stringify({
+      revision: 1,
+      nodeRuns: [{
+        nodeId: "assets",
+        status: "succeeded",
+        operationRequestId: "source-operation",
+        outputState: {
+          generatedVersionId: "source-assets-v1",
+          effectiveVersionId: "source-assets-v1",
+          stale: false,
+        },
+      }],
+    }));
+    const sourceLedgerPath = path.join(
+      runsRoot,
+      sourceRunId,
+      "nodes",
+      "assets",
+      ".generation-operations",
+      `${createHash("sha256").update("source-operation").digest("hex")}.json`,
+    );
+    return {
+      root,
+      subject,
+      getPaidCalls: () => paidCalls,
+      reworkRequest: (attempt: number, affectedScenePositions: number[]) => {
+        const outputDir = path.join(root, `rework-${attempt}`, "attempt-1");
+        const request = routedWorkerRequest(scriptPath, directorPlanPath, outputDir, 4, 1);
+        request.commandId = `rework-operation-${attempt}`;
+        request.runId = "run-current";
+        (request.input as Record<string, unknown>).rework = {
+          sourceRunId,
+          sourceRunRevision: 1,
+          nodeInstructions: { visualDirection: "保留未受影响镜头。", assets: "只重做受影响镜头，其余保留母片。" },
+          findings: [],
+          affectedScenePositions,
+          previousScript: script,
+          previousDirectorPlan: directorPlan,
+        };
+        return { request, outputDir };
+      },
+      readSourceLedger: async () => JSON.parse(await readFile(sourceLedgerPath, "utf8")),
+      overwriteSourceLedger: async (ledger: unknown) => {
+        await writeFile(sourceLedgerPath, JSON.stringify(ledger));
+      },
+    };
+  }
+
+  it("carries every unchanged paid scene when the creator selects an explicit empty rework scope", async () => {
+    const { subject, getPaidCalls, reworkRequest } = await setupReferenceReworkSourceRun();
+    const { request, outputDir } = reworkRequest(0, []);
+
+    const response = await subject.run(request);
+
+    assert.equal(response.status, "succeeded");
+    assert.equal(getPaidCalls(), 4);
+    assert.equal(response.diagnostics?.estimatedCostCny, 0);
+    assert.equal(response.diagnostics?.actualCostCny, 0);
+    assert.equal(response.diagnostics?.meteredAttemptCount, 0);
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+    assert.deepEqual(jobs.jobs.map((job: { scenePosition: number; carriedForward?: boolean }) => (
+      [job.scenePosition, job.carriedForward === true]
+    )), [
+      [1, true],
+      [2, true],
+      [3, true],
+      [4, true],
+    ]);
+  });
+
+  it("carries an unaffected multi-level reference chain across runs with one new paid call", async () => {
+    const { root, subject, getPaidCalls, reworkRequest, readSourceLedger } = await setupReferenceReworkSourceRun();
+    const { request, outputDir } = reworkRequest(1, [4]);
+
+    const response = await subject.run(request);
+
+    assert.equal(response.status, "succeeded");
+    assert.equal(getPaidCalls(), 5);
+    assert.equal(response.diagnostics?.estimatedCostCny, 0.25);
+    assert.equal(response.diagnostics?.actualCostCny, 0.25);
+    assert.equal(response.diagnostics?.meteredAttemptCount, 1);
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 1)?.carriedForward, true);
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 2)?.carriedForward, true);
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 3)?.carriedForward, true);
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 4)?.carriedForward, undefined);
+    const ledger = JSON.parse(await readFile(path.join(
+      path.dirname(outputDir),
+      ".generation-operations",
+      `${createHash("sha256").update(String(request.commandId)).digest("hex")}.json`,
+    ), "utf8"));
+    const sourceLedger = await readSourceLedger();
+    for (const position of [1, 2, 3]) {
+      const carried = ledger.items.find((item: { scenePosition: number }) => item.scenePosition === position);
+      const source = sourceLedger.items.find((item: { scenePosition: number }) => item.scenePosition === position);
+      assert.equal(carried.carriedForwardFromItemRequestId, source.itemRequestId);
+      assert.equal(carried.sha256, source.sha256);
+      assert.equal(carried.sizeBytes, source.sizeBytes);
+      assert.equal(carried.actualCostCny, source.actualCostCny);
+    }
+    const regenerated = ledger.items.find((item: { scenePosition: number }) => item.scenePosition === 4);
+    assert.equal(regenerated.carriedForwardFromItemRequestId, undefined);
+    void root;
+  });
+
+  it("regenerates reference dependents when their reference source joins the affected closure", async () => {
+    const { subject, getPaidCalls, reworkRequest } = await setupReferenceReworkSourceRun();
+    const { request, outputDir } = reworkRequest(2, [1]);
+
+    const response = await subject.run(request);
+
+    assert.equal(response.status, "succeeded");
+    assert.equal(getPaidCalls(), 7);
+    assert.equal(response.diagnostics?.actualCostCny, 0.75);
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 1)?.carriedForward, undefined);
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 2)?.carriedForward, undefined);
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 3)?.carriedForward, undefined);
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 4)?.carriedForward, true);
+  });
+
+  it("refuses to inherit a reference-derived master whose reference SHA cannot be proven", async () => {
+    const { subject, getPaidCalls, reworkRequest, readSourceLedger, overwriteSourceLedger } = await setupReferenceReworkSourceRun();
+    const sourceLedger = await readSourceLedger();
+    const tampered = sourceLedger.items.find((item: { scenePosition: number }) => item.scenePosition === 2);
+    tampered.parameters.referenceImageSha256 = "0".repeat(64);
+    await overwriteSourceLedger(sourceLedger);
+    const { request, outputDir } = reworkRequest(3, [4]);
+
+    const response = await subject.run(request);
+
+    assert.equal(response.status, "succeeded");
+    assert.equal(getPaidCalls(), 7);
+    assert.equal(response.diagnostics?.actualCostCny, 0.75);
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 1)?.carriedForward, true);
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 2)?.carriedForward, undefined);
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 3)?.carriedForward, undefined);
+    assert.equal(jobs.jobs.find((job: { scenePosition: number }) => job.scenePosition === 4)?.carriedForward, undefined);
   });
 
   it("refuses a generation request before external calls when its estimate exceeds the budget", async () => {
@@ -1020,6 +2190,174 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(plan.generation.meteredAttemptCount, 0);
     assert.equal(plan.generation.meteredFailedAttemptCount, 0);
     assert.equal(plan.generation.actualModelIds, undefined);
+  });
+
+  it("keeps an AI-routed task recoverable after a transient reconciled-result download failure", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-routed-transient-recovery-"));
+    const scriptPath = path.join(root, "script.json");
+    const directorPlanPath = path.join(root, "director_plan.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "恢复导演路由的付费镜头" },
+    ] }));
+    await writeFile(directorPlanPath, JSON.stringify({
+      version: "video-factory/director-plan-v1",
+      shots: [{
+        scenePosition: 1,
+        preferredProviderId: "seedance-video-v1",
+        deliveryType: "generated_video",
+        generationPrompt: "恢复导演路由的付费镜头",
+      }],
+    }));
+    let createCalls = 0;
+    let reconcileCalls = 0;
+    let downloadCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async (_request, onProgress) => {
+            createCalls += 1;
+            await onProgress?.({
+              providerId: "seedance-video-v1",
+              taskId: "routed-existing-task",
+              status: "unknown",
+              error: "initial polling connection lost",
+            });
+            throw new Error("initial polling connection lost");
+          },
+          reconcile: async (taskId) => {
+            reconcileCalls += 1;
+            assert.equal(taskId, "routed-existing-task");
+            return {
+              providerId: "seedance-video-v1",
+              taskId,
+              videoUrl: "https://example.com/routed-recovered.mp4",
+            };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => {
+        downloadCalls += 1;
+        return downloadCalls === 1
+          ? new Response("temporary CDN failure", { status: 503 })
+          : new Response("routed-recovered-video", { headers: { "content-type": "video/mp4" } });
+      },
+    });
+
+    assert.equal((await subject.run(routedWorkerRequest(
+      scriptPath,
+      directorPlanPath,
+      path.join(root, "attempt-1"),
+      1,
+      1,
+    ))).status, "failed");
+    const secondRequest = routedWorkerRequest(
+      scriptPath,
+      directorPlanPath,
+      path.join(root, "attempt-2"),
+      0,
+      0,
+    );
+    secondRequest.attempt = 2;
+    assert.equal((await subject.run(secondRequest)).status, "failed");
+    const ledgerPath = path.join(
+      root,
+      ".generation-operations",
+      `${createHash("sha256").update("command-routed").digest("hex")}.json`,
+    );
+    const recoveringLedger = JSON.parse(await readFile(ledgerPath, "utf8"));
+    assert.equal(recoveringLedger.items[0].state, "provider_succeeded");
+    assert.equal(recoveringLedger.items[0].taskId, "routed-existing-task");
+    assert.equal(recoveringLedger.items[0].resultUrl, "https://example.com/routed-recovered.mp4");
+
+    const thirdRequest = routedWorkerRequest(
+      scriptPath,
+      directorPlanPath,
+      path.join(root, "attempt-3"),
+      0,
+      0,
+    );
+    thirdRequest.attempt = 3;
+    const recovered = await subject.run(thirdRequest);
+
+    assert.equal(recovered.status, "succeeded");
+    assert.equal(createCalls, 1);
+    assert.equal(reconcileCalls, 2);
+    assert.equal(downloadCalls, 2);
+    assert.equal(recovered.diagnostics?.meteredAttemptCount, 0);
+  });
+
+  it("flags an AI-routed result whose download fails permanently for item-level reconciliation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-routed-permanent-download-"));
+    const scriptPath = path.join(root, "script.json");
+    const directorPlanPath = path.join(root, "director_plan.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "路由任务永久下载失败" },
+    ] }));
+    await writeFile(directorPlanPath, JSON.stringify({
+      version: "video-factory/director-plan-v1",
+      shots: [{
+        scenePosition: 1,
+        preferredProviderId: "seedance-video-v1",
+        deliveryType: "generated_video",
+        generationPrompt: "路由任务永久下载失败",
+      }],
+    }));
+    let createCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 1,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => {
+            createCalls += 1;
+            return {
+              providerId: "seedance-video-v1",
+              taskId: "routed-permanent-404",
+              videoUrl: "https://example.com/routed-gone.mp4",
+            };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("gone", { status: 404 }),
+    });
+
+    assert.equal((await subject.run(routedWorkerRequest(
+      scriptPath,
+      directorPlanPath,
+      path.join(root, "attempt-1"),
+      1,
+      1,
+    ))).status, "failed");
+    const recoveryRequest = routedWorkerRequest(
+      scriptPath,
+      directorPlanPath,
+      path.join(root, "attempt-2"),
+      0,
+      0,
+    );
+    recoveryRequest.attempt = 2;
+    const recovery = await subject.run(recoveryRequest);
+
+    assert.equal(recovery.status, "failed");
+    assert.equal(recovery.diagnostics?.providerOutcomeKnown, false);
+    const ledger = JSON.parse(await readFile(path.join(
+      root,
+      ".generation-operations",
+      `${createHash("sha256").update("command-routed").digest("hex")}.json`,
+    ), "utf8"));
+    // 404 是永久失败：保留任务、URL、费用与错误证据，标记逐项人工核账，且绝不重建任务。
+    assert.equal(ledger.items[0].state, "provider_succeeded");
+    assert.equal(ledger.items[0].manualReconciliationRequired, true);
+    assert.equal(ledger.items[0].taskId, "routed-permanent-404");
+    assert.equal(ledger.items[0].resultUrl, "https://example.com/routed-gone.mp4");
+    assert.match(ledger.items[0].error ?? "", /404/i);
+    assert.equal(createCalls, 1);
   });
 
   it("executes the AI director route instead of deriving a fixed material mix from the recipe", async () => {
@@ -1552,6 +2890,276 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(response.diagnostics?.actualCostCny, 3.75);
     assert.equal(response.diagnostics?.actualCostSource, "configured_rate");
     assert.deepEqual(response.diagnostics?.actualModelIds, ["seedream-image-v1", "seedance-video-v1"]);
+  });
+
+  it("generates referenced images in scene order without persisting the reference data URL", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-image-reference-"));
+    const scriptPath = path.join(root, "script.json");
+    const directorPlanPath = path.join(root, "director_plan.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 4, visual_strategy: "generated", visual_prompt: "固定主角与厨房环境" },
+      { position: 2, duration: 4, visual_strategy: "generated", visual_prompt: "同一主角切开苹果" },
+    ] }));
+    await writeFile(directorPlanPath, JSON.stringify({ shots: [
+      { scenePosition: 1, preferredProviderId: "seedream-image-v1", generationPrompt: "主角站在厨房案板前" },
+      {
+        scenePosition: 2,
+        preferredProviderId: "seedream-image-v1",
+        referenceFromScenePosition: 1,
+        generationPrompt: "保持同一主角与厨房，切开苹果",
+      },
+    ] }));
+    const requests: Array<{ prompt: string; referenceImages?: [string, ...string[]] }> = [];
+    const imageAdapter: ImageGenerationAdapter = {
+      providerId: "seedream-image-v1",
+      modelId: "doubao-seedream-4-0-250828",
+      supportsReferenceImage: true,
+      generate: async (request) => {
+        requests.push(request);
+        const index = requests.length;
+        return {
+          providerId: "seedream-image-v1",
+          taskId: `image-reference-${index}`,
+          imageUrl: `https://example.com/reference-${index}.png`,
+        };
+      },
+    };
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [],
+      imageAdapters: [{ adapter: imageAdapter, estimatedCnyPerImage: 0.25 }],
+      resolveHost: resolvePublicHost,
+      fetch: async (input) => new Response(
+        String(input).endsWith("reference-1.png") ? "source-image" : "referenced-image",
+        { headers: { "content-type": "image/png" } },
+      ),
+    });
+
+    const response = await subject.run(routedWorkerRequest(scriptPath, directorPlanPath, outputDir, 2, 0.5));
+
+    assert.equal(response.status, "succeeded");
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0]?.referenceImages, undefined);
+    assert.deepEqual(requests[1]?.referenceImages, [
+      `data:image/png;base64,${Buffer.from("source-image").toString("base64")}`,
+    ]);
+    const jobsText = await readFile(path.join(outputDir, "generation_jobs.json"), "utf8");
+    const jobs = JSON.parse(jobsText);
+    assert.deepEqual(
+      jobs.jobs.map((job: { modelId: string }) => job.modelId),
+      ["doubao-seedream-4-0-250828", "doubao-seedream-4-0-250828"],
+    );
+    assert.equal(jobsText.includes("data:image"), false);
+    const ledgerName = (await readdir(path.join(root, ".generation-operations")))[0]!;
+    const ledgerText = await readFile(path.join(root, ".generation-operations", ledgerName), "utf8");
+    const ledger = JSON.parse(ledgerText);
+    assert.equal(ledgerText.includes("data:image"), false);
+    assert.equal(ledger.items[1].modelId, "doubao-seedream-4-0-250828");
+    assert.equal(ledger.items[1].parameters.referenceFromScenePosition, 1);
+    assert.equal(
+      ledger.items[1].parameters.referenceImageSha256,
+      createHash("sha256").update("source-image").digest("hex"),
+    );
+    assert.equal(ledger.items[1].inputFingerprint.length, 64);
+    assert.equal(response.diagnostics?.estimatedCostCny, 0.5);
+    assert.equal(response.diagnostics?.actualCostCny, 0.5);
+    assert.deepEqual(response.diagnostics?.actualModelIds, ["doubao-seedream-4-0-250828"]);
+
+    const retryRequest = routedWorkerRequest(
+      scriptPath,
+      directorPlanPath,
+      path.join(root, "attempt-2"),
+      0,
+      0,
+    );
+    retryRequest.commandId = "command-routed-reference-retry";
+    const retried = await subject.run(retryRequest);
+    assert.equal(retried.status, "succeeded");
+    assert.equal(requests.length, 2);
+    assert.equal(retried.diagnostics?.estimatedCostCny, 0);
+    assert.equal(retried.diagnostics?.actualCostCny, 0);
+  });
+
+  it("redacts a reference data URL echoed by an image provider before persisting diagnostics", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-reference-redaction-"));
+    const scriptPath = path.join(root, "script.json");
+    const directorPlanPath = path.join(root, "director_plan.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [1, 2].map((position) => ({
+      position,
+      duration: 4,
+      visual_strategy: "generated",
+      visual_prompt: `scene ${position}`,
+    })) }));
+    await writeFile(directorPlanPath, JSON.stringify({ shots: [
+      { scenePosition: 1, preferredProviderId: "seedream-image-v1", generationPrompt: "first" },
+      { scenePosition: 2, preferredProviderId: "seedream-image-v1", referenceFromScenePosition: 1, generationPrompt: "second" },
+    ] }));
+    let calls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [],
+      imageAdapters: [{
+        estimatedCnyPerImage: 0.25,
+        adapter: {
+          providerId: "seedream-image-v1",
+          supportsReferenceImage: true,
+          generate: async () => {
+            calls += 1;
+            if (calls === 1) {
+              return {
+                providerId: "seedream-image-v1",
+                taskId: "source-image",
+                imageUrl: "https://example.com/source.png",
+              };
+            }
+            throw new ProviderRequestRejectedError("bad reference data:image/png;base64,UElJ");
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("source-image", { headers: { "content-type": "image/png" } }),
+    });
+
+    const response = await subject.run(routedWorkerRequest(scriptPath, directorPlanPath, outputDir, 2, 0.5));
+    const jobsText = await readFile(path.join(outputDir, "generation_jobs.json"), "utf8");
+    const ledgerName = (await readdir(path.join(root, ".generation-operations")))[0]!;
+    const ledgerText = await readFile(path.join(root, ".generation-operations", ledgerName), "utf8");
+
+    assert.equal(response.status, "failed");
+    assert.equal(calls, 2);
+    assert.match(response.error?.message ?? "", /\[redacted image data\]/);
+    for (const persisted of [jobsText, ledgerText]) {
+      assert.match(persisted, /\[redacted image data\]/);
+      assert.doesNotMatch(persisted, /data:image|UElJ/);
+    }
+  });
+
+  it("rejects invalid reference-image routes before fallback or paid provider calls", async () => {
+    const cases = [
+      {
+        name: "missing generated image source",
+        shots: [
+          { scenePosition: 1, preferredProviderId: "seedream-image-v1", generationPrompt: "first" },
+          { scenePosition: 2, preferredProviderId: "seedream-image-v1", referenceFromScenePosition: 9, generationPrompt: "second" },
+        ],
+        expected: /must reference an earlier generated image scene/i,
+      },
+      {
+        name: "reuse and reference conflict",
+        shots: [
+          { scenePosition: 1, preferredProviderId: "seedream-image-v1", generationPrompt: "first" },
+          {
+            scenePosition: 2,
+            preferredProviderId: "pexels-stock-v1",
+            reuseFromScenePosition: 1,
+            referenceFromScenePosition: 1,
+            generationPrompt: "second",
+          },
+        ],
+        expected: /cannot both reuse and reference/i,
+      },
+      {
+        name: "reference source is itself reused",
+        shots: [
+          { scenePosition: 1, preferredProviderId: "seedream-image-v1", generationPrompt: "first" },
+          { scenePosition: 2, preferredProviderId: "pexels-stock-v1", reuseFromScenePosition: 1, generationPrompt: "reuse" },
+          { scenePosition: 3, preferredProviderId: "seedream-image-v1", referenceFromScenePosition: 2, generationPrompt: "third" },
+        ],
+        expected: /must reference an earlier generated image scene/i,
+      },
+      {
+        name: "image adapter does not implement reference generation",
+        shots: [
+          { scenePosition: 1, preferredProviderId: "seedream-image-v1", generationPrompt: "first" },
+          { scenePosition: 2, preferredProviderId: "seedream-image-v1", referenceFromScenePosition: 1, generationPrompt: "second" },
+        ],
+        supportsReferenceImage: false,
+        expected: /does not support reference images/i,
+      },
+    ];
+    for (const testCase of cases) {
+      const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-invalid-reference-"));
+      const scriptPath = path.join(root, "script.json");
+      const directorPlanPath = path.join(root, "director_plan.json");
+      await writeFile(scriptPath, JSON.stringify({ scenes: testCase.shots.map((_shot, index) => ({
+        position: index + 1,
+        duration: 4,
+        visual_strategy: "generated",
+        visual_prompt: `scene ${index + 1}`,
+      })) }));
+      await writeFile(directorPlanPath, JSON.stringify({ shots: testCase.shots }));
+      const fallback = new LocalAssetWorker();
+      let paidCalls = 0;
+      const subject = new GenerativeAssetWorkerClient({
+        fallback,
+        adapters: [],
+        imageAdapters: [{
+          estimatedCnyPerImage: 0.25,
+          adapter: {
+            providerId: "seedream-image-v1",
+            supportsReferenceImage: testCase.supportsReferenceImage ?? true,
+            generate: async () => {
+              paidCalls += 1;
+              return { providerId: "seedream-image-v1", taskId: "must-not-run", imageUrl: "https://example.com/no.png" };
+            },
+          },
+        }],
+      });
+
+      await assert.rejects(
+        () => subject.run(routedWorkerRequest(scriptPath, directorPlanPath, path.join(root, "attempt-1"), 2, 0.5)),
+        testCase.expected,
+        testCase.name,
+      );
+      assert.equal(fallback.calls.length, 0, testCase.name);
+      assert.equal(paidCalls, 0, testCase.name);
+    }
+  });
+
+  it("stops referenced generation when the source image cannot be materialized", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-reference-failure-"));
+    const scriptPath = path.join(root, "script.json");
+    const directorPlanPath = path.join(root, "director_plan.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [1, 2].map((position) => ({
+      position,
+      duration: 4,
+      visual_strategy: "generated",
+      visual_prompt: `scene ${position}`,
+    })) }));
+    await writeFile(directorPlanPath, JSON.stringify({ shots: [
+      { scenePosition: 1, preferredProviderId: "seedream-image-v1", generationPrompt: "first" },
+      { scenePosition: 2, preferredProviderId: "seedream-image-v1", referenceFromScenePosition: 1, generationPrompt: "second" },
+    ] }));
+    let paidCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [],
+      imageAdapters: [{
+        estimatedCnyPerImage: 0.25,
+        adapter: {
+          providerId: "seedream-image-v1",
+          supportsReferenceImage: true,
+          generate: async () => {
+            paidCalls += 1;
+            return { providerId: "seedream-image-v1", taskId: "source", imageUrl: "https://example.com/source.png" };
+          },
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("download failed", { status: 502 }),
+    });
+
+    const response = await subject.run(routedWorkerRequest(scriptPath, directorPlanPath, outputDir, 2, 0.5));
+    const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+
+    assert.equal(response.status, "failed");
+    assert.equal(paidCalls, 1);
+    assert.equal(jobs.jobs.length, 1);
+    assert.match(response.error?.message ?? "", /download failed with status 502/i);
+    assert.equal(response.artifacts.some((artifact) => artifact.kind === "media_asset"), false);
   });
 
   it("requires an explicit retry when the director's selected paid provider is unavailable", async () => {
@@ -2120,6 +3728,62 @@ class LocalAssetWorker {
   }
 }
 
+async function runCraftedAssetPlan({
+  asset = {},
+  route = {},
+  directorShot = {},
+}: {
+  asset?: Record<string, unknown>;
+  route?: Record<string, unknown>;
+  directorShot?: Record<string, unknown>;
+}): Promise<WorkerResponse> {
+  const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-card-guard-"));
+  const scriptPath = path.join(root, "script.json");
+  const directorPlanPath = path.join(root, "director_plan.json");
+  const mediaPath = path.join(root, "scene_01.png");
+  const planPath = path.join(root, "asset_plan.json");
+  await writeFile(scriptPath, JSON.stringify({ scenes: [
+    { position: 1, duration: 4, visual_strategy: "stock", visual_prompt: "必须使用真实图库画面" },
+  ] }));
+  await writeFile(directorPlanPath, JSON.stringify({ shots: [{
+    scenePosition: 1,
+    preferredProviderId: "pexels-stock-v1",
+    deliveryType: "stock_video",
+    query: "real stock footage",
+    ...directorShot,
+  }] }));
+  await writeFile(mediaPath, "asset bytes");
+  await writeFile(planPath, JSON.stringify({
+    scene_assets: [{
+      ...localAsset(1, mediaPath),
+      provider: "pexels",
+      source_url: "https://pexels.example/asset",
+      ...asset,
+    }],
+    director_routing: [{
+      scene_position: 1,
+      preferred_provider_id: "pexels-stock-v1",
+      actual_provider_id: "pexels-stock-v1",
+      actual_provider: "pexels",
+      generation_pending: false,
+      ...route,
+    }],
+  }));
+  const subject = new GenerativeAssetWorkerClient({
+    fallback: {
+      run: async (): Promise<WorkerResponse> => ({
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        commandId: "command-routed",
+        status: "succeeded",
+        output: { assetPlanPath: planPath },
+        artifacts: [],
+      }),
+    },
+    adapters: [],
+  });
+  return subject.run(routedWorkerRequest(scriptPath, directorPlanPath, path.join(root, "attempt-1"), 0, 0));
+}
+
 function routedWorkerRequest(
   scriptPath: string,
   directorPlanPath: string,
@@ -2192,3 +3856,108 @@ function reuseSourceForTest(shot: { query?: string; reuseFromScenePosition?: num
   };
   return /^\d+$/.test(token) ? Number(token) : words[token];
 }
+
+describe("reworkAffectedScenePositions", () => {
+  const scene = (position: number, narration = `第${position}幕`) => ({
+    position,
+    narration,
+    duration: 4,
+    visual_strategy: "generated",
+    visual_prompt: `scene ${position}`,
+  });
+  const finding = (scenePosition: number | undefined, targetNodeIds: string[] = ["visual-direction", "assets"]) => ({
+    findingId: `vf_${String(scenePosition ?? 0).padStart(24, "0")}`.slice(0, 27),
+    timecodeMs: 1_000,
+    ...(scenePosition === undefined ? {} : { scenePosition }),
+    category: "continuity",
+    description: "画面问题。",
+    suggestion: "修复。",
+    targetNodeIds,
+  });
+
+  it("expands reference and REUSE_ONLY dependents into the director-facing affected closure", () => {
+    const positions = reworkAffectedScenePositions({
+      findings: [finding(1)],
+      previousScenes: [scene(1), scene(2), scene(3)],
+      previousShots: [
+        { scenePosition: 1 },
+        { scenePosition: 2, referenceFromScenePosition: 1 },
+        { scenePosition: 3, query: "REUSE_ONLY scene 2" },
+      ],
+      currentScenes: [scene(1), scene(2), scene(3)],
+      affectedScenePositions: [1],
+    });
+    assert.deepEqual(positions, [1, 2, 3]);
+  });
+
+  it("merges visual findings with script-only scene changes before the director runs", () => {
+    const positions = reworkAffectedScenePositions({
+      findings: [finding(2, ["visual-direction"])],
+      previousScenes: [scene(1), scene(2), scene(3), scene(4)],
+      currentScenes: [scene(1), scene(2), scene(3), scene(4, "重写后的第四幕")],
+      affectedScenePositions: [],
+    });
+    assert.deepEqual(positions, [2, 4]);
+  });
+
+  it("falls back to every current scene when a visual or asset finding cannot be located", () => {
+    const positions = reworkAffectedScenePositions({
+      findings: [finding(undefined)],
+      previousScenes: [scene(1), scene(2)],
+      currentScenes: [scene(1), scene(2)],
+      affectedScenePositions: [],
+    });
+    assert.deepEqual(positions, [1, 2]);
+  });
+
+  it("falls back to every current scene when a legacy run lacks a structured scope", () => {
+    const scenes = Array.from({ length: 8 }, (_, index) => scene(index + 1));
+    const positions = reworkAffectedScenePositions({
+      findings: [],
+      previousScenes: scenes,
+      currentScenes: scenes.map((entry) => structuredClone(entry)),
+    });
+    assert.deepEqual(positions, [1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it("keeps Studio-generated technical-failure instructions inside their structured scene scope", () => {
+    const scenes = [scene(1), scene(2), scene(3), scene(4)];
+    const positions = reworkAffectedScenePositions({
+      findings: [],
+      previousScenes: scenes,
+      currentScenes: scenes.map((entry) => structuredClone(entry)),
+      affectedScenePositions: [3],
+    });
+    assert.deepEqual(positions, [3]);
+  });
+
+  it("treats an explicit scene selection as authoritative while preserving canonical safety expansion", () => {
+    const scenes = [scene(1), scene(2), scene(3), scene(4)];
+    const selected = (affectedScenePositions: number[], overrides: Record<string, unknown> = {}) => (
+      reworkAffectedScenePositions({
+        findings: [],
+        previousScenes: scenes,
+        currentScenes: scenes.map((entry) => structuredClone(entry)),
+        affectedScenePositions,
+        ...overrides,
+      })
+    );
+
+    assert.deepEqual(selected([4]), [4]);
+    assert.deepEqual(selected([]), []);
+    assert.deepEqual(selected([4], { findings: [finding(2)] }), [2, 4]);
+    assert.deepEqual(selected([4], { findings: [finding(undefined)] }), [1, 2, 3, 4]);
+    assert.deepEqual(selected([4], {
+      currentScenes: [scene(1), scene(2), scene(3, "重写后的第三幕"), scene(4)],
+    }), [3, 4]);
+    assert.deepEqual(selected([1], {
+      currentShots: [
+        { scenePosition: 1 },
+        { scenePosition: 2, referenceFromScenePosition: 1 },
+        { scenePosition: 3, query: "REUSE_ONLY scene 2" },
+        { scenePosition: 4 },
+      ],
+    }), [1, 2, 3]);
+  });
+
+});

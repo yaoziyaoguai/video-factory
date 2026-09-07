@@ -14,6 +14,7 @@ import {
   reviewedVideoModelCatalog,
 } from "./video-provider-settings.js";
 import { readMeteredImageProviderSettings } from "./image-provider-settings.js";
+import { seedreamModelSupportsReferenceImage } from "@video-factory/production-pipeline";
 
 export interface ProviderRuntime {
   python: boolean;
@@ -46,6 +47,11 @@ export function assetProviderDeliveryTypes(providerId: string): AssetDeliveryTyp
   const deliveryTypes = ASSET_PROVIDER_DELIVERY_TYPES[providerId as keyof typeof ASSET_PROVIDER_DELIVERY_TYPES];
   if (!deliveryTypes) throw new Error(`Asset provider '${providerId}' is missing its delivery type declaration.`);
   return [...deliveryTypes];
+}
+
+export function assetProviderSupportsReferenceImage(providerId: string, modelId?: string): boolean {
+  if (providerId !== "seedream-image-v1") return false;
+  return modelId === undefined || seedreamModelSupportsReferenceImage(modelId);
 }
 
 export function buildProviderCatalog(
@@ -163,8 +169,8 @@ export function buildProviderCatalog(
       available: codexRoleAvailable("series-roadmap") || zaiRoleAvailable("series-roadmap"),
       kind: "external",
       billing: "subscription",
-      description: "维护 Series Bible、Canon 与集间承接，规划长期路线并在单集开拍前重新绿灯审计。",
-      modes: ["系列圣经", "连续性", "单集绿灯", "三轮自审"],
+      description: "维护 Series Bible、Canon 与集间承接，规划长期路线并在单集开拍前重新复核。",
+      modes: ["系列圣经", "连续性", "单集开拍复核", "最多三轮修订"],
       latency: "seconds",
       defaultModelId: codexRoleAvailable("series-roadmap") ? modelForTask("series-roadmap") : zaiModelForTask("series-roadmap"),
       modelProfiles: roleModelProfiles("codex-series-showrunner-v1", "series-roadmap"),
@@ -188,7 +194,7 @@ export function buildProviderCatalog(
       available: codexRoleAvailable("script-draft") || zaiRoleAvailable("script-draft"),
       kind: "external",
       billing: "subscription",
-      description: "按选题角度撰写可拍、可朗读、可核验的分镜脚本；首选模型调用故障时按候选顺序切换，内容校验或质量审计失败时明确失败，不回退模板。",
+      description: "按选题角度撰写可拍、可朗读、可核验的分镜脚本；首选模型调用故障时按候选顺序切换，内容校验或质量复核未通过时明确失败，不回退模板。",
       modes: ["口语旁白", "3-10 场分镜", "逐场画面指令"],
       latency: "seconds",
       defaultModelId: codexRoleAvailable("script-draft") ? modelForTask("script-draft") : zaiModelForTask("script-draft"),
@@ -301,7 +307,14 @@ export function buildProviderCatalog(
       billing: "metered",
       status: seedreamAvailable ? "ready" : "needs_config",
       description: "火山方舟同步生成竖屏关键画面，适合解释性插画、概念视觉和系列统一风格。",
-      modes: ["文生图", "9:16", "单张关键画面"],
+      modes: [
+        "文生图",
+        ...(seedreamSettings && assetProviderSupportsReferenceImage("seedream-image-v1", seedreamSettings.model)
+          ? ["参考图再生成"]
+          : []),
+        "9:16",
+        "单张关键画面",
+      ],
       deliveryTypes: assetProviderDeliveryTypes("seedream-image-v1"),
       latency: "seconds",
       ...(seedreamSettings ? { estimatedCnyPerClip: seedreamSettings.estimatedCnyPerImage } : {}),
@@ -321,6 +334,7 @@ export function buildProviderCatalog(
       } : {}),
       requirement: "需要连接火山方舟账号；模型与单图估价未单独设置时使用已审核的保守默认值",
       docsUrl: "https://api.volcengine.com/api-docs/view?action=ImageGenerations&serviceCode=ark&version=2024-01-01",
+      consoleUrl: "https://console.volcengine.com/ark",
     }),
     provider({
       id: "seedance-video-v1",
@@ -348,6 +362,7 @@ export function buildProviderCatalog(
       })),
       requirement: "需要连接火山方舟账号，并为视频模型配置单镜头估价；模型可在页面选择",
       docsUrl: "https://www.volcengine.com/docs/82379/1520757?lang=zh",
+      consoleUrl: "https://console.volcengine.com/ark",
     }),
     provider({
       id: "hailuo-video-v1",
@@ -374,6 +389,7 @@ export function buildProviderCatalog(
       })),
       requirement: "需要连接 MiniMax 账号，选择已审核的视频模型，并配置单镜头估价",
       docsUrl: "https://platform.minimaxi.com/docs/api-reference/video-generation-v2-create",
+      consoleUrl: "https://platform.minimaxi.com/",
     }),
     provider({
       id: "wan-video-v1",
@@ -398,6 +414,7 @@ export function buildProviderCatalog(
       })),
       requirement: "需要连接阿里云百炼账号及工作空间，选择已审核的视频模型，并配置单镜头估价",
       docsUrl: "https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference",
+      consoleUrl: "https://bailian.console.aliyun.com/",
     }),
     plannedVideoProvider("kling-video-v1", "Kling 可灵", "可灵官方接口的模型目录与鉴权适配将在账号权限确认后启用。"),
     plannedVideoProvider("vidu-video-v1", "Vidu", "参考生视频、模板和口型能力将在统一生成任务协议上接入。"),
@@ -419,6 +436,7 @@ export function buildProviderCatalog(
       modelProfiles: [textModelProfile(environment.MINIMAX_TTS_MODEL_ID?.trim() || "speech-2.8-turbo", "MiniMax Speech 2.8 Turbo", "minimax-tts-v1", "minimax", miniMaxTtsAvailable, "云端中文配音模型；费用按一条视频的旁白保守估算。", positiveEstimate(environment.MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP, 0.5))],
       requirement: "需要连接 MiniMax 账号；未单独选择配音模型时使用已审核的默认模型",
       docsUrl: "https://platform.minimaxi.com/docs/api-reference/speech-t2a-http",
+      consoleUrl: "https://platform.minimaxi.com/",
     }),
     provider({
       id: "macos-say-v1",
@@ -485,7 +503,7 @@ export function buildProviderCatalog(
       available: runtime.python && runtime.ffmpeg && runtime.ffprobe,
       kind: "local",
       description: "检查分辨率、时长、轨道、素材完整性和产物哈希。",
-      modes: ["技术门禁", "产物校验"],
+      modes: ["技术检查", "文件校验"],
       latency: "seconds",
       requirement: "需要 python3、ffmpeg 和 ffprobe",
     }),
@@ -553,12 +571,12 @@ export function buildProviderCatalog(
     provider({
       id: "codex-role-auditor-v1",
       capability: "role.audit",
-      label: "Codex 独立质量审计",
+      label: "AI 独立质量复核",
       available: codexAuditAvailable || zaiAuditAvailable,
       kind: "external",
       billing: "subscription",
-      description: "与生产角色隔离，逐条核对上下文、角色合同和下游边界；发现阻断问题时要求原角色修订。",
-      modes: ["独立会话", "xhigh 推理", "最多三轮", "阻断门禁"],
+      description: "由独立 AI 核对创作依据、角色要求和后续能否直接使用；发现必须修改的问题时，交回原角色修订。",
+      modes: ["独立复核", "深入核对", "最多三轮", "不通过则要求修改"],
       latency: "seconds",
       defaultModelId: codexAuditAvailable ? modelForTask("role-audit") : zaiModelForTask("role-audit"),
       modelProfiles: roleModelProfiles("codex-role-auditor-v1", "role-audit"),

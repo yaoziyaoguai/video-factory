@@ -133,7 +133,7 @@ describe("FallbackScreenwriterAgent", () => {
     ]);
   });
 
-  it("shares one wall-clock deadline across every text model candidate", async () => {
+  it("shares one stage admission deadline across every text model candidate", async () => {
     let now = 1_000;
     const deadlines: Array<number | undefined> = [];
     const fallback = new FallbackScreenwriterAgent({
@@ -207,6 +207,168 @@ describe("FallbackScreenwriterAgent", () => {
         outcome: "succeeded",
       },
     ]);
+  });
+
+  it("does not start the backup candidate after an uncertain timeout on the primary", async () => {
+    let backupCalls = 0;
+    const uncertainTimeout = new CodexBridgeError(
+      "request timed out after 660000ms; the task may still be executing",
+      false,
+      "uncertain",
+    );
+    const fallback = new FallbackScreenwriterAgent({
+      candidates: [
+        {
+          providerId: "openai",
+          agent: agent("gpt-primary", async () => {
+            throw uncertainTimeout;
+          }),
+        },
+        {
+          providerId: "zai-bigmodel-api",
+          agent: agent("glm-5.3", async () => {
+            backupCalls += 1;
+            return successful("glm-5.3");
+          }),
+        },
+      ],
+    });
+
+    await assert.rejects(
+      () => fallback.draftDetailed(input),
+      (error: unknown) => {
+        assert.equal(error, uncertainTimeout);
+        assert.ok(error instanceof CodexBridgeError);
+        assert.equal(error.stage, "uncertain");
+        return true;
+      },
+    );
+
+    assert.equal(backupCalls, 0);
+  });
+
+  it("does not start the backup candidate after an uncertain structured timeout on the primary", async () => {
+    let backupCalls = 0;
+    const fallback = new FallbackScreenwriterAgent({
+      candidates: [
+        {
+          providerId: "openai",
+          agent: agent("gpt-primary", async () => {
+            throw new CodexBridgeError(
+              "Codex bridge returned HTTP 504.",
+              false,
+              "uncertain",
+              504,
+              undefined,
+              { category: "timeout", reasonCode: "request_timeout", providerId: "openai", modelId: "gpt-primary" },
+            );
+          }),
+        },
+        {
+          providerId: "zai-bigmodel-api",
+          agent: agent("glm-5.3", async () => {
+            backupCalls += 1;
+            return successful("glm-5.3");
+          }),
+        },
+      ],
+    });
+
+    await assert.rejects(
+      () => fallback.draftDetailed(input),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexBridgeError);
+        assert.equal(error.stage, "uncertain");
+        return true;
+      },
+    );
+
+    assert.equal(backupCalls, 0);
+  });
+
+  for (const [label, notAcceptedFailure] of [
+    ["timeout", new CodexBridgeError("request timed out before the task was accepted", false, "not_accepted")],
+    ["service unavailable", new CodexBridgeError(
+      "Codex bridge returned HTTP 503.",
+      true,
+      "not_accepted",
+      503,
+    )],
+  ] as const) {
+    it(`still switches to the backup after a not_accepted ${label}`, async () => {
+      const calls: string[] = [];
+      const fallback = new FallbackScreenwriterAgent({
+        candidates: [
+          {
+            providerId: "openai",
+            agent: agent("gpt-primary", async () => {
+              calls.push("gpt-primary");
+              throw notAcceptedFailure;
+            }),
+          },
+          {
+            providerId: "zai-bigmodel-api",
+            agent: agent("glm-5.3", async () => {
+              calls.push("glm-5.3");
+              return successful("glm-5.3");
+            }),
+          },
+        ],
+      });
+
+      const execution = await fallback.draftDetailed(input);
+
+      assert.deepEqual(calls, ["gpt-primary", "glm-5.3"]);
+      assert.equal(execution.trace?.modelId, "glm-5.3");
+      assert.equal(execution.trace?.fallbackFromModelId, "gpt-primary");
+      assert.deepEqual(execution.trace?.modelCandidateAttempts?.map((attempt) => [
+        attempt.modelId,
+        attempt.outcome,
+        attempt.failureStage,
+      ]), [
+        ["gpt-primary", "failed", "not_accepted"],
+        ["glm-5.3", "succeeded", undefined],
+      ]);
+    });
+  }
+
+  it("does not switch to the backup after a completed invalid-output failure", async () => {
+    let backupCalls = 0;
+    const fallback = new FallbackScreenwriterAgent({
+      candidates: [
+        {
+          providerId: "openai",
+          agent: agent("gpt-primary", async () => {
+            throw new CodexBridgeError(
+              "model output does not satisfy the requested structure",
+              false,
+              "completed_failure",
+              422,
+              undefined,
+              { category: "invalid_output", reasonCode: "output_contract", providerId: "openai", modelId: "gpt-primary" },
+            );
+          }),
+        },
+        {
+          providerId: "zai-bigmodel-api",
+          agent: agent("glm-5.3", async () => {
+            backupCalls += 1;
+            return successful("glm-5.3");
+          }),
+        },
+      ],
+    });
+
+    await assert.rejects(
+      () => fallback.draftDetailed(input),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexBridgeError);
+        assert.equal(error.stage, "completed_failure");
+        return true;
+      },
+    );
+
+    assert.equal(backupCalls, 0);
   });
 
   it("stops immediately on output or business validation failure", async () => {
@@ -358,11 +520,6 @@ describe("FallbackScreenwriterAgent", () => {
       "not_accepted",
       503,
     )],
-    ["timeout", new CodexBridgeError(
-      "role audit request timed out after 300000ms",
-      false,
-      "uncertain",
-    )],
   ] as const) {
     it(`keeps the produced candidate and switches only the audit after ${label}`, async () => {
       let primaryProducerCalls = 0;
@@ -448,6 +605,74 @@ describe("FallbackScreenwriterAgent", () => {
     });
   }
 
+  it("does not switch audit providers when the audit request outcome is uncertain", async () => {
+    let primaryProducerCalls = 0;
+    let primaryAuditCalls = 0;
+    let backupProducerCalls = 0;
+    let backupAuditCalls = 0;
+    const uncertainAuditTimeout = new CodexBridgeError(
+      "role audit request timed out after 300000ms",
+      false,
+      "uncertain",
+    );
+    const fallback = new FallbackScreenwriterAgent({
+      candidates: [
+        {
+          providerId: "openai",
+          agent: agent("gpt-primary", async () => runRoleAgentLoop({
+            role: "编剧",
+            contractVersion: "screenwriter-test-v1",
+            criteria: ["结构完整"],
+            maxIterations: 1,
+            produce: async () => {
+              primaryProducerCalls += 1;
+              return successful("gpt-primary");
+            },
+            audit: async () => {
+              primaryAuditCalls += 1;
+              throw uncertainAuditTimeout;
+            },
+            validate: (value) => value as { scenes: unknown[] },
+          })),
+        },
+        {
+          providerId: "zai-bigmodel-api",
+          agent: agent("glm-5.3", async () => runRoleAgentLoop({
+            role: "编剧",
+            contractVersion: "screenwriter-test-v1",
+            criteria: ["结构完整"],
+            maxIterations: 1,
+            produce: async () => {
+              backupProducerCalls += 1;
+              throw new Error("backup producer must not run");
+            },
+            audit: async () => {
+              backupAuditCalls += 1;
+              throw new Error("backup audit must not run");
+            },
+            validate: (value) => value as { scenes: unknown[] },
+          })),
+        },
+      ],
+    });
+
+    await assert.rejects(
+      () => fallback.draftDetailed(input),
+      (error: unknown) => {
+        assert.ok(error instanceof RoleAgentLoopError);
+        assert.ok(error.sourceError instanceof CodexBridgeError);
+        assert.equal(error.sourceError, uncertainAuditTimeout);
+        assert.equal(error.sourceError.stage, "uncertain");
+        return true;
+      },
+    );
+
+    assert.equal(primaryProducerCalls, 1);
+    assert.equal(primaryAuditCalls, 1);
+    assert.equal(backupProducerCalls, 0);
+    assert.equal(backupAuditCalls, 0);
+  });
+
   it("does not switch audit providers for a malformed audit result", async () => {
     let backupCalls = 0;
     const fallback = new FallbackScreenwriterAgent({
@@ -502,6 +727,42 @@ describe("model provider failure policy", () => {
     ["502", new CodexBridgeError("HTTP 502", false, "not_accepted", 502), true],
     ["503", new CodexBridgeError("HTTP 503", false, "not_accepted", 503), true],
     ["504", new CodexBridgeError("HTTP 504", false, "not_accepted", 504), true],
+    ["uncertain timeout", new CodexBridgeError("request timed out after 300000ms", false, "uncertain"), false],
+    ["uncertain service unavailable HTTP 503", new CodexBridgeError("Codex bridge returned HTTP 503.", false, "uncertain", 503), false],
+    ["uncertain gateway timeout HTTP 504", new CodexBridgeError("Codex bridge returned HTTP 504.", false, "uncertain", 504), false],
+    ["uncertain request timeout HTTP 408", new CodexBridgeError("Codex bridge returned HTTP 408.", false, "uncertain", 408), false],
+    ["uncertain with structured timeout category", new CodexBridgeError(
+      "model request timed out",
+      false,
+      "uncertain",
+      504,
+      undefined,
+      { category: "timeout", reasonCode: "request_timeout", providerId: "openai", modelId: "gpt-5.6-sol" },
+    ), false],
+    ["uncertain with structured network category", new CodexBridgeError(
+      "connection was reset while the task was already accepted",
+      false,
+      "uncertain",
+      undefined,
+      undefined,
+      { category: "network", reasonCode: "connection_reset", providerId: "openai", modelId: "gpt-5.6-sol" },
+    ), false],
+    ["uncertain structured transient kind", new CodexBridgeError(
+      "task status is unknown after a transport failure",
+      false,
+      "uncertain",
+      503,
+      "model_provider_transient",
+    ), false],
+    ["not_accepted timeout message", new CodexBridgeError("request timed out before the task was accepted", false, "not_accepted"), true],
+    ["not_accepted structured timeout category", new CodexBridgeError(
+      "model request timed out",
+      false,
+      "not_accepted",
+      undefined,
+      undefined,
+      { category: "timeout", reasonCode: "request_timeout", providerId: "openai", modelId: "gpt-5.6-sol" },
+    ), true],
     ["unknown 500", new CodexBridgeError("HTTP 500", false, "completed_failure", 500), false],
     ["explicit 500 overload", new CodexBridgeError("HTTP 500: model capacity overloaded", false, "completed_failure", 500), true],
     ["transient 422", new CodexBridgeError("role is temporarily unavailable", false, "completed_failure", 422), true],
@@ -523,8 +784,32 @@ describe("model provider failure policy", () => {
     ), false],
     ["semantic 422", new CodexBridgeError("payload failed business validation", false, "completed_failure", 422), false],
     ["socket cause", new Error("outer", { cause: new CodexBridgeError("socket failed with ECONNREFUSED", true) }), true],
-    ["timeout", new CodexBridgeError("request timed out after 300000ms", false, "uncertain"), true],
+    ["uncertain socket cause", new Error("outer", { cause: new CodexBridgeError("socket failed with ECONNRESET while the task was accepted", false, "uncertain") }), false],
     ["invalid JSON", new CodexBridgeError("response contained invalid JSON", false, "completed_failure", 503), false],
+    ["structured invalid JSON", new CodexBridgeError(
+      "model output could not be parsed",
+      false,
+      "completed_failure",
+      422,
+      undefined,
+      { category: "invalid_output", reasonCode: "invalid_json", providerId: "zai-bigmodel-api", modelId: "glm-5.3" },
+    ), false],
+    ["structured output contract", new CodexBridgeError(
+      "model output does not satisfy the requested structure",
+      false,
+      "completed_failure",
+      422,
+      undefined,
+      { category: "invalid_output", reasonCode: "output_contract", providerId: "zai-bigmodel-api", modelId: "glm-5.3" },
+    ), false],
+    ["invalid request mentioning JSON", new CodexBridgeError(
+      "request uses an invalid JSON schema",
+      false,
+      "completed_failure",
+      400,
+      undefined,
+      { category: "invalid_request", reasonCode: "invalid_json_schema", providerId: "openai", modelId: "gpt-5.6-sol" },
+    ), false],
     ["output contract", new CodexBridgeError("output contract failed", false, "completed_failure", 503), false],
     ["content safety", new CodexBridgeError("content safety policy rejected the prompt", false, "completed_failure", 503), false],
     ["schema failure", new CodexBridgeError("response schema validation failed", false, "completed_failure", 503), false],

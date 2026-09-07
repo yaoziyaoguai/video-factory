@@ -1,12 +1,12 @@
 import { CircleDollarSign, Clock3, Gauge, ReceiptText, RotateCcw } from "lucide-react";
 import { Link } from "react-router-dom";
-import type { StudioCostDashboard, StudioCostGroup, StudioCostRunDetail, StudioCostTotals } from "../../shared/api.js";
-import { providerLabel, runNodeLabel } from "../presentation.js";
+import type { StudioCostDashboard, StudioCostGroup, StudioCostRunDetail, StudioCostTotals, StudioProvider } from "../../shared/api.js";
+import { catalogModelLabel, providerLabel, runNodeLabel } from "../presentation.js";
 
 export function CostDashboard({ dashboard }: { dashboard: StudioCostDashboard }) {
   return (
     <section className="cost-dashboard" aria-labelledby="cost-dashboard-title">
-      <header className="section-heading"><div><p className="eyebrow">费用记录</p><h2 id="cost-dashboard-title">每一笔费用都能追到制作步骤</h2></div><span>人民币 CNY</span></header>
+      <header className="section-heading"><div><p className="eyebrow">费用记录</p><h2 id="cost-dashboard-title">按服务和制作步骤核对费用</h2></div><span>人民币 CNY</span></header>
       <CostMetrics totals={dashboard.totals} />
       <div className="cost-dashboard-grid">
         <CostRanking title="按实际服务" groups={dashboard.byProvider} kind="provider" />
@@ -20,7 +20,7 @@ export function CostDashboard({ dashboard }: { dashboard: StudioCostDashboard })
   );
 }
 
-export function RunCostDetailPanel({ detail }: { detail: StudioCostRunDetail }) {
+export function RunCostDetailPanel({ detail, providers }: { detail: StudioCostRunDetail; providers?: StudioProvider[] }) {
   const lines = groupCostLines(detail.lines);
   return (
     <section className="run-cost-detail" aria-labelledby="run-cost-title">
@@ -29,7 +29,7 @@ export function RunCostDetailPanel({ detail }: { detail: StudioCostRunDetail }) 
       <details className="cost-call-details">
         <summary><span><strong>逐角色消费明细</strong><small>报价不等于消费；只有外部任务结果不明确时才需确认是否扣费</small></span><b>{lines.length} 项</b></summary>
         <div className="cost-line-list">
-          {lines.length ? lines.map((line) => <article key={line.id}><span><strong>{line.role ?? runNodeLabel(line.nodeId)}</strong><small>{line.nodeId === "assets" ? "实际生成：" : ""}{capabilityLabel(line)}</small></span><span><small>{line.callCount > 1 ? `${line.callCount} 次执行 · ` : ""}{costLineLabel(line)}</small><b>{line.actualPending ? `待确认是否扣费 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
+          {lines.length ? lines.map((line) => <article key={line.id}><span><strong>{line.role ?? runNodeLabel(line.nodeId)}</strong><small>{line.nodeId === "assets" ? "实际生成：" : ""}{capabilityLabel(line, providers)}</small></span><span><small>{line.callCount > 1 ? `${line.callCount} 次执行 · ` : ""}{costLineLabel(line)}</small><b>{line.actualPending ? `待确认是否扣费 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
         </div>
       </details>
     </section>
@@ -75,10 +75,15 @@ function CostRanking({ title, groups, kind }: { title: string; groups: StudioCos
   }) : <p>暂无调用数据</p>}</section>;
 }
 
-function capabilityLabel(line: StudioCostRunDetail["lines"][number]): string {
+const UNRECORDED_MODEL_LABEL = "模型名称未记录";
+
+function capabilityLabel(line: StudioCostRunDetail["lines"][number], providers?: StudioProvider[]): string {
   const provider = providerLabel(line.providerId) ?? "自动制作能力";
   if (!line.modelId || line.modelId === "inline" || line.modelId === line.providerId) return provider;
-  return `${provider} · ${line.modelId}`;
+  // 主界面始终由 RunWorkbench 注入 Provider 目录；未注入目录的旧调用保留原样展示。
+  if (providers === undefined) return `${provider} · ${line.modelId}`;
+  const model = catalogModelLabel(providers, line.modelId) ?? UNRECORDED_MODEL_LABEL;
+  return model === provider ? provider : `${provider} · ${model}`;
 }
 
 function actualCostLabel(totals: StudioCostTotals): string {

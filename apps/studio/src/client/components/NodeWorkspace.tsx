@@ -306,7 +306,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         {readOnly ? <p className="node-workspace-warning"><AlertTriangle aria-hidden="true" size={16} />旧版工作流结果只读；要继续修改，请基于这版重新制作。</p> : null}
         {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
           <strong>{agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
-          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{humanizeCreativeText(node.agentLoopProgress.latestAudit.summary)}</span> : <span>正在生成本轮方案，完成后由独立 AI 做质量审计。</span>}
+          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{creatorFacingTechnicalText(humanizeCreativeText(node.agentLoopProgress.latestAudit.summary))}</span> : <span>正在生成本轮方案，完成后由独立 AI 做质量复核。</span>}
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>{fallbackHeading}</strong>：{fallbackReason}</span></p> : null}
         {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />这一步的结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成。</p> : null}
@@ -322,7 +322,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         {executionTiming ? <details className="node-execution-timing">
           <summary><Clock3 aria-hidden="true" size={15} /><span><strong>这一步为什么用了这些时间</strong><small>{executionTiming.summary}</small></span><ChevronDown aria-hidden="true" size={15} /></summary>
           <div>
-            <p>内容先生成，再由独立模型做质量审计；审计未通过时会按意见修订。只有首选模型暂时不可用时，才会切换到替补模型。</p>
+            <p>内容先生成，再由独立模型做质量复核；复核未通过时会按意见修订。只有首选模型暂时不可用时，才会切换到替补模型。</p>
             <div className="node-evidence-row">
               {executionTiming.items.map((item) => <span key={item.label}><b>{item.label}</b>{item.value}</span>)}
             </div>
@@ -438,13 +438,13 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
 
 function agentLoopPhaseLabel(progress: NonNullable<StudioNode["agentLoopProgress"]>): string {
   const phase = progress.phase === "auditing"
-    ? "独立审计中"
+    ? "独立复核中"
     : progress.phase === "repairing"
-      ? "按审计意见修订中"
+      ? "按复核意见修订中"
       : progress.phase === "passed"
-        ? "独立审计已通过"
+        ? "独立复核已通过"
         : progress.phase === "exhausted"
-          ? "三轮审计未通过"
+          ? "三轮复核未通过"
           : "AI 创作中";
   return `第 ${progress.iteration} / ${progress.maxIterations} 轮 · ${phase}`;
 }
@@ -695,7 +695,11 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, re
   return <section className="node-execution-config" aria-label={`${node.role ?? node.label}本次制作选择`}>
     <header>
       <span><Settings2 aria-hidden="true" size={16} /></span>
-      <div><strong>本次制作选择</strong><small>{editing ? "保存后继续制作才会生效，旧费用确认会自动失效" : executionConfigurationSummary(node, providers)}</small></div>
+      <div><strong>本次制作选择</strong><small>{editing
+        ? node.id === "assets"
+          ? "更换画面来源，或切换到时长、任务能力不同的视频模型，会让导演重新规划；同一来源下，只有能力兼容的模型切换才从画面素材继续。保存后旧费用确认会自动失效。"
+          : "保存后继续制作才会生效，旧费用确认会自动失效"
+        : executionConfigurationSummary(node, providers)}</small></div>
       {canEdit && !editing ? <button className="button button-ghost" type="button" onClick={() => setEditing(true)}>调整</button> : null}
     </header>
     {editing ? <div className="node-execution-config-editor">
@@ -896,7 +900,7 @@ function creatorCapabilityLabel(
   return [
     `本次使用 ${providerName}${!modelName || modelId === providerId || modelName === providerName ? "" : ` · ${modelName}`}`,
     typeof reasoningEffort === "string" ? reasoningEffortLabel(reasoningEffort) : undefined,
-    typeof loopIterations === "number" ? `AI 创作与独立质量审计 · ${loopIterations}/3 轮` : undefined,
+    typeof loopIterations === "number" ? `AI 创作与独立质量复核 · ${loopIterations}/3 轮` : undefined,
     typeof auditEffort === "string" ? `质量复核：${reasoningEffortLabel(auditEffort)}` : undefined,
   ].filter(Boolean).join(" · ");
 }
@@ -944,7 +948,7 @@ function executionTimingDetails(
     providerWaitMs === undefined ? undefined : { label: "最终模型等待", value: formatDuration(providerWaitMs) },
     firstOutputEventMs === undefined ? undefined : { label: "首次响应", value: formatDuration(firstOutputEventMs) },
     producerMs === undefined ? undefined : { label: "内容生成累计", value: formatDuration(producerMs) },
-    auditMs === undefined ? undefined : { label: "独立审计累计", value: formatDuration(auditMs) },
+    auditMs === undefined ? undefined : { label: "独立复核累计", value: formatDuration(auditMs) },
     fallbackAndDispatchMs === undefined ? undefined : { label: "替补前等待与调度", value: formatDuration(fallbackAndDispatchMs) },
     toolMs === undefined ? undefined : { label: "工具处理", value: formatDuration(toolMs) },
     providerValidationMs === undefined && loopValidationMs === undefined

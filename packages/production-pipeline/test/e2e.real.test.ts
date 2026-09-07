@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { describe, it } from "node:test";
 import { ProductionPipeline, PythonWorkerClient, type WorkerResponse } from "../src/index.js";
+import { explicitEditorialDirector, localEditorialAssetProvider } from "../src/cli.js";
 
 const execFileAsync = promisify(execFile);
 const e2eEnabled = process.env.VIDEO_FACTORY_E2E === "1";
@@ -35,7 +36,13 @@ describe("real production E2E", () => {
         return client.run(request);
       },
     };
-    const firstProcess = new ProductionPipeline({ workspaceRoot, worker });
+    const pipelineOptions = {
+      workspaceRoot,
+      worker,
+      directorAgent: explicitEditorialDirector,
+      assetProviders: [localEditorialAssetProvider],
+    };
+    const firstProcess = new ProductionPipeline(pipelineOptions);
 
     const waiting = await firstProcess.start(brief);
 
@@ -73,7 +80,7 @@ describe("real production E2E", () => {
 
     const intervention = waiting.interventions.at(-1);
     assert.ok(intervention);
-    const secondProcess = new ProductionPipeline({ workspaceRoot, worker });
+    const secondProcess = new ProductionPipeline(pipelineOptions);
     const approved = await secondProcess.decide(waiting.id, {
       interventionId: intervention.id,
       action: "approve",

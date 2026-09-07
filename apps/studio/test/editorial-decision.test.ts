@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { decideEditorialFormat } from "../src/server/editorial-decision.js";
+import { decideEditorialFormat as decideEditorialFormatWithTemplates } from "../src/server/editorial-decision.js";
 import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
+
+const decideEditorialFormat = (input: Parameters<typeof decideEditorialFormatWithTemplates>[0]) => (
+  decideEditorialFormatWithTemplates(input, BUILTIN_TEMPLATES)
+);
 
 const base = {
   origin: "trend" as const,
@@ -55,7 +59,39 @@ describe("editorial production decision", () => {
     assert.match(decision.guardrails.join(" "), /原始来源|虚构|生成/);
   });
 
-  it("skips a high-risk trend when evidence readiness is blocked", () => {
+  it("keeps everyday guidance with ambiguous words on an action-led video format", () => {
+    for (const input of [
+      { title: "三步化解亲子冲突", category: "parenting" as const },
+      { title: "如何回应孩子突然发脾气", category: "parenting" as const },
+      { title: "家长如何回应学校的临时安排", category: "parenting" as const },
+      { title: "做饭前避免厨房事故的三个检查", category: "food" as const },
+    ]) {
+      const decision = decideEditorialFormat({
+        ...base,
+        ...input,
+        freshness: "evergreen",
+      });
+
+      assert.equal(decision.verdict, "produce_video", input.title);
+      assert.equal(decision.recommendedTemplate?.id, "product-demo", input.title);
+    }
+  });
+
+  it("still treats a real public-event response as an evidence-led update", () => {
+    const decision = decideEditorialFormat({
+      ...base,
+      title: "警方回应公共安全事故调查进展",
+      category: "society",
+      risk: "review",
+      verification: { ...base.verification, status: "review_required" },
+      score: { ...base.score, complianceRisk: 60 },
+    });
+
+    assert.equal(decision.verdict, "produce_image_story");
+    assert.equal(decision.recommendedTemplate?.id, "photo-story");
+  });
+
+  it("keeps the format recommendation visible while a high-risk trend remains source-blocked", () => {
     const decision = decideEditorialFormat({
       ...base,
       title: "重大事故伤亡消息持续更新",
@@ -70,12 +106,13 @@ describe("editorial production decision", () => {
       score: { ...base.score, complianceRisk: 72, final: 61 },
     });
 
-    assert.equal(decision.verdict, "skip");
-    assert.equal(decision.score, 0);
-    assert.match(decision.reasons.join(" "), /证据/);
+    assert.equal(decision.verdict, "produce_image_story");
+    assert.equal(decision.score > 0, true);
+    assert.equal(decision.recommendedTemplate?.id, "photo-story");
+    assert.match(decision.guardrails.join(" "), /高风险热点至少需要 2 个独立来源/);
   });
 
-  it("does not let a blocked series candidate bypass the evidence gate", () => {
+  it("scores a blocked series candidate independently from its evidence gate", () => {
     const decision = decideEditorialFormat({
       ...base,
       origin: "series",
@@ -87,9 +124,11 @@ describe("editorial production decision", () => {
       },
     });
 
-    assert.equal(decision.verdict, "skip");
-    assert.equal(decision.score, 0);
-    assert.match(decision.reasons.join(" "), /关键结论|证据/);
+    assert.equal(decision.verdict, "produce_video");
+    assert.equal(decision.score > 0, true);
+    // 系列入口不再直接锁死人物短纪录：时效型系列选题与热点同样落到事实短片。
+    assert.equal(decision.recommendedTemplate?.id, "trend-fact-brief");
+    assert.match(decision.guardrails.join(" "), /本集关键结论还没有可核验来源/);
   });
 
   it("rejects a vague trend before production even when its aggregate scores are high", () => {
@@ -98,11 +137,11 @@ describe("editorial production decision", () => {
       audience: "所有人",
       painPoint: "想变好",
       hook: "聊聊 AI",
-      evidence: [],
+    evidence: [],
     });
 
     assert.equal(decision.verdict, "skip");
-    assert.match(decision.reasons.join(" "), /受众|痛点|开场|证据/);
+    assert.match(decision.reasons.join(" "), /受众|痛点|开场/);
   });
 
   it("does not promote an unaudited rule fallback to a production recommendation", () => {
@@ -163,7 +202,15 @@ describe("editorial production decision", () => {
       ...base,
       origin: "series",
       freshness: "evergreen",
+      category: "local-culture",
       title: "下班观察 06｜一个上班族的真实变化",
+    });
+    // 系列入口不再整体锁定在微纪录：非纪实类别回到与热点一致的形态检测。
+    const technology = decideEditorialFormat({
+      ...base,
+      origin: "series",
+      freshness: "evergreen",
+      title: "下班随想 07｜为什么周末总是过得更快",
     });
 
     assert.equal(decision.verdict, "produce_video");
@@ -172,6 +219,8 @@ describe("editorial production decision", () => {
     assert.equal(comparison.recommendedTemplate?.id, "ranked-comparison");
     assert.equal(observational.verdict, "produce_video");
     assert.equal(observational.recommendedTemplate?.id, "human-mini-doc");
+    assert.equal(technology.verdict, "produce_video");
+    assert.equal(technology.recommendedTemplate?.id, "knowledge-explainer");
   });
 
   it("requires every viral-video gate to clear its exact boundary", () => {
@@ -214,6 +263,16 @@ describe("editorial production decision", () => {
     assert.equal(liveBrief.recommendedTemplate?.id, "trend-fact-brief");
     assert.equal(miniDoc.recommendedTemplate?.id, "human-mini-doc");
     assert.equal(explainer.recommendedTemplate?.id, "knowledge-explainer");
+  });
+
+  it("omits a recommendation when the preferred template is not currently published", () => {
+    const decision = decideEditorialFormatWithTemplates(
+      { ...base, title: "实测 AI 如何整理一份会议记录", freshness: "evergreen" },
+      BUILTIN_TEMPLATES.filter((template) => template.id !== "product-demo"),
+    );
+
+    assert.equal(decision.verdict, "produce_video");
+    assert.equal(decision.recommendedTemplate, undefined);
   });
 
   it("keeps a comparison topic's audience, hook, value, evidence, template, shots, and sound in one intent", () => {

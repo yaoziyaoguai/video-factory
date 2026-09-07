@@ -83,6 +83,8 @@ function validDirectorPlan(): Record<string, unknown> {
     },
     shots: [{
       scenePosition: 1,
+      reuseFromScenePosition: null,
+      referenceFromScenePosition: null,
       narrativeRole: "hook",
       authenticityPolicy: "illustrative",
       preferredProviderId: "pexels-stock-v1",
@@ -473,6 +475,25 @@ describe("ZaiCodePlanExecutor", () => {
         assert.equal(error.transient, false);
         assert.equal(error.details?.category, "execution_failed");
         assert.equal(error.details?.reasonCode, "http_500");
+        return true;
+      },
+    );
+  });
+
+  it("classifies an HTTP 408 response as a timeout-category transient failure", async () => {
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => new Response(null, { status: 408 }),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(scriptDraftTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.match(error.message, /HTTP 408/);
+        assert.equal(error.transient, true);
+        assert.equal(error.details?.category, "timeout");
+        assert.equal(error.details?.reasonCode, "http_408");
         return true;
       },
     );
