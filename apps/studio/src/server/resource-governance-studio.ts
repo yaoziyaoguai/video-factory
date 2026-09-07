@@ -1,6 +1,6 @@
 import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import type { WorkflowRun } from "@video-factory/workflow-core";
+import type { Artifact, WorkflowRun } from "@video-factory/workflow-core";
 import type { ProductionBrief } from "@video-factory/production-pipeline";
 import type {
   StudioAssetIndex,
@@ -14,14 +14,8 @@ import type {
   StudioTemplateExperimentScorecard,
 } from "../shared/api.js";
 import { StudioInputError } from "../shared/api.js";
-import { ResourceReviewStore } from "./resource-review-store.js";
+import { ResourceReviewStore, type ResourceReviewDecision } from "./resource-review-store.js";
 import { StudioNotFoundError } from "./studio-errors.js";
-
-const EXPERIMENT_TEMPLATES = [
-  ["trend-fact-brief", "热点事实简报"],
-  ["knowledge-explainer", "知识解释"],
-  ["photo-story", "照片故事"],
-] as const;
 
 interface StoredManifest {
   version: "video-factory/resource-manifest-v1";
@@ -37,6 +31,11 @@ export interface RejectedVisualResource {
   scenePosition?: number;
 }
 
+interface ExperimentTemplate {
+  id: string;
+  name: string;
+}
+
 export class ResourceGovernanceStudio {
   private readonly reviews: ResourceReviewStore;
   private readonly withRunLease: <T>(runId: string, action: () => Promise<T>) => Promise<T>;
@@ -46,6 +45,7 @@ export class ResourceGovernanceStudio {
     private readonly listRuns: () => Promise<WorkflowRun<ProductionBrief>[]>,
     private readonly now: () => Date = () => new Date(),
     withRunLease?: <T>(runId: string, action: () => Promise<T>) => Promise<T>,
+    private readonly listPublishedTemplates: () => Promise<readonly ExperimentTemplate[]> = async () => [],
   ) {
     this.reviews = new ResourceReviewStore(path.join(workspaceRoot, "resource-governance", "reviews.json"));
     this.withRunLease = withRunLease ?? (async <T>(_runId: string, action: () => Promise<T>) => action());
@@ -84,10 +84,10 @@ export class ResourceGovernanceStudio {
       }
     }
     const reviewSnapshot = await this.reviews.snapshot();
-    const effectiveItems = items.map((item) => applyReviewDecision(item, reviewSnapshot.decisions[reviewKey(item.runId, item.id)]));
+    const effectiveItems = items.map((item) => applyReviewDecision(item, reviewDecisionForItem(item, reviewSnapshot.decisions)));
     const categories: StudioResourceManifest["categories"] = { visual: 0, voice: 0, font: 0, document: 0, other: 0 };
     for (const item of effectiveItems) categories[item.category] += 1;
-    const pendingItems = effectiveItems.filter((item) => requiresRightsReview(item) && item.reviewStatus === "needs_review");
+    const pendingItems = uniqueReviewRepresentatives(effectiveItems.filter(isPendingRightsReview));
     const visibleItems = [
       ...pendingItems,
       ...effectiveItems.filter((item) => !pendingItems.includes(item)).slice(0, Math.max(0, 500 - pendingItems.length)),
@@ -103,6 +103,7 @@ export class ResourceGovernanceStudio {
       truncatedRunCount: Math.max(0, allRuns.length - runs.length),
       truncatedItemCount: Math.max(0, items.length - visibleItems.length),
       categories,
+      needsReviewItems: pendingItems,
       items: visibleItems,
       assetIndex: buildAssetIndex(effectiveItems),
     };
@@ -135,7 +136,7 @@ export class ResourceGovernanceStudio {
     if (!items) return [];
     const snapshot = await this.reviews.snapshot();
     return items.flatMap((item): RejectedVisualResource[] => {
-      const effective = applyReviewDecision(item, snapshot.decisions[reviewKey(item.runId, item.id)]);
+      const effective = applyReviewDecision(item, reviewDecisionForItem(item, snapshot.decisions));
       if (effective.category !== "visual" || effective.reviewDecision?.action !== "rejected" || !effective.reviewDecision.note) return [];
       return [{
         itemId: effective.id,
@@ -153,8 +154,9 @@ export class ResourceGovernanceStudio {
     const items = await this.itemsForRun(run);
     if (!items) return undefined;
     const snapshot = await this.reviews.snapshot();
-    return items.map((item) => applyReviewDecision(item, snapshot.decisions[reviewKey(item.runId, item.id)]))
-      .filter((item) => requiresRightsReview(item) && item.reviewStatus === "needs_review").length;
+    return uniqueReviewRepresentatives(items
+      .map((item) => applyReviewDecision(item, reviewDecisionForItem(item, snapshot.decisions)))
+      .filter(isPendingRightsReview)).length;
   }
 
   private async itemsForRun(run: WorkflowRun<ProductionBrief>): Promise<StudioResourceManifestItem[] | undefined> {
@@ -176,12 +178,18 @@ export class ResourceGovernanceStudio {
   }
 
   async templateExperiments(): Promise<StudioTemplateExperimentScorecard[]> {
-    const runs = await this.listRuns();
-    return EXPERIMENT_TEMPLATES.map(([templateId, templateName]) => {
-      const samples = runs.filter((run) => run.initialInput.templateSnapshot?.templateId === templateId);
+    const [runs, templates] = await Promise.all([this.listRuns(), this.listPublishedTemplates()]);
+    return templates.map(({ id: templateId, name: templateName }) => {
+      const samples = runs.filter((run) =>
+        run.initialInput.runPurpose !== "test"
+        && run.initialInput.templateSnapshot?.templateId === templateId);
       const completed = samples.filter((run) => run.nodeRuns.some((node) =>
         node.nodeId === "render" && node.status === "succeeded" && node.outputState?.stale !== true));
-      const approved = samples.filter((run) => hasCurrentFinalApproval(run));
+      const finalReviewOutcomes = samples.flatMap((run) => {
+        const outcome = currentFinalReviewOutcome(run);
+        return outcome ? [outcome] : [];
+      });
+      const approved = finalReviewOutcomes.filter((outcome) => outcome === "approved").length;
       const manualEditCount = samples.reduce((total, run) => total + run.nodeRuns.reduce((nodeTotal, node) => {
         const inputEdits = node.inputState?.versions.filter((version) => version.source === "human").length ?? 0;
         const outputEdits = node.outputState?.versions.filter((version) => version.source === "human").length ?? 0;
@@ -210,7 +218,7 @@ export class ResourceGovernanceStudio {
           soundQuality: soundChecks.length ? roundScore(average(soundChecks)) : null,
           costEfficiency: null,
           manualEditCount,
-          finalApprovalRate: samples.length ? percent(approved.length, samples.length) : null,
+          finalApprovalRate: finalReviewOutcomes.length ? percent(approved, finalReviewOutcomes.length) : null,
         },
         note: samples.length
           ? "只展示可由运行证据计算的指标；钩子清晰度需后续接入独立人工评分，当前不编造分数。"
@@ -250,7 +258,20 @@ function reviewFingerprint(item: StudioResourceManifestItem): string {
     item.attributionRequirement,
   ]);
 }
-function applyReviewDecision(item: StudioResourceManifestItem, decision: import("./resource-review-store.js").ResourceReviewDecision | undefined): StudioResourceManifestItem {
+function reviewDecisionForItem(
+  item: StudioResourceManifestItem,
+  decisions: Readonly<Record<string, ResourceReviewDecision>>,
+): ResourceReviewDecision | undefined {
+  const direct = decisions[reviewKey(item.runId, item.id)];
+  if (direct) return direct;
+  if (!item.sha256 && !item.sourceUrl) return undefined;
+  const fingerprint = reviewFingerprint(item);
+  return Object.values(decisions)
+    .filter((decision) => decision.fingerprint === fingerprint)
+    .sort((left, right) => Date.parse(right.reviewedAt) - Date.parse(left.reviewedAt))[0];
+}
+
+function applyReviewDecision(item: StudioResourceManifestItem, decision: ResourceReviewDecision | undefined): StudioResourceManifestItem {
   if (!decision || decision.fingerprint !== reviewFingerprint(item)) return item;
   return {
     ...item,
@@ -263,15 +284,35 @@ function requiresRightsReview(item: StudioResourceManifestItem): boolean {
   return item.category === "visual" || item.category === "voice" || item.category === "font";
 }
 
-function hasCurrentFinalApproval(run: WorkflowRun<ProductionBrief>): boolean {
-  if (run.status !== "succeeded") return false;
+function isPendingRightsReview(item: StudioResourceManifestItem): boolean {
+  return requiresRightsReview(item)
+    && item.reviewStatus === "needs_review"
+    && item.reviewDecision?.action !== "rejected";
+}
+
+function uniqueReviewRepresentatives(items: StudioResourceManifestItem[]): StudioResourceManifestItem[] {
+  const representatives = new Map<string, StudioResourceManifestItem>();
+  for (const item of items) {
+    const key = item.sha256 || item.sourceUrl
+      ? reviewFingerprint(item)
+      : `${reviewFingerprint(item)}\u0000${item.runId}\u0000${item.id}`;
+    if (!representatives.has(key)) representatives.set(key, item);
+  }
+  return [...representatives.values()];
+}
+
+function currentFinalReviewOutcome(run: WorkflowRun<ProductionBrief>): "approved" | "rejected" | undefined {
   const finalReview = run.nodeRuns.find((node) => node.nodeId === "final-review");
-  if (!finalReview || finalReview.status !== "succeeded" || finalReview.outputState?.stale === true) return false;
-  const finalReviewInterventions = new Set(
-    run.interventions.filter((intervention) => intervention.nodeId === "final-review").map((intervention) => intervention.id),
-  );
-  return run.decisions.some((decision) =>
-    decision.action === "approve" && finalReviewInterventions.has(decision.interventionId));
+  if (!finalReview || finalReview.outputState?.stale === true) return undefined;
+  const interventionId = finalReview.intervention?.id
+    ?? [...run.interventions].reverse().find((intervention) => intervention.nodeId === "final-review")?.id;
+  if (!interventionId) return undefined;
+  const decision = [...run.decisions].reverse().find((candidate) =>
+    candidate.interventionId === interventionId
+    && (candidate.action === "approve" || candidate.action === "reject"));
+  if (decision?.action === "approve" && finalReview.status === "succeeded") return "approved";
+  if (decision?.action === "reject" && finalReview.status === "rejected") return "rejected";
+  return undefined;
 }
 
 function hasMeteredExecution(run: WorkflowRun<ProductionBrief>): boolean {
@@ -281,25 +322,53 @@ function hasMeteredExecution(run: WorkflowRun<ProductionBrief>): boolean {
 function reconstructManifestItems(run: WorkflowRun<ProductionBrief>): StudioResourceManifestItem[] {
   return run.artifacts
     .filter((artifact) => artifact.kind !== "resource_manifest")
-    .map((artifact) => ({
-      id: `reconstructed:${artifact.id}`,
-      runId: run.id,
-      runTitle: run.initialInput.title,
-      category: reconstructedCategory(artifact.kind, artifact.contentType, artifact.producer?.nodeId),
-      kind: artifact.kind,
-      providerId: artifact.provenance.providerId ?? "unknown",
-      ...(artifact.provenance.sourceUrl ? { sourceUrl: artifact.provenance.sourceUrl } : {}),
-      ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
-      licenseNote: artifact.provenance.licenseNote
-        ? `从未完成任务恢复：${artifact.provenance.licenseNote}`
-        : "从未完成任务恢复，授权与来源尚未形成最终清单，必须人工复核。",
-      ...(artifact.contentType ? { contentType: artifact.contentType } : {}),
-      ...(artifact.sha256 ? { sha256: artifact.sha256 } : {}),
-      commercialUse: "review_required" as const,
-      attributionRequirement: "unknown" as const,
-      reviewStatus: "needs_review" as const,
-      ...resourceContentUrl(run, `artifact:${artifact.id}`, artifact.sha256),
-    }));
+    .map((artifact) => reconstructManifestItem(run, artifact));
+}
+
+function reconstructManifestItem(run: WorkflowRun<ProductionBrief>, artifact: Artifact): StudioResourceManifestItem {
+  const providerId = artifact.provenance.providerId ?? "unknown";
+  const licenseNote = artifact.provenance.licenseNote;
+  const privateReference = artifact.kind === "reference_video" || providerId === "creator-upload";
+  const humanRevision = artifact.kind === "human_media_revision" || providerId.startsWith("human-editor");
+  const selfOwned = artifact.kind === "render"
+    || providerId.startsWith("video-factory")
+    || providerId === "local-editorial-v1";
+  const evidenceRecorded = Boolean(licenseNote) && !privateReference && !humanRevision;
+  const rightsRecorded = selfOwned || evidenceRecorded;
+  return {
+    id: `reconstructed:${artifact.id}`,
+    runId: run.id,
+    runTitle: run.initialInput.title,
+    category: reconstructedCategory(artifact.kind, artifact.contentType, artifact.producer?.nodeId),
+    kind: artifact.kind,
+    providerId,
+    ...(artifact.provenance.sourceUrl ? { sourceUrl: artifact.provenance.sourceUrl } : {}),
+    ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
+    licenseNote: licenseNote
+      ?? (selfOwned
+        ? "从未完成任务恢复：本地制作产物，来源已记录。"
+        : "从未完成任务恢复，授权与来源尚未形成最终清单，必须人工复核。"),
+    ...(artifact.contentType ? { contentType: artifact.contentType } : {}),
+    ...(artifact.sha256 ? { sha256: artifact.sha256 } : {}),
+    ...(artifactScenePosition(artifact) !== undefined ? { scenePosition: artifactScenePosition(artifact)! } : {}),
+    commercialUse: selfOwned ? "self_owned" : evidenceRecorded ? "provider_terms" : "review_required",
+    attributionRequirement: selfOwned ? "not_required" : evidenceRecorded ? "provider_terms" : "unknown",
+    reviewStatus: rightsRecorded ? "recorded" : "needs_review",
+    ...resourceContentUrl(run, `artifact:${artifact.id}`, artifact.sha256),
+  };
+}
+
+function artifactScenePosition(artifact: Artifact): number | undefined {
+  const data = isRecord(artifact.data) ? artifact.data : undefined;
+  const explicit = data ? positiveInteger(data.scenePosition) ?? positiveInteger(data.scene_position) : undefined;
+  if (explicit !== undefined) return explicit;
+  const filename = artifact.uri ? path.basename(artifact.uri) : "";
+  const match = /(?:^|[_-])scene[_-]?(\d+)(?:[_\-.]|$)/i.exec(filename);
+  return match ? positiveInteger(Number(match[1])) : undefined;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : undefined;
 }
 
 function resourceContentUrl(run: WorkflowRun<ProductionBrief>, itemId: string, sha256?: string): { contentUrl?: string } {
@@ -327,6 +396,7 @@ function reconstructedCategory(
 
 function parseManifestItem(value: unknown, index: number): StoredManifest["items"][number] {
   const item = requiredRecord(value, `资源清单第 ${index + 1} 项`);
+  const id = requiredText(item.id, "id", 256);
   const categories = new Set(["visual", "voice", "font", "document", "other"] as const);
   const commercialUses = new Set(["self_owned", "provider_terms", "review_required"] as const);
   const attributions = new Set(["not_required", "provider_terms", "unknown"] as const);
@@ -336,9 +406,10 @@ function parseManifestItem(value: unknown, index: number): StoredManifest["items
   const attributionRequirement = enumValue(item.attributionRequirement, attributions, "attributionRequirement");
   const reviewStatus = enumValue(item.reviewStatus, reviewStatuses, "reviewStatus");
   const sha256 = optionalText(item.sha256, "sha256", 64);
+  const scenePosition = optionalInteger(item.scenePosition, "scenePosition", 1) ?? scenePositionFromManifestItemId(id);
   if (sha256 && !/^[a-f0-9]{64}$/i.test(sha256)) throw new Error("资源清单 sha256 格式不正确。");
   return {
-    id: requiredText(item.id, "id", 256),
+    id,
     category,
     kind: requiredText(item.kind, "kind", 128),
     providerId: requiredText(item.providerId, "providerId", 160),
@@ -347,7 +418,7 @@ function parseManifestItem(value: unknown, index: number): StoredManifest["items
     ...(optionalText(item.licenseNote, "licenseNote", 2_048) ? { licenseNote: optionalText(item.licenseNote, "licenseNote", 2_048)! } : {}),
     ...(optionalText(item.contentType, "contentType", 160) ? { contentType: optionalText(item.contentType, "contentType", 160)! } : {}),
     ...(sha256 ? { sha256 } : {}),
-    ...(optionalInteger(item.scenePosition, "scenePosition", 1) !== undefined ? { scenePosition: optionalInteger(item.scenePosition, "scenePosition", 1)! } : {}),
+    ...(scenePosition !== undefined ? { scenePosition } : {}),
     ...(optionalInteger(item.width, "width", 1) !== undefined ? { width: optionalInteger(item.width, "width", 1)! } : {}),
     ...(optionalInteger(item.height, "height", 1) !== undefined ? { height: optionalInteger(item.height, "height", 1)! } : {}),
     ...(optionalFinite(item.durationSeconds, "durationSeconds", 0) !== undefined ? { durationSeconds: optionalFinite(item.durationSeconds, "durationSeconds", 0)! } : {}),
@@ -358,6 +429,11 @@ function parseManifestItem(value: unknown, index: number): StoredManifest["items
     attributionRequirement,
     reviewStatus,
   };
+}
+
+function scenePositionFromManifestItemId(itemId: string): number | undefined {
+  const match = /^scene:(\d+)(?::|$)/i.exec(itemId);
+  return match ? positiveInteger(Number(match[1])) : undefined;
 }
 
 function buildAssetIndex(items: StudioResourceManifestItem[]): StudioAssetIndex {
@@ -513,6 +589,7 @@ function assetOrigin(item: StudioResourceManifestItem): StudioAssetOrigin {
 
 function assetReuseStatus(item: StudioResourceManifestItem, mediaKind: StudioAssetMediaKind, origin: StudioAssetOrigin): StudioAssetReuseStatus {
   if (origin === "creator_upload") return "private";
+  if (item.reviewDecision?.action === "rejected") return "not_reusable";
   if (origin === "final_render" || origin === "voice_synthesis" || !["video", "image"].includes(mediaKind)) return "not_reusable";
   if (item.reviewStatus === "needs_review" || item.commercialUse === "review_required") return "review_required";
   return item.contentUrl || item.sourceUrl ? "ready" : "review_required";

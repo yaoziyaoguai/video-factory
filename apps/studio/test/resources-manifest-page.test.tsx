@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +7,10 @@ import { studioApi } from "../src/client/api.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
 
 describe("ResourcesPage source and rights section", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
 
   it("keeps production documents out of the material review queue", async () => {
     const user = userEvent.setup();
@@ -29,7 +32,7 @@ describe("ResourcesPage source and rights section", () => {
     vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
       generatedAt: "2026-09-04T00:00:00.000Z",
       totalItems: 3,
-      needsReviewCount: 2,
+      needsReviewCount: 1,
       legacyRunsWithoutManifest: 0,
       reconstructedRunCount: 0,
       unreadableManifestCount: 0,
@@ -63,6 +66,16 @@ describe("ResourcesPage source and rights section", () => {
     expect(records).toHaveAttribute("open");
     expect(within(section!).getByLabelText("按视频整理的制作记录")).toHaveTextContent("制作文档");
     expect(within(section!).getByLabelText("制作记录明细")).toHaveTextContent("制作记录");
+  });
+
+  it("separates text-model selection from paid visual approval", async () => {
+    stubResourcePage(emptyResourceManifest());
+
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    const rolesLink = await screen.findByRole("link", { name: "制作分工" });
+    fireEvent.click(rolesLink);
+    expect(screen.getByText("文本模型在新建或返工时选择；只有付费图片、视频会在执行前逐镜报价并确认")).toBeInTheDocument();
   });
 
   it("groups materials by video and reveals additional video records in batches", async () => {
@@ -155,6 +168,106 @@ describe("ResourcesPage source and rights section", () => {
     expect(screen.getByRole("button", { name: "显示更多素材视频（还剩 1 条）" })).toBeInTheDocument();
   });
 
+  it("dismisses a successful settings notice after a delay and when changing sections", async () => {
+    stubResourcePage(emptyResourceManifest());
+    vi.spyOn(studioApi, "updateSettings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "free-stock",
+      roleProviderDefaults: {},
+      modelDefaults: {},
+      topicStrategy: { customInstruction: "" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "bilibili", durationSeconds: 24 },
+    });
+
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    fireEvent.change(await screen.findByRole("combobox", { name: "默认目标平台" }), { target: { value: "bilibili" } });
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存创作默认" }));
+      await Promise.resolve();
+    });
+    expect(screen.getByText(/创作默认值已保存/)).toBeInTheDocument();
+
+    act(() => vi.runOnlyPendingTimers());
+    expect(screen.queryByText(/创作默认值已保存/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("combobox", { name: "默认目标平台" }), { target: { value: "douyin" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存创作默认" }));
+      await Promise.resolve();
+    });
+    expect(screen.getByText(/创作默认值已保存/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: "热点信号" }));
+    expect(screen.queryByText(/创作默认值已保存/)).not.toBeInTheDocument();
+  });
+
+  it("keeps a failed settings notice visible instead of timing it out", async () => {
+    stubResourcePage(emptyResourceManifest());
+    vi.spyOn(studioApi, "updateSettings").mockRejectedValue(new Error("网络暂不可用"));
+
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    fireEvent.change(await screen.findByRole("combobox", { name: "默认目标平台" }), { target: { value: "bilibili" } });
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存创作默认" }));
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("保存失败：网络暂不可用");
+
+    act(() => vi.runOnlyPendingTimers());
+    expect(screen.getByRole("alert")).toHaveTextContent("保存失败：网络暂不可用");
+  });
+
+  it("numbers collected signals by page order while preserving their source rank", async () => {
+    stubResourcePage(emptyResourceManifest());
+    vi.mocked(studioApi.trendSignals).mockResolvedValue([
+      { id: "douyin-1", sourceId: "newsnow", platform: "douyin", title: "热点一", rank: 1, collectedAt: "2026-09-07T00:00:00.000Z" },
+      { id: "weibo-1", sourceId: "dailyhot", platform: "weibo", title: "热点二", rank: 1, collectedAt: "2026-09-07T00:00:00.000Z" },
+      { id: "bilibili-7", sourceId: "rsshub", platform: "bilibili", title: "热点三", rank: 7, collectedAt: "2026-09-07T00:00:00.000Z" },
+    ]);
+
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    const signalList = await screen.findByLabelText("已采集热点信号");
+    const rows = within(signalList).getAllByRole("listitem");
+    expect(rows.map((row) => row.querySelector(":scope > span")?.textContent)).toEqual(["01", "02", "03"]);
+    expect(rows[0]).toHaveTextContent("原榜第 1");
+    expect(rows[1]).toHaveTextContent("原榜第 1");
+    expect(rows[2]).toHaveTextContent("原榜第 7");
+  });
+
+  it("distinguishes same-title productions and labels each material with its scene", async () => {
+    stubResourcePage({
+      ...emptyResourceManifest(),
+      totalItems: 2,
+      needsReviewCount: 2,
+      categories: { visual: 2, voice: 0, font: 0, document: 0, other: 0 },
+      items: [
+        { id: "image-1", runId: "vf-production-alpha1234", runTitle: "同名视频", category: "visual", kind: "media_asset", providerId: "seedream-image-v1", contentUrl: "/api/runs/alpha/artifacts/image-1/content", contentType: "image/png", scenePosition: 1, commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "needs_review" },
+        { id: "video-2", runId: "vf-production-beta5678", runTitle: "同名视频", category: "visual", kind: "media_asset", providerId: "pexels-stock-v1", contentUrl: "/api/runs/beta/artifacts/video-2/content", contentType: "video/mp4", scenePosition: 2, commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "needs_review" },
+      ],
+    });
+
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    const runs = await screen.findByLabelText("按视频整理的素材记录");
+    const summaries = within(runs).getAllByText("同名视频", { selector: "summary strong" });
+    expect(summaries).toHaveLength(2);
+    expect(summaries[0]?.closest("summary")).toHaveTextContent("制作编号 alpha1234");
+    expect(summaries[1]?.closest("summary")).toHaveTextContent("制作编号 beta5678");
+    expect(summaries[0]?.closest("summary")).toHaveAccessibleName("查看“同名视频”（制作编号 alpha1234）的素材明细");
+    expect(summaries[1]?.closest("summary")).toHaveAccessibleName("查看“同名视频”（制作编号 beta5678）的素材明细");
+
+    fireEvent.click(summaries[0]!);
+    fireEvent.click(summaries[1]!);
+    expect(within(runs).getByText("第 1 镜 · 图片画面")).toBeInTheDocument();
+    expect(within(runs).getByText("第 2 镜 · 视频画面")).toBeInTheDocument();
+    expect(within(runs).getByRole("img", { name: "第 1 镜素材缩略图" })).toHaveAttribute("src", "/api/runs/alpha/artifacts/image-1/content");
+    expect(within(runs).getByLabelText("第 2 镜素材缩略图")).toHaveAttribute("src", "/api/runs/beta/artifacts/video-2/content#t=0.1");
+  });
+
   it("marks the voice direction as creator-customized when saving it from settings", async () => {
     const user = userEvent.setup();
     const manifest: StudioResourceManifest = {
@@ -219,7 +332,14 @@ describe("ResourcesPage source and rights section", () => {
     }));
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
     await user.click(await screen.findByText("示例视频", { selector: "summary strong" }));
-    await user.click(screen.getAllByRole("button", { name: "确认可用" })[0]!);
+    const ledger = screen.getByLabelText("素材来源与授权明细");
+    expect(within(ledger).getByText("未定位镜头 · 素材标识 CONFIRM")).toBeInTheDocument();
+    expect(within(ledger).getByText("未定位镜头 · 素材标识 REJECT")).toBeInTheDocument();
+    const confirmButton = screen.getAllByRole("button", { name: "确认可用" })[0]!;
+    const rejectButton = screen.getAllByRole("button", { name: "驳回" })[0]!;
+    expect(confirmButton).toHaveClass("button", "button-secondary");
+    expect(rejectButton).toHaveClass("button", "button-danger-ghost");
+    await user.click(confirmButton);
     expect(review).toHaveBeenCalledWith(expect.objectContaining({ itemId: "confirm", expectedRevision: 3, action: "confirmed" }));
 
     await user.click(screen.getByRole("button", { name: "驳回" }));
@@ -321,4 +441,20 @@ function stubResourcePage(resourceManifest: StudioResourceManifest) {
   });
   vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
   vi.spyOn(studioApi, "resourceManifest").mockResolvedValue(resourceManifest);
+}
+
+function emptyResourceManifest(): StudioResourceManifest {
+  return {
+    generatedAt: "2026-09-07T00:00:00.000Z",
+    totalItems: 0,
+    needsReviewCount: 0,
+    legacyRunsWithoutManifest: 0,
+    reconstructedRunCount: 0,
+    unreadableManifestCount: 0,
+    truncatedRunCount: 0,
+    truncatedItemCount: 0,
+    categories: { visual: 0, voice: 0, font: 0, document: 0, other: 0 },
+    items: [],
+    assetIndex: { version: "video-factory/asset-index-v1", totalAssets: 0, duplicateUses: 0, reusableCount: 0, needsReviewCount: 0, facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} }, assets: [] },
+  };
 }

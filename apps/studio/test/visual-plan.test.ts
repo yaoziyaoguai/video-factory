@@ -29,4 +29,17 @@ describe("planVisualDirection", () => {
     assert.equal(plan.beats[1]?.source, "screen");
     assert.equal(plan.beats.every((beat) => Boolean(beat.searchQuery)), true);
   });
+
+  it("turns a long quoted headline into complete creator-facing shot directions", () => {
+    const plan = planVisualDirection({
+      title: "学校治理AI作弊，难点可能不是“禁不禁”，而是怎样证明学习发生过",
+      hook: "丹麦推出紧急方案遏制AI作弊，但一份作业究竟怎样证明是学生完成的？",
+      category: "education",
+    });
+
+    assert.match(plan.beats[1]?.description ?? "", /纸面推演或屏幕演示/);
+    assert.match(plan.beats[2]?.description ?? "", /回答“学校治理AI作弊”/);
+    assert.equal(plan.beats.every((beat) => !`${beat.description} ${beat.searchQuery}`.includes("…")), true);
+    assert.equal(plan.beats.every((beat) => !beat.description.includes("“禁不禁”")), true);
+  });
 });

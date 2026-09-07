@@ -93,7 +93,9 @@ export function buildRunObservability(input: BuildRunObservabilityInput): Studio
       (activeNode.executionReceipt ?? activeNode.plannedExecution)?.providerId,
     ),
   } : undefined;
-  const failure = input.status === "failed"
+  const sourceAssetRejected = input.status === "rejected"
+    && input.nodes.some((node) => node.id === "asset-source-review" && node.status === "rejected");
+  const failure = input.status === "failed" || sourceAssetRejected
     ? buildFailure(input.nodes, input.videoAvailable)
     : undefined;
 

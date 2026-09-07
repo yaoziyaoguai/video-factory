@@ -20,6 +20,20 @@ describe("topic taxonomy", () => {
     assert.equal(classifyTopicCategory("中学任命新团委书记并调整社团安排", "daily-observer"), "education");
   });
 
+  it("classifies current feed misses for tennis, device certification, and public transit", () => {
+    assert.equal(classifyTopicCategory("郑钦文晋级网球四强"), "health-sports");
+    assert.equal(classifyTopicCategory("郑钦文法网夺冠后世界排名变化"), "health-sports");
+    assert.equal(classifyTopicCategory("华为新款平板通过3C认证"), "technology");
+    assert.equal(classifyTopicCategory("多地地铁延时运营方便夜间出行"), "travel");
+    assert.equal(classifyTopicCategory("12306火车票预售期调整"), "travel");
+  });
+
+  it("falls back to original signal keywords when the editorial title stays abstract", () => {
+    assert.equal(classifyTopicCategory("新设备过审了，该不该等下一批？", "daily-observer", ["华为新款平板通过3C认证"]), "technology");
+    assert.equal(classifyTopicCategory("这场比赛还值得追吗", "daily-observer", ["郑钦文晋级网球四强"]), "health-sports");
+    assert.equal(classifyTopicCategory("下班后的新变化怎么看", "daily-observer", []), "finance-career");
+  });
+
   it("marks sensitive claims for review without treating every current topic as high risk", () => {
     assert.equal(topicRiskLevel("地震伤亡数据仍在更新"), "high");
     assert.equal(topicRiskLevel("以色列黑手党头目遭枪杀"), "high");
@@ -46,6 +60,26 @@ describe("topic taxonomy", () => {
     assert.equal(classifyTopicCategory("蔚来全国建成充换电站"), "automotive");
     assert.equal(classifyTopicCategory("不吃碳水就能减肥吗"), "health-sports");
     assert.equal(classifyTopicCategory("18名船员失联家属发声"), "society");
+  });
+
+  it("does not turn everyday guidance into a public high-risk event because of an ambiguous word", () => {
+    assert.equal(classifyTopicCategory("三步化解亲子冲突"), "parenting");
+    assert.equal(classifyTopicCategory("如何回应孩子突然发脾气"), "parenting");
+    assert.equal(classifyTopicCategory("做饭前避免厨房事故的三个检查"), "food");
+    assert.equal(topicRiskLevel("三步化解亲子冲突"), "low");
+    assert.equal(topicRiskLevel("亲子冲突为什么会升级"), "low");
+    assert.equal(topicRiskLevel("如何回应孩子突然发脾气"), "low");
+    assert.equal(topicRiskLevel("做饭前避免厨房事故的三个检查"), "low");
+    assert.equal(topicRiskLevel("警方通报亲子冲突造成伤亡"), "high");
+  });
+
+  it("does not let everyday framing hide a real public event", () => {
+    assert.equal(classifyTopicCategory("父母如何向孩子解释以色列与伊朗冲突"), "society");
+    assert.equal(topicRiskLevel("父母如何向孩子解释以色列与伊朗冲突"), "high");
+    assert.equal(classifyTopicCategory("家长讨论中东局势"), "society");
+    assert.equal(topicRiskLevel("家长讨论中东局势"), "high");
+    assert.equal(classifyTopicCategory("厨房事故多人受伤"), "society");
+    assert.equal(topicRiskLevel("厨房事故多人受伤"), "high");
   });
 
   it("classifies ambiguous real feed titles by editorial intent instead of the first loose keyword", () => {

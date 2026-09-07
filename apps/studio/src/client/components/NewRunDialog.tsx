@@ -15,7 +15,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, StudioReferenceVideo, StudioReworkDraft, StudioReworkFinding, StudioTemplate } from "../../shared/api.js";
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
@@ -128,6 +128,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const releasedReferenceId = useRef<string | undefined>(undefined);
   const voiceTouched = useRef(false);
   const templateAddedEditorialSource = useRef(false);
+  const formScrollRef = useRef<HTMLDivElement>(null);
+  const assetSourcePoolRef = useRef<HTMLElement>(null);
+  const scrollToAssetSourcesOnOpen = useRef(false);
+  const initialScrollResetPending = useRef(false);
   const [referenceUploading, setReferenceUploading] = useState(false);
   const [referenceError, setReferenceError] = useState<string>();
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -139,7 +143,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [templateLoading, setTemplateLoading] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState(
     initialValues?.template?.templateId
-      ?? (initialValues?.editorial?.verdict === "produce_image_story" ? "photo-story" : "knowledge-explainer"),
+      ?? (initialValues?.editorial?.verdict === "produce_image_story"
+        ? "photo-story"
+        : initialValues?.editorial ? "" : "knowledge-explainer"),
   );
   const [templateReplacementConfirmed, setTemplateReplacementConfirmed] = useState(false);
   const [templateError, setTemplateError] = useState<string>();
@@ -172,6 +178,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const selectedMeteredSources = selectedAssetSources.filter((provider) => provider.billing === "metered");
   const selectedRecipe = RECIPES.find((recipe) => recipe.id === recipeId) ?? RECIPES[0]!;
   const selectedTemplate = templates.find((template) => template.id === selectedTemplateId);
+  const templateSelectionMissing = templatesLoaded && !selectedTemplate;
   const inheritedTemplateAvailable = !initialValues?.rework || !initialValues.template
     || templates.some((template) => (
       template.id === initialValues.template?.templateId
@@ -313,7 +320,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const missingProductionRoles = [
     ...missingCapabilities.map((item) => item.label),
     ...(assetProviderIds.length > 0 ? [] : ["导演画面来源"]),
-    ...(roleAuditProvider ? [] : ["独立质量审计"]),
+    ...(roleAuditProvider ? [] : ["独立质量复核"]),
     ...(voiceSelectionAvailable === false && !initialValues?.rework ? ["可用声音演员"] : []),
   ];
   // 链接按现有分区优先：制作角色能力缺口落到制作分工；只剩画面来源缺口时落到画面来源分区，避免让创作者自己找。
@@ -321,7 +328,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     || (voiceSelectionAvailable === false && !initialValues?.rework)
     ? "/resources#production-roles"
     : "/resources#visual-providers";
-  const productionBlocked = missingProductionRoles.length > 0 || inheritedSelectionIssues.length > 0;
+  const productionBlocked = missingProductionRoles.length > 0 || inheritedSelectionIssues.length > 0 || templateSelectionMissing;
 
   async function readTemplateCatalog(revision: number, requestedTemplateId: string, preserveCurrentChoices: boolean) {
     setTemplateLoading(true);
@@ -336,12 +343,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       if (initialValues?.rework) {
         setSelectedTemplateId(requestedTemplateId);
       } else {
-        const resolvedTemplate = availableTemplates.find((template) => template.id === requestedTemplateId) ?? availableTemplates[0]!;
-        setSelectedTemplateId(resolvedTemplate.id);
-        if (!preserveCurrentChoices && resolvedTemplate.id !== requestedTemplateId) {
-          setDurationSeconds(resolvedTemplate.durationSeconds);
-        }
-        if (!preserveCurrentChoices && !initialValues?.voiceDirection && !creatorVoiceWasCustomized(creatorSettings) && !voiceTouched.current) {
+        const resolvedTemplate = availableTemplates.find((template) => template.id === requestedTemplateId);
+        setSelectedTemplateId(resolvedTemplate?.id ?? "");
+        if (resolvedTemplate && !preserveCurrentChoices && !initialValues?.voiceDirection && !creatorVoiceWasCustomized(creatorSettings) && !voiceTouched.current) {
           setVoiceDirection((current) => applyTemplateVoiceRecommendation(resolvedTemplate, current));
         }
       }
@@ -359,11 +363,20 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     if (!open) {
       initializedForOpen.current = false;
       initializationRevision.current += 1;
+      initialScrollResetPending.current = false;
+      setAdvancedOpen(false);
+      setInheritedSettingsOpen(false);
+      setTemplates([]);
+      setTemplatesLoaded(false);
+      setTemplateLoading(false);
+      setTemplateError(undefined);
       return;
     }
     if (!initialDataReady) return;
     if (initializedForOpen.current) return;
     initializedForOpen.current = true;
+    initialScrollResetPending.current = true;
+    if (formScrollRef.current) formScrollRef.current.scrollTop = 0;
     voiceTouched.current = false;
     const revision = ++initializationRevision.current;
     const initialVoiceDirection = initialValues?.voiceDirection ?? creatorSettings?.voiceDirection ?? defaultVoiceDirection(providers);
@@ -386,7 +399,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     const recipe = RECIPES.find((item) => item.id === initialRecipe) ?? RECIPES[0]!;
     const initialProfile = initialValues?.director?.profileId ?? creatorSettings?.productionDefaults?.directorProfileId ?? "auto";
     const requestedTemplateId = initialValues?.template?.templateId
-      ?? (imageStory ? "photo-story" : initialValues?.editorial ? "trend-fact-brief" : "knowledge-explainer");
+      ?? (imageStory ? "photo-story" : initialValues?.editorial ? "" : "knowledge-explainer");
     const inheritedOrRecommendedSourceIds = initialValues?.director?.assetProviderIds
       ?? sourceIdsForRecipe(recipe, providers, creatorSettings?.defaultAssetProviderId);
     const sourceIds = requestedTemplateId === "photo-story"
@@ -411,6 +424,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setReferenceError(undefined);
     setActiveKey("assets");
     setAdvancedOpen(false);
+    scrollToAssetSourcesOnOpen.current = false;
     setInheritedSettingsOpen(false);
     setError(undefined);
     setSelectedTemplateId(requestedTemplateId);
@@ -426,6 +440,19 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setTemplatesLoaded(false);
     void readTemplateCatalog(revision, requestedTemplateId, false);
   }, [creatorSettings, defaults, imageStory, initialDataReady, initialValues, open, providers, requiredAffectedScenePositions]);
+
+  useLayoutEffect(() => {
+    if (!open || !initialScrollResetPending.current || (!templatesLoaded && !templateError)) return;
+    if (formScrollRef.current) formScrollRef.current.scrollTop = 0;
+    initialScrollResetPending.current = false;
+  }, [open, templateError, templatesLoaded]);
+
+  useEffect(() => {
+    if (!open || !advancedOpen || !inheritedSettingsOpen || !scrollToAssetSourcesOnOpen.current) return;
+    scrollToAssetSourcesOnOpen.current = false;
+    const sourcePool = assetSourcePoolRef.current;
+    if (typeof sourcePool?.scrollIntoView === "function") sourcePool.scrollIntoView({ block: "nearest" });
+  }, [advancedOpen, inheritedSettingsOpen, open]);
 
   useEffect(() => {
     if (!open || !referenceVideo) return;
@@ -493,6 +520,27 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       delete next.visualReview;
       return next;
     });
+  }
+
+  function openAssetSourceControls() {
+    if (advancedOpen && inheritedSettingsOpen) {
+      scrollToAssetSourcesOnOpen.current = false;
+      assetSourcePoolRef.current?.scrollIntoView?.({ block: "nearest" });
+    } else {
+      scrollToAssetSourcesOnOpen.current = true;
+    }
+    setInheritedSettingsOpen(true);
+    setAdvancedOpen(true);
+    setActiveKey("assets");
+  }
+
+  function toggleAssetSourceControls() {
+    if (advancedOpen) {
+      scrollToAssetSourcesOnOpen.current = false;
+      setAdvancedOpen(false);
+      return;
+    }
+    openAssetSourceControls();
   }
 
   function selectTemplate(template: StudioTemplate) {
@@ -594,7 +642,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         durationSeconds,
         platform,
         reviewMode: "manual",
+        runPurpose: initialValues?.runPurpose ?? "production",
         ...(editorial ? { editorial } : {}),
+        ...(initialValues?.visualProof ? { visualProof: initialValues.visualProof } : {}),
+        ...(initialValues?.visualPlan ? { visualPlan: initialValues.visualPlan } : {}),
         ...(initialValues?.seriesContext ? { seriesContext: initialValues.seriesContext } : {}),
         ...(initialValues?.creationContext ? { creationContext: initialValues.creationContext } : {}),
         ...(rework ? { rework } : {}),
@@ -654,7 +705,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         </header>
 
         <form className="run-form recipe-form" onSubmit={(event) => event.preventDefault()} key={initialValues?.title ?? "blank-production"}>
-          <div className="recipe-form-scroll">
+          <div ref={formScrollRef} className="recipe-form-scroll" style={{ overflowAnchor: "none" }}>
             {rework ? <section className="rework-brief-section" aria-labelledby="rework-scope-title" tabIndex={-1} data-dialog-initial-focus>
               <div className="compact-section-heading">
                 <div><span>返工</span><h3 id="rework-scope-title">本轮变更范围</h3></div>
@@ -708,8 +759,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 setAssetProviderIds(selectedTemplateId === "photo-story"
                   ? includeLocalEditorialSource(sourceIds, providers)
                   : sourceIds);
-                setAdvancedOpen(true);
-                setActiveKey("assets");
+                openAssetSourceControls();
               }}>用当前策略的可用来源替换</button> : null}
             </section> : null}
             {rework ? <section className="rework-brief-section" aria-labelledby="rework-brief-title">
@@ -772,7 +822,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <div><span>00</span><h3 id="template-picker-title">视频模板</h3></div>
                 <small>模板决定这条视频怎么讲，不锁死模型和素材</small>
               </div>
-              {templates.length > 0 ? (
+              {templates.length > 0 && (!rework || inheritedSettingsOpen) ? (
                 <TemplateGallery
                   templates={templates}
                   selectedId={selectedTemplateId}
@@ -790,6 +840,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   >{templateLoading ? "正在重新读取..." : "重新读取模板"}</button> : null}
                 </div>
               )}
+              {!initialValues?.rework && templateSelectionMissing ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />推荐模板当前不可用，请明确选择一个可用模板后再开始制作。</p> : null}
             </section>
             <section className="brief-section" aria-labelledby="brief-section-title">
               <div className="compact-section-heading">
@@ -982,7 +1033,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                           {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                         </select> : <small>{providerBillingLabel(provider)}</small>}
                       </label>;})}
-                      <button className="button button-ghost" type="button" onClick={() => { setInheritedSettingsOpen(true); setAdvancedOpen(true); setActiveKey("assets"); }}>调整来源</button>
+                      <button className="button button-ghost" type="button" onClick={toggleAssetSourceControls}>{advancedOpen ? "收起来源" : "调整来源"}</button>
                     </div> : null}
                     <small className="production-role-billing">{selected
                       ? item.key === "assets"
@@ -996,8 +1047,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               </div>
               <div className={roleAuditProvider ? "production-auditor" : "production-auditor is-unavailable"}>
                 <span><ScanSearch aria-hidden="true" size={18} /></span>
-                <div><strong>{roleAuditProvider ? creatorProviderName(roleAuditProvider) : "独立质量审计未接通"}</strong><small>由独立 AI 逐步检查输入、交付格式和后续使用是否一致。</small></div>
-                <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "实际使用模型"} · 深度质量审计 · 最多三轮` : "开工前请先恢复独立质量审计能力"}</em>
+                <div><strong>{roleAuditProvider ? creatorProviderName(roleAuditProvider) : "独立质量复核未接通"}</strong><small>由独立 AI 逐步检查输入、交付格式和后续使用是否一致。</small></div>
+                <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "实际使用模型"} · 深入质量复核 · 最多三轮` : "开工前请先恢复独立质量复核能力"}</em>
               </div>
             </section>
 
@@ -1073,7 +1124,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 </div>
               </div>
               </section> : null}
-              {advancedOpen ? <section className="asset-source-pool" aria-labelledby="asset-source-pool-title">
+              {advancedOpen ? <section ref={assetSourcePoolRef} className="asset-source-pool" aria-labelledby="asset-source-pool-title">
                 <div className="compact-section-heading">
                   <div><span>B</span><h3 id="asset-source-pool-title">导演可用素材池</h3></div>
                   <small>{assetProviderIds.length} 项已启用，最终组合由 AI 生成</small>
@@ -1433,17 +1484,21 @@ function defaultReworkScenePositions(
   for (const position of requiredAffectedScenePositions ?? []) {
     if (knownPositions.has(position)) selected.add(position);
   }
-  let hasUnlocatedFinding = false;
+  let hasUnlocatedVisualFinding = false;
   for (const finding of rework.findings ?? []) {
     if (!isLegalScenePosition(finding.scenePosition) || !knownPositions.has(finding.scenePosition)) {
-      hasUnlocatedFinding = true;
+      // 只有真正指向导演/素材的未定位 finding 才能把画面返工扩大到全片；
+      // 脚本或其他节点的全片问题不改变画面镜头选择，显式空范围因此得以保留。
+      if (finding.targetNodeIds.some((nodeId) => nodeId === "visual-direction" || nodeId === "assets")) {
+        hasUnlocatedVisualFinding = true;
+      }
       continue;
     }
     selected.add(finding.scenePosition);
   }
   const explicitlyCleared = Array.isArray(rework.affectedScenePositions)
     && rework.affectedScenePositions.length === 0;
-  if (hasUnlocatedFinding || (!explicitlyCleared && selected.size === 0)) {
+  if (hasUnlocatedVisualFinding || (!explicitlyCleared && selected.size === 0)) {
     return [...fullScenePositions];
   }
   return fullScenePositions.filter((position) => selected.has(position));
@@ -1462,7 +1517,9 @@ function requiredScenePositionsForRework(
   }
   let hasUnlocatedRequiredFinding = false;
   for (const finding of rework.findings ?? []) {
-    if (!finding.targetNodeIds.some((nodeId) => nodeId === "visual-direction" || nodeId === "assets")) continue;
+    const targetsVisualWork = finding.targetNodeIds.some((nodeId) => nodeId === "visual-direction" || nodeId === "assets");
+    const targetsLocatedScriptWork = finding.targetNodeIds.includes("script") && finding.scenePosition !== undefined;
+    if (!targetsVisualWork && !targetsLocatedScriptWork) continue;
     if (!isLegalScenePosition(finding.scenePosition) || !knownPositions.has(finding.scenePosition)) {
       hasUnlocatedRequiredFinding = true;
       continue;

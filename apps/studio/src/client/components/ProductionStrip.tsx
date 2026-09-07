@@ -1,13 +1,14 @@
 import { ArrowUpRight, CircleCheck, CircleDollarSign, LoaderCircle, RotateCcw } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
-import { runNodeLabel } from "../presentation.js";
+import { isHistoricalReadOnlyRun, runNodeLabel } from "../presentation.js";
 
 export function ProductionStrip({ runs }: { runs: StudioRunSummary[] }) {
-  const activeRun = runs.find((run) => run.status === "awaiting_spend_approval" || run.status === "approval_invalidated")
-    ?? runs.find((run) => run.status === "stale")
-    ?? runs.find((run) => run.status === "needs_human")
-    ?? runs.find((run) => run.status === "running" || run.status === "pending");
+  const currentRuns = runs.filter((run) => !isHistoricalReadOnlyRun(run));
+  const activeRun = currentRuns.find((run) => run.status === "awaiting_spend_approval" || run.status === "approval_invalidated")
+    ?? currentRuns.find((run) => run.status === "stale")
+    ?? currentRuns.find((run) => run.status === "needs_human")
+    ?? currentRuns.find((run) => run.status === "running" || run.status === "pending");
 
   if (!activeRun) {
     return null;

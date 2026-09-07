@@ -14,8 +14,10 @@ const STATUS_LABELS: Record<StudioRunStatus, string> = {
   approval_invalidated: "费用确认已失效",
 };
 
-export function StatusBadge({ status }: { status: StudioRunStatus }) {
-  const Icon = status === "running"
+export function StatusBadge({ status, label }: { status: StudioRunStatus; label?: string }) {
+  const Icon = label
+    ? CircleDashed
+    : status === "running"
     ? LoaderCircle
     : status === "succeeded"
       ? CircleCheck
@@ -25,9 +27,9 @@ export function StatusBadge({ status }: { status: StudioRunStatus }) {
           ? XCircle
           : CircleDashed;
   return (
-    <span className={`status-badge status-${status}`}>
+    <span className={`status-badge${label ? " status-historical" : ` status-${status}`}`}>
       <Icon aria-hidden="true" size={14} strokeWidth={2} />
-      {STATUS_LABELS[status]}
+      {label ?? STATUS_LABELS[status]}
     </span>
   );
 }

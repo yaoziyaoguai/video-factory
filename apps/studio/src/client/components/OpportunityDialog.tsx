@@ -10,15 +10,15 @@ interface OpportunityDialogProps {
   onSubmit: (input: StudioOpportunityInput) => Promise<void>;
 }
 
-const SCORE_FIELDS = [
-  ["audienceReach", "人群覆盖", 70],
-  ["visualFeasibility", "视觉可行", 70],
-  ["productionCostEfficiency", "成本效率", 70],
-  ["novelty", "内容新鲜", 60],
-  ["monetization", "商业潜力", 50],
-  ["seriesPotential", "系列潜力", 70],
-  ["complianceRisk", "合规风险", 20],
-] as const;
+const SYSTEM_SCORE_DEFAULTS: StudioOpportunityInput["scores"] = {
+  audienceReach: 70,
+  visualFeasibility: 70,
+  productionCostEfficiency: 70,
+  novelty: 60,
+  monetization: 50,
+  seriesPotential: 70,
+  complianceRisk: 20,
+};
 
 export function OpportunityDialog({ open, initialMode = "manual", onClose, onSubmit }: OpportunityDialogProps) {
   const [mode, setMode] = useState<"manual" | "json">(initialMode);
@@ -101,7 +101,7 @@ function ManualFields() {
   return (
     <>
       <div className="form-section">
-        <div className="form-section-heading"><h3>快速录入</h3><span>完成 5 项基础信息即可开始</span></div>
+        <div className="form-section-heading"><h3>快速录入</h3><span>你填写创作事实和方向，机会评分交给系统</span></div>
         <label className="field field-wide"><span>选题标题</span><input name="title" required data-dialog-initial-focus placeholder="一个具体、可验证的内容命题" /></label>
         <label className="field"><span>目标平台</span><select name="platform" defaultValue="douyin"><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option><option value="bilibili">哔哩哔哩</option></select></label>
         <label className="field"><span>目标受众</span><input name="audience" required placeholder="这条内容为谁解决问题" /></label>
@@ -109,23 +109,11 @@ function ManualFields() {
         <label className="field field-wide"><span>开场钩子</span><textarea name="hook" required rows={3} placeholder="前 3 秒要说出的关键一句" /></label>
       </div>
       <details className="opportunity-advanced">
-        <summary>高级：补充证据与调整估分</summary>
+        <summary>可选：补充参考来源</summary>
         <div className="opportunity-advanced-body">
           <div className="form-section">
-            <div className="form-section-heading"><h3>证据信号</h3><span>有真实来源时再补充</span></div>
-            <label className="field"><span>来源名称</span><input name="evidenceSource" placeholder="manual-research" /></label>
-            <label className="field"><span>来源平台</span><input name="evidencePlatform" defaultValue="douyin" /></label>
-            <label className="field field-wide"><span>观察关键词</span><input name="evidenceKeyword" placeholder="不填时使用选题标题" /></label>
-            <label className="field"><span>信号强度</span><input name="evidenceStrength" type="number" min="0" max="100" defaultValue="70" /></label>
-            <label className="field"><span>证据链接</span><input name="evidenceUrl" type="url" placeholder="https://" /></label>
-          </div>
-          <div className="form-section">
-            <div className="form-section-heading"><h3>各维度估分</h3><span>可按你的判断调整；合规风险分越低越好</span></div>
-            <div className="score-fields">
-              {SCORE_FIELDS.map(([name, label, defaultValue]) => (
-                <label className="field" key={name}><span>{label}</span><input name={name} type="number" min="0" max="100" defaultValue={defaultValue} /></label>
-              ))}
-            </div>
+            <div className="form-section-heading"><h3>参考来源</h3><span>有可追溯资料时再补充；来源强度与机会评分都由系统判断</span></div>
+            <label className="field field-wide"><span>参考链接</span><input name="evidenceUrl" type="url" placeholder="https://" /></label>
           </div>
         </div>
       </details>
@@ -145,14 +133,14 @@ function formInput(data: FormData): StudioOpportunityInput {
     painPoint: required(data, "painPoint"),
     hook: required(data, "hook"),
     evidence: [{
-      source: optional(data, "evidenceSource") ?? "manual-research",
-      platform: optional(data, "evidencePlatform") ?? platform,
-      keyword: optional(data, "evidenceKeyword") ?? title,
-      strength: numeric(data, "evidenceStrength", 70),
+      source: "manual-supplement",
+      platform: "manual",
+      keyword: title,
+      strength: 0,
       ...(evidenceUrl ? { evidenceUrl } : {}),
       collectedAt: new Date().toISOString(),
     }],
-    scores: Object.fromEntries(SCORE_FIELDS.map(([name, , defaultValue]) => [name, numeric(data, name, defaultValue)])) as StudioOpportunityInput["scores"],
+    scores: { ...SYSTEM_SCORE_DEFAULTS },
   };
 }
 
@@ -186,10 +174,4 @@ const FIELD_LABELS: Record<string, string> = {
 function optional(data: FormData, key: string): string | undefined {
   const value = data.get(key);
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function numeric(data: FormData, key: string, fallback?: number): number {
-  const value = optional(data, key);
-  if (value === undefined && fallback !== undefined) return fallback;
-  return Number(value ?? required(data, key));
 }

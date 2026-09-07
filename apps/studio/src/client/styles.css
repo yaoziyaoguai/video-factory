@@ -116,6 +116,9 @@ a { color: inherit; }
 .opportunity-card-copy strong { overflow: hidden; font-size: 14px; font-weight: 650; line-height: 1.45; text-overflow: ellipsis; }
 .opportunity-card-copy small { color: #aeb3ae; font-size: 12px; line-height: 1.35; }
 .opportunity-card-score { padding-top: 1px; color: #0f5cf6; font-size: 12px; font-weight: 800; }
+.opportunity-card-score-label { display: block; font-size: 9px; font-weight: 650; opacity: 0.75; }
+.candidate-visual-proof { color: #5b615b; }
+.candidate-visual-proof small { display: block; margin-bottom: 2px; color: #8a9089; font-size: 10px; font-weight: 650; letter-spacing: 0.04em; }
 
 .opportunity-focus { min-width: 0; padding: 26px 28px 30px; background: var(--paper); }
 .focus-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
@@ -712,7 +715,7 @@ a { color: inherit; }
   .workflow-stage-list { display: flex; overflow-x: auto; }
   .workflow-stage { min-width: 158px; border-right: 1px solid var(--line); border-bottom: 0; }
   .workflow-stage.is-active { box-shadow: inset 0 -3px 0 var(--accent); }
-  .provider-browser { min-height: 390px; }
+  .provider-browser { min-height: 0; }
   .provider-choice { grid-template-columns: 20px minmax(0, 1fr); }
   .provider-choice-status { grid-column: 2; }
   .production-guardrails { grid-template-columns: 1fr; }
@@ -1102,3 +1105,10 @@ h1, h2, .creative-stage blockquote, .brand strong { font-family: "Manrope Variab
   .project-folio-copy { gap: 9px; }
   .project-folio h3 { display: -webkit-box; overflow: hidden; font-size: 16px; -webkit-box-orient: vertical; -webkit-line-clamp: 5; }
 }
+
+.source-supplement-field { display: grid; gap: 6px; }
+.source-supplement-field span { color: #5b615b; font-size: 12px; font-weight: 650; }
+.source-supplement-field textarea { min-height: 108px; padding: 10px 12px; border: 1px solid #cfd4cf; border-radius: 8px; font: inherit; resize: vertical; }
+.source-supplement-hint { margin: 0; color: #6b716b; font-size: 12px; line-height: 1.7; }
+.source-supplement-error { margin: 0; color: #a13026; font-size: 12px; font-weight: 600; }
+.opportunity-supplement-sources { margin-top: 8px; }

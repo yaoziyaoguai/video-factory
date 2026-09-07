@@ -41,6 +41,27 @@ beforeEach(() => {
 });
 
 describe("TemplatesPage", () => {
+  it("puts template editing first and keeps supporting evidence and model overrides collapsed until requested", async () => {
+    const user = userEvent.setup();
+    render(<TemplatesPage />);
+
+    await screen.findByRole("heading", { name: "知识解释" });
+    const gallery = screen.getByRole("radiogroup", { name: "视频模板" });
+    const editor = screen.getByRole("region", { name: "模板编辑器" });
+    const performance = screen.getByRole("group", { name: "模板实际表现" });
+    const advancedModels = screen.getByRole("group", { name: "高级模型设置" });
+
+    expect(gallery.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(editor.compareDocumentPosition(performance) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(performance).not.toHaveAttribute("open");
+    expect(advancedModels).not.toHaveAttribute("open");
+
+    await user.click(screen.getByText("高级模型设置"));
+    expect(advancedModels).toHaveAttribute("open");
+    await user.click(screen.getByText("模板实际表现"));
+    expect(performance).toHaveAttribute("open");
+  });
+
   it("creates a new editable template from a minimal blank grammar", async () => {
     const user = userEvent.setup();
     vi.spyOn(crypto, "randomUUID").mockReturnValue("12345678-1234-4123-8123-123456789abc");
@@ -118,6 +139,7 @@ describe("TemplatesPage", () => {
 
     await screen.findByRole("heading", { name: "知识解释" });
     await user.click(screen.getByRole("radio", { name: /我的系列/ }));
+    await user.click(screen.getByText("高级模型设置"));
     await user.selectOptions(screen.getByLabelText("火山方舟视频生成 模板模型"), "seedance-2-0-lite");
     await user.click(screen.getByRole("button", { name: "保存草稿" }));
 

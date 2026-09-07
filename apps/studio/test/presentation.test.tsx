@@ -8,6 +8,7 @@ describe("creator-facing presentation labels", () => {
     expect(providerLabel("human-editor-private-state")).toBe("人工编辑记录");
     expect(providerLabel("human-validated-director-plan-v1")).toBe("人工确认导演方案");
     expect(providerLabel("multiple")).toBe("多来源制作记录");
+    expect(providerLabel("codex-role-auditor-v1")).toBe("AI 独立质量复核");
     expect(providerLabel("unknown-provider-v1")).toBeUndefined();
     expect(providerModelLabel(undefined, "internal-model-id")).toBe("未识别模型");
     expect(humanizeCreativeText("knowledge-failed-intuition：generated_image，REUSE_ONLY scene 2"))
@@ -44,9 +45,22 @@ describe("creator-facing presentation labels", () => {
     const technical = creatorFacingTechnicalText("Agent Provider Broker schema manifest fallback taskId api-visual-director-v1 primary provider timed out blocking");
     expect(technical).toBe("AI 服务 AI 服务 数据格式 资源清单 备用方案 任务编号 内部能力 首选服务响应超时 必须修改的问题");
     expect(technical).not.toMatch(/Agent|Provider|Broker|schema|manifest|fallback|taskId|api-visual-director-v1|blocking/i);
+    expect(creatorFacingTechnicalText("Codex 独立质量审计 · xhigh 推理 · 阻断门禁"))
+      .toBe("AI 独立质量复核 · 深入推理 · 不通过则要求修改");
+    expect(creatorFacingTechnicalText("Codex 独立质量审计 Agent")).toBe("AI 独立质量复核");
 
     const creatorCopy = "我的 Provider 不是故事主角，Agent 也不是标题。";
     expect(humanizeCreativeText(creatorCopy)).toBe(creatorCopy);
+  });
+
+  it("publishes the independent reviewer catalog in creator language", () => {
+    const catalog = buildProviderCatalog({ python: true, ffmpeg: true, ffprobe: true, say: true }, {});
+    const reviewer = catalog.find((provider) => provider.id === "codex-role-auditor-v1");
+    expect(reviewer?.label).toBe("AI 独立质量复核");
+    expect(reviewer?.description).toContain("创作依据");
+    expect(reviewer?.modes).toEqual(["独立复核", "深入核对", "最多三轮", "不通过则要求修改"]);
+    expect([reviewer?.label, reviewer?.description, ...(reviewer?.modes ?? [])].join(" "))
+      .not.toMatch(/Codex|审计|xhigh|门禁|角色合同|下游边界/);
   });
 
   it("hides internal actor and local service connection details", () => {

@@ -242,29 +242,6 @@ export function TemplatesPage() {
       {error ? <div className="page-error" role="alert"><AlertCircle size={18} aria-hidden="true" /><span>{error}</span></div> : null}
       {loading && templates.length === 0 ? <div className="queue-placeholder">正在读取模板目录...</div> : null}
       {templates.length > 0 ? <TemplateGallery templates={templates} selectedId={selectedId} onSelect={select} /> : null}
-      {deletedBuiltIns.length > 0 ? <section className="template-restore-panel" aria-label="已删除的内置模板">
-        <div><p className="eyebrow">可恢复</p><h2>已删除的内置模板</h2><p>这里只保留内置模板的隐藏记录，不会自动恢复到生产目录。</p></div>
-        <div>{deletedBuiltIns.map((template) => <button className="button button-secondary" type="button" disabled={saving} key={template.id} aria-label={`恢复“${template.name}”`} onClick={() => void restoreBuiltIn(template)}><RotateCcw size={15} aria-hidden="true" />恢复“{template.name}”</button>)}</div>
-      </section> : null}
-      {providerError ? <p className="template-editor-notice is-warning" role="status">模型目录暂时不可用：{providerError}。模板内容仍可查看和编辑。</p> : null}
-
-      <section className="template-experiments" aria-label="模板实验评分">
-        <div className="section-heading"><div><p className="eyebrow">运行证据</p><h2>模板实验评分</h2></div><span>只统计运行证据，不改写已发布模板</span></div>
-        {experimentError ? <p className="template-editor-notice is-warning">评分读取失败：{experimentError}</p> : null}
-        <div className="template-scorecard-grid">{experiments.map((scorecard) => <article key={scorecard.templateId}>
-          <header><div><strong>{scorecard.templateName}</strong><small>{scorecard.sampleSize} 条样本</small></div><span>{scorecard.metrics.finalApprovalRate === null ? "待样本" : `${scorecard.metrics.finalApprovalRate}% 通过`}</span></header>
-          <dl>
-            <div><dt>叙事完整</dt><dd>{metricLabel(scorecard.metrics.narrativeCompleteness)}</dd></div>
-            <div><dt>视觉匹配</dt><dd>{metricLabel(scorecard.metrics.visualMatch)}</dd></div>
-            <div><dt>声音质量</dt><dd>{metricLabel(scorecard.metrics.soundQuality)}</dd></div>
-            <div><dt>成本效率</dt><dd>{metricLabel(scorecard.metrics.costEfficiency)}</dd></div>
-            <div><dt>人工修订</dt><dd>{scorecard.metrics.manualEditCount} 次</dd></div>
-            <div><dt>钩子清晰</dt><dd>{metricLabel(scorecard.metrics.hookClarity)}</dd></div>
-          </dl>
-          <p>{scorecard.note}</p>
-        </article>)}</div>
-      </section>
-
       {draft ? (
         <section className="template-editor" aria-label="模板编辑器">
           <header className="template-editor-heading">
@@ -282,8 +259,9 @@ export function TemplatesPage() {
                 <label className="field"><span>声音角色</span><textarea rows={3} value={draft.soundSystem.voiceIntent} disabled={draft.status !== "draft"} onChange={(event) => setDraft({ ...draft, soundSystem: { ...draft.soundSystem, voiceIntent: event.target.value } })} /></label>
                 <label className="field"><span>音乐策略</span><textarea rows={3} value={draft.soundSystem.musicIntent} disabled={draft.status !== "draft"} onChange={(event) => setDraft({ ...draft, soundSystem: { ...draft.soundSystem, musicIntent: event.target.value } })} /></label>
               </div>
-              {modelProviders.length ? <section className="template-model-strategy" aria-label="模板模型策略">
-                <div className="section-heading"><div><h3>模板模型</h3><p>只固定这个模板确实需要的模型；未固定时使用系统推荐，也可在单次制作中另选。</p></div><span>{Object.keys(draft.modelDefaults ?? {}).length} 项固定</span></div>
+              {modelProviders.length || providerError ? <details className="template-model-strategy" aria-label="高级模型设置">
+                <summary><span><strong>高级模型设置</strong><small>通常保持系统推荐；只有模板确实依赖某个模型时才固定。</small></span><b>{providerError ? "目录暂时不可用" : `${Object.keys(draft.modelDefaults ?? {}).length} 项固定`}</b></summary>
+                {providerError ? <p className="template-editor-notice is-warning" role="status">模型目录暂时不可用：{providerError}。模板内容仍可查看和编辑。</p> : null}
                 <div>{modelProviders.map((provider) => {
                   const selectedModelId = draft.modelDefaults?.[provider.id] ?? "";
                   const selected = provider.modelProfiles?.find((model) => model.id === selectedModelId);
@@ -296,7 +274,7 @@ export function TemplatesPage() {
                     <small>{selected?.description ?? "新建制作时会预选系统推荐，你仍可为本次制作单独选择。"}</small>
                   </label>;
                 })}</div>
-              </section> : null}
+              </details> : null}
             </section>
             <section className="template-story-editor">
               <div className="section-heading"><h3>故事结构</h3><span>{draft.storyStructure.length} 个节拍</span></div>
@@ -325,6 +303,29 @@ export function TemplatesPage() {
           </footer>
         </section>
       ) : null}
+      <details className="template-experiments" aria-label="模板实际表现">
+        <summary><span><strong>模板实际表现</strong><small>查看模板实验评分与历史运行证据</small></span><b>{experiments.length ? `${experiments.length} 个模板有数据` : "暂无数据"}</b></summary>
+        <div className="template-experiment-content">
+          <div className="section-heading"><div><p className="eyebrow">运行证据</p><h2>模板实验评分</h2></div><span>只统计运行证据，不改写已发布模板</span></div>
+          {experimentError ? <p className="template-editor-notice is-warning">评分读取失败：{experimentError}</p> : null}
+          <div className="template-scorecard-grid">{experiments.map((scorecard) => <article key={scorecard.templateId}>
+            <header><div><strong>{scorecard.templateName}</strong><small>{scorecard.sampleSize} 条样本</small></div><span>{scorecard.metrics.finalApprovalRate === null ? "待样本" : `${scorecard.metrics.finalApprovalRate}% 通过`}</span></header>
+            <dl>
+              <div><dt>叙事完整</dt><dd>{metricLabel(scorecard.metrics.narrativeCompleteness)}</dd></div>
+              <div><dt>视觉匹配</dt><dd>{metricLabel(scorecard.metrics.visualMatch)}</dd></div>
+              <div><dt>声音质量</dt><dd>{metricLabel(scorecard.metrics.soundQuality)}</dd></div>
+              <div><dt>成本效率</dt><dd>{metricLabel(scorecard.metrics.costEfficiency)}</dd></div>
+              <div><dt>人工修订</dt><dd>{scorecard.metrics.manualEditCount} 次</dd></div>
+              <div><dt>钩子清晰</dt><dd>{metricLabel(scorecard.metrics.hookClarity)}</dd></div>
+            </dl>
+            <p>{scorecard.note}</p>
+          </article>)}</div>
+        </div>
+      </details>
+      {deletedBuiltIns.length > 0 ? <section className="template-restore-panel" aria-label="已删除的内置模板">
+        <div><p className="eyebrow">可恢复</p><h2>已删除的内置模板</h2><p>这里只保留内置模板的隐藏记录，不会自动恢复到生产目录。</p></div>
+        <div>{deletedBuiltIns.map((template) => <button className="button button-secondary" type="button" disabled={saving} key={template.id} aria-label={`恢复“${template.name}”`} onClick={() => void restoreBuiltIn(template)}><RotateCcw size={15} aria-hidden="true" />恢复“{template.name}”</button>)}</div>
+      </section> : null}
       {createOpen ? <div className="dialog-backdrop" role="presentation">
         <section className="reject-dialog create-template-dialog" role="dialog" aria-modal="true" aria-labelledby="create-template-title">
           <header className="dialog-header"><div><p className="eyebrow">新视频模板</p><h2 id="create-template-title">创建空白模板</h2></div><button className="icon-button" type="button" aria-label="关闭" disabled={saving} onClick={() => setCreateOpen(false)}><X size={18} aria-hidden="true" /></button></header>

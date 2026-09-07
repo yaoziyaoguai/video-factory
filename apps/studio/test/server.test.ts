@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { buildStudioApp, type StudioServicePort } from "../src/server/app.js";
-import { StudioConflictError } from "../src/server/studio-service.js";
+import { StudioConflictError, StudioNotFoundError } from "../src/server/studio-service.js";
 import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
 import type { StudioOpportunity, StudioPaidReconciliationInput, StudioResourceReviewInput, StudioRunDetail } from "../src/shared/api.js";
 
@@ -294,6 +294,115 @@ describe("Studio API", () => {
     assert.deepEqual(opportunityOrigins, ["series"]);
     assert.deepEqual(runOrigins, ["trend"]);
     assert.match(invalid.json().error, /创作入口/);
+    await app.close();
+  });
+
+  it("supplements candidate and opportunity sources through validated endpoints", async () => {
+    const received: Array<{ scope: string; id: string; input: unknown }> = [];
+    const inboxItem = {
+      id: "trend-1",
+      origin: "trend" as const,
+      title: "AI 工作流",
+      platform: "douyin",
+      track: "daily-observer",
+      category: "technology" as const,
+      audience: "普通上班族",
+      painPoint: "不知道是否真省时间",
+      hook: "先验证，再下结论。",
+      rationale: "来自可追溯热点信号。",
+      freshness: "today" as const,
+      risk: "low" as const,
+      evidence: [{ source: "dailyhot", platform: "douyin", keyword: "AI", strength: 90, evidenceUrl: "https://example.com/a" }],
+      score: {
+        audienceReach: 80, visualFeasibility: 80, productionCostEfficiency: 80,
+        novelty: 80, monetization: 60, seriesPotential: 80, complianceRisk: 10, final: 78,
+      },
+      providerId: "api-topic-editor-v1",
+      generatedAt: "2026-09-07T05:00:00.000Z",
+      verification: { status: "ready" as const, independentSources: 2, requiredSources: 2, reasons: ["常规风险候选。"] },
+      editorialDecision: { verdict: "produce_video" as const, score: 78, reasons: ["观看价值明确。"], guardrails: ["核验结果。"] },
+    };
+    const opportunity = {
+      id: "opp-1",
+      title: "AI 工作流",
+      platform: "douyin",
+      track: "daily-observer",
+      audience: "普通上班族",
+      painPoint: "不知道是否真省时间",
+      hook: "先验证，再下结论。",
+      status: "shortlisted" as const,
+      score: inboxItem.score,
+      scoreProvenance: { source: "热点候选", scoredAt: "2026-09-07T05:00:00.000Z" },
+      evidence: inboxItem.evidence,
+      createdAt: "2026-09-07T05:00:00.000Z",
+      updatedAt: "2026-09-07T05:00:00.000Z",
+      origin: "trend" as const,
+    };
+    const service = fakeService();
+    service.supplementCandidateSources = async (candidateId, input) => {
+      received.push({ scope: "candidate", id: candidateId, input });
+      return inboxItem;
+    };
+    service.supplementOpportunitySources = async (opportunityId, input) => {
+      if (opportunityId === "opp-missing") throw new StudioNotFoundError("Opportunity was not found.");
+      received.push({ scope: "opportunity", id: opportunityId, input });
+      return opportunity;
+    };
+    const app = buildStudioApp({ service });
+
+    const candidateSources = await app.inject({
+      method: "POST",
+      url: "/api/candidate-inbox/trend-1/sources",
+      payload: { evidenceUrls: ["  https://News.cn/news/a?b=1#frag  ", "https://news.cn/news/a?b=1"] },
+    });
+    const opportunitySources = await app.inject({
+      method: "POST",
+      url: "/api/opportunities/opp-1/sources",
+      payload: { evidenceUrls: ["https://people.com.cn/report"] },
+    });
+    const emptyBatch = await app.inject({
+      method: "POST",
+      url: "/api/candidate-inbox/trend-1/sources",
+      payload: { evidenceUrls: [] },
+    });
+    const badScheme = await app.inject({
+      method: "POST",
+      url: "/api/candidate-inbox/trend-1/sources",
+      payload: { evidenceUrls: ["ftp://example.com/file"] },
+    });
+    const withCredentials = await app.inject({
+      method: "POST",
+      url: "/api/opportunities/opp-1/sources",
+      payload: { evidenceUrls: ["https://user:pass@example.com/a"] },
+    });
+    const unsafeId = await app.inject({
+      method: "POST",
+      url: "/api/candidate-inbox/not%20safe/sources",
+      payload: { evidenceUrls: ["https://news.cn/a"] },
+    });
+    const missing = await app.inject({
+      method: "POST",
+      url: "/api/opportunities/opp-missing/sources",
+      payload: { evidenceUrls: ["https://news.cn/a"] },
+    });
+
+    assert.equal(candidateSources.statusCode, 200);
+    assert.equal(candidateSources.json().id, "trend-1");
+    assert.equal(opportunitySources.statusCode, 200);
+    assert.equal(opportunitySources.json().id, "opp-1");
+    // 服务端收到的是去 fragment、去重、规范化后的链接。
+    assert.deepEqual(received, [
+      { scope: "candidate", id: "trend-1", input: { evidenceUrls: ["https://news.cn/news/a?b=1"] } },
+      { scope: "opportunity", id: "opp-1", input: { evidenceUrls: ["https://people.com.cn/report"] } },
+    ]);
+    assert.equal(emptyBatch.statusCode, 400);
+    assert.match(emptyBatch.json().error, /1 到 10 条/);
+    assert.equal(badScheme.statusCode, 400);
+    assert.match(badScheme.json().error, /http 或 https/);
+    assert.equal(withCredentials.statusCode, 400);
+    assert.match(withCredentials.json().error, /用户名或密码/);
+    assert.equal(unsafeId.statusCode, 400);
+    assert.equal(missing.statusCode, 404);
     await app.close();
   });
 

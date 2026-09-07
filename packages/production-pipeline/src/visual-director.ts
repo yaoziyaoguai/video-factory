@@ -4,6 +4,7 @@ import {
   type ProductionReworkFinding,
   type ProductionSeriesContext,
   type ProductionSpendFeedbackReason,
+  type ProductionVisualPlan,
 } from "./contracts.js";
 import type { ProductionBlueprint } from "@video-factory/template-core";
 import type { CodexTaskExecution } from "./codex-chat.js";
@@ -186,6 +187,8 @@ export interface VisualDirectorAgentInput {
       reasons: string[];
       guardrails: string[];
     };
+    visualProof?: string;
+    visualPlan?: ProductionVisualPlan;
     referenceGrammar?: ShotGrammar;
     seriesContext?: ProductionSeriesContext;
     rework?: {

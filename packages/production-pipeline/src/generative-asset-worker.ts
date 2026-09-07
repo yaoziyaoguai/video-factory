@@ -105,6 +105,16 @@ export type PaidAssetItemState =
   | "terminal_failed"
   | "unknown";
 
+export function paidAssetLedgerLeaves<T extends {
+  itemRequestId: string;
+  carriedForwardFromItemRequestId?: string;
+}>(items: readonly T[]): T[] {
+  const supersededItemIds = new Set(items.flatMap((item) => (
+    item.carriedForwardFromItemRequestId ? [item.carriedForwardFromItemRequestId] : []
+  )));
+  return items.filter((item) => !supersededItemIds.has(item.itemRequestId));
+}
+
 interface PaidAssetOperationItem {
   itemRequestId: string;
   quoteItemId: string;
@@ -123,7 +133,7 @@ interface PaidAssetOperationItem {
   sha256?: string;
   sizeBytes?: number;
   actualCostCny?: number;
-  actualCostSource?: "configured_rate";
+  actualCostSource?: "provider_reported" | "configured_rate";
   carriedForwardFromItemRequestId?: string;
   error?: string;
   manualReconciliationRequired?: boolean;
@@ -349,23 +359,21 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           delete job.actualCostCny;
           delete job.actualCostSource;
         }
-        const generated = ledgerItem?.state === "provider_succeeded" && ledgerItem.resultUrl
+        const generated = ledgerItem?.state === "materialized"
           ? acceptedResultFromLedger(ledgerItem)
-          : ledgerItem?.state === "materialized"
-            ? acceptedResultFromLedger(ledgerItem)
-            : await generatePaidAssetItem({
-                binding,
-                scene,
-                prompt,
-                job,
-                jobs,
-                jobsPath,
-                sceneCost,
-                ledgerPath,
-                ledger: openedLedger?.ledger,
-                ledgerItem,
-                allowCreate: openedLedger?.created !== false,
-              });
+          : await generatePaidAssetItem({
+              binding,
+              scene,
+              prompt,
+              job,
+              jobs,
+              jobsPath,
+              sceneCost,
+              ledgerPath,
+              ledger: openedLedger?.ledger,
+              ledgerItem,
+              allowCreate: openedLedger?.created !== false,
+            });
         applyAcceptedTask(job, generated.taskId, sceneCost);
         if (job.carriedForward) {
           delete job.actualCostCny;
@@ -413,6 +421,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
             sizeBytes: descriptor.sizeBytes,
           });
           delete ledgerItem.error;
+          // 下载物化成功即解除此前的逐项人工核账标记（含 reconcile 刷新 URL 后恢复的同一 task）。
+          delete ledgerItem.manualReconciliationRequired;
           await writeGenerationLedger(ledgerPath, openedLedger.ledger);
         }
         replaceSceneAsset(plan, assets, scene, generated.taskId, media.path, providerId, binding.mediaType);
@@ -437,6 +447,11 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
             ledgerItem.error = job.error;
             if (ledgerItem.resultUrl && ledgerItem.taskId) {
               ledgerItem.state = "provider_succeeded";
+              // 永久下载失败（403/404、非法/不安全 URL、超限）保留 task、URL、费用与错误证据，
+              // 但标记逐项人工核账可操作；普通网络/超时错误不标记，继续按原任务恢复。
+              if (error instanceof UnrecoverableGeneratedAssetDownloadError) {
+                ledgerItem.manualReconciliationRequired = true;
+              }
             }
           }
           await writeGenerationLedger(ledgerPath, openedLedger.ledger);
@@ -725,24 +740,22 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           delete job.actualCostCny;
           delete job.actualCostSource;
         }
-        const generated = ledgerItem?.state === "provider_succeeded" && ledgerItem.resultUrl
+        const generated = ledgerItem?.state === "materialized"
           ? acceptedResultFromLedger(ledgerItem)
-          : ledgerItem?.state === "materialized"
-            ? acceptedResultFromLedger(ledgerItem)
-            : await generatePaidAssetItem({
-                binding,
-                scene,
-                prompt,
-                job,
-                jobs,
-                jobsPath,
-                sceneCost,
-                ledgerPath,
-                ledger: openedLedger?.ledger,
-                ledgerItem,
-                allowCreate: openedLedger?.created !== false,
-                ...(referenceImages ? { referenceImages } : {}),
-              });
+          : await generatePaidAssetItem({
+              binding,
+              scene,
+              prompt,
+              job,
+              jobs,
+              jobsPath,
+              sceneCost,
+              ledgerPath,
+              ledger: openedLedger?.ledger,
+              ledgerItem,
+              allowCreate: openedLedger?.created !== false,
+              ...(referenceImages ? { referenceImages } : {}),
+            });
         applyAcceptedTask(job, generated.taskId, sceneCost);
         if (job.carriedForward) {
           delete job.actualCostCny;
@@ -790,6 +803,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
             sizeBytes: descriptor.sizeBytes,
           });
           delete ledgerItem.error;
+          // 下载物化成功即解除此前的逐项人工核账标记（含 reconcile 刷新 URL 后恢复的同一 task）。
+          delete ledgerItem.manualReconciliationRequired;
           await writeGenerationLedger(ledgerPath, openedLedger.ledger);
         }
         replaceSceneAsset(plan, assets, scene, generated.taskId, media.path, providerId, binding.mediaType);
@@ -812,7 +827,13 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         if (ledgerPath && openedLedger && ledgerItem) {
           if (!isManuallyReconciledTerminalItem(ledgerItem)) {
             ledgerItem.error = job.error;
-            if (ledgerItem.resultUrl && ledgerItem.taskId) ledgerItem.state = "provider_succeeded";
+            if (ledgerItem.resultUrl && ledgerItem.taskId) {
+              ledgerItem.state = "provider_succeeded";
+              // 同 direct 路径：永久下载失败接通逐项人工核账，暂时失败仍按原任务恢复。
+              if (error instanceof UnrecoverableGeneratedAssetDownloadError) {
+                ledgerItem.manualReconciliationRequired = true;
+              }
+            }
           }
           await writeGenerationLedger(ledgerPath, openedLedger.ledger);
         }
@@ -1075,8 +1096,10 @@ async function findReworkCarryForwardItems(
   if (!options.runsRoot || !isRecord(options.input.rework)) return [];
   const rework = options.input.rework;
   const sourceRunId = optionalString(rework.sourceRunId);
+  const sourceRunRevision = rework.sourceRunRevision;
   if (!sourceRunId
     || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sourceRunId)
+    || !Number.isSafeInteger(sourceRunRevision)
     || !isRecord(rework.previousScript)
     || !isRecord(rework.previousDirectorPlan)) {
     return [];
@@ -1120,7 +1143,11 @@ async function findReworkCarryForwardItems(
   }));
   if (reusableScenes.size === 0) return [];
 
-  const sourceItems = await effectiveSourcePaidAssetItems(options.runsRoot, sourceRunId);
+  const sourceItems = await effectiveSourcePaidAssetItems(
+    options.runsRoot,
+    sourceRunId,
+    Number(sourceRunRevision),
+  );
   return safelyCarriableReworkItems(sourceItems, reusableScenes, routedShots, options.modelSelections);
 }
 
@@ -1187,7 +1214,11 @@ function safelyCarriableReworkItems(
   return carried;
 }
 
-async function effectiveSourcePaidAssetItems(runsRoot: string, sourceRunId: string): Promise<PaidAssetOperationItem[]> {
+async function effectiveSourcePaidAssetItems(
+  runsRoot: string,
+  sourceRunId: string,
+  sourceRunRevision: number,
+): Promise<PaidAssetOperationItem[]> {
   let sourceRun: Record<string, unknown>;
   try {
     sourceRun = requiredRecord(
@@ -1198,7 +1229,7 @@ async function effectiveSourcePaidAssetItems(runsRoot: string, sourceRunId: stri
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  if (!Array.isArray(sourceRun.nodeRuns)) return [];
+  if (sourceRun.revision !== sourceRunRevision || !Array.isArray(sourceRun.nodeRuns)) return [];
   const assetNodes = sourceRun.nodeRuns.filter((value): value is Record<string, unknown> => (
     isRecord(value) && value.nodeId === "assets"
   ));
@@ -1246,6 +1277,11 @@ async function effectiveSourcePaidAssetItems(runsRoot: string, sourceRunId: stri
       // 源文件缺失或身份变化时按新生成报价，不能承诺一次无法兑现的零费用继承。
     }
   }
+  const latestSourceRun = requiredRecord(
+    JSON.parse(await readFile(path.join(runsRoot, sourceRunId, "run.json"), "utf8")),
+    "Rework source run",
+  );
+  if (latestSourceRun.revision !== sourceRunRevision) return [];
   return verified;
 }
 
@@ -1487,7 +1523,13 @@ function assertCompletedAssetPlan(
     if (!optionalString(asset.local_path)) {
       throw new Error(`Scene ${scenePosition} is still pending generation and cannot be rendered.`);
     }
-    const usesLocalCard = asset.provider === "local" || asset.source_url === "local://video-factory/card";
+    const matchingRoute = routes.find((candidate) => (
+      typeof candidate === "object"
+      && candidate !== null
+      && !Array.isArray(candidate)
+      && Number((candidate as Record<string, unknown>).scene_position) === scenePosition
+    ));
+    const usesLocalCard = identifiesLocalEditorialCard(asset, matchingRoute);
     if (usesLocalCard && !editorialCards.has(scenePosition)) {
       throw new Error(`Scene ${scenePosition} resolved to a local card without explicit editorial_card authorization.`);
     }
@@ -1521,6 +1563,16 @@ function assertCompletedAssetPlan(
   }
 }
 
+function identifiesLocalEditorialCard(asset: Record<string, unknown>, route?: unknown): boolean {
+  const routeRecord = typeof route === "object" && route !== null && !Array.isArray(route)
+    ? route as Record<string, unknown>
+    : undefined;
+  return asset.provider === "local"
+    || asset.provider_id === "local-editorial-v1"
+    || routeRecord?.actual_provider_id === "local-editorial-v1"
+    || (typeof asset.source_url === "string" && asset.source_url.startsWith("local://video-factory/card"));
+}
+
 function assertExactScenePositions(label: string, positions: number[], scenes: ScriptScene[]): void {
   const expected = scenes.map((scene) => scene.position);
   const validPositions = positions.every((position) => Number.isInteger(position) && position > 0);
@@ -1545,11 +1597,15 @@ function meteredJobDiagnostics(jobs: GenerationJob[]): {
   };
 }
 
-// 就本地证据而言，Provider 结果已知当且仅当 ledger 中不存在任何停留在 unknown
-// （create 边界断连，结果可能已被受理）或 submitted（在途）状态的条目。
+// Provider 已成功但文件尚未物化时，本地仍没有可交付产物，也不能证明重新 create 安全；
+// 必须保持 outcomeUncertain，直到同一 task 被物化或人工核账闭环。
 function ledgerProviderOutcomeKnown(ledger: PaidAssetOperationLedger | undefined): boolean {
   if (!ledger) return true;
-  return ledger.items.every((item) => item.state !== "unknown" && item.state !== "submitted");
+  return ledger.items.every((item) => ![
+    "unknown",
+    "submitted",
+    "provider_succeeded",
+  ].includes(item.state));
 }
 
 function isManuallyReconciledTerminalItem(item: PaidAssetOperationItem): boolean {
@@ -1767,6 +1823,8 @@ function replaceSceneAsset(
   }
 }
 
+class UnrecoverableGeneratedAssetDownloadError extends Error {}
+
 async function downloadGeneratedAsset(
   fetcher: FetchLike | undefined,
   url: string,
@@ -1788,19 +1846,35 @@ async function downloadGeneratedAsset(
       if (![301, 302, 303, 307, 308].includes(response.status)) break;
       const location = response.headers.get("location");
       await response.body?.cancel();
-      if (!location) throw new Error(`Generated ${mediaType} redirect did not include a location.`);
-      if (redirects === 5) throw new Error(`Generated ${mediaType} download exceeded the redirect limit.`);
-      currentTarget = await validatedMediaTarget(new URL(location, currentTarget.url).toString(), resolveHost);
+      if (!location) throw new UnrecoverableGeneratedAssetDownloadError(
+        `Generated ${mediaType} redirect did not include a location.`,
+      );
+      if (redirects === 5) throw new UnrecoverableGeneratedAssetDownloadError(
+        `Generated ${mediaType} download exceeded the redirect limit.`,
+      );
+      let redirectUrl: string;
+      try {
+        redirectUrl = new URL(location, currentTarget.url).toString();
+      } catch {
+        throw new UnrecoverableGeneratedAssetDownloadError("Generated media URL is invalid.");
+      }
+      currentTarget = await validatedMediaTarget(redirectUrl, resolveHost);
     }
     if (!response) throw new Error(`Generated ${mediaType} download did not return a response.`);
     if (!response.ok) {
       await response.body?.cancel();
-      throw new Error(`Generated ${mediaType} download failed with status ${response.status}.`);
+      const message = `Generated ${mediaType} download failed with status ${response.status}.`;
+      if (response.status === 403 || response.status === 404) {
+        throw new UnrecoverableGeneratedAssetDownloadError(message);
+      }
+      throw new Error(message);
     }
     const contentLength = Number(response.headers.get("content-length") ?? "0");
     if (Number.isFinite(contentLength) && contentLength > maxBytes) {
       await response.body?.cancel();
-      throw new Error(`Generated ${mediaType} exceeds the ${maxBytes}-byte download limit.`);
+      throw new UnrecoverableGeneratedAssetDownloadError(
+        `Generated ${mediaType} exceeds the ${maxBytes}-byte download limit.`,
+      );
     }
     const rawContentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
     let contentType: string;
@@ -1830,13 +1904,15 @@ async function validatedMediaTarget(value: string, resolveHost: ResolveHost): Pr
   try {
     url = new URL(value);
   } catch {
-    throw new Error("Generated media URL is invalid.");
+    throw new UnrecoverableGeneratedAssetDownloadError("Generated media URL is invalid.");
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error("Generated media URL must use HTTP or HTTPS.");
+    throw new UnrecoverableGeneratedAssetDownloadError("Generated media URL must use HTTP or HTTPS.");
   }
   if (url.username || url.password || isBlockedMediaHost(url.hostname)) {
-    throw new Error("Generated media URL points to a private or unsafe network destination.");
+    throw new UnrecoverableGeneratedAssetDownloadError(
+      "Generated media URL points to a private or unsafe network destination.",
+    );
   }
   const hostname = normalizedHost(url.hostname);
   let addresses: readonly string[] = [hostname];
@@ -1849,7 +1925,9 @@ async function validatedMediaTarget(value: string, resolveHost: ResolveHost): Pr
   }
   addresses = [...new Set(addresses.map(normalizedHost))];
   if (addresses.length === 0 || addresses.some((address) => isIP(address) === 0 || isBlockedMediaHost(address))) {
-    throw new Error("Generated media URL points to a private or unsafe network destination.");
+    throw new UnrecoverableGeneratedAssetDownloadError(
+      "Generated media URL points to a private or unsafe network destination.",
+    );
   }
   return { url: url.toString(), hostname, addresses };
 }
@@ -1947,7 +2025,9 @@ async function resolveMediaHostname(hostname: string): Promise<readonly string[]
 }
 
 async function readLimitedBody(response: Response, mediaType: "image" | "video", maxBytes: number): Promise<Buffer> {
-  if (!response.body) throw new Error(`Generated ${mediaType} download returned an empty body.`);
+  if (!response.body) throw new UnrecoverableGeneratedAssetDownloadError(
+    `Generated ${mediaType} download returned an empty body.`,
+  );
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
   let received = 0;
@@ -1957,22 +2037,31 @@ async function readLimitedBody(response: Response, mediaType: "image" | "video",
     received += value.byteLength;
     if (received > maxBytes) {
       await reader.cancel();
-      throw new Error(`Generated ${mediaType} exceeds the ${maxBytes}-byte download limit.`);
+      throw new UnrecoverableGeneratedAssetDownloadError(
+        `Generated ${mediaType} exceeds the ${maxBytes}-byte download limit.`,
+      );
     }
     chunks.push(Buffer.from(value));
   }
+  if (received === 0) throw new UnrecoverableGeneratedAssetDownloadError(
+    `Generated ${mediaType} download returned an empty body.`,
+  );
   return Buffer.concat(chunks);
 }
 
 function validatedMediaContentType(mediaType: "image" | "video", value: string | undefined): string {
   if (mediaType === "video") {
     if (value && !["video/mp4", "application/mp4", "audio/mp4", "application/octet-stream"].includes(value)) {
-      throw new Error(`Generated video returned unsupported content type '${value}'.`);
+      throw new UnrecoverableGeneratedAssetDownloadError(
+        `Generated video returned unsupported content type '${value}'.`,
+      );
     }
     return "video/mp4";
   }
   if (value && value !== "application/octet-stream" && !["image/jpeg", "image/webp", "image/png"].includes(value)) {
-    throw new Error(`Generated image returned unsupported content type '${value}'.`);
+    throw new UnrecoverableGeneratedAssetDownloadError(
+      `Generated image returned unsupported content type '${value}'.`,
+    );
   }
   return supportedImageContentType(value);
 }
@@ -2061,7 +2150,9 @@ async function preparePaidAssetOperation(
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 
-  const previousItems = await previousPaidAssetItems(path.dirname(ledgerPath), operationId);
+  const previousItems = paidAssetLedgerLeaves(
+    await previousPaidAssetItems(path.dirname(ledgerPath), operationId),
+  );
   const carriedItems: PaidAssetOperationItem[] = [];
   for (const item of items) {
     const previousCandidates = previousItems.filter((candidate) => (
@@ -2072,7 +2163,7 @@ async function preparePaidAssetOperation(
       isMatchingReworkCarryForwardItem(candidate, item, carriedItems)
     ));
     const candidates = [...previousCandidates, ...reworkCandidates];
-    const reusable = candidates.find((candidate) => candidate.state === "materialized")
+    const reusable = await firstVerifiedMaterializedItem(candidates)
       ?? candidates.find((candidate) => (
         candidate.state === "provider_succeeded"
         && Boolean(candidate.taskId)
@@ -2119,6 +2210,21 @@ async function preparePaidAssetOperation(
       0,
     )),
   };
+}
+
+async function firstVerifiedMaterializedItem(
+  candidates: readonly PaidAssetOperationItem[],
+): Promise<PaidAssetOperationItem | undefined> {
+  for (const candidate of candidates) {
+    if (candidate.state !== "materialized") continue;
+    try {
+      await verifyMaterializedItem(candidate);
+      return candidate;
+    } catch {
+      // 文件丢失或身份变化的旧母片不能继续抵扣新一轮报价。
+    }
+  }
+  return undefined;
 }
 
 function isMatchingReworkCarryForwardItem(
@@ -2248,7 +2354,7 @@ export interface PaidAssetLedgerItemSummary {
   sha256?: string;
   sizeBytes?: number;
   actualCostCny?: number;
-  actualCostSource?: "configured_rate";
+  actualCostSource?: "provider_reported" | "configured_rate";
   carriedForwardFromItemRequestId?: string;
   error?: string;
   manualReconciliationRequired?: boolean;
@@ -2471,6 +2577,13 @@ async function generatePaidAssetItem(options: {
     if (options.ledgerPath && options.ledger) await writeGenerationLedger(options.ledgerPath, options.ledger);
     return reconciled;
   }
+  if (
+    ledgerItem?.state === "provider_succeeded"
+    && ledgerItem.taskId
+    && ledgerItem.resultUrl
+  ) {
+    return acceptedResultFromLedger(ledgerItem);
+  }
   if (ledgerItem && ledgerItem.state !== "prepared") {
     if (ledgerItem.state === "submitted" || ledgerItem.state === "unknown" || ledgerItem.state === "provider_succeeded") {
       throw new Error(
@@ -2547,7 +2660,7 @@ function acceptedResultFromLedger(item: PaidAssetOperationItem): { taskId: strin
 async function verifyMaterializedItem(
   item: PaidAssetOperationItem,
 ): Promise<{ path: string; contentType: string }> {
-  if (!item.localPath || !item.sha256 || item.sizeBytes === undefined) {
+  if (!item.localPath || !item.sha256 || item.sizeBytes === undefined || item.sizeBytes <= 0) {
     throw new Error(`Paid item '${item.itemRequestId}' is missing its materialized file identity.`);
   }
   const identity = await fileIdentity(item.localPath);

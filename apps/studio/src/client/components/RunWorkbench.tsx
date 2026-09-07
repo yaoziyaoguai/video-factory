@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { creatorFacingTechnicalText, platformLabel, providerLabel, catalogModelLabel } from "../presentation.js";
+import { creatorFacingTechnicalText, platformLabel, providerLabel, catalogModelLabel, sourceAssetReviewBreakdown } from "../presentation.js";
 import { NodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 
@@ -53,6 +53,9 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
   const assetVersionId = run.nodes.find((node) => node.id === "assets")?.outputState?.effectiveVersionId;
   const isCostReplan = run.status === "stale" && hasDirectorCostFeedback(run);
+  const sourceAssetFailure = run.failure && isSourceAssetReviewFailure(run.failure)
+    ? sourceAssetReviewBreakdown(run.failure)
+    : undefined;
 
   const renderNodeWorkspace = (node: StudioRunDetail["nodes"][number]) => <NodeWorkspace
     key={node.id}
@@ -90,10 +93,10 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
           <h1>{run.title}</h1>
           <p className="page-summary">{run.angle} · {run.audience}</p>
         </div>
-        <StatusBadge status={run.status} />
+        <StatusBadge status={run.status} {...(readOnly ? { label: "历史只读" } : {})} />
       </header>
 
-      {run.phases && run.progress ? <ProductionProgress run={run} /> : (
+      {!readOnly && (run.phases && run.progress ? <ProductionProgress run={run} /> : (
         <section className="workflow-track" aria-label="生产工作流" data-tour="run-workflow">
           {run.nodes.map((node, index) => (
             <div className={`workflow-node node-${node.status}`} key={node.id}>
@@ -102,7 +105,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
             </div>
           ))}
         </section>
-      )}
+      ))}
 
       {activeSpendNode ? <section className="current-production-action" aria-labelledby="current-production-action-title">
         <header>
@@ -113,7 +116,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
         {renderNodeWorkspace(activeSpendNode)}
       </section> : !showReviewSurface ? <section className="current-production-action is-running" aria-live="polite">
         <header><div><p className="eyebrow">自动制作中</p><h2>{runningNodeLabel(run)}</h2></div><StatusBadge status={run.status} /></header>
-        <p>{run.currentAction?.label ?? runStateMessage(run)}</p>
+        <p>{creatorFacingTechnicalText(run.currentAction?.label) ?? runStateMessage(run)}</p>
         {run.progress ? <div className="run-live-metrics">
           <span><Activity aria-hidden="true" size={15} /><strong>{run.progress.completedNodes} / {run.progress.totalNodes}</strong> 个步骤完成</span>
           <span><Clock3 aria-hidden="true" size={15} />{run.progress.currentNodeElapsedSeconds !== undefined ? "当前步骤" : "累计处理"} <strong>{formatDuration(run.progress.currentNodeElapsedSeconds ?? run.progress.elapsedSeconds)}</strong></span>
@@ -216,20 +219,41 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
           ) : (
             <section className={`run-state-panel${run.failure ? " has-failure" : ""}`}>
               {run.failure ? <>
-                <p className="eyebrow">停在 {run.failure.nodeLabel}</p>
-                <h2>{run.failure.nodeLabel}没有完成</h2>
-                <p className="run-failure-summary">{run.failure.summary}</p>
-                {(["asset-source-review", "visual-review"].includes(run.failure.nodeId) || /源素材视觉预检/.test(run.failure.technicalDetail ?? "")) && run.failure.technicalDetail
-                  ? <p className="run-failure-summary"><strong>失败原因：</strong>{creatorFacingTechnicalText(run.failure.technicalDetail)}</p>
-                  : null}
-                <div className="run-failure-impact">
-                  <strong>{run.resultAvailability?.label ?? "前序结果已保留"}</strong>
-                  <span>{run.failure.impact}</span>
-                </div>
-                <p className="run-saved-work">已保留前面 {run.failure.savedNodeCount} 个步骤的结果</p>
-                <ul className="run-recovery-list">
-                  {run.failure.recoveryActions.map((action) => <li key={action}>{action}</li>)}
-                </ul>
+                <p className="eyebrow">{sourceAssetFailure ? "制作已安全停止" : `停在 ${run.failure.nodeLabel}`}</p>
+                <h2>{sourceAssetFailure ? "画面预检未通过" : `${run.failure.nodeLabel}没有完成`}</h2>
+                {sourceAssetFailure ? <>
+                  <div className="run-failure-breakdown">
+                    <strong>结论</strong>
+                    <ul>{sourceAssetFailure.conclusion.map((fact) => <li key={fact}>{fact}</li>)}</ul>
+                  </div>
+                  {sourceAssetFailure.sceneFindings.length > 0 ? <div className="run-failure-breakdown">
+                    <strong>逐镜问题</strong>
+                    <ul>{sourceAssetFailure.sceneFindings.map((finding) => <li key={finding}>{finding}</li>)}</ul>
+                  </div> : null}
+                  <div className="run-failure-impact">
+                    <strong>已保留的内容</strong>
+                    {sourceAssetFailure.preservedContent.map((fact) => <span key={fact}>{fact}</span>)}
+                  </div>
+                  <div className="run-failure-breakdown">
+                    <strong>下一步</strong>
+                    <ul className="run-recovery-list">
+                      {sourceAssetFailure.nextSteps.map((action) => <li key={action}>{action}</li>)}
+                    </ul>
+                  </div>
+                </> : <>
+                  <p className="run-failure-summary">{run.failure.summary}</p>
+                  {(["asset-source-review", "visual-review"].includes(run.failure.nodeId) || /源素材视觉预检/.test(run.failure.technicalDetail ?? "")) && run.failure.technicalDetail
+                    ? <p className="run-failure-summary"><strong>失败原因：</strong>{creatorFacingTechnicalText(run.failure.technicalDetail)}</p>
+                    : null}
+                  <div className="run-failure-impact">
+                    <strong>{run.resultAvailability?.label ?? "前序结果已保留"}</strong>
+                    <span>{run.failure.impact}</span>
+                  </div>
+                  <p className="run-saved-work">已保留前面 {run.failure.savedNodeCount} 个步骤的结果</p>
+                  <ul className="run-recovery-list">
+                    {run.failure.recoveryActions.map((action) => <li key={action}>{action}</li>)}
+                  </ul>
+                </>}
               </> : <>
                 <h2>当前状态</h2>
                 <p>{runStateMessage(run)}</p>
@@ -351,12 +375,15 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
   const requiresItemSelection = summary.nodeId === "assets" && summary.items.length > 0;
   const parsedActualCost = actualCost.trim() ? Number(actualCost) : undefined;
   const actualCostValid = parsedActualCost === undefined || (Number.isFinite(parsedActualCost) && parsedActualCost >= 0);
-  const isRunLevelVoiceCall = summary.nodeId === "voice" && summary.items.length === 0;
+  const isVoiceCall = summary.nodeId === "voice";
   const providerLookupBlocked = summary.items.some((item) => item.manualReconciliationRequired);
   const consoleEntries = providerConsoleEntries(providers, summary.items.length
     ? summary.items.map((item) => item.providerId)
     : providerIdHint ? [providerIdHint] : []);
-  if (isRunLevelVoiceCall && summary.requiresManualReconciliation && summary.failureKind === "terminal_failure") {
+  if (isVoiceCall && summary.requiresManualReconciliation && (
+    summary.failureKind === "terminal_failure"
+    || summary.recommendedOutcome === "confirmed_not_charged"
+  )) {
     return <section className="paid-operation-panel requires-manual" aria-label="配音恢复">
       <header><strong>配音请求被明确拒绝</strong><small>未扣费 · 不记入成本账</small></header>
       <p>服务商事实：本次请求被服务商明确拒绝，未扣费。系统动作：这笔失败不会记入成本账。点击下方按钮会先按“未扣费”结清本次失败，再创建一条新的配音任务；请先在下方配音设置里修正音色、模型或服务配置。</p>
@@ -371,10 +398,13 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
       ><RotateCcw aria-hidden="true" size={16} />不记账并重新配音</button> : null}
     </section>;
   }
-  if (isRunLevelVoiceCall && summary.requiresManualReconciliation && summary.failureKind === "unknown_outcome") {
+  if (isVoiceCall && summary.requiresManualReconciliation) {
+    const connectionInterrupted = summary.failureKind === "unknown_outcome";
     return <section className="paid-operation-panel requires-manual" aria-label="配音恢复">
-      <header><strong>配音连接中断</strong><small>按已扣费登记</small></header>
-      <p>请求提交后连接中断，系统无法确认服务商是否已经计费，因此没有自动重放。点击下方按钮会依次执行两项操作：先把上一笔配音按原预估费用登记到成本账，再创建一条新的配音任务继续制作；不点击就不会记账，也不会重试。</p>
+      <header><strong>{connectionInterrupted ? "配音连接中断" : "配音结果无法确认"}</strong><small>按预估费用保守记账</small></header>
+      <p>{connectionInterrupted
+        ? "请求提交后连接中断，系统无法确认服务商是否已经计费，因此没有自动重放。"
+        : "系统没有拿到足够的配音调用与计费结果，因此没有自动重放。"} 点击下方按钮会依次执行两项操作：先把上一笔配音按原预估费用登记到成本账，再创建一条新的配音任务继续制作；不点击就不会记账，也不会重试。</p>
       {onReconcile ? <button
         className="button button-primary"
         type="button"
@@ -383,7 +413,7 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
           outcome: "confirmed_charged",
           note: "自动配音提交后连接中断，结果无法确认；按原预估费用保守记账并创建新的配音任务。",
         })}
-      ><RotateCcw aria-hidden="true" size={16} />登记上一笔费用，再重新配音</button> : null}
+      ><RotateCcw aria-hidden="true" size={16} />按预估记账并重新配音</button> : null}
     </section>;
   }
   const title = summary.requiresManualReconciliation
@@ -392,7 +422,7 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
       ? "未完成的画面需要重新报价"
       : "已找到可恢复的付费任务";
   return <section className={`paid-operation-panel${summary.requiresManualReconciliation ? " requires-manual" : ""}`} aria-label="付费任务证据">
-    <header><strong>{title}</strong><small>{isRunLevelVoiceCall ? "一次配音调用" : `${summary.items.length} 个镜头`}</small></header>
+    <header><strong>{title}</strong><small>{isVoiceCall ? "一次配音调用" : `${summary.items.length} 个镜头`}</small></header>
     <div className="paid-operation-items">
       {summary.items.map((item) => <article key={`${item.operationId}:${item.itemRequestId}`}>
         <header><strong>镜头 {item.scenePosition}</strong><span>{paidOperationStateLabel(item.state)}</span></header>
@@ -404,11 +434,11 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
     {summary.requiresManualReconciliation ? <div className="paid-operation-explanation">
       <p><strong>发生了什么：</strong>{providerLookupBlocked
         ? "系统保留了服务商任务编号，但服务商已明确拒绝继续查询，无法再自动确认结果。"
-        : isRunLevelVoiceCall ? "请求发出后连接中断，系统没有收到明确结果。" : "服务商可能已经收到请求，但系统没有拿到足够的任务证据。"}</p>
+        : isVoiceCall ? "请求发出后连接中断，系统没有收到明确结果。" : "服务商可能已经收到请求，但系统没有拿到足够的任务证据。"}</p>
       <p><strong>为什么需要核对：</strong>直接重试可能产生重复任务和重复扣费，所以系统已经停住，不会自动重试或重新制作。</p>
       <p><strong>下一步：</strong>{providerLookupBlocked
         ? "请用页面显示的任务编号到服务商控制台核对结果和账单，再按真实情况登记“未扣费”或“已扣费”。"
-        : isRunLevelVoiceCall ? "请在配音服务商控制台按本次调用记录与账单核对，再登记结果。" : "请到服务商控制台核对任务与账单；找到任务编号时可先录入并继续查询原任务。"}</p>
+        : isVoiceCall ? "请在配音服务商控制台按本次调用记录与账单核对，再登记结果。" : "请到服务商控制台核对任务与账单；找到任务编号时可先录入并继续查询原任务。"}</p>
       <p><strong>核对入口：</strong>{consoleEntries.length
         ? consoleEntries.map((entry, index) => <span key={entry.providerId}>{index > 0 ? "；" : ""}<a href={entry.consoleUrl} target="_blank" rel="noreferrer">打开{entry.label}控制台</a></span>)
         : "这项能力没有配置可点击的服务商控制台入口，请联系管理员核对任务与账单。"}</p>
@@ -695,6 +725,10 @@ function hasUncertainPaidOutcome(run: StudioRunDetail): boolean {
   return run.nodes.some((node) => node.outcomeUncertain === true);
 }
 
+function isSourceAssetReviewFailure(failure: NonNullable<StudioRunDetail["failure"]>): boolean {
+  return failure.nodeId === "asset-source-review" || /源素材视觉预检/.test(failure.technicalDetail ?? "");
+}
+
 function runningNodeLabel(run: StudioRunDetail): string {
   const current = run.nodes.find((node) => node.id === run.currentAction?.nodeId)
     ?? run.nodes.find((node) => node.id === run.currentNodeId)
@@ -703,7 +737,7 @@ function runningNodeLabel(run: StudioRunDetail): string {
   if (current?.id === "script") {
     const providerId = (current.executionReceipt ?? current.plannedExecution)?.providerId;
     return providerId === "codex-screenwriter-v1"
-      ? "编剧与独立质量审计正在修改脚本"
+      ? "编剧与独立质量复核正在修改脚本"
       : "编剧正在生成结构化脚本";
   }
   return current ? `${current.role ?? "制作角色"}正在处理${current.label}` : "系统正在推进制作";

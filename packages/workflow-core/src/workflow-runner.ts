@@ -751,8 +751,13 @@ export class WorkflowRunner {
     run.initialInput = structuredClone(override.initialInput);
     const target = run.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId);
     const invalidatedNodeIds = new Set([override.nodeId, ...descendants]);
+    const previousProviderId = previousRun.executionPlan?.find(
+      (plan) => plan.nodeId === override.nodeId,
+    )?.providerId ?? previousNodeRun?.executionReceipt?.providerId;
+    const providerChanged = previousProviderId !== undefined && previousProviderId !== node.providerId;
 
-    if (target) markNodeExecutionStale(target, false);
+    // Provider 的输入契约可能不同；切换 Provider 后必须重新派生输入，不能回放旧 Provider 的缓存形状。
+    if (target) markNodeExecutionStale(target, providerChanged);
     for (const candidate of run.nodeRuns) {
       if (descendants.has(candidate.nodeId)) markNodeExecutionStale(candidate, true);
     }

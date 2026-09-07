@@ -29,6 +29,8 @@ import type {
   StudioSeries,
   StudioSeriesInput,
   StudioSeriesEpisodePlanInput,
+  StudioCandidateInboxItem,
+  StudioCandidateSourcesInput,
   StudioTrendSource,
   StudioTrendService,
   StudioTrendSignal,
@@ -118,6 +120,14 @@ export const studioApi = {
   },
   adoptCandidate: (candidateId: string, input: StudioCandidateAdoptionInput) => requestJson<StudioOpportunity>(
     `/api/candidate-inbox/${encodeURIComponent(candidateId)}/adopt`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  supplementCandidateSources: (candidateId: string, input: StudioCandidateSourcesInput) => requestJson<StudioCandidateInboxItem>(
+    `/api/candidate-inbox/${encodeURIComponent(candidateId)}/sources`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  supplementOpportunitySources: (opportunityId: string, input: StudioCandidateSourcesInput) => requestJson<StudioOpportunity>(
+    `/api/opportunities/${encodeURIComponent(opportunityId)}/sources`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
   series: () => requestJson<StudioSeries[]>("/api/series"),

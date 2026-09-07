@@ -7,6 +7,7 @@
   "durationSeconds": 20,
   "platform": "douyin",
   "reviewMode": "automatic",
+  "runPurpose": "test",
   "providers": {
     "script": "python-template-v1",
     "director": "explicit-editorial-director-v1",

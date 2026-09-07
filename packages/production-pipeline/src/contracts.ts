@@ -70,6 +70,22 @@ export interface ProductionEditorialDirection {
   guardrails: string[];
 }
 
+export type ProductionVisualSource = "creator" | "stock" | "screen" | "local-card" | "generated";
+
+export interface ProductionVisualBeat {
+  id: string;
+  role: string;
+  duration: string;
+  description: string;
+  searchQuery: string;
+  source: ProductionVisualSource;
+}
+
+export interface ProductionVisualPlan {
+  strategy: string;
+  beats: ProductionVisualBeat[];
+}
+
 export interface ProductionReworkFinding {
   findingId: string;
   timecodeMs: number;
@@ -182,6 +198,7 @@ export interface ProductionBrief {
   durationSeconds: number;
   platform: string;
   reviewMode: "manual" | "automatic";
+  runPurpose?: "production" | "test";
   templateSnapshot?: ProductionTemplateSnapshot;
   providers: ProductionProviderBindings;
   models?: Record<string, string>;
@@ -193,6 +210,8 @@ export interface ProductionBrief {
   spendFeedback?: ProductionSpendFeedback[];
   voiceDirection: ProductionVoiceDirection;
   editorial?: ProductionEditorialDirection;
+  visualProof?: string;
+  visualPlan?: ProductionVisualPlan;
   seriesContext?: ProductionSeriesContext;
   creationContext?: {
     origin: "trend" | "series" | "manual";
@@ -221,6 +240,8 @@ export function parseBrief(value: unknown): ProductionBrief {
   const spendFeedback = parseSpendFeedback(value.spendFeedback);
   const voiceDirection = parseVoiceDirection(value.voiceDirection);
   const editorial = parseEditorialDirection(value.editorial);
+  const visualProof = value.visualProof === undefined ? undefined : requireString(value.visualProof, "visualProof");
+  const visualPlan = parseProductionVisualPlan(value.visualPlan);
   const seriesContext = parseProductionSeriesContext(value.seriesContext);
   const creationContext = parseCreationContext(value.creationContext);
   const rework = parseReworkContext(value.rework);
@@ -250,6 +271,9 @@ export function parseBrief(value: unknown): ProductionBrief {
   if (value.reviewMode !== "manual" && value.reviewMode !== "automatic") {
     throw new Error("reviewMode must be 'manual' or 'automatic'.");
   }
+  if (value.runPurpose !== undefined && value.runPurpose !== "production" && value.runPurpose !== "test") {
+    throw new Error("runPurpose must be 'production' or 'test'.");
+  }
 
   return {
     protocolVersion: BRIEF_PROTOCOL_VERSION,
@@ -260,6 +284,7 @@ export function parseBrief(value: unknown): ProductionBrief {
     durationSeconds: Number(durationSeconds),
     platform: requireProductionPlatform(value.platform),
     reviewMode: value.reviewMode,
+    runPurpose: value.runPurpose ?? "production",
     ...(templateSnapshot ? { templateSnapshot } : {}),
     providers: {
       script: requireString(providers.script, "providers.script"),
@@ -279,10 +304,41 @@ export function parseBrief(value: unknown): ProductionBrief {
     ...(spendFeedback.length ? { spendFeedback } : {}),
     voiceDirection,
     ...(editorial ? { editorial } : {}),
+    ...(visualProof ? { visualProof } : {}),
+    ...(visualPlan ? { visualPlan } : {}),
     ...(seriesContext ? { seriesContext } : {}),
     ...(creationContext ? { creationContext } : {}),
     ...(rework ? { rework } : {}),
   };
+}
+
+const PRODUCTION_VISUAL_SOURCES = new Set<ProductionVisualSource>(["creator", "stock", "screen", "local-card", "generated"]);
+
+export function parseProductionVisualPlan(value: unknown): ProductionVisualPlan | undefined {
+  if (value === undefined) return undefined;
+  const input = requireRecord(value, "visualPlan");
+  if (!Array.isArray(input.beats) || input.beats.length < 1 || input.beats.length > 12) {
+    throw new Error("visualPlan.beats must contain between 1 and 12 entries.");
+  }
+  const beats = input.beats.map((entry, index): ProductionVisualBeat => {
+    const beat = requireRecord(entry, `visualPlan.beats[${index}]`);
+    const source = requireString(beat.source, `visualPlan.beats[${index}].source`);
+    if (!PRODUCTION_VISUAL_SOURCES.has(source as ProductionVisualSource)) {
+      throw new Error(`visualPlan.beats[${index}].source is invalid.`);
+    }
+    return {
+      id: requireString(beat.id, `visualPlan.beats[${index}].id`),
+      role: requireString(beat.role, `visualPlan.beats[${index}].role`),
+      duration: requireString(beat.duration, `visualPlan.beats[${index}].duration`),
+      description: requireString(beat.description, `visualPlan.beats[${index}].description`),
+      searchQuery: requireString(beat.searchQuery, `visualPlan.beats[${index}].searchQuery`),
+      source: source as ProductionVisualSource,
+    };
+  });
+  if (new Set(beats.map((beat) => beat.id)).size !== beats.length) {
+    throw new Error("visualPlan.beats ids must be unique.");
+  }
+  return { strategy: requireString(input.strategy, "visualPlan.strategy"), beats };
 }
 
 function parseReworkContext(value: unknown): ProductionReworkContext | undefined {

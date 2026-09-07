@@ -256,20 +256,35 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
         and not isinstance(configured_cost, bool)
         and configured_cost >= 0
     )
-    plan_path = synthesize_voiceover_plan(
-        script_path=script_path,
-        output_dir=output_dir,
-        provider=provider,
-        voice=voice,
-        rate=int(input_values.get("rate", parameters.get("rate", 190))),
-        profile_id=profile_id,
-        pause_scale=float(input_values.get("pause_scale", parameters.get("pauseScale", 1))),
-        mastering_preset=str(input_values.get("mastering_preset", parameters.get("masteringPreset", "natural"))),
-        operation_id=request["commandId"] if provider == "minimax" else None,
-        provider_id=str(parameters.get("providerId") or "minimax-tts-v1") if provider == "minimax" else None,
-        model_id=optional_string(parameters.get("modelId")) if provider == "minimax" else None,
-        estimated_cost_cny=float(configured_cost) if provider == "minimax" and valid_configured_cost else None,
-    )
+    try:
+        plan_path = synthesize_voiceover_plan(
+            script_path=script_path,
+            output_dir=output_dir,
+            provider=provider,
+            voice=voice,
+            rate=int(input_values.get("rate", parameters.get("rate", 190))),
+            profile_id=profile_id,
+            pause_scale=float(input_values.get("pause_scale", parameters.get("pauseScale", 1))),
+            mastering_preset=str(input_values.get("mastering_preset", parameters.get("masteringPreset", "natural"))),
+            operation_id=request["commandId"] if provider == "minimax" else None,
+            provider_id=str(parameters.get("providerId") or "minimax-tts-v1") if provider == "minimax" else None,
+            model_id=optional_string(parameters.get("modelId")) if provider == "minimax" else None,
+            estimated_cost_cny=float(configured_cost) if provider == "minimax" and valid_configured_cost else None,
+        )
+    except Exception as error:
+        if provider != "minimax":
+            raise
+        return {
+            "protocolVersion": WORKER_PROTOCOL_VERSION,
+            "commandId": request["commandId"],
+            "status": "failed",
+            "error": {"code": "WORKER_REQUEST_FAILED", "message": str(error)},
+            "artifacts": [],
+            "diagnostics": {
+                "durationMs": round((time.monotonic() - started_at) * 1000, 3),
+                **minimax_failure_diagnostics(output_dir, request["commandId"]),
+            },
+        }
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     artifacts = [
         describe_artifact(
@@ -289,11 +304,14 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
     ]
     diagnostics: Dict[str, Any] = {}
     if provider == "minimax" and valid_configured_cost:
+        synthesized_scenes = plan.get("scenes")
+        metered_attempt_count = len(synthesized_scenes) if isinstance(synthesized_scenes, list) else 1
         diagnostics = {
             "actualCostCny": round(float(configured_cost), 2),
             "actualCostSource": "configured_rate",
-            "meteredAttemptCount": 1,
+            "meteredAttemptCount": metered_attempt_count,
             "meteredFailedAttemptCount": 0,
+            "providerOutcomeKnown": True,
         }
     return success_response(
         request,
@@ -305,6 +323,49 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
         started_at=started_at,
         diagnostics=diagnostics,
     )
+
+
+def minimax_failure_diagnostics(output_dir: Path, operation_id: str) -> Dict[str, Any]:
+    ledger_path = output_dir.parent / ".voice-operations" / (
+        hashlib.sha256(operation_id.encode("utf-8")).hexdigest() + ".json"
+    )
+    try:
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "meteredAttemptCount": 0,
+            "meteredFailedAttemptCount": 0,
+            "providerOutcomeKnown": False,
+        }
+    items = ledger.get("items") if isinstance(ledger, dict) else None
+    if not isinstance(items, list):
+        return {
+            "meteredAttemptCount": 0,
+            "meteredFailedAttemptCount": 0,
+            "providerOutcomeKnown": False,
+        }
+    attempted_count = sum(
+        isinstance(item, dict)
+        and isinstance(item.get("stateHistory"), list)
+        and "unknown" in item["stateHistory"]
+        for item in items
+    )
+    failed_count = sum(isinstance(item, dict) and item.get("state") == "terminal_failed" for item in items)
+    provider_outcome_known = all(
+        isinstance(item, dict)
+        and item.get("state") not in {"unknown", "submitted", "provider_succeeded"}
+        for item in items
+    )
+    diagnostics: Dict[str, Any] = {
+        "meteredAttemptCount": attempted_count,
+        "meteredFailedAttemptCount": failed_count,
+        "providerOutcomeKnown": provider_outcome_known,
+    }
+    actual_cost = ledger.get("actualCostCny")
+    if provider_outcome_known:
+        diagnostics["actualCostCny"] = round(float(actual_cost), 2) if isinstance(actual_cost, (int, float)) else 0
+        diagnostics["actualCostSource"] = str(ledger.get("actualCostSource") or "configured_rate")
+    return diagnostics
 
 
 def render_video(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:

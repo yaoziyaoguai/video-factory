@@ -260,6 +260,31 @@ describe("run observability", () => {
     expect(result.failure?.recoveryActions).toContain("在画面步骤切换视觉审片服务或模型后重试");
   });
 
+  it("projects an automated source-asset rejection as a recoverable failure, not a human final decision", () => {
+    const result = buildRunObservability({
+      status: "rejected",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:02:00.000Z",
+      now: "2026-08-30T10:02:00.000Z",
+      nodes: [
+        node("assets", "画面", "succeeded"),
+        node("asset-source-review", "生成画面预检", "rejected", {
+          error: "源素材视觉预检未通过。镜头 2：主体动作与导演方案不一致。请调整导演方案后重新生成。",
+        }),
+        node("voice", "配音", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure).toMatchObject({
+      nodeId: "asset-source-review",
+      summary: "生成画面的视觉预检没有完成，已保留本轮画面结果",
+      retryable: true,
+    });
+    expect(result.failure?.impact).toContain("配音尚未开始");
+  });
+
   it("does not ask for billing reconciliation when a zero-attempt receipt proves rejection before submission", () => {
     const result = buildRunObservability({
       status: "failed",

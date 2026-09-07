@@ -9,7 +9,7 @@ interface GuideDockProps {
   onStartPageTour: () => void;
 }
 
-const WORKFLOW_STEPS = ["选选题", "定方案", "跑制作", "做审片", "多端发布", "看复盘"];
+const WORKFLOW_STEPS = ["挑选题", "定方案", "跑制作", "做审片", "多端发布", "看复盘"];
 
 export function GuideDock({ open, pathname, onOpenChange, onStartFullTour, onStartPageTour }: GuideDockProps) {
   const panelRef = useRef<HTMLElement>(null);

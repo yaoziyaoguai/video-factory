@@ -24,6 +24,7 @@ import type {
 } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { creatorFacingTechnicalText, providerLabel } from "../presentation.js";
+import { statusLabel } from "../components/StatusBadge.js";
 
 type AssetFilter = "all" | StudioAssetMediaKind | "reusable" | "needs_review";
 type AssetCollection = "creative" | "records";
@@ -94,6 +95,7 @@ export function AssetsPage() {
     setQuery("");
   };
   const workGroups = useMemo(() => groupAssetsByWork(assets, runs), [assets, runs]);
+  const runsById = useMemo(() => new Map(runs.map((run) => [run.id, run])), [runs]);
   useEffect(() => {
     setExpandedWorkKeys((current) => {
       const visible = new Set(workGroups.map((group) => group.key));
@@ -167,7 +169,7 @@ export function AssetsPage() {
       {!loading && manifest && assets.length === 0 ? <div className="asset-library-empty"><FolderOpen aria-hidden="true" size={28} /><strong>这个范围里还没有内容</strong><span>{hasFilters ? "可以清除筛选，查看完整素材库。" : "完成一次真实制作后，镜头和制作记录会自动归档到这里。"}</span>{hasFilters ? <button className="button button-secondary" type="button" onClick={clearFilters}>清除筛选</button> : null}</div> : null}
 
       {assets.length && view === "asset" ? <section className="asset-library-grid" aria-live="polite">
-        {assets.map((asset) => <AssetCard asset={asset} key={asset.key} />)}
+        {assets.map((asset) => <AssetCard asset={asset} run={runsById.get(asset.usages.at(-1)?.runId ?? "")} key={asset.key} />)}
       </section> : null}
       {assets.length && view === "work" ? <section className="asset-work-groups" aria-live="polite">
         {workGroups.map((group, index) => {
@@ -178,7 +180,7 @@ export function AssetsPage() {
             if (next.has(group.key)) next.delete(group.key); else next.add(group.key);
             return next;
           })}><ChevronDown aria-hidden="true" size={18} /><div><small>{index === 0 ? "最近制作" : "历史制作"} · {group.items.length} 项素材</small><h2 id={`asset-work-${group.key}`}>{group.runTitle}</h2></div></button>{group.runId ? <Link to={`/projects/${group.runId}`}>打开制作</Link> : null}</header>
-          {expanded ? <div id={`asset-work-items-${group.key}`} className="asset-library-grid">{group.items.map(({ asset, usage }) => <AssetCard asset={asset} usage={usage} grouped key={`${asset.key}:${usage?.itemId ?? "unassigned"}`} />)}</div> : null}
+          {expanded ? <div id={`asset-work-items-${group.key}`} className="asset-library-grid">{group.items.map(({ asset, usage }) => <AssetCard asset={asset} usage={usage} run={runsById.get(group.runId ?? "")} grouped key={`${asset.key}:${usage?.itemId ?? "unassigned"}`} />)}</div> : null}
           </section>;
         })}
       </section> : null}
@@ -212,13 +214,14 @@ function groupAssetsByWork(assets: StudioIndexedAsset[], runs: StudioRunSummary[
   });
 }
 
-function AssetCard({ asset, usage, grouped = false }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; grouped?: boolean }) {
+function AssetCard({ asset, usage, run, grouped = false }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; run?: StudioRunSummary | undefined; grouped?: boolean }) {
   const resolvedUsage = usage ?? asset.usages.at(-1);
-  const metadata = assetMetadata(asset);
+  const identity = assetUsageIdentity(asset, resolvedUsage, grouped);
+  const metadata = assetMetadata(asset, run);
   const creator = creatorFacingTechnicalText(asset.creator);
   const visibleTags = asset.tags.filter((tag) => tag !== "studio-owner" && tag !== asset.creator);
   return <article className="asset-card">
-    <AssetPreview asset={asset} usage={resolvedUsage} />
+    <AssetPreview asset={asset} usage={resolvedUsage} identity={identity} />
     <div className="asset-card-copy">
       <header><span>{originLabel(asset.origin)} · {mediaKindLabel(asset.mediaKind)}</span><b className={`reuse-${asset.reuseStatus}`}>{reuseStatusLabel(asset.reuseStatus)}</b></header>
       <h3>{assetTitle(asset, resolvedUsage)}</h3>
@@ -226,19 +229,39 @@ function AssetCard({ asset, usage, grouped = false }: { asset: StudioIndexedAsse
       {metadata.length ? <ul className="asset-metadata" aria-label="素材规格">{metadata.map((item) => <li key={item}>{item}</li>)}</ul> : null}
       {visibleTags.length ? <div className="asset-tags">{visibleTags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
       <footer>
-        <span>{grouped ? (resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已关联制作" : "未归属") : asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? "已关联制作" : "未归属"}</span>
+        <span>{grouped ? identity : asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? identity : "未归属"}</span>
         <div>{asset.reuseStatus === "review_required" ? <Link to="/resources#resource-manifest">去确认授权</Link> : null}{resolvedUsage ? <Link to={`/projects/${resolvedUsage.runId}`}>查看作品</Link> : null}{asset.sourceUrl ? <a href={asset.sourceUrl} target="_blank" rel="noreferrer" aria-label="查看素材原始来源"><ExternalLink aria-hidden="true" size={14} /></a> : null}</div>
       </footer>
     </div>
   </article>;
 }
 
-function AssetPreview({ asset, usage = asset.usages.at(-1) }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined }) {
-  if (asset.contentUrl && asset.mediaKind === "video") return <div className="asset-card-preview"><video aria-label={`${assetTitle(asset, usage)} 预览`} src={`${asset.contentUrl}#t=0.1`} muted controls playsInline preload="metadata" /></div>;
-  if (asset.contentUrl && asset.mediaKind === "image") return <div className="asset-card-preview"><img src={asset.contentUrl} alt={`${assetTitle(asset, usage)} 素材`} loading="lazy" /></div>;
-  if (asset.contentUrl && asset.mediaKind === "audio") return <div className="asset-card-preview is-audio"><Music2 aria-hidden="true" size={28} /><audio aria-label={`${assetTitle(asset, usage)} 试听`} src={asset.contentUrl} controls preload="none" /></div>;
+function AssetPreview({ asset, usage = asset.usages.at(-1), identity }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; identity: string }) {
+  if (asset.contentUrl && asset.mediaKind === "video") return <div className="asset-card-preview"><video aria-label={`${assetTitle(asset, usage)} 预览`} src={`${asset.contentUrl}#t=0.1`} muted controls playsInline preload="metadata" /><span className="asset-card-identity">{identity}</span></div>;
+  if (asset.contentUrl && asset.mediaKind === "image") return <div className="asset-card-preview"><img src={asset.contentUrl} alt={`${assetTitle(asset, usage)} 素材`} loading="lazy" /><span className="asset-card-identity">{identity}</span></div>;
+  if (asset.contentUrl && asset.mediaKind === "audio") return <div className="asset-card-preview is-audio"><Music2 aria-hidden="true" size={28} /><audio aria-label={`${assetTitle(asset, usage)} 试听`} src={asset.contentUrl} controls preload="none" /><span className="asset-card-identity">{identity}</span></div>;
   const Icon = asset.mediaKind === "video" ? Film : asset.mediaKind === "image" ? ImageIcon : asset.mediaKind === "audio" ? Music2 : asset.mediaKind === "document" ? FileText : Database;
-  return <div className={`asset-card-preview is-${asset.mediaKind}`}><Icon aria-hidden="true" size={28} /><span>{mediaKindLabel(asset.mediaKind)}</span></div>;
+  return <div className={`asset-card-preview is-${asset.mediaKind}`}><Icon aria-hidden="true" size={28} /><span>{mediaKindLabel(asset.mediaKind)}</span><span className="asset-card-identity">{identity}</span></div>;
+}
+
+function assetUsageIdentity(asset: StudioIndexedAsset, usage: StudioIndexedAssetUsage | undefined, grouped: boolean): string {
+  if (usage) {
+    const related = grouped ? asset.usages.filter((item) => item.runId === usage.runId) : [usage];
+    const positions = [...new Set(related.flatMap((item) => item.scenePosition ? [item.scenePosition] : []))].sort((left, right) => left - right);
+    if (positions.length) return `镜头 ${positions.join("、")}`;
+  }
+  return genericAssetIdentity(asset.mediaKind);
+}
+
+function genericAssetIdentity(kind: StudioAssetMediaKind): string {
+  return ({
+    video: "视频素材",
+    image: "图片素材",
+    audio: "声音素材",
+    document: "制作文档",
+    font: "字体资源",
+    other: "制作资源",
+  })[kind];
 }
 
 const FILTERS: Array<{ id: AssetFilter; label: string }> = [
@@ -295,18 +318,43 @@ function providerAssetSuffix(asset: StudioIndexedAsset): string {
 }
 
 function assetTitle(asset: StudioIndexedAsset, usage = asset.usages.at(-1)): string {
+  if (asset.origin === "final_render" || asset.origin === "production_document" || asset.mediaKind === "document") {
+    return productionRecordTitle(asset);
+  }
   if (asset.query) return asset.query;
   if (!usage) return mediaKindLabel(asset.mediaKind);
   return usage.scenePosition ? `${usage.runTitle} · 镜头 ${usage.scenePosition}` : usage.runTitle;
 }
 
-function assetMetadata(asset: StudioIndexedAsset): string[] {
+function productionRecordTitle(asset: StudioIndexedAsset): string {
+  if (asset.kind === "render") return "最终成片";
+  if (asset.kind === "script") return "脚本";
+  if (asset.kind === "storyboard") return "导演方案";
+  if (asset.kind === "asset_plan") return "画面方案";
+  if (asset.kind === "generation_jobs") return "画面生成记录";
+  if (asset.kind === "publish_package") return "发布包";
+  if (asset.kind === "review_report") {
+    if (asset.providerId.includes("technical-review")) return "技术质检报告";
+    if (asset.providerId.includes("visual-review") || asset.providerId === "openai") return "视觉审片报告";
+    return "审片报告";
+  }
+  return "制作记录";
+}
+
+function assetMetadata(asset: StudioIndexedAsset, run?: StudioRunSummary): string[] {
   return [
     asset.width && asset.height ? `${asset.width} × ${asset.height}` : undefined,
     asset.aspectRatio,
     asset.durationSeconds ? `${Math.round(asset.durationSeconds * 10) / 10} 秒` : undefined,
     asset.usages.some((item) => item.selectedInFinal) ? "已入片" : undefined,
+    run ? `${formatRunDate(run.finishedAt ?? run.startedAt)} · ${statusLabel(run.status)}` : undefined,
   ].filter((item): item is string => Boolean(item));
+}
+
+function formatRunDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "日期未知";
+  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 
 function mediaKindLabel(kind: StudioAssetMediaKind): string {

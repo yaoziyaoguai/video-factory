@@ -1,7 +1,7 @@
 import { CodexBridgeClient, requestOptionsForDeadline, type CodexTaskExecution } from "./codex-chat.js";
 import type { ProductionBlueprint } from "@video-factory/template-core";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
-import type { ProductionReworkFinding, ProductionSeriesContext } from "./contracts.js";
+import type { ProductionReworkFinding, ProductionSeriesContext, ProductionVisualPlan } from "./contracts.js";
 
 export type ScriptVisualStrategy = "stock" | "image" | "generated" | "local";
 
@@ -42,6 +42,8 @@ export interface ScreenwriterAgentInput {
       reasons: string[];
       guardrails: string[];
     };
+    visualProof?: string;
+    visualPlan?: ProductionVisualPlan;
     seriesContext?: ProductionSeriesContext;
     rework?: {
       sourceRunId: string;
@@ -79,7 +81,7 @@ export interface CodexScreenwriterAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_SCREENWRITER_TIMEOUT_MS = 660_000;
 const DEFAULT_SCREENWRITER_MAX_ATTEMPTS = 2;
-export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v6|role-audit-v1|script-validator-v1";
+export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v6|role-audit-v1|script-validator-v1|visual-plan-v1";
 
 // id 固定为 codex-screenwriter-v1：brief.providers.script 持久化该 id，registry 按 id 匹配 provider。
 export class CodexScreenwriterAgent implements ScreenwriterAgent {
@@ -139,6 +141,7 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
         "每镜头只有一个可见动作，成功与失败条件可由下游验收",
         "旁白时长、镜头时长、屏幕文字和声音提示彼此一致",
         "事实、素材可得性、平台与模板约束均未被虚构或绕过",
+        "上游已经给出的具体画面证据与画面计划得到兑现；可以深化和拆镜，但不能被模板的通用镜头覆盖",
         "系列单集遵守系列圣经、已内部定版 canon 与前后集连续性，并在本集形成独立兑现",
         "系列单集的 canonFacts 只记录本集已经明确建立且可供后集引用的事实，不得包含预告、计划、悬念、问题或尚待验证的结论",
         "返工时只处理分配给 script 的 findingId；当前节点可以说明已落实修改，但不得宣称问题已经复验通过",
@@ -185,6 +188,8 @@ function screenwriterAuditContext(brief: ScreenwriterAgentInput["brief"]): Recor
       audience: brief.audience,
       nicheSlug: brief.nicheSlug,
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
+      ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
+      ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
       ...(brief.rework ? { rework: brief.rework } : {}),
     },
     currentRoleContract: {

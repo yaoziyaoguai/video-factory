@@ -99,6 +99,8 @@ describe("AssetsPage", () => {
     expect(sourceLinks.map((link) => link.getAttribute("href"))).toEqual(
       expect.arrayContaining(["https://example.com/pending-source", "https://example.com/cleared-source"]),
     );
+    expect(screen.getAllByText("图片素材").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/EPENDING|ECLEARED/)).not.toBeInTheDocument();
   });
 
   it("shows deduplicated indexed assets and filters without inventing content", async () => {
@@ -263,7 +265,7 @@ describe("AssetsPage", () => {
     expect(screen.getByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 1" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 2" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("窗边一杯水 · 镜头 1 预览")).toHaveAttribute("src", "/api/runs/run-1/artifacts/render/content#t=0.1");
-    expect(screen.getByText("镜头 2")).toBeInTheDocument();
+    expect(screen.getAllByText("镜头 1、2").length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: /制作 · 1 项素材/ })).toHaveLength(3);
     expect(screen.queryByRole("heading", { level: 2, name: "未归属项目" })).not.toBeInTheDocument();
 
@@ -273,16 +275,91 @@ describe("AssetsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /声音/ }));
     expect(await screen.findByRole("heading", { level: 3, name: "夜晚书房" })).toBeInTheDocument();
-    expect(screen.getByText("已关联制作")).toBeInTheDocument();
+    expect(screen.getAllByText("声音素材").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/VOICE1/)).not.toBeInTheDocument();
     expect(screen.queryByText("已归档")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { level: 3, name: "窗边一杯水 · 镜头 1" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "成片与记录" }));
-    expect(screen.getByRole("heading", { level: 3, name: "制作文档" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 3, name: "脚本" })).toBeInTheDocument();
     expect(screen.getByText("AI 编剧 · 由你确认")).toBeInTheDocument();
     expect(screen.queryByText("studio-owner")).not.toBeInTheDocument();
     expect(screen.getAllByText("未归属").length).toBeGreaterThan(0);
     expect(screen.queryByText(/作品素材包/)).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { level: 3, name: "夜晚书房" })).not.toBeInTheDocument();
+  });
+
+  it("gives every production record a recognizable title, date, and run status", async () => {
+    const user = userEvent.setup();
+    const records = [
+      { kind: "render", providerId: "python-ffmpeg-v1", mediaKind: "video", origin: "final_render" },
+      { kind: "script", providerId: "codex-screenwriter-v1", mediaKind: "document", origin: "production_document" },
+      { kind: "storyboard", providerId: "api-visual-director-v1", mediaKind: "document", origin: "production_document" },
+      { kind: "asset_plan", providerId: "ai-shot-router-v1", mediaKind: "document", origin: "production_document" },
+      { kind: "generation_jobs", providerId: "ai-shot-router-v1", mediaKind: "document", origin: "production_document" },
+      { kind: "review_report", providerId: "python-technical-review-v1", mediaKind: "document", origin: "production_document" },
+      { kind: "review_report", providerId: "codex-visual-review-v1", mediaKind: "document", origin: "production_document" },
+      { kind: "publish_package", providerId: "inline:publish-package", mediaKind: "document", origin: "production_document" },
+      { kind: "agent_loop_trace", providerId: "openai", mediaKind: "document", origin: "production_document" },
+    ] as const;
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
+      generatedAt: "2026-09-07T08:00:00.000Z",
+      totalItems: records.length,
+      needsReviewCount: 0,
+      legacyRunsWithoutManifest: 0,
+      reconstructedRunCount: 0,
+      unreadableManifestCount: 0,
+      truncatedRunCount: 0,
+      truncatedItemCount: 0,
+      categories: { visual: 1, voice: 0, font: 0, document: records.length - 1, other: 0 },
+      items: [],
+      assetIndex: {
+        version: "video-factory/asset-index-v1",
+        totalAssets: records.length,
+        duplicateUses: 0,
+        reusableCount: 0,
+        needsReviewCount: 0,
+        facets: { mediaKinds: { video: 1, document: records.length - 1 }, origins: { final_render: 1, production_document: records.length - 1 }, providers: {}, reuseStatuses: { not_reusable: records.length } },
+        assets: records.map((record, index) => ({
+          key: `sha256:record-${index}`,
+          ...record,
+          category: record.kind === "render" ? "visual" as const : "document" as const,
+          tags: [],
+          commercialUse: "self_owned" as const,
+          attributionRequirement: "not_required" as const,
+          reviewStatus: "recorded" as const,
+          reuseStatus: "not_reusable" as const,
+          useCount: 1,
+          usages: [{
+            runId: "run-records",
+            runTitle: "爆款候选复盘",
+            itemId: `record-${index}`,
+            providerId: record.providerId,
+            commercialUse: "self_owned" as const,
+            attributionRequirement: "not_required" as const,
+            reviewStatus: "recorded" as const,
+          }],
+        })),
+      },
+    });
+    vi.spyOn(studioApi, "runs").mockResolvedValue([{
+      id: "run-records",
+      title: "爆款候选复盘",
+      status: "rejected",
+      platform: "douyin",
+      durationSeconds: 24,
+      startedAt: "2026-09-06T08:00:00.000Z",
+      finishedAt: "2026-09-06T08:12:00.000Z",
+      currentNodeId: "final-review",
+    }]);
+
+    render(<MemoryRouter><AssetsPage /></MemoryRouter>);
+    await user.click(await screen.findByRole("button", { name: "成片与记录" }));
+
+    for (const title of ["最终成片", "脚本", "导演方案", "画面方案", "画面生成记录", "技术质检报告", "视觉审片报告", "发布包", "制作记录"]) {
+      expect(screen.getByRole("heading", { level: 3, name: title })).toBeInTheDocument();
+    }
+    expect(screen.getAllByText(/2026.*09.*06.*已打回/)).toHaveLength(records.length);
+    expect(screen.queryByRole("heading", { level: 3, name: "爆款候选复盘" })).not.toBeInTheDocument();
   });
 });

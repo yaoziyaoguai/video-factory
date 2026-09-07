@@ -10,13 +10,15 @@ import { OpportunityDialog } from "../src/client/components/OpportunityDialog.js
 import { OpportunityRail } from "../src/client/components/OpportunityRail.js";
 import { ProductionStrip } from "../src/client/components/ProductionStrip.js";
 import { SeriesDialog } from "../src/client/components/SeriesDialog.js";
+import { SourceSupplementDialog } from "../src/client/components/SourceSupplementDialog.js";
 import { TopicEntryWorkspace } from "../src/client/components/TopicEntryWorkspace.js";
 import { ExperimentsPage } from "../src/client/pages/ExperimentsPage.js";
 import { ProductionPage } from "../src/client/pages/ProductionPage.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
 import { HomePage } from "../src/client/pages/HomePage.js";
 import { TodayPage } from "../src/client/pages/TodayPage.js";
-import type { StudioCandidateInboxItem, StudioLocalCapability, StudioOpportunity, StudioProvider, StudioRunSummary, StudioSeries, StudioTemplate, StudioTrendSource } from "../src/shared/api.js";
+import type { StudioCandidateInboxItem, StudioCostDashboard, StudioLocalCapability, StudioOpportunity, StudioProvider, StudioRunSummary, StudioSeries, StudioTemplate, StudioTrendSource } from "../src/shared/api.js";
+import { planVisualDirection } from "../src/shared/visual-plan.js";
 
 const opportunity: StudioOpportunity = {
   id: "opportunity-1",
@@ -183,6 +185,66 @@ afterEach(() => {
   restoreScrollIntoView = undefined;
 });
 
+function seriesPublicAffairs(): StudioSeries {
+  return {
+    id: "series-public-affairs",
+    name: "台风事实台账",
+    premise: "每集核对一条公共事件的原始来源。",
+    audience: "需要辨别信息的中文观众",
+    platform: "douyin",
+    category: "society",
+    track: "fact-review",
+    pillars: ["来源核验"],
+    tone: "克制",
+    visualStyle: "证据图解",
+    status: "active",
+    revision: 1,
+    currentSeason: { number: 1, title: "第一季", arc: "台风季事实核对" },
+    bible: { rules: ["只引用可打开的原始来源"], recurringElements: [], forbiddenChanges: [] },
+    canon: { revision: 0, facts: [] },
+    episodes: [{
+      id: "series-public-affairs-e1",
+      seriesId: "series-public-affairs",
+      episodeNumber: 1,
+      seasonNumber: 1,
+      arc: "台风季事实核对",
+      pillar: "来源核验",
+      title: "台风伤亡消息持续更新",
+      viewerPromise: "看懂每条消息背后的来源",
+      hook: "哪些伤亡说法真的有来源？",
+      payoff: "给出可核验的来源清单",
+      canonBaseRevision: 0,
+      status: "planned",
+      continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: [], canonChecks: [] },
+      planning: { source: "rules", role: "系列总编", auditRole: "独立质量审计", auditStatus: "passed", auditIterations: 1, providerId: "rules", modelId: "deterministic", promptVersion: "test" },
+      createdAt: "2026-09-07T08:00:00.000Z",
+      updatedAt: "2026-09-07T08:00:00.000Z",
+    }],
+    nextEpisodeNumber: 1,
+    createdAt: "2026-09-07T08:00:00.000Z",
+    updatedAt: "2026-09-07T08:00:00.000Z",
+  };
+}
+
+function seriesPublicAffairsBlockedCandidate(): StudioCandidateInboxItem {
+  return {
+    ...candidate(81, "society"),
+    id: "series-public-affairs-e1",
+    origin: "series",
+    title: "台风伤亡消息持续更新",
+    seriesId: "series-public-affairs",
+    seriesName: "台风事实台账",
+    episodeNumber: 1,
+    seriesSequence: { status: "ready" },
+    verification: {
+      status: "blocked",
+      independentSources: 0,
+      requiredSources: 2,
+      reasons: ["高风险公共题材不能只依据系列路线图开拍，需要补齐至少 2 个独立原始来源。"],
+    },
+  };
+}
+
 describe("Creative OS", () => {
   it("treats both manual and custom query aliases as the isolated custom creation entry", async () => {
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
@@ -261,10 +323,134 @@ describe("Creative OS", () => {
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     expect(await screen.findByRole("heading", { name: "历史候选需补来源" })).toBeInTheDocument();
-    expect(screen.getByText(/0 条可开工 · 1 条历史候选需补来源/)).toBeInTheDocument();
+    expect(screen.getByText(/0 条可采用候选 · 0 条已进入待制作区 · 1 条历史候选需补来源/)).toBeInTheDocument();
     expect(screen.queryByText(/1 条制作机会/)).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: blocked.title })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建制作" })).toBeDisabled();
+  });
+
+  it("supplements a blocked candidate and refreshes its gate before enabling adoption", async () => {
+    const user = userEvent.setup();
+    const blocked = {
+      ...candidate(81, "technology"),
+      id: "trend-needs-source",
+      title: "AI 办公实测值不值得做",
+      verification: { status: "blocked" as const, independentSources: 1, requiredSources: 2, reasons: ["还缺少第二个独立来源。"] },
+    };
+    const ready = {
+      ...blocked,
+      evidence: [...blocked.evidence, { source: "manual-supplement", platform: "manual", keyword: "人工补充来源", strength: 0, evidenceUrl: "https://news.example.org/report" }],
+      verification: { status: "ready" as const, independentSources: 2, requiredSources: 2, reasons: ["来源门槛已满足。"] },
+    };
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "free-stock",
+      topicStrategy: { customInstruction: "优先可拍题材。" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValueOnce(inbox([blocked])).mockResolvedValue(inbox([ready]));
+    const supplement = vi.spyOn(studioApi, "supplementCandidateSources").mockResolvedValue(ready);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    await user.click(await screen.findByRole("button", { name: "查看待补来源候选（1 条）" }));
+    const supplementButton = await screen.findByRole("button", { name: `补充来源 ${blocked.title}` });
+    await user.click(supplementButton);
+    const input = screen.getByLabelText("来源链接（每行一条，1–10 条）");
+    await user.type(input, "https://news.example.org/report\nhttps://search.example.com/results");
+    await user.click(screen.getByRole("button", { name: "保存来源（2 条）" }));
+
+    await waitFor(() => expect(supplement).toHaveBeenCalledWith(blocked.id, {
+      evidenceUrls: ["https://news.example.org/report", "https://search.example.com/results"],
+      origin: "trend",
+    }));
+    expect(await screen.findByRole("button", { name: `采用候选 ${ready.title}` })).toBeEnabled();
+    expect(screen.getByText(/来源已保存；开工门槛与制作建议已按最新来源重算/)).toBeInTheDocument();
+    expect(screen.getByText("用户补充 · 不作为热度信号")).toBeInTheDocument();
+  });
+
+  it("supplements a blocked historical trend and refreshes its score and shot-plan state", async () => {
+    const user = userEvent.setup();
+    const blocked = sourceBlockedOpportunity("historical-source-gap", "历史热点补来源测试");
+    const ready: StudioOpportunity = {
+      ...blocked,
+      evidence: [...blocked.evidence, { source: "manual-supplement", platform: "manual", keyword: "人工补充来源", strength: 0, evidenceUrl: "https://news.example.org/report" }],
+      verification: { status: "ready", independentSources: 2, requiredSources: 2, reasons: ["来源门槛已满足。"] },
+      editorialDecision: {
+        verdict: "produce_video",
+        score: 82,
+        reasons: ["适合视频表达。"],
+        guardrails: ["逐镜核验。"],
+        recommendedTemplate: {
+          id: "knowledge-explainer",
+          name: "知识解释",
+          format: "问题、因果模型与生活验证构成的解释视频",
+          rationale: "让抽象信息形成可复述的因果链。",
+        },
+      },
+    };
+    vi.spyOn(studioApi, "opportunities").mockResolvedValueOnce([blocked]).mockResolvedValue([ready]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "free-stock",
+      topicStrategy: { customInstruction: "优先可拍题材。" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+    const supplement = vi.spyOn(studioApi, "supplementOpportunitySources").mockResolvedValue(ready);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "补齐来源后的镜头方向" })).toBeInTheDocument();
+    expect(screen.getByLabelText(/历史机会评分/)).toHaveTextContent("历史分");
+    await user.click(screen.getByRole("button", { name: "补充原始来源" }));
+    await user.type(screen.getByLabelText("来源链接（每行一条，1–10 条）"), "https://news.example.org/report");
+    await user.click(screen.getByRole("button", { name: "保存来源（1 条）" }));
+
+    await waitFor(() => expect(supplement).toHaveBeenCalledWith(blocked.id, { evidenceUrls: ["https://news.example.org/report"] }));
+    expect(await screen.findByRole("heading", { name: "可执行镜头计划" })).toBeInTheDocument();
+    expect(screen.getByLabelText(/机会总分/)).toHaveTextContent("机会分");
+    expect(screen.getByRole("button", { name: "新建制作" })).toBeEnabled();
+  });
+
+  it("keeps source input after a failed save and locks duplicate actions while pending", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const onSubmit = vi.fn().mockRejectedValue(new Error("保存失败"));
+    const { rerender } = render(<SourceSupplementDialog
+      open
+      title="来源待补选题"
+      currentSources={1}
+      requiredSources={2}
+      pending={false}
+      onClose={onClose}
+      onSubmit={onSubmit}
+    />);
+
+    const input = screen.getByLabelText("来源链接（每行一条，1–10 条）");
+    await user.type(input, "https://news.example.org/report");
+    await user.click(screen.getByRole("button", { name: "保存来源（1 条）" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(["https://news.example.org/report"]));
+
+    rerender(<SourceSupplementDialog
+      open
+      title="来源待补选题"
+      currentSources={1}
+      requiredSources={2}
+      pending
+      error="来源保存失败：网络暂不可用"
+      onClose={onClose}
+      onSubmit={onSubmit}
+    />);
+    expect(input).toHaveValue("https://news.example.org/report");
+    expect(screen.getByRole("alert")).toHaveTextContent("来源保存失败：网络暂不可用");
+    expect(screen.getByRole("button", { name: "正在保存..." })).toBeDisabled();
+    expect(screen.getByTitle("关闭")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "暂不补充" })).toBeDisabled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("keeps all agent candidates visible beside persisted opportunities and filters by category", async () => {
@@ -278,9 +464,10 @@ describe("Creative OS", () => {
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     expect(await screen.findByRole("heading", { name: "热点候选收件箱" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "这轮没有可直接开工的热点建议" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "这轮没有可采用的热点建议" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(8);
     expect(screen.getByRole("heading", { name: opportunity.title })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "待制作选题" })).toBeInTheDocument();
     expect(screen.getByText("问题、因果模型与生活验证构成的解释视频")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /科技 5/ }));
@@ -307,6 +494,9 @@ describe("Creative OS", () => {
 
     await screen.findAllByRole("button", { name: /查看候选提案/ });
     await waitFor(() => expect(screen.getByText(/2 个平台 · 2 条/)).toBeInTheDocument());
+    expect(screen.getByText("2 条可采用候选 · 0 条已进入待制作区 · 0 条已完成")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "可采用候选 2" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `采用候选 ${candidates[0]!.title}` })).toBeEnabled();
     expect(screen.getByRole("button", { name: "游戏电竞 0" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "汽车 0" })).toBeDisabled();
     const platformFilter = screen.getByRole("combobox", { name: "热点来源平台" });
@@ -441,6 +631,8 @@ describe("Creative OS", () => {
       runningRun,
       { ...runningRun, id: "run-done", status: "succeeded" },
       { ...runningRun, id: "run-failed", status: "failed" },
+      { ...runningRun, id: "run-rejected", status: "rejected" },
+      { ...runningRun, id: "run-archived", status: "rejected", archivedAt: "2026-09-07T12:00:00.000Z" },
     ]);
     const candidateInbox = vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([candidate(1, "technology")]));
     render(<MemoryRouter><HomePage /></MemoryRouter>);
@@ -448,10 +640,29 @@ describe("Creative OS", () => {
     expect(await screen.findByRole("heading", { name: "你今天从哪里出发？" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "先替你筛到三条" })).not.toBeInTheDocument();
     expect(candidateInbox).not.toHaveBeenCalled();
-    expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("待你处理1");
+    expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("待你处理3");
     expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("自动制作1");
     expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("已完成1");
-    expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("需调整1");
+    expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("已归档1");
+    expect(screen.getByRole("region", { name: "制作概况" })).not.toHaveTextContent("需调整");
+  });
+
+  it("keeps a legacy read-only review out of the home to-do count and offers a new version", async () => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([{
+      ...runningRun,
+      id: "legacy-review",
+      title: "旧版待审记录",
+      status: "needs_human",
+      currentNodeId: "final-review",
+      continuation: { supported: false, reason: "这条旧版制作只能查看。" },
+    }]);
+    render(<MemoryRouter><HomePage /></MemoryRouter>);
+
+    expect(await screen.findByRole("region", { name: "制作概况" })).toHaveTextContent("待你处理0");
+    expect(screen.getByText("历史只读")).toBeInTheDocument();
+    expect(screen.queryByText("等你审片")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /基于这版重新制作/ })).toHaveAttribute("href", "/projects/legacy-review");
+    expect(screen.queryByRole("link", { name: /进入审片/ })).not.toBeInTheDocument();
   });
 
   it("creates a durable series from the peer series entry mode", async () => {
@@ -568,6 +779,78 @@ describe("Creative OS", () => {
     expect(screen.getByRole("button", { name: /请先迁移到支持的平台/ })).toBeDisabled();
   });
 
+  it("offers persisted source supplements for a source-blocked series episode before adoption", async () => {
+    const user = userEvent.setup();
+    const publicSeries = seriesPublicAffairs();
+    const blockedEpisodeCandidate = seriesPublicAffairsBlockedCandidate();
+    const onSupplementSources = vi.fn();
+    render(<MemoryRouter><TopicEntryWorkspace
+      initialMode="series"
+      selectedSeriesId={publicSeries.id}
+      inbox={inbox([blockedEpisodeCandidate])}
+      series={[publicSeries]}
+      historicalRuns={[]}
+      loading={{}}
+      trendMeta={{ platformCount: 0, candidateCount: 1 }}
+      seriesAuditReady
+      onRetry={vi.fn()}
+      onRefreshTrends={vi.fn()}
+      onAdopt={vi.fn()}
+      onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()}
+      onUpdateSeriesEpisode={vi.fn()}
+      onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()}
+      onViewProductionRecords={vi.fn()}
+      onSupplementSources={onSupplementSources}
+      onManual={vi.fn()}
+      onImport={vi.fn()}
+    /></MemoryRouter>);
+
+    expect(screen.getByRole("heading", { name: "台风伤亡消息持续更新" })).toBeInTheDocument();
+    expect(screen.getByText(/高风险公共题材不能只依据系列路线图开拍/)).toBeInTheDocument();
+    const adopt = screen.getByRole("button", { name: /采用本集|等待补充原始来源/ });
+    expect(adopt).toBeDisabled();
+    expect(adopt).toHaveTextContent("等待补充原始来源");
+
+    await user.click(screen.getByRole("button", { name: /^补充原始来源/ }));
+    expect(onSupplementSources).toHaveBeenCalledWith(blockedEpisodeCandidate);
+  });
+
+  it("routes series source supplements to the series entry and reloads the roadmap", async () => {
+    const user = userEvent.setup();
+    const publicSeries = seriesPublicAffairs();
+    const blockedEpisodeCandidate = seriesPublicAffairsBlockedCandidate();
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([publicSeries]);
+    const inboxCalls = vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([blockedEpisodeCandidate]));
+    const supplemented: StudioCandidateInboxItem = {
+      ...blockedEpisodeCandidate,
+      verification: {
+        status: "review_required",
+        independentSources: 2,
+        requiredSources: 2,
+        reasons: ["高风险公共题材已补齐独立原始来源，采用前需要人工查看并确认。"],
+      },
+    };
+    const supplement = vi.spyOn(studioApi, "supplementCandidateSources").mockResolvedValue(supplemented);
+    render(<MemoryRouter initialEntries={["/topics?mode=series"]}><TodayPage /></MemoryRouter>);
+
+    await user.click(await screen.findByRole("button", { name: /^补充原始来源/ }));
+    await user.type(screen.getByLabelText(/来源链接/), "https://news.example.org/typhoon-report\nhttps://police.example.cn/notice");
+    await user.click(screen.getByRole("button", { name: /保存来源（2 条）/ }));
+
+    await waitFor(() => expect(supplement).toHaveBeenCalledOnce());
+    expect(supplement).toHaveBeenCalledWith("series-public-affairs-e1", {
+      evidenceUrls: ["https://news.example.org/typhoon-report", "https://police.example.cn/notice"],
+      origin: "series",
+    });
+    // 补齐后重拉系列工作区，而不是在客户端乐观解除阻断。
+    await waitFor(() => expect(inboxCalls.mock.calls.filter(([query]) => (query as { origins?: string[] } | undefined)?.origins?.[0] === "series").length).toBeGreaterThanOrEqual(2));
+  });
+
   it("exposes the four real workspaces in the primary navigation", async () => {
     vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
@@ -625,6 +908,25 @@ describe("Creative OS", () => {
 
     expect(await screen.findByRole("link", { name: /失败的制作/ })).toHaveTextContent("失败");
     expect(screen.getByRole("link", { name: /失败的制作/ })).not.toHaveTextContent("制作中");
+  });
+
+  it("distinguishes same-name rework runs with time and a short production id", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
+    vi.spyOn(studioApi, "runs").mockResolvedValue([
+      { ...runningRun, id: "run-rework-alpha", title: "同名返工作品", startedAt: "2026-09-06T10:00:00.000Z" },
+      { ...runningRun, id: "run-rework-beta", title: "同名返工作品", status: "failed", startedAt: "2026-09-07T10:00:00.000Z" },
+    ]);
+    render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
+
+    await user.click(screen.getByRole("button", { name: "搜索项目、模板或功能" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目、模板或功能" }), "同名返工作品");
+
+    const results = await screen.findAllByRole("link", { name: /同名返工作品/ });
+    expect(results).toHaveLength(2);
+    expect(results[0]).toHaveTextContent("制作 rk-alpha");
+    expect(results[1]).toHaveTextContent("制作 ork-beta");
+    expect(results[0]).not.toHaveTextContent(results[1]?.textContent ?? "");
   });
 
   it("closes global search with Escape, clears it, and restores focus", async () => {
@@ -756,6 +1058,82 @@ describe("Creative OS", () => {
     expect(within(shotBoard).queryByRole("img")).not.toBeInTheDocument();
   });
 
+  it("puts a blocked source gate ahead of historical scores and labels the shot plan as provisional", () => {
+    render(<OpportunityFocus opportunity={{
+      ...opportunity,
+      verification: {
+        status: "blocked",
+        independentSources: 1,
+        requiredSources: 2,
+        reasons: ["还缺少第二个独立来源。"],
+      },
+      visualPlan: {
+        strategy: "把两条来源标题并列放进确定性标尺，补源后仍沿用这套视觉论证。",
+        beats: [{
+          id: "source-certainty",
+          role: "来源核对",
+          duration: "0-8 秒",
+          description: "左右并列原始标题，高亮“网传”和“正在核查”。",
+          searchQuery: "source headlines certainty",
+          source: "screen",
+        }],
+      },
+    }} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("暂不可开工");
+    expect(screen.getByRole("status")).toHaveTextContent("还缺少第二个独立来源");
+    expect(screen.getByLabelText(/历史机会评分/)).toHaveTextContent("历史分");
+    expect(screen.getByText(/历史内容潜力，仅供参考/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "补齐来源后的镜头方向" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "可执行镜头计划" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "镜头方向示意" })).toHaveTextContent("高亮“网传”和“正在核查”");
+  });
+
+  it("keeps a stored shot plan with legitimate ellipses instead of recomputing it", () => {
+    render(<OpportunityFocus opportunity={{
+      ...opportunity,
+      title: "学校治理AI作弊，难点可能不是“禁不禁”，而是怎样证明学习发生过",
+      category: "education",
+      verification: {
+        status: "blocked",
+        independentSources: 1,
+        requiredSources: 2,
+        reasons: ["还缺少第二个独立来源。"],
+      },
+      editorialDecision: {
+        verdict: "produce_image_story",
+        score: 72,
+        reasons: ["适合用来源画面和数据解释。"],
+        guardrails: ["补齐来源后再开工。"],
+        recommendedTemplate: {
+          id: "photo-story",
+          name: "证据图解",
+          format: "来源画面与数据证据驱动的图解视频",
+          rationale: "以证据为主。",
+        },
+      },
+      visualPlan: {
+        strategy: "已保存的视觉方案。",
+        beats: [{
+          id: "legacy",
+          role: "旧镜头",
+          duration: "0-24 秒",
+          description: "让“学校治理AI作弊，难点可能不是“禁不禁”，而是怎样证明…”能被复现。",
+          searchQuery: "学校治理AI作弊，难点可能不是…",
+          source: "screen",
+        }],
+      },
+    }} />);
+
+    const shotBoard = screen.getByRole("region", { name: "镜头方向示意" });
+    expect(within(shotBoard).getByText("推荐模板 · 证据图解")).toBeInTheDocument();
+    expect(within(shotBoard).queryByText("视觉方案 · A01")).not.toBeInTheDocument();
+    // 已保存计划是规范真相：含合法省略号的描述不得被展示层重算替换。
+    expect(shotBoard).toHaveTextContent("已保存的视觉方案。");
+    expect(shotBoard).toHaveTextContent("让“学校治理AI作弊，难点可能不是“禁不禁”，而是怎样证明…”能被复现。");
+    expect(shotBoard).toHaveTextContent("素材搜索：学校治理AI作弊，难点可能不是…");
+  });
+
   it("keeps successful data regions visible when the opportunity source fails", async () => {
     vi.spyOn(studioApi, "opportunities").mockRejectedValue(new Error("trend adapter timeout"));
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
@@ -875,7 +1253,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument());
     expect(screen.getByText(/本轮收件箱还没有任何已评估热点候选/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "查看缺来源的选题" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeEnabled();
@@ -902,7 +1280,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox(evaluated));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
     expect(screen.getByText(/选题总编本轮评估了 12 条热点候选，其中 12 条未推荐/)).toBeInTheDocument();
     expect(screen.getByText(/其中 12 条未推荐/)).toBeInTheDocument();
     expect(screen.getByText(/3 条历史选题因来源核验被阻断/)).toBeInTheDocument();
@@ -915,7 +1293,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("button", { name: /查看未入选（12 条）/ })).toBeInTheDocument();
   });
 
-  it("keeps recommended but under-sourced candidates out of the un-recommended count while still listing them as unselected", async () => {
+  it("keeps recommended but under-sourced candidates separate from editorially unselected candidates", async () => {
     const user = userEvent.setup();
     const underSourced = {
       ...candidate(51, "technology"),
@@ -942,14 +1320,105 @@ describe("Creative OS", () => {
       onImport={vi.fn()}
     /></MemoryRouter>);
 
-    expect(screen.getByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
     expect(screen.getByText(/选题总编本轮评估了 3 条热点候选，其中 2 条未推荐/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "查看未入选（3 条）" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看未入选（2 条）" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看待补来源候选（1 条）" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "查看未入选（3 条）" }));
+    await user.click(screen.getByRole("button", { name: "查看未入选（2 条）" }));
 
-    expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: `查看${underSourced.title}` })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /待补来源 1/ }));
     expect(screen.getByRole("button", { name: `查看${underSourced.title}` })).toBeInTheDocument();
+  });
+
+  it("keeps candidates without a live recommended template out of adoption with a distinct reason", async () => {
+    const user = userEvent.setup();
+    const templateGone = {
+      ...candidate(61, "technology"),
+      editorialDecision: {
+        verdict: "produce_video" as const,
+        score: 82,
+        reasons: ["适合视频表达。"],
+        guardrails: ["逐镜核验。"],
+      },
+    };
+    render(<MemoryRouter><TopicEntryWorkspace
+      initialMode="trend"
+      selectedSeriesId={undefined}
+      inbox={inbox([templateGone])}
+      series={[]}
+      historicalRuns={[]}
+      loading={{}}
+      trendMeta={{ platformCount: 1, candidateCount: 1 }}
+      onRetry={vi.fn()}
+      onRefreshTrends={vi.fn()}
+      onAdopt={vi.fn()}
+      onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()}
+      onUpdateSeriesEpisode={vi.fn()}
+      onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()}
+      onViewProductionRecords={vi.fn()}
+      onManual={vi.fn()}
+      onImport={vi.fn()}
+    /></MemoryRouter>);
+
+    // 推荐模板不在生产目录时，候选不进入可采用分组，也提供独立的阻断原因。
+    expect(screen.getByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /查看未入选（1 条）/ }));
+    await user.click(screen.getByRole("button", { name: `查看${templateGone.title}` }));
+    expect(screen.getByText("推荐模板暂不可用 · 暂不可采用")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `采用候选 ${templateGone.title}` })).toBeDisabled();
+    expect(screen.getByRole("button", { name: `采用候选 ${templateGone.title}` })).toHaveTextContent("推荐模板暂不可用");
+  });
+
+  it("words source supplements and provider tooltips in creator language", async () => {
+    const user = userEvent.setup();
+    const underSourced = {
+      ...candidate(71, "technology"),
+      verification: { status: "blocked" as const, independentSources: 1, requiredSources: 2, reasons: ["高风险热点至少需要 2 个独立来源"] },
+    };
+    const skipped = unselectedCandidate(72);
+    const renderWorkspace = (items: StudioCandidateInboxItem[]) => render(<MemoryRouter><TopicEntryWorkspace
+      initialMode="trend"
+      selectedSeriesId={undefined}
+      inbox={inbox(items)}
+      series={[]}
+      historicalRuns={[]}
+      loading={{}}
+      trendMeta={{ platformCount: 1, candidateCount: items.length }}
+      onRetry={vi.fn()}
+      onRefreshTrends={vi.fn()}
+      onAdopt={vi.fn()}
+      onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()}
+      onUpdateSeriesEpisode={vi.fn()}
+      onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()}
+      onViewProductionRecords={vi.fn()}
+      onSupplementSources={vi.fn()}
+      onManual={vi.fn()}
+      onImport={vi.fn()}
+    /></MemoryRouter>);
+
+    const { unmount } = renderWorkspace([underSourced]);
+    await user.click(screen.getByRole("button", { name: "查看待补来源候选（1 条）" }));
+    await user.click(screen.getByRole("button", { name: `查看${underSourced.title}` }));
+    expect(screen.getByText("待补来源 · 暂不可采用")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `补充来源 ${underSourced.title}` })).toHaveTextContent("保存来源并重新评估");
+    // 悬停提示用创作者语言，不暴露内部 provider id。
+    expect(screen.getByTitle("AI 选题总编")).toBeInTheDocument();
+    unmount();
+
+    renderWorkspace([skipped]);
+    await user.click(screen.getByRole("button", { name: "查看未入选（1 条）" }));
+    await user.click(screen.getByRole("button", { name: `查看${skipped.title}` }));
+    expect(screen.getByText("内容暂不推荐 · 暂不可采用")).toBeInTheDocument();
+    expect(screen.getAllByText("没有越过生产门槛。").length).toBeGreaterThan(0);
+    expect(screen.queryByText("证据不足，暂不可采用")).not.toBeInTheDocument();
   });
 
   it("selects and focuses the first source-blocked historical topic instead of editorial skips", async () => {
@@ -982,7 +1451,7 @@ describe("Creative OS", () => {
     const adopt = vi.spyOn(studioApi, "adoptCandidate");
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
     expect(screen.getByText(/2 条历史选题因来源核验被阻断/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "查看缺来源的选题" }));
 
@@ -1017,13 +1486,16 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
     expect(screen.getByText(/另有 2 条历史选题因来源核验被阻断/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "暂不可开工的选题" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "历史候选需补来源" })).not.toBeInTheDocument();
     expect(screen.queryByText(/3 条需补来源/)).not.toBeInTheDocument();
-    expect(screen.getByText("0 条可开工 · 2 条需补来源 · 1 条暂不建议生产")).toBeInTheDocument();
-    expect(screen.getByText(/0 条候选 · 0 条可开工 · 2 条需补来源 · 1 条暂不建议生产 · 0 条已完成/)).toBeInTheDocument();
+    expect(screen.getByText("0 条已进入待制作区 · 2 条需补来源 · 1 条暂不建议生产")).toBeInTheDocument();
+    expect(screen.getByText(/0 条可采用候选 · 0 条已进入待制作区 · 2 条需补来源 · 1 条暂不建议生产 · 0 条已完成/)).toBeInTheDocument();
+    // 被当前政策阻断的历史热点：旧分数标为历史内容潜力，并突出当前不可开工，而不是当作当前结论。
+    expect(screen.getAllByText("历史内容潜力").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("待补来源 · 当前不可开工").length).toBeGreaterThanOrEqual(2);
   });
 
   it("keeps the manual path usable while the local topic model is warming up", async () => {
@@ -1053,17 +1525,17 @@ describe("Creative OS", () => {
     expect(await screen.findByText("热点候选暂时不可用")).toBeInTheDocument();
     expect(screen.getByText("热点服务超时")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /重试/ })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "这轮没有可直接开工的热点建议" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "这轮没有可采用的热点建议" })).not.toBeInTheDocument();
     unmount();
 
     inboxApi.mockResolvedValue(inbox([unselectedCandidate(1), unselectedCandidate(2)]));
     const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockRejectedValue(new Error("上游刷新失败"));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重新刷新热点" }));
     expect(await screen.findByText(/本次更新失败，继续展示上次缓存/)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "这轮没有可直接开工的热点建议" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "录入自己的选题" })).toBeInTheDocument();
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeEnabled();
@@ -1222,7 +1694,7 @@ describe("Creative OS", () => {
     expect(await screen.findByRole("region", { name: "本季策划摘要" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /E01.*候选提案 20/ })).toBeInTheDocument();
     expect(screen.getByText("AI 系列总编")).toBeInTheDocument();
-    expect(screen.getByText("独立审计 2/3 轮通过")).toBeInTheDocument();
+    expect(screen.getByText("独立复核 2/3 轮通过")).toBeInTheDocument();
     expect(screen.getByText(/路线图有独立价值并形成递进.*91 分/)).toBeInTheDocument();
     expect(screen.getByText("深入推理")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "编辑路线图" })).toBeInTheDocument();
@@ -1230,7 +1702,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("combobox", { name: "选择待制作单集" })).toBeInTheDocument();
     expect(within(screen.getByRole("combobox", { name: "选择待制作单集" })).getAllByRole("option")).toHaveLength(1);
     expect(screen.queryByRole("option", { name: /历史成片不应再次制作/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "候选机会" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "待制作选题" })).not.toBeInTheDocument();
     expect(opportunities).toHaveBeenCalledWith("series");
     expect(runs).toHaveBeenCalledWith(undefined);
     expect(screen.queryByRole("heading", { name: "正在生成今日提案" })).not.toBeInTheDocument();
@@ -1253,7 +1725,7 @@ describe("Creative OS", () => {
     expect(await screen.findByText(/第 1 集路线图已保存为人工版本/)).toBeInTheDocument();
     expect(screen.getByText("人工 / 手工编辑")).toBeInTheDocument();
     expect(screen.getByText("人工决定")).toBeInTheDocument();
-    expect(screen.queryByText(/审计结论：/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/复核结论：/)).not.toBeInTheDocument();
   });
 
   it("turns local agent candidates into editable opportunities with one explicit action", async () => {
@@ -1269,7 +1741,18 @@ describe("Creative OS", () => {
       freshness: "live",
       risk: "low",
       verification: { status: "ready", independentSources: 1, requiredSources: 1, reasons: ["常规风险"] },
-      editorialDecision: { verdict: "produce_video", score: 86, reasons: ["适合视频表达。"], guardrails: ["逐镜核验。"] },
+      editorialDecision: {
+        verdict: "produce_video",
+        score: 86,
+        reasons: ["适合视频表达。"],
+        guardrails: ["逐镜核验。"],
+        recommendedTemplate: {
+          id: "knowledge-explainer",
+          name: "知识解释",
+          format: "问题、因果模型与生活验证构成的解释视频",
+          rationale: "让抽象信息形成可复述的因果链。",
+        },
+      },
       title: "下班后的 AI 时间账本",
       platform: "douyin",
       track: "ai-daily-life",
@@ -1331,10 +1814,93 @@ describe("Creative OS", () => {
     await user.click(screen.getByRole("button", { name: "确认核验并采用" }));
     expect(adopt).toHaveBeenCalledWith(reviewCandidate.id, { origin: "trend", verificationConfirmed: true });
 
-    await user.click(screen.getByRole("button", { name: "查看未入选（1 条）" }));
+    await user.click(screen.getByRole("button", { name: "查看待补来源候选（1 条）" }));
     await user.click(screen.getByRole("button", { name: `查看${blockedCandidate.title}` }));
-    expect(screen.getByRole("button", { name: `采用候选 ${blockedCandidate.title}` })).toBeDisabled();
+    const supplementSources = screen.getByRole("button", { name: `补充来源 ${blockedCandidate.title}` });
+    expect(supplementSources).toBeEnabled();
+    expect(screen.queryByRole("button", { name: `采用候选 ${blockedCandidate.title}` })).not.toBeInTheDocument();
     expect(screen.getByText(/至少需要 2 个独立来源/)).toBeInTheDocument();
+    await user.click(supplementSources);
+    expect(screen.getByRole("dialog", { name: "补齐可核验的原始来源" })).toBeInTheDocument();
+  });
+
+  it("shows content potential instead of a fake zero editorial score for source-blocked candidates", async () => {
+    const user = userEvent.setup();
+    const blockedCandidate: StudioCandidateInboxItem = {
+      ...candidate(61, "technology"),
+      title: "来源待补的高潜力候选",
+      editorialDecision: { verdict: "skip", score: 0, reasons: ["证据门槛未满足：至少 2 个独立来源。"], guardrails: ["补齐来源后才推荐形态。"] },
+      verification: { status: "blocked", independentSources: 1, requiredSources: 2, reasons: ["至少需要 2 个不同域名的有效原始来源链接。"] },
+    };
+    render(<MemoryRouter><TopicEntryWorkspace
+      initialMode="trend"
+      selectedSeriesId={undefined}
+      inbox={inbox([blockedCandidate, candidate(62, "technology")])}
+      series={[]}
+      historicalRuns={[]}
+      loading={{}}
+      trendMeta={{ platformCount: 1, candidateCount: 2 }}
+      onRetry={vi.fn()}
+      onRefreshTrends={vi.fn()}
+      onAdopt={vi.fn()}
+      onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()}
+      onUpdateSeriesEpisode={vi.fn()}
+      onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()}
+      onViewProductionRecords={vi.fn()}
+      onManual={vi.fn()}
+      onImport={vi.fn()}
+    /></MemoryRouter>);
+
+    // 内容潜力与开工状态分开：阻断项显示内容潜力分与“待补来源”，不再显示“总编评分 0”。
+    await user.click(screen.getByRole("button", { name: /待补来源 1/ }));
+    expect(screen.getByRole("button", { name: `查看${blockedCandidate.title}` })).toBeInTheDocument();
+    expect(screen.getByLabelText("内容潜力 78 分")).toBeInTheDocument();
+    expect(screen.queryByLabelText("总编评分 0 分")).not.toBeInTheDocument();
+    expect(screen.getByText("待补来源 · 补齐后再评估")).toBeInTheDocument();
+    expect(screen.getByText("待补来源 · 暂不可采用")).toBeInTheDocument();
+    expect(screen.queryByText("推荐形态")).not.toBeInTheDocument();
+  });
+
+  it("reports this round's source-blocked candidates in the recovery panel and opens them", async () => {
+    const user = userEvent.setup();
+    const blockedCandidate: StudioCandidateInboxItem = {
+      ...candidate(71, "technology"),
+      title: "本轮被阻断的待补来源候选",
+      editorialDecision: { verdict: "skip", score: 0, reasons: ["证据门槛未满足：至少 2 个独立来源。"], guardrails: ["补齐来源后才推荐形态。"] },
+      verification: { status: "blocked", independentSources: 1, requiredSources: 2, reasons: ["至少需要 2 个不同域名的有效原始来源链接。"] },
+    };
+    render(<MemoryRouter><TopicEntryWorkspace
+      initialMode="trend"
+      selectedSeriesId={undefined}
+      inbox={inbox([blockedCandidate, unselectedCandidate(72)])}
+      series={[]}
+      historicalRuns={[]}
+      loading={{}}
+      trendMeta={{ platformCount: 1, candidateCount: 2 }}
+      onRetry={vi.fn()}
+      onRefreshTrends={vi.fn()}
+      onAdopt={vi.fn()}
+      onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()}
+      onUpdateSeriesEpisode={vi.fn()}
+      onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()}
+      onViewProductionRecords={vi.fn()}
+      onManual={vi.fn()}
+      onImport={vi.fn()}
+    /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
+    // 恢复面板统计的是本轮候选的来源阻断，而不是历史机会。
+    expect(screen.getByText(/本轮另有 1 条候选有内容潜力/)).toBeInTheDocument();
+    expect(screen.getByText(/其中 1 条未推荐/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "查看待补来源候选（1 条）" }));
+
+    expect(screen.getByRole("button", { name: `查看${blockedCandidate.title}` })).toBeInTheDocument();
+    expect(screen.getByLabelText("内容潜力 78 分")).toBeInTheDocument();
   });
 
   it("shows only the editorial shortlist by default and ranks it by the editorial score", async () => {
@@ -1344,7 +1910,18 @@ describe("Creative OS", () => {
       id: "trend-editorial-winner",
       title: "总编高分候选",
       score: { ...candidate(33, "technology").score, final: 42 },
-      editorialDecision: { verdict: "produce_video", score: 93, reasons: ["观看价值明确。"], guardrails: ["核验结果。"] },
+      editorialDecision: {
+        verdict: "produce_video",
+        score: 93,
+        reasons: ["观看价值明确。"],
+        guardrails: ["核验结果。"],
+        recommendedTemplate: {
+          id: "knowledge-explainer",
+          name: "知识解释",
+          format: "问题、因果模型与生活验证构成的解释视频",
+          rationale: "让抽象信息形成可复述的因果链。",
+        },
+      },
     };
     const rejectedRawWinner: StudioCandidateInboxItem = {
       ...candidate(34, "technology"),
@@ -1429,7 +2006,18 @@ describe("Creative OS", () => {
       freshness: "today",
       risk: "low",
       verification: { status: "ready", independentSources: 1, requiredSources: 1, reasons: ["常规风险"] },
-      editorialDecision: { verdict: "produce_video", score: 78, reasons: ["适合视频表达。"], guardrails: ["逐镜核验。"] },
+      editorialDecision: {
+        verdict: "produce_video",
+        score: 78,
+        reasons: ["适合视频表达。"],
+        guardrails: ["逐镜核验。"],
+        recommendedTemplate: {
+          id: "knowledge-explainer",
+          name: "知识解释",
+          format: "问题、因果模型与生活验证构成的解释视频",
+          rationale: "让抽象信息形成可复述的因果链。",
+        },
+      },
       title: "一个待核验的热点角度",
       platform: "douyin",
       track: "ordinary-life",
@@ -1492,23 +2080,67 @@ describe("Creative OS", () => {
     expect(updateStatus).not.toHaveBeenCalled();
   });
 
-  it("creates a manually scored opportunity with traceable evidence", async () => {
+  it("submits the same deterministic visual plan it previewed when the opportunity has none saved", async () => {
+    const user = userEvent.setup();
+    const planless: StudioOpportunity = { ...opportunity };
+    delete planless.visualPlan;
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([planless]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue([
+      ...providers,
+      { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external", billing: "free", deliveryTypes: ["stock_video"] },
+    ]);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    vi.spyOn(studioApi, "voices").mockResolvedValue([
+      { id: "macos:Tingting", providerId: "macos-say-v1", label: "Tingting", locale: "zh-CN", engine: "macos" },
+    ]);
+    vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 0, templates: [knowledgeTemplate()] });
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "free-stock",
+      topicStrategy: { customInstruction: "" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+    const start = vi.spyOn(studioApi, "start").mockResolvedValue({ runId: "run-visual-plan-1" } as Awaited<ReturnType<typeof studioApi.start>>);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    await user.click(await screen.findByRole("button", { name: "新建制作" }));
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    // 预览的确定性 fallback 必须原样进入开工 payload，而不是提交侧丢失计划。
+    const submitted = start.mock.calls[0]![0] as { visualPlan?: { strategy: string; beats: unknown[] } };
+    expect(submitted.visualPlan?.strategy).toBe(planVisualDirection(opportunity).strategy);
+    expect(submitted.visualPlan?.beats.length).toBeGreaterThan(0);
+  });
+
+  it("keeps scoring out of the creator form and records an optional reference", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const { rerender } = render(<OpportunityDialog open onClose={() => undefined} onSubmit={onSubmit} />);
 
+    expect(screen.getByText("你填写创作事实和方向，机会评分交给系统")).toBeInTheDocument();
+    expect(screen.queryByLabelText("人群覆盖")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("合规风险")).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("选题标题"), opportunity.title);
     await user.type(screen.getByLabelText("目标受众"), opportunity.audience);
     await user.type(screen.getByLabelText("核心痛点"), opportunity.painPoint);
     await user.type(screen.getByLabelText("开场钩子"), opportunity.hook);
-    await user.type(screen.getByLabelText("来源名称"), "manual-research");
-    await user.type(screen.getByLabelText("观察关键词"), "下班后什么都不想做");
+    await user.click(screen.getByText("可选：补充参考来源"));
+    await user.type(screen.getByLabelText("参考链接"), "https://example.cn/source");
     await user.click(screen.getByRole("button", { name: "保存机会" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       title: opportunity.title,
       track: "ordinary-life",
-      evidence: [expect.objectContaining({ source: "manual-research" })],
+      evidence: [expect.objectContaining({
+        source: "manual-supplement",
+        platform: "manual",
+        keyword: opportunity.title,
+        strength: 0,
+        evidenceUrl: "https://example.cn/source",
+      })],
       scores: expect.objectContaining({ complianceRisk: 20 }),
     }));
 
@@ -1531,10 +2163,10 @@ describe("Creative OS", () => {
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       track: "ordinary-life",
       evidence: [expect.objectContaining({
-        source: "manual-research",
-        platform: "douyin",
+        source: "manual-supplement",
+        platform: "manual",
         keyword: "下班后的十分钟如何真正休息",
-        strength: 70,
+        strength: 0,
       })],
       scores: expect.objectContaining({ audienceReach: 70, complianceRisk: 20 }),
     }));
@@ -1638,8 +2270,93 @@ describe("Creative OS", () => {
 
     await waitFor(() => expect(screen.getByText("抖音官方热点")).toBeInTheDocument());
     expect(screen.getAllByText("需要配置").length).toBeGreaterThan(0);
-    expect(screen.getByRole("heading", { name: "平台数据尚未接入" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "还不能判断是否成为爆款" })).toBeInTheDocument();
     expect(screen.queryByText(/播放量/)).not.toBeInTheDocument();
+  });
+
+  it("puts content learning before the secondary cost ledger on the review page", async () => {
+    const user = userEvent.setup();
+    const reviewRuns: StudioRunSummary[] = [
+      { ...runningRun, id: "approved", title: "通过作品", status: "succeeded", currentNodeId: "publish", finalReviewOutcome: "approved" },
+      { ...runningRun, id: "rejected", title: "返工作品", status: "rejected", currentNodeId: "final-review", finalReviewOutcome: "rejected" },
+      { ...runningRun, id: "source-rejected", title: "来源打回作品", status: "rejected", currentNodeId: "asset-source-review" },
+      { ...runningRun, id: "failed", title: "素材中断作品", status: "failed", currentNodeId: "assets" },
+      { ...runningRun, id: "stale", title: "待重新生成作品", status: "stale", currentNodeId: "assets" },
+      { ...runningRun, id: "source-review", title: "待核对来源作品", status: "needs_human", currentNodeId: "asset-source-review" },
+      { ...runningRun, id: "review", title: "待审作品", status: "needs_human", currentNodeId: "final-review" },
+    ];
+    const costs: StudioCostDashboard = {
+      currency: "CNY",
+      totals: {
+        estimatedCostCny: 1,
+        authorizedCostCny: 1,
+        actualCostCny: 1,
+        actualPendingCount: 0,
+        meteredCalls: 1,
+        subscriptionCalls: 2,
+        freeCalls: 3,
+        failedMeteredCalls: 0,
+      },
+      byProvider: [],
+      byNode: [],
+      runs: [],
+    };
+    vi.spyOn(studioApi, "runs").mockResolvedValue(reviewRuns);
+    vi.spyOn(studioApi, "templateExperiments").mockResolvedValue([{
+      templateId: "knowledge-explainer",
+      templateName: "知识解释",
+      sampleSize: 4,
+      metrics: {
+        hookClarity: null,
+        narrativeCompleteness: 75,
+        visualMatch: 82,
+        soundQuality: 100,
+        costEfficiency: null,
+        manualEditCount: 3,
+        finalApprovalRate: 50,
+      },
+      note: "来自真实运行。",
+    }]);
+    const costRequest = vi.spyOn(studioApi, "costs").mockResolvedValue(costs);
+
+    render(<MemoryRouter><ExperimentsPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "这一轮最该改什么" })).toBeInTheDocument();
+    expect(screen.getByText("终审通过率")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("制作统计")).getByText("50%")).toBeInTheDocument();
+    expect(within(screen.getByText("已打回返工").closest("article")!).getByText("1")).toBeInTheDocument();
+    expect(within(screen.getByText("制作中断").closest("article")!).getByText("1")).toBeInTheDocument();
+    const reviewMetric = within(screen.getByLabelText("制作统计")).getByText("等你审片").closest("article");
+    expect(within(reviewMetric!).getByText("1")).toBeInTheDocument();
+    expect(screen.getByText("画面出现 1 次问题")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "哪种讲法更容易过审" })).toBeInTheDocument();
+    expect(screen.getByText("82 分")).toBeInTheDocument();
+    expect(screen.getByText("75%")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "还不能判断是否成为爆款" })).toBeInTheDocument();
+    expect(screen.queryByText("来源打回作品")).not.toBeInTheDocument();
+    expect(screen.queryByText("待重新生成作品")).not.toBeInTheDocument();
+    expect(screen.queryByText("待核对来源作品")).not.toBeInTheDocument();
+
+    const costDetails = screen.getByText("费用与调用记录").closest("details");
+    expect(costDetails).not.toBeNull();
+    expect(costDetails).not.toHaveAttribute("open");
+    expect(costRequest).not.toHaveBeenCalled();
+    await user.click(screen.getByText("费用与调用记录"));
+    expect(costDetails).toHaveAttribute("open");
+    expect(await screen.findByRole("heading", { name: "按服务和制作步骤核对费用" })).toBeInTheDocument();
+    expect(costRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a template request failure without also claiming there are no samples", async () => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "templateExperiments").mockRejectedValue(new Error("template store offline"));
+    const costRequest = vi.spyOn(studioApi, "costs");
+
+    render(<MemoryRouter><ExperimentsPage /></MemoryRouter>);
+
+    expect(await screen.findByText("模板表现读取失败：template store offline")).toBeInTheDocument();
+    expect(screen.queryByText("还没有可比较的模板样本。完成第一条成片后，这里会开始累计真实结果。")).not.toBeInTheDocument();
+    expect(costRequest).not.toHaveBeenCalled();
   });
 
   it("exposes model economics and honest trend connector states in the resource registry", async () => {
@@ -1812,6 +2529,27 @@ describe("Creative OS", () => {
     expect(await screen.findByRole("combobox", { name: "默认导演角色" })).toBeInTheDocument();
     expect(screen.getAllByText("模板脚本").length).toBeGreaterThan(0);
     expect(screen.queryByText("正在读取创作默认值...")).not.toBeInTheDocument();
+  });
+
+  it("explains the real topic gates without presenting misleading score weights", async () => {
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "trendSources").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSignals").mockResolvedValue([]);
+    vi.spyOn(studioApi, "localCapabilities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
+
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    const topicGates = await screen.findByLabelText("视频选题准入标准");
+    expect(within(topicGates).getByText("明确观众收益")).toBeInTheDocument();
+    expect(within(topicGates).getByText("前两秒钩子")).toBeInTheDocument();
+    expect(within(topicGates).getByText("画面不可替代")).toBeInTheDocument();
+    expect(within(topicGates).getByText("可追溯来源")).toBeInTheDocument();
+    expect(within(topicGates).getByText("成本与价值匹配")).toBeInTheDocument();
+    expect(within(topicGates).getByText("风险与形式匹配")).toBeInTheDocument();
+    expect(screen.getByText(/只需维护账号定位、内容边界和来源标准，不需要调整评分权重/)).toBeInTheDocument();
+    expect(topicGates).not.toHaveTextContent(/\d+%/);
   });
 
   it("keeps the configuration room focused on one editable category at a time", async () => {
@@ -2014,7 +2752,7 @@ describe("Creative OS", () => {
     const roleSection = screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section");
     expect(within(roleSection!).getByText("GPT-5.6 Terra")).toBeInTheDocument();
     expect(within(roleSection!).getByText("故障替补：GPT-5.6 Sol")).toBeInTheDocument();
-    expect(screen.getByText("独立质量审计")).toBeInTheDocument();
+    expect(screen.getByText("独立质量复核")).toBeInTheDocument();
     expect(screen.getByText("独立复核 · 最多三轮")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));
 

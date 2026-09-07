@@ -44,6 +44,7 @@ import {
   estimateVideoGenerationCostCny,
   inspectReworkCarriedAssetScenePositions,
   inspectPaidAssetLedger,
+  paidAssetLedgerLeaves,
   paidAssetSourceFingerprint,
   reworkAffectedScenePositions,
   type PaidAssetLedgerItemSummary,
@@ -53,7 +54,7 @@ import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type Screenwr
 import { ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
 import { VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport } from "./codex-visual-review.js";
-import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
+import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
 import { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
 import type { WorkerResponse } from "./python-worker-client.js";
 import {
@@ -135,7 +136,7 @@ export interface ProductionPaidOperationItemSummary {
   estimatedCostCny: number;
   taskId?: string;
   actualCostCny?: number;
-  actualCostSource?: "configured_rate";
+  actualCostSource?: "provider_reported" | "configured_rate";
   error?: string;
   manualReconciliationRequired?: boolean;
 }
@@ -1297,6 +1298,7 @@ export class ProductionPipeline {
             manualAssetItem.itemRequestId,
             reconciliationRecord.reconciliationId,
             confirmedActualCostCny!,
+            draft.actualCostCny !== undefined ? "provider_reported" : "configured_rate",
           );
         }
         items = (await inspectPaidAssetLedger(nodeDirectory)).filter((item) => item.operationId === operationId);
@@ -1904,6 +1906,7 @@ export class ProductionPipeline {
           ...(brief.rework ? {
             rework: {
               sourceRunId: brief.rework.sourceRunId,
+              sourceRunRevision: brief.rework.sourceRunRevision,
               nodeInstructions: brief.rework.nodeInstructions,
               // 素材节点只接收 visual-direction/assets 的 findings（与 reworkAffectedScenePositions
               // 内部对 visual findings 的同一过滤语义）；script-only finding 不透传给素材，
@@ -2372,17 +2375,21 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
     context: WorkflowContext,
   ): Promise<{ items: NonNullable<SpendQuote["items"]>; reconciliationRequired: boolean }> {
     const sourceFingerprint = await paidAssetSourceFingerprint(sourcePaths);
-    const ledgerItems = await inspectPaidAssetLedger(
+    const ledgerItems = paidAssetLedgerLeaves(await inspectPaidAssetLedger(
       path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId),
-      sourceFingerprint,
-    );
+    )).filter((item) => item.sourceFingerprint === sourceFingerprint);
+    const reusableMaterializedItemIds = new Set((await Promise.all(ledgerItems.map(async (candidate) => (
+      candidate.state === "materialized" && await materializedAssetFileMatchesLedger(candidate)
+        ? candidate.itemRequestId
+        : undefined
+    )))).filter((itemRequestId): itemRequestId is string => itemRequestId !== undefined));
     const matches = (item: NonNullable<SpendQuote["items"]>[number]) => ledgerItems.filter((candidate) => (
       candidate.quoteItemId === item.id
       && candidate.providerId === item.providerId
       && candidate.modelId === item.modelId
     ));
     const reusableIds = new Set(items.filter((item) => matches(item).some((candidate) => (
-      candidate.state === "materialized"
+      candidate.state === "materialized" && reusableMaterializedItemIds.has(candidate.itemRequestId)
       || candidate.state === "provider_succeeded" && Boolean(candidate.taskId) && Boolean(candidate.resultUrl)
     ))).map((item) => item.id));
     const reconciliationRequired = items.some((item) => !reusableIds.has(item.id) && matches(item).some((candidate) => (
@@ -2460,6 +2467,24 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
   }
 }
 
+async function materializedAssetFileMatchesLedger(item: PaidAssetLedgerItemSummary): Promise<boolean> {
+  const sizeBytes = item.sizeBytes;
+  if (!item.localPath
+    || !item.sha256
+    || !/^[a-f0-9]{64}$/i.test(item.sha256)
+    || typeof sizeBytes !== "number"
+    || !Number.isInteger(sizeBytes)
+    || sizeBytes <= 0) {
+    return false;
+  }
+  try {
+    await verifyArtifactBytes(item.localPath, item.sha256, sizeBytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function readScriptSceneDurations(scriptPath: string): Promise<Map<number, number>> {
   const script = requireOutputRecord(JSON.parse(await readFile(scriptPath, "utf8")), "script");
   if (!Array.isArray(script.scenes)) throw new Error("Script scenes must be an array before quoting assets.");
@@ -2510,7 +2535,7 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   readonly label = "Codex 视觉导演";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly parameters = { promptPack: "video-factory/director-v14" };
+  readonly parameters = { promptPack: "video-factory/director-v15" };
 
   constructor(
     private readonly agent: VisualDirectorAgent,
@@ -2543,7 +2568,7 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTask
   readonly label = "Codex 编剧";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly parameters = { promptPack: "video-factory/screenwriter-v5" };
+  readonly parameters = { promptPack: "video-factory/screenwriter-v6" };
 
   constructor(
     private readonly agent: ScreenwriterAgent,
@@ -2924,6 +2949,8 @@ function directorNode(
             requestedProfileId: currentDirection.profileId,
             ...(currentBrief.templateSnapshot ? { templateBlueprint: currentBrief.templateSnapshot.resolvedBlueprint } : {}),
             ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
+            ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
+            ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
             ...(referenceGrammar ? { referenceGrammar } : {}),
             ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
             ...(currentBrief.rework ? {
@@ -3440,6 +3467,8 @@ function screenwriterBrief(brief: ProductionBrief): ScreenwriterAgentInput["brie
     durationSeconds: brief.durationSeconds,
     ...(brief.templateSnapshot ? { templateBlueprint: brief.templateSnapshot.resolvedBlueprint } : {}),
     ...(brief.editorial ? { editorial: brief.editorial } : {}),
+    ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
+    ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
     ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
     ...(brief.rework ? {
       rework: {
@@ -3487,6 +3516,13 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
       reasons: stringList(editorial.reasons, "script input editorial.reasons"),
       guardrails: stringList(editorial.guardrails, "script input editorial.guardrails"),
     };
+  }
+  if (rawBrief.visualProof !== undefined) {
+    brief.visualProof = requiredOutputString(rawBrief, "visualProof");
+  }
+  if (rawBrief.visualPlan !== undefined) {
+    const visualPlan = parseProductionVisualPlan(rawBrief.visualPlan);
+    if (visualPlan) brief.visualPlan = visualPlan;
   }
   if (rawBrief.seriesContext !== undefined) {
     const seriesContext = parseProductionSeriesContext(rawBrief.seriesContext);
@@ -6108,6 +6144,7 @@ async function markPaidAssetItemCharged(
   itemRequestId: string,
   reconciliationId: string,
   actualCostCny: number,
+  actualCostSource: "provider_reported" | "configured_rate",
 ): Promise<void> {
   const pathname = path.join(
     nodeDirectory,
@@ -6135,6 +6172,7 @@ async function markPaidAssetItemCharged(
   const resolutionError = confirmedChargedAssetItemError(reconciliationId);
   if (item.state === "terminal_failed"
     && item.actualCostCny === actualCostCny
+    && item.actualCostSource === actualCostSource
     && item.error === resolutionError) {
     return;
   }
@@ -6143,7 +6181,7 @@ async function markPaidAssetItemCharged(
   }
   item.state = "terminal_failed";
   item.actualCostCny = roundCurrency(actualCostCny);
-  item.actualCostSource = "configured_rate";
+  item.actualCostSource = actualCostSource;
   item.error = resolutionError;
   delete item.manualReconciliationRequired;
   delete item.resultUrl;

@@ -123,9 +123,9 @@ describe("broker-owned task definitions", () => {
     const director = taskPromptFor("director-plan");
     const review = taskPromptFor("visual-review");
 
-    assert.equal(topic.version, "video-factory/topic-editor-v3");
-    assert.equal(script.version, "video-factory/screenwriter-v5");
-    assert.equal(director.version, "video-factory/director-v14");
+    assert.equal(topic.version, "video-factory/topic-editor-v5");
+    assert.equal(script.version, "video-factory/screenwriter-v6");
+    assert.equal(director.version, "video-factory/director-v15");
     assert.equal(review.version, "video-factory/visual-review-v6");
     assert.match(review.outputRules.join("\n"), /不得为了通过审计而美化评分/);
     assert.match(review.directive, /任何可读字.*不得 recommendation=approve/);
@@ -133,10 +133,13 @@ describe("broker-owned task definitions", () => {
     assert.match(review.directive, /主体、物体、动作.*不得 recommendation=approve/);
     assert.match(review.outputRules.join("\n"), /scenePosition.*targetNodeId/);
     assert.match(topic.directive, /值得做视频/);
+    assert.match(topic.directive, /visualPlan/);
+    assert.match(topic.directive, /模板.*不能.*覆盖/);
     assert.match(script.directive, /观众承诺/);
     assert.match(script.directive, /5 到 24/);
     assert.match(script.directive, /每秒约 2 到 6 个汉字/);
     assert.match(script.directive, /成功条件/);
+    assert.match(script.directive, /visualProof 与 visualPlan.*不得用 templateBlueprint 的通用镜头覆盖/);
     assert.match(director.directive, /逐秒动作/);
     assert.match(director.directive, /负面约束/);
     assert.match(director.directive, /Provider Compiler/);
@@ -147,6 +150,7 @@ describe("broker-owned task definitions", () => {
     assert.match(director.directive, /3 到 8 个具体英文概念/);
     assert.match(director.directive, /onScreenText.*soundCue/);
     assert.match(director.directive, /完整方案.*真实报价/);
+    assert.match(director.directive, /visualProof 与 visualPlan.*不得用 templateBlueprint 的通用镜头覆盖/);
     assert.match(director.directive, /costFeedback.*重规划偏好/);
     assert.match(director.directive, /目标预计费用.*不是硬门禁/);
     assert.match(director.directive, /不得.*说明卡.*降级/);
@@ -180,6 +184,21 @@ describe("broker-owned task definitions", () => {
     assert.match(review.directive, /不得仅因此自动给出 revise/);
     assert.ok(script.examples.some((example) => /反例/.test(example)));
     assert.ok(director.examples.some((example) => /\[0s-2s\]/.test(example)));
+  });
+
+  it("allows the topic editor to return an explicit empty shortlist and treats signal links as leads", () => {
+    const topic = taskPromptFor("topic-ideas");
+    assert.match(topic.directive, /sourceId、url、collectedAt 只是来源线索/);
+    assert.match(topic.directive, /榜单排名和热度不足事实证据/);
+    assert.match(topic.directive, /每个顶层信号是一个 canonical topic/);
+    assert.match(topic.directive, /relatedSignals.*同一事件的关联报道/);
+    assert.match(topic.directive, /signalId.*顶层 canonical id/);
+    assert.match(topic.directive, /来源数量门槛由下游/);
+    assert.match(topic.directive, /不得仅因来源数量不足.*空短名单/);
+    assert.match(topic.directive, /空短名单/);
+    assert.match(topic.directive, /ideas 为空数组/);
+    assert.match(topic.task, /内容价值或视频表现价值.*不足时.*空 ideas 数组/);
+    assert.match(topic.outputRules.join("\n"), /空数组只能表示.*内容或视觉价值不足/);
   });
 
   it("owns a strict output schema for every allowed task kind", () => {
@@ -370,6 +389,17 @@ describe("broker-owned task definitions", () => {
         hook: "钩子",
         rationale: "理由",
         visualProof: "拍摄下班后用工具整理日程前后的可见对比，来自可复现实拍，动作变化比文字描述更直观。",
+        visualPlan: {
+          strategy: "同一本纸质时间账本贯穿前后对照。",
+          beats: [{
+            id: "ledger-before-after",
+            role: "前后对照",
+            duration: "0-6 秒",
+            description: "俯拍同一只手划掉重复安排，再圈出省下的时间。",
+            searchQuery: "paper planner hand before after",
+            source: "creator",
+          }],
+        },
         visualFeasibility: 85,
         productionCostEfficiency: 90,
         novelty: 80,
@@ -389,6 +419,10 @@ describe("broker-owned task definitions", () => {
     }), "string");
     assert.equal(typeof outputValidationErrorFor("topic-ideas", {
       ideas: [{ ...valid.ideas[0], visualProof: "" }],
+    }), "string");
+    const { visualPlan: _visualPlan, ...withoutVisualPlan } = valid.ideas[0]!;
+    assert.equal(typeof outputValidationErrorFor("topic-ideas", {
+      ideas: [withoutVisualPlan],
     }), "string");
   });
 

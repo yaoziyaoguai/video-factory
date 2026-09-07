@@ -15,6 +15,7 @@ import type {
   StudioSeriesEpisodePlanInput,
 } from "../../shared/api.js";
 import { studioApi } from "../api.js";
+import { resolveOpportunityVisualPlan } from "../../shared/visual-plan.js";
 import { DirectorPanel } from "../components/DirectorPanel.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 import { OpportunityDialog } from "../components/OpportunityDialog.js";
@@ -22,8 +23,9 @@ import { OpportunityFocus } from "../components/OpportunityFocus.js";
 import { OpportunityRail } from "../components/OpportunityRail.js";
 import { ProductionStrip } from "../components/ProductionStrip.js";
 import { SeriesDialog } from "../components/SeriesDialog.js";
+import { SourceSupplementDialog } from "../components/SourceSupplementDialog.js";
 import { TopicEntryWorkspace } from "../components/TopicEntryWorkspace.js";
-import { opportunityProductionBlockReason } from "../presentation.js";
+import { opportunityProductionBlockReason, candidateTemplateUnavailable } from "../presentation.js";
 
 export function TodayPage() {
   const navigate = useNavigate();
@@ -59,6 +61,11 @@ export function TodayPage() {
   const [candidateActionError, setCandidateActionError] = useState<string>();
   const [adoptingCandidateId, setAdoptingCandidateId] = useState<string>();
   const [nextStepNotice, setNextStepNotice] = useState<string>();
+  const [sourceSupplementTarget, setSourceSupplementTarget] = useState<
+    { kind: "candidate"; candidate: StudioCandidateInboxItem } | { kind: "opportunity"; opportunity: StudioOpportunity }
+  >();
+  const [sourceSupplementPending, setSourceSupplementPending] = useState(false);
+  const [sourceSupplementError, setSourceSupplementError] = useState<string>();
   const [trendRefreshFinishedAt, setTrendRefreshFinishedAt] = useState<string>();
   const [trendRefreshPending, setTrendRefreshPending] = useState(false);
   const adoptedSectionRef = useRef<HTMLElement>(null);
@@ -290,12 +297,16 @@ export function TodayPage() {
       continuity: episode.continuity,
     };
   }, [selected, series]);
+  const visibleCandidateItems = entryMode === "series" && selectedSeriesId
+    ? (inbox?.items.filter((item) => item.seriesId === selectedSeriesId) ?? [])
+    : (inbox?.items ?? []);
   const visibleCandidateCount = entryMode === "series" && selectedSeriesId
-    ? (inbox?.items.filter((item) => item.seriesId === selectedSeriesId).length ?? 0)
+    ? visibleCandidateItems.length
     : (inbox?.facets.total ?? 0);
+  const adoptableCandidateCount = visibleCandidateItems.filter(isAdoptableCandidate).length;
   const completedCount = visibleRuns.filter((run) => run.status === "succeeded").length;
-  const dailyStatus = entryMode === "trend" && blockedOpportunityCount > 0
-    ? `${visibleCandidateCount} 条候选 · ${startableOpportunities.length} 条可开工 · ${blockedTrendStatusText(sourceBlockedCount, otherBlockedCount)} · ${completedCount} 条已完成`
+  const dailyStatus = entryMode === "trend"
+    ? `${adoptableCandidateCount} 条可采用候选 · ${startableOpportunities.length} 条已进入待制作区${blockedOpportunityCount > 0 ? ` · ${blockedTrendStatusText(sourceBlockedCount, otherBlockedCount)}` : ""} · ${completedCount} 条已完成`
     : `${visibleCandidateCount} 条候选 · ${startableOpportunities.length} 条制作机会 · ${completedCount} 条已完成`;
   const onlyBlockedHistoricalTopics = entryMode === "trend"
     && startableOpportunities.length === 0
@@ -397,6 +408,40 @@ export function TodayPage() {
     });
   }
 
+  // 补充来源保存成功后不做任何乐观解除阻塞：完全重新拉取候选/机会列表，
+  // 让来源数、门禁状态、分组和推荐模板都以服务端重算结果为准。
+  async function submitSupplementSources(evidenceUrls: string[]) {
+    if (!sourceSupplementTarget) return;
+    setSourceSupplementPending(true);
+    setSourceSupplementError(undefined);
+    try {
+      if (sourceSupplementTarget.kind === "candidate") {
+        const candidate = sourceSupplementTarget.candidate;
+        await studioApi.supplementCandidateSources(candidate.id, {
+          evidenceUrls,
+          // 入口声明让服务端把补充写入对应持久层：热点→候选缓存，系列→单集计划。
+          ...(candidate.origin === "series" ? { origin: "series" as const } : { origin: "trend" as const }),
+        });
+        if (candidate.origin === "series") {
+          await loadSeriesWorkspace();
+        } else {
+          updateTrendInbox(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }));
+        }
+      } else {
+        await studioApi.supplementOpportunitySources(sourceSupplementTarget.opportunity.id, { evidenceUrls });
+        const origin = entryMode === "custom" ? "manual" : entryMode;
+        setOpportunities(await studioApi.opportunities(origin));
+      }
+      setSourceSupplementTarget(undefined);
+      setNextStepNotice("来源已保存；开工门槛与制作建议已按最新来源重算。");
+    } catch (caught) {
+      setSourceSupplementError(`来源保存失败：${errorMessage(caught)}`);
+      throw caught;
+    } finally {
+      setSourceSupplementPending(false);
+    }
+  }
+
   function openOpportunityDialog(mode: "manual" | "json") {
     setOpportunityDialogMode(mode);
     setOpportunityDialogOpen(true);
@@ -422,7 +467,7 @@ export function TodayPage() {
           <button className="button button-secondary" type="button" onClick={() => void retrySettings()}><RefreshCw aria-hidden="true" size={16} />重新读取</button>
         </div>
       ) : null}
-      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} trendRefreshPending={trendRefreshPending} sourceBlockedOpportunities={sourceBlockedOpportunities} onFocusSourceBlocked={focusSourceBlockedOpportunity} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
+      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} trendRefreshPending={trendRefreshPending} sourceBlockedOpportunities={sourceBlockedOpportunities} onFocusSourceBlocked={focusSourceBlockedOpportunity} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
       {candidateActionError ? <div className="inline-error topic-action-error" role="alert"><AlertCircle aria-hidden="true" size={18} />{candidateActionError}</div> : null}
       {nextStepNotice ? <div className="next-step-notice" role="status"><CheckCircle2 aria-hidden="true" size={18} /><strong>{nextStepNotice}</strong><button type="button" onClick={() => setNextStepNotice(undefined)} aria-label="关闭下一步提示">知道了</button></div> : null}
 
@@ -439,7 +484,9 @@ export function TodayPage() {
                 {displayedOpportunities.map((item) => <option key={item.id} value={item.id}>E{String(item.episodeNumber ?? 0).padStart(2, "0")} · {item.title}</option>)}
               </select>
             </label>
-          ) : <span>{blockedOpportunityCount > 0 ? `${startableOpportunities.length} 条可开工 · ${blockedTrendCountText(sourceBlockedCount, otherBlockedCount)}` : `${startableOpportunities.length} 条`}</span>}
+          ) : <span>{entryMode === "trend"
+            ? `${startableOpportunities.length} 条已进入待制作区${blockedOpportunityCount > 0 ? ` · ${blockedTrendCountText(sourceBlockedCount, otherBlockedCount)}` : ""}`
+            : `${startableOpportunities.length} 条`}</span>}
         </header>
         {opportunitiesLoading ? <div className="today-loading"><RadioTower aria-hidden="true" size={22} />正在读取制作机会...</div> : opportunitiesError ? (
           <div className="source-error-state" role="alert"><AlertCircle aria-hidden="true" size={22} /><div><p className="eyebrow">制作机会不可用</p><h2>机会读取失败</h2><p>{opportunitiesError}</p></div><button className="button button-secondary" type="button" onClick={() => void load()}><RefreshCw aria-hidden="true" size={16} />重试</button></div>
@@ -452,7 +499,7 @@ export function TodayPage() {
           ) : (
             <div className="director-workspace">
               <OpportunityRail opportunities={displayedOpportunities} selectedId={selected.id} onSelect={setSelectedId} onCreate={() => openOpportunityDialog("manual")} />
-              <OpportunityFocus key={selected.id} opportunity={selected} />
+              <OpportunityFocus key={selected.id} opportunity={selected} {...(selected.origin === "trend" && selected.verification?.status === "blocked" ? { onSupplementSources: () => setSourceSupplementTarget({ kind: "opportunity", opportunity: selected }) } : {})} />
               <DirectorPanel opportunity={selected} providers={providers} {...(providersLoading || providersError ? { providerError: providersLoading ? "正在读取能力状态..." : `能力状态读取失败：${providersError}` } : {})} onProduce={openProductionDialog} />
             </div>
           )
@@ -460,6 +507,24 @@ export function TodayPage() {
       </section>
 
       <OpportunityDialog open={opportunityDialogOpen} initialMode={opportunityDialogMode} onClose={() => setOpportunityDialogOpen(false)} onSubmit={createOpportunity} />
+      <SourceSupplementDialog
+        open={sourceSupplementTarget !== undefined}
+        title={sourceSupplementTarget?.kind === "candidate" ? sourceSupplementTarget.candidate.title : sourceSupplementTarget?.opportunity.title ?? ""}
+        currentSources={sourceSupplementTarget?.kind === "candidate"
+          ? sourceSupplementTarget.candidate.verification.independentSources
+          : sourceSupplementTarget?.opportunity.verification?.independentSources ?? 0}
+        requiredSources={sourceSupplementTarget?.kind === "candidate"
+          ? sourceSupplementTarget.candidate.verification.requiredSources
+          : sourceSupplementTarget?.opportunity.verification?.requiredSources ?? 2}
+        pending={sourceSupplementPending}
+        {...(sourceSupplementError ? { error: sourceSupplementError } : {})}
+        onClose={() => {
+          if (sourceSupplementPending) return;
+          setSourceSupplementTarget(undefined);
+          setSourceSupplementError(undefined);
+        }}
+        onSubmit={submitSupplementSources}
+      />
       <SeriesDialog open={seriesDialogOpen} onClose={() => setSeriesDialogOpen(false)} onSubmit={createSeries} />
       <NewRunDialog open={productionDialogOpen} providers={providers} initialDataReady={!providersLoading && !settingsLoading && !settingsError} {...(creatorSettings ? { creatorSettings } : {})} {...(settingsError ? { settingsError } : {})} onRetrySettings={() => void retrySettings()} {...(selected ? { initialValues: {
         title: selected.title,
@@ -470,6 +535,9 @@ export function TodayPage() {
           ? creatorSettings?.productionDefaults.platform ?? "douyin"
           : selected.platform,
         durationSeconds: creatorSettings?.productionDefaults.durationSeconds ?? 24,
+        ...(selected.visualProof ? { visualProof: selected.visualProof } : {}),
+        // 开工 payload 与预览共用同一个 resolved plan：缺失计划时预览 fallback 也进入提交。
+        visualPlan: resolveOpportunityVisualPlan(selected),
         ...(selected.editorialDecision?.verdict !== "skip" && selected.editorialDecision ? {
           editorial: {
             verdict: selected.editorialDecision.verdict,
@@ -516,6 +584,13 @@ function isPendingSeriesProduction(
 
 function isProductionPlatform(platform: string): boolean {
   return platform === "douyin" || platform === "xiaohongshu" || platform === "bilibili";
+}
+
+function isAdoptableCandidate(candidate: StudioCandidateInboxItem): boolean {
+  return candidate.editorialDecision.verdict !== "skip"
+    && candidate.verification.status !== "blocked"
+    && candidate.seriesSequence?.status !== "blocked"
+    && !candidateTemplateUnavailable(candidate);
 }
 
 function isPendingProduction(

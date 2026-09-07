@@ -162,7 +162,10 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
               {matchingRuns.map((run) => (
                 <NavLink key={run.id} to={`/projects/${run.id}`} onClick={closeSearch}>
                   <span><Clapperboard aria-hidden="true" size={16} /></span>
-                  <strong>{run.title}</strong>
+                  <div className="studio-search-result-copy">
+                    <strong>{run.title}</strong>
+                    <small>{formatSearchRunTime(run.startedAt)} · {shortRunId(run.id)}</small>
+                  </div>
                   <small>{statusLabel(run.status)}</small>
                 </NavLink>
               ))}
@@ -181,6 +184,22 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
       ) : null}
     </div>
   );
+}
+
+function formatSearchRunTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "时间未记录";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function shortRunId(value: string): string {
+  return `制作 ${value.length > 8 ? value.slice(-8) : value}`;
 }
 
 function AccountMenu({ username, onLogout, compact = false }: { username: string; onLogout(): Promise<void>; compact?: boolean }) {

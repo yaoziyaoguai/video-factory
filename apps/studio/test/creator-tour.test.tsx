@@ -164,7 +164,7 @@ describe("creator tour routing", () => {
     );
 
     fireEvent.click(screen.getAllByRole("button", { name: "打开创作向导" })[0]!);
-    expect(screen.getByRole("dialog", { name: "创作向导" })).toHaveTextContent("选选题定方案跑制作做审片多端发布看复盘");
+    expect(screen.getByRole("dialog", { name: "创作向导" })).toHaveTextContent("挑选题定方案跑制作做审片多端发布看复盘");
     fireEvent.click(screen.getByRole("button", { name: "完整流程导览" }));
     expect(screen.getByText("今日机会页")).toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(900); });

@@ -122,6 +122,20 @@ export class SeriesStudio {
     }
   }
 
+  async appendEpisodeSources(
+    seriesId: string,
+    episodeNumber: number,
+    evidenceUrls: string[],
+  ): Promise<StudioSeries> {
+    try {
+      return await this.options.series.appendEpisodeSources(seriesId, episodeNumber, evidenceUrls, this.now().toISOString());
+    } catch (error) {
+      if (error instanceof SeriesStoreNotFoundError) throw new StudioNotFoundError(error.message);
+      if (error instanceof SeriesStoreConflictError) throw new StudioConflictError(error.message);
+      throw error;
+    }
+  }
+
   async linkRun(context: StudioSeriesProductionContext, runId: string): Promise<StudioSeries> {
     try {
       return await this.options.series.linkRun(context.seriesId, context.episodeId, runId, this.now().toISOString());

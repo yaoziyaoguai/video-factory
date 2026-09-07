@@ -195,7 +195,7 @@ describe("node production workspaces", () => {
     expect(screen.getByText("最终模型等待").parentElement).toHaveTextContent("12 秒");
     expect(screen.getByText("首次响应").parentElement).toHaveTextContent("410 毫秒");
     expect(screen.getByText("内容生成累计").parentElement).toHaveTextContent("13 秒");
-    expect(screen.getByText("独立审计累计").parentElement).toHaveTextContent("8.2 秒");
+    expect(screen.getByText("独立复核累计").parentElement).toHaveTextContent("8.2 秒");
     expect(screen.getByText("结果校验").parentElement).toHaveTextContent("21 毫秒");
     expect(screen.getByText("模型调用").parentElement).toHaveTextContent("2 次");
     expect(screen.getByText("自动重试").parentElement).toHaveTextContent("1 次");
@@ -481,6 +481,8 @@ describe("node production workspaces", () => {
     />);
 
     await userEvent.click(screen.getByRole("button", { name: "调整" }));
+    expect(screen.getByText(/切换到时长、任务能力不同的视频模型，会让导演重新规划；同一来源下，只有能力兼容的模型切换才从画面素材继续/))
+      .toBeInTheDocument();
     const unavailableSource = screen.getByRole("checkbox", { name: /已停用素材库.*已失效/ });
     expect(unavailableSource).toBeChecked();
     await userEvent.click(unavailableSource);
@@ -580,7 +582,7 @@ describe("node production workspaces", () => {
     };
     render(<NodeWorkspace node={node} runStatus="running" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
-    expect(screen.getByText("第 2 / 3 轮 · 独立审计中")).toBeInTheDocument();
+    expect(screen.getByText("第 2 / 3 轮 · 独立复核中")).toBeInTheDocument();
     expect(screen.getByText("上一轮 68 分：AI 图片生成的屏幕文字仍有必须修改的问题。")).toBeInTheDocument();
   });
 
@@ -1457,7 +1459,7 @@ describe("node production workspaces", () => {
     };
     render(<MemoryRouter><CostDashboard dashboard={dashboard} /></MemoryRouter>);
 
-    expect(screen.getByRole("heading", { name: "每一笔费用都能追到制作步骤" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "按服务和制作步骤核对费用" })).toBeInTheDocument();
     expect(screen.getByText("已批准报价合计")).toBeInTheDocument();
     expect(screen.getByText("待确认是否扣费")).toBeInTheDocument();
     expect(screen.getByText("按实际服务")).toBeInTheDocument();

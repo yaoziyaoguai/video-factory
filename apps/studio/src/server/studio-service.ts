@@ -6,7 +6,9 @@ import type {
   StudioArtifactResource,
   StudioCandidateAdoptionInput,
   StudioCandidateInbox,
+  StudioCandidateInboxItem,
   StudioCandidateInboxQuery,
+  StudioCandidateSourcesInput,
   StudioCreatorSettings,
   StudioCreatorSettingsPatch,
   StudioCostDashboard,
@@ -171,17 +173,20 @@ export class StudioService {
     });
     this.creatorSettings = options.creatorSettings
       ?? new JsonCreatorSettingsStore(path.join(options.workspaceRoot, "settings", "creator-settings.json"));
+    const templateStore = new JsonTemplateStore(
+      path.join(options.workspaceRoot, "templates", "templates.json"),
+      BUILTIN_TEMPLATES,
+    );
+    const publishedTemplates = async () => (await templateStore.list()).publishedTemplates;
+    this.templates = new TemplateStudio(templateStore, now);
     this.candidateInbox = new CandidateInboxStudio({
       trends: this.trends,
       series: this.series,
       opportunities: this.opportunities,
       topicStrategy: async () => (await this.creatorSettings.get()).topicStrategy,
+      publishedTemplates,
       now,
     });
-    this.templates = new TemplateStudio(
-      new JsonTemplateStore(path.join(options.workspaceRoot, "templates", "templates.json"), BUILTIN_TEMPLATES),
-      now,
-    );
     this.resourceGovernance = new ResourceGovernanceStudio(
       options.workspaceRoot,
       () => options.pipeline.list(),
@@ -196,6 +201,7 @@ export class StudioService {
           throw error;
         }
       },
+      publishedTemplates,
     );
     this.production = new ProductionStudio({
       workspaceRoot: options.workspaceRoot,
@@ -300,6 +306,22 @@ export class StudioService {
   adoptCandidate(candidateId: string, input: StudioCandidateAdoptionInput): Promise<StudioOpportunity> {
     return this.candidateInbox.adopt(candidateId, input);
   }
+  supplementCandidateSources(candidateId: string, input: StudioCandidateSourcesInput): Promise<StudioCandidateInboxItem> {
+    return this.candidateInbox.supplementCandidateSources(candidateId, input);
+  }
+  async supplementOpportunitySources(opportunityId: string, input: StudioCandidateSourcesInput): Promise<StudioOpportunity> {
+    // 补充后不另存派生决策：用列表同一条 reviewTrendOpportunityAgainstCurrentPolicy 链重算返回。
+    const [updated, settings, templates] = await Promise.all([
+      this.opportunities.appendEvidence(opportunityId, input),
+      this.creatorSettings.get(),
+      this.templates.list(),
+    ]);
+    return reviewTrendOpportunityAgainstCurrentPolicy(
+      updated,
+      settings.topicStrategy.sourcePolicy,
+      templates.productionTemplates,
+    );
+  }
 
   async listSeries(): Promise<StudioSeries[]> {
     await this.reconcileSeriesRuns();
@@ -329,9 +351,16 @@ export class StudioService {
   }
 
   async listOpportunities(origin?: "trend" | "series" | "manual"): Promise<StudioOpportunity[]> {
-    const opportunities = await this.opportunities.list();
-    const sourcePolicy = (await this.creatorSettings.get()).topicStrategy.sourcePolicy;
-    const currentOpportunities = opportunities.map((item) => reviewTrendOpportunityAgainstCurrentPolicy(item, sourcePolicy));
+    const [opportunities, settings, templates] = await Promise.all([
+      this.opportunities.list(),
+      this.creatorSettings.get(),
+      this.templates.list(),
+    ]);
+    const currentOpportunities = opportunities.map((item) => reviewTrendOpportunityAgainstCurrentPolicy(
+      item,
+      settings.topicStrategy.sourcePolicy,
+      templates.productionTemplates,
+    ));
     return origin
       ? currentOpportunities.filter((item) => origin === "manual" ? item.origin === "manual" || item.origin === undefined : item.origin === origin)
       : currentOpportunities;
@@ -339,8 +368,12 @@ export class StudioService {
   async getOpportunity(opportunityId: string): Promise<StudioOpportunity | undefined> {
     const opportunity = await this.opportunities.get(opportunityId);
     if (!opportunity) return undefined;
-    const sourcePolicy = (await this.creatorSettings.get()).topicStrategy.sourcePolicy;
-    return reviewTrendOpportunityAgainstCurrentPolicy(opportunity, sourcePolicy);
+    const [settings, templates] = await Promise.all([this.creatorSettings.get(), this.templates.list()]);
+    return reviewTrendOpportunityAgainstCurrentPolicy(
+      opportunity,
+      settings.topicStrategy.sourcePolicy,
+      templates.productionTemplates,
+    );
   }
   createOpportunity(input: StudioOpportunityInput): Promise<StudioOpportunity> {
     if (input.origin === "series" || input.origin === "trend") {

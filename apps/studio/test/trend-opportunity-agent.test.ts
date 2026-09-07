@@ -31,6 +31,8 @@ const signals: StudioTrendSignal[] = [
   },
 ];
 
+const modelSignals = signals.map((signal) => ({ ...signal, relatedSignals: [] }));
+
 class CapturingCodexClient extends CodexBridgeClient {
   readonly calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
 
@@ -70,6 +72,18 @@ describe("TrendOpportunityAgent", () => {
         painPoint: "工具很多，却没有减少疲惫",
         hook: "真正偷走你下班时间的，可能不是加班。",
         rationale: "适合做低成本生活实验。",
+        visualProof: "用同一本时间账本呈现调整前后的差异。",
+        visualPlan: {
+          strategy: "用同一本时间账本贯穿前后对比。",
+          beats: [{
+            id: "ledger-contrast",
+            role: "实物对照",
+            duration: "0-6 秒",
+            description: "同一只手在同一页纸上圈出被重复安排占用的时间。",
+            searchQuery: "paper planner hand close up",
+            source: "creator",
+          }],
+        },
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
@@ -77,10 +91,11 @@ describe("TrendOpportunityAgent", () => {
     }));
     const model = new CodexTopicIdeaModel(codexClient);
 
-    const ideas = await model.generate(signals);
+    const ideas = await model.generate(modelSignals);
 
     assert.equal(model.id, "api-topic-editor-v1");
     assert.equal(ideas[0]?.title, "下班后的 AI 时间账本");
+    assert.equal(ideas[0]?.visualPlan?.beats[0]?.id, "ledger-contrast");
     assert.equal(codexClient.calls.length, 2);
     assert.equal(codexClient.calls[0]?.kind, "topic-ideas");
     assert.equal(codexClient.calls[1]?.kind, "role-audit");
@@ -88,12 +103,85 @@ describe("TrendOpportunityAgent", () => {
     assert.equal("directive" in payload, false);
     assert.deepEqual(Object.keys(payload), ["signals"]);
     assert.deepEqual(payload.signals, [
-      { id: "signal-ai", platform: "douyin", rank: 2, title: "普通人开始用 AI 管理下班后的时间", heat: 9_800_000 },
-      { id: "signal-weather", platform: "weibo", rank: 1, title: "台风路径发生变化", heat: null },
+      {
+        id: "signal-ai",
+        sourceId: "dailyhot",
+        platform: "douyin",
+        rank: 2,
+        title: "普通人开始用 AI 管理下班后的时间",
+        heat: 9_800_000,
+        url: "https://example.com/ai",
+        collectedAt: "2026-08-24T08:00:00.000Z",
+        relatedSignals: [],
+      },
+      {
+        id: "signal-weather",
+        sourceId: "newsnow",
+        platform: "weibo",
+        rank: 1,
+        title: "台风路径发生变化",
+        heat: null,
+        url: "https://example.com/weather",
+        collectedAt: "2026-08-24T08:01:00.000Z",
+        relatedSignals: [],
+      },
     ]);
-    const auditPayload = codexClient.calls[1]!.payload as { context: { roleScope: { owns: string[] } } };
+    const auditPayload = codexClient.calls[1]!.payload as {
+      context: {
+        roleScope: { owns: string[] };
+        currentRoleContract: Record<string, unknown>;
+        downstreamBoundary: string;
+      };
+    };
     assert.equal(auditPayload.context.roleScope.owns.includes("ideas.audience"), true);
     assert.equal(auditPayload.context.roleScope.owns.includes("ideas.painPoint"), true);
+    assert.equal(auditPayload.context.roleScope.owns.includes("ideas.visualPlan"), true);
+    assert.equal(auditPayload.context.currentRoleContract.sourceGateAppliedDownstream, true);
+    assert.equal(auditPayload.context.currentRoleContract.sourceBlockedIdeasRemainVisibleForSupplement, true);
+    assert.equal(auditPayload.context.currentRoleContract.emptyIdeasCannotBeJustifiedSolelyByMissingSourceCount, true);
+    assert.match(auditPayload.context.downstreamBoundary, /来源不足.*保留为可补源候选/);
+  });
+
+  it("serializes related reports under the canonical signal instead of flattening secondary ids", async () => {
+    const related = {
+      id: "signal-ai-independent",
+      sourceId: "newsnow",
+      platform: "toutiao",
+      title: "媒体观察普通人用 AI 管理业余时间",
+      rank: 7,
+      collectedAt: "2026-08-24T08:02:00.000Z",
+      url: "https://independent.example.org/ai-time",
+    } satisfies StudioTrendSignal;
+    const codexClient = new CapturingCodexClient(() => ({
+      ideas: [{
+        signalId: "signal-ai",
+        title: "下班后的 AI 时间账本",
+        track: "ai-daily-life",
+        audience: "普通上班族",
+        painPoint: "工具很多，却没有减少疲惫",
+        hook: "先看它是否真的节省时间。",
+        rationale: "适合做低成本生活实验。",
+        novelty: 85,
+        seriesPotential: 88,
+        monetization: 72,
+      }],
+    }));
+
+    await new CodexTopicIdeaModel(codexClient).generate([{ ...signals[0]!, relatedSignals: [related] }]);
+
+    const payload = codexClient.calls[0]!.payload as { signals: Array<{ id: string; relatedSignals: StudioTrendSignal[] }> };
+    assert.equal(payload.signals.length, 1);
+    assert.equal(payload.signals[0]?.id, "signal-ai");
+    assert.deepEqual(payload.signals[0]?.relatedSignals, [{
+      id: "signal-ai-independent",
+      sourceId: "newsnow",
+      platform: "toutiao",
+      rank: 7,
+      title: "媒体观察普通人用 AI 管理业余时间",
+      heat: null,
+      url: "https://independent.example.org/ai-time",
+      collectedAt: "2026-08-24T08:02:00.000Z",
+    }]);
   });
 
   it("turns the structured creator strategy into a bounded self-contained editorial instruction", async () => {
@@ -113,7 +201,7 @@ describe("TrendOpportunityAgent", () => {
     }));
     const model = new CodexTopicIdeaModel(codexClient);
 
-    await model.generate(signals, {
+    await model.generate(modelSignals, {
       positioning: "替普通人解释技术变化。",
       targetAudience: "关注 AI 但不想看营销稿的职场人。",
       preferredDirections: "真实工作影响\n可复现实验",
@@ -126,12 +214,14 @@ describe("TrendOpportunityAgent", () => {
     assert.match(payload.strategy ?? "", /内容定位：替普通人解释技术变化/);
     assert.match(payload.strategy ?? "", /核心受众：关注 AI 但不想看营销稿的职场人/);
     assert.match(payload.strategy ?? "", /优先题材：\n真实工作影响\n可复现实验/);
-    assert.match(payload.strategy ?? "", /至少需要两个不同域名的有效原始来源链接/);
+    assert.match(payload.strategy ?? "", /来源开工门槛由下游执行/);
+    assert.match(payload.strategy ?? "", /来源不足但内容与视觉潜力成立的角度仍须输出/);
+    assert.doesNotMatch(payload.strategy ?? "", /才进入制作推荐/);
     assert.match(payload.strategy ?? "", /必须能在 30 秒内兑现标题承诺/);
     assert.equal((payload.strategy ?? "").length <= 6_000, true);
   });
 
-  it("describes the strict source standard when an older strategy has no source policy", async () => {
+  it("keeps the source gate downstream when an older strategy has no source policy", async () => {
     const codexClient = new CapturingCodexClient(() => ({
       ideas: [{
         signalId: "signal-ai",
@@ -148,10 +238,11 @@ describe("TrendOpportunityAgent", () => {
     }));
     const model = new CodexTopicIdeaModel(codexClient);
 
-    await model.generate(signals, { customInstruction: "" });
+    await model.generate(modelSignals, { customInstruction: "" });
 
     const payload = codexClient.calls[0]!.payload as { strategy?: string };
-    assert.match(payload.strategy ?? "", /至少需要两个不同域名的有效原始来源链接/);
+    assert.match(payload.strategy ?? "", /来源开工门槛由下游执行/);
+    assert.match(payload.strategy ?? "", /来源不足.*仍须输出/);
   });
 
   it("keeps the final custom rule after all bounded strategy fields", async () => {
@@ -171,7 +262,7 @@ describe("TrendOpportunityAgent", () => {
     }));
     const model = new CodexTopicIdeaModel(codexClient);
 
-    await model.generate(signals, {
+    await model.generate(modelSignals, {
       positioning: "定".repeat(500),
       targetAudience: "众".repeat(500),
       preferredDirections: "优".repeat(1_000),
@@ -216,6 +307,17 @@ describe("TrendOpportunityAgent", () => {
         hook: "真正偷走你下班时间的，可能不是加班。",
         rationale: "热点有规模，且能转化为低成本生活实验。",
         visualProof: "实拍同一位上班族整理日程前后的操作和时间对比，动作变化比文字解释更直观。",
+        visualPlan: {
+          strategy: "同一张纸质时间账本贯穿全片，让前后差异可核对。",
+          beats: [{
+            id: "before-after-ledger",
+            role: "前后对照",
+            duration: "0-6 秒",
+            description: "俯拍同一只手先划掉三项重复安排，再把省下的二十分钟圈成红色。",
+            searchQuery: "paper schedule hand before after",
+            source: "creator" as const,
+          }],
+        },
         visualFeasibility: 91,
         productionCostEfficiency: 94,
         novelty: 0.85,
@@ -239,7 +341,12 @@ describe("TrendOpportunityAgent", () => {
     assert.equal(candidate?.score.monetization, 72);
     assert.equal(candidate?.score.visualFeasibility, 91);
     assert.equal(candidate?.score.productionCostEfficiency, 94);
-    assert.match(candidate?.rationale ?? "", /可见画面：实拍同一位上班族整理日程前后的操作和时间对比/);
+    assert.match(candidate?.rationale ?? "", /热点有规模，且能转化为低成本生活实验/);
+    assert.doesNotMatch(candidate?.rationale ?? "", /可见画面/);
+    assert.equal(candidate?.visualProof, "实拍同一位上班族整理日程前后的操作和时间对比，动作变化比文字解释更直观。");
+    assert.equal(candidate?.visualPlan?.strategy, "同一张纸质时间账本贯穿全片，让前后差异可核对。");
+    assert.equal(candidate?.visualPlan?.beats[0]?.id, "before-after-ledger");
+    assert.match(candidate?.visualPlan?.beats[0]?.description ?? "", /划掉三项重复安排/);
     assert.equal(candidate?.evidence[0]?.evidenceUrl, "https://example.com/ai");
     assert.equal(candidate?.generatedAt, "2026-08-24T08:05:00.000Z");
   });
@@ -333,6 +440,64 @@ describe("TrendOpportunityAgent", () => {
 
     assert.equal(candidates.length, 1);
     assert.deepEqual(candidates[0]?.evidence.map((item) => item.source).sort(), ["dailyhot", "newsnow"]);
+  });
+
+  it("sends one canonical signal id with nested cross-domain reports to the topic editor", async () => {
+    const groupedSignals: StudioTrendSignal[] = [
+      {
+        id: "signal-help-primary",
+        sourceId: "dailyhot",
+        platform: "weibo",
+        title: "官方确认帮扶老人遭索赔店主不担责",
+        rank: 1,
+        collectedAt: "2026-08-24T08:00:00.000Z",
+        url: "https://primary.example.cn/help",
+      },
+      {
+        id: "signal-help-secondary",
+        sourceId: "newsnow",
+        platform: "toutiao",
+        title: "央媒评扶老人被索赔：法律不能和稀泥",
+        rank: 2,
+        collectedAt: "2026-08-24T08:01:00.000Z",
+        url: "https://independent.example.org/report",
+      },
+    ];
+    let receivedSignals: Array<StudioTrendSignal & { relatedSignals?: StudioTrendSignal[] }> = [];
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => groupedSignals },
+      model: {
+        id: "api-topic-editor-v1",
+        generate: async (modelSignals) => {
+          receivedSignals = modelSignals;
+          return [{
+            signalId: "signal-help-primary",
+            title: "扶老人被索赔：普通人该如何保留善意证据？",
+            track: "public-interest",
+            audience: "关心公共议题的普通人",
+            painPoint: "想帮助别人，又担心责任说不清",
+            hook: "善意之后，怎样留下能说清责任的证据？",
+            rationale: "同一事件已有不同媒体报道，适合转成普通人可执行的证据意识选题。",
+            visualProof: "用可复现的求助场景和证据留存步骤展示行动前后的差别。",
+            visualFeasibility: 82,
+            productionCostEfficiency: 88,
+            novelty: 80,
+            seriesPotential: 76,
+            monetization: 40,
+          }];
+        },
+      },
+    });
+
+    const [candidate] = await agent.listCandidates();
+
+    assert.equal(receivedSignals.length, 1);
+    assert.equal(receivedSignals[0]?.id, "signal-help-primary");
+    assert.deepEqual(receivedSignals[0]?.relatedSignals?.map((item) => item.id), ["signal-help-secondary"]);
+    assert.deepEqual(candidate?.evidence.map((item) => item.evidenceUrl), [
+      "https://primary.example.cn/help",
+      "https://independent.example.org/report",
+    ]);
   });
 
   it("conservatively merges differently worded reports of the same event", async () => {
@@ -443,14 +608,14 @@ describe("TrendOpportunityAgent", () => {
       freshness: "live",
       risk: "low",
       verification: { status: "ready", independentSources: 1, requiredSources: 1, reasons: ["来源可打开。"] },
-    });
+    }, []);
 
     assert.equal(candidate?.providerId, "trend-heuristic-v1");
     assert.equal(decision.verdict, "skip");
     assert.match(decision.reasons.join(" "), /标题没有形成可判断的具体问题/);
   });
 
-  it("keeps a specific traceable rule fallback out of production when the semantic model returns no ideas", async () => {
+  it("treats a legally empty model shortlist as no recommendation without a second call or rule backfill", async () => {
     let modelCalls = 0;
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => [signals[0]!] },
@@ -463,20 +628,54 @@ describe("TrendOpportunityAgent", () => {
       },
     });
 
-    const [candidate] = await agent.listCandidates();
-    const decision = decideEditorialFormat({
-      ...candidate!,
-      origin: "trend",
-      category: candidate!.category!,
-      freshness: "live",
-      risk: "low",
-      verification: { status: "ready", independentSources: 1, requiredSources: 1, reasons: ["来源可打开。"] },
+    const candidates = await agent.listCandidates();
+
+    // 模型成功返回空就是“本轮无值得推荐”：不二次调用，也不回填规则候选冒充推荐。
+    assert.equal(modelCalls, 1);
+    assert.deepEqual(candidates, []);
+  });
+
+  it("keeps a single-source high-potential idea visible for downstream source supplementation", async () => {
+    let receivedRelatedCount = -1;
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [signals[0]!] },
+      strategy: async () => ({
+        positioning: "解释技术如何影响普通人的生活",
+        targetAudience: "普通上班族",
+        preferredDirections: "可复现实验",
+        excludedDirections: "",
+        sourcePolicy: "primary_or_two_independent",
+        customInstruction: "",
+      }),
+      model: {
+        id: "api-topic-editor-v1",
+        generate: async (receivedSignals) => {
+          receivedRelatedCount = receivedSignals[0]?.relatedSignals.length ?? -1;
+          return [{
+            signalId: "signal-ai",
+            title: "下班后的 AI 时间实验",
+            track: "ai-daily-life",
+            audience: "普通上班族",
+            painPoint: "工具很多，却没有减少疲惫",
+            hook: "它真的帮你省下了下班时间吗？",
+            rationale: "内容与画面潜力成立，应保留角度供下游继续补充来源。",
+            visualProof: "实拍整理日程前后的操作与耗时变化。",
+            visualFeasibility: 90,
+            productionCostEfficiency: 92,
+            novelty: 82,
+            seriesPotential: 86,
+            monetization: 68,
+          }];
+        },
+      },
     });
 
-    assert.equal(modelCalls, 2);
-    assert.equal(candidate?.providerId, "trend-heuristic-v1");
-    assert.equal(decision.verdict, "skip");
-    assert.match(decision.reasons.join(" "), /规则保底候选|选题总编/);
+    const [candidate] = await agent.listCandidates();
+
+    assert.equal(receivedRelatedCount, 0);
+    assert.equal(candidate?.title, "下班后的 AI 时间实验");
+    assert.equal(candidate?.evidence.length, 1);
+    assert.equal(candidate?.evidence[0]?.evidenceUrl, "https://example.com/ai");
   });
 
   it("still applies creator positioning, audience, preferences, and exclusions in rule fallback", async () => {
@@ -533,7 +732,7 @@ describe("TrendOpportunityAgent", () => {
     assert.equal(candidate?.providerId, "api-topic-editor-v1");
   });
 
-  it("removes unsupported numbers, quotes, and interview claims from model output", async () => {
+  it("rejects model ideas that add unsupported numbers, quotes, or interview claims", async () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => signals },
       model: {
@@ -553,12 +752,11 @@ describe("TrendOpportunityAgent", () => {
       },
     });
 
-    const [candidate] = await agent.listCandidates();
+    const candidates = await agent.listCandidates();
 
-    assert.doesNotMatch(candidate?.title ?? "", /90%/);
-    assert.doesNotMatch(candidate?.hook ?? "", /专家|90%|3 分钟/);
-    assert.match(candidate?.rationale ?? "", /已移除/);
-    assert.equal(candidate?.providerId, "api-topic-editor-v1");
+    // 含原信号没有的数字、引语或采访假设的 idea 被拒绝，不再用机械标题顶替后绕过复核。
+    assert.deepEqual(candidates, []);
+    assert.equal(candidates.some((candidate) => candidate.providerId === "trend-heuristic-v1"), false);
   });
 
   it("rejects unsupported acronyms and clickbait claims in model titles", async () => {
@@ -589,11 +787,10 @@ describe("TrendOpportunityAgent", () => {
       },
     });
 
-    const [candidate] = await agent.listCandidates();
+    const candidates = await agent.listCandidates();
 
-    assert.equal(candidate?.title, "TYL获2026年度总冠军：这场结果有哪些可核验的看点？");
-    assert.doesNotMatch(candidate?.title ?? "", /AI|内幕|秘密/);
-    assert.match(candidate?.rationale ?? "", /已移除/);
+    // 新增英文专名与 clickbait 属于事实越界，整个 idea 被拒绝而不是被机械改写。
+    assert.deepEqual(candidates, []);
   });
 
   it("never exposes model-added facts for high-risk public events", async () => {
@@ -618,6 +815,18 @@ describe("TrendOpportunityAgent", () => {
           painPoint: "想知道伤亡情况",
           hook: "平民伤亡数据仍未公开。",
           rationale: "适合追踪局势升级。",
+          visualProof: "把未经来源确认的伤亡数字做成动态图表。",
+          visualPlan: {
+            strategy: "用未经来源确认的伤亡数字制造冲击。",
+            beats: [{
+              id: "invented-casualty-chart",
+              role: "冲击钩子",
+              duration: "0-8 秒",
+              description: "动态图表展示未经来源确认的伤亡数字。",
+              searchQuery: "casualty chart",
+              source: "generated",
+            }],
+          },
           novelty: 80,
           seriesPotential: 60,
           monetization: 20,
@@ -631,6 +840,44 @@ describe("TrendOpportunityAgent", () => {
     assert.doesNotMatch(candidate?.title ?? "", /伤亡数据/);
     assert.doesNotMatch(candidate?.hook ?? "", /伤亡数据/);
     assert.match(candidate?.rationale ?? "", /未采用模型扩写/);
+    assert.doesNotMatch(JSON.stringify(candidate?.visualPlan), /invented-casualty-chart|伤亡数字/);
+  });
+
+  it("keeps a grounded editorial question for a high-risk event instead of replacing it just for being sensitive", async () => {
+    const typhoonSignal: StudioTrendSignal = {
+      id: "signal-typhoon-school",
+      sourceId: "dailyhot",
+      platform: "douyin",
+      title: "台风登陆广东多地停课",
+      rank: 2,
+      collectedAt: "2026-08-24T08:00:00.000Z",
+      url: "https://example.com/typhoon-school",
+    };
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [typhoonSignal] },
+      model: {
+        id: "api-topic-editor-v1",
+        generate: async () => [{
+          signalId: typhoonSignal.id,
+          title: "台风登陆广东多地停课：家长现在该核验哪些学校通知？",
+          track: "breaking-news",
+          audience: "需要安排接送与居家的广东家长",
+          painPoint: "通知来源很多，想先确认学校安排",
+          hook: "哪些通知已经能从学校原始渠道核验？",
+          rationale: "把公共事件转成家长可执行的来源核验问题。",
+          visualProof: "展示学校原始通知、发布时间与适用地区。",
+          novelty: 76,
+          seriesPotential: 55,
+          monetization: 15,
+        }],
+      },
+    });
+
+    const [candidate] = await agent.listCandidates();
+
+    assert.equal(candidate?.title, "台风登陆广东多地停课：家长现在该核验哪些学校通知？");
+    assert.equal(candidate?.hook, "哪些通知已经能从学校原始渠道核验？");
+    assert.doesNotMatch(candidate?.rationale ?? "", /未采用模型扩写/);
   });
 
   it("uses the shared risk taxonomy for violent crime signals", async () => {
@@ -680,8 +927,80 @@ describe("TrendOpportunityAgent", () => {
 
     const [candidate] = await agent.listCandidates();
 
-    assert.match(candidate?.rationale ?? "", /需要核验/);
-    assert.doesNotMatch(candidate?.rationale ?? "", /高风险/);
+    // 独立复核通过的编辑标题不会被 grounder 因“敏感”降质，只保留事实边界内的原始字段。
+    assert.equal(candidate?.title, "帮扶老人遭索赔：善意与规则如何平衡");
+    assert.equal(candidate?.hook, "先核验已经确认的责任边界。");
+    assert.equal(candidate?.audience, "关注公共议题的用户");
+    assert.match(candidate?.rationale ?? "", /适合做法律常识解释/);
+    assert.doesNotMatch(candidate?.rationale ?? "", /高风险|未采用模型扩写|已移除/);
+  });
+
+  it("keeps legitimate quotes around original signal phrases instead of rejecting the idea", async () => {
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [signals[0]!] },
+      model: {
+        id: "api-topic-editor-v1",
+        generate: async () => [{
+          signalId: "signal-ai",
+          title: "“普通人开始用 AI 管理下班后的时间”，到底改变了什么？",
+          track: "ai-daily-life",
+          audience: "普通上班族",
+          painPoint: "工具很多，却没有减少疲惫",
+          hook: "热搜里的“AI 管理”，和你有什么关系？",
+          rationale: "适合做低成本生活实验。",
+          novelty: 82,
+          seriesPotential: 86,
+          monetization: 70,
+        }],
+      },
+    });
+
+    const [candidate] = await agent.listCandidates();
+
+    assert.equal(candidate?.title, "“普通人开始用 AI 管理下班后的时间”，到底改变了什么？");
+    assert.equal(candidate?.hook, "热搜里的“AI 管理”，和你有什么关系？");
+  });
+
+  it("keeps rationale and visual proof separate and sentence-complete instead of a truncated half-sentence", async () => {
+    const ordinals = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
+    const rationale = ordinals
+      .map((ordinal) => `第${ordinal}句话解释这个角度如何帮助普通观众理解热点与自身生活的关系并保持证据边界。`)
+      .join("");
+    const visualProof = ordinals.slice(0, 5)
+      .map((ordinal) => `第${ordinal}个画面展示可核验的操作或对比。`)
+      .join("");
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [signals[0]!] },
+      model: {
+        id: "api-topic-editor-v1",
+        generate: async () => [{
+          signalId: "signal-ai",
+          title: "下班后的 AI 时间账本",
+          track: "ai-daily-life",
+          audience: "想提高生活掌控感的上班族",
+          painPoint: "工具很多，却没有减少疲惫",
+          hook: "真正偷走你下班时间的，可能不是加班。",
+          rationale,
+          visualProof,
+          visualFeasibility: 91,
+          productionCostEfficiency: 94,
+          novelty: 85,
+          seriesPotential: 88,
+          monetization: 72,
+        }],
+      },
+    });
+
+    const [candidate] = await agent.listCandidates();
+
+    // 两个长字段分字段保留；即使触发长度上限，也只落在完整句子边界，不出现半句话。
+    assert.ok((candidate?.rationale ?? "").length >= 24);
+    assert.match(candidate?.rationale ?? "", /。$/);
+    assert.doesNotMatch(candidate?.rationale ?? "", /可见画面/);
+    assert.equal(typeof candidate?.visualProof, "string");
+    assert.ok((candidate?.visualProof ?? "").length > 0);
+    assert.match(candidate?.visualProof ?? "", /。$/);
+    assert.doesNotMatch(candidate?.visualProof ?? "", /…$/);
   });
 
   it("treats a public figure death as source-grounded high-risk news", async () => {

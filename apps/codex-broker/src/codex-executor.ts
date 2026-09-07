@@ -229,6 +229,9 @@ export interface ScriptBrief {
   platform: string;
   durationSeconds: number;
   templateBlueprint?: Record<string, unknown>;
+  visualProof?: string;
+  visualPlan?: Record<string, unknown>;
+  seriesContext?: Record<string, unknown>;
   editorial?: {
     verdict: "produce_video" | "produce_image_story";
     reasons: string[];
@@ -1500,7 +1503,10 @@ function requireScriptBrief(value: unknown): ScriptBrief {
   const record = requireRecord(value, "payload.brief");
   assertExactKeys(
     record,
-    ["title", "angle", "audience", "nicheSlug", "platform", "durationSeconds", "templateBlueprint", "editorial", "rework"],
+    [
+      "title", "angle", "audience", "nicheSlug", "platform", "durationSeconds", "templateBlueprint",
+      "visualProof", "visualPlan", "seriesContext", "editorial", "rework",
+    ],
     "payload.brief",
   );
   const durationSeconds = record.durationSeconds;
@@ -1517,6 +1523,19 @@ function requireScriptBrief(value: unknown): ScriptBrief {
   };
   if (record.templateBlueprint !== undefined) {
     brief.templateBlueprint = withoutLegacyCostPolicy(record.templateBlueprint, "payload.brief.templateBlueprint");
+  }
+  if (record.visualProof !== undefined) {
+    const visualProof = requiredText(record.visualProof, "payload.brief.visualProof");
+    if (visualProof.length > 10_000) {
+      throw new CodexExecutorError("payload.brief.visualProof exceeds 10000 characters.", false);
+    }
+    brief.visualProof = visualProof;
+  }
+  if (record.visualPlan !== undefined) {
+    brief.visualPlan = boundedRecord(record.visualPlan, "payload.brief.visualPlan", 100_000);
+  }
+  if (record.seriesContext !== undefined) {
+    brief.seriesContext = boundedRecord(record.seriesContext, "payload.brief.seriesContext", 150_000);
   }
   if (record.editorial !== undefined) brief.editorial = requireEditorialBrief(record.editorial);
   if (record.rework !== undefined) brief.rework = requireScriptRework(record.rework);

@@ -153,6 +153,20 @@ describe("CodexVisualDirectorAgent", () => {
 
   it("routes stateless ZAI production and independent OpenAI audit to separate clients", async () => {
     const input = directorInput();
+    const visualProof = "两条真实标题的措辞差异可以直接并列核对。";
+    const visualPlan = {
+      strategy: "用来源标题并列和确定性标尺逐项核对。",
+      beats: [{
+        id: "headline-certainty-scale",
+        role: "证据钩子",
+        duration: "0-6 秒",
+        description: "左右并列真实标题，高亮“网传”和“正在核查”。",
+        searchQuery: "原始来源 标题 截图",
+        source: "local-card" as const,
+      }],
+    };
+    input.brief.visualProof = visualProof;
+    input.brief.visualPlan = visualPlan;
     input.assetProviders[0]!.constraints.push("成片必须保留 AIGC 标识");
     const firstPlan = validPlan();
     const repairedPlan = validPlan();
@@ -220,11 +234,19 @@ describe("CodexVisualDirectorAgent", () => {
     );
     const auditPayload = auditClient.calls[0]!.payload as {
       context: {
-        upstreamFacts: { scenes: Array<Record<string, unknown>> };
+        upstreamFacts: {
+          brief: { visualProof?: string; visualPlan?: unknown };
+          scenes: Array<Record<string, unknown>>;
+        };
         currentRoleContract: Record<string, unknown>;
         downstreamBoundary: string;
       };
     };
+    const producerBrief = (producerClient.calls[0]!.payload as { brief: VisualDirectorAgentInput["brief"] }).brief;
+    assert.equal(producerBrief.visualProof, visualProof);
+    assert.deepEqual(producerBrief.visualPlan, visualPlan);
+    assert.equal(auditPayload.context.upstreamFacts.brief.visualProof, visualProof);
+    assert.deepEqual(auditPayload.context.upstreamFacts.brief.visualPlan, visualPlan);
     const contract = auditPayload.context.currentRoleContract;
     assert.equal("directorProfiles" in contract, false);
     assert.deepEqual(contract.availableDirectorProfileIds, [
@@ -744,6 +766,87 @@ describe("CodexVisualDirectorAgent", () => {
     assert.equal((plan.visualBible as { color: string }).color, "统一换成冷蓝色体系");
     assert.equal(plan.shots[0]!.generationPrompt, "全片重做后的第一镜");
     assert.equal(plan.shots[1]!.generationPrompt, "全片重做后的第二镜");
+  });
+
+  it("treats a previous shot as drifted when any reference alternative loses support", async () => {
+    const input = directorInput();
+    input.scenes.push({ ...input.scenes[0]!, position: 2, narration: "雨停之后", visualPrompt: "雨停后的街角" });
+    input.assetProviders = [
+      {
+        id: "seedream-image-v1",
+        label: "Seedream",
+        billing: "metered",
+        modes: ["AI 图片", "参考图再生成"],
+        deliveryTypes: ["generated_image"],
+        supportsReferenceImage: true,
+        strengths: ["系列视觉连续性"],
+        constraints: ["不得作为事实证据"],
+        estimatedCnyPerClip: 0.25,
+      },
+      {
+        id: "doubao-image-v1",
+        label: "Doubao",
+        billing: "metered",
+        modes: ["AI 图片"],
+        deliveryTypes: ["generated_image"],
+        strengths: ["解释性画面"],
+        constraints: ["不得作为事实证据"],
+        estimatedCnyPerClip: 0.2,
+      },
+    ];
+    input.economics = { allowMeteredProviders: true };
+    const baseShot = (validPlan().shots as Array<Record<string, unknown>>)[0]!;
+    const previousPlan = validPlan();
+    const previousShots = previousPlan.shots as Array<Record<string, unknown>>;
+    previousShots[0] = {
+      ...structuredClone(baseShot),
+      preferredProviderId: "seedream-image-v1",
+      deliveryType: "generated_image",
+      alternativeProviderIds: [],
+      estimatedCostCny: 0.25,
+    };
+    // 上一版第二镜的 preferred 仍支持参考图，但备选已不支持：与验证同口径应判漂移。
+    previousShots.push({
+      ...structuredClone(baseShot),
+      scenePosition: 2,
+      preferredProviderId: "seedream-image-v1",
+      deliveryType: "generated_image",
+      alternativeProviderIds: ["doubao-image-v1"],
+      referenceFromScenePosition: 1,
+      generationPrompt: "上一版第二镜",
+      query: "雨后 街角",
+      estimatedCostCny: 0.25,
+    });
+    input.brief.rework = {
+      sourceRunId: "run-reference-alternative-drift",
+      visualDirectionInstruction: "只重做第一镜，第二镜沿用。",
+      assetInstruction: "保留第二镜。",
+      findings: [{
+        findingId: "vf_driftaaaaaaaaaaaaaaaaaaaaa",
+        timecodeMs: 2_000,
+        scenePosition: 1,
+        category: "composition",
+        description: "第一镜构图失衡。",
+        suggestion: "重新构图。",
+        targetNodeIds: ["visual-direction", "assets"],
+      }],
+      affectedScenePositions: [1],
+      previousDirectorPlan: previousPlan,
+    };
+    const candidate = structuredClone(previousPlan);
+    const candidateShots = candidate.shots as Array<Record<string, unknown>>;
+    candidateShots[0]!.generationPrompt = "修正后的第一镜";
+    candidateShots[1]!.alternativeProviderIds = [];
+    candidateShots[1]!.generationPrompt = "备选已清理的第二镜";
+    const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => candidate) });
+
+    const plan = await agent.plan(input);
+
+    // 漂移闭包把第二镜纳入返工：merged plan 采用 candidate 的干净备选，验证得以通过。
+    assert.equal(plan.shots[0]!.generationPrompt, "修正后的第一镜");
+    assert.equal(plan.shots[1]!.generationPrompt, "备选已清理的第二镜");
+    assert.deepEqual(plan.shots[1]!.alternativeProviderIds, []);
+    assert.equal(plan.shots[1]!.referenceFromScenePosition, 1);
   });
 
   it("sends the director-plan payload and returns the validated plan", async () => {

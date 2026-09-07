@@ -49,5 +49,27 @@ describe("SeriesPlanner", () => {
       "https://video.wangjinkun333.me/topics?mode=series&candidate=series-series-1-episode-001",
     );
     assert.match(candidates[0]?.visualPlan?.strategy ?? "", /真实桌面操作与生活空镜/);
+    assert.equal(candidates[0]?.score.visualFeasibility, 68);
+    assert.equal(candidates[0]?.score.audienceReach, 68);
+    assert.notEqual(candidates[0]?.editorialDecision.score, 93);
+  });
+
+  it("detects public-event risk in the hook while keeping a source-gated visual format", () => {
+    const planner = new SeriesPlanner({ now: () => new Date("2026-08-24T09:00:00.000Z") });
+    const [episode] = planner.planEpisodes(series, 1);
+    const candidates = planner.plan({
+      ...series,
+      episodes: [{
+        ...episode!,
+        title: "今天的信息判断方法",
+        hook: "警方通报出来后，这项伤亡数字到底来自哪里？",
+      }],
+    }, 1);
+
+    assert.equal(candidates[0]?.risk, "high");
+    assert.equal(candidates[0]?.verification.status, "blocked");
+    assert.equal(candidates[0]?.editorialDecision.verdict, "produce_image_story");
+    assert.equal((candidates[0]?.editorialDecision.score ?? 0) > 0, true);
+    assert.match(candidates[0]?.editorialDecision.guardrails[0] ?? "", /开工门槛.*至少 2 个独立原始来源/);
   });
 });

@@ -7,6 +7,14 @@ export interface VisualDirectionInput {
   visualStyle?: string;
 }
 
+// 机会的已保存 visualPlan 是规范真相（含合法省略号“…”的计划不得在展示层被重算替换）；
+// 缺失时才使用确定性 fallback。展示与开工 payload 必须读取同一个 resolved plan。
+export function resolveOpportunityVisualPlan(
+  opportunity: Pick<VisualDirectionInput, "title" | "hook" | "category" | "visualStyle"> & { visualPlan?: StudioVisualPlan },
+): StudioVisualPlan {
+  return opportunity.visualPlan ?? planVisualDirection(opportunity);
+}
+
 export function planVisualDirection(input: VisualDirectionInput): StudioVisualPlan {
   const topic = compactTopic(input.title);
   const category = input.category ?? inferVisualCategory(`${input.title} ${input.hook}`);
@@ -20,7 +28,7 @@ export function planVisualDirection(input: VisualDirectionInput): StudioVisualPl
         id: "hook",
         role: "冲突钩子",
         duration: "0-3 秒",
-        description: `用一个具体动作或结果先呈现：${shorten(input.hook, 42)} 画面先于解释。`,
+        description: `用一个具体动作或结果先呈现：${completePhrase(input.hook)} 画面先于解释。`,
         searchQuery: `${topic} 真实反应 特写 竖屏`,
         source: "creator",
       },
@@ -120,9 +128,16 @@ function inferVisualCategory(value: string): StudioTopicCategory {
 }
 
 function compactTopic(value: string): string {
-  return shorten(value.replace(/[？?！!。]/g, "").trim(), 28);
+  const normalized = value
+    .replace(/[“”"'《》]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const [firstClause] = normalized.split(/[，,:：；;。？！!?]/).map((part) => part.trim()).filter(Boolean);
+  return firstClause || normalized || "这个选题";
 }
 
-function shorten(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+function completePhrase(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return "先让观众看见问题本身。";
+  return /[。？！!?]$/.test(normalized) ? normalized : `${normalized}。`;
 }

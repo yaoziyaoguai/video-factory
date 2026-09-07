@@ -6,7 +6,7 @@ import { catalogModelLabel, providerLabel, runNodeLabel } from "../presentation.
 export function CostDashboard({ dashboard }: { dashboard: StudioCostDashboard }) {
   return (
     <section className="cost-dashboard" aria-labelledby="cost-dashboard-title">
-      <header className="section-heading"><div><p className="eyebrow">费用记录</p><h2 id="cost-dashboard-title">每一笔费用都能追到制作步骤</h2></div><span>人民币 CNY</span></header>
+      <header className="section-heading"><div><p className="eyebrow">费用记录</p><h2 id="cost-dashboard-title">按服务和制作步骤核对费用</h2></div><span>人民币 CNY</span></header>
       <CostMetrics totals={dashboard.totals} />
       <div className="cost-dashboard-grid">
         <CostRanking title="按实际服务" groups={dashboard.byProvider} kind="provider" />

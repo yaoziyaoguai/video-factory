@@ -35,6 +35,7 @@ export interface StudioSeriesRepository {
   create(record: SeriesRecord): Promise<SeriesRecord>;
   appendPlannedEpisodes(id: string, expectedRevision: number, episodes: StudioSeriesEpisode[], updatedAt: string): Promise<SeriesRecord>;
   updateEpisodePlan(id: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput, updatedAt: string): Promise<SeriesRecord>;
+  appendEpisodeSources(id: string, episodeNumber: number, evidenceUrls: string[], updatedAt: string): Promise<SeriesRecord>;
   rebaseEpisodePlan(
     id: string,
     episodeNumber: number,
@@ -234,6 +235,44 @@ export class JsonSeriesStore implements StudioSeriesRepository {
         }
         return candidate;
       });
+      const updated = { ...current, episodes, revision: current.revision + 1, updatedAt };
+      file.series[index] = updated;
+      await this.write(file);
+      return structuredClone(updated);
+    });
+  }
+
+  async appendEpisodeSources(
+    id: string,
+    episodeNumber: number,
+    evidenceUrls: string[],
+    updatedAt: string,
+  ): Promise<SeriesRecord> {
+    return this.withWriteLock(async () => {
+      const file = await this.read();
+      const index = file.series.findIndex((item) => item.id === id);
+      const current = file.series[index];
+      if (!current) throw new SeriesStoreNotFoundError("没有找到这个系列。");
+      const episodeIndex = current.episodes.findIndex((episode) => episode.episodeNumber === episodeNumber);
+      const episode = current.episodes[episodeIndex];
+      if (!episode) throw new SeriesStoreNotFoundError("没有找到这条单集计划。");
+      if (episode.status !== "planned") {
+        throw new SeriesStoreConflictError("只有尚未采用的单集可以补充原始来源；已进入制作的内容请到对应制作节点处理。");
+      }
+      // 只追加、按规范化 URL 幂等去重；重复保存不重写文件、不递增版本。
+      const existing = new Set(episode.supplementSources?.evidenceUrls ?? []);
+      const additions = [...new Set(evidenceUrls)].filter((url) => !existing.has(url));
+      if (additions.length === 0) return structuredClone(current);
+      const episodes = current.episodes.map((candidate, candidateIndex) => candidateIndex === episodeIndex
+        ? {
+            ...candidate,
+            supplementSources: {
+              evidenceUrls: [...(candidate.supplementSources?.evidenceUrls ?? []), ...additions],
+              updatedAt,
+            },
+            updatedAt,
+          }
+        : candidate);
       const updated = { ...current, episodes, revision: current.revision + 1, updatedAt };
       file.series[index] = updated;
       await this.write(file);

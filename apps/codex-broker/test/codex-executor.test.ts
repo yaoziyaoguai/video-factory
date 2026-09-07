@@ -142,6 +142,23 @@ function scriptRequest(): { protocolVersion: string; kind: string; payload: Reco
           soundSystem: { voiceIntent: "可信", pace: "medium" },
           costPolicy: { currency: "CNY", maxCost: 0, maxPaidShots: 0 },
         },
+        visualProof: "同一只苹果的三个切面在相同光线下并列展示颜色变化。",
+        visualPlan: {
+          strategy: "固定机位记录同一只苹果三种处理方式的十分钟变化。",
+          beats: [{
+            id: "apple-comparison",
+            role: "同场对比",
+            duration: "0-6 秒",
+            description: "三个苹果切面分别浸过清水、盐水和柠檬水后并排放置。",
+            searchQuery: "apple slices oxidation comparison",
+            source: "generated",
+          }],
+        },
+        seriesContext: {
+          bible: { premise: "用同条件实验验证家用方法" },
+          canon: [],
+          continuity: { fromPrevious: [], toNext: [] },
+        },
         editorial: {
           verdict: "produce_image_story",
           reasons: ["事件需要事实边界"],
@@ -989,7 +1006,7 @@ describe("CodexExecutor.runTask", () => {
 
     const prompt = Buffer.concat(childRef?.stdinChunks ?? []).toString("utf8");
     assert.equal(result.trace?.taskKind, "topic-ideas");
-    assert.equal(result.trace?.promptVersion, "video-factory/topic-editor-v3");
+    assert.equal(result.trace?.promptVersion, "video-factory/topic-editor-v5");
     assert.equal(result.trace?.providerId, "openai");
     assert.equal(result.trace?.modelId, "gpt-5.3-codex");
     assert.equal(result.trace?.prompt, prompt);

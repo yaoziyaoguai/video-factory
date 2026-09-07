@@ -7,6 +7,7 @@ import { StudioVoicePreviewUnavailableError } from "./local-capabilities.js";
 import {
   StudioInputError,
   parseStudioCandidateAdoptionInput,
+  parseStudioCandidateSourcesInput,
   parseStudioCreatorSettingsPatch,
   parseStudioSeriesInput,
   parseStudioSeriesEpisodePlanInput,
@@ -20,7 +21,9 @@ import {
   type StudioArtifactResource,
   type StudioCandidateInbox,
   type StudioCandidateAdoptionInput,
+  type StudioCandidateInboxItem,
   type StudioCandidateInboxQuery,
+  type StudioCandidateSourcesInput,
   type StudioCreatorSettings,
   type StudioCreatorSettingsPatch,
   type StudioCostDashboard,
@@ -102,6 +105,8 @@ export interface StudioServicePort {
   trendCandidateRefreshStatus(refreshId: string): Promise<StudioTrendRefreshStatus>;
   listCandidateInbox(input: StudioCandidateInboxQuery): Promise<StudioCandidateInbox>;
   adoptCandidate(candidateId: string, input: StudioCandidateAdoptionInput): Promise<StudioOpportunity>;
+  supplementCandidateSources?(candidateId: string, input: StudioCandidateSourcesInput): Promise<StudioCandidateInboxItem>;
+  supplementOpportunitySources?(opportunityId: string, input: StudioCandidateSourcesInput): Promise<StudioOpportunity>;
   listSeries(): Promise<StudioSeries[]>;
   createSeries(input: StudioSeriesInput): Promise<StudioSeries>;
   updateSeriesEpisodePlan(seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput): Promise<StudioSeries>;
@@ -294,6 +299,22 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       request.params.candidateId,
       parseStudioCandidateAdoptionInput(request.body),
     ));
+  });
+  app.post<{ Params: { candidateId: string } }>("/api/candidate-inbox/:candidateId/sources", async (request, reply) => {
+    if (!options.service.supplementCandidateSources) throw new StudioInputError("当前环境没有启用候选来源补充。");
+    requireSafeRouteId(request.params.candidateId, "候选编号");
+    return reply.code(200).send(await options.service.supplementCandidateSources(
+      request.params.candidateId,
+      parseStudioCandidateSourcesInput(request.body),
+    ));
+  });
+  app.post<{ Params: { opportunityId: string } }>("/api/opportunities/:opportunityId/sources", async (request) => {
+    if (!options.service.supplementOpportunitySources) throw new StudioInputError("当前环境没有启用机会来源补充。");
+    requireSafeRouteId(request.params.opportunityId, "机会编号");
+    return await options.service.supplementOpportunitySources(
+      request.params.opportunityId,
+      parseStudioCandidateSourcesInput(request.body),
+    );
   });
   app.get("/api/series", async () => options.service.listSeries());
   app.post("/api/series", async (request, reply) => {

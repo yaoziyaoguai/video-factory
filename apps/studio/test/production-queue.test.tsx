@@ -62,4 +62,69 @@ describe("ProductionQueue rejected follow-up", () => {
     expectTodoCount("0");
     expect(screen.queryByRole("link", { name: /调整方案后重新制作/ })).not.toBeInTheDocument();
   });
+
+  it("presents an unsupported legacy review as history instead of a pending review", async () => {
+    const user = userEvent.setup();
+    const legacyReview: StudioRunSummary = {
+      ...rejectedRun,
+      status: "needs_human",
+      title: "旧版待审记录",
+      currentNodeId: "final-review",
+      continuation: {
+        supported: false,
+        reason: "这条制作来自旧版工作流，只能查看现有结果。",
+      },
+    };
+    render(
+      <MemoryRouter>
+        <ProductionQueue runs={[legacyReview]} loading={false} onCreate={() => undefined} />
+      </MemoryRouter>,
+    );
+
+    expectTodoCount("0");
+    expect(screen.getByText("历史只读")).toBeInTheDocument();
+    expect(screen.queryByText("等你审片")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("当前工序：人工终审")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "基于这版重新制作：旧版待审记录" })).toHaveAttribute("href", "/projects/run-1");
+    expect(screen.queryByRole("link", { name: /进入审片/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "筛选：待你处理" }));
+    expect(screen.queryByText("旧版待审记录")).not.toBeInTheDocument();
+  });
+
+  it("does not count an unsupported legacy run as active production", async () => {
+    const user = userEvent.setup();
+    const legacyRunning: StudioRunSummary = {
+      ...rejectedRun,
+      status: "running",
+      title: "旧版进行中记录",
+      currentNodeId: "script",
+      continuation: {
+        supported: false,
+        reason: "这条制作来自旧版工作流，只能查看现有结果。",
+      },
+    };
+    render(
+      <MemoryRouter>
+        <ProductionQueue runs={[legacyRunning]} loading={false} onCreate={() => undefined} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("制作中", { selector: ".project-edition span" }).closest("div")).toHaveTextContent("0");
+    expect(screen.queryByLabelText("当前工序：脚本")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "筛选：制作中" }));
+    expect(screen.queryByText("旧版进行中记录")).not.toBeInTheDocument();
+  });
+
+  it("labels an explicitly tagged test run without hiding its operational state", () => {
+    render(
+      <MemoryRouter>
+        <ProductionQueue runs={[{ ...rejectedRun, runPurpose: "test" }]} loading={false} onCreate={() => undefined} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText(/测试记录 · 抖音 · 9:16/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "调整方案后重新制作：被打回的作品" })).toBeInTheDocument();
+  });
 });
