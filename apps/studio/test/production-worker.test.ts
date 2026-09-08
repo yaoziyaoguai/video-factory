@@ -4,6 +4,7 @@ import {
   buildDirectorAssetProviders,
   buildProductionWorker,
   buildProductionProviderRuntimeMetadata,
+  probeGeneratedMediaWithFfprobe,
   resolveProductionPython,
 } from "../src/server/production-worker.js";
 import { readMeteredImageProviderSettings } from "../src/server/image-provider-settings.js";
@@ -33,6 +34,36 @@ describe("production Python runtime", () => {
       SAFE_VALUE: "kept",
       PYTHONPATH: "/repo/python",
     });
+  });
+});
+
+describe("generated media probing", () => {
+  it("keeps untrusted Provider media local and bounds ffprobe execution time", async () => {
+    let invocation: {
+      command: string;
+      args: string[];
+      options: { maxBuffer: number; timeout: number };
+    } | undefined;
+    const metadata = await probeGeneratedMediaWithFfprobe(
+      "/runs/example/generated.mp4",
+      "video",
+      async (command, args, options) => {
+        invocation = { command, args, options };
+        return {
+          stdout: JSON.stringify({
+            streams: [{ width: 1080, height: 1920 }],
+            format: { duration: "6" },
+          }),
+        };
+      },
+    );
+
+    assert.deepEqual(metadata, { width: 1080, height: 1920, durationSeconds: 6 });
+    assert.equal(invocation?.command, "ffprobe");
+    assert.deepEqual(invocation?.args.slice(0, 4), ["-v", "error", "-protocol_whitelist", "file,pipe"]);
+    assert.equal(invocation?.args.at(-1), "/runs/example/generated.mp4");
+    assert.equal(invocation?.options.timeout, 30_000);
+    assert.equal(invocation?.options.maxBuffer, 1024 * 1024);
   });
 });
 

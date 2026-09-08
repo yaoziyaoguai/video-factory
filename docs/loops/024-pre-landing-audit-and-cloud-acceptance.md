@@ -104,6 +104,10 @@ PR #28 将 ZAI Broker 从 3 类任务扩展到完整任务集，但部署脚本�
 
 尚未连接的素材与数字人能力把 `*_API_KEY`、模型 ID、工作空间 ID 和 `AK/SK` 直接展示给创作者。Provider 的真实配置与可用性判断保持不变，创作者可见说明改为账号连接、服务权限、模型选择和估价配置等可执行中文，并由目录回归测试禁止这些部署变量重新进入素材能力说明。
 
+### VF-CA-054 — 外部生成媒体可让 ffprobe 打开次级网络资源或长期占用 Worker
+
+生成媒体虽然先经过 URL、DNS、Content-Type 和大小检查并下载到本地，但媒体探测曾直接把外部 Provider 返回的文件交给 `ffprobe`。伪装成媒体的 playlist/container 可能诱导解析器访问次级网络资源，损坏文件也可能长期阻塞生产 Worker。探测现只允许 `file,pipe` 协议并设置 30 秒进程超时；回归测试固定协议边界、输入路径、缓冲区和超时配置。
+
 ## Consolidated Local Resolution
 
 - 返工继承不可变模板、标题、角度、受众、时长、声音、画面来源和节点模型；视觉 finding 以 `targetNodeId` 精确预填到脚本、导演方案或素材节点。
@@ -178,5 +182,6 @@ PR #28 将 ZAI Broker 从 3 类任务扩展到完整任务集，但部署脚本�
 - 费用反馈弹窗的错误清理已在桌面点击复验；当前制作页在 390×844 下无横向溢出，console 为 0 error / 0 warning。完整 trace、网络记录与截图保存在 `output/playwright/local-qa/`。
 - VF-CA-051 的 Provider 目录聚焦测试 26/26 通过；第二次完整 `make test` 退出码为 0：Python 104/104、Pipeline 408/409（仅真实 E2E 显式跳过）、Broker 119/119、Studio Vitest 253/253、Studio server 352/352、package smoke 3/3，production build 成功。重启后的真实接口与 1440×1000、390×844 画面来源页面不再出现部署变量或 `AK/SK`，横向溢出为 0，console 0 error / 0 warning。
 - 最新一次完整 `make test` 退出码为 0：Python 109/109；Pipeline/核心 TypeScript 528/529（通过 528，仅 1 个显式真实 E2E skip）；Broker 127/127；Studio Vitest 348/348；Studio server 421/421；production build 成功；package smoke 3/3。本地自动化门禁已全绿，云端实际 SHA、桌面/移动点击与真实付费成片尚未验证。
+- `ffprobe` 隔离修复后的完整 `make test` 再次退出 0：Python 109/109；Pipeline/核心 TypeScript 528/529（通过 528，仅 1 个显式真实 E2E skip）；Broker 127/127；Studio Vitest 348/348；Studio server 422/422；production build 成功；package smoke 3/3。第一次并发运行同时暴露热点信号测试只等待静态列表容器、没有等待异步数据的竞态，修正等待条件后整套门禁通过。
 - 发布前静态门禁已通过：改动过的 shell 脚本 `bash -n`、`git diff --check`、生产 Compose `config --quiet`、新增内容高置信密钥模式扫描均无问题；`npm audit --omit=dev --audit-level=high` 经 npm 官方 registry 返回 0 vulnerabilities。
-- 尚待：提交推送、GitHub Actions 部署，以及云端桌面/移动端和一条真实付费视频的最终验收。完成前本 Loop 保持 `in progress`。
+- 尚待：提交推送、GitHub Actions 部署，以及云端桌面/移动端和一条真实付费视频的最终验收。2026-09-09 发布时 `gh` API、`git ls-remote` 和 HTTPS push 均被 GitHub 返回 `403 account suspended` 阻断；不能把未进入 Actions 的本地提交冒充成已部署版本。完成前本 Loop 保持 `in progress`。

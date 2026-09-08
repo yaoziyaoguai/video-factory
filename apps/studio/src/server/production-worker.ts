@@ -24,6 +24,18 @@ import { assetProviderDeliveryTypes, assetProviderSupportsReferenceImage } from 
 import { buildStudioChildEnvironment } from "./studio-child-environment.js";
 
 const execFileAsync = promisify(execFile);
+const GENERATED_MEDIA_PROBE_TIMEOUT_MS = 30_000;
+
+type GeneratedMediaProbeRunner = (
+  command: string,
+  args: string[],
+  options: { maxBuffer: number; timeout: number },
+) => Promise<{ stdout: string }>;
+
+const runGeneratedMediaProbe: GeneratedMediaProbeRunner = async (command, args, options) => {
+  const { stdout } = await execFileAsync(command, args, options);
+  return { stdout: String(stdout) };
+};
 
 export interface ProductionWorkerOptions {
   repositoryRoot: string;
@@ -105,17 +117,20 @@ export function buildProductionWorker(options: ProductionWorkerOptions): Generat
   });
 }
 
-async function probeGeneratedMediaWithFfprobe(
+export async function probeGeneratedMediaWithFfprobe(
   mediaPath: string,
   mediaType: "image" | "video",
+  runner: GeneratedMediaProbeRunner = runGeneratedMediaProbe,
 ): Promise<GeneratedMediaMetadata> {
-  const { stdout } = await execFileAsync("ffprobe", [
+  const { stdout } = await runner("ffprobe", [
     "-v", "error",
+    // Provider 媒体是不可信输入；只允许读取已下载的本地文件，禁止播放列表或容器再访问网络。
+    "-protocol_whitelist", "file,pipe",
     "-select_streams", "v:0",
     "-show_entries", "stream=width,height:format=duration",
     "-of", "json",
     mediaPath,
-  ], { maxBuffer: 1024 * 1024 });
+  ], { maxBuffer: 1024 * 1024, timeout: GENERATED_MEDIA_PROBE_TIMEOUT_MS });
   const result = JSON.parse(stdout) as {
     streams?: Array<{ width?: number; height?: number }>;
     format?: { duration?: string };

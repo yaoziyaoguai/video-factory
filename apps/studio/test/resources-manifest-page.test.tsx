@@ -230,7 +230,8 @@ describe("ResourcesPage source and rights section", () => {
 
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
-    const signalList = await screen.findByLabelText("已采集热点信号");
+    await screen.findByText("热点一");
+    const signalList = screen.getByLabelText("已采集热点信号");
     const rows = within(signalList).getAllByRole("listitem");
     expect(rows.map((row) => row.querySelector(":scope > span")?.textContent)).toEqual(["01", "02", "03"]);
     expect(rows[0]).toHaveTextContent("原榜第 1");
