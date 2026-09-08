@@ -65,6 +65,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     }]),
     previewVoice: async () => undefined,
     reworkDraft: async () => undefined,
+    reinspectVisualReview: async () => runDetail(),
     getCreatorSettings: async () => ({
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "economy-daily",
@@ -1347,7 +1348,14 @@ describe("Studio API", () => {
     const decision = await app.inject({
       method: "POST",
       url: "/api/runs/run-1/decisions",
-      payload: { action: "approve", actor: "jinkun", note: "检查通过" },
+      payload: {
+        action: "approve",
+        actor: "jinkun",
+        note: "检查通过",
+        expectedRunRevision: 1,
+        interventionId: "intervention-1",
+        reviewEvidenceId: null,
+      },
     });
 
     assert.equal(list.statusCode, 200);

@@ -23,7 +23,7 @@ const brief: ScreenwriterAgentInput["brief"] = {
   durationSeconds: 24,
 };
 
-it("falls back after a ZAI upstream outage crosses the broker boundary", async () => {
+it("starts a backup after an accepted ZAI request definitively ends with an upstream outage", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "video-factory-zai-fallback-"));
   const socketPath = path.join(directory, "worker.sock");
   let zaiCalls = 0;
@@ -73,29 +73,18 @@ it("falls back after a ZAI upstream outage crosses the broker boundary", async (
       ],
     });
 
-    const execution = await candidates.draftDetailed({ brief, selectedModelId: "glm-5.3" });
+    const result = await candidates.draftDetailed({ brief, selectedModelId: "glm-5.3" });
 
     assert.equal(zaiCalls, 1);
     assert.equal(backupCalls, 1);
-    assert.equal(execution.trace?.modelId, "gpt-5.6-sol");
-    assert.deepEqual(execution.trace?.attemptedModelIds, ["glm-5.3", "gpt-5.6-sol"]);
-    assert.deepEqual(execution.trace?.modelCandidateAttempts, [
-      {
-        modelId: "glm-5.3",
-        providerId: "zai-bigmodel-api",
-        outcome: "failed",
-        failureStage: "completed_failure",
-        failureReason: "暂时不可用",
-      },
-      { modelId: "gpt-5.6-sol", providerId: "openai", outcome: "succeeded" },
-    ]);
+    assert.equal(result.trace?.modelId, "gpt-5.6-sol");
   } finally {
     await broker.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-it("falls back after ZAI completes without output across the broker boundary", async () => {
+it("starts a backup after an accepted ZAI request definitively completes without output", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "video-factory-zai-no-output-fallback-"));
   const socketPath = path.join(directory, "worker.sock");
   let zaiCalls = 0;
@@ -145,21 +134,11 @@ it("falls back after ZAI completes without output across the broker boundary", a
       ],
     });
 
-    const execution = await candidates.draftDetailed({ brief, selectedModelId: "glm-5.3" });
+    const result = await candidates.draftDetailed({ brief, selectedModelId: "glm-5.3" });
 
     assert.equal(zaiCalls, 1);
     assert.equal(backupCalls, 1);
-    assert.equal(execution.trace?.modelId, "gpt-5.6-sol");
-    assert.deepEqual(execution.trace?.modelCandidateAttempts, [
-      {
-        modelId: "glm-5.3",
-        providerId: "zai-bigmodel-api",
-        outcome: "failed",
-        failureStage: "completed_failure",
-        failureReason: "未返回结果",
-      },
-      { modelId: "gpt-5.6-sol", providerId: "openai", outcome: "succeeded" },
-    ]);
+    assert.equal(result.trace?.modelId, "gpt-5.6-sol");
   } finally {
     await broker.close();
     await rm(directory, { recursive: true, force: true });

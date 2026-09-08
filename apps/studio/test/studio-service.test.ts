@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import type { HumanDecisionDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
+import type { Artifact, HumanDecisionDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
 import type {
   DispatchedProductionRun,
   ProductionBrief,
@@ -14,7 +14,7 @@ import type {
   ProductionSceneRevisionDraft,
   ProductionSpendRejectionDraft,
 } from "@video-factory/production-pipeline";
-import { PaidOperationManualReconciliationError, StaleRunRevisionError } from "@video-factory/production-pipeline";
+import { effectiveProductionBrief, PaidOperationManualReconciliationError, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, StaleRunRevisionError } from "@video-factory/production-pipeline";
 import {
   StudioConflictError,
   StudioService,
@@ -23,7 +23,7 @@ import {
 import { JsonOpportunityStore } from "../src/server/opportunity-store.js";
 import { JsonRunArchiveStore } from "../src/server/run-archive-store.js";
 import { loadAgentLoopProgress, ProductionStudio } from "../src/server/production-studio.js";
-import type { StudioOpportunityInput, StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
+import type { StudioOpportunityInput, StudioProvider, StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
 
 const brief: ProductionBrief = {
   protocolVersion: "video-factory/brief-v1",
@@ -34,6 +34,7 @@ const brief: ProductionBrief = {
   durationSeconds: 24,
   platform: "douyin",
   reviewMode: "manual",
+  runPurpose: "test",
   economics: {
     recipeId: "economy-daily",
     allowMeteredProviders: false,
@@ -331,6 +332,14 @@ const opportunityInput: StudioOpportunityInput = {
   },
 };
 
+function fileIntegrity(content: string | Buffer): { sizeBytes: number; sha256: string } {
+  const bytes = typeof content === "string" ? Buffer.from(content, "utf8") : content;
+  return {
+    sizeBytes: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
 describe("StudioService", () => {
   it("builds a rejected-run draft that inherits production choices and prefills affected nodes", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rework-draft-"));
@@ -338,8 +347,10 @@ describe("StudioService", () => {
     const storyboardPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "visual-direction", "attempt-1", "storyboard.json");
     await mkdir(path.dirname(scriptPath), { recursive: true });
     await mkdir(path.dirname(storyboardPath), { recursive: true });
-    await writeFile(scriptPath, JSON.stringify({ viewerPromise: "原版承诺", scenes: [1, 2, 3, 4].map((position) => ({ position })) }), "utf8");
-    await writeFile(storyboardPath, JSON.stringify({ visualBible: { typography: "画面内不出现文字" }, shots: [1, 2, 3, 4].map((scenePosition) => ({ scenePosition })) }), "utf8");
+    const scriptContent = JSON.stringify({ viewerPromise: "原版承诺", scenes: [1, 2, 3, 4].map((position) => ({ position })) });
+    const storyboardContent = JSON.stringify({ visualBible: { typography: "画面内不出现文字" }, shots: [1, 2, 3, 4].map((scenePosition) => ({ scenePosition })) });
+    await writeFile(scriptPath, scriptContent, "utf8");
+    await writeFile(storyboardPath, storyboardContent, "utf8");
     const base = waitingRun(workspaceRoot);
     const rejectedRun: WorkflowRun<ProductionBrief> = {
       ...base,
@@ -396,9 +407,9 @@ describe("StudioService", () => {
           artifactIds: [],
           qualityGateResults: [],
           output: { report: { findings: [
-            { timecodeMs: 4_000, scenePosition: 2, targetNodeIds: ["script"], category: "factual_accuracy", description: "第二镜数字错误。", suggestion: "改成已核验数据。" },
-            { timecodeMs: 8_000, scenePosition: 3, targetNodeId: "assets", category: "typography", description: "文字遮挡主体。", suggestion: "换用无字母片。" },
-            { timecodeMs: 12_000, scenePosition: 4, targetNodeId: "visual-direction", category: "composition", description: "主体被裁切到画面边缘。", suggestion: "换成主体完整居中的镜头。" },
+            { timecodeMs: 4_000, startTimecodeMs: 4_000, endTimecodeMs: 4_000, scenePosition: 2, targetNodeIds: ["script"], evidenceStatus: "failed", evidenceFrameSha256: "a".repeat(64), nextAction: "replan_upstream", severity: "warning", category: "factual_accuracy", description: "第二镜数字错误。", suggestion: "改成已核验数据。" },
+            { timecodeMs: 8_000, startTimecodeMs: 8_000, endTimecodeMs: 8_000, scenePosition: 3, targetNodeId: "assets", evidenceStatus: "failed", evidenceFrameSha256: "b".repeat(64), nextAction: "rework_asset", severity: "warning", category: "typography", description: "文字遮挡主体。", suggestion: "换用无字母片。" },
+            { timecodeMs: 12_000, startTimecodeMs: 12_000, endTimecodeMs: 12_000, scenePosition: 4, targetNodeId: "visual-direction", evidenceStatus: "failed", evidenceFrameSha256: "c".repeat(64), nextAction: "replan_upstream", severity: "warning", category: "composition", description: "主体被裁切到画面边缘。", suggestion: "换成主体完整居中的镜头。" },
           ] } },
         },
       ],
@@ -409,8 +420,7 @@ describe("StudioService", () => {
           uri: scriptPath,
           createdAt: base.startedAt,
           contentType: "application/json",
-          sizeBytes: 64,
-          sha256: "b".repeat(64),
+          ...fileIntegrity(scriptContent),
           producer: { nodeId: "script", attempt: 1 },
           provenance: { providerId: "codex-screenwriter-v1" },
         },
@@ -420,8 +430,7 @@ describe("StudioService", () => {
           uri: storyboardPath,
           createdAt: base.startedAt,
           contentType: "application/json",
-          sizeBytes: 64,
-          sha256: "c".repeat(64),
+          ...fileIntegrity(storyboardContent),
           producer: { nodeId: "visual-direction", attempt: 1 },
           provenance: { providerId: "api-visual-director-v1" },
         },
@@ -472,6 +481,198 @@ describe("StudioService", () => {
     tampered.providers.script = "codex-screenwriter-v1";
     tampered.rework!.findings[0]!.description = "用户尝试改写审片事实";
     await assert.rejects(() => service.startRun(tampered), /审片问题已经变化或被修改/);
+  });
+
+  it("uses the effective human brief in list, detail, and rework projections without losing frozen task contracts", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-effective-brief-"));
+    const base = waitingRun(workspaceRoot);
+    const initialInput: ProductionBrief = {
+      ...base.initialInput,
+      taskContractDigests: { ...REQUIRED_CODEX_TASK_CONTRACT_DIGESTS },
+    };
+    const humanBrief = {
+      title: "人工修订后的标题",
+      angle: "人工确认的新角度",
+      audience: "第一次尝试视频创作的人",
+    };
+    const run: WorkflowRun<ProductionBrief> = {
+      ...base,
+      status: "rejected",
+      initialInput,
+      decisions: [],
+      interventions: [],
+      nodeRuns: [{
+        nodeId: "brief",
+        status: "succeeded",
+        output: { ...initialInput, ...humanBrief },
+        artifactIds: [],
+        qualityGateResults: [],
+        outputState: {
+          nodeId: "brief",
+          generatedVersionId: "brief-generated",
+          effectiveVersionId: "brief-human",
+          stale: false,
+          versions: [{
+            id: "brief-generated",
+            nodeId: "brief",
+            source: "generated",
+            output: initialInput,
+            artifactIds: [],
+            inputVersionIds: [],
+            createdAt: base.startedAt,
+            createdBy: "creator",
+            schemaVersion: "video-factory/brief-v1",
+          }, {
+            id: "brief-human",
+            nodeId: "brief",
+            source: "human",
+            output: humanBrief,
+            artifactIds: [],
+            inputVersionIds: [],
+            createdAt: base.startedAt,
+            createdBy: "owner",
+            schemaVersion: "video-factory/brief-v1",
+          }],
+        },
+      }],
+      artifacts: [],
+    };
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(run),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+
+    const [summary] = await service.listRuns();
+    const detail = await service.getRun(run.id);
+    const rework = await service.reworkDraft(run.id);
+
+    assert.equal(summary?.title, humanBrief.title);
+    assert.equal(detail?.angle, humanBrief.angle);
+    assert.equal(detail?.audience, humanBrief.audience);
+    assert.equal(rework?.input.title, humanBrief.title);
+    assert.equal(rework?.input.angle, humanBrief.angle);
+    assert.deepEqual(effectiveProductionBrief(run).taskContractDigests, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS);
+    assert.equal(run.initialInput.title, brief.title);
+  });
+
+  it("turns a note-only human rejection into an executable and protected scene scope", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-note-only-rework-"));
+    const scriptPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "attempt-1", "script.json");
+    const storyboardPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "visual-direction", "attempt-1", "director_plan.json");
+    const scriptContent = JSON.stringify({ scenes: [1, 2, 3, 4].map((position) => ({ position })) });
+    const storyboardContent = JSON.stringify({ shots: [1, 2, 3, 4].map((scenePosition) => ({ scenePosition })) });
+    await mkdir(path.dirname(scriptPath), { recursive: true });
+    await mkdir(path.dirname(storyboardPath), { recursive: true });
+    await writeFile(scriptPath, scriptContent, "utf8");
+    await writeFile(storyboardPath, storyboardContent, "utf8");
+    const base = waitingRun(workspaceRoot);
+    const run: WorkflowRun<ProductionBrief> = {
+      ...base,
+      status: "rejected",
+      decisions: [{
+        interventionId: "intervention-1",
+        action: "reject",
+        decidedBy: "owner",
+        decidedAt: "2026-08-21T10:02:00.000Z",
+        note: "第 2、4 镜构图没有兑现开场承诺。",
+      }],
+      nodeRuns: [{
+        nodeId: "script",
+        status: "succeeded",
+        artifactIds: ["artifact-script"],
+        qualityGateResults: [],
+      }, {
+        nodeId: "visual-direction",
+        status: "succeeded",
+        artifactIds: ["artifact-storyboard"],
+        qualityGateResults: [],
+      }],
+      artifacts: [{
+        id: "artifact-script",
+        kind: "script",
+        uri: scriptPath,
+        createdAt: base.startedAt,
+        contentType: "application/json",
+        ...fileIntegrity(scriptContent),
+        producer: { nodeId: "script", attempt: 1 },
+        provenance: { providerId: "codex-screenwriter-v1" },
+      }, {
+        id: "artifact-storyboard",
+        kind: "storyboard",
+        uri: storyboardPath,
+        createdAt: base.startedAt,
+        contentType: "application/json",
+        ...fileIntegrity(storyboardContent),
+        producer: { nodeId: "visual-direction", attempt: 1 },
+        provenance: { providerId: "api-visual-director-v1" },
+      }],
+    };
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const localized = await service.reworkDraft("run-1");
+    assert.deepEqual(localized?.input.rework?.findings, []);
+    assert.deepEqual(localized?.requiredAffectedScenePositions, [2, 4]);
+    assert.deepEqual(localized?.input.rework?.affectedScenePositions, [2, 4]);
+    assert.match(localized?.input.rework?.nodeInstructions.visualDirection ?? "", /第 2、4 镜构图没有兑现/);
+    await assert.rejects(
+      () => service.startRun({
+        ...localized!.input,
+        providers: { ...localized!.input.providers, script: "codex-screenwriter-v1" },
+        rework: { ...localized!.input.rework!, affectedScenePositions: [2] },
+      }),
+      /返工范围不能移除/,
+    );
+
+    run.decisions[0]!.note = "整体节奏和画面承诺都需要重新调整。";
+    const wholeFilm = await service.reworkDraft("run-1");
+    assert.deepEqual(wholeFilm?.requiredAffectedScenePositions, [1, 2, 3, 4]);
+    assert.deepEqual(wholeFilm?.input.rework?.affectedScenePositions, [1, 2, 3, 4]);
+  });
+
+  it("rejects a same-size JSON artifact whose bytes changed before building a rework draft", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rework-integrity-"));
+    const base = waitingRun(workspaceRoot);
+    const scriptPath = path.join(workspaceRoot, "runs", base.id, "nodes", "script", "attempt-1", "script.json");
+    const original = '{"scenes":[1]}';
+    const tampered = '{"scenes":[2]}';
+    await mkdir(path.dirname(scriptPath), { recursive: true });
+    await writeFile(scriptPath, original, "utf8");
+    const run: WorkflowRun<ProductionBrief> = {
+      ...base,
+      status: "rejected",
+      decisions: [],
+      interventions: [],
+      nodeRuns: [{
+        nodeId: "script",
+        status: "succeeded",
+        output: { scriptPath },
+        artifactIds: ["artifact-script"],
+        qualityGateResults: [],
+      }],
+      artifacts: [{
+        id: "artifact-script",
+        kind: "script",
+        uri: scriptPath,
+        createdAt: base.startedAt,
+        contentType: "application/json",
+        ...fileIntegrity(original),
+        producer: { nodeId: "script", attempt: 1 },
+        provenance: { providerId: "codex-screenwriter-v1" },
+      }],
+    };
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(run),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+    assert.equal(Buffer.byteLength(original), Buffer.byteLength(tampered));
+    await writeFile(scriptPath, tampered, "utf8");
+
+    await assert.rejects(() => service.reworkDraft(run.id), /内容已经变化/);
   });
 
   it("prefills an asset rework from the source-media visual gate", async () => {
@@ -690,7 +891,8 @@ describe("StudioService", () => {
       ],
     };
     await mkdir(path.dirname(jobsPath), { recursive: true });
-    await writeFile(jobsPath, `${JSON.stringify(jobsDocument)}\n`, "utf8");
+    const jobsContent = `${JSON.stringify(jobsDocument)}\n`;
+    await writeFile(jobsPath, jobsContent, "utf8");
     const base = waitingRun(workspaceRoot);
     const failedRun: WorkflowRun<ProductionBrief> = {
       ...base,
@@ -713,8 +915,7 @@ describe("StudioService", () => {
         uri: jobsPath,
         createdAt: base.startedAt,
         contentType: "application/json",
-        sizeBytes: Buffer.byteLength(JSON.stringify(jobsDocument)),
-        sha256: "d".repeat(64),
+        ...fileIntegrity(jobsContent),
         producer: { nodeId: "assets", attempt: 1 },
         provenance: { providerId: "ai-shot-router-v1" },
       }],
@@ -817,8 +1018,7 @@ describe("StudioService", () => {
           uri: scriptPath,
           createdAt: base.startedAt,
           contentType: "application/json",
-          sizeBytes: Buffer.byteLength(JSON.stringify(scriptDocument)),
-          sha256: "e".repeat(64),
+          ...fileIntegrity(`${JSON.stringify(scriptDocument)}\n`),
           producer: { nodeId: "script", attempt: 1 },
           provenance: { providerId: "codex-screenwriter-v1" },
         },
@@ -828,8 +1028,7 @@ describe("StudioService", () => {
           uri: storyboardPath,
           createdAt: base.startedAt,
           contentType: "application/json",
-          sizeBytes: Buffer.byteLength(JSON.stringify(storyboardDocument)),
-          sha256: "f".repeat(64),
+          ...fileIntegrity(`${JSON.stringify(storyboardDocument)}\n`),
           producer: { nodeId: "visual-direction", attempt: 1 },
           provenance: { providerId: "api-visual-director-v1" },
         },
@@ -839,8 +1038,7 @@ describe("StudioService", () => {
           uri: assetPlanPath,
           createdAt: base.startedAt,
           contentType: "application/json",
-          sizeBytes: Buffer.byteLength(JSON.stringify(assetPlanDocument)),
-          sha256: "1".repeat(64),
+          ...fileIntegrity(`${JSON.stringify(assetPlanDocument)}\n`),
           producer: { nodeId: "assets", attempt: 1 },
           provenance: { providerId: "ai-shot-router-v1" },
         },
@@ -850,8 +1048,7 @@ describe("StudioService", () => {
           uri: jobsPath,
           createdAt: base.startedAt,
           contentType: "application/json",
-          sizeBytes: Buffer.byteLength(JSON.stringify(jobsDocument)),
-          sha256: "2".repeat(64),
+          ...fileIntegrity(`${JSON.stringify(jobsDocument)}\n`),
           producer: { nodeId: "assets", attempt: 1 },
           provenance: { providerId: "ai-shot-router-v1" },
         },
@@ -967,8 +1164,7 @@ describe("StudioService", () => {
             uri: assetPlanPath,
             createdAt: base.startedAt,
             contentType: "application/json",
-            sizeBytes: Buffer.byteLength(JSON.stringify(assetPlanDocument)),
-            sha256: "3".repeat(64),
+            ...fileIntegrity(`${JSON.stringify(assetPlanDocument)}\n`),
             producer: { nodeId: "assets", attempt: 1 },
             provenance: { providerId: "ai-shot-router-v1" },
           },
@@ -978,8 +1174,7 @@ describe("StudioService", () => {
             uri: jobsPath,
             createdAt: base.startedAt,
             contentType: "application/json",
-            sizeBytes: Buffer.byteLength(JSON.stringify(jobsDocument)),
-            sha256: "4".repeat(64),
+            ...fileIntegrity(`${JSON.stringify(jobsDocument)}\n`),
             producer: { nodeId: "assets", attempt: 1 },
             provenance: { providerId: "ai-shot-router-v1" },
           },
@@ -1140,6 +1335,63 @@ describe("StudioService", () => {
 
     assert.equal(currentTemplateResolveCalls, 0);
     assert.deepEqual((pipeline.lastInput as ProductionBrief).templateSnapshot, historicalSnapshot);
+  });
+
+  it("requires two distinct production visual reviewers and role audit before Studio dispatch", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-dual-review-readiness-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const baseProviders = [
+      { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" as const },
+      { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑画面", available: true, kind: "local" as const },
+      { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" as const },
+      { id: "python-ffmpeg-v1", capability: "video.render", label: "本地渲染", available: true, kind: "local" as const },
+      { id: "python-technical-review-v1", capability: "quality.review", label: "机器质检", available: true, kind: "local" as const },
+      { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 审片", available: true, kind: "external" as const, defaultModelId: "glm-5.3-flash" },
+    ];
+    const productionBrief: ProductionBrief = {
+      ...brief,
+      runPurpose: "production",
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+    };
+    const studio = (extraProviders: StudioProvider[] = []) => new ProductionStudio({
+      workspaceRoot,
+      pipeline,
+      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive", "runs.json")),
+      listProviders: async () => [...baseProviders, ...extraProviders],
+    });
+
+    await assert.rejects(() => studio().start(productionBrief), /正式制作需要 GLM 与 Codex 使用两个不同模型完成独立双审/);
+    await assert.rejects(() => studio([{
+      id: "codex-visual-review-v1",
+      capability: "quality.review.visual",
+      label: "Codex 审片",
+      available: true,
+      kind: "external",
+      defaultModelId: "glm-5.3-flash",
+    }, {
+      id: "codex-role-auditor-v1",
+      capability: "role.audit",
+      label: "独立质量复核",
+      available: true,
+      kind: "external",
+    }]).start(productionBrief), /两个不同模型/);
+    assert.equal(pipeline.dispatchCount, 0);
+
+    await studio([{
+      id: "codex-visual-review-v1",
+      capability: "quality.review.visual",
+      label: "Codex 审片",
+      available: true,
+      kind: "external",
+      defaultModelId: "gpt-5.6-sol",
+    }, {
+      id: "codex-role-auditor-v1",
+      capability: "role.audit",
+      label: "独立质量复核",
+      available: true,
+      kind: "external",
+    }]).start(productionBrief);
+    assert.equal(pipeline.dispatchCount, 1);
   });
 
   it("prefills actionable generation changes after a content-safety failure", async () => {
@@ -2883,6 +3135,111 @@ describe("StudioService", () => {
     assert.deepEqual(await readFile(dispatched.referenceVideo!.path), sourceBytes);
   });
 
+  it("rejects stale, missing, tampered, or escaped inherited reference videos before dispatch", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-reference-rework-rejection-"));
+    const sourcePath = path.join(workspaceRoot, "runs", "run-1", "nodes", "reference-grammar", "attempt-1", "reference.mp4");
+    const escapedPath = path.join(workspaceRoot, "escaped-reference.mp4");
+    const sourceBytes = Buffer.from([0, 0, 0, 12, 102, 116, 121, 112, 105, 115, 111, 109]);
+    const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
+    await mkdir(path.dirname(sourcePath), { recursive: true });
+    await writeFile(sourcePath, sourceBytes);
+    await writeFile(escapedPath, sourceBytes);
+    const base = waitingRun(workspaceRoot);
+    const referencedBrief: ProductionBrief = {
+      ...base.initialInput,
+      providers: { ...base.initialInput.providers, script: "codex-screenwriter-v1", director: "api-visual-director-v1" },
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: true },
+      referenceVideo: {
+        uploadId: "67d86948-5517-4b17-8da1-b0a695159d4d",
+        label: "参考节奏.mp4",
+        mimeType: "video/mp4",
+        sizeBytes: sourceBytes.length,
+        sha256: sourceSha256,
+        path: path.join(workspaceRoot, "uploads", "reference-videos", "released", "source.mp4"),
+      },
+      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+    };
+    const referenceNode = {
+      nodeId: "reference-grammar",
+      status: "succeeded" as const,
+      artifactIds: ["artifact-reference-video"],
+      qualityGateResults: [],
+    };
+    const referenceArtifact: Artifact = {
+      id: "artifact-reference-video",
+      kind: "reference_video",
+      uri: sourcePath,
+      createdAt: base.startedAt,
+      contentType: "video/mp4",
+      sizeBytes: sourceBytes.length,
+      sha256: sourceSha256,
+      producer: { nodeId: "reference-grammar", attempt: 1 },
+      provenance: { providerId: "creator-upload" },
+    };
+    const rejectedRun: WorkflowRun<ProductionBrief> = {
+      ...base,
+      status: "rejected",
+      revision: 7,
+      initialInput: referencedBrief,
+      decisions: [{
+        interventionId: "intervention-1",
+        action: "reject",
+        decidedBy: "owner",
+        decidedAt: "2026-08-21T10:02:00.000Z",
+        note: "按审片建议调整画面后重做。",
+      }],
+      nodeRuns: [referenceNode, ...base.nodeRuns],
+      artifacts: [referenceArtifact, ...base.artifacts],
+    };
+    const pipeline = new FakePipeline(rejectedRun);
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      codexAvailability: { available: true, reason: "", taskKinds: ["script-draft", "director-plan", "reference-grammar", "role-audit"] },
+    });
+    const draft = await service.reworkDraft("run-1");
+    assert.ok(draft);
+
+    await assert.rejects(
+      () => service.startRun({
+        ...draft.input,
+        rework: { ...draft.input.rework!, sourceRunRevision: 6 },
+      }, "reference-rework-stale"),
+      /原制作在返工草稿打开后发生了变化/,
+    );
+
+    referenceNode.artifactIds = [];
+    await assert.rejects(
+      () => service.startRun(draft.input, "reference-rework-missing"),
+      /参考视频没有完整留档/,
+    );
+    referenceNode.artifactIds = [referenceArtifact.id];
+
+    referenceArtifact.sha256 = "f".repeat(64);
+    await assert.rejects(
+      () => service.startRun(draft.input, "reference-rework-metadata"),
+      /留档与原始记录不一致/,
+    );
+    referenceArtifact.sha256 = sourceSha256;
+
+    await writeFile(sourcePath, Buffer.from("tampered-reference"));
+    await assert.rejects(
+      () => service.startRun(draft.input, "reference-rework-bytes"),
+      /参考视频内容已经变化/,
+    );
+    await writeFile(sourcePath, sourceBytes);
+
+    referenceArtifact.uri = escapedPath;
+    await assert.rejects(
+      () => service.startRun(draft.input, "reference-rework-escape"),
+      /不属于当前制作目录/,
+    );
+    referenceArtifact.uri = sourcePath;
+    assert.equal(pipeline.dispatchCount, 0);
+  });
+
   it("blocks disabled metered providers but ignores legacy video-wide ceilings", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -3342,14 +3699,24 @@ describe("StudioService", () => {
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
-    await service.decide("run-1", { action: "approve" }, "jinkun");
+    await service.decide("run-1", {
+      action: "approve",
+      expectedRunRevision: 0,
+      interventionId: "intervention-1",
+      reviewEvidenceId: null,
+    }, "jinkun");
 
     assert.equal(pipeline.lastDecision?.interventionId, "intervention-1");
     assert.equal(pipeline.lastDecision?.action, "approve");
 
     pipeline.run = waitingRun(workspaceRoot);
     await assert.rejects(
-      () => service.decide("run-1", { action: "reject" }, "jinkun"),
+      () => service.decide("run-1", {
+        action: "reject",
+        expectedRunRevision: 0,
+        interventionId: "intervention-1",
+        reviewEvidenceId: null,
+      }, "jinkun"),
       (error: unknown) => error instanceof StudioConflictError && /填写原因/.test(error.message),
     );
   });
@@ -3389,7 +3756,12 @@ describe("StudioService", () => {
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
     await assert.rejects(
-      () => service.decide("run-1", { action: "approve" }, "director"),
+      () => service.decide("run-1", {
+        action: "approve",
+        expectedRunRevision: 0,
+        interventionId: "intervention-1",
+        reviewEvidenceId: null,
+      }, "director"),
       (error: unknown) => error instanceof StudioConflictError && /刷新/.test(error.message),
     );
   });
@@ -3763,7 +4135,13 @@ describe("StudioService", () => {
     ]);
     run.initialInput = {
       ...run.initialInput,
-      workflowFeatures: { assetSemanticRank: true },
+      providers: {
+        ...run.initialInput.providers,
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+      },
+      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      workflowFeatures: { assetSemanticRank: true, referenceGrammar: false },
     };
     run.nodeRuns.unshift({
       nodeId: "asset-candidates",

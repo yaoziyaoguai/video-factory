@@ -25,6 +25,11 @@ export interface EditorialDecisionInput {
   risk: StudioCandidateRisk;
   verification: StudioCandidateVerification;
   score: StudioOpportunityScore;
+  visualProof?: string;
+  visualPlan?: {
+    strategy: string;
+    beats: Array<{ role: string; description: string; searchQuery?: string }>;
+  };
   audience?: string;
   painPoint?: string;
   hook?: string;
@@ -35,7 +40,7 @@ const STATIC_UPDATE_PATTERN = /通报|公告|回应|声明|会议(?:召开|举�
 const PUBLIC_UPDATE_ACTOR_PATTERN = /(?:警方|法院|检察院|政府|官方|部门|机构|公司|企业|平台|学校|医院|当事人).{0,12}(?:通报|公告|回应|声明|发布会|任免|判决|调查进展|数据公布)/;
 const PUBLIC_EVENT_CONTEXT_PATTERN = /社会事件|公共安全|外交|国际|战争|灾害|伤亡|遇难|失联|地震|台风|暴雨|救灾/;
 const EVERYDAY_GUIDANCE_PATTERN = /亲子|孩子|家长|家庭|厨房|做饭|居家|同事|沟通|相处|如何|怎么|三步|方法|教程|化解|避免|预防|防止/;
-const ACTION_PATTERN = /实测|实验|挑战|教程|方法|对比|体验|探店|旅行|美食|运动|比赛|改造|制作|开箱|测评|操作|演示|工作流|如何|三步|一天|化解|回应|避免|预防/;
+const ACTION_PATTERN = /实测|实验|挑战|教程|对比|体验|探店|旅行|美食|运动|比赛|改造|制作|开箱|测评|操作|演示|工作流|三步|一天/;
 const COMPARISON_PATTERN = /对比|横评|测评|谁更适合|怎么选|选哪个|\bA\s*(?:还是|vs\.?)\s*B\b/i;
 const HOOK_PATTERN = /[？?]|\d|为什么|如何|到底|能不能|不是.+而是|别.+先|实测|对比|横评|省下|少花|多赚|变化/;
 const GENERIC_AUDIENCE_PATTERN = /^(所有人|大家|普通人|用户|年轻人|成年人)$/;
@@ -79,10 +84,16 @@ function decideProductionPotential(
     };
   }
 
+  const visualPlanText = [
+    input.visualProof,
+    input.visualPlan?.strategy,
+    ...(input.visualPlan?.beats.flatMap((beat) => [beat.role, beat.description, beat.searchQuery]) ?? []),
+  ].filter(Boolean).join(" ");
   const topicText = `${input.title} ${input.track}`;
+  const productionIntentText = `${topicText} ${visualPlanText}`;
   const staticUpdate = isPublicStaticUpdate(input, topicText);
-  const comparison = COMPARISON_PATTERN.test(topicText);
-  const hasAction = comparison || ACTION_PATTERN.test(topicText);
+  const comparison = COMPARISON_PATTERN.test(productionIntentText);
+  const hasAction = comparison || ACTION_PATTERN.test(productionIntentText);
   const videoValue = Math.round(
     input.score.visualFeasibility * 0.34
     + input.score.novelty * 0.2

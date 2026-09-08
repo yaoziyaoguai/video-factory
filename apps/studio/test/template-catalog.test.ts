@@ -22,7 +22,7 @@ describe("template catalog", () => {
       assert.ok(template.shotSlots.length >= template.storyStructure.length);
       assert.ok(template.shotSlots.length >= 4);
       assert.ok(template.shotSlots.every((slot) => slot.durationSeconds <= 5));
-      assert.ok(template.shotSlots.every((slot) => slot.allowedCapabilities.includes("asset.generate.video")));
+      assert.ok(template.shotSlots.every((slot) => slot.allowedCapabilities.includes("asset.search")));
       assert.ok(template.qualityRules.length >= 3);
       assert.equal(template.qualityRules.some((rule) => rule.label === "模板核心质量"), false);
       assert.equal(template.shotSlots.some((slot) => /建立具体画面|展示动作或变化|补充关键细节|用结果或反应兑现/.test(slot.purpose)), false);
@@ -33,7 +33,16 @@ describe("template catalog", () => {
     assert.equal(new Set(BUILTIN_TEMPLATES.map((template) => template.shotSlots.map((slot) => slot.purpose).join("|"))).size, 6);
   });
 
-  it("maps every template sound system to one calibrated voice preset without replacing the actor", () => {
+  it("does not treat generated media as equivalent evidence in real-world proof templates", () => {
+    for (const template of BUILTIN_TEMPLATES.filter((candidate) => candidate.id !== "knowledge-explainer")) {
+      assert.ok(template.shotSlots.every((slot) => !slot.allowedCapabilities.some((capability) => capability.startsWith("asset.generate."))));
+    }
+    const knowledge = BUILTIN_TEMPLATES.find((candidate) => candidate.id === "knowledge-explainer")!;
+    assert.deepEqual(knowledge.shotSlots.find((slot) => slot.id === "knowledge-evidence")?.allowedCapabilities, ["asset.search"]);
+    assert.ok(knowledge.shotSlots.find((slot) => slot.id === "knowledge-mechanism")?.allowedCapabilities.includes("asset.generate.video"));
+  });
+
+  it("maps every template sound system to one calibrated actor and delivery preset", () => {
     const expected = new Map([
       ["trend-fact-brief", "news"],
       ["knowledge-explainer", "explainer"],
@@ -46,11 +55,14 @@ describe("template catalog", () => {
 
     for (const template of BUILTIN_TEMPLATES) {
       assert.equal(voicePresetForTemplate(template).id, expected.get(template.id));
-      assert.equal(applyTemplateVoiceRecommendation(template, baseDirection).profileId, "macos:Tingting");
+      assert.equal(
+        applyTemplateVoiceRecommendation(template, baseDirection).profileId,
+        voicePresetForTemplate(template).preferredProfileIds[0],
+      );
     }
     assert.deepEqual(
       applyTemplateVoiceRecommendation(BUILTIN_TEMPLATES.find((template) => template.id === "ranked-comparison")!, baseDirection),
-      { profileId: "macos:Tingting", rate: 205, pauseScale: 0.9, masteringPreset: "social" },
+      { profileId: "minimax:Chinese (Mandarin)_News_Anchor", rate: 205, pauseScale: 0.9, masteringPreset: "social" },
     );
   });
 
@@ -68,7 +80,7 @@ describe("template catalog", () => {
   it("publishes a less mechanical knowledge-explainer revision without pretending generated scenes prove causality", () => {
     const template = BUILTIN_TEMPLATES.find((candidate) => candidate.id === "knowledge-explainer")!;
 
-    assert.equal(template.version, 3);
+    assert.equal(template.version, 4);
     assert.equal(template.shotSlots.length, 5);
     assert.equal(template.shotSlots.some((slot) => /只改变一个变量|真实案例/.test(slot.purpose)), false);
     assert.match(template.description, /理解|应用/);

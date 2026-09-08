@@ -23,8 +23,9 @@ export function isTransientRoleAuditProviderFailure(error: unknown): error is Ro
 //   还是消息含 timeout，都不能作为切换依据，必须原样上抛（保留 failureStage=uncertain），
 //   由确定性 requestId/broker 幂等恢复，禁止在本层生成 backup requestId 造成双跑。
 // - stage=not_accepted：失败确证发生在受理之前；连接失败、限流、容量、服务不可用可切候选。
-// - stage=completed_failure：仅当能明确归类为允许 fallback 的瞬时 Provider 故障时才可切；
-//   invalid request/output/auth/业务/质量/审计失败一律禁止。
+// - stage=completed_failure：原请求已经确定结束；只有 Broker 给出可验证的
+//   基础设施分类或“模型无输出”时才能换候选。模糊的 500、结构/业务/质量失败
+//   仍保留原证据并停止，不用第二个模型掩盖。
 function hasFallbackEligibleProviderFailure(error: unknown): boolean {
   for (const candidate of errorChain(error)) {
     if (!(candidate instanceof CodexBridgeError)) continue;
@@ -38,6 +39,7 @@ function hasFallbackEligibleProviderFailure(error: unknown): boolean {
       || candidate.failureDetails?.category === "timeout"
       || candidate.failureDetails?.category === "network") return true;
     if (candidate.failureKind === "model_provider_transient" || candidate.failureKind === "model_provider_no_output") return true;
+    if (candidate.stage === "completed_failure") return false;
     if (candidate.statusCode !== undefined) {
       if (candidate.statusCode === 408 || candidate.statusCode === 429) return true;
       if (candidate.statusCode === 502 || candidate.statusCode === 503 || candidate.statusCode === 504) return true;

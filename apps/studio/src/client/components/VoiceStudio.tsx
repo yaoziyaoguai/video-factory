@@ -82,9 +82,12 @@ export function VoiceStudio({
     const selectionAvailable = voices.some((voice) => voice.id === direction.profileId);
     onSelectionAvailabilityChange?.(selectionAvailable);
     if (!selectionAvailable && voices[0] && !preserveUnavailableSelection) {
-      update({ ...direction, profileId: voices[0].id }, voices[0], false);
+      const compatibleVoice = selectedPreset?.preferredProfileIds
+        .map((profileId) => voices.find((voice) => voice.id === profileId))
+        .find((voice) => voice !== undefined) ?? voices[0];
+      update({ ...direction, profileId: compatibleVoice.id }, compatibleVoice, false);
     }
-  }, [direction.profileId, loading, preserveUnavailableSelection, voices]);
+  }, [direction.profileId, loading, preserveUnavailableSelection, selectedPreset, voices]);
 
   function update(next: StudioVoiceDirection, profile = voices.find((voice) => voice.id === next.profileId), userInitiated = true) {
     if (userInitiated) onUserChange?.();

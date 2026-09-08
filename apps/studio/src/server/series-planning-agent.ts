@@ -10,8 +10,8 @@ import type { StudioSeriesEpisode } from "../shared/api.js";
 import type { SeriesEpisodeDraft } from "./series-planner.js";
 import type { SeriesRecord } from "./series-store.js";
 
-const SERIES_SHOWRUNNER_CONTRACT_VERSION = "series-showrunner-v1|role-audit-v1|series-roadmap-validator-v1";
-const SERIES_GREENLIGHT_CONTRACT_VERSION = "series-greenlight-v1|role-audit-v1|series-roadmap-validator-v1";
+const SERIES_SHOWRUNNER_CONTRACT_VERSION = "series-showrunner-v1|role-audit-v3|series-roadmap-validator-v1";
+const SERIES_GREENLIGHT_CONTRACT_VERSION = "series-greenlight-v1|role-audit-v3|series-roadmap-validator-v1";
 
 export interface SeriesPlanningResult {
   drafts: SeriesEpisodeDraft[];

@@ -77,20 +77,20 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
         <div className="section-heading">
           <div>
             <span className="eyebrow">依据</span>
-            <h2 id="evidence-heading">信号证据</h2>
+            <h2 id="evidence-heading">来源线索</h2>
           </div>
           <span>{opportunity.evidence.length} 条</span>
         </div>
         <div className="evidence-list">
           {opportunity.evidence.map((evidence, index) => (
             <article className="evidence-row" key={`${evidence.source}-${evidence.keyword}-${index}`}>
-              <span className="evidence-strength" aria-label={isManualEvidence(evidence) ? "用户补充来源" : `信号强度 ${evidence.strength}`}>{isManualEvidence(evidence) ? "补" : evidence.strength}</span>
+              <span className="evidence-strength" aria-label={isManualEvidence(evidence) ? "用户补充来源" : `榜单热度或排名信号 ${evidence.strength}`}>{isManualEvidence(evidence) ? "补" : evidence.strength}</span>
               <div>
                 <strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong>
                 <small><Clock3 aria-hidden="true" size={12} />{formatEvidenceTime(evidence.collectedAt)}</small>
               </div>
               {evidence.evidenceUrl ? (
-                <a href={evidence.evidenceUrl} target="_blank" rel="noreferrer" aria-label={`查看 ${evidence.source} 证据`}>
+                <a href={evidence.evidenceUrl} target="_blank" rel="noreferrer" aria-label={`查看 ${evidence.source} 来源`}>
                   <Link2 aria-hidden="true" size={14} />{isManualEvidence(evidence) ? "用户补充" : evidence.source}<ArrowUpRight aria-hidden="true" size={13} />
                 </a>
               ) : <span className="evidence-source">{evidence.source}</span>}

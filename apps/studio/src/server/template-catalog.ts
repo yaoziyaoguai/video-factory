@@ -12,6 +12,10 @@ const CAPABILITY_REQUIREMENTS = [
 ];
 
 function visualCapabilities(): string[] {
+  return ["asset.search"];
+}
+
+function illustrativeVisualCapabilities(): string[] {
   return ["asset.search", "asset.generate.image", "asset.generate.video"];
 }
 
@@ -62,7 +66,7 @@ export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = [
       { id: "trend-viewer-payoff", label: "收束必须给出具体影响而非复述热搜", dimension: "artistic", required: true, threshold: 88 },
       { id: "trend-platform-safety", label: "标题与画面不消费伤亡、不制造未证实恐慌", dimension: "platform", required: true, threshold: 95 },
     ],
-  }),
+  }, 3),
   publishedTemplate({
     id: "knowledge-explainer",
     name: "知识解释",
@@ -77,11 +81,11 @@ export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = [
       { id: "transfer", label: "迁移判断", purpose: "给出观众可马上使用的判断方法", required: true },
     ],
     shotSlots: [
-      { id: "knowledge-open-loop", beatId: "misconception", purpose: "用一个可见结果或具体选择建立认知缺口，并在前六秒给出部分答案", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
-      { id: "knowledge-mechanism", beatId: "mechanism", purpose: "用一段连续动作或一张无字机制示意讲清最少必要关系；生成画面只作示意", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-open-loop", beatId: "misconception", purpose: "用一个可见结果或具体选择建立认知缺口，并在前六秒给出部分答案", durationSeconds: 5, allowedCapabilities: illustrativeVisualCapabilities(), manualReplacement: true },
+      { id: "knowledge-mechanism", beatId: "mechanism", purpose: "用一段连续动作或一张无字机制示意讲清最少必要关系；生成画面只作示意", durationSeconds: 5, allowedCapabilities: illustrativeVisualCapabilities(), manualReplacement: true },
       { id: "knowledge-evidence", beatId: "worked-example", purpose: "展示可追溯来源、屏幕录制、测量或真实观察；缺少事实证据时明确标为示意，不伪装验证", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
       { id: "knowledge-boundary", beatId: "worked-example", purpose: "让观众看见一个适用条件或反例，避免把趋势说成必然因果", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
-      { id: "knowledge-transfer", beatId: "transfer", purpose: "回到开场问题，用一句可执行判断和可见结果兑现观众收益", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-transfer", beatId: "transfer", purpose: "回到开场问题，用一句可执行判断和可见结果兑现观众收益", durationSeconds: 5, allowedCapabilities: illustrativeVisualCapabilities(), manualReplacement: true },
     ],
     visualSystem: { composition: "实拍问题与简洁机制图交替；一个画面只承担一个因果步骤，主体关系始终可追踪", colorIntent: "自然底色配单一高对比标记色，同一变量始终使用同一颜色", subtitleDensity: "medium", pacing: "measured" },
     soundSystem: { voiceIntent: "聪明、清楚、像和观众共同推理，不使用居高临下的课堂腔", pace: "medium", musicIntent: "轻量节拍在模型建立后进入，例证处让位于动作与界面声" },
@@ -91,7 +95,7 @@ export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = [
       { id: "knowledge-legible", label: "生成母图不得绘制文字；术语、条件与标注由后期字幕或确定性图形清晰呈现", dimension: "technical", required: true, threshold: 90 },
       { id: "knowledge-transfer", label: "结尾必须给出可迁移的判断而非口号", dimension: "platform", required: true, threshold: 86 },
     ],
-  }, 3),
+  }, 4),
   publishedTemplate({
     id: "photo-story",
     name: "证据图解",
@@ -123,7 +127,7 @@ export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = [
       { id: "evidence-no-card-fallback", label: "不得用说明卡代替缺失素材或调用失败", dimension: "technical", required: true, threshold: 100 },
       { id: "evidence-claim-boundary", label: "旁白不得超出材料能够支持的结论", dimension: "platform", required: true, threshold: 96 },
     ],
-  }),
+  }, 3),
   publishedTemplate({
     id: "product-demo",
     name: "实证演示",
@@ -156,7 +160,7 @@ export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = [
       { id: "demo-comparable", label: "前后对照使用同一条件和评价口径", dimension: "artistic", required: true, threshold: 92 },
       { id: "demo-limit-honest", label: "至少呈现一个真实限制或不适用条件", dimension: "platform", required: true, threshold: 90 },
     ],
-  }),
+  }, 3),
   publishedTemplate({
     id: "human-mini-doc",
     name: "人物微纪录",
@@ -192,7 +196,7 @@ export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = [
       { id: "doc-room-tone", label: "关键场景保留连续同期声和空间方向", dimension: "technical", required: true, threshold: 88 },
       { id: "doc-no-manipulation", label: "剪辑不虚构因果、不诱导人物重复情绪", dimension: "factual", required: true, threshold: 96 },
     ],
-  }),
+  }, 3),
   publishedTemplate({
     id: "ranked-comparison",
     name: "条件式对比",
@@ -226,5 +230,5 @@ export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = [
       { id: "compare-visible-proof", label: "每个结论都有同屏结果或可复查数据支撑", dimension: "technical", required: true, threshold: 94 },
       { id: "compare-no-absolute-winner", label: "不得把条件结论包装成对所有人适用的冠军", dimension: "platform", required: true, threshold: 92 },
     ],
-  }),
+  }, 3),
 ];

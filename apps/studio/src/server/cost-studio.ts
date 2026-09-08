@@ -11,6 +11,7 @@ interface CostRunSource {
   id: string;
   initialInput?: unknown;
   nodeRuns?: unknown;
+  executionPlan?: unknown;
   executionReceipts?: unknown;
   spendAuthorizations?: unknown;
 }
@@ -46,7 +47,7 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       : [])
     : [];
   const uncertainReceipts = Array.isArray(run.nodeRuns)
-    ? run.nodeRuns.flatMap((value) => uncertainReceipt(value, authorizations))
+    ? run.nodeRuns.flatMap((value) => uncertainReceipt(value, authorizations, run.executionPlan))
     : [];
   const receipts = mergeReceipts(
     [...nestedReceipts, ...uncertainReceipts],
@@ -72,7 +73,7 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
         && (value.modelId === receiptModelId || value.modelId === undefined);
     });
     const actualCost = nonNegativeNumber(receipt.actualCostCny);
-    const actualCostSource = receipt.actualCostSource === "provider_reported" || receipt.actualCostSource === "configured_rate"
+    const actualCostSource = receipt.actualCostSource === "provider_reported" || receipt.actualCostSource === "configured_rate" || receipt.actualCostSource === "manual_reconciled"
       ? receipt.actualCostSource
       : undefined;
     const status = receipt.status === "failed" ? "failed" : receipt.status === "succeeded" ? "succeeded" : "unknown";
@@ -166,30 +167,38 @@ function actualMediaProviderId(modelId: string): string | undefined {
   return undefined;
 }
 
-function uncertainReceipt(value: unknown, authorizations: unknown[]): Record<string, unknown>[] {
+function uncertainReceipt(value: unknown, authorizations: unknown[], executionPlan: unknown): Record<string, unknown>[] {
   if (!isRecord(value) || value.outcomeUncertain !== true || isRecord(value.executionReceipt)) return [];
+  const nodeId = text(value.nodeId);
   const authorizationId = text(value.spendAuthorizationId);
   const authorization = authorizations.find((candidate) => isRecord(candidate) && candidate.id === authorizationId);
-  if (!authorizationId || !isRecord(authorization)) return [];
-  const plan = isRecord(value.spendPlan) ? value.spendPlan : undefined;
-  const startedAt = text(value.startedAt) || text(authorization.approvedAt);
-  const nodeId = text(value.nodeId);
-  const providerId = text(authorization.providerId) || text(plan?.providerId);
-  const modelId = text(authorization.modelId) || text(plan?.modelId);
+  const nodePlan = Array.isArray(executionPlan)
+    ? executionPlan.find((candidate) => isRecord(candidate) && candidate.nodeId === nodeId)
+    : undefined;
+  const plan = isRecord(value.spendPlan) ? value.spendPlan : isRecord(nodePlan) ? nodePlan : undefined;
+  const automaticVoice = nodeId === "voice"
+    && isRecord(plan)
+    && plan.capability === "voice.synthesize"
+    && plan.billing === "metered";
+  if ((!authorizationId || !isRecord(authorization)) && !automaticVoice) return [];
+  const startedAt = text(value.startedAt) || (isRecord(authorization) ? text(authorization.approvedAt) : "");
+  const providerId = (isRecord(authorization) ? text(authorization.providerId) : "") || text(plan?.providerId);
+  const modelId = (isRecord(authorization) ? text(authorization.modelId) : "") || text(plan?.modelId);
   if (!startedAt || !nodeId || !providerId || !modelId) return [];
+  const requestId = text(value.operationRequestId);
   return [{
-    id: `uncertain:${authorizationId}:${text(value.operationRequestId) || startedAt}`,
+    id: `uncertain:${authorizationId || "automatic"}:${requestId || startedAt}`,
     nodeId,
     providerId,
     modelId,
-    capability: "unknown",
+    capability: text(plan?.capability) || "unknown",
     billing: "metered",
     status: "unknown",
-    spendAuthorizationId: authorizationId,
-    authorizedCostCny: nonNegativeNumber(authorization.maxCostCny),
+    ...(authorizationId ? { spendAuthorizationId: authorizationId } : {}),
+    ...(isRecord(authorization) ? { authorizedCostCny: nonNegativeNumber(authorization.maxCostCny) } : {}),
     estimatedCostCny: nonNegativeNumber(plan?.estimatedCostCny) ?? 0,
     meteredAttemptCount: 1,
-    ...(text(value.operationRequestId) ? { requestId: text(value.operationRequestId) } : {}),
+    ...(requestId ? { requestId } : {}),
     startedAt,
   }];
 }

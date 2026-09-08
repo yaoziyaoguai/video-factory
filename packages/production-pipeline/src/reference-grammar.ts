@@ -59,7 +59,7 @@ export interface CodexReferenceGrammarAgentOptions {
   maxReviewIterations?: number;
 }
 
-export const REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION = "reference-grammar-v1|role-audit-v1|shot-grammar-validator-v1";
+export const REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION = "reference-grammar-v2|role-audit-v3|shot-grammar-validator-v1";
 
 export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
   readonly id: string;

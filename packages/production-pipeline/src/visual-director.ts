@@ -164,6 +164,7 @@ export interface VisualDirectorPlan {
 
 export interface VisualDirectorPlanValidation {
   scenePositions: number[];
+  viewerPromise?: string;
   sceneDurations?: Record<number, number>;
   sceneVisualStrategies?: Record<number, "stock" | "image" | "generated" | "local">;
   allowedProviderIds: string[];
@@ -188,6 +189,8 @@ export interface VisualDirectorAgentInput {
     audience: string;
     platform: string;
     durationSeconds: number;
+    viewerPromise?: string;
+    narrativeArc?: string;
     requestedProfileId: ProductionDirectorProfileId;
     templateBlueprint?: ProductionBlueprint;
     editorial?: {
@@ -210,6 +213,7 @@ export interface VisualDirectorAgentInput {
   };
   scenes: Array<{
     position: number;
+    purpose?: string;
     narration: string;
     duration: number;
     visualPrompt: string;
@@ -298,6 +302,9 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       ? { antiPatterns: optionalStringArray(visualBibleInput.antiPatterns, "visualBible.antiPatterns")! }
       : {}),
   };
+  if (options.viewerPromise !== undefined && visualBible.viewerPromise !== options.viewerPromise) {
+    throw new Error("Director visualBible.viewerPromise must preserve the screenwriter viewerPromise exactly.");
+  }
   if (!Array.isArray(input.shots)) throw new Error("Director plan shots must be an array.");
 
   const allowed = new Set(options.allowedProviderIds);

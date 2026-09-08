@@ -21,6 +21,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
     assert.equal(openai.auditEffort, "xhigh");
     // 强推理候选需要 1200s（20 分钟）默认 deadline，防止回落到曾经掐断 xhigh/max 的 300s/600s。
     assert.equal(openai.timeoutMs, 1_200_000);
+    assert.equal(openai.maxBacklog, 1);
 
     const fakeSecret = "test-only-secret-not-for-a-real-request";
     const zai = brokerRuntimeConfigFromEnv({

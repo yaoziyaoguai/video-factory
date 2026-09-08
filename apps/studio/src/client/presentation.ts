@@ -215,7 +215,7 @@ export function humanizeCreativeText(value: string): string {
 export function creatorFacingTechnicalText(value?: string): string | undefined {
   if (!value) return undefined;
   return value
-    .replace(/已按\s+hook_and_scene_midpoints\s+的稀疏证据逐场核对。?/gi, "已按每个镜头的关键画面完成预检。")
+    .replace(/已按\s+hook_and_scene_midpoints\s+的稀疏证据逐场核对。?/gi, "已抽查各镜头关键帧，未覆盖逐帧运动与声音。")
     .replace(/画面\s+Provider/gi, "画面服务")
     .replace(/\bstudio-owner\b/gi, "由你确认")
     .replace(/需要[^。]*VIDEO_FACTORY_[A-Z0-9_]+[^。]*。?\s*当前：[^。]*。?/gi, "AI 创作服务尚未连接，请到“创作设置 → 制作分工”检查服务状态。")
@@ -242,14 +242,13 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/Candidate ranking only; no source media was downloaded or altered\.?/gi, "只保存候选排序结果，没有下载或修改原始素材。")
     .replace(/Series Bible/gi, "系列设定")
     .replace(/\bCanon\b/gi, "已确认内容")
-    .replace(/Codex\s*独立质量审计(?:\s*Agent)?/gi, "AI 独立质量复核")
+    .replace(/Codex\s*独立质量审计(?:\s*Agent)?/gi, "Codex 独立质量复核")
     .replace(/独立质量审计\s*Agent/gi, "AI 独立质量复核")
     .replace(/独立质量审计/g, "独立质量复核")
     .replace(/独立审计/g, "独立复核")
     .replace(/质量审计/g, "质量复核")
     .replace(/审计意见/g, "复核意见")
     .replace(/审计结论/g, "复核结论")
-    .replace(/\bCodex\b/gi, "AI")
     .replace(/\bAgent\b/gi, "AI")
     .replace(/\bProvider\b/gi, "服务")
     .replace(/\bBroker\b/gi, "AI 服务")
@@ -261,7 +260,7 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/\s*\bhook_and_scene_midpoints\b\s*/gi, "逐镜关键画面抽查")
     .replace(/\s*\bscene_triplets\b\s*/gi, "逐镜首中尾抽查")
     .replace(/\s*\bscene_change_keyframes\b\s*/gi, "场景变化关键画面抽查")
-    .replace(/\s*\bsource_assets\b\s*/gi, "生成画面")
+    .replace(/\s*\bsource_assets\b\s*/gi, "源素材预检")
     .replace(/manualReplacement/gi, "人工补充素材")
     .replace(/primary\s+服务\s+timed\s+out/gi, "首选服务响应超时")
     .replace(/服务\s+timed\s+out/gi, "服务响应超时")

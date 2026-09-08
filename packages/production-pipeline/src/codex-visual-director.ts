@@ -30,7 +30,7 @@ export interface CodexVisualDirectorAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
-export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v24|role-audit-v2|director-validator-v4|visual-plan-v2";
+export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v25|role-audit-v3|director-validator-v5|visual-plan-v2";
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
 export class CodexVisualDirectorAgent implements VisualDirectorAgent {
@@ -95,7 +95,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
       role: "导演",
       contractVersion: VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
       criteria: [
-        "视觉圣经与题材、观众承诺、模板和参考语法一致",
+        "视觉圣经与题材、模板和参考语法一致；输入含编剧 viewerPromise 时必须逐字保留，narrativeArc 与每个 scene purpose 必须原样进入导演判断，不能另起观众承诺",
         "上游画面方案中的观众收益与视觉论证意图得到兑现；方案可以按 Provider 能力重规划，但不能被模板通用镜头机械覆盖，也不能被当作已经验证的事实",
         "每镜头的动作、逐秒节拍、构图、声音设计与验收条件可真实执行；脚本 onScreenText 与 soundCue 由下游继承，不得要求导演重复输出不存在的字段",
         "素材 Provider、交付类型和能力约束完全匹配；方案费用可真实报价，费用反馈用于优先降低成本，无法达到目标时仍须给出可执行方案供创作者决定",
@@ -138,8 +138,9 @@ function directorInputForModel(
 ): typeof input {
   const rework = input.brief.rework;
   if (!rework?.previousDirectorPlan || rework.affectedScenePositions === undefined) return input;
-  const affectedScenes = previousToCurrentConfigurationDrift(
-    new Set(rework.affectedScenePositions),
+  const affectedScenes = new Set(rework.affectedScenePositions);
+  assertNoUnauthorizedConfigurationDrift(
+    affectedScenes,
     rework.previousDirectorPlan,
     validationFor(input),
   );
@@ -185,11 +186,7 @@ function validateDirectorCandidate(
   const merged = mergeReworkCandidateShots(
     value,
     rework.previousDirectorPlan,
-    previousToCurrentConfigurationDrift(
-      new Set(rework.affectedScenePositions),
-      rework.previousDirectorPlan,
-      validation,
-    ),
+    new Set(rework.affectedScenePositions),
     validation.scenePositions,
   );
   return validateVisualDirectorPlan(merged, validation);
@@ -199,8 +196,7 @@ function validateDirectorCandidate(
 // previous shot 依赖的 Provider 已从当前允许目录移除、不再被允许、不再兼容当前交付类型
 // 或参考图能力，或其 REUSE_ONLY 母片在当前所选 model 的时长边界下不再可行时，
 // 合并保留下来的 previous shot 无法通过完整 plan validation，会把返工卡成永久校验失败。
-// 这些镜头必须自动加入 affected scene positions，改用 candidate 的合法替换；
-// 最终仍走完整校验，绝不绕过 allowed-provider 门禁。
+// 这些镜头必须在模型调用前触发范围冲突，等用户重新确认；不能由模型静默扩大返工范围。
 // director plan 的 shot 不持久化 model 身份；用户更换 model 的执行后果
 // 经当前时长边界（selectedVideoModelDurationBounds）进入闭包。
 function previousToCurrentConfigurationDrift(
@@ -218,6 +214,24 @@ function previousToCurrentConfigurationDrift(
     }
   }
   return affectedScenes;
+}
+
+function assertNoUnauthorizedConfigurationDrift(
+  authorizedScenes: Set<number>,
+  previousPlan: Record<string, unknown>,
+  validation: VisualDirectorPlanValidation,
+): void {
+  const drifted = previousToCurrentConfigurationDrift(
+    new Set(authorizedScenes),
+    previousPlan,
+    validation,
+  );
+  const unauthorized = [...drifted]
+    .filter((position) => !authorizedScenes.has(position))
+    .sort((left, right) => left - right);
+  if (unauthorized.length > 0) {
+    throw new Error(`Director rework scope must be confirmed again because scenes ${unauthorized.join(", ")} are no longer executable with the current Provider or model configuration.`);
+  }
 }
 
 function previousShotConfigurationDrifted(
@@ -311,7 +325,10 @@ function mergeReworkCandidateShots(
       throw new Error(`Director rework affects scene ${position}, which is not part of the current script.`);
     }
   }
-  const merged = { ...(isRecord(candidate) ? candidate : {}) };
+  const partialRework = affectedScenes.size < expectedPositions.length;
+  const merged = partialRework
+    ? { ...(isRecord(previous) ? previous : {}) }
+    : { ...(isRecord(candidate) ? candidate : {}) };
   return {
     ...merged,
     shots: expectedPositions.map((position) => {
@@ -390,6 +407,8 @@ function visualDirectorAuditContext(
         audience: brief.audience,
         platform: brief.platform,
         durationSeconds: brief.durationSeconds,
+        ...(brief.viewerPromise ? { viewerPromise: brief.viewerPromise } : {}),
+        ...(brief.narrativeArc ? { narrativeArc: brief.narrativeArc } : {}),
         requestedProfileId: brief.requestedProfileId,
         ...(brief.editorial ? { editorial: brief.editorial } : {}),
         ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
@@ -456,6 +475,7 @@ function visualDirectorAuditContext(
       },
       scenes: input.scenes.map((scene) => ({
         position: scene.position,
+        ...(scene.purpose ? { purpose: scene.purpose } : {}),
         narration: scene.narration,
         duration: scene.duration,
         visualStrategy: scene.visualStrategy,
@@ -549,6 +569,7 @@ function isDownstreamDisclosureConstraint(value: string): boolean {
 function validationFor(input: VisualDirectorAgentInput): VisualDirectorPlanValidation {
   return {
     scenePositions: input.scenes.map((scene) => scene.position),
+    ...(input.brief.viewerPromise ? { viewerPromise: input.brief.viewerPromise } : {}),
     sceneDurations: Object.fromEntries(input.scenes.map((scene) => [scene.position, scene.duration])),
     sceneVisualStrategies: Object.fromEntries(input.scenes.map((scene) => [scene.position, scene.visualStrategy])),
     allowedProviderIds: input.assetProviders.map((provider) => provider.id),

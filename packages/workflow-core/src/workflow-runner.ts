@@ -5,6 +5,7 @@ import type {
   ArtifactDraft,
   ArtifactKind,
   ExecutionConfigurationOverrideDraft,
+  HumanDecision,
   HumanDecisionDraft,
   HumanIntervention,
   HumanInterventionDraft,
@@ -69,6 +70,7 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
     readonly nextId: (prefix: string) => string,
     readonly artifacts: Artifact[] = [],
     readonly outputs: Map<string, unknown> = new Map<string, unknown>(),
+    readonly decisions: HumanDecision[] = [],
   ) {
     this.#providers = providers;
     const context = this;
@@ -77,6 +79,7 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
       get workflowId() { return context.workflowId; },
       get initialInput() { return context.initialInput; },
       get artifacts() { return context.artifacts; },
+      get decisions() { return context.decisions; },
       get outputs() { return context.outputs; },
       get spendAuthorization() { return context.spendAuthorization; },
       get spendAuthorizationExemptProviderId() { return context.spendAuthorizationExemptProviderId; },
@@ -315,6 +318,7 @@ export class WorkflowRunner {
       this.idFactory,
       run.artifacts,
       outputs,
+      run.decisions,
     );
     run.executionPlan ??= createExecutionPlan(definition, context as InMemoryWorkflowContext<unknown>, "reconstructed");
     normalizeLegacyVersionStates(definition, run, context.publicContext());
@@ -373,6 +377,7 @@ export class WorkflowRunner {
       this.idFactory,
       run.artifacts,
       outputs,
+      run.decisions,
     );
     normalizeLegacyVersionStates(definition, run, context.publicContext());
 
@@ -426,6 +431,7 @@ export class WorkflowRunner {
       this.idFactory,
       run.artifacts,
       outputs,
+      run.decisions,
     );
     normalizeLegacyVersionStates(definition, run, context.publicContext());
     const outputState = nodeRun.outputState ?? createLegacyOutputState(node, nodeRun, run.nodeRuns);
@@ -567,6 +573,7 @@ export class WorkflowRunner {
       this.idFactory,
       run.artifacts,
       outputs,
+      run.decisions,
     );
     normalizeLegacyVersionStates(definition, run, context.publicContext());
     const previousInputState = nodeRun.inputState;
@@ -778,6 +785,7 @@ export class WorkflowRunner {
       this.idFactory,
       run.artifacts,
       outputs,
+      run.decisions,
     );
     normalizeLegacyVersionStates(definition, run, context.publicContext());
     run.executionPlan = refreshMutableExecutionPlan(definition, run, context as InMemoryWorkflowContext<unknown>);
@@ -835,6 +843,7 @@ export class WorkflowRunner {
       this.idFactory,
       run.artifacts,
       outputs,
+      run.decisions,
     );
     normalizeLegacyVersionStates(definition, run, context.publicContext());
     const provider = resolveNodeProvider(node, context);
@@ -946,6 +955,7 @@ export class WorkflowRunner {
       this.idFactory,
       run.artifacts,
       outputs,
+      run.decisions,
     );
     normalizeLegacyVersionStates(definition, run, context.publicContext());
     run.revision += 1;
@@ -982,6 +992,7 @@ export class WorkflowRunner {
       this.idFactory,
       run.artifacts,
       outputs,
+      run.decisions,
     );
     normalizeLegacyVersionStates(definition, run, context.publicContext());
     run.revision += 1;
@@ -1058,6 +1069,74 @@ export class WorkflowRunner {
       this.idFactory,
       run.artifacts,
       outputs,
+      run.decisions,
+    );
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
+    run.revision += 1;
+    run.status = "running";
+    delete run.finishedAt;
+    await this.checkpoint?.(run);
+    return this.continueRun(definition, run, context);
+  }
+
+  async rerunFromNode<TInitialInput>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+    nodeId: string,
+  ): Promise<WorkflowRun<TInitialInput>> {
+    validateWorkflowDefinition(definition);
+    if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
+      throw new Error("Workflow definition does not match the persisted run.");
+    }
+    if (previousRun.status === "running") {
+      throw new Error(`Run '${previousRun.id}' is still running.`);
+    }
+    const node = definition.nodes.find((candidate) => candidate.id === nodeId);
+    const startedNode = previousRun.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+    if (!node || !startedNode || node.mode !== "automatic") {
+      throw new Error(`Node '${nodeId}' cannot be rerun.`);
+    }
+    const invalidatedNodeIds = new Set([nodeId, ...descendantNodeIds(definition.nodes, nodeId)]);
+    assertNoUncertainPaidOutcomeInvalidated(previousRun, invalidatedNodeIds);
+
+    const run = cloneWorkflowRun(previousRun);
+    const outputs = new Map<string, unknown>();
+    for (const nodeRun of run.nodeRuns) {
+      if (!invalidatedNodeIds.has(nodeRun.nodeId)) {
+        if (nodeRun.status === "succeeded" && nodeRun.output !== undefined) {
+          outputs.set(nodeRun.nodeId, nodeRun.output);
+        }
+        continue;
+      }
+      nodeRun.status = "pending";
+      nodeRun.artifactIds = [];
+      nodeRun.qualityGateResults = [];
+      delete nodeRun.output;
+      delete nodeRun.finishedAt;
+      delete nodeRun.error;
+      delete nodeRun.intervention;
+      delete nodeRun.executionReceipt;
+      delete nodeRun.spendPlan;
+      delete nodeRun.spendAuthorizationId;
+      delete nodeRun.operationRequestId;
+      delete nodeRun.interrupted;
+      delete nodeRun.outcomeUncertain;
+      if (nodeRun.outputState) nodeRun.outputState.stale = true;
+      if (nodeRun.inputState) nodeRun.inputState.stale = true;
+    }
+    run.interventions = run.interventions.filter((intervention) => !invalidatedNodeIds.has(intervention.nodeId));
+    run.spendAuthorizations = (run.spendAuthorizations ?? [])
+      .filter((authorization) => !invalidatedNodeIds.has(authorization.nodeId));
+    const context = new InMemoryWorkflowContext(
+      run.id,
+      definition.id,
+      run.initialInput,
+      this.providers,
+      this.clock,
+      this.idFactory,
+      run.artifacts,
+      outputs,
+      run.decisions,
     );
     normalizeLegacyVersionStates(definition, run, context.publicContext());
     run.revision += 1;
@@ -1880,8 +1959,8 @@ function validateReceiptCosts(
   if (receipt.actualCostCny !== undefined && !isFiniteNonNegative(receipt.actualCostCny)) {
     throw new Error("Execution receipt actualCostCny must be a finite non-negative number.");
   }
-  if (receipt.actualCostSource !== undefined && receipt.actualCostSource !== "provider_reported" && receipt.actualCostSource !== "configured_rate") {
-    throw new Error("Execution receipt actualCostSource must identify provider-reported or configured-rate accounting.");
+  if (receipt.actualCostSource !== undefined && receipt.actualCostSource !== "provider_reported" && receipt.actualCostSource !== "configured_rate" && receipt.actualCostSource !== "manual_reconciled") {
+    throw new Error("Execution receipt actualCostSource must identify provider-reported, configured-rate, or manually reconciled accounting.");
   }
   if (receipt.actualCostSource !== undefined && receipt.actualCostCny === undefined) {
     throw new Error("Execution receipt actualCostSource requires actualCostCny.");
@@ -1982,7 +2061,7 @@ function sanitizeFailureReceiptDraft(receipt: NodeExecutionReceiptDraft): NodeEx
     delete sanitized.actualCostCny;
     delete sanitized.actualCostSource;
   }
-  if (sanitized.actualCostSource !== undefined && sanitized.actualCostSource !== "provider_reported" && sanitized.actualCostSource !== "configured_rate") {
+  if (sanitized.actualCostSource !== undefined && sanitized.actualCostSource !== "provider_reported" && sanitized.actualCostSource !== "configured_rate" && sanitized.actualCostSource !== "manual_reconciled") {
     delete sanitized.actualCostSource;
   }
   if (sanitized.actualCostCny === undefined) delete sanitized.actualCostSource;

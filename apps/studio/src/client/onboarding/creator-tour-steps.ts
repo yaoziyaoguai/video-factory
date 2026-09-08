@@ -131,7 +131,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
   {
     popover: {
       title: "第五步：发布或取包",
-      description: "批准后可下载发布包，也可进入多平台发布。只有官方开放能力、账号授权和合规检查都通过的平台才会发送。",
+      description: "批准后可下载发布包，也可准备各平台发布材料。导出后由你到目标平台确认发布；只有已接入并授权的平台才会提供直接发送。",
     },
   },
   {
@@ -185,7 +185,7 @@ const PROJECT_TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="project-overview"]',
     popover: {
       title: "先看今天卡在哪一步",
-      description: "制作中会自动推进；等你审片需要你决策；已完成表示发布包已准备好，可以下载或进入多平台发布。",
+      description: "制作中会自动推进；等你审片需要你决策；已完成表示发布包已准备好，可以下载后到目标平台发布。",
       side: "bottom",
       align: "start",
     },
@@ -230,7 +230,7 @@ const RUN_TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="run-header"]',
     popover: {
       title: "这是这条视频的制作详情",
-      description: "标题旁的状态决定现在要做什么：制作中就等待，等你审片就做人工终审；失败时先查看真实原因，选择其他模型或调整配置后重试；待重新生成时确认修改后继续，已完成就取发布包或做多平台发布。",
+      description: "标题旁的状态决定现在要做什么：制作中就等待，等你审片就做人工终审；失败时先查看真实原因，选择其他模型或调整配置后重试；待重新生成时确认修改后继续，已完成就下载或准备各平台发布包。",
       side: "bottom",
       align: "start",
     },

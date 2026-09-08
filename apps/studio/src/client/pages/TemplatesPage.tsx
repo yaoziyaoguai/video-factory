@@ -292,6 +292,38 @@ export function TemplatesPage() {
                   <span>{String(index + 1).padStart(2, "0")}</span>
                   <label><small>节拍名称</small><input value={beat.label} disabled={draft.status !== "draft"} onChange={(event) => setDraft({ ...draft, storyStructure: draft.storyStructure.map((item) => item.id === beat.id ? { ...item, label: event.target.value } : item) })} /></label>
                   <label><small>叙事目的</small><textarea rows={2} value={beat.purpose} disabled={draft.status !== "draft"} onChange={(event) => setDraft({ ...draft, storyStructure: draft.storyStructure.map((item) => item.id === beat.id ? { ...item, purpose: event.target.value } : item) })} /></label>
+                  <div className="template-shot-slots">
+                    <small>关联镜头职责 · {draft.shotSlots.filter((slot) => slot.beatId === beat.id).length} 个</small>
+                    {draft.shotSlots.filter((slot) => slot.beatId === beat.id).map((slot) => (
+                      <div className="template-shot-slot" key={slot.id}>
+                        <label><small>镜头用途</small><textarea
+                          aria-label={`${beat.label} · ${slot.id} 镜头用途`}
+                          rows={2}
+                          value={slot.purpose}
+                          disabled={draft.status !== "draft"}
+                          onChange={(event) => setDraft({
+                            ...draft,
+                            shotSlots: draft.shotSlots.map((item) => item.id === slot.id ? { ...item, purpose: event.target.value } : item),
+                          })}
+                        /></label>
+                        <label><small>建议时长（秒）</small><input
+                          aria-label={`${beat.label} · ${slot.id} 建议时长`}
+                          type="number"
+                          min="0.25"
+                          max="120"
+                          step="0.25"
+                          value={slot.durationSeconds}
+                          disabled={draft.status !== "draft"}
+                          onChange={(event) => setDraft({
+                            ...draft,
+                            shotSlots: draft.shotSlots.map((item) => item.id === slot.id
+                              ? { ...item, durationSeconds: Number(event.target.value) }
+                              : item),
+                          })}
+                        /></label>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ))}
             </section>
@@ -312,10 +344,10 @@ export function TemplatesPage() {
           </footer>
         </section>
       ) : null}
-      <details className="template-experiments" aria-label="模板实际表现">
-        <summary><span><strong>模板实际表现</strong><small>查看模板实验评分与历史运行证据</small></span><b>{experiments.length ? `${experiments.length} 个模板有数据` : "暂无数据"}</b></summary>
+      <details className="template-experiments" aria-label="模板制作质量记录">
+        <summary><span><strong>模板制作质量记录</strong><small>查看过审、返工和制作质量证据，不预测流量</small></span><b>{experiments.length ? `${experiments.length} 个模板有数据` : "暂无数据"}</b></summary>
         <div className="template-experiment-content">
-          <div className="section-heading"><div><p className="eyebrow">运行证据</p><h2>模板实验评分</h2></div><span>只统计运行证据，不改写已发布模板</span></div>
+          <div className="section-heading"><div><p className="eyebrow">运行证据</p><h2>制作质量记录</h2></div><span>只统计真实制作，不代表播放量或爆款概率</span></div>
           {experimentError ? <p className="template-editor-notice is-warning">评分读取失败：{experimentError}</p> : null}
           <div className="template-scorecard-grid">{experiments.map((scorecard) => <article key={scorecard.templateId}>
             <header><div><strong>{scorecard.templateName}</strong><small>{scorecard.sampleSize} 条样本</small></div><span>{scorecard.metrics.finalApprovalRate === null ? "待样本" : `${scorecard.metrics.finalApprovalRate}% 通过`}</span></header>

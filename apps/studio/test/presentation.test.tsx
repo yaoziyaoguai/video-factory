@@ -46,8 +46,8 @@ describe("creator-facing presentation labels", () => {
     expect(technical).toBe("AI 服务 AI 服务 数据格式 资源清单 备用方案 任务编号 内部能力 首选服务响应超时 必须修改的问题");
     expect(technical).not.toMatch(/Agent|Provider|Broker|schema|manifest|fallback|taskId|api-visual-director-v1|blocking/i);
     expect(creatorFacingTechnicalText("Codex 独立质量审计 · xhigh 推理 · 阻断门禁"))
-      .toBe("AI 独立质量复核 · 深入推理 · 不通过则要求修改");
-    expect(creatorFacingTechnicalText("Codex 独立质量审计 Agent")).toBe("AI 独立质量复核");
+      .toBe("Codex 独立质量复核 · 深入推理 · 不通过则要求修改");
+    expect(creatorFacingTechnicalText("Codex 独立质量审计 Agent")).toBe("Codex 独立质量复核");
 
     const creatorCopy = "我的 Provider 不是故事主角，Agent 也不是标题。";
     expect(humanizeCreativeText(creatorCopy)).toBe(creatorCopy);
@@ -76,7 +76,7 @@ describe("creator-facing presentation labels", () => {
     }
     expect(creatorFacingTechnicalText(diagnostics[0])).toContain("由你确认");
     expect(creatorFacingTechnicalText("已按 hook_and_scene_midpoints 的稀疏证据逐场核对。请调整 source_assets 或画面 Provider。"))
-      .toBe("已按每个镜头的关键画面完成预检。请调整生成画面或画面服务。");
+      .toBe("已抽查各镜头关键帧，未覆盖逐帧运动与声音。请调整源素材预检或画面服务。");
   });
 
   it("translates persisted worker provenance into clear Chinese", () => {

@@ -65,6 +65,7 @@ export function resolveExecutableVisualPlan(
   capabilities: VisualPlanDeliveryCapabilities,
 ): StudioVisualPlan {
   let changed = false;
+  const executableStrategy = removeUnavailableSourceDirections(plan.strategy);
   const beats = plan.beats.map((beat) => {
     if (beat.source === "stock" && capabilities.stock) return { ...beat };
     if (beat.source === "generated" && capabilities.generated) return { ...beat };
@@ -82,16 +83,27 @@ export function resolveExecutableVisualPlan(
     return { ...beat, source };
   });
 
-  if (!changed) return { strategy: plan.strategy, beats };
+  if (!changed && executableStrategy === plan.strategy) return { strategy: plan.strategy, beats };
   const enabledSources = [
     capabilities.stock ? "素材库" : undefined,
     capabilities.generated ? "AI 生成" : undefined,
     capabilities.editorialCard ? "主动排版" : undefined,
   ].filter(Boolean).join("、");
   return {
-    strategy: `保留原计划的观看顺序、主体、动作与证据编排；本次只使用已启用的${enabledSources}画面，不假设存在未提供的创作者拍摄或屏幕录制。`,
+    strategy: `${executableStrategy || "保留原计划的观看顺序、主体、动作与证据编排；"}本次只使用已启用的${enabledSources}画面，不假设存在未提供的创作者拍摄或屏幕录制。`,
     beats,
   };
+}
+
+function removeUnavailableSourceDirections(strategy: string): string {
+  const unavailableSource = /(?:创作者|作者|用户)(?:自行)?(?:拍摄|实拍)|屏幕(?:录制|录像)/;
+  if (!unavailableSource.test(strategy)) return strategy;
+  const kept = strategy
+    .split(/[。！？!?；;]+/)
+    .map((clause) => clause.trim())
+    .filter(Boolean)
+    .filter((clause) => !unavailableSource.test(clause));
+  return kept.length ? `${kept.join("；")}；` : "";
 }
 
 function payoffSourceFor(category: StudioTopicCategory): StudioVisualSource {

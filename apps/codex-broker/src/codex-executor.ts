@@ -151,12 +151,14 @@ const DATA_ISOLATION_NOTICE = [
 export class CodexExecutorError extends Error {
   readonly details: CodexExecutorFailureDetails | undefined;
   readonly failureKind: "model_provider_transient" | "model_provider_no_output" | undefined;
+  readonly outcomeUncertain: boolean;
 
   constructor(message: string, readonly transient: boolean, options?: CodexExecutorErrorOptions) {
     super(message, options);
     this.name = "CodexExecutorError";
     this.details = options?.details;
     this.failureKind = options?.failureKind;
+    this.outcomeUncertain = options?.outcomeUncertain === true;
   }
 }
 
@@ -175,6 +177,7 @@ export interface CodexExecutorFailureDetails {
   reasonCode: string;
   providerId: string;
   modelId: string;
+  queueWaitMs?: number;
   providerWaitMs?: number;
   requestIdHash?: string;
   finishReason?: string;
@@ -187,6 +190,7 @@ export interface CodexExecutorFailureDetails {
 interface CodexExecutorErrorOptions extends ErrorOptions {
   details?: CodexExecutorFailureDetails;
   failureKind?: "model_provider_transient" | "model_provider_no_output";
+  outcomeUncertain?: boolean;
 }
 
 export interface TopicIdeasPayload {
@@ -348,7 +352,7 @@ export interface ReferenceGrammarPayload {
   revision?: Record<string, unknown>;
 }
 
-export type ValidatedTask =
+export type ValidatedTask = (
   | { kind: "topic-ideas"; payload: TopicIdeasPayload }
   | { kind: "series-roadmap"; payload: SeriesRoadmapPayload }
   | { kind: "director-plan"; payload: DirectorPlanPayload }
@@ -357,7 +361,8 @@ export type ValidatedTask =
   | { kind: "asset-rank"; payload: AssetRankPayload }
   | { kind: "reference-grammar"; payload: ReferenceGrammarPayload }
   | { kind: "visual-review"; payload: VisualReviewPayload }
-  | { kind: "role-audit"; payload: RoleAuditPayload };
+  | { kind: "role-audit"; payload: RoleAuditPayload }
+) & { expectedContractDigest?: string };
 
 export interface SpawnedProcess {
   readonly pid?: number | undefined;
@@ -420,6 +425,7 @@ export interface CodexTaskTrace {
   fallbackFromModelId?: string;
   fallbackReason?: string;
   attemptedModelIds?: string[];
+  queueWaitMs?: number;
   providerWaitMs?: number;
   firstOutputEventMs?: number;
   toolMs?: number;
@@ -441,7 +447,7 @@ export function parseTaskRequest(
     throw new CodexExecutorError("Codex task request must be an object.", false);
   }
   const record = value as Record<string, unknown>;
-  assertExactKeys(record, ["protocolVersion", "requestId", "kind", "payload", "sessionKey", "sessionHandle"], "request");
+  assertExactKeys(record, ["protocolVersion", "requestId", "kind", "payload", "expectedContractDigest", "sessionKey", "sessionHandle"], "request");
   if (record.protocolVersion !== CODEX_BRIDGE_PROTOCOL_VERSION) {
     throw new CodexExecutorError("Unsupported codex bridge protocol version.", false);
   }
@@ -459,7 +465,33 @@ export function parseTaskRequest(
       false,
     );
   }
-  return validateTaskPayload(kind as BrokerTaskKind, record.payload);
+  const task = validateTaskPayload(kind as BrokerTaskKind, record.payload);
+  const contractProtected = kind === "visual-review" || kind === "role-audit";
+  if (contractProtected) {
+    if (typeof record.expectedContractDigest !== "string" || !/^[a-f0-9]{64}$/.test(record.expectedContractDigest)) {
+      throw contractMismatchError(identity, kind, "The request is missing a valid expected task contract digest.");
+    }
+    const actual = taskContractDescriptorFor(kind as BrokerTaskKind).digest;
+    if (record.expectedContractDigest !== actual) {
+      throw contractMismatchError(identity, kind, "The requested task contract is not available on this broker.");
+    }
+    return { ...task, expectedContractDigest: record.expectedContractDigest } as ValidatedTask;
+  }
+  if (record.expectedContractDigest !== undefined) {
+    throw new CodexExecutorError("expectedContractDigest is only supported for contract-protected tasks.", false);
+  }
+  return task;
+}
+
+function contractMismatchError(identity: CodexExecutorIdentity | undefined, kind: string, message: string): CodexExecutorError {
+  return new CodexExecutorError(message, false, {
+    details: {
+      category: "invalid_request",
+      reasonCode: "contract_mismatch",
+      providerId: identity?.providerId ?? "codex-broker",
+      modelId: identity?.taskModels?.[kind as BrokerTaskKind] ?? identity?.modelId ?? "unknown",
+    },
+  });
 }
 
 export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): ValidatedTask {
@@ -1520,7 +1552,7 @@ function requireRoleAuditValidationFailure(value: unknown): NonNullable<RoleAudi
   const record = requireRecord(value, "payload.validationFailure");
   assertExactKeys(
     record,
-    ["invalidCandidate", "invalidCandidateHash", "validationError", "iteration"],
+    ["invalidCandidate", "invalidCandidateHash", "validationError"],
     "payload.validationFailure",
   );
   let serialized: string | undefined;

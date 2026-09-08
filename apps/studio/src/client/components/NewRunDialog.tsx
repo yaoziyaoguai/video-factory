@@ -20,7 +20,7 @@ import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, Stud
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { applyTemplateVoiceRecommendation } from "../../shared/template-voice-recommendation.js";
-import { resolveExecutableVisualPlan } from "../../shared/visual-plan.js";
+import { planVisualDirection, resolveExecutableVisualPlan } from "../../shared/visual-plan.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { VoiceStudio } from "./VoiceStudio.js";
 import { studioApi } from "../api.js";
@@ -75,7 +75,7 @@ const CAPABILITIES: CapabilityDefinition[] = [
   { key: "voice", capability: "voice.synthesize", label: "配音", role: "声音导演", description: "旁白音色与语速", preferred: "macos-say-v1", icon: Mic2 },
   { key: "render", capability: "video.render", label: "视频渲染", role: "剪辑师", description: "9:16 合成、字幕与音轨", preferred: "python-ffmpeg-v1", icon: Film },
   { key: "technicalReview", capability: "quality.review", label: "机器质检", role: "技术质检", description: "分辨率、时长与产物校验", preferred: "python-technical-review-v1", icon: ScanSearch },
-  { key: "visualReview", capability: "quality.review.visual", label: "视觉审片", role: "视觉审片员", description: "构图、连续性、节奏与文字可读性", preferred: "glm-visual-review-v1", icon: ScanSearch, optional: true },
+  { key: "visualReview", capability: "quality.review.visual", label: "视觉审片", role: "视觉审片员", description: "构图、连续性、节奏与文字可读性", preferred: "glm-visual-review-v1", icon: ScanSearch },
 ];
 
 const RECIPES: Array<{
@@ -94,7 +94,7 @@ const RECIPES: Array<{
   },
   {
     id: "keyshot-ai",
-    label: "允许付费关键镜头",
+    label: "允许 AI 生成画面，按实际镜头报价",
     description: "导演可建议生成关键图片或视频，每次调用前都会给出报价并等你确认",
     allowMeteredProviders: true,
   },
@@ -128,7 +128,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([]);
   const [modelSelections, setModelSelections] = useState<Record<string, string>>({});
   const [voiceDirection, setVoiceDirection] = useState<StudioProductionInput["voiceDirection"]>(() => defaultVoiceDirection(providers));
-  const [visualReviewEnabled, setVisualReviewEnabled] = useState(false);
   const [semanticRankEnabled, setSemanticRankEnabled] = useState(true);
   const [referenceVideo, setReferenceVideo] = useState<ReferenceVideoSelection>();
   const releasedReferenceId = useRef<string | undefined>(undefined);
@@ -144,6 +143,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     title: initialValues?.title ?? "",
     angle: initialValues?.angle ?? "",
     audience: initialValues?.audience ?? "",
+  }));
+  const [visualBriefValues, setVisualBriefValues] = useState(() => ({
+    visualProof: initialValues?.visualProof ?? "",
+    strategy: initialValues?.visualPlan?.strategy ?? "",
   }));
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [inheritedSettingsOpen, setInheritedSettingsOpen] = useState(false);
@@ -198,29 +201,32 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const effectiveModelId = (provider: StudioProvider) => modelSelections[provider.id]
     ?? selectedTemplate?.modelDefaults?.[provider.id]
     ?? provider.defaultModelId;
-  const visualReviewProvider = providers.find((provider) => {
-    return provider.capability === "quality.review.visual" && provider.id === effectiveBindings.visualReview && provider.available;
-  }) ?? providers.find((provider) => provider.capability === "quality.review.visual" && provider.available);
-  const dualFinalReviewAvailable = providers.some((provider) => provider.id === "glm-visual-review-v1" && provider.available)
-    && providers.some((provider) => provider.id === "codex-visual-review-v1" && provider.available);
-  const inheritedVisualReviewUnavailable = Boolean(initialValues?.rework && bindings.visualReview && !providers.some((provider) => (
-    provider.id === bindings.visualReview
-    && provider.capability === "quality.review.visual"
-    && provider.available
-    && provider.kind !== "test"
-  )));
+  const finalReviewProviders = ["glm-visual-review-v1", "codex-visual-review-v1"].map((providerId) => (
+    providers.find((provider) => provider.id === providerId
+      && provider.capability === "quality.review.visual"
+      && provider.available
+      && provider.kind !== "test")
+  ));
+  const visualReviewProvider = finalReviewProviders.find((provider) => provider?.id === effectiveBindings.visualReview)
+    ?? finalReviewProviders.find((provider): provider is StudioProvider => provider !== undefined);
   const referenceGrammarProvider = providers.find((provider) => {
     return provider.id === "codex-reference-grammar-v1" && provider.capability === "reference.grammar" && provider.available;
   });
   const roleAuditProvider = providers.find((provider) => {
-    return provider.id === "codex-role-auditor-v1" && provider.capability === "role.audit" && provider.available;
+    return provider.id === "codex-role-auditor-v1"
+      && provider.capability === "role.audit"
+      && provider.available
+      && provider.kind !== "test";
   });
+  const finalReviewerModels = finalReviewProviders.map((provider) => provider?.defaultModelId).filter(Boolean);
+  const dualFinalReviewAvailable = finalReviewProviders.every(Boolean)
+    && finalReviewerModels.length === 2
+    && new Set(finalReviewerModels).size === 2
+    && Boolean(roleAuditProvider);
   const semanticRankCompatible = Boolean(effectiveBindings.director && effectiveBindings.assets === "ai-shot-router-v1");
   const effectiveSemanticRank = semanticRankCompatible && semanticRankEnabled;
   const meteredSelected = selectedMeteredSources.length > 0 && selectedRecipe.allowMeteredProviders;
-  const visualReviewRequired = meteredSelected;
-  const effectiveVisualReviewEnabled = visualReviewRequired || visualReviewEnabled;
-  const subscriptionVisualReview = effectiveVisualReviewEnabled && visualReviewProvider?.billing === "subscription"
+  const subscriptionVisualReview = dualFinalReviewAvailable && visualReviewProvider?.billing === "subscription"
     ? visualReviewProvider
     : undefined;
   const automaticVoiceProvider = providers.find((provider) => {
@@ -292,7 +298,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
           label: "画面来源",
           value: provider ? creatorProviderName(provider) : "上一版画面来源",
           reason,
-          action: "请调整画面来源，或重新选择允许付费关键镜头",
+          action: "请调整画面来源，或重新选择允许 AI 生成画面，按实际镜头报价",
         });
       }
     }
@@ -334,6 +340,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     ...missingCapabilities.map((item) => item.label),
     ...(assetProviderIds.length > 0 ? [] : ["导演画面来源"]),
     ...(roleAuditProvider ? [] : ["独立质量复核"]),
+    ...(dualFinalReviewAvailable ? [] : ["GLM 与 Codex 双模型审片"]),
     ...(voiceSelectionAvailable === false && !initialValues?.rework ? ["可用声音演员"] : []),
   ];
   // 链接按现有分区优先：制作角色能力缺口落到制作分工；只剩画面来源缺口时落到画面来源分区，避免让创作者自己找。
@@ -345,7 +352,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const creativeSummary = {
     audience: briefSummaryValues.audience || "待填写目标受众",
     openingPromise: initialValues?.seriesContext?.episode.hook ?? (briefSummaryValues.angle || "待填写开头承诺"),
-    requiredVisual: initialValues?.visualProof ?? initialValues?.visualPlan?.strategy ?? (briefSummaryValues.angle ? `用画面证明“${briefSummaryValues.angle}”` : "待明确必须看到的画面证据"),
+    requiredVisual: visualBriefValues.visualProof || visualBriefValues.strategy || (briefSummaryValues.angle ? `用画面证明“${briefSummaryValues.angle}”` : "待明确必须看到的画面证据"),
     payoff: initialValues?.seriesContext?.episode.payoff
       ?? (briefSummaryValues.title ? `围绕“${briefSummaryValues.title}”给出明确答案或可执行判断` : "待填写观众最终收获"),
   };
@@ -366,7 +373,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         const resolvedTemplate = availableTemplates.find((template) => template.id === requestedTemplateId);
         setSelectedTemplateId(resolvedTemplate?.id ?? "");
         if (resolvedTemplate && !preserveCurrentChoices && !initialValues?.voiceDirection && !creatorVoiceWasCustomized(creatorSettings) && !voiceTouched.current) {
-          setVoiceDirection((current) => applyTemplateVoiceRecommendation(resolvedTemplate, current));
+          applyUntouchedTemplateVoice(resolvedTemplate);
         }
       }
       setTemplatesLoaded(true);
@@ -435,15 +442,16 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     // 只有用户或入口明确指定的模型才属于本次覆盖。全局/模板默认值由服务端按优先级解析。
     setModelSelections({ ...(initialValues?.models ?? {}) });
     setVoiceDirection(resolvedVoiceDirection);
-    setVisualReviewEnabled(Boolean(initialBindings.visualReview && providers.some((provider) => {
-      return provider.id === initialBindings.visualReview && provider.available;
-    })));
     setSemanticRankEnabled(initialValues?.workflowFeatures?.assetSemanticRank ?? Boolean(initialBindings.director));
     setReferenceVideo(inheritedReferenceVideo ? { ...inheritedReferenceVideo, inheritedFromRework: true } : undefined);
     setBriefSummaryValues({
       title: initialValues?.title ?? "",
       angle: initialValues?.angle ?? "",
       audience: initialValues?.audience ?? "",
+    });
+    setVisualBriefValues({
+      visualProof: initialValues?.visualProof ?? "",
+      strategy: initialValues?.visualPlan?.strategy ?? "",
     });
     setReferenceUploading(false);
     setReferenceError(undefined);
@@ -535,16 +543,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   function selectProvider(provider: StudioProvider) {
     if (!provider.available) return;
     setBindings((current) => ({ ...current, [activeKey]: provider.id }));
-    if (activeKey === "visualReview") setVisualReviewEnabled(true);
-  }
-
-  function disableInheritedVisualReview() {
-    setVisualReviewEnabled(false);
-    setBindings((current) => {
-      const next = { ...current };
-      delete next.visualReview;
-      return next;
-    });
   }
 
   function openAssetSourceControls() {
@@ -585,8 +583,14 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       return current;
     });
     if (!initialValues?.rework && !initialValues?.voiceDirection && !creatorVoiceWasCustomized(creatorSettings) && !voiceTouched.current) {
-      setVoiceDirection((current) => applyTemplateVoiceRecommendation(template, current));
+      applyUntouchedTemplateVoice(template);
     }
+  }
+
+  function applyUntouchedTemplateVoice(template: StudioTemplate) {
+    const recommendation = applyTemplateVoiceRecommendation(template, voiceDirection);
+    setVoiceDirection(recommendation);
+    setBindings((current) => ({ ...current, voice: providerForVoiceProfile(recommendation.profileId) }));
   }
 
   function toggleAssetProvider(provider: StudioProvider) {
@@ -648,13 +652,12 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       if (!templatesLoaded || !templates.some((template) => template.id === selectedTemplateId && template.status === "published")) {
         throw new Error(templateError ?? "模板目录尚未加载完成，请稍后重试。");
       }
-      if (visualReviewRequired && !visualReviewProvider) {
-        throw new Error("付费图片和视频必须先启用可用的视觉审片；请检查视觉审片服务，或改用免费画面来源。");
+      if (!dualFinalReviewAvailable || !visualReviewProvider) {
+        throw new Error("正式制作必须由 GLM 与 Codex 使用两个不同模型独立审片；请先在创作设置中恢复两种审片和独立质量复核能力。");
       }
       const selectedTemplate = templates.find((template) => template.id === selectedTemplateId)!;
       const providersForRun: StudioProductionInput["providers"] = { ...effectiveBindings };
-      if (effectiveVisualReviewEnabled && visualReviewProvider) providersForRun.visualReview = visualReviewProvider.id;
-      else delete providersForRun.visualReview;
+      providersForRun.visualReview = visualReviewProvider.id;
       const selectedProviderIds = new Set([
         ...Object.values(providersForRun).filter((providerId): providerId is string => Boolean(providerId)),
         ...assetProviderIds,
@@ -662,8 +665,19 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       const modelsForRun = Object.fromEntries(Object.entries(modelSelections).filter(([providerId, modelId]) => {
         return selectedProviderIds.has(providerId) && Boolean(modelId);
       }));
-      const executableVisualPlan = initialValues?.visualPlan
-        ? resolveExecutableVisualPlan(initialValues.visualPlan, {
+      const visualProof = visualBriefValues.visualProof.trim();
+      const visualPlanStrategy = visualBriefValues.strategy.trim();
+      const visualPlan = visualPlanStrategy
+        ? {
+            ...(initialValues?.visualPlan ?? planVisualDirection({
+              title: requiredString(data, "title"),
+              hook: requiredString(data, "angle"),
+            })),
+            strategy: visualPlanStrategy,
+          }
+        : initialValues?.visualPlan;
+      const executableVisualPlan = visualPlan
+        ? resolveExecutableVisualPlan(visualPlan, {
             stock: selectedAssetSources.some((provider) => provider.deliveryTypes?.some((type) => type === "stock_video" || type === "stock_image")),
             generated: selectedAssetSources.some((provider) => provider.deliveryTypes?.some((type) => type === "generated_video" || type === "generated_image")),
             editorialCard: selectedAssetSources.some((provider) => provider.deliveryTypes?.includes("editorial_card")),
@@ -680,7 +694,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         reviewMode: "manual",
         runPurpose: initialValues?.runPurpose ?? "production",
         ...(editorial ? { editorial } : {}),
-        ...(initialValues?.visualProof ? { visualProof: initialValues.visualProof } : {}),
+        ...(visualProof ? { visualProof } : {}),
         ...(executableVisualPlan ? { visualPlan: executableVisualPlan } : {}),
         ...(initialValues?.seriesContext ? { seriesContext: initialValues.seriesContext } : {}),
         ...(initialValues?.creationContext ? { creationContext: initialValues.creationContext } : {}),
@@ -828,15 +842,15 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               <div className="rework-instruction-grid">
                 <label className="field">
                   <span>脚本修改要求</span>
-                  <textarea required value={rework.nodeInstructions.script} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, script: event.target.value } } : current)} />
+                  <textarea required value={creatorFacingTechnicalText(rework.nodeInstructions.script)} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, script: event.target.value } } : current)} />
                 </label>
                 <label className="field">
                   <span>导演方案修改要求</span>
-                  <textarea required value={rework.nodeInstructions.visualDirection} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, visualDirection: event.target.value } } : current)} />
+                  <textarea required value={creatorFacingTechnicalText(rework.nodeInstructions.visualDirection)} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, visualDirection: event.target.value } } : current)} />
                 </label>
                 <label className="field">
                   <span>画面素材修改要求</span>
-                  <textarea required value={rework.nodeInstructions.assets} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, assets: event.target.value } } : current)} />
+                  <textarea required value={creatorFacingTechnicalText(rework.nodeInstructions.assets)} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, assets: event.target.value } } : current)} />
                 </label>
               </div>
               <p className="rework-boundary-note">{reworkBaselineSummary(rework)}</p>
@@ -920,6 +934,24 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                     <option value="45">45 秒</option>
                     <option value="60">60 秒</option>
                   </select>
+                </label>
+                <label className="field field-wide">
+                  <span>必须让观众看到的证据（可选）</span>
+                  <textarea
+                    rows={3}
+                    value={visualBriefValues.visualProof}
+                    placeholder="例如：同一个操作修改前后的真实结果并列出现，观众可以直接核对差异"
+                    onChange={(event) => setVisualBriefValues((current) => ({ ...current, visualProof: event.target.value }))}
+                  />
+                </label>
+                <label className="field field-wide">
+                  <span>视觉论证方式（可选）</span>
+                  <textarea
+                    rows={3}
+                    value={visualBriefValues.strategy}
+                    placeholder="例如：用同一主体贯穿全片，先展示问题，再用过程和结果兑现开头承诺"
+                    onChange={(event) => setVisualBriefValues((current) => ({ ...current, strategy: event.target.value }))}
+                  />
                 </label>
               </div>
               <CreativeSummary summary={creativeSummary} />
@@ -1006,7 +1038,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
 
             <section className="production-team-section" aria-labelledby="production-team-title">
               <div className="compact-section-heading">
-                <div><span>04</span><h3 id="production-team-title">开工前确认制作团队</h3></div>
+                <div><span>04</span><h3 id="production-team-title">自动制作设置</h3></div>
                 <small>这里的选择会真实进入本次生产单</small>
               </div>
               <div className="production-role-grid">
@@ -1035,7 +1067,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                           const provider = providers.find((candidate) => candidate.id === event.target.value);
                           if (!provider) return;
                           setBindings((current) => ({ ...current, [item.key]: provider.id }));
-                          if (item.key === "visualReview") setVisualReviewEnabled(true);
                         }}
                       >
                         {!requestedProviderId ? <option value="">未配置</option> : null}
@@ -1055,7 +1086,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                         {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                       </select>
                       {(item.key === "script" || item.key === "director" || item.key === "visualReview") && models.length > 1
-                        ? <small>你选的是首选；仅在连接、超时、限流或服务不可用时，才按兼容候选顺序接管。</small>
+                        ? <small>你选的是首选；只有确认请求未被受理时，兼容候选才会接管。若请求可能已受理但结果不确定，流程会暂停核对，不会切换模型。</small>
                         : null}
                     </label> : <p>{item.key === "voice" ? "音色与语速在下方声音导演中调整。" : selected?.description ?? item.description}</p>}
                     {item.key === "assets" ? <div className="production-role-source-models">
@@ -1228,36 +1259,24 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <span><Sparkles aria-hidden="true" size={17} /><strong>AI 候选画面排序</strong></span>
                 <small>{semanticRankCompatible ? "先预览图库候选并给出逐镜排序；失败时保留素材源原顺序，下载前仍可人工调整" : "需要先启用 AI 视觉导演与逐镜画面选择"}</small>
               </label>
-              <label className={effectiveVisualReviewEnabled ? "visual-review-control is-enabled" : "visual-review-control"}>
+              <label className={dualFinalReviewAvailable ? "visual-review-control is-enabled" : "visual-review-control"}>
                 <input
                   type="checkbox"
-                  checked={effectiveVisualReviewEnabled && Boolean(visualReviewProvider)}
-                  disabled={!visualReviewProvider || visualReviewRequired}
-                  onChange={(event) => {
-                    setVisualReviewEnabled(event.target.checked);
-                    if (event.target.checked && visualReviewProvider) {
-                      setBindings((current) => ({ ...current, visualReview: visualReviewProvider.id }));
-                    }
-                  }}
+                  checked={dualFinalReviewAvailable && Boolean(visualReviewProvider)}
+                  disabled
+                  readOnly
                 />
-                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片</strong></span>
-                <small>{visualReviewProvider
-                  ? dualFinalReviewAvailable
-                    ? `${creatorProviderName(visualReviewProvider)} 负责中途预检；最终成片由 GLM 与 Codex 对同一组抽帧分别审查，不上传音轨${visualReviewRequired ? "；付费画面必须启用" : ""}`
-                    : `${creatorProviderName(visualReviewProvider)} · 抽帧审查，不上传音轨${visualReviewRequired ? "；付费画面必须启用" : ""}`
-                  : "ZAI 视觉审片服务当前不可用，本次不会运行视觉审片"}</small>
+                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · GLM + Codex 双模型</strong></span>
+                <small>{dualFinalReviewAvailable && visualReviewProvider
+                  ? `${creatorProviderName(visualReviewProvider)} 负责中途预检；最终成片由 GLM 与 Codex 对同一组抽帧分别独立审查，不上传音轨`
+                  : "两种审片模型或独立质量复核当前不完整，正式制作不能开工"}</small>
               </label>
-              {inheritedVisualReviewUnavailable && !visualReviewRequired ? <button
-                className="button button-ghost"
-                type="button"
-                onClick={disableInheritedVisualReview}
-              >本次停用视觉审片</button> : null}
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>
               <div className="budget-control">
                 <span><strong>费用确认方式</strong></span>
                 <small>{[
                   meteredSelected ? "图片和视频按实际方案逐项报价，人工确认后才执行" : "图片和视频不会产生现金报价",
-                  automaticVoiceProvider ? "配音自动记入成本账，不弹现金报价；失败会停在配音步骤" : "",
+                  automaticVoiceProvider ? "配音自动计入已记录费用，不弹现金报价；失败会停在配音步骤" : "",
                   subscriptionVisualReview ? "视觉审片使用订阅额度，不产生现金报价；质量问题会停在审片步骤" : "",
                 ].filter(Boolean).join("；")}</small>
               </div>
@@ -1287,7 +1306,7 @@ function CreativeSummary({ summary }: {
   summary: { audience: string; openingPromise: string; requiredVisual: string; payoff: string };
 }) {
   return <section className="creative-summary" aria-label="创作目标摘要">
-    <header><strong>创作目标摘要</strong><small>开工和终审都按这四项核对</small></header>
+    <header><strong>系统整理的创作目标</strong><small>根据简报推导；可回到标题、角度、受众和画面字段修改</small></header>
     <dl>
       <div><dt>给谁看</dt><dd>{summary.audience}</dd></div>
       <div><dt>开头承诺</dt><dd>{summary.openingPromise}</dd></div>
@@ -1363,7 +1382,7 @@ function roleExecutionLabel(item: CapabilityDefinition, provider: StudioProvider
   if (item.key === "visualReview") return "模型审片";
   if (provider.id.startsWith("codex-") || provider.id === "api-visual-director-v1") return "AI 创作 · 最多 3 轮质量修订";
   if (provider.id === "ai-shot-router-v1") return "AI 逐镜选择画面来源";
-  return "确定性工具";
+  return "本地处理 / 自动执行";
 }
 
 function withModelSelection(current: Record<string, string>, providerId: string, modelId: string): Record<string, string> {
@@ -1414,10 +1433,14 @@ function sourceIdsForRecipe(
           && provider.estimatedCnyPerClip;
       })
     : undefined;
-  const metered = preferredMetered ?? providers
+  const metered = providers
     .filter((provider) => isAssetSource(provider) && provider.available && provider.billing === "metered" && provider.estimatedCnyPerClip)
-    .sort((left, right) => (left.estimatedCnyPerClip ?? Infinity) - (right.estimatedCnyPerClip ?? Infinity))[0];
-  return metered ? [...free, metered.id] : free;
+    .sort((left, right) => (
+      Number(right.id === preferredMetered?.id) - Number(left.id === preferredMetered?.id)
+      || (left.estimatedCnyPerClip ?? Infinity) - (right.estimatedCnyPerClip ?? Infinity)
+    ));
+  // 这里只声明导演可规划的能力池，不代表费用授权；保留图片和视频路线，逐镜报价后再由用户确认。
+  return [...free, ...metered.map((provider) => provider.id)];
 }
 
 function includeLocalEditorialSource(sourceIds: string[], providers: StudioProvider[]): string[] {
@@ -1439,13 +1462,7 @@ function creatorFacingRework(
 ): StudioProductionInput["rework"] | undefined {
   if (!rework) return undefined;
   const draft = structuredClone(rework);
-  const present = (value: string) => creatorFacingTechnicalText(value) ?? value;
-  // 审片事实参与服务端完整性校验，展示时转换即可，不能改写后再提交。
-  draft.nodeInstructions = {
-    script: present(draft.nodeInstructions.script),
-    visualDirection: present(draft.nodeInstructions.visualDirection),
-    assets: present(draft.nodeInstructions.assets),
-  };
+  // nodeInstructions 是下一轮生产的权威输入；人类可读转换只用于渲染，不能写回载荷。
   const fullScenePositions = verifiedReworkScenePositions(draft);
   if (fullScenePositions) {
     draft.affectedScenePositions = defaultReworkScenePositions(

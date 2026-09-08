@@ -11,7 +11,7 @@ import {
 } from "./model-fallback.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
-export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v11|role-audit-v1|visual-review-validator-v4|evidence-state-v2|pilot-scope-v2";
+export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v13|role-audit-v3|visual-review-validator-v4|evidence-state-v2|pilot-scope-v2";
 
 export interface VisualReviewFramePayload {
   timecodeMs: number;
@@ -96,6 +96,7 @@ export interface VisualReviewFinding {
   severity: "info" | "warning" | "critical";
   description: string;
   suggestion: string;
+  reviewSources?: Array<{ providerId: string; modelId: string }>;
 }
 
 export interface VisualReviewReport {
@@ -135,6 +136,11 @@ export interface VisualReviewScope {
 export interface VisualReviewAgent {
   id: string;
   modelId: string;
+  independentRoleAudit?: boolean;
+  finalReviewConfiguration?: {
+    mode: "dual";
+    reviewers: Array<{ providerId: string; modelId: string; independentRoleAudit: boolean }>;
+  };
   review(input: VisualReviewAgentInput): Promise<VisualReviewReport>;
   reviewDetailed?(input: VisualReviewAgentInput): Promise<VisualReviewExecution>;
 }
@@ -290,6 +296,7 @@ export class FallbackVisualReviewAgent implements VisualReviewAgent {
 export class IndependentDualVisualReviewAgent implements VisualReviewAgent {
   readonly id: string;
   readonly modelId: string;
+  readonly finalReviewConfiguration: NonNullable<VisualReviewAgent["finalReviewConfiguration"]>;
 
   constructor(private readonly options: IndependentDualVisualReviewAgentOptions) {
     if (options.primary.id === options.secondary.id || options.primary.modelId === options.secondary.modelId) {
@@ -297,6 +304,14 @@ export class IndependentDualVisualReviewAgent implements VisualReviewAgent {
     }
     this.id = options.primary.id;
     this.modelId = options.primary.modelId;
+    this.finalReviewConfiguration = {
+      mode: "dual",
+      reviewers: [options.primary, options.secondary].map((agent) => ({
+        providerId: agent.id,
+        modelId: agent.modelId,
+        independentRoleAudit: agent.independentRoleAudit === true,
+      })),
+    };
   }
 
   async review(input: VisualReviewAgentInput): Promise<VisualReviewReport> {
@@ -463,7 +478,10 @@ function mergeIndependentVisualReviews(reviews: IndependentVisualReviewExecution
     legibility: Math.min(...reviews.map((review) => review.output.scores.legibility)),
     safety: Math.min(...reviews.map((review) => review.output.scores.safety)),
   };
-  const findings = deduplicateVisualReviewFindings(reviews.flatMap((review) => review.output.findings));
+  const findings = deduplicateVisualReviewFindings(reviews.flatMap((review) => review.output.findings.map((finding) => ({
+    ...finding,
+    reviewSources: [{ providerId: review.providerId, modelId: review.modelId }],
+  }))));
   const requestedRecommendation = reviews.some((review) => review.output.recommendation === "reject")
     ? "reject"
     : reviews.some((review) => review.output.recommendation === "revise") ? "revise" : "approve";
@@ -479,8 +497,8 @@ function mergeIndependentVisualReviews(reviews: IndependentVisualReviewExecution
 }
 
 function deduplicateVisualReviewFindings(findings: VisualReviewFinding[]): VisualReviewFinding[] {
-  const seen = new Set<string>();
-  return findings.filter((finding) => {
+  const deduplicated = new Map<string, VisualReviewFinding>();
+  for (const finding of findings) {
     const key = JSON.stringify({
       startTimecodeMs: finding.startTimecodeMs,
       endTimecodeMs: finding.endTimecodeMs,
@@ -492,20 +510,33 @@ function deduplicateVisualReviewFindings(findings: VisualReviewFinding[]): Visua
       description: finding.description,
       suggestion: finding.suggestion,
     });
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+    const previous = deduplicated.get(key);
+    if (!previous) {
+      deduplicated.set(key, finding);
+      continue;
+    }
+    const severityRank = { info: 0, warning: 1, critical: 2 } as const;
+    const strongest = severityRank[finding.severity] > severityRank[previous.severity] ? finding : previous;
+    const reviewSources = [...new Map([
+      ...(previous.reviewSources ?? []),
+      ...(finding.reviewSources ?? []),
+    ].map((source) => [`${source.providerId}\u0000${source.modelId}`, source])).values()];
+    deduplicated.set(key, { ...strongest, reviewSources });
+  }
+  return [...deduplicated.values()];
 }
 
 export class CodexVisualReviewAgent implements VisualReviewAgent {
   readonly id: string;
   readonly modelId: string;
+  readonly independentRoleAudit: boolean;
   private readonly maxReviewIterations: number;
 
   constructor(private readonly options: CodexVisualReviewAgentOptions) {
     this.id = options.providerId ?? "codex-visual-review-v1";
     this.modelId = options.modelId ?? "codex-default";
+    this.independentRoleAudit = typeof options.client.runTaskDetailed === "function"
+      && typeof (options.auditClient ?? options.client).runTaskDetailed === "function";
     this.maxReviewIterations = options.maxReviewIterations ?? 3;
   }
 
@@ -601,7 +632,15 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
   }> {
     const media = input.preparedMedia ?? await this.options.media.prepare(input);
     const { sampling, ...boundedMedia } = media;
-    const reviewContext = await buildReviewContext(input, sampling);
+    const authoritativeContext = await buildReviewContext(input, sampling);
+    const preparedContext = media.reviewContext;
+    // 预处理器负责来源身份等媒体证据；运行阶段、采样和当前脚本/方案由本层覆盖同名字段。
+    const reviewContext = preparedContext || authoritativeContext
+      ? { ...(preparedContext ?? {}), ...(authoritativeContext ?? {}) }
+      : undefined;
+    if (reviewContext && Buffer.byteLength(JSON.stringify(reviewContext), "utf8") > 128 * 1024) {
+      throw new Error("Visual review context exceeds 131072 bytes after assembly.");
+    }
     return {
       payload: { ...boundedMedia, ...(reviewContext ? { reviewContext } : {}) },
       ...(sampling ? { sampling } : {}),
@@ -815,6 +854,29 @@ export function validateVisualReviewReport(
   scenePositions?: readonly number[],
   evidenceFrames?: readonly VisualReviewFramePayload[],
 ): VisualReviewReport {
+  return validateVisualReviewReportWithLimit(value, durationMs, scenePositions, evidenceFrames, 50);
+}
+
+export function validateAggregatedVisualReviewReport(
+  value: unknown,
+  durationMs: number,
+  scenePositions?: readonly number[],
+  evidenceFrames?: readonly VisualReviewFramePayload[],
+): VisualReviewReport {
+  const report = record(value, "aggregated visual review");
+  if (!Array.isArray(report.independentReviews) || report.independentReviews.length !== 2) {
+    throw new Error("Aggregated visual review must preserve two independent branch reports.");
+  }
+  return validateVisualReviewReportWithLimit(value, durationMs, scenePositions, evidenceFrames, 100);
+}
+
+function validateVisualReviewReportWithLimit(
+  value: unknown,
+  durationMs: number,
+  scenePositions: readonly number[] | undefined,
+  evidenceFrames: readonly VisualReviewFramePayload[] | undefined,
+  maxFindings: number,
+): VisualReviewReport {
   const report = record(value, "visual review");
   if (report.version !== "video-factory/visual-review-v1") throw new Error("Visual review version is invalid.");
   const scores = record(report.scores, "visual review scores");
@@ -825,7 +887,7 @@ export function validateVisualReviewReport(
     legibility: score(scores.legibility, "legibility"),
     safety: score(scores.safety, "safety"),
   };
-  if (!Array.isArray(report.findings) || report.findings.length > 50) throw new Error("Visual review findings are invalid.");
+  if (!Array.isArray(report.findings) || report.findings.length > maxFindings) throw new Error("Visual review findings are invalid.");
   const findings = report.findings.map((item, index): VisualReviewFinding => {
     const finding = record(item, `visual review finding ${index}`);
     const timecodeMs = finding.timecodeMs;

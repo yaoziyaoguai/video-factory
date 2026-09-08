@@ -91,8 +91,9 @@ export class SeedanceVideoAdapter implements VideoGenerationAdapter {
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     validateRequest(request);
+    const deadline = Date.now() + this.timeoutMs;
     const model = resolveRequestedModel(request.modelId, this.options.model, this.options.allowedModels);
-    const submitted = await requestJson(this.fetch, `${this.baseUrl}/contents/generations/tasks`, {
+    const submitted = await requestJsonBeforeDeadline(this.fetch, `${this.baseUrl}/contents/generations/tasks`, {
       method: "POST",
       headers: authHeaders(this.options.apiKey),
       body: JSON.stringify({
@@ -104,10 +105,10 @@ export class SeedanceVideoAdapter implements VideoGenerationAdapter {
         generate_audio: request.generateAudio ?? false,
         ...(request.resolution ? { resolution: request.resolution } : {}),
       }),
-    });
+    }, deadline);
     const taskId = requiredString(submitted.id, "Seedance task id");
     await onProgress?.({ providerId: this.providerId, taskId, status: "submitted" });
-    return this.reconcile(taskId, request, onProgress);
+    return this.reconcileBeforeDeadline(taskId, onProgress, deadline);
   }
 
   async reconcile(
@@ -116,11 +117,27 @@ export class SeedanceVideoAdapter implements VideoGenerationAdapter {
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     taskId = requiredString(taskId, "Seedance task id");
-    const startedAt = Date.now();
-    while (Date.now() - startedAt <= this.timeoutMs) {
-      const task = await requestJson(this.fetch, `${this.baseUrl}/contents/generations/tasks/${encodeURIComponent(taskId)}`, {
-        headers: authHeaders(this.options.apiKey),
-      });
+    return this.reconcileBeforeDeadline(taskId, onProgress, Date.now() + this.timeoutMs);
+  }
+
+  private async reconcileBeforeDeadline(
+    taskId: string,
+    onProgress: ((progress: VideoGenerationProgress) => Promise<void> | void) | undefined,
+    deadline: number,
+  ): Promise<VideoGenerationResult> {
+    while (Date.now() < deadline) {
+      let task: Record<string, unknown>;
+      try {
+        task = await requestJsonBeforeDeadline(this.fetch, `${this.baseUrl}/contents/generations/tasks/${encodeURIComponent(taskId)}`, {
+          headers: authHeaders(this.options.apiKey),
+        }, deadline);
+      } catch (error) {
+        if (!(error instanceof RetryableProviderTransportError)) throw error;
+        if (Date.now() >= deadline) break;
+        await onProgress?.({ providerId: this.providerId, taskId, status: "running" });
+        await this.sleep(Math.min(this.pollIntervalMs, Math.max(0, deadline - Date.now())));
+        continue;
+      }
       const status = requiredString(task.status, "Seedance task status");
       if (status === "succeeded") {
         const content = requiredRecord(task.content, "Seedance task content");
@@ -134,7 +151,7 @@ export class SeedanceVideoAdapter implements VideoGenerationAdapter {
         throw new Error(message);
       }
       await onProgress?.({ providerId: this.providerId, taskId, status: "running" });
-      await this.sleep(this.pollIntervalMs);
+      await this.sleep(Math.min(this.pollIntervalMs, Math.max(0, deadline - Date.now())));
     }
     const message = `Seedance task '${taskId}' timed out after ${this.timeoutMs}ms.`;
     await onProgress?.({ providerId: this.providerId, taskId, status: "unknown", error: message });
@@ -177,10 +194,11 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     validateRequest(request);
+    const deadline = Date.now() + this.timeoutMs;
     const model = resolveMiniMaxModel(request.modelId, this.options.model, this.options.modelProtocols);
     return this.options.modelProtocols?.[model] === "v2"
-      ? this.generateV2(model, request, onProgress)
-      : this.generateV1(model, request, onProgress);
+      ? this.generateV2(model, request, onProgress, deadline)
+      : this.generateV1(model, request, onProgress, deadline);
   }
 
   async reconcile(
@@ -189,22 +207,24 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     const model = resolveMiniMaxModel(request.modelId, this.options.model, this.options.modelProtocols);
+    const deadline = Date.now() + this.timeoutMs;
     return this.options.modelProtocols?.[model] === "v2"
-      ? this.reconcileV2(requiredString(taskId, "MiniMax H3 task id"), onProgress)
-      : this.reconcileV1(requiredString(taskId, "MiniMax task id"), onProgress);
+      ? this.reconcileV2(requiredString(taskId, "MiniMax H3 task id"), onProgress, deadline)
+      : this.reconcileV1(requiredString(taskId, "MiniMax task id"), onProgress, deadline);
   }
 
   private async generateV1(
     model: string,
     request: VideoGenerationRequest,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+    deadline = Date.now() + this.timeoutMs,
   ): Promise<VideoGenerationResult> {
     if (request.ratio !== "16:9") {
       throw new Error(
         `MiniMax v1 model '${model}' cannot guarantee the requested ${request.ratio} aspect ratio; use a MiniMax H3 v2 model.`,
       );
     }
-    const submitted = await requestJson(this.fetch, `${this.apiRoot}/v1/video_generation`, {
+    const submitted = await requestJsonBeforeDeadline(this.fetch, `${this.apiRoot}/v1/video_generation`, {
       method: "POST",
       headers: authHeaders(this.options.apiKey),
       body: JSON.stringify({
@@ -215,18 +235,18 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
         prompt_optimizer: true,
         aigc_watermark: false,
       }),
-    });
+    }, deadline);
     assertMiniMaxSuccess(submitted);
     const taskId = requiredString(submitted.task_id, "MiniMax task id");
     await onProgress?.({ providerId: this.providerId, taskId, status: "submitted" });
-    return this.reconcileV1(taskId, onProgress);
+    return this.reconcileV1(taskId, onProgress, deadline);
   }
 
   private async reconcileV1(
     taskId: string,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+    deadline = Date.now() + this.timeoutMs,
   ): Promise<VideoGenerationResult> {
-    const deadline = Date.now() + this.timeoutMs;
     while (Date.now() < deadline) {
       try {
         const queryUrl = new URL(`${this.apiRoot}/v1/query/video_generation`);
@@ -277,8 +297,9 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     model: string,
     request: VideoGenerationRequest,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+    deadline = Date.now() + this.timeoutMs,
   ): Promise<VideoGenerationResult> {
-    const submitted = await requestJson(this.fetch, `${this.apiRoot}/v2/video_generation`, {
+    const submitted = await requestJsonBeforeDeadline(this.fetch, `${this.apiRoot}/v2/video_generation`, {
       method: "POST",
       headers: authHeaders(this.options.apiKey),
       body: JSON.stringify({
@@ -289,17 +310,17 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
         ratio: request.ratio,
         aigc_watermark: false,
       }),
-    });
+    }, deadline);
     const taskId = requiredString(submitted.task_id, "MiniMax H3 task id");
     await onProgress?.({ providerId: this.providerId, taskId, status: "submitted" });
-    return this.reconcileV2(taskId, onProgress);
+    return this.reconcileV2(taskId, onProgress, deadline);
   }
 
   private async reconcileV2(
     taskId: string,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
+    deadline = Date.now() + this.timeoutMs,
   ): Promise<VideoGenerationResult> {
-    const deadline = Date.now() + this.timeoutMs;
     while (Date.now() < deadline) {
       let response: Record<string, unknown>;
       try {
@@ -372,8 +393,9 @@ export class WanVideoAdapter implements VideoGenerationAdapter {
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     validateRequest(request);
+    const deadline = Date.now() + this.timeoutMs;
     const model = resolveRequestedModel(request.modelId, this.options.model, this.options.allowedModels);
-    const submitted = await requestJson(
+    const submitted = await requestJsonBeforeDeadline(
       this.fetch,
       `${this.baseUrl}/api/v1/services/aigc/video-generation/video-synthesis`,
       {
@@ -391,11 +413,12 @@ export class WanVideoAdapter implements VideoGenerationAdapter {
           },
         }),
       },
+      deadline,
     );
     const submittedOutput = requiredRecord(submitted.output, "Wan task output");
     const taskId = requiredString(submittedOutput.task_id, "Wan task id");
     await onProgress?.({ providerId: this.providerId, taskId, status: "submitted" });
-    return this.reconcile(taskId, request, onProgress);
+    return this.reconcileBeforeDeadline(taskId, onProgress, deadline);
   }
 
   async reconcile(
@@ -404,11 +427,27 @@ export class WanVideoAdapter implements VideoGenerationAdapter {
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     taskId = requiredString(taskId, "Wan task id");
-    const startedAt = Date.now();
-    while (Date.now() - startedAt <= this.timeoutMs) {
-      const task = await requestJson(this.fetch, `${this.baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`, {
-        headers: authHeaders(this.options.apiKey),
-      });
+    return this.reconcileBeforeDeadline(taskId, onProgress, Date.now() + this.timeoutMs);
+  }
+
+  private async reconcileBeforeDeadline(
+    taskId: string,
+    onProgress: ((progress: VideoGenerationProgress) => Promise<void> | void) | undefined,
+    deadline: number,
+  ): Promise<VideoGenerationResult> {
+    while (Date.now() < deadline) {
+      let task: Record<string, unknown>;
+      try {
+        task = await requestJsonBeforeDeadline(this.fetch, `${this.baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`, {
+          headers: authHeaders(this.options.apiKey),
+        }, deadline);
+      } catch (error) {
+        if (!(error instanceof RetryableProviderTransportError)) throw error;
+        if (Date.now() >= deadline) break;
+        await onProgress?.({ providerId: this.providerId, taskId, status: "running" });
+        await this.sleep(Math.min(this.pollIntervalMs, Math.max(0, deadline - Date.now())));
+        continue;
+      }
       const output = requiredRecord(task.output, "Wan task output");
       const status = requiredString(output.task_status, "Wan task status");
       if (status === "SUCCEEDED") {
@@ -427,7 +466,7 @@ export class WanVideoAdapter implements VideoGenerationAdapter {
         throw new Error(message);
       }
       await onProgress?.({ providerId: this.providerId, taskId, status: "running" });
-      await this.sleep(this.pollIntervalMs);
+      await this.sleep(Math.min(this.pollIntervalMs, Math.max(0, deadline - Date.now())));
     }
     const message = `Wan task '${taskId}' timed out after ${this.timeoutMs}ms.`;
     await onProgress?.({ providerId: this.providerId, taskId, status: "unknown", error: message });

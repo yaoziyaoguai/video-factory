@@ -1995,9 +1995,9 @@ describe("GenerativeAssetWorkerClient", () => {
     void root;
   });
 
-  it("regenerates reference dependents when their reference source joins the affected closure", async () => {
+  it("regenerates the full human-approved reference dependency closure", async () => {
     const { subject, getPaidCalls, reworkRequest } = await setupReferenceReworkSourceRun();
-    const { request, outputDir } = reworkRequest(2, [1]);
+    const { request, outputDir } = reworkRequest(2, [1, 2, 3]);
 
     const response = await subject.run(request);
 
@@ -4210,8 +4210,8 @@ describe("reworkAffectedScenePositions", () => {
     targetNodeIds,
   });
 
-  it("expands reference and REUSE_ONLY dependents into the director-facing affected closure", () => {
-    const positions = reworkAffectedScenePositions({
+  it("requires renewed approval when reference and REUSE_ONLY dependents exceed the approved scope", () => {
+    const scope = {
       findings: [finding(1)],
       previousScenes: [scene(1), scene(2), scene(3)],
       previousShots: [
@@ -4220,29 +4220,33 @@ describe("reworkAffectedScenePositions", () => {
         { scenePosition: 3, query: "REUSE_ONLY scene 2" },
       ],
       currentScenes: [scene(1), scene(2), scene(3)],
-      affectedScenePositions: [1],
-    });
-    assert.deepEqual(positions, [1, 2, 3]);
+    };
+    assert.throws(
+      () => reworkAffectedScenePositions({ ...scope, affectedScenePositions: [1] }),
+      /新增了镜头 2、3.*重新确认返工范围/,
+    );
+    assert.deepEqual(
+      reworkAffectedScenePositions({ ...scope, affectedScenePositions: [1, 2, 3] }),
+      [1, 2, 3],
+    );
   });
 
-  it("merges visual findings with script-only scene changes before the director runs", () => {
-    const positions = reworkAffectedScenePositions({
+  it("requires renewed approval when findings or script changes exceed the approved scope", () => {
+    assert.throws(() => reworkAffectedScenePositions({
       findings: [finding(2, ["visual-direction"])],
       previousScenes: [scene(1), scene(2), scene(3), scene(4)],
       currentScenes: [scene(1), scene(2), scene(3), scene(4, "重写后的第四幕")],
       affectedScenePositions: [],
-    });
-    assert.deepEqual(positions, [2, 4]);
+    }), /新增了镜头 2、4.*重新确认返工范围/);
   });
 
-  it("falls back to every current scene when a visual or asset finding cannot be located", () => {
-    const positions = reworkAffectedScenePositions({
+  it("requires full-scope approval when a visual or asset finding cannot be located", () => {
+    assert.throws(() => reworkAffectedScenePositions({
       findings: [finding(undefined)],
       previousScenes: [scene(1), scene(2)],
       currentScenes: [scene(1), scene(2)],
       affectedScenePositions: [],
-    });
-    assert.deepEqual(positions, [1, 2]);
+    }), /新增了镜头 1、2.*重新确认返工范围/);
   });
 
   it("falls back to every current scene when a legacy run lacks a structured scope", () => {
@@ -4266,7 +4270,7 @@ describe("reworkAffectedScenePositions", () => {
     assert.deepEqual(positions, [3]);
   });
 
-  it("treats an explicit scene selection as authoritative while preserving canonical safety expansion", () => {
+  it("treats an explicit scene selection as an execution upper bound", () => {
     const scenes = [scene(1), scene(2), scene(3), scene(4)];
     const selected = (affectedScenePositions: number[], overrides: Record<string, unknown> = {}) => (
       reworkAffectedScenePositions({
@@ -4280,19 +4284,32 @@ describe("reworkAffectedScenePositions", () => {
 
     assert.deepEqual(selected([4]), [4]);
     assert.deepEqual(selected([]), []);
-    assert.deepEqual(selected([4], { findings: [finding(2)] }), [2, 4]);
-    assert.deepEqual(selected([4], { findings: [finding(undefined)] }), [1, 2, 3, 4]);
-    assert.deepEqual(selected([4], {
+    assert.throws(() => selected([4], { findings: [finding(2)] }), /新增了镜头 2/);
+    assert.throws(() => selected([4], { findings: [finding(undefined)] }), /新增了镜头 1、2、3/);
+    assert.throws(() => selected([4], {
       currentScenes: [scene(1), scene(2), scene(3, "重写后的第三幕"), scene(4)],
-    }), [3, 4]);
-    assert.deepEqual(selected([1], {
+    }), /新增了镜头 3/);
+    assert.throws(() => selected([1], {
       currentShots: [
         { scenePosition: 1 },
         { scenePosition: 2, referenceFromScenePosition: 1 },
         { scenePosition: 3, query: "REUSE_ONLY scene 2" },
         { scenePosition: 4 },
       ],
-    }), [1, 2, 3]);
+    }), /新增了镜头 2、3/);
+  });
+
+  it("does not turn inspect-only findings into a paid rework scope", () => {
+    const inspectFinding = {
+      ...finding(2),
+      nextAction: "inspect_existing_media",
+    };
+    assert.deepEqual(reworkAffectedScenePositions({
+      findings: [inspectFinding],
+      previousScenes: [scene(1), scene(2)],
+      currentScenes: [scene(1), scene(2)],
+      affectedScenePositions: [],
+    }), []);
   });
 
 });

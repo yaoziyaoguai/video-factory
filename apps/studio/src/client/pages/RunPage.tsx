@@ -1,7 +1,7 @@
 import { AlertCircle, ArrowLeft, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { StudioCostRunDetail, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioReworkDraft, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioReworkDraft, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { studioApi, subscribeToRun } from "../api.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 import { RunWorkbench } from "../components/RunWorkbench.js";
@@ -46,7 +46,7 @@ export function RunPage() {
       setCostDetail(await studioApi.runCosts(runId));
       setCostError(undefined);
     } catch (caught) {
-      setCostError(`成本明细读取失败：${caught instanceof Error ? caught.message : String(caught)}`);
+      setCostError(`调用与费用明细读取失败：${caught instanceof Error ? caught.message : String(caught)}`);
     }
   }, [runId]);
 
@@ -93,7 +93,7 @@ export function RunPage() {
       setCostDetail(costResult.status === "fulfilled" ? costResult.value : undefined);
       setRunProviders(providerResult.status === "fulfilled" ? providerResult.value : []);
       setCostError(costResult.status === "rejected"
-        ? `成本明细读取失败：${costResult.reason instanceof Error ? costResult.reason.message : String(costResult.reason)}`
+        ? `调用与费用明细读取失败：${costResult.reason instanceof Error ? costResult.reason.message : String(costResult.reason)}`
         : undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -164,6 +164,20 @@ export function RunPage() {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setDecisionPending(false);
+    }
+  }
+
+  async function reinspectVisualReview(input: StudioVisualReinspectionInput) {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await withMutationProgress(() => studioApi.reinspectVisualReview(runId, input));
+      setRun((current) => preferRunSnapshot(current, nextRun));
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setNodeMutationPending(false);
     }
   }
 
@@ -393,7 +407,7 @@ export function RunPage() {
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
       {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
       {paidOperationError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{paidOperationError}</div> : null}
-      <RunWorkbench run={run} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
+      <RunWorkbench run={run} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
       <NewRunDialog
         open={restarting}

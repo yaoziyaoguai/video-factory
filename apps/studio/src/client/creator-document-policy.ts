@@ -1,6 +1,6 @@
 const TOP_LEVEL_FIELDS: Record<string, ReadonlySet<string>> = {
   brief: new Set(["title", "angle", "audience"]),
-  script: new Set(["title", "hook", "structure", "duration_target", "disclosure_required", "platform_notes", "quality_checks", "hashtags", "canonFacts", "scenes"]),
+  script: new Set(["title", "viewerPromise", "narrativeArc", "hook", "structure", "duration_target", "disclosure_required", "platform_notes", "quality_checks", "hashtags", "canonFacts", "scenes"]),
   "reference-grammar": new Set(["summary", "pacing", "composition", "camera", "color", "transitions", "sound", "confidence", "beats", "reusableRules", "avoidCopying"]),
   "visual-direction": new Set(["requestedProfileId", "resolvedProfileId", "profileRationale", "visualBible", "shots"]),
   "asset-candidates": new Set(["scene_candidates"]),

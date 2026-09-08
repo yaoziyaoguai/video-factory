@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS } from "../../../packages/production-pipeline/src/codex-chat.js";
 import { CODEX_BRIDGE_PROTOCOL_VERSION } from "../src/codex-executor.js";
 import {
   BROKER_TASK_KINDS,
   outputSchemaFor,
   outputValidationErrorFor,
+  taskContractDescriptorFor,
   taskPromptFor,
 } from "../src/task-definitions.js";
 
@@ -78,6 +80,16 @@ function assertStrictObjectRequirements(schema: unknown, path: string): void {
 }
 
 describe("broker-owned task definitions", () => {
+  it("keeps production contract pins synchronized with protected broker tasks", () => {
+    assert.equal(
+      REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["visual-review"],
+      taskContractDescriptorFor("visual-review").digest,
+    );
+    assert.equal(
+      REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["role-audit"],
+      taskContractDescriptorFor("role-audit").digest,
+    );
+  });
   it("pins protocol v2 and owns prompts for every allowed task kind", () => {
     assert.equal(CODEX_BRIDGE_PROTOCOL_VERSION, "video-factory/codex-bridge-v2");
     assert.deepEqual(BROKER_TASK_KINDS, [
@@ -123,10 +135,10 @@ describe("broker-owned task definitions", () => {
     const director = taskPromptFor("director-plan");
     const review = taskPromptFor("visual-review");
 
-    assert.equal(topic.version, "video-factory/topic-editor-v6");
-    assert.equal(script.version, "video-factory/screenwriter-v13");
-    assert.equal(director.version, "video-factory/director-v24");
-    assert.equal(review.version, "video-factory/visual-review-v11");
+    assert.equal(topic.version, "video-factory/topic-editor-v7");
+    assert.equal(script.version, "video-factory/screenwriter-v14");
+    assert.equal(director.version, "video-factory/director-v25");
+    assert.equal(review.version, "video-factory/visual-review-v13");
     assert.match(review.outputRules.join("\n"), /不得为了通过审计而美化评分/);
     assert.match(review.directive, /真实来源材料自带.*editorial_card.*renderManifest.*不因‘出现文字’本身打回/);
     assert.match(review.directive, /生成模型自造的标签、乱码.*内部工作流术语.*必须留下 failed/);
@@ -218,7 +230,7 @@ describe("broker-owned task definitions", () => {
     assert.match(review.directive, /scene_sequence.*高密度帧.*近似保持时长/);
     assert.match(review.directive, /hook_and_scene_midpoints.*scene_change_keyframes/);
     assert.match(review.directive, /稀疏证据/);
-    assert.match(review.directive, /不得仅因此自动给出 revise/);
+    assert.match(review.directive, /不得仅因未覆盖而自动给出 revise/);
     assert.ok(script.examples.some((example) => /反例/.test(example)));
     assert.ok(director.examples.some((example) => /\[0s-2s\]/.test(example)));
   });

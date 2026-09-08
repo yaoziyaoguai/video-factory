@@ -45,7 +45,7 @@ class ControlledClient extends CodexBridgeClient {
 describe("FallbackCodexTaskClient", () => {
   it("switches providers only for a classified provider failure and records the attempt chain", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
-      throw new CodexBridgeError("OpenAI service temporarily unavailable.", false, "completed_failure", 503, "model_provider_transient");
+      throw new CodexBridgeError("OpenAI service temporarily unavailable.", true, "not_accepted", 503, "model_provider_transient");
     });
     const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ideas: [] }));
     const client = new FallbackCodexTaskClient({
@@ -67,7 +67,7 @@ describe("FallbackCodexTaskClient", () => {
 
   it("keeps later calls in one session on the provider that accepted it", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
-      throw new CodexBridgeError("OpenAI service temporarily unavailable.", false, "completed_failure", 503, "model_provider_transient");
+      throw new CodexBridgeError("OpenAI service temporarily unavailable.", true, "not_accepted", 503, "model_provider_transient");
     });
     const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
     const client = new FallbackCodexTaskClient({
@@ -87,7 +87,7 @@ describe("FallbackCodexTaskClient", () => {
 
   it("keeps a stateless backup on the same provider without sending unsupported session fields", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
-      throw new CodexBridgeError("OpenAI service temporarily unavailable.", false, "completed_failure", 503, "model_provider_transient");
+      throw new CodexBridgeError("OpenAI service temporarily unavailable.", true, "not_accepted", 503, "model_provider_transient");
     });
     const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
     const client = new FallbackCodexTaskClient({
@@ -161,6 +161,24 @@ describe("FallbackCodexTaskClient", () => {
 
     assert.deepEqual(openai.calls, [{ kind: "publish-copy", requestId: "publish-uncertain" }]);
     assert.equal(zai.calls.length, 0);
+  });
+
+  it("switches providers after the broker confirms a classified transient failure", async () => {
+    const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
+      throw new CodexBridgeError("OpenAI service temporarily unavailable.", false, "completed_failure", 503, "model_provider_transient");
+    });
+    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const client = new FallbackCodexTaskClient({
+      candidates: [
+        { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
+        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["publish-copy"] },
+      ],
+    });
+
+    const execution = await client.runTaskDetailed("publish-copy", {}, "publish-completed-failure");
+    assert.deepEqual(execution.output, { ok: true });
+    assert.equal(zai.calls.length, 1);
+    assert.match(zai.calls[0]?.requestId ?? "", /^backup-/);
   });
 
   it("does not switch providers for invalid output or business validation failures", async () => {

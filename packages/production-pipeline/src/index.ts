@@ -31,6 +31,7 @@ export type {
 } from "./visual-director.js";
 export {
   CODEX_BRIDGE_PROTOCOL_VERSION,
+  REQUIRED_CODEX_TASK_CONTRACT_DIGESTS,
   CODEX_TASK_KINDS,
   CodexBridgeClient,
   CodexBridgeError,
@@ -68,7 +69,7 @@ export type {
   AssetSemanticRanking,
   CodexAssetSemanticRankerOptions,
 } from "./asset-semantic-ranker.js";
-export { CodexVisualReviewAgent, FallbackVisualReviewAgent, IndependentDualVisualReviewAgent, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateVisualReviewReport } from "./codex-visual-review.js";
+export { CodexVisualReviewAgent, FallbackVisualReviewAgent, IndependentDualVisualReviewAgent, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport } from "./codex-visual-review.js";
 export type { CodexVisualReviewAgentOptions, FallbackVisualReviewAgentOptions, IndependentDualVisualReviewAgentOptions, IndependentVisualReviewExecution, VisualReviewAgent, VisualReviewAgentInput, VisualReviewExecution, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport, VisualReviewScope } from "./codex-visual-review.js";
 export { FallbackScreenwriterAgent, FallbackVisualDirectorAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
 export type { FallbackScreenwriterAgentOptions, FallbackVisualDirectorAgentOptions } from "./fallback-role-agents.js";
@@ -103,7 +104,7 @@ export type {
   WorkerArtifactDescriptor,
   WorkerResponse,
 } from "./python-worker-client.js";
-export { canRetryRejectedReviewNode, PaidOperationManualReconciliationError, ProductionPipeline, productionWorkflowVersion } from "./production-pipeline.js";
+export { canRetryRejectedReviewNode, effectiveProductionBrief, PaidOperationManualReconciliationError, ProductionPipeline, productionWorkflowVersion } from "./production-pipeline.js";
 export type {
   DispatchedProductionRun,
   ProductionPaidNodeSummary,
@@ -113,6 +114,7 @@ export type {
   ProductionProviderRuntimeMetadata,
   ProductionRunListener,
   ProductionSceneRevisionDraft,
+  ProductionVisualReinspectionDraft,
   ProductionSpendRejectionDraft,
 } from "./production-pipeline.js";
 export { MiniMaxVideoAdapter, SeedanceVideoAdapter, WanVideoAdapter } from "./video-generation.js";
@@ -140,6 +142,7 @@ export {
   GenerativeAssetWorkerClient,
   inspectPaidAssetLedger,
   paidAssetSourceFingerprint,
+  reworkSceneDependencyClosure,
 } from "./generative-asset-worker.js";
 export type {
   GenerativeAssetWorkerClientOptions,

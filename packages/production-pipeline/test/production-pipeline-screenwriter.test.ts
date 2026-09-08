@@ -23,6 +23,7 @@ const brief = {
   nicheSlug: "life-avoidance",
   durationSeconds: 24,
   platform: "douyin",
+  runPurpose: "test",
   reviewMode: "automatic",
   providers: {
     script: "codex-screenwriter-v1",

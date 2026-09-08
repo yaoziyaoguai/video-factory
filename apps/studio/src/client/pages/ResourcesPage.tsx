@@ -51,7 +51,7 @@ const LOCAL_CAPABILITY_IMPACT_LABELS: Record<string, string> = {
 };
 const RECIPE_OPTIONS: Array<{ id: StudioProductionRecipeId; label: string }> = [
   { id: "free-stock", label: "仅免费画面" },
-  { id: "keyshot-ai", label: "允许付费关键镜头" },
+  { id: "keyshot-ai", label: "允许 AI 生成画面，按实际镜头报价" },
 ];
 const RESOURCE_SECTION_IDS = [
   "creation-defaults",
@@ -85,7 +85,7 @@ const PRODUCTION_ROLE_DEFINITIONS: ProductionRoleDefinition[] = [
   { key: "voice", label: "配音执行", capability: "voice.synthesize", preferredProviderId: "macos-say-v1", responsibility: "按声音演员表执行音色、语速和停顿", mode: "tool", selectable: false, configurationAnchor: "voice-casting", configurationLabel: "去声音演员表配置" },
   { key: "render", label: "剪辑师", capability: "video.render", preferredProviderId: "python-ffmpeg-v1", responsibility: "合成画面、字幕、旁白和音轨", mode: "tool" },
   { key: "technicalReview", label: "技术质检", capability: "quality.review", preferredProviderId: "python-technical-review-v1", responsibility: "检查分辨率、时长、轨道、文件和产物哈希", mode: "tool" },
-  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "glm-visual-review-v1", responsibility: "用成片关键帧审查构图、连续性和可读性；两种审片模型都可用时执行独立双审", mode: "model" },
+  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "glm-visual-review-v1", responsibility: "正式制作必须完成 GLM 与 Codex 双审；任一路未就绪均不能开工", mode: "model" },
 ];
 
 const AUTOMATIC_AGENT_ROLES = [
@@ -712,9 +712,9 @@ function RoleProviderCard({ definition, providers, selectedProvider, onProviderC
       </label>
       <div className="role-runtime-summary"><span>系统推荐</span><strong>{activeModel?.label ?? selectedProvider?.label ?? "尚未配置"}</strong>{backupModels.length ? <span>故障替补：{backupModels.map((model) => model.label).join("、")}</span> : null}</div>
       {dualFinalReviewAvailable
-        ? <p className="role-fallback-note">中途画面预检使用首选模型，服务故障时才切换；最终成片由 GLM 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。</p>
+        ? <p className="role-fallback-note">中途画面预检优先使用首选模型，只有确认请求未受理时才切换；结果不确定会暂停核对。最终成片由 GLM 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。</p>
         : candidates.filter((provider) => provider.id !== selectedProvider?.id && isProductionReady(provider)).length > 0
-          ? <p className="role-fallback-note">其余可用能力只在首选服务故障时依次接管，不会与首选同时重复生成。</p>
+          ? <p className="role-fallback-note">只有确认首选请求未被受理时，其余可用能力才会依次接管。若请求结果不确定，流程会暂停核对，不会切换模型或重复生成。</p>
         : null}
     </>}
     <footer><span>{selectedProvider ? billingLabel(selectedProvider.billing) : "无可用能力"}</span><strong>{selectedProvider ? providerReadinessLabel(selectedProvider, ready) : "需要配置"}</strong></footer>
@@ -764,7 +764,7 @@ function preferredAutomaticProvider(capability: string, providers: StudioProvide
 function roleModeLabel(mode: ProductionRoleDefinition["mode"]): string {
   if (mode === "agent") return "AI 创作 · 最多三轮质量修订";
   if (mode === "model") return "模型审片";
-  return "确定性工具";
+  return "本地处理 / 自动执行";
 }
 
 function formatCost(value: number): string {

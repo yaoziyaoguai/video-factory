@@ -102,6 +102,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     const modelId = images.length > 0 ? this.visualModelId : this.textModelId;
     const reasoningEffort = zaiReasoningEffort(modelId, this.effort);
     const requestStartedAt = this.now();
+    let responseHeadersReceived = false;
 
     try {
       let activePrompt = prompt;
@@ -136,6 +137,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
         signal: controller.signal,
         dispatcher: this.dispatcher,
       } as RequestInit & { dispatcher: Dispatcher });
+      responseHeadersReceived = true;
       if (!response.ok) {
         const code = await readErrorCode(response);
         throw new CodexExecutorError(
@@ -285,6 +287,8 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
       if (error instanceof CodexExecutorError) throw error;
       const cancelled = options.signal?.aborted === true;
       const requestFailure = networkFailureFor(error, controller.signal.aborted);
+      const definitelyNotAccepted = !responseHeadersReceived
+        && (errorCodeInCauseChain(error) === "ENOTFOUND" || errorCodeInCauseChain(error) === "ECONNREFUSED");
       throw new CodexExecutorError(
         cancelled
           ? "ZAI Code Plan task was cancelled because its client disconnected."
@@ -298,6 +302,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
             modelId,
             providerWaitMs: elapsedMs(requestStartedAt, this.now()),
           },
+          outcomeUncertain: !definitelyNotAccepted,
         },
       );
     } finally {
@@ -330,8 +335,13 @@ function contractRepairPrompt(
 }
 
 function contractRepairPreservesSemantics(kind: BrokerTaskKind, before: unknown, after: unknown): boolean {
-  if (kind !== "visual-review") return true;
-  return JSON.stringify(protectedVisualReviewContent(before)) === JSON.stringify(protectedVisualReviewContent(after));
+  if (kind === "visual-review") {
+    return JSON.stringify(protectedVisualReviewContent(before)) === JSON.stringify(protectedVisualReviewContent(after));
+  }
+  if (kind === "role-audit") {
+    return JSON.stringify(protectedRoleAuditContent(before)) === JSON.stringify(protectedRoleAuditContent(after));
+  }
+  return true;
 }
 
 function protectedVisualReviewContent(value: unknown): unknown {
@@ -347,6 +357,7 @@ function protectedVisualReviewContent(value: unknown): unknown {
         startTimecodeMs: finding.startTimecodeMs,
         endTimecodeMs: finding.endTimecodeMs,
         scenePosition: finding.scenePosition,
+        targetNodeId: finding.targetNodeId,
         evidenceStatus: finding.evidenceStatus,
         evidenceFrameSha256: finding.evidenceFrameSha256,
         nextAction: finding.nextAction,
@@ -356,6 +367,26 @@ function protectedVisualReviewContent(value: unknown): unknown {
         suggestion: finding.suggestion,
       };
     }) : value.findings,
+  };
+}
+
+function protectedRoleAuditContent(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  return {
+    version: value.version,
+    verdict: value.verdict,
+    score: value.score,
+    summary: value.summary,
+    issues: Array.isArray(value.issues) ? value.issues.map((issue) => {
+      if (!isRecord(issue)) return issue;
+      return {
+        severity: issue.severity,
+        criterion: issue.criterion,
+        evidence: issue.evidence,
+        repairInstruction: issue.repairInstruction,
+      };
+    }) : value.issues,
+    repairInstructions: value.repairInstructions,
   };
 }
 

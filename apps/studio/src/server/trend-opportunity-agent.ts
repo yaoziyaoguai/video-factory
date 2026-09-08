@@ -19,7 +19,7 @@ import { parseStudioVisualPlan } from "../shared/api.js";
 import { planVisualDirection } from "../shared/visual-plan.js";
 import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
 
-const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v6|role-audit-v1|topic-ideas-validator-v4|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v2";
+const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v7|role-audit-v3|topic-ideas-validator-v4|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v2";
 
 export interface TrendSignalPort {
   listSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
@@ -454,7 +454,7 @@ function normalizePercent(value: number): number {
 
 // 独立复核通过后只做字段级 claim 校验：
 // - 高风险公共事件不再仅因“敏感/高风险”被整组替换；风险标签与来源门禁在下游继续把关，
-//   只有实际无法被来源支持的 claim 才退回保守问句版本；
+//   只有实际无法被来源支持的 claim 才退回只基于原信号的核验问句；
 // - 其余题材含原信号不支持的数字、引语、英文专名或 clickbait 的 idea 直接拒绝，
 //   不用机械标题顶替后绕过复核。
 function groundModelIdea(idea: TrendModelIdea, signals: StudioTrendSignal[]): TrendModelIdea | null {
@@ -462,6 +462,7 @@ function groundModelIdea(idea: TrendModelIdea, signals: StudioTrendSignal[]): Tr
   const sourceText = signals.map((item) => item.title).join("；");
   const sourceNumbers = new Set(numberTokens(sourceText));
   const riskLevel = topicRiskLevel(signal.title);
+  // duration 是执行节拍，不参与事实校验；strategy 与 description 仍可能夹带“省下 20 分钟”一类无来源主张。
   const visualPlanClaims = idea.visualPlan
     ? [idea.visualPlan.strategy, ...idea.visualPlan.beats.map((beat) => beat.description)]
     : [];
@@ -487,8 +488,7 @@ function groundModelIdea(idea: TrendModelIdea, signals: StudioTrendSignal[]): Tr
   };
 }
 
-// 只有无法被来源支持的 claim 才进入这里：高风险信号退回只基于原始信号的保守问句，
-// 保留安全边际与风险标签，不把模型新增事实带进候选。
+// 高风险热点仍保留选题价值，但绝不保留模型新增事实；回退结果只引用原始信号并明确要求核验。
 function conservativeHighRiskIdea(idea: TrendModelIdea, signal: StudioTrendSignal): TrendModelIdea {
   const { visualPlan: _unsafeVisualPlan, ...safeIdea } = idea;
   return {

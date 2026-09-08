@@ -7,7 +7,7 @@ export interface PublishCopy {
   hashtags: string[];
 }
 
-export const PUBLISH_COPY_AGENT_CONTRACT_VERSION = "publish-editor-v1|role-audit-v1|publish-copy-validator-v1";
+export const PUBLISH_COPY_AGENT_CONTRACT_VERSION = "publish-editor-v2|role-audit-v3|publish-copy-validator-v1";
 
 export interface PublishCopyInput {
   platform: string;

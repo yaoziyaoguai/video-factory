@@ -925,6 +925,7 @@ function executionTimingDetails(
   if (!receipt) return undefined;
   const parameters = receipt.parameters ?? {};
   const totalMs = elapsedReceiptMs(receipt.startedAt, receipt.finishedAt);
+  const queueWaitMs = timingParameter(parameters.queueWaitMs);
   const providerWaitMs = timingParameter(parameters.providerWaitMs);
   const firstOutputEventMs = timingParameter(parameters.firstOutputEventMs);
   const toolMs = timingParameter(parameters.toolMs);
@@ -941,13 +942,14 @@ function executionTimingDetails(
     && auditMs !== undefined
     ? Math.max(0, totalMs - producerMs - auditMs)
     : undefined;
-  if ([providerWaitMs, firstOutputEventMs, toolMs, providerValidationMs, producerMs, auditMs, loopValidationMs]
+  if ([queueWaitMs, providerWaitMs, firstOutputEventMs, toolMs, providerValidationMs, producerMs, auditMs, loopValidationMs]
     .every((value) => value === undefined)
     && modelCallCount === undefined
     && retryCount === undefined) return undefined;
 
   const items = [
     totalMs === undefined ? undefined : { label: "步骤总耗时", value: formatDuration(totalMs) },
+    queueWaitMs === undefined ? undefined : { label: "等待执行席位", value: formatDuration(queueWaitMs) },
     providerWaitMs === undefined ? undefined : { label: "最终模型等待", value: formatDuration(providerWaitMs) },
     firstOutputEventMs === undefined ? undefined : { label: "首次响应", value: formatDuration(firstOutputEventMs) },
     producerMs === undefined ? undefined : { label: "内容生成累计", value: formatDuration(producerMs) },

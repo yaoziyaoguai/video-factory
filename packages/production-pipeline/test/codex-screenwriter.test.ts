@@ -323,7 +323,7 @@ describe("CodexScreenwriterAgent", () => {
     assert.match(auditContext.verificationBoundary ?? "", /不得宣称已复验/);
   });
 
-  it("keeps unaffected scenes byte-for-byte when a rework model rewrites the whole script", async () => {
+  it("keeps unaffected scenes and top-level intent byte-for-byte through every scoped repair round", async () => {
     const input = screenwriterInput();
     const previousScript = {
       viewerPromise: "上一版观众承诺",
@@ -348,8 +348,26 @@ describe("CodexScreenwriterAgent", () => {
         validScene(3, { narration: "模型擅自改写第三镜。" }),
       ],
     };
-    const producerClient = new SequencedCodexClient([candidate]);
-    const auditClient = new SequencedCodexClient([{
+    const repairedCandidate = {
+      viewerPromise: "第二轮再次擅自改写观众承诺",
+      narrativeArc: "第二轮再次擅自改写叙事弧",
+      canonFacts: ["第二轮新增的越界事实"],
+      scenes: [
+        validScene(1, { narration: "第二轮擅自改写第一镜。" }),
+        validScene(2, { narration: "第二轮按审计建议修正第二镜。" }),
+        validScene(3, { narration: "第二轮擅自改写第三镜。" }),
+      ],
+    };
+    const repairAudit = {
+      version: "video-factory/role-audit-v1",
+      verdict: "repair",
+      score: 72,
+      summary: "第二镜仍需给出更具体的动作。",
+      issues: [{ severity: "blocking", criterion: "镜头动作", evidence: "第二镜动作不具体", repairInstruction: "只修正第二镜" }],
+      repairInstructions: ["只修正第二镜"],
+    };
+    const producerClient = new SequencedCodexClient([candidate, repairedCandidate]);
+    const auditClient = new SequencedCodexClient([repairAudit, {
       version: "video-factory/role-audit-v1",
       verdict: "pass",
       score: 92,
@@ -357,19 +375,25 @@ describe("CodexScreenwriterAgent", () => {
       issues: [],
       repairInstructions: [],
     }]);
-    const agent = new CodexScreenwriterAgent({ client: producerClient, auditClient, maxReviewIterations: 1 });
+    const agent = new CodexScreenwriterAgent({ client: producerClient, auditClient, maxReviewIterations: 2 });
 
     const execution = await agent.draftDetailed(input);
 
     assert.equal(execution.output.viewerPromise, previousScript.viewerPromise);
     assert.equal(execution.output.narrativeArc, previousScript.narrativeArc);
+    assert.deepEqual(execution.output.canonFacts, previousScript.canonFacts);
     assert.deepEqual(execution.output.scenes, [
       previousScript.scenes[0],
-      candidate.scenes[1],
+      repairedCandidate.scenes[1],
       previousScript.scenes[2],
     ]);
-    const auditedCandidate = (auditClient.calls[0]!.payload as { candidate: unknown }).candidate;
-    assert.deepEqual(auditedCandidate, execution.output);
+    const firstAuditedCandidate = (auditClient.calls[0]!.payload as {
+      candidate: { viewerPromise?: string; scenes: unknown[] };
+    }).candidate;
+    const secondAuditedCandidate = (auditClient.calls[1]!.payload as { candidate: unknown }).candidate;
+    assert.equal(firstAuditedCandidate.viewerPromise, previousScript.viewerPromise);
+    assert.deepEqual(firstAuditedCandidate.scenes, [previousScript.scenes[0], candidate.scenes[1], previousScript.scenes[2]]);
+    assert.deepEqual(secondAuditedCandidate, execution.output);
   });
 
   it("uses the shared wall-clock deadline as an admission gate without shortening accepted operations", async () => {

@@ -15,6 +15,7 @@ import {
   parseStudioOpportunityStatusInput,
   parseStudioDecisionInput,
   parseStudioSceneRevisionInput,
+  parseStudioVisualReinspectionInput,
   parseStudioPublishInput,
   parseStudioVoicePreviewInput,
   type StartRunResponse,
@@ -30,6 +31,7 @@ import {
   type StudioCostRunDetail,
   type StudioDecisionInput,
   type StudioSceneRevisionInput,
+  type StudioVisualReinspectionInput,
   type StudioHealth,
   type StudioLocalCapability,
   type StudioOpportunity,
@@ -128,6 +130,7 @@ export interface StudioServicePort {
   deleteReferenceVideo?(uploadId: string): Promise<void>;
   decide(runId: string, input: StudioDecisionInput, actor: string): Promise<StudioRunDetail>;
   requestSceneRevision(runId: string, input: StudioSceneRevisionInput, actor: string): Promise<StudioRunDetail>;
+  reinspectVisualReview(runId: string, input: StudioVisualReinspectionInput): Promise<StudioRunDetail>;
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeExecutionConfiguration(runId: string, nodeId: string, input: StudioNodeExecutionConfigurationInput, actor: string): Promise<StudioRunDetail>;
@@ -515,6 +518,14 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/regenerate-stale", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     return options.service.resumeStale(request.params.runId);
+  });
+
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/reinspect-visual-review", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    return options.service.reinspectVisualReview(
+      request.params.runId,
+      parseStudioVisualReinspectionInput(request.body),
+    );
   });
 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/pause", async (request) => {

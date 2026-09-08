@@ -137,6 +137,8 @@ export interface HumanDecisionDraft {
   action: HumanDecisionAction;
   actor: string;
   note?: string;
+  expectedRunRevision?: number;
+  reviewEvidenceId?: string | null;
 }
 
 export interface HumanDecision extends HumanDecisionDraft {
@@ -174,7 +176,7 @@ export interface NodeExecutionReceiptDraft {
   parameters?: Record<string, ExecutionParameterValue>;
   estimatedCostCny?: number;
   actualCostCny?: number;
-  actualCostSource?: "provider_reported" | "configured_rate";
+  actualCostSource?: "provider_reported" | "configured_rate" | "manual_reconciled";
   meteredAttemptCount?: number;
   meteredFailedAttemptCount?: number;
   requestId?: string;
@@ -420,6 +422,7 @@ export interface WorkflowContext<TInitialInput = unknown> {
   workflowId: string;
   initialInput: TInitialInput;
   artifacts: readonly Artifact[];
+  decisions: readonly HumanDecision[];
   outputs: ReadonlyMap<string, unknown>;
   readonly spendAuthorization: Readonly<SpendAuthorization> | undefined;
   readonly spendAuthorizationExemptProviderId: string | undefined;

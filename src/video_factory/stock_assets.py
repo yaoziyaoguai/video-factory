@@ -1404,51 +1404,6 @@ def local_card_spec(scene: Scene, director_shot: Optional[dict] = None) -> dict:
             raise ValueError(f"Editorial card contains internal workflow terminology: {forbidden}")
         return spec
 
-    if "node output self review red team" in query:
-        return final_card({
-            "layout": "audit_flow",
-            "kicker": "节点审计",
-            "title": "每个节点，都先过两关",
-            "items": ["节点输出", "自审", "独立红队"],
-            "status": "发现问题",
-        })
-
-    if "self review independent red team" in query:
-        return final_card({
-            "layout": "audit_flow",
-            "kicker": "审核顺序",
-            "title": "先自审，再交独立红队",
-            "items": ["自审", "独立红队"],
-            "status": "",
-        })
-
-    if "overhead hand moving blank cards" in query:
-        return final_card({
-            "layout": "card_pair",
-            "kicker": "每个节点",
-            "title": "同样走完两关",
-            "items": ["自审", "独立红队"],
-            "status": "重复执行",
-        })
-
-    if "paid step" in query and "confirmation" in query:
-        return final_card({
-            "layout": "paid_gate",
-            "kicker": "费用边界",
-            "title": "付费前，停下来确认",
-            "items": ["返回修改", "确认继续"],
-            "status": "付费节点 · 未执行",
-        })
-
-    if "audit payment confirmation outro" in query:
-        return final_card({
-            "layout": "audit_outro",
-            "kicker": "生产口诀",
-            "title": "每个节点：自审 → 红队",
-            "items": ["付费前：用户确认", "继续生产"],
-            "status": "",
-        })
-
     if "status" in query and ("verification" in query or "核验" in supporting_text):
         raise ValueError("Editorial card may not render an internal verification status flow")
 

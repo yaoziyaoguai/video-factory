@@ -36,7 +36,7 @@ import {
   type AssetSemanticRanker,
 } from "./asset-semantic-ranker.js";
 import { REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION, fallbackShotGrammar, validateShotGrammar, type ReferenceGrammarAgent, type ReferenceGrammarExecution, type ShotGrammar } from "./reference-grammar.js";
-import type { AgentLoopTrace, CodexTaskExecution, CodexTaskKind, CodexTaskTrace, ModelCandidateAttempt } from "./codex-chat.js";
+import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, type AgentLoopTrace, type CodexTaskExecution, type CodexTaskKind, type CodexTaskTrace, type ModelCandidateAttempt } from "./codex-chat.js";
 import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
 import { RoleAgentLoopError } from "./role-agent-loop.js";
 import {
@@ -53,7 +53,7 @@ import {
 import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
 import { ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
-import { IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateVisualReviewReport, type IndependentVisualReviewExecution, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport, type VisualReviewScope } from "./codex-visual-review.js";
+import { IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport, type IndependentVisualReviewExecution, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport, type VisualReviewScope } from "./codex-visual-review.js";
 import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
 import { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
 import type { WorkerResponse } from "./python-worker-client.js";
@@ -112,6 +112,11 @@ export interface ProductionSceneRevisionDraft {
   note: string;
 }
 
+export interface ProductionVisualReinspectionDraft {
+  expectedRunRevision: number;
+  reviewEvidenceId: string;
+}
+
 export interface ProductionPaidNodeReconciliationDraft {
   nodeId: string;
   expectedRunRevision: number;
@@ -136,7 +141,7 @@ export interface ProductionPaidOperationItemSummary {
   estimatedCostCny: number;
   taskId?: string;
   actualCostCny?: number;
-  actualCostSource?: "provider_reported" | "configured_rate";
+  actualCostSource?: "provider_reported" | "configured_rate" | "manual_reconciled";
   error?: string;
   manualReconciliationRequired?: boolean;
 }
@@ -265,10 +270,10 @@ export function productionWorkflowVersion(
 ): string {
   return brief.providers.visualReview
     ? brief.workflowFeatures?.referenceGrammar
-      ? "1.7.0"
+      ? "1.10.0"
       : brief.workflowFeatures?.assetSemanticRank
-        ? "1.6.0"
-        : "1.5.0"
+        ? "1.9.0"
+        : "1.8.0"
     : brief.workflowFeatures?.referenceGrammar
       ? "1.4.0"
       : brief.workflowFeatures?.assetSemanticRank
@@ -343,7 +348,12 @@ export class ProductionPipeline {
   }
 
   async dispatch(input: unknown, listener?: ProductionRunListener): Promise<DispatchedProductionRun> {
-    const brief = parseBrief(input);
+    const parsedBrief = parseBrief(input);
+    const brief: ProductionBrief = {
+      ...parsedBrief,
+      taskContractDigests: { ...REQUIRED_CODEX_TASK_CONTRACT_DIGESTS },
+    };
+    assertProductionVisualReviewReady(brief, this.options);
     const registry = this.createRegistry(brief);
     const runId = this.idFactory("run");
     let created = false;
@@ -562,16 +572,16 @@ export class ProductionPipeline {
       throw error;
     }
     const temporary = `${handle.path}.tmp-${process.pid}-${randomUUID()}`;
-    await writeFile(temporary, executionLeasePayload(handle.token), { encoding: "utf8", flag: "wx", mode: 0o600 });
     try {
+      await writeFile(temporary, executionLeasePayload(handle.token), { encoding: "utf8", flag: "wx", mode: 0o600 });
       await rename(temporary, handle.path);
+      await rm(temporary, { force: true });
       return handle;
     } catch (error) {
       const release = handle.release;
       if (release) await release(true).catch(() => undefined);
+      await rm(temporary, { force: true }).catch(() => undefined);
       throw error;
-    } finally {
-      await rm(temporary, { force: true });
     }
   }
 
@@ -649,12 +659,27 @@ export class ProductionPipeline {
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun> {
     return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
+      if (!Number.isSafeInteger(decision.expectedRunRevision) || decision.expectedRunRevision !== previous.revision) {
+        throw new StaleRunRevisionError(runId, decision.expectedRunRevision ?? -1, previous.revision);
+      }
       const brief = parsePersistedBrief(previous.initialInput);
       const activeInterventionNode = previous.nodeRuns.find(
         (node) => node.intervention?.id === decision.interventionId,
       );
+      if (!activeInterventionNode || activeInterventionNode.status !== "needs_human") {
+        throw new Error(`Intervention '${decision.interventionId}' is not active for run '${runId}'.`);
+      }
+      const currentReviewEvidenceId = finalReviewEvidenceId(activeInterventionNode);
+      if (decision.reviewEvidenceId !== currentReviewEvidenceId) {
+        throw new Error("Human decision is not bound to the current review evidence.");
+      }
       if (decision.action === "approve" && activeInterventionNode?.nodeId === "final-review") {
         assertPersistedFinalApprovalReady(previous, brief, activeInterventionNode);
+        if (brief.providers.visualReview
+          && visualReviewRecommendation(currentVisualReviewDelivery(previous)) !== "approve"
+          && !decision.note?.trim()) {
+          throw new Error("Approving against the visual-review recommendation requires a reason.");
+        }
       }
       const registry = this.createRegistry(brief);
       const runner = new WorkflowRunner({
@@ -688,8 +713,7 @@ export class ProductionPipeline {
     previous: WorkflowRun<ProductionBrief>,
     override: NodeOverrideDraft,
   ): Promise<NodeOverrideDraft> {
-    const workflowBrief = parsePersistedBrief(previous.initialInput);
-    const currentBrief = currentEffectiveBriefFromRun(previous, workflowBrief);
+    const currentBrief = effectiveProductionBrief(previous);
     const direction = currentBrief.director;
     if (!direction) throw new Error("Visual direction is not enabled for this run.");
 
@@ -699,7 +723,7 @@ export class ProductionPipeline {
       previous.nodeRuns.find((node) => node.nodeId === "script")?.output,
       "scriptPath",
     );
-    const script = JSON.parse(await readFile(scriptPath, "utf8")) as { scenes?: unknown };
+    const script = JSON.parse(await readFile(scriptPath, "utf8")) as { viewerPromise?: unknown; narrativeArc?: unknown; scenes?: unknown };
     const scenes = parseDirectorScenes(script.scenes);
     const plan = validateVisualDirectorPlan(
       JSON.parse(await readFile(submittedPath, "utf8")) as unknown,
@@ -708,6 +732,7 @@ export class ProductionPipeline {
         scenes,
         this.options.assetProviders ?? [],
         this.options.providerRuntimeMetadata ?? [],
+        optionalOutputString(script.viewerPromise),
       ),
     );
 
@@ -813,7 +838,7 @@ export class ProductionPipeline {
       if (!Number.isInteger(reviewDurationMs) || reviewDurationMs <= 0) {
         throw new Error("Current visual-review duration is invalid.");
       }
-      const storedReport = validateVisualReviewReport(
+      const storedReport = validateAggregatedVisualReviewReport(
         JSON.parse(await readFile(reviewArtifact.uri!, "utf8")),
         reviewDurationMs,
       );
@@ -1291,12 +1316,12 @@ export class ProductionPipeline {
       if (draft.outcome === "confirmed_charged" && confirmedActualCostCny === undefined) {
         throw new Error("Paid reconciliation actual cost is required because the original estimate is unavailable.");
       }
-      const settlementActualCostSource = (
-        draft.outcome === "confirmed_charged" && draft.actualCostCny !== undefined
-        || previousNode.executionReceipt?.actualCostSource === "provider_reported"
-      )
-        ? "provider_reported"
-        : "configured_rate";
+      const settlementActualCostSource = draft.outcome === "confirmed_charged" && draft.actualCostCny !== undefined
+        ? "manual_reconciled"
+        : previousNode.executionReceipt?.actualCostSource === "provider_reported"
+          || previousNode.executionReceipt?.actualCostSource === "manual_reconciled"
+          ? previousNode.executionReceipt.actualCostSource
+          : "configured_rate";
       const reconciliationRecord: PaidNodeReconciliationRecord = existingRecord ?? {
         version: "video-factory/paid-reconciliation-v1",
         reconciliationId: draft.reconciliationId.trim(),
@@ -1325,7 +1350,7 @@ export class ProductionPipeline {
             manualAssetItem.itemRequestId,
             reconciliationRecord.reconciliationId,
             confirmedActualCostCny!,
-            draft.actualCostCny !== undefined ? "provider_reported" : "configured_rate",
+            draft.actualCostCny !== undefined ? "manual_reconciled" : "configured_rate",
           );
         }
         items = (await inspectPaidAssetLedger(nodeDirectory)).filter((item) => item.operationId === operationId);
@@ -1335,7 +1360,7 @@ export class ProductionPipeline {
           draft.nodeId,
           operationId,
           confirmedActualCostCny!,
-          draft.actualCostCny !== undefined,
+          settlementActualCostSource,
           this.clock(),
         );
         await this.assertExecutionLease(lease);
@@ -1368,7 +1393,6 @@ export class ProductionPipeline {
       if (draft.outcome === "confirmed_not_charged" && voiceOperation) {
         await this.assertExecutionLease(lease);
         voiceOperation = await markPaidVoiceItemsNotCharged(nodeDirectory, voiceOperation);
-        resumeOriginalOperation = true;
       }
       if (manualAssetItem && items.some((item) => (
         item.itemRequestId !== manualAssetItem.itemRequestId
@@ -1396,6 +1420,32 @@ export class ProductionPipeline {
         settlementActualCostSource,
       );
       const retryNode = retrySource.nodeRuns.find((node) => node.nodeId === draft.nodeId)!;
+      if (draft.nodeId === "voice" && draft.outcome === "confirmed_not_charged") {
+        const authorizationId = retryNode.spendAuthorizationId;
+        if (authorizationId) {
+          const consumed = (retrySource.consumedSpendAuthorizationIds ??= []);
+          if (!consumed.includes(authorizationId)) consumed.push(authorizationId);
+        }
+        retryNode.status = "failed";
+        retryNode.error = "配音请求已按服务商明确拒绝结清；请先调整配音设置，再点击“重试失败步骤”创建新任务。";
+        retryNode.finishedAt = this.clock();
+        delete retryNode.spendAuthorizationId;
+        delete retryNode.outcomeUncertain;
+        delete retryNode.interrupted;
+        delete retryNode.operationRequestId;
+        retrySource.revision += 1;
+        retrySource.status = "failed";
+        retrySource.finishedAt = this.clock();
+        await this.assertExecutionLease(lease);
+        await this.store.save(retrySource, previous.revision);
+        await this.assertExecutionLease(lease);
+        await writePaidNodeReconciliationRecord(recordPath, {
+          ...reconciliationRecord,
+          status: "completed",
+          resultingRunRevision: retrySource.revision,
+        });
+        return retrySource;
+      }
       const remainingManualAssetItems = manualAssetItem
         ? items.filter((item) => paidAssetItemNeedsManualReconciliation(item))
         : [];
@@ -1634,6 +1684,55 @@ export class ProductionPipeline {
         withExecutableBrief(previous, brief),
         nodeId,
         retryRejectedReview ? { allowRejectedNode: true } : undefined,
+      );
+    }, listener);
+  }
+
+  async dispatchVisualReinspection(
+    runId: string,
+    draft: ProductionVisualReinspectionDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
+      if (previous.revision !== draft.expectedRunRevision) {
+        throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
+      }
+      if (previous.status !== "needs_human" && previous.status !== "rejected") {
+        throw new Error(`Run '${runId}' is not waiting for visual reinspection.`);
+      }
+      const brief = parsePersistedBrief(previous.initialInput);
+      if (!brief.providers.visualReview) throw new Error("Visual reinspection is not enabled for this run.");
+      const delivery = requireOutputRecord(currentVisualReviewDelivery(previous), "visual-review delivery");
+      const report = requireOutputRecord(delivery.report, "visual-review report");
+      const scope = finalVisualReviewScope(delivery);
+      if (scope.evidenceId !== draft.reviewEvidenceId) {
+        throw new Error("Visual reinspection request is not bound to the current review evidence.");
+      }
+      const needsInspection = Array.isArray(report.findings) && report.findings.some((finding) => (
+        isObjectRecord(finding)
+        && finding.evidenceStatus === "not_observed"
+        && finding.nextAction === "inspect_existing_media"
+      ));
+      if (!needsInspection) {
+        throw new Error("Current visual review has no existing-media inspection request.");
+      }
+      // 显式补查必须开启新的审片缓存轮次；同一轮因进程中断而重试时仍沿用该轮，
+      // 这样既不会把旧审片结论冒充补查结果，也不会重复已完成的模型分支。
+      await writeTextAtomically(
+        visualReinspectionCyclePath(this.runsRoot, runId),
+        `${randomUUID()}\n`,
+      );
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.consumePauseRequest(runId),
+      });
+      return runner.rerunFromNode(
+        this.createWorkflow(brief),
+        withExecutableBrief(previous, brief),
+        "visual-review",
       );
     }, listener);
   }
@@ -1944,9 +2043,8 @@ export class ProductionPipeline {
               // 素材节点只接收 visual-direction/assets 的 findings（与 reworkAffectedScenePositions
               // 内部对 visual findings 的同一过滤语义）；script-only finding 不透传给素材，
               // 其场景实际变化仍经 current/previous script 逐镜差异进入统一 affected 闭包。
-              findings: brief.rework.findings.filter((finding) => finding.targetNodeIds.some(
-                (target) => target === "visual-direction" || target === "assets",
-              )),
+              findings: brief.rework.findings.filter((finding) => finding.action !== "inspect_existing_media"
+                && finding.targetNodeIds.some((target) => target === "visual-direction" || target === "assets")),
               ...(assetReworkScenePositions.length || brief.rework.affectedScenePositions !== undefined
                 ? { affectedScenePositions: assetReworkScenePositions }
                 : {}),
@@ -2118,7 +2216,7 @@ export class ProductionPipeline {
                 transport: "unix_socket",
                 billing: "subscription",
                 configurationSource: "system_default",
-                parameters: { promptPack: "video-factory/publish-copy-v1" },
+                parameters: { promptPack: "video-factory/publish-editor-v2" },
               },
               providerLabel: "Codex 发行编辑",
             });
@@ -2176,6 +2274,7 @@ export class ProductionPipeline {
             publishAttempt.attempt,
           );
           const packagePath = path.join(publishAttempt.directory, "publish_package.json");
+          const persistedApproval = currentPublishApproval(context) ?? approvalDecision;
           const payload = {
             version: "video-factory/publish-package-v1",
             runId: context.runId,
@@ -2188,13 +2287,17 @@ export class ProductionPipeline {
               hashtags: copyOutcome.copy.hashtags,
               ...(copyOutcome.fallbackReason !== undefined ? { fallbackReason: copyOutcome.fallbackReason } : {}),
             },
-            approval: approvalDecision
+            approval: persistedApproval
               ? {
                   status: "approved",
-                  actor: approvalDecision.actor,
-                  note: approvalDecision.note ?? "",
-                  action: approvalDecision.action,
-                  interventionId: approvalDecision.interventionId,
+                  actor: persistedApproval.actor,
+                  note: persistedApproval.note ?? "",
+                  action: persistedApproval.action,
+                  interventionId: persistedApproval.interventionId,
+                  ...("id" in persistedApproval && typeof persistedApproval.id === "string"
+                    ? { decisionId: persistedApproval.id }
+                    : {}),
+                  ...(persistedApproval.reviewEvidenceId ? { reviewEvidenceId: persistedApproval.reviewEvidenceId } : {}),
                   reviewArtifactIds: finalReviewArtifactIdsFromOutput(context.outputs.get("final-review")),
                 }
               : {
@@ -2274,6 +2377,28 @@ export class ProductionPipeline {
       nodes,
     };
   }
+}
+
+function currentPublishApproval(context: WorkflowContext): WorkflowContext["decisions"][number] | undefined {
+  const finalReview = isObjectRecord(context.outputs.get("final-review"))
+    ? context.outputs.get("final-review") as Record<string, unknown>
+    : undefined;
+  const evidenceId = typeof finalReview?.reviewEvidenceId === "string" ? finalReview.reviewEvidenceId : undefined;
+  return [...context.decisions].reverse().find((decision) => (
+    decision.action === "approve"
+    && (evidenceId === undefined || decision.reviewEvidenceId === evidenceId)
+  ));
+}
+
+function finalReviewEvidenceId(node: WorkflowRun<ProductionBrief>["nodeRuns"][number]): string | null {
+  if (node.nodeId !== "final-review" || !isObjectRecord(node.output)) return null;
+  const value = node.output.reviewEvidenceId;
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
+}
+
+function currentVisualReviewDelivery(run: WorkflowRun<ProductionBrief>): unknown {
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === "visual-review");
+  return node?.outputState?.versions.find((version) => version.id === node.outputState?.effectiveVersionId)?.output ?? node?.output;
 }
 
 class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse> {
@@ -2597,7 +2722,7 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   readonly label = "Codex 视觉导演";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly parameters = { promptPack: "video-factory/director-v24" };
+  readonly parameters = { promptPack: "video-factory/director-v25" };
 
   constructor(
     private readonly agent: VisualDirectorAgent,
@@ -2630,7 +2755,7 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTask
   readonly label = "Codex 编剧";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly parameters = { promptPack: "video-factory/screenwriter-v13" };
+  readonly parameters = { promptPack: "video-factory/screenwriter-v14" };
 
   constructor(
     private readonly agent: ScreenwriterAgent,
@@ -2673,7 +2798,7 @@ class VisualReviewProvider implements Provider<VisualReviewAgentInput, VisualRev
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
   get approvalPolicy(): ApprovalPolicy { return this.metadata?.approvalPolicy ?? "none"; }
   get configurationSource(): ExecutionConfigurationSource { return "system_default"; }
-  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v11", agentLoopMaxIterations: 3, independentAudit: true }; }
+  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v13", agentLoopMaxIterations: 3, independentAudit: true }; }
   get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number { return roundCurrency((this.metadata?.estimatedCostCny ?? 0) * this.maxAttempts); }
   get maxAttempts(): number { return Math.max(3, this.metadata?.maxAttempts ?? 3); }
@@ -2733,7 +2858,7 @@ function referenceGrammarNode(
       transport: "unix_socket",
       billing: "subscription",
       configurationSource: "system_default",
-      parameters: { sampleMode: "keyframes", promptPack: "video-factory/reference-grammar-v1" },
+      parameters: { sampleMode: "keyframes", promptPack: "video-factory/reference-grammar-v2" },
       estimatedCostCny: 0,
     },
     mode: "automatic",
@@ -2811,7 +2936,7 @@ function referenceGrammarNode(
               transport: "unix_socket",
               billing: "subscription",
               configurationSource: "system_default",
-              parameters: { sampleMode: "keyframes", promptPack: "video-factory/reference-grammar-v1" },
+              parameters: { sampleMode: "keyframes", promptPack: "video-factory/reference-grammar-v2" },
             },
             providerLabel: "Codex 参考视频分析",
           });
@@ -2869,7 +2994,7 @@ function referenceGrammarNode(
                 billing: "subscription" as const,
                 configurationSource: "system_default" as const,
               }),
-          parameters: { sampleMode: "keyframes", promptPack: (execution?.trace ?? failedTrace)?.promptVersion ?? "video-factory/reference-grammar-v1" },
+          parameters: { sampleMode: "keyframes", promptPack: (execution?.trace ?? failedTrace)?.promptVersion ?? "video-factory/reference-grammar-v2" },
           estimatedCostCny: 0,
           requestId: context.nextId("reference-grammar"),
         },
@@ -2941,7 +3066,9 @@ function directorNode(
       if (!currentDirection) throw new Error("AI director configuration is incomplete.");
       const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "visual-direction"));
       const scriptPath = requiredOutputString(input, "scriptPath");
-      const script = JSON.parse(await readFile(scriptPath, "utf8")) as { scenes?: unknown };
+      const script = JSON.parse(await readFile(scriptPath, "utf8")) as { viewerPromise?: unknown; narrativeArc?: unknown; scenes?: unknown };
+      const viewerPromise = optionalOutputString(script.viewerPromise);
+      const narrativeArc = optionalOutputString(script.narrativeArc);
       const referenceGrammar: ShotGrammar | undefined = brief.workflowFeatures?.referenceGrammar
         ? await readShotGrammarFile(requiredOutputString(input, "referenceGrammarPath"))
         : undefined;
@@ -3009,6 +3136,8 @@ function directorNode(
             audience: currentBrief.audience,
             platform: currentBrief.platform,
             durationSeconds: currentBrief.durationSeconds,
+            ...(viewerPromise ? { viewerPromise } : {}),
+            ...(narrativeArc ? { narrativeArc } : {}),
             requestedProfileId: currentDirection.profileId,
             ...(currentBrief.templateSnapshot ? { templateBlueprint: currentBrief.templateSnapshot.resolvedBlueprint } : {}),
             ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
@@ -3022,7 +3151,7 @@ function directorNode(
                 visualDirectionInstruction: currentBrief.rework.nodeInstructions.visualDirection,
                 assetInstruction: currentBrief.rework.nodeInstructions.assets,
                 findings: currentBrief.rework.findings
-                  .filter((finding) => finding.targetNodeIds.includes("visual-direction"))
+                  .filter((finding) => finding.targetNodeIds.includes("visual-direction") && finding.action !== "inspect_existing_media")
                   .map(modelFacingReworkFinding),
                 ...(affectedScenePositions.length || currentBrief.rework.affectedScenePositions !== undefined
                   ? { affectedScenePositions }
@@ -3085,6 +3214,7 @@ function directorNode(
           scenes,
           options.assetProviders ?? [],
           options.providerRuntimeMetadata ?? [],
+          viewerPromise,
         ),
       );
       const planPath = path.join(attempt.directory, "director_plan.json");
@@ -3432,6 +3562,7 @@ function parseDirectorScenes(value: unknown): VisualDirectorAgentInput["scenes"]
     if (!Number.isFinite(duration) || duration <= 0) throw new Error(`Script scene ${index + 1} duration is invalid.`);
     return {
       position,
+      ...(optionalOutputString(scene.purpose) ? { purpose: optionalOutputString(scene.purpose)! } : {}),
       duration,
       narration: requiredOutputString(scene, "narration"),
       visualPrompt: requiredOutputString(scene, "visual_prompt"),
@@ -3455,6 +3586,7 @@ function visualDirectorPlanValidation(
   scenes: VisualDirectorAgentInput["scenes"],
   catalog: VisualAssetProviderCapability[],
   runtimeMetadata: ProductionProviderRuntimeMetadata[] = [],
+  viewerPromise?: string,
 ): Parameters<typeof validateVisualDirectorPlan>[1] {
   const direction = brief.director;
   if (!direction) throw new Error("AI director configuration is incomplete.");
@@ -3466,7 +3598,9 @@ function visualDirectorPlanValidation(
   });
   return {
     scenePositions: scenes.map((scene) => scene.position),
+    ...(viewerPromise ? { viewerPromise } : {}),
     sceneDurations: Object.fromEntries(scenes.map((scene) => [scene.position, scene.duration])),
+    sceneVisualStrategies: Object.fromEntries(scenes.map((scene) => [scene.position, scene.visualStrategy])),
     allowedProviderIds: direction.assetProviderIds,
     generativeProviderIds: selectedProviders.filter((provider) => provider.generative).map((provider) => provider.id),
     providerDeliveryTypes: Object.fromEntries(
@@ -3548,7 +3682,7 @@ function screenwriterBrief(brief: ProductionBrief): ScreenwriterAgentInput["brie
         sourceRunId: brief.rework.sourceRunId,
         instruction: brief.rework.nodeInstructions.script,
         findings: brief.rework.findings
-          .filter((finding) => finding.targetNodeIds.includes("script"))
+          .filter((finding) => finding.targetNodeIds.includes("script") && finding.action !== "inspect_existing_media")
           .map(modelFacingReworkFinding),
         ...(brief.rework.affectedScenePositions !== undefined
           ? { affectedScenePositions: [...brief.rework.affectedScenePositions] }
@@ -3910,6 +4044,7 @@ function visualReviewNode(
     execute: async (input, context) => {
       const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "visual-review"));
       const request = validateVisualReviewInput(input, Boolean(brief.director));
+      const checkpointCycle = await currentVisualReinspectionCycle(runsRoot, context.runId);
       const parentArtifactIds = context.artifacts
         .filter((artifact) => artifact.producer && ["render", "technical-review"].includes(artifact.producer.nodeId))
         .map((artifact) => artifact.id);
@@ -3927,14 +4062,14 @@ function visualReviewNode(
             context.runId,
             "visual-review",
             request,
-            VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+            `${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}|cycle:${checkpointCycle}`,
           ),
           agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
             runsRoot,
             context.runId,
             "visual-review",
             request,
-            VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+            `${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}|cycle:${checkpointCycle}`,
             modelId,
           ),
           independentReviewCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
@@ -3942,7 +4077,7 @@ function visualReviewNode(
             context.runId,
             "visual-review",
             request,
-            `independent-final-visual-review-result-v2|${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}`,
+            `independent-final-visual-review-result-v2|${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}|cycle:${checkpointCycle}`,
             modelId,
           ),
         }, context);
@@ -4600,6 +4735,29 @@ function validateVisualReviewRuntimeMetadata(
   }
 }
 
+function assertProductionVisualReviewReady(
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+): void {
+  if (brief.runPurpose === "test") return;
+  const providerId = brief.providers.visualReview;
+  if (!providerId) {
+    throw new Error("Formal production requires GLM and Codex visual review before work can start.");
+  }
+  const agent = [
+    ...(options.visualReviewAgents ?? []),
+    ...(options.visualReviewAgent ? [options.visualReviewAgent] : []),
+  ].find((candidate) => candidate.id === providerId);
+  const reviewers = agent?.finalReviewConfiguration?.reviewers ?? [];
+  if (agent?.finalReviewConfiguration?.mode !== "dual"
+    || reviewers.length !== 2
+    || new Set(reviewers.map((reviewer) => reviewer.providerId)).size !== 2
+    || new Set(reviewers.map((reviewer) => reviewer.modelId)).size !== 2
+    || reviewers.some((reviewer) => reviewer.independentRoleAudit !== true)) {
+    throw new Error("Formal production requires two distinct GLM and Codex visual-review providers, models, and independent role audits.");
+  }
+}
+
 function roundCurrency(value: number): number {
   return Math.round(value * 10_000) / 10_000;
 }
@@ -4692,8 +4850,8 @@ function providerExecutionReceipt(
     throw new Error("Worker diagnostics actualCostCny must be a finite non-negative number.");
   }
   const actualCostSource = response.diagnostics?.actualCostSource;
-  if (actualCostSource !== undefined && actualCostSource !== "provider_reported" && actualCostSource !== "configured_rate") {
-    throw new Error("Worker diagnostics actualCostSource must identify provider-reported or configured-rate accounting.");
+  if (actualCostSource !== undefined && actualCostSource !== "provider_reported" && actualCostSource !== "configured_rate" && actualCostSource !== "manual_reconciled") {
+    throw new Error("Worker diagnostics actualCostSource must identify provider-reported, configured-rate, or manually reconciled accounting.");
   }
   if (actualCostSource !== undefined && actualCost === undefined) {
     throw new Error("Worker diagnostics actualCostSource requires actualCostCny.");
@@ -4755,6 +4913,7 @@ function modelTraceReceipt(
     parameters: {
       promptPack: trace.promptVersion,
       ...(trace.reasoningEffort ? { reasoningEffort: trace.reasoningEffort } : {}),
+      ...(trace.queueWaitMs !== undefined ? { queueWaitMs: trace.queueWaitMs } : {}),
       ...(trace.providerWaitMs !== undefined ? { providerWaitMs: trace.providerWaitMs } : {}),
       ...(trace.firstOutputEventMs !== undefined ? { firstOutputEventMs: trace.firstOutputEventMs } : {}),
       ...(trace.toolMs !== undefined ? { toolMs: trace.toolMs } : {}),
@@ -4827,14 +4986,13 @@ function validateBriefInputOverride(value: unknown, workflowBrief: ProductionBri
   return parsed;
 }
 
-function currentEffectiveBriefFromRun(
-  run: WorkflowRun<ProductionBrief>,
-  workflowBrief: ProductionBrief,
-): ProductionBrief {
-  return mergeCurrentBrief(
-    run.nodeRuns.find((node) => node.nodeId === "brief")?.output,
-    workflowBrief,
-  );
+export function effectiveProductionBrief(run: WorkflowRun<ProductionBrief>): ProductionBrief {
+  const workflowBrief = parsePersistedBrief(run.initialInput);
+  const briefNode = run.nodeRuns.find((node) => node.nodeId === "brief");
+  const current = briefNode?.outputState?.versions.find(
+    (version) => version.id === briefNode.outputState?.effectiveVersionId,
+  )?.output ?? briefNode?.output;
+  return current === undefined ? workflowBrief : mergeCurrentBrief(current, workflowBrief);
 }
 
 function currentEffectiveBriefFromContext(
@@ -4845,9 +5003,10 @@ function currentEffectiveBriefFromContext(
 }
 
 function mergeCurrentBrief(value: unknown, workflowBrief: ProductionBrief): ProductionBrief {
-  const current = parseBrief(value);
-  return parseBrief({
-    ...current,
+  if (!isObjectRecord(value)) throw new Error("Brief output must be an object.");
+  return parsePersistedBrief({
+    ...workflowBrief,
+    ...value,
     providers: workflowBrief.providers,
     models: workflowBrief.models,
     modelSelectionSources: workflowBrief.modelSelectionSources,
@@ -4858,6 +5017,7 @@ function mergeCurrentBrief(value: unknown, workflowBrief: ProductionBrief): Prod
     voiceDirection: workflowBrief.voiceDirection,
     reviewMode: workflowBrief.reviewMode,
     spendFeedback: workflowBrief.spendFeedback,
+    taskContractDigests: workflowBrief.taskContractDigests,
   });
 }
 
@@ -4973,7 +5133,7 @@ function visualReviewModelProof(
   };
 }
 
-function assertDualVisualReviewReady(reviewedDelivery: unknown): void {
+function assertDualVisualReviewReady(reviewedDelivery: unknown, brief: ProductionBrief): void {
   const delivery = requireOutputRecord(reviewedDelivery, "visual-review delivery");
   const report = requireOutputRecord(delivery.report, "visual-review report");
   const scope = finalVisualReviewScope(delivery);
@@ -4996,6 +5156,14 @@ function assertDualVisualReviewReady(reviewedDelivery: unknown): void {
   if (new Set(scope.actualModels.map((model) => model.producerContractDigest)).size !== 1
     || new Set(scope.actualModels.map((model) => model.auditContractDigest)).size !== 1) {
     throw new Error("Final visual-review branches did not use the same producer and audit contracts.");
+  }
+  if (brief.taskContractDigests?.["visual-review"] !== REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["visual-review"]
+    || brief.taskContractDigests?.["role-audit"] !== REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["role-audit"]
+    || scope.actualModels.some((model) => (
+      model.producerContractDigest !== brief.taskContractDigests?.["visual-review"]
+      || model.auditContractDigest !== brief.taskContractDigests?.["role-audit"]
+    ))) {
+    throw new Error("Final visual-review evidence does not match the task contracts frozen for this run.");
   }
   if (!Array.isArray(report.independentReviews) || report.independentReviews.length !== 2) {
     throw new Error("Final publication requires both independent visual-review reports.");
@@ -5027,8 +5195,8 @@ function assertPublishEvidenceReady(context: WorkflowContext, brief: ProductionB
   if (JSON.stringify(finalReviewArtifactIdsFromOutput(finalReview)) !== JSON.stringify(currentArtifactIds)) {
     throw new Error("Final approval is not bound to the current review artifact versions.");
   }
-  if (brief.providers.visualReview) {
-    assertDualVisualReviewReady(context.outputs.get("visual-review"));
+  if (brief.runPurpose !== "test" || brief.providers.visualReview) {
+    assertDualVisualReviewReady(context.outputs.get("visual-review"), brief);
     const scope = finalVisualReviewScope(context.outputs.get("visual-review"));
     if (finalReview.reviewEvidenceId !== scope.evidenceId) {
       throw new Error("Final approval is not bound to the current visual evidence digest.");
@@ -5066,12 +5234,12 @@ function assertPersistedFinalApprovalReady(
       throw new Error("Final approval references a review artifact that is no longer current.");
     }
   }
-  if (brief.providers.visualReview) {
+  if (brief.runPurpose !== "test" || brief.providers.visualReview) {
     const visualNode = run.nodeRuns.find((node) => node.nodeId === "visual-review");
     if (visualNode?.status !== "succeeded") {
       throw new Error("Final approval requires a completed visual-review node.");
     }
-    assertDualVisualReviewReady(visualNode.output);
+    assertDualVisualReviewReady(visualNode.output, brief);
     const scope = finalVisualReviewScope(visualNode.output);
     if (output.reviewEvidenceId !== scope.evidenceId) {
       throw new Error("Final approval is not bound to the current visual evidence digest.");
@@ -5727,6 +5895,7 @@ async function persistModelTrace(options: {
     ...(options.trace.modelCandidateAttempts?.length
       ? { modelCandidateAttempts: options.trace.modelCandidateAttempts }
       : {}),
+    ...(options.trace.queueWaitMs !== undefined ? { queueWaitMs: options.trace.queueWaitMs } : {}),
     ...(options.trace.providerWaitMs !== undefined ? { providerWaitMs: options.trace.providerWaitMs } : {}),
     ...(options.trace.firstOutputEventMs !== undefined ? { firstOutputEventMs: options.trace.firstOutputEventMs } : {}),
     ...(options.trace.toolMs !== undefined ? { toolMs: options.trace.toolMs } : {}),
@@ -5830,6 +5999,20 @@ function nodeAgentLoopCheckpoint(
     key,
     { restartExhausted: true },
   );
+}
+
+function visualReinspectionCyclePath(runsRoot: string, runId: string): string {
+  return path.join(runsRoot, runId, "nodes", "visual-review", ".reinspection-cycle");
+}
+
+async function currentVisualReinspectionCycle(runsRoot: string, runId: string): Promise<string> {
+  try {
+    const value = (await readFile(visualReinspectionCyclePath(runsRoot, runId), "utf8")).trim();
+    return /^[0-9a-f-]{36}$/.test(value) ? value : "initial";
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return "initial";
+    throw error;
+  }
 }
 
 async function writeTextAtomically(destination: string, content: string): Promise<void> {
@@ -6273,7 +6456,7 @@ function applyConfirmedChargedResolution(
   nodeId: string,
   operationId: string | undefined,
   actualCostCny: number,
-  providerReportedCost: boolean,
+  actualCostSource: "provider_reported" | "configured_rate" | "manual_reconciled",
   reconciledAt: string,
 ): WorkflowRun<ProductionBrief> {
   const run = structuredClone(previous);
@@ -6305,7 +6488,7 @@ function applyConfirmedChargedResolution(
     status: "failed",
     estimatedCostCny: originalPaidEstimate(run, node) ?? actualCostCny,
     actualCostCny,
-    actualCostSource: providerReportedCost ? "provider_reported" : "configured_rate",
+    actualCostSource,
     meteredAttemptCount: Math.max(1, node.executionReceipt?.meteredAttemptCount ?? 0),
     meteredFailedAttemptCount: Math.max(1, node.executionReceipt?.meteredFailedAttemptCount ?? 0),
     ...(operationId ? { requestId: operationId } : {}),
@@ -6354,7 +6537,7 @@ function settlePaidOperationReceipt(
   meteredAttemptCount: number,
   meteredFailedAttemptCount: number,
   reconciledAt: string,
-  actualCostSource: "provider_reported" | "configured_rate" = "configured_rate",
+  actualCostSource: "provider_reported" | "configured_rate" | "manual_reconciled" = "configured_rate",
 ): void {
   const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId)!;
   const receipts = (run.executionReceipts ??= []);
@@ -6654,7 +6837,7 @@ async function markPaidAssetItemCharged(
   itemRequestId: string,
   reconciliationId: string,
   actualCostCny: number,
-  actualCostSource: "provider_reported" | "configured_rate",
+  actualCostSource: "provider_reported" | "configured_rate" | "manual_reconciled",
 ): Promise<void> {
   const pathname = path.join(
     nodeDirectory,

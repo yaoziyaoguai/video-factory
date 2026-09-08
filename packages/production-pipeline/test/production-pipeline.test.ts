@@ -17,6 +17,7 @@ const brief = {
   durationSeconds: 30,
   platform: "douyin",
   reviewMode: "manual",
+  runPurpose: "test",
   providers: {
     script: "python-template-v1",
     assets: "local-editorial-v1",
@@ -117,6 +118,24 @@ class FakeWorker {
   }
 }
 
+class GeneratedScriptWorker extends FakeWorker {
+  override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+    const response = await super.run(request);
+    if (request.capability !== "script.draft") return response;
+    const scriptPath = String(response.output?.scriptPath);
+    const script = JSON.parse(await readFile(scriptPath, "utf8")) as { scenes: Array<Record<string, unknown>> };
+    script.scenes = script.scenes.map((scene) => ({ ...scene, visual_strategy: "generated" }));
+    const content = JSON.stringify(script);
+    await writeFile(scriptPath, content, "utf8");
+    response.artifacts[0] = {
+      ...response.artifacts[0]!,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      sizeBytes: Buffer.byteLength(content),
+    };
+    return response;
+  }
+}
+
 async function assertCandidateFailureTrace(
   run: WorkflowRun<pipeline.ProductionBrief>,
   nodeId: string,
@@ -145,8 +164,29 @@ async function assertCandidateFailureTrace(
   assert.doesNotMatch(JSON.stringify(payload), /secret-primary|secret-backup/);
 }
 
-const visualProducerContractDigest = createHash("sha256").update("visual-review-test-producer-contract").digest("hex");
-const visualAuditContractDigest = createHash("sha256").update("visual-review-test-audit-contract").digest("hex");
+const visualProducerContractDigest = pipeline.REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["visual-review"];
+const visualAuditContractDigest = pipeline.REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["role-audit"];
+
+function humanDecisionFor(
+  run: WorkflowRun<pipeline.ProductionBrief>,
+  action: "approve" | "reject",
+  actor: string,
+  note?: string,
+) {
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === "final-review" && candidate.status === "needs_human");
+  const interventionId = node?.intervention?.id;
+  assert.ok(interventionId);
+  const output = node.output as Record<string, unknown>;
+  const reviewEvidenceId = typeof output.reviewEvidenceId === "string" ? output.reviewEvidenceId : null;
+  return {
+    interventionId,
+    action,
+    actor,
+    expectedRunRevision: run.revision,
+    reviewEvidenceId,
+    ...(note ? { note } : {}),
+  };
+}
 
 function passedVisualReviewLoop(
   output: pipeline.VisualReviewReport,
@@ -478,7 +518,7 @@ describe("ProductionPipeline", () => {
     });
 
     assert.equal(waiting.status, "needs_human");
-    assert.equal(waiting.workflowVersion, "1.5.0");
+    assert.equal(waiting.workflowVersion, "1.8.0");
     assert.equal(reviewCalls.length, 2);
     assert.equal(reviewCalls[0]!.reviewStage, "source_assets");
     assert.equal(reviewCalls[1]!.reviewStage, "rendered_video");
@@ -500,7 +540,7 @@ describe("ProductionPipeline", () => {
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "glm-5.3-flash");
     assert.equal(
       waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/visual-review-v11",
+      "video-factory/visual-review-v13",
     );
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.billing, "subscription");
@@ -1433,12 +1473,10 @@ describe("ProductionPipeline", () => {
     }
     assert.equal((await subject.loadPersisted(reviewedAgain.id)).revision, reviewedAgain.revision);
 
-    const approved = await subject.decide(reviewedAgain.id, {
-      interventionId: reviewedAgain.interventions.at(-1)!.id,
-      action: "approve",
-      actor: "director",
-      note: "返修后批准。",
-    });
+    const approved = await subject.decide(
+      reviewedAgain.id,
+      humanDecisionFor(reviewedAgain, "approve", "director", "返修后批准。"),
+    );
     const publishArtifact = approved.artifacts.find((artifact) => artifact.kind === "publish_package");
     assert.ok(publishArtifact?.uri);
     const publishPackage = JSON.parse(await readFile(publishArtifact.uri, "utf8")) as {
@@ -1446,6 +1484,43 @@ describe("ProductionPipeline", () => {
     };
     assert.equal(publishPackage.artifacts.some((artifact) => artifact.id === sceneOneMedia.id), true);
     assert.equal(publishPackage.artifacts.some((artifact) => artifact.id === sceneTwoMedia.id), false);
+  });
+
+  it("rejects formal production before any worker runs when dual visual review is incomplete", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-final-review-readiness-"));
+    const worker = new FakeWorker();
+    const productionBrief = { ...brief, runPurpose: "production" as const };
+
+    await assert.rejects(
+      () => new pipeline.ProductionPipeline({ workspaceRoot, worker }).dispatch(productionBrief),
+      /requires GLM and Codex visual review before work can start/,
+    );
+    assert.equal(worker.calls.length, 0);
+
+    const singleReviewAgent: pipeline.VisualReviewAgent = {
+      id: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+      finalReviewConfiguration: {
+        mode: "dual",
+        reviewers: [
+          { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash", independentRoleAudit: true },
+          { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol", independentRoleAudit: false },
+        ],
+      },
+      review: async () => { throw new Error("must not execute"); },
+    };
+    await assert.rejects(
+      () => new pipeline.ProductionPipeline({
+        workspaceRoot,
+        worker,
+        visualReviewAgents: [singleReviewAgent],
+      }).dispatch({
+        ...productionBrief,
+        providers: { ...productionBrief.providers, visualReview: "glm-visual-review-v1" },
+      }),
+      /requires two distinct GLM and Codex visual-review providers, models, and independent role audits/,
+    );
+    assert.equal(worker.calls.length, 0);
   });
 
   it("requires complete current dual-review proof before final publication", async () => {
@@ -1473,6 +1548,13 @@ describe("ProductionPipeline", () => {
       visualReviewAgents: [{
         id: "glm-visual-review-v1",
         modelId: "glm-5.3-flash",
+        finalReviewConfiguration: {
+          mode: "dual",
+          reviewers: [
+            { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash", independentRoleAudit: true },
+            { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol", independentRoleAudit: true },
+          ],
+        },
         review: async () => { throw new Error("Detailed review must be used."); },
         reviewDetailed: async (input) => input.reviewStage === "source_assets"
           ? { output: cleanReport, inspectedDurationMs: 10_000 }
@@ -1481,18 +1563,14 @@ describe("ProductionPipeline", () => {
     });
     const waiting = await subject.start({
       ...brief,
+      runPurpose: "production",
       providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
       models: { "glm-visual-review-v1": "glm-5.3-flash" },
     });
     assert.equal(waiting.status, "needs_human");
     const runPath = path.join(workspaceRoot, "runs", waiting.id, "run.json");
     const original = await readFile(runPath, "utf8");
-    const decision = {
-      interventionId: waiting.interventions.at(-1)!.id,
-      action: "approve" as const,
-      actor: "director",
-      note: "双审证据完整，批准发布。",
-    };
+    const decision = humanDecisionFor(waiting, "approve", "director", "双审证据完整，批准发布。");
     const assertTamperRejected = async (
       mutate: (visualReport: Record<string, unknown>, finalReviewOutput: Record<string, unknown>) => void,
       error: RegExp,
@@ -1546,9 +1624,17 @@ describe("ProductionPipeline", () => {
       const scope = visualReport.reviewScope as { actualModels: Array<Record<string, unknown>> };
       delete scope.actualModels[1]!.auditContractDigest;
     }, /complete producer and audit proof/);
+    await assertTamperRejected((visualReport) => {
+      const scope = visualReport.reviewScope as { actualModels: Array<Record<string, unknown>> };
+      scope.actualModels[1]!.producerContractDigest = "f".repeat(64);
+    }, /did not use the same producer and audit contracts/);
+    await assertTamperRejected((visualReport) => {
+      const reviews = visualReport.independentReviews as Array<Record<string, unknown>>;
+      reviews[1]!.modelId = "unexpected-review-model";
+    }, /reports do not match the actual model proof/);
     await assertTamperRejected((_visualReport, finalOutput) => {
       finalOutput.reviewEvidenceId = "e".repeat(64);
-    }, /not bound to the current visual evidence digest/);
+    }, /Human decision is not bound to the current review evidence/);
     await assertTamperRejected((_visualReport, finalOutput) => {
       finalOutput.reviewArtifactIds = [...(finalOutput.reviewArtifactIds as string[])].reverse();
     }, /intervention is not bound to the current review artifacts/);
@@ -1935,11 +2021,7 @@ describe("ProductionPipeline", () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rejected-override-"));
     const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });
     const waiting = await subject.start(brief);
-    const rejected = await subject.decide(waiting.id, {
-      interventionId: waiting.interventions.at(-1)!.id,
-      action: "reject",
-      actor: "director",
-    });
+    const rejected = await subject.decide(waiting.id, humanDecisionFor(waiting, "reject", "director"));
 
     await assert.rejects(
       () => subject.applyNodeOverride(rejected.id, {
@@ -1963,15 +2045,7 @@ describe("ProductionPipeline", () => {
   it("persists a manual review pause and resumes in another instance without rerunning media nodes", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
     const worker = new FakeWorker();
-    const ProductionPipeline = (pipeline as { ProductionPipeline?: new (options: {
-      workspaceRoot: string;
-      worker: FakeWorker;
-      clock: () => string;
-      idFactory: (prefix: string) => string;
-    }) => {
-      start: (brief: unknown) => Promise<{ id: string; status: string; interventions: Array<{ id: string }> }>;
-      decide: (runId: string, decision: { interventionId: string; action: "approve"; actor: string; note: string }) => Promise<{ status: string; decisions: Array<{ actor: string }>; artifacts: Artifact[] }>;
-    } }).ProductionPipeline;
+    const ProductionPipeline = pipeline.ProductionPipeline;
     assert.equal(typeof ProductionPipeline, "function");
     let nextId = 1;
     const idFactory = (prefix: string): string => `${prefix}-${nextId++}`;
@@ -2008,12 +2082,10 @@ describe("ProductionPipeline", () => {
     assert.equal(persisted.status, "needs_human");
 
     const secondProcess = new ProductionPipeline!(options);
-    const approved = await secondProcess.decide(waiting.id, {
-      interventionId: waiting.interventions[0]!.id,
-      action: "approve",
-      actor: "director",
-      note: "Picture, subtitles and narration are aligned.",
-    });
+    const approved = await secondProcess.decide(
+      waiting.id,
+      humanDecisionFor(waiting, "approve", "director", "Picture, subtitles and narration are aligned."),
+    );
 
     assert.equal(approved.status, "succeeded");
     assert.equal(approved.decisions[0]?.actor, "director");
@@ -2243,13 +2315,131 @@ describe("ProductionPipeline", () => {
     assert.equal(switched.nodeRuns.find((node) => node.nodeId === "asset-source-review")?.status, "stale");
 
     const resumed = await subject.resumeStale(switched.id);
-    assert.equal(resumed.status, "succeeded");
+    assert.equal(
+      resumed.status,
+      "succeeded",
+      JSON.stringify(resumed.nodeRuns.map(({ nodeId, status, error }) => ({ nodeId, status, error })), null, 2),
+    );
     assert.equal(worker.calls.filter((call) => call.capability === "asset.prepare").length, 1);
     assert.equal(worker.calls.filter((call) => call.capability === "voice.synthesize").length, 1);
     assert.equal(worker.calls.filter((call) => call.capability === "video.render").length, 1);
     assert.equal(worker.calls.filter((call) => call.capability === "quality.review").length, 1);
     assert.equal(backupReviewInputs.filter((input) => input.reviewStage === "source_assets").length, 1);
     assert.equal(backupReviewInputs.filter((input) => input.videoPath?.endsWith("final.mp4")).length, 1);
+  });
+
+  it("reinspects the existing video with both reviewers without rerunning assets, voice, or render", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-reinspection-"));
+    const worker = new FakeWorker();
+    const cleanReport: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "现有成片证据完整，可以进入人工终审。",
+      scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 95 },
+      findings: [],
+      confidence: 0.95,
+      recommendation: "approve",
+    };
+    const pendingReport: pipeline.VisualReviewReport = {
+      ...cleanReport,
+      summary: "当前抽帧不足以确认第一镜完整运动。",
+      findings: [{
+        timecodeMs: 3_000,
+        startTimecodeMs: 2_500,
+        endTimecodeMs: 3_500,
+        scenePosition: 1,
+        targetNodeId: "assets",
+        evidenceStatus: "not_observed",
+        evidenceFrameSha256: null,
+        nextAction: "inspect_existing_media",
+        category: "continuity",
+        severity: "info",
+        description: "需要补查第一镜现有成片的过程帧。",
+        suggestion: "只补查现有成片，不重新生成素材。",
+      }],
+      recommendation: "revise",
+    };
+    const branchCalls = { glm: 0, codex: 0 };
+    const reviewer = (
+      id: "glm-visual-review-v1" | "codex-visual-review-v1",
+      modelId: "glm-5.3-flash" | "gpt-5.6-sol",
+      counter: "glm" | "codex",
+    ): pipeline.VisualReviewAgent => ({
+      id,
+      modelId,
+      independentRoleAudit: true,
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async () => {
+        branchCalls[counter] += 1;
+        const output = branchCalls[counter] === 1 ? pendingReport : cleanReport;
+        return {
+          output,
+          executedProviderId: id,
+          executedModelId: modelId,
+          ...(passedVisualReviewLoop(output, id, modelId).iterations[0]!.candidateTrace
+            ? { trace: passedVisualReviewLoop(output, id, modelId).iterations[0]!.candidateTrace }
+            : {}),
+          agentLoop: passedVisualReviewLoop(output, id, modelId),
+        };
+      },
+    });
+    const dualReview = new pipeline.IndependentDualVisualReviewAgent({
+      primary: reviewer("glm-visual-review-v1", "glm-5.3-flash", "glm"),
+      secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol", "codex"),
+      sourceAgent: {
+        id: "glm-source-review-v1",
+        modelId: "glm-5.3-flash",
+        review: async () => cleanReport,
+      },
+      media: {
+        prepare: async () => ({
+          durationMs: 10_000,
+          frames: [
+            { timecodeMs: 3_000, sha256: "a".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+            { timecodeMs: 8_000, sha256: "b".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 2 },
+          ],
+        }),
+      },
+    });
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      providerRuntimeMetadata: [{
+        id: "glm-visual-review-v1",
+        label: "GLM + Codex 双模型审片",
+        modelId: "glm-5.3-flash",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 1,
+      }],
+      visualReviewAgents: [dualReview],
+    });
+    const waiting = await subject.start({
+      ...brief,
+      runPurpose: "production",
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+    });
+    assert.equal(waiting.status, "needs_human");
+    assert.deepEqual(branchCalls, { glm: 1, codex: 1 });
+    const workerCallsBefore = worker.calls.map((call) => String(call.capability));
+    const visualDelivery = waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.output as {
+      report: { reviewScope: { evidenceId: string } };
+    };
+
+    const dispatched = await subject.dispatchVisualReinspection(waiting.id, {
+      expectedRunRevision: waiting.revision,
+      reviewEvidenceId: visualDelivery.report.reviewScope.evidenceId,
+    });
+    const reinspected = await dispatched.completion;
+
+    assert.equal(reinspected.status, "needs_human");
+    assert.deepEqual(branchCalls, { glm: 2, codex: 2 });
+    assert.deepEqual(worker.calls.map((call) => String(call.capability)), workerCallsBefore);
+    assert.equal(worker.calls.filter((call) => call.capability === "asset.prepare").length, 1);
+    assert.equal(worker.calls.filter((call) => call.capability === "voice.synthesize").length, 1);
+    assert.equal(worker.calls.filter((call) => call.capability === "video.render").length, 1);
+    assert.equal(worker.calls.filter((call) => call.capability === "quality.review").length, 1);
   });
 
   it("fails closed when a known metered worker has no runtime metadata", async () => {
@@ -2637,6 +2827,70 @@ describe("ProductionPipeline", () => {
     assert.equal(persistedPlan.profileRationale, "generated-by-glm-5.3");
   });
 
+  it("revalidates an injected director plan against the script visual strategy", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-director-host-validation-"));
+    const worker = new FakeWorker();
+    const directorAgent: pipeline.VisualDirectorAgent = {
+      id: "api-visual-director-v1",
+      modelId: "gpt-5.6-sol",
+      plan: async (input) => ({
+        version: "video-factory/director-plan-v1",
+        requestedProfileId: input.brief.requestedProfileId,
+        resolvedProfileId: "documentary-observer",
+        profileRationale: "尝试把实拍要求改为生成画面。",
+        visualBible: {
+          narrativeApproach: "逐镜说明",
+          pacing: "均匀",
+          composition: "稳定中景",
+          camera: "固定机位",
+          color: "自然色",
+          continuity: "同一时段",
+          sound: "环境声",
+        },
+        shots: input.scenes.map((scene) => ({
+          scenePosition: scene.position,
+          narrativeRole: "解释",
+          authenticityPolicy: "illustrative",
+          preferredProviderId: "fixture-generated-image-v1",
+          deliveryType: "generated_image",
+          alternativeProviderIds: [],
+          temporalBeats: [
+            `[0s-${scene.duration / 2}s] 建立主体`,
+            `[${scene.duration / 2}s-${scene.duration}s] 保持主体清晰`,
+          ],
+          query: scene.visualPrompt,
+          generationPrompt: `竖屏插画：${scene.visualPrompt}`,
+          rationale: "生成插画便于统一风格。",
+          continuityNote: "保持相同色调。",
+          confidence: 0.8,
+          estimatedCostCny: 0,
+        })),
+      }),
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      directorAgent,
+      assetProviders: [{
+        id: "fixture-generated-image-v1",
+        label: "Fixture generated image",
+        billing: "free",
+        modes: ["AI 图片"],
+        deliveryTypes: ["generated_image"],
+      }],
+    });
+
+    const failed = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      director: { profileId: "auto", assetProviderIds: ["fixture-generated-image-v1"] },
+    });
+
+    assert.equal(failed.status, "failed");
+    assert.match(failed.nodeRuns.find((node) => node.nodeId === "visual-direction")?.error ?? "", /requires real stock footage/);
+    assert.deepEqual(worker.calls.map((call) => call.capability), ["script.draft"]);
+  });
+
   it("runs an AI director before assets and passes its per-shot plan to the router", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
     const worker = new FakeWorker();
@@ -2820,7 +3074,7 @@ describe("ProductionPipeline", () => {
     });
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/director-v24",
+      "video-factory/director-v25",
     );
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.modelId,
@@ -2893,7 +3147,7 @@ describe("ProductionPipeline", () => {
 
   it("validates and reprices a human visual plan before invalidating the old asset approval", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-human-director-plan-"));
-    const worker = new FakeWorker();
+    const worker = new GeneratedScriptWorker();
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
       worker,
@@ -3309,8 +3563,14 @@ describe("ProductionPipeline", () => {
     assert.equal(historical.workflowVersion, "0.9.0");
     assert.ok(historical.nodeRuns[0]?.outputState?.effectiveVersionId);
     await assert.rejects(
-      () => subject.decide("run-historical", { interventionId: "legacy", action: "approve", actor: "owner" }),
-      /Workflow definition does not match the persisted run/,
+      () => subject.decide("run-historical", {
+        interventionId: "legacy",
+        action: "approve",
+        actor: "owner",
+        expectedRunRevision: 0,
+        reviewEvidenceId: null,
+      }),
+      /is not active for run/,
     );
   });
 
@@ -3325,11 +3585,7 @@ describe("ProductionPipeline", () => {
 
     const historical = await subject.show(waiting.id);
     assert.equal(historical.initialInput.platform, "douyin");
-    const resumed = await subject.decide(waiting.id, {
-      interventionId: waiting.interventions.at(-1)!.id,
-      action: "approve",
-      actor: "director",
-    });
+    const resumed = await subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director"));
     assert.equal(resumed.status, "succeeded");
     assert.equal(resumed.initialInput.platform, "douyin");
   });
@@ -4296,7 +4552,7 @@ describe("ProductionPipeline", () => {
     const oldReceipts = resolved.executionReceipts?.filter((receipt) => receipt.requestId === oldOperationId) ?? [];
     assert.equal(oldReceipts.length, 1);
     assert.equal(oldReceipts[0]?.actualCostCny, 4.1);
-    assert.equal(oldReceipts[0]?.actualCostSource, "provider_reported");
+    assert.equal(oldReceipts[0]?.actualCostSource, "manual_reconciled");
     assert.equal(oldReceipts[0]?.meteredAttemptCount, 2);
     assert.equal(oldReceipts[0]?.meteredFailedAttemptCount, 1);
 
@@ -4541,7 +4797,7 @@ describe("ProductionPipeline", () => {
     assert.equal(lockedNode?.operationRequestId, oldOperationId);
     assert.equal(lockedNode?.outcomeUncertain, true);
     assert.equal(lockedNode?.interrupted, true);
-    assert.equal(lockedNode?.executionReceipt?.actualCostSource, "provider_reported");
+    assert.equal(lockedNode?.executionReceipt?.actualCostSource, "manual_reconciled");
     const failedLedger = JSON.parse(await readFile(
       path.join(failedLedgerDirectory, `${createHash("sha256").update(oldOperationId).digest("hex")}.json`),
       "utf8",
@@ -5414,7 +5670,7 @@ describe("ProductionPipeline", () => {
     const settledReceipts = resolved.executionReceipts?.filter((receipt) => receipt.requestId === oldOperationId) ?? [];
     assert.equal(settledReceipts.length, 1);
     assert.equal(settledReceipts[0]?.actualCostCny, 1.75);
-    assert.equal(settledReceipts[0]?.actualCostSource, "provider_reported");
+    assert.equal(settledReceipts[0]?.actualCostSource, "manual_reconciled");
     assert.equal(settledReceipts[0]?.meteredAttemptCount, 1);
     assert.equal(settledReceipts[0]?.meteredFailedAttemptCount, 1);
     const persistedLedger = JSON.parse(await readFile(ledgerPath, "utf8")) as {
@@ -5430,7 +5686,7 @@ describe("ProductionPipeline", () => {
     assert.equal(persistedLedger.items[0]?.state, "terminal_failed");
     assert.equal(persistedLedger.items[0]?.taskId, "provider-task-query-rejected");
     assert.equal(persistedLedger.items[0]?.actualCostCny, 1.75);
-    assert.equal(persistedLedger.items[0]?.actualCostSource, "provider_reported");
+    assert.equal(persistedLedger.items[0]?.actualCostSource, "manual_reconciled");
     assert.equal(persistedLedger.items[0]?.manualReconciliationRequired, undefined);
     assert.match(persistedLedger.items[0]?.error ?? "", /confirmed that this provider task was charged without a recoverable result/);
 
@@ -5690,7 +5946,7 @@ describe("ProductionPipeline", () => {
     );
   });
 
-  it("allows manual not-charged reconciliation to unlock an uncertain automatic TTS call", async () => {
+  it("settles an explicitly rejected automatic TTS call without retrying before configuration changes", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-tts-reconciliation-"));
     let voiceCalls = 0;
     class AmbiguousVoiceWorker extends FakeWorker {
@@ -5807,11 +6063,13 @@ describe("ProductionPipeline", () => {
       note: "MiniMax 控制台确认该请求没有受理记录和扣费。",
     });
 
-    assert.equal(resolved.status, "needs_human");
-    assert.equal(resolved.nodeRuns.find((node) => node.nodeId === "voice")?.status, "succeeded");
-    assert.equal(voiceCalls, 2);
-    const voiceRequests = worker.calls.filter((call) => call.capability === "voice.synthesize");
-    assert.equal(voiceRequests.at(-1)?.commandId, operationId);
+    assert.equal(resolved.status, "failed");
+    const resolvedVoice = resolved.nodeRuns.find((node) => node.nodeId === "voice");
+    assert.equal(resolvedVoice?.status, "failed");
+    assert.equal(resolvedVoice?.outcomeUncertain, undefined);
+    assert.equal(resolvedVoice?.operationRequestId, undefined);
+    assert.match(resolvedVoice?.error ?? "", /调整配音设置.*重试失败步骤/);
+    assert.equal(voiceCalls, 1);
     const reconciledLedger = JSON.parse(await readFile(voiceLedgerPath, "utf8")) as {
       items: Array<{ state: string }>;
     };
@@ -5979,7 +6237,7 @@ describe("ProductionPipeline", () => {
     assert.match(voiceNode?.error ?? "", /原配音费用已登记.*重新创建配音任务/);
     assert.doesNotMatch(voiceNode?.error ?? "", /可恢复的素材|重新报价/);
     assert.equal(voiceNode?.executionReceipt?.actualCostCny, 0.1);
-    assert.equal(voiceNode?.executionReceipt?.actualCostSource, "provider_reported");
+    assert.equal(voiceNode?.executionReceipt?.actualCostSource, "manual_reconciled");
     assert.equal(voiceNode?.executionReceipt?.providerId, "minimax-tts-v1");
     assert.equal(voiceNode?.executionReceipt?.modelId, "speech-2.8-turbo");
     // 确认计费后不再自动重试配音，也不改变人民币记账策略。
@@ -6022,6 +6280,27 @@ describe("ProductionPipeline", () => {
       readFile(path.join(workspaceRoot, "runs", dispatched.runId, ".execution-lease.json"), "utf8"),
       (error: NodeJS.ErrnoException) => error.code === "ENOENT",
     );
+  });
+
+  it("releases the execution lock when initial lease metadata cannot be installed", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });
+    const runId = "run-lease-metadata-failure";
+    const leasePath = path.join(workspaceRoot, "runs", runId, ".execution-lease.json");
+    const lockPath = `${leasePath}.lock`;
+    await mkdir(leasePath, { recursive: true });
+    const leaseProbe = subject as unknown as {
+      acquireExecutionLease(id: string): Promise<unknown>;
+      releaseExecutionLease(handle: unknown): Promise<void>;
+    };
+
+    await assert.rejects(() => leaseProbe.acquireExecutionLease(runId));
+    await assert.rejects(stat(lockPath), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+
+    await rm(leasePath, { recursive: true, force: true });
+    const lease = await leaseProbe.acquireExecutionLease(runId);
+    await leaseProbe.releaseExecutionLease(lease);
+    await assert.rejects(stat(lockPath), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
   });
 
   it("blocks node edits while another process owns the execution lease", async () => {
@@ -6249,11 +6528,7 @@ describe("ProductionPipeline", () => {
       },
     };
     const waiting = await new pipeline.ProductionPipeline(options).start(brief);
-    const decision = {
-      interventionId: waiting.interventions[0]!.id,
-      action: "approve" as const,
-      actor: "director",
-    };
+    const decision = humanDecisionFor(waiting, "approve", "director");
 
     const results = await Promise.allSettled([
       new pipeline.ProductionPipeline(options).decide(waiting.id, decision),
@@ -6620,7 +6895,7 @@ describe("ProductionPipeline", () => {
 
   it("quotes the exact paid shots selected by the AI shot router", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-unlimited-router-"));
-    const worker = new FakeWorker();
+    const worker = new GeneratedScriptWorker();
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
       worker,
@@ -6713,7 +6988,7 @@ describe("ProductionPipeline", () => {
           position: 1,
           narration: "第一幕",
           duration: 5,
-          visual_strategy: "stock",
+          visual_strategy: "generated",
           visual_prompt: "城市早餐摊",
           on_screen_text: "早餐第一步",
           sound_cue: "摊位环境声",
@@ -6722,7 +6997,7 @@ describe("ProductionPipeline", () => {
           position: 2,
           narration: "第二幕",
           duration: 5,
-          visual_strategy: "stock",
+          visual_strategy: "generated",
           visual_prompt: "食物制作特写",
           on_screen_text: "看清制作动作",
           sound_cue: "煎制声",
@@ -6812,7 +7087,7 @@ describe("ProductionPipeline", () => {
 
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
-      worker: new FakeWorker(),
+      worker: new GeneratedScriptWorker(),
       directorAgent: {
         id: "api-visual-director-v1",
         plan: async () => directorPlan("修正版第二镜", 0),
@@ -6893,7 +7168,7 @@ describe("ProductionPipeline", () => {
 
   it("quotes mixed generated images and videos before calling either paid adapter", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-mixed-asset-approval-"));
-    class RoutedAssetBaselineWorker extends FakeWorker {
+    class RoutedAssetBaselineWorker extends GeneratedScriptWorker {
       override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
         const response = await super.run(request);
         if (request.capability !== "asset.prepare") return response;
@@ -7109,7 +7384,7 @@ describe("ProductionPipeline", () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-duration-quote-"));
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
-      worker: new FakeWorker(),
+      worker: new GeneratedScriptWorker(),
       directorAgent: {
         id: "api-visual-director-v1",
         plan: async (input) => {
@@ -7202,7 +7477,7 @@ describe("ProductionPipeline", () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-reuse-quote-"));
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
-      worker: new FakeWorker(),
+      worker: new GeneratedScriptWorker(),
       directorAgent: {
         id: "api-visual-director-v1",
         plan: async (input) => ({
@@ -7364,7 +7639,7 @@ describe("ProductionPipeline", () => {
 
   it("stores a rejected asset quote and waits for a manual director replan", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-cost-replan-"));
-    const worker = new FakeWorker();
+    const worker = new GeneratedScriptWorker();
     const directorInputs: pipeline.VisualDirectorAgentInput[] = [];
     const historicalFeedback = Array.from({ length: 20 }, (_, index) => ({
       spendPlanId: `historical-plan-${index + 1}`,
@@ -7547,7 +7822,7 @@ describe("ProductionPipeline", () => {
 
   it("quotes an executable plan above a cost target instead of turning feedback into a hidden limit", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-cost-boundary-"));
-    const worker = new FakeWorker();
+    const worker = new GeneratedScriptWorker();
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
       worker,
@@ -7761,11 +8036,7 @@ describe("ProductionPipeline", () => {
       assert.equal(createHash("sha256").update(bytes).digest("hex"), artifact.sha256, artifact.kind);
     }
 
-    const approved = await subject.decide(rerun.id, {
-      interventionId: rerun.interventions.at(-1)!.id,
-      action: "approve",
-      actor: "director",
-    });
+    const approved = await subject.decide(rerun.id, humanDecisionFor(rerun, "approve", "director"));
     assert.equal(approved.status, "succeeded");
     const packageArtifact = approved.artifacts.find((artifact) => artifact.kind === "publish_package");
     assert.ok(packageArtifact?.uri);
@@ -7789,11 +8060,7 @@ describe("ProductionPipeline", () => {
     assert.ok(renderArtifact?.uri);
     await writeFile(renderArtifact.uri, "changed-after-review", "utf8");
 
-    const failed = await subject.decide(waiting.id, {
-      interventionId: waiting.interventions[0]!.id,
-      action: "approve",
-      actor: "director",
-    });
+    const failed = await subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director"));
 
     assert.equal(failed.status, "failed");
     assert.match(failed.nodeRuns.at(-1)?.error ?? "", /sha256 does not match/);
@@ -7855,11 +8122,7 @@ describe("ProductionPipeline", () => {
     }
     const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new IndexedAssetWorker() });
     const waiting = await subject.start(brief);
-    const finished = await subject.decide(waiting.id, {
-      interventionId: waiting.interventions.at(-1)!.id,
-      action: "approve",
-      actor: "director",
-    });
+    const finished = await subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director"));
     const manifestArtifact = finished.artifacts.find((artifact) => artifact.kind === "resource_manifest");
     assert.ok(manifestArtifact?.uri);
     const manifest = JSON.parse(await readFile(manifestArtifact.uri, "utf8")) as { items: Array<Record<string, unknown>> };

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { CodexExecutorError, codexExecutorProfileFor, parseTaskRequest } from "../src/codex-executor.js";
-import { BROKER_TASK_KINDS } from "../src/task-definitions.js";
+import { BROKER_TASK_KINDS, taskContractDescriptorFor } from "../src/task-definitions.js";
 import { ZaiCodePlanExecutor } from "../src/zai-code-plan-executor.js";
 
 const API_KEY = "test-only-zai-key";
@@ -114,6 +114,7 @@ function visualReviewTask() {
   return parseTaskRequest({
     protocolVersion: "video-factory/codex-bridge-v2",
     kind: "visual-review",
+    expectedContractDigest: taskContractDescriptorFor("visual-review").digest,
     payload: {
       durationMs: 10_000,
       frames: [{
@@ -163,6 +164,7 @@ function roleAuditTask(withImage: boolean) {
   return parseTaskRequest({
     protocolVersion: "video-factory/codex-bridge-v2",
     kind: "role-audit",
+    expectedContractDigest: taskContractDescriptorFor("role-audit").digest,
     payload: {
       role: "screenwriter",
       iteration: 1,
@@ -414,10 +416,30 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(requestBodies[1]?.temperature, 0.6);
   });
 
+  it("allows a visual format repair to remove only an unsupported extra field", async () => {
+    const invalid = { ...validReport(), internalNote: "must not cross the public contract" };
+    let calls = 0;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(calls === 1 ? invalid : validReport()) } }],
+        }), { status: 200 });
+      },
+    });
+
+    const result = await executor.runTask(visualReviewTask());
+
+    assert.equal(calls, 2);
+    assert.deepEqual(JSON.parse(result.output), validReport());
+  });
+
   it("rejects a visual format repair that changes evidence semantics", async () => {
     const invalid = validReport();
     delete (invalid as Partial<typeof invalid>).version;
     const changed = validReport();
+    changed.scores = { composition: 96, continuity: 96, pacing: 96, legibility: 96, safety: 98 };
     changed.recommendation = "approve";
     changed.findings = [];
     let calls = 0;
@@ -436,6 +458,33 @@ describe("ZaiCodePlanExecutor", () => {
       (error: unknown) => {
         assert.ok(error instanceof CodexExecutorError);
         assert.equal(error.details?.category, "invalid_output");
+        assert.equal(error.details?.reasonCode, "repair_semantic_drift");
+        return true;
+      },
+    );
+    assert.equal(calls, 2);
+  });
+
+  it("rejects a visual format repair that redirects a finding to another production node", async () => {
+    const invalid = validReport();
+    delete (invalid as Partial<typeof invalid>).version;
+    const changed = validReport();
+    (changed.findings as Array<Record<string, unknown>>)[0]!.targetNodeId = "script";
+    let calls = 0;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(calls === 1 ? invalid : changed) } }],
+        }), { status: 200 });
+      },
+    });
+
+    await assert.rejects(
+      () => executor.runTask(visualReviewTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
         assert.equal(error.details?.reasonCode, "repair_semantic_drift");
         return true;
       },

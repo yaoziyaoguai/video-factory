@@ -83,7 +83,7 @@ export interface CodexScreenwriterAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_SCREENWRITER_TIMEOUT_MS = 660_000;
 const DEFAULT_SCREENWRITER_MAX_ATTEMPTS = 2;
-export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v13|role-audit-v1|script-validator-v3|visual-plan-v2";
+export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v14|role-audit-v3|script-validator-v3|visual-plan-v2";
 
 // id 固定为 codex-screenwriter-v1：brief.providers.script 持久化该 id，registry 按 id 匹配 provider。
 export class CodexScreenwriterAgent implements ScreenwriterAgent {
@@ -137,7 +137,7 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
       contractVersion: SCREENWRITER_AGENT_CONTRACT_VERSION,
       criteria: [
         "前两秒建立具体钩子，前六秒兑现一部分观众承诺",
-        "每镜头只有一个可见动作，成功与失败条件可由下游验收",
+        "每镜头只有一个可见动作，成功与失败条件可由下游验收；关键 payoff 在现有字段中明确起始状态、关键变化和观众可见的结果",
         "每镜头可由一段从开头播放的素材独立执行；不得要求跨镜抽取同一母片的末帧、后续片段或新状态",
         "旁白时长、镜头时长、屏幕文字和声音提示彼此一致",
         "事实断言精确；单变量对照只要求画面可核验的条件；屏幕文字的信息量与实际展示时长匹配",
@@ -279,9 +279,16 @@ function validateScreenwriterCandidate(
   };
   const candidate = validateScriptDraft(value, validation);
   const rework = input.brief.rework;
-  if (context.repair || !rework?.previousScript || rework.affectedScenePositions === undefined) {
+  if (!rework?.previousScript || rework.affectedScenePositions === undefined) {
     return candidate;
   }
+
+  const wholeScriptRevisionAuthorized = rework.findings.some((finding) => (
+    finding.scenePosition === undefined
+    && finding.targetNodeIds.includes("script")
+    && finding.action !== "inspect_existing_media"
+  ));
+  if (wholeScriptRevisionAuthorized) return candidate;
 
   const previous = validateScriptDraft(rework.previousScript, validation);
   const previousPositions = new Set(previous.scenes.map((scene) => scene.position));

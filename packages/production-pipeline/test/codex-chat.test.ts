@@ -304,6 +304,37 @@ describe("CodexBridgeClient", () => {
     }
   });
 
+  it("treats a severed accepted response body as uncertain and never retries it", async () => {
+    const bridge = await startBridge((_request, response) => {
+      response.writeHead(200, {
+        "content-type": "application/json",
+        "content-length": "512",
+      });
+      response.write('{"ok":true,"output":"');
+      setImmediate(() => response.socket?.destroy());
+    });
+    try {
+      const client = new CodexBridgeClient({
+        socketPath: bridge.socketPath,
+        maxAttempts: 3,
+        sleep: async () => {},
+      });
+
+      await assert.rejects(
+        () => client.runTask("script-draft", {}, "response-stream-interrupted"),
+        (error: unknown) => {
+          assert.ok(error instanceof CodexBridgeError);
+          assert.equal(error.transient, false);
+          assert.equal(error.stage, "uncertain");
+          return true;
+        },
+      );
+      assert.equal(bridge.requests.length, 1);
+    } finally {
+      await bridge.close();
+    }
+  });
+
   it("retries connect-phase failures that provably precede task acceptance", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "video-factory-codex-"));
     const delays: number[] = [];
@@ -380,6 +411,7 @@ describe("CodexBridgeClient", () => {
           requestIdHash: "a".repeat(64),
           providerId: "zai-bigmodel-api",
           modelId: "glm-5.3",
+          queueWaitMs: 19,
           providerWaitMs: 37,
           finishReason: "length",
           promptTokens: 2_000,
@@ -405,6 +437,7 @@ describe("CodexBridgeClient", () => {
           requestIdHash: "a".repeat(64),
           providerId: "zai-bigmodel-api",
           modelId: "glm-5.3",
+          queueWaitMs: 19,
           providerWaitMs: 37,
           finishReason: "length",
           promptTokens: 2_000,

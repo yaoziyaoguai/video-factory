@@ -48,7 +48,7 @@ describe("TemplatesPage", () => {
     await screen.findByRole("heading", { name: "知识解释" });
     const gallery = screen.getByRole("radiogroup", { name: "视频模板" });
     const editor = screen.getByRole("region", { name: "模板编辑器" });
-    const performance = screen.getByRole("group", { name: "模板实际表现" });
+    const performance = screen.getByRole("group", { name: "模板制作质量记录" });
     const advancedModels = screen.getByRole("group", { name: "高级模型设置" });
 
     expect(gallery.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -58,7 +58,7 @@ describe("TemplatesPage", () => {
 
     await user.click(screen.getByText("高级模型设置"));
     expect(advancedModels).toHaveAttribute("open");
-    await user.click(screen.getByText("模板实际表现"));
+    await user.click(screen.getByText("模板制作质量记录"));
     expect(performance).toHaveAttribute("open");
   });
 
@@ -162,6 +162,30 @@ describe("TemplatesPage", () => {
 
     expect(save).toHaveBeenCalledWith(expect.objectContaining({
       modelDefaults: { "ark-seedance-video-v1": "seedance-2-0-lite" },
+    }), 3);
+  });
+
+  it("saves edited shot responsibilities with the template draft", async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(studioApi, "saveTemplateDraft");
+    render(<TemplatesPage />);
+
+    await screen.findByRole("heading", { name: "知识解释" });
+    await user.click(screen.getByRole("radio", { name: /我的系列/ }));
+    const purpose = screen.getByLabelText("开场 · shot 镜头用途");
+    await user.clear(purpose);
+    await user.type(purpose, "前三秒展示可核验的结果反差");
+    const duration = screen.getByLabelText("开场 · shot 建议时长");
+    await user.clear(duration);
+    await user.type(duration, "3.5");
+    await user.click(screen.getByRole("button", { name: "保存草稿" }));
+
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      shotSlots: [expect.objectContaining({
+        id: "shot",
+        purpose: "前三秒展示可核验的结果反差",
+        durationSeconds: 3.5,
+      })],
     }), 3);
   });
 

@@ -346,7 +346,7 @@ function assetMetadata(asset: StudioIndexedAsset, run?: StudioRunSummary): strin
     asset.width && asset.height ? `${asset.width} × ${asset.height}` : undefined,
     asset.aspectRatio,
     asset.durationSeconds ? `${Math.round(asset.durationSeconds * 10) / 10} 秒` : undefined,
-    asset.usages.some((item) => item.selectedInFinal) ? "已入片" : undefined,
+    asset.usages.some((item) => item.runId === run?.id && item.selectedInFinal) ? "已入片" : undefined,
     run ? `${formatRunDate(run.finishedAt ?? run.startedAt)} · ${statusLabel(run.status)}` : undefined,
   ].filter((item): item is string => Boolean(item));
 }

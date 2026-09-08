@@ -562,7 +562,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
           ? "内容潜力分只反映选题机会与制作可行性，不代表当前可以采用；下方的形态建议在补齐来源并通过核验前仅供参考。"
           : "总分综合内容机会与制作可行性；风险分越低越安全。证据强度表示当前信号热度或排名，不等同于事实可信度。"}</p>
       </details>
-      <div className="candidate-evidence"><span>原始证据</span>{item.evidence.slice(0, 2).map((evidence, index) => evidence.evidenceUrl ? <a key={`${item.id}-${index}`} href={evidence.evidenceUrl} target="_blank" rel="noreferrer"><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong><small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${evidence.source} · 强度 ${evidence.strength}`}</small></a> : <div key={`${item.id}-${index}`}><strong>{evidence.keyword}</strong><small>{evidence.source} · 强度 {evidence.strength}</small></div>)}</div>
+      <div className="candidate-evidence"><span>来源线索</span>{item.evidence.slice(0, 2).map((evidence, index) => evidence.evidenceUrl ? <a key={`${item.id}-${index}`} href={evidence.evidenceUrl} target="_blank" rel="noreferrer"><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong><small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${evidence.source} · 榜单热度或排名信号 ${evidence.strength}`}</small></a> : <div key={`${item.id}-${index}`}><strong>{evidence.keyword}</strong><small>{evidence.source} · 榜单热度或排名信号 {evidence.strength}</small></div>)}</div>
       <div className={`candidate-verification is-${item.verification.status}`}><ShieldAlert aria-hidden="true" size={15} /><span><strong>{sourceBlocked
         ? "待补来源 · 暂不可采用"
         : skipped
@@ -577,7 +577,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
           ? item.editorialDecision.reasons[0]
           : templateUnavailable
             ? "总编推荐的模板不在当前生产目录里；请刷新候选，或到模板目录确认后再采用。"
-            : item.verification.reasons[0]}</small></span><output>{item.evidence.length} 条证据 · {item.verification.independentSources} 个有效来源域名（需 {item.verification.requiredSources} 个）</output></div>
+            : item.verification.reasons[0]}</small></span><output>{item.evidence.length} 条来源线索 · {item.verification.independentSources} 个有效来源域名（需 {item.verification.requiredSources} 个）</output></div>
       {canSupplementSources ? (
         <button className="button button-primary candidate-adopt" type="button" aria-label={`补充来源 ${item.title}`} disabled={disabled} onClick={() => onSupplementSources?.(item)}>保存来源并重新评估<ArrowRight aria-hidden="true" size={16} /></button>
       ) : (

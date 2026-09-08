@@ -96,6 +96,41 @@ describe("CostStudio", () => {
     assert.equal(detail?.lines[0]?.actualPending, true);
   });
 
+  it("keeps an interrupted automatic voice request visible without inventing an actual charge", async () => {
+    const studio = new CostStudio(async () => ([{
+      id: "run-uncertain-voice",
+      initialInput: { title: "中断的自动配音" },
+      executionPlan: [{
+        nodeId: "voice",
+        capability: "voice.synthesize",
+        providerId: "minimax-tts-v1",
+        modelId: "speech-2.8-hd",
+        billing: "metered",
+        estimatedCostCny: 0.08,
+      }],
+      nodeRuns: [{
+        nodeId: "voice",
+        role: "声音导演",
+        status: "failed",
+        startedAt: "2026-08-27T11:10:00.000Z",
+        outcomeUncertain: true,
+        operationRequestId: "voice-operation-uncertain",
+      }],
+      executionReceipts: [],
+      spendAuthorizations: [],
+    }]));
+
+    const detail = await studio.runDetail("run-uncertain-voice");
+
+    assert.equal(detail?.lines.length, 1);
+    assert.equal(detail?.lines[0]?.providerId, "minimax-tts-v1");
+    assert.equal(detail?.lines[0]?.capability, "voice.synthesize");
+    assert.equal(detail?.lines[0]?.estimatedCostCny, 0.08);
+    assert.equal(detail?.lines[0]?.actualCostCny, undefined);
+    assert.equal(detail?.lines[0]?.actualPending, true);
+    assert.equal(detail?.totals.meteredCalls, 1);
+  });
+
   it("does not report a pending bill when the provider rejected before task submission", async () => {
     const studio = new CostStudio(async () => ([{
       id: "run-definitive-rejection",

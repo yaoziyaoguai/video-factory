@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS } from "@video-factory/production-pipeline";
 import {
   DEFAULT_CODEX_SOCKET_PATH,
   DEFAULT_ZAI_CODEX_SOCKET_PATH,
@@ -112,6 +113,7 @@ describe("readCodexProviderSettings", () => {
         modelId,
         taskModels,
         taskKinds,
+        taskContracts: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS,
       }));
     });
     await new Promise<void>((resolve, reject) => {
@@ -173,6 +175,7 @@ describe("readZaiCodexProviderSettings", () => {
         "visual-review": "glm-5.3-flash",
         "role-audit": "glm-5.3-flash",
       },
+      taskContracts: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS,
     };
     const server = http.createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });

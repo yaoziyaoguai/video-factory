@@ -80,11 +80,16 @@ describe("real production E2E", () => {
 
     const intervention = waiting.interventions.at(-1);
     assert.ok(intervention);
+    const finalReviewOutput = waiting.nodeRuns.find((node) => node.nodeId === "final-review")?.output as Record<string, unknown> | undefined;
     const secondProcess = new ProductionPipeline(pipelineOptions);
     const approved = await secondProcess.decide(waiting.id, {
       interventionId: intervention.id,
       action: "approve",
       actor: "e2e-director",
+      expectedRunRevision: waiting.revision,
+      reviewEvidenceId: typeof finalReviewOutput?.reviewEvidenceId === "string"
+        ? finalReviewOutput.reviewEvidenceId
+        : null,
       note: "Automated technical checks passed; test approval records the resume path.",
     });
 

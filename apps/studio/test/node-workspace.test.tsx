@@ -1506,7 +1506,8 @@ describe("node production workspaces", () => {
     }} />);
 
     expect(screen.getByText("付费服务失败")).toBeInTheDocument();
-    await userEvent.click(screen.getByText("逐角色消费明细"));
+    const detailsHint = screen.getByText("报价不等于消费；只有外部任务结果不明确时才需确认是否扣费");
+    await userEvent.click(detailsHint.closest("summary")!);
     expect(screen.getByText("AI 创作服务 · gpt-5.6-terra")).toBeInTheDocument();
     expect(screen.getByText("订阅任务失败 · 不产生按量费用")).toBeInTheDocument();
   });

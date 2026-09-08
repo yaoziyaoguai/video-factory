@@ -13,10 +13,11 @@ import {
   type CodexExecutorFailureDetails,
   type ValidatedTask,
 } from "./codex-executor.js";
+import { taskContractDescriptorFor } from "./task-definitions.js";
 
 const DEFAULT_SOCKET_MODE = 0o660;
 const DEFAULT_CONCURRENCY = 1;
-const DEFAULT_MAX_BACKLOG = 20;
+const DEFAULT_MAX_BACKLOG = 1;
 // 5 MiB JPEG 解码预算经 base64 后约 6.7 MiB；额外空间容纳固定 JSON 元数据与审片上下文。
 const DEFAULT_MAX_BODY_BYTES = 9 * 1024 * 1024;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -31,6 +32,7 @@ export type TaskOutcome =
     message: string;
     failureKind?: "model_provider_transient" | "model_provider_no_output";
     failureDetails?: CodexExecutorFailureDetails;
+    outcomeUncertain?: true;
   };
 
 interface QueuedTask {
@@ -38,6 +40,7 @@ interface QueuedTask {
   executionOptions: CodexExecutionOptions;
   controller: AbortController;
   active: boolean;
+  submittedAtMs: number;
   settle: (outcome: TaskOutcome) => void;
 }
 
@@ -70,7 +73,14 @@ class BrokerTaskQueue {
     if (this.pending.length >= this.maxBacklog) return settledSubmission(busyOutcome());
     let entry!: QueuedTask;
     const outcome = new Promise<TaskOutcome>((settle) => {
-      entry = { task, executionOptions, settle, controller: new AbortController(), active: false };
+      entry = {
+        task,
+        executionOptions,
+        settle,
+        controller: new AbortController(),
+        active: false,
+        submittedAtMs: Date.now(),
+      };
       const insertionIndex = this.pending.findIndex((queued) => taskPriority(task) < taskPriority(queued.task));
       if (insertionIndex < 0) this.pending.push(entry);
       else this.pending.splice(insertionIndex, 0, entry);
@@ -110,21 +120,32 @@ class BrokerTaskQueue {
       const next = this.pending.shift()!;
       next.active = true;
       this.activeTasks += 1;
+      const queueWaitMs = Math.max(0, Date.now() - next.submittedAtMs);
       try {
         const result = await this.executor.runTask(next.task, {
           ...next.executionOptions,
           signal: next.controller.signal,
         });
+        if (next.task.expectedContractDigest && result.trace?.contractDigest !== next.task.expectedContractDigest) {
+          throw new CodexExecutorError("Executor returned a result for a different task contract.", false, {
+            details: {
+              category: "invalid_output",
+              reasonCode: "contract_mismatch",
+              providerId: this.executor.identity.providerId,
+              modelId: this.executor.identity.taskModels?.[next.task.kind] ?? this.executor.identity.modelId,
+            },
+          });
+        }
         this.completedTasks += 1;
         next.settle({
           ok: true,
           output: result.output,
-          ...(result.trace ? { trace: result.trace } : {}),
+          ...(result.trace ? { trace: { ...result.trace, queueWaitMs } } : {}),
           ...(result.sessionId ? { sessionId: result.sessionId } : {}),
         });
       } catch (error) {
         this.failedTasks += 1;
-        next.settle(failureOutcome(error));
+        next.settle(failureOutcome(error, queueWaitMs));
       } finally {
         next.active = false;
         this.activeTasks -= 1;
@@ -220,6 +241,11 @@ export class CodexBrokerServer {
   healthReport(): Record<string, unknown> {
     return {
       protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+      taskContracts: Object.fromEntries(
+        (["visual-review", "role-audit"] as const)
+          .filter((kind) => this.options.executor.identity.taskKinds.includes(kind))
+          .map((kind) => [kind, taskContractDescriptorFor(kind).digest]),
+      ),
       ...this.options.executor.identity,
       active: this.queue.active(),
       queued: this.queue.queued(),
@@ -275,7 +301,10 @@ export class CodexBrokerServer {
       session = taskSessionRequest(parsed);
     } catch (error) {
       const message = error instanceof CodexExecutorError ? error.message : "Invalid codex task request.";
-      this.sendJson(response, 400, { error: message });
+      this.sendJson(response, 400, {
+        error: message,
+        ...(error instanceof CodexExecutorError && error.details ? { failureDetails: error.details } : {}),
+      });
       return;
     }
     const requestId = taskRequestId(parsed);
@@ -338,6 +367,7 @@ export class CodexBrokerServer {
         error: outcome.message,
         ...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}),
         ...(outcome.failureDetails ? { failureDetails: outcome.failureDetails } : {}),
+        ...(outcome.outcomeUncertain ? { outcomeUncertain: true } : {}),
       },
       outcome.status === 503 ? DEFAULT_RETRY_AFTER_SECONDS : undefined,
     );
@@ -409,6 +439,9 @@ export class CodexBrokerServer {
     }).outcome;
     if (!outcome.ok && outcome.status === 503) {
       await rm(recordPath, { force: true });
+      return outcome;
+    }
+    if (!outcome.ok && outcome.outcomeUncertain) {
       return outcome;
     }
     const completion = this.prepareSessionCompletion(task.kind, session, sessionId, outcome);
@@ -686,16 +719,17 @@ async function writeSessionRecord(recordPath: string, record: SessionRecord): Pr
   }
 }
 
-function failureOutcome(error: unknown): TaskOutcome {
+function failureOutcome(error: unknown, queueWaitMs: number): TaskOutcome {
   if (error instanceof CodexExecutorError) {
     const failureKind = error.failureKind ?? (error.transient ? "model_provider_transient" as const : undefined);
     // 任务已受理后的失败（含执行超时）一律 422：客户端不重放，任务至多执行一次。
     return {
       ok: false,
-      status: 422,
+      status: error.outcomeUncertain ? 500 : 422,
       message: publicExecutorMessage(error.message, error.transient),
       ...(failureKind ? { failureKind } : {}),
-      ...(error.details ? { failureDetails: error.details } : {}),
+      ...(error.details ? { failureDetails: { ...error.details, queueWaitMs } } : {}),
+      ...(error.outcomeUncertain ? { outcomeUncertain: true } : {}),
     };
   }
   return { ok: false, status: 500, message: "The model service could not complete this step." };

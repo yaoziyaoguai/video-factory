@@ -2,6 +2,7 @@ import type {
   StartRunResponse,
   StudioDecisionInput,
   StudioSceneRevisionInput,
+  StudioVisualReinspectionInput,
   StudioCandidateInbox,
   StudioCandidateAdoptionInput,
   StudioCandidateInboxQuery,
@@ -235,6 +236,10 @@ export const studioApi = {
   runCosts: (runId: string) => requestJson<StudioCostRunDetail>(`/api/runs/${encodeURIComponent(runId)}/costs`),
   run: (runId: string) => requestJson<StudioRunDetail>(`/api/runs/${encodeURIComponent(runId)}`),
   reworkDraft: (runId: string) => requestJson<StudioReworkDraft>(`/api/runs/${encodeURIComponent(runId)}/rework-draft`),
+  reinspectVisualReview: (runId: string, input: StudioVisualReinspectionInput) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/reinspect-visual-review`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
   uploadReferenceVideo: (file: File) => requestJson<StudioReferenceVideo>("/api/reference-videos", {
     method: "POST",
     headers: {

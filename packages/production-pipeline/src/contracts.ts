@@ -260,6 +260,7 @@ export interface ProductionBrief {
     opportunityId: string;
   };
   rework?: ProductionReworkContext;
+  taskContractDigests?: Partial<Record<"visual-review" | "role-audit", string>>;
 }
 
 export function parseBrief(value: unknown): ProductionBrief {
@@ -287,6 +288,7 @@ export function parseBrief(value: unknown): ProductionBrief {
   const seriesContext = parseProductionSeriesContext(value.seriesContext);
   const creationContext = parseCreationContext(value.creationContext);
   const rework = parseReworkContext(value.rework);
+  const taskContractDigests = parseTaskContractDigests(value.taskContractDigests);
   const templateSnapshot = value.templateSnapshot === undefined
     ? undefined
     : parseProductionTemplateSnapshot(value.templateSnapshot);
@@ -351,7 +353,27 @@ export function parseBrief(value: unknown): ProductionBrief {
     ...(seriesContext ? { seriesContext } : {}),
     ...(creationContext ? { creationContext } : {}),
     ...(rework ? { rework } : {}),
+    ...(taskContractDigests ? { taskContractDigests } : {}),
   };
+}
+
+function parseTaskContractDigests(value: unknown): ProductionBrief["taskContractDigests"] {
+  if (value === undefined) return undefined;
+  const input = requireRecord(value, "taskContractDigests");
+  const allowed = new Set(["visual-review", "role-audit"]);
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
+    throw new Error("taskContractDigests contains an unsupported task kind.");
+  }
+  const result: NonNullable<ProductionBrief["taskContractDigests"]> = {};
+  for (const kind of allowed) {
+    const digest = input[kind];
+    if (digest === undefined) continue;
+    if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)) {
+      throw new Error(`taskContractDigests.${kind} must be a SHA-256 digest.`);
+    }
+    result[kind as keyof typeof result] = digest;
+  }
+  return result;
 }
 
 const PRODUCTION_VISUAL_SOURCES = new Set<ProductionVisualSource>(["creator", "stock", "screen", "local-card", "generated"]);
@@ -440,7 +462,9 @@ export function compileProductionReworkPlan(
     const reuse = shot && (Number.isInteger(shot.reuseFromScenePosition)
       || typeof shot.query === "string" && /^REUSE_ONLY\s+scene\s+/i.test(shot.query));
     let action: ProductionReworkPlan["sceneActions"][number]["action"];
-    if (!affected.has(scenePosition)) action = reuse ? "reuse" : "retain";
+    const inspectionOnly = reasons.length > 0 && reasons.every((reason) => reason.action === "inspect_existing_media");
+    if (inspectionOnly) action = "inspect";
+    else if (!affected.has(scenePosition)) action = reuse ? "reuse" : "retain";
     else if (reasons.some((reason) => reason.action === "replan_upstream")) action = "blocked";
     else if (reasons.some((reason) => reason.action === "replace_asset")) action = reuse ? "reuse" : "generate";
     else if (reasons.some((reason) => reason.action === "inspect_existing_media")) action = "inspect";
@@ -916,7 +940,9 @@ function parseModelSelections(value: unknown): Record<string, string> {
 }
 
 export function parsePersistedBrief(value: unknown): ProductionBrief {
-  const migrated = migratePersistedReworkFindingIds(migratePersistedReferenceVideo(value));
+  const migrated = migratePersistedBriefShape(
+    migratePersistedReworkFindingIds(migratePersistedReferenceVideo(value)),
+  );
   const persistedPlatform = isRecord(migrated) && typeof migrated.platform === "string"
     ? migrated.platform.trim()
     : undefined;
@@ -941,6 +967,30 @@ export function parsePersistedBrief(value: unknown): ProductionBrief {
       voiceDirection: { ...strictInput.voiceDirection, profileId: compatibleProfileId },
     });
   }
+}
+
+function migratePersistedBriefShape(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  let migrated = value;
+  if (isRecord(value.director) && isRecord(value.providers) && value.providers.director === undefined) {
+    migrated = {
+      ...migrated,
+      providers: { ...value.providers, director: "api-visual-director-v1" },
+    };
+  }
+  const creationContext = migrated.creationContext;
+  if (isRecord(creationContext)
+    && creationContext.origin === undefined
+    && typeof creationContext.opportunityId === "string"
+    && creationContext.opportunityId.trim()) {
+    // 早期制作只保存机会编号，无法仅凭 brief 可靠判断来自选题还是系列；保留编号并标为手动来源，
+    // 上层仍可通过唯一机会关系恢复系列归属，同时不会把未知来源伪装成已确认的系列制作。
+    migrated = {
+      ...migrated,
+      creationContext: { ...creationContext, origin: "manual" },
+    };
+  }
+  return migrated;
 }
 
 function requireProductionPlatform(value: unknown): string {

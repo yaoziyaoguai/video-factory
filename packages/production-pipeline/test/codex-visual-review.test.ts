@@ -120,6 +120,72 @@ describe("CodexVisualReviewAgent", () => {
     ]);
   });
 
+  it("preserves more than fifty distinct findings across the two independent reviews", async () => {
+    const findingsFor = (prefix: string) => Array.from({ length: 26 }, (_, index) => ({
+      ...report.findings[0],
+      evidenceStatus: "satisfied" as const,
+      nextAction: "none" as const,
+      severity: "info" as const,
+      description: `${prefix} 独立发现 ${index + 1}`,
+      suggestion: `${prefix} 建议 ${index + 1}`,
+    }));
+    const reviewer = (id: string, modelId: string, prefix: string): VisualReviewAgent => ({
+      id,
+      modelId,
+      review: async () => ({
+        ...report,
+        scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 95 },
+        findings: findingsFor(prefix),
+        recommendation: "approve",
+      }),
+    });
+    const subject = new IndependentDualVisualReviewAgent({
+      primary: reviewer("glm-visual-review-v1", "glm-5.3-flash", "GLM"),
+      secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol", "Codex"),
+      media: { prepare: async () => media },
+    });
+
+    const execution = await subject.reviewDetailed({
+      videoPath: "/run/final.mp4",
+      runRoot: "/run",
+      reviewStage: "rendered_video",
+    });
+
+    assert.equal(execution.output.findings.length, 52);
+    assert.equal(execution.output.findings.filter((finding) => finding.reviewSources?.length === 1).length, 52);
+  });
+
+  it("merges the same finding from both reviewers and keeps the strongest severity and both sources", async () => {
+    const reviewer = (id: string, modelId: string, severity: "warning" | "critical"): VisualReviewAgent => ({
+      id,
+      modelId,
+      review: async () => ({
+        ...report,
+        scores: { ...report.scores, legibility: severity === "critical" ? 35 : 68 },
+        findings: [{ ...report.findings[0], severity }],
+        recommendation: severity === "critical" ? "reject" : "revise",
+      }),
+    });
+    const subject = new IndependentDualVisualReviewAgent({
+      primary: reviewer("glm-visual-review-v1", "glm-5.3-flash", "warning"),
+      secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol", "critical"),
+      media: { prepare: async () => media },
+    });
+
+    const execution = await subject.reviewDetailed({
+      videoPath: "/run/final.mp4",
+      runRoot: "/run",
+      reviewStage: "rendered_video",
+    });
+
+    assert.equal(execution.output.findings.length, 1);
+    assert.equal(execution.output.findings[0]?.severity, "critical");
+    assert.deepEqual(execution.output.findings[0]?.reviewSources, [
+      { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" },
+      { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol" },
+    ]);
+  });
+
   it("retries only the failed final-review branch after preserving the completed model result", async () => {
     const calls = { glm: 0, codex: 0 };
     const stored = new Map<string, unknown>();
@@ -244,6 +310,37 @@ describe("CodexVisualReviewAgent", () => {
     assert.equal((reviewContext.script as Record<string, unknown>).viewerPromise, "看见窗边光线变化");
     assert.deepEqual((reviewContext.directorPlan as Record<string, unknown>).shots, [{ scenePosition: 1, temporalBeats: ["[0s-2s] 拉开窗帘"], successCriteria: ["杯沿变亮"] }]);
     assert.deepEqual((reviewContext.renderManifest as Record<string, unknown>).slides, [{ scene_position: 1, duration: 6 }]);
+  });
+
+  it("preserves prepared source identity while authoritative run fields override stale namesakes", async () => {
+    let payload: unknown;
+    const sourceAwareMedia: VisualReviewMediaPayload = {
+      ...media,
+      reviewContext: {
+        reviewStage: "stale-stage",
+        pilotScenePositions: [99],
+        sourceIdentity: [{ scenePosition: 1, providerId: "pexels-stock-v1", assetId: "asset-1", license: "Pexels" }],
+      },
+    };
+    const agent = new CodexVisualReviewAgent({
+      media: { prepare: async () => sourceAwareMedia },
+      client: { runTask: async (_kind, input) => {
+        payload = input;
+        return report;
+      } },
+    });
+
+    await agent.review({ reviewStage: "source_assets", scenePositions: [1], runRoot: "/run" });
+
+    const reviewContext = (payload as { reviewContext: Record<string, unknown> }).reviewContext;
+    assert.equal(reviewContext.reviewStage, "source_assets");
+    assert.deepEqual(reviewContext.pilotScenePositions, [1]);
+    assert.deepEqual(reviewContext.sourceIdentity, [{
+      scenePosition: 1,
+      providerId: "pexels-stock-v1",
+      assetId: "asset-1",
+      license: "Pexels",
+    }]);
   });
 
   it("describes dense pilot frames as ordered sequence evidence instead of sparse midpoints", async () => {

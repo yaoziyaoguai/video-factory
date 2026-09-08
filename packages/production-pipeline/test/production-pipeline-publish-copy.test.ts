@@ -22,6 +22,7 @@ const brief = {
   nicheSlug: "life-avoidance",
   durationSeconds: 24,
   platform: "douyin",
+  runPurpose: "test",
   reviewMode: "automatic",
   providers: {
     script: "codex-screenwriter-v1",
@@ -273,11 +274,16 @@ describe("ProductionPipeline publish copy", () => {
       "quality.review",
     ]);
 
+    const finalReviewOutput = waiting.nodeRuns.find((node) => node.nodeId === "final-review")?.output as Record<string, unknown> | undefined;
     const secondProcess = new ProductionPipeline(options);
     const approved = await secondProcess.decide(waiting.id, {
       interventionId: waiting.interventions[0]!.id,
       action: "approve",
       actor: "director",
+      expectedRunRevision: waiting.revision,
+      reviewEvidenceId: typeof finalReviewOutput?.reviewEvidenceId === "string"
+        ? finalReviewOutput.reviewEvidenceId
+        : null,
       note: "Approved after full watch.",
     });
 
@@ -288,6 +294,51 @@ describe("ProductionPipeline publish copy", () => {
     const copy = payload.copy as Record<string, unknown>;
     assert.equal(copy.source, "codex-publish-copy-v1");
     assert.equal(payload.title, publishCopy.title);
+  });
+
+  it("preserves the original human approval when publishing fails and is retried", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publish-retry-"));
+    const worker = new RecordingWorker();
+    let writerCalls = 0;
+    const writer: PublishCopyWriter = {
+      id: "codex-publish-copy-v1",
+      write: async () => publishCopy,
+      writeDetailed: async () => {
+        writerCalls += 1;
+        if (writerCalls === 1) throw exhaustedAgentError("发行编辑");
+        return { output: publishCopy };
+      },
+    };
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker, screenwriterAgent: screenwriter, publishCopyWriter: writer });
+    const waiting = await pipeline.start({ ...brief, reviewMode: "manual" });
+    const decision = {
+      interventionId: waiting.interventions[0]!.id,
+      action: "approve" as const,
+      actor: "总导演",
+      expectedRunRevision: waiting.revision,
+      reviewEvidenceId: null,
+      note: "已完整观看并确认可发布。",
+    };
+
+    const failed = await pipeline.decide(waiting.id, decision);
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.nodeRuns.find((node) => node.nodeId === "publish-package")?.status, "failed");
+
+    const recovered = await pipeline.retryFailedNode(failed.id, "publish-package");
+
+    assert.equal(recovered.status, "succeeded");
+    assert.equal(writerCalls, 2);
+    assert.equal(worker.requests.length, 4);
+    const payload = await readPackage(recovered);
+    const approval = payload.approval as Record<string, unknown>;
+    assert.equal(approval.status, "approved");
+    assert.equal(approval.actor, decision.actor);
+    assert.equal(approval.note, decision.note);
+    assert.equal(approval.action, "approve");
+    assert.equal(approval.interventionId, decision.interventionId);
+    assert.equal(approval.decisionId, recovered.decisions[0]?.id);
+    const finalReviewOutput = waiting.nodeRuns.find((node) => node.nodeId === "final-review")?.output as Record<string, unknown> | undefined;
+    assert.deepEqual(approval.reviewArtifactIds, finalReviewOutput?.reviewArtifactIds);
   });
 });
 

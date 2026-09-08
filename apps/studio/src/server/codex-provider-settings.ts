@@ -2,7 +2,7 @@ import http from "node:http";
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import type { Stats } from "node:fs";
-import { CODEX_BRIDGE_PROTOCOL_VERSION } from "@video-factory/production-pipeline";
+import { CODEX_BRIDGE_PROTOCOL_VERSION, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS } from "@video-factory/production-pipeline";
 
 export const DEFAULT_CODEX_SOCKET_PATH = "/run/video-factory-codex/worker.sock";
 export const DEFAULT_ZAI_CODEX_SOCKET_PATH = "/run/video-factory-zai-codex/worker.sock";
@@ -237,6 +237,10 @@ function probeCodexHealth(
             settle("protocol_mismatch");
             return;
           }
+          if (!isCompatibleTaskContracts(body.taskContracts, body.taskKinds)) {
+            settle("protocol_mismatch");
+            return;
+          }
           if (!Array.isArray(body.taskKinds) || body.taskKinds.some((value) => typeof value !== "string" || !value.trim())) {
             settle("protocol_mismatch");
             return;
@@ -269,6 +273,14 @@ function probeCodexHealth(
     request.on("error", () => settle("unreachable"));
     request.end();
   });
+}
+
+function isCompatibleTaskContracts(value: unknown, taskKinds: unknown): boolean {
+  if (!Array.isArray(taskKinds) || typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const contracts = value as Record<string, unknown>;
+  return Object.entries(REQUIRED_CODEX_TASK_CONTRACT_DIGESTS).every(([kind, digest]) => (
+    !taskKinds.includes(kind) || contracts[kind] === digest
+  ));
 }
 
 function parseTaskModels(value: unknown, taskKinds: readonly string[]): Record<string, string> | undefined {

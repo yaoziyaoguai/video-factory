@@ -840,7 +840,7 @@ export interface StudioNodeExecutionReceipt {
   estimatedCostCny?: number;
   authorizedCostCny?: number;
   actualCostCny?: number;
-  actualCostSource?: "provider_reported" | "configured_rate";
+  actualCostSource?: "provider_reported" | "configured_rate" | "manual_reconciled";
   meteredAttemptCount?: number;
   meteredFailedAttemptCount?: number;
   spendAuthorizationId?: string;
@@ -929,7 +929,7 @@ export interface StudioPaidOperationItem {
   estimatedCostCny: number;
   taskId?: string;
   actualCostCny?: number;
-  actualCostSource?: "provider_reported" | "configured_rate";
+  actualCostSource?: "provider_reported" | "configured_rate" | "manual_reconciled";
   error?: string;
   manualReconciliationRequired?: boolean;
 }
@@ -981,6 +981,8 @@ export interface StudioDecision {
   action: "approve" | "request_changes" | "reject";
   actor: string;
   note?: string;
+  expectedRunRevision?: number;
+  reviewEvidenceId?: string | null;
   createdAt: string;
 }
 
@@ -1176,7 +1178,7 @@ export interface StudioCostLine {
   authorizedCostCny?: number;
   spendAuthorizationId?: string;
   actualCostCny?: number;
-  actualCostSource?: "provider_reported" | "configured_rate";
+  actualCostSource?: "provider_reported" | "configured_rate" | "manual_reconciled";
   meteredAttemptCount?: number;
   meteredFailedAttemptCount?: number;
   subscriptionCallCount?: number;
@@ -1351,6 +1353,9 @@ export interface StudioReferenceVideo {
 
 export interface StudioDecisionInput {
   action: "approve" | "reject";
+  expectedRunRevision: number;
+  interventionId: string;
+  reviewEvidenceId: string | null;
   note?: string;
 }
 
@@ -1361,6 +1366,11 @@ export interface StudioSceneRevisionInput {
   findingIndex: number;
   reuseFromScenePosition: number;
   note: string;
+}
+
+export interface StudioVisualReinspectionInput {
+  expectedRunRevision: number;
+  reviewEvidenceId: string;
 }
 
 export type StudioPublishPlatformId = "douyin" | "toutiao" | "kuaishou" | "bilibili" | "xiaohongshu";
@@ -1715,7 +1725,23 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
   if (input.note !== undefined && typeof input.note !== "string") {
     throw new StudioInputError("审片说明必须是文字。");
   }
-  return { action: input.action, ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}) };
+  if (!Number.isSafeInteger(input.expectedRunRevision) || Number(input.expectedRunRevision) < 0) {
+    throw new StudioInputError("制作版本必须是非负整数。");
+  }
+  const interventionId = requiredTrimmedString(input.interventionId, "人工确认编号");
+  const reviewEvidenceId = input.reviewEvidenceId === null
+    ? null
+    : requiredTrimmedString(input.reviewEvidenceId, "审片证据编号");
+  if (reviewEvidenceId !== null && !/^[a-f0-9]{64}$/.test(reviewEvidenceId)) {
+    throw new StudioInputError("审片证据编号必须是 SHA-256 摘要。");
+  }
+  return {
+    action: input.action,
+    expectedRunRevision: Number(input.expectedRunRevision),
+    interventionId,
+    reviewEvidenceId,
+    ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}),
+  };
 }
 
 export function parseStudioSceneRevisionInput(value: unknown): StudioSceneRevisionInput {
@@ -1736,6 +1762,18 @@ export function parseStudioSceneRevisionInput(value: unknown): StudioSceneRevisi
     reuseFromScenePosition: positiveInteger(input.reuseFromScenePosition, "替换来源镜头"),
     note,
   };
+}
+
+export function parseStudioVisualReinspectionInput(value: unknown): StudioVisualReinspectionInput {
+  const input = requiredObject(value, "成片补查请求");
+  if (!Number.isSafeInteger(input.expectedRunRevision) || Number(input.expectedRunRevision) < 0) {
+    throw new StudioInputError("制作版本必须是非负整数。");
+  }
+  const reviewEvidenceId = requiredTrimmedString(input.reviewEvidenceId, "审片证据编号");
+  if (!/^[a-f0-9]{64}$/.test(reviewEvidenceId)) {
+    throw new StudioInputError("审片证据编号必须是 SHA-256 摘要。");
+  }
+  return { expectedRunRevision: Number(input.expectedRunRevision), reviewEvidenceId };
 }
 
 const PUBLISH_PLATFORMS = new Set<StudioPublishPlatformId>([

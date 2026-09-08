@@ -154,7 +154,7 @@ interface PaidAssetOperationItem {
   sha256?: string;
   sizeBytes?: number;
   actualCostCny?: number;
-  actualCostSource?: "provider_reported" | "configured_rate";
+  actualCostSource?: "provider_reported" | "configured_rate" | "manual_reconciled";
   carriedForwardFromItemRequestId?: string;
   error?: string;
   manualReconciliationRequired?: boolean;
@@ -1250,45 +1250,60 @@ export interface ReworkAffectedSceneScope {
   affectedScenePositions?: readonly number[];
 }
 
-// 导演节点与素材执行器共用的唯一影响闭包：结构化范围、finding 定位、无定位保守全片、
-// script 逐镜差异和 previous/current 方案中的 reference/REUSE 传递依赖都在这里展开，
-// 下游不得再用另一套自然语言规则推导范围。
+// 人工确认的结构化范围是执行上界。审片定位、脚本差异或 reference/REUSE 依赖若在
+// 确认后扩大，必须回到确认页更新范围，不能在素材执行阶段静默扩大付费工作。
 export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): number[] {
   const currentSceneRecords = positionedRecords(scope.currentScenes, "position");
   const validPositions = new Set(currentSceneRecords.keys());
   if (validPositions.size === 0) return [];
+  if (scope.affectedScenePositions === undefined) {
+    return [...validPositions].sort((left, right) => left - right);
+  }
+  const approved = new Set(scope.affectedScenePositions.filter((position) => (
+    Number.isInteger(position) && position > 0 && validPositions.has(position)
+  )));
+  if (approved.size !== scope.affectedScenePositions.length) {
+    throw new Error("返工镜头范围与当前脚本不一致，请重新确认返工范围。");
+  }
   const visualFindings = (Array.isArray(scope.findings) ? scope.findings : []).filter((finding) => (
     isRecord(finding)
     && Array.isArray(finding.targetNodeIds)
     && finding.targetNodeIds.some((target) => target === "visual-direction" || target === "assets")
+    && finding.action !== "inspect_existing_media"
+    && finding.nextAction !== "inspect_existing_media"
   ));
-  const affected = new Set<number>();
+  const required = new Set<number>();
   for (const finding of visualFindings) {
     const position = Number(finding.scenePosition);
     if (!Number.isInteger(finding.scenePosition) || finding.scenePosition === undefined) {
-      // 无法定位的返工问题保守按全片处理。
-      return [...validPositions].sort((left, right) => left - right);
+      for (const validPosition of validPositions) required.add(validPosition);
+      continue;
     }
-    if (position > 0) affected.add(position);
+    if (position > 0) required.add(position);
   }
   const previousSceneRecords = positionedRecords(scope.previousScenes, "position");
   if (previousSceneRecords.size > 0) {
     for (const [position, scene] of currentSceneRecords) {
-      if (!isDeepStrictEqual(scene, previousSceneRecords.get(position))) affected.add(position);
+      if (!isDeepStrictEqual(scene, previousSceneRecords.get(position))) required.add(position);
     }
   }
-  // 自由文本只描述“怎么改”，不再决定付费范围。旧 run 缺少结构化字段时，
-  // 任何局部推断都可能漏掉应重做镜头，因此 fail closed 为全部当前镜头。
-  if (scope.affectedScenePositions === undefined) {
-    for (const position of validPositions) affected.add(position);
-  } else {
-    for (const position of scope.affectedScenePositions) {
-      if (Number.isInteger(position) && position > 0) affected.add(position);
-    }
+  const requiredClosure = reworkSceneDependencyClosure([...required], scope.previousShots, scope.currentShots);
+  const approvedClosure = reworkSceneDependencyClosure([...approved], scope.previousShots, scope.currentShots);
+  const outsideApproval = [...new Set([...requiredClosure, ...approvedClosure])]
+    .filter((position) => validPositions.has(position) && !approved.has(position));
+  if (outsideApproval.length > 0) {
+    throw new Error(`返工影响范围新增了镜头 ${outsideApproval.sort((left, right) => left - right).join("、")}，请重新确认返工范围。`);
   }
-  expandAffectedDependencies(affected, scope.previousShots);
-  expandAffectedDependencies(affected, scope.currentShots);
-  return [...affected].filter((position) => validPositions.has(position)).sort((left, right) => left - right);
+  return [...approved].sort((left, right) => left - right);
+}
+
+export function reworkSceneDependencyClosure(
+  scenePositions: readonly number[],
+  ...shotSets: unknown[]
+): number[] {
+  const affected = new Set(scenePositions.filter((position) => Number.isInteger(position) && position > 0));
+  for (const shots of shotSets) expandAffectedDependencies(affected, shots);
+  return [...affected].sort((left, right) => left - right);
 }
 
 function expandAffectedDependencies(affected: Set<number>, shots: unknown): void {
@@ -1344,12 +1359,6 @@ async function findReworkCarryForwardItems(
       ? { affectedScenePositions: rework.affectedScenePositions.map(Number) }
       : {}),
   }));
-  if (Array.isArray(rework.affectedScenePositions)) {
-    for (const value of rework.affectedScenePositions) {
-      const position = Number(value);
-      if (Number.isInteger(position) && position > 0) affectedScenes.add(position);
-    }
-  }
   const currentScenes = positionedRecords(options.currentScript.scenes, "position");
   const previousScenes = positionedRecords(rework.previousScript.scenes, "position");
   // 为什么不用整条 shot deepEqual：estimatedCostCny、confidence、rationale 等字段只影响
@@ -2662,7 +2671,7 @@ export interface PaidAssetLedgerItemSummary {
   sha256?: string;
   sizeBytes?: number;
   actualCostCny?: number;
-  actualCostSource?: "provider_reported" | "configured_rate";
+  actualCostSource?: "provider_reported" | "configured_rate" | "manual_reconciled";
   carriedForwardFromItemRequestId?: string;
   error?: string;
   manualReconciliationRequired?: boolean;

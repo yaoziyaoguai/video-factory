@@ -351,6 +351,8 @@ body { background: var(--canvas); }
 .studio-v3 .template-beat-editor small { color: var(--muted); font-size: 9px; font-weight: 750; }
 .studio-v3 .template-beat-editor input, .studio-v3 .template-beat-editor textarea { width: 100%; box-sizing: border-box; padding: 9px 10px; color: var(--ink); background: #fff; border: 1px solid #d6d7d1; border-radius: 6px; font: inherit; font-size: 11px; resize: vertical; }
 .studio-v3 .template-beat-editor input:disabled, .studio-v3 .template-beat-editor textarea:disabled, .studio-v3 .template-editor .field :disabled { color: #50534f; background: transparent; border-color: transparent; opacity: 1; }
+.studio-v3 .template-shot-slots { grid-column: 2 / 4; display: grid; gap: 8px; padding: 9px; background: #f7f8f5; border: 1px solid #e3e5df; border-radius: 6px; }
+.studio-v3 .template-shot-slot { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 9px; }
 .studio-v3 .template-editor-notice { margin: 0; padding: 10px 20px; color: #4d554f; background: #f0f4ef; border-top: 1px solid #dce4dc; font-size: 11px; }
 .studio-v3 .template-editor-notice.is-warning { color: #755410; background: #fff7db; border-color: #ead9a3; }
 .studio-v3 .template-experiments { overflow: hidden; margin: 22px 0; background: #f4f5f0; border: 1px solid var(--line); border-radius: 8px; }
@@ -506,7 +508,9 @@ body { background: var(--canvas); }
   .studio-v3 .template-editor-copy { border-right: 0; border-bottom: 1px solid var(--line); }
   .studio-v3 .template-system-fields { grid-template-columns: 1fr; }
   .studio-v3 .template-beat-editor { grid-template-columns: 26px minmax(0, 1fr); }
-  .studio-v3 .template-beat-editor label:last-child { grid-column: 2; }
+  .studio-v3 .template-beat-editor > label:last-of-type { grid-column: 2; }
+  .studio-v3 .template-shot-slots { grid-column: 2; }
+  .studio-v3 .template-shot-slot { grid-template-columns: 1fr; }
   .studio-v3 .template-editor-actions { align-items: stretch; flex-direction: column; }
   .studio-v3 .template-editor-actions > span { margin: 0 0 3px; }
   .studio-v3 .resource-manifest-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }

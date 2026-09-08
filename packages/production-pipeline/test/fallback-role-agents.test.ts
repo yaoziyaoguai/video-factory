@@ -199,7 +199,7 @@ describe("FallbackScreenwriterAgent", () => {
     assert.equal(execution.trace?.modelId, "glm-backup");
   });
 
-  it("switches from OpenAI to GLM after an accepted transient provider outage", async () => {
+  it("does not switch from OpenAI to GLM after the original request completed with a provider failure", async () => {
     const calls: string[] = [];
     const fallback = new FallbackScreenwriterAgent({
       candidates: [
@@ -225,24 +225,8 @@ describe("FallbackScreenwriterAgent", () => {
       ],
     });
 
-    const execution = await fallback.draftDetailed(input);
-
-    assert.deepEqual(calls, ["gpt-5.6-sol", "glm-5.3"]);
-    assert.equal(execution.trace?.modelId, "glm-5.3");
-    assert.deepEqual(execution.trace?.modelCandidateAttempts, [
-      {
-        modelId: "gpt-5.6-sol",
-        providerId: "openai",
-        outcome: "failed",
-        failureStage: "completed_failure",
-        failureReason: "暂时不可用",
-      },
-      {
-        modelId: "glm-5.3",
-        providerId: "zai-bigmodel-api",
-        outcome: "succeeded",
-      },
-    ]);
+    await assert.rejects(() => fallback.draftDetailed(input), /temporarily unavailable/);
+    assert.deepEqual(calls, ["gpt-5.6-sol"]);
   });
 
   it("does not start the backup candidate after an uncertain timeout on the primary", async () => {
@@ -800,8 +784,8 @@ describe("model provider failure policy", () => {
       { category: "timeout", reasonCode: "request_timeout", providerId: "openai", modelId: "gpt-5.6-sol" },
     ), true],
     ["unknown 500", new CodexBridgeError("HTTP 500", false, "completed_failure", 500), false],
-    ["explicit 500 overload", new CodexBridgeError("HTTP 500: model capacity overloaded", false, "completed_failure", 500), true],
-    ["transient 422", new CodexBridgeError("role is temporarily unavailable", false, "completed_failure", 422), true],
+    ["explicit 500 overload", new CodexBridgeError("HTTP 500: model capacity overloaded", false, "completed_failure", 500), false],
+    ["transient 422", new CodexBridgeError("role is temporarily unavailable", false, "completed_failure", 422), false],
     ["structured transient 422", new CodexBridgeError("model execution failed", false, "completed_failure", 422, "model_provider_transient"), true],
     ["model completed without output", new CodexBridgeError(
       "The model could not complete this step.",

@@ -186,7 +186,7 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
               <div><p className="eyebrow">永久删除</p><h2 id="delete-run-title">确定删除“{deleteTarget.title}”吗？</h2></div>
               <button className="icon-button" type="button" aria-label="关闭" disabled={busy} onClick={() => setDeleteTarget(undefined)}><X aria-hidden="true" size={18} /></button>
             </header>
-            <p className="delete-run-warning">这会删除该项目的脚本、制作文件、成片和费用明细，无法恢复。仅想整理列表时请保留在归档中。</p>
+            <p className="delete-run-warning">这会删除该项目的脚本、制作文件、成片，以及调用与费用明细，无法恢复。仅想整理列表时请保留在归档中。</p>
             {operationError ? <p className="form-error" role="alert">{operationError}</p> : null}
             <footer className="dialog-actions">
               <button className="button button-secondary" type="button" disabled={busy} onClick={() => setDeleteTarget(undefined)}>保留归档</button>

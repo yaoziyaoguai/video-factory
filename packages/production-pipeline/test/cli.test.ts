@@ -68,7 +68,9 @@ describe("factory CLI", () => {
         interventionId: "intervention-1",
         action: "approve",
         actor: "director",
+        expectedRunRevision: 0,
         note: "Ready to publish",
+        reviewEvidenceId: null,
       },
     ]);
     assert.equal(JSON.parse(output[0]!).status, "needs_human");
@@ -115,6 +117,7 @@ describe("factory CLI", () => {
       nicheSlug: "cli-failure",
       durationSeconds: 20,
       platform: "douyin",
+      runPurpose: "test",
       reviewMode: "automatic",
       providers: {
         script: "python-template-v1",

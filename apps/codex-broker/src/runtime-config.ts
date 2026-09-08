@@ -57,7 +57,7 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
     // 600s 仍可能掐断 xhigh/max 级强推理候选；默认放宽到 20 分钟，与 ZAI 生产 unit 的 1200000ms 对齐。
     timeoutMs: readInteger(env, "VIDEO_FACTORY_CODEX_TIMEOUT_MS", 1_200_000, 1_000, 3_600_000),
     concurrency: readInteger(env, "VIDEO_FACTORY_CODEX_CONCURRENCY", 1, 1, 8),
-    maxBacklog: readInteger(env, "VIDEO_FACTORY_CODEX_MAX_BACKLOG", 20, 1, 1_000),
+    maxBacklog: readInteger(env, "VIDEO_FACTORY_CODEX_MAX_BACKLOG", 1, 1, 1_000),
   };
 }
 

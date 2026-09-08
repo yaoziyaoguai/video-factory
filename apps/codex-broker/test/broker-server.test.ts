@@ -16,7 +16,7 @@ import {
   type CodexExecutorProfile,
   type ValidatedTask,
 } from "../src/codex-executor.js";
-import { BROKER_TASK_KINDS } from "../src/task-definitions.js";
+import { BROKER_TASK_KINDS, taskContractDescriptorFor } from "../src/task-definitions.js";
 
 class ScriptedExecutor extends CodexExecutor {
   readonly calls: ValidatedTask[] = [];
@@ -205,6 +205,7 @@ function visualReviewTaskBody(): string {
     protocolVersion: "video-factory/codex-bridge-v2",
     requestId: "visual-review-fixture",
     kind: "visual-review",
+    expectedContractDigest: taskContractDescriptorFor("visual-review").digest,
     payload: {
       durationMs: 1_000,
       frames: [0, 1_000].map((timecodeMs) => ({
@@ -316,6 +317,51 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
         path: "/v1/tasks",
         body: JSON.stringify(changed),
       })).status, 409);
+      assert.equal(calls, 1);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("keeps an uncertain accepted task durable and never replays the same request id", async () => {
+    let calls = 0;
+    const broker = await startBroker({
+      durableIdempotency: true,
+      script: () => {
+        calls += 1;
+        throw new CodexExecutorError("provider response stream ended after acceptance", false, {
+          outcomeUncertain: true,
+          failureKind: "model_provider_transient",
+          details: {
+            category: "network",
+            reasonCode: "response_stream_interrupted",
+            providerId: "openai",
+            modelId: "gpt-5.6-sol",
+          },
+        });
+      },
+    });
+    try {
+      const body = topicTaskBody("accepted-uncertain");
+      const requestId = String((JSON.parse(body) as { requestId: string }).requestId);
+
+      const first = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
+
+      assert.equal(first.status, 500);
+      const firstEnvelope = JSON.parse(first.body) as Record<string, unknown>;
+      assert.equal(firstEnvelope.outcomeUncertain, true);
+      assert.equal(calls, 1);
+      const record = JSON.parse(await readFile(path.join(
+        broker.directory,
+        "idempotency",
+        `${createHash("sha256").update(requestId).digest("hex")}.json`,
+      ), "utf8")) as { version: number; state: string };
+      assert.equal(record.version, 1);
+      assert.equal(record.state, "accepted");
+
+      const replay = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
+      assert.equal(replay.status, 409);
+      assert.match(JSON.parse(replay.body).error, /uncertain outcome/);
       assert.equal(calls, 1);
     } finally {
       await broker.close();
@@ -595,13 +641,33 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       profile: codexExecutorProfileFor("zai"),
       script: (task) => {
         assert.equal(task.kind, "visual-review");
-        return { output: "{}" };
+        return {
+          output: "{}",
+          trace: {
+            taskKind: task.kind,
+            promptVersion: taskContractDescriptorFor(task.kind).promptVersion,
+            contractDigest: task.expectedContractDigest!,
+            prompt: "test",
+            providerId: "zai-bigmodel-api",
+            modelId: "glm-test",
+          },
+        };
       },
     });
     const openai = await startBroker({
       script: (task) => {
         assert.equal(task.kind, "visual-review");
-        return { output: "{}" };
+        return {
+          output: "{}",
+          trace: {
+            taskKind: task.kind,
+            promptVersion: taskContractDescriptorFor(task.kind).promptVersion,
+            contractDigest: task.expectedContractDigest!,
+            prompt: "test",
+            providerId: "openai",
+            modelId: "gpt-test",
+          },
+        };
       },
     });
     const body = visualReviewTaskBody();
@@ -719,7 +785,10 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       assert.equal(credentialDiagnostic.status, 422);
       assert.doesNotMatch(credentialDiagnostic.body, /Bearer|eyJhbGci|OPENAI_API_KEY|plain-secret/);
       assert.equal(JSON.parse(credentialDiagnostic.body).error, "The model could not complete this step.");
-      assert.deepEqual(JSON.parse(credentialDiagnostic.body).failureDetails, {
+      const failureDetails = JSON.parse(credentialDiagnostic.body).failureDetails as Record<string, unknown>;
+      assert.equal(typeof failureDetails.queueWaitMs, "number");
+      delete failureDetails.queueWaitMs;
+      assert.deepEqual(failureDetails, {
         category: "invalid_request",
         reasonCode: "1308",
         requestIdHash: "a".repeat(64),
@@ -876,7 +945,6 @@ describe("CodexBrokerServer queue", () => {
     const order: string[] = [];
     const broker = await startBroker({
       concurrency: 1,
-      maxBacklog: 1,
       script: (task) => {
         assert.equal(task.kind, "topic-ideas");
         const title = (task.payload.signals[0] as { title: string }).title;
@@ -885,7 +953,16 @@ describe("CodexBrokerServer queue", () => {
         gates.push(gate);
         return gate.promise.then(() => {
           order.push(`end:${title}`);
-          return { output: "{\"done\":true}" };
+          return {
+            output: "{\"done\":true}",
+            trace: {
+              taskKind: task.kind,
+              promptVersion: "queue-test-v1",
+              prompt: "queue test",
+              providerId: "openai",
+              modelId: "gpt-5.6-sol",
+            },
+          };
         });
       },
     });
@@ -915,6 +992,9 @@ describe("CodexBrokerServer queue", () => {
       gates[1]!.resolve();
       const secondDone = await second;
       assert.equal(secondDone.status, 200);
+      const secondTrace = JSON.parse(secondDone.body).trace as { queueWaitMs?: number };
+      assert.equal(typeof secondTrace.queueWaitMs, "number");
+      assert.ok(secondTrace.queueWaitMs! >= 0);
 
       const finalReport = await healthReport(broker.socketPath);
       assert.equal(finalReport.active, 0);

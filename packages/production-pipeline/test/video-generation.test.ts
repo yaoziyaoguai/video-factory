@@ -703,6 +703,128 @@ describe("metered video generation adapters", () => {
     assert.equal(progress.at(-1), "unknown");
   });
 
+  it("bounds a stuck create request for every video adapter without resubmitting", async () => {
+    const calls = new Map<string, number>();
+    const stuckFetch = (label: string) => async () => {
+      calls.set(label, (calls.get(label) ?? 0) + 1);
+      return new Promise<Response>(() => undefined);
+    };
+    const cases: Array<{ label: string; adapter: VideoGenerationAdapter; ratio: "9:16" | "16:9" }> = [{
+      label: "Seedance",
+      adapter: new SeedanceVideoAdapter({ apiKey: "test-key", model: "seedance", fetch: stuckFetch("Seedance"), timeoutMs: 5 }),
+      ratio: "9:16",
+    }, {
+      label: "Wan",
+      adapter: new WanVideoAdapter({ apiKey: "test-key", model: "wan", workspaceId: "workspace-1", fetch: stuckFetch("Wan"), timeoutMs: 5 }),
+      ratio: "9:16",
+    }, {
+      label: "MiniMax v1",
+      adapter: new MiniMaxVideoAdapter({
+        apiKey: "test-key",
+        model: "MiniMax-Hailuo-2.3",
+        modelProtocols: { "MiniMax-Hailuo-2.3": "v1" },
+        fetch: stuckFetch("MiniMax v1"),
+        timeoutMs: 5,
+      }),
+      ratio: "16:9",
+    }, {
+      label: "MiniMax v2",
+      adapter: new MiniMaxVideoAdapter({
+        apiKey: "test-key",
+        model: "MiniMax-H3",
+        modelProtocols: { "MiniMax-H3": "v2" },
+        fetch: stuckFetch("MiniMax v2"),
+        timeoutMs: 5,
+      }),
+      ratio: "9:16",
+    }];
+
+    for (const testCase of cases) {
+      const outcome = await Promise.race([
+        testCase.adapter.generate({ prompt: "创建请求卡死测试", durationSeconds: 5, ratio: testCase.ratio })
+          .then(() => "resolved", (error: unknown) => error instanceof Error ? error.message : String(error)),
+        new Promise<string>((resolve) => setTimeout(() => resolve("still pending"), 50)),
+      ]);
+      assert.match(outcome, /exceeded the polling deadline/, testCase.label);
+      assert.equal(calls.get(testCase.label), 1, testCase.label);
+    }
+  });
+
+  it("bounds stuck Seedance and Wan response bodies after task acceptance without another POST", async () => {
+    const cases: Array<{
+      label: string;
+      adapter: VideoGenerationAdapter;
+      requests: string[];
+    }> = [];
+    for (const provider of ["Seedance", "Wan"] as const) {
+      const requests: string[] = [];
+      const fetch = async (url: string | URL | Request, init?: RequestInit) => {
+        requests.push(`${init?.method ?? "GET"} ${String(url)}`);
+        if (init?.method === "POST") {
+          return provider === "Seedance"
+            ? jsonResponse({ id: "accepted-task" })
+            : jsonResponse({ output: { task_id: "accepted-task" } });
+        }
+        return {
+          ok: true,
+          status: 200,
+          text: async () => new Promise<string>(() => undefined),
+        } as Response;
+      };
+      cases.push({
+        label: provider,
+        requests,
+        adapter: provider === "Seedance"
+          ? new SeedanceVideoAdapter({ apiKey: "test-key", model: "seedance", fetch, pollIntervalMs: 0, timeoutMs: 5 })
+          : new WanVideoAdapter({ apiKey: "test-key", model: "wan", workspaceId: "workspace-1", fetch, pollIntervalMs: 0, timeoutMs: 5 }),
+      });
+    }
+
+    for (const testCase of cases) {
+      const outcome = await Promise.race([
+        testCase.adapter.generate({ prompt: "响应体卡死测试", durationSeconds: 5, ratio: "9:16" })
+          .then(() => "resolved", (error: unknown) => error instanceof Error ? error.message : String(error)),
+        new Promise<string>((resolve) => setTimeout(() => resolve("still pending"), 50)),
+      ]);
+      assert.match(outcome, /task 'accepted-task' timed out/, testCase.label);
+      assert.equal(testCase.requests.filter((request) => request.startsWith("POST ")).length, 1, testCase.label);
+    }
+  });
+
+  it("shares one absolute MiniMax deadline across task creation and polling", async () => {
+    const requests: string[] = [];
+    const adapter = new MiniMaxVideoAdapter({
+      apiKey: "test-key",
+      model: "MiniMax-H3",
+      modelProtocols: { "MiniMax-H3": "v2" },
+      timeoutMs: 40,
+      pollIntervalMs: 0,
+      fetch: async (url, init) => {
+        requests.push(`${init?.method ?? "GET"} ${String(url)}`);
+        if (init?.method === "POST") {
+          return {
+            ok: true,
+            status: 200,
+            text: async () => {
+              await new Promise((resolve) => setTimeout(resolve, 30));
+              return JSON.stringify({ task_id: "minimax-shared-deadline" });
+            },
+          } as Response;
+        }
+        return new Promise<Response>(() => undefined);
+      },
+    });
+    const startedAt = Date.now();
+
+    await assert.rejects(
+      () => adapter.generate({ prompt: "共享截止时间测试", durationSeconds: 5, ratio: "9:16" }),
+      /MiniMax H3 task 'minimax-shared-deadline' timed out/,
+    );
+
+    assert.ok(Date.now() - startedAt < 60, "polling must use only the time left after task creation");
+    assert.equal(requests.filter((request) => request.startsWith("POST ")).length, 1);
+  });
+
   it("keeps transient create HTTP failures uncertain for every video adapter", async () => {
     const cases: Array<{ label: string; adapter: VideoGenerationAdapter }> = [{
       label: "Seedance 502",

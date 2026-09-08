@@ -129,6 +129,8 @@ export async function runCli(
       interventionId: intervention.id,
       action: command,
       actor: actor.trim(),
+      expectedRunRevision: waiting.revision,
+      reviewEvidenceId: activeReviewEvidenceId(waiting),
       ...(note ? { note } : {}),
     };
     const run = await pipeline.decide(runId, decision);
@@ -137,6 +139,15 @@ export async function runCli(
   }
 
   throw new Error(`Unknown factory command '${command}'.\n${usage()}`);
+}
+
+function activeReviewEvidenceId(run: WorkflowRun): string | null {
+  const waiting = run.nodeRuns.find((nodeRun) => nodeRun.status === "needs_human");
+  if (waiting?.nodeId !== "final-review" || typeof waiting.output !== "object" || waiting.output === null || Array.isArray(waiting.output)) {
+    return null;
+  }
+  const value = (waiting.output as Record<string, unknown>).reviewEvidenceId;
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
 }
 
 function defaultDependencies(): CliDependencies {

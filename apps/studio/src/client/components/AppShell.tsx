@@ -259,5 +259,5 @@ const SEARCH_DESTINATIONS = [
   { to: "/assets", label: "素材库", description: "检索画面、声音与授权记录", keywords: "媒体 资产 来源", icon: Images },
   { to: "/templates", label: "模板工坊", description: "选择或创建视频模板", keywords: "栏目 风格", icon: LayoutTemplate },
   { to: "/resources", label: "创作设置", description: "模型、素材、费用与发布平台", keywords: "总配置 API 方舟 MiniMax Codex", icon: Settings2 },
-  { to: "/experiments", label: "制作复盘", description: "查看质量与成本表现", keywords: "数据 统计", icon: ChartNoAxesCombined },
+  { to: "/experiments", label: "制作复盘", description: "查看质量与费用表现", keywords: "数据 统计", icon: ChartNoAxesCombined },
 ] as const;

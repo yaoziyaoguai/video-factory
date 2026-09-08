@@ -24,10 +24,10 @@ export function RunCostDetailPanel({ detail, providers }: { detail: StudioCostRu
   const lines = groupCostLines(detail.lines);
   return (
     <section className="run-cost-detail" aria-labelledby="run-cost-title">
-      <header className="section-heading"><div><p className="eyebrow">本片费用</p><h2 id="run-cost-title">费用明细</h2></div><ReceiptText aria-hidden="true" size={19} /></header>
+      <header className="section-heading"><div><p className="eyebrow">本片费用</p><h2 id="run-cost-title">调用与费用明细</h2></div><ReceiptText aria-hidden="true" size={19} /></header>
       <CostMetrics totals={detail.totals} compact />
       <details className="cost-call-details">
-        <summary><span><strong>逐角色消费明细</strong><small>报价不等于消费；只有外部任务结果不明确时才需确认是否扣费</small></span><b>{lines.length} 项</b></summary>
+        <summary><span><strong>调用与费用明细</strong><small>报价不等于消费；只有外部任务结果不明确时才需确认是否扣费</small></span><b>{lines.length} 项</b></summary>
         <div className="cost-line-list">
           {lines.length ? lines.map((line) => <article key={line.id}><span><strong>{line.role ?? runNodeLabel(line.nodeId)}</strong><small>{line.nodeId === "assets" ? "实际生成：" : ""}{capabilityLabel(line, providers)}</small></span><span><small>{line.callCount > 1 ? `${line.callCount} 次执行 · ` : ""}{costLineLabel(line)}</small><b>{line.actualPending ? `待确认是否扣费 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
         </div>
@@ -67,9 +67,9 @@ function CostMetrics({ totals, compact = false }: { totals: StudioCostTotals; co
 }
 
 function CostRanking({ title, groups, kind }: { title: string; groups: StudioCostGroup[]; kind: "provider" | "node" }) {
-  const max = Math.max(...groups.map((group) => group.actualCostCny || group.estimatedCostCny), 1);
+  const max = Math.max(...groups.map((group) => group.actualCostCny), 1);
   return <section className="cost-ranking"><header><strong>{title}</strong><span>{groups.length} 项</span></header>{groups.length ? groups.map((group) => {
-    const amount = group.actualCostCny || group.estimatedCostCny;
+    const amount = group.actualCostCny;
     const label = kind === "provider" ? providerLabel(group.id) ?? group.label : runNodeLabel(group.id);
     return <div key={group.id}><span><b>{label}</b><small>{group.calls} 次执行</small></span><i><span style={{ width: `${Math.max(4, amount / max * 100)}%` }} /></i><strong>{group.actualPendingCount > 0 ? `¥${group.actualCostCny.toFixed(2)} + ${group.actualPendingCount} 笔待确认` : `¥${group.actualCostCny.toFixed(2)}`}</strong></div>;
   }) : <p>暂无调用数据</p>}</section>;
@@ -101,6 +101,7 @@ function costLineLabel(line: StudioCostRunDetail["lines"][number]): string {
   if (line.status === "failed" && line.billing === "subscription") return "订阅任务失败 · 不产生按量费用";
   if (line.status === "failed") return "任务失败";
   if (line.actualCostSource === "configured_rate") return "按配置费率记录 · 非服务商确认账单";
+  if (line.actualCostSource === "manual_reconciled") return "人工核对后登记";
   if (line.actualCostSource === "provider_reported") return "服务商回传费用";
   if (line.billing === "metered") return "按量付费";
   if (line.billing === "subscription") return "订阅额度";

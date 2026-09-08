@@ -14,9 +14,10 @@ import {
   buildCodexExecCommand,
   codexExecutorProfileFor,
   parseTaskRequest,
+  type RoleAuditPayload,
   type SpawnedProcess,
 } from "../src/codex-executor.js";
-import { BROKER_TASK_KINDS } from "../src/task-definitions.js";
+import { BROKER_TASK_KINDS, taskContractDescriptorFor } from "../src/task-definitions.js";
 
 class FakeCodexChild extends EventEmitter implements SpawnedProcess {
   readonly pid = 4242;
@@ -190,10 +191,11 @@ function visualReviewRequest(
   frames: Array<{ timecodeMs: number; jpeg: Buffer }> = [
     { timecodeMs: 0, jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]) },
   ],
-): { protocolVersion: string; kind: string; payload: Record<string, unknown> } {
+): { protocolVersion: string; kind: string; expectedContractDigest: string; payload: Record<string, unknown> } {
   return {
     protocolVersion: "video-factory/codex-bridge-v2",
     kind: "visual-review",
+    expectedContractDigest: taskContractDescriptorFor("visual-review").digest,
     payload: {
       durationMs: 10_000,
       frames: frames.map(({ timecodeMs, jpeg }) => ({
@@ -205,10 +207,11 @@ function visualReviewRequest(
   };
 }
 
-function roleAuditRequest(jpeg?: Buffer): { protocolVersion: string; kind: string; payload: Record<string, unknown> } {
+function roleAuditRequest(jpeg?: Buffer): { protocolVersion: string; kind: string; expectedContractDigest: string; payload: Record<string, unknown> } {
   return {
     protocolVersion: "video-factory/codex-bridge-v2",
     kind: "role-audit",
+    expectedContractDigest: taskContractDescriptorFor("role-audit").digest,
     payload: {
       role: "编剧",
       iteration: 1,
@@ -905,6 +908,43 @@ describe("role audit continuation contract", () => {
     assert.match(prompt, /"roleScope"/);
     assert.match(prompt, /一滴墨为什么能长成一座山/);
   });
+
+  it("accepts the exact validation-failure contract used by role loops", () => {
+    const request = roleAuditRequest();
+    request.payload.validationFailure = {
+      invalidCandidate: { verdict: "pass", score: "ninety" },
+      invalidCandidateHash: "a".repeat(64),
+      validationError: "score must be a number",
+    };
+
+    const parsed = parseTaskRequest(request);
+
+    assert.deepEqual((parsed.payload as RoleAuditPayload).validationFailure, request.payload.validationFailure);
+  });
+
+  it("rejects malformed, unsafe, or oversized validation-failure evidence", () => {
+    const invalidCases: Array<[unknown, RegExp]> = [
+      [{ invalidCandidate: { value: 1 }, invalidCandidateHash: "bad", validationError: "invalid" }, /SHA-256 digest/],
+      [{ invalidCandidate: { value: "x".repeat(65_537) }, invalidCandidateHash: "a".repeat(64), validationError: "invalid" }, /exceeds 65536 bytes/],
+      [{ invalidCandidate: { value: 1 }, invalidCandidateHash: "a".repeat(64), validationError: "x".repeat(301) }, /exceeds 300 characters/],
+      [{ invalidCandidate: { value: 1 }, invalidCandidateHash: "a".repeat(64), validationError: "invalid", iteration: 1 }, /iteration is not allowed/],
+    ];
+    for (const [validationFailure, expected] of invalidCases) {
+      const request = roleAuditRequest();
+      request.payload.validationFailure = validationFailure;
+      assert.throws(() => parseTaskRequest(request), expected);
+    }
+
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const request = roleAuditRequest();
+    request.payload.validationFailure = {
+      invalidCandidate: cyclic,
+      invalidCandidateHash: "a".repeat(64),
+      validationError: "invalid",
+    };
+    assert.throws(() => parseTaskRequest(request), /must be JSON serializable/);
+  });
 });
 
 describe("CodexExecutor.runTask", () => {
@@ -1167,7 +1207,7 @@ describe("CodexExecutor.runTask", () => {
 
     const prompt = Buffer.concat(childRef?.stdinChunks ?? []).toString("utf8");
     assert.equal(result.trace?.taskKind, "topic-ideas");
-    assert.equal(result.trace?.promptVersion, "video-factory/topic-editor-v6");
+    assert.equal(result.trace?.promptVersion, "video-factory/topic-editor-v7");
     assert.equal(result.trace?.providerId, "openai");
     assert.equal(result.trace?.modelId, "gpt-5.3-codex");
     assert.equal(result.trace?.prompt, prompt);

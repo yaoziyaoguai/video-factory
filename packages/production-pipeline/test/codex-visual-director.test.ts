@@ -838,7 +838,7 @@ describe("CodexVisualDirectorAgent", () => {
     await assert.rejects(() => agent.plan(input), /more than one shot for scene 1/);
   });
 
-  it("auto-adopts the candidate replacement when a previous provider leaves the allowed pool", async () => {
+  it("stops before the model when a previous provider leaves the authorized rework scope", async () => {
     const input = directorInput();
     input.scenes.push({
       ...input.scenes[0]!,
@@ -898,19 +898,69 @@ describe("CodexVisualDirectorAgent", () => {
       shot.deliveryType = "generated_image";
     }
     (candidate.shots as Array<Record<string, unknown>>)[1]!.generationPrompt = "修正后的第二镜";
-    const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => candidate) });
+    const client = new CapturingCodexClient(() => candidate);
+    const agent = new CodexVisualDirectorAgent({ client });
 
-    const plan = await agent.plan(input);
-
-    // 镜头 1 不回滚为已下线的 A，两镜都按 candidate 的 B 进入新报价。
-    assert.deepEqual(plan.shots.map((shot) => shot.preferredProviderId), ["seedream-image-v1", "seedream-image-v1"]);
-    assert.deepEqual(plan.shots.map((shot) => shot.deliveryType), ["generated_image", "generated_image"]);
-    assert.deepEqual(plan.shots.map((shot) => shot.estimatedCostCny), [6, 6]);
-    assert.equal(plan.shots[0]!.generationPrompt, "雨夜城市人物近景");
-    assert.equal(plan.shots[1]!.generationPrompt, "修正后的第二镜");
+    await assert.rejects(() => agent.plan(input), /scenes 1.*no longer executable/);
+    assert.equal(client.calls.length, 0);
   });
 
-  it("still rejects a drift-expanded shot whose candidate provider is outside the allowed pool", async () => {
+  it("stops before the model when a new video-model duration makes an unaffected reuse route impossible", async () => {
+    const input = directorInput();
+    input.scenes[0] = { ...input.scenes[0]!, duration: 4 };
+    input.scenes.push({
+      ...input.scenes[0]!,
+      position: 2,
+      duration: 5,
+      narration: "继续沿用同一段母片",
+      visualPrompt: "复用第一镜母片",
+    });
+    input.assetProviders = [{
+      id: "seedance-video-v1",
+      label: "Seedance",
+      billing: "metered",
+      modes: ["AI 视频"],
+      deliveryTypes: ["generated_video"],
+      strengths: ["动态镜头"],
+      constraints: ["当前模型最多生成 4 秒"],
+      minDurationSeconds: 4,
+      maxDurationSeconds: 4,
+      estimatedCnyPerClip: 2,
+    }];
+    input.economics = { allowMeteredProviders: true };
+    const baseShot = (validPlan().shots as Array<Record<string, unknown>>)[0]!;
+    const previousPlan = validPlan();
+    previousPlan.shots = [{
+      ...structuredClone(baseShot),
+      scenePosition: 1,
+      preferredProviderId: "seedance-video-v1",
+      deliveryType: "generated_video",
+      query: "generated master",
+      temporalBeats: ["[0s-2s] 建立母片", "[2s-4s] 完成母片"],
+    }, {
+      ...structuredClone(baseShot),
+      scenePosition: 2,
+      preferredProviderId: "seedance-video-v1",
+      deliveryType: "generated_video",
+      query: "REUSE_ONLY scene 1 locked master crop",
+      temporalBeats: ["[0s-2s] 复用前段", "[2s-5s] 复用后段"],
+    }];
+    input.brief.rework = {
+      sourceRunId: "run-reuse-duration-drift",
+      visualDirectionInstruction: "只重做镜头 1。",
+      assetInstruction: "镜头 2 继续沿用已有母片。",
+      findings: [],
+      affectedScenePositions: [1],
+      previousDirectorPlan: previousPlan,
+    };
+    const client = new CapturingCodexClient(() => previousPlan);
+    const agent = new CodexVisualDirectorAgent({ client });
+
+    await assert.rejects(() => agent.plan(input), /scenes 2.*no longer executable/);
+    assert.equal(client.calls.length, 0);
+  });
+
+  it("does not ask the model to repair configuration drift outside the approved scene set", async () => {
     const input = directorInput();
     input.scenes.push({
       ...input.scenes[0]!,
@@ -935,17 +985,17 @@ describe("CodexVisualDirectorAgent", () => {
       previousDirectorPlan: previousPlan,
     };
     const candidate = structuredClone(previousPlan);
-    // candidate 对差异闭包新增的镜头 1 给出的替换同样不在允许目录内：
-    // 差异闭包不得绕过 allowed-provider 完整校验，仍必须拒绝。
     (candidate.shots as Array<Record<string, unknown>>)[0]!.preferredProviderId = "removed-image-v2";
     (candidate.shots as Array<Record<string, unknown>>)[1]!.preferredProviderId = "local-editorial-v1";
     (candidate.shots as Array<Record<string, unknown>>)[1]!.deliveryType = "editorial_card";
-    const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => candidate) });
+    const client = new CapturingCodexClient(() => candidate);
+    const agent = new CodexVisualDirectorAgent({ client });
 
-    await assert.rejects(() => agent.plan(input), /not in the enabled asset pool/);
+    await assert.rejects(() => agent.plan(input), /scenes 1.*no longer executable/);
+    assert.equal(client.calls.length, 0);
   });
 
-  it("accepts a visual-bible correction during scoped rework without regenerating unaffected shots", async () => {
+  it("keeps the previous visual bible during a scene-scoped rework", async () => {
     const { input, previousPlan } = scopedReworkWithSecondScene();
     const candidate = structuredClone(previousPlan);
     (candidate.shots as Array<Record<string, unknown>>)[0]!.generationPrompt = "模型无意中改写了第一镜";
@@ -955,7 +1005,7 @@ describe("CodexVisualDirectorAgent", () => {
 
     const plan = await agent.plan(input);
 
-    assert.equal((plan.visualBible as { color: string }).color, "统一换成冷蓝色体系");
+    assert.equal((plan.visualBible as { color: string }).color, "霓虹综合色");
     assert.equal(plan.shots[0]!.generationPrompt, "雨夜城市人物近景");
     assert.equal(plan.shots[1]!.generationPrompt, "修正后的第二镜");
   });
@@ -976,7 +1026,7 @@ describe("CodexVisualDirectorAgent", () => {
     assert.equal(plan.shots[1]!.generationPrompt, "全片重做后的第二镜");
   });
 
-  it("treats a previous shot as drifted when any reference alternative loses support", async () => {
+  it("requires renewed scope approval when an unaffected reference alternative loses support", async () => {
     const input = directorInput();
     input.scenes.push({ ...input.scenes[0]!, position: 2, narration: "雨停之后", visualPrompt: "雨停后的街角" });
     input.assetProviders = [
@@ -1046,15 +1096,11 @@ describe("CodexVisualDirectorAgent", () => {
     candidateShots[0]!.generationPrompt = "修正后的第一镜";
     candidateShots[1]!.alternativeProviderIds = [];
     candidateShots[1]!.generationPrompt = "备选已清理的第二镜";
-    const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => candidate) });
+    const client = new CapturingCodexClient(() => candidate);
+    const agent = new CodexVisualDirectorAgent({ client });
 
-    const plan = await agent.plan(input);
-
-    // 漂移闭包把第二镜纳入返工：merged plan 采用 candidate 的干净备选，验证得以通过。
-    assert.equal(plan.shots[0]!.generationPrompt, "修正后的第一镜");
-    assert.equal(plan.shots[1]!.generationPrompt, "备选已清理的第二镜");
-    assert.deepEqual(plan.shots[1]!.alternativeProviderIds, []);
-    assert.equal(plan.shots[1]!.referenceFromScenePosition, 1);
+    await assert.rejects(() => agent.plan(input), /scenes 2.*no longer executable/);
+    assert.equal(client.calls.length, 0);
   });
 
   it("sends the director-plan payload and returns the validated plan", async () => {

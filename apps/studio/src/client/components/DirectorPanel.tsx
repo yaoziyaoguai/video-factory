@@ -29,10 +29,10 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
   const productionReady = !providerError && !topicBlockReason && capabilities.every((item) => item.available);
   const hasTopicAgent = providers.some((provider) => provider.capability === "topic.intelligence" && provider.available && provider.kind !== "test");
   const topicIntelligenceCopy = opportunity.origin === "trend"
-    ? "热点转译、制作潜力判断与来源核验由 AI 选题总编完成"
+    ? "AI 提出热点角度；系统检查来源链接；关键事实仍需按来源核对"
     : opportunity.origin === "series"
       ? "系列选题、连续性检查与开拍前复核由 AI 系列总编完成"
-      : "自定义命题复核、制作潜力判断与来源核验由 AI 选题总编完成";
+      : "AI 提出自定义选题角度；系统检查来源链接；关键事实仍需按来源核对";
 
   return (
     <aside className="director-panel" aria-label="导演控制台" data-tour="director-panel">

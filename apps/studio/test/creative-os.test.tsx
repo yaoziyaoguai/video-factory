@@ -975,7 +975,7 @@ describe("Creative OS", () => {
       { id: "api-topic-editor-v1", capability: "topic.intelligence", label: "Codex 选题总编", available: true, kind: "external" },
     ];
     const { rerender } = render(<MemoryRouter><DirectorPanel opportunity={{ ...opportunity, origin: "manual" }} providers={topicProviders} onProduce={() => undefined} /></MemoryRouter>);
-    expect(screen.getByText("自定义命题复核、制作潜力判断与来源核验由 AI 选题总编完成")).toBeInTheDocument();
+    expect(screen.getByText("AI 提出自定义选题角度；系统检查来源链接；关键事实仍需按来源核对")).toBeInTheDocument();
 
     rerender(<MemoryRouter><DirectorPanel opportunity={{ ...opportunity, origin: "series" }} providers={topicProviders} onProduce={() => undefined} /></MemoryRouter>);
     expect(screen.getByText("系列选题、连续性检查与开拍前复核由 AI 系列总编完成")).toBeInTheDocument();
@@ -1808,7 +1808,7 @@ describe("Creative OS", () => {
     const adopt = vi.spyOn(studioApi, "adoptCandidate").mockResolvedValue({ ...opportunity, id: reviewCandidate.id });
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByText("1 条证据 · 1 个有效来源域名（需 1 个）")).toBeInTheDocument();
+    expect(await screen.findByText("1 条来源线索 · 1 个有效来源域名（需 1 个）")).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: `采用候选 ${reviewCandidate.title}` }));
     expect(screen.getByRole("dialog", { name: "采用前核验证据" })).toBeInTheDocument();
     await user.click(screen.getByRole("checkbox", { name: /我已打开原始来源/ }));
@@ -2056,6 +2056,8 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "providers").mockResolvedValue([
       ...providers,
       { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external", billing: "free", deliveryTypes: ["stock_video"] },
+      { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "glm-5.3-flash" },
+      { id: "codex-visual-review-v1", capability: "quality.review.visual", label: "Codex 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
     ]);
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
     vi.spyOn(studioApi, "series").mockResolvedValue([]);
@@ -2089,6 +2091,8 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "providers").mockResolvedValue([
       ...providers,
       { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external", billing: "free", deliveryTypes: ["stock_video"] },
+      { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "glm-5.3-flash" },
+      { id: "codex-visual-review-v1", capability: "quality.review.visual", label: "Codex 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
     ]);
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
     vi.spyOn(studioApi, "series").mockResolvedValue([]);
@@ -2745,7 +2749,7 @@ describe("Creative OS", () => {
 
     expect(await screen.findByRole("heading", { name: "按角色配置生产能力" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "编剧首选能力" })).toHaveValue("python-template-v1");
-    expect(screen.getByText("其余可用能力只在首选服务故障时依次接管，不会与首选同时重复生成。")).toBeInTheDocument();
+    expect(screen.getByText("只有确认首选请求未被受理时，其余可用能力才会依次接管。若请求结果不确定，流程会暂停核对，不会切换模型或重复生成。")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "去画面来源配置" })).toHaveAttribute("href", "#visual-providers");
     expect(screen.getByRole("link", { name: "去声音演员表配置" })).toHaveAttribute("href", "#voice-casting");
     expect(screen.queryByRole("combobox", { name: "画面执行首选能力" })).not.toBeInTheDocument();
@@ -2755,7 +2759,7 @@ describe("Creative OS", () => {
     const roleSection = screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section");
     expect(within(roleSection!).getByText("GPT-5.6 Terra")).toBeInTheDocument();
     expect(within(roleSection!).getByText("故障替补：GPT-5.6 Sol")).toBeInTheDocument();
-    expect(within(roleSection!).getByText("中途画面预检使用首选模型，服务故障时才切换；最终成片由 GLM 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。")).toBeInTheDocument();
+    expect(within(roleSection!).getByText("中途画面预检优先使用首选模型，只有确认请求未受理时才切换；结果不确定会暂停核对。最终成片由 GLM 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。")).toBeInTheDocument();
     expect(screen.getByText("独立质量复核")).toBeInTheDocument();
     expect(screen.getByText("独立复核 · 最多三轮")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));

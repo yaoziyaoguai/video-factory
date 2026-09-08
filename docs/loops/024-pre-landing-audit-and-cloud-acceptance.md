@@ -108,6 +108,22 @@ PR #28 将 ZAI Broker 从 3 类任务扩展到完整任务集，但部署脚本�
 
 生成媒体虽然先经过 URL、DNS、Content-Type 和大小检查并下载到本地，但媒体探测曾直接把外部 Provider 返回的文件交给 `ffprobe`。伪装成媒体的 playlist/container 可能诱导解析器访问次级网络资源，损坏文件也可能长期阻塞生产 Worker。探测现只允许 `file,pipe` 协议并设置 30 秒进程超时；回归测试固定协议边界、输入路径、缓冲区和超时配置。
 
+### VF-CA-055 — 文本请求明确结束后仍无法接管可恢复故障
+
+此前为避免 durable Broker 中的原请求与 backup 双跑，fallback 一度只允许 `not_accepted` 请求切换，但这也拦住了已经明确结束且由 Broker 结构化归类的基础设施故障或模型无输出。现在 `uncertain` 仍一律停止并通过原 requestId 恢复；`completed_failure` 只有在结构化分类为网络、超时、限流、服务不可用、瞬时 Provider 故障或 `model_provider_no_output` 时才允许候选接管。模糊 HTTP 500、无效 JSON、Schema、鉴权、内容安全、业务、质量和审计失败仍 fail closed。
+
+### VF-CA-056 — 纯人工备注打回可能生成空返工范围
+
+没有结构化审片 finding、只有人工打回备注时，返工范围过去可能为空，随后原样复用旧脚本和导演方案。服务端现在从“第 2、4 镜”等备注解析镜号并计算必要的 REUSE/reference 依赖闭包；备注未给镜号时使用上一版已核验的完整镜头集合。该范围继续作为提交时不可删除必改镜头的执行边界。
+
+### VF-CA-057 — 模板声音只改节奏、不改演员
+
+模板的声音推荐过去只应用语速、停顿和母带，演员仍沿用入口默认值，导致“人物纪实”等模板可能在云端落到不相称的新闻主播。自动推荐现在一起应用演员并同步 Provider binding；用户已经自定义的声音保持不变。没有 macOS 音色的部署环境会按内容 preset 选择兼容的 MiniMax 音色。
+
+### VF-CA-058 — 正式说明卡仍含可被 query 触发的内部术语模板
+
+虽然 `editorial_card` 已只能由导演明确选择，Python 卡片渲染器仍保留了按英文 query 命中“节点审计”“独立红队”“付费节点 · 未执行”“生产口诀”等内部流程卡片的分支。上述硬编码已删除；回归测试固定这些 query 只能生成作品内容，不能覆盖成内部工作流说明。
+
 ## Consolidated Local Resolution
 
 - 返工继承不可变模板、标题、角度、受众、时长、声音、画面来源和节点模型；视觉 finding 以 `targetNodeId` 精确预填到脚本、导演方案或素材节点。
@@ -115,13 +131,15 @@ PR #28 将 ZAI Broker 从 3 类任务扩展到完整任务集，但部署脚本�
 - 生成、图库、复用失败不再产生说明卡；只有导演明确选择 `editorial_card` 才允许正式卡片。
 - 生成素材在渲染前增加独立的 `asset-source-review` 文字污染、主体和动作一致性门禁；失败保留已生成画面，只重试免费预检，不会启动配音、渲染或再次调用付费画面模型。
 - 24 秒、30fps 的渲染输出固定为 720 帧，移除项目名、Scene 编号、导演字段和自动标签，只保留正式字幕与首镜 AIGC 披露。
-- 文本和视觉模型按节点首选模型及健康候选池执行；只有已分类的连接、超时、限流、容量或明确服务不可用错误触发 backup。GLM-5.3-Flash 将不支持的 `xhigh` 规范化为 `max`。
+- 文本和视觉模型按节点首选模型及健康候选池执行；未受理请求的已分类基础设施故障，以及已明确结束且有结构化基础设施/无输出分类的失败可以触发 backup。结果不确定、结构/业务/内容安全/审计失败不能触发第二次模型调用。GLM-5.3-Flash 将不支持的 `xhigh` 规范化为 `max`。
 - 失败节点修改模型后，Provider 会用当前执行配置覆盖旧节点输入中的模型选择；模型明确结束但未返回结果时允许 backup，实际尝试模型与公开回执保持一致。
 - 660 秒是新阶段准入截止时间；截止前已提交给 durable Broker 的幂等操作允许在单次请求上限内返回，同时由 1260 秒节点上限兜底。
 - fallback 展示同时表达候选切换、首选等待与最终状态；费用聚合中的调用次数不再伪装成人工确认次数。
 - 素材授权审核、500 条以上待审记录、失败/登录/搜索/帮助状态、模板 CRUD 和 QA 模板迁移均增加了行为回归测试。
 - 最终双审对同一 evidence digest 分别保留 producer/audit trace；两分支不完整、实际模型重合、证据不一致或旧人工批准都不能生成发布包。
 - 审片 finding 形成主责任节点、受影响下游和明确 action；只按责任传播返工，不把“局部返工”默认扩大为全片重做。
+- 只有人工备注的打回同样生成服务端保护的镜头范围；模板自动声音同时覆盖演员、语速、停顿和母带，显式自定义仍优先。
+- 正式 `editorial_card` 不再按内部 query 生成流程说明，只能呈现导演主动选择的作品内容。
 - 费用界面已区分报价授权、已记录费用、配置费率和服务商回传费用；长审片报告默认显示前 5 条，其余可展开。毫秒级耗时对创作者统一显示为“不到 1 秒”。
 
 ## Verification Plan
@@ -185,3 +203,9 @@ PR #28 将 ZAI Broker 从 3 类任务扩展到完整任务集，但部署脚本�
 - `ffprobe` 隔离修复后的完整 `make test` 再次退出 0：Python 109/109；Pipeline/核心 TypeScript 528/529（通过 528，仅 1 个显式真实 E2E skip）；Broker 127/127；Studio Vitest 348/348；Studio server 422/422；production build 成功；package smoke 3/3。第一次并发运行同时暴露热点信号测试只等待静态列表容器、没有等待异步数据的竞态，修正等待条件后整套门禁通过。
 - 发布前静态门禁已通过：改动过的 shell 脚本 `bash -n`、`git diff --check`、生产 Compose `config --quiet`、新增内容高置信密钥模式扫描均无问题；`npm audit --omit=dev --audit-level=high` 经 npm 官方 registry 返回 0 vulnerabilities。
 - 尚待：提交推送、GitHub Actions 部署，以及云端桌面/移动端和一条真实付费视频的最终验收。2026-09-09 发布时 `gh` API、`git ls-remote` 和 HTTPS push 均被 GitHub 返回 `403 account suspended` 阻断；不能把未进入 Actions 的本地提交冒充成已部署版本。完成前本 Loop 保持 `in progress`。
+- 2026-09-09 集中收口补齐：返工镜头范围成为执行硬上界，超出的人审 finding、脚本变化和 reference/REUSE 依赖必须重新确认；只有 `not_accepted` 的模型请求允许切换候选，已受理、结果不确定或已完成失败均禁止重复调用；Seedance、Wan、MiniMax 的 create、response body 与 poll 共用绝对 deadline，已有 taskId 后只查询原任务；execution lease 首次安装失败会释放锁。最终 GLM 与 Codex 双审身份、返工按钮、来源线索、制作设置、发布包和 ETA 文案同步改成创作者能直接理解的表达。
+- 本轮还补齐两条审计证据：返工弹窗只转换展示文字，未编辑的 `nodeInstructions` 保持原始生产载荷；视觉预处理器给出的素材来源身份会保留，运行阶段只覆盖 `reviewStage`、镜头范围、采样与当前脚本/方案等权威同名字段。选题事实门禁同时覆盖 `visualPlan.strategy` 与镜头描述中的无来源数字；高风险热点若模型夹带事实则退回到只引用原信号的核验问句，真实核验型问题不被误删。
+- Oracle Web 第 5 档最终统一会话 `vf-final-unified-a9k2` 已验证网页强度，但 45 分钟后 `browser-run-timeout`，没有产生可用建议，失败会话已放弃且未恢复。随后三个独立终审覆盖 red team、安全、规格与工程规范：red team 无 finding；`ffprobe` 隔离问题已修；规格审查提出的文本 fallback、人工备注返工范围、模板演员推荐和内部术语卡片四项高置信问题均已修复。API contract 对 `visual-review-v1` 的兼容担忧经合同版本、evidence digest、旧数据读取和正式发布 fail-closed 路径复核后排除，当前单机 ECS 不存在滚动混合版本场景，因此不升级 artifact schema。
+- 修复后的最新完整 `make test` 退出码为 0：Python 109/109；Pipeline/核心 TypeScript 543/544（通过 543，仅 1 个显式真实付费 E2E skip）；Broker 133/133；Studio Vitest 350/350；Studio server 429/429；production build 成功；package smoke 3/3。
+- 最终静态门禁再次通过：`git diff --check`、四个部署 shell 脚本 `bash -n` 和新增行高置信密钥扫描均为 0；本机 Docker 29.3.1 没有 `docker compose` 插件，使用已安装的 Docker Compose 5.3.1 兼容入口执行同一份 `docker-compose --env-file .env.docker.prod.example -f docker/docker-compose.prod.yml config --quiet` 并通过。按用户要求只执行一次 `graphify update`，成功更新为 4699 nodes、11168 edges、171 communities，没有排障或重复运行。
+- 本地集中提交已创建；随后再次执行普通 HTTPS push，GitHub 仍明确返回 `403 Your account is suspended`，因此该提交尚未进入远程仓库，GitHub Actions、阿里云部署和新版本云端付费验收都未启动。禁止用 SSH 手工覆盖或用旧线上版本冒充本次验收；账号恢复后从同一分支重新 push 即可继续。

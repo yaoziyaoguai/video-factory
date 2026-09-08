@@ -2,6 +2,10 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
+export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
+  "visual-review": "0d1a2ec35d50b2b8e350b7cddd2ad23a31a9bd6518764fdd609c34d54b700a69",
+  "role-audit": "88f86bc1796d81bd538b0ac1263cfc43f46b001cada2383497dd8bd68945e7ba",
+} as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。
 export const CODEX_TASK_KINDS = ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"] as const;
@@ -37,6 +41,7 @@ export interface CodexTaskTrace {
   fallbackReason?: string;
   attemptedModelIds?: string[];
   modelCandidateAttempts?: ModelCandidateAttempt[];
+  queueWaitMs?: number;
   providerWaitMs?: number;
   firstOutputEventMs?: number;
   toolMs?: number;
@@ -77,6 +82,7 @@ export interface ModelProviderFailureDetails {
   reasonCode: string;
   providerId: string;
   modelId: string;
+  queueWaitMs?: number;
   providerWaitMs?: number;
   requestIdHash?: string;
   finishReason?: string;
@@ -228,8 +234,12 @@ export class CodexBridgeClient {
       requestId,
       kind,
       payload,
+      ...(REQUIRED_CODEX_TASK_CONTRACT_DIGESTS[kind as keyof typeof REQUIRED_CODEX_TASK_CONTRACT_DIGESTS]
+        ? { expectedContractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS[kind as keyof typeof REQUIRED_CODEX_TASK_CONTRACT_DIGESTS] }
+        : {}),
       ...(session ? { sessionKey: session.key, ...(session.handle ? { sessionHandle: session.handle } : {}) } : {}),
     });
+    const expectedContractDigest = REQUIRED_CODEX_TASK_CONTRACT_DIGESTS[kind as keyof typeof REQUIRED_CODEX_TASK_CONTRACT_DIGESTS];
     const requestTimeoutMs = requestOptions.timeoutMs === undefined
       ? this.timeoutMs
       : positiveRequestTimeout(requestOptions.timeoutMs);
@@ -239,7 +249,7 @@ export class CodexBridgeClient {
       try {
         const remainingMs = deadlineAtMs - Date.now();
         if (remainingMs <= 0) throw requestDeadlineError(requestTimeoutMs);
-        return await this.send(body, session?.key, remainingMs);
+        return await this.send(body, session?.key, remainingMs, expectedContractDigest);
       } catch (error) {
         if (!(error instanceof CodexBridgeError) || !error.transient || attempt === this.maxAttempts) throw error;
         lastError = error;
@@ -251,7 +261,7 @@ export class CodexBridgeClient {
     throw lastError ?? new CodexBridgeError("Codex bridge request failed.", false);
   }
 
-  private send(body: string, sessionKey: string | undefined, timeoutMs: number): Promise<CodexTaskExecution> {
+  private send(body: string, sessionKey: string | undefined, timeoutMs: number, expectedContractDigest?: string): Promise<CodexTaskExecution> {
     return new Promise((resolve, reject) => {
       const request = http.request({
         socketPath: this.options.socketPath,
@@ -263,7 +273,7 @@ export class CodexBridgeClient {
         },
         signal: AbortSignal.timeout(timeoutMs),
       }, (response) => {
-        this.consume(response, request, sessionKey, resolve, reject);
+        this.consume(response, request, sessionKey, resolve, reject, expectedContractDigest);
       });
       request.on("error", (error) => reject(mapTransportError(error, this.options.socketPath, timeoutMs)));
       request.end(body);
@@ -276,6 +286,7 @@ export class CodexBridgeClient {
     sessionKey: string | undefined,
     resolve: (value: CodexTaskExecution) => void,
     reject: (reason?: unknown) => void,
+    expectedContractDigest?: string,
   ): void {
     const chunks: Buffer[] = [];
     let received = 0;
@@ -312,7 +323,7 @@ export class CodexBridgeClient {
         return;
       }
       try {
-        resolve(parseEnvelope(raw, sessionKey));
+        resolve(parseEnvelope(raw, sessionKey, expectedContractDigest));
       } catch (error) {
         reject(error);
       }
@@ -342,7 +353,7 @@ function requestDeadlineError(timeoutMs: number): CodexBridgeError {
   return new CodexBridgeError(`Text agent wall-clock deadline exhausted after ${timeoutMs}ms.`, false, "not_accepted");
 }
 
-function parseEnvelope(raw: string, sessionKey?: string): CodexTaskExecution {
+function parseEnvelope(raw: string, sessionKey?: string, expectedContractDigest?: string): CodexTaskExecution {
   const envelope = parseJsonOrThrow(raw, "Codex bridge returned a non-JSON response body.");
   if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) {
     throw new CodexBridgeError("Codex bridge response envelope must be an object.", false);
@@ -358,9 +369,13 @@ function parseEnvelope(raw: string, sessionKey?: string): CodexTaskExecution {
     throw new CodexBridgeError("Codex bridge response session handle is invalid.", false);
   }
   const output = parseJsonOrThrow(stripCodeFence(record.output), "Codex bridge output is not valid JSON.");
+  const trace = record.trace === undefined ? undefined : parseTrace(record.trace);
+  if (expectedContractDigest && trace?.contractDigest !== expectedContractDigest) {
+    throw new CodexBridgeError("Codex bridge task contract does not match the requested contract.", false, "uncertain");
+  }
   return {
     output,
-    ...(record.trace === undefined ? {} : { trace: parseTrace(record.trace) }),
+    ...(trace ? { trace } : {}),
     ...(sessionKey && typeof record.sessionHandle === "string"
       ? { session: { key: sessionKey, handle: record.sessionHandle } }
       : {}),
@@ -393,6 +408,7 @@ function parseTrace(value: unknown): CodexTaskTrace {
     throw new CodexBridgeError("Codex bridge trace is invalid.", false);
   }
   const modelCandidateAttempts = parseModelCandidateAttempts(trace.modelCandidateAttempts);
+  const queueWaitMs = optionalDurationMs(trace.queueWaitMs, "queueWaitMs");
   const providerWaitMs = optionalDurationMs(trace.providerWaitMs, "providerWaitMs");
   const firstOutputEventMs = optionalDurationMs(trace.firstOutputEventMs, "firstOutputEventMs");
   const toolMs = optionalDurationMs(trace.toolMs, "toolMs");
@@ -435,6 +451,7 @@ function parseTrace(value: unknown): CodexTaskTrace {
       ? { attemptedModelIds: [...new Set(trace.attemptedModelIds)] as string[] }
       : {}),
     ...(modelCandidateAttempts ? { modelCandidateAttempts } : {}),
+    ...(queueWaitMs !== undefined ? { queueWaitMs } : {}),
     ...(providerWaitMs !== undefined ? { providerWaitMs } : {}),
     ...(firstOutputEventMs !== undefined ? { firstOutputEventMs } : {}),
     ...(toolMs !== undefined ? { toolMs } : {}),
@@ -582,6 +599,7 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       || !isBoundedIdentifier(details.reasonCode, 128)
       || !isBoundedIdentifier(details.providerId, 128)
       || !isBoundedIdentifier(details.modelId, 128)
+      || (details.queueWaitMs !== undefined && optionalDurationMs(details.queueWaitMs, "queueWaitMs") === undefined)
       || (details.providerWaitMs !== undefined && optionalDurationMs(details.providerWaitMs, "providerWaitMs") === undefined)
       || (details.requestIdHash !== undefined
         && (typeof details.requestIdHash !== "string" || !/^[a-f0-9]{64}$/.test(details.requestIdHash)))
@@ -597,6 +615,7 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       reasonCode: details.reasonCode as string,
       providerId: details.providerId as string,
       modelId: details.modelId as string,
+      ...(details.queueWaitMs !== undefined ? { queueWaitMs: Number(details.queueWaitMs) } : {}),
       ...(details.providerWaitMs !== undefined ? { providerWaitMs: Number(details.providerWaitMs) } : {}),
       ...(typeof details.requestIdHash === "string" ? { requestIdHash: details.requestIdHash } : {}),
       ...(typeof details.finishReason === "string" ? { finishReason: details.finishReason } : {}),

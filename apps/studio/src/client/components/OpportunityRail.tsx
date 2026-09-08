@@ -37,7 +37,7 @@ export function OpportunityRail({ opportunities, selectedId, onSelect, onCreate 
               <span className="opportunity-card-copy">
                 <strong>{opportunity.title}</strong>
                 <small>{platformLabel(opportunity.platform)} · {statusLabel(opportunity.status)} · {formatFreshness(opportunity.updatedAt)}</small>
-                <small>{sourceBlocked ? "待补来源 · 当前不可开工" : `${opportunity.evidence.length} 条证据 · ${scoreSourceLabel(opportunity.scoreProvenance.source)}`}</small>
+                <small>{sourceBlocked ? "待补来源 · 当前不可开工" : `${opportunity.evidence.length} 条来源线索 · ${scoreSourceLabel(opportunity.scoreProvenance.source)}`}</small>
               </span>
               <span className="opportunity-card-score">{sourceBlocked ? <small className="opportunity-card-score-label">历史内容潜力</small> : null}{opportunity.score.final}分</span>
             </button>

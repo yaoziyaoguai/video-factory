@@ -82,7 +82,7 @@ const MAX_RANK_THUMBNAILS = 12;
 // 与 Broker 的逐图边界保持一致，避免在模型调用前被协议层拒绝。
 const MAX_THUMBNAIL_BYTES = 256 * 1024;
 const THUMBNAIL_HOSTS = new Set(["images.pexels.com", "cdn.pixabay.com"]);
-export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v3|role-audit-v1|asset-ranking-validator-v1";
+export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v3|role-audit-v3|asset-ranking-validator-v1";
 
 export class CodexAssetSemanticRanker implements AssetSemanticRanker {
   readonly id: string;

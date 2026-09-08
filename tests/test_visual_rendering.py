@@ -93,29 +93,28 @@ class VisualRenderingTest(unittest.TestCase):
         self.assertEqual(checklist["status"], "待发布")
         self.assertEqual(local_card_semantic_style(checklist)["accent"], "#188465")
 
-    def test_local_card_spec_supports_audit_paid_gate_and_outro_visual_grammar(self):
+    def test_internal_workflow_queries_do_not_override_formal_card_content(self):
         scene = Scene(
             position=2,
-            narration="先自审，再交独立红队。",
+            narration="光线从左侧推进，杯壁的水珠慢慢变亮。",
             duration=3,
             visual_strategy="local",
-            visual_prompt="蓝色自审、红色独立红队。",
+            visual_prompt="水杯与侧光的正式解释卡。",
         )
 
-        audit = local_card_spec(scene, {"query": "self review independent red team"})
-        node_audit = local_card_spec(scene, {"query": "node output self review red team"})
-        paid = local_card_spec(scene, {"query": "paid step user confirmation options"})
-        outro = local_card_spec(scene, {"query": "agent audit payment confirmation outro"})
+        cards = [
+            local_card_spec(scene, {"query": "self review independent red team"}),
+            local_card_spec(scene, {"query": "node output self review red team"}),
+            local_card_spec(scene, {"query": "paid step user confirmation options"}),
+            local_card_spec(scene, {"query": "agent audit payment confirmation outro"}),
+        ]
 
-        self.assertEqual(audit["layout"], "audit_flow")
-        self.assertEqual(audit["items"], ["自审", "独立红队"])
-        self.assertEqual(node_audit["items"], ["节点输出", "自审", "独立红队"])
-        self.assertEqual(paid["layout"], "paid_gate")
-        self.assertEqual(paid["items"], ["返回修改", "确认继续"])
-        self.assertIn("未执行", paid["status"])
-        self.assertEqual(outro["layout"], "audit_outro")
-        self.assertEqual(outro["title"], "每个节点：自审 → 红队")
-        self.assertEqual(local_card_semantic_style(audit)["background"], "#0b1220")
+        for card in cards:
+            visible_text = " ".join([card["kicker"], card["title"], card["status"], *card["items"]])
+            self.assertNotIn("节点审计", visible_text)
+            self.assertNotIn("独立红队", visible_text)
+            self.assertNotIn("付费节点", visible_text)
+            self.assertNotIn("未执行", visible_text)
 
     def test_generic_typography_direction_does_not_expose_internal_review_language(self):
         scene = Scene(

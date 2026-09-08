@@ -150,6 +150,7 @@ describe("ProductionPipeline reference grammar", () => {
       nicheSlug: "reference-grammar",
       durationSeconds: 24,
       platform: "douyin",
+      runPurpose: "test",
       reviewMode: "manual",
       providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
       workflowFeatures: { assetSemanticRank: false, referenceGrammar: true },
@@ -179,7 +180,16 @@ describe("ProductionPipeline reference grammar", () => {
     assert.ok(run.artifacts.some((artifact) => artifact.kind === "reference_video"));
     const intervention = run.interventions.find((item) => item.nodeId === "final-review");
     assert.ok(intervention);
-    const finished = await subject.decide(run.id, { interventionId: intervention.id, action: "approve", actor: "producer" });
+    const finalReviewOutput = run.nodeRuns.find((node) => node.nodeId === "final-review")?.output as Record<string, unknown> | undefined;
+    const finished = await subject.decide(run.id, {
+      interventionId: intervention.id,
+      action: "approve",
+      actor: "producer",
+      expectedRunRevision: run.revision,
+      reviewEvidenceId: typeof finalReviewOutput?.reviewEvidenceId === "string"
+        ? finalReviewOutput.reviewEvidenceId
+        : null,
+    });
     const manifestArtifact = finished.artifacts.find((artifact) => artifact.kind === "resource_manifest");
     assert.ok(manifestArtifact?.uri);
     const referenceArtifact = finished.artifacts.find((artifact) => artifact.kind === "reference_video");
