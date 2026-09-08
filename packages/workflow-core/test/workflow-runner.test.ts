@@ -1020,6 +1020,21 @@ describe("WorkflowRunner", () => {
     assert.equal(rejected.nodeRuns[0]?.outcomeUncertain, undefined);
     assert.equal(rejected.nodeRuns[0]?.executionReceipt?.actualCostCny, 0.25);
     assert.equal(rejected.nodeRuns[0]?.executionReceipt?.meteredFailedAttemptCount, 0);
+
+    await assert.rejects(
+      () => runner.retryFailedNode(definition, rejected, "assets"),
+      /not failed/,
+    );
+    const requoted = await runner.retryFailedNode(
+      definition,
+      rejected,
+      "assets",
+      { allowRejectedNode: true },
+    );
+    assert.equal(requoted.status, "awaiting_spend_approval");
+    assert.equal(requoted.nodeRuns[0]?.status, "awaiting_spend_approval");
+    assert.equal(requoted.nodeRuns[0]?.spendAuthorizationId, undefined);
+    assert.equal(requoted.nodeRuns[0]?.spendPlan?.estimatedCostCny, 0.25);
   });
 
   it("does not make a settled paid result uncertain when a free post-check fails", async () => {

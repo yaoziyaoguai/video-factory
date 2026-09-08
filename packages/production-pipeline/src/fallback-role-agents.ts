@@ -19,7 +19,7 @@ export interface FallbackScreenwriterAgentOptions {
   candidates: Array<RoleCandidate<ScreenwriterAgent>>;
   /**
    * 兼容保留的旧字段名：它只控制“新阶段准入窗口”，不是整个角色的硬 wall-clock 总耗时。
-   * 660 秒仅在启动新候选/新 agent-loop stage 之前被检查；已交给 durable broker 的请求仍按
+   * 默认 45 分钟仅在启动新候选/新 agent-loop stage 之前被检查；已交给 durable broker 的请求仍按
    * 客户端单次超时继续等待，不会被 Abort 强杀，也不会因此切换 Provider（at-most-once 优先）。
    */
   totalTimeoutMs?: number;
@@ -30,7 +30,7 @@ export interface FallbackVisualDirectorAgentOptions {
   candidates: Array<RoleCandidate<VisualDirectorAgent>>;
   /**
    * 兼容保留的旧字段名：它只控制“新阶段准入窗口”，不是整个角色的硬 wall-clock 总耗时。
-   * 660 秒仅在启动新候选/新 agent-loop stage 之前被检查；已交给 durable broker 的请求仍按
+   * 默认 45 分钟仅在启动新候选/新 agent-loop stage 之前被检查；已交给 durable broker 的请求仍按
    * 客户端单次超时继续等待，不会被 Abort 强杀，也不会因此切换 Provider（at-most-once 优先）。
    */
   totalTimeoutMs?: number;
@@ -38,8 +38,10 @@ export interface FallbackVisualDirectorAgentOptions {
 }
 
 // 默认的新阶段准入窗口（stage admission window）：只在启动新候选/新 agent-loop stage 前检查。
+// xhigh/max 强推理的多轮生产+独立审计实测单轮即可达 4-6 分钟，660s 会把第二轮返修/审计挡在门外，
+// 因此默认放宽到 45 分钟（2,700,000ms），覆盖多轮质量循环的整体启动预算。
 // 它不截断已经交给 durable broker 的同一 requestId，也不是硬 SLA；真实耗时优化留给后续 trace 决策。
-const DEFAULT_TEXT_AGENT_STAGE_ADMISSION_WINDOW_MS = 660_000;
+const DEFAULT_TEXT_AGENT_STAGE_ADMISSION_WINDOW_MS = 2_700_000;
 
 export class ModelCandidatesExhaustedError extends Error {
   readonly attempts: ModelCandidateAttempt[];

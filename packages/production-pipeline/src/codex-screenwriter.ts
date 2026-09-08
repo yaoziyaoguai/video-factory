@@ -2,6 +2,7 @@ import { CodexBridgeClient, requestOptionsForDeadline, type CodexTaskExecution }
 import type { ProductionBlueprint } from "@video-factory/template-core";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { ProductionReworkFinding, ProductionSeriesContext, ProductionVisualPlan } from "./contracts.js";
+import { assertGeneratedVisualDoesNotClaimEvidence } from "./visual-evidence-boundary.js";
 
 export type ScriptVisualStrategy = "stock" | "image" | "generated" | "local";
 
@@ -49,6 +50,7 @@ export interface ScreenwriterAgentInput {
       sourceRunId: string;
       instruction: string;
       findings: ProductionReworkFinding[];
+      affectedScenePositions?: number[];
       previousScript?: Record<string, unknown>;
     };
   };
@@ -81,7 +83,7 @@ export interface CodexScreenwriterAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_SCREENWRITER_TIMEOUT_MS = 660_000;
 const DEFAULT_SCREENWRITER_MAX_ATTEMPTS = 2;
-export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v6|role-audit-v1|script-validator-v1|visual-plan-v1";
+export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v13|role-audit-v1|script-validator-v3|visual-plan-v2";
 
 // id 固定为 codex-screenwriter-v1：brief.providers.script 持久化该 id，registry 按 id 匹配 provider。
 export class CodexScreenwriterAgent implements ScreenwriterAgent {
@@ -123,10 +125,7 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
       undefined,
       requestOptionsForDeadline(input.wallClockDeadlineAtMs),
     );
-    return validateScriptDraft(rawDraft, {
-      durationSeconds: input.brief.durationSeconds,
-      requireCanonFacts: Boolean(input.brief.seriesContext),
-    });
+    return validateScreenwriterCandidate(rawDraft, input, { iteration: 1, repair: false });
   }
 
   async draftDetailed(input: ScreenwriterAgentInput): Promise<CodexTaskExecution<ScriptDraft>> {
@@ -139,9 +138,12 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
       criteria: [
         "前两秒建立具体钩子，前六秒兑现一部分观众承诺",
         "每镜头只有一个可见动作，成功与失败条件可由下游验收",
+        "每镜头可由一段从开头播放的素材独立执行；不得要求跨镜抽取同一母片的末帧、后续片段或新状态",
         "旁白时长、镜头时长、屏幕文字和声音提示彼此一致",
+        "事实断言精确；单变量对照只要求画面可核验的条件；屏幕文字的信息量与实际展示时长匹配",
         "事实、素材可得性、平台与模板约束均未被虚构或绕过",
-        "上游已经给出的具体画面证据与画面计划得到兑现；可以深化和拆镜，但不能被模板的通用镜头覆盖",
+        "上游画面方案中的观众收益与视觉论证意图得到兑现；方案可以按执行能力重规划，但不能被模板通用镜头机械覆盖，也不能被当作已经验证的事实",
+        "生成式画面没有被当作现实因果、真实实验或产品效果的证据",
         "系列单集遵守系列圣经、已内部定版 canon 与前后集连续性，并在本集形成独立兑现",
         "系列单集的 canonFacts 只记录本集已经明确建立且可供后集引用的事实，不得包含预告、计划、悬念、问题或尚待验证的结论",
         "返工时只处理分配给 script 的 findingId；当前节点可以说明已落实修改，但不得宣称问题已经复验通过",
@@ -151,18 +153,17 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
         brief: input.brief,
         ...(revision ? { revision } : {}),
       }, requestId, this.sessionMode === "stateless" ? undefined : session, requestOptionsForDeadline(input.wallClockDeadlineAtMs)),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => auditClient.runTaskDetailed("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId }) => auditClient.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
         context: screenwriterAuditContext(input.brief),
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
-      }, requestId, this.sessionMode === "stateless" ? undefined : session, requestOptionsForDeadline(input.wallClockDeadlineAtMs)),
-      validate: (value) => validateScriptDraft(value, {
-        durationSeconds: input.brief.durationSeconds,
-        requireCanonFacts: Boolean(input.brief.seriesContext),
-      }),
+        ...(validationFailure ? { validationFailure } : {}),
+      // 每轮输入已经自包含完整候选、合同和上一轮结论；继承审计会话只会重复累积旧候选。
+      }, requestId, undefined, requestOptionsForDeadline(input.wallClockDeadlineAtMs)),
+      validate: (value, context) => validateScreenwriterCandidate(value, input, context),
       ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
     });
   }
@@ -177,6 +178,14 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
 function screenwriterAuditContext(brief: ScreenwriterAgentInput["brief"]): Record<string, unknown> {
   const template = brief.templateBlueprint;
   const series = brief.seriesContext;
+  const reworkForAudit = brief.rework ? {
+    sourceRunId: brief.rework.sourceRunId,
+    instruction: brief.rework.instruction,
+    findings: brief.rework.findings,
+    ...(brief.rework.affectedScenePositions !== undefined
+      ? { affectedScenePositions: brief.rework.affectedScenePositions }
+      : {}),
+  } : undefined;
   return {
     roleScope: {
       owns: ["viewerPromise", "narrativeArc", "canonFacts", "scenes"],
@@ -190,7 +199,7 @@ function screenwriterAuditContext(brief: ScreenwriterAgentInput["brief"]): Recor
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
       ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
-      ...(brief.rework ? { rework: brief.rework } : {}),
+      ...(reworkForAudit ? { rework: reworkForAudit } : {}),
     },
     currentRoleContract: {
       platform: brief.platform,
@@ -201,6 +210,11 @@ function screenwriterAuditContext(brief: ScreenwriterAgentInput["brief"]): Recor
         maxSeconds: brief.durationSeconds * 1.4,
       },
       requiredSceneFields: ["position", "narration", "duration", "visual_strategy", "visual_prompt", "search_terms"],
+      assetExecutionBoundary: {
+        eachSceneStartsAtMediaBeginning: true,
+        crossSceneReuse: "只能从更早母片开头原样复用，不能抽取末帧、后续时间段或产生新状态。",
+        continuousActionRule: "必须连续展示准备、变化和结果时，把全过程放在同一个 scene 内。",
+      },
       ...(template ? {
         template: {
           automationLevel: template.automationLevel,
@@ -235,12 +249,6 @@ function screenwriterAuditContext(brief: ScreenwriterAgentInput["brief"]): Recor
       },
     } : {}),
     ...(brief.rework ? {
-      rework: {
-        sourceRunId: brief.rework.sourceRunId,
-        instruction: brief.rework.instruction,
-        findings: brief.rework.findings,
-        previousScript: brief.rework.previousScript,
-      },
       verificationBoundary: "findingId 仅追踪修改要求；只有后续视觉审片的新报告批准后才算 verified，当前编剧审计不得宣称已复验。",
     } : {}),
   };
@@ -252,6 +260,44 @@ function validateScreenwriterTarget(input: ScreenwriterAgentInput): void {
       || input.brief.durationSeconds > 180) {
       throw new Error("Screenwriter brief.durationSeconds must be an integer between 20 and 180.");
     }
+  const affected = input.brief.rework?.affectedScenePositions;
+  if (affected !== undefined && (affected.length > 100
+    || affected.some((position) => !Number.isInteger(position) || position < 1)
+    || new Set(affected).size !== affected.length)) {
+    throw new Error("Screenwriter rework affectedScenePositions must contain unique positive integers.");
+  }
+}
+
+function validateScreenwriterCandidate(
+  value: unknown,
+  input: ScreenwriterAgentInput,
+  context: { iteration: number; repair: boolean },
+): ScriptDraft {
+  const validation = {
+    durationSeconds: input.brief.durationSeconds,
+    requireCanonFacts: Boolean(input.brief.seriesContext),
+  };
+  const candidate = validateScriptDraft(value, validation);
+  const rework = input.brief.rework;
+  if (context.repair || !rework?.previousScript || rework.affectedScenePositions === undefined) {
+    return candidate;
+  }
+
+  const previous = validateScriptDraft(rework.previousScript, validation);
+  const previousPositions = new Set(previous.scenes.map((scene) => scene.position));
+  const candidateByPosition = new Map(candidate.scenes.map((scene) => [scene.position, scene]));
+  if (candidate.scenes.length !== previous.scenes.length
+    || rework.affectedScenePositions.some((position) => !previousPositions.has(position))) {
+    throw new Error("Scoped script rework must preserve the previous scene positions.");
+  }
+  const affected = new Set(rework.affectedScenePositions);
+  // 未受影响镜头可能直接复用上一版付费母片；由宿主确定性保留，不能依赖模型自觉不改写。
+  return validateScriptDraft({
+    ...previous,
+    scenes: previous.scenes.map((scene) => affected.has(scene.position)
+      ? candidateByPosition.get(scene.position) ?? scene
+      : scene),
+  }, validation);
 }
 
 export function validateScriptDraft(value: unknown, options: { durationSeconds: number; requireCanonFacts?: boolean }): ScriptDraft {
@@ -271,7 +317,7 @@ export function validateScriptDraft(value: unknown, options: { durationSeconds: 
     if (!isScriptVisualStrategy(visualStrategy)) {
       throw new Error(`scenes[${index}].visual_strategy must be one of stock, image, generated, local.`);
     }
-    return {
+    const parsed = {
       position: integer(scene.position, `scenes[${index}].position`),
       ...(optionalText(scene.purpose, `scenes[${index}].purpose`) !== undefined
         ? { purpose: optionalText(scene.purpose, `scenes[${index}].purpose`)! }
@@ -297,6 +343,18 @@ export function validateScriptDraft(value: unknown, options: { durationSeconds: 
         : {}),
       search_terms: searchTermArray(scene.search_terms, `scenes[${index}].search_terms`),
     };
+    if (parsed.visual_strategy === "generated") {
+      assertGeneratedVisualDoesNotClaimEvidence([
+        parsed.purpose,
+        parsed.narration,
+        parsed.visual_prompt,
+        parsed.visible_action,
+        parsed.on_screen_text,
+        ...(parsed.success_criteria ?? []),
+        ...(parsed.failure_conditions ?? []),
+      ], `scenes[${index}]`);
+    }
+    return parsed;
   }).sort((left, right) => left.position - right.position);
   scenes.forEach((scene, index) => {
     if (scene.position !== index + 1) {

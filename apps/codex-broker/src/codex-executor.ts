@@ -6,7 +6,9 @@ import type { Readable, Writable } from "node:stream";
 import {
   BROKER_TASK_KINDS,
   outputSchemaFor,
-  outputValidationErrorFor,
+  outputSchemaValidationErrorFor,
+  outputSemanticValidationErrorFor,
+  taskContractDescriptorFor,
   taskPromptFor,
   type BrokerTaskKind,
 } from "./task-definitions.js";
@@ -114,8 +116,13 @@ function codexFailureExcerpt(stdout: string, stderr: string): string {
 }
 
 const TERMINAL_CODEX_EXIT_PATTERN = /\b(?:unauthori[sz]ed|forbidden|authentication|authorization|invalid api key|missing api key|credential(?:s)?|configuration error|invalid configuration|invalid[_ -]?json[_ -]?schema|invalid json|output (?:schema|contract)|content (?:policy|filter|moderation)|policy violation|prompt rejected)\b/i;
+
 const TRANSIENT_CODEX_EXIT_PATTERN = /(?:\b(?:http\s*)?429\b|\btoo many requests\b|\brate[ _-]?limit(?:ed|ing)?\b|\boverload(?:ed|ing)?\b|\bno available (?:model )?capacity\b|\b(?:insufficient|exhausted|unavailable) (?:model )?capacity\b|\bcapacity (?:is )?(?:unavailable|exhausted)\b|\b(?:service|server|model|backend)(?: is)? (?:temporarily )?unavailable\b|\btemporarily unavailable\b)/i;
 const NO_OUTPUT_CODEX_EXIT_PATTERN = /\b(?:the )?model could not complete this step\b|\bmodel (?:returned|produced) no (?:output|result)\b/i;
+const AUTHENTICATION_CODEX_EXIT_PATTERN = /\b(?:unauthori[sz]ed|forbidden|authentication|authorization|invalid api key|missing api key|credential(?:s)?)\b/i;
+const INVALID_REQUEST_CODEX_EXIT_PATTERN = /\b(?:invalid configuration|configuration error|invalid[_ -]?json[_ -]?schema|prompt rejected)\b/i;
+const RATE_LIMIT_CODEX_EXIT_PATTERN = /(?:\b(?:http\s*)?429\b|\btoo many requests\b|\brate[ _-]?limit(?:ed|ing)?\b)/i;
+const NETWORK_CODEX_EXIT_PATTERN = /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EPIPE)\b|connection (?:failed|reset|refused)/i;
 
 function isTransientCodexExit(stdout: string, stderr: string): boolean {
   const diagnostics = codexFailureDiagnostics(stdout, stderr);
@@ -170,6 +177,11 @@ export interface CodexExecutorFailureDetails {
   modelId: string;
   providerWaitMs?: number;
   requestIdHash?: string;
+  finishReason?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  reasoningTokens?: number;
 }
 
 interface CodexExecutorErrorOptions extends ErrorOptions {
@@ -247,8 +259,9 @@ export interface ScriptBrief {
       category: string;
       description: string;
       suggestion: string;
-      targetNodeIds: Array<"script" | "visual-direction" | "assets">;
-    }>;
+        targetNodeIds: Array<"script" | "visual-direction" | "assets">;
+      }>;
+    affectedScenePositions?: number[];
     previousScript?: Record<string, unknown>;
   };
 }
@@ -265,6 +278,11 @@ export interface RoleAuditPayload {
   context: Record<string, unknown>;
   candidate: Record<string, unknown>;
   previousAudit?: Record<string, unknown>;
+  validationFailure?: {
+    invalidCandidate: unknown;
+    invalidCandidateHash: string;
+    validationError: string;
+  };
   images: RoleAuditImage[];
 }
 
@@ -394,6 +412,7 @@ export interface BrokerTaskExecutor {
 export interface CodexTaskTrace {
   taskKind: BrokerTaskKind;
   promptVersion: string;
+  contractDigest?: string;
   prompt: string;
   providerId: string;
   modelId: string;
@@ -405,6 +424,13 @@ export interface CodexTaskTrace {
   firstOutputEventMs?: number;
   toolMs?: number;
   validationMs?: number;
+  requestIdHash?: string;
+  finishReason?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  reasoningTokens?: number;
+  retryCount?: number;
 }
 
 export function parseTaskRequest(
@@ -488,7 +514,7 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
     };
   }
   if (kind === "role-audit") {
-    assertExactKeys(record, ["role", "iteration", "criteria", "context", "candidate", "previousAudit", "images"], "payload");
+    assertExactKeys(record, ["role", "iteration", "criteria", "context", "candidate", "previousAudit", "validationFailure", "images"], "payload");
     if (!Number.isInteger(record.iteration) || Number(record.iteration) < 1 || Number(record.iteration) > 3) {
       throw new CodexExecutorError("payload.iteration must be an integer between 1 and 3.", false);
     }
@@ -506,6 +532,9 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
         candidate: boundedRecord(record.candidate, "payload.candidate", 192 * 1024),
         ...(record.previousAudit === undefined ? {} : {
           previousAudit: boundedRecord(record.previousAudit, "payload.previousAudit", 64 * 1024),
+        }),
+        ...(record.validationFailure === undefined ? {} : {
+          validationFailure: requireRoleAuditValidationFailure(record.validationFailure),
         }),
         images: record.images === undefined ? [] : requireRoleAuditImages(record.images),
       },
@@ -635,7 +664,9 @@ export class CodexExecutor implements BrokerTaskExecutor {
         false,
       );
     }
-    const taskPrompt = taskPromptFor(task.kind, task.kind === "publish-copy" ? task.payload.platform : undefined);
+    const platform = task.kind === "publish-copy" ? task.payload.platform : undefined;
+    const taskPrompt = taskPromptFor(task.kind, platform);
+    const contractDescriptor = taskContractDescriptorFor(task.kind, platform);
     const prompt = options.sessionId
       ? buildContinuationPrompt(task, taskPrompt)
       : buildTaskPrompt(task, taskPrompt);
@@ -653,6 +684,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
         trace: {
           taskKind: task.kind,
           promptVersion: taskPrompt.version,
+          contractDigest: contractDescriptor.digest,
           prompt,
           providerId: this.identity.providerId,
           modelId: model ?? this.identity.modelId,
@@ -661,6 +693,10 @@ export class CodexExecutor implements BrokerTaskExecutor {
           ...(execution.firstOutputEventMs !== undefined ? { firstOutputEventMs: execution.firstOutputEventMs } : {}),
           toolMs: 0,
           validationMs: execution.validationMs,
+          ...(execution.promptTokens !== undefined ? { promptTokens: execution.promptTokens } : {}),
+          ...(execution.completionTokens !== undefined ? { completionTokens: execution.completionTokens } : {}),
+          ...(execution.totalTokens !== undefined ? { totalTokens: execution.totalTokens } : {}),
+          ...(execution.reasoningTokens !== undefined ? { reasoningTokens: execution.reasoningTokens } : {}),
         },
         ...(execution.sessionId ? { sessionId: execution.sessionId } : {}),
       };
@@ -680,6 +716,10 @@ export class CodexExecutor implements BrokerTaskExecutor {
     providerWaitMs: number;
     firstOutputEventMs?: number;
     validationMs: number;
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+    reasoningTokens?: number;
   }> {
     const workspaceDir = path.join(taskDir, "workspace");
     const lastMessagePath = path.join(taskDir, "last-message.txt");
@@ -698,16 +738,29 @@ export class CodexExecutor implements BrokerTaskExecutor {
       imagePaths,
       ...(this.modelFor(task.kind) !== undefined ? { model: this.modelFor(task.kind)! } : {}),
       ...(this.effortFor(task.kind) !== undefined ? { effort: this.effortFor(task.kind)! } : {}),
+      ...(this.identity.profileId === "openai" ? { serviceTier: "priority" as const } : {}),
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
       persistSession: options.persistSession === true,
     });
     const child = this.spawnProcess(command, args, {
       cwd: workspaceDir,
-      env: this.env,
+      env: isolatedCodexEnvironment(this.env),
       stdio: "pipe",
       detached: true,
     });
     const providerStartedAt = this.now();
+    const failureDetails = (
+      category: CodexExecutorFailureCategory,
+      reasonCode: string,
+      extra: Partial<CodexExecutorFailureDetails> = {},
+    ): CodexExecutorFailureDetails => ({
+      category,
+      reasonCode,
+      providerId: this.identity.providerId,
+      modelId: this.modelFor(task.kind) ?? this.identity.modelId,
+      providerWaitMs: elapsedMilliseconds(providerStartedAt, this.now()),
+      ...extra,
+    });
     let firstOutputAt: number | undefined;
 
     let timedOut = false;
@@ -733,6 +786,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
       child.on("error", (error) => reject(new CodexExecutorError(
         `Failed to start '${this.codexBin}': ${error.message}`,
         true,
+        { details: failureDetails("network", "process_spawn_failed") },
       )));
       child.on("close", (code, signal) => resolve({ code, signal }));
     });
@@ -754,16 +808,22 @@ export class CodexExecutor implements BrokerTaskExecutor {
       throw new CodexExecutorError("Codex task was cancelled because its client disconnected.", true);
     }
     if (timedOut) {
-      throw new CodexExecutorError(`Codex task timed out after ${this.timeoutMs}ms.`, true);
+      throw new CodexExecutorError(`Codex task timed out after ${this.timeoutMs}ms.`, true, {
+        details: failureDetails("timeout", "request_timeout"),
+      });
     }
     if (exit.code !== 0) {
       const stdout = await stdoutPromise;
       const stderr = await stderrPromise;
       const excerpt = codexFailureExcerpt(stdout, stderr);
+      const classification = codexExitClassification(stdout, stderr);
       throw new CodexExecutorError(
         `Codex exited with code ${exit.code}${exit.signal ? ` (signal ${exit.signal})` : ""}.${excerpt ? ` ${excerpt}` : ""}`,
         isTransientCodexExit(stdout, stderr),
-        isNoOutputCodexExit(stdout, stderr) ? { failureKind: "model_provider_no_output" } : undefined,
+        {
+          ...(isNoOutputCodexExit(stdout, stderr) ? { failureKind: "model_provider_no_output" as const } : {}),
+          details: failureDetails(classification.category, classification.reasonCode),
+        },
       );
     }
 
@@ -774,26 +834,37 @@ export class CodexExecutor implements BrokerTaskExecutor {
     } catch {
       throw new CodexExecutorError("Codex finished without writing an output file.", false, {
         failureKind: "model_provider_no_output",
+        details: failureDetails("execution_failed", "no_output_file"),
       });
     }
     if (outputSize > this.maxOutputBytes) {
-      throw new CodexExecutorError(`Codex output exceeds ${this.maxOutputBytes} bytes.`, false);
+      throw new CodexExecutorError(`Codex output exceeds ${this.maxOutputBytes} bytes.`, false, {
+        details: failureDetails("invalid_output", "output_too_large"),
+      });
     }
     const output = await readFile(lastMessagePath, "utf8");
     if (!output.trim()) {
       throw new CodexExecutorError("Codex produced an empty output.", false, {
         failureKind: "model_provider_no_output",
+        details: failureDetails("execution_failed", "no_output"),
       });
     }
-    const parsedOutput = parseOutputJson(output);
-    if (task.kind === "visual-review" || task.kind === "role-audit" || task.kind === "series-roadmap") {
-      const validationError = outputValidationErrorFor(task.kind, parsedOutput);
-      if (validationError !== undefined) {
-        throw new CodexExecutorError(
-          `Codex output does not match ${task.kind} schema: ${validationError}`,
-          false,
-        );
-      }
+    const parsedOutput = parseOutputJson(output, failureDetails("invalid_output", "invalid_json"));
+    const schemaError = outputSchemaValidationErrorFor(task.kind, parsedOutput);
+    if (schemaError !== undefined) {
+      throw new CodexExecutorError(
+        `Codex output does not match ${task.kind} schema: ${schemaError}`,
+        false,
+        { details: failureDetails("invalid_output", "task_schema") },
+      );
+    }
+    const semanticError = outputSemanticValidationErrorFor(task.kind, parsedOutput);
+    if (semanticError !== undefined) {
+      throw new CodexExecutorError(
+        `Codex output does not satisfy ${task.kind} semantics: ${semanticError}`,
+        false,
+        { details: failureDetails("invalid_output", "task_semantics") },
+      );
     }
     if (task.kind === "visual-review") {
       const findings = (parsedOutput as { findings: Array<{ timecodeMs: number }> }).findings;
@@ -801,6 +872,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
         throw new CodexExecutorError(
           "Codex output does not match visual-review schema: finding timecodeMs exceeds payload.durationMs.",
           false,
+          { details: failureDetails("invalid_output", "timecode_out_of_bounds") },
         );
       }
     }
@@ -808,6 +880,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
     const sessionId = options.persistSession || options.sessionId
       ? codexSessionIdFromJsonl(stdout) ?? options.sessionId
       : undefined;
+    const usage = codexUsageFromJsonl(stdout);
     return {
       output,
       ...(sessionId ? { sessionId } : {}),
@@ -816,6 +889,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
         ? { firstOutputEventMs: elapsedMilliseconds(providerStartedAt, firstOutputAt) }
         : {}),
       validationMs: elapsedMilliseconds(validationStartedAt, this.now()),
+      ...usage,
     };
   }
 
@@ -851,6 +925,46 @@ const MODEL_ONLY_DISABLED_FEATURES = [
   "search_tool",
 ] as const;
 
+// 这些设置只移除与纯模型任务无关的 Codex 宿主上下文；模型、推理强度、任务提示、
+// JSON Schema 和独立审计合同均保持不变。否则本地桌面环境会把权限、App、协作模式、
+// 工作区 AGENTS.md 等 coding-agent 上下文重复注入每一次内容生产调用。
+const MODEL_ONLY_CONFIG_OVERRIDES = [
+  "include_permissions_instructions=false",
+  "include_apps_instructions=false",
+  "include_collaboration_mode_instructions=false",
+  "include_environment_context=false",
+  "project_doc_max_bytes=0",
+] as const;
+
+// 当前运行网络中 Codex WebSocket 会连续等待五次超时才回退，给每个文本节点固定增加约 100 秒。
+// 使用同一 ChatGPT 登录态、同一模型和同一推理强度，只关闭传输层 WebSocket，直接走 Responses HTTPS。
+const OPENAI_HTTPS_CONFIG_OVERRIDES = [
+  "model_provider=\"openai-http\"",
+  "model_providers.openai-http.name=\"OpenAI HTTPS\"",
+  "model_providers.openai-http.base_url=\"https://chatgpt.com/backend-api/codex\"",
+  "model_providers.openai-http.wire_api=\"responses\"",
+  "model_providers.openai-http.requires_openai_auth=true",
+  "model_providers.openai-http.supports_websockets=false",
+] as const;
+
+const CODEX_DESKTOP_PARENT_ENV = [
+  "CODEX_APP_TOOLS_PIPE_PATH",
+  "CODEX_CI",
+  "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+  "CODEX_PERMISSION_PROFILE",
+  "CODEX_SAGE_BACKFILL_TRACKER_TAB_REUSE",
+  "CODEX_SESSION_ID",
+  "CODEX_THREAD_ID",
+] as const;
+
+function isolatedCodexEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const isolated = { ...source };
+  // 本地 Studio 可能由 Codex Desktop 启动；这些父会话变量会把当前开发对话、插件推荐
+  // 和工具通道注入内容生产请求。broker 只继承登录态与普通运行环境，不继承开发会话。
+  for (const name of CODEX_DESKTOP_PARENT_ENV) delete isolated[name];
+  return isolated;
+}
+
 export function buildCodexExecCommand(input: {
   codexBin: string;
   workspaceDir: string;
@@ -860,9 +974,13 @@ export function buildCodexExecCommand(input: {
   imagePaths?: readonly string[];
   model?: string;
   effort?: string;
+  serviceTier?: "priority";
   sessionId?: string;
   persistSession?: boolean;
 }): { command: string; args: string[] } {
+  const providerConfigOverrides = input.profile?.identity.profileId === "openai"
+    ? OPENAI_HTTPS_CONFIG_OVERRIDES
+    : [];
   if (input.sessionId) {
     return {
       command: input.codexBin,
@@ -872,6 +990,8 @@ export function buildCodexExecCommand(input: {
         "--all",
         "--ignore-user-config",
         "--ignore-rules",
+        ...MODEL_ONLY_CONFIG_OVERRIDES.flatMap((setting) => ["--config", setting]),
+        ...providerConfigOverrides.flatMap((setting) => ["--config", setting]),
         ...MODEL_ONLY_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
         "--skip-git-repo-check",
         "--config", "sandbox_mode=\"read-only\"",
@@ -882,6 +1002,7 @@ export function buildCodexExecCommand(input: {
           ? ["--model", (input.model ?? input.profile?.model)!]
           : []),
         ...(input.effort !== undefined ? ["--config", `model_reasoning_effort=${input.effort}`] : []),
+        ...(input.serviceTier !== undefined ? ["--config", `service_tier="${input.serviceTier}"`] : []),
         ...(input.imagePaths ?? []).flatMap((imagePath) => ["--image", imagePath]),
         input.sessionId,
         "-",
@@ -896,6 +1017,8 @@ export function buildCodexExecCommand(input: {
       ...(input.persistSession ? [] : ["--ephemeral"]),
       "--ignore-user-config",
       "--ignore-rules",
+      ...MODEL_ONLY_CONFIG_OVERRIDES.flatMap((setting) => ["--config", setting]),
+      ...providerConfigOverrides.flatMap((setting) => ["--config", setting]),
       ...MODEL_ONLY_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
       "--skip-git-repo-check",
       "--cd", input.workspaceDir,
@@ -906,6 +1029,7 @@ export function buildCodexExecCommand(input: {
         ? ["--model", (input.model ?? input.profile?.model)!]
         : []),
       ...(input.effort !== undefined ? ["--config", `model_reasoning_effort=${input.effort}`] : []),
+      ...(input.serviceTier !== undefined ? ["--config", `service_tier="${input.serviceTier}"`] : []),
       ...(input.imagePaths ?? []).flatMap((imagePath) => ["--image", imagePath]),
       "-",
     ],
@@ -927,6 +1051,41 @@ export function codexSessionIdFromJsonl(stdout: string): string | undefined {
     }
   }
   return undefined;
+}
+
+function codexUsageFromJsonl(stdout: string): {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  reasoningTokens?: number;
+} {
+  let result: ReturnType<typeof codexUsageFromJsonl> = {};
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as { type?: unknown; usage?: unknown };
+      if (event.type !== "turn.completed" || typeof event.usage !== "object" || event.usage === null) continue;
+      const usage = event.usage as Record<string, unknown>;
+      const promptTokens = nonNegativeInteger(usage.input_tokens);
+      const completionTokens = nonNegativeInteger(usage.output_tokens);
+      const reasoningTokens = nonNegativeInteger(usage.reasoning_output_tokens);
+      result = {
+        ...(promptTokens !== undefined ? { promptTokens } : {}),
+        ...(completionTokens !== undefined ? { completionTokens } : {}),
+        ...(promptTokens !== undefined && completionTokens !== undefined
+          ? { totalTokens: promptTokens + completionTokens }
+          : {}),
+        ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+      };
+    } catch {
+      // 非 JSON 诊断行不参与 token usage 识别。
+    }
+  }
+  return result;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
 }
 
 async function writeTaskImages(task: ValidatedTask, taskDir: string): Promise<string[]> {
@@ -951,6 +1110,8 @@ export function buildTaskPrompt(
   task: ValidatedTask,
   prompt = taskPromptFor(task.kind, task.kind === "publish-copy" ? task.payload.platform : undefined),
 ): string {
+  const isolatedRepairPrompt = buildIsolatedRepairPrompt(task, prompt);
+  if (isolatedRepairPrompt) return isolatedRepairPrompt;
   let data: Record<string, unknown>;
   if (task.kind === "topic-ideas") {
     data = {
@@ -1024,6 +1185,7 @@ export function buildTaskPrompt(
       context: task.payload.context,
       candidate: task.payload.candidate,
       ...(task.payload.previousAudit ? { previousAudit: task.payload.previousAudit } : {}),
+      ...(task.payload.validationFailure ? { validationFailure: task.payload.validationFailure } : {}),
       images: task.payload.images.map(({ jpeg: _jpeg, ...image }) => image),
     };
   } else {
@@ -1058,6 +1220,30 @@ export function buildTaskPrompt(
   ].join("\n");
 }
 
+function buildIsolatedRepairPrompt(
+  task: ValidatedTask,
+  prompt: ReturnType<typeof taskPromptFor>,
+): string | undefined {
+  if (task.kind !== "script-draft" && task.kind !== "director-plan") return undefined;
+  const revision = task.payload.revision;
+  if (!revision || revision.mode !== "repair-bootstrap") return undefined;
+  return [
+    `Prompt Pack: ${prompt.version} · 隔离修订`,
+    "你正在局部修订一份已经通过结构校验的完整候选。只落实独立审计列出的修改要求，并返回修订后的完整 JSON。",
+    "未被审计要求修改的字段必须保持原值；只有为消除审计指出的矛盾而必需时，才同步修改直接关联字段。不得重新构思、扩写或替换其他内容。",
+    "候选本身已经包含本轮修订所需的创作事实。不要假设旧会话、隐藏上下文或未提供的素材与能力。",
+    "输出要求：",
+    ...prompt.outputRules.map((rule) => `- ${rule}`),
+    "",
+    DATA_ISOLATION_NOTICE,
+    "<<<TASK_DATA",
+    JSON.stringify({ revision }),
+    "TASK_DATA>>>",
+    "",
+    "最终回复只输出一个满足 broker JSON Schema 的完整 JSON 对象，不要输出解释文字。",
+  ].join("\n");
+}
+
 export function buildContinuationPrompt(
   task: ValidatedTask,
   prompt = taskPromptFor(task.kind, task.kind === "publish-copy" ? task.payload.platform : undefined),
@@ -1070,6 +1256,7 @@ export function buildContinuationPrompt(
       context: task.payload.context,
       candidate: task.payload.candidate,
       ...(task.payload.previousAudit ? { previousAudit: task.payload.previousAudit } : {}),
+      ...(task.payload.validationFailure ? { validationFailure: task.payload.validationFailure } : {}),
       images: task.payload.images.map(({ jpeg: _jpeg, ...image }) => image),
     }
     : "revision" in task.payload && task.payload.revision
@@ -1091,14 +1278,43 @@ export function buildContinuationPrompt(
   ].join("\n");
 }
 
-function parseOutputJson(output: string): unknown {
+function parseOutputJson(output: string, details: CodexExecutorFailureDetails): unknown {
   const trimmed = output.trim();
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
   try {
     return JSON.parse(fenced?.[1] ?? trimmed);
   } catch {
-    throw new CodexExecutorError("Codex output is not valid JSON.", false);
+    throw new CodexExecutorError("Codex output is not valid JSON.", false, { details });
   }
+}
+
+function codexExitClassification(
+  stdout: string,
+  stderr: string,
+): Pick<CodexExecutorFailureDetails, "category" | "reasonCode"> {
+  const diagnostics = codexFailureDiagnostics(stdout, stderr).join("\n");
+  if (AUTHENTICATION_CODEX_EXIT_PATTERN.test(diagnostics)) {
+    return { category: "authentication", reasonCode: "authentication_failed" };
+  }
+  if (INVALID_REQUEST_CODEX_EXIT_PATTERN.test(diagnostics)) {
+    return { category: "invalid_request", reasonCode: "invalid_request" };
+  }
+  if (RATE_LIMIT_CODEX_EXIT_PATTERN.test(diagnostics)) {
+    return { category: "rate_limited", reasonCode: "rate_limited" };
+  }
+  if (NETWORK_CODEX_EXIT_PATTERN.test(diagnostics)) {
+    return { category: "network", reasonCode: "connection_failed" };
+  }
+  if (isNoOutputCodexExit(stdout, stderr)) {
+    return { category: "execution_failed", reasonCode: "no_output" };
+  }
+  if (TRANSIENT_CODEX_EXIT_PATTERN.test(diagnostics)) {
+    return { category: "service_unavailable", reasonCode: "service_unavailable" };
+  }
+  if (/invalid json|output (?:schema|contract)/i.test(diagnostics)) {
+    return { category: "invalid_output", reasonCode: "provider_output_contract" };
+  }
+  return { category: "execution_failed", reasonCode: "process_exit" };
 }
 
 async function collectText(stream: Readable | null, maxBytes: number, onFirstData?: () => void): Promise<string> {
@@ -1298,6 +1514,36 @@ function boundedRecord(value: unknown, field: string, maximumBytes: number): Rec
     throw new CodexExecutorError(`${field} exceeds ${maximumBytes} bytes.`, false);
   }
   return result;
+}
+
+function requireRoleAuditValidationFailure(value: unknown): NonNullable<RoleAuditPayload["validationFailure"]> {
+  const record = requireRecord(value, "payload.validationFailure");
+  assertExactKeys(
+    record,
+    ["invalidCandidate", "invalidCandidateHash", "validationError", "iteration"],
+    "payload.validationFailure",
+  );
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(record.invalidCandidate);
+  } catch {
+    throw new CodexExecutorError("payload.validationFailure.invalidCandidate must be JSON serializable.", false);
+  }
+  if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > 64 * 1024) {
+    throw new CodexExecutorError("payload.validationFailure.invalidCandidate exceeds 65536 bytes.", false);
+  }
+  if (typeof record.invalidCandidateHash !== "string" || !/^[a-f0-9]{64}$/.test(record.invalidCandidateHash)) {
+    throw new CodexExecutorError("payload.validationFailure.invalidCandidateHash must be a SHA-256 digest.", false);
+  }
+  const validationError = requiredText(record.validationError, "payload.validationFailure.validationError");
+  if (validationError.length > 300) {
+    throw new CodexExecutorError("payload.validationFailure.validationError exceeds 300 characters.", false);
+  }
+  return {
+    invalidCandidate: JSON.parse(serialized) as unknown,
+    invalidCandidateHash: record.invalidCandidateHash,
+    validationError,
+  };
 }
 
 function requireVisualReviewPayload(record: Record<string, unknown>): VisualReviewPayload {
@@ -1544,10 +1790,17 @@ function requireScriptBrief(value: unknown): ScriptBrief {
 
 function requireScriptRework(value: unknown): NonNullable<ScriptBrief["rework"]> {
   const record = requireRecord(value, "payload.brief.rework");
-  assertExactKeys(record, ["sourceRunId", "instruction", "findings", "previousScript"], "payload.brief.rework");
+  assertExactKeys(
+    record,
+    ["sourceRunId", "instruction", "findings", "affectedScenePositions", "previousScript"],
+    "payload.brief.rework",
+  );
   const sourceRunId = requireReworkSourceRunId(record.sourceRunId, "payload.brief.rework.sourceRunId");
   const instruction = boundedReworkInstruction(record.instruction, "payload.brief.rework.instruction");
   const findings = requireReworkFindings(record.findings, "script", "payload.brief.rework.findings");
+  const affectedScenePositions = record.affectedScenePositions === undefined
+    ? undefined
+    : boundedScenePositions(record.affectedScenePositions, "payload.brief.rework.affectedScenePositions");
   const previousScript = record.previousScript === undefined
     ? undefined
     : boundedRecord(record.previousScript, "payload.brief.rework.previousScript", 150_000);
@@ -1555,6 +1808,7 @@ function requireScriptRework(value: unknown): NonNullable<ScriptBrief["rework"]>
     sourceRunId,
     instruction,
     findings,
+    ...(affectedScenePositions ? { affectedScenePositions } : {}),
     ...(previousScript ? { previousScript } : {}),
   };
 }

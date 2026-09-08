@@ -304,6 +304,7 @@ export function candidateVerification(
   sourcePolicy?: StudioTopicStrategy["sourcePolicy"],
 ): StudioCandidateVerification {
   const effectiveSourcePolicy = sourcePolicy ?? "primary_or_two_independent";
+  const policyRequiredSources = effectiveSourcePolicy === "primary_or_two_independent" ? 2 : 1;
   const independentSources = new Set(evidence.map(traceableEvidenceIdentity).filter(Boolean)).size;
   const linkedSources = independentSources;
   if (effectiveSourcePolicy === "primary_or_two_independent" && (independentSources < 2 || linkedSources < 2)) {
@@ -334,14 +335,14 @@ export function candidateVerification(
     return {
       status: "review_required",
       independentSources,
-      requiredSources: risk === "high" ? 2 : 1,
+      requiredSources: Math.max(policyRequiredSources, risk === "high" ? 2 : 1),
       reasons: ["采用前需要人工查看原始来源，确认标题与开场没有超出证据。"],
     };
   }
   return {
     status: "ready",
     independentSources,
-    requiredSources: 1,
+    requiredSources: policyRequiredSources,
     reasons: ["常规风险候选，可进入制作区继续核验。"],
   };
 }

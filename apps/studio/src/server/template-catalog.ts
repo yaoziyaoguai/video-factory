@@ -15,10 +15,13 @@ function visualCapabilities(): string[] {
   return ["asset.search", "asset.generate.image", "asset.generate.video"];
 }
 
-function publishedTemplate(input: Omit<ProductionTemplateInput, "version" | "status" | "platforms" | "capabilityRequirements" | "createdAt" | "updatedAt">): ProductionTemplate {
+function publishedTemplate(
+  input: Omit<ProductionTemplateInput, "version" | "status" | "platforms" | "capabilityRequirements" | "createdAt" | "updatedAt">,
+  version = 2,
+): ProductionTemplate {
   return parseProductionTemplate({
     ...input,
-    version: 2,
+    version,
     status: "published",
     platforms: PLATFORMS,
     capabilityRequirements: CAPABILITY_REQUIREMENTS,
@@ -63,35 +66,32 @@ export const BUILTIN_TEMPLATES: readonly ProductionTemplate[] = [
   publishedTemplate({
     id: "knowledge-explainer",
     name: "知识解释",
-    description: "从一个反直觉问题出发，用最小因果模型和真实例子让观众在结尾能自己复述并应用。",
+    description: "从一个具体困惑出发，用最少必要解释和可追溯证据，让观众在结尾能理解边界并马上应用。",
     category: "knowledge",
     durationSeconds: 42,
     automationLevel: "assisted",
     storyStructure: [
       { id: "misconception", label: "打破误解", purpose: "用日常判断失灵的瞬间建立认知缺口", required: true },
       { id: "mechanism", label: "最小模型", purpose: "只解释理解问题必需的因果关系", required: true },
-      { id: "worked-example", label: "带入例子", purpose: "在具体场景中逐步验证模型", required: true },
+      { id: "worked-example", label: "看见边界", purpose: "用可追溯事实或明确标注的示意说明模型如何应用、何时不成立", required: true },
       { id: "transfer", label: "迁移判断", purpose: "给出观众可马上使用的判断方法", required: true },
     ],
     shotSlots: [
-      { id: "knowledge-failed-intuition", beatId: "misconception", purpose: "先演示一个符合直觉却得到错误结果的生活瞬间", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
-      { id: "knowledge-question", beatId: "misconception", purpose: "冻结关键动作并提出唯一核心问题", durationSeconds: 3, allowedCapabilities: visualCapabilities(), manualReplacement: true },
-      { id: "knowledge-cause", beatId: "mechanism", purpose: "用一个对象或关系图显露真正起作用的变量", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
-      { id: "knowledge-chain", beatId: "mechanism", purpose: "连续展示原因如何推动结果，禁止堆术语", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
-      { id: "knowledge-example-setup", beatId: "worked-example", purpose: "换到真实案例，用无字母图呈现条件；条件说明由后期字幕或确定性图形承担", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
-      { id: "knowledge-example-change", beatId: "worked-example", purpose: "只改变一个变量，展示结果随之变化", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
-      { id: "knowledge-rule", beatId: "transfer", purpose: "把因果链压缩成一句可复述判断规则", durationSeconds: 4, allowedCapabilities: visualCapabilities(), manualReplacement: true },
-      { id: "knowledge-use", beatId: "transfer", purpose: "回到开场场景，用新规则做出更好的选择", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-open-loop", beatId: "misconception", purpose: "用一个可见结果或具体选择建立认知缺口，并在前六秒给出部分答案", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-mechanism", beatId: "mechanism", purpose: "用一段连续动作或一张无字机制示意讲清最少必要关系；生成画面只作示意", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-evidence", beatId: "worked-example", purpose: "展示可追溯来源、屏幕录制、测量或真实观察；缺少事实证据时明确标为示意，不伪装验证", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-boundary", beatId: "worked-example", purpose: "让观众看见一个适用条件或反例，避免把趋势说成必然因果", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
+      { id: "knowledge-transfer", beatId: "transfer", purpose: "回到开场问题，用一句可执行判断和可见结果兑现观众收益", durationSeconds: 5, allowedCapabilities: visualCapabilities(), manualReplacement: true },
     ],
     visualSystem: { composition: "实拍问题与简洁机制图交替；一个画面只承担一个因果步骤，主体关系始终可追踪", colorIntent: "自然底色配单一高对比标记色，同一变量始终使用同一颜色", subtitleDensity: "medium", pacing: "measured" },
     soundSystem: { voiceIntent: "聪明、清楚、像和观众共同推理，不使用居高临下的课堂腔", pace: "medium", musicIntent: "轻量节拍在模型建立后进入，例证处让位于动作与界面声" },
     qualityRules: [
       { id: "knowledge-one-model", label: "全片只围绕一个可验证的核心因果模型", dimension: "factual", required: true, threshold: 92 },
-      { id: "knowledge-example-proves", label: "例子必须真正验证模型而非仅作装饰", dimension: "artistic", required: true, threshold: 88 },
+      { id: "knowledge-evidence-boundary", label: "机制示意与事实证据必须明确区分，生成画面不得冒充验证", dimension: "factual", required: true, threshold: 96 },
       { id: "knowledge-legible", label: "生成母图不得绘制文字；术语、条件与标注由后期字幕或确定性图形清晰呈现", dimension: "technical", required: true, threshold: 90 },
       { id: "knowledge-transfer", label: "结尾必须给出可迁移的判断而非口号", dimension: "platform", required: true, threshold: 86 },
     ],
-  }),
+  }, 3),
   publishedTemplate({
     id: "photo-story",
     name: "证据图解",

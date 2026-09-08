@@ -645,6 +645,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("已完成1");
     expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("已归档1");
     expect(screen.getByRole("region", { name: "制作概况" })).not.toHaveTextContent("需调整");
+    expect(screen.getByText("选择一种开始方式。系统会沿同一条制作线推进；需要生成付费图片或视频时，会先报价并等你确认。")).toBeInTheDocument();
   });
 
   it("keeps a legacy read-only review out of the home to-do count and offers a new version", async () => {
@@ -2693,6 +2694,8 @@ describe("Creative OS", () => {
         ],
       },
       { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立质量审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol", modes: ["独立会话", "xhigh 推理", "最多三轮"] },
+      { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 视觉审片", available: true, kind: "external", billing: "subscription" },
+      { id: "codex-visual-review-v1", capability: "quality.review.visual", label: "Codex 视觉审片", available: true, kind: "external", billing: "subscription" },
     ];
     const initialSettings = {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
@@ -2752,6 +2755,7 @@ describe("Creative OS", () => {
     const roleSection = screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section");
     expect(within(roleSection!).getByText("GPT-5.6 Terra")).toBeInTheDocument();
     expect(within(roleSection!).getByText("故障替补：GPT-5.6 Sol")).toBeInTheDocument();
+    expect(within(roleSection!).getByText("中途画面预检使用首选模型，服务故障时才切换；最终成片由 GLM 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。")).toBeInTheDocument();
     expect(screen.getByText("独立质量复核")).toBeInTheDocument();
     expect(screen.getByText("独立复核 · 最多三轮")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));

@@ -68,8 +68,8 @@ export type {
   AssetSemanticRanking,
   CodexAssetSemanticRankerOptions,
 } from "./asset-semantic-ranker.js";
-export { CodexVisualReviewAgent, FallbackVisualReviewAgent, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateVisualReviewReport } from "./codex-visual-review.js";
-export type { CodexVisualReviewAgentOptions, FallbackVisualReviewAgentOptions, VisualReviewAgent, VisualReviewAgentInput, VisualReviewExecution, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport } from "./codex-visual-review.js";
+export { CodexVisualReviewAgent, FallbackVisualReviewAgent, IndependentDualVisualReviewAgent, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateVisualReviewReport } from "./codex-visual-review.js";
+export type { CodexVisualReviewAgentOptions, FallbackVisualReviewAgentOptions, IndependentDualVisualReviewAgentOptions, IndependentVisualReviewExecution, VisualReviewAgent, VisualReviewAgentInput, VisualReviewExecution, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport, VisualReviewScope } from "./codex-visual-review.js";
 export { FallbackScreenwriterAgent, FallbackVisualDirectorAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
 export type { FallbackScreenwriterAgentOptions, FallbackVisualDirectorAgentOptions } from "./fallback-role-agents.js";
 export { CodexVisualDirectorAgent } from "./codex-visual-director.js";
@@ -103,7 +103,7 @@ export type {
   WorkerArtifactDescriptor,
   WorkerResponse,
 } from "./python-worker-client.js";
-export { PaidOperationManualReconciliationError, ProductionPipeline, productionWorkflowVersion } from "./production-pipeline.js";
+export { canRetryRejectedReviewNode, PaidOperationManualReconciliationError, ProductionPipeline, productionWorkflowVersion } from "./production-pipeline.js";
 export type {
   DispatchedProductionRun,
   ProductionPaidNodeSummary,
@@ -143,6 +143,8 @@ export {
 } from "./generative-asset-worker.js";
 export type {
   GenerativeAssetWorkerClientOptions,
+  GeneratedMediaMetadata,
+  GeneratedMediaProbe,
   ImageGenerationAdapterBinding,
   PaidAssetItemState,
   PaidAssetLedgerItemSummary,
@@ -150,3 +152,4 @@ export type {
 } from "./generative-asset-worker.js";
 export { runCli } from "./cli.js";
 export type { CliDependencies } from "./cli.js";
+export { SourceAssetPilotReviewer, type AssetPilotReviewer, type AssetPilotReviewInput, type AssetPilotReviewResult } from "./asset-pilot-review.js";

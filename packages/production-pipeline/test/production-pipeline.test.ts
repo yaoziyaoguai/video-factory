@@ -145,6 +145,95 @@ async function assertCandidateFailureTrace(
   assert.doesNotMatch(JSON.stringify(payload), /secret-primary|secret-backup/);
 }
 
+const visualProducerContractDigest = createHash("sha256").update("visual-review-test-producer-contract").digest("hex");
+const visualAuditContractDigest = createHash("sha256").update("visual-review-test-audit-contract").digest("hex");
+
+function passedVisualReviewLoop(
+  output: pipeline.VisualReviewReport,
+  providerId: string,
+  modelId: string,
+): pipeline.AgentLoopTrace {
+  const candidateHash = createHash("sha256").update(JSON.stringify(output)).digest("hex");
+  return {
+    version: "video-factory/agent-loop-v1",
+    role: "视觉审片员",
+    contractVersion: "visual-review-test-v1",
+    criteria: ["忠于同一份成片证据"],
+    status: "passed",
+    maxIterations: 3,
+    modelCallCount: 2,
+    producerModelCallCount: 1,
+    auditModelCallCount: 1,
+    iterations: [{
+      iteration: 1,
+      candidate: output,
+      candidateHash,
+      candidateTrace: {
+        taskKind: "visual-review",
+        promptVersion: "visual-review-test-v1",
+        contractDigest: visualProducerContractDigest,
+        prompt: "Inspect the immutable rendered-video evidence.",
+        providerId,
+        modelId,
+      },
+      auditTrace: {
+        taskKind: "role-audit",
+        promptVersion: "role-audit-test-v1",
+        contractDigest: visualAuditContractDigest,
+        prompt: "Audit the visual review against its contract.",
+        providerId,
+        modelId,
+      },
+      audit: {
+        version: "video-factory/role-audit-v1",
+        verdict: "pass",
+        score: 95,
+        summary: "审片结论与证据一致。",
+        issues: [],
+        repairInstructions: [],
+      },
+    }],
+  };
+}
+
+function completedDualVisualReview(
+  input: pipeline.VisualReviewAgentInput,
+  output: pipeline.VisualReviewReport,
+  primary: { providerId: string; modelId: string } = {
+    providerId: "glm-visual-review-v1",
+    modelId: "glm-5.3-flash",
+  },
+): pipeline.VisualReviewExecution {
+  const secondary = { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol" };
+  const evidenceSnapshotId = createHash("sha256").update(JSON.stringify({
+    videoPath: input.videoPath,
+    renderManifestPath: input.renderManifestPath,
+  })).digest("hex");
+  const independentReviews = [primary, secondary].map(({ providerId, modelId }) => ({
+    providerId,
+    modelId,
+    output,
+    trace: {
+      taskKind: "visual-review" as const,
+      promptVersion: "visual-review-test-v1",
+      contractDigest: visualProducerContractDigest,
+      prompt: "Inspect the immutable rendered-video evidence.",
+      providerId,
+      modelId,
+    },
+    agentLoop: passedVisualReviewLoop(output, providerId, modelId),
+  }));
+  return {
+    output,
+    inspectedDurationMs: 15_000,
+    evidenceSnapshotId,
+    attemptedModelIds: independentReviews.map(({ modelId }) => modelId),
+    independentReviews,
+    trace: independentReviews[0]!.trace,
+    agentLoop: independentReviews[0]!.agentLoop,
+  };
+}
+
 describe("ProductionPipeline", () => {
   it("uses the newly selected script model when regenerating a failed node", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-script-model-switch-"));
@@ -332,8 +421,13 @@ describe("ProductionPipeline", () => {
               scores: { composition: 80, continuity: 80, pacing: 80, legibility: 80, safety: 95 },
               findings: [{
                 timecodeMs: 9_000,
+                startTimecodeMs: 9_000,
+                endTimecodeMs: 9_000,
                 scenePosition: 1,
                 targetNodeId: "assets",
+                evidenceStatus: "failed",
+                evidenceFrameSha256: null,
+                nextAction: "rework_asset",
                 category: "continuity",
                 severity: "warning",
                 description: "第一镜结尾动作不连续。",
@@ -345,6 +439,20 @@ describe("ProductionPipeline", () => {
             return {
               output,
               inspectedDurationMs: 20_000,
+              attemptedModelIds: ["glm-5.3-flash", "gpt-5.6-sol"],
+              independentReviews: [
+                { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash", output },
+                {
+                  providerId: "codex-visual-review-v1",
+                  modelId: "gpt-5.6-sol",
+                  output: {
+                    ...output,
+                    summary: "Codex 独立审片未发现额外阻断问题。",
+                    findings: [],
+                    recommendation: "approve",
+                  },
+                },
+              ],
               agentLoop: {
                 version: "video-factory/agent-loop-v1",
                 role: "视觉审片员",
@@ -373,6 +481,7 @@ describe("ProductionPipeline", () => {
     assert.equal(waiting.workflowVersion, "1.5.0");
     assert.equal(reviewCalls.length, 2);
     assert.equal(reviewCalls[0]!.reviewStage, "source_assets");
+    assert.equal(reviewCalls[1]!.reviewStage, "rendered_video");
     assert.match(reviewCalls[1]!.videoPath ?? "", /final\.mp4$/);
     assert.match(reviewCalls[1]!.renderManifestPath ?? "", /render_manifest\.json$/);
     assert.equal(reviewCalls[1]!.selectedModelId, "glm-5.3-flash");
@@ -381,16 +490,112 @@ describe("ProductionPipeline", () => {
     assert.ok(reviewPrimaryCheckpoint);
     assert.ok(reviewBackupCheckpoint);
     assert.notEqual(reviewPrimaryCheckpoint.key, reviewBackupCheckpoint.key);
+    const independentPrimaryCheckpoint = reviewCalls[1]!.independentReviewCheckpointForModel?.("glm-5.3-flash");
+    const independentBackupCheckpoint = reviewCalls[1]!.independentReviewCheckpointForModel?.("gpt-5.6-sol");
+    assert.ok(independentPrimaryCheckpoint);
+    assert.ok(independentBackupCheckpoint);
+    assert.notEqual(independentPrimaryCheckpoint.key, independentBackupCheckpoint.key);
+    assert.notEqual(independentPrimaryCheckpoint.key, reviewPrimaryCheckpoint.key);
     assert.ok(waiting.nodeRuns.some((node) => node.nodeId === "visual-review" && node.status === "succeeded"));
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "glm-5.3-flash");
+    assert.equal(
+      waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.parameters?.promptPack,
+      "video-factory/visual-review-v11",
+    );
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.billing, "subscription");
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.estimatedCostCny, 0);
     const visualOutput = waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.output as {
-      report: pipeline.VisualReviewReport;
+      report: pipeline.VisualReviewReport & {
+        reviewScope?: { reviewStage?: string; evidenceId?: string; sourceNodeIds?: string[] };
+        independentReviews?: Array<{ providerId: string; modelId: string }>;
+      };
     };
     assert.equal(visualOutput.report.findings[0]?.scenePosition, 1);
+    assert.equal(visualOutput.report.reviewScope?.reviewStage, "rendered_video");
+    assert.match(visualOutput.report.reviewScope?.evidenceId ?? "", /^[a-f0-9]{64}$/);
+    assert.deepEqual(visualOutput.report.reviewScope?.sourceNodeIds, ["render", "technical-review"]);
+    assert.deepEqual(visualOutput.report.independentReviews?.map(({ providerId, modelId }) => ({ providerId, modelId })), [
+      { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" },
+      { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol" },
+    ]);
     assert.ok(waiting.artifacts.some((artifact) => artifact.kind === "review_report" && artifact.provenance.providerId === "glm-visual-review-v1"));
+  });
+
+  it("persists completed final-review branches when the other reviewer fails", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-partial-visual-review-"));
+    const approvedReport: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "GLM 已完成独立审片，未发现阻断问题。",
+      scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 95 },
+      findings: [],
+      confidence: 0.94,
+      recommendation: "approve",
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      providerRuntimeMetadata: [{
+        id: "glm-visual-review-v1",
+        label: "GLM + Codex 双模型审片",
+        modelId: "glm-5.3-flash",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 1,
+      }],
+      visualReviewAgents: [{
+        id: "glm-visual-review-v1",
+        modelId: "glm-5.3-flash",
+        review: async () => { throw new Error("Detailed review must be used."); },
+        reviewDetailed: async (input) => {
+          if (input.reviewStage === "source_assets") return { output: approvedReport, inspectedDurationMs: 10_000 };
+          throw new pipeline.IndependentVisualReviewError([{
+            providerId: "codex-visual-review-v1",
+            modelId: "gpt-5.6-sol",
+            error: new Error("Codex review temporarily unavailable"),
+          }], [{
+            providerId: "glm-visual-review-v1",
+            modelId: "glm-5.3-flash",
+            output: approvedReport,
+            trace: {
+              taskKind: "visual-review",
+              promptVersion: "visual-review-test-v1",
+              prompt: "inspect immutable frames",
+              providerId: "zai-code-plan",
+              modelId: "glm-5.3-flash",
+              reasoningEffort: "high",
+            },
+          }]);
+        },
+      }],
+    });
+
+    const failed = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+    });
+
+    assert.equal(failed.status, "failed");
+    const node = failed.nodeRuns.find((candidate) => candidate.nodeId === "visual-review");
+    assert.equal(node?.status, "failed");
+    assert.match(node?.error ?? "", /已完成分支保留/);
+    assert.equal(node?.executionReceipt?.billing, "subscription");
+    assert.deepEqual(node?.executionReceipt?.actualModelIds, ["glm-5.3-flash", "gpt-5.6-sol"]);
+    assert.equal(node?.spendPlan, undefined);
+    const statusArtifact = failed.artifacts.find((artifact) => artifact.kind === "review_branch_status");
+    assert.ok(statusArtifact?.uri);
+    const status = JSON.parse(await readFile(statusArtifact.uri, "utf8")) as {
+      status: string;
+      branches: Array<{ modelId: string; status: string }>;
+    };
+    assert.equal(status.status, "partial");
+    assert.deepEqual(status.branches, [
+      { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash", status: "succeeded" },
+      { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol", status: "failed", reason: "Codex review temporarily unavailable" },
+    ]);
+    assert.ok(failed.artifacts.some((artifact) => artifact.kind === "model_trace" && artifact.provenance.model === "glm-5.3-flash"));
   });
 
   it("stops after source assets fail the free visual gate and never starts voice or render", async () => {
@@ -489,8 +694,13 @@ describe("ProductionPipeline", () => {
               scores: { composition: 80, continuity: 80, pacing: 80, legibility: 40, safety: 90 },
               findings: [{
                 timecodeMs: 7_500,
+                startTimecodeMs: 7_500,
+                endTimecodeMs: 7_500,
                 scenePosition: 2,
                 targetNodeId: "assets",
+                evidenceStatus: "failed",
+                evidenceFrameSha256: null,
+                nextAction: "rework_asset",
                 category: "legibility",
                 severity: "critical",
                 description: "画面烧入 9:16 比例文字。",
@@ -527,6 +737,16 @@ describe("ProductionPipeline", () => {
     assert.equal(reviewInputs[0]?.reviewStage, "source_assets");
     assert.match(reviewInputs[0]?.assetPlanPath ?? "", /asset_plan\.json$/);
     assert.match(run.nodeRuns.find((node) => node.nodeId === "asset-source-review")?.error ?? "", /不会自动再次调用付费画面模型/);
+    const sourceReviewOutput = run.nodeRuns.find((node) => node.nodeId === "asset-source-review")?.output as {
+      report?: pipeline.VisualReviewReport;
+    };
+    assert.equal(sourceReviewOutput.report?.reviewScope?.reviewStage, "source_assets");
+    assert.deepEqual(sourceReviewOutput.report?.reviewScope?.scenePositions, [2]);
+    assert.match(sourceReviewOutput.report?.reviewScope?.evidenceId ?? "", /^[a-f0-9]{64}$/);
+    assert.deepEqual(sourceReviewOutput.report?.reviewScope?.actualModels, [{
+      providerId: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+    }]);
     assert.ok(run.artifacts.some((artifact) => (
       artifact.kind === "review_report"
       && artifact.producer?.nodeId === "asset-source-review"
@@ -848,8 +1068,8 @@ describe("ProductionPipeline", () => {
       id: "glm-visual-review-v1",
       modelId: "glm-5.3-flash",
       review: async () => { throw new Error("Detailed review must be used."); },
-      reviewDetailed: async (input) => input.reviewStage === "source_assets"
-        ? {
+      reviewDetailed: async (input) => {
+        if (input.reviewStage === "source_assets") return {
             output: {
               version: "video-factory/visual-review-v1",
               summary: "源素材可以进入后续制作。",
@@ -859,18 +1079,19 @@ describe("ProductionPipeline", () => {
               recommendation: "approve",
             },
             inspectedDurationMs: 15_000,
-          }
-        : {
-            output: {
-              version: "video-factory/visual-review-v1",
-              summary: "第二镜需要替换。",
-              scores: { composition: 80, continuity: 65, pacing: 80, legibility: 80, safety: 95 },
-              findings: [{ timecodeMs: 6_000, scenePosition: 2, targetNodeId: "assets", category: "continuity", severity: "warning", description: "动作不连续。", suggestion: "复用第一镜。" }],
-              confidence: 0.9,
-              recommendation: "revise",
-            },
-            inspectedDurationMs: 15_000,
-          },
+          };
+        return completedDualVisualReview(input, {
+          version: "video-factory/visual-review-v1",
+          summary: "第二镜需要替换。",
+          scores: { composition: 80, continuity: 65, pacing: 80, legibility: 80, safety: 95 },
+          findings: [{ timecodeMs: 6_000, startTimecodeMs: 6_000, endTimecodeMs: 6_000,
+            scenePosition: 2, targetNodeId: "assets", evidenceStatus: "failed",
+            evidenceFrameSha256: null, nextAction: "rework_asset", category: "continuity",
+            severity: "warning", description: "动作不连续。", suggestion: "复用第一镜。" }],
+          confidence: 0.9,
+          recommendation: "revise",
+        });
+      },
     };
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
@@ -1035,9 +1256,9 @@ describe("ProductionPipeline", () => {
           findingIndex: 0,
           reuseFromScenePosition: 2,
           actor: "director",
-          note: "服务端必须按时间轴重新定位，不能相信报告自报镜头号。",
+          note: "报告镜头号必须与服务端时间轴一致。",
         }),
-        /cannot reuse itself/,
+        /claims scene 1, but the render manifest maps it to scene 2/,
       );
     } finally {
       await writeFile(nextReviewArtifact.uri!, reviewReportContent, "utf8");
@@ -1227,6 +1448,116 @@ describe("ProductionPipeline", () => {
     assert.equal(publishPackage.artifacts.some((artifact) => artifact.id === sceneTwoMedia.id), false);
   });
 
+  it("requires complete current dual-review proof before final publication", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-final-review-proof-"));
+    const cleanReport: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "两个独立模型均确认成片可以进入人工终审。",
+      scores: { composition: 90, continuity: 90, pacing: 90, legibility: 92, safety: 96 },
+      findings: [],
+      confidence: 0.95,
+      recommendation: "approve",
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      providerRuntimeMetadata: [{
+        id: "glm-visual-review-v1",
+        label: "GLM + Codex 双模型审片",
+        modelId: "glm-5.3-flash",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 1,
+      }],
+      visualReviewAgents: [{
+        id: "glm-visual-review-v1",
+        modelId: "glm-5.3-flash",
+        review: async () => { throw new Error("Detailed review must be used."); },
+        reviewDetailed: async (input) => input.reviewStage === "source_assets"
+          ? { output: cleanReport, inspectedDurationMs: 10_000 }
+          : completedDualVisualReview(input, cleanReport),
+      }],
+    });
+    const waiting = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+    });
+    assert.equal(waiting.status, "needs_human");
+    const runPath = path.join(workspaceRoot, "runs", waiting.id, "run.json");
+    const original = await readFile(runPath, "utf8");
+    const decision = {
+      interventionId: waiting.interventions.at(-1)!.id,
+      action: "approve" as const,
+      actor: "director",
+      note: "双审证据完整，批准发布。",
+    };
+    const assertTamperRejected = async (
+      mutate: (visualReport: Record<string, unknown>, finalReviewOutput: Record<string, unknown>) => void,
+      error: RegExp,
+    ) => {
+      const persisted = JSON.parse(original) as {
+        nodeRuns: Array<{
+          nodeId: string;
+          output?: Record<string, unknown>;
+          outputState?: { effectiveVersionId: string; versions: Array<{ id: string; output?: Record<string, unknown> }> };
+        }>;
+      };
+      const visualNode = persisted.nodeRuns.find((node) => node.nodeId === "visual-review")!;
+      const finalNode = persisted.nodeRuns.find((node) => node.nodeId === "final-review")!;
+      const visualReport = visualNode.output!.report as Record<string, unknown>;
+      const finalOutput = finalNode.output!;
+      mutate(visualReport, finalOutput);
+      const visualVersion = visualNode.outputState!.versions.find(
+        (version) => version.id === visualNode.outputState!.effectiveVersionId,
+      )!;
+      const finalVersion = finalNode.outputState!.versions.find(
+        (version) => version.id === finalNode.outputState!.effectiveVersionId,
+      )!;
+      visualVersion.output = structuredClone(visualNode.output!);
+      finalVersion.output = structuredClone(finalNode.output!);
+      await writeFile(runPath, JSON.stringify(persisted), "utf8");
+      try {
+        await assert.rejects(() => subject.decide(waiting.id, decision), error);
+      } finally {
+        await writeFile(runPath, original, "utf8");
+      }
+    };
+
+    await assertTamperRejected((visualReport) => {
+      const scope = visualReport.reviewScope as { actualModels: unknown[] };
+      scope.actualModels = scope.actualModels.slice(0, 1);
+      visualReport.independentReviews = (visualReport.independentReviews as unknown[]).slice(0, 1);
+    }, /two distinct actual visual-review providers and models/);
+    await assertTamperRejected((visualReport) => {
+      const scope = visualReport.reviewScope as { actualModels: Array<Record<string, unknown>> };
+      scope.actualModels[1]!.providerId = scope.actualModels[0]!.providerId;
+      scope.actualModels[1]!.modelId = scope.actualModels[0]!.modelId;
+      const reviews = visualReport.independentReviews as Array<Record<string, unknown>>;
+      reviews[1]!.providerId = reviews[0]!.providerId;
+      reviews[1]!.modelId = reviews[0]!.modelId;
+    }, /two distinct actual visual-review providers and models/);
+    await assertTamperRejected((visualReport) => {
+      const scope = visualReport.reviewScope as { actualModels: Array<Record<string, unknown>> };
+      scope.actualModels[1]!.evidenceId = "f".repeat(64);
+    }, /complete producer and audit proof/);
+    await assertTamperRejected((visualReport) => {
+      const scope = visualReport.reviewScope as { actualModels: Array<Record<string, unknown>> };
+      delete scope.actualModels[1]!.auditContractDigest;
+    }, /complete producer and audit proof/);
+    await assertTamperRejected((_visualReport, finalOutput) => {
+      finalOutput.reviewEvidenceId = "e".repeat(64);
+    }, /not bound to the current visual evidence digest/);
+    await assertTamperRejected((_visualReport, finalOutput) => {
+      finalOutput.reviewArtifactIds = [...(finalOutput.reviewArtifactIds as string[])].reverse();
+    }, /intervention is not bound to the current review artifacts/);
+
+    const approved = await subject.decide(waiting.id, decision);
+    assert.equal(approved.status, "succeeded");
+    assert.ok(approved.artifacts.some((artifact) => artifact.kind === "publish_package"));
+  });
+
   it("fails closed when the Code Plan visual reviewer has no subscription metadata", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-review-metadata-"));
     let calls = 0;
@@ -1272,7 +1603,10 @@ describe("ProductionPipeline", () => {
               version: "video-factory/visual-review-v1",
               summary: "字幕遮挡了主体。",
               scores: { composition: 45, continuity: 70, pacing: 70, legibility: 30, safety: 90 },
-              findings: [{ timecodeMs: 1_000, scenePosition: 1, targetNodeId: "assets", category: "legibility", severity: "critical", description: "字幕不可读", suggestion: "重新排版" }],
+              findings: [{ timecodeMs: 1_000, startTimecodeMs: 1_000, endTimecodeMs: 1_000,
+                scenePosition: 1, targetNodeId: "assets", evidenceStatus: "failed",
+                evidenceFrameSha256: null, nextAction: "rework_asset", category: "legibility",
+                severity: "critical", description: "字幕不可读", suggestion: "重新排版" }],
               confidence: 0.9,
               recommendation: "reject",
             },
@@ -1842,17 +2176,19 @@ describe("ProductionPipeline", () => {
         review: async () => { throw new Error("Detailed review must be used."); },
         reviewDetailed: async (input) => {
           backupReviewInputs.push(input);
-          return {
-            output: {
-              version: "video-factory/visual-review-v1",
-              summary: "备用审片已确认画面可继续。",
-              scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 95 },
-              findings: [],
-              confidence: 0.95,
-              recommendation: "approve",
-            },
-            inspectedDurationMs: 10_000,
+          const output: pipeline.VisualReviewReport = {
+            version: "video-factory/visual-review-v1",
+            summary: "备用审片已确认画面可继续。",
+            scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 95 },
+            findings: [],
+            confidence: 0.95,
+            recommendation: "approve",
           };
+          if (input.reviewStage === "source_assets") return { output, inspectedDurationMs: 10_000 };
+          return completedDualVisualReview(input, output, {
+            providerId: "glm-visual-review-backup-v1",
+            modelId: "glm-review-backup",
+          });
         },
       }],
     });
@@ -2088,11 +2424,22 @@ describe("ProductionPipeline", () => {
         findings: [{
           findingId: "vf_e1e1e1e1e1e1e1e1e1e1e1e1",
           timecodeMs: 4_000,
+          startTimecodeMs: 3_500,
+          endTimecodeMs: 4_500,
           scenePosition: 1,
+          evidenceStatus: "failed",
+          evidenceFrameSha256: "a".repeat(64),
+          nextAction: "replan_upstream",
           category: "continuity",
           description: "第一镜主体不一致。",
           suggestion: "重新生成第一镜。",
           targetNodeIds: ["visual-direction", "assets"],
+          sourceReviewStage: "source_assets",
+          sourceReviewNodeId: "asset-source-review",
+          sourceReviewVersionId: "version-review",
+          reviewEvidenceId: "b".repeat(64),
+          actualModels: [{ providerId: "zai-bigmodel-api", modelId: "glm-5.3-flash" }],
+          current: true,
         }],
         previousScript,
         previousDirectorPlan: {
@@ -2107,6 +2454,15 @@ describe("ProductionPipeline", () => {
     });
 
     assert.deepEqual(closureDirectorInput?.brief.rework?.affectedScenePositions, [1, 2, 3]);
+    assert.deepEqual(closureDirectorInput?.brief.rework?.findings, [{
+      findingId: "vf_e1e1e1e1e1e1e1e1e1e1e1e1",
+      timecodeMs: 4_000,
+      scenePosition: 1,
+      category: "continuity",
+      description: "第一镜主体不一致。",
+      suggestion: "重新生成第一镜。",
+      targetNodeIds: ["visual-direction", "assets"],
+    }]);
   });
 
   it("keeps the selected director model in the execution plan and a pre-trace failure receipt", async () => {
@@ -2464,7 +2820,7 @@ describe("ProductionPipeline", () => {
     });
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/director-v15",
+      "video-factory/director-v24",
     );
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.modelId,

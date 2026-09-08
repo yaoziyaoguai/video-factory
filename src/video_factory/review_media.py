@@ -133,6 +133,8 @@ def prepare_asset_review_media(
     asset_plan_path: Path,
     run_root: Path,
     max_frames: int = MAX_FRAMES,
+    scene_positions: Optional[List[int]] = None,
+    script_path: Optional[Path] = None,
 ) -> Path:
     """Create bounded evidence frames from every materialized source asset."""
     root = Path(run_root).expanduser().resolve(strict=True)
@@ -152,6 +154,31 @@ def prepare_asset_review_media(
     if not isinstance(assets, list) or not assets or len(assets) > max_frames:
         raise ValueError("asset plan must contain one reviewable asset per scene within the frame limit")
 
+    scene_count = len(assets)
+    planned_durations = {}
+    if script_path is not None:
+        script_file = _resolve_run_file(script_path, root, "script_path")
+        if script_file.stat().st_size > 512 * 1024:
+            raise ValueError("script exceeds 524288 bytes")
+        script = json.loads(script_file.read_text(encoding="utf-8"))
+        for scene in script["scenes"]:
+            position, duration = scene["position"], scene["duration"]
+            if (isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0
+                    or isinstance(position, bool) or not isinstance(position, int) or position in planned_durations):
+                raise ValueError("script scene duration or position is invalid")
+            planned_durations[position] = duration
+        if set(planned_durations) != set(range(1, scene_count + 1)):
+            raise ValueError("script must cover every source asset scene")
+    pilot_review = scene_positions is not None
+    if pilot_review:
+        if (not scene_positions or len(set(scene_positions)) != len(scene_positions)
+                or any(isinstance(p, bool) or not isinstance(p, int) or p < 1 or p > scene_count for p in scene_positions)):
+            raise ValueError("pilot scene positions are invalid")
+        # 试片保留真实镜号，其余尚未生成的素材不在本次检查范围内。
+        assets = [asset for asset in assets if isinstance(asset, dict) and asset.get("scene_position") in scene_positions]
+        if len(assets) != len(scene_positions):
+            raise ValueError("pilot scenes are missing from the asset plan")
+
     normalized_assets = []
     seen_positions = set()
     for index, asset in enumerate(assets):
@@ -163,7 +190,7 @@ def prepare_asset_review_media(
         if scene_position in seen_positions:
             raise ValueError(f"asset plan scene position {scene_position} is duplicated")
         seen_positions.add(scene_position)
-        duration = asset.get("duration")
+        duration = planned_durations.get(scene_position, asset.get("duration"))
         if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
             raise ValueError(f"asset plan scene {scene_position} duration is invalid")
         media_path = _resolve_run_file(Path(str(asset.get("local_path") or "")), root, "asset local_path")
@@ -181,12 +208,28 @@ def prepare_asset_review_media(
     sample_counts = [1] * len(normalized_assets)
     remaining = max_frames - len(normalized_assets)
     video_indexes = [index for index, asset in enumerate(normalized_assets) if asset["mediaType"] == "video"]
-    for _round in range(2):
-        for index in video_indexes:
-            if remaining == 0:
+    if pilot_review:
+        while remaining > 0 and video_indexes:
+            advanced = False
+            for index in video_indexes:
+                if remaining == 0:
+                    break
+                if sample_counts[index] >= normalized_assets[index]["durationMs"]:
+                    continue
+                sample_counts[index] += 1
+                remaining -= 1
+                advanced = True
+            if not advanced:
                 break
-            sample_counts[index] += 1
-            remaining -= 1
+    else:
+        for _round in range(2):
+            for index in video_indexes:
+                if remaining == 0:
+                    break
+                sample_counts[index] += 1
+                remaining -= 1
+
+    sequence_sampling = pilot_review and any(count > 3 for count in sample_counts)
 
     total_duration_ms = sum(asset["durationMs"] for asset in normalized_assets)
     output_dir = root / "asset_review_media"
@@ -204,14 +247,25 @@ def prepare_asset_review_media(
         cursor_ms = 0
         for asset_index, asset in enumerate(normalized_assets):
             count = sample_counts[asset_index]
-            phases = {
-                1: [(0.5, "midpoint")],
-                2: [(0.15, "opening"), (0.85, "closing")],
-                3: [(0.15, "opening"), (0.5, "middle"), (0.85, "closing")],
-            }[count]
+            if count == 1:
+                phases = [(0.5, "midpoint")]
+            elif count == 2:
+                phases = [(0.15, "opening"), (0.85, "closing")]
+            elif count == 3:
+                phases = [(0.15, "opening"), (0.5, "middle"), (0.85, "closing")]
+            else:
+                phases = [
+                    (
+                        (phase_index + 0.5) / count,
+                        "opening" if phase_index == 0 else "closing" if phase_index == count - 1 else "middle",
+                    )
+                    for phase_index in range(count)
+                ]
             source_duration_ms = None
             if asset["mediaType"] == "video":
                 source_duration_ms = max(1, int(round(float(_probe_video(asset["mediaPath"])["duration"]) * 1000)))
+                # 渲染从素材开头截取；未使用的尾段不应成为付费返工的证据。
+                source_duration_ms = min(source_duration_ms, asset["durationMs"])
             for phase_index, (fraction, phase) in enumerate(phases):
                 timestamp_ms = min(total_duration_ms - 1, cursor_ms + int(round(asset["durationMs"] * fraction)))
                 filename = f"scene-{asset['scenePosition']:02d}-{phase_index:02d}.jpg"
@@ -243,10 +297,10 @@ def prepare_asset_review_media(
             "version": MANIFEST_VERSION,
             "durationMs": total_duration_ms,
             "sampling": {
-                "mode": "hook_and_scene_midpoints",
-                "sceneCount": len(normalized_assets),
+                "mode": "scene_sequence" if sequence_sampling else "hook_and_scene_midpoints",
+                "sceneCount": scene_count,
                 "coveredScenePositions": sorted(seen_positions),
-                "missingScenePositions": [],
+                "missingScenePositions": [p for p in range(1, scene_count + 1) if p not in seen_positions],
             },
             "frames": frame_entries,
             "contactSheet": _image_entry(contact_sheet_path, "asset_review_media/contact_sheet.jpg"),
@@ -293,9 +347,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--run-root", required=True)
     parser.add_argument("--max-frames", type=int, default=MAX_FRAMES)
     parser.add_argument("--render-manifest")
+    parser.add_argument("--scene-positions", type=int, nargs="+")
+    parser.add_argument("--script")
     args = parser.parse_args(argv)
     manifest = (
-        prepare_asset_review_media(Path(args.asset_plan), Path(args.run_root), args.max_frames)
+        prepare_asset_review_media(Path(args.asset_plan), Path(args.run_root), args.max_frames,
+                                   args.scene_positions, Path(args.script) if args.script else None)
         if args.asset_plan
         else prepare_review_media(
             Path(args.video),

@@ -81,6 +81,7 @@ export interface Provenance {
   promptVersion?: string;
   model?: string;
   notes?: string;
+  scenePosition?: number;
 }
 
 export interface ArtifactProducer {

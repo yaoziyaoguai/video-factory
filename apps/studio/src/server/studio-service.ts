@@ -435,7 +435,7 @@ export class StudioService {
       ? String(configuredInput.creationContext.opportunityId ?? "")
       : undefined;
     const reservationId = seriesContext ? `series-run-${randomUUID()}` : undefined;
-    const trustedInput = seriesContext && reservationId && isRecord(configuredInput)
+    let trustedInput = seriesContext && reservationId && isRecord(configuredInput)
       ? {
           ...configuredInput,
           title: seriesContext.episode.title,
@@ -450,7 +450,17 @@ export class StudioService {
       await this.series.reserveRun(seriesContext, opportunityId, reservationId);
     }
     let dispatchedRunId: string | undefined;
+    let stagedInheritedReferenceUploadId: string | undefined;
     try {
+      const inheritedReference = await this.production.loadInheritedReferenceVideo(trustedInput);
+      if (inheritedReference && isRecord(trustedInput)) {
+        const staged = await this.referenceVideos.upload(inheritedReference);
+        stagedInheritedReferenceUploadId = staged.uploadId;
+        trustedInput = {
+          ...trustedInput,
+          referenceVideo: { uploadId: staged.uploadId, label: staged.label },
+        };
+      }
       let started: StartRunResponse;
       if (!isRecord(trustedInput) || !isRecord(trustedInput.referenceVideo)) {
         started = await this.production.start(trustedInput, idempotencyKey, input);
@@ -483,6 +493,9 @@ export class StudioService {
       }
       return started;
     } catch (error) {
+      if (stagedInheritedReferenceUploadId) {
+        await this.referenceVideos.remove(stagedInheritedReferenceUploadId).catch(() => undefined);
+      }
       if (error instanceof ProductionStartDispatchedError) dispatchedRunId = error.runId;
       if (seriesContext && reservationId) {
         if (dispatchedRunId) {

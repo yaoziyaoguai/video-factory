@@ -575,7 +575,7 @@ def ranking_candidate_ids_by_scene(candidate_ranking: Optional[dict]) -> dict[in
     if not isinstance(scenes, list):
         raise ValueError("Candidate ranking scenes must be an array")
     result: dict[int, list[RankedCandidatePreference]] = {}
-    enforce_score = candidate_ranking.get("source") == "model"
+    semantic_scores_verified = candidate_ranking.get("source") == "model"
     for scene in scenes:
         if not isinstance(scene, dict) or not isinstance(scene.get("scenePosition"), int):
             raise ValueError("Candidate ranking scenePosition is invalid")
@@ -590,9 +590,9 @@ def ranking_candidate_ids_by_scene(candidate_ranking: Optional[dict]) -> dict[in
             RankedCandidatePreference(
                 provider=str(item.get("provider") or ""),
                 asset_id=str(item.get("assetId") or ""),
-                semantic_score=int(item.get("semanticScore", 0)),
+                semantic_score=int(item.get("semanticScore", 0)) if semantic_scores_verified else 0,
                 locked=item.get("locked") is True,
-                enforce_score=enforce_score,
+                enforce_score=True,
             )
             for item in ordered
             if isinstance(item, dict) and item.get("provider") and item.get("assetId")

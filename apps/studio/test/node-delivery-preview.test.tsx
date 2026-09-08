@@ -180,7 +180,7 @@ describe("NodeDeliveryPreview", () => {
     expect(screen.getByText("本集已经完成一次可复现的真实验证。")).toBeInTheDocument();
   });
 
-  it("hides empty and technical-only collection items while keeping all review findings", () => {
+  it("hides empty and technical-only collection items while keeping all review findings reachable", async () => {
     const findings = Array.from({ length: 10 }, (_, index) => ({
       description: `审片意见 ${index + 1}`,
       severity: index === 8 ? "high" : "low",
@@ -189,6 +189,8 @@ describe("NodeDeliveryPreview", () => {
       findings: [{ codec_name: "h264" }, ...findings, { description: "" }],
     }} />);
 
+    expect(screen.queryByText("审片意见 10")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "展开其余 5 个审片发现" }));
     expect(screen.getByText("审片意见 10")).toBeInTheDocument();
     expect(screen.getByText("高风险")).toBeInTheDocument();
     expect(screen.getAllByText("10").length).toBeGreaterThan(0);

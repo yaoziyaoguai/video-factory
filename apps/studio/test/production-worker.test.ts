@@ -48,7 +48,7 @@ describe("production provider runtime metadata", () => {
       MINIMAX_ESTIMATED_CNY_PER_CLIP: "2",
       DASHSCOPE_API_KEY: "wan-key",
       DASHSCOPE_WORKSPACE_ID: "workspace-1",
-      WAN_MODEL_ID: "wan2.7-t2v",
+      WAN_MODEL_ID: "wan3.0-video",
       WAN_ESTIMATED_CNY_PER_CLIP: "2.25",
     } });
 
@@ -79,7 +79,7 @@ describe("production provider runtime metadata", () => {
 });
 
 describe("metered video provider settings", () => {
-  it("keeps paid adapters disabled until every required field and cost estimate exists", () => {
+  it("keeps paid adapters disabled until required credentials exist and retains explicit Seedance pricing", () => {
     assert.deepEqual(readMeteredVideoProviderSettings({}), []);
     assert.deepEqual(readMeteredVideoProviderSettings({
       ARK_API_KEY: "seedance-key",
@@ -93,7 +93,12 @@ describe("metered video provider settings", () => {
     assert.deepEqual(readMeteredVideoProviderSettings({
       MINIMAX_API_KEY: "minimax-key",
       MINIMAX_VIDEO_MODEL_ID: "MiniMax-Hailuo-2.3",
-    }), []);
+    }).map((setting) => setting.providerId), ["hailuo-video-v1"]);
+    assert.deepEqual(readMeteredVideoProviderSettings({
+      DASHSCOPE_API_KEY: "wan-key",
+      DASHSCOPE_WORKSPACE_ID: "workspace-1",
+      WAN_MODEL_ID: "wan3.0-video",
+    }).map((setting) => setting.providerId), ["wan-video-v1"]);
   });
 
   it("normalizes complete Seedance, MiniMax and Wan configurations for the runtime worker", () => {
@@ -108,9 +113,9 @@ describe("metered video provider settings", () => {
       MINIMAX_BASE_URL: "https://minimax.example/v1/",
       DASHSCOPE_API_KEY: "wan-key",
       DASHSCOPE_WORKSPACE_ID: "workspace-1",
-      WAN_MODEL_ID: "wan2.7-t2v",
+      WAN_MODEL_ID: "wan3.0-video",
       WAN_ESTIMATED_CNY_PER_CLIP: "2.25",
-      WAN_MODEL_ESTIMATES_JSON: JSON.stringify({ "wan3.0-video": 5.5, "wan2.7-t2v": 2.25 }),
+      WAN_MODEL_ESTIMATES_JSON: JSON.stringify({ "wan3.0-video": 5.5 }),
       WAN_BASE_URL: "https://wan.example/",
     };
     const settings = readMeteredVideoProviderSettings(environment);
@@ -127,12 +132,12 @@ describe("metered video provider settings", () => {
       },
       {
         providerId: "hailuo-video-v1",
-        estimatedCnyPerClip: 2.1,
+        estimatedCnyPerClip: 2,
         baseUrl: "https://minimax.example/v1/",
       },
       {
         providerId: "wan-video-v1",
-        estimatedCnyPerClip: 2.25,
+        estimatedCnyPerClip: 1.2,
         baseUrl: "https://wan.example/",
       },
     ]);
@@ -140,16 +145,46 @@ describe("metered video provider settings", () => {
     assert.equal(miniMax?.models.find((model) => model.id === "MiniMax-H3")?.protocol, "v2");
     assert.equal(miniMax?.models.find((model) => model.id === "MiniMax-H3")?.estimatedCnyPerSecond, 0.5);
     assert.deepEqual(miniMax?.models.find((model) => model.id === "MiniMax-H3")?.resolutions, ["768P", "2K"]);
+    const hailuo = miniMax?.models.find((model) => model.id === "MiniMax-Hailuo-2.3");
+    assert.deepEqual(hailuo?.allowedDurationsSeconds, [6, 10]);
+    assert.deepEqual(hailuo?.estimatedCnyByResolutionAndDuration, {
+      "768P": { "6": 2, "10": 4 },
+      "1080P": { "6": 3.5 },
+    });
+    const seedance2 = settings
+      .find((setting) => setting.providerId === "seedance-video-v1")
+      ?.models.find((model) => model.id === "doubao-seedance-2-0-260128");
+    const seedanceFast = settings
+      .find((setting) => setting.providerId === "seedance-video-v1")
+      ?.models.find((model) => model.id === "doubao-seedance-2-0-fast-260128");
+    const seedance15 = settings
+      .find((setting) => setting.providerId === "seedance-video-v1")
+      ?.models.find((model) => model.id === "doubao-seedance-1-5-pro-251215");
+    assert.equal(seedance2?.supportsAudio, true);
+    assert.equal(seedanceFast?.supportsAudio, true);
+    assert.equal(seedanceFast?.resolutions.includes("1080p"), false);
+    assert.equal(seedance15?.supportsAudio, true);
     const wan = settings.find((setting) => setting.providerId === "wan-video-v1");
-    assert.equal(wan?.models.find((model) => model.id === "wan3.0-video")?.estimatedCnyPerClip, 5.5);
+    assert.equal(wan?.models.find((model) => model.id === "wan3.0-video")?.estimatedCnyPerClip, 1.2);
     assert.deepEqual(wan?.models.find((model) => model.id === "wan3.0-video")?.taskTypes, ["text-to-video"]);
+    assert.deepEqual(wan?.models.find((model) => model.id === "wan3.0-video")?.resolutions, ["720P"]);
+    assert.equal(wan?.models.find((model) => model.id === "wan3.0-video")?.estimatedCnyPerSecond, 0.6);
     assert.equal(wan?.models.find((model) => model.id === "wan3.0-video")?.maxDurationSeconds, 15);
-    assert.equal(wan?.models.find((model) => model.id === "wan2.7-t2v")?.recommended, true);
+    assert.equal(wan?.models.find((model) => model.id === "wan3.0-video")?.recommended, true);
+    assert.equal(wan?.models.some((model) => model.id === "wan2.7-t2v"), false);
     assert.doesNotThrow(() => buildProductionWorker({
       repositoryRoot: "/repo",
       pythonPath: "/repo/python",
       environment,
     }));
+    const runtimeHailuo = buildProductionProviderRuntimeMetadata(environment)
+      .find((item) => item.id === "hailuo-video-v1")
+      ?.modelProfiles?.find((model) => model.modelId === "MiniMax-Hailuo-2.3");
+    assert.deepEqual(runtimeHailuo?.allowedDurationsSeconds, [6, 10]);
+    assert.deepEqual(runtimeHailuo?.estimatedCnyByResolutionAndDuration, {
+      "768P": { "6": 2, "10": 4 },
+      "1080P": { "6": 3.5 },
+    });
   });
 
   it("rejects unreviewed Wan model ids before paid generation", () => {

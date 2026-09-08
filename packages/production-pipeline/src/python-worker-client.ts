@@ -23,6 +23,7 @@ export interface WorkerArtifactDescriptor {
     licenseNote: string;
     sourceUrl?: string;
     creator?: string;
+    scenePosition?: number;
   };
 }
 
@@ -218,6 +219,9 @@ function parseArtifactDescriptor(value: unknown, index: number): WorkerArtifactD
       licenseNote: provenance.licenseNote,
       ...(optionalArtifactText(provenance.sourceUrl, `${prefix} provenance sourceUrl`) ? { sourceUrl: optionalArtifactText(provenance.sourceUrl, `${prefix} provenance sourceUrl`)! } : {}),
       ...(optionalArtifactText(provenance.creator, `${prefix} provenance creator`) ? { creator: optionalArtifactText(provenance.creator, `${prefix} provenance creator`)! } : {}),
+      ...(Number.isInteger(provenance.scenePosition) && Number(provenance.scenePosition) > 0
+        ? { scenePosition: Number(provenance.scenePosition) }
+        : {}),
     },
   };
 }

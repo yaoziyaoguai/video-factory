@@ -383,11 +383,15 @@ export function buildProviderCatalog(
         providerId: "hailuo-video-v1",
         providerFamily: "minimax-video",
         available: miniMaxAvailable,
-        description: model.estimatedCnyPerSecond
-          ? `${model.label} 按时长与分辨率计费，默认规格约 ¥${model.estimatedCnyPerSecond.toFixed(2)}/秒；执行前按实际镜头重新核算。`
-          : "MiniMax Hailuo 固定规格视频模型；实际选中镜头逐项报价并等待人工确认。",
+        description: !model.aspectRatios.includes("9:16")
+          ? `${model.label} 当前接口只能可靠交付横屏，不能用于本项目的 9:16 成片。请改选 MiniMax H3 系列。`
+          : model.estimatedCnyByResolutionAndDuration
+          ? `${model.label} 固定规格：768P 6 秒 ¥2、10 秒 ¥4；1080P 仅 6 秒 ¥3.5。实际选中镜头逐项报价并等待人工确认。`
+          : model.estimatedCnyPerSecond
+            ? `${model.label} 按时长与分辨率计费，默认规格约 ¥${model.estimatedCnyPerSecond.toFixed(2)}/秒；执行前按实际镜头重新核算。`
+            : "MiniMax Hailuo 固定规格视频模型；实际选中镜头逐项报价并等待人工确认。",
       })),
-      requirement: "需要连接 MiniMax 账号，选择已审核的视频模型，并配置单镜头估价",
+      requirement: "需要连接 MiniMax 账号并选择已审核的视频模型；系统会按所选规格逐镜报价",
       docsUrl: "https://platform.minimaxi.com/docs/api-reference/video-generation-v2-create",
       consoleUrl: "https://platform.minimaxi.com/",
     }),
@@ -410,9 +414,9 @@ export function buildProviderCatalog(
         providerId: "wan-video-v1",
         providerFamily: "dashscope-video",
         available: wanAvailable,
-        description: "当前阿里云 Model Studio 视频模型，按镜头调用。",
+        description: "当前接入文生视频、720P、2–15 秒，按 ¥0.60/秒逐镜报价；模型其他输入方式与更长时长尚未接入。",
       })),
-      requirement: "需要连接阿里云百炼账号及工作空间，选择已审核的视频模型，并配置单镜头估价",
+      requirement: "需要连接阿里云百炼账号及工作空间，并选择当前已接入的视频模型",
       docsUrl: "https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference",
       consoleUrl: "https://bailian.console.aliyun.com/",
     }),

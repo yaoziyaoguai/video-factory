@@ -85,7 +85,7 @@ const PRODUCTION_ROLE_DEFINITIONS: ProductionRoleDefinition[] = [
   { key: "voice", label: "配音执行", capability: "voice.synthesize", preferredProviderId: "macos-say-v1", responsibility: "按声音演员表执行音色、语速和停顿", mode: "tool", selectable: false, configurationAnchor: "voice-casting", configurationLabel: "去声音演员表配置" },
   { key: "render", label: "剪辑师", capability: "video.render", preferredProviderId: "python-ffmpeg-v1", responsibility: "合成画面、字幕、旁白和音轨", mode: "tool" },
   { key: "technicalReview", label: "技术质检", capability: "quality.review", preferredProviderId: "python-technical-review-v1", responsibility: "检查分辨率、时长、轨道、文件和产物哈希", mode: "tool" },
-  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "glm-visual-review-v1", responsibility: "用成片关键帧审查构图、连续性和可读性", mode: "model" },
+  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "glm-visual-review-v1", responsibility: "用成片关键帧审查构图、连续性和可读性；两种审片模型都可用时执行独立双审", mode: "model" },
 ];
 
 const AUTOMATIC_AGENT_ROLES = [
@@ -684,6 +684,9 @@ function RoleProviderCard({ definition, providers, selectedProvider, onProviderC
     ?? models[0];
   const backupModels = models.filter((model) => model.id !== activeModel?.id);
   const ready = Boolean(selectedProvider && isProductionReady(selectedProvider));
+  const dualFinalReviewAvailable = definition.key === "visualReview"
+    && providers.some((provider) => provider.id === "glm-visual-review-v1" && isProductionReady(provider))
+    && providers.some((provider) => provider.id === "codex-visual-review-v1" && isProductionReady(provider));
   return <article className={ready ? "role-configuration" : "role-configuration is-unavailable"}>
     <header>
       <span>{definition.label}</span>
@@ -708,8 +711,10 @@ function RoleProviderCard({ definition, providers, selectedProvider, onProviderC
         </select>
       </label>
       <div className="role-runtime-summary"><span>系统推荐</span><strong>{activeModel?.label ?? selectedProvider?.label ?? "尚未配置"}</strong>{backupModels.length ? <span>故障替补：{backupModels.map((model) => model.label).join("、")}</span> : null}</div>
-      {candidates.filter((provider) => provider.id !== selectedProvider?.id && isProductionReady(provider)).length > 0
-        ? <p className="role-fallback-note">其余可用能力只在首选服务故障时依次接管，不会与首选同时重复生成。</p>
+      {dualFinalReviewAvailable
+        ? <p className="role-fallback-note">中途画面预检使用首选模型，服务故障时才切换；最终成片由 GLM 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。</p>
+        : candidates.filter((provider) => provider.id !== selectedProvider?.id && isProductionReady(provider)).length > 0
+          ? <p className="role-fallback-note">其余可用能力只在首选服务故障时依次接管，不会与首选同时重复生成。</p>
         : null}
     </>}
     <footer><span>{selectedProvider ? billingLabel(selectedProvider.billing) : "无可用能力"}</span><strong>{selectedProvider ? providerReadinessLabel(selectedProvider, ready) : "需要配置"}</strong></footer>

@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 import {
   GenerativeAssetWorkerClient,
   MiniMaxVideoAdapter,
@@ -7,8 +9,11 @@ import {
   SeedreamImageAdapter,
   SeedanceVideoAdapter,
   WanVideoAdapter,
+  SourceAssetPilotReviewer,
+  type VisualReviewAgent,
   type VisualAssetProviderCapability,
   type ImageGenerationAdapterBinding,
+  type GeneratedMediaMetadata,
   type ProductionProviderRuntimeMetadata,
   type VideoGenerationAdapterBinding,
 } from "@video-factory/production-pipeline";
@@ -18,11 +23,14 @@ import { resolveZaiVisualReviewModelId } from "./codex-provider-settings.js";
 import { assetProviderDeliveryTypes, assetProviderSupportsReferenceImage } from "./provider-catalog.js";
 import { buildStudioChildEnvironment } from "./studio-child-environment.js";
 
+const execFileAsync = promisify(execFile);
+
 export interface ProductionWorkerOptions {
   repositoryRoot: string;
   pythonPath: string;
   environment: NodeJS.ProcessEnv;
   runsRoot?: string;
+  visualReviewAgents?: VisualReviewAgent[];
 }
 
 export function buildProductionWorker(options: ProductionWorkerOptions): GenerativeAssetWorkerClient {
@@ -62,12 +70,19 @@ export function buildProductionWorker(options: ProductionWorkerOptions): Generat
       modelProfiles: Object.fromEntries(setting.models.map((model) => [model.id, {
         taskTypes: [...model.taskTypes],
         resolutions: [...model.resolutions],
+        aspectRatios: [...model.aspectRatios],
         minDurationSeconds: model.minDurationSeconds,
         maxDurationSeconds: model.maxDurationSeconds,
         supportsAudio: model.supportsAudio,
+        ...(model.allowedDurationsSeconds
+          ? { allowedDurationsSeconds: [...model.allowedDurationsSeconds] }
+          : {}),
         ...(model.estimatedCnyPerSecond ? { estimatedCnyPerSecond: model.estimatedCnyPerSecond } : {}),
         ...(model.estimatedCnyPerSecondByResolution
           ? { estimatedCnyPerSecondByResolution: { ...model.estimatedCnyPerSecondByResolution } }
+          : {}),
+        ...(model.estimatedCnyByResolutionAndDuration
+          ? { estimatedCnyByResolutionAndDuration: structuredClone(model.estimatedCnyByResolutionAndDuration) }
           : {}),
       }])),
     };
@@ -84,8 +99,41 @@ export function buildProductionWorker(options: ProductionWorkerOptions): Generat
     fallback,
     adapters,
     imageAdapters,
+    probeGeneratedMedia: probeGeneratedMediaWithFfprobe,
+    pilotReviewer: new SourceAssetPilotReviewer(options.visualReviewAgents ?? []),
     ...(options.runsRoot ? { runsRoot: options.runsRoot } : {}),
   });
+}
+
+async function probeGeneratedMediaWithFfprobe(
+  mediaPath: string,
+  mediaType: "image" | "video",
+): Promise<GeneratedMediaMetadata> {
+  const { stdout } = await execFileAsync("ffprobe", [
+    "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=width,height:format=duration",
+    "-of", "json",
+    mediaPath,
+  ], { maxBuffer: 1024 * 1024 });
+  const result = JSON.parse(stdout) as {
+    streams?: Array<{ width?: number; height?: number }>;
+    format?: { duration?: string };
+  };
+  const stream = result.streams?.[0];
+  const width = Number(stream?.width);
+  const height = Number(stream?.height);
+  const durationSeconds = Number(result.format?.duration);
+  if (!Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
+    throw new Error(`ffprobe did not return valid dimensions for generated ${mediaType}.`);
+  }
+  return {
+    width,
+    height,
+    ...(mediaType === "video" && Number.isFinite(durationSeconds) && durationSeconds > 0
+      ? { durationSeconds }
+      : {}),
+  };
 }
 
 export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOptions, "environment">): VisualAssetProviderCapability[] {
@@ -208,12 +256,19 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
       estimatedCostCny: model.estimatedCnyPerClip,
       taskTypes: [...model.taskTypes],
       resolutions: [...model.resolutions],
+      aspectRatios: [...model.aspectRatios],
       minDurationSeconds: model.minDurationSeconds,
       maxDurationSeconds: model.maxDurationSeconds,
       supportsAudio: model.supportsAudio,
+      ...(model.allowedDurationsSeconds
+        ? { allowedDurationsSeconds: [...model.allowedDurationsSeconds] }
+        : {}),
       ...(model.estimatedCnyPerSecond ? { estimatedCnyPerSecond: model.estimatedCnyPerSecond } : {}),
       ...(model.estimatedCnyPerSecondByResolution
         ? { estimatedCnyPerSecondByResolution: { ...model.estimatedCnyPerSecondByResolution } }
+        : {}),
+      ...(model.estimatedCnyByResolutionAndDuration
+        ? { estimatedCnyByResolutionAndDuration: structuredClone(model.estimatedCnyByResolutionAndDuration) }
         : {}),
     })),
   });

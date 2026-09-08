@@ -279,10 +279,92 @@ describe("run observability", () => {
 
     expect(result.failure).toMatchObject({
       nodeId: "asset-source-review",
-      summary: "生成画面的视觉预检没有完成，已保留本轮画面结果",
+      summary: "画面审查已完成并发现问题，已保留素材与修改建议",
       retryable: true,
     });
     expect(result.failure?.impact).toContain("配音尚未开始");
+    expect(result.failure?.recoveryActions.join(" ")).not.toContain("切换视觉审片服务");
+  });
+
+  it("projects an in-node pilot rejection instead of hiding it behind the rejected run status", () => {
+    const result = buildRunObservability({
+      status: "rejected",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:02:00.000Z",
+      now: "2026-08-30T10:02:00.000Z",
+      nodes: [
+        node("script", "脚本", "succeeded"),
+        node("assets", "画面", "rejected", {
+          error: "镜头 2 试片未通过，已停止后续付费生成。已保留试片与审查报告。人物动作与旁白相反。",
+        }),
+        node("voice", "配音", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure).toMatchObject({
+      nodeId: "assets",
+      summary: "画面审查已完成并发现问题，已保留素材与修改建议",
+      retryable: true,
+    });
+    expect(result.failure?.recoveryActions).toEqual([
+      "查看具体镜头的问题与修改建议",
+      "先调整导演方案或替换已有素材；只有确需新生成时才重新报价",
+    ]);
+  });
+
+  it("explains that an interrupted pilot review can continue without buying the generated shot again", () => {
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:02:00.000Z",
+      now: "2026-08-30T10:02:00.000Z",
+      nodes: [
+        node("assets", "画面", "failed", {
+          error: "镜头 2 已生成，但试片审查暂未完成，后续付费生成已停止。重试时会复用该镜头并恢复审查。连接超时。",
+        }),
+        node("voice", "配音", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure).toMatchObject({
+      nodeId: "assets",
+      summary: "试片审查没有完成，已生成画面仍会保留",
+      retryable: true,
+    });
+    expect(result.failure?.recoveryActions).toEqual([
+      "继续未完成的试片审查",
+      "重试会复用已生成画面，不会重新购买成功素材",
+    ]);
+  });
+
+  it("explains a partial final dual review as one remaining subscription review branch", () => {
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:05:00.000Z",
+      now: "2026-08-30T10:05:00.000Z",
+      nodes: [
+        node("render", "渲染", "succeeded"),
+        node("visual-review", "视觉审片", "failed", {
+          error: "最终双模型审片尚未完成：gpt-5.6-sol 暂时不可用。已完成分支保留，重试只继续未完成分支。",
+        }),
+        node("final-review", "人工终审", "pending"),
+      ],
+      videoAvailable: true,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure).toMatchObject({
+      nodeId: "visual-review",
+      summary: "最终双模型审片只完成了一部分，已保留完成结果",
+      retryable: true,
+    });
+    expect(result.failure?.recoveryActions).toEqual(["重试未完成的审片模型分支"]);
+    expect(result.failure?.impact).toContain("成片已保留");
   });
 
   it("does not ask for billing reconciliation when a zero-attempt receipt proves rejection before submission", () => {

@@ -11,17 +11,125 @@ import {
 } from "@video-factory/workflow-core";
 import {
   GenerativeAssetWorkerClient,
+  SourceAssetPilotReviewer,
   ProviderRequestRejectedError,
   WORKER_PROTOCOL_VERSION,
   type VideoGenerationAdapter,
   type ImageGenerationAdapter,
   type WorkerResponse,
+  type VisualReviewAgent,
+  type VisualReviewReport,
 } from "../src/index.js";
-import { reworkAffectedScenePositions } from "../src/generative-asset-worker.js";
+import {
+  estimateVideoGenerationCostCny,
+  normalizeVideoGenerationDurationSeconds,
+  reworkAffectedScenePositions,
+} from "../src/generative-asset-worker.js";
 
 const resolvePublicHost = async (): Promise<string[]> => ["93.184.216.34"];
 
 describe("GenerativeAssetWorkerClient", () => {
+  for (const routed of [false, true]) {
+    it(`stops after a rejected pilot, preserves paid media and routes findings to rework (${routed ? "director" : "direct"})`, async () => {
+      const harness = await pilotHarness(routed, "revise");
+      const result = await harness.worker.run(harness.request);
+      assert.equal(result.status, "rejected");
+      assert.deepEqual(harness.events, ["generate-1", "review-1"]);
+      assert.equal(result.diagnostics?.actualCostCny, 2);
+      assert.equal(result.diagnostics?.generatedScenes, 1);
+      assert.equal(result.diagnostics?.meteredAttemptCount, 1);
+      assert.equal(result.diagnostics?.meteredFailedAttemptCount, 0);
+      assert.equal(result.diagnostics?.providerOutcomeKnown, true);
+      assert.equal((result.output?.sourceVisualReview as VisualReviewReport).findings[0]?.scenePosition, 1);
+      assert.ok(result.artifacts.some((artifact) => artifact.kind === "media_asset"));
+      assert.ok(result.artifacts.some((artifact) => artifact.kind === "review_report"));
+
+      const repeated = await harness.worker.run({ ...harness.request, outputDir: path.join(harness.root, "attempt-2") });
+      assert.equal(repeated.status, "rejected");
+      assert.deepEqual(harness.events, ["generate-1", "review-1"]);
+      assert.equal(repeated.diagnostics?.actualCostCny, 0);
+      assert.equal(repeated.diagnostics?.providerOutcomeKnown, true);
+    });
+
+    it(`reviews one pilot before the remaining same-model clips and uses it in the final plan (${routed ? "director" : "direct"})`, async () => {
+      const harness = await pilotHarness(routed, "approve");
+      const result = await harness.worker.run(harness.request);
+      assert.equal(result.status, "succeeded");
+      assert.deepEqual(harness.events, ["generate-1", "review-1", "generate-2", "generate-3"]);
+      assert.equal(result.diagnostics?.actualCostCny, 6);
+      const plan = JSON.parse(await readFile(String(result.output?.assetPlanPath), "utf8"));
+      assert.deepEqual(plan.scene_assets.map((asset: { asset_id: string }) => asset.asset_id), ["task-1", "task-2", "task-3"]);
+    });
+  }
+
+  it("retains the materialized pilot when review is unavailable and resumes without buying it again", async () => {
+    const harness = await pilotHarness(false, "unavailable");
+    const result = await harness.worker.run(harness.request);
+    assert.equal(result.status, "failed");
+    assert.equal(result.diagnostics?.providerOutcomeKnown, true);
+    assert.equal(result.diagnostics?.generatedScenes, 1);
+    assert.deepEqual(harness.events, ["generate-1", "review-1"]);
+    harness.setVerdict("approve");
+    const resumed = await harness.worker.run({ ...harness.request,
+      commandId: "new-authorized-operation",
+      outputDir: path.join(harness.root, "attempt-2"),
+      parameters: { ...harness.request.parameters, maxCostCny: 4 },
+    });
+    assert.equal(resumed.status, "succeeded");
+    assert.equal(resumed.diagnostics?.actualCostCny, 4);
+    assert.deepEqual(harness.events, ["generate-1", "review-1", "review-1", "generate-2", "generate-3"]);
+  });
+
+  it("rechecks a materialized rejected pilot and quotes only the remaining scenes", async () => {
+    const harness = await pilotHarness(true, "revise");
+    const rejected = await harness.worker.run(harness.request);
+    assert.equal(rejected.status, "rejected");
+    assert.deepEqual(harness.events, ["generate-1", "review-1"]);
+
+    harness.setVerdict("approve");
+    await rm(path.join(harness.root, "asset-pilot-reviews"), { recursive: true, force: true });
+    const resumed = await harness.worker.run({
+      ...harness.request,
+      commandId: "pilot-recheck-operation",
+      outputDir: path.join(harness.root, "attempt-2"),
+      parameters: { ...harness.request.parameters, maxCostCny: 4 },
+    });
+
+    assert.equal(resumed.status, "succeeded");
+    assert.equal(resumed.diagnostics?.estimatedCostCny, 4);
+    assert.equal(resumed.diagnostics?.actualCostCny, 4);
+    assert.deepEqual(harness.events, ["generate-1", "review-1", "review-1", "generate-2", "generate-3"]);
+  });
+
+  it("fails before spending when the production pilot reviewer is unavailable", async () => {
+    const harness = await pilotHarness(false, "approve", true);
+    const response = await harness.worker.run(harness.request);
+    assert.equal(response.status, "failed");
+    assert.match(response.error?.message ?? "", /试片审查服务尚未连接/);
+    assert.equal(response.diagnostics?.providerOutcomeKnown, true);
+    assert.equal(response.diagnostics?.meteredAttemptCount, 0);
+    assert.deepEqual(harness.events, []);
+  });
+
+  it("requires an independent pilot for a different generated media route", async () => {
+    const harness = await pilotHarness(true, "approve", false, true);
+    const result = await harness.worker.run(harness.request);
+    assert.equal(result.status, "succeeded");
+    assert.deepEqual(harness.events, ["generate-1", "review-1", "generate-2", "review-2", "generate-3"]);
+  });
+
+  it("tests the most demanding independent director shot before simpler paid shots", async () => {
+    const harness = await pilotHarness(true, "revise");
+    const directorPath = String((harness.request.input as Record<string, unknown>).directorPlanPath);
+    const plan = JSON.parse(await readFile(directorPath, "utf8"));
+    plan.shots[2].temporalBeats = ["[0s-1s] establish", "[1s-3s] move", "[3s-4s] hold"];
+    await writeFile(directorPath, JSON.stringify(plan));
+    const response = await harness.worker.run(harness.request);
+    assert.equal(response.status, "rejected");
+    assert.deepEqual(harness.events, ["generate-1", "review-3"]);
+    assert.equal((response.output?.sourceVisualReview as VisualReviewReport).findings[0]?.scenePosition, 3);
+  });
+
   it("rejects a direct local-card scene before fallback or paid provider calls", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-direct-local-"));
     const scriptPath = path.join(root, "script.json");
@@ -282,10 +390,16 @@ describe("GenerativeAssetWorkerClient", () => {
     request.parameters.provider = "seedream";
 
     const response = await subject.run(request);
+    const ledgerName = (await readdir(path.join(root, ".generation-operations")))[0]!;
+    const ledger = JSON.parse(await readFile(path.join(root, ".generation-operations", ledgerName), "utf8"));
 
     assert.equal(response.status, "succeeded");
     assert.match(generatedPrompt, /^宣纸上的水墨山峰\n/);
     assert.match(generatedPrompt, /不得出现任何可读文字.*乱码.*内部制作术语/);
+    assert.equal(
+      ledger.items[0].parameters.compiledPromptSha256,
+      createHash("sha256").update(generatedPrompt).digest("hex"),
+    );
   });
 
   it("refuses direct paid shots without a current spend authorization", async () => {
@@ -1990,6 +2104,8 @@ describe("GenerativeAssetWorkerClient", () => {
 
     const response = await subject.run(request);
     const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+    const ledgerName = (await readdir(path.join(root, ".generation-operations")))[0]!;
+    const ledger = JSON.parse(await readFile(path.join(root, ".generation-operations", ledgerName), "utf8"));
 
     assert.deepEqual(receivedModels, ["doubao-seedance-2-5-260628"]);
     assert.deepEqual(receivedDurations, [4]);
@@ -2000,6 +2116,10 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(response.diagnostics?.actualCostCny, 2.4);
     assert.equal(response.diagnostics?.actualCostSource, "configured_rate");
     assert.deepEqual(response.diagnostics?.actualModelIds, ["doubao-seedance-2-5-260628"]);
+    assert.equal(ledger.items[0].parameters.durationSeconds, receivedDurations[0]);
+    assert.equal(ledger.items[0].parameters.resolution, receivedResolutions[0]);
+    assert.equal(ledger.items[0].parameters.generateAudio, false);
+    assert.match(ledger.items[0].parameters.executionDigest, /^[a-f0-9]{64}$/);
   });
 
   it("rejects invalid model-specific prices during configuration", () => {
@@ -2059,6 +2179,153 @@ describe("GenerativeAssetWorkerClient", () => {
 
     assert.equal(response.diagnostics?.estimatedCostCny, 2.5);
     assert.equal(response.diagnostics?.actualCostCny, 2.5);
+  });
+
+  it("uses Hailuo 2.3 discrete duration and resolution prices for quotes and execution", () => {
+    const profile = {
+      taskTypes: ["text-to-video" as const],
+      resolutions: ["768P", "1080P"],
+      minDurationSeconds: 6,
+      maxDurationSeconds: 10,
+      allowedDurationsSeconds: [6, 10],
+      supportsAudio: false,
+      estimatedCnyByResolutionAndDuration: {
+        "768P": { "6": 2, "10": 4 },
+        "1080P": { "6": 3.5 },
+      },
+    };
+
+    assert.equal(normalizeVideoGenerationDurationSeconds(4, profile), 6);
+    assert.equal(normalizeVideoGenerationDurationSeconds(7, profile), 10);
+    assert.equal(estimateVideoGenerationCostCny(4, 2, profile), 2);
+    assert.equal(estimateVideoGenerationCostCny(7, 2, profile), 4);
+  });
+
+  it("rejects a selected video model that cannot deliver the required portrait ratio before spending", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-ratio-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 6, visual_strategy: "generated", visual_prompt: "窗边水杯" },
+    ] }));
+    let paidCalls = 0;
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 2,
+        defaultModelId: "MiniMax-Hailuo-2.3",
+        modelPrices: { "MiniMax-Hailuo-2.3": 2 },
+        modelProfiles: {
+          "MiniMax-Hailuo-2.3": {
+            taskTypes: ["text-to-video"], resolutions: ["768P"], aspectRatios: ["16:9"],
+            minDurationSeconds: 6, maxDurationSeconds: 10, allowedDurationsSeconds: [6, 10], supportsAudio: false,
+          },
+        },
+        adapter: {
+          providerId: "hailuo-video-v1",
+          generate: async () => {
+            paidCalls += 1;
+            return { providerId: "hailuo-video-v1", taskId: "must-not-run", videoUrl: "https://example.com/no.mp4" };
+          },
+        },
+      }],
+    });
+
+    const request = workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 2);
+    (request.parameters as Record<string, unknown>).providerId = "hailuo-video-v1";
+    (request.parameters as Record<string, unknown>).modelSelections = { "hailuo-video-v1": "MiniMax-Hailuo-2.3" };
+    await assert.rejects(
+      () => subject.run(request),
+      /does not support.*9:16/i,
+    );
+    assert.equal(paidCalls, 0);
+  });
+
+  it("records probed generated-video metadata instead of declared placeholder dimensions", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-probe-"));
+    const scriptPath = path.join(root, "script.json");
+    const outputDir = path.join(root, "attempt-1");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "雨后街道" },
+    ] }));
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 2,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({
+            providerId: "seedance-video-v1", taskId: "portrait-task", videoUrl: "https://example.com/portrait.mp4",
+          }),
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("portrait-video", { headers: { "content-type": "video/mp4" } }),
+      probeGeneratedMedia: async () => ({ width: 1080, height: 1920, durationSeconds: 5.875 }),
+    });
+
+    const response = await subject.run(workerRequest(scriptPath, outputDir, 1, 2));
+    const plan = JSON.parse(await readFile(String(response.output?.assetPlanPath), "utf8"));
+    assert.deepEqual(
+      { width: plan.scene_assets[0].width, height: plan.scene_assets[0].height, duration: plan.scene_assets[0].duration },
+      { width: 1080, height: 1920, duration: 5.875 },
+    );
+  });
+
+  it("stops before downstream spending when a generated video is shorter than its planned use", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-short-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 3, visual_strategy: "generated", visual_prompt: "雨后街道" },
+    ] }));
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 2,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({
+            providerId: "seedance-video-v1", taskId: "short-task", videoUrl: "https://example.com/short.mp4",
+          }),
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("short-video", { headers: { "content-type": "video/mp4" } }),
+      probeGeneratedMedia: async () => ({ width: 720, height: 1280, durationSeconds: 0.5 }),
+    });
+
+    const response = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 2));
+
+    assert.equal(response.status, "failed");
+    assert.match(response.error?.message ?? "", /0\.5s.*planned 3s/);
+    assert.equal(response.diagnostics?.providerOutcomeKnown, true);
+  });
+
+  it("fails a paid asset before rendering when the downloaded video is not portrait", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-probe-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "雨后街道" },
+    ] }));
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 2,
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({
+            providerId: "seedance-video-v1", taskId: "landscape-task", videoUrl: "https://example.com/landscape.mp4",
+          }),
+        },
+      }],
+      resolveHost: resolvePublicHost,
+      fetch: async () => new Response("landscape-video", { headers: { "content-type": "video/mp4" } }),
+      probeGeneratedMedia: async () => ({ width: 1366, height: 768, durationSeconds: 5.875 }),
+    });
+
+    const response = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 2));
+    assert.equal(response.status, "failed");
+    assert.match(response.error?.message ?? "", /1366x768.*9:16/);
+    assert.equal(response.diagnostics?.providerOutcomeKnown, true);
   });
 
   it("clamps paid requests to the selected model runtime boundary", async () => {
@@ -3618,6 +3885,74 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.match(jobs.jobs[0].error, /5-byte download limit/);
   });
 });
+
+async function pilotHarness(routed: boolean, initialVerdict: "approve" | "revise" | "unavailable", unavailable = false, mixed = false) {
+  const root = await mkdtemp(path.join(tmpdir(), "vf-pilot-"));
+  const scriptPath = path.join(root, "script.json");
+  const directorPlanPath = path.join(root, "director.json");
+  const events: string[] = [];
+  let verdict = initialVerdict;
+  const scenes = [1, 2, 3].map((position) => ({
+    position, duration: 4, visual_strategy: "generated", visual_prompt: `scene ${position}`,
+  }));
+  await writeFile(scriptPath, JSON.stringify({ scenes }));
+  await writeFile(directorPlanPath, JSON.stringify({ shots: scenes.map((scene) => ({
+    scenePosition: scene.position,
+    preferredProviderId: mixed && scene.position > 1 ? "seedream-image-v1" : "seedance-video-v1",
+    deliveryType: mixed && scene.position > 1 ? "generated_image" : "generated_video",
+    alternativeProviderIds: [], query: scene.visual_prompt, generationPrompt: scene.visual_prompt,
+  })) }));
+  const agent: VisualReviewAgent = {
+    id: "reviewer", modelId: "test-review-model",
+    review: async (input) => {
+      const position = input.scenePositions![0]!;
+      events.push(`review-${position}`);
+      const plan = JSON.parse(await readFile(input.assetPlanPath!, "utf8"));
+      assert.ok(plan.scene_assets.find((asset: { scene_position: number }) => asset.scene_position === position).local_path);
+      if (verdict === "unavailable") throw new Error("review service unavailable");
+      return {
+        version: "video-factory/visual-review-v1", summary: "试片结果",
+        scores: { composition: 94, continuity: 94, pacing: 94, legibility: 94, safety: 94 },
+        confidence: 0.95, recommendation: verdict,
+        findings: verdict === "approve" ? [] : [{
+          timecodeMs: 0, startTimecodeMs: 0, endTimecodeMs: 0,
+          scenePosition: position, targetNodeId: "assets", evidenceStatus: "failed",
+          evidenceFrameSha256: null, nextAction: "rework_asset", category: "legibility", severity: "critical",
+          description: "生成了水印", suggestion: "移除画面水印后重做此镜头",
+        }],
+      };
+    },
+  };
+  let count = 0;
+  const worker = new GenerativeAssetWorkerClient({
+    fallback: new LocalAssetWorker(),
+    pilotReviewer: new SourceAssetPilotReviewer(unavailable ? [] : [agent]),
+    adapters: [{ estimatedCnyPerClip: 2, adapter: {
+      providerId: "seedance-video-v1",
+      generate: async () => {
+        count += 1;
+        events.push(`generate-${count}`);
+        return { providerId: "seedance-video-v1", taskId: `task-${count}`, videoUrl: `https://example.com/clip-${count}.mp4` };
+      },
+    } }],
+    imageAdapters: [{ estimatedCnyPerImage: 2, adapter: {
+      providerId: "seedream-image-v1",
+      generate: async () => {
+        count += 1;
+        events.push(`generate-${count}`);
+        return { providerId: "seedream-image-v1", taskId: `task-${count}`, imageUrl: `https://example.com/clip-${count}.png` };
+      },
+    } }],
+    resolveHost: resolvePublicHost,
+    fetch: async (url) => new Response("media-bytes", { headers: { "content-type": String(url).endsWith(".png") ? "image/png" : "video/mp4" } }),
+  });
+  const request = workerRequest(scriptPath, path.join(root, "attempt-1"), 3, 6);
+  if (routed) {
+    Object.assign(request.input, { directorPlanPath });
+    Object.assign(request.parameters, { providerId: "ai-shot-router-v1", provider: "ai-router" });
+  }
+  return { root, worker, request, events, setVerdict: (value: typeof verdict) => { verdict = value; } };
+}
 
 class LocalAssetWorker {
   readonly calls: Array<Record<string, unknown>> = [];

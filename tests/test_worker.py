@@ -442,11 +442,12 @@ class WorkerContractTest(unittest.TestCase):
             ranking_path = root / "ranking.json"
             ranking_path.write_text(json.dumps({
                 "version": "video-factory/asset-ranking-v1",
+                "source": "model",
                 "scenes": [{
                     "scenePosition": 1,
                     "candidates": [
-                        {"provider": "pexels", "assetId": "candidate-2", "rank": 1},
-                        {"provider": "pexels", "assetId": "candidate-1", "rank": 2},
+                        {"provider": "pexels", "assetId": "candidate-2", "rank": 1, "semanticScore": 88, "locked": False},
+                        {"provider": "pexels", "assetId": "candidate-1", "rank": 2, "semanticScore": 64, "locked": False},
                     ],
                 }],
             }), encoding="utf-8")

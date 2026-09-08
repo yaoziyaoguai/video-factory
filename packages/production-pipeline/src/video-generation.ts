@@ -199,6 +199,11 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
     request: VideoGenerationRequest,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
+    if (request.ratio !== "16:9") {
+      throw new Error(
+        `MiniMax v1 model '${model}' cannot guarantee the requested ${request.ratio} aspect ratio; use a MiniMax H3 v2 model.`,
+      );
+    }
     const submitted = await requestJson(this.fetch, `${this.apiRoot}/v1/video_generation`, {
       method: "POST",
       headers: authHeaders(this.options.apiKey),

@@ -6,7 +6,6 @@ import { BROKER_TASK_KINDS } from "../src/task-definitions.js";
 import { ZaiCodePlanExecutor } from "../src/zai-code-plan-executor.js";
 
 const API_KEY = "test-only-zai-key";
-const ZAI_CHAT_COMPLETIONS_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 const ZAI_CODING_PLAN_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
 
 function scriptDraftTask() {
@@ -140,8 +139,15 @@ function validReport(): Record<string, unknown> {
     },
     findings: [{
       timecodeMs: 0,
+      startTimecodeMs: 0,
+      endTimecodeMs: 0,
       scenePosition: 1,
       targetNodeId: "assets",
+      evidenceStatus: "failed",
+      evidenceFrameSha256: createHash("sha256")
+        .update(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]))
+        .digest("hex"),
+      nextAction: "rework_asset",
       category: "legibility",
       severity: "warning",
       description: "浅色字幕与背景对比不足。",
@@ -200,7 +206,7 @@ describe("ZaiCodePlanExecutor", () => {
     }
   });
 
-  it("sends bounded frames to the official BigModel Chat Completion endpoint and validates the report", async () => {
+  it("sends bounded frames to the Coding Plan Chat Completion endpoint and validates the report", async () => {
     let capturedUrl = "";
     let capturedInit: RequestInit | undefined;
     const fetchFn: typeof fetch = async (input, init) => {
@@ -218,7 +224,7 @@ describe("ZaiCodePlanExecutor", () => {
 
     const result = await executor.runTask(visualReviewTask());
 
-    assert.equal(capturedUrl, "https://open.bigmodel.cn/api/paas/v4/chat/completions");
+    assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
     assert.equal(new Headers(capturedInit?.headers).get("authorization"), `Bearer ${API_KEY}`);
     const body = JSON.parse(String(capturedInit?.body)) as Record<string, unknown>;
     assert.equal(body.model, "glm-5.3-flash");
@@ -286,6 +292,7 @@ describe("ZaiCodePlanExecutor", () => {
 
   it("sends script drafting to the ZAI Coding Plan endpoint with glm-5.3", async () => {
     let capturedUrl = "";
+    let capturedInit: RequestInit | undefined;
     let capturedBody: Record<string, unknown> | undefined;
     let clock = 2_000;
     const output = validScriptDraft();
@@ -294,19 +301,31 @@ describe("ZaiCodePlanExecutor", () => {
       now: () => clock,
       fetchFn: async (input, init) => {
         capturedUrl = String(input);
+        capturedInit = init;
         capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         clock = 2_041;
         return new Response(JSON.stringify({
-          choices: [{ message: { content: JSON.stringify(output) } }],
-        }), { status: 200 });
+          choices: [{ finish_reason: "stop", message: { content: JSON.stringify(output) } }],
+          usage: {
+            prompt_tokens: 1_200,
+            completion_tokens: 3_400,
+            total_tokens: 4_600,
+            completion_tokens_details: { reasoning_tokens: 2_700 },
+          },
+        }), { status: 200, headers: { "x-request-id": "zai-success-request" } });
       },
     });
 
     const result = await executor.runTask(scriptDraftTask());
 
     assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
+    assert.equal(
+      ((capturedInit as RequestInit & { dispatcher?: { constructor?: { name?: string } } })?.dispatcher)?.constructor?.name,
+      "Agent",
+    );
     assert.equal(capturedBody?.model, "glm-5.3");
-    assert.equal(capturedBody?.reasoning_effort, "high");
+    assert.equal(capturedBody?.reasoning_effort, "max");
+    assert.equal(capturedBody?.max_tokens, 65_536);
     assert.equal(typeof (capturedBody?.messages as Array<{ content: unknown }>)[0]?.content, "string");
     assert.deepEqual(JSON.parse(result.output), output);
     assert.equal(result.trace?.providerId, "zai-bigmodel-api");
@@ -316,6 +335,112 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(result.trace?.firstOutputEventMs, 41);
     assert.equal(result.trace?.toolMs, 0);
     assert.equal(result.trace?.validationMs, 0);
+    assert.equal(result.trace?.finishReason, "stop");
+    assert.equal(result.trace?.promptTokens, 1_200);
+    assert.equal(result.trace?.completionTokens, 3_400);
+    assert.equal(result.trace?.totalTokens, 4_600);
+    assert.equal(result.trace?.reasoningTokens, 2_700);
+    assert.equal(result.trace?.requestIdHash, createHash("sha256").update("zai-success-request").digest("hex"));
+  });
+
+  it("classifies finish_reason length as truncated no-output before JSON parsing", async () => {
+    const requestId = "zai-truncated-request";
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      now: () => 0,
+      fetchFn: async () => new Response(JSON.stringify({
+        choices: [{ finish_reason: "length", message: { content: '{"viewerPromise":"unfinished' } }],
+        usage: {
+          prompt_tokens: 2_000,
+          completion_tokens: 65_536,
+          total_tokens: 67_536,
+          completion_tokens_details: { reasoning_tokens: 61_000 },
+        },
+      }), { status: 200, headers: { "x-request-id": requestId } }),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(scriptDraftTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.match(error.message, /output limit/);
+        assert.equal(error.failureKind, "model_provider_no_output");
+        assert.deepEqual(error.details, {
+          category: "invalid_output",
+          reasonCode: "output_truncated",
+          providerId: "zai-bigmodel-api",
+          modelId: "glm-5.3",
+          providerWaitMs: 0,
+          requestIdHash: createHash("sha256").update(requestId).digest("hex"),
+          finishReason: "length",
+          promptTokens: 2_000,
+          completionTokens: 65_536,
+          totalTokens: 67_536,
+          reasoningTokens: 61_000,
+        });
+        return true;
+      },
+    );
+  });
+
+  it("repairs one JSON contract failure without weakening the original visual-review task", async () => {
+    const invalid = validReport();
+    delete (invalid as Partial<typeof invalid>).version;
+    let calls = 0;
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async (_input, init) => {
+        calls += 1;
+        requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        const output = calls === 1 ? invalid : validReport();
+        return new Response(JSON.stringify({
+          choices: [{ finish_reason: "stop", message: { content: JSON.stringify(output) } }],
+        }), { status: 200 });
+      },
+    });
+
+    const result = await executor.runTask(visualReviewTask());
+
+    assert.equal(calls, 2);
+    assert.deepEqual(JSON.parse(result.output), validReport());
+    assert.equal((result.trace as typeof result.trace & { retryCount?: number })?.retryCount, 1);
+    const retryMessages = requestBodies[1]?.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    assert.match(String(retryMessages[0]?.content[0]?.text), /output\.version is required/);
+    assert.match(String(retryMessages[0]?.content[0]?.text), /不得改变 scores、confidence、recommendation/);
+    assert.doesNotMatch(String(retryMessages[0]?.content[0]?.text), /允许按确定性合同调整/);
+    assert.equal(retryMessages[0]?.content.filter((item) => item.type === "image_url").length, 1);
+    assert.equal(requestBodies[0]?.temperature, 1);
+    assert.equal(requestBodies[1]?.temperature, 0.6);
+  });
+
+  it("rejects a visual format repair that changes evidence semantics", async () => {
+    const invalid = validReport();
+    delete (invalid as Partial<typeof invalid>).version;
+    const changed = validReport();
+    changed.recommendation = "approve";
+    changed.findings = [];
+    let calls = 0;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(calls === 1 ? invalid : changed) } }],
+        }), { status: 200 });
+      },
+    });
+
+    await assert.rejects(
+      () => executor.runTask(visualReviewTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.details?.category, "invalid_output");
+        assert.equal(error.details?.reasonCode, "repair_semantic_drift");
+        return true;
+      },
+    );
+    assert.equal(calls, 2);
   });
 
   it("sends director planning to the ZAI Coding Plan endpoint with glm-5.3", async () => {
@@ -382,7 +507,7 @@ describe("ZaiCodePlanExecutor", () => {
 
     const result = await executor.runTask(roleAuditTask(true));
 
-    assert.equal(capturedUrl, ZAI_CHAT_COMPLETIONS_URL);
+    assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
     assert.equal(capturedBody?.model, "glm-5.3-flash");
     const content = (capturedBody?.messages as Array<{ content: unknown }>)[0]?.content;
     assert.ok(Array.isArray(content));
@@ -499,6 +624,41 @@ describe("ZaiCodePlanExecutor", () => {
     );
   });
 
+  it("classifies the underlying Undici response-headers deadline without exposing its message", async () => {
+    let clock = 5_000;
+    const privateMessage = `headers timeout leaked ${API_KEY}`;
+    const providerError = Object.assign(new Error(privateMessage), {
+      code: "UND_ERR_HEADERS_TIMEOUT",
+    });
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      now: () => clock,
+      fetchFn: async () => {
+        clock = 305_051;
+        throw new TypeError("fetch failed", { cause: providerError });
+      },
+    });
+
+    await assert.rejects(
+      () => executor.runTask(scriptDraftTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.transient, true);
+        assert.match(error.message, /response headers timed out/);
+        assert.deepEqual(error.details, {
+          category: "timeout",
+          reasonCode: "response_headers_timeout",
+          providerId: "zai-bigmodel-api",
+          modelId: "glm-5.3",
+          providerWaitMs: 300_051,
+        });
+        assert.doesNotMatch(error.message, new RegExp(API_KEY));
+        assert.doesNotMatch(JSON.stringify(error.details), /headers timeout leaked/);
+        return true;
+      },
+    );
+  });
+
   it("classifies an explicit service-unavailable error code as transient", async () => {
     const executor = new ZaiCodePlanExecutor({
       env: { ZAI_BIGMODEL_API_KEY: API_KEY },
@@ -601,7 +761,7 @@ describe("ZaiCodePlanExecutor", () => {
         assert.ok(error instanceof CodexExecutorError);
         assert.match(error.message, /does not match visual-review schema/);
         assert.equal(error.details?.category, "invalid_output");
-        assert.equal(error.details?.reasonCode, "output_contract");
+        assert.equal(error.details?.reasonCode, "task_schema");
         return true;
       },
     );
@@ -609,8 +769,15 @@ describe("ZaiCodePlanExecutor", () => {
     const lateFinding = validReport();
     lateFinding.findings = [{
       timecodeMs: 10_001,
+      startTimecodeMs: 10_001,
+      endTimecodeMs: 10_001,
       scenePosition: 1,
       targetNodeId: "assets",
+      evidenceStatus: "failed",
+      evidenceFrameSha256: createHash("sha256")
+        .update(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]))
+        .digest("hex"),
+      nextAction: "rework_asset",
       category: "other",
       severity: "warning",
       description: "时间码超界。",

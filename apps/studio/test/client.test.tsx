@@ -30,8 +30,8 @@ const providers: StudioProvider[] = [
   { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" },
   { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "local" },
   { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
-  { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑卡片", available: true, kind: "local" },
-  { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external", status: "ready" },
+  { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑卡片", available: true, kind: "local", deliveryTypes: ["editorial_card"] },
+  { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external", status: "ready", deliveryTypes: ["stock_video", "stock_image"] },
   { id: "macos-say-v1", capability: "voice.synthesize", label: "macOS 系统配音", available: true, kind: "local" },
   { id: "python-ffmpeg-v1", capability: "video.render", label: "FFmpeg 竖屏渲染", available: true, kind: "local" },
   { id: "python-technical-review-v1", capability: "quality.review", label: "本地技术审片", available: true, kind: "local" },
@@ -468,11 +468,20 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
+    const creativeSummary = screen.getByRole("region", { name: "创作目标摘要" });
+    expect(within(creativeSummary).getByText("想核验热点的普通观众")).toBeInTheDocument();
+    expect(within(creativeSummary).getByText("先比较标题证据，不猜传播链")).toBeInTheDocument();
+    expect(within(creativeSummary).getByText("两条真实标题的措辞差异可以直接并列核对。")).toBeInTheDocument();
+    expect(within(creativeSummary).getByText("围绕“同一事件为什么有不同确定性”给出明确答案或可执行判断")).toBeInTheDocument();
+
     await user.click(await screen.findByRole("button", { name: "开始制作" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       visualProof: "两条真实标题的措辞差异可以直接并列核对。",
-      visualPlan,
+      visualPlan: {
+        strategy: expect.stringMatching(/不假设存在未提供的创作者拍摄或屏幕录制/),
+        beats: [{ ...visualPlan.beats[0], source: "stock" }],
+      },
     }));
   });
 
@@ -1481,6 +1490,69 @@ describe("Studio client", () => {
     expect(screen.queryByText("参考节奏.mp4")).not.toBeInTheDocument();
   });
 
+  it("shows an inherited rework reference and lets the creator remove it without deleting a source artifact", async () => {
+    const user = userEvent.setup();
+    const remove = vi.spyOn(studioApi, "deleteReferenceVideo").mockResolvedValue(undefined);
+    remove.mockClear();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const providersWithReference: StudioProvider[] = [...providers, {
+      id: "codex-screenwriter-v1",
+      capability: "script.draft",
+      label: "Codex 编剧",
+      available: true,
+      kind: "external",
+      billing: "subscription",
+    }, {
+      id: "codex-reference-grammar-v1",
+      capability: "reference.grammar",
+      label: "Codex 参考视频分析",
+      available: true,
+      kind: "external",
+      billing: "subscription",
+    }];
+    render(<NewRunDialog
+      open
+      providers={providersWithReference}
+      initialValues={{
+        title: "沿用参考语法的返工视频",
+        angle: "只调整审片指出的镜头",
+        audience: "短视频创作者",
+        nicheSlug: "reference-rework",
+        durationSeconds: 24,
+        platform: "douyin",
+        reviewMode: "manual",
+        providers: { script: "codex-screenwriter-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
+        workflowFeatures: { assetSemanticRank: false, referenceGrammar: true },
+        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        economics: { recipeId: "free-stock", allowMeteredProviders: false },
+        voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+        rework: {
+          sourceRunId: "run-reference-source",
+          sourceRunRevision: 7,
+          nodeInstructions: { script: "保留原脚本。", visualDirection: "调整问题镜头。", assets: "替换问题画面。" },
+          findings: [],
+        },
+      }}
+      inheritedReferenceVideo={{ label: "参考节奏.mp4", mimeType: "video/mp4", sizeBytes: 1_048_576 }}
+      inheritedNodeIds={["brief", "reference-grammar"]}
+      onClose={() => undefined}
+      onSubmit={onSubmit}
+    />);
+
+    await user.click(screen.getByRole("button", { name: /查看继承设置/ }));
+    expect(await screen.findByText("参考节奏.mp4")).toBeInTheDocument();
+    expect(screen.getByText(/沿用上一版参考视频/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "不再沿用参考视频" }));
+
+    expect(remove).not.toHaveBeenCalled();
+    expect(screen.queryByText("参考节奏.mp4")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false },
+    }));
+    expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("referenceVideo");
+  });
+
   it("clears the file picker after a failed upload so the same file can be retried", async () => {
     const user = userEvent.setup();
     const upload = vi.spyOn(studioApi, "uploadReferenceVideo")
@@ -1600,7 +1672,7 @@ describe("Studio client", () => {
     expect(screen.getByLabelText("费用方式")).toHaveTextContent(/按实际方案报价.*逐项人工确认/);
   });
 
-  it("treats GLM Flash visual review as Code Plan without a cash quote", async () => {
+  it("treats GLM Flash visual review as Code Plan without a cash quote and explains final dual review", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const providersWithGlmReview: StudioProvider[] = [
       ...providers,
@@ -1613,12 +1685,22 @@ describe("Studio client", () => {
         billing: "subscription",
         approvalPolicy: "none",
       },
+      {
+        id: "codex-visual-review-v1",
+        capability: "quality.review.visual",
+        label: "Codex 视觉审片",
+        available: true,
+        kind: "external",
+        billing: "subscription",
+        approvalPolicy: "none",
+      },
     ];
     render(<NewRunDialog open providers={providersWithGlmReview} onClose={() => undefined} onSubmit={onSubmit} />);
 
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
     expect(screen.queryByText("1 次付费审片")).not.toBeInTheDocument();
     expect(screen.getByText(/视觉审片使用订阅额度/)).toBeInTheDocument();
+    expect(screen.getByText(/负责中途预检；最终成片由 GLM 与 Codex 对同一组抽帧分别审查，不上传音轨/)).toBeInTheDocument();
     expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
     const user = userEvent.setup();
     await user.type(screen.getByLabelText("视频标题"), "按次审片预算");
@@ -3327,14 +3409,15 @@ describe("Studio client", () => {
       artifacts: [
         ...runDetail.artifacts,
         { id: "asset-plan-human", kind: "asset_plan", producerNodeId: "assets", providerId: "human-editor", createdAt: "2026-08-21T10:00:40.000Z", contentType: "application/json", contentUrl: "/api/asset-plan" },
-        { id: "scene-video", kind: "media_asset", producerNodeId: "assets", providerId: "hailuo-video-v1", createdAt: "2026-08-21T10:00:20.000Z", contentType: "video/mp4", contentUrl: "/api/scene-video" },
+        { id: "scene-video", kind: "media_asset", producerNodeId: "assets", providerId: "hailuo-video-v1", scenePosition: 6, createdAt: "2026-08-21T10:00:20.000Z", contentType: "video/mp4", contentUrl: "/api/scene-video" },
       ],
     };
 
     render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
     await user.click(screen.getByText("画面").closest("summary")!);
 
-    expect(document.querySelector('video[aria-label="素材 1 画面预览"]')).toHaveAttribute("src", "/api/scene-video");
+    expect(document.querySelector('video[aria-label="镜头 6 画面预览"]')).toHaveAttribute("src", "/api/scene-video");
+    expect(screen.getByText("镜头 6")).toBeInTheDocument();
   });
 
   it("puts the current paid node and its confirmation action above unfinished output", async () => {
@@ -3697,6 +3780,26 @@ describe("Studio client", () => {
     expect(screen.getByRole("button", { name: "重试视觉审片" })).toBeInTheDocument();
   });
 
+  it("keeps the creative goal visible while reviewing the finished video", () => {
+    render(<RunWorkbench
+      run={{
+        ...runDetail,
+        creativeSummary: {
+          audience: "想核验热点的普通观众",
+          openingPromise: "先比较标题证据，不猜传播链",
+          requiredVisual: "两条真实标题的措辞差异可以直接并列核对。",
+          payoff: "让观众能区分传闻和已证实信息",
+        },
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+    />);
+
+    const creativeSummary = screen.getByRole("region", { name: "创作目标摘要" });
+    expect(within(creativeSummary).getByText("想核验热点的普通观众")).toBeInTheDocument();
+    expect(within(creativeSummary).getByText("让观众能区分传闻和已证实信息")).toBeInTheDocument();
+  });
+
   it("shows a source-asset review failure reason on the main failure panel", () => {
     const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
     const reason = "源素材视觉预检服务暂时不可用。已保留生成结果，请切换视觉审片模型。";
@@ -3762,6 +3865,38 @@ describe("Studio client", () => {
     expect(screen.getByText("请调整导演方案或画面服务，重新报价并确认后再生成。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "调整方案后重新制作" })).toBeInTheDocument();
     expect(screen.queryByText(technicalDetail)).not.toBeInTheDocument();
+  });
+
+  it("shows an in-node pilot rejection as a safe visual stop", () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    const retry = vi.fn(async () => undefined);
+    render(<RunWorkbench
+      run={{
+        ...withoutIntervention,
+        status: "rejected",
+        failure: {
+          nodeId: "assets",
+          nodeLabel: "画面",
+          category: "node_failure",
+          summary: "画面审查已完成并发现问题，已保留素材与修改建议",
+          impact: "试片和前序方案已保留；后续付费画面尚未生成。",
+          retryable: true,
+          recoveryActions: ["查看具体镜头的问题与修改建议", "先调整导演方案或替换已有素材；只有确需新生成时才重新报价"],
+          savedNodeCount: 5,
+          technicalDetail: "镜头 2 试片未通过，已停止后续付费生成。人物动作与旁白相反。",
+        },
+        nodes: withoutIntervention.nodes.map((node, index) => index === 0 ? { ...node, id: "assets", label: "画面", status: "rejected" } : node),
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onRetryFailedNode={retry}
+      onRestart={() => undefined}
+    />);
+
+    expect(screen.getByRole("heading", { name: "画面预检未通过" })).toBeInTheDocument();
+    expect(screen.getByText("已保留的内容")).toBeInTheDocument();
+    expect(screen.getByText("先调整导演方案或替换已有素材；只有确需新生成时才重新报价")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新检查已有试片" })).toBeInTheDocument();
   });
 
   it("shows an explicit regenerate action instead of pretending a stale run is active", async () => {
@@ -4311,6 +4446,8 @@ describe("Studio client", () => {
 
     expect(await screen.findByText("预计 ¥2.40，最高 ¥2.40 · 最多 1 次")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "检查并确认" }));
+    expect(screen.getByRole("dialog", { name: "确认本次费用" })).toHaveTextContent("试片会直接用于成片，只计费一次");
+    expect(screen.getByRole("dialog", { name: "确认本次费用" })).toHaveTextContent("检查未通过就停止后续付费生成");
     await userEvent.click(screen.getByRole("button", { name: "确认并执行" }));
     expect(authorize).toHaveBeenCalledWith("run-1", "assets", {
       spendPlanId: "quote-lower",

@@ -995,17 +995,20 @@ export class WorkflowRunner {
     definition: WorkflowDefinition,
     previousRun: WorkflowRun<TInitialInput>,
     nodeId: string,
-    options: { resumeUncertainOperation?: boolean } = {},
+    options: { resumeUncertainOperation?: boolean; allowRejectedNode?: boolean } = {},
   ): Promise<WorkflowRun<TInitialInput>> {
     validateWorkflowDefinition(definition);
     if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
       throw new Error("Workflow definition does not match the persisted run.");
     }
-    if (previousRun.status !== "failed") {
+    const retryingRejectedNode = options.allowRejectedNode === true && previousRun.status === "rejected";
+    if (previousRun.status !== "failed" && !retryingRejectedNode) {
       throw new Error(`Run '${previousRun.id}' is not failed.`);
     }
     const failedNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId);
-    if (!failedNode || failedNode.status !== "failed" || !definition.nodes.some((node) => node.id === nodeId)) {
+    const retryableNodeStatus = failedNode?.status === "failed"
+      || retryingRejectedNode && failedNode?.status === "rejected";
+    if (!failedNode || !retryableNodeStatus || !definition.nodes.some((node) => node.id === nodeId)) {
       throw new Error(`Node '${nodeId}' is not the failed node.`);
     }
     if (options.resumeUncertainOperation && !(

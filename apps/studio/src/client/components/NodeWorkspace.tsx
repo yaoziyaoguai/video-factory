@@ -112,7 +112,9 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const fallbackHeading = modelBackupUsed
     ? receipt?.status === "succeeded"
       ? "首选模型暂时不可用，替补模型已完成"
-      : "已尝试替补模型，但本步骤仍未完成"
+      : receipt?.status === "rejected" && ["asset-source-review", "visual-review"].includes(node.id)
+        ? "替补模型已完成审片，画面需要修改"
+        : "已尝试替补模型，但本步骤仍未完成"
     : "智能复核未完成，已使用基础方案";
   const capability = useMemo(() => fallbackReason
     ? `${fallbackHeading} · ${fallbackReason}`
@@ -370,9 +372,9 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             <div>
               {visualArtifacts.map((artifact, index) => <figure key={artifact.id}>
                 {artifact.contentType?.startsWith("video/")
-                  ? <video aria-label={`素材 ${index + 1} 画面预览`} src={artifact.contentUrl} controls playsInline preload="metadata" />
-                  : <img alt={`素材 ${index + 1} 画面预览`} src={artifact.contentUrl} loading="lazy" />}
-                <figcaption><span>素材 {index + 1}</span><small>{providerLabel(artifact.providerId) ?? "素材来源未记录"}</small></figcaption>
+                  ? <video aria-label={`${artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`} 画面预览`} src={artifact.contentUrl} controls playsInline preload="metadata" />
+                  : <img alt={`${artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`} 画面预览`} src={artifact.contentUrl} loading="lazy" />}
+                <figcaption><span>{artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`}</span><small>{providerLabel(artifact.providerId) ?? "素材来源未记录"}</small></figcaption>
               </figure>)}
             </div>
           </div> : null}
@@ -388,6 +390,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <section ref={spendDialogRef} role="dialog" aria-modal="true" aria-label="确认本次费用" tabIndex={-1}>
           <CircleDollarSign aria-hidden="true" size={24} />
           <h3>确认执行 {node.label}</h3>
+          {node.id === "assets" ? <p>每种生成路线先检查一镜，通过后继续制作。试片会直接用于成片，只计费一次；检查未通过就停止后续付费生成。全部素材还会在配音和剪辑前复查。</p> : null}
           <p>这次授权只对下面已经审阅的输入版本、{node.spendPlan.items?.length
             ? `报价中列出的 ${node.spendPlan.items.length} 个画面任务`
             : providerModelLabel(providers.find((provider) => provider.id === node.spendPlan?.providerId), node.spendPlan.modelId)}和本次最高授权额 ¥{node.spendPlan.maxCostCny.toFixed(2)} 有效。任何内容、模型、报价或重试次数变化都会让授权自动失效。</p>
@@ -984,7 +987,7 @@ function elapsedReceiptMs(startedAt: string, finishedAt: string): number | undef
 }
 
 function formatDuration(milliseconds: number): string {
-  if (milliseconds < 1_000) return `${milliseconds} 毫秒`;
+  if (milliseconds < 1_000) return "不到 1 秒";
   if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 1 : 0)} 秒`;
   const minutes = Math.floor(milliseconds / 60_000);
   const seconds = Math.round((milliseconds % 60_000) / 1_000);

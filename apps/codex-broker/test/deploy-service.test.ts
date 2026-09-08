@@ -402,7 +402,9 @@ describe("ZAI systemd service sample", () => {
 
     assert.match(service, /^User=vf-zai-codex$/m);
     assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_PROFILE=zai$/m);
-    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_EFFORT=high$/m);
+    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_EFFORT=max$/m);
+    // ZAI unit 显式配置 1200s（20 分钟），与 broker 默认及本地开发脚本一致，避免 max 推理在旧 deadline 被截断。
+    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=1200000$/m);
     assert.match(service, /^EnvironmentFile=\/etc\/video-factory\/zai-codex-broker\.env$/m);
     assert.match(service, /stat -c %%U:%%G \/etc\/video-factory\/zai-codex-broker\.env/);
     assert.match(service, /stat -c %%a \/etc\/video-factory\/zai-codex-broker\.env/);
@@ -439,6 +441,11 @@ describe("ZAI systemd service sample", () => {
   it("keeps the local BigModel key in a broker-only ignored environment file", async () => {
     const script = await readFile(path.join(repositoryRoot, "scripts", "studio-dev-with-codex.sh"), "utf8");
 
+    assert.match(script, /codex_process_home=\$\{VIDEO_FACTORY_CODEX_LOCAL_PROCESS_HOME:-"\$runtime_root\/home"\}/);
+    assert.match(script, /codex_home=\$\{VIDEO_FACTORY_CODEX_LOCAL_HOME:-"\$runtime_root\/codex-home"\}/);
+    assert.match(script, /codex_auth_file=\$\{VIDEO_FACTORY_CODEX_AUTH_FILE:-"\$source_codex_home\/auth\.json"\}/);
+    assert.match(script, /ln -sfn "\$codex_auth_file" "\$codex_home\/auth\.json"/);
+    assert.match(script, /HOME="\$codex_process_home" \\\nCODEX_HOME="\$codex_home" \\\nVIDEO_FACTORY_CODEX_SOCKET_PATH/);
     assert.match(script, /\.local\/secrets\/zai-bigmodel\.env/);
     assert.match(script, /zai_workspace_root=\$\{VIDEO_FACTORY_ZAI_CODEX_WORKSPACE_ROOT:-"\$zai_runtime_root\/tasks"\}/);
     assert.match(script, /mkdir -p "\$zai_runtime_root" "\$zai_workspace_root"/);
@@ -447,14 +454,14 @@ describe("ZAI systemd service sample", () => {
     assert.doesNotMatch(script, /node --env-file="\$repository_root\/\.env"/);
   });
 
-  it("pins the official BigModel visual and Coding Plan endpoints", async () => {
+  it("pins every BigModel request to the Coding Plan endpoint", async () => {
     const executor = await readFile(
       path.join(brokerRoot, "src", "zai-code-plan-executor.ts"),
       "utf8",
     );
 
-    assert.match(executor, /https:\/\/open\.bigmodel\.cn\/api\/paas\/v4\/chat\/completions/);
     assert.match(executor, /https:\/\/open\.bigmodel\.cn\/api\/coding\/paas\/v4\/chat\/completions/);
+    assert.doesNotMatch(executor, /open\.bigmodel\.cn\/api\/paas\/v4\/chat\/completions/);
     assert.match(executor, /model: modelId/);
     assert.match(executor, /type: "image_url"/);
     assert.match(executor, /response_format: \{ type: "json_object" \}/);
@@ -526,8 +533,8 @@ describe("production deployment transaction", () => {
       readFile(path.join(repositoryRoot, "apps", "studio", "src", "server", "main.ts"), "utf8"),
     ]);
 
-    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=600000$/m);
-    assert.match(studioMain, /timeoutMs: 1_260_000/);
+    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=1200000$/m);
+    assert.match(studioMain, /timeoutMs: 2_460_000/);
     assert.match(dockerfile, /^COPY apps\/codex-broker\/deploy apps\/codex-broker\/deploy$/m);
     assert.match(deploy, /Candidate image does not contain a complete broker release/);
     assert.match(deploy, /vf-zai-codex-broker\.service/);
@@ -628,7 +635,7 @@ exit 42
 
     assert.match(compose, /SEEDANCE_MODEL_ESTIMATES_JSON: \$\{SEEDANCE_MODEL_ESTIMATES_JSON:-\}/);
     assert.match(compose, /SEEDANCE_MODEL_PROFILES_JSON: \$\{SEEDANCE_MODEL_PROFILES_JSON:-\}/);
-    assert.match(compose, /WAN_MODEL_ESTIMATES_JSON: \$\{WAN_MODEL_ESTIMATES_JSON:-\}/);
+    assert.doesNotMatch(compose, /MINIMAX_ESTIMATED_CNY_PER_CLIP|WAN_ESTIMATED_CNY_PER_CLIP|WAN_MODEL_ESTIMATES_JSON/);
   });
 
   it("installs a physical shared Node runtime instead of linking into a private home", async () => {
@@ -649,7 +656,7 @@ exit 42
     );
 
     assert.match(script, /default_codex_model=gpt-5\.6-sol/);
-    assert.match(script, /default_codex_effort=high/);
+    assert.match(script, /default_codex_effort=xhigh/);
     assert.match(script, /default_codex_audit_effort=xhigh/);
     assert.match(script, /default_codex_audit_model=gpt-5\.6-sol/);
     assert.match(script, /VIDEO_FACTORY_CODEX_MODEL:-\$existing_codex_model/);
@@ -754,8 +761,8 @@ exit 42
 
     assert.match(probe, /--env-file=\/etc\/video-factory\/zai-codex-broker\.env/);
     assert.match(probe, /method: "GET"/);
-    assert.match(probe, /api\/paas\/v4\/models/);
     assert.match(probe, /api\/coding\/paas\/v4\/models/);
+    assert.doesNotMatch(probe, /open\.bigmodel\.cn\/api\/paas\/v4\/models/);
     assert.doesNotMatch(probe, /method: "POST"|messages:|body:\s*(?:JSON|stringify|["'`])/);
     assert.match(probe, /response\.status !== 200/);
   });

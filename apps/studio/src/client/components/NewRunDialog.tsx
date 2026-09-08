@@ -20,6 +20,7 @@ import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, Stud
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { applyTemplateVoiceRecommendation } from "../../shared/template-voice-recommendation.js";
+import { resolveExecutableVisualPlan } from "../../shared/visual-plan.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { VoiceStudio } from "./VoiceStudio.js";
 import { studioApi } from "../api.js";
@@ -33,6 +34,7 @@ interface NewRunDialogProps {
   initialValues?: Partial<StudioProductionInput>;
   inheritedNodeIds?: StudioReworkDraft["inheritedNodeIds"];
   requiredAffectedScenePositions?: StudioReworkDraft["requiredAffectedScenePositions"];
+  inheritedReferenceVideo?: StudioReworkDraft["inheritedReferenceVideo"];
   creatorSettings?: StudioCreatorSettings;
   settingsError?: string;
   onRetrySettings?: () => void;
@@ -61,6 +63,10 @@ interface InheritedSelectionIssue {
   reason: string;
   action: string;
 }
+
+type ReferenceVideoSelection = StudioReferenceVideo | (NonNullable<StudioReworkDraft["inheritedReferenceVideo"]> & {
+  inheritedFromRework: true;
+});
 
 const CAPABILITIES: CapabilityDefinition[] = [
   { key: "script", capability: "script.draft", label: "脚本生成", role: "编剧", description: "结构、钩子与分镜文案", preferred: "codex-screenwriter-v1", icon: FileText },
@@ -104,7 +110,7 @@ function canonicalRecipeId(recipeId: RecipeId | undefined): RecipeId {
   return recipeId === "keyshot-ai" || recipeId === "cinematic-ai" ? "keyshot-ai" : "free-stock";
 }
 
-export function NewRunDialog({ open, providers, initialDataReady = true, initialValues, inheritedNodeIds, requiredAffectedScenePositions, creatorSettings, settingsError, onRetrySettings, onClose, onSubmit }: NewRunDialogProps) {
+export function NewRunDialog({ open, providers, initialDataReady = true, initialValues, inheritedNodeIds, requiredAffectedScenePositions, inheritedReferenceVideo, creatorSettings, settingsError, onRetrySettings, onClose, onSubmit }: NewRunDialogProps) {
   const defaults = useMemo(
     () => providerDefaults(providers, creatorSettings?.roleProviderDefaults),
     [creatorSettings?.roleProviderDefaults, providers],
@@ -124,7 +130,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [voiceDirection, setVoiceDirection] = useState<StudioProductionInput["voiceDirection"]>(() => defaultVoiceDirection(providers));
   const [visualReviewEnabled, setVisualReviewEnabled] = useState(false);
   const [semanticRankEnabled, setSemanticRankEnabled] = useState(true);
-  const [referenceVideo, setReferenceVideo] = useState<StudioReferenceVideo>();
+  const [referenceVideo, setReferenceVideo] = useState<ReferenceVideoSelection>();
   const releasedReferenceId = useRef<string | undefined>(undefined);
   const voiceTouched = useRef(false);
   const templateAddedEditorialSource = useRef(false);
@@ -134,6 +140,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const initialScrollResetPending = useRef(false);
   const [referenceUploading, setReferenceUploading] = useState(false);
   const [referenceError, setReferenceError] = useState<string>();
+  const [briefSummaryValues, setBriefSummaryValues] = useState(() => ({
+    title: initialValues?.title ?? "",
+    angle: initialValues?.angle ?? "",
+    audience: initialValues?.audience ?? "",
+  }));
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [inheritedSettingsOpen, setInheritedSettingsOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -190,6 +201,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const visualReviewProvider = providers.find((provider) => {
     return provider.capability === "quality.review.visual" && provider.id === effectiveBindings.visualReview && provider.available;
   }) ?? providers.find((provider) => provider.capability === "quality.review.visual" && provider.available);
+  const dualFinalReviewAvailable = providers.some((provider) => provider.id === "glm-visual-review-v1" && provider.available)
+    && providers.some((provider) => provider.id === "codex-visual-review-v1" && provider.available);
   const inheritedVisualReviewUnavailable = Boolean(initialValues?.rework && bindings.visualReview && !providers.some((provider) => (
     provider.id === bindings.visualReview
     && provider.capability === "quality.review.visual"
@@ -329,6 +342,13 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     ? "/resources#production-roles"
     : "/resources#visual-providers";
   const productionBlocked = missingProductionRoles.length > 0 || inheritedSelectionIssues.length > 0 || templateSelectionMissing;
+  const creativeSummary = {
+    audience: briefSummaryValues.audience || "待填写目标受众",
+    openingPromise: initialValues?.seriesContext?.episode.hook ?? (briefSummaryValues.angle || "待填写开头承诺"),
+    requiredVisual: initialValues?.visualProof ?? initialValues?.visualPlan?.strategy ?? (briefSummaryValues.angle ? `用画面证明“${briefSummaryValues.angle}”` : "待明确必须看到的画面证据"),
+    payoff: initialValues?.seriesContext?.episode.payoff
+      ?? (briefSummaryValues.title ? `围绕“${briefSummaryValues.title}”给出明确答案或可执行判断` : "待填写观众最终收获"),
+  };
 
   async function readTemplateCatalog(revision: number, requestedTemplateId: string, preserveCurrentChoices: boolean) {
     setTemplateLoading(true);
@@ -419,7 +439,12 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       return provider.id === initialBindings.visualReview && provider.available;
     })));
     setSemanticRankEnabled(initialValues?.workflowFeatures?.assetSemanticRank ?? Boolean(initialBindings.director));
-    setReferenceVideo(undefined);
+    setReferenceVideo(inheritedReferenceVideo ? { ...inheritedReferenceVideo, inheritedFromRework: true } : undefined);
+    setBriefSummaryValues({
+      title: initialValues?.title ?? "",
+      angle: initialValues?.angle ?? "",
+      audience: initialValues?.audience ?? "",
+    });
     setReferenceUploading(false);
     setReferenceError(undefined);
     setActiveKey("assets");
@@ -439,7 +464,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setTemplates([]);
     setTemplatesLoaded(false);
     void readTemplateCatalog(revision, requestedTemplateId, false);
-  }, [creatorSettings, defaults, imageStory, initialDataReady, initialValues, open, providers, requiredAffectedScenePositions]);
+  }, [creatorSettings, defaults, imageStory, inheritedReferenceVideo, initialDataReady, initialValues, open, providers, requiredAffectedScenePositions]);
 
   useLayoutEffect(() => {
     if (!open || !initialScrollResetPending.current || (!templatesLoaded && !templateError)) return;
@@ -455,7 +480,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   }, [advancedOpen, inheritedSettingsOpen, open]);
 
   useEffect(() => {
-    if (!open || !referenceVideo) return;
+    if (!open || !referenceVideo || !isUploadedReferenceVideo(referenceVideo)) return;
     const uploadId = referenceVideo.uploadId;
     return () => {
       if (releasedReferenceId.current !== uploadId) void studioApi.deleteReferenceVideo(uploadId).catch(() => undefined);
@@ -591,6 +616,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
 
   async function removeReferenceVideo() {
     if (!referenceVideo) return;
+    if (!isUploadedReferenceVideo(referenceVideo)) {
+      setReferenceVideo(undefined);
+      return;
+    }
     setReferenceUploading(true);
     setReferenceError(undefined);
     try {
@@ -633,6 +662,13 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       const modelsForRun = Object.fromEntries(Object.entries(modelSelections).filter(([providerId, modelId]) => {
         return selectedProviderIds.has(providerId) && Boolean(modelId);
       }));
+      const executableVisualPlan = initialValues?.visualPlan
+        ? resolveExecutableVisualPlan(initialValues.visualPlan, {
+            stock: selectedAssetSources.some((provider) => provider.deliveryTypes?.some((type) => type === "stock_video" || type === "stock_image")),
+            generated: selectedAssetSources.some((provider) => provider.deliveryTypes?.some((type) => type === "generated_video" || type === "generated_image")),
+            editorialCard: selectedAssetSources.some((provider) => provider.deliveryTypes?.includes("editorial_card")),
+          })
+        : undefined;
       await onSubmit({
         protocolVersion: "video-factory/brief-v1",
         title: requiredString(data, "title"),
@@ -645,7 +681,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         runPurpose: initialValues?.runPurpose ?? "production",
         ...(editorial ? { editorial } : {}),
         ...(initialValues?.visualProof ? { visualProof: initialValues.visualProof } : {}),
-        ...(initialValues?.visualPlan ? { visualPlan: initialValues.visualPlan } : {}),
+        ...(executableVisualPlan ? { visualPlan: executableVisualPlan } : {}),
         ...(initialValues?.seriesContext ? { seriesContext: initialValues.seriesContext } : {}),
         ...(initialValues?.creationContext ? { creationContext: initialValues.creationContext } : {}),
         ...(rework ? { rework } : {}),
@@ -671,11 +707,13 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         providers: providersForRun,
         models: modelsForRun,
         workflowFeatures: { assetSemanticRank: effectiveSemanticRank, referenceGrammar: Boolean(referenceVideo) },
-        ...(referenceVideo ? { referenceVideo: { uploadId: referenceVideo.uploadId, label: referenceVideo.label } } : {}),
+        ...(referenceVideo && isUploadedReferenceVideo(referenceVideo)
+          ? { referenceVideo: { uploadId: referenceVideo.uploadId, label: referenceVideo.label } }
+          : {}),
         director: { profileId: directorProfileId, assetProviderIds },
         economics,
       });
-      if (referenceVideo) releasedReferenceId.current = referenceVideo.uploadId;
+      if (referenceVideo && isUploadedReferenceVideo(referenceVideo)) releasedReferenceId.current = referenceVideo.uploadId;
       setReferenceVideo(undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -850,15 +888,15 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               <div className="brief-fields">
                 <label className="field field-wide">
                   <span>视频标题</span>
-                  <input name="title" required data-dialog-initial-focus={rework ? undefined : true} defaultValue={initialValues?.title ?? ""} placeholder="一句能让人停下来的具体承诺" />
+                  <input name="title" required data-dialog-initial-focus={rework ? undefined : true} defaultValue={initialValues?.title ?? ""} placeholder="一句能让人停下来的具体承诺" onChange={(event) => setBriefSummaryValues((current) => ({ ...current, title: event.target.value }))} />
                 </label>
                 <label className="field field-wide">
                   <span>内容角度</span>
-                  <input name="angle" required defaultValue={initialValues?.angle ?? ""} placeholder="这条视频用什么独特角度讲清问题" />
+                  <input name="angle" required defaultValue={initialValues?.angle ?? ""} placeholder="这条视频用什么独特角度讲清问题" onChange={(event) => setBriefSummaryValues((current) => ({ ...current, angle: event.target.value }))} />
                 </label>
                 <label className="field">
                   <span>目标受众</span>
-                  <input name="audience" required defaultValue={initialValues?.audience ?? ""} placeholder="这条视频最想帮助谁" />
+                  <input name="audience" required defaultValue={initialValues?.audience ?? ""} placeholder="这条视频最想帮助谁" onChange={(event) => setBriefSummaryValues((current) => ({ ...current, audience: event.target.value }))} />
                 </label>
                 <label className="field field-compact">
                   <span>目标平台</span>
@@ -884,6 +922,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   </select>
                 </label>
               </div>
+              <CreativeSummary summary={creativeSummary} />
               {imageStory ? (
                 <div className="editorial-brief-note" role="note">
                   <strong>总编建议 · 图文成片</strong>
@@ -932,9 +971,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                     }}
                   />
                   <Upload aria-hidden="true" size={19} />
-                  <span><strong>{referenceUploading ? "正在安全上传..." : referenceVideo ? referenceVideo.label : "选择 MP4、MOV 或 WebM"}</strong><small>{referenceVideo ? `${formatBytes(referenceVideo.sizeBytes)} · 上传完成` : "不超过 30 MB；未开工上传最多保留 7 天"}</small></span>
+                  <span><strong>{referenceUploading ? "正在安全上传..." : referenceVideo ? referenceVideo.label : "选择 MP4、MOV 或 WebM"}</strong><small>{referenceVideo ? `${formatBytes(referenceVideo.sizeBytes)} · ${isUploadedReferenceVideo(referenceVideo) ? "上传完成" : "沿用上一版参考视频"}` : "不超过 30 MB；未开工上传最多保留 7 天"}</small></span>
                 </label>
-                {referenceVideo ? <button className="icon-button reference-video-remove" type="button" title="删除参考视频" aria-label="删除参考视频" disabled={referenceUploading} onClick={() => void removeReferenceVideo()}><X aria-hidden="true" size={17} /></button> : null}
+                {referenceVideo ? <button className="icon-button reference-video-remove" type="button" title={isUploadedReferenceVideo(referenceVideo) ? "删除参考视频" : "不再沿用参考视频"} aria-label={isUploadedReferenceVideo(referenceVideo) ? "删除参考视频" : "不再沿用参考视频"} disabled={referenceUploading} onClick={() => void removeReferenceVideo()}><X aria-hidden="true" size={17} /></button> : null}
               </div>
               <p className="reference-style-note"><Film aria-hidden="true" size={16} /><span><strong>{referenceGrammarProvider ? creatorProviderName(referenceGrammarProvider) : "参考视频分析当前不可用"}</strong>只提炼节奏、构图、运镜、色彩、转场和声音结构；开工后原片作为私密运行输入留档，不进入发布包，分析结果可预览和编辑。</span></p>
               {referenceError ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />{referenceError}</p> : null}
@@ -1203,7 +1242,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 />
                 <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片</strong></span>
                 <small>{visualReviewProvider
-                  ? `${creatorProviderName(visualReviewProvider)} · 抽帧审查，不上传音轨${visualReviewRequired ? "；付费画面必须启用" : ""}`
+                  ? dualFinalReviewAvailable
+                    ? `${creatorProviderName(visualReviewProvider)} 负责中途预检；最终成片由 GLM 与 Codex 对同一组抽帧分别审查，不上传音轨${visualReviewRequired ? "；付费画面必须启用" : ""}`
+                    : `${creatorProviderName(visualReviewProvider)} · 抽帧审查，不上传音轨${visualReviewRequired ? "；付费画面必须启用" : ""}`
                   : "ZAI 视觉审片服务当前不可用，本次不会运行视觉审片"}</small>
               </label>
               {inheritedVisualReviewUnavailable && !visualReviewRequired ? <button
@@ -1240,6 +1281,20 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       </section>
     </div>
   );
+}
+
+function CreativeSummary({ summary }: {
+  summary: { audience: string; openingPromise: string; requiredVisual: string; payoff: string };
+}) {
+  return <section className="creative-summary" aria-label="创作目标摘要">
+    <header><strong>创作目标摘要</strong><small>开工和终审都按这四项核对</small></header>
+    <dl>
+      <div><dt>给谁看</dt><dd>{summary.audience}</dd></div>
+      <div><dt>开头承诺</dt><dd>{summary.openingPromise}</dd></div>
+      <div><dt>必须看到</dt><dd>{summary.requiredVisual}</dd></div>
+      <div><dt>结尾收益</dt><dd>{summary.payoff}</dd></div>
+    </dl>
+  </section>;
 }
 
 function productionStepLabel(capability: string): string {
@@ -1407,8 +1462,13 @@ const REWORK_BASELINE_NODE_LABELS: Record<string, string> = {
   template: "视频模板",
   script: "上一版脚本",
   "visual-direction": "上一版导演方案",
+  "reference-grammar": "参考视频",
   "visual-review": "视觉审片记录",
 };
+
+function isUploadedReferenceVideo(reference: ReferenceVideoSelection): reference is StudioReferenceVideo {
+  return "uploadId" in reference;
+}
 
 function isLegalScenePosition(position: unknown): position is number {
   return typeof position === "number" && Number.isInteger(position) && position > 0;

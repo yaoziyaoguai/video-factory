@@ -75,6 +75,7 @@ export function TemplatesPage() {
   }
 
   function select(template: StudioTemplate) {
+    if (template.id === selectedId) return;
     if (template.id !== selectedId && !confirmDiscard()) return;
     setSelectedId(template.id);
     const nextDraft = structuredClone(template);
@@ -200,11 +201,17 @@ export function TemplatesPage() {
     if (!draft || draft.status !== "draft") return;
     setSaving(true);
     setNotice(undefined);
+    let draftSaved = false;
     try {
       let publishRevision = revision;
       if (dirty) {
         const saved = await studioApi.saveTemplateDraft(draft, publishRevision);
         publishRevision = saved.storeRevision;
+        draftSaved = true;
+        setRevision(saved.storeRevision);
+        setDraft(saved.template);
+        setSavedDraft(JSON.stringify(saved.template));
+        setTemplates((current) => current.map((template) => template.id === saved.template.id ? saved.template : template));
       }
       const result = await studioApi.publishTemplate(draft.id, publishRevision);
       setRevision(result.storeRevision);
@@ -213,7 +220,9 @@ export function TemplatesPage() {
       setTemplates((current) => current.map((template) => template.id === result.template.id ? result.template : template));
       setNotice("新版本已发布；已有项目继续使用自己的运行快照。");
     } catch (caught) {
-      setNotice(`发布失败：${errorMessage(caught)}`);
+      setNotice(draftSaved
+        ? `草稿已保存，发布未完成：${errorMessage(caught)}`
+        : `发布失败：${errorMessage(caught)}`);
     } finally {
       setSaving(false);
     }

@@ -28,6 +28,7 @@ export type ModelCandidateAttempt = ModelCandidateAttemptBase & (
 export interface CodexTaskTrace {
   taskKind: CodexTaskKind;
   promptVersion: string;
+  contractDigest?: string;
   prompt: string;
   providerId: string;
   modelId: string;
@@ -40,6 +41,13 @@ export interface CodexTaskTrace {
   firstOutputEventMs?: number;
   toolMs?: number;
   validationMs?: number;
+  requestIdHash?: string;
+  finishReason?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  reasoningTokens?: number;
+  retryCount?: number;
 }
 
 export interface CodexTaskSession {
@@ -71,6 +79,11 @@ export interface ModelProviderFailureDetails {
   modelId: string;
   providerWaitMs?: number;
   requestIdHash?: string;
+  finishReason?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  reasoningTokens?: number;
 }
 
 export interface RoleAuditIssue {
@@ -384,9 +397,26 @@ function parseTrace(value: unknown): CodexTaskTrace {
   const firstOutputEventMs = optionalDurationMs(trace.firstOutputEventMs, "firstOutputEventMs");
   const toolMs = optionalDurationMs(trace.toolMs, "toolMs");
   const validationMs = optionalDurationMs(trace.validationMs, "validationMs");
+  const promptTokens = optionalTokenCount(trace.promptTokens, "promptTokens");
+  const completionTokens = optionalTokenCount(trace.completionTokens, "completionTokens");
+  const totalTokens = optionalTokenCount(trace.totalTokens, "totalTokens");
+  const reasoningTokens = optionalTokenCount(trace.reasoningTokens, "reasoningTokens");
+  const retryCount = optionalTokenCount(trace.retryCount, "retryCount");
+  if (trace.requestIdHash !== undefined
+    && (typeof trace.requestIdHash !== "string" || !/^[a-f0-9]{64}$/.test(trace.requestIdHash))) {
+    throw new CodexBridgeError("Codex bridge trace requestIdHash is invalid.", false);
+  }
+  if (trace.contractDigest !== undefined
+    && (typeof trace.contractDigest !== "string" || !/^[a-f0-9]{64}$/.test(trace.contractDigest))) {
+    throw new CodexBridgeError("Codex bridge trace contractDigest is invalid.", false);
+  }
+  if (trace.finishReason !== undefined && !isBoundedIdentifier(trace.finishReason, 64)) {
+    throw new CodexBridgeError("Codex bridge trace finishReason is invalid.", false);
+  }
   return {
     taskKind: trace.taskKind as CodexTaskKind,
     promptVersion: trace.promptVersion,
+    ...(typeof trace.contractDigest === "string" ? { contractDigest: trace.contractDigest } : {}),
     prompt: trace.prompt,
     providerId: trace.providerId,
     modelId: trace.modelId,
@@ -409,10 +439,25 @@ function parseTrace(value: unknown): CodexTaskTrace {
     ...(firstOutputEventMs !== undefined ? { firstOutputEventMs } : {}),
     ...(toolMs !== undefined ? { toolMs } : {}),
     ...(validationMs !== undefined ? { validationMs } : {}),
+    ...(typeof trace.requestIdHash === "string" ? { requestIdHash: trace.requestIdHash } : {}),
+    ...(typeof trace.finishReason === "string" ? { finishReason: trace.finishReason } : {}),
+    ...(promptTokens !== undefined ? { promptTokens } : {}),
+    ...(completionTokens !== undefined ? { completionTokens } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(retryCount !== undefined ? { retryCount } : {}),
   };
 }
 
 function optionalDurationMs(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new CodexBridgeError(`Codex bridge trace ${field} is invalid.`, false);
+  }
+  return Number(value);
+}
+
+function optionalTokenCount(value: unknown, field: string): number | undefined {
   if (value === undefined) return undefined;
   if (!Number.isSafeInteger(value) || Number(value) < 0) {
     throw new CodexBridgeError(`Codex bridge trace ${field} is invalid.`, false);
@@ -539,7 +584,12 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       || !isBoundedIdentifier(details.modelId, 128)
       || (details.providerWaitMs !== undefined && optionalDurationMs(details.providerWaitMs, "providerWaitMs") === undefined)
       || (details.requestIdHash !== undefined
-        && (typeof details.requestIdHash !== "string" || !/^[a-f0-9]{64}$/.test(details.requestIdHash)))) {
+        && (typeof details.requestIdHash !== "string" || !/^[a-f0-9]{64}$/.test(details.requestIdHash)))
+      || (details.finishReason !== undefined && !isBoundedIdentifier(details.finishReason, 64))
+      || !isOptionalTokenCount(details.promptTokens)
+      || !isOptionalTokenCount(details.completionTokens)
+      || !isOptionalTokenCount(details.totalTokens)
+      || !isOptionalTokenCount(details.reasoningTokens)) {
       return undefined;
     }
     return {
@@ -549,10 +599,19 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       modelId: details.modelId as string,
       ...(details.providerWaitMs !== undefined ? { providerWaitMs: Number(details.providerWaitMs) } : {}),
       ...(typeof details.requestIdHash === "string" ? { requestIdHash: details.requestIdHash } : {}),
+      ...(typeof details.finishReason === "string" ? { finishReason: details.finishReason } : {}),
+      ...(typeof details.promptTokens === "number" ? { promptTokens: details.promptTokens } : {}),
+      ...(typeof details.completionTokens === "number" ? { completionTokens: details.completionTokens } : {}),
+      ...(typeof details.totalTokens === "number" ? { totalTokens: details.totalTokens } : {}),
+      ...(typeof details.reasoningTokens === "number" ? { reasoningTokens: details.reasoningTokens } : {}),
     };
   } catch {
     return undefined;
   }
+}
+
+function isOptionalTokenCount(value: unknown): boolean {
+  return value === undefined || (Number.isSafeInteger(value) && Number(value) >= 0);
 }
 
 function isBoundedIdentifier(value: unknown, maxLength: number): value is string {

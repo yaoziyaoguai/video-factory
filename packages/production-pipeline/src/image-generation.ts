@@ -136,8 +136,8 @@ function requiredReferenceImage(value: unknown, label: string): string {
 
 function imageSize(ratio: ImageAspectRatio): string {
   const sizes: Record<ImageAspectRatio, string> = {
-    "9:16": "1440x2560",
-    "16:9": "2560x1440",
+    "9:16": "1600x2848",
+    "16:9": "2848x1600",
     "1:1": "2048x2048",
     "3:4": "1728x2304",
     "4:3": "2304x1728",

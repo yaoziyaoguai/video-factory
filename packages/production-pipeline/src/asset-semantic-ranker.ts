@@ -79,9 +79,10 @@ interface AssetRankThumbnail {
 }
 
 const MAX_RANK_THUMBNAILS = 12;
-const MAX_THUMBNAIL_BYTES = 512 * 1024;
+// 与 Broker 的逐图边界保持一致，避免在模型调用前被协议层拒绝。
+const MAX_THUMBNAIL_BYTES = 256 * 1024;
 const THUMBNAIL_HOSTS = new Set(["images.pexels.com", "cdn.pixabay.com"]);
-export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v2|role-audit-v1|asset-ranking-validator-v1";
+export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v3|role-audit-v1|asset-ranking-validator-v1";
 
 export class CodexAssetSemanticRanker implements AssetSemanticRanker {
   readonly id: string;
@@ -108,7 +109,7 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
         "逐镜候选完整保留，排名和原始排名均连续且没有重复",
         "排序理由引用可见证据或明确承认证据不足，不根据 URL、作者或素材 ID 臆测",
         "主体、环境、动作、景别、构图与连续性优先于单纯分辨率和素材源质量分",
-        "对已有候选的镜头，首选候选的核心主体、物体和动作必须与导演意图一致；已有候选但没有合格候选时不得通过审计；输入候选为空时只需如实标记无可排序项，由下游素材路由决定生成、复用或停住",
+        "对已有合格候选的镜头，首选候选的核心主体、物体和动作必须与导演意图一致；没有合格候选时必须诚实标记无匹配，并把所有不合格候选评分保持在自动执行阈值以下，这种排序结果本身可以通过审计；输入候选为空时只需如实标记无可排序项，由下游素材路由决定生成、复用或停住",
         "没有把候选锁定，也没有新增、删除或替换候选素材",
       ],
       maxIterations: this.options.maxReviewIterations ?? 3,
@@ -116,7 +117,7 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
         ...payload,
         ...(revision ? { revision } : {}),
       }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => client.runTaskDetailed!("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session }) => client.runTaskDetailed!("role-audit", {
         role,
         iteration,
         criteria,
@@ -126,11 +127,18 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
             doesNotOwn: ["新增候选", "删除候选", "下载素材", "锁定人工选择"],
           },
           upstreamFacts: { version: report.version, scenes: report.scenes },
-          currentRoleContract: { preserveEveryCandidate: true, ranksStartAtOneAndAreUnique: true, lockedMustRemainFalse: true },
+          currentRoleContract: {
+            preserveEveryCandidate: true,
+            ranksStartAtOneAndAreUnique: true,
+            lockedMustRemainFalse: true,
+            automaticUseMinimumSemanticScore: 40,
+            noMatchPolicy: "所有候选都不满足核心主体、物体和动作时，完整保留并相对排序、全部低于 40、明确标记无自动可用候选；排序结果本身可以通过审计，由素材节点停住。",
+          },
           downstreamBoundary: "只排序已有候选；不得要求尚未下载的原文件或后续成片作为当前节点通过证据。",
         },
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
+        ...(validationFailure ? { validationFailure } : {}),
         images: payload.thumbnails.map((thumbnail, index) => ({
           imageIndex: index + 1,
           scenePosition: thumbnail.scenePosition,
@@ -253,11 +261,11 @@ export function deterministicAssetRanking(
     providerId: "deterministic-quality-v1",
     modelId: "quality-score-v1",
     summary: hasCandidates
-      ? "候选素材按原始质量分和竖屏适配稳定排序；可在执行下载前人工调整。"
+      ? "候选素材仅按原始质量分和竖屏适配稳定排序；语义未验证，需恢复语义审查或由人工明确锁定后才能采用。"
       : "本次没有图库候选需要排序；后续由逐镜素材路由执行生成、复用或明确停住。",
     scenes: report.scenes.map((scene) => ({
       scenePosition: scene.scenePosition,
-      summary: scene.candidates.length ? "当前排序未进行视觉语义判断。" : "该镜头没有可排序的图库候选。",
+      summary: scene.candidates.length ? "当前排序语义未验证，不能自动采用。" : "该镜头没有可排序的图库候选。",
       candidates: scene.candidates
         .map((candidate, index) => ({ candidate, originalRank: index + 1 }))
         .sort((left, right) => right.candidate.qualityScore - left.candidate.qualityScore || left.originalRank - right.originalRank)
@@ -266,8 +274,8 @@ export function deterministicAssetRanking(
           assetId: candidate.assetId,
           originalRank,
           rank: index + 1,
-          semanticScore: Math.max(1, 70 - index * 5),
-          rationale: "回退排序：依据素材源质量分、方向与原始顺序。",
+          semanticScore: 0,
+          rationale: "回退排序仅依据素材源质量分与原始顺序；未进行视觉语义判断。",
           locked: false,
         })),
     })),

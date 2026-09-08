@@ -23,6 +23,93 @@ FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None and shutil.which("ffprobe"
 
 @unittest.skipUnless(FFMPEG_AVAILABLE, "FFmpeg and ffprobe are required")
 class ReviewMediaTest(unittest.TestCase):
+    def test_source_review_uses_only_the_duration_used_by_the_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "long.mp4"
+            video.write_bytes(b"test video")
+            script = root / "script.json"
+            script.write_text(json.dumps({"scenes": [{"position": 1, "duration": 2}]}), encoding="utf-8")
+            plan = root / "asset_plan.json"
+            plan.write_text(json.dumps({"scene_assets": [
+                {"scene_position": 1, "duration": 10, "media_type": "video", "local_path": str(video)},
+            ]}), encoding="utf-8")
+            timestamps = []
+
+            def extract(_video, timestamp, target):
+                timestamps.append(timestamp)
+                Image.new("RGB", (320, 480), "blue").save(target, format="JPEG")
+
+            with patch("video_factory.review_media._probe_video", return_value={"duration": 10}), patch(
+                "video_factory.review_media._extract_frame", side_effect=extract
+            ):
+                manifest = json.loads(prepare_asset_review_media(plan, root, script_path=script).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["durationMs"], 2000)
+            self.assertEqual(timestamps, [300, 1000, 1700])
+
+    def test_pilot_video_uses_the_full_frame_budget_as_an_ordered_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "pilot.mp4"
+            video.write_bytes(b"test video")
+            plan = root / "asset_plan.json"
+            plan.write_text(json.dumps({"scene_assets": [
+                {
+                    "scene_position": position,
+                    "duration": 5,
+                    "media_type": "video",
+                    "local_path": str(video) if position == 6 else "",
+                }
+                for position in range(1, 9)
+            ]}), encoding="utf-8")
+            timestamps = []
+
+            def extract(_video, timestamp, target):
+                timestamps.append(timestamp)
+                Image.new("RGB", (320, 480), "blue").save(target, format="JPEG")
+
+            with patch("video_factory.review_media._probe_video", return_value={"duration": 5}), patch(
+                "video_factory.review_media._extract_frame", side_effect=extract
+            ):
+                manifest = json.loads(prepare_asset_review_media(
+                    plan, root, scene_positions=[6]
+                ).read_text(encoding="utf-8"))
+
+            self.assertEqual(len(timestamps), 24)
+            self.assertEqual(timestamps, sorted(set(timestamps)))
+            self.assertLess(timestamps[0], 250)
+            self.assertGreater(timestamps[-1], 4750)
+            self.assertEqual(manifest["sampling"]["mode"], "scene_sequence")
+            self.assertEqual(manifest["sampling"]["coveredScenePositions"], [6])
+            self.assertEqual(manifest["sampling"]["missingScenePositions"], [1, 2, 3, 4, 5, 7, 8])
+            self.assertEqual(manifest["frames"][0]["phase"], "opening")
+            self.assertTrue(all(frame["phase"] == "middle" for frame in manifest["frames"][1:-1]))
+            self.assertEqual(manifest["frames"][-1]["phase"], "closing")
+
+    def test_pilot_reviews_only_selected_materialized_scene_and_preserves_its_position(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "scene-2.png"
+            Image.new("RGB", (320, 480), "blue").save(image_path)
+            plan_path = root / "asset_plan.json"
+            plan_path.write_text(json.dumps({"scene_assets": [
+                {"scene_position": 1, "duration": 4, "media_type": "video", "local_path": ""},
+                {"scene_position": 2, "duration": 4, "media_type": "image", "local_path": str(image_path)},
+                {"scene_position": 3, "duration": 4, "media_type": "video", "local_path": ""},
+            ]}), encoding="utf-8")
+            manifest_path = prepare_asset_review_media(plan_path, root, scene_positions=[2])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["sampling"]["sceneCount"], 3)
+            self.assertEqual(manifest["sampling"]["coveredScenePositions"], [2])
+            self.assertEqual(manifest["sampling"]["missingScenePositions"], [1, 3])
+            self.assertEqual([frame["scenePosition"] for frame in manifest["frames"]], [2])
+            for positions in ([], [2, 2], [4]):
+                with self.assertRaisesRegex(ValueError, "pilot scene positions are invalid"):
+                    prepare_asset_review_media(plan_path, root, scene_positions=positions)
+            # 整批预检仍必须拒绝缺失的素材，不能因为支持试片而放松整片检查。
+            with self.assertRaises((ValueError, IsADirectoryError)):
+                prepare_asset_review_media(plan_path, root)
+
     def test_prepares_every_source_asset_before_rendering(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_root = Path(tmp) / "run-1"

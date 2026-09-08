@@ -51,6 +51,7 @@ describe("JsonTemplateStore", () => {
 
   it("revises a built-in as the next version under the same template id", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-templates-"));
+    const builtInVersion = BUILTIN_TEMPLATES.find((template) => template.id === "knowledge-explainer")!.version;
     const store = new JsonTemplateStore(
       path.join(root, "templates.json"),
       BUILTIN_TEMPLATES,
@@ -61,19 +62,19 @@ describe("JsonTemplateStore", () => {
 
     assert.equal(revised.storeRevision, 1);
     assert.equal(revised.template.id, "knowledge-explainer");
-    assert.equal(revised.template.version, 3);
+    assert.equal(revised.template.version, builtInVersion + 1);
     assert.equal(revised.template.status, "draft");
 
     const catalog = await store.list();
     assert.equal(catalog.templates.filter((template) => template.id === "knowledge-explainer").length, 1);
-    assert.equal(catalog.templates.find((template) => template.id === "knowledge-explainer")?.version, 3);
-    assert.equal(catalog.publishedTemplates.find((template) => template.id === "knowledge-explainer")?.version, 2);
-    assert.equal((await store.get("knowledge-explainer", 2))?.status, "published");
-    assert.equal((await store.getPublished("knowledge-explainer"))?.version, 2);
+    assert.equal(catalog.templates.find((template) => template.id === "knowledge-explainer")?.version, builtInVersion + 1);
+    assert.equal(catalog.publishedTemplates.find((template) => template.id === "knowledge-explainer")?.version, builtInVersion);
+    assert.equal((await store.get("knowledge-explainer", builtInVersion))?.status, "published");
+    assert.equal((await store.getPublished("knowledge-explainer"))?.version, builtInVersion);
 
     const saved = await store.saveDraft({ ...revised.template, name: "知识解释新版" }, revised.storeRevision);
     const published = await store.publish(saved.template.id, saved.storeRevision);
-    assert.equal(published.template.version, 3);
+    assert.equal(published.template.version, builtInVersion + 1);
     assert.equal(published.template.name, "知识解释新版");
   });
 

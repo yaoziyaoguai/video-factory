@@ -26,6 +26,8 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
     assetPlanPath?: string;
     runRoot: string;
     renderManifestPath?: string;
+    scenePositions?: number[];
+    scriptPath?: string;
   }): Promise<VisualReviewMediaPayload> {
     const command = [
       "-m", "video_factory.review_media",
@@ -33,6 +35,8 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
       "--run-root", input.runRoot,
       "--max-frames", String(MAX_REVIEW_FRAMES),
       ...(input.renderManifestPath ? ["--render-manifest", input.renderManifestPath] : []),
+      ...(input.scenePositions ? ["--scene-positions", ...input.scenePositions.map(String)] : []),
+      ...(input.assetPlanPath && input.scriptPath ? ["--script", input.scriptPath] : []),
     ];
     let stdout: string;
     try {
@@ -86,6 +90,11 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
       });
     }
     const sampling = parseSampling(manifest.sampling, frames);
+    if (input.scenePositions && (input.scenePositions.length === 0
+      || input.scenePositions.some((position) => !frames.some((frame) => frame.scenePosition === position))
+      || frames.some((frame) => !input.scenePositions!.includes(frame.scenePosition!)))) {
+      throw new Error("Pilot review evidence does not cover exactly the requested scenes.");
+    }
     return { durationMs: Number(manifest.durationMs), frames, ...(sampling ? { sampling } : {}) };
   }
 }
@@ -101,13 +110,13 @@ function parseSampling(
 ): VisualReviewMediaPayload["sampling"] | undefined {
   if (value === undefined) return undefined;
   const sampling = parseRecord(value, "review media sampling");
-  if (!["scene_triplets", "hook_and_scene_midpoints", "scene_change_keyframes"].includes(String(sampling.mode))) {
+  if (!["scene_triplets", "scene_sequence", "hook_and_scene_midpoints", "scene_change_keyframes"].includes(String(sampling.mode))) {
     throw new Error("Review media sampling mode is invalid.");
   }
   if (sampling.sceneCount !== undefined && (!Number.isInteger(sampling.sceneCount) || Number(sampling.sceneCount) < 1)) {
     throw new Error("Review media sampling sceneCount is invalid.");
   }
-  const mode = sampling.mode as "scene_triplets" | "hook_and_scene_midpoints" | "scene_change_keyframes";
+  const mode = sampling.mode as "scene_triplets" | "scene_sequence" | "hook_and_scene_midpoints" | "scene_change_keyframes";
   const sceneCount = sampling.sceneCount === undefined ? undefined : Number(sampling.sceneCount);
   if (mode === "scene_triplets" && sceneCount === undefined) {
     throw new Error("Scene-triplet sampling requires sceneCount.");

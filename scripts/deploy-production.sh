@@ -107,11 +107,10 @@ check_codex_upstream() {
 }
 
 check_zai_upstream() {
-  # 两个官方 models 端点都只读取目录，不提交 prompt、不创建模型任务，也不会
-  # 产生内容生成费用；要求 200 可同时验证 TLS、API key 与普通/Code Plan 两条路由。
+  # Broker 的文本与视觉任务统一使用 Coding Plan；这里只读模型目录，不提交 prompt、
+  # 不创建模型任务，也不会产生内容生成费用。
   "$broker_root/bin/node" --env-file=/etc/video-factory/zai-codex-broker.env --input-type=module --eval '
     const urls = [
-      "https://open.bigmodel.cn/api/paas/v4/models",
       "https://open.bigmodel.cn/api/coding/paas/v4/models",
     ];
     const key = process.env.ZAI_BIGMODEL_API_KEY?.trim();

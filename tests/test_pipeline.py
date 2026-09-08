@@ -25,6 +25,8 @@ from video_factory.stock_assets import (
     open_asset_request,
     prepare_scene_assets,
     query_for_scene,
+    ranking_candidate_ids_by_scene,
+    reorder_candidates,
     resolve_director_stock_query,
     search_scene_asset_candidates,
     search_pixabay,
@@ -57,6 +59,29 @@ def stock_candidate(download_url):
 
 
 class PipelineTest(unittest.TestCase):
+    def test_fallback_ranking_is_not_automatic_semantic_approval_but_human_lock_is(self):
+        candidate = stock_candidate("mock://fallback")
+        ranking = {
+            "source": "fallback",
+            "scenes": [{
+                "scenePosition": 1,
+                "candidates": [{
+                    "provider": candidate.provider,
+                    "assetId": candidate.asset_id,
+                    "rank": 1,
+                    "semanticScore": 90,
+                    "locked": False,
+                }],
+            }],
+        }
+
+        preferences = ranking_candidate_ids_by_scene(ranking)[1]
+        self.assertEqual(reorder_candidates([candidate], preferences), [])
+
+        ranking["scenes"][0]["candidates"][0]["locked"] = True
+        locked_preferences = ranking_candidate_ids_by_scene(ranking)[1]
+        self.assertEqual(reorder_candidates([candidate], locked_preferences), [candidate])
+
     def test_topic_to_review_package(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

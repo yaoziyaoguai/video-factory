@@ -53,8 +53,8 @@ import {
 import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
 import { ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
-import { VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateVisualReviewReport, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport } from "./codex-visual-review.js";
-import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, WORKER_PROTOCOL_VERSION, type ProductionBrief } from "./contracts.js";
+import { IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateVisualReviewReport, type IndependentVisualReviewExecution, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport, type VisualReviewScope } from "./codex-visual-review.js";
+import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
 import { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
 import type { WorkerResponse } from "./python-worker-client.js";
 import {
@@ -219,11 +219,14 @@ export interface ProductionProviderModelRuntimeMetadata {
   estimatedCostCny: number;
   taskTypes?: VideoGenerationRuntimeProfile["taskTypes"];
   resolutions?: string[];
+  aspectRatios?: VideoGenerationRuntimeProfile["aspectRatios"];
   minDurationSeconds?: number;
   maxDurationSeconds?: number;
   supportsAudio?: boolean;
+  allowedDurationsSeconds?: number[];
   estimatedCnyPerSecond?: number;
   estimatedCnyPerSecondByResolution?: Record<string, number>;
+  estimatedCnyByResolutionAndDuration?: Record<string, Record<string, number>>;
 }
 
 export interface ProductionProviderRuntimeMetadata {
@@ -288,6 +291,24 @@ function withExecutableBrief(
 ): WorkflowRun<ProductionBrief> {
   parseBrief(brief);
   return withPersistedBrief(run, brief);
+}
+
+export function canRetryRejectedReviewNode(
+  run: WorkflowRun<ProductionBrief>,
+  nodeId: string,
+): boolean {
+  if (run.status !== "rejected") return false;
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+  if (!node || node.status !== "rejected" || node.outcomeUncertain === true) return false;
+  if (typeof node.output !== "object" || node.output === null || Array.isArray(node.output)) return false;
+  const output = node.output as Record<string, unknown>;
+  const report = nodeId === "assets" ? output.sourceVisualReview : output.report;
+  if (!["assets", "asset-source-review"].includes(nodeId)
+    || typeof report !== "object" || report === null || Array.isArray(report)) {
+    return false;
+  }
+  const recommendation = (report as Record<string, unknown>).recommendation;
+  return recommendation === "revise" || recommendation === "reject";
 }
 
 const INTERRUPTED_RUN_ERROR = "应用重启中断了这次制作，请重新发起制作。已完成的产物仍保留在本次记录中。";
@@ -629,6 +650,12 @@ export class ProductionPipeline {
   ): Promise<DispatchedProductionRun> {
     return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       const brief = parsePersistedBrief(previous.initialInput);
+      const activeInterventionNode = previous.nodeRuns.find(
+        (node) => node.intervention?.id === decision.interventionId,
+      );
+      if (decision.action === "approve" && activeInterventionNode?.nodeId === "final-review") {
+        assertPersistedFinalApprovalReady(previous, brief, activeInterventionNode);
+      }
       const registry = this.createRegistry(brief);
       const runner = new WorkflowRunner({
         providers: registry,
@@ -1593,6 +1620,7 @@ export class ProductionPipeline {
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun> {
     return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
+      const retryRejectedReview = canRetryRejectedReviewNode(previous, nodeId);
       const brief = parsePersistedBrief(previous.initialInput);
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
@@ -1601,7 +1629,12 @@ export class ProductionPipeline {
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
         shouldPause: () => this.consumePauseRequest(runId),
       });
-      return runner.retryFailedNode(this.createWorkflow(brief), withExecutableBrief(previous, brief), nodeId);
+      return runner.retryFailedNode(
+        this.createWorkflow(brief),
+        withExecutableBrief(previous, brief),
+        nodeId,
+        retryRejectedReview ? { allowRejectedNode: true } : undefined,
+      );
     }, listener);
   }
 
@@ -1982,32 +2015,42 @@ export class ProductionPipeline {
           review: context.outputs.get(brief.providers.visualReview ? "visual-review" : "technical-review"),
           canonFacts: outputStringArray(context.outputs.get("script"), "canonFacts"),
         }),
-        execute: (input) => {
+        execute: (input, context) => {
           const reviewedInput = validateFinalReviewInput(input, Boolean(brief.seriesContext));
+          const reviewArtifactIds = currentFinalReviewArtifactIds(context, brief, reviewedInput.review);
+          const boundInput = {
+            ...reviewedInput,
+            reviewArtifactIds,
+            ...(brief.providers.visualReview ? {
+              reviewEvidenceId: finalVisualReviewScope(reviewedInput.review).evidenceId,
+            } : {}),
+          };
           if (brief.reviewMode === "automatic") {
             const recommendation = visualReviewRecommendation(reviewedInput.review);
             if (recommendation === "reject" || recommendation === "revise") {
               return {
                 status: "needs_human",
-                output: reviewedInput,
+                output: boundInput,
                 intervention: {
                   reason: recommendation === "reject"
                     ? "视觉审片判定存在阻断问题，请人工确认后再继续。"
                     : "视觉审片建议修改，请人工确认是否继续。",
                   requiredAction: "approve",
                   options: ["approve", "request_changes", "reject"],
+                  artifactIds: reviewArtifactIds,
                 },
               };
             }
-            return { status: "succeeded", output: reviewedInput };
+            return { status: "succeeded", output: boundInput };
           }
           return {
             status: "needs_human",
-            output: reviewedInput,
+            output: boundInput,
             intervention: {
               reason: "请完整观看成片，检查画面、字幕、旁白、事实和素材授权。",
               requiredAction: "approve",
               options: ["approve", "request_changes", "reject"],
+              artifactIds: reviewArtifactIds,
             },
           };
         },
@@ -2039,6 +2082,7 @@ export class ProductionPipeline {
           const packageInput = validatePublishPackageInput(input);
           const currentBrief = currentEffectiveBriefFromContext(context, brief);
           const publishBrief: ProductionBrief = { ...currentBrief, ...packageInput.brief };
+          assertPublishEvidenceReady(context, publishBrief);
           const currentArtifacts = await currentArtifactsForPackaging(context, currentBrief);
           await verifyStoredArtifacts(currentArtifacts);
           const artifactIds = currentArtifacts.map((artifact) => artifact.id);
@@ -2150,8 +2194,16 @@ export class ProductionPipeline {
                   actor: approvalDecision.actor,
                   note: approvalDecision.note ?? "",
                   action: approvalDecision.action,
+                  interventionId: approvalDecision.interventionId,
+                  reviewArtifactIds: finalReviewArtifactIdsFromOutput(context.outputs.get("final-review")),
                 }
-              : { status: "approved", actor: "automatic-review", note: "", action: "approve" },
+              : {
+                  status: "approved",
+                  actor: "automatic-review",
+                  note: "",
+                  action: "approve",
+                  reviewArtifactIds: finalReviewArtifactIdsFromOutput(context.outputs.get("final-review")),
+                },
             aigc: {
               disclosureRequired: true,
               explicitLabelChecked: true,
@@ -2413,6 +2465,9 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
       ? this.config.metadata
       : this.config.assetRuntimeMetadata?.get(providerId);
     const profile = metadata?.modelProfiles?.find((candidate) => candidate.modelId === modelId);
+    if (profile?.aspectRatios && !profile.aspectRatios.includes("9:16")) {
+      throw new Error(`Video model '${modelId}' does not support the required 9:16 aspect ratio.`);
+    }
     const estimatedCnyPerClip = profile?.estimatedCostCny ?? metadata?.estimatedCostCny ?? fallbackEstimatedCostCny;
     return estimateVideoGenerationCostCny(
       sceneDurationSeconds,
@@ -2518,14 +2573,21 @@ function videoPricingProfile(
   return {
     taskTypes: [...profile.taskTypes],
     resolutions: [...profile.resolutions],
+    ...(profile.aspectRatios ? { aspectRatios: [...profile.aspectRatios] } : {}),
     minDurationSeconds: profile.minDurationSeconds,
     maxDurationSeconds: profile.maxDurationSeconds,
     supportsAudio: profile.supportsAudio,
+    ...(profile.allowedDurationsSeconds
+      ? { allowedDurationsSeconds: [...profile.allowedDurationsSeconds] }
+      : {}),
     ...(profile.estimatedCnyPerSecond !== undefined
       ? { estimatedCnyPerSecond: profile.estimatedCnyPerSecond }
       : {}),
     ...(profile.estimatedCnyPerSecondByResolution
       ? { estimatedCnyPerSecondByResolution: { ...profile.estimatedCnyPerSecondByResolution } }
+      : {}),
+    ...(profile.estimatedCnyByResolutionAndDuration
+      ? { estimatedCnyByResolutionAndDuration: structuredClone(profile.estimatedCnyByResolutionAndDuration) }
       : {}),
   };
 }
@@ -2535,7 +2597,7 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   readonly label = "Codex 视觉导演";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly parameters = { promptPack: "video-factory/director-v15" };
+  readonly parameters = { promptPack: "video-factory/director-v24" };
 
   constructor(
     private readonly agent: VisualDirectorAgent,
@@ -2568,7 +2630,7 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTask
   readonly label = "Codex 编剧";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly parameters = { promptPack: "video-factory/screenwriter-v6" };
+  readonly parameters = { promptPack: "video-factory/screenwriter-v13" };
 
   constructor(
     private readonly agent: ScreenwriterAgent,
@@ -2611,7 +2673,7 @@ class VisualReviewProvider implements Provider<VisualReviewAgentInput, VisualRev
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
   get approvalPolicy(): ApprovalPolicy { return this.metadata?.approvalPolicy ?? "none"; }
   get configurationSource(): ExecutionConfigurationSource { return "system_default"; }
-  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v6", agentLoopMaxIterations: 3, independentAudit: true }; }
+  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v11", agentLoopMaxIterations: 3, independentAudit: true }; }
   get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number { return roundCurrency((this.metadata?.estimatedCostCny ?? 0) * this.maxAttempts); }
   get maxAttempts(): number { return Math.max(3, this.metadata?.maxAttempts ?? 3); }
@@ -2907,6 +2969,7 @@ function directorNode(
             selectedModelId: selectedVideoModel.modelId,
             minDurationSeconds: selectedVideoModel.minDurationSeconds,
             maxDurationSeconds: selectedVideoModel.maxDurationSeconds,
+            ...(selectedVideoModel.aspectRatios ? { aspectRatios: [...selectedVideoModel.aspectRatios] } : {}),
           } : {}),
         };
       });
@@ -2958,7 +3021,9 @@ function directorNode(
                 sourceRunId: currentBrief.rework.sourceRunId,
                 visualDirectionInstruction: currentBrief.rework.nodeInstructions.visualDirection,
                 assetInstruction: currentBrief.rework.nodeInstructions.assets,
-                findings: currentBrief.rework.findings.filter((finding) => finding.targetNodeIds.includes("visual-direction")),
+                findings: currentBrief.rework.findings
+                  .filter((finding) => finding.targetNodeIds.includes("visual-direction"))
+                  .map(modelFacingReworkFinding),
                 ...(affectedScenePositions.length || currentBrief.rework.affectedScenePositions !== undefined
                   ? { affectedScenePositions }
                   : {}),
@@ -3422,6 +3487,13 @@ function visualDirectorPlanValidation(
         }]] : [];
       }),
     ),
+    selectedVideoModelAspectRatios: Object.fromEntries(
+      selectedProviders.flatMap((provider): Array<[string, NonNullable<VideoGenerationRuntimeProfile["aspectRatios"]>]> => {
+        const selected = selectedVideoModelRuntime(brief, provider.id, runtimeMetadata);
+        return selected?.aspectRatios ? [[provider.id, [...selected.aspectRatios]]] : [];
+      }),
+    ),
+    requiredAspectRatio: "9:16",
     economics: { allowMeteredProviders: brief.economics.allowMeteredProviders },
   };
 }
@@ -3430,7 +3502,7 @@ function selectedVideoModelRuntime(
   brief: ProductionBrief,
   providerId: string,
   runtimeMetadata: ProductionProviderRuntimeMetadata[],
-): { modelId: string; minDurationSeconds: number; maxDurationSeconds: number } | undefined {
+): { modelId: string; minDurationSeconds: number; maxDurationSeconds: number; aspectRatios?: VideoGenerationRuntimeProfile["aspectRatios"] } | undefined {
   const provider = runtimeMetadata.find((candidate) => candidate.id === providerId);
   if (!provider?.modelProfiles?.length) return undefined;
   const modelId = brief.models?.[providerId] ?? provider.modelId;
@@ -3441,6 +3513,7 @@ function selectedVideoModelRuntime(
         modelId,
         minDurationSeconds: profile.minDurationSeconds,
         maxDurationSeconds: profile.maxDurationSeconds,
+        ...(profile.aspectRatios ? { aspectRatios: [...profile.aspectRatios] } : {}),
       };
 }
 
@@ -3474,10 +3547,31 @@ function screenwriterBrief(brief: ProductionBrief): ScreenwriterAgentInput["brie
       rework: {
         sourceRunId: brief.rework.sourceRunId,
         instruction: brief.rework.nodeInstructions.script,
-        findings: brief.rework.findings.filter((finding) => finding.targetNodeIds.includes("script")),
+        findings: brief.rework.findings
+          .filter((finding) => finding.targetNodeIds.includes("script"))
+          .map(modelFacingReworkFinding),
+        ...(brief.rework.affectedScenePositions !== undefined
+          ? { affectedScenePositions: [...brief.rework.affectedScenePositions] }
+          : {}),
         ...(brief.rework.previousScript ? { previousScript: brief.rework.previousScript } : {}),
       },
     } : {}),
+  };
+}
+
+function modelFacingReworkFinding(finding: ProductionReworkFinding): ProductionReworkFinding {
+  // 模型只接收提出修改所需的事实；帧哈希、审片版本和调用身份留在内部证据链中。
+  return {
+    findingId: finding.findingId,
+    timecodeMs: finding.timecodeMs,
+    ...(finding.scenePosition !== undefined ? { scenePosition: finding.scenePosition } : {}),
+    category: finding.category,
+    description: finding.description,
+    suggestion: finding.suggestion,
+    targetNodeIds: [...finding.targetNodeIds],
+    ...(finding.primaryOwnerNodeId ? { primaryOwnerNodeId: finding.primaryOwnerNodeId } : {}),
+    ...(finding.affectedNodeIds ? { affectedNodeIds: [...finding.affectedNodeIds] } : {}),
+    ...(finding.action ? { action: finding.action } : {}),
   };
 }
 
@@ -3538,6 +3632,9 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
       sourceRunId: requiredOutputString(rework, "sourceRunId"),
       instruction: requiredOutputString(rework, "instruction"),
       findings,
+      ...(rework.affectedScenePositions === undefined
+        ? {}
+        : { affectedScenePositions: parseScreenwriterAffectedScenePositions(rework.affectedScenePositions) }),
       ...(rework.previousScript === undefined
         ? {}
         : { previousScript: requireOutputRecord(rework.previousScript, "script input rework.previousScript") }),
@@ -3549,6 +3646,19 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
   return { brief, ...(selectedModelId ? { selectedModelId } : {}) };
 }
 
+function parseScreenwriterAffectedScenePositions(value: unknown): number[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new Error("script input rework.affectedScenePositions must contain at most 100 entries.");
+  }
+  const positions = value.map((position, index) => {
+    if (!Number.isInteger(position) || Number(position) < 1 || Number(position) > 10_000) {
+      throw new Error(`script input rework.affectedScenePositions[${index}] must be a positive integer.`);
+    }
+    return Number(position);
+  });
+  return [...new Set(positions)].sort((left, right) => left - right);
+}
+
 function validateVisualReviewInput(
   value: unknown,
   directorEnabled: boolean,
@@ -3556,6 +3666,7 @@ function validateVisualReviewInput(
   const input = requireOutputRecord(value, "visual-review input");
   const request: VisualReviewAgentInput & { renderManifestPath: string } = {
     videoPath: requiredOutputString(input, "videoPath"),
+    reviewStage: "rendered_video",
     runRoot: requiredOutputString(input, "runRoot"),
     scriptPath: requiredOutputString(input, "scriptPath"),
     renderManifestPath: requiredOutputString(input, "renderManifestPath"),
@@ -3650,8 +3761,27 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
         };
       }
 
+      const sourceScenePositions = [...new Set([
+        ...(execution.sampling?.coveredScenePositions ?? []),
+        ...execution.output.findings.flatMap((finding) => finding.scenePosition ? [finding.scenePosition] : []),
+      ])].sort((left, right) => left - right);
+      const report: VisualReviewReport = {
+        ...execution.output,
+        reviewScope: {
+          reviewStage: "source_assets",
+          evidenceId: execution.evidenceSnapshotId ?? visualReviewEvidenceId(context, parentArtifactIds),
+          sourceNodeIds: ["script", ...(brief.director ? ["visual-direction"] : []), "assets"],
+          sourceArtifactIds: [...parentArtifactIds].sort(),
+          scenePositions: sourceScenePositions,
+          timelineDurationMs: execution.inspectedDurationMs ?? brief.durationSeconds * 1_000,
+          actualModels: [{
+            providerId: execution.executedProviderId ?? execution.trace?.providerId ?? provider.id,
+            modelId: execution.executedModelId ?? execution.trace?.modelId ?? provider.modelId ?? provider.id,
+          }],
+        },
+      };
       const reportPath = path.join(attempt.directory, "source_visual_review.json");
-      const reportContent = `${JSON.stringify(execution.output, null, 2)}\n`;
+      const reportContent = `${JSON.stringify(report, null, 2)}\n`;
       await writeTextAtomically(reportPath, reportContent);
       const reportArtifact = fileArtifact(
         "review_report",
@@ -3679,15 +3809,15 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
         attempt: attempt.attempt,
         parentArtifactIds,
       });
-      const output = { sourceVisualReviewPath: reportPath, report: execution.output };
+      const output = { sourceVisualReviewPath: reportPath, report };
       const result = {
         output,
         ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, provider.label ?? "生成画面预检", "subscription", execution.agentLoop, provider.configurationSource) } : {}),
         artifacts: [reportArtifact, traceArtifact, loopArtifact].filter((artifact): artifact is ArtifactDraft => Boolean(artifact)),
       };
-      return execution.output.recommendation === "approve" && execution.output.findings.length === 0
+      return report.recommendation === "approve" && report.findings.every((finding) => finding.severity === "info")
         ? { ...result, status: "succeeded" }
-        : { ...result, status: "rejected", error: sourceAssetReviewFailureMessage(execution.output) };
+        : { ...result, status: "rejected", error: sourceAssetReviewFailureMessage(report) };
     },
     validateOverride: (output) => validatePathOutput(output, "sourceVisualReviewPath", "asset-source-review"),
   };
@@ -3769,6 +3899,7 @@ function visualReviewNode(
     dependsOn: ["render", "technical-review"],
     getInput: (context) => ({
       videoPath: outputPath(context, "render", "videoPath"),
+      reviewStage: "rendered_video",
       runRoot: path.join(runsRoot, context.runId),
       scriptPath: outputPath(context, "script", "scriptPath"),
       ...(brief.director ? { directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath") } : {}),
@@ -3806,6 +3937,14 @@ function visualReviewNode(
             VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
             modelId,
           ),
+          independentReviewCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
+            runsRoot,
+            context.runId,
+            "visual-review",
+            request,
+            `independent-final-visual-review-result-v2|${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}`,
+            modelId,
+          ),
         }, context);
       } catch (error) {
         if (error instanceof RoleAgentLoopError) {
@@ -3831,13 +3970,62 @@ function visualReviewNode(
             providerLabel: provider.label ?? "视觉审片",
           });
         }
+        if (error instanceof IndependentVisualReviewError) {
+          return failedIndependentVisualReviewNodeResult({
+            error,
+            attemptDirectory: attempt.directory,
+            nodeId: "visual-review",
+            attempt: attempt.attempt,
+            parentArtifactIds,
+            provider,
+            providerLabel: provider.label ?? "视觉审片",
+          });
+        }
         throw error;
       }
-      const report = await localizeVisualReviewReport(
+      const localizedReport = await localizeVisualReviewReport(
         execution.output,
         request.renderManifestPath,
         execution.inspectedDurationMs,
       );
+      const independentReviews = execution.independentReviews
+        ? await Promise.all(execution.independentReviews.map(async (review) => ({
+            providerId: review.providerId,
+            modelId: review.modelId,
+            report: await localizeVisualReviewReport(
+              review.output,
+              request.renderManifestPath,
+              execution.inspectedDurationMs,
+            ),
+          })))
+        : undefined;
+      const actualModels = independentReviews?.map(({ providerId: actualProviderId, modelId }) => ({
+        providerId: actualProviderId,
+        modelId,
+      })) ?? [{
+        providerId: execution.executedProviderId ?? execution.trace?.providerId ?? provider.id,
+        modelId: execution.executedModelId ?? execution.trace?.modelId ?? provider.modelId ?? provider.id,
+      }];
+      const actualModelProofs = execution.independentReviews?.map((review) => (
+        visualReviewModelProof(review, execution.evidenceSnapshotId)
+      )) ?? actualModels;
+      const scenePositions = [...new Set([
+        ...(execution.sampling?.coveredScenePositions ?? []),
+        ...localizedReport.findings.flatMap((finding) => finding.scenePosition ? [finding.scenePosition] : []),
+      ])].sort((left, right) => left - right);
+      const report: VisualReviewReport = {
+        ...localizedReport,
+        reviewScope: {
+          reviewStage: "rendered_video",
+          evidenceId: execution.evidenceSnapshotId ?? visualReviewEvidenceId(context, parentArtifactIds),
+          sourceNodeIds: ["render", "technical-review"],
+          sourceArtifactIds: [...parentArtifactIds].sort(),
+          scenePositions,
+          timelineDurationMs: execution.inspectedDurationMs ?? brief.durationSeconds * 1_000,
+          actualModels: actualModelProofs,
+        },
+        ...(independentReviews ? { independentReviews } : {}),
+      };
       const reportPath = path.join(attempt.directory, "visual_review.json");
       const content = `${JSON.stringify(report, null, 2)}\n`;
       await writeTextAtomically(reportPath, content);
@@ -3855,6 +4043,24 @@ function visualReviewNode(
         attempt: attempt.attempt,
         parentArtifactIds,
       });
+      const independentTraceArtifacts = (await Promise.all((execution.independentReviews ?? []).flatMap((review, index) => [
+        persistModelTrace({
+          trace: review.trace,
+          attemptDirectory: attempt.directory,
+          nodeId: "visual-review",
+          attempt: attempt.attempt,
+          parentArtifactIds,
+          fileSuffix: `-${index + 1}`,
+        }),
+        persistAgentLoopTrace({
+          loop: review.agentLoop,
+          attemptDirectory: attempt.directory,
+          nodeId: "visual-review",
+          attempt: attempt.attempt,
+          parentArtifactIds,
+          fileSuffix: `-${index + 1}`,
+        }),
+      ]))).filter((artifact): artifact is ArtifactDraft => Boolean(artifact));
       const meteredAttemptCount = provider.billing === "metered"
         ? Math.max(1, execution.agentLoop?.producerModelCallCount ?? execution.agentLoop?.iterations.length ?? 1)
         : undefined;
@@ -3909,7 +4115,7 @@ function visualReviewNode(
           providerId,
           "Sampled-frame AI visual review; human final review remains mandatory.",
           attempt.attempt,
-        ), ...(traceArtifact ? [traceArtifact] : []), ...(loopArtifact ? [loopArtifact] : [])],
+        ), ...(traceArtifact ? [traceArtifact] : []), ...(loopArtifact ? [loopArtifact] : []), ...independentTraceArtifacts],
       };
     },
     validateOverride: (output) => {
@@ -3949,7 +4155,7 @@ function assetSemanticRankNode(
       transport: "unix_socket",
       billing: "subscription",
       configurationSource: "system_default",
-      parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v2" },
+      parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v3" },
       estimatedCostCny: 0,
     } : {
       providerId: "deterministic-quality-v1",
@@ -4017,7 +4223,7 @@ function assetSemanticRankNode(
                 transport: "unix_socket",
                 billing: "subscription",
                 configurationSource: "system_default",
-                parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v2" },
+                parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v3" },
               },
               providerLabel: "Codex 候选画面排序",
             });
@@ -4116,6 +4322,10 @@ function providerConfigs(brief: ProductionBrief, options: ProductionPipelineOpti
     providerConfig(brief.providers.assets, "asset.prepare", "assets", {
       maxCostCny: 0,
       modelSelections: resolvedAssetModels(brief, runtimeMetadata),
+      ...(brief.providers.visualReview ? {
+        reviewProviderId: brief.providers.visualReview,
+        ...(brief.models?.[brief.providers.visualReview] ? { reviewModelId: brief.models[brief.providers.visualReview] } : {}),
+      } : {}),
       freeProviderIds: (brief.director?.assetProviderIds ?? []).filter((providerId) =>
         options.assetProviders?.some((provider) => provider.id === providerId && provider.billing === "free")),
     }, assetMetadata, assetConfigurationSource(brief), runtimeMetadata),
@@ -4421,6 +4631,7 @@ function workerResponseToNodeResult(
       licenseNote: artifact.provenance.licenseNote,
       ...(artifact.provenance.sourceUrl ? { sourceUrl: artifact.provenance.sourceUrl } : {}),
       ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
+      ...(artifact.provenance.scenePosition ? { scenePosition: artifact.provenance.scenePosition } : {}),
     },
   }));
   const providerOutcomeKnown = response.diagnostics?.providerOutcomeKnown;
@@ -4667,10 +4878,205 @@ function validateFinalReviewInput(input: unknown, requireCanonFacts = false): Re
   if (requireCanonFacts && canonFacts.length === 0) {
     throw new Error("系列成片在终审前必须从最终脚本确认 1 到 8 条可供后集依赖的定版事实。");
   }
+  const reviewArtifactIds = value.reviewArtifactIds === undefined
+    ? undefined
+    : finalReviewArtifactIdsFromOutput(value);
+  if (value.reviewEvidenceId !== undefined
+    && (typeof value.reviewEvidenceId !== "string" || !/^[a-f0-9]{64}$/.test(value.reviewEvidenceId))) {
+    throw new Error("final-review reviewEvidenceId must be a SHA-256 digest.");
+  }
   return {
     ...value,
     canonFacts,
+    ...(reviewArtifactIds ? { reviewArtifactIds } : {}),
   };
+}
+
+function currentFinalReviewArtifactIds(
+  context: WorkflowContext,
+  brief: ProductionBrief,
+  reviewedDelivery: unknown,
+): string[] {
+  const expected = [
+    { nodeId: "technical-review", output: context.outputs.get("technical-review"), field: "reviewPath" },
+    ...(brief.providers.visualReview
+      ? [{ nodeId: "visual-review", output: reviewedDelivery, field: "visualReviewPath" }]
+      : []),
+  ];
+  return expected.map(({ nodeId, output, field }) => {
+    const outputPathValue = requiredOutputString(requireOutputRecord(output, `${nodeId} output`), field);
+    const matching = context.artifacts.filter((artifact) => (
+      artifact.producer?.nodeId === nodeId
+      && artifact.uri !== undefined
+      && path.resolve(artifact.uri) === path.resolve(outputPathValue)
+    ));
+    if (matching.length !== 1) {
+      throw new Error(`Final review cannot bind one current '${nodeId}' evidence artifact.`);
+    }
+    return matching[0]!.id;
+  });
+}
+
+function finalReviewArtifactIdsFromOutput(output: unknown): string[] {
+  const value = requireOutputRecord(output, "final-review output");
+  if (!Array.isArray(value.reviewArtifactIds)
+    || value.reviewArtifactIds.length < 1
+    || value.reviewArtifactIds.length > 4
+    || value.reviewArtifactIds.some((artifactId) => typeof artifactId !== "string" || !artifactId.trim())) {
+    throw new Error("final-review output must bind the current review artifacts.");
+  }
+  const artifactIds = value.reviewArtifactIds.map(String);
+  if (new Set(artifactIds).size !== artifactIds.length) {
+    throw new Error("final-review output contains duplicate review artifact ids.");
+  }
+  return artifactIds;
+}
+
+function finalVisualReviewScope(reviewedDelivery: unknown): VisualReviewScope {
+  const delivery = requireOutputRecord(reviewedDelivery, "visual-review delivery");
+  const report = requireOutputRecord(delivery.report, "visual-review report");
+  const scope = requireOutputRecord(report.reviewScope, "visual-review scope");
+  if (scope.reviewStage !== "rendered_video"
+    || typeof scope.evidenceId !== "string"
+    || !/^[a-f0-9]{64}$/.test(scope.evidenceId)
+    || !Array.isArray(scope.actualModels)) {
+    throw new Error("Final visual review is missing a valid rendered-video evidence scope.");
+  }
+  return scope as unknown as VisualReviewScope;
+}
+
+function visualReviewModelProof(
+  review: IndependentVisualReviewExecution,
+  evidenceId: string | undefined,
+): VisualReviewScope["actualModels"][number] {
+  const iterations = review.agentLoop?.iterations ?? [];
+  const producerDigests = [...new Set(iterations.flatMap((iteration) => (
+    iteration.candidateTrace?.contractDigest ? [iteration.candidateTrace.contractDigest] : []
+  )))];
+  const auditDigests = [...new Set(iterations.flatMap((iteration) => (
+    iteration.auditTrace?.contractDigest ? [iteration.auditTrace.contractDigest] : []
+  )))];
+  const producerCompleted = review.agentLoop?.status === "passed"
+    && iterations.length > 0
+    && iterations.every((iteration) => Boolean(iteration.candidateTrace?.contractDigest));
+  const auditCompleted = review.agentLoop?.status === "passed"
+    && iterations.length > 0
+    && iterations.every((iteration) => Boolean(iteration.auditTrace?.contractDigest));
+  return {
+    providerId: review.providerId,
+    modelId: review.modelId,
+    ...(evidenceId ? { evidenceId } : {}),
+    ...(producerDigests.length === 1 ? { producerContractDigest: producerDigests[0] } : {}),
+    ...(auditDigests.length === 1 ? { auditContractDigest: auditDigests[0] } : {}),
+    producerCompleted,
+    auditCompleted,
+  };
+}
+
+function assertDualVisualReviewReady(reviewedDelivery: unknown): void {
+  const delivery = requireOutputRecord(reviewedDelivery, "visual-review delivery");
+  const report = requireOutputRecord(delivery.report, "visual-review report");
+  const scope = finalVisualReviewScope(delivery);
+  if (scope.actualModels.length !== 2
+    || new Set(scope.actualModels.map((model) => model.providerId)).size !== 2
+    || new Set(scope.actualModels.map((model) => model.modelId)).size !== 2) {
+    throw new Error("Final publication requires two distinct actual visual-review providers and models.");
+  }
+  for (const model of scope.actualModels) {
+    if (model.evidenceId !== scope.evidenceId
+      || model.producerCompleted !== true
+      || model.auditCompleted !== true
+      || typeof model.producerContractDigest !== "string"
+      || !/^[a-f0-9]{64}$/.test(model.producerContractDigest)
+      || typeof model.auditContractDigest !== "string"
+      || !/^[a-f0-9]{64}$/.test(model.auditContractDigest)) {
+      throw new Error("Final publication requires complete producer and audit proof for both visual-review models on the same evidence.");
+    }
+  }
+  if (new Set(scope.actualModels.map((model) => model.producerContractDigest)).size !== 1
+    || new Set(scope.actualModels.map((model) => model.auditContractDigest)).size !== 1) {
+    throw new Error("Final visual-review branches did not use the same producer and audit contracts.");
+  }
+  if (!Array.isArray(report.independentReviews) || report.independentReviews.length !== 2) {
+    throw new Error("Final publication requires both independent visual-review reports.");
+  }
+  const scopedIdentities = new Set(scope.actualModels.map((model) => `${model.providerId}\u0000${model.modelId}`));
+  const reportedIdentities = new Set(report.independentReviews.map((entry, index) => {
+    const review = requireOutputRecord(entry, `independent visual review ${index + 1}`);
+    if (typeof review.providerId !== "string" || typeof review.modelId !== "string") {
+      throw new Error("Independent visual-review identity is invalid.");
+    }
+    return `${review.providerId}\u0000${review.modelId}`;
+  }));
+  if (reportedIdentities.size !== 2 || [...reportedIdentities].some((identity) => !scopedIdentities.has(identity))) {
+    throw new Error("Independent visual-review reports do not match the actual model proof.");
+  }
+}
+
+function assertTechnicalReviewReady(output: unknown): void {
+  const technical = requireOutputRecord(output, "technical-review output");
+  if (technical.passed !== true || typeof technical.reviewPath !== "string" || !technical.reviewPath) {
+    throw new Error("Final publication requires a completed passing technical review.");
+  }
+}
+
+function assertPublishEvidenceReady(context: WorkflowContext, brief: ProductionBrief): void {
+  assertTechnicalReviewReady(context.outputs.get("technical-review"));
+  const finalReview = requireOutputRecord(context.outputs.get("final-review"), "final-review output");
+  const currentArtifactIds = currentFinalReviewArtifactIds(context, brief, context.outputs.get("visual-review"));
+  if (JSON.stringify(finalReviewArtifactIdsFromOutput(finalReview)) !== JSON.stringify(currentArtifactIds)) {
+    throw new Error("Final approval is not bound to the current review artifact versions.");
+  }
+  if (brief.providers.visualReview) {
+    assertDualVisualReviewReady(context.outputs.get("visual-review"));
+    const scope = finalVisualReviewScope(context.outputs.get("visual-review"));
+    if (finalReview.reviewEvidenceId !== scope.evidenceId) {
+      throw new Error("Final approval is not bound to the current visual evidence digest.");
+    }
+  }
+}
+
+function assertPersistedFinalApprovalReady(
+  run: WorkflowRun<ProductionBrief>,
+  brief: ProductionBrief,
+  finalReviewNode: WorkflowRun["nodeRuns"][number],
+): void {
+  const uncertain = run.nodeRuns.find((node) => node.outcomeUncertain === true);
+  if (uncertain) {
+    throw new Error(`Final approval is blocked while paid node '${uncertain.nodeId}' has an unknown outcome.`);
+  }
+  const technicalNode = run.nodeRuns.find((node) => node.nodeId === "technical-review");
+  if (technicalNode?.status !== "succeeded") {
+    throw new Error("Final approval requires a completed technical-review node.");
+  }
+  assertTechnicalReviewReady(technicalNode.output);
+  const output = validateFinalReviewInput(finalReviewNode.output, Boolean(brief.seriesContext));
+  const artifactIds = finalReviewArtifactIdsFromOutput(output);
+  if (JSON.stringify(finalReviewNode.intervention?.artifactIds ?? []) !== JSON.stringify(artifactIds)) {
+    throw new Error("Final approval intervention is not bound to the current review artifacts.");
+  }
+  for (const artifactId of artifactIds) {
+    const artifact = run.artifacts.find((candidate) => candidate.id === artifactId);
+    const producer = artifact?.producer?.nodeId;
+    const producerNode = run.nodeRuns.find((node) => node.nodeId === producer);
+    const currentVersion = producerNode?.outputState?.versions.find(
+      (version) => version.id === producerNode.outputState?.effectiveVersionId,
+    );
+    if (!artifact || !currentVersion?.artifactIds.includes(artifactId)) {
+      throw new Error("Final approval references a review artifact that is no longer current.");
+    }
+  }
+  if (brief.providers.visualReview) {
+    const visualNode = run.nodeRuns.find((node) => node.nodeId === "visual-review");
+    if (visualNode?.status !== "succeeded") {
+      throw new Error("Final approval requires a completed visual-review node.");
+    }
+    assertDualVisualReviewReady(visualNode.output);
+    const scope = finalVisualReviewScope(visualNode.output);
+    if (output.reviewEvidenceId !== scope.evidenceId) {
+      throw new Error("Final approval is not bound to the current visual evidence digest.");
+    }
+  }
 }
 
 function requireOutputRecord(output: unknown, nodeId: string): Record<string, unknown> {
@@ -4713,6 +5119,18 @@ function visualReviewRecommendation(input: unknown): VisualReviewReport["recomme
   return recommendation === "approve" || recommendation === "revise" || recommendation === "reject"
     ? recommendation
     : undefined;
+}
+
+function visualReviewEvidenceId(context: WorkflowContext, artifactIds: string[]): string {
+  const selected = context.artifacts
+    .filter((artifact) => artifactIds.includes(artifact.id))
+    .map((artifact) => ({
+      id: artifact.id,
+      nodeId: artifact.producer?.nodeId,
+      sha256: artifact.sha256,
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return createHash("sha256").update(JSON.stringify(selected)).digest("hex");
 }
 
 async function localizeVisualReviewReport(
@@ -4758,7 +5176,12 @@ async function localizeVisualReviewReport(
         && (finding.timecodeMs < timing.endMs || (index === scenes.length - 1 && finding.timecodeMs <= timing.endMs))
       ));
       if (!scene) throw new Error(`Visual review finding at ${finding.timecodeMs}ms is outside the render manifest timeline.`);
-      return { ...finding, scenePosition: scene.scenePosition };
+      if (finding.scenePosition !== scene.scenePosition) {
+        throw new Error(
+          `Visual review finding at ${finding.timecodeMs}ms claims scene ${finding.scenePosition}, but the render manifest maps it to scene ${scene.scenePosition}.`,
+        );
+      }
+      return finding;
     }),
   };
 }
@@ -5160,6 +5583,90 @@ async function failedModelCandidatesNodeResult(options: {
   };
 }
 
+async function failedIndependentVisualReviewNodeResult(options: {
+  error: IndependentVisualReviewError;
+  attemptDirectory: string;
+  nodeId: string;
+  attempt: number;
+  parentArtifactIds: string[];
+  provider: Pick<Provider, "id" | "modelId" | "transport" | "billing" | "configurationSource" | "parameters">;
+  providerLabel: string;
+}): Promise<NodeExecutionResult<Record<string, unknown>>> {
+  const branches = [
+    ...options.error.completedReviews.map(({ providerId, modelId }) => ({ providerId, modelId, status: "succeeded" as const })),
+    ...options.error.failures.map(({ providerId, modelId, error }) => ({
+      providerId,
+      modelId,
+      status: "failed" as const,
+      reason: publicFallbackReason(error),
+    })),
+  ];
+  const statusPath = path.join(options.attemptDirectory, "independent_review_branches.json");
+  const statusPayload = {
+    version: "video-factory/independent-review-branches-v1",
+    status: "partial",
+    branches,
+  };
+  const statusContent = `${JSON.stringify(statusPayload, null, 2)}\n`;
+  await writeTextAtomically(statusPath, statusContent);
+  const statusArtifact = fileArtifact(
+    "review_branch_status",
+    statusPath,
+    statusContent,
+    "application/json",
+    "video-factory/independent-review-branches-v1",
+    options.nodeId,
+    options.parentArtifactIds,
+    options.provider.id,
+    "Final visual-review branch status; completed branch checkpoints are reused on retry.",
+    options.attempt,
+  );
+  const completedTraceArtifacts = (await Promise.all(options.error.completedReviews.flatMap((review, index) => [
+    persistModelTrace({
+      trace: review.trace,
+      attemptDirectory: options.attemptDirectory,
+      nodeId: options.nodeId,
+      attempt: options.attempt,
+      parentArtifactIds: options.parentArtifactIds,
+      fileSuffix: `-completed-${index + 1}`,
+    }),
+    persistAgentLoopTrace({
+      loop: review.agentLoop,
+      attemptDirectory: options.attemptDirectory,
+      nodeId: options.nodeId,
+      attempt: options.attempt,
+      parentArtifactIds: options.parentArtifactIds,
+      fileSuffix: `-completed-${index + 1}`,
+    }),
+  ]))).filter((artifact): artifact is ArtifactDraft => Boolean(artifact));
+  const attemptedModelIds = [...new Set(branches.map(({ modelId }) => modelId))];
+  const failedBranch = options.error.failures.at(-1);
+  return {
+    status: "failed",
+    error: `${options.error.message} 已完成分支保留，重试只继续未完成分支。`,
+    output: {
+      independentReviewStatus: statusPayload,
+    },
+    receipt: {
+      providerId: failedBranch?.providerId ?? options.provider.id,
+      providerLabel: options.providerLabel,
+      modelId: failedBranch?.modelId ?? options.provider.modelId ?? options.provider.id,
+      transport: options.provider.transport ?? "unix_socket",
+      billing: options.provider.billing ?? "subscription",
+      configurationSource: options.provider.configurationSource ?? "system_default",
+      parameters: {
+        ...(options.provider.parameters ?? {}),
+        independentReviewStatus: "partial",
+        completedReviewBranches: options.error.completedReviews.length,
+        failedReviewBranches: options.error.failures.length,
+      },
+      actualModelIds: attemptedModelIds,
+      fallbackReason: options.error.message,
+    },
+    artifacts: [statusArtifact, ...completedTraceArtifacts],
+  };
+}
+
 async function persistModelCandidateFailureTrace(options: {
   taskKind: CodexTaskKind;
   attempts: ModelCandidateAttempt[];
@@ -5202,13 +5709,15 @@ async function persistModelTrace(options: {
   nodeId: string;
   attempt: number;
   parentArtifactIds: string[];
+  fileSuffix?: string;
 }): Promise<ArtifactDraft | undefined> {
   if (!options.trace) return undefined;
-  const tracePath = path.join(options.attemptDirectory, "model_trace.json");
+  const tracePath = path.join(options.attemptDirectory, `model_trace${options.fileSuffix ?? ""}.json`);
   const payload = {
     version: "video-factory/model-trace-v1",
     taskKind: options.trace.taskKind,
     promptVersion: options.trace.promptVersion,
+    ...(options.trace.contractDigest ? { contractDigest: options.trace.contractDigest } : {}),
     providerId: options.trace.providerId,
     modelId: options.trace.modelId,
     ...(options.trace.reasoningEffort ? { reasoningEffort: options.trace.reasoningEffort } : {}),
@@ -5252,9 +5761,10 @@ async function persistAgentLoopTrace(options: {
   nodeId: string;
   attempt: number;
   parentArtifactIds: string[];
+  fileSuffix?: string;
 }): Promise<ArtifactDraft | undefined> {
   if (!options.loop) return undefined;
-  const tracePath = path.join(options.attemptDirectory, "agent_loop_trace.json");
+  const tracePath = path.join(options.attemptDirectory, `agent_loop_trace${options.fileSuffix ?? ""}.json`);
   const payload = {
     ...options.loop,
     iterations: options.loop.iterations.map((iteration) => ({

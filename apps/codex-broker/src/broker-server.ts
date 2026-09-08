@@ -462,10 +462,28 @@ export class CodexBrokerServer {
       return { outcome: { ok: false, status: 500, message: "Codex role session registry is unavailable." } };
     }
     if (!outcome.sessionId || !isCodexThreadId(outcome.sessionId)) {
-      return { outcome: { ok: false, status: 422, message: "Codex role session was not created; the task result was not accepted." } };
+      return {
+        outcome: {
+          ok: false,
+          status: 422,
+          message: "Codex role session was not created; the task result was not accepted.",
+          ...(outcome.trace ? {
+            failureDetails: failureDetailsFromTrace(outcome.trace, "session_not_created"),
+          } : {}),
+        },
+      };
     }
     if (expectedSessionId && outcome.sessionId !== expectedSessionId) {
-      return { outcome: { ok: false, status: 422, message: "Codex resumed a different role session; the task result was rejected." } };
+      return {
+        outcome: {
+          ok: false,
+          status: 422,
+          message: "Codex resumed a different role session; the task result was rejected.",
+          ...(outcome.trace ? {
+            failureDetails: failureDetailsFromTrace(outcome.trace, "session_mismatch"),
+          } : {}),
+        },
+      };
     }
     const handle = session.handle ?? `vfs_${randomBytes(24).toString("base64url")}`;
     const sessionRecord: SessionRecord = {
@@ -681,6 +699,19 @@ function failureOutcome(error: unknown): TaskOutcome {
     };
   }
   return { ok: false, status: 500, message: "The model service could not complete this step." };
+}
+
+function failureDetailsFromTrace(
+  trace: CodexTaskTrace,
+  reasonCode: "session_not_created" | "session_mismatch",
+): CodexExecutorFailureDetails {
+  return {
+    category: "invalid_output",
+    reasonCode,
+    providerId: trace.providerId,
+    modelId: trace.modelId,
+    ...(trace.providerWaitMs !== undefined ? { providerWaitMs: trace.providerWaitMs } : {}),
+  };
 }
 
 function publicExecutorMessage(message: string, transient = false): string {

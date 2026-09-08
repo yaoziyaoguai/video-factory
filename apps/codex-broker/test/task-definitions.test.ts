@@ -123,34 +123,66 @@ describe("broker-owned task definitions", () => {
     const director = taskPromptFor("director-plan");
     const review = taskPromptFor("visual-review");
 
-    assert.equal(topic.version, "video-factory/topic-editor-v5");
-    assert.equal(script.version, "video-factory/screenwriter-v6");
-    assert.equal(director.version, "video-factory/director-v15");
-    assert.equal(review.version, "video-factory/visual-review-v6");
+    assert.equal(topic.version, "video-factory/topic-editor-v6");
+    assert.equal(script.version, "video-factory/screenwriter-v13");
+    assert.equal(director.version, "video-factory/director-v24");
+    assert.equal(review.version, "video-factory/visual-review-v11");
     assert.match(review.outputRules.join("\n"), /不得为了通过审计而美化评分/);
-    assert.match(review.directive, /任何可读字.*不得 recommendation=approve/);
-    assert.match(review.directive, /只有导演明确选择 deliveryType=editorial_card.*其他镜头出现任何可读文字.*必须阻断/);
+    assert.match(review.directive, /真实来源材料自带.*editorial_card.*renderManifest.*不因‘出现文字’本身打回/);
+    assert.match(review.directive, /生成模型自造的标签、乱码.*内部工作流术语.*必须留下 failed/);
     assert.match(review.directive, /主体、物体、动作.*不得 recommendation=approve/);
+    assert.match(review.directive, /pilotScenePositions.*仅审列出的试片镜头/);
+    assert.match(review.directive, /证据不足.*补充已有素材.*不能直接要求重新付费生成/);
+    assert.match(review.directive, /scale-to-fill.*center crop.*不能仅因源素材画幅比例存在轻微偏差.*rework_asset/);
+    assert.match(
+      review.directive,
+      /方案本身在当前 Provider 能力边界内无法兑现.*visual-direction 或 script.*replan_upstream.*不得.*assets.*重复付费生成/,
+    );
+    assert.match(
+      review.directive,
+      /上游.*不承诺.*精确身份.*不能豁免.*同一人物、物件或空间.*replan_upstream/,
+    );
+    assert.match(
+      review.examples.join("\n"),
+      /"startTimecodeMs".*"evidenceStatus":"not_observed".*"evidenceFrameSha256":null.*"nextAction":"inspect_existing_media"/,
+    );
     assert.match(review.outputRules.join("\n"), /scenePosition.*targetNodeId/);
     assert.match(topic.directive, /值得做视频/);
     assert.match(topic.directive, /visualPlan/);
+    assert.match(topic.directive, /待试片验证的实现方案.*不是已经发生或已经核验的事实/);
     assert.match(topic.directive, /模板.*不能.*覆盖/);
     assert.match(script.directive, /观众承诺/);
-    assert.match(script.directive, /5 到 24/);
+    assert.match(script.directive, /镜头数量由观众收益和可执行动作决定/);
     assert.match(script.directive, /每秒约 2 到 6 个汉字/);
+    assert.match(script.directive, /每个 scene 必须能由一段素材从开头独立执行/);
+    assert.match(script.directive, /事实陈述.*绝对化断言/);
+    assert.match(script.directive, /单变量对照.*画面可核验/);
+    assert.match(script.directive, /生成式画面.*不能.*真实实验|真实因果/);
+    assert.match(script.directive, /最后半秒.*简短行动提示/);
+    assert.match(script.directive, /shotSlots 不是灵感列表.*不能用同一故事段落中的相邻动作替代/);
+    assert.match(script.directive, /只有输入明确列出停帧能力.*固定机位.*近静止关键状态/);
+    assert.match(director.directive, /选择其中的 metered Provider 只是形成报价/);
+    assert.match(taskPromptFor("role-audit").directive, /真实付费审批在下游执行/);
     assert.match(script.directive, /成功条件/);
-    assert.match(script.directive, /visualProof 与 visualPlan.*不得用 templateBlueprint 的通用镜头覆盖/);
+    assert.match(script.directive, /visualProof 与 visualPlan.*不得用 templateBlueprint 的通用镜头机械覆盖/);
     assert.match(director.directive, /逐秒动作/);
+    assert.match(director.directive, /shots 只输出 affectedScenePositions/);
     assert.match(director.directive, /负面约束/);
     assert.match(director.directive, /Provider Compiler/);
     assert.match(director.directive, /deliveryType/);
+    assert.match(director.directive, /移动、出现、消失、亮度变化.*stock_video 或 generated_video/);
+    assert.match(director.directive, /静态图片冒充动作已经完成/);
     assert.match(director.directive, /未列出自有素材库存/);
     assert.match(director.directive, /只交付一张静态卡片/);
     assert.match(director.directive, /图库是检索而不是生成/);
+    assert.match(director.directive, /不得假设图库视频自带停帧.*固定机位的近静止连续画面/);
+    assert.match(director.directive, /事实证据.*不得改成 generated/);
+    assert.match(director.directive, /生成式画面.*不得.*现实因果|真实实验/);
+    assert.match(director.directive, /精确多步动作.*事实证据/);
     assert.match(director.directive, /3 到 8 个具体英文概念/);
     assert.match(director.directive, /onScreenText.*soundCue/);
     assert.match(director.directive, /完整方案.*真实报价/);
-    assert.match(director.directive, /visualProof 与 visualPlan.*不得用 templateBlueprint 的通用镜头覆盖/);
+    assert.match(director.directive, /visualProof 与 visualPlan.*不得用 templateBlueprint 的通用镜头机械覆盖/);
     assert.match(director.directive, /costFeedback.*重规划偏好/);
     assert.match(director.directive, /目标预计费用.*不是硬门禁/);
     assert.match(director.directive, /不得.*说明卡.*降级/);
@@ -162,13 +194,17 @@ describe("broker-owned task definitions", () => {
     assert.match(director.directive, /不得只在 generationPrompt、continuityNote 等文字里描述参考关系/);
     assert.match(director.directive, /未使用对应路由时输出 null/);
     assert.match(director.directive, /独立生成且没有复用.*generated_image/);
+    assert.match(director.directive, /静态交付.*一个.*状态节拍/);
     assert.match(director.directive, /只允许引用更早镜头/);
     assert.match(director.directive, /不会重新搜索、生成或计费/);
     assert.match(director.directive, /不会产生新的动作、光线变化或画面状态/);
+    assert.match(director.directive, /temporalBeats.*最终成片使用的镜头时长/);
+    assert.match(director.directive, /最短时长.*裁切.*多出的尾部/);
     const rank = taskPromptFor("asset-rank");
-    assert.equal(rank.version, "video-factory/asset-rank-v2");
+    assert.equal(rank.version, "video-factory/asset-rank-v3");
     assert.match(rank.directive, /主体、物体、动作.*硬门槛/);
-    assert.match(rank.directive, /已有候选.*没有任何.*不得.*通过/);
+    assert.match(rank.directive, /没有任何.*合格候选.*诚实的 no-match/);
+    assert.match(rank.directive, /低于自动执行阈值/);
     assert.match(rank.directive, /输入候选本来为空.*原样保留空数组/);
     assert.match(director.directive, /没有可执行的免费或复用方案.*保留可执行的付费镜头.*重新报价/);
     assert.doesNotMatch(director.directive, /付费镜头上限是硬边界/);
@@ -179,6 +215,7 @@ describe("broker-owned task definitions", () => {
     assert.match(review.directive, /脚本.*导演意图/);
     assert.match(review.directive, /逐场核对/);
     assert.match(review.directive, /scene_triplets.*opening.*middle.*closing/);
+    assert.match(review.directive, /scene_sequence.*高密度帧.*近似保持时长/);
     assert.match(review.directive, /hook_and_scene_midpoints.*scene_change_keyframes/);
     assert.match(review.directive, /稀疏证据/);
     assert.match(review.directive, /不得仅因此自动给出 revise/);
@@ -230,10 +267,10 @@ describe("broker-owned task definitions", () => {
   it("requires inspectable shot intent instead of accepting generic scene prose", () => {
     const scriptSchema = outputSchemaFor("script-draft") as {
       required: string[];
-      properties: { scenes: { items: { required: string[] } } };
+      properties: { scenes: { minItems: number; items: { required: string[] } } };
     };
     const directorSchema = outputSchemaFor("director-plan") as {
-      properties: { shots: { items: { required: string[] } } };
+      properties: { shots: { items: { required: string[]; properties: { temporalBeats: { minItems: number } } } } };
     };
 
     assert.deepEqual(scriptSchema.required, ["viewerPromise", "narrativeArc", "canonFacts", "scenes"]);
@@ -246,6 +283,8 @@ describe("broker-owned task definitions", () => {
     assert.ok(directorSchema.properties.shots.items.required.includes("deliveryType"));
     assert.ok(directorSchema.properties.shots.items.required.includes("reuseFromScenePosition"));
     assert.ok(directorSchema.properties.shots.items.required.includes("referenceFromScenePosition"));
+    assert.equal(scriptSchema.properties.scenes.minItems, 3);
+    assert.equal(directorSchema.properties.shots.items.properties.temporalBeats.minItems, 1);
   });
 
   it("validates structured reference-image routing fields", () => {
@@ -304,8 +343,13 @@ describe("broker-owned task definitions", () => {
         ...valid,
         findings: [{
           timecodeMs: 0,
+          startTimecodeMs: 0,
+          endTimecodeMs: 500,
           scenePosition: 1,
           targetNodeId: "assets",
+          evidenceStatus: "failed",
+          evidenceFrameSha256: "a".repeat(64),
+          nextAction: "rework_asset",
           category: "unknown",
           severity: "warning",
           description: "问题",
@@ -318,14 +362,41 @@ describe("broker-owned task definitions", () => {
     }
     assert.match(outputValidationErrorFor("visual-review", {
       ...valid,
-      scores: { ...valid.scores, pacing: 59 },
+      recommendation: "revise",
+      findings: [{
+        timecodeMs: 100,
+        startTimecodeMs: 0,
+        endTimecodeMs: 500,
+        scenePosition: 1,
+        targetNodeId: "assets",
+        evidenceStatus: "failed",
+        evidenceFrameSha256: "not-a-sha256",
+        nextAction: "rework_asset",
+        category: "continuity",
+        severity: "warning",
+        description: "镜头重复",
+        suggestion: "更换素材",
+      }],
+    }) ?? "", /evidenceFrameSha256.*required pattern/);
+    assert.match(outputValidationErrorFor("visual-review", {
+      ...valid,
+      scores: { ...valid.scores, pacing: 74 },
+    }) ?? "", /cannot approve/);
+    assert.match(outputValidationErrorFor("visual-review", {
+      ...valid,
+      confidence: 0.69,
     }) ?? "", /cannot approve/);
     assert.match(outputValidationErrorFor("visual-review", {
       ...valid,
       findings: [{
         timecodeMs: 100,
+        startTimecodeMs: 0,
+        endTimecodeMs: 500,
         scenePosition: 1,
         targetNodeId: "assets",
+        evidenceStatus: "failed",
+        evidenceFrameSha256: "a".repeat(64),
+        nextAction: "rework_asset",
         category: "continuity",
         severity: "warning",
         description: "镜头重复",
@@ -336,12 +407,37 @@ describe("broker-owned task definitions", () => {
       ...valid,
       findings: [{
         timecodeMs: 100,
+        startTimecodeMs: 0,
+        endTimecodeMs: 500,
+        evidenceStatus: "failed",
+        evidenceFrameSha256: "a".repeat(64),
+        nextAction: "rework_asset",
         category: "other",
         severity: "warning",
         description: "第 8 镜没有杯子。",
         suggestion: "替换素材。",
       }],
     }) ?? "", /scenePosition|required property/);
+
+    assert.equal(outputValidationErrorFor("visual-review", {
+      ...valid,
+      scores: { ...valid.scores, pacing: 74 },
+      findings: [{
+        timecodeMs: 100,
+        startTimecodeMs: 0,
+        endTimecodeMs: 500,
+        scenePosition: 1,
+        targetNodeId: "script",
+        evidenceStatus: "failed",
+        evidenceFrameSha256: "a".repeat(64),
+        nextAction: "replan_upstream",
+        category: "pacing",
+        severity: "warning",
+        description: "前六秒没有兑现承诺。",
+        suggestion: "重写开场脚本。",
+      }],
+      recommendation: "revise",
+    }), undefined);
   });
 
   it("rejects broken scene ordering and duplicate director routes", () => {

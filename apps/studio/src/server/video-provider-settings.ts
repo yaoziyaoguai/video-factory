@@ -10,12 +10,15 @@ export interface VideoModelRuntimeProfile {
   estimatedCnyPerClip: number;
   taskTypes: Array<"text-to-video" | "image-to-video">;
   resolutions: string[];
+  aspectRatios: Array<"9:16" | "16:9" | "1:1" | "3:4" | "4:3">;
   minDurationSeconds: number;
   maxDurationSeconds: number;
   supportsAudio: boolean;
   protocol?: "v1" | "v2";
+  allowedDurationsSeconds?: number[];
   estimatedCnyPerSecond?: number;
   estimatedCnyPerSecondByResolution?: Record<string, number>;
+  estimatedCnyByResolutionAndDuration?: Record<string, Record<string, number>>;
   recommended?: boolean;
 }
 
@@ -68,10 +71,9 @@ export function readMeteredVideoProviderSettings(
     });
   }
 
-  const miniMaxEstimate = positiveNumber(environment.MINIMAX_ESTIMATED_CNY_PER_CLIP);
-  if (environment.MINIMAX_API_KEY && environment.MINIMAX_VIDEO_MODEL_ID && miniMaxEstimate !== undefined) {
+  if (environment.MINIMAX_API_KEY && environment.MINIMAX_VIDEO_MODEL_ID) {
     const model = environment.MINIMAX_VIDEO_MODEL_ID;
-    const models = reviewedMiniMaxProfiles(model, miniMaxEstimate);
+    const models = reviewedMiniMaxProfiles(model);
     const configuredProfile = models.find((profile) => profile.id === model);
     if (!configuredProfile) {
       throw new Error(`MINIMAX_VIDEO_MODEL_ID '${model}' has no reviewed runtime profile.`);
@@ -86,19 +88,13 @@ export function readMeteredVideoProviderSettings(
     });
   }
 
-  const wanEstimate = positiveNumber(environment.WAN_ESTIMATED_CNY_PER_CLIP);
   if (
     environment.DASHSCOPE_API_KEY
     && environment.DASHSCOPE_WORKSPACE_ID
     && environment.WAN_MODEL_ID
-    && wanEstimate !== undefined
   ) {
     const model = environment.WAN_MODEL_ID;
-    const models = reviewedWanProfiles(
-      model,
-      wanEstimate,
-      readModelEstimates(environment.WAN_MODEL_ESTIMATES_JSON, "WAN_MODEL_ESTIMATES_JSON"),
-    );
+    const models = reviewedWanProfiles(model);
     const configuredProfile = models.find((profile) => profile.id === model);
     if (!configuredProfile) {
       throw new Error(`WAN_MODEL_ID '${model}' has no reviewed runtime profile.`);
@@ -127,23 +123,22 @@ export function reviewedVideoModelCatalog(environment: NodeJS.ProcessEnv): Recor
       readModelEstimates(environment.SEEDANCE_MODEL_ESTIMATES_JSON),
       readSeedanceModelProfiles(environment.SEEDANCE_MODEL_PROFILES_JSON),
     ),
-    "hailuo-video-v1": reviewedMiniMaxProfiles(
-      miniMaxModel,
-      positiveNumber(environment.MINIMAX_ESTIMATED_CNY_PER_CLIP) ?? 2.1,
-    ),
-    "wan-video-v1": reviewedWanProfiles(
-      wanModel,
-      positiveNumber(environment.WAN_ESTIMATED_CNY_PER_CLIP) ?? 5,
-      readModelEstimates(environment.WAN_MODEL_ESTIMATES_JSON, "WAN_MODEL_ESTIMATES_JSON"),
-    ),
+    "hailuo-video-v1": reviewedMiniMaxProfiles(miniMaxModel),
+    "wan-video-v1": reviewedWanProfiles(wanModel),
   };
 }
 
-function reviewedMiniMaxProfiles(configuredModel: string, hailuoEstimate: number): VideoModelRuntimeProfile[] {
+function reviewedMiniMaxProfiles(configuredModel: string): VideoModelRuntimeProfile[] {
   const profiles: VideoModelRuntimeProfile[] = [
     {
-      ...genericProfile("MiniMax-Hailuo-2.3", "MiniMax Hailuo 2.3", hailuoEstimate, 6, 6, ["768P", "1080P"]),
+      ...genericProfile("MiniMax-Hailuo-2.3", "MiniMax Hailuo 2.3", 2, 6, 10, ["768P", "1080P"]),
+      aspectRatios: ["16:9"],
       protocol: "v1",
+      allowedDurationsSeconds: [6, 10],
+      estimatedCnyByResolutionAndDuration: {
+        "768P": { "6": 2, "10": 4 },
+        "1080P": { "6": 3.5 },
+      },
     },
     {
       id: "MiniMax-H3",
@@ -153,6 +148,7 @@ function reviewedMiniMaxProfiles(configuredModel: string, hailuoEstimate: number
       estimatedCnyPerSecondByResolution: { "768P": 0.5, "2K": 0.8 },
       taskTypes: ["text-to-video"],
       resolutions: ["768P", "2K"],
+      aspectRatios: ["9:16", "16:9", "1:1"],
       minDurationSeconds: 4,
       maxDurationSeconds: 15,
       supportsAudio: true,
@@ -166,6 +162,7 @@ function reviewedMiniMaxProfiles(configuredModel: string, hailuoEstimate: number
       estimatedCnyPerSecondByResolution: { "480P": 0.33, "768P": 0.5 },
       taskTypes: ["text-to-video"],
       resolutions: ["480P", "768P"],
+      aspectRatios: ["9:16", "16:9", "1:1"],
       minDurationSeconds: 5,
       maxDurationSeconds: 15,
       supportsAudio: true,
@@ -175,42 +172,33 @@ function reviewedMiniMaxProfiles(configuredModel: string, hailuoEstimate: number
   return profiles.map((profile) => profile.id === configuredModel ? { ...profile, recommended: true } : profile);
 }
 
-function reviewedWanProfiles(
-  configuredModel: string,
-  estimatedCnyPerClip: number,
-  modelEstimates: Record<string, number>,
-): VideoModelRuntimeProfile[] {
-  const estimate = (modelId: string) => modelEstimates[modelId] ?? estimatedCnyPerClip;
+function reviewedWanProfiles(configuredModel: string): VideoModelRuntimeProfile[] {
   const profiles: VideoModelRuntimeProfile[] = [
     {
       id: "wan3.0-video",
       label: "Wan 3.0",
-      estimatedCnyPerClip: estimate("wan3.0-video"),
+      estimatedCnyPerClip: 1.2,
+      estimatedCnyPerSecond: 0.6,
+      estimatedCnyPerSecondByResolution: { "720P": 0.6 },
       taskTypes: ["text-to-video"],
-      resolutions: ["480P", "720P", "1080P"],
+      resolutions: ["720P"],
+      aspectRatios: ["9:16", "16:9"],
       minDurationSeconds: 2,
       maxDurationSeconds: 15,
-      supportsAudio: true,
+      supportsAudio: false,
     },
     {
       id: "wan3.0-video-prime",
       label: "Wan 3.0 Prime",
-      estimatedCnyPerClip: estimate("wan3.0-video-prime"),
+      estimatedCnyPerClip: 1.2,
+      estimatedCnyPerSecond: 0.6,
+      estimatedCnyPerSecondByResolution: { "720P": 0.6 },
       taskTypes: ["text-to-video"],
-      resolutions: ["480P", "720P", "1080P"],
+      resolutions: ["720P"],
+      aspectRatios: ["9:16", "16:9"],
       minDurationSeconds: 2,
       maxDurationSeconds: 15,
-      supportsAudio: true,
-    },
-    {
-      id: "wan2.7-t2v",
-      label: "Wan 2.7 文生视频",
-      estimatedCnyPerClip: estimate("wan2.7-t2v"),
-      taskTypes: ["text-to-video"],
-      resolutions: ["720P", "1080P"],
-      minDurationSeconds: 2,
-      maxDurationSeconds: 15,
-      supportsAudio: true,
+      supportsAudio: false,
     },
   ];
   return profiles.map((profile) => profile.id === configuredModel ? { ...profile, recommended: true } : profile);
@@ -230,14 +218,15 @@ function reviewedSeedanceProfiles(
       estimatedCnyPerClip: estimate(DEFAULT_SEEDANCE_MODEL_ID),
       taskTypes: ["text-to-video"],
       resolutions: ["480p", "720p", "1080p"],
+      aspectRatios: ["9:16", "16:9", "1:1", "3:4", "4:3"],
       minDurationSeconds: 4,
       maxDurationSeconds: 15,
       supportsAudio: true,
     },
-    genericProfile("doubao-seedance-2-0-260128", "Seedance 2.0", estimate("doubao-seedance-2-0-260128"), 4, 15, ["480p", "720p", "1080p"]),
-    genericProfile("doubao-seedance-2-0-fast-260128", "Seedance 2.0 Fast", estimate("doubao-seedance-2-0-fast-260128"), 4, 15, ["480p", "720p", "1080p"]),
+    { ...genericProfile("doubao-seedance-2-0-260128", "Seedance 2.0", estimate("doubao-seedance-2-0-260128"), 4, 15, ["480p", "720p", "1080p"]), supportsAudio: true },
+    { ...genericProfile("doubao-seedance-2-0-fast-260128", "Seedance 2.0 Fast", estimate("doubao-seedance-2-0-fast-260128"), 4, 15, ["480p", "720p"]), supportsAudio: true },
     genericProfile("doubao-seedance-2-0-mini-260615", "Seedance 2.0 Mini", estimate("doubao-seedance-2-0-mini-260615"), 4, 15, ["480p", "720p"]),
-    genericProfile("doubao-seedance-1-5-pro-251215", "Seedance 1.5 Pro", estimate("doubao-seedance-1-5-pro-251215"), 4, 12, ["480p", "720p", "1080p"]),
+    { ...genericProfile("doubao-seedance-1-5-pro-251215", "Seedance 1.5 Pro", estimate("doubao-seedance-1-5-pro-251215"), 4, 12, ["480p", "720p", "1080p"]), supportsAudio: true },
   ];
   const profiles = new Map(builtIns.map((profile) => [profile.id, profile]));
   for (const profile of customProfiles) {
@@ -266,6 +255,7 @@ function genericProfile(
     estimatedCnyPerClip,
     taskTypes: ["text-to-video"],
     resolutions,
+    aspectRatios: ["9:16", "16:9", "1:1", "3:4", "4:3"],
     minDurationSeconds,
     maxDurationSeconds,
     supportsAudio: false,
@@ -320,6 +310,12 @@ function readSeedanceModelProfiles(value: string | undefined): VideoModelRuntime
       throw new Error(`SEEDANCE_MODEL_PROFILES_JSON profile '${id}' has an unsupported task type.`);
     }
     const resolutions = stringArray(profile.resolutions, `profile '${id}' resolutions`);
+    const aspectRatios = profile.aspectRatios === undefined
+      ? ["9:16", "16:9", "1:1", "3:4", "4:3"]
+      : stringArray(profile.aspectRatios, `profile '${id}' aspectRatios`);
+    if (aspectRatios.some((ratio) => !["9:16", "16:9", "1:1", "3:4", "4:3"].includes(ratio))) {
+      throw new Error(`SEEDANCE_MODEL_PROFILES_JSON profile '${id}' has an unsupported aspect ratio.`);
+    }
     const minDurationSeconds = positiveProfileNumber(profile.minDurationSeconds, `profile '${id}' minDurationSeconds`);
     const maxDurationSeconds = positiveProfileNumber(profile.maxDurationSeconds, `profile '${id}' maxDurationSeconds`);
     if (minDurationSeconds > maxDurationSeconds) {
@@ -334,6 +330,7 @@ function readSeedanceModelProfiles(value: string | undefined): VideoModelRuntime
       estimatedCnyPerClip: positiveProfileNumber(profile.estimatedCnyPerClip, `profile '${id}' estimatedCnyPerClip`),
       taskTypes: taskTypes as VideoModelRuntimeProfile["taskTypes"],
       resolutions,
+      aspectRatios: aspectRatios as VideoModelRuntimeProfile["aspectRatios"],
       minDurationSeconds,
       maxDurationSeconds,
       supportsAudio: profile.supportsAudio,

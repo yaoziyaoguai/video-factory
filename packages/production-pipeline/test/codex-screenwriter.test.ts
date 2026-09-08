@@ -63,6 +63,41 @@ class SequencedCodexClient extends CodexBridgeClient {
   }
 }
 
+class SessionAwareCodexClient extends CodexBridgeClient {
+  readonly calls: Array<{
+    kind: CodexTaskKind;
+    payload: unknown;
+    session: CodexTaskExecution["session"];
+  }> = [];
+  private readonly callCounts: Partial<Record<CodexTaskKind, number>> = {};
+
+  constructor(private readonly responses: Partial<Record<CodexTaskKind, unknown[]>>) {
+    super({ socketPath: "/nonexistent/vf-codex.sock", sleep: async () => {} });
+  }
+
+  async runTaskDetailed(
+    kind: CodexTaskKind,
+    payload: unknown,
+    _requestId: string,
+    session?: CodexTaskExecution["session"],
+  ): Promise<CodexTaskExecution> {
+    this.calls.push({ kind, payload, session: structuredClone(session) });
+    const callIndex = this.callCounts[kind] ?? 0;
+    this.callCounts[kind] = callIndex + 1;
+    const output = this.responses[kind]?.[callIndex];
+    if (output === undefined) throw new Error(`missing ${kind} response ${callIndex + 1}`);
+    return {
+      output,
+      ...(session ? {
+        session: {
+          key: session.key,
+          handle: session.handle ?? `vfs_${(kind === "role-audit" ? "a" : "p").repeat(32)}`,
+        },
+      } : {}),
+    };
+  }
+}
+
 function screenwriterInput(durationSeconds = 24): ScreenwriterAgentInput {
   return {
     brief: {
@@ -211,6 +246,132 @@ describe("CodexScreenwriterAgent", () => {
     assert.deepEqual((auditClient.calls[1]!.payload as Record<string, unknown>).previousAudit, repairAudit);
   });
 
+  it("keeps revisions stateful while each full independent audit starts without inherited history", async () => {
+    const first = validDraft();
+    const repaired = validDraft();
+    repaired.scenes[0]!.narration = "先看结果，再解释原因。";
+    const client = new SessionAwareCodexClient({
+      "script-draft": [first, repaired],
+      "role-audit": [{
+        version: "video-factory/role-audit-v1",
+        verdict: "repair",
+        score: 72,
+        summary: "钩子需要修改。",
+        issues: [{
+          severity: "blocking",
+          criterion: "前两秒建立具体钩子",
+          evidence: "第一句没有先给结果。",
+          repairInstruction: "先展示结果。",
+        }],
+        repairInstructions: ["先展示结果。"],
+      }, {
+        version: "video-factory/role-audit-v1",
+        verdict: "pass",
+        score: 92,
+        summary: "可以进入下游。",
+        issues: [],
+        repairInstructions: [],
+      }],
+    });
+    const agent = new CodexScreenwriterAgent({ client, maxReviewIterations: 2 });
+
+    await agent.draftDetailed(screenwriterInput());
+
+    const producerCalls = client.calls.filter(({ kind }) => kind === "script-draft");
+    const auditCalls = client.calls.filter(({ kind }) => kind === "role-audit");
+    assert.equal(producerCalls[0]?.session?.handle, undefined);
+    assert.match(producerCalls[1]?.session?.handle ?? "", /^vfs_p/);
+    assert.equal(
+      ((producerCalls[1]?.payload as Record<string, unknown>).revision as { mode?: string }).mode,
+      "repair-delta",
+    );
+    assert.deepEqual(auditCalls.map(({ session }) => session), [undefined, undefined]);
+    assert.ok((auditCalls[1]?.payload as Record<string, unknown>).previousAudit);
+  });
+
+  it("keeps the previous script in the producer input without duplicating it into the independent audit", async () => {
+    const input = screenwriterInput();
+    const previousScript = { viewerPromise: "上一版承诺", scenes: [validScene(1), validScene(2), validScene(3)] };
+    input.brief.rework = {
+      sourceRunId: "run-rejected-script",
+      instruction: "只修正第一句旁白。",
+      findings: [],
+      previousScript,
+    };
+    const producerClient = new SequencedCodexClient([validDraft()]);
+    const auditClient = new SequencedCodexClient([{
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 92,
+      summary: "返工脚本可执行。",
+      issues: [],
+      repairInstructions: [],
+    }]);
+    const agent = new CodexScreenwriterAgent({ client: producerClient, auditClient, maxReviewIterations: 1 });
+
+    await agent.draftDetailed(input);
+
+    assert.deepEqual(
+      (producerClient.calls[0]!.payload as { brief: { rework: { previousScript: unknown } } }).brief.rework.previousScript,
+      previousScript,
+    );
+    const auditContext = (auditClient.calls[0]!.payload as {
+      context: { upstreamFacts: { rework: Record<string, unknown> }; rework?: unknown; verificationBoundary?: string };
+    }).context;
+    assert.equal("previousScript" in auditContext.upstreamFacts.rework, false);
+    assert.equal("rework" in auditContext, false);
+    assert.match(auditContext.verificationBoundary ?? "", /不得宣称已复验/);
+  });
+
+  it("keeps unaffected scenes byte-for-byte when a rework model rewrites the whole script", async () => {
+    const input = screenwriterInput();
+    const previousScript = {
+      viewerPromise: "上一版观众承诺",
+      narrativeArc: "上一版叙事弧",
+      canonFacts: [],
+      scenes: [validScene(1), validScene(2), validScene(3)],
+    };
+    input.brief.rework = {
+      sourceRunId: "run-scoped-script-rework",
+      instruction: "只重做镜头 2，其他镜头直接复用。",
+      findings: [],
+      previousScript,
+    };
+    Object.assign(input.brief.rework, { affectedScenePositions: [2] });
+    const candidate = {
+      viewerPromise: "模型擅自改写的观众承诺",
+      narrativeArc: "模型擅自改写的叙事弧",
+      canonFacts: [],
+      scenes: [
+        validScene(1, { narration: "模型擅自改写第一镜。" }),
+        validScene(2, { narration: "按要求修正第二镜。" }),
+        validScene(3, { narration: "模型擅自改写第三镜。" }),
+      ],
+    };
+    const producerClient = new SequencedCodexClient([candidate]);
+    const auditClient = new SequencedCodexClient([{
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 92,
+      summary: "局部返工保持了未受影响镜头。",
+      issues: [],
+      repairInstructions: [],
+    }]);
+    const agent = new CodexScreenwriterAgent({ client: producerClient, auditClient, maxReviewIterations: 1 });
+
+    const execution = await agent.draftDetailed(input);
+
+    assert.equal(execution.output.viewerPromise, previousScript.viewerPromise);
+    assert.equal(execution.output.narrativeArc, previousScript.narrativeArc);
+    assert.deepEqual(execution.output.scenes, [
+      previousScript.scenes[0],
+      candidate.scenes[1],
+      previousScript.scenes[2],
+    ]);
+    const auditedCandidate = (auditClient.calls[0]!.payload as { candidate: unknown }).candidate;
+    assert.deepEqual(auditedCandidate, execution.output);
+  });
+
   it("uses the shared wall-clock deadline as an admission gate without shortening accepted operations", async () => {
     const client = new SequencedCodexClient([validDraft(), {
       version: "video-factory/role-audit-v1",
@@ -338,6 +499,37 @@ describe("CodexScreenwriterAgent", () => {
     };
 
     assert.deepEqual(validateScriptDraft(draft, { durationSeconds: 24 }), draft);
+  });
+
+  it("keeps generated scenes inside an explicit illustration boundary", () => {
+    const unsafe = {
+      scenes: [
+        validScene(1, {
+          visual_strategy: "generated",
+          narration: "这个画面已经证明了方法有效。",
+          visual_prompt: "生成式人物完成实验",
+        }),
+        validScene(2),
+        validScene(3),
+      ],
+    };
+    assert.throws(
+      () => validateScriptDraft(unsafe, { durationSeconds: 24 }),
+      /generated visual as real-world evidence/,
+    );
+
+    const bounded = {
+      scenes: [
+        validScene(1, {
+          visual_strategy: "generated",
+          narration: "下面只用机制示意解释步骤，并不构成真实验证。",
+          visual_prompt: "无文字的机制示意",
+        }),
+        validScene(2),
+        validScene(3),
+      ],
+    };
+    assert.deepEqual(validateScriptDraft(bounded, { durationSeconds: 24 }), bounded);
   });
 
   it("rejects non-contract drafts without any fallback", async () => {

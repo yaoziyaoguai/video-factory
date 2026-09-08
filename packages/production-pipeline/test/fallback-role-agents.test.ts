@@ -163,6 +163,42 @@ describe("FallbackScreenwriterAgent", () => {
     assert.deepEqual(deadlines, [1_600, 1_600]);
   });
 
+  it("keeps the default shared admission deadline open after the legacy 660s window", async () => {
+    // 用注入时钟模拟首轮生产、审计和返修已经超过旧窗口，不做真实等待。
+    let now = 1_000_000;
+    const calls: string[] = [];
+    const deadlines: Array<number | undefined> = [];
+    const fallback = new FallbackScreenwriterAgent({
+      now: () => now,
+      candidates: [
+        {
+          providerId: "openai",
+          agent: agent("gpt-primary", async (candidateInput) => {
+            calls.push("gpt-primary");
+            deadlines.push(candidateInput.wallClockDeadlineAtMs);
+            now += 700_000;
+            throw providerFailure("gpt-primary");
+          }),
+        },
+        {
+          providerId: "zai-bigmodel-api",
+          agent: agent("glm-backup", async (candidateInput) => {
+            calls.push("glm-backup");
+            deadlines.push(candidateInput.wallClockDeadlineAtMs);
+            return successful("glm-backup");
+          }),
+        },
+      ],
+    });
+
+    const execution = await fallback.draftDetailed(input);
+
+    assert.deepEqual(calls, ["gpt-primary", "glm-backup"]);
+    assert.deepEqual(deadlines, [1_000_000 + 2_700_000, 1_000_000 + 2_700_000]);
+    assert.ok(deadlines[0]! > now);
+    assert.equal(execution.trace?.modelId, "glm-backup");
+  });
+
   it("switches from OpenAI to GLM after an accepted transient provider outage", async () => {
     const calls: string[] = [];
     const fallback = new FallbackScreenwriterAgent({

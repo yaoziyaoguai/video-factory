@@ -276,9 +276,10 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.deepEqual(wan?.modelProfiles?.map((model) => model.id), [
       "wan3.0-video",
       "wan3.0-video-prime",
-      "wan2.7-t2v",
     ]);
     assert.equal(wan?.modelProfiles?.every((model) => model.available === false), true);
+    assert.deepEqual(wan?.modelProfiles?.[0]?.resolutions, ["720P"]);
+    assert.match(wan?.modelProfiles?.[0]?.description ?? "", /当前接入文生视频、720P、2–15 秒/);
 
     const miniMax = providers.find((provider) => provider.id === "hailuo-video-v1");
     assert.deepEqual(miniMax?.modelProfiles?.map((model) => model.id), [
@@ -286,6 +287,7 @@ describe("buildProviderCatalog codex fallback", () => {
       "MiniMax-H3",
       "MiniMax-H3-Max",
     ]);
+    assert.match(miniMax?.modelProfiles?.[0]?.description ?? "", /只能可靠交付横屏.*不能用于.*9:16/);
   });
 
   it("keeps every role unavailable until one provider owns production and audit", () => {

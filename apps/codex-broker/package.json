@@ -13,5 +13,8 @@
     "test": "node --test --import tsx test/*.test.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "undici": "^7.29.0"
   }
 }

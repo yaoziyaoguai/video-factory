@@ -20,6 +20,7 @@ const reviewMedia = {
 
 class ControlledCodexClient extends CodexBridgeClient {
   readonly calls: CodexTaskKind[] = [];
+  readonly sessions: Array<CodexTaskExecution["session"]> = [];
 
   constructor(
     private readonly providerId: string,
@@ -36,6 +37,7 @@ class ControlledCodexClient extends CodexBridgeClient {
     _session?: CodexTaskExecution["session"],
   ): Promise<CodexTaskExecution> {
     this.calls.push(kind);
+    this.sessions.push(_session);
     return {
       output: this.respond(kind),
       trace: {
@@ -168,6 +170,61 @@ describe("buildRoleAgentAssembly", () => {
     assert.deepEqual(execution.trace?.attemptedModelIds, ["gpt-writer", "glm-writer"]);
   });
 
+  it("keeps assembled OpenAI producer revisions isolated from prior model history", async () => {
+    const repairAudit = {
+      version: "video-factory/role-audit-v1",
+      verdict: "repair",
+      score: 70,
+      summary: "第一镜需要更具体。",
+      issues: [{
+        severity: "blocking",
+        criterion: "前两秒建立具体钩子",
+        evidence: "第一镜没有先给结果。",
+        repairInstruction: "第一镜先展示结果。",
+      }],
+      repairInstructions: ["第一镜先展示结果。"],
+    };
+    let scriptCalls = 0;
+    let auditCalls = 0;
+    const openai = new ControlledCodexClient("openai", "gpt-writer", (kind) => {
+      if (kind === "script-draft") {
+        scriptCalls += 1;
+        const draft = validDraft();
+        if (scriptCalls === 2) draft.scenes[0]!.narration = "先看结果，再解释原因。";
+        return draft;
+      }
+      if (kind === "role-audit") {
+        auditCalls += 1;
+        return auditCalls === 1 ? repairAudit : passingAudit;
+      }
+      throw new Error(`Unexpected OpenAI task ${kind}`);
+    });
+    const result = buildRoleAgentAssembly({
+      codexSettings: settings("openai", ["script-draft", "role-audit"], {
+        "script-draft": "gpt-writer",
+        "role-audit": "gpt-writer",
+      }),
+      zaiCodexSettings: unavailable,
+      codexClient: openai,
+      reviewMedia,
+      environment: {},
+    });
+
+    await result.screenwriterAgent?.draftDetailed?.({
+      brief: {
+        title: "下班后的三个真实动作",
+        angle: "验证隔离修订",
+        audience: "普通上班族",
+        nicheSlug: "isolated-repair",
+        platform: "douyin",
+        durationSeconds: 24,
+      },
+    });
+
+    assert.deepEqual(openai.calls, ["script-draft", "role-audit", "script-draft", "role-audit"]);
+    assert.deepEqual(openai.sessions, [undefined, undefined, undefined, undefined]);
+  });
+
   it("runs the assembled GLM visual reviewer through its OpenAI backup after a transient outage", async () => {
     const openai = new ControlledCodexClient("openai", "gpt-review", (kind) => {
       if (kind === "visual-review") return passingVisualReport;
@@ -192,6 +249,7 @@ describe("buildRoleAgentAssembly", () => {
     const execution = await result.visualReviewAgents[0]?.reviewDetailed?.({
       videoPath: "/run/final.mp4",
       runRoot: "/run",
+      reviewStage: "source_assets",
     });
 
     assert.ok(execution);
@@ -200,6 +258,46 @@ describe("buildRoleAgentAssembly", () => {
     assert.equal(execution.executedModelId, "gpt-review");
     assert.equal(execution.fallbackFromProviderId, "zai-bigmodel-api");
     assert.deepEqual(execution.attemptedModelIds, ["glm-review", "gpt-review"]);
+  });
+
+  it("runs both configured models for the final review while preprocessing evidence once", async () => {
+    let prepareCalls = 0;
+    const sharedReviewMedia = {
+      prepare: async () => {
+        prepareCalls += 1;
+        return reviewMedia.prepare();
+      },
+    };
+    const openai = new ControlledCodexClient("openai", "gpt-review", (kind) => {
+      if (kind === "visual-review") return passingVisualReport;
+      if (kind === "role-audit") return passingAudit;
+      throw new Error(`Unexpected OpenAI task ${kind}`);
+    });
+    const zai = new ControlledCodexClient("zai-bigmodel-api", "glm-review", (kind) => {
+      if (kind === "visual-review") return passingVisualReport;
+      if (kind === "role-audit") return passingAudit;
+      throw new Error(`Unexpected ZAI task ${kind}`);
+    });
+    const result = buildRoleAgentAssembly({
+      codexSettings: settings("openai", ["visual-review", "role-audit"], { "visual-review": "gpt-review" }),
+      zaiCodexSettings: settings("zai", ["visual-review", "role-audit"], { "visual-review": "glm-review", "role-audit": "glm-review" }),
+      codexClient: openai,
+      zaiCodexClient: zai,
+      reviewMedia: sharedReviewMedia,
+      environment: {},
+    });
+
+    const execution = await result.visualReviewAgents[0]?.reviewDetailed?.({
+      videoPath: "/run/final.mp4",
+      runRoot: "/run",
+      reviewStage: "rendered_video",
+    });
+
+    assert.ok(execution);
+    assert.equal(prepareCalls, 1);
+    assert.deepEqual(zai.calls, ["visual-review", "role-audit"]);
+    assert.deepEqual(openai.calls, ["visual-review", "role-audit"]);
+    assert.deepEqual(execution.independentReviews?.map(({ modelId }) => modelId), ["glm-review", "gpt-review"]);
   });
 
   it("assembles OpenAI-only roles when ZAI is unavailable", () => {

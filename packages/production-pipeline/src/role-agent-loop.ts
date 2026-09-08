@@ -24,12 +24,18 @@ export interface RoleAgentLoopOptions<TOutput> {
     criteria: string[];
     candidate: TOutput;
     previousAudit?: RoleAudit;
+    validationFailure?: RoleAuditValidationFailure;
     requestId: string;
     session: CodexTaskSession;
   }): Promise<CodexTaskExecution<unknown>>;
-  validate(value: unknown): TOutput;
+  validate(value: unknown, context: RoleAgentValidationContext): TOutput;
   checkpoint?: RoleAgentLoopCheckpoint;
   now?: () => number;
+}
+
+export interface RoleAgentValidationContext {
+  iteration: number;
+  repair: boolean;
 }
 
 export type RoleAgentRevision<TOutput> =
@@ -46,9 +52,16 @@ export type RoleAgentRevision<TOutput> =
   }
   | {
     mode: "validation-repair";
+    invalidCandidate: unknown;
     invalidCandidateHash: string;
     validationError: string;
   };
+
+export interface RoleAuditValidationFailure {
+  invalidCandidate: unknown;
+  invalidCandidateHash: string;
+  validationError: string;
+}
 
 interface RoleRepairFeedback {
   summary: string;
@@ -93,12 +106,17 @@ interface PersistedLoopCandidate {
 
 interface PersistedValidationFailure {
   iteration: number;
+  invalidCandidate?: unknown;
   invalidCandidateHash: string;
   validationError: string;
 }
 
+interface PersistedAuditValidationFailure extends RoleAuditValidationFailure {
+  iteration: number;
+}
+
 interface PersistedLoopState {
-  version: "video-factory/agent-loop-checkpoint-v6";
+  version: "video-factory/agent-loop-checkpoint-v7";
   key: string;
   contractDigest: string;
   role: string;
@@ -108,6 +126,7 @@ interface PersistedLoopState {
   completed: PersistedLoopIteration[];
   pendingCandidate?: PersistedLoopCandidate;
   validationFailure?: PersistedValidationFailure;
+  auditValidationFailure?: PersistedAuditValidationFailure;
   operationGenerations: Record<string, number>;
   failedOperationRequestIds: Record<string, string>;
   attemptedRequestIds: string[];
@@ -148,7 +167,7 @@ export async function runRoleAgentLoop<TOutput>(
     && !state.pendingCandidate) {
     state.pendingCandidate = {
       iteration: 1,
-      candidate: timedValidate(options, state, options.initialCandidate),
+      candidate: timedValidate(options, state, options.initialCandidate, validationContext(1)),
     };
     await persistCheckpoint(options, state);
   }
@@ -166,7 +185,10 @@ export async function runRoleAgentLoop<TOutput>(
 
   const lastCompleted = state.completed.at(-1);
   let revision: { candidate: TOutput; audit: RoleAudit } | undefined = lastCompleted
-    ? { candidate: timedValidate(options, state, lastCompleted.candidate), audit: lastCompleted.audit }
+    ? {
+      candidate: timedValidate(options, state, lastCompleted.candidate, validationContext(lastCompleted.iteration)),
+      audit: lastCompleted.audit,
+    }
     : undefined;
   let validationRevision = state.validationFailure;
   let previousCandidate = lastCompleted ? JSON.stringify(revision!.candidate) : "";
@@ -175,7 +197,7 @@ export async function runRoleAgentLoop<TOutput>(
     let candidateExecution: CodexTaskExecution<unknown>;
     let candidate: TOutput;
     if (state.pendingCandidate?.iteration === iteration) {
-      candidate = timedValidate(options, state, state.pendingCandidate.candidate);
+      candidate = timedValidate(options, state, state.pendingCandidate.candidate, validationContext(iteration));
       candidateExecution = {
         output: candidate,
         ...(state.pendingCandidate.candidateTrace ? { trace: state.pendingCandidate.candidateTrace } : {}),
@@ -191,7 +213,7 @@ export async function runRoleAgentLoop<TOutput>(
           throw await failedLoopError(error, options, state, iterations, state.completed.at(-1)?.candidateTrace);
         }
         try {
-          candidate = timedValidate(options, state, candidateExecution.output);
+          candidate = timedValidate(options, state, candidateExecution.output, validationContext(iteration));
           break;
         } catch (error) {
           structuredOutputAttempts += 1;
@@ -199,6 +221,7 @@ export async function runRoleAgentLoop<TOutput>(
           retireAcceptedOperation(state, operationKey);
           validationRevision = {
             iteration,
+            invalidCandidate: structuredClone(candidateExecution.output),
             invalidCandidateHash: valueHash(candidateExecution.output),
             validationError: publicValidationError(error),
           };
@@ -245,6 +268,9 @@ export async function runRoleAgentLoop<TOutput>(
     let audit: RoleAudit;
     const auditOperationKey = loopOperationKey(state, iteration, "audit");
     let structuredAuditAttempts = 0;
+    let auditValidationFailure = state.auditValidationFailure?.iteration === iteration
+      ? state.auditValidationFailure
+      : undefined;
     while (true) {
       try {
         auditExecution = await executeOperation(options, state, operationScope, iteration, "audit", (operation) =>
@@ -254,6 +280,7 @@ export async function runRoleAgentLoop<TOutput>(
             criteria: options.criteria,
             candidate,
             ...(revision?.audit ? { previousAudit: revision.audit } : {}),
+            ...(auditValidationFailure ? { validationFailure: auditValidationFailure } : {}),
             ...operation,
           }));
       } catch (error) {
@@ -266,6 +293,13 @@ export async function runRoleAgentLoop<TOutput>(
         structuredAuditAttempts += 1;
         acceptOperationSession(state, "audit", auditExecution.session);
         retireAcceptedOperation(state, auditOperationKey);
+        auditValidationFailure = {
+          iteration,
+          invalidCandidate: structuredClone(auditExecution.output),
+          invalidCandidateHash: valueHash(auditExecution.output),
+          validationError: publicValidationError(error),
+        };
+        state.auditValidationFailure = auditValidationFailure;
         await persistCheckpoint(options, state);
         if (structuredAuditAttempts >= MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN) {
           throw await failedLoopError(
@@ -282,6 +316,7 @@ export async function runRoleAgentLoop<TOutput>(
       }
     }
     acceptOperationSession(state, "audit", auditExecution.session);
+    delete state.auditValidationFailure;
     state.completed.push({
       iteration,
       candidate,
@@ -340,7 +375,7 @@ async function resumePendingAudit<TOutput>(
     }
     return {
       iteration: entry.iteration,
-      candidate: timedValidate(options, state, entry.candidate),
+      candidate: timedValidate(options, state, entry.candidate, validationContext(entry.iteration)),
       ...(entry.candidateTrace ? { candidateTrace: structuredClone(entry.candidateTrace) } : {}),
       audit: validateRoleAudit(entry.audit),
       ...(entry.auditTrace ? { auditTrace: structuredClone(entry.auditTrace) } : {}),
@@ -348,7 +383,12 @@ async function resumePendingAudit<TOutput>(
   });
   state.pendingCandidate = {
     iteration: resume.pendingCandidate.iteration,
-    candidate: timedValidate(options, state, resume.pendingCandidate.candidate),
+    candidate: timedValidate(
+      options,
+      state,
+      resume.pendingCandidate.candidate,
+      validationContext(resume.pendingCandidate.iteration),
+    ),
     ...(resume.pendingCandidate.candidateTrace
       ? { candidateTrace: structuredClone(resume.pendingCandidate.candidateTrace) }
       : {}),
@@ -420,7 +460,7 @@ async function failedLoopError<TOutput>(
 
 async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>): Promise<PersistedLoopState> {
   const fresh = (cycle = 0): PersistedLoopState => ({
-    version: "video-factory/agent-loop-checkpoint-v6",
+    version: "video-factory/agent-loop-checkpoint-v7",
     key: options.checkpoint?.key ?? "ephemeral",
     contractDigest: roleContractDigest(options),
     role: options.role,
@@ -446,7 +486,8 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
   const legacyV3 = loadedVersion === "video-factory/agent-loop-checkpoint-v3";
   const legacyV4 = loadedVersion === "video-factory/agent-loop-checkpoint-v4";
   const legacyV5 = loadedVersion === "video-factory/agent-loop-checkpoint-v5";
-  if (!legacyV3 && !legacyV4 && !legacyV5 && loadedVersion !== "video-factory/agent-loop-checkpoint-v6"
+  const legacyV6 = loadedVersion === "video-factory/agent-loop-checkpoint-v6";
+  if (!legacyV3 && !legacyV4 && !legacyV5 && !legacyV6 && loadedVersion !== "video-factory/agent-loop-checkpoint-v7"
     || candidate.key !== options.checkpoint.key
     || candidate.contractDigest !== roleContractDigest(options)
     || candidate.role !== options.role
@@ -466,7 +507,7 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) throw new Error("Agent loop checkpoint iteration is invalid.");
     const value = entry as Partial<PersistedLoopIteration>;
     if (value.iteration !== index + 1) throw new Error("Agent loop checkpoint iterations are not contiguous.");
-    const output = options.validate(value.candidate);
+    const output = options.validate(value.candidate, validationContext(value.iteration));
     return {
       iteration: value.iteration,
       candidate: output,
@@ -485,7 +526,7 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
     if (value.iteration !== completed.length + 1) throw new Error("Agent loop checkpoint pending iteration is invalid.");
     pendingCandidate = {
       iteration: value.iteration,
-      candidate: options.validate(value.candidate),
+      candidate: options.validate(value.candidate, validationContext(value.iteration)),
       ...(value.candidateTrace ? { candidateTrace: value.candidateTrace } : {}),
     };
   }
@@ -499,12 +540,23 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
     }
     validationFailure = failure as PersistedValidationFailure;
   }
+  let auditValidationFailure: PersistedAuditValidationFailure | undefined;
+  if (candidate.auditValidationFailure !== undefined) {
+    const failure = candidate.auditValidationFailure as Partial<PersistedAuditValidationFailure>;
+    if (failure.iteration !== completed.length + 1
+      || failure.invalidCandidate === undefined
+      || typeof failure.invalidCandidateHash !== "string"
+      || typeof failure.validationError !== "string") {
+      throw new Error("Agent loop checkpoint audit validation failure is invalid.");
+    }
+    auditValidationFailure = failure as PersistedAuditValidationFailure;
+  }
   if (pendingCandidate && validationFailure) throw new Error("Agent loop checkpoint cannot contain a candidate and validation failure together.");
   if (candidate.status === "passed" && (pendingCandidate || completed.at(-1)?.audit.verdict !== "pass")) {
     throw new Error("Passed agent loop checkpoint has no passing final audit.");
   }
   const restored: PersistedLoopState = {
-    version: "video-factory/agent-loop-checkpoint-v6",
+    version: "video-factory/agent-loop-checkpoint-v7",
     key: candidate.key,
     contractDigest: candidate.contractDigest,
     role: candidate.role,
@@ -529,6 +581,7 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
       : [],
     ...(pendingCandidate ? { pendingCandidate } : {}),
     ...(validationFailure ? { validationFailure } : {}),
+    ...(auditValidationFailure ? { auditValidationFailure } : {}),
   };
   if (restored.status === "exhausted" && options.checkpoint.restartExhausted) {
     const restarted = fresh(restored.cycle + 1);
@@ -554,7 +607,7 @@ function completedExecution<TOutput>(
   if (!final || final.audit.verdict !== "pass") throw new Error("Agent loop checkpoint has no passing result.");
   const finalTrace = final.candidateTrace ?? final.auditTrace;
   return {
-    output: timedValidate(options, state, final.candidate),
+    output: timedValidate(options, state, final.candidate, validationContext(final.iteration)),
     ...(finalTrace ? { trace: finalTrace } : {}),
     agentLoop: {
       version: "video-factory/agent-loop-v1",
@@ -704,8 +757,10 @@ function producerRevision<TOutput>(
   session: CodexTaskSession,
 ): RoleAgentRevision<TOutput> | undefined {
   if (validationFailure) {
+    if (validationFailure.invalidCandidate === undefined) return undefined;
     return {
       mode: "validation-repair",
+      invalidCandidate: structuredClone(validationFailure.invalidCandidate),
       invalidCandidateHash: validationFailure.invalidCandidateHash,
       validationError: validationFailure.validationError,
     };
@@ -761,13 +816,18 @@ function timedValidate<TOutput>(
   options: RoleAgentLoopOptions<TOutput>,
   state: PersistedLoopState,
   value: unknown,
+  context: RoleAgentValidationContext,
 ): TOutput {
   const startedAt = nowMs(options);
   try {
-    return options.validate(value);
+    return options.validate(value, context);
   } finally {
     state.validationMs += elapsedMs(startedAt, nowMs(options));
   }
+}
+
+function validationContext(iteration: number): RoleAgentValidationContext {
+  return { iteration, repair: iteration > 1 };
 }
 
 function timedValidateAudit<TOutput>(

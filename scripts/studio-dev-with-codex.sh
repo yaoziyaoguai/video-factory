@@ -5,11 +5,17 @@ repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 runtime_root=${VIDEO_FACTORY_CODEX_LOCAL_RUNTIME_ROOT:-"$repository_root/.local/runtime/codex"}
 socket_path=${VIDEO_FACTORY_CODEX_SOCKET_PATH:-"$runtime_root/worker.sock"}
 workspace_root=${VIDEO_FACTORY_CODEX_WORKSPACE_ROOT:-"$runtime_root/tasks"}
+codex_process_home=${VIDEO_FACTORY_CODEX_LOCAL_PROCESS_HOME:-"$runtime_root/home"}
+codex_home=${VIDEO_FACTORY_CODEX_LOCAL_HOME:-"$runtime_root/codex-home"}
+source_codex_home=${CODEX_HOME:-"$HOME/.codex"}
+codex_auth_file=${VIDEO_FACTORY_CODEX_AUTH_FILE:-"$source_codex_home/auth.json"}
 codex_bin=${CODEX_BIN:-$(command -v codex || true)}
 zai_runtime_root=${VIDEO_FACTORY_ZAI_CODEX_LOCAL_RUNTIME_ROOT:-"$repository_root/.local/runtime/zai-codex"}
 zai_socket_path=${VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH:-"$zai_runtime_root/worker.sock"}
 zai_workspace_root=${VIDEO_FACTORY_ZAI_CODEX_WORKSPACE_ROOT:-"$zai_runtime_root/tasks"}
 zai_env_file=${ZAI_BIGMODEL_ENV_FILE:-"$repository_root/.local/secrets/zai-bigmodel.env"}
+# 本地与生产 unit 统一 1200s（20 分钟）deadline；xhigh/max 强推理候选在旧 300s/600s 默认下无法完成。
+codex_timeout_ms=${VIDEO_FACTORY_CODEX_TIMEOUT_MS:-1200000}
 zai_broker_pid=""
 
 if [[ -z "$codex_bin" ]]; then
@@ -21,12 +27,28 @@ if ! "$codex_bin" login status >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "$runtime_root" "$workspace_root"
+mkdir -p "$runtime_root" "$workspace_root" "$codex_process_home" "$codex_home"
+if [[ ! -f "$codex_auth_file" ]]; then
+  echo "Codex auth file is unavailable at $codex_auth_file." >&2
+  exit 1
+fi
+if [[ -e "$codex_home/auth.json" && ! -L "$codex_home/auth.json" ]]; then
+  echo "$codex_home/auth.json exists and is not a symlink; refusing to overwrite it." >&2
+  exit 1
+fi
+ln -sfn "$codex_auth_file" "$codex_home/auth.json"
+if ! HOME="$codex_process_home" CODEX_HOME="$codex_home" "$codex_bin" login status >/dev/null 2>&1; then
+  echo "The isolated Codex runtime cannot read the existing login at $codex_auth_file." >&2
+  exit 1
+fi
 cd "$repository_root"
 npm run build:broker
 
+HOME="$codex_process_home" \
+CODEX_HOME="$codex_home" \
 VIDEO_FACTORY_CODEX_SOCKET_PATH="$socket_path" \
 VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="$workspace_root" \
+VIDEO_FACTORY_CODEX_TIMEOUT_MS="$codex_timeout_ms" \
 CODEX_BIN="$codex_bin" \
 npm run start --workspace @video-factory/codex-broker &
 broker_pid=$!
@@ -69,7 +91,8 @@ if [[ -f "$zai_env_file" ]] \
   mkdir -p "$zai_runtime_root" "$zai_workspace_root"
   env -u ZAI_BIGMODEL_API_KEY -u ZAI_API_KEY \
     VIDEO_FACTORY_CODEX_PROFILE=zai \
-    VIDEO_FACTORY_CODEX_EFFORT=high \
+    VIDEO_FACTORY_CODEX_EFFORT=max \
+    VIDEO_FACTORY_CODEX_TIMEOUT_MS="$codex_timeout_ms" \
     VIDEO_FACTORY_CODEX_SOCKET_PATH="$zai_socket_path" \
     VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="$zai_workspace_root" \
     node --env-file="$zai_env_file" apps/codex-broker/dist/main.js &

@@ -44,7 +44,7 @@ export function HomePage() {
         <div>
           <p className="eyebrow">今日创作台</p>
           <h1>从一个想法，到一条成片。</h1>
-          <p>选择一种开始方式。系统会沿同一条制作线推进，并在花钱前停下来等你确认。</p>
+          <p>选择一种开始方式。系统会沿同一条制作线推进；需要生成付费图片或视频时，会先报价并等你确认。</p>
         </div>
         <time>{new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "short" }).format(new Date())}</time>
       </header>
@@ -89,7 +89,7 @@ export function HomePage() {
           </button>
           <button type="button" onClick={() => navigate("/topics?mode=manual")}>
             <span className="home-option-icon is-idea"><Lightbulb aria-hidden="true" size={21} /></span>
-            <span><strong>从自己的想法开始</strong><small>输入主题、照片或参考视频</small></span>
+            <span><strong>从自己的想法开始</strong><small>输入主题，需要时添加参考视频</small></span>
             <Plus aria-hidden="true" size={18} />
           </button>
         </div>

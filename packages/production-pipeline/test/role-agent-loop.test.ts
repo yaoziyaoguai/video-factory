@@ -382,6 +382,8 @@ describe("role agent loop audit boundary", () => {
     const auditOperations: Array<{ requestId: string; session: { key: string; handle?: string } }> = [];
     let produceCalls = 0;
     let auditCalls = 0;
+    const producerRevisions: unknown[] = [];
+    const auditValidationFailures: unknown[] = [];
     const execute = () => runRoleAgentLoop<{ title: string }>({
       role: "编剧",
       contractVersion: "screenwriter-v1",
@@ -392,7 +394,8 @@ describe("role agent loop audit boundary", () => {
         load: async () => stored,
         save: async (value) => { stored = structuredClone(value); },
       },
-      produce: async (_revision, operation) => {
+      produce: async (revision, operation) => {
+        producerRevisions.push(structuredClone(revision));
         producerOperations.push(structuredClone(operation));
         produceCalls += 1;
         return {
@@ -400,7 +403,8 @@ describe("role agent loop audit boundary", () => {
           session: { key: operation.session.key, handle: producerHandle },
         };
       },
-      audit: async ({ requestId, session }) => {
+      audit: async ({ requestId, session, validationFailure }) => {
+        auditValidationFailures.push(structuredClone(validationFailure));
         auditOperations.push({ requestId, session: structuredClone(session) });
         auditCalls += 1;
         return {
@@ -416,9 +420,22 @@ describe("role agent loop audit boundary", () => {
     assert.notEqual(producerOperations[0]?.requestId, producerOperations[1]?.requestId);
     assert.equal(producerOperations[0]?.session.handle, undefined);
     assert.equal(producerOperations[1]?.session.handle, producerHandle);
+    assert.deepEqual(producerRevisions[1], {
+      mode: "validation-repair",
+      invalidCandidate: { invalid: true },
+      invalidCandidateHash: (producerRevisions[1] as { invalidCandidateHash: string }).invalidCandidateHash,
+      validationError: "candidate invalid",
+    });
     assert.notEqual(auditOperations[0]?.requestId, auditOperations[1]?.requestId);
     assert.equal(auditOperations[0]?.session.handle, undefined);
     assert.equal(auditOperations[1]?.session.handle, auditHandle);
+    assert.deepEqual(auditValidationFailures[0], undefined);
+    assert.deepEqual(auditValidationFailures[1], {
+      iteration: 1,
+      invalidCandidate: { invalid: true },
+      invalidCandidateHash: (auditValidationFailures[1] as { invalidCandidateHash: string }).invalidCandidateHash,
+      validationError: "Role audit version is invalid.",
+    });
     assert.deepEqual((stored as { sessions: Record<string, unknown> }).sessions, {
       produce: { key: producerOperations[1]!.session.key, handle: producerHandle },
       audit: { key: auditOperations[1]!.session.key, handle: auditHandle },
@@ -534,7 +551,7 @@ describe("role agent loop audit boundary", () => {
 
     assert.deepEqual(result.output, { title: "旧检查点候选" });
     assert.equal(produceCalls, 0);
-    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v6");
+    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v7");
   });
 
   it("migrates v5 checkpoints so historical infrastructure failures do not exhaust semantic rounds", async () => {
@@ -575,7 +592,7 @@ describe("role agent loop audit boundary", () => {
     });
 
     assert.deepEqual(result.output, { title: "保留的导演候选" });
-    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v6");
+    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v7");
   });
 
   it("audits an existing human candidate before asking the producer to repair it", async () => {

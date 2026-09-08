@@ -17,8 +17,10 @@ describe("brokerRuntimeConfigFromEnv", () => {
     });
     assert.equal(openai.profile.model, "gpt-5.6-sol");
     assert.equal(openai.auditModel, "gpt-5.6-sol");
-    assert.equal(openai.effort, "high");
+    assert.equal(openai.effort, "xhigh");
     assert.equal(openai.auditEffort, "xhigh");
+    // 强推理候选需要 1200s（20 分钟）默认 deadline，防止回落到曾经掐断 xhigh/max 的 300s/600s。
+    assert.equal(openai.timeoutMs, 1_200_000);
 
     const fakeSecret = "test-only-secret-not-for-a-real-request";
     const zai = brokerRuntimeConfigFromEnv({
@@ -31,6 +33,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
     assert.equal(zai.socketPath, "/run/video-factory-zai-codex/worker.sock");
     assert.equal(zai.workspaceRoot, "/var/lib/video-factory-zai-codex/workspace");
     assert.equal(zai.effort, "max");
+    assert.equal(zai.timeoutMs, 1_200_000);
     assert.doesNotMatch(JSON.stringify(zai), new RegExp(fakeSecret));
 
     const customZai = brokerRuntimeConfigFromEnv({
@@ -39,7 +42,7 @@ describe("brokerRuntimeConfigFromEnv", () => {
       ZAI_TEXT_MODEL_ID: "glm-5.3-preview",
     });
     assert.equal(customZai.profile.identity.modelId, "glm-5.3-preview");
-    assert.equal(customZai.effort, "high");
+    assert.equal(customZai.effort, "max");
   });
 
   it("allows the host to configure production and deep-review models independently", () => {

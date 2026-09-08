@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -443,18 +444,24 @@ describe("StudioService", () => {
     );
     assert.equal(new Set(draft?.input.rework?.findings.map(({ findingId }) => findingId)).size, 3);
     assert.ok(draft?.input.rework?.findings.every(({ findingId }) => /^vf_[a-f0-9]{24}$/.test(findingId)));
-    assert.deepEqual(draft?.input.rework?.findings[0]?.targetNodeIds, ["script"]);
+    assert.deepEqual(draft?.input.rework?.findings[0]?.targetNodeIds, ["script", "visual-direction", "assets"]);
+    assert.equal(draft?.input.rework?.findings[0]?.primaryOwnerNodeId, "script");
+    assert.deepEqual(draft?.input.rework?.findings[0]?.affectedNodeIds, ["script", "visual-direction", "assets"]);
+    assert.equal(draft?.input.rework?.findings[0]?.action, "replan_upstream");
     assert.match(draft?.input.rework?.nodeInstructions.script ?? "", /第二镜数字错误/);
     assert.match(draft?.input.rework?.nodeInstructions.script ?? "", /改成已核验数据/);
     assert.doesNotMatch(draft?.input.rework?.nodeInstructions.script ?? "", /主体被裁切到画面边缘|换成主体完整居中的镜头/);
-    assert.doesNotMatch(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /第二镜数字错误|改成已核验数据/);
+    assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /第二镜数字错误/);
+    assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /改成已核验数据/);
     assert.doesNotMatch(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /文字遮挡主体|换用无字母片/);
     assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /主体被裁切到画面边缘/);
     assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /换成主体完整居中的镜头/);
     assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /不得用说明卡/);
-    assert.doesNotMatch(draft?.input.rework?.nodeInstructions.assets ?? "", /第二镜数字错误|改成已核验数据/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /第二镜数字错误/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /改成已核验数据/);
     assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /文字遮挡主体/);
-    assert.doesNotMatch(draft?.input.rework?.nodeInstructions.assets ?? "", /主体被裁切到画面边缘|换成主体完整居中的镜头/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /主体被裁切到画面边缘/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /换成主体完整居中的镜头/);
     assert.match(draft?.input.rework?.nodeInstructions.script ?? "", /本次重做原因/);
     assert.deepEqual(draft?.input.rework?.previousScript, { viewerPromise: "原版承诺", scenes: [1, 2, 3, 4].map((position) => ({ position })) });
     assert.deepEqual(draft?.inheritedNodeIds, ["brief", "script", "visual-direction", "visual-review"]);
@@ -486,14 +493,37 @@ describe("StudioService", () => {
         error: "源素材视觉预检未通过。",
         output: {
           sourceVisualReview: {
+            reviewScope: {
+              reviewStage: "source_assets",
+              evidenceId: "b".repeat(64),
+              sourceNodeIds: ["assets"],
+              sourceArtifactIds: ["pilot-media-3"],
+              scenePositions: [3],
+              timelineDurationMs: 10_000,
+              actualModels: [{ providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" }],
+            },
             findings: [{
               timecodeMs: 8_000,
+              startTimecodeMs: 7_800,
+              endTimecodeMs: 8_200,
               scenePosition: 3,
               targetNodeId: "assets",
+              evidenceStatus: "failed",
+              evidenceFrameSha256: "c".repeat(64),
+              nextAction: "rework_asset",
               category: "text_interference",
               severity: "major",
               description: "画面烧入了不可接受的文字。",
               suggestion: "第三镜换成无字素材并重新检查。",
+            }, {
+              timecodeMs: 600,
+              scenePosition: 1,
+              targetNodeId: "assets",
+              evidenceStatus: "not_observed",
+              category: "other",
+              severity: "warning",
+              description: "稀疏抽帧不足以证明完整运动。",
+              suggestion: "先补充已有素材的过程帧，不应直接重生成。",
             }],
           },
         },
@@ -506,11 +536,115 @@ describe("StudioService", () => {
     const finding = draft?.input.rework?.findings[0];
 
     assert.equal(finding?.scenePosition, 3);
+    assert.equal(draft?.input.rework?.findings.length, 1);
+    assert.deepEqual(draft?.requiredAffectedScenePositions, [3]);
+    assert.deepEqual(draft?.input.rework?.affectedScenePositions, [3]);
+    assert.equal((failedRun.nodeRuns[0]!.output as { sourceVisualReview: { findings: unknown[] } }).sourceVisualReview.findings.length, 2);
     assert.deepEqual(finding?.targetNodeIds, ["assets"]);
+    assert.equal(finding?.startTimecodeMs, 7_800);
+    assert.equal(finding?.endTimecodeMs, 8_200);
+    assert.equal(finding?.evidenceStatus, "failed");
+    assert.equal(finding?.evidenceFrameSha256, "c".repeat(64));
+    assert.equal(finding?.nextAction, "rework_asset");
+    assert.equal(finding?.sourceReviewStage, "source_assets");
+    assert.equal(finding?.sourceReviewNodeId, "assets");
+    assert.equal(finding?.sourceReviewVersionId, "legacy-output");
+    assert.equal(finding?.reviewEvidenceId, "b".repeat(64));
+    assert.deepEqual(finding?.actualModels, [{ providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" }]);
+    assert.equal(finding?.current, true);
     assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /第三镜换成无字素材并重新检查/);
+    assert.doesNotMatch(draft?.input.rework?.nodeInstructions.assets ?? "", /补充已有素材的过程帧/);
     assert.doesNotMatch(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /画面烧入了不可接受的文字/);
     assert.match(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /本轮结构化问题未直接指向导演方案/);
     assert.doesNotMatch(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /当前没有结构化视觉问题/);
+  });
+
+  it("keeps a stale visual report as history without expanding the current rework scope", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-stale-review-rework-"));
+    const base = waitingRun(workspaceRoot);
+    const reportOutput = { report: {
+      version: "video-factory/visual-review-v1",
+      summary: "旧成片的第一镜需要替换。",
+      scores: { composition: 70, continuity: 80, pacing: 80, legibility: 80, safety: 90 },
+      findings: [{
+        timecodeMs: 1_000,
+        startTimecodeMs: 900,
+        endTimecodeMs: 1_100,
+        scenePosition: 1,
+        targetNodeId: "assets",
+        evidenceStatus: "failed",
+        evidenceFrameSha256: null,
+        nextAction: "rework_asset",
+        category: "composition",
+        severity: "warning",
+        description: "旧版第一镜主体被裁切。",
+        suggestion: "替换旧版第一镜。",
+      }],
+      confidence: 0.9,
+      recommendation: "revise",
+      reviewScope: {
+        reviewStage: "rendered_video",
+        evidenceId: "a".repeat(64),
+        sourceNodeIds: ["render", "technical-review"],
+        sourceArtifactIds: ["old-render-artifact"],
+        scenePositions: [1],
+        timelineDurationMs: 24_000,
+        actualModels: [{ providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" }],
+        current: true,
+      },
+    } };
+    const rejectedRun: WorkflowRun<ProductionBrief> = {
+      ...base,
+      status: "rejected",
+      initialInput: {
+        ...base.initialInput,
+        providers: { ...base.initialInput.providers, visualReview: "glm-visual-review-v1" },
+      },
+      decisions: [],
+      interventions: [],
+      nodeRuns: [{
+        nodeId: "visual-review",
+        status: "stale",
+        artifactIds: [],
+        qualityGateResults: [],
+        output: reportOutput,
+        outputState: {
+          nodeId: "visual-review",
+          generatedVersionId: "review-v1",
+          effectiveVersionId: "review-v1",
+          stale: true,
+          versions: [{
+            id: "review-v1",
+            nodeId: "visual-review",
+            source: "generated",
+            artifactIds: [],
+            output: reportOutput,
+            inputVersionIds: ["old-render-v1"],
+            createdAt: base.startedAt,
+            createdBy: "glm-visual-review-v1",
+            schemaVersion: "video-factory/visual-review-v1",
+          }],
+        },
+      }],
+      artifacts: [],
+    };
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(rejectedRun),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+
+    const draft = await service.reworkDraft("run-1");
+    const detail = await service.getRun("run-1");
+
+    assert.deepEqual(draft?.input.rework?.findings, []);
+    assert.deepEqual(draft?.requiredAffectedScenePositions, []);
+    assert.doesNotMatch(draft?.input.rework?.nodeInstructions.assets ?? "", /旧版第一镜/);
+    const projected = detail?.nodes.find((node) => node.id === "visual-review")?.output as typeof reportOutput | undefined;
+    assert.equal(projected?.report.reviewScope.current, false);
+    const projectedVersion = detail?.nodes.find((node) => node.id === "visual-review")?.outputState?.versions[0]?.output as typeof reportOutput | undefined;
+    assert.equal(projectedVersion?.report.reviewScope.current, false);
   });
 
   it("prefills the concrete failed-node reason instead of a generic rework summary", async () => {
@@ -591,7 +725,8 @@ describe("StudioService", () => {
 
     assert.deepEqual(draft?.input.rework?.affectedScenePositions, [3]);
     assert.deepEqual(draft?.requiredAffectedScenePositions, [3]);
-    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /只重新生成镜头 3/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /镜头 3 属于本轮影响范围/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /只有确认需要新画面时才进入报价/);
     assert.doesNotMatch(draft?.input.rework?.nodeInstructions.assets ?? "", /只替换本次重做原因涉及的素材/);
 
     const tampered = structuredClone(draft!.input);
@@ -733,7 +868,8 @@ describe("StudioService", () => {
 
     assert.deepEqual(draft?.requiredAffectedScenePositions, positions);
     assert.deepEqual(draft?.input.rework?.affectedScenePositions, positions);
-    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /只重新生成镜头 1、2、3、4/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /镜头 1、2、3、4 属于本轮影响范围/);
+    assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /只有确认需要新画面时才进入报价/);
 
     const jobsOnlyRun: WorkflowRun<ProductionBrief> = {
       ...failedRun,
@@ -750,11 +886,119 @@ describe("StudioService", () => {
     }).reworkDraft("run-1");
     assert.deepEqual(jobsOnlyDraft?.requiredAffectedScenePositions, positions);
 
+    const resumedPipeline = new FakePipeline(failedRun);
+    resumedPipeline.inspectPaidNode = async (_runId: string, nodeId: string) => ({
+      nodeId,
+      operationId: "paid-operation-1",
+      recommendedOutcome: "resume_original",
+      requiresManualReconciliation: false,
+      items: [1, 2, 4].map((scenePosition) => ({
+        operationId: "paid-operation-1",
+        itemRequestId: `paid-item-${scenePosition}`,
+        quoteItemId: `scene-${scenePosition}`,
+        scenePosition,
+        executorProviderId: "ai-shot-router-v1",
+        providerId: "seedream-image-v1",
+        modelId: "seedream-4-5",
+        state: "materialized" as const,
+        estimatedCostCny: 1,
+      })),
+    });
+    const resumedDraft = await new StudioService({
+      workspaceRoot,
+      pipeline: resumedPipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    }).reworkDraft("run-1");
+    assert.deepEqual(resumedDraft?.requiredAffectedScenePositions, [3]);
+    assert.deepEqual(resumedDraft?.input.rework?.affectedScenePositions, [3]);
+
     const tampered = structuredClone(draft!.input);
     tampered.providers.script = "codex-screenwriter-v1";
     tampered.rework!.affectedScenePositions = [1];
     await assert.rejects(() => service.startRun(tampered), /返工范围不能移除审片问题或未物化镜头/);
   });
+
+  for (const pilotReview of ["rejected", "unavailable"] as const) {
+    it(`does not classify a materialized ${pilotReview} pilot as missing paid media`, async () => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), `video-factory-materialized-${pilotReview}-pilot-`));
+      const runRoot = path.join(workspaceRoot, "runs", "run-1");
+      const assetPlanPath = path.join(runRoot, "nodes", "assets", "attempt-1", "asset_plan.json");
+      const jobsPath = path.join(runRoot, "nodes", "assets", "attempt-1", "generation_jobs.json");
+      const pilotPath = path.join(runRoot, "nodes", "assets", "attempt-1", "scene-1.mp4");
+      const assetPlanDocument = {
+        scene_assets: [{ scene_position: 1, provider: "seedance-video-v1", local_path: pilotPath }],
+      };
+      const jobsDocument = {
+        version: "video-factory/generation-jobs-v1",
+        jobs: [{
+          scenePosition: 1,
+          providerId: "seedance-video-v1",
+          status: "failed",
+          pilotReview,
+          error: pilotReview === "rejected" ? "试片未通过" : "审片服务暂时不可用",
+        }],
+      };
+      await mkdir(path.dirname(assetPlanPath), { recursive: true });
+      await Promise.all([
+        writeFile(assetPlanPath, `${JSON.stringify(assetPlanDocument)}\n`, "utf8"),
+        writeFile(jobsPath, `${JSON.stringify(jobsDocument)}\n`, "utf8"),
+        writeFile(pilotPath, "materialized-pilot", "utf8"),
+      ]);
+      const base = waitingRun(workspaceRoot);
+      const failedRun: WorkflowRun<ProductionBrief> = {
+        ...base,
+        status: "failed",
+        decisions: [],
+        interventions: [],
+        nodeRuns: [{
+          nodeId: "assets",
+          status: "failed",
+          startedAt: base.startedAt,
+          finishedAt: base.finishedAt,
+          artifactIds: ["artifact-asset-plan", "artifact-generation-jobs"],
+          qualityGateResults: [],
+          error: pilotReview === "rejected" ? "试片未通过" : "审片服务暂时不可用",
+        }],
+        artifacts: [
+          {
+            id: "artifact-asset-plan",
+            kind: "asset_plan",
+            uri: assetPlanPath,
+            createdAt: base.startedAt,
+            contentType: "application/json",
+            sizeBytes: Buffer.byteLength(JSON.stringify(assetPlanDocument)),
+            sha256: "3".repeat(64),
+            producer: { nodeId: "assets", attempt: 1 },
+            provenance: { providerId: "ai-shot-router-v1" },
+          },
+          {
+            id: "artifact-generation-jobs",
+            kind: "generation_jobs",
+            uri: jobsPath,
+            createdAt: base.startedAt,
+            contentType: "application/json",
+            sizeBytes: Buffer.byteLength(JSON.stringify(jobsDocument)),
+            sha256: "4".repeat(64),
+            producer: { nodeId: "assets", attempt: 1 },
+            provenance: { providerId: "ai-shot-router-v1" },
+          },
+        ],
+      };
+      const service = new StudioService({
+        workspaceRoot,
+        pipeline: new FakePipeline(failedRun),
+        commandAvailable: allCommandsAvailable,
+        environment: {},
+      });
+
+      const draft = await service.reworkDraft("run-1");
+
+      assert.deepEqual(draft?.requiredAffectedScenePositions, []);
+      assert.deepEqual(draft?.input.rework?.affectedScenePositions, []);
+      assert.doesNotMatch(draft?.input.rework?.nodeInstructions.assets ?? "", /只重新生成镜头 1/);
+    });
+  }
 
   it("rejects a direct rework start while the source has an uncertain paid outcome", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-uncertain-rework-start-"));
@@ -1457,6 +1701,12 @@ describe("StudioService", () => {
     assert.equal(summary?.videoContentUrl, "/api/runs/run-1/artifacts/artifact-video-current/content");
     assert.equal(detail?.videoArtifactId, "artifact-video-current");
     assert.equal(detail?.publishPackageArtifactId, "artifact-package-current");
+    assert.deepEqual(detail?.creativeSummary, {
+      audience: brief.audience,
+      openingPromise: brief.angle,
+      requiredVisual: `用画面证明“${brief.angle}”`,
+      payoff: `围绕“${brief.title}”给出明确答案或可执行判断`,
+    });
   });
 
   it("does not expose a stale render or publish package as the current result", async () => {
@@ -2259,6 +2509,33 @@ describe("StudioService", () => {
     completeRetry(pipeline.run);
   });
 
+  it("allows a settled rejected asset pilot to be rechecked in the same run", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-background-pilot-recheck-"));
+    const run = waitingRun(workspaceRoot);
+    const assetNodeId = run.nodeRuns[0]!.nodeId;
+    run.status = "rejected";
+    run.nodeRuns[0] = {
+      ...run.nodeRuns[0]!,
+      nodeId: "assets",
+      status: "rejected",
+      error: "镜头 6 试片未通过，已停止后续付费生成。",
+      output: {
+        sourceVisualReview: {
+          version: "video-factory/visual-review-v1",
+          recommendation: "revise",
+        },
+      },
+    };
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const response = await service.retryFailedNode(run.id, "assets");
+
+    assert.equal(response.status, "running");
+    assert.equal(pipeline.lastRetriedNodeId, "assets");
+    assert.notEqual(assetNodeId, "assets");
+  });
+
   it("reconciles an ordinary failed series attempt before starting its replacement", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-restart-reconcile-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -2522,6 +2799,88 @@ describe("StudioService", () => {
     assert.deepEqual(await restarted.startRun(input, "referenced-production-request-1"), first);
     await assert.rejects(() => restarted.startRun(input, "referenced-production-request-2"), /参考视频不存在或已经失效/);
     assert.equal(pipeline.dispatchCount, 1);
+  });
+
+  it("inherits a verified private reference video into a new rework run without exposing its path", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-reference-rework-"));
+    const sourcePath = path.join(workspaceRoot, "runs", "run-1", "nodes", "reference-grammar", "attempt-1", "reference.mp4");
+    const sourceBytes = Buffer.from([0, 0, 0, 12, 102, 116, 121, 112, 105, 115, 111, 109]);
+    const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
+    await mkdir(path.dirname(sourcePath), { recursive: true });
+    await writeFile(sourcePath, sourceBytes);
+    const base = waitingRun(workspaceRoot);
+    const referencedBrief: ProductionBrief = {
+      ...base.initialInput,
+      providers: { ...base.initialInput.providers, script: "codex-screenwriter-v1", director: "api-visual-director-v1" },
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: true },
+      referenceVideo: {
+        uploadId: "67d86948-5517-4b17-8da1-b0a695159d4d",
+        label: "参考节奏.mp4",
+        mimeType: "video/mp4",
+        sizeBytes: sourceBytes.length,
+        sha256: sourceSha256,
+        path: path.join(workspaceRoot, "uploads", "reference-videos", "released", "source.mp4"),
+      },
+      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+    };
+    const rejectedRun: WorkflowRun<ProductionBrief> = {
+      ...base,
+      status: "rejected",
+      revision: 7,
+      initialInput: referencedBrief,
+      decisions: [{
+        interventionId: "intervention-1",
+        action: "reject",
+        decidedBy: "owner",
+        decidedAt: "2026-08-21T10:02:00.000Z",
+        note: "按审片建议调整画面后重做。",
+      }],
+      nodeRuns: [{
+        nodeId: "reference-grammar",
+        status: "succeeded",
+        artifactIds: ["artifact-reference-video"],
+        qualityGateResults: [],
+      }, ...base.nodeRuns],
+      artifacts: [{
+        id: "artifact-reference-video",
+        kind: "reference_video",
+        uri: sourcePath,
+        createdAt: base.startedAt,
+        contentType: "video/mp4",
+        sizeBytes: sourceBytes.length,
+        sha256: sourceSha256,
+        producer: { nodeId: "reference-grammar", attempt: 1 },
+        provenance: { providerId: "creator-upload" },
+      }, ...base.artifacts],
+    };
+    const pipeline = new FakePipeline(rejectedRun);
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      codexAvailability: { available: true, reason: "", taskKinds: ["script-draft", "director-plan", "reference-grammar", "role-audit"] },
+    });
+
+    const draft = await service.reworkDraft("run-1");
+
+    assert.deepEqual(draft?.inheritedReferenceVideo, {
+      label: "参考节奏.mp4",
+      mimeType: "video/mp4",
+      sizeBytes: sourceBytes.length,
+    });
+    assert.equal("path" in (draft?.inheritedReferenceVideo ?? {}), false);
+    assert.equal(draft?.input.referenceVideo, undefined);
+    assert.ok(draft?.inheritedNodeIds.includes("reference-grammar"));
+
+    await service.startRun(draft!.input, "reference-rework-request-1");
+
+    const dispatched = pipeline.lastInput as ProductionBrief;
+    assert.equal(dispatched.referenceVideo?.label, "参考节奏.mp4");
+    assert.equal(dispatched.referenceVideo?.sha256, sourceSha256);
+    assert.notEqual(dispatched.referenceVideo?.path, sourcePath);
+    assert.match(dispatched.referenceVideo?.path ?? "", /uploads\/reference-videos\/[a-f0-9-]{36}\/source\.mp4$/);
+    assert.deepEqual(await readFile(dispatched.referenceVideo!.path), sourceBytes);
   });
 
   it("blocks disabled metered providers but ignores legacy video-wide ceilings", async () => {

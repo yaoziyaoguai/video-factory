@@ -37,7 +37,7 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
   if (profileId === "zai" && optionalText(env, "ZAI_BIGMODEL_API_KEY") === undefined) {
     throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
   }
-  const effort = optionalText(env, "VIDEO_FACTORY_CODEX_EFFORT") ?? "high";
+  const effort = optionalText(env, "VIDEO_FACTORY_CODEX_EFFORT") ?? (profileId === "zai" ? "max" : "xhigh");
   if (!ALLOWED_EFFORTS.has(effort)) {
     throw new Error("VIDEO_FACTORY_CODEX_EFFORT must be one of low|medium|high|xhigh|max.");
   }
@@ -54,7 +54,8 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
     effort,
     ...(configuredAuditModel ? { auditModel: configuredAuditModel } : {}),
     auditEffort,
-    timeoutMs: readInteger(env, "VIDEO_FACTORY_CODEX_TIMEOUT_MS", 300_000, 1_000, 3_600_000),
+    // 600s 仍可能掐断 xhigh/max 级强推理候选；默认放宽到 20 分钟，与 ZAI 生产 unit 的 1200000ms 对齐。
+    timeoutMs: readInteger(env, "VIDEO_FACTORY_CODEX_TIMEOUT_MS", 1_200_000, 1_000, 3_600_000),
     concurrency: readInteger(env, "VIDEO_FACTORY_CODEX_CONCURRENCY", 1, 1, 8),
     maxBacklog: readInteger(env, "VIDEO_FACTORY_CODEX_MAX_BACKLOG", 20, 1, 1_000),
   };

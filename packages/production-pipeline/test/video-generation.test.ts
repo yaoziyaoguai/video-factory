@@ -257,7 +257,7 @@ describe("metered video generation adapters", () => {
       timeoutMs: 100,
     });
 
-    const result = await adapter.generate({ prompt: "雨夜里的霓虹街道", durationSeconds: 6, ratio: "9:16" });
+    const result = await adapter.generate({ prompt: "雨夜里的霓虹街道", durationSeconds: 6, ratio: "16:9" });
 
     assert.deepEqual(result, {
       providerId: "hailuo-video-v1",
@@ -269,12 +269,31 @@ describe("metered video generation adapters", () => {
     assert.equal(requests[3]?.url, "https://api.minimaxi.com/v1/files/retrieve?file_id=minimax-file-1");
     assert.deepEqual(JSON.parse(String(requests[0]?.init?.body)), {
       model: "MiniMax-Hailuo-2.3",
-      prompt: "竖屏 9:16 构图。雨夜里的霓虹街道",
+      prompt: "16:9 构图。雨夜里的霓虹街道",
       duration: 6,
       resolution: "768P",
       prompt_optimizer: true,
       aigc_watermark: false,
     });
+  });
+
+  it("rejects a portrait request for MiniMax v1 before creating a paid task", async () => {
+    let requested = false;
+    const adapter = new MiniMaxVideoAdapter({
+      apiKey: "test-key",
+      model: "MiniMax-Hailuo-2.3",
+      modelProtocols: { "MiniMax-Hailuo-2.3": "v1" },
+      fetch: async () => {
+        requested = true;
+        return jsonResponse({});
+      },
+    });
+
+    await assert.rejects(
+      () => adapter.generate({ prompt: "竖屏测试", durationSeconds: 6, ratio: "9:16" }),
+      /cannot guarantee.*9:16.*H3 v2/i,
+    );
+    assert.equal(requested, false);
   });
 
   it("continues a MiniMax task by taskId without submitting a second create request", async () => {
@@ -348,7 +367,7 @@ describe("metered video generation adapters", () => {
       timeoutMs: 100,
     });
 
-    const result = await adapter.generate({ prompt: "网络恢复测试", durationSeconds: 6, ratio: "9:16" });
+    const result = await adapter.generate({ prompt: "网络恢复测试", durationSeconds: 6, ratio: "16:9" });
 
     assert.equal(result.taskId, "minimax-network-task");
     assert.equal(result.videoUrl, "https://example.com/recovered.mp4");
@@ -377,7 +396,7 @@ describe("metered video generation adapters", () => {
 
     const outcome = await Promise.race([
       adapter.generate(
-        { prompt: "查询卡死测试", durationSeconds: 6, ratio: "9:16" },
+        { prompt: "查询卡死测试", durationSeconds: 6, ratio: "16:9" },
         (event) => { progress.push(event.status); },
       ).then(() => "resolved", (error: unknown) => error instanceof Error ? error.message : String(error)),
       new Promise<string>((resolve) => setTimeout(() => resolve("still pending"), 50)),
@@ -418,7 +437,7 @@ describe("metered video generation adapters", () => {
     });
 
     await assert.rejects(
-      () => adapter.generate({ prompt: "非法地址测试", durationSeconds: 6, ratio: "9:16" }),
+      () => adapter.generate({ prompt: "非法地址测试", durationSeconds: 6, ratio: "16:9" }),
       /Invalid URL|must use HTTP or HTTPS/,
     );
     assert.equal(requests.filter((request) => request.includes("/query/video_generation")).length, 1);
@@ -571,7 +590,7 @@ describe("metered video generation adapters", () => {
     });
 
     await assert.rejects(
-      () => adapter.generate({ prompt: "测试余额错误", durationSeconds: 6, ratio: "9:16" }),
+      () => adapter.generate({ prompt: "测试余额错误", durationSeconds: 6, ratio: "16:9" }),
       (error: unknown) => error instanceof ProviderRequestRejectedError && /insufficient balance/.test(error.message),
     );
   });
@@ -652,7 +671,7 @@ describe("metered video generation adapters", () => {
       const progress: string[] = [];
       await assert.rejects(
         () => testCase.adapter.generate(
-          { prompt: "测试超时状态", durationSeconds: 5, ratio: "9:16" },
+          { prompt: "测试超时状态", durationSeconds: 5, ratio: "16:9" },
           (event) => { progress.push(event.status); },
         ),
         /timed out/,

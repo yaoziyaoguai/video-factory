@@ -115,6 +115,58 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
     }
   });
 
+  it("keeps a pilot's original scene position and rejects evidence from other scenes", async () => {
+    const harness = await createHarness();
+    try {
+      const jpeg = makeJpeg(64);
+      await writeFrame(harness, "review_media/frame.jpg", jpeg);
+      await writeManifest(harness,
+        [{ ...frame("review_media/frame.jpg", 250, jpeg), scenePosition: 3, phase: "midpoint" }],
+        1_000, { mode: "hook_and_scene_midpoints", sceneCount: 8 });
+      const input = { assetPlanPath: path.join(harness.runRoot, "asset_plan.json"), runRoot: harness.runRoot, scenePositions: [3] };
+      const result = await harness.preprocessor.prepare(input);
+      assert.deepEqual(result.sampling?.coveredScenePositions, [3]);
+      assert.match(await readFile(harness.capturePath, "utf8"), /--scene-positions\n3/);
+      await assert.rejects(() => harness.preprocessor.prepare({ ...input, scenePositions: [2] }), /exactly the requested scenes/);
+    } finally {
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts an ordered dense frame sequence for a video pilot", async () => {
+    const harness = await createHarness();
+    try {
+      const jpeg = makeJpeg(64);
+      const frames: FrameDescriptor[] = [];
+      for (let index = 0; index < 4; index += 1) {
+        const relativePath = `review_media/sequence-${index}.jpg`;
+        await writeFrame(harness, relativePath, jpeg);
+        frames.push({
+          ...frame(relativePath, 100 + index * 200, jpeg),
+          scenePosition: 6,
+          phase: index === 0 ? "opening" : index === 3 ? "closing" : "middle",
+        });
+      }
+      await writeManifest(harness, frames, 1_000, { mode: "scene_sequence", sceneCount: 8 });
+
+      const result = await harness.preprocessor.prepare({
+        assetPlanPath: path.join(harness.runRoot, "asset_plan.json"),
+        runRoot: harness.runRoot,
+        scenePositions: [6],
+      });
+
+      assert.deepEqual(result.sampling, {
+        mode: "scene_sequence",
+        sceneCount: 8,
+        coveredScenePositions: [6],
+        missingScenePositions: [1, 2, 3, 4, 5, 7, 8],
+      });
+      assert.deepEqual(result.frames.map((item) => item.phase), ["opening", "middle", "middle", "closing"]);
+    } finally {
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a manifest that claims scene triplets without three phases for every scene", async () => {
     const harness = await createHarness();
     try {

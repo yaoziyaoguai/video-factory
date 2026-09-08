@@ -7,6 +7,12 @@ export interface VisualDirectionInput {
   visualStyle?: string;
 }
 
+export interface VisualPlanDeliveryCapabilities {
+  stock: boolean;
+  generated: boolean;
+  editorialCard: boolean;
+}
+
 // 机会的已保存 visualPlan 是规范真相（含合法省略号“…”的计划不得在展示层被重算替换）；
 // 缺失时才使用确定性 fallback。展示与开工 payload 必须读取同一个 resolved plan。
 export function resolveOpportunityVisualPlan(
@@ -22,7 +28,7 @@ export function planVisualDirection(input: VisualDirectionInput): StudioVisualPl
   const contextSource = contextSourceFor(category);
 
   return {
-    strategy: `${direction}。优先使用创作者可拍画面与可验证素材，缺口再由素材库或生成模型补齐。`,
+    strategy: `${direction}。优先使用可验证的素材库实拍，只有确有必要时才使用已启用的生成模型补齐。`,
     beats: [
       {
         id: "hook",
@@ -30,7 +36,7 @@ export function planVisualDirection(input: VisualDirectionInput): StudioVisualPl
         duration: "0-3 秒",
         description: `用一个具体动作或结果先呈现：${completePhrase(input.hook)} 画面先于解释。`,
         searchQuery: `${topic} 真实反应 特写 竖屏`,
-        source: "creator",
+        source: "stock",
       },
       {
         id: "context",
@@ -52,16 +58,48 @@ export function planVisualDirection(input: VisualDirectionInput): StudioVisualPl
   };
 }
 
+// 机会计划可以来自历史版本或外部总编，因此可能仍含当前自动生产链无法执行的
+// creator/screen 来源。开工时按本次真实启用的素材池解析，不能把矛盾合同交给模型反复猜测。
+export function resolveExecutableVisualPlan(
+  plan: StudioVisualPlan,
+  capabilities: VisualPlanDeliveryCapabilities,
+): StudioVisualPlan {
+  let changed = false;
+  const beats = plan.beats.map((beat) => {
+    if (beat.source === "stock" && capabilities.stock) return { ...beat };
+    if (beat.source === "generated" && capabilities.generated) return { ...beat };
+    if (beat.source === "local-card" && capabilities.editorialCard) return { ...beat };
+
+    const source: StudioVisualSource | undefined = capabilities.stock
+      ? "stock"
+      : capabilities.generated
+        ? "generated"
+        : undefined;
+    if (!source) {
+      throw new Error(`镜头“${beat.role}”需要真实画面，但当前素材池没有可执行的图库或生成能力。`);
+    }
+    changed = true;
+    return { ...beat, source };
+  });
+
+  if (!changed) return { strategy: plan.strategy, beats };
+  const enabledSources = [
+    capabilities.stock ? "素材库" : undefined,
+    capabilities.generated ? "AI 生成" : undefined,
+    capabilities.editorialCard ? "主动排版" : undefined,
+  ].filter(Boolean).join("、");
+  return {
+    strategy: `保留原计划的观看顺序、主体、动作与证据编排；本次只使用已启用的${enabledSources}画面，不假设存在未提供的创作者拍摄或屏幕录制。`,
+    beats,
+  };
+}
+
 function payoffSourceFor(category: StudioTopicCategory): StudioVisualSource {
-  if (category === "technology" || category === "finance-career" || category === "education" || category === "gaming") return "screen";
-  if (category === "society" || category === "entertainment" || category === "health-sports" || category === "automotive") return "stock";
-  return "creator";
+  return "stock";
 }
 
 function contextSourceFor(category: StudioTopicCategory): StudioVisualSource {
-  if (category === "technology" || category === "finance-career" || category === "education") return "screen";
-  if (category === "society" || category === "health-sports" || category === "entertainment" || category === "gaming" || category === "automotive") return "stock";
-  return "creator";
+  return "stock";
 }
 
 function contextDescription(category: StudioTopicCategory, topic: string): string {
@@ -132,7 +170,8 @@ function compactTopic(value: string): string {
     .replace(/[“”"'《》]/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  const [firstClause] = normalized.split(/[，,:：；;。？！!?]/).map((part) => part.trim()).filter(Boolean);
+  // 冒号常用于“栏目名：本期主题”；真正可检索的主题通常在冒号后，不能在这里截断。
+  const [firstClause] = normalized.split(/[，,；;。？！!?]/).map((part) => part.trim()).filter(Boolean);
   return firstClause || normalized || "这个选题";
 }
 

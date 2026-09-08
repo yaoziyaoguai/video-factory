@@ -193,10 +193,10 @@ describe("node production workspaces", () => {
     await userEvent.click(screen.getByText("这一步为什么用了这些时间"));
     expect(screen.getByText("步骤总耗时").parentElement).toHaveTextContent("21 秒");
     expect(screen.getByText("最终模型等待").parentElement).toHaveTextContent("12 秒");
-    expect(screen.getByText("首次响应").parentElement).toHaveTextContent("410 毫秒");
+    expect(screen.getByText("首次响应").parentElement).toHaveTextContent("不到 1 秒");
     expect(screen.getByText("内容生成累计").parentElement).toHaveTextContent("13 秒");
     expect(screen.getByText("独立复核累计").parentElement).toHaveTextContent("8.2 秒");
-    expect(screen.getByText("结果校验").parentElement).toHaveTextContent("21 毫秒");
+    expect(screen.getByText("结果校验").parentElement).toHaveTextContent("不到 1 秒");
     expect(screen.getByText("模型调用").parentElement).toHaveTextContent("2 次");
     expect(screen.getByText("自动重试").parentElement).toHaveTextContent("1 次");
     expect(screen.queryByText(/Prompt Pack|screenwriter-v2/)).not.toBeInTheDocument();
@@ -1460,7 +1460,7 @@ describe("node production workspaces", () => {
     render(<MemoryRouter><CostDashboard dashboard={dashboard} /></MemoryRouter>);
 
     expect(screen.getByRole("heading", { name: "按服务和制作步骤核对费用" })).toBeInTheDocument();
-    expect(screen.getByText("已批准报价合计")).toBeInTheDocument();
+    expect(screen.getByText("报价授权金额（非消费）")).toBeInTheDocument();
     expect(screen.getByText("待确认是否扣费")).toBeInTheDocument();
     expect(screen.getByText("按实际服务")).toBeInTheDocument();
     expect(screen.queryByText("授权上限")).not.toBeInTheDocument();

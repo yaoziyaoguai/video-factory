@@ -136,6 +136,7 @@ export interface StudioModelProfile {
   description: string;
   taskTypes: Array<"text-to-video" | "image-to-video" | "text-to-image" | "visual-review" | "digital-human" | "text">;
   resolutions?: string[];
+  aspectRatios?: Array<"9:16" | "16:9" | "1:1" | "3:4" | "4:3">;
   minDurationSeconds?: number;
   maxDurationSeconds?: number;
   supportsAudio?: boolean;
@@ -703,6 +704,7 @@ export interface StudioRunDetail extends StudioRunSummary {
   audience: string;
   nicheSlug: string;
   reviewMode: "manual" | "automatic";
+  creativeSummary?: StudioCreativeSummary;
   nodes: StudioNode[];
   artifacts: StudioArtifact[];
   decisions: StudioDecision[];
@@ -715,6 +717,13 @@ export interface StudioRunDetail extends StudioRunSummary {
   videoArtifactId?: string;
   publishPackageArtifactId?: string;
   pauseRequested?: boolean;
+}
+
+export interface StudioCreativeSummary {
+  audience: string;
+  openingPromise: string;
+  requiredVisual: string;
+  payoff: string;
 }
 
 export interface StudioNode {
@@ -954,6 +963,7 @@ export interface StudioArtifact {
   schemaVersion?: string;
   producerNodeId?: string;
   providerId?: string;
+  scenePosition?: number;
   licenseNote?: string;
   contentUrl?: string;
 }
@@ -1216,11 +1226,25 @@ export interface StudioCostRunDetail extends StudioCostRunSummary {
 export interface StudioReworkFinding {
   findingId: string;
   timecodeMs: number;
+  startTimecodeMs?: number;
+  endTimecodeMs?: number;
   scenePosition?: number;
+  evidenceStatus?: "satisfied" | "failed" | "not_observed" | "not_applicable";
+  evidenceFrameSha256?: string | null;
+  nextAction?: "inspect_existing_media" | "replan_upstream" | "rework_asset" | "none";
   category: string;
   description: string;
   suggestion: string;
   targetNodeIds: Array<"script" | "visual-direction" | "assets">;
+  primaryOwnerNodeId?: "script" | "visual-direction" | "assets";
+  affectedNodeIds?: Array<"script" | "visual-direction" | "assets">;
+  action?: "inspect_existing_media" | "replan_upstream" | "replace_asset";
+  sourceReviewStage?: "source_assets" | "rendered_video";
+  sourceReviewNodeId?: string;
+  sourceReviewVersionId?: string;
+  reviewEvidenceId?: string;
+  actualModels?: Array<{ providerId: string; modelId: string }>;
+  current?: boolean;
 }
 
 export interface StudioReworkContext {
@@ -1234,6 +1258,24 @@ export interface StudioReworkContext {
     assets: string;
   };
   findings: StudioReworkFinding[];
+  plan?: {
+    version: "video-factory/rework-plan-v1";
+    planDigest: string;
+    source: { runId: string; runRevision: number; reviewEvidenceIds: string[] };
+    requirements: Array<{
+      findingId: string;
+      primaryOwnerNodeId: "script" | "visual-direction" | "assets";
+      affectedNodeIds: Array<"script" | "visual-direction" | "assets">;
+      action: "inspect_existing_media" | "replan_upstream" | "replace_asset";
+      scenePositions: number[];
+    }>;
+    sceneActions: Array<{
+      scenePosition: number;
+      action: "inspect" | "retain" | "reuse" | "generate" | "blocked";
+      reasonFindingIds: string[];
+    }>;
+    nodeInstructions: { script: string; visualDirection: string; assets: string };
+  };
   previousScript?: Record<string, unknown>;
   previousDirectorPlan?: Record<string, unknown>;
 }
@@ -1242,6 +1284,7 @@ export interface StudioReworkDraft {
   input: StudioProductionInput;
   inheritedNodeIds: string[];
   requiredAffectedScenePositions: number[];
+  inheritedReferenceVideo?: Pick<StudioReferenceVideo, "label" | "mimeType" | "sizeBytes">;
 }
 
 export interface StudioProductionInput {

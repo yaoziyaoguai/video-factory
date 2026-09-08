@@ -89,11 +89,52 @@ export interface ProductionVisualPlan {
 export interface ProductionReworkFinding {
   findingId: string;
   timecodeMs: number;
+  startTimecodeMs?: number;
+  endTimecodeMs?: number;
   scenePosition?: number;
+  evidenceStatus?: "satisfied" | "failed" | "not_observed" | "not_applicable";
+  evidenceFrameSha256?: string | null;
+  nextAction?: "inspect_existing_media" | "replan_upstream" | "rework_asset" | "none";
   category: string;
   description: string;
   suggestion: string;
   targetNodeIds: Array<"script" | "visual-direction" | "assets">;
+  primaryOwnerNodeId?: "script" | "visual-direction" | "assets";
+  affectedNodeIds?: Array<"script" | "visual-direction" | "assets">;
+  action?: "inspect_existing_media" | "replan_upstream" | "replace_asset";
+  sourceReviewStage?: "source_assets" | "rendered_video";
+  sourceReviewNodeId?: string;
+  sourceReviewVersionId?: string;
+  reviewEvidenceId?: string;
+  actualModels?: Array<{ providerId: string; modelId: string }>;
+  current?: boolean;
+}
+
+export interface ProductionReworkPlan {
+  version: "video-factory/rework-plan-v1";
+  planDigest: string;
+  source: {
+    runId: string;
+    runRevision: number;
+    reviewEvidenceIds: string[];
+  };
+  requirements: Array<{
+    findingId: string;
+    primaryOwnerNodeId: "script" | "visual-direction" | "assets";
+    affectedNodeIds: Array<"script" | "visual-direction" | "assets">;
+    action: "inspect_existing_media" | "replan_upstream" | "replace_asset";
+    scenePositions: number[];
+  }>;
+  sceneActions: Array<{
+    scenePosition: number;
+    action: "inspect" | "retain" | "reuse" | "generate" | "blocked";
+    reasonFindingIds: string[];
+  }>;
+  nodeInstructions: {
+    script: string;
+    visualDirection: string;
+    assets: string;
+  };
 }
 
 export interface ProductionReworkContext {
@@ -107,6 +148,7 @@ export interface ProductionReworkContext {
     assets: string;
   };
   findings: ProductionReworkFinding[];
+  plan?: ProductionReworkPlan;
   previousScript?: Record<string, unknown>;
   previousDirectorPlan?: Record<string, unknown>;
 }
@@ -358,7 +400,7 @@ function parseReworkContext(value: unknown): ProductionReworkContext | undefined
   const rejectionReason = input.rejectionReason === undefined
     ? undefined
     : boundedReworkText(input.rejectionReason, "rework.rejectionReason");
-  return {
+  const context: Omit<ProductionReworkContext, "plan"> = {
     sourceRunId,
     sourceRunRevision,
     ...(rejectionReason ? { rejectionReason } : {}),
@@ -368,6 +410,104 @@ function parseReworkContext(value: unknown): ProductionReworkContext | undefined
     ...(input.previousScript === undefined ? {} : { previousScript: boundedReworkDocument(input.previousScript, "rework.previousScript") }),
     ...(input.previousDirectorPlan === undefined ? {} : { previousDirectorPlan: boundedReworkDocument(input.previousDirectorPlan, "rework.previousDirectorPlan") }),
   };
+  return { ...context, plan: compileProductionReworkPlan(context) };
+}
+
+export function compileProductionReworkPlan(
+  context: Omit<ProductionReworkContext, "plan">,
+): ProductionReworkPlan {
+  const affectedScenePositions = [...new Set(context.affectedScenePositions ?? [])].sort((left, right) => left - right);
+  const requirements = context.findings.map((finding) => {
+    const primaryOwnerNodeId = finding.primaryOwnerNodeId ?? finding.targetNodeIds[0] ?? "assets";
+    const affectedNodeIds = finding.affectedNodeIds ?? finding.targetNodeIds;
+    const action = finding.action ?? reworkActionForFinding(finding, primaryOwnerNodeId);
+    return {
+      findingId: finding.findingId,
+      primaryOwnerNodeId,
+      affectedNodeIds: [...affectedNodeIds],
+      action,
+      scenePositions: finding.scenePosition === undefined
+        ? [...affectedScenePositions]
+        : [finding.scenePosition],
+    };
+  });
+  const previousShots = reworkShotsByPosition(context.previousDirectorPlan);
+  const universe = reworkPlanSceneUniverse(context.previousScript, context.previousDirectorPlan, affectedScenePositions);
+  const affected = new Set(affectedScenePositions);
+  const sceneActions = universe.map((scenePosition) => {
+    const reasons = requirements.filter((requirement) => requirement.scenePositions.includes(scenePosition));
+    const shot = previousShots.get(scenePosition);
+    const reuse = shot && (Number.isInteger(shot.reuseFromScenePosition)
+      || typeof shot.query === "string" && /^REUSE_ONLY\s+scene\s+/i.test(shot.query));
+    let action: ProductionReworkPlan["sceneActions"][number]["action"];
+    if (!affected.has(scenePosition)) action = reuse ? "reuse" : "retain";
+    else if (reasons.some((reason) => reason.action === "replan_upstream")) action = "blocked";
+    else if (reasons.some((reason) => reason.action === "replace_asset")) action = reuse ? "reuse" : "generate";
+    else if (reasons.some((reason) => reason.action === "inspect_existing_media")) action = "inspect";
+    else action = reuse ? "reuse" : reworkShotRequiresGeneration(shot) ? "generate" : "inspect";
+    return {
+      scenePosition,
+      action,
+      reasonFindingIds: reasons.map((reason) => reason.findingId),
+    };
+  });
+  const payload = {
+    version: "video-factory/rework-plan-v1" as const,
+    source: {
+      runId: context.sourceRunId,
+      runRevision: context.sourceRunRevision,
+      reviewEvidenceIds: [...new Set(context.findings.flatMap((finding) => (
+        finding.reviewEvidenceId ? [finding.reviewEvidenceId] : []
+      )))].sort(),
+    },
+    requirements,
+    sceneActions,
+    nodeInstructions: { ...context.nodeInstructions },
+  };
+  return {
+    ...payload,
+    planDigest: createHash("sha256").update(JSON.stringify(payload)).digest("hex"),
+  };
+}
+
+function reworkActionForFinding(
+  finding: ProductionReworkFinding,
+  primaryOwnerNodeId: "script" | "visual-direction" | "assets",
+): ProductionReworkPlan["requirements"][number]["action"] {
+  if (finding.nextAction === "inspect_existing_media") return "inspect_existing_media";
+  if (finding.nextAction === "replan_upstream") return "replan_upstream";
+  if (finding.nextAction === "rework_asset") return "replace_asset";
+  return primaryOwnerNodeId === "assets" ? "replace_asset" : "replan_upstream";
+}
+
+function reworkPlanSceneUniverse(
+  previousScript: Record<string, unknown> | undefined,
+  previousDirectorPlan: Record<string, unknown> | undefined,
+  affectedScenePositions: number[],
+): number[] {
+  const positions = new Set<number>(affectedScenePositions);
+  for (const [position] of reworkPositionedRecords(previousScript?.scenes, "position")) positions.add(position);
+  for (const [position] of reworkPositionedRecords(previousDirectorPlan?.shots, "scenePosition")) positions.add(position);
+  return [...positions].sort((left, right) => left - right);
+}
+
+function reworkShotsByPosition(value: Record<string, unknown> | undefined): Map<number, Record<string, unknown>> {
+  return reworkPositionedRecords(value?.shots, "scenePosition");
+}
+
+function reworkPositionedRecords(value: unknown, positionKey: string): Map<number, Record<string, unknown>> {
+  const result = new Map<number, Record<string, unknown>>();
+  if (!Array.isArray(value)) return result;
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const position = Number(entry[positionKey]);
+    if (Number.isInteger(position) && position > 0) result.set(position, entry);
+  }
+  return result;
+}
+
+function reworkShotRequiresGeneration(shot: Record<string, unknown> | undefined): boolean {
+  return shot?.deliveryType === "generated_image" || shot?.deliveryType === "generated_video";
 }
 
 function parseReworkAffectedScenePositions(value: unknown): number[] | undefined {
@@ -404,6 +544,16 @@ export function parseProductionReworkFindings(
     const scenePosition = finding.scenePosition === undefined
       ? undefined
       : boundedNumber(finding.scenePosition, `${itemField}.scenePosition`, 1, 10_000, true);
+    const startTimecodeMs = finding.startTimecodeMs === undefined
+      ? undefined
+      : boundedNumber(finding.startTimecodeMs, `${itemField}.startTimecodeMs`, 0, 10_800_000, true);
+    const endTimecodeMs = finding.endTimecodeMs === undefined
+      ? undefined
+      : boundedNumber(finding.endTimecodeMs, `${itemField}.endTimecodeMs`, 0, 10_800_000, true);
+    if (startTimecodeMs !== undefined && endTimecodeMs !== undefined
+      && (startTimecodeMs > timecodeMs || timecodeMs > endTimecodeMs)) {
+      throw new Error(`${itemField} time range is invalid.`);
+    }
     if (!Array.isArray(finding.targetNodeIds) || finding.targetNodeIds.length === 0 || finding.targetNodeIds.length > 3) {
       throw new Error(`${itemField}.targetNodeIds is invalid.`);
     }
@@ -413,14 +563,101 @@ export function parseProductionReworkFindings(
       }
       return target as ProductionReworkFinding["targetNodeIds"][number];
     }))];
+    const evidenceStatus = optionalEnum(finding.evidenceStatus,
+      ["satisfied", "failed", "not_observed", "not_applicable"] as const, `${itemField}.evidenceStatus`);
+    const nextAction = optionalEnum(finding.nextAction,
+      ["inspect_existing_media", "replan_upstream", "rework_asset", "none"] as const, `${itemField}.nextAction`);
+    const sourceReviewStage = optionalEnum(finding.sourceReviewStage,
+      ["source_assets", "rendered_video"] as const, `${itemField}.sourceReviewStage`);
+    const evidenceFrameSha256 = optionalSha256OrNull(finding.evidenceFrameSha256, `${itemField}.evidenceFrameSha256`);
+    const reviewEvidenceId = optionalSha256(finding.reviewEvidenceId, `${itemField}.reviewEvidenceId`);
+    const actualModels = finding.actualModels === undefined
+      ? undefined
+      : parseReworkActualModels(finding.actualModels, `${itemField}.actualModels`);
+    const primaryOwnerNodeId = optionalEnum(
+      finding.primaryOwnerNodeId,
+      ["script", "visual-direction", "assets"] as const,
+      `${itemField}.primaryOwnerNodeId`,
+    );
+    const affectedNodeIds = finding.affectedNodeIds === undefined
+      ? undefined
+      : parseReworkNodeIds(finding.affectedNodeIds, `${itemField}.affectedNodeIds`);
+    const action = optionalEnum(
+      finding.action,
+      ["inspect_existing_media", "replan_upstream", "replace_asset"] as const,
+      `${itemField}.action`,
+    );
+    if (finding.current !== undefined && typeof finding.current !== "boolean") {
+      throw new Error(`${itemField}.current must be a boolean.`);
+    }
     return {
       findingId,
       timecodeMs,
+      ...(startTimecodeMs === undefined ? {} : { startTimecodeMs }),
+      ...(endTimecodeMs === undefined ? {} : { endTimecodeMs }),
       ...(scenePosition === undefined ? {} : { scenePosition }),
+      ...(evidenceStatus ? { evidenceStatus } : {}),
+      ...(evidenceFrameSha256 !== undefined ? { evidenceFrameSha256 } : {}),
+      ...(nextAction ? { nextAction } : {}),
       category: boundedReworkText(finding.category, `${itemField}.category`, 120),
       description: boundedReworkText(finding.description, `${itemField}.description`),
       suggestion: boundedReworkText(finding.suggestion, `${itemField}.suggestion`),
       targetNodeIds,
+      ...(primaryOwnerNodeId ? { primaryOwnerNodeId } : {}),
+      ...(affectedNodeIds ? { affectedNodeIds } : {}),
+      ...(action ? { action } : {}),
+      ...(sourceReviewStage ? { sourceReviewStage } : {}),
+      ...(finding.sourceReviewNodeId === undefined ? {} : {
+        sourceReviewNodeId: boundedReworkText(finding.sourceReviewNodeId, `${itemField}.sourceReviewNodeId`, 120),
+      }),
+      ...(finding.sourceReviewVersionId === undefined ? {} : {
+        sourceReviewVersionId: boundedReworkText(finding.sourceReviewVersionId, `${itemField}.sourceReviewVersionId`, 240),
+      }),
+      ...(reviewEvidenceId ? { reviewEvidenceId } : {}),
+      ...(actualModels ? { actualModels } : {}),
+      ...(finding.current === undefined ? {} : { current: finding.current }),
+    };
+  });
+}
+
+function parseReworkNodeIds(
+  value: unknown,
+  field: string,
+): Array<"script" | "visual-direction" | "assets"> {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 3) {
+    throw new Error(`${field} is invalid.`);
+  }
+  return [...new Set(value.map((entry, index) => {
+    if (entry !== "script" && entry !== "visual-direction" && entry !== "assets") {
+      throw new Error(`${field}[${index}] is invalid.`);
+    }
+    return entry;
+  }))];
+}
+
+function optionalEnum<T extends string>(value: unknown, allowed: readonly T[], field: string): T | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !allowed.includes(value as T)) throw new Error(`${field} is invalid.`);
+  return value as T;
+}
+
+function optionalSha256(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) throw new Error(`${field} is invalid.`);
+  return value;
+}
+
+function optionalSha256OrNull(value: unknown, field: string): string | null | undefined {
+  return value === null ? null : optionalSha256(value, field);
+}
+
+function parseReworkActualModels(value: unknown, field: string): Array<{ providerId: string; modelId: string }> {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 4) throw new Error(`${field} is invalid.`);
+  return value.map((entry, index) => {
+    const model = requireRecord(entry, `${field}[${index}]`);
+    return {
+      providerId: boundedReworkText(model.providerId, `${field}[${index}].providerId`, 120),
+      modelId: boundedReworkText(model.modelId, `${field}[${index}].modelId`, 240),
     };
   });
 }

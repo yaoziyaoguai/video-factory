@@ -101,6 +101,23 @@ describe("TemplatesPage", () => {
     expect(confirm).toHaveBeenCalledTimes(2);
   });
 
+  it("does not replace unsaved edits when the selected template card is clicked again", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.spyOn(window, "confirm");
+    render(<TemplatesPage />);
+
+    await screen.findByRole("heading", { name: "知识解释" });
+    await user.click(screen.getByRole("radio", { name: /我的系列/ }));
+    await user.clear(screen.getByLabelText("模板名称"));
+    await user.type(screen.getByLabelText("模板名称"), "未保存的新名称");
+
+    await user.click(screen.getByRole("radio", { name: /我的系列/ }));
+
+    expect(screen.getByLabelText("模板名称")).toHaveValue("未保存的新名称");
+    expect(screen.getByText("有未保存修改")).toBeInTheDocument();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
   it("opens a published template as the next editable version under the same id", async () => {
     const user = userEvent.setup();
     render(<TemplatesPage />);
@@ -160,6 +177,26 @@ describe("TemplatesPage", () => {
     const dialog = screen.getByRole("dialog", { name: "确认发布“我的系列”" });
     await user.click(within(dialog).getByRole("button", { name: "确认发布" }));
     expect(studioApi.publishTemplate).toHaveBeenCalledWith("my-series", 3);
+  });
+
+  it("keeps the saved revision when publishing fails after an automatic draft save", async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(studioApi, "saveTemplateDraft");
+    vi.mocked(studioApi.publishTemplate).mockRejectedValueOnce(new Error("发布校验暂时不可用"));
+    render(<TemplatesPage />);
+
+    await screen.findByRole("heading", { name: "知识解释" });
+    await user.click(screen.getByRole("radio", { name: /我的系列/ }));
+    await user.clear(screen.getByLabelText("模板名称"));
+    await user.type(screen.getByLabelText("模板名称"), "已保存但尚未发布");
+    await user.click(screen.getByRole("button", { name: "发布新版本" }));
+    await user.click(within(screen.getByRole("dialog", { name: "确认发布“已保存但尚未发布”" })).getByRole("button", { name: "确认发布" }));
+
+    expect(await screen.findByText("草稿已保存，发布未完成：发布校验暂时不可用")).toBeInTheDocument();
+    expect(screen.queryByText("有未保存修改")).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("适用说明"), "；补充修改");
+    await user.click(screen.getByRole("button", { name: "保存草稿" }));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ name: "已保存但尚未发布" }), 4);
   });
 });
 

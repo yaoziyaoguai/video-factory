@@ -43,25 +43,19 @@ const creatorSettings = new JsonCreatorSettingsStore(path.join(workspaceRoot, "s
 const pythonPath = process.env.PYTHONPATH
   ? `${path.join(repositoryRoot, "src")}${path.delimiter}${process.env.PYTHONPATH}`
   : path.join(repositoryRoot, "src");
-const worker = buildProductionWorker({
-  repositoryRoot,
-  pythonPath,
-  environment: process.env,
-  runsRoot: path.join(workspaceRoot, "runs"),
-});
 // 启动时探测一次宿主机 Codex bridge；不可用时不创建任何 agent，保持规则与模板行为。
 const [codexSettings, zaiCodexSettings] = await Promise.all([
   readCodexProviderSettings(process.env),
   readZaiCodexProviderSettings(process.env),
 ]);
 const codexModelId = codexSettings.modelId || process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
-// 单并发 broker 中，21 分钟覆盖一个 10 分钟在途任务、一个完整执行和传输余量；
+// 单并发 broker 中，41 分钟覆盖一个 20 分钟在途任务、一个完整执行和传输余量；
 // 生产任务会插队尚未开始的热点任务，客户端仍不重放已受理任务。
 const codexClient = codexSettings.available
-  ? new CodexBridgeClient({ socketPath: codexSettings.socketPath, timeoutMs: 1_260_000 })
+  ? new CodexBridgeClient({ socketPath: codexSettings.socketPath, timeoutMs: 2_460_000 })
   : undefined;
 const zaiCodexClient = zaiCodexSettings.available
-  ? new CodexBridgeClient({ socketPath: zaiCodexSettings.socketPath, timeoutMs: 1_260_000 })
+  ? new CodexBridgeClient({ socketPath: zaiCodexSettings.socketPath, timeoutMs: 2_460_000 })
   : undefined;
 const auditedTaskCandidates = [
   ...(codexClient && codexSettings.taskKinds.includes("role-audit") ? [{
@@ -116,7 +110,13 @@ const { screenwriterAgent, directorAgent, visualReviewAgents } = buildRoleAgentA
 });
 const pipeline = new ProductionPipeline({
   workspaceRoot,
-  worker,
+  worker: buildProductionWorker({
+    repositoryRoot,
+    pythonPath,
+    environment: process.env,
+    runsRoot: path.join(workspaceRoot, "runs"),
+    visualReviewAgents,
+  }),
   ...(screenwriterAgent ? { screenwriterAgent } : {}),
   ...(directorAgent ? { directorAgent } : {}),
   ...(publishCopyWriter ? { publishCopyWriter } : {}),

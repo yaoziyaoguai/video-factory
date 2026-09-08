@@ -189,6 +189,7 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             provider_id=provider_id,
             source_url=optional_string(scene_asset.get("source_url")),
             creator=optional_string(scene_asset.get("creator")),
+            scene_position=int(scene_asset.get("scene_position", 0)) or None,
         ))
     return success_response(
         request,
@@ -477,6 +478,7 @@ def describe_artifact(
     provider_id: str | None = None,
     source_url: str | None = None,
     creator: str | None = None,
+    scene_position: int | None = None,
 ) -> Dict[str, Any]:
     content = path.read_bytes()
     return {
@@ -492,6 +494,7 @@ def describe_artifact(
             "licenseNote": license_note,
             **({"sourceUrl": source_url} if source_url else {}),
             **({"creator": creator} if creator else {}),
+            **({"scenePosition": scene_position} if scene_position else {}),
         },
     }
 

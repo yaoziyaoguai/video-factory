@@ -119,6 +119,12 @@ describe("CodexBridgeClient", () => {
       firstOutputEventMs: 410,
       toolMs: 0,
       validationMs: 7,
+      requestIdHash: "b".repeat(64),
+      finishReason: "stop",
+      promptTokens: 1_200,
+      completionTokens: 3_400,
+      totalTokens: 4_600,
+      reasoningTokens: 2_700,
       attemptedModelIds: ["glm-5.3", "gpt-5.4"],
       modelCandidateAttempts: [{
         modelId: "glm-5.3",
@@ -375,6 +381,11 @@ describe("CodexBridgeClient", () => {
           providerId: "zai-bigmodel-api",
           modelId: "glm-5.3",
           providerWaitMs: 37,
+          finishReason: "length",
+          promptTokens: 2_000,
+          completionTokens: 65_536,
+          totalTokens: 67_536,
+          reasoningTokens: 61_000,
         },
       });
     });
@@ -395,6 +406,11 @@ describe("CodexBridgeClient", () => {
           providerId: "zai-bigmodel-api",
           modelId: "glm-5.3",
           providerWaitMs: 37,
+          finishReason: "length",
+          promptTokens: 2_000,
+          completionTokens: 65_536,
+          totalTokens: 67_536,
+          reasoningTokens: 61_000,
         });
         assert.doesNotMatch(error.creatorMessage, /Agent|Codex bridge|host-only broker|socket/i);
         return true;

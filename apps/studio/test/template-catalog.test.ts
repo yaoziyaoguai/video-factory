@@ -19,8 +19,8 @@ describe("template catalog", () => {
     for (const template of BUILTIN_TEMPLATES) {
       assert.equal(template.status, "published");
       assert.ok(template.storyStructure.length >= 3);
-      assert.ok(template.shotSlots.length > template.storyStructure.length);
-      assert.ok(template.shotSlots.length >= 6);
+      assert.ok(template.shotSlots.length >= template.storyStructure.length);
+      assert.ok(template.shotSlots.length >= 4);
       assert.ok(template.shotSlots.every((slot) => slot.durationSeconds <= 5));
       assert.ok(template.shotSlots.every((slot) => slot.allowedCapabilities.includes("asset.generate.video")));
       assert.ok(template.qualityRules.length >= 3);
@@ -56,12 +56,23 @@ describe("template catalog", () => {
 
   it("keeps generated knowledge-explainer source images text-free", () => {
     const template = BUILTIN_TEMPLATES.find((candidate) => candidate.id === "knowledge-explainer")!;
-    const exampleSetup = template.shotSlots.find((slot) => slot.id === "knowledge-example-setup")!;
+    const exampleSetup = template.shotSlots.find((slot) => slot.id === "knowledge-mechanism")!;
     const legibilityRule = template.qualityRules.find((rule) => rule.id === "knowledge-legible")!;
 
-    assert.match(exampleSetup.purpose, /无字母图/);
-    assert.match(exampleSetup.purpose, /后期字幕|确定性图形/);
+    assert.match(exampleSetup.purpose, /无字/);
+    assert.match(exampleSetup.purpose, /生成画面只作示意/);
     assert.match(legibilityRule.label, /生成母图不得绘制文字/);
     assert.match(legibilityRule.label, /后期字幕|确定性图形/);
+  });
+
+  it("publishes a less mechanical knowledge-explainer revision without pretending generated scenes prove causality", () => {
+    const template = BUILTIN_TEMPLATES.find((candidate) => candidate.id === "knowledge-explainer")!;
+
+    assert.equal(template.version, 3);
+    assert.equal(template.shotSlots.length, 5);
+    assert.equal(template.shotSlots.some((slot) => /只改变一个变量|真实案例/.test(slot.purpose)), false);
+    assert.match(template.description, /理解|应用/);
+    assert.equal(template.qualityRules.some((rule) => /例子必须真正验证|证明因果/.test(rule.label)), false);
+    assert.match(template.qualityRules.map((rule) => rule.label).join("\n"), /示意.*事实证据|事实证据.*示意/);
   });
 });

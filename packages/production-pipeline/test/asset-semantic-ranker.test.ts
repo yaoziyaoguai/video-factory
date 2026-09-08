@@ -68,7 +68,12 @@ describe("asset semantic ranking", () => {
     assert.equal("revision" in (calls[2]!.payload as Record<string, unknown>), true);
     const auditImages = (calls[1]!.payload as { images: Array<Record<string, unknown>> }).images;
     const auditCriteria = (calls[1]!.payload as { criteria: string[] }).criteria;
-    assert.match(auditCriteria.join("\n"), /核心主体、物体和动作.*不得通过审计/);
+    assert.match(auditCriteria.join("\n"), /核心主体、物体和动作.*诚实标记无匹配/);
+    const auditContract = (calls[1]!.payload as {
+      context: { currentRoleContract: Record<string, unknown> };
+    }).context.currentRoleContract;
+    assert.equal(auditContract.automaticUseMinimumSemanticScore, 40);
+    assert.match(String(auditContract.noMatchPolicy), /排序结果本身可以通过审计/);
     assert.equal(auditImages.length, 2);
     assert.deepEqual(auditImages.map((image) => [image.imageIndex, image.provider, image.assetId]), [[1, "pexels", "first"], [2, "pixabay", "second"]]);
     assert.equal(typeof auditImages[0]?.jpegBase64, "string");
@@ -85,6 +90,8 @@ describe("asset semantic ranking", () => {
     const ranking = deterministicAssetRanking(report, "test fallback");
     assert.equal(ranking.source, "fallback");
     assert.deepEqual(ranking.scenes[0]?.candidates.map((item) => item.assetId), ["second", "first"]);
+    assert.deepEqual(ranking.scenes[0]?.candidates.map((item) => item.semanticScore), [0, 0]);
+    assert.match(ranking.scenes[0]?.summary ?? "", /语义未验证/);
     assert.equal(ranking.fallbackReason, "test fallback");
   });
 
@@ -168,6 +175,28 @@ describe("asset semantic ranking", () => {
       [[1, "pexels", "first"], [1, "pixabay", "second"]],
     );
     assert.equal(typeof payload.thumbnails[0]?.jpegBase64, "string");
+  });
+
+  it("drops thumbnails larger than the broker per-image boundary before sending", async () => {
+    const report = parseAssetCandidateReport(rawReport);
+    const seen: unknown[] = [];
+    const oversized = Buffer.alloc(256 * 1024 + 1);
+    oversized[0] = 0xff;
+    oversized[1] = 0xd8;
+    const ranker = new CodexAssetSemanticRanker({
+      client: {
+        runTask: async (_kind, payload) => {
+          seen.push(payload);
+          return deterministicAssetRanking(report);
+        },
+      },
+      fetchThumbnail: async () => oversized,
+    });
+
+    await ranker.rank(report);
+
+    const payload = seen[0] as { thumbnails: unknown[] };
+    assert.deepEqual(payload.thumbnails, []);
   });
 });
 

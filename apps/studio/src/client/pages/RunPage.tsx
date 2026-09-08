@@ -403,6 +403,7 @@ export function RunPage() {
           initialValues: restartDraft.input,
           inheritedNodeIds: restartDraft.inheritedNodeIds,
           requiredAffectedScenePositions: restartDraft.requiredAffectedScenePositions,
+          ...(restartDraft.inheritedReferenceVideo ? { inheritedReferenceVideo: restartDraft.inheritedReferenceVideo } : {}),
         } : {})}
         onClose={() => setRestarting(false)}
         onSubmit={restartProduction}

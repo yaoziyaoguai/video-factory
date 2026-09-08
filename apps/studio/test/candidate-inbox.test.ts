@@ -960,6 +960,21 @@ describe("CandidateInboxStudio", () => {
     assert.equal(verification.independentSources, 0);
   });
 
+  it("keeps the configured two-source requirement visible after the candidate satisfies it", () => {
+    const evidence = [
+      { source: "source-a", platform: "manual", keyword: "证据 A", strength: 80, evidenceUrl: "https://news.cn/report-a" },
+      { source: "source-b", platform: "manual", keyword: "证据 B", strength: 82, evidenceUrl: "https://people.com.cn/report-b" },
+    ];
+
+    const ready = candidateVerification("low", evidence, "primary_or_two_independent");
+    const reviewRequired = candidateVerification("review", evidence, "primary_or_two_independent");
+
+    assert.equal(ready.status, "ready");
+    assert.equal(ready.requiredSources, 2);
+    assert.equal(reviewRequired.status, "review_required");
+    assert.equal(reviewRequired.requiredSources, 2);
+  });
+
   it("does not let a newly added source make an old trend look fresh", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-manual-source-freshness-"));
     const opportunities = new OpportunityStudio({

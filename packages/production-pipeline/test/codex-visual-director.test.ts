@@ -56,6 +56,41 @@ class SequencedCodexClient extends CodexBridgeClient {
   }
 }
 
+class SessionAwareCodexClient extends CodexBridgeClient {
+  readonly calls: Array<{
+    kind: CodexTaskKind;
+    payload: unknown;
+    session: CodexTaskExecution["session"];
+  }> = [];
+  private readonly callCounts: Partial<Record<CodexTaskKind, number>> = {};
+
+  constructor(private readonly responses: Partial<Record<CodexTaskKind, unknown[]>>) {
+    super({ socketPath: "/nonexistent/vf-codex.sock", sleep: async () => {} });
+  }
+
+  async runTaskDetailed(
+    kind: CodexTaskKind,
+    payload: unknown,
+    _requestId: string,
+    session?: CodexTaskExecution["session"],
+  ): Promise<CodexTaskExecution> {
+    this.calls.push({ kind, payload, session: structuredClone(session) });
+    const callIndex = this.callCounts[kind] ?? 0;
+    this.callCounts[kind] = callIndex + 1;
+    const output = this.responses[kind]?.[callIndex];
+    if (output === undefined) throw new Error(`missing ${kind} response ${callIndex + 1}`);
+    return {
+      output,
+      ...(session ? {
+        session: {
+          key: session.key,
+          handle: session.handle ?? `vfs_${(kind === "role-audit" ? "a" : "p").repeat(32)}`,
+        },
+      } : {}),
+    };
+  }
+}
+
 function directorInput(): VisualDirectorAgentInput {
   return {
     brief: {
@@ -248,6 +283,11 @@ describe("CodexVisualDirectorAgent", () => {
     assert.equal(auditPayload.context.upstreamFacts.brief.visualProof, visualProof);
     assert.deepEqual(auditPayload.context.upstreamFacts.brief.visualPlan, visualPlan);
     const contract = auditPayload.context.currentRoleContract;
+    const auditCriteria = (auditClient.calls[0]!.payload as { criteria: string[] }).criteria.join("\n");
+    assert.match(
+      auditCriteria,
+      /现有 Provider 没有一致性能力.*不能降为 advisory.*阻断.*重规划可执行叙事/,
+    );
     assert.equal("directorProfiles" in contract, false);
     assert.deepEqual(contract.availableDirectorProfileIds, [
       "documentary-observer",
@@ -258,6 +298,10 @@ describe("CodexVisualDirectorAgent", () => {
       "suspense-staging",
     ]);
     assert.equal((contract.selectedDirectorProfile as { id: string }).id, "urban-poetic");
+    assert.match(
+      String((contract.inheritedScriptFields as { onScreenText: string }).onScreenText),
+      /下游从脚本逐镜继承.*不重复输出/,
+    );
     assert.deepEqual(contract.assetReuse, {
       querySyntax: "REUSE_ONLY scene N",
       execution: "下游素材执行器直接复用已解析的更早镜头母片，不会重新搜索、生成或计费。",
@@ -267,6 +311,12 @@ describe("CodexVisualDirectorAgent", () => {
         "复用从母片开头使用相同媒体内容，不会产生新的动作、光线变化、后续片段或画面状态。",
         "生成视频母片的真实长度按所选模型的最短/最长时长和整数秒规则归一化；复用镜头不得更长。",
       ],
+    });
+    assert.deepEqual(contract.timelineExecution, {
+      temporalBeatsDescribeRenderedSceneDuration: true,
+      generatedClipMayBeLongerThanRenderedScene: true,
+      extraGeneratedTailIsTrimmed: true,
+      rule: "temporalBeats 的结束时间不得超过脚本镜头时长；Provider 最短生成时长更长时，只描述成片实际使用区间，多出的母片尾部由渲染器裁切。",
     });
     assert.deepEqual(
       (contract.assetProviders as Array<{ constraints: string[] }>)[0]?.constraints,
@@ -285,6 +335,49 @@ describe("CodexVisualDirectorAgent", () => {
       "visualPrompt",
       "visualStrategy",
     ]);
+  });
+
+  it("keeps revisions stateful while each full independent audit starts without inherited history", async () => {
+    const first = validPlan();
+    const repaired = validPlan();
+    repaired.profileRationale = "用固定轴线和冷暖光变化兑现观众承诺。";
+    const client = new SessionAwareCodexClient({
+      "director-plan": [first, repaired],
+      "role-audit": [{
+        version: "video-factory/role-audit-v1",
+        verdict: "repair",
+        score: 76,
+        summary: "风格理由需要修改。",
+        issues: [{
+          severity: "blocking",
+          criterion: "视觉圣经兑现观众承诺",
+          evidence: "风格理由没有说明动作与光线。",
+          repairInstruction: "补充动作和光线。",
+        }],
+        repairInstructions: ["补充动作和光线。"],
+      }, {
+        version: "video-factory/role-audit-v1",
+        verdict: "pass",
+        score: 93,
+        summary: "可以进入下游。",
+        issues: [],
+        repairInstructions: [],
+      }],
+    });
+    const agent = new CodexVisualDirectorAgent({ client, maxReviewIterations: 2 });
+
+    await agent.planDetailed(directorInput());
+
+    const producerCalls = client.calls.filter(({ kind }) => kind === "director-plan");
+    const auditCalls = client.calls.filter(({ kind }) => kind === "role-audit");
+    assert.equal(producerCalls[0]?.session?.handle, undefined);
+    assert.match(producerCalls[1]?.session?.handle ?? "", /^vfs_p/);
+    assert.equal(
+      ((producerCalls[1]?.payload as Record<string, unknown>).revision as { mode?: string }).mode,
+      "repair-delta",
+    );
+    assert.deepEqual(auditCalls.map(({ session }) => session), [undefined, undefined]);
+    assert.ok((auditCalls[1]?.payload as Record<string, unknown>).previousAudit);
   });
 
   it("authorizes both rework instructions without expanding finding ownership or verification claims", async () => {
@@ -343,10 +436,11 @@ describe("CodexVisualDirectorAgent", () => {
     const execution = await agent.planDetailed({ ...input, selectedModelId: "glm-5.3" });
 
     assert.equal(execution.agentLoop?.status, "passed");
-    assert.deepEqual(
-      ((producerClient.calls[0]!.payload as { brief: { rework: unknown } }).brief.rework),
-      input.brief.rework,
-    );
+    const producerRework = (producerClient.calls[0]!.payload as {
+      brief: { rework: { affectedScenePositions: number[]; previousDirectorPlan: { shots: Array<{ scenePosition: number }> } } };
+    }).brief.rework;
+    assert.deepEqual(producerRework.affectedScenePositions, [1]);
+    assert.deepEqual(producerRework.previousDirectorPlan.shots.map(({ scenePosition }) => scenePosition), [1]);
     const auditPayload = auditClient.calls[0]!.payload as {
       criteria: string[];
       context: {
@@ -384,6 +478,12 @@ describe("CodexVisualDirectorAgent", () => {
     assert.match(auditPayload.context.currentRoleContract.reworkAuthorization.findingOwnership, /assetInstruction 无需额外 findingId/);
     assert.match(auditPayload.context.currentRoleContract.reworkAuthorization.preservationRule, /不得.*撤销 assetInstruction/);
     assert.match(auditPayload.context.currentRoleContract.reworkAuthorization.verificationBoundary, /不得宣称后续视觉审片已经验证通过/);
+    const auditRework = (auditClient.calls[0]!.payload as {
+      context: { upstreamFacts: { brief: { rework: Record<string, unknown> } } };
+    }).context.upstreamFacts.brief.rework;
+    assert.equal("previousDirectorPlan" in auditRework, false);
+    assert.equal(auditRework.visualDirectionInstruction, input.brief.rework.visualDirectionInstruction);
+    assert.deepEqual(auditRework.affectedScenePositions, [1]);
   });
 
   it("keeps unaffected shots byte-for-byte from the previous director plan during scoped rework", async () => {
@@ -420,8 +520,8 @@ describe("CodexVisualDirectorAgent", () => {
     };
     const candidate = structuredClone(previousPlan);
     const candidateShots = candidate.shots as Array<Record<string, unknown>>;
-    candidateShots[0]!.generationPrompt = "模型无意中改写了第一镜";
     candidateShots[1]!.generationPrompt = "修正后的第二镜";
+    candidate.shots = [candidateShots[1]!];
     const producerClient = new SequencedCodexClient([candidate], "openai", "gpt-5.6-sol");
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v1",
@@ -445,6 +545,112 @@ describe("CodexVisualDirectorAgent", () => {
     assert.equal(outputShots[0]!.generationPrompt, "雨夜城市人物近景");
     assert.equal(outputShots[1]!.generationPrompt, "修正后的第二镜");
     assert.equal(auditedShots[0]!.generationPrompt, "雨夜城市人物近景");
+    assert.equal((producerClient.calls[0]!.payload as { brief: { rework: { affectedScenePositions: number[] } } }).brief.rework.affectedScenePositions[0], 2);
+  });
+
+  it("keeps the initial rework scoped, then lets stateless repair inspect the merged plan", async () => {
+    const { input, previousPlan } = scopedReworkWithSecondScene();
+    const firstCandidate = structuredClone(previousPlan);
+    const secondCandidate = structuredClone(previousPlan);
+    (firstCandidate.shots as Array<Record<string, unknown>>)[1]!.generationPrompt = "第一次修正后的第二镜";
+    (secondCandidate.shots as Array<Record<string, unknown>>)[1]!.generationPrompt = "审计后修正的第二镜";
+    firstCandidate.shots = [(firstCandidate.shots as Array<Record<string, unknown>>)[1]!];
+    const producerClient = new SequencedCodexClient([firstCandidate, secondCandidate], "zai-bigmodel-api", "glm-5.3");
+    const auditClient = new SequencedCodexClient([{
+      version: "video-factory/role-audit-v1",
+      verdict: "repair",
+      score: 78,
+      summary: "第二镜动作还不够明确。",
+      issues: [{
+        severity: "blocking",
+        criterion: "动作可执行",
+        evidence: "第二镜缺少动作落点。",
+        repairInstruction: "只补齐第二镜动作落点。",
+      }],
+      repairInstructions: ["只补齐第二镜动作落点。"],
+    }, {
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 94,
+      summary: "局部返工可执行。",
+      issues: [],
+      repairInstructions: [],
+    }], "openai", "gpt-5.6-sol");
+    const agent = new CodexVisualDirectorAgent({
+      client: producerClient,
+      auditClient,
+      maxReviewIterations: 2,
+      modelId: "glm-5.3",
+      sessionMode: "stateless",
+    });
+
+    const execution = await agent.planDetailed({ ...input, selectedModelId: "glm-5.3" });
+
+    const firstPayload = producerClient.calls[0]!.payload as {
+      brief: { rework: { previousDirectorPlan: { shots: Array<{ scenePosition: number }> } } };
+    };
+    const secondRevision = (producerClient.calls[1]!.payload as {
+      revision: { mode: string; candidate: { shots: Array<{ scenePosition: number }> } };
+    }).revision;
+    assert.deepEqual(firstPayload.brief.rework.previousDirectorPlan.shots.map(({ scenePosition }) => scenePosition), [2]);
+    assert.equal(secondRevision.mode, "repair-bootstrap");
+    assert.deepEqual(secondRevision.candidate.shots.map(({ scenePosition }) => scenePosition), [1, 2]);
+    assert.deepEqual(
+      auditClient.calls.map(({ payload }) => (payload as { candidate: { shots: Array<{ scenePosition: number }> } }).candidate.shots.map(({ scenePosition }) => scenePosition)),
+      [[1, 2], [1, 2]],
+    );
+    assert.equal(execution.output.shots[0]!.generationPrompt, "雨夜城市人物近景");
+    assert.equal(execution.output.shots[1]!.generationPrompt, "审计后修正的第二镜");
+  });
+
+  it("does not let an audit repair silently expand a scoped rework to an unaffected shot", async () => {
+    const { input, previousPlan } = scopedReworkWithSecondScene();
+    (previousPlan.shots as Array<Record<string, unknown>>)[0]!.generationPrompt = "第一镜仍有水位矛盾";
+    const firstCandidate = structuredClone(previousPlan);
+    (firstCandidate.shots as Array<Record<string, unknown>>)[1]!.generationPrompt = "第一次修正后的第二镜";
+    firstCandidate.shots = [(firstCandidate.shots as Array<Record<string, unknown>>)[1]!];
+    const repairedCandidate = structuredClone(previousPlan);
+    (repairedCandidate.shots as Array<Record<string, unknown>>)[0]!.generationPrompt = "第一镜水位已经统一";
+    (repairedCandidate.shots as Array<Record<string, unknown>>)[1]!.generationPrompt = "第一次修正后的第二镜";
+    const producerClient = new SequencedCodexClient([firstCandidate, repairedCandidate], "zai-bigmodel-api", "glm-5.3");
+    const auditClient = new SequencedCodexClient([{
+      version: "video-factory/role-audit-v1",
+      verdict: "repair",
+      score: 75,
+      summary: "第一镜仍有阻断性的水位矛盾。",
+      issues: [{
+        severity: "blocking",
+        criterion: "合并后的完整方案必须保持跨镜一致",
+        evidence: "第一镜水位与视觉圣经冲突。",
+        repairInstruction: "只修正第一镜水位，其他镜头保持不变。",
+      }],
+      repairInstructions: ["只修正第一镜水位，其他镜头保持不变。"],
+    }, {
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 92,
+      summary: "合并后的完整方案已经一致。",
+      issues: [],
+      repairInstructions: [],
+    }], "openai", "gpt-5.6-sol");
+    const agent = new CodexVisualDirectorAgent({
+      client: producerClient,
+      auditClient,
+      maxReviewIterations: 2,
+      modelId: "glm-5.3",
+      sessionMode: "stateless",
+    });
+
+    await assert.rejects(
+      () => agent.planDetailed({ ...input, selectedModelId: "glm-5.3" }),
+      /按修改建议重做后内容没有变化/,
+    );
+
+    const repairRevision = (producerClient.calls[1]!.payload as {
+      revision: { mode: string; candidate: { shots: Array<{ scenePosition: number }> } };
+    }).revision;
+    assert.equal(repairRevision.mode, "repair-bootstrap");
+    assert.deepEqual(repairRevision.candidate.shots.map(({ scenePosition }) => scenePosition), [1, 2]);
   });
 
   it("validates only the merged plan so an obsolete affected shot cannot fail a scoped rework", async () => {
@@ -739,17 +945,19 @@ describe("CodexVisualDirectorAgent", () => {
     await assert.rejects(() => agent.plan(input), /not in the enabled asset pool/);
   });
 
-  it("rejects a partial-scope rework that changes the top-level visual bible", async () => {
+  it("accepts a visual-bible correction during scoped rework without regenerating unaffected shots", async () => {
     const { input, previousPlan } = scopedReworkWithSecondScene();
     const candidate = structuredClone(previousPlan);
+    (candidate.shots as Array<Record<string, unknown>>)[0]!.generationPrompt = "模型无意中改写了第一镜";
     (candidate.shots as Array<Record<string, unknown>>)[1]!.generationPrompt = "修正后的第二镜";
     (candidate.visualBible as Record<string, unknown>).color = "统一换成冷蓝色体系";
     const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => candidate) });
 
-    await assert.rejects(
-      () => agent.plan(input),
-      /changes the top-level visualBible while the rework scope is not the whole script/,
-    );
+    const plan = await agent.plan(input);
+
+    assert.equal((plan.visualBible as { color: string }).color, "统一换成冷蓝色体系");
+    assert.equal(plan.shots[0]!.generationPrompt, "雨夜城市人物近景");
+    assert.equal(plan.shots[1]!.generationPrompt, "修正后的第二镜");
   });
 
   it("adopts the candidate visual bible when the rework scope covers every scene", async () => {
@@ -1023,6 +1231,92 @@ describe("CodexVisualDirectorAgent", () => {
     const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => generatedPlan) });
 
     await assert.rejects(() => agent.plan(input), /evidence shot.*generative provider/);
+  });
+
+  it("does not let the director replace a script-required real stock shot with generated media", async () => {
+    const input = directorInput();
+    input.scenes[0]!.visualStrategy = "stock";
+    input.assetProviders.push({
+      id: "seedream-image-v1",
+      label: "Seedream",
+      billing: "free",
+      modes: ["AI 图片"],
+      deliveryTypes: ["generated_image"],
+      strengths: ["解释性画面"],
+      constraints: ["不得作为事实证据"],
+      estimatedCnyPerClip: 0,
+    });
+    const plan = validPlan();
+    const shot = (plan.shots as Array<Record<string, unknown>>)[0]!;
+    shot.preferredProviderId = "seedream-image-v1";
+    shot.deliveryType = "generated_image";
+    const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => plan) });
+
+    await assert.rejects(() => agent.plan(input), /requires real stock footage/);
+  });
+
+  it("rejects generated shots that claim real verification", async () => {
+    const input = directorInput();
+    input.scenes[0]!.visualStrategy = "generated";
+    input.assetProviders.push({
+      id: "seedream-image-v1",
+      label: "Seedream",
+      billing: "free",
+      modes: ["AI 图片"],
+      deliveryTypes: ["generated_image"],
+      strengths: ["解释性画面"],
+      constraints: ["不得作为事实证据"],
+      estimatedCnyPerClip: 0,
+    });
+    const plan = validPlan();
+    const shot = (plan.shots as Array<Record<string, unknown>>)[0]!;
+    shot.preferredProviderId = "seedream-image-v1";
+    shot.deliveryType = "generated_image";
+    shot.authenticityPolicy = "illustrative";
+    shot.rationale = "生成画面已经验证了产品效果。";
+    const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => plan) });
+
+    await assert.rejects(() => agent.plan(input), /generated visual as real-world evidence/);
+  });
+
+  it("rejects unsupported identity continuity across independently generated scenes", async () => {
+    const input = directorInput();
+    input.scenes = [1, 2].map((position) => ({
+      position,
+      narration: `第 ${position} 幕`,
+      duration: 5,
+      visualPrompt: `生成镜头 ${position}`,
+      visualStrategy: "generated" as const,
+      visibleAction: "人物完成一个独立动作",
+      successCriteria: ["动作可见"],
+      failureConditions: ["动作缺失"],
+      searchTerms: ["人物动作"],
+    }));
+    input.assetProviders = [{
+      id: "seedream-image-v1",
+      label: "Seedream",
+      billing: "free",
+      modes: ["AI 图片"],
+      deliveryTypes: ["generated_image"],
+      strengths: ["解释性画面"],
+      constraints: ["不得作为事实证据"],
+      estimatedCnyPerClip: 0,
+    }];
+    const plan = validPlan();
+    plan.visualBible = { ...(plan.visualBible as Record<string, unknown>), continuity: "同一人物与同一杯子跨镜保持不变" };
+    plan.shots = [1, 2].map((position) => ({
+      ...(structuredClone((validPlan().shots as Array<Record<string, unknown>>)[0]!)),
+      scenePosition: position,
+      preferredProviderId: "seedream-image-v1",
+      deliveryType: "generated_image",
+      authenticityPolicy: "illustrative",
+      subject: "人物与杯子",
+      generationPrompt: `第 ${position} 个独立生成画面`,
+      continuityNote: "同一人物与杯子保持一致",
+    }));
+    const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => plan) });
+
+    await assert.rejects(() => agent.plan(input), /same person, object, or experiment subject/);
   });
 
   it("keeps the historical provider id for persisted briefs", () => {

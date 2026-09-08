@@ -19,7 +19,7 @@ import { parseStudioVisualPlan } from "../shared/api.js";
 import { planVisualDirection } from "../shared/visual-plan.js";
 import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
 
-const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v5|role-audit-v1|topic-ideas-validator-v3|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v1";
+const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v6|role-audit-v1|topic-ideas-validator-v4|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v2";
 
 export interface TrendSignalPort {
   listSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
@@ -71,8 +71,8 @@ export class TrendOpportunityAgent {
   async listCandidates(): Promise<StudioTrendCandidate[]> {
     const signals = await this.options.signals.listSignals({ limit: 160 });
     const strategy = await this.options.strategy?.().catch(() => undefined);
-    const signalGroups = groupEquivalentSignals(signals)
-      .filter((group) => !strategyExcludesSignal(strategy, group[0]!));
+    const compareCandidates = topicCandidateComparator(strategy);
+    const signalGroups = groupEquivalentSignals(signals);
     const modelSignals = signalGroups.map((group): TrendModelSignal => ({
       ...group[0]!,
       relatedSignals: group.slice(1),
@@ -90,8 +90,11 @@ export class TrendOpportunityAgent {
         }
         // 模型成功返回（含合法空短名单与全部被事实校验拒绝）就是总编本轮的最终取舍；
         // 此时不再回填规则候选，否则未经独立复核的内容会混进推荐。
-        const selectedByModel = [...modelCandidates.values()].sort(byFinalScore).slice(0, 8);
-        return selectCandidatePortfolio(selectedByModel, [], TREND_CANDIDATE_LIMIT);
+        const selectedByModel = [...modelCandidates.values()]
+          .filter((candidate) => !matchesExcludedDirection(candidate, strategy))
+          .sort(compareCandidates)
+          .slice(0, 8);
+        return selectCandidatePortfolio(selectedByModel, [], TREND_CANDIDATE_LIMIT, compareCandidates);
       } catch {
         // 只有模型执行真正失败时，才退回可追溯的规则候选保底。
       }
@@ -99,8 +102,10 @@ export class TrendOpportunityAgent {
     return selectCandidatePortfolio(
       [],
       signalGroups.map((group) => this.fromSignal(group, strategy))
-        .sort((left, right) => byStrategyThenFinal(left, right, strategy)),
+        .filter((candidate) => !matchesExcludedDirection(candidate, strategy))
+        .sort(compareCandidates),
       TREND_CANDIDATE_LIMIT,
+      compareCandidates,
     );
   }
 
@@ -111,7 +116,6 @@ export class TrendOpportunityAgent {
     // 不用机械标题顶替后绕过独立复核。
     if (!grounded) return null;
     const scores = [idea.novelty, idea.seriesPotential, idea.monetization].map(normalizePercent);
-    const allZero = scores.every((value) => value === 0);
     return this.buildCandidate({
       signal,
       relatedSignals: signals,
@@ -130,9 +134,9 @@ export class TrendOpportunityAgent {
           : normalizePercent(idea.visualFeasibility),
       }),
       ...(idea.productionCostEfficiency === undefined ? {} : { productionCostEfficiency: normalizePercent(idea.productionCostEfficiency) }),
-      novelty: allZero ? 64 : scores[0]!,
-      seriesPotential: allZero ? 72 : scores[1]!,
-      monetization: allZero ? 52 : scores[2]!,
+      novelty: scores[0]!,
+      seriesPotential: scores[1]!,
+      monetization: scores[2]!,
     });
   }
 
@@ -273,7 +277,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
           collectedAt: related.collectedAt,
         })),
       })),
-      ...(strategy ? { strategy: formatTopicStrategy(strategy) } : {}),
+      ...(strategy ? { creatorStrategy: formatTopicStrategy(strategy) } : {}),
     };
     const execution = await runRoleAgentLoop<{ ideas: TrendModelIdea[] }>({
       role: "选题总编",
@@ -291,7 +295,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         ...request,
         ...(revision ? { revision } : {}),
       }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => this.client.runTaskDetailed("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
@@ -317,6 +321,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         },
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
+        ...(validationFailure ? { validationFailure } : {}),
       }, requestId, session),
       validate: parseTopicIdeasOutput,
       ...(this.checkpointDirectory ? {
@@ -341,33 +346,6 @@ function formatTopicStrategy(strategy: StudioTopicStrategy): string {
       : "来源工作流：来源开工门槛由下游执行；总编不得按来源数量淘汰角度。来源不足但内容与视觉潜力成立的角度仍须输出，供创作者补充来源；下游再核对原始来源或两个不同域名的独立来源。",
     strategy.customInstruction ? `补充原则：${strategy.customInstruction}` : undefined,
   ].filter((value): value is string => Boolean(value)).join("\n\n").slice(0, 6_000);
-}
-
-function strategyExcludesSignal(strategy: StudioTopicStrategy | undefined, signal: StudioTrendSignal): boolean {
-  if (!strategy?.excludedDirections?.trim()) return false;
-  const subject = `${signal.title} ${signal.platform}`.toLowerCase();
-  return strategyTerms(strategy.excludedDirections).some((term) => subject.includes(term));
-}
-
-function byStrategyThenFinal(
-  left: StudioTrendCandidate,
-  right: StudioTrendCandidate,
-  strategy?: StudioTopicStrategy,
-): number {
-  const preferred = strategyTerms(strategy?.preferredDirections ?? "");
-  const preference = (candidate: StudioTrendCandidate) => {
-    const subject = `${candidate.title} ${candidate.track} ${candidate.rationale}`.toLowerCase();
-    return preferred.filter((term) => subject.includes(term)).length;
-  };
-  return preference(right) - preference(left) || byFinalScore(left, right);
-}
-
-function strategyTerms(value: string): string[] {
-  return [...new Set(value
-    .toLowerCase()
-    .split(/[\s\n,，、;；。/或与及]+/)
-    .map((term) => term.replace(/^(?:只有|无法|消费|未经证实的|只能靠|优先|避免|不要)/, "").trim())
-    .filter((term) => term.length >= 2))];
 }
 
 function parseTopicIdeasOutput(value: unknown): { ideas: TrendModelIdea[] } {
@@ -471,8 +449,7 @@ function number(value: unknown): number {
 }
 
 function normalizePercent(value: number): number {
-  const normalized = value >= 0 && value <= 1 ? value * 100 : value;
-  return Math.min(100, Math.max(0, normalized));
+  return Math.min(100, Math.max(0, value));
 }
 
 // 独立复核通过后只做字段级 claim 校验：
@@ -485,7 +462,10 @@ function groundModelIdea(idea: TrendModelIdea, signals: StudioTrendSignal[]): Tr
   const sourceText = signals.map((item) => item.title).join("；");
   const sourceNumbers = new Set(numberTokens(sourceText));
   const riskLevel = topicRiskLevel(signal.title);
-  const bodyUnsafe = [idea.audience, idea.painPoint, idea.hook, idea.rationale, idea.visualProof ?? ""]
+  const visualPlanClaims = idea.visualPlan
+    ? [idea.visualPlan.strategy, ...idea.visualPlan.beats.map((beat) => beat.description)]
+    : [];
+  const bodyUnsafe = [idea.audience, idea.painPoint, idea.hook, idea.rationale, idea.visualProof ?? "", ...visualPlanClaims]
     .some((value) => unsupportedClaim(value, sourceText, sourceNumbers)
       || (riskLevel === "high" && unsupportedHighRiskAssertion(value, sourceText)));
   const titleUnsafe = unsupportedClaim(idea.title, sourceText, sourceNumbers)
@@ -570,6 +550,7 @@ function selectCandidatePortfolio(
   anchors: StudioTrendCandidate[],
   candidates: StudioTrendCandidate[],
   limit: number,
+  compareCandidates: (left: StudioTrendCandidate, right: StudioTrendCandidate) => number = byFinalScore,
 ): StudioTrendCandidate[] {
   const selected = [...anchors].slice(0, limit);
   const selectedIds = new Set(selected.map((candidate) => candidate.id));
@@ -604,7 +585,7 @@ function selectCandidatePortfolio(
     selected.push(candidate);
     selectedIds.add(candidate.id);
   }
-  return selected.sort(byFinalScore);
+  return selected.sort(compareCandidates);
 }
 
 function countBy<T>(items: T[], key: (item: T) => StudioTopicCategory | string): Map<string, number> {
@@ -696,4 +677,50 @@ function platformLabel(platform: string): string {
 
 function byFinalScore(left: StudioTrendCandidate, right: StudioTrendCandidate): number {
   return right.score.final - left.score.final;
+}
+
+function topicCandidateComparator(
+  strategy: StudioTopicStrategy | undefined,
+): (left: StudioTrendCandidate, right: StudioTrendCandidate) => number {
+  return (left, right) => (
+    strategyPreferenceRank(right, strategy) - strategyPreferenceRank(left, strategy)
+    || byFinalScore(left, right)
+  );
+}
+
+function strategyPreferenceRank(candidate: StudioTrendCandidate, strategy: StudioTopicStrategy | undefined): number {
+  return strategyDirections(strategy?.preferredDirections).some((direction) => directionMatches(candidate, direction)) ? 1 : 0;
+}
+
+function matchesExcludedDirection(candidate: StudioTrendCandidate, strategy: StudioTopicStrategy | undefined): boolean {
+  return strategyDirections(strategy?.excludedDirections).some((direction) => directionMatches(candidate, direction));
+}
+
+function strategyDirections(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(/[\n；;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function directionMatches(candidate: StudioTrendCandidate, direction: string): boolean {
+  const content = [
+    candidate.title,
+    candidate.track,
+    candidate.audience,
+    candidate.painPoint,
+    candidate.hook,
+    candidate.visualProof ?? "",
+    candidate.visualPlan?.strategy ?? "",
+    ...(candidate.visualPlan?.beats.flatMap((beat) => [beat.role, beat.description, beat.searchQuery]) ?? []),
+    ...candidate.evidence.map((item) => item.keyword),
+  ].join(" ");
+  const normalizedDirection = normalizeTopicText(direction);
+  const normalizedContent = normalizeTopicText(content);
+  if (!normalizedDirection) return false;
+  if (normalizedContent.includes(normalizedDirection)) return true;
+  const terms = meaningfulTopicTerms(direction);
+  if (terms.size === 0) return false;
+  const contentTerms = meaningfulTopicTerms(content);
+  return [...terms].every((term) => contentTerms.has(term));
 }

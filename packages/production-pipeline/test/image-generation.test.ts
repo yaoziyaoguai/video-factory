@@ -13,7 +13,7 @@ describe("SeedreamImageAdapter", () => {
         return Response.json({
           model: "doubao-seedream-test",
           created: 123456,
-          data: [{ url: "https://example.com/seedream.png", size: "1440x2560" }],
+          data: [{ url: "https://example.com/seedream.png", size: "1600x2848" }],
           usage: { generated_images: 1 },
         });
       },
@@ -31,7 +31,7 @@ describe("SeedreamImageAdapter", () => {
     assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), {
       model: "doubao-seedream-test",
       prompt: "雨夜中的城市便利店，纪实电影光线",
-      size: "1440x2560",
+      size: "1600x2848",
       sequential_image_generation: "disabled",
       response_format: "url",
       watermark: false,

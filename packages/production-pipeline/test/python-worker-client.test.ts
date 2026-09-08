@@ -91,7 +91,8 @@ describe("PythonWorkerClient", () => {
     );
     const client = new PythonWorkerClient({
       command: [process.execPath, scriptPath, pidPath],
-      timeoutMs: 300,
+      // 全量测试并发时给子进程足够启动时间；仍验证真实超时后整个进程组退出。
+      timeoutMs: 2_000,
     });
 
     await assert.rejects(

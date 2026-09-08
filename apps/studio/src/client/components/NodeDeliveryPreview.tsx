@@ -252,7 +252,7 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
 }
 
 function CollectionPreview({ collectionKey, items }: { collectionKey: string; items: unknown[] }) {
-  const initialCount = collectionKey === "findings" ? 20 : 8;
+  const initialCount = collectionKey === "findings" ? 5 : 8;
   const { expanded, hiddenCount, setExpanded, visibleItems } = useExpandedItems(items, initialCount);
   const label = fieldLabel(collectionKey);
 

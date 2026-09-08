@@ -6,6 +6,7 @@ import { NodeVersionConflictError } from "@video-factory/workflow-core";
 import type { ArtifactDraft, HumanDecisionDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
 import type { ProductionTemplateSnapshot } from "@video-factory/template-core";
 import {
+  canRetryRejectedReviewNode,
   PaidOperationManualReconciliationError,
   parseBrief,
   parsePersistedBrief,
@@ -250,6 +251,9 @@ export class ProductionStudio {
     });
     // 历史运行可能把热点来源误存成目标平台；返工页仍需打开，让创作者明确重选。
     const brief = parsePersistedBrief(run.initialInput);
+    const inheritedReferenceVideo = brief.workflowFeatures?.referenceGrammar && brief.referenceVideo
+      ? await this.verifiedReferenceVideoForRun(run, brief)
+      : undefined;
     const reworkScriptProviderId = brief.providers.script === "codex-screenwriter-v1"
       ? brief.providers.script
       : (await this.options.listProviders()).some((provider) => (
@@ -305,10 +309,79 @@ export class ProductionStudio {
         ...(brief.templateSnapshot ? ["template"] : []),
         ...(previousScript ? ["script"] : []),
         ...(previousDirectorPlan ? ["visual-direction"] : []),
+        ...(inheritedReferenceVideo ? ["reference-grammar"] : []),
         ...(findings.length ? ["visual-review"] : []),
       ],
       requiredAffectedScenePositions,
+      ...(inheritedReferenceVideo ? {
+        inheritedReferenceVideo: {
+          label: inheritedReferenceVideo.label,
+          mimeType: inheritedReferenceVideo.mimeType,
+          sizeBytes: inheritedReferenceVideo.bytes.length,
+        },
+      } : {}),
     };
+  }
+
+  async loadInheritedReferenceVideo(input: unknown): Promise<{
+    label: string;
+    mimeType: "video/mp4" | "video/quicktime" | "video/webm";
+    bytes: Buffer;
+  } | undefined> {
+    if (!isRecord(input)
+      || input.referenceVideo !== undefined
+      || !isRecord(input.workflowFeatures)
+      || input.workflowFeatures.referenceGrammar !== true
+      || !isRecord(input.rework)) return undefined;
+    const sourceRunId = typeof input.rework.sourceRunId === "string" ? input.rework.sourceRunId : "";
+    const sourceRunRevision = Number(input.rework.sourceRunRevision);
+    if (!sourceRunId || !Number.isInteger(sourceRunRevision) || sourceRunRevision < 0) {
+      throw new StudioInputError("返工来源不完整，请回到原制作重新发起。");
+    }
+    let source: WorkflowRun<ProductionBrief>;
+    try {
+      source = await this.options.pipeline.show(sourceRunId);
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) throw new StudioInputError("返工来源已经不存在，请回到原制作重新发起。");
+      throw error;
+    }
+    if (source.revision !== sourceRunRevision) {
+      throw new StudioConflictError("原制作在返工草稿打开后发生了变化，请重新读取审片建议。");
+    }
+    const sourceBrief = parsePersistedBrief(source.initialInput);
+    if (!sourceBrief.workflowFeatures?.referenceGrammar || !sourceBrief.referenceVideo) {
+      throw new StudioConflictError("上一版没有可继承的参考视频，请关闭参考视频分析或重新上传。");
+    }
+    return this.verifiedReferenceVideoForRun(source, sourceBrief);
+  }
+
+  private async verifiedReferenceVideoForRun(
+    run: WorkflowRun<ProductionBrief>,
+    brief: ProductionBrief,
+  ): Promise<{
+    label: string;
+    mimeType: "video/mp4" | "video/quicktime" | "video/webm";
+    bytes: Buffer;
+  }> {
+    const reference = brief.referenceVideo;
+    if (!reference) throw new StudioConflictError("上一版没有可继承的参考视频，请重新上传。");
+    const artifact = effectiveNodeArtifact(run, "reference-grammar", (candidate) => candidate.kind === "reference_video");
+    if (!artifact?.uri || !artifact.sha256 || artifact.sizeBytes === undefined) {
+      throw new StudioConflictError("上一版参考视频没有完整留档，请重新上传后再制作。");
+    }
+    if (artifact.sha256 !== reference.sha256
+      || artifact.sizeBytes !== reference.sizeBytes
+      || artifact.contentType !== reference.mimeType) {
+      throw new StudioConflictError("上一版参考视频留档与原始记录不一致，请重新上传后再制作。");
+    }
+    const runRoot = path.join(this.options.workspaceRoot, "runs", run.id);
+    await assertContainedFile(runRoot, artifact.uri);
+    const bytes = await readFile(artifact.uri);
+    const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+    if (bytes.length !== reference.sizeBytes || actualSha256 !== reference.sha256) {
+      throw new StudioConflictError("上一版参考视频内容已经变化，请重新上传后再制作。");
+    }
+    return { label: reference.label, mimeType: reference.mimeType, bytes };
   }
 
   private async readReworkDocument(
@@ -339,6 +412,10 @@ export class ProductionStudio {
   ): Promise<number[]> {
     const document = await this.readReworkDocument(run, "assets", "generation_jobs");
     if (!document) return [];
+    const paidSummary = await this.options.pipeline.inspectPaidNode(run.id, "assets");
+    const materializedLedgerPositions = new Set(paidSummary.items.flatMap((item) => (
+      item.state === "materialized" ? [item.scenePosition] : []
+    )));
     if (document.version !== "video-factory/generation-jobs-v1" || !Array.isArray(document.jobs)) {
       throw new StudioConflictError("上一版画面任务记录格式不正确，请先检查素材节点产物。");
     }
@@ -362,8 +439,10 @@ export class ProductionStudio {
         ?? sceneUniverse
         ?? [];
       return [...new Set([
-        ...incompleteJobPositions,
-        ...expectedGenerationPositions.filter((position) => !succeededJobPositions.has(position)),
+        ...incompleteJobPositions.filter((position) => !materializedLedgerPositions.has(position)),
+        ...expectedGenerationPositions.filter((position) => (
+          !succeededJobPositions.has(position) && !materializedLedgerPositions.has(position)
+        )),
       ])].sort((left, right) => left - right);
     }
     if (!Array.isArray(assetPlan.scene_assets)) {
@@ -371,6 +450,7 @@ export class ProductionStudio {
     }
     const planPositions: number[] = [];
     const unmaterializedPlanPositions: number[] = [];
+    const materializedPlanPositions = new Set<number>();
     for (const asset of assetPlan.scene_assets) {
       if (!isRecord(asset)) {
         throw new StudioConflictError("上一版画面计划格式不正确，请先检查素材节点产物。");
@@ -382,6 +462,8 @@ export class ProductionStudio {
       planPositions.push(position);
       if (typeof asset.local_path !== "string" || !asset.local_path.trim()) {
         unmaterializedPlanPositions.push(position);
+      } else {
+        materializedPlanPositions.add(position);
       }
     }
     const uniquePlanPositions = [...new Set(planPositions)].sort((left, right) => left - right);
@@ -396,7 +478,12 @@ export class ProductionStudio {
     if (document.jobs.some((job) => isRecord(job) && !planPositionSet.has(Number(job.scenePosition)))) {
       throw new StudioConflictError("上一版画面任务包含画面计划之外的镜头，请先检查素材节点产物。");
     }
-    return [...new Set([...incompleteJobPositions, ...unmaterializedPlanPositions])]
+    return [...new Set([
+      ...incompleteJobPositions.filter((position) => (
+        !materializedPlanPositions.has(position) && !materializedLedgerPositions.has(position)
+      )),
+      ...unmaterializedPlanPositions.filter((position) => !materializedLedgerPositions.has(position)),
+    ])]
       .sort((left, right) => left - right);
   }
 
@@ -1217,7 +1304,9 @@ export class ProductionStudio {
 
   async retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
-    if (current.status !== "failed" || current.nodeRuns.find((node) => node.nodeId === nodeId)?.status !== "failed") {
+    const retryingFailure = current.status === "failed"
+      && current.nodeRuns.find((node) => node.nodeId === nodeId)?.status === "failed";
+    if (!retryingFailure && !canRetryRejectedReviewNode(current, nodeId)) {
       throw new StudioConflictError("这个节点当前不能重试，请刷新页面检查最新状态。");
     }
     try {
@@ -1808,6 +1897,7 @@ function toRunDetail(
     ...(artifact.schemaVersion ? { schemaVersion: artifact.schemaVersion } : {}),
     ...(artifact.producer ? { producerNodeId: artifact.producer.nodeId } : {}),
     ...(artifact.provenance.providerId ? { providerId: artifact.provenance.providerId } : {}),
+    ...(artifact.provenance.scenePosition ? { scenePosition: artifact.provenance.scenePosition } : {}),
     ...(artifact.provenance.licenseNote ? { licenseNote: artifact.provenance.licenseNote } : {}),
     ...(artifact.uri && !isPrivateArtifactKind(artifact.kind) ? { contentUrl: `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}/content` } : {}),
   }));
@@ -1824,6 +1914,10 @@ function toRunDetail(
       ? redactManagedFileReferences(plannedExecution) as NonNullable<StudioNode["plannedExecution"]>
       : undefined;
     const effectiveExecution = safeExecutionReceipt ?? safePlannedExecution;
+    const currentOutput = node?.status !== "stale" && node?.outputState?.stale !== true;
+    const safeOutput = node?.output !== undefined
+      ? withReviewScopeCurrent(id, redactManagedFileReferences(node.output), currentOutput)
+      : undefined;
     return {
       id,
       label,
@@ -1841,7 +1935,7 @@ function toRunDetail(
         status: result.status,
         reasons: result.reasons.map(redactManagedPathText),
       })),
-      ...(node?.output !== undefined ? { output: redactManagedFileReferences(node.output) } : {}),
+      ...(safeOutput !== undefined ? { output: safeOutput } : {}),
       ...(node?.inputState ? {
         inputState: {
           effectiveVersionId: node.inputState.effectiveVersionId,
@@ -1872,7 +1966,13 @@ function toRunDetail(
             createdAt: version.createdAt,
             createdBy: version.createdBy,
             schemaVersion: version.schemaVersion,
-            ...(version.output !== undefined ? { output: redactManagedFileReferences(version.output) } : {}),
+            ...(version.output !== undefined ? {
+              output: withReviewScopeCurrent(
+                id,
+                redactManagedFileReferences(version.output),
+                currentOutput && version.id === node.outputState?.effectiveVersionId,
+              ),
+            } : {}),
           })),
         },
       } : {}),
@@ -1927,6 +2027,7 @@ function toRunDetail(
     audience: run.initialInput.audience,
     nicheSlug: run.initialInput.nicheSlug,
     reviewMode: run.initialInput.reviewMode,
+    creativeSummary: creativeSummary(run.initialInput),
     nodes,
     artifacts,
     decisions,
@@ -1937,6 +2038,15 @@ function toRunDetail(
     continuation: continuationSupported
       ? { supported: true }
       : legacyRunContinuation(),
+  };
+}
+
+function creativeSummary(brief: ProductionBrief): NonNullable<StudioRunDetail["creativeSummary"]> {
+  return {
+    audience: brief.audience,
+    openingPromise: brief.seriesContext?.episode.hook ?? brief.angle,
+    requiredVisual: brief.visualProof ?? brief.visualPlan?.strategy ?? `用画面证明“${brief.angle}”`,
+    payoff: brief.seriesContext?.episode.payoff ?? `围绕“${brief.title}”给出明确答案或可执行判断`,
   };
 }
 
@@ -1996,6 +2106,7 @@ function collectNodeDurationHistory(runs: WorkflowRun<ProductionBrief>[]): Recor
 function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
   const reports = ["visual-review", "asset-source-review", "assets"].flatMap((nodeId) => {
     const node = run.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node || node.status === "stale" || node.outputState?.stale === true) return [];
     const versionId = node?.outputState?.effectiveVersionId ?? "legacy-output";
     const effectiveOutput = node?.outputState?.versions.find(
       (version) => version.id === node.outputState?.effectiveVersionId,
@@ -2005,11 +2116,13 @@ function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
       ? effectiveOutput.sourceVisualReview
       : isRecord(effectiveOutput.report) ? effectiveOutput.report : effectiveOutput;
     return isRecord(report) && Array.isArray(report.findings)
-      ? [{ nodeId, versionId, findings: report.findings }]
+      ? [{ nodeId, versionId, report, findings: report.findings }]
       : [];
   });
-  return reports.flatMap(({ nodeId, versionId, findings }) => findings.flatMap((value, findingIndex): StudioReworkFinding[] => {
+  return reports.flatMap(({ nodeId, versionId, report, findings }) => findings.flatMap((value, findingIndex): StudioReworkFinding[] => {
     if (!isRecord(value) || !Number.isInteger(value.timecodeMs) || Number(value.timecodeMs) < 0) return [];
+    // 新报告只有已观察且确认失败的问题才能扩大返工范围；旧报告没有 evidenceStatus，继续按严重度兼容。
+    if (value.evidenceStatus !== undefined && value.evidenceStatus !== "failed" || value.severity === "info") return [];
     const description = typeof value.description === "string" && value.description.trim()
       ? value.description.trim()
       : "审片在此处发现需要修改的视觉问题。";
@@ -2021,18 +2134,68 @@ function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
     const explicitTargets = Array.isArray(value.targetNodeIds)
       ? [...new Set(value.targetNodeIds.filter(isReworkTargetNodeId))]
       : isReworkTargetNodeId(value.targetNodeId) ? [value.targetNodeId] : [];
-    const targetNodeIds: StudioReworkFinding["targetNodeIds"] = explicitTargets.length > 0
-      ? explicitTargets
-      : /节奏|叙事|旁白|文案|pacing|narrative|script|voice/i.test(`${category} ${description} ${suggestion}`)
-        ? ["script", "visual-direction", "assets"]
-        : ["visual-direction", "assets"];
-    const normalizedFinding = {
+    const inferredScriptOwner = /叙事|旁白|文案|narrative|script|voice/i.test(`${category} ${description} ${suggestion}`);
+    const primaryOwnerNodeId: StudioReworkFinding["targetNodeIds"][number] = explicitTargets[0]
+      ?? (inferredScriptOwner ? "script" : "visual-direction");
+    const nextAction = isVisualReviewNextAction(value.nextAction) ? value.nextAction : undefined;
+    const affectedNodeIds = affectedReworkNodes({
+      primaryOwnerNodeId,
+      explicitTargets,
+      ...(nextAction ? { nextAction } : {}),
+      category,
+      description,
+      suggestion,
+    });
+    const action: NonNullable<StudioReworkFinding["action"]> = nextAction === "inspect_existing_media"
+      ? "inspect_existing_media"
+      : nextAction === "replan_upstream" || primaryOwnerNodeId !== "assets"
+        ? "replan_upstream"
+        : "replace_asset";
+    const targetNodeIds: StudioReworkFinding["targetNodeIds"] = affectedNodeIds;
+    const scope = isRecord(report.reviewScope) ? report.reviewScope : undefined;
+    const sourceReviewStage = scope?.reviewStage === "rendered_video" || scope?.reviewStage === "source_assets"
+      ? scope.reviewStage
+      : nodeId === "visual-review" ? "rendered_video" : "source_assets";
+    const startTimecodeMs = Number(value.startTimecodeMs);
+    const endTimecodeMs = Number(value.endTimecodeMs);
+    const evidenceStatus = isVisualReviewEvidenceStatus(value.evidenceStatus) ? value.evidenceStatus : undefined;
+    const evidenceFrameSha256 = value.evidenceFrameSha256 === null
+      ? null
+      : typeof value.evidenceFrameSha256 === "string" && /^[a-f0-9]{64}$/.test(value.evidenceFrameSha256)
+        ? value.evidenceFrameSha256
+        : undefined;
+    const actualModels = Array.isArray(scope?.actualModels)
+      ? scope.actualModels.flatMap((model): Array<{ providerId: string; modelId: string }> => (
+          isRecord(model)
+          && typeof model.providerId === "string" && model.providerId.trim()
+          && typeof model.modelId === "string" && model.modelId.trim()
+            ? [{ providerId: model.providerId.trim(), modelId: model.modelId.trim() }]
+            : []
+        ))
+      : [];
+    const normalizedFinding: Omit<StudioReworkFinding, "findingId"> = {
       timecodeMs: Number(value.timecodeMs),
+      ...(Number.isInteger(startTimecodeMs) && startTimecodeMs >= 0 ? { startTimecodeMs } : {}),
+      ...(Number.isInteger(endTimecodeMs) && endTimecodeMs >= 0 ? { endTimecodeMs } : {}),
       ...(Number.isInteger(scenePosition) && scenePosition > 0 ? { scenePosition } : {}),
+      ...(evidenceStatus ? { evidenceStatus } : {}),
+      ...(evidenceFrameSha256 !== undefined ? { evidenceFrameSha256 } : {}),
+      ...(nextAction ? { nextAction } : {}),
       category,
       description,
       suggestion,
       targetNodeIds,
+      primaryOwnerNodeId,
+      affectedNodeIds,
+      action,
+      sourceReviewStage,
+      sourceReviewNodeId: nodeId,
+      sourceReviewVersionId: versionId,
+      ...(typeof scope?.evidenceId === "string" && /^[a-f0-9]{64}$/.test(scope.evidenceId)
+        ? { reviewEvidenceId: scope.evidenceId }
+        : {}),
+      ...(actualModels.length ? { actualModels } : {}),
+      current: true,
     };
     const findingId = `vf_${createHash("sha256").update(JSON.stringify({
       sourceRunId: run.id,
@@ -2045,8 +2208,42 @@ function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
   }));
 }
 
+function affectedReworkNodes(options: {
+  primaryOwnerNodeId: StudioReworkFinding["targetNodeIds"][number];
+  explicitTargets: StudioReworkFinding["targetNodeIds"];
+  nextAction?: NonNullable<StudioReworkFinding["nextAction"]>;
+  category: string;
+  description: string;
+  suggestion: string;
+}): StudioReworkFinding["targetNodeIds"] {
+  const affected = new Set<StudioReworkFinding["targetNodeIds"][number]>(options.explicitTargets);
+  affected.add(options.primaryOwnerNodeId);
+  if (options.primaryOwnerNodeId === "script") {
+    affected.add("visual-direction");
+    affected.add("assets");
+  } else if (options.primaryOwnerNodeId === "visual-direction") {
+    affected.add("assets");
+  }
+  const visualPlanningIssue = /composition|continuity|pacing|构图|连续|节奏|调度|机位|光线|灯光/i.test(
+    `${options.category} ${options.description} ${options.suggestion}`,
+  );
+  if (options.nextAction === "replan_upstream" || options.primaryOwnerNodeId === "assets" && visualPlanningIssue) {
+    affected.add("visual-direction");
+    affected.add("assets");
+  }
+  return (["script", "visual-direction", "assets"] as const).filter((nodeId) => affected.has(nodeId));
+}
+
 function isReworkTargetNodeId(value: unknown): value is StudioReworkFinding["targetNodeIds"][number] {
   return value === "script" || value === "visual-direction" || value === "assets";
+}
+
+function isVisualReviewEvidenceStatus(value: unknown): value is NonNullable<StudioReworkFinding["evidenceStatus"]> {
+  return value === "satisfied" || value === "failed" || value === "not_observed" || value === "not_applicable";
+}
+
+function isVisualReviewNextAction(value: unknown): value is NonNullable<StudioReworkFinding["nextAction"]> {
+  return value === "inspect_existing_media" || value === "replan_upstream" || value === "rework_asset" || value === "none";
 }
 
 function resourceReworkFindings(runId: string, resources: RejectedVisualResource[]): StudioReworkFinding[] {
@@ -2058,6 +2255,13 @@ function resourceReworkFindings(runId: string, resources: RejectedVisualResource
       description: `素材“${resource.label}”未通过授权审核。`,
       suggestion: `${resource.note}；替换为授权明确的素材并重新核验。`,
       targetNodeIds: ["assets"] as StudioReworkFinding["targetNodeIds"],
+      primaryOwnerNodeId: "assets" as const,
+      affectedNodeIds: ["assets"] as StudioReworkFinding["targetNodeIds"],
+      action: "replace_asset" as const,
+      sourceReviewStage: "source_assets" as const,
+      sourceReviewNodeId: "resource-governance",
+      sourceReviewVersionId: "current",
+      current: true,
     };
     const findingId = `vf_${createHash("sha256").update(JSON.stringify({
       sourceRunId: runId,
@@ -2148,14 +2352,23 @@ function buildReworkNodeInstructions(
           ? `镜头 ${finding.scenePosition}`
           : `镜头 ${finding.scenePosition} · ${formatReworkTimecode(finding.timecodeMs)}`
         : formatReworkTimecode(finding.timecodeMs);
-      return `- ${location}：${finding.description}；修改为：${finding.suggestion}`;
+      const action = nodeId === "assets"
+        ? finding.action === "inspect_existing_media"
+          ? "先补查已有素材，不进入新购买"
+          : finding.action === "replan_upstream"
+            ? "等待上游方案确认后再判断沿用或新生成"
+            : "替换素材并重新审查"
+        : finding.action === "inspect_existing_media"
+          ? "核对已有证据后再决定是否修改"
+          : "按建议修改方案";
+      return `- ${location}：${finding.description}；下一步：${action}；建议：${finding.suggestion}`;
     });
   const scriptLines = linesFor("script");
   const visualLines = linesFor("visual-direction");
   const assetLines = linesFor("assets");
   const failedAssetInstruction = affectedScenePositions.length
-    ? `- 只重新生成镜头 ${affectedScenePositions.join("、")}；其余镜头保持原方案与连续性。`
-    : "- 只替换本次重做原因涉及的素材，其余镜头保持连续性。";
+    ? `- 镜头 ${affectedScenePositions.join("、")} 属于本轮影响范围；先执行补查或方案修改，只有确认需要新画面时才进入报价。其余镜头沿用已有素材。`
+    : "- 先核对本次原因涉及的已有素材；只有确认需要新画面时才进入报价，其余镜头继续沿用。";
   if (contentSafetyFailure && findings.length === 0) {
     return {
       script: `${rejection}以上一版脚本为底稿，保留旁白、事实和叙事结构；只把 visual_prompt 与 search_terms 中可能产生歧义的说法改成中性、具体、可见的物体和动作描述，不改写无关内容。`.trim(),
@@ -2265,6 +2478,7 @@ function videoModelContract(provider: StudioProvider, modelId: string | undefine
   if (!profile) return "unknown";
   return JSON.stringify({
     taskTypes: [...profile.taskTypes].sort(),
+    aspectRatios: [...(profile.aspectRatios ?? [])].sort(),
     minDurationSeconds: profile.minDurationSeconds ?? null,
     maxDurationSeconds: profile.maxDurationSeconds ?? null,
   });
@@ -2352,6 +2566,20 @@ function redactManagedFileReferences(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => [key, redactManagedFileReferences(item)]),
   );
+}
+
+function withReviewScopeCurrent(nodeId: string, value: unknown, current: boolean): unknown {
+  if (!["assets", "asset-source-review", "visual-review"].includes(nodeId) || !isRecord(value)) return value;
+  const reportKey = nodeId === "assets" ? "sourceVisualReview" : "report";
+  const report = value[reportKey];
+  if (!isRecord(report) || !isRecord(report.reviewScope)) return value;
+  return {
+    ...value,
+    [reportKey]: {
+      ...report,
+      reviewScope: { ...report.reviewScope, current },
+    },
+  };
 }
 
 function redactManagedPathText(value: string): string {

@@ -94,7 +94,9 @@ export function buildRunObservability(input: BuildRunObservabilityInput): Studio
     ),
   } : undefined;
   const sourceAssetRejected = input.status === "rejected"
-    && input.nodes.some((node) => node.id === "asset-source-review" && node.status === "rejected");
+    && input.nodes.some((node) => node.status === "rejected"
+      && ["asset-source-review", "assets"].includes(node.id)
+      && /源素材视觉预检|试片未通过/.test(node.error ?? ""));
   const failure = input.status === "failed" || sourceAssetRejected
     ? buildFailure(input.nodes, input.videoAvailable)
     : undefined;
@@ -226,6 +228,31 @@ function isDefinitiveZeroAttemptFailure(node: StudioNode): boolean {
 
 function normalizeFailure(raw: string, node: StudioNode, provider?: string): Pick<StudioRunFailure, "category" | "summary" | "retryable" | "recoveryActions"> {
   const service = provider ?? node.role ?? node.label;
+  if (node.id === "visual-review" && /最终双模型审片尚未完成|已完成分支保留/.test(raw)) {
+    return {
+      category: "node_failure",
+      summary: "最终双模型审片只完成了一部分，已保留完成结果",
+      retryable: true,
+      recoveryActions: ["重试未完成的审片模型分支"],
+    };
+  }
+  if (["asset-source-review", "assets"].includes(node.id) && node.status === "rejected"
+    && /源素材视觉预检|试片未通过/.test(raw)) {
+    return {
+      category: "node_failure",
+      summary: "画面审查已完成并发现问题，已保留素材与修改建议",
+      retryable: true,
+      recoveryActions: ["查看具体镜头的问题与修改建议", "先调整导演方案或替换已有素材；只有确需新生成时才重新报价"],
+    };
+  }
+  if (["asset-source-review", "assets"].includes(node.id) && /试片审查暂未完成/.test(raw)) {
+    return {
+      category: /timeout|timed out|超时/i.test(raw) ? "provider_timeout" : "node_failure",
+      summary: "试片审查没有完成，已生成画面仍会保留",
+      retryable: true,
+      recoveryActions: ["继续未完成的试片审查", "重试会复用已生成画面，不会重新购买成功素材"],
+    };
+  }
   if (/源素材视觉预检/.test(raw)) {
     return {
       category: /timeout|timed out|超时/i.test(raw) ? "provider_timeout" : "node_failure",

@@ -18,9 +18,14 @@ flowchart TB
     subgraph WORKERS[Python 媒体执行平面]
         RUNNER --> SCRIPT[script.draft\n脚本]
         SCRIPT --> DIRECTOR[storyboard.plan\n导演方案]
-        DIRECTOR --> ASSETS[asset.prepare\n素材执行]
-        ASSETS --> VOICE[voice.synthesize\n旁白与音频计划]
-        ASSETS --> RENDER[video.render\n1080x1920 MP4]
+        DIRECTOR --> QUOTE[逐镜报价与人工确认]
+        QUOTE --> PILOT[每种生成路线先试一镜并视觉审查]
+        PILOT -- 通过，复用试片 --> ASSETS[asset.prepare\n继续剩余素材]
+        PILOT -- 不通过或审查不可用 --> STOP[保留素材与意见\n停止后续付费生成]
+        ASSETS --> SOURCE[逐镜素材预检]
+        SOURCE -- 通过 --> VOICE[voice.synthesize\n旁白与音频计划]
+        SOURCE -- 不通过 --> STOP
+        SOURCE -- 通过 --> RENDER[video.render\n1080x1920 MP4]
         VOICE --> RENDER
         RENDER --> TECH[quality.review\nffprobe + 音量 + 时长 + 素材门禁]
         VISUAL[quality.review.visual\n关键帧视觉审片]
@@ -46,8 +51,14 @@ flowchart TB
 - `WorkflowRunner` 只负责状态机与节点调度；每种具体能力由 Provider 实现。
 - `assets` 在 `script` 之后执行；素材报价获批并完成后才执行 `voice`，避免尚未接受画面方案时提前产生配音调用，二者完成后进入渲染。
 - 图片和视频逐次报价并人工确认；TTS 自动执行、后台记账。FFmpeg 等本地计算失败只进入技术重试，不进入付费账单核对。
+- 付费前沿用编剧和导演的独立审计：核对钩子与承诺兑现、镜头可执行性、画幅/时长、文字风险与跨镜一致性的具体实现依据。不增加额外的全方案模型审计轮次。
+- Studio 的素材执行器在同一方案中，按 Provider、模型、图片/视频、画幅、是否依赖参考图区分生成路线。独立镜头优先选择 temporalBeats 更多、其次 successCriteria 更多的代表镜头作为试片，同分按镜号排序；参考图子镜仍在母片之后执行。这是基于现有字段的确定性选择，不保证覆盖所有内容风险。试片通过后才继续提交后续付费任务，试片直接进入正式素材，不另生成一份。
+- 试片只审所选镜头的真实证据，不把其余未生成镜头当作缺帧。审片服务失败保留付费素材与角色检查点；质量不通过保留报告并按镜号进入原有返工建议预填。恢复不会重买相同镜头，后续尚未执行的付费任务仍遵守报价授权。
+- 试片结果绑定方案输入指纹、实际文件 SHA-256、生成规格与审片模型；这些内容变化后重新审查。整批素材预检继续检查逐镜内容与跨镜一致性，最终审片继续检查成片效果。关键帧不能证明声音质量或连续运动流畅性，最终人工完整观看仍有必要。
+- 源素材按脚本实际使用时长抽帧，不把未进入剪辑的尾段作为返工证据。纯 info 提示保留在原报告，不自动转成必改镜头；warning/critical 和不通过的审片结论仍阻断下游。仅因证据不足时应先复核已有素材，不直接要求重买。
+- 最终成片审片由 GLM 与 Codex 对同一帧证据快照独立执行，确定性合并两份报告。发布前必须证明两个分支使用不同的实际 Provider/模型、同一 evidence digest，且两边 producer/audit trace 完整；任一条件不满足都阻止发布，不允许退化为单模型审片。
 - TypeScript 是 `run.json` 的唯一所有者；Python worker 只写自己的 `attempt-1` 目录。
-- 人工终审是一个持久化 intervention，可以批准、拒绝，或根据当前视觉审片 finding 提交受版本保护的局部素材返修。
+- 人工终审是一个持久化 intervention，可以批准、拒绝，或根据当前视觉审片 finding 提交受版本保护的局部素材返修。局部返修只按 finding 的主责任节点和受影响下游扩散，不无条件重做全片。
 - `approve` 的加载、恢复、发布包写入和 revision 更新位于同一个 run lock transaction 中。
 - 被打回后可从返工草稿重新制作。原模板版本、模型、画面来源、声音和导演配置默认继承，视觉 finding 会按问题类型预填到编剧、视觉导演和素材执行输入；所有字段在开工前仍可修改。
 - 每个模型节点只有一个首选模型；同一能力下其他健康模型是有序候选。系统只在调用层故障时切换，内容结构、业务校验或质量审计失败仍留在当前节点修正。模型尝试顺序和最终采用模型进入执行回执。
@@ -95,7 +106,7 @@ workspace/factory/runs/<run-id>/
 | 配音 | `minimax-tts-v1`、`macos-say-v1`；`ffmpeg-tone-test-v1` 仅用于测试 | 自动 | 可继续增加云 TTS 或真人录音 Provider |
 | 渲染 | Python + FFmpeg，H.264/AAC，1080x1920 | 自动 | 可增加 Remotion 或其他渲染 Provider |
 | 技术审片 | 分辨率、编码、音量、时长、分镜覆盖、素材存在性 | 自动 | 可增加视觉/内容质量模型 |
-| 最终审片 | `manual` 支持跨进程 approve/reject；视觉 finding 可触发 `request_changes` 局部返修；`automatic` 可跳过无问题的人工节点 | 可配置 | 返修只允许复用同一 run 中更早且已物化的非说明卡母片 |
+| 最终审片 | GLM/Codex 同证据独立双审；`manual` 支持跨进程 approve/reject；视觉 finding 可触发 `request_changes` 局部返修；`automatic` 可跳过无问题的人工节点 | 可配置 | 双审不可降级为单审；局部返修只允许复用同一 run 中更早且已物化的非说明卡母片 |
 | 持久化 | 首个 worker 前创建 `run.json`，每个节点后 checkpoint | 自动 | 当前是单机 FileRunStore |
 | 并发保护 | PID lock、孤儿锁回收、revision 与副作用事务 | 自动 | 尚不是分布式锁 |
 | Worker 协议 | `video-factory/worker-v1` 单 JSON stdout，stderr 诊断 | 自动 | 可接入其他语言 worker |

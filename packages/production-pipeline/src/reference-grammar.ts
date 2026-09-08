@@ -95,7 +95,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
         ...payload,
         ...(revision ? { revision } : {}),
       }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => client.runTaskDetailed!("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session }) => client.runTaskDetailed!("role-audit", {
         role,
         iteration,
         criteria,
@@ -120,6 +120,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
         },
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
+        ...(validationFailure ? { validationFailure } : {}),
         images: payload.frames.map((frame, index) => ({
           imageIndex: index + 1,
           timecodeMs: frame.timecodeMs,

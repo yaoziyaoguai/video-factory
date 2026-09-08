@@ -7,6 +7,8 @@ import {
   CodexBridgeError,
   CodexVisualReviewAgent,
   FallbackVisualReviewAgent,
+  IndependentDualVisualReviewAgent,
+  IndependentVisualReviewError,
   RoleAgentLoopError,
   VisualReviewFallbackError,
   runRoleAgentLoop,
@@ -15,13 +17,14 @@ import {
   type VisualReviewAgent,
   type VisualReviewAgentInput,
   type VisualReviewMediaPayload,
+  type VisualReviewReport,
 } from "../src/index.js";
 
 const media: VisualReviewMediaPayload = {
   durationMs: 6_000,
   frames: [
-    { timecodeMs: 0, sha256: "a".repeat(64), jpegBase64: "/9j/2Q==" },
-    { timecodeMs: 3_000, sha256: "b".repeat(64), jpegBase64: "/9j/2Q==" },
+    { timecodeMs: 0, sha256: "a".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+    { timecodeMs: 3_000, sha256: "b".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
   ],
 };
 
@@ -31,8 +34,13 @@ const report = {
   scores: { composition: 84, continuity: 82, pacing: 78, legibility: 72, safety: 96 },
   findings: [{
     timecodeMs: 3_000,
+    startTimecodeMs: 2_500,
+    endTimecodeMs: 3_500,
     scenePosition: 1,
     targetNodeId: "assets",
+    evidenceStatus: "failed",
+    evidenceFrameSha256: "b".repeat(64),
+    nextAction: "rework_asset",
     category: "legibility",
     severity: "warning",
     description: "字幕行数偏多。",
@@ -52,6 +60,137 @@ const passingAudit = {
 } as const;
 
 describe("CodexVisualReviewAgent", () => {
+  it("runs final Codex and GLM reviews independently over one immutable evidence snapshot", async () => {
+    let prepareCalls = 0;
+    const preparedInputs: VisualReviewMediaPayload[] = [];
+    const calls: string[] = [];
+    const reviewer = (id: string, modelId: string, output: VisualReviewReport): VisualReviewAgent => ({
+      id,
+      modelId,
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async (input) => {
+        calls.push(id);
+        assert.ok(input.preparedMedia);
+        preparedInputs.push(input.preparedMedia);
+        assert.equal(Object.hasOwn(input, "independentReviews"), false);
+        return { output, executedProviderId: id, executedModelId: modelId };
+      },
+    });
+    const hardFailure = {
+      ...report,
+      summary: "GLM 确认画面存在水印。",
+      scores: { ...report.scores, legibility: 35 },
+      findings: [{ ...report.findings[0], severity: "critical" as const, description: "画面存在水印。" }],
+      recommendation: "reject" as const,
+    };
+    const codexPass = {
+      ...report,
+      summary: "Codex 未发现阻断问题。",
+      scores: { composition: 92, continuity: 90, pacing: 88, legibility: 91, safety: 96 },
+      findings: [],
+      confidence: 0.92,
+      recommendation: "approve" as const,
+    };
+    const subject = new IndependentDualVisualReviewAgent({
+      primary: reviewer("glm-visual-review-v1", "glm-5.3-flash", hardFailure),
+      secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol", codexPass),
+      media: {
+        prepare: async () => {
+          prepareCalls += 1;
+          return media;
+        },
+      },
+    });
+
+    const execution = await subject.reviewDetailed({
+      videoPath: "/run/final.mp4",
+      runRoot: "/run",
+      reviewStage: "rendered_video",
+    });
+
+    assert.equal(prepareCalls, 1);
+    assert.deepEqual(new Set(calls), new Set(["glm-visual-review-v1", "codex-visual-review-v1"]));
+    assert.equal(preparedInputs[0], preparedInputs[1]);
+    assert.equal(execution.output.recommendation, "reject");
+    assert.equal(execution.output.scores.legibility, 35);
+    assert.equal(execution.output.findings.some((finding) => finding.description === "画面存在水印。"), true);
+    assert.deepEqual(execution.independentReviews?.map(({ providerId, modelId }) => ({ providerId, modelId })), [
+      { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" },
+      { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol" },
+    ]);
+  });
+
+  it("retries only the failed final-review branch after preserving the completed model result", async () => {
+    const calls = { glm: 0, codex: 0 };
+    const stored = new Map<string, unknown>();
+    const cleanReport: VisualReviewReport = {
+      ...report,
+      scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 95 },
+      findings: [],
+      recommendation: "approve",
+    };
+    const subject = new IndependentDualVisualReviewAgent({
+      primary: {
+        id: "glm-visual-review-v1",
+        modelId: "glm-5.3-flash",
+        review: async () => {
+          calls.glm += 1;
+          return cleanReport;
+        },
+      },
+      secondary: {
+        id: "codex-visual-review-v1",
+        modelId: "gpt-5.6-sol",
+        review: async () => {
+          calls.codex += 1;
+          if (calls.codex === 1) throw new Error("Codex review temporarily unavailable");
+          return cleanReport;
+        },
+      },
+      media: { prepare: async () => media },
+    });
+    const input: VisualReviewAgentInput = {
+      videoPath: "/run/final.mp4",
+      runRoot: "/run",
+      reviewStage: "rendered_video",
+      independentReviewCheckpointForModel: (modelId) => ({
+        key: modelId,
+        load: async () => stored.get(modelId),
+        save: async (value) => { stored.set(modelId, structuredClone(value)); },
+      }),
+    };
+
+    await assert.rejects(
+      () => subject.reviewDetailed(input),
+      (error: unknown) => {
+        assert.ok(error instanceof IndependentVisualReviewError);
+        assert.deepEqual(error.completedReviews.map(({ providerId, modelId }) => ({ providerId, modelId })), [{
+          providerId: "glm-visual-review-v1",
+          modelId: "glm-5.3-flash",
+        }]);
+        assert.deepEqual(error.failures.map(({ providerId, modelId }) => ({ providerId, modelId })), [{
+          providerId: "codex-visual-review-v1",
+          modelId: "gpt-5.6-sol",
+        }]);
+        assert.match(error.message, /gpt-5\.6-sol 暂时不可用/);
+        return true;
+      },
+    );
+    const recovered = await subject.reviewDetailed(input);
+
+    assert.deepEqual(calls, { glm: 1, codex: 2 });
+    assert.equal(recovered.independentReviews?.length, 2);
+    assert.equal(recovered.output.recommendation, "approve");
+  });
+
+  it("rejects a finding outside the requested pilot before completing the review", async () => {
+    const agent = new CodexVisualReviewAgent({
+      media: { prepare: async () => media },
+      client: { runTask: async () => report },
+    });
+    await assert.rejects(() => agent.review({ runRoot: "/run", scenePositions: [3] }), /未检查镜头/);
+  });
+
   it("rejects a stale selected model before preprocessing media for a single configured agent", async () => {
     let mediaCalls = 0;
     const agent = new CodexVisualReviewAgent({
@@ -107,6 +246,51 @@ describe("CodexVisualReviewAgent", () => {
     assert.deepEqual((reviewContext.renderManifest as Record<string, unknown>).slides, [{ scene_position: 1, duration: 6 }]);
   });
 
+  it("describes dense pilot frames as ordered sequence evidence instead of sparse midpoints", async () => {
+    let payload: unknown;
+    const sequenceMedia: VisualReviewMediaPayload = {
+      durationMs: 5_000,
+      frames: [
+        { timecodeMs: 100, sha256: "a".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 6, phase: "opening" },
+        { timecodeMs: 2_500, sha256: "b".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 6, phase: "middle" },
+        { timecodeMs: 4_900, sha256: "c".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 6, phase: "closing" },
+      ],
+      sampling: {
+        mode: "scene_sequence",
+        sceneCount: 8,
+        coveredScenePositions: [6],
+        missingScenePositions: [1, 2, 3, 4, 5, 7, 8],
+      },
+    };
+    const approved = {
+      ...report,
+      summary: "高密度时间序列支持当前试片的可见状态推进。",
+      scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 95 },
+      findings: [],
+      recommendation: "approve" as const,
+    };
+    const agent = new CodexVisualReviewAgent({
+      media: { prepare: async () => sequenceMedia },
+      client: { runTask: async (_kind, input) => {
+        payload = input;
+        return approved;
+      } },
+    });
+
+    await agent.review({ reviewStage: "source_assets", scenePositions: [6], runRoot: "/run" });
+
+    const reviewContext = (payload as { reviewContext: Record<string, unknown> }).reviewContext;
+    const sampling = reviewContext.sampling as Record<string, unknown>;
+    assert.equal(sampling.mode, "scene_sequence");
+    assert.deepEqual(sampling.phases, ["opening", "middle", "closing"]);
+    assert.match(String(sampling.evidenceBoundary), /Dense ordered samples.*approximate hold timing/);
+    assert.deepEqual(reviewContext.renderConform, {
+      policy: "scale_to_fill_center_crop",
+      outputAspectRatio: "9:16",
+      reviewRule: "A minor source aspect-ratio difference is normalized before render and is not itself an asset defect. Only require asset rework when the deterministic center crop would remove a required subject, action, or text-safe area.",
+    });
+  });
+
   it("identifies director-approved editorial cards while keeping undeclared text blocked and private paths hidden", async () => {
     const runRoot = await mkdtemp(path.join(tmpdir(), "video-factory-source-review-context-"));
     const assetPlanPath = path.join(runRoot, "asset_plan.json");
@@ -145,11 +329,12 @@ describe("CodexVisualReviewAgent", () => {
       } },
     });
 
-    await agent.review({ assetPlanPath, reviewStage: "source_assets", runRoot });
+    await agent.review({ assetPlanPath, reviewStage: "source_assets", scenePositions: [1], runRoot });
 
     const serialized = JSON.stringify(payload);
     const reviewContext = (payload as { reviewContext: Record<string, unknown> }).reviewContext;
     assert.equal(reviewContext.reviewStage, "source_assets");
+    assert.deepEqual(reviewContext.pilotScenePositions, [1]);
     assert.match(serialized, /cold drink condensation/);
     assert.match(serialized, /editorial_card/);
     assert.match(serialized, /undeclared-text-card/);
@@ -246,7 +431,15 @@ describe("CodexVisualReviewAgent", () => {
     assert.deepEqual(calls.map((call) => call.kind), ["visual-review", "role-audit", "visual-review", "role-audit"]);
     assert.equal(calls[2]?.payload.revision !== undefined, true);
     assert.match((calls[1]?.payload.criteria as string[]).join("\n"), /核心主体、物体或动作对象.*必须判定返修/);
-    assert.match((calls[1]?.payload.criteria as string[]).join("\n"), /任何可读字、标签、比例标记或水印.*必须判定返修/);
+    assert.match((calls[1]?.payload.criteria as string[]).join("\n"), /真实来源原生文字.*生成伪标签\/乱码\/水印\/内部术语/);
+    assert.match(
+      (calls[1]?.payload.criteria as string[]).join("\n"),
+      /同一人物、物件或空间.*Provider.*无法保证.*visual-direction 或 script.*replan_upstream/,
+    );
+    assert.match(
+      JSON.stringify(calls[1]?.payload.context),
+      /上游免责声明.*不能把不可执行方案变成可执行方案.*不得.*assets.*重复付费/,
+    );
     assert.deepEqual(execution.output, repairedReport);
   });
 
@@ -277,7 +470,7 @@ describe("CodexVisualReviewAgent", () => {
     assert.equal(execution.agentLoop?.iterations.length, 1);
   });
 
-  it("keeps a stateless ZAI producer out of Codex sessions while preserving full repair context", async () => {
+  it("keeps stateless ZAI visual-review calls out of Codex sessions while preserving full repair context", async () => {
     const producerSessions: unknown[] = [];
     const producerPayloads: Array<Record<string, unknown>> = [];
     const auditSessions: unknown[] = [];
@@ -324,8 +517,7 @@ describe("CodexVisualReviewAgent", () => {
 
     assert.deepEqual(producerSessions, [undefined, undefined]);
     assert.equal((producerPayloads[1]?.revision as { mode?: string }).mode, "repair-bootstrap");
-    assert.equal((auditSessions[0] as { handle?: string }).handle, undefined);
-    assert.equal((auditSessions[1] as { handle?: string }).handle, `vfs_${"a".repeat(32)}`);
+    assert.deepEqual(auditSessions, [undefined, undefined]);
     assert.deepEqual(execution.output, repairedReport);
     assert.equal(execution.agentLoop?.producerModelCallCount, 2);
     assert.equal(execution.agentLoop?.auditModelCallCount, 2);
@@ -882,6 +1074,11 @@ describe("CodexVisualReviewAgent", () => {
 
     assert.equal(localized.findings[0]?.scenePosition, 2);
     assert.equal(localized.findings[0]?.targetNodeId, "assets");
+    const scriptFinding = validateVisualReviewReport({
+      ...report,
+      findings: [{ ...report.findings[0], targetNodeId: "script", nextAction: "replan_upstream" }],
+    }, 6_000);
+    assert.equal(scriptFinding.findings[0]?.targetNodeId, "script");
     assert.throws(
       () => validateVisualReviewReport({
         ...report,
@@ -905,10 +1102,55 @@ describe("CodexVisualReviewAgent", () => {
     );
   });
 
+  it("validates evidence ranges and frame references, and keeps not-observed work out of paid rework", () => {
+    assert.throws(
+      () => validateVisualReviewReport({
+        ...report,
+        findings: [{ ...report.findings[0], startTimecodeMs: 3_500, endTimecodeMs: 2_500 }],
+      }, 6_000, [1], media.frames),
+      /time range is invalid/,
+    );
+    assert.throws(
+      () => validateVisualReviewReport({
+        ...report,
+        findings: [{ ...report.findings[0], evidenceFrameSha256: "c".repeat(64) }],
+      }, 6_000, [1], media.frames),
+      /evidence frame is invalid/,
+    );
+    const duplicateShaFrames = [
+      { ...media.frames[0]!, timecodeMs: 1_000, sha256: "b".repeat(64) },
+      media.frames[1]!,
+    ];
+    assert.doesNotThrow(() => validateVisualReviewReport(report, 6_000, [1], duplicateShaFrames));
+    assert.throws(
+      () => validateVisualReviewReport({
+        ...report,
+        findings: [{ ...report.findings[0], timecodeMs: 2_900 }],
+      }, 6_000, [1], duplicateShaFrames),
+      /evidence frame is invalid/,
+    );
+    const notObserved = validateVisualReviewReport({
+      ...report,
+      scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 90 },
+      findings: [{
+        ...report.findings[0],
+        severity: "info",
+        evidenceStatus: "not_observed",
+        evidenceFrameSha256: null,
+        nextAction: "inspect_existing_media",
+        description: "稀疏抽帧没有覆盖动作结果。",
+        suggestion: "先补抽已有素材，不重新生成。",
+      }],
+      recommendation: "approve",
+    }, 6_000, [1], media.frames);
+    assert.equal(notObserved.recommendation, "revise");
+    assert.equal(notObserved.findings[0]?.nextAction, "inspect_existing_media");
+  });
+
   it("fails closed when model recommendation conflicts with scores, findings, or confidence", () => {
     assert.equal(validateVisualReviewReport({
       ...report,
-      scores: { ...report.scores, pacing: 59 },
+      scores: { ...report.scores, pacing: 74 },
       findings: [],
       recommendation: "approve",
     }, 6_000).recommendation, "revise");

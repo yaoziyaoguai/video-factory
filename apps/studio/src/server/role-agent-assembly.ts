@@ -5,6 +5,7 @@ import {
   FallbackScreenwriterAgent,
   FallbackVisualDirectorAgent,
   FallbackVisualReviewAgent,
+  IndependentDualVisualReviewAgent,
   type CodexBridgeClient,
   type ScreenwriterAgent,
   type VisualDirectorAgent,
@@ -42,7 +43,11 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
 
   const directorAvailability = auditedRoleCandidateAvailability(codexSettings, zaiCodexSettings, "director-plan");
   const codexDirector = codexClient && directorAvailability.codex
-    ? new CodexVisualDirectorAgent({ client: codexClient, modelId: codexModelFor("director-plan") })
+    ? new CodexVisualDirectorAgent({
+        client: codexClient,
+        modelId: codexModelFor("director-plan"),
+        sessionMode: "stateless",
+      })
     : undefined;
   const glmDirector = zaiCodexClient && directorAvailability.zai
     ? new CodexVisualDirectorAgent({
@@ -57,7 +62,11 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
 
   const screenwriterAvailability = auditedRoleCandidateAvailability(codexSettings, zaiCodexSettings, "script-draft");
   const codexScreenwriter = codexClient && screenwriterAvailability.codex
-    ? new CodexScreenwriterAgent({ client: codexClient, modelId: codexModelFor("script-draft") })
+    ? new CodexScreenwriterAgent({
+        client: codexClient,
+        modelId: codexModelFor("script-draft"),
+        sessionMode: "stateless",
+      })
     : undefined;
   const glmScreenwriter = zaiCodexClient && screenwriterAvailability.zai
     ? new CodexScreenwriterAgent({
@@ -108,25 +117,38 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
         })),
       }),
     } : {}),
-    visualReviewAgents: orderedVisualReviewAgents(codexReview, glmReview),
+    visualReviewAgents: orderedVisualReviewAgents(codexReview, glmReview, options.reviewMedia),
   };
 }
 
 function orderedVisualReviewAgents(
   codex: CodexVisualReviewAgent | undefined,
   glm: CodexVisualReviewAgent | undefined,
+  media: VisualReviewMediaPreprocessor,
 ): VisualReviewAgent[] {
   if (codex && glm) {
+    const glmWithSourceFallback = new FallbackVisualReviewAgent({
+      primary: glm,
+      primaryProviderId: "zai-bigmodel-api",
+      backups: [{ agent: codex, label: "Codex 视觉审片", providerId: "openai" }],
+    });
+    const codexWithSourceFallback = new FallbackVisualReviewAgent({
+      primary: codex,
+      primaryProviderId: "openai",
+      backups: [{ agent: glm, label: "GLM 视觉审片", providerId: "zai-bigmodel-api" }],
+    });
     return [
-      new FallbackVisualReviewAgent({
+      new IndependentDualVisualReviewAgent({
         primary: glm,
-        primaryProviderId: "zai-bigmodel-api",
-        backups: [{ agent: codex, label: "Codex 视觉审片", providerId: "openai" }],
+        secondary: codex,
+        sourceAgent: glmWithSourceFallback,
+        media,
       }),
-      new FallbackVisualReviewAgent({
+      new IndependentDualVisualReviewAgent({
         primary: codex,
-        primaryProviderId: "openai",
-        backups: [{ agent: glm, label: "GLM 视觉审片", providerId: "zai-bigmodel-api" }],
+        secondary: glm,
+        sourceAgent: codexWithSourceFallback,
+        media,
       }),
     ];
   }

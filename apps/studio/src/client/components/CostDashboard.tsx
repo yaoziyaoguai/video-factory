@@ -59,8 +59,8 @@ function groupCostLines(lines: StudioCostRunDetail["lines"]): GroupedCostLine[] 
 
 function CostMetrics({ totals, compact = false }: { totals: StudioCostTotals; compact?: boolean }) {
   return <div className={compact ? "cost-metrics is-compact" : "cost-metrics"}>
-    <article><CircleDollarSign aria-hidden="true" size={17} /><span>实际消费</span><strong>{actualCostLabel(totals)}</strong></article>
-    <article title="历史所有已确认报价的总额，不是费用上限，也不代表实际消费"><Gauge aria-hidden="true" size={17} /><span>已批准报价合计</span><strong>¥{totals.authorizedCostCny.toFixed(2)}</strong></article>
+    <article title="包含服务商回传费用，以及按项目配置费率记录但尚未由服务商账单确认的费用"><CircleDollarSign aria-hidden="true" size={17} /><span>已记录费用</span><strong>{actualCostLabel(totals)}</strong></article>
+    <article title="历史所有已确认报价的授权金额，仅用于执行控制，不是费用上限，也不代表实际消费"><Gauge aria-hidden="true" size={17} /><span>报价授权金额（非消费）</span><strong>¥{totals.authorizedCostCny.toFixed(2)}</strong></article>
     <article><Clock3 aria-hidden="true" size={17} /><span>待确认是否扣费</span><strong>{totals.actualPendingCount}</strong></article>
     <article><RotateCcw aria-hidden="true" size={17} /><span>付费服务失败</span><strong>{totals.failedMeteredCalls}</strong></article>
   </div>;
@@ -88,7 +88,7 @@ function capabilityLabel(line: StudioCostRunDetail["lines"][number], providers?:
 
 function actualCostLabel(totals: StudioCostTotals): string {
   return totals.actualPendingCount > 0
-    ? `¥${totals.actualCostCny.toFixed(2)} 已核算 + ${totals.actualPendingCount} 笔待确认`
+    ? `¥${totals.actualCostCny.toFixed(2)} 已记录 + ${totals.actualPendingCount} 笔待确认`
     : `¥${totals.actualCostCny.toFixed(2)}`;
 }
 
@@ -100,8 +100,8 @@ function costLineLabel(line: StudioCostRunDetail["lines"][number]): string {
   }
   if (line.status === "failed" && line.billing === "subscription") return "订阅任务失败 · 不产生按量费用";
   if (line.status === "failed") return "任务失败";
-  if (line.actualCostSource === "configured_rate") return "按配置单价核算";
-  if (line.actualCostSource === "provider_reported") return "供应商账单回填";
+  if (line.actualCostSource === "configured_rate") return "按配置费率记录 · 非服务商确认账单";
+  if (line.actualCostSource === "provider_reported") return "服务商回传费用";
   if (line.billing === "metered") return "按量付费";
   if (line.billing === "subscription") return "订阅额度";
   return "免费/本地";

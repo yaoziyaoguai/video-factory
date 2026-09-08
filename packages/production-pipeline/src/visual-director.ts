@@ -10,11 +10,16 @@ import type { ProductionBlueprint } from "@video-factory/template-core";
 import type { CodexTaskExecution } from "./codex-chat.js";
 import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { ShotGrammar } from "./reference-grammar.js";
+import type { VideoAspectRatio } from "./video-generation.js";
 import {
   assetReuseSourceScenePosition,
   normalizeVideoGenerationDurationSeconds,
   type VideoGenerationDurationBounds,
 } from "./generative-asset-worker.js";
+import {
+  assertGeneratedVisualDoesNotClaimEvidence,
+  requiresUnsupportedGeneratedIdentity,
+} from "./visual-evidence-boundary.js";
 
 export const DIRECTOR_PLAN_VERSION = "video-factory/director-plan-v1" as const;
 
@@ -160,12 +165,15 @@ export interface VisualDirectorPlan {
 export interface VisualDirectorPlanValidation {
   scenePositions: number[];
   sceneDurations?: Record<number, number>;
+  sceneVisualStrategies?: Record<number, "stock" | "image" | "generated" | "local">;
   allowedProviderIds: string[];
   generativeProviderIds: string[];
   providerDeliveryTypes?: Record<string, VisualAssetDeliveryType[]>;
   referenceImageProviderIds?: string[];
   estimatedCnyPerClip: Record<string, number>;
   selectedVideoModelDurationBounds?: Record<string, VideoGenerationDurationBounds>;
+  selectedVideoModelAspectRatios?: Record<string, VideoAspectRatio[]>;
+  requiredAspectRatio?: VideoAspectRatio;
   economics: VisualDirectorEconomics;
 }
 
@@ -226,6 +234,7 @@ export interface VisualDirectorAgentInput {
     selectedModelId?: string;
     minDurationSeconds?: number;
     maxDurationSeconds?: number;
+    aspectRatios?: VideoAspectRatio[];
   }>;
   economics: VisualDirectorEconomics;
   selectedModelId?: string;
@@ -309,6 +318,17 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       providerId(id, allowed, `shots[${index}].alternativeProviderIds`);
       assertProviderDeliveryType(id, deliveryType, options, `shots[${index}].alternativeProviderIds`);
     }
+    if (deliveryType === "generated_video" && options.requiredAspectRatio) {
+      const unsupportedProvider = [preferredProviderId, ...alternativeProviderIds].find((id) => {
+        const ratios = options.selectedVideoModelAspectRatios?.[id];
+        return ratios !== undefined && !ratios.includes(options.requiredAspectRatio!);
+      });
+      if (unsupportedProvider) {
+        throw new Error(
+          `Director plan provider '${unsupportedProvider}' does not support the required ${options.requiredAspectRatio} aspect ratio.`,
+        );
+      }
+    }
     const authenticityPolicy = authenticity(shot.authenticityPolicy, `shots[${index}].authenticityPolicy`);
     if (authenticityPolicy === "evidence" && [preferredProviderId, ...alternativeProviderIds].some((id) => generative.has(id))) {
       throw new Error(`Director plan evidence shot ${scenePosition} cannot use a generative provider.`);
@@ -359,6 +379,21 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
           `Director plan scene ${scenePosition} provider '${unsupportedProvider}' does not support reference-image generation.`,
         );
       }
+    }
+    const generatedDelivery = deliveryType === "generated_image" || deliveryType === "generated_video";
+    if (options.sceneVisualStrategies?.[scenePosition] === "stock" && generatedDelivery) {
+      throw new Error(`Director plan scene ${scenePosition} requires real stock footage and cannot be changed to generated media.`);
+    }
+    if (generatedDelivery) {
+      assertGeneratedVisualDoesNotClaimEvidence([
+        optionalText(shot.subject, `shots[${index}].subject`),
+        optionalText(shot.environment, `shots[${index}].environment`),
+        visibleAction,
+        ...(beats ?? []),
+        generationPrompt,
+        rationale,
+        ...(successCriteria ?? []),
+      ], `shots[${index}]`);
     }
     return {
       scenePosition,
@@ -415,6 +450,25 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
   }
 
   const shotsByPosition = new Map(shots.map((shot) => [shot.scenePosition, shot]));
+  const independentGeneratedShots = shots.filter((shot) => (
+    (shot.deliveryType === "generated_image" || shot.deliveryType === "generated_video")
+    && assetReuseSourceScenePosition(shot) === undefined
+    && shot.referenceFromScenePosition === undefined
+  ));
+  if (independentGeneratedShots.length > 1
+    && requiresUnsupportedGeneratedIdentity([
+      visualBible.continuity,
+      ...independentGeneratedShots.flatMap((shot) => [
+        shot.subject,
+        shot.generationPrompt,
+        shot.rationale,
+        shot.continuityNote,
+        ...(shot.negativeConstraints ?? []),
+        ...(shot.referenceRequirements ?? []),
+      ]),
+    ])) {
+    throw new Error("Director plan cannot claim the same person, object, or experiment subject across independently generated scenes; use executable reuse/reference routing or replan the visual argument.");
+  }
   for (const shot of shots) {
     if (shot.referenceFromScenePosition !== undefined) {
       const source = shotsByPosition.get(shot.referenceFromScenePosition);

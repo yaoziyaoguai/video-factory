@@ -9,6 +9,7 @@ import { Readable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import type { WorkerArtifactDescriptor, WorkerResponse } from "./python-worker-client.js";
 import type {
+  VideoAspectRatio,
   VideoGenerationAdapter,
   VideoGenerationProgress,
   VideoGenerationRequest,
@@ -18,6 +19,7 @@ import type {
   ImageGenerationProgress,
 } from "./image-generation.js";
 import { ProviderRequestRejectedError } from "./provider-request-error.js";
+import type { AssetPilotReviewer } from "./asset-pilot-review.js";
 
 interface WorkerClient {
   run(request: Record<string, unknown>): Promise<WorkerResponse>;
@@ -34,16 +36,19 @@ export interface VideoGenerationAdapterBinding {
 export interface VideoGenerationRuntimeProfile {
   taskTypes: Array<"text-to-video" | "image-to-video">;
   resolutions: string[];
+  aspectRatios?: VideoAspectRatio[];
   minDurationSeconds: number;
   maxDurationSeconds: number;
   supportsAudio: boolean;
+  allowedDurationsSeconds?: number[];
   estimatedCnyPerSecond?: number;
   estimatedCnyPerSecondByResolution?: Record<string, number>;
+  estimatedCnyByResolutionAndDuration?: Record<string, Record<string, number>>;
 }
 
 export type VideoGenerationDurationBounds = Pick<
   VideoGenerationRuntimeProfile,
-  "minDurationSeconds" | "maxDurationSeconds"
+  "minDurationSeconds" | "maxDurationSeconds" | "allowedDurationsSeconds"
 >;
 
 export interface ImageGenerationAdapterBinding {
@@ -69,7 +74,20 @@ export interface GenerativeAssetWorkerClientOptions {
   resolveHost?: ResolveHost;
   maxDownloadBytes?: number;
   downloadTimeoutMs?: number;
+  probeGeneratedMedia?: GeneratedMediaProbe;
+  pilotReviewer?: AssetPilotReviewer;
 }
+
+export interface GeneratedMediaMetadata {
+  width: number;
+  height: number;
+  durationSeconds?: number;
+}
+
+export type GeneratedMediaProbe = (
+  mediaPath: string,
+  mediaType: "image" | "video",
+) => Promise<GeneratedMediaMetadata>;
 
 interface ScriptScene {
   position: number;
@@ -79,6 +97,8 @@ interface ScriptScene {
 }
 
 const METERED_CREATE_ATTEMPTED = Symbol("meteredCreateAttempted");
+
+class AssetPilotReviewError extends Error {}
 
 interface GenerationJob {
   scenePosition: number;
@@ -95,6 +115,7 @@ interface GenerationJob {
   carriedForward?: boolean;
   [METERED_CREATE_ATTEMPTED]?: boolean;
   error?: string;
+  pilotReview?: "approved" | "rejected" | "unavailable";
 }
 
 export type PaidAssetItemState =
@@ -170,20 +191,37 @@ interface ResolvedAssetBinding {
   mediaType: "image" | "video";
   supportsReferenceImage?: boolean;
   estimatedCnyPerAsset: number;
-  estimateCny(scene: ScriptScene): number;
+  resolveRequest(
+    scene: ScriptScene,
+    compiledPrompt: string,
+    reference?: { scenePosition: number; imageSha256?: string },
+  ): ResolvedAssetExecutionRequest;
+  estimateCny(request: ResolvedAssetExecutionRequest): number;
   modelId?: string;
   generate(
-    scene: ScriptScene,
-    prompt: string,
+    request: ResolvedAssetExecutionRequest,
     onProgress: (progress: VideoGenerationProgress | ImageGenerationProgress) => Promise<void>,
     referenceImages?: [string, ...string[]],
   ): Promise<{ taskId: string; url: string }>;
   reconcile?(
     taskId: string,
-    scene: ScriptScene,
-    prompt: string,
+    request: ResolvedAssetExecutionRequest,
     onProgress: (progress: VideoGenerationProgress | ImageGenerationProgress) => Promise<void>,
   ): Promise<{ taskId: string; url: string }>;
+}
+
+export interface ResolvedAssetExecutionRequest {
+  providerId: string;
+  modelId: string;
+  compiledPrompt: string;
+  mediaType: "image" | "video";
+  durationSeconds: number;
+  ratio: "9:16";
+  resolution?: VideoGenerationRequest["resolution"];
+  generateAudio?: boolean;
+  referenceFromScenePosition?: number;
+  referenceImageSha256?: string;
+  executionDigest: string;
 }
 
 const KNOWN_METERED_ASSET_PROVIDERS = new Set([
@@ -206,6 +244,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
   private readonly resolveHost: ResolveHost;
   private readonly maxDownloadBytes: number;
   private readonly downloadTimeoutMs: number;
+  private readonly probeGeneratedMedia: GeneratedMediaProbe | undefined;
 
   constructor(private readonly options: GenerativeAssetWorkerClientOptions) {
     for (const binding of options.adapters) {
@@ -241,6 +280,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     this.resolveHost = options.resolveHost ?? resolveMediaHostname;
     this.maxDownloadBytes = options.maxDownloadBytes ?? 200 * 1024 * 1024;
     this.downloadTimeoutMs = options.downloadTimeoutMs ?? 60_000;
+    this.probeGeneratedMedia = options.probeGeneratedMedia;
     if (!Number.isInteger(this.downloadTimeoutMs) || this.downloadTimeoutMs <= 0) {
       throw new Error("downloadTimeoutMs must be a positive integer.");
     }
@@ -268,6 +308,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     }
 
     const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0, 100_000);
+    const unavailableReview = this.pilotReviewUnavailable(request, parameters);
+    if (unavailableReview) return unavailableReview;
     const input = requiredRecord(request.input, "Worker input");
     const scriptPath = requiredString(input.scriptPath, "scriptPath");
     const outputDir = requiredString(request.outputDir, "outputDir");
@@ -281,13 +323,16 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const scenes = allScenes;
     const operationId = requiredString(request.commandId, "commandId");
     const sourceFingerprint = await paidAssetSourceFingerprint([scriptPath]);
+    const resolvedRequests = new Map(scenes.map((scene) => {
+      const resolved = binding.resolveRequest(scene, compileDirectGenerationPrompt(scene));
+      return [scene.position, resolved] as const;
+    }));
     const baseItems = scenes.map((scene) => createPaidAssetOperationItem(
       operationId,
       scene,
       providerId,
-      providerId,
+      resolvedRequests.get(scene.position)!,
       binding,
-      scene.visualPrompt,
       sourceFingerprint,
     ));
     const preparedOperation = scenes.length
@@ -333,6 +378,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const ledgerPath = preparedOperation?.ledgerPath;
     const jobs: GenerationJob[] = [];
     const mediaArtifacts: WorkerArtifactDescriptor[] = [];
+    const approvedPilotGroups = new Set<string>();
 
     const preparedItems = preparedOperation?.items ?? [];
     const openedLedger = ledgerPath
@@ -340,7 +386,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       : undefined;
 
     for (const scene of scenes) {
-      const sceneCost = binding.estimateCny(scene);
+      const resolvedRequest = resolvedRequests.get(scene.position)!;
+      const sceneCost = binding.estimateCny(resolvedRequest);
       const ledgerItem = openedLedger?.ledger.items.find((item) => item.scenePosition === scene.position);
       const job: GenerationJob = {
         scenePosition: scene.position,
@@ -352,7 +399,6 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       };
       jobs.push(job);
       try {
-        const prompt = compileDirectGenerationPrompt(scene);
         const resumedExistingTask = isExistingPaidTask(ledgerItem);
         if (resumedExistingTask || ledgerItem?.carriedForwardFromItemRequestId) {
           job.carriedForward = true;
@@ -363,8 +409,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           ? acceptedResultFromLedger(ledgerItem)
           : await generatePaidAssetItem({
               binding,
-              scene,
-              prompt,
+              request: resolvedRequest,
               job,
               jobs,
               jobsPath,
@@ -390,7 +435,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           );
           if (ledgerPath && openedLedger) await writeGenerationLedger(ledgerPath, openedLedger.ledger);
           applySucceeded(job, generated.taskId, generated.url);
-          replaceSceneAsset(plan, assets, scene, generated.taskId, materialized.path, providerId, binding.mediaType);
+          const mediaMetadata = await this.validateGeneratedMedia(materialized.path, binding.mediaType, scene.duration);
+          replaceSceneAsset(plan, assets, scene, generated.taskId, materialized.path, providerId, binding.mediaType, mediaMetadata);
           mediaArtifacts.push(await describeFile(
             materialized.path,
             "media_asset",
@@ -398,7 +444,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
             providerId,
             request,
             `AI-generated ${binding.mediaType}; review provider terms, likeness rights, and AIGC disclosure before publishing.`,
+            scene.position,
           ));
+          await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts });
           continue;
         }
         const media = await downloadGeneratedAsset(
@@ -410,6 +458,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           this.resolveHost,
           this.downloadTimeoutMs,
         );
+        const mediaMetadata = await this.validateGeneratedMedia(media.path, binding.mediaType, scene.duration);
         applySucceeded(job, generated.taskId, generated.url);
         await writeJobs(jobsPath, jobs);
         if (ledgerPath && openedLedger && ledgerItem) {
@@ -425,7 +474,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           delete ledgerItem.manualReconciliationRequired;
           await writeGenerationLedger(ledgerPath, openedLedger.ledger);
         }
-        replaceSceneAsset(plan, assets, scene, generated.taskId, media.path, providerId, binding.mediaType);
+        replaceSceneAsset(plan, assets, scene, generated.taskId, media.path, providerId, binding.mediaType, mediaMetadata);
         mediaArtifacts.push(await describeFile(
           media.path,
           "media_asset",
@@ -433,7 +482,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           providerId,
           request,
           `AI-generated ${binding.mediaType}; review provider terms, likeness rights, and AIGC disclosure before publishing.`,
+          scene.position,
         ));
+        await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts });
       } catch (error) {
         job.status = "failed";
         job.error = safeGenerationDiagnostic(error);
@@ -442,11 +493,11 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           delete job.actualCostSource;
         }
         await writeJobs(jobsPath, jobs);
-        if (ledgerPath && openedLedger && ledgerItem) {
+        if (!(error instanceof AssetPilotReviewError) && ledgerPath && openedLedger && ledgerItem) {
           if (!isManuallyReconciledTerminalItem(ledgerItem)) {
             ledgerItem.error = job.error;
             if (ledgerItem.resultUrl && ledgerItem.taskId) {
-              ledgerItem.state = "provider_succeeded";
+              ledgerItem.state = error instanceof GeneratedMediaContractError ? "terminal_failed" : "provider_succeeded";
               // 永久下载失败（403/404、非法/不安全 URL、超限）保留 task、URL、费用与错误证据，
               // 但标记逐项人工核账可操作；普通网络/超时错误不标记，继续按原任务恢复。
               if (error instanceof UnrecoverableGeneratedAssetDownloadError) {
@@ -456,12 +507,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           }
           await writeGenerationLedger(ledgerPath, openedLedger.ledger);
         }
-        if (openedLedger?.created === false) continue;
+        if (!(error instanceof AssetPilotReviewError) && openedLedger?.created === false) continue;
         break;
       }
     }
 
-    const generatedScenes = jobs.filter((job) => job.status === "succeeded").length;
+    const generatedScenes = jobs.filter((job) => job.status === "succeeded" || job.pilotReview !== undefined).length;
     const failedJob = jobs.find((job) => job.status === "failed");
     const fallbackScenes = 0;
     const accountedCostCny = configuredCost(jobs);
@@ -518,12 +569,14 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       return {
         ...baseline,
         commandId: requiredString(request.commandId, "commandId"),
-        status: "failed",
-        output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath },
-        artifacts: [planArtifact, jobsArtifact],
+        status: failedJob.pilotReview === "rejected" ? "rejected" : "failed",
+        output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath,
+          ...(plan.sourceVisualReview ? { sourceVisualReview: plan.sourceVisualReview } : {}),
+        },
+        artifacts: [planArtifact, jobsArtifact, ...mediaArtifacts],
         error: {
-          code: "ASSET_GENERATION_FAILED",
-          message: `Scene ${failedJob.scenePosition} generation failed: ${failedJob.error ?? "unknown provider error"}`,
+          code: failedJob.pilotReview ? "ASSET_PILOT_REVIEW_FAILED" : "ASSET_GENERATION_FAILED",
+          message: failedJob.pilotReview ? failedJob.error! : `Scene ${failedJob.scenePosition} generation failed: ${failedJob.error ?? "unknown provider error"}`,
         },
         diagnostics: {
           ...diagnostics,
@@ -536,7 +589,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     return {
       ...baseline,
       commandId: requiredString(request.commandId, "commandId"),
-      output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath },
+      output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath,
+        ...(plan.sourceVisualReview ? { sourceVisualReview: plan.sourceVisualReview } : {}),
+      },
       artifacts: [
         ...retainedFinalAssetArtifacts(baseline.artifacts, planPath, assets),
         planArtifact,
@@ -604,9 +659,27 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       if (!binding) {
         throw new Error(`Provider '${providerId}' is not configured.`);
       }
-      return [{ route, scene, providerId, ...(modelId ? { modelId } : {}), binding }];
+      const compiledPrompt = compileGenerationPrompt(providerId, route, scene);
+      return [{
+        route,
+        scene,
+        providerId,
+        ...(modelId ? { modelId } : {}),
+        binding,
+        resolvedRequest: binding.resolveRequest(
+          scene,
+          compiledPrompt,
+          route.referenceFromScenePosition === undefined
+            ? undefined
+            : { scenePosition: route.referenceFromScenePosition },
+        ),
+      }];
     }).sort((left, right) => left.scene.position - right.scene.position);
     const generatedRouteByPosition = new Map(generatedRoutes.map((entry) => [entry.scene.position, entry]));
+    if (generatedRoutes.length) {
+      const unavailableReview = this.pilotReviewUnavailable(request, parameters);
+      if (unavailableReview) return unavailableReview;
+    }
     for (const entry of generatedRoutes) {
       const referenceFrom = entry.route.referenceFromScenePosition;
       if (referenceFrom === undefined) continue;
@@ -625,17 +698,13 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     }
     const operationId = requiredString(request.commandId, "commandId");
     const sourceFingerprint = await paidAssetSourceFingerprint([scriptPath, directorPlanPath]);
-    const baseItems = generatedRoutes.map(({ route, scene, binding, providerId }) => createPaidAssetOperationItem(
+    const baseItems = generatedRoutes.map(({ scene, binding, resolvedRequest }) => createPaidAssetOperationItem(
       operationId,
       scene,
       "ai-shot-router-v1",
-      providerId,
+      resolvedRequest,
       binding,
-      compileGenerationPrompt(providerId, route, scene),
       sourceFingerprint,
-      route.referenceFromScenePosition === undefined
-        ? undefined
-        : { scenePosition: route.referenceFromScenePosition },
     ));
     const reworkCarryForwardItems = await findReworkCarryForwardItems({
       ...(this.options.runsRoot ? { runsRoot: this.options.runsRoot } : {}),
@@ -693,8 +762,26 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       ? await openGenerationOperation(ledgerPath, operationId, preparedItems)
       : undefined;
 
-    for (const { route, scene, binding, providerId } of generatedRoutes) {
-      const sceneCost = binding.estimateCny(scene);
+    const approvedPilotGroups = new Set<string>();
+    const pilotPositions = new Set<number>();
+    if (this.options.pilotReviewer) {
+      const candidates = [...generatedRoutes].filter(({ route }) => route.referenceFromScenePosition === undefined)
+        .sort((a, b) => b.route.temporalBeats.length - a.route.temporalBeats.length
+          || b.route.successCriteria.length - a.route.successCriteria.length
+          || a.scene.position - b.scene.position);
+      const groups = new Set<string>();
+      for (const candidate of candidates) {
+        const key = `${candidate.providerId}:${candidate.binding.modelId ?? ""}`;
+        if (groups.has(key)) continue;
+        groups.add(key);
+        pilotPositions.add(candidate.scene.position);
+      }
+    }
+    // 先试动作节拍/验收条件最多的独立镜头；参考图子镜仍按母片先行的原顺序执行。
+    const executionRoutes = [...generatedRoutes].sort((a, b) => Number(pilotPositions.has(b.scene.position)) - Number(pilotPositions.has(a.scene.position)));
+    for (const { route, scene, binding, providerId, resolvedRequest: baseResolvedRequest } of executionRoutes) {
+      let resolvedRequest = baseResolvedRequest;
+      let sceneCost = binding.estimateCny(resolvedRequest);
       let ledgerItem = openedLedger?.ledger.items.find((item) => item.scenePosition === scene.position);
       const job: GenerationJob = {
         scenePosition: scene.position,
@@ -706,7 +793,6 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       };
       jobs.push(job);
       try {
-        const prompt = compileGenerationPrompt(providerId, route, scene);
         let referenceImages: [string, ...string[]] | undefined;
         if (route.referenceFromScenePosition !== undefined && ledgerItem?.state !== "materialized") {
           if (!openedLedger || !ledgerPath || !ledgerItem) {
@@ -716,15 +802,18 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
             openedLedger.ledger,
             route.referenceFromScenePosition,
           );
+          resolvedRequest = binding.resolveRequest(scene, baseResolvedRequest.compiledPrompt, {
+            scenePosition: route.referenceFromScenePosition,
+            imageSha256: reference.sha256,
+          });
+          sceneCost = binding.estimateCny(resolvedRequest);
           const referencedItem = createPaidAssetOperationItem(
             operationId,
             scene,
             "ai-shot-router-v1",
-            providerId,
+            resolvedRequest,
             binding,
-            prompt,
             sourceFingerprint,
-            { scenePosition: route.referenceFromScenePosition, imageSha256: reference.sha256 },
           );
           ledgerItem = await bindReferenceImageToLedger(
             ledgerPath,
@@ -744,8 +833,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           ? acceptedResultFromLedger(ledgerItem)
           : await generatePaidAssetItem({
               binding,
-              scene,
-              prompt,
+              request: resolvedRequest,
               job,
               jobs,
               jobsPath,
@@ -772,7 +860,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           );
           if (ledgerPath && openedLedger) await writeGenerationLedger(ledgerPath, openedLedger.ledger);
           applySucceeded(job, generated.taskId, generated.url);
-          replaceSceneAsset(plan, assets, scene, generated.taskId, materialized.path, providerId, binding.mediaType);
+          const mediaMetadata = await this.validateGeneratedMedia(materialized.path, binding.mediaType, scene.duration);
+          replaceSceneAsset(plan, assets, scene, generated.taskId, materialized.path, providerId, binding.mediaType, mediaMetadata);
           mediaArtifacts.push(await describeFile(
             materialized.path,
             "media_asset",
@@ -780,7 +869,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
             providerId,
             request,
             `AI-generated ${binding.mediaType} selected by the director plan; review terms, likeness rights, and AIGC disclosure.`,
+            scene.position,
           ));
+          await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts });
           continue;
         }
         const media = await downloadGeneratedAsset(
@@ -792,6 +883,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           this.resolveHost,
           this.downloadTimeoutMs,
         );
+        const mediaMetadata = await this.validateGeneratedMedia(media.path, binding.mediaType, scene.duration);
         applySucceeded(job, generated.taskId, generated.url);
         await writeJobs(jobsPath, jobs);
         if (ledgerPath && openedLedger && ledgerItem) {
@@ -807,7 +899,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           delete ledgerItem.manualReconciliationRequired;
           await writeGenerationLedger(ledgerPath, openedLedger.ledger);
         }
-        replaceSceneAsset(plan, assets, scene, generated.taskId, media.path, providerId, binding.mediaType);
+        replaceSceneAsset(plan, assets, scene, generated.taskId, media.path, providerId, binding.mediaType, mediaMetadata);
         mediaArtifacts.push(await describeFile(
           media.path,
           "media_asset",
@@ -815,7 +907,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           providerId,
           request,
           `AI-generated ${binding.mediaType} selected by the director plan; review terms, likeness rights, and AIGC disclosure.`,
+          scene.position,
         ));
+        await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts });
       } catch (error) {
         job.status = "failed";
         job.error = safeGenerationDiagnostic(error);
@@ -824,11 +918,11 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           delete job.actualCostSource;
         }
         await writeJobs(jobsPath, jobs);
-        if (ledgerPath && openedLedger && ledgerItem) {
+        if (!(error instanceof AssetPilotReviewError) && ledgerPath && openedLedger && ledgerItem) {
           if (!isManuallyReconciledTerminalItem(ledgerItem)) {
             ledgerItem.error = job.error;
             if (ledgerItem.resultUrl && ledgerItem.taskId) {
-              ledgerItem.state = "provider_succeeded";
+              ledgerItem.state = error instanceof GeneratedMediaContractError ? "terminal_failed" : "provider_succeeded";
               // 同 direct 路径：永久下载失败接通逐项人工核账，暂时失败仍按原任务恢复。
               if (error instanceof UnrecoverableGeneratedAssetDownloadError) {
                 ledgerItem.manualReconciliationRequired = true;
@@ -837,12 +931,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           }
           await writeGenerationLedger(ledgerPath, openedLedger.ledger);
         }
-        if (openedLedger?.created === false) continue;
+        if (!(error instanceof AssetPilotReviewError) && openedLedger?.created === false) continue;
         break;
       }
     }
 
-    const generatedScenes = jobs.filter((job) => job.status === "succeeded").length;
+    const generatedScenes = jobs.filter((job) => job.status === "succeeded" || job.pilotReview !== undefined).length;
     const failedJob = jobs.find((job) => job.status === "failed");
     const fallbackScenes = 0;
     const accountedCostCny = configuredCost(jobs);
@@ -900,12 +994,14 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       return {
         ...baseline,
         commandId: requiredString(request.commandId, "commandId"),
-        status: "failed",
-        output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath },
-        artifacts: [planArtifact, jobsArtifact],
+        status: failedJob.pilotReview === "rejected" ? "rejected" : "failed",
+        output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath,
+          ...(plan.sourceVisualReview ? { sourceVisualReview: plan.sourceVisualReview } : {}),
+        },
+        artifacts: [planArtifact, jobsArtifact, ...mediaArtifacts],
         error: {
-          code: "ASSET_GENERATION_FAILED",
-          message: `Scene ${failedJob.scenePosition} generation failed: ${failedJob.error ?? "unknown provider error"}`,
+          code: failedJob.pilotReview ? "ASSET_PILOT_REVIEW_FAILED" : "ASSET_GENERATION_FAILED",
+          message: failedJob.pilotReview ? failedJob.error! : `Scene ${failedJob.scenePosition} generation failed: ${failedJob.error ?? "unknown provider error"}`,
         },
         diagnostics: {
           ...diagnostics,
@@ -918,7 +1014,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     return {
       ...baseline,
       commandId: requiredString(request.commandId, "commandId"),
-      output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath },
+      output: { ...(baseline.output ?? {}), assetPlanPath: planPath, generationJobsPath: jobsPath,
+        ...(plan.sourceVisualReview ? { sourceVisualReview: plan.sourceVisualReview } : {}),
+      },
       artifacts: [
         ...retainedFinalAssetArtifacts(baseline.artifacts, planPath, assets),
         planArtifact,
@@ -927,6 +1025,77 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       ],
       diagnostics,
     };
+  }
+
+  private pilotReviewUnavailable(request: Record<string, unknown>, parameters: Record<string, unknown>): WorkerResponse | undefined {
+    try {
+      this.options.pilotReviewer?.assertAvailable(optionalString(parameters.reviewProviderId), optionalString(parameters.reviewModelId));
+      return undefined;
+    } catch (error) {
+      return {
+        protocolVersion: "video-factory/worker-v1",
+        commandId: requiredString(request.commandId, "commandId"),
+        status: "failed",
+        artifacts: [],
+        error: { code: "ASSET_PILOT_REVIEW_UNAVAILABLE", message: safeGenerationDiagnostic(error) },
+        diagnostics: { providerOutcomeKnown: true, meteredAttemptCount: 0, meteredFailedAttemptCount: 0, actualCostCny: 0 },
+      };
+    }
+  }
+
+  private async reviewPilot(options: {
+    request: Record<string, unknown>;
+    parameters: Record<string, unknown>;
+    plan: Record<string, unknown>;
+    planPath: string;
+    ledgerItem: PaidAssetOperationItem | undefined;
+    job: GenerationJob;
+    approvedPilotGroups: Set<string>;
+    mediaArtifacts: WorkerArtifactDescriptor[];
+  }): Promise<void> {
+    const reviewer = this.options.pilotReviewer;
+    if (!reviewer) return;
+    const { request, parameters, plan, planPath, ledgerItem: item, job } = options;
+    if (!item?.sha256) throw new Error("Pilot review requires a materialized asset identity.");
+    // 每个方案内，不同模型和参考图生成路线分别试片；先审首个镜头再提交后续付费任务。
+    const group = JSON.stringify([item.providerId, item.modelId, item.parameters.mediaType,
+      item.parameters.ratio, item.parameters.referenceFromScenePosition !== undefined]);
+    if (options.approvedPilotGroups.has(group)) return;
+    const input = requiredRecord(request.input, "Worker input");
+    const scriptPath = requiredString(input.scriptPath, "scriptPath");
+    const outputDir = requiredString(request.outputDir, "outputDir");
+    await writeJsonAtomically(planPath, plan);
+    try {
+      const result = await reviewer.review({
+        runRoot: this.options.runsRoot
+          ? path.join(this.options.runsRoot, requiredString(request.runId, "runId"))
+          : path.dirname(scriptPath),
+        outputDir,
+        assetPlanPath: planPath,
+        scriptPath,
+        ...(optionalString(input.directorPlanPath) ? { directorPlanPath: String(input.directorPlanPath) } : {}),
+        scenePosition: item.scenePosition,
+        inputFingerprint: item.inputFingerprint,
+        mediaSha256: item.sha256,
+        ...(optionalString(parameters.reviewProviderId) ? { reviewProviderId: String(parameters.reviewProviderId) } : {}),
+        ...(optionalString(parameters.reviewModelId) ? { reviewModelId: String(parameters.reviewModelId) } : {}),
+      });
+      options.mediaArtifacts.push(await describeFile(result.reportPath, "review_report", "application/json",
+        optionalString(parameters.reviewProviderId) ?? "source-asset-pilot-review", request,
+        "Pilot source review before subsequent paid generation.", item.scenePosition));
+      const report = result.execution.output;
+      plan.sourceVisualReview = report;
+      if (report.recommendation !== "approve" || report.findings.some((finding) => finding.severity !== "info")) {
+        job.pilotReview = "rejected";
+        throw new AssetPilotReviewError(`镜头 ${item.scenePosition} 试片未通过，已停止后续付费生成。已保留试片与审查报告。${report.summary} ${report.findings.map((finding) => finding.suggestion).join(" ")} 请调整对应方案后重新报价；已生成素材不会自动重买。`);
+      }
+      job.pilotReview = "approved";
+      options.approvedPilotGroups.add(group);
+    } catch (error) {
+      if (error instanceof AssetPilotReviewError) throw error;
+      job.pilotReview = "unavailable";
+      throw new AssetPilotReviewError(`镜头 ${item.scenePosition} 已生成，但试片审查暂未完成，后续付费生成已停止。重试时会复用该镜头并恢复审查。${safeGenerationDiagnostic(error)}`);
+    }
   }
 
   private resolveBinding(providerId: string, modelId?: string): ResolvedAssetBinding | undefined {
@@ -946,27 +1115,47 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       if (profile && !profile.taskTypes.includes("text-to-video")) {
         throw new Error(`Video model '${effectiveModelId}' does not support text-to-video generation.`);
       }
+      if (profile?.aspectRatios && !profile.aspectRatios.includes("9:16")) {
+        throw new Error(`Video model '${effectiveModelId}' does not support the required 9:16 aspect ratio.`);
+      }
       return {
         mediaType: "video",
         estimatedCnyPerAsset,
-        estimateCny: (scene) => estimateVideoGenerationCostCny(
-          scene.duration,
+        resolveRequest: (scene, compiledPrompt, reference) => resolveAssetExecutionRequest({
+          scene,
+          providerId,
+          modelId: effectiveModelId ?? providerId,
+          compiledPrompt,
+          mediaType: "video",
+          ...(profile ? { profile } : {}),
+          ...(reference ? { reference } : {}),
+        }),
+        estimateCny: (request) => estimateResolvedVideoGenerationCostCny(
+          request,
           estimatedCnyPerAsset,
           profile,
         ),
         ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
-        generate: async (scene, prompt, onProgress) => {
+        generate: async (request, onProgress) => {
           const result = await video.adapter.generate({
-            ...generationRequest(scene, prompt, profile),
+            prompt: request.compiledPrompt,
+            durationSeconds: request.durationSeconds,
+            ratio: request.ratio,
+            ...(request.resolution ? { resolution: request.resolution } : {}),
+            ...(request.generateAudio !== undefined ? { generateAudio: request.generateAudio } : {}),
             ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
           }, onProgress);
           return { taskId: result.taskId, url: result.videoUrl };
         },
         ...(video.adapter.reconcile
           ? {
-              reconcile: async (taskId, scene, prompt, onProgress) => {
+              reconcile: async (taskId, request, onProgress) => {
                 const result = await video.adapter.reconcile!(taskId, {
-                  ...generationRequest(scene, prompt, profile),
+                  prompt: request.compiledPrompt,
+                  durationSeconds: request.durationSeconds,
+                  ratio: request.ratio,
+                  ...(request.resolution ? { resolution: request.resolution } : {}),
+                  ...(request.generateAudio !== undefined ? { generateAudio: request.generateAudio } : {}),
                   ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
                 }, onProgress);
                 return { taskId: result.taskId, url: result.videoUrl };
@@ -982,12 +1171,20 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         mediaType: "image",
         supportsReferenceImage: image.adapter.supportsReferenceImage ?? false,
         estimatedCnyPerAsset: image.estimatedCnyPerImage,
+        resolveRequest: (scene, compiledPrompt, reference) => resolveAssetExecutionRequest({
+          scene,
+          providerId,
+          modelId: modelId ?? providerId,
+          compiledPrompt,
+          mediaType: "image",
+          ...(reference ? { reference } : {}),
+        }),
         estimateCny: () => image.estimatedCnyPerImage,
         ...(modelId ? { modelId } : {}),
-        generate: async (_scene, prompt, onProgress, referenceImages) => {
+        generate: async (request, onProgress, referenceImages) => {
           const result = await image.adapter.generate({
-            prompt,
-            ratio: "9:16",
+            prompt: request.compiledPrompt,
+            ratio: request.ratio,
             ...(referenceImages ? { referenceImages } : {}),
           }, onProgress);
           return { taskId: result.taskId, url: result.imageUrl };
@@ -995,6 +1192,35 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       };
     }
     return undefined;
+  }
+
+  private async validateGeneratedMedia(
+    mediaPath: string,
+    mediaType: "image" | "video",
+    plannedUseDurationSeconds: number,
+  ): Promise<GeneratedMediaMetadata | undefined> {
+    if (!this.probeGeneratedMedia) return undefined;
+    const metadata = await this.probeGeneratedMedia(mediaPath, mediaType);
+    if (!Number.isInteger(metadata.width) || metadata.width <= 0
+      || !Number.isInteger(metadata.height) || metadata.height <= 0
+      || (mediaType === "video"
+        && (!Number.isFinite(metadata.durationSeconds) || metadata.durationSeconds! <= 0))) {
+      throw new GeneratedMediaContractError(`Generated ${mediaType} has invalid probed media metadata.`);
+    }
+    const actualRatio = metadata.width / metadata.height;
+    const requiredRatio = 9 / 16;
+    if (Math.abs(actualRatio - requiredRatio) > 0.02) {
+      throw new GeneratedMediaContractError(
+        `Generated ${mediaType} is ${metadata.width}x${metadata.height}, which does not satisfy the required 9:16 aspect ratio.`,
+      );
+    }
+    // ffprobe 的容器时长可能与最后一帧相差一个很小的时间基单位；保留约两个常见视频帧的余量。
+    if (mediaType === "video" && metadata.durationSeconds! + 0.1 < plannedUseDurationSeconds) {
+      throw new GeneratedMediaContractError(
+        `Generated video is ${metadata.durationSeconds}s, shorter than the planned ${plannedUseDurationSeconds}s use.`,
+      );
+    }
+    return metadata;
   }
 }
 
@@ -1311,8 +1537,26 @@ export function estimateVideoGenerationCostCny(
   const perSecond = resolution
     ? profile?.estimatedCnyPerSecondByResolution?.[resolution]
     : undefined;
+  const fixedSpecPrice = resolution
+    ? profile?.estimatedCnyByResolutionAndDuration?.[resolution]?.[String(durationSeconds)]
+    : undefined;
   const rate = perSecond ?? profile?.estimatedCnyPerSecond;
-  return roundMoney(rate ? durationSeconds * rate : estimatedCnyPerClip);
+  return roundMoney(fixedSpecPrice ?? (rate ? durationSeconds * rate : estimatedCnyPerClip));
+}
+
+function estimateResolvedVideoGenerationCostCny(
+  request: ResolvedAssetExecutionRequest,
+  estimatedCnyPerClip: number,
+  profile?: VideoGenerationRuntimeProfile,
+): number {
+  const resolution = request.resolution;
+  const fixedSpecPrice = resolution
+    ? profile?.estimatedCnyByResolutionAndDuration?.[resolution]?.[String(request.durationSeconds)]
+    : undefined;
+  const rate = resolution
+    ? profile?.estimatedCnyPerSecondByResolution?.[resolution] ?? profile?.estimatedCnyPerSecond
+    : profile?.estimatedCnyPerSecond;
+  return roundMoney(fixedSpecPrice ?? (rate ? request.durationSeconds * rate : estimatedCnyPerClip));
 }
 
 function optionalStringRecord(value: unknown, field: string): Record<string, string> {
@@ -1339,18 +1583,36 @@ function parseScenes(value: unknown): ScriptScene[] {
   });
 }
 
-function generationRequest(
-  scene: ScriptScene,
-  prompt = scene.visualPrompt,
-  profile?: VideoGenerationRuntimeProfile,
-): VideoGenerationRequest {
-  const resolution = preferredResolution(profile?.resolutions);
-  return {
-    prompt,
-    durationSeconds: normalizeVideoGenerationDurationSeconds(scene.duration, profile),
-    ratio: "9:16",
+export function resolveAssetExecutionRequest(options: {
+  scene: ScriptScene;
+  providerId: string;
+  modelId: string;
+  compiledPrompt: string;
+  mediaType: "image" | "video";
+  profile?: VideoGenerationRuntimeProfile;
+  reference?: { scenePosition: number; imageSha256?: string };
+}): ResolvedAssetExecutionRequest {
+  const durationSeconds = options.mediaType === "video"
+    ? normalizeVideoGenerationDurationSeconds(options.scene.duration, options.profile)
+    : 1;
+  const resolution = options.mediaType === "video"
+    ? preferredResolution(options.profile?.resolutions)
+    : undefined;
+  const identity = {
+    providerId: options.providerId,
+    modelId: options.modelId,
+    compiledPrompt: options.compiledPrompt,
+    mediaType: options.mediaType,
+    durationSeconds,
+    ratio: "9:16" as const,
     ...(resolution ? { resolution } : {}),
-    ...(profile ? { generateAudio: false } : {}),
+    ...(options.mediaType === "video" && options.profile ? { generateAudio: false } : {}),
+    ...(options.reference ? { referenceFromScenePosition: options.reference.scenePosition } : {}),
+    ...(options.reference?.imageSha256 ? { referenceImageSha256: options.reference.imageSha256 } : {}),
+  };
+  return {
+    ...identity,
+    executionDigest: createHash("sha256").update(JSON.stringify(identity)).digest("hex"),
   };
 }
 
@@ -1370,6 +1632,16 @@ export function normalizeVideoGenerationDurationSeconds(
     || minimum > maximum) {
     throw new Error("Video generation duration bounds are invalid.");
   }
+  if (bounds?.allowedDurationsSeconds) {
+    const allowed = [...new Set(bounds.allowedDurationsSeconds)].sort((left, right) => left - right);
+    if (allowed.length === 0
+      || allowed.some((duration) => !Number.isInteger(duration) || duration < minimum || duration > maximum)
+      || allowed[0] !== minimum
+      || allowed.at(-1) !== maximum) {
+      throw new Error("Video generation allowed durations are invalid.");
+    }
+    return allowed.find((duration) => duration >= sceneDurationSeconds) ?? maximum;
+  }
   return Math.max(minimum, Math.min(maximum, Math.round(sceneDurationSeconds)));
 }
 
@@ -1388,6 +1660,11 @@ function validateVideoRuntimeProfile(providerId: string, modelId: string, profil
     || profile.taskTypes.some((task) => task !== "text-to-video" && task !== "image-to-video")
     || !Array.isArray(profile.resolutions)
     || profile.resolutions.length === 0
+    || (profile.aspectRatios !== undefined && (
+      !Array.isArray(profile.aspectRatios)
+      || profile.aspectRatios.length === 0
+      || profile.aspectRatios.some((ratio) => !["9:16", "16:9", "1:1", "3:4", "4:3"].includes(ratio))
+    ))
     || !Number.isInteger(profile.minDurationSeconds)
     || !Number.isInteger(profile.maxDurationSeconds)
     || profile.minDurationSeconds < 2
@@ -1396,6 +1673,18 @@ function validateVideoRuntimeProfile(providerId: string, modelId: string, profil
     || typeof profile.supportsAudio !== "boolean") {
     throw new Error(`Adapter '${providerId}' has an invalid runtime profile for model '${modelId}'.`);
   }
+  if (profile.allowedDurationsSeconds) {
+    const allowed = [...new Set(profile.allowedDurationsSeconds)].sort((left, right) => left - right);
+    if (allowed.length === 0
+      || allowed.length !== profile.allowedDurationsSeconds.length
+      || allowed.some((duration) => !Number.isInteger(duration)
+        || duration < profile.minDurationSeconds
+        || duration > profile.maxDurationSeconds)
+      || allowed[0] !== profile.minDurationSeconds
+      || allowed.at(-1) !== profile.maxDurationSeconds) {
+      throw new Error(`Adapter '${providerId}' has invalid allowed durations for model '${modelId}'.`);
+    }
+  }
   if (profile.estimatedCnyPerSecond !== undefined
     && (!Number.isFinite(profile.estimatedCnyPerSecond) || profile.estimatedCnyPerSecond <= 0)) {
     throw new Error(`Adapter '${providerId}' has an invalid per-second price for model '${modelId}'.`);
@@ -1403,6 +1692,16 @@ function validateVideoRuntimeProfile(providerId: string, modelId: string, profil
   for (const [resolution, price] of Object.entries(profile.estimatedCnyPerSecondByResolution ?? {})) {
     if (!profile.resolutions.includes(resolution) || !Number.isFinite(price) || price <= 0) {
       throw new Error(`Adapter '${providerId}' has an invalid '${resolution}' price for model '${modelId}'.`);
+    }
+  }
+  for (const [resolution, prices] of Object.entries(profile.estimatedCnyByResolutionAndDuration ?? {})) {
+    if (!profile.resolutions.includes(resolution) || !isRecord(prices)) {
+      throw new Error(`Adapter '${providerId}' has invalid fixed-spec prices for model '${modelId}'.`);
+    }
+    for (const [duration, price] of Object.entries(prices)) {
+      if (!profile.allowedDurationsSeconds?.includes(Number(duration)) || !Number.isFinite(price) || price <= 0) {
+        throw new Error(`Adapter '${providerId}' has invalid '${resolution}/${duration}s' price for model '${modelId}'.`);
+      }
     }
   }
 }
@@ -1593,7 +1892,7 @@ function meteredJobDiagnostics(jobs: GenerationJob[]): {
   const submittedJobs = jobs.filter((job) => job[METERED_CREATE_ATTEMPTED] === true);
   return {
     meteredAttemptCount: submittedJobs.length,
-    meteredFailedAttemptCount: submittedJobs.filter((job) => job.status === "failed").length,
+    meteredFailedAttemptCount: submittedJobs.filter((job) => job.status === "failed" && !job.pilotReview).length,
   };
 }
 
@@ -1769,6 +2068,7 @@ function replaceSceneAsset(
   clipPath: string,
   providerId: string,
   mediaType: "image" | "video",
+  mediaMetadata?: GeneratedMediaMetadata,
 ): void {
   const routingRecords = Array.isArray(plan.director_routing) ? plan.director_routing : [];
   const pending = [scene.position];
@@ -1784,16 +2084,21 @@ function replaceSceneAsset(
     const existing = index >= 0 && typeof assets[index] === "object" && assets[index] !== null && !Array.isArray(assets[index])
       ? assets[index] as Record<string, unknown>
       : undefined;
-    const { source_url: _previousSourceUrl, ...existingFields } = existing ?? {};
+    const {
+      source_url: _previousSourceUrl,
+      width: _previousWidth,
+      height: _previousHeight,
+      duration: _previousDuration,
+      ...existingFields
+    } = existing ?? {};
     const next = {
       ...existingFields,
       scene_position: scenePosition,
       provider: providerId,
       asset_id: taskId,
       media_type: mediaType,
-      width: mediaType === "video" ? 720 : 1440,
-      height: mediaType === "video" ? 1280 : 2560,
-      duration: existing?.duration ?? scene.duration,
+      ...(mediaMetadata ? { width: mediaMetadata.width, height: mediaMetadata.height } : {}),
+      duration: mediaMetadata?.durationSeconds ?? scene.duration,
       local_path: clipPath,
       creator: providerId,
       license_note: `AI-generated ${mediaType}; provider terms and AIGC disclosure apply.`,
@@ -1824,6 +2129,7 @@ function replaceSceneAsset(
 }
 
 class UnrecoverableGeneratedAssetDownloadError extends Error {}
+class GeneratedMediaContractError extends Error {}
 
 async function downloadGeneratedAsset(
   fetcher: FetchLike | undefined,
@@ -2087,27 +2393,27 @@ function createPaidAssetOperationItem(
   operationId: string,
   scene: ScriptScene,
   executorProviderId: string,
-  providerId: string,
+  request: ResolvedAssetExecutionRequest,
   binding: ResolvedAssetBinding,
-  prompt: string,
   sourceFingerprint: string,
-  reference?: { scenePosition: number; imageSha256?: string },
 ): PaidAssetOperationItem {
   const parameters = {
-    mediaType: binding.mediaType,
-    durationSeconds: binding.mediaType === "video" ? generationRequest(scene, prompt).durationSeconds : 1,
-    ratio: "9:16",
-    ...(reference ? { referenceFromScenePosition: reference.scenePosition } : {}),
-    ...(reference?.imageSha256 ? { referenceImageSha256: reference.imageSha256 } : {}),
+    mediaType: request.mediaType,
+    durationSeconds: request.durationSeconds,
+    ratio: request.ratio,
+    ...(request.resolution ? { resolution: request.resolution } : {}),
+    ...(request.generateAudio !== undefined ? { generateAudio: request.generateAudio } : {}),
+    ...(request.referenceFromScenePosition !== undefined
+      ? { referenceFromScenePosition: request.referenceFromScenePosition }
+      : {}),
+    ...(request.referenceImageSha256 ? { referenceImageSha256: request.referenceImageSha256 } : {}),
+    compiledPromptSha256: createHash("sha256").update(request.compiledPrompt).digest("hex"),
+    executionDigest: request.executionDigest,
   };
-  const modelId = binding.modelId ?? providerId;
   const inputFingerprint = createHash("sha256").update(JSON.stringify({
     scenePosition: scene.position,
-    providerId,
-    modelId,
-    prompt,
+    request,
     sourceFingerprint,
-    parameters,
   })).digest("hex");
   const itemRequestId = `paid-item-${createHash("sha256")
     .update(`${operationId}\0${inputFingerprint}`)
@@ -2119,12 +2425,12 @@ function createPaidAssetOperationItem(
     inputFingerprint,
     scenePosition: scene.position,
     executorProviderId,
-    providerId,
-    modelId,
+    providerId: request.providerId,
+    modelId: request.modelId,
     sourceFingerprint,
     parameters,
     state: "prepared",
-    estimatedCostCny: binding.estimateCny(scene),
+    estimatedCostCny: binding.estimateCny(request),
   };
 }
 
@@ -2236,9 +2542,7 @@ function isMatchingReworkCarryForwardItem(
     && candidate.executorProviderId === prepared.executorProviderId
     && candidate.providerId === prepared.providerId
     && candidate.modelId === prepared.modelId
-    && candidate.parameters.mediaType === prepared.parameters.mediaType
-    && candidate.parameters.durationSeconds === prepared.parameters.durationSeconds
-    && candidate.parameters.ratio === prepared.parameters.ratio;
+    && paidExecutionParametersMatch(candidate.parameters, prepared.parameters);
   if (!identityMatches) return false;
   const preparedReference = prepared.parameters.referenceFromScenePosition;
   const candidateReference = candidate.parameters.referenceFromScenePosition;
@@ -2273,6 +2577,9 @@ function paidItemWithReferenceIdentity(
     parameters: {
       ...prepared.parameters,
       referenceImageSha256,
+      ...(typeof reusable.parameters.executionDigest === "string"
+        ? { executionDigest: reusable.parameters.executionDigest }
+        : {}),
     },
   };
 }
@@ -2291,7 +2598,8 @@ function isMatchingReferencedPaidItem(
     || candidate.executorProviderId !== prepared.executorProviderId
     || candidate.providerId !== prepared.providerId
     || candidate.modelId !== prepared.modelId
-    || candidate.sourceFingerprint !== prepared.sourceFingerprint) {
+    || candidate.sourceFingerprint !== prepared.sourceFingerprint
+    || !paidExecutionParametersMatch(candidate.parameters, prepared.parameters)) {
     return false;
   }
   return carriedItems.some((source) => (
@@ -2464,12 +2772,32 @@ function paidOperationInputsMatch(
     if (!candidate || item.parameters.referenceImageSha256 !== undefined) return false;
     return item.parameters.referenceFromScenePosition !== undefined
       && candidate.parameters.referenceFromScenePosition === item.parameters.referenceFromScenePosition
+      && paidExecutionParametersMatch(candidate.parameters, item.parameters)
       && candidate.scenePosition === item.scenePosition
       && candidate.executorProviderId === item.executorProviderId
       && candidate.providerId === item.providerId
       && candidate.modelId === item.modelId
       && candidate.sourceFingerprint === item.sourceFingerprint;
   });
+}
+
+function paidExecutionParametersMatch(
+  left: PaidAssetOperationItem["parameters"],
+  right: PaidAssetOperationItem["parameters"],
+): boolean {
+  const fields = [
+    "mediaType",
+    "durationSeconds",
+    "ratio",
+    "resolution",
+    "generateAudio",
+    "referenceFromScenePosition",
+  ] as const;
+  if (fields.some((field) => left[field] !== right[field])) return false;
+  const leftPrompt = left.compiledPromptSha256;
+  const rightPrompt = right.compiledPromptSha256;
+  // 旧账本没有保存 Prompt 摘要；其复用仍受脚本、导演执行语义与 source fingerprint 门禁约束。
+  return typeof leftPrompt !== "string" || typeof rightPrompt !== "string" || leftPrompt === rightPrompt;
 }
 
 async function materializedReferenceImage(
@@ -2513,8 +2841,7 @@ async function bindReferenceImageToLedger(
 
 async function generatePaidAssetItem(options: {
   binding: ResolvedAssetBinding;
-  scene: ScriptScene;
-  prompt: string;
+  request: ResolvedAssetExecutionRequest;
   job: GenerationJob;
   jobs: GenerationJob[];
   jobsPath: string;
@@ -2557,8 +2884,7 @@ async function generatePaidAssetItem(options: {
     try {
       reconciled = await options.binding.reconcile(
         ledgerItem.taskId,
-        options.scene,
-        options.prompt,
+        options.request,
         recordProgress,
       );
     } catch (error) {
@@ -2607,8 +2933,7 @@ async function generatePaidAssetItem(options: {
   options.job[METERED_CREATE_ATTEMPTED] = true;
   try {
     const generated = await options.binding.generate(
-      options.scene,
-      options.prompt,
+      options.request,
       recordProgress,
       options.referenceImages,
     );
@@ -2730,6 +3055,7 @@ async function describeFile(
   providerId: string,
   request: Record<string, unknown>,
   licenseNote: string,
+  scenePosition?: number,
 ): Promise<WorkerArtifactDescriptor> {
   const bytes = await readFile(uri);
   return {
@@ -2743,6 +3069,7 @@ async function describeFile(
       producerNodeId: requiredString(request.nodeRunId, "nodeRunId"),
       attempt: boundedInteger(request.attempt, "attempt", 1, 10_000),
       licenseNote,
+      ...(scenePosition ? { scenePosition } : {}),
     },
   };
 }

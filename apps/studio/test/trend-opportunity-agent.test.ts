@@ -210,15 +210,15 @@ describe("TrendOpportunityAgent", () => {
       customInstruction: "必须能在 30 秒内兑现标题承诺。",
     });
 
-    const payload = codexClient.calls[0]!.payload as { strategy?: string };
-    assert.match(payload.strategy ?? "", /内容定位：替普通人解释技术变化/);
-    assert.match(payload.strategy ?? "", /核心受众：关注 AI 但不想看营销稿的职场人/);
-    assert.match(payload.strategy ?? "", /优先题材：\n真实工作影响\n可复现实验/);
-    assert.match(payload.strategy ?? "", /来源开工门槛由下游执行/);
-    assert.match(payload.strategy ?? "", /来源不足但内容与视觉潜力成立的角度仍须输出/);
-    assert.doesNotMatch(payload.strategy ?? "", /才进入制作推荐/);
-    assert.match(payload.strategy ?? "", /必须能在 30 秒内兑现标题承诺/);
-    assert.equal((payload.strategy ?? "").length <= 6_000, true);
+    const payload = codexClient.calls[0]!.payload as { creatorStrategy?: string };
+    assert.match(payload.creatorStrategy ?? "", /内容定位：替普通人解释技术变化/);
+    assert.match(payload.creatorStrategy ?? "", /核心受众：关注 AI 但不想看营销稿的职场人/);
+    assert.match(payload.creatorStrategy ?? "", /优先题材：\n真实工作影响\n可复现实验/);
+    assert.match(payload.creatorStrategy ?? "", /来源开工门槛由下游执行/);
+    assert.match(payload.creatorStrategy ?? "", /来源不足但内容与视觉潜力成立的角度仍须输出/);
+    assert.doesNotMatch(payload.creatorStrategy ?? "", /才进入制作推荐/);
+    assert.match(payload.creatorStrategy ?? "", /必须能在 30 秒内兑现标题承诺/);
+    assert.equal((payload.creatorStrategy ?? "").length <= 6_000, true);
   });
 
   it("keeps the source gate downstream when an older strategy has no source policy", async () => {
@@ -240,9 +240,9 @@ describe("TrendOpportunityAgent", () => {
 
     await model.generate(modelSignals, { customInstruction: "" });
 
-    const payload = codexClient.calls[0]!.payload as { strategy?: string };
-    assert.match(payload.strategy ?? "", /来源开工门槛由下游执行/);
-    assert.match(payload.strategy ?? "", /来源不足.*仍须输出/);
+    const payload = codexClient.calls[0]!.payload as { creatorStrategy?: string };
+    assert.match(payload.creatorStrategy ?? "", /来源开工门槛由下游执行/);
+    assert.match(payload.creatorStrategy ?? "", /来源不足.*仍须输出/);
   });
 
   it("keeps the final custom rule after all bounded strategy fields", async () => {
@@ -271,9 +271,9 @@ describe("TrendOpportunityAgent", () => {
       customInstruction: "最后这条原则不能丢失。".repeat(100),
     });
 
-    const payload = codexClient.calls[0]!.payload as { strategy?: string };
-    assert.match(payload.strategy ?? "", /最后这条原则不能丢失/);
-    assert.equal((payload.strategy ?? "").length <= 6_000, true);
+    const payload = codexClient.calls[0]!.payload as { creatorStrategy?: string };
+    assert.match(payload.creatorStrategy ?? "", /最后这条原则不能丢失/);
+    assert.equal((payload.creatorStrategy ?? "").length <= 6_000, true);
   });
 
   it("builds traceable zero-cost candidates when no semantic model is ready", async () => {
@@ -320,9 +320,9 @@ describe("TrendOpportunityAgent", () => {
         },
         visualFeasibility: 91,
         productionCostEfficiency: 94,
-        novelty: 0.85,
-        seriesPotential: 0.88,
-        monetization: 0.72,
+        novelty: 85,
+        seriesPotential: 88,
+        monetization: 72,
       }],
     };
     const agent = new TrendOpportunityAgent({
@@ -349,6 +349,34 @@ describe("TrendOpportunityAgent", () => {
     assert.match(candidate?.visualPlan?.beats[0]?.description ?? "", /划掉三项重复安排/);
     assert.equal(candidate?.evidence[0]?.evidenceUrl, "https://example.com/ai");
     assert.equal(candidate?.generatedAt, "2026-08-24T08:05:00.000Z");
+  });
+
+  it("preserves zero-to-one-hundred model scores without inventing defaults or percentage scaling", async () => {
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [signals[0]!] },
+      model: {
+        id: "api-topic-editor-v1",
+        generate: async () => [{
+          signalId: "signal-ai",
+          title: "下班后的 AI 时间账本",
+          track: "ai-daily-life",
+          audience: "普通上班族",
+          painPoint: "工具很多，却没有减少疲惫",
+          hook: "先看它是否真的节省时间。",
+          rationale: "对照日程变化，判断工具是否真正减少重复安排。",
+          visualProof: "同一页日程展示调整前后的可见差异。",
+          novelty: 0,
+          seriesPotential: 1,
+          monetization: 2,
+        }],
+      },
+    });
+
+    const [candidate] = await agent.listCandidates();
+
+    assert.equal(candidate?.score.novelty, 0);
+    assert.equal(candidate?.score.seriesPotential, 1);
+    assert.equal(candidate?.score.monetization, 2);
   });
 
   it("keeps a deliberately small editorial desk when the model only selects a few ideas", async () => {
@@ -678,7 +706,7 @@ describe("TrendOpportunityAgent", () => {
     assert.equal(candidate?.evidence[0]?.evidenceUrl, "https://example.com/ai");
   });
 
-  it("still applies creator positioning, audience, preferences, and exclusions in rule fallback", async () => {
+  it("applies explicit creator preferences to rule-fallback selection", async () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => signals },
       model: { id: "api-topic-editor-v1", generate: async () => { throw new Error("model offline"); } },
@@ -695,10 +723,29 @@ describe("TrendOpportunityAgent", () => {
     const candidates = await agent.listCandidates();
 
     assert.equal(candidates.length, 1);
-    assert.equal(candidates[0]?.title, "普通人开始用 AI 管理下班后的时间");
-    assert.equal(candidates[0]?.audience, "不想看营销稿的职场人");
-    assert.match(candidates[0]?.painPoint ?? "", /只解释能让普通人采取行动的变化/);
     assert.equal(candidates.some((candidate) => candidate.title.includes("台风")), false);
+    assert.equal(candidates.every((candidate) => candidate.audience === "不想看营销稿的职场人"), true);
+    assert.equal(candidates.every((candidate) => candidate.painPoint.includes("只解释能让普通人采取行动的变化")), true);
+  });
+
+  it("ranks an explicitly preferred direction ahead of a higher generic score", async () => {
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => signals },
+      model: { id: "api-topic-editor-v1", generate: async () => { throw new Error("model offline"); } },
+      strategy: async () => ({
+        positioning: "解释热点对普通人的影响",
+        targetAudience: "普通观众",
+        preferredDirections: "台风",
+        excludedDirections: "",
+        sourcePolicy: "primary_or_two_independent",
+        customInstruction: "",
+      }),
+    });
+
+    const candidates = await agent.listCandidates();
+
+    assert.match(candidates[0]?.title ?? "", /台风/);
+    assert.ok((candidates[0]?.score.final ?? 0) < (candidates[1]?.score.final ?? 0));
   });
 
   it("retries one smaller batch when the model returns malformed structured output", async () => {
@@ -757,6 +804,41 @@ describe("TrendOpportunityAgent", () => {
     // 含原信号没有的数字、引语或采访假设的 idea 被拒绝，不再用机械标题顶替后绕过复核。
     assert.deepEqual(candidates, []);
     assert.equal(candidates.some((candidate) => candidate.providerId === "trend-heuristic-v1"), false);
+  });
+
+  it("rejects unsupported factual numbers hidden inside the visual plan", async () => {
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [signals[0]!] },
+      model: {
+        id: "api-topic-editor-v1",
+        generate: async () => [{
+          signalId: "signal-ai",
+          title: "下班后的 AI 时间账本",
+          track: "ai-daily-life",
+          audience: "普通上班族",
+          painPoint: "工具很多，却没有减少疲惫",
+          hook: "先看它是否真的节省时间。",
+          rationale: "用可见日程对照解释热点。",
+          visualProof: "同一页日程展示调整前后的差异。",
+          visualPlan: {
+            strategy: "用日程页面形成前后对照。",
+            beats: [{
+              id: "unsupported-saving",
+              role: "结果兑现",
+              duration: "0-6 秒",
+              description: "日程页显示使用 AI 后每天省下 20 分钟。",
+              searchQuery: "paper schedule comparison",
+              source: "creator",
+            }],
+          },
+          novelty: 80,
+          seriesPotential: 80,
+          monetization: 60,
+        }],
+      },
+    });
+
+    assert.deepEqual(await agent.listCandidates(), []);
   });
 
   it("rejects unsupported acronyms and clickbait claims in model titles", async () => {
@@ -1040,7 +1122,7 @@ describe("TrendOpportunityAgent", () => {
     assert.match(candidate?.rationale ?? "", /未采用模型扩写/);
   });
 
-  it("uses bounded baseline scores when the model returns an all-zero scorecard", async () => {
+  it("preserves an all-zero model scorecard", async () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => [signals[0]!] },
       model: {
@@ -1062,9 +1144,9 @@ describe("TrendOpportunityAgent", () => {
 
     const [candidate] = await agent.listCandidates();
 
-    assert.equal(candidate?.score.novelty, 64);
-    assert.equal(candidate?.score.seriesPotential, 72);
-    assert.equal(candidate?.score.monetization, 52);
+    assert.equal(candidate?.score.novelty, 0);
+    assert.equal(candidate?.score.seriesPotential, 0);
+    assert.equal(candidate?.score.monetization, 0);
   });
 
   it("normalizes an invalid model track before exposing a candidate to the opportunity API", async () => {

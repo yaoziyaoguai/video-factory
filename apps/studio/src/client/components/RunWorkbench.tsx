@@ -96,6 +96,16 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
         <StatusBadge status={run.status} {...(readOnly ? { label: "历史只读" } : {})} />
       </header>
 
+      {run.creativeSummary ? <section className="creative-summary run-creative-summary" aria-label="创作目标摘要">
+        <header><strong>创作目标摘要</strong><small>审片时逐项确认是否兑现</small></header>
+        <dl>
+          <div><dt>给谁看</dt><dd>{run.creativeSummary.audience}</dd></div>
+          <div><dt>开头承诺</dt><dd>{run.creativeSummary.openingPromise}</dd></div>
+          <div><dt>必须看到</dt><dd>{run.creativeSummary.requiredVisual}</dd></div>
+          <div><dt>结尾收益</dt><dd>{run.creativeSummary.payoff}</dd></div>
+        </dl>
+      </section> : null}
+
       {!readOnly && (run.phases && run.progress ? <ProductionProgress run={run} /> : (
         <section className="workflow-track" aria-label="生产工作流" data-tour="run-workflow">
           {run.nodes.map((node, index) => (
@@ -267,7 +277,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               /> : null}
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />多平台发布</button> : null}
               {run.status === "succeeded" && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
-              {run.status === "failed" && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && failedNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(failedNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤"}</button> : null}
+              {(run.status === "failed" || run.status === "rejected") && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && retryableNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{sourceAssetFailure && run.status === "rejected" ? "重新检查已有试片" : run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤"}</button> : null}
               {(run.status === "failed" || run.status === "rejected") && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
               {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />{isCostReplan ? "按降本意见重新规划并报价" : "按人工版本继续生成"}</button> : null}
               {run.status === "paused" && onResumePaused ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onResumePaused()}><Play aria-hidden="true" size={16} />继续自动制作</button> : null}
@@ -568,7 +578,9 @@ function paidOperationStateLabel(state: StudioPaidNodeSummary["items"][number]["
 }
 
 function paidOperationCostLabel(item: StudioPaidNodeSummary["items"][number]): string {
-  if (item.actualCostCny !== undefined) return `已计费 ¥${item.actualCostCny.toFixed(2)}`;
+  if (item.actualCostCny !== undefined && item.actualCostSource === "provider_reported") return `服务商回传 ¥${item.actualCostCny.toFixed(2)}`;
+  if (item.actualCostCny !== undefined && item.actualCostSource === "configured_rate") return `按配置费率记录 ¥${item.actualCostCny.toFixed(2)} · 非服务商确认账单`;
+  if (item.actualCostCny !== undefined) return `已登记费用 ¥${item.actualCostCny.toFixed(2)}`;
   if (item.state === "prepared" || item.state === "terminal_failed") return `未计费 · 预估 ¥${item.estimatedCostCny.toFixed(2)}`;
   if (item.state === "materialized") return "已完成 · 费用待回写";
   return `待确认 · 预估 ¥${item.estimatedCostCny.toFixed(2)}`;
@@ -717,8 +729,11 @@ function hasDirectorCostFeedback(run: StudioRunDetail): boolean {
   return Array.isArray(costFeedback) ? costFeedback.length > 0 : typeof costFeedback === "object" && costFeedback !== null;
 }
 
-function failedNodeId(run: StudioRunDetail): string | undefined {
-  return run.nodes.find((node) => node.status === "failed")?.id;
+function retryableNodeId(run: StudioRunDetail): string | undefined {
+  return run.nodes.find((node) => node.status === "failed")?.id
+    ?? (run.failure && isSourceAssetReviewFailure(run.failure)
+      ? run.nodes.find((node) => node.status === "rejected" && ["assets", "asset-source-review"].includes(node.id))?.id
+      : undefined);
 }
 
 function hasUncertainPaidOutcome(run: StudioRunDetail): boolean {
@@ -726,7 +741,9 @@ function hasUncertainPaidOutcome(run: StudioRunDetail): boolean {
 }
 
 function isSourceAssetReviewFailure(failure: NonNullable<StudioRunDetail["failure"]>): boolean {
-  return failure.nodeId === "asset-source-review" || /源素材视觉预检/.test(failure.technicalDetail ?? "");
+  return failure.nodeId === "asset-source-review"
+    || (["assets", "asset-source-review"].includes(failure.nodeId)
+      && /源素材视觉预检|试片未通过|试片审查暂未完成/.test(failure.technicalDetail ?? ""));
 }
 
 function runningNodeLabel(run: StudioRunDetail): string {

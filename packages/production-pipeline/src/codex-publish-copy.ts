@@ -98,7 +98,7 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
         ...request,
         ...(revision ? { revision } : {}),
       }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => this.client.runTaskDetailed("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
@@ -113,6 +113,7 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
         },
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
+        ...(validationFailure ? { validationFailure } : {}),
       }, requestId, session),
       validate: validatePublishCopy,
       ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),

@@ -11,7 +11,7 @@ import {
 } from "./model-fallback.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
-export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v6|role-audit-v1|visual-review-validator-v2";
+export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v11|role-audit-v1|visual-review-validator-v4|evidence-state-v2|pilot-scope-v2";
 
 export interface VisualReviewFramePayload {
   timecodeMs: number;
@@ -25,7 +25,7 @@ export interface VisualReviewMediaPayload {
   durationMs: number;
   frames: VisualReviewFramePayload[];
   sampling?: {
-    mode: "scene_triplets" | "hook_and_scene_midpoints" | "scene_change_keyframes";
+    mode: "scene_triplets" | "scene_sequence" | "hook_and_scene_midpoints" | "scene_change_keyframes";
     sceneCount?: number;
     coveredScenePositions?: number[];
     missingScenePositions?: number[];
@@ -37,14 +37,25 @@ export interface VisualReviewAgentInput {
   videoPath?: string;
   assetPlanPath?: string;
   reviewStage?: "source_assets" | "rendered_video";
+  scenePositions?: number[];
   runRoot: string;
   scriptPath?: string;
   directorPlanPath?: string;
   renderManifestPath?: string;
   requestId?: string;
   selectedModelId?: string;
+  preparedMedia?: VisualReviewMediaPayload;
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
   agentLoopCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
+  independentReviewCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
+}
+
+export interface IndependentVisualReviewExecution {
+  providerId: string;
+  modelId: string;
+  output: VisualReviewReport;
+  trace?: CodexTaskExecution<VisualReviewReport>["trace"];
+  agentLoop?: AgentLoopTrace;
 }
 
 export interface VisualReviewMediaPreprocessor {
@@ -53,12 +64,15 @@ export interface VisualReviewMediaPreprocessor {
     assetPlanPath?: string;
     runRoot: string;
     renderManifestPath?: string;
+    scenePositions?: number[];
+    scriptPath?: string;
   }): Promise<VisualReviewMediaPayload>;
 }
 
 export type VisualReviewExecution = CodexTaskExecution<VisualReviewReport> & {
   requestId?: string;
   inspectedDurationMs?: number;
+  evidenceSnapshotId?: string;
   sampling?: VisualReviewMediaPayload["sampling"];
   executedProviderId?: string;
   executedProviderLabel?: string;
@@ -66,12 +80,18 @@ export type VisualReviewExecution = CodexTaskExecution<VisualReviewReport> & {
   fallbackFromProviderId?: string;
   fallbackReason?: string;
   attemptedModelIds?: string[];
+  independentReviews?: IndependentVisualReviewExecution[];
 };
 
 export interface VisualReviewFinding {
   timecodeMs: number;
+  startTimecodeMs: number;
+  endTimecodeMs: number;
   scenePosition?: number;
-  targetNodeId?: "visual-direction" | "assets";
+  targetNodeId?: "script" | "visual-direction" | "assets";
+  evidenceStatus: "satisfied" | "failed" | "not_observed" | "not_applicable";
+  evidenceFrameSha256: string | null;
+  nextAction: "inspect_existing_media" | "replan_upstream" | "rework_asset" | "none";
   category: "composition" | "continuity" | "pacing" | "legibility" | "safety" | "other";
   severity: "info" | "warning" | "critical";
   description: string;
@@ -85,6 +105,31 @@ export interface VisualReviewReport {
   findings: VisualReviewFinding[];
   confidence: number;
   recommendation: "approve" | "revise" | "reject";
+  reviewScope?: VisualReviewScope;
+  independentReviews?: Array<{
+    providerId: string;
+    modelId: string;
+    report: VisualReviewReport;
+  }>;
+}
+
+export interface VisualReviewScope {
+  reviewStage: "source_assets" | "rendered_video";
+  evidenceId: string;
+  sourceNodeIds: string[];
+  sourceArtifactIds: string[];
+  scenePositions: number[];
+  timelineDurationMs: number;
+  actualModels: Array<{
+    providerId: string;
+    modelId: string;
+    evidenceId?: string;
+    producerContractDigest?: string;
+    auditContractDigest?: string;
+    producerCompleted?: boolean;
+    auditCompleted?: boolean;
+  }>;
+  current?: boolean;
 }
 
 export interface VisualReviewAgent {
@@ -110,6 +155,13 @@ export interface FallbackVisualReviewAgentOptions {
   primaryProviderId: string;
   backups: Array<{ agent: VisualReviewAgent; label?: string; providerId: string }>;
   shouldFallback?: (error: unknown) => boolean;
+}
+
+export interface IndependentDualVisualReviewAgentOptions {
+  primary: VisualReviewAgent;
+  secondary: VisualReviewAgent;
+  media: VisualReviewMediaPreprocessor;
+  sourceAgent?: VisualReviewAgent;
 }
 
 export class VisualReviewFallbackError extends Error {
@@ -234,6 +286,218 @@ export class FallbackVisualReviewAgent implements VisualReviewAgent {
   }
 }
 
+// 最终成片由两个不同模型各自完成首评和独立审计；这里只做确定性汇总，不引入第三个融合模型。
+export class IndependentDualVisualReviewAgent implements VisualReviewAgent {
+  readonly id: string;
+  readonly modelId: string;
+
+  constructor(private readonly options: IndependentDualVisualReviewAgentOptions) {
+    if (options.primary.id === options.secondary.id || options.primary.modelId === options.secondary.modelId) {
+      throw new Error("Independent visual review requires two distinct providers and models.");
+    }
+    this.id = options.primary.id;
+    this.modelId = options.primary.modelId;
+  }
+
+  async review(input: VisualReviewAgentInput): Promise<VisualReviewReport> {
+    return (await this.reviewDetailed(input)).output;
+  }
+
+  async reviewDetailed(input: VisualReviewAgentInput): Promise<VisualReviewExecution> {
+    if (input.reviewStage === "source_assets") {
+      return runVisualReviewAgent(this.options.sourceAgent ?? this.options.primary, input);
+    }
+    const preparedMedia = input.preparedMedia ?? await this.options.media.prepare(input);
+    const evidenceSnapshotId = visualEvidenceSnapshotId(preparedMedia);
+    const agents = [this.options.primary, this.options.secondary];
+    const settled = await Promise.allSettled(agents.map(async (agent) => {
+      const resultCheckpoint = input.independentReviewCheckpointForModel?.(agent.modelId);
+      const cached = resultCheckpoint
+        ? cachedIndependentVisualReview(
+            await resultCheckpoint.load(),
+            agent,
+            evidenceSnapshotId,
+            preparedMedia,
+            input.scenePositions,
+          )
+        : undefined;
+      if (cached) return cached;
+      const execution = await runVisualReviewAgent(agent, {
+        ...input,
+        preparedMedia,
+        selectedModelId: agent.modelId,
+        ...(input.requestId ? { requestId: `${input.requestId}:${agent.id}` } : {}),
+        ...(input.agentLoopCheckpointForModel
+          ? { agentLoopCheckpoint: input.agentLoopCheckpointForModel(agent.modelId) }
+          : {}),
+      });
+      const validated = {
+        ...execution,
+        output: validateVisualReviewReport(
+          execution.output,
+          preparedMedia.durationMs,
+          input.scenePositions,
+          preparedMedia.frames,
+        ),
+      };
+      await resultCheckpoint?.save({
+        version: "video-factory/independent-visual-review-result-v1",
+        contractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+        providerId: agent.id,
+        modelId: agent.modelId,
+        evidenceSnapshotId,
+        execution: validated,
+      });
+      return validated;
+    }));
+    const failures = settled.flatMap((result, index) => result.status === "rejected"
+      ? [{ providerId: agents[index]!.id, modelId: agents[index]!.modelId, error: result.reason }]
+      : []);
+    const completedReviews = settled.flatMap((result, index): IndependentVisualReviewExecution[] => {
+      if (result.status !== "fulfilled") return [];
+      return [{
+        providerId: result.value.executedProviderId ?? result.value.trace?.providerId ?? agents[index]!.id,
+        modelId: result.value.executedModelId ?? result.value.trace?.modelId ?? agents[index]!.modelId,
+        output: result.value.output,
+        ...(result.value.trace ? { trace: result.value.trace } : {}),
+        ...(result.value.agentLoop ? { agentLoop: result.value.agentLoop } : {}),
+      }];
+    });
+    if (failures.length) {
+      throw new IndependentVisualReviewError(failures, completedReviews);
+    }
+    const executions = settled.map((result) => {
+      if (result.status !== "fulfilled") throw new Error("Independent visual review branch did not complete.");
+      return result.value;
+    });
+    const independentReviews = executions.map((execution, index): IndependentVisualReviewExecution => ({
+      providerId: execution.executedProviderId ?? execution.trace?.providerId ?? agents[index]!.id,
+      modelId: execution.executedModelId ?? execution.trace?.modelId ?? agents[index]!.modelId,
+      output: execution.output,
+      ...(execution.trace ? { trace: execution.trace } : {}),
+      ...(execution.agentLoop ? { agentLoop: execution.agentLoop } : {}),
+    }));
+    if (new Set(independentReviews.map((review) => review.providerId)).size !== 2
+      || new Set(independentReviews.map((review) => review.modelId)).size !== 2) {
+      throw new IndependentVisualReviewError([
+        {
+          providerId: independentReviews[1]?.providerId ?? agents[1]!.id,
+          modelId: independentReviews[1]?.modelId ?? agents[1]!.modelId,
+          error: new Error("最终审片的两个分支落到了同一个实际 Provider 或模型，不能作为独立双审。"),
+        },
+      ], independentReviews);
+    }
+    return {
+      output: mergeIndependentVisualReviews(independentReviews),
+      inspectedDurationMs: preparedMedia.durationMs,
+      evidenceSnapshotId,
+      ...(preparedMedia.sampling ? { sampling: preparedMedia.sampling } : {}),
+      attemptedModelIds: independentReviews.map((review) => review.modelId),
+      independentReviews,
+    };
+  }
+}
+
+function visualEvidenceSnapshotId(media: VisualReviewMediaPayload): string {
+  return createHash("sha256").update(JSON.stringify({
+    contractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+    durationMs: media.durationMs,
+    frames: media.frames.map(({ timecodeMs, sha256, scenePosition, phase }, index) => ({
+      frameIndex: index + 1,
+      timecodeMs,
+      sha256,
+      ...(scenePosition !== undefined ? { scenePosition } : {}),
+      ...(phase ? { phase } : {}),
+    })),
+    sampling: media.sampling,
+    reviewContext: media.reviewContext,
+  })).digest("hex");
+}
+
+function cachedIndependentVisualReview(
+  value: unknown,
+  agent: VisualReviewAgent,
+  evidenceSnapshotId: string,
+  media: VisualReviewMediaPayload,
+  scenePositions?: readonly number[],
+): VisualReviewExecution | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const cache = value as Record<string, unknown>;
+  if (cache.version !== "video-factory/independent-visual-review-result-v1"
+    || cache.contractVersion !== VISUAL_REVIEW_AGENT_CONTRACT_VERSION
+    || cache.providerId !== agent.id
+    || cache.modelId !== agent.modelId
+    || cache.evidenceSnapshotId !== evidenceSnapshotId
+    || typeof cache.execution !== "object"
+    || cache.execution === null
+    || Array.isArray(cache.execution)) return undefined;
+  const execution = cache.execution as VisualReviewExecution;
+  try {
+    return {
+      ...execution,
+      output: validateVisualReviewReport(execution.output, media.durationMs, scenePositions, media.frames),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export class IndependentVisualReviewError extends Error {
+  constructor(
+    readonly failures: Array<{ providerId: string; modelId: string; error: unknown }>,
+    readonly completedReviews: IndependentVisualReviewExecution[] = [],
+  ) {
+    super(
+      `最终双模型审片尚未完成：${failures.map((failure) => `${failure.modelId} ${publicModelFailure(failure.error)}`).join("；")}。重试只会继续未完成的模型分支。`,
+      failures.at(-1)?.error instanceof Error ? { cause: failures.at(-1)!.error } : undefined,
+    );
+    this.name = "IndependentVisualReviewError";
+  }
+}
+
+function mergeIndependentVisualReviews(reviews: IndependentVisualReviewExecution[]): VisualReviewReport {
+  const scores = {
+    composition: Math.min(...reviews.map((review) => review.output.scores.composition)),
+    continuity: Math.min(...reviews.map((review) => review.output.scores.continuity)),
+    pacing: Math.min(...reviews.map((review) => review.output.scores.pacing)),
+    legibility: Math.min(...reviews.map((review) => review.output.scores.legibility)),
+    safety: Math.min(...reviews.map((review) => review.output.scores.safety)),
+  };
+  const findings = deduplicateVisualReviewFindings(reviews.flatMap((review) => review.output.findings));
+  const requestedRecommendation = reviews.some((review) => review.output.recommendation === "reject")
+    ? "reject"
+    : reviews.some((review) => review.output.recommendation === "revise") ? "revise" : "approve";
+  const confidence = Math.min(...reviews.map((review) => review.output.confidence));
+  return {
+    version: "video-factory/visual-review-v1",
+    summary: reviews.map((review) => `${review.modelId}：${review.output.summary}`).join("；"),
+    scores,
+    findings,
+    confidence,
+    recommendation: normalizeRecommendation(requestedRecommendation, scores, findings, confidence),
+  };
+}
+
+function deduplicateVisualReviewFindings(findings: VisualReviewFinding[]): VisualReviewFinding[] {
+  const seen = new Set<string>();
+  return findings.filter((finding) => {
+    const key = JSON.stringify({
+      startTimecodeMs: finding.startTimecodeMs,
+      endTimecodeMs: finding.endTimecodeMs,
+      scenePosition: finding.scenePosition,
+      targetNodeId: finding.targetNodeId,
+      evidenceStatus: finding.evidenceStatus,
+      evidenceFrameSha256: finding.evidenceFrameSha256,
+      category: finding.category,
+      description: finding.description,
+      suggestion: finding.suggestion,
+    });
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export class CodexVisualReviewAgent implements VisualReviewAgent {
   readonly id: string;
   readonly modelId: string;
@@ -254,13 +518,20 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
       throw new Error(`Selected model '${input.selectedModelId}' is not available for visual review.`);
     }
     const { payload, sampling } = await this.preparePayload(input);
+    const evidenceSnapshotId = visualEvidenceSnapshotId(payload);
     const client = this.options.client;
     const requestId = normalizedRequestId(input.requestId);
     if (typeof client.runTaskDetailed !== "function") {
       return {
-        output: validateVisualReviewReport(await client.runTask("visual-review", payload, requestId), payload.durationMs),
+        output: validateVisualReviewReport(
+          await client.runTask("visual-review", payload, requestId),
+          payload.durationMs,
+          input.scenePositions,
+          payload.frames,
+        ),
         ...(requestId ? { requestId } : {}),
         inspectedDurationMs: payload.durationMs,
+        evidenceSnapshotId,
         ...(sampling ? { sampling } : {}),
       };
     }
@@ -273,12 +544,16 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
       role: "视觉审片员",
       contractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
       criteria: [
-        "每条问题必须由对应时间码的画面证据支持，不得把稀疏关键帧看不到的声音或连续运动当作已证事实",
+        "每条问题必须由对应时间码的画面证据支持；scene_sequence 的相邻时间点可以支持可见状态推进与近似保持时长，稀疏关键帧看不到的声音或连续运动不得当作已证事实",
         "逐项核对脚本可见动作、导演成功条件、镜头时长与渲染清单，不得只凭整体观感打分",
         "核心主体、物体或动作对象与对应镜头要求不符时必须判定返修；环境相似不能代替目标物体，并须定位到具体镜头与 assets 或 visual-direction",
-        "除脚本主字幕和渲染清单明确的 AIGC 披露外，任何可读字、标签、比例标记或水印都必须判定返修并定位到具体镜头与责任节点",
-        "当 reviewContext.reviewStage=source_assets 时，画面尚未叠加主字幕或 AIGC 披露；除导演明确选择 editorial_card 的正式内容外，任何可读文字、水印、比例标记或内部工作流术语都必须阻断进入渲染",
-        "构图、连续性、节奏、可读性和安全五项评分必须与 findings 的严重程度及 recommendation 自洽",
+        "先区分真实来源原生文字、正式 editorial_card、render manifest 明确的后期文字，以及生成伪标签/乱码/水印/内部术语；前三类按准确性与可读性审查，后一类必须阻断",
+        "模糊不可读且与核心内容无关的痕迹只能标为 not_observed 并补查已有素材，不得凭猜测直接要求付费返工",
+        "当 reviewContext.reviewStage=source_assets 时，画面尚未叠加主字幕或 AIGC 披露；正式 editorial_card 和可追溯来源原生文字可以存在，生成伪文字、水印、比例标记或内部工作流术语必须阻断进入渲染",
+        "当 reviewContext.pilotScenePositions 存在时，只审这些已生成镜头的主体、动作、构图与禁文字条件；其余镜头尚未付费生成，不得把它们的缺帧判为缺陷，也不得宣称全片连续性或整体节奏已经通过",
+        "构图、连续性、节奏、可读性和安全五项评分必须与 findings 的 evidenceStatus、严重程度及 recommendation 自洽；通过门槛为五项均不低于 75 且 confidence 不低于 0.7",
+        "每条 finding 必须给出镜号、证据帧或时间范围和下一步；failed 才能进入上游重规划或素材返工，not_observed 只能先补查已有素材",
+        "核心论证依赖同一人物、物件或空间，而当前 Provider 无参考图、母片复用等能力无法保证跨镜一致时，必须把方案缺陷指向 visual-direction 或 script 并使用 replan_upstream；上游免责声明不能将其降级为 satisfied，也不得只指向 assets 重复付费",
         "抽样覆盖不足、缺帧或上下文缺失必须降低 confidence 并明确证据边界，不得虚构画面细节",
         "审片报告只判断当前成片并给出可执行修复建议；不得擅自改写脚本、导演方案或掩盖需要人工终审的问题",
       ],
@@ -288,13 +563,14 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
         ...payload,
         ...(revision ? { revision } : {}),
       }, operation.requestId, this.options.producerSessionMode === "stateless" ? undefined : operation.session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId: auditRequestId, session }) => runAuditTask("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId: auditRequestId }) => runAuditTask("role-audit", {
         role,
         iteration,
         criteria,
         context: visualReviewAuditContext(payload),
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
+        ...(validationFailure ? { validationFailure } : {}),
         images: payload.frames.map((frame, index) => ({
           imageIndex: index + 1,
           sha256: frame.sha256,
@@ -303,14 +579,16 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
           ...(frame.timecodeMs !== undefined ? { timecodeMs: frame.timecodeMs } : {}),
           ...(frame.phase ? { phase: frame.phase } : {}),
         })),
-      }, auditRequestId, session),
-      validate: (value) => validateVisualReviewReport(value, payload.durationMs),
+      // 审计请求已经自包含候选、证据帧与合同；不要求 Provider 创建可续写会话。
+      }, auditRequestId, undefined),
+      validate: (value) => validateVisualReviewReport(value, payload.durationMs, input.scenePositions, payload.frames),
       ...(checkpoint ? { checkpoint } : {}),
     });
     return {
       output: execution.output,
       ...(requestId ? { requestId } : {}),
       inspectedDurationMs: payload.durationMs,
+      evidenceSnapshotId,
       ...(sampling ? { sampling } : {}),
       ...(execution.trace ? { trace: execution.trace } : {}),
       ...(execution.agentLoop ? { agentLoop: execution.agentLoop } : {}),
@@ -321,7 +599,7 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
     payload: VisualReviewMediaPayload;
     sampling?: VisualReviewMediaPayload["sampling"];
   }> {
-    const media = await this.options.media.prepare(input);
+    const media = input.preparedMedia ?? await this.options.media.prepare(input);
     const { sampling, ...boundedMedia } = media;
     const reviewContext = await buildReviewContext(input, sampling);
     return {
@@ -346,6 +624,7 @@ function visualReviewAuditContext(payload: VisualReviewMediaPayload): Record<str
       owns: ["summary", "scores", "findings", "confidence", "recommendation"],
       doesNotOwn: ["脚本内容", "导演方案", "素材选择", "配音", "渲染产物"],
     },
+    currentRoleContract: "必须区分上游方案不可执行与单次素材偶发未命中。上游免责声明不能把不可执行方案变成可执行方案；前者必须回流 script 或 visual-direction 并 replan_upstream，不得只指向 assets 重复付费。",
     evidence: {
       durationMs: payload.durationMs,
       frames: payload.frames.map(({ jpegBase64: _jpegBase64, ...frame }) => frame),
@@ -441,11 +720,21 @@ async function buildReviewContext(
   if (!script && !directorPlan && !renderManifest && !assetPlan && !sampling && !input.reviewStage) return undefined;
   const context = {
     ...(input.reviewStage ? { reviewStage: input.reviewStage } : {}),
+    ...(input.scenePositions ? { pilotScenePositions: input.scenePositions } : {}),
+    ...(input.reviewStage === "source_assets" ? { renderConform: {
+      policy: "scale_to_fill_center_crop",
+      outputAspectRatio: "9:16",
+      reviewRule: "A minor source aspect-ratio difference is normalized before render and is not itself an asset defect. Only require asset rework when the deterministic center crop would remove a required subject, action, or text-safe area.",
+    } } : {}),
     ...(sampling ? { sampling: {
       ...sampling,
-      phases: sampling.mode === "scene_triplets" ? ["opening", "middle", "closing"] : sampling.mode === "hook_and_scene_midpoints" ? ["hook", "midpoint"] : ["keyframe"],
+      phases: sampling.mode === "scene_triplets" || sampling.mode === "scene_sequence"
+        ? ["opening", "middle", "closing"]
+        : sampling.mode === "hook_and_scene_midpoints" ? ["hook", "midpoint"] : ["keyframe"],
       evidenceBoundary: sampling.mode === "scene_triplets"
         ? "Triplets can show state progression; audio and frame-to-frame smoothness are reviewed separately."
+        : sampling.mode === "scene_sequence"
+          ? "Dense ordered samples can support visible state progression and approximate hold timing; frames between samples, audio, and absolute motion smoothness are reviewed separately."
         : "Sparse samples do not prove per-scene state progression, audio, or frame-to-frame smoothness.",
     } } : {}),
     ...(script ? { script: compactScript(script) } : {}),
@@ -520,7 +809,12 @@ function pick(value: Record<string, unknown>, keys: string[]): Record<string, un
   return Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]));
 }
 
-export function validateVisualReviewReport(value: unknown, durationMs: number): VisualReviewReport {
+export function validateVisualReviewReport(
+  value: unknown,
+  durationMs: number,
+  scenePositions?: readonly number[],
+  evidenceFrames?: readonly VisualReviewFramePayload[],
+): VisualReviewReport {
   const report = record(value, "visual review");
   if (report.version !== "video-factory/visual-review-v1") throw new Error("Visual review version is invalid.");
   const scores = record(report.scores, "visual review scores");
@@ -536,17 +830,60 @@ export function validateVisualReviewReport(value: unknown, durationMs: number): 
     const finding = record(item, `visual review finding ${index}`);
     const timecodeMs = finding.timecodeMs;
     if (!Number.isInteger(timecodeMs) || Number(timecodeMs) < 0 || Number(timecodeMs) > durationMs) throw new Error("Visual review finding timecode is invalid.");
+    const startTimecodeMs = finding.startTimecodeMs;
+    const endTimecodeMs = finding.endTimecodeMs;
+    if (!Number.isInteger(startTimecodeMs) || !Number.isInteger(endTimecodeMs)
+      || Number(startTimecodeMs) < 0 || Number(endTimecodeMs) > durationMs
+      || Number(startTimecodeMs) > Number(timecodeMs) || Number(timecodeMs) > Number(endTimecodeMs)) {
+      throw new Error("Visual review finding time range is invalid.");
+    }
     const category = enumValue(finding.category, ["composition", "continuity", "pacing", "legibility", "safety", "other"] as const, "category");
     const severity = enumValue(finding.severity, ["info", "warning", "critical"] as const, "severity");
     const scenePosition = finding.scenePosition;
     if (!Number.isInteger(scenePosition) || Number(scenePosition) < 1) {
       throw new Error("Visual review finding scene position is invalid.");
     }
-    const targetNodeId = enumValue(finding.targetNodeId, ["visual-direction", "assets"] as const, "targetNodeId");
+    if (scenePositions && !scenePositions.includes(Number(scenePosition))) {
+      throw new Error("试片报告包含未检查镜头的问题，请重新检查当前试片。");
+    }
+    const targetNodeId = enumValue(finding.targetNodeId, ["script", "visual-direction", "assets"] as const, "targetNodeId");
+    const evidenceStatus = enumValue(
+      finding.evidenceStatus,
+      ["satisfied", "failed", "not_observed", "not_applicable"] as const,
+      "evidenceStatus",
+    );
+    const nextAction = enumValue(
+      finding.nextAction,
+      ["inspect_existing_media", "replan_upstream", "rework_asset", "none"] as const,
+      "nextAction",
+    );
+    const evidenceFrameSha256 = finding.evidenceFrameSha256;
+    if (evidenceFrameSha256 !== null
+      && (typeof evidenceFrameSha256 !== "string" || !/^[a-f0-9]{64}$/.test(evidenceFrameSha256))) {
+      throw new Error("Visual review finding evidence frame is invalid.");
+    }
+    if (evidenceFrameSha256 !== null && evidenceFrames) {
+      const matchingFrames = evidenceFrames.filter((candidate) => (
+        candidate.sha256 === evidenceFrameSha256
+        && candidate.timecodeMs === Number(timecodeMs)
+        && candidate.scenePosition === Number(scenePosition)
+        && candidate.timecodeMs >= Number(startTimecodeMs)
+        && candidate.timecodeMs <= Number(endTimecodeMs)
+      ));
+      if (matchingFrames.length !== 1) {
+        throw new Error("Visual review finding evidence frame is invalid.");
+      }
+    }
+    assertFindingEvidenceContract(evidenceStatus, severity, nextAction);
     return {
       timecodeMs: Number(timecodeMs),
+      startTimecodeMs: Number(startTimecodeMs),
+      endTimecodeMs: Number(endTimecodeMs),
       scenePosition: Number(scenePosition),
       targetNodeId,
+      evidenceStatus,
+      evidenceFrameSha256,
+      nextAction,
       category,
       severity,
       description: text(finding.description, "description"),
@@ -576,15 +913,37 @@ function normalizeRecommendation(
   findings: VisualReviewFinding[],
   confidence: number,
 ): VisualReviewReport["recommendation"] {
-  if (requested === "reject" || findings.some((finding) => finding.severity === "critical")) return "reject";
+  if (requested === "reject" || findings.some((finding) => finding.evidenceStatus === "failed" && finding.severity === "critical")) return "reject";
   const minimumScore = Math.min(...Object.values(scores));
   if (
     requested === "revise"
-    || findings.some((finding) => finding.severity === "warning")
+    || findings.some((finding) => finding.evidenceStatus === "failed" || finding.evidenceStatus === "not_observed")
     || minimumScore < 75
     || confidence < 0.7
   ) return "revise";
   return "approve";
+}
+
+function assertFindingEvidenceContract(
+  status: VisualReviewFinding["evidenceStatus"],
+  severity: VisualReviewFinding["severity"],
+  nextAction: VisualReviewFinding["nextAction"],
+): void {
+  if (status === "failed") {
+    if (severity === "info" || (nextAction !== "replan_upstream" && nextAction !== "rework_asset")) {
+      throw new Error("Visual review failed evidence must describe actionable rework.");
+    }
+    return;
+  }
+  if (status === "not_observed") {
+    if (severity !== "info" || nextAction !== "inspect_existing_media") {
+      throw new Error("Visual review not_observed evidence must request inspection of existing media.");
+    }
+    return;
+  }
+  if (severity !== "info" || nextAction !== "none") {
+    throw new Error("Visual review non-failing evidence cannot request rework.");
+  }
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {

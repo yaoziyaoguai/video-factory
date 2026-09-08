@@ -77,7 +77,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         ...request,
         ...(revision ? { revision } : {}),
       }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => this.client.runTaskDetailed("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
@@ -92,6 +92,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         },
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
+        ...(validationFailure ? { validationFailure } : {}),
       }, requestId, session),
       validate: (value) => parseSeriesRoadmapOutput(value, series.pillars, startEpisodeNumber, count),
       ...(this.checkpointDirectory ? {
@@ -149,7 +150,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         ...request,
         ...(revision ? { revision } : {}),
       }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, requestId, session }) => this.client.runTaskDetailed("role-audit", {
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session }) => this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
@@ -164,6 +165,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         },
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
+        ...(validationFailure ? { validationFailure } : {}),
       }, requestId, session),
       validate: (value) => {
         const parsed = parseSeriesRoadmapOutput(value, series.pillars, episode.episodeNumber, 1);
