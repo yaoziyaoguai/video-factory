@@ -152,7 +152,10 @@ export function creatorViewId(nodeId: string): string {
 export function isCreatorTopLevelField(nodeId: string, key: string, value: unknown): boolean {
   const viewId = creatorViewId(nodeId);
   const policy = TOP_LEVEL_FIELDS[viewId];
-  if (!policy) return isCreatorNestedField(key);
+  if (!policy) {
+    // 未登记专属视图的节点（如 joint-v1 创作规划）：输入里的标准容器仍按输入视图展示。
+    return (nodeId.endsWith("-input") && INPUT_CONTAINERS.has(key) && isRecord(value)) || isCreatorNestedField(key);
+  }
   if (policy.has(key)) return true;
   return nodeId.endsWith("-input") && INPUT_CONTAINERS.has(key) && isRecord(value);
 }

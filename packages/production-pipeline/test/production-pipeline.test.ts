@@ -118,6 +118,68 @@ class FakeWorker {
   }
 }
 
+async function uncertainPaidVoiceFixture(prefix: string) {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), prefix));
+  let voiceCalls = 0;
+  class UnknownOutcomeVoiceWorker extends FakeWorker {
+    override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+      const response = await super.run(request);
+      if (request.capability === "voice.synthesize") {
+        voiceCalls += 1;
+        if (voiceCalls === 1) {
+          return {
+            ...response,
+            status: "failed",
+            error: { code: "WORKER_REQUEST_FAILED", message: "voice provider outcome is unknown" },
+            artifacts: [],
+          };
+        }
+      }
+      return response;
+    }
+  }
+  const worker = new UnknownOutcomeVoiceWorker();
+  const subject = new pipeline.ProductionPipeline({
+    workspaceRoot,
+    worker,
+    providerRuntimeMetadata: [{
+      id: "minimax-tts-v1",
+      label: "MiniMax 中文声音演员",
+      modelId: "speech-2.8-turbo",
+      transport: "http_api",
+      billing: "metered",
+      approvalPolicy: "automatic",
+      estimatedCostCny: 0.1,
+      maxAttempts: 1,
+    }],
+  });
+  const failed = await subject.start({
+    ...brief,
+    providers: { ...brief.providers, voice: "minimax-tts-v1" },
+    voiceDirection: { ...brief.voiceDirection, profileId: "minimax:female-chengshu" },
+  });
+  const failedVoice = failed.nodeRuns.find((node) => node.nodeId === "voice");
+  assert.equal(failedVoice?.outcomeUncertain, true);
+  assert.ok(failedVoice?.operationRequestId);
+  failedVoice.spendPlan = {
+    id: "legacy-voice-spend-plan",
+    nodeId: "voice",
+    inputVersionIds: [],
+    providerId: "minimax-tts-v1",
+    modelId: "speech-2.8-turbo",
+    estimatedCostCny: 0.1,
+    maxCostCny: 0.1,
+    maxAttempts: 1,
+    createdAt: "2026-09-09T00:00:00.000Z",
+  };
+  await writeFile(
+    path.join(workspaceRoot, "runs", failed.id, "run.json"),
+    `${JSON.stringify(failed, null, 2)}\n`,
+    "utf8",
+  );
+  return { subject, worker, failed, failedVoice };
+}
+
 class GeneratedScriptWorker extends FakeWorker {
   override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
     const response = await super.run(request);
@@ -540,7 +602,7 @@ describe("ProductionPipeline", () => {
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "glm-5.3-flash");
     assert.equal(
       waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/visual-review-v13",
+      "video-factory/visual-review-v14",
     );
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.billing, "subscription");
@@ -1201,9 +1263,11 @@ describe("ProductionPipeline", () => {
     assert.equal(reviewedAgain.id, waiting.id);
     assert.equal(reviewedAgain.status, "needs_human");
     assert.equal(reviewedAgain.decisions.at(-1)?.action, "request_changes");
+    // BG-07 合同：assets 失效（scene REUSE 改写 asset plan）后 voice 是其后代，必须重跑
+    // （TTS 自动执行、后台记账，不弹现金审批）；render/review 随后完整复验。
     assert.deepEqual(worker.calls.map((call) => call.capability), [
       "script.draft", "asset.prepare", "voice.synthesize", "video.render", "quality.review",
-      "video.render", "quality.review",
+      "voice.synthesize", "video.render", "quality.review",
     ]);
     const revisedPlanPath = String((reviewedAgain.nodeRuns.find((node) => node.nodeId === "assets")?.output as Record<string, unknown>).assetPlanPath);
     const revisedPlan = JSON.parse(await readFile(revisedPlanPath, "utf8")) as {
@@ -1222,11 +1286,11 @@ describe("ProductionPipeline", () => {
     );
     assert.equal(effectiveAssets?.artifactIds.includes(sceneOneMedia.id), true);
     assert.equal(effectiveAssets?.artifactIds.includes(sceneTwoMedia.id), false);
+    // BG-07：voice 是 assets 后代，随 scene revision 失效并重新合成（新版本、新 receipt）。
     const voiceAfter = reviewedAgain.nodeRuns.find((node) => node.nodeId === "voice")!;
-    assert.equal(voiceAfter.outputState?.versions.length, 1);
-    assert.equal(voiceAfter.outputState?.effectiveVersionId, voiceBefore.outputState?.effectiveVersionId);
-    assert.deepEqual(voiceAfter.artifactIds, voiceBefore.artifactIds);
-    assert.deepEqual(voiceAfter.executionReceipt, voiceBefore.executionReceipt);
+    assert.equal(voiceAfter.outputState?.versions.length, 2);
+    assert.notEqual(voiceAfter.outputState?.effectiveVersionId, voiceBefore.outputState?.effectiveVersionId);
+    assert.notDeepEqual(voiceAfter.executionReceipt, voiceBefore.executionReceipt);
     assert.equal(reviewedAgain.nodeRuns.find((node) => node.nodeId === "render")?.outputState?.versions.length, 2);
     assert.equal(reviewedAgain.nodeRuns.find((node) => node.nodeId === "visual-review")?.outputState?.versions.length, 2);
 
@@ -1945,6 +2009,7 @@ describe("ProductionPipeline", () => {
     });
     const original = await subject.start({
       ...brief,
+      durationRange: { minSeconds: 20, maxSeconds: 34 },
       reviewMode: "automatic",
       providers: {
         ...brief.providers,
@@ -1998,6 +2063,14 @@ describe("ProductionPipeline", () => {
       [screenwriterInputs[1]?.brief.visualPlan, directorInputs[1]?.brief.visualPlan],
       [visualPlan, visualPlan],
     );
+    assert.deepEqual(screenwriterInputs.map((input) => input.brief.durationRange), [
+      { minSeconds: 20, maxSeconds: 34 },
+      { minSeconds: 20, maxSeconds: 34 },
+    ]);
+    assert.deepEqual(directorInputs.map((input) => input.brief.durationRange), [
+      { minSeconds: 20, maxSeconds: 34 },
+      { minSeconds: 20, maxSeconds: 34 },
+    ]);
     assert.notEqual(screenwriterInputs[0]?.agentLoopCheckpoint?.key, screenwriterInputs[1]?.agentLoopCheckpoint?.key);
     assert.notEqual(directorInputs[0]?.agentLoopCheckpoint?.key, directorInputs[1]?.agentLoopCheckpoint?.key);
     assert.notEqual(publishInputs[0]?.agentLoopCheckpoint?.key, publishInputs[1]?.agentLoopCheckpoint?.key);
@@ -2827,6 +2900,226 @@ describe("ProductionPipeline", () => {
     assert.equal(persistedPlan.profileRationale, "generated-by-glm-5.3");
   });
 
+  it("reuses a verified unchanged director plan before calling the director model", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-director-rework-reuse-"));
+    class ReworkScriptWorker extends FakeWorker {
+      scriptCalls = 0;
+
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const response = await super.run(request);
+        if (request.capability !== "script.draft") return response;
+        this.scriptCalls += 1;
+        if (this.scriptCalls < 3) return response;
+        const scriptPath = String(response.output?.scriptPath);
+        const script = JSON.parse(await readFile(scriptPath, "utf8")) as { scenes: Array<Record<string, unknown>> };
+        if (this.scriptCalls === 3) script.scenes[0]!.narration = "第一幕。";
+        if (this.scriptCalls === 6) script.scenes[0]!.visual_prompt = "真实变化后的城市夜景";
+        const content = JSON.stringify(script);
+        await writeFile(scriptPath, content, "utf8");
+        response.artifacts[0] = {
+          ...response.artifacts[0]!,
+          sha256: createHash("sha256").update(content).digest("hex"),
+          sizeBytes: Buffer.byteLength(content),
+        };
+        return response;
+      }
+    }
+    const worker = new ReworkScriptWorker();
+    let directorCalls = 0;
+    const directorAgent: pipeline.VisualDirectorAgent = {
+      id: "api-visual-director-v1",
+      modelId: "gpt-5.6-terra",
+      plan: async (input) => {
+        directorCalls += 1;
+        return {
+          version: "video-factory/director-plan-v1",
+          requestedProfileId: input.brief.requestedProfileId,
+          resolvedProfileId: "geometric-control",
+          profileRationale: "使用本地编辑卡保持视觉结构。",
+          visualBible: {
+            narrativeApproach: "逐镜说明",
+            pacing: "均匀",
+            composition: "稳定中景",
+            camera: "固定机位",
+            color: "自然色",
+            continuity: "同一时段",
+            sound: "旁白优先",
+          },
+          shots: input.scenes.map((scene) => ({
+            scenePosition: scene.position,
+            narrativeRole: "解释",
+            authenticityPolicy: "illustrative",
+            preferredProviderId: "local-editorial-v1",
+            deliveryType: "editorial_card",
+            alternativeProviderIds: [],
+            temporalBeats: [`[0s-${scene.duration}s] 保持构图`],
+            query: scene.visualPrompt,
+            generationPrompt: scene.visualPrompt,
+            rationale: "本地编辑卡即可交付。",
+            continuityNote: "保持相同版式。",
+            confidence: 0.9,
+            estimatedCostCny: 0,
+          })),
+        };
+      },
+    };
+    const assetProviders: pipeline.VisualAssetProviderCapability[] = [{
+      id: "local-editorial-v1",
+      label: "本地编辑卡片",
+      billing: "free",
+      modes: ["本地"],
+      deliveryTypes: ["editorial_card"],
+    }];
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      directorAgent,
+      assetProviders,
+    });
+    const originalSource = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+    });
+    const sourceBriefOutput = originalSource.nodeRuns.find((node) => node.nodeId === "brief")?.output as pipeline.ProductionBrief;
+    const effectiveTitle = "实际由源导演消费的人工题目";
+    const staleSource = await subject.applyNodeOverride(originalSource.id, {
+      nodeId: "brief",
+      actor: "producer",
+      allowTerminalEdit: true,
+      output: { ...sourceBriefOutput, title: effectiveTitle },
+    });
+    const source = await subject.resumeStale(staleSource.id);
+    const effectiveArtifact = (nodeId: string, kind?: string) => {
+      const node = source.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+      const version = node?.outputState?.versions.find(({ id }) => id === node.outputState?.effectiveVersionId);
+      return version?.artifactIds
+        .map((id) => source.artifacts.find((artifact) => artifact.id === id))
+        .find((artifact) => artifact && (kind === undefined || artifact.kind === kind));
+    };
+    const scriptArtifact = effectiveArtifact("script");
+    const directorArtifact = effectiveArtifact("visual-direction", "storyboard");
+    assert.ok(scriptArtifact?.uri && directorArtifact?.uri, JSON.stringify({
+      status: source.status,
+      nodes: source.nodeRuns.map((node) => ({
+        nodeId: node.nodeId,
+        status: node.status,
+        error: node.error,
+        effectiveVersionId: node.outputState?.effectiveVersionId,
+        artifactIds: node.outputState?.versions.find(({ id }) => id === node.outputState?.effectiveVersionId)?.artifactIds,
+      })),
+    }));
+    const previousScript = JSON.parse(await readFile(scriptArtifact.uri, "utf8"));
+    const previousDirectorPlan = JSON.parse(await readFile(directorArtifact.uri, "utf8"));
+
+    const reworked = await subject.start({
+      ...source.initialInput,
+      title: effectiveTitle,
+      voiceDirection: { ...source.initialInput.voiceDirection, rate: 190 },
+      rework: {
+        sourceRunId: source.id,
+        sourceRunRevision: source.revision,
+        affectedScenePositions: [1],
+        nodeInstructions: { script: "沿用", visualDirection: "沿用", assets: "沿用" },
+        findings: [],
+        previousScript,
+        previousDirectorPlan,
+      },
+    });
+
+    assert.equal(directorCalls, 2);
+    const inherited = reworked.artifacts.find((artifact) => artifact.producer?.nodeId === "visual-direction");
+    assert.equal(inherited?.sha256, directorArtifact.sha256);
+    assert.match(inherited?.provenance.notes ?? "", /Inherited unchanged/);
+
+    const sourceRunPath = path.join(workspaceRoot, "runs", source.id, "run.json");
+    await subject.withRunMaintenanceLease([source.id], async () => {
+      await subject.start({
+        ...source.initialInput,
+        title: effectiveTitle,
+        rework: {
+          sourceRunId: source.id,
+          sourceRunRevision: source.revision,
+          affectedScenePositions: [1],
+          nodeInstructions: { script: "沿用", visualDirection: "沿用", assets: "沿用" },
+          findings: [],
+          previousScript,
+          previousDirectorPlan,
+        },
+      });
+      const sourceMutation = JSON.parse(await readFile(sourceRunPath, "utf8"));
+      sourceMutation.revision += 1;
+      await writeFile(sourceRunPath, `${JSON.stringify(sourceMutation, null, 2)}\n`, "utf8");
+    });
+    assert.equal(directorCalls, 3, "a locked source snapshot must fail closed instead of being inherited");
+    await writeFile(sourceRunPath, `${JSON.stringify(source, null, 2)}\n`, "utf8");
+
+    const runtimeChangedSubject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      directorAgent,
+      assetProviders: [{ ...assetProviders[0]!, label: "运行时目录已更新的本地卡片" }],
+    });
+    await runtimeChangedSubject.start({
+      ...source.initialInput,
+      title: effectiveTitle,
+      rework: {
+        sourceRunId: source.id,
+        sourceRunRevision: source.revision,
+        affectedScenePositions: [1],
+        nodeInstructions: { script: "沿用", visualDirection: "沿用", assets: "沿用" },
+        findings: [],
+        previousScript,
+        previousDirectorPlan,
+      },
+    });
+    assert.equal(directorCalls, 4, "a changed runtime provider catalog must invoke the director");
+
+    await subject.start({
+      ...source.initialInput,
+      title: effectiveTitle,
+      rework: {
+        sourceRunId: source.id,
+        sourceRunRevision: source.revision,
+        affectedScenePositions: [1],
+        nodeInstructions: { script: "沿用", visualDirection: "沿用", assets: "沿用" },
+        findings: [],
+        previousScript,
+        previousDirectorPlan,
+      },
+    });
+    assert.equal(directorCalls, 5, "a changed structured visual input must invoke the director");
+
+    const persistedSource = JSON.parse(await readFile(sourceRunPath, "utf8"));
+    const persistedDirectorNode = persistedSource.nodeRuns.find((node: { nodeId: string }) => node.nodeId === "visual-direction");
+    const effectiveDirectorOutput = persistedDirectorNode.outputState.versions.find(
+      (version: { id: string }) => version.id === persistedDirectorNode.outputState.effectiveVersionId,
+    );
+    const persistedDirectorArtifact = persistedSource.artifacts.find(
+      (artifact: { id: string }) => effectiveDirectorOutput.artifactIds.includes(artifact.id),
+    );
+    const wrongPath = path.join(path.dirname(persistedDirectorArtifact.uri), "wrong-director-plan.json");
+    await writeFile(wrongPath, await readFile(persistedDirectorArtifact.uri));
+    const wrongPathArtifact = { ...persistedDirectorArtifact, id: "artifact-director-wrong-path", uri: wrongPath };
+    persistedSource.artifacts.push(wrongPathArtifact);
+    effectiveDirectorOutput.artifactIds = [wrongPathArtifact.id];
+    await writeFile(sourceRunPath, `${JSON.stringify(persistedSource, null, 2)}\n`, "utf8");
+    await subject.start({
+      ...source.initialInput,
+      title: effectiveTitle,
+      rework: {
+        sourceRunId: source.id,
+        sourceRunRevision: source.revision,
+        affectedScenePositions: [1],
+        nodeInstructions: { script: "沿用", visualDirection: "沿用", assets: "沿用" },
+        findings: [],
+        previousScript,
+        previousDirectorPlan,
+      },
+    });
+    assert.equal(directorCalls, 6, "a same-kind artifact at the wrong effective output path must not be inherited");
+  });
+
   it("revalidates an injected director plan against the script visual strategy", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-director-host-validation-"));
     const worker = new FakeWorker();
@@ -3074,7 +3367,7 @@ describe("ProductionPipeline", () => {
     });
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/director-v25",
+      "video-factory/director-v28",
     );
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.modelId,
@@ -4408,7 +4701,7 @@ describe("ProductionPipeline", () => {
     assert.equal(settledReceipt?.meteredFailedAttemptCount, 1);
   });
 
-  it("confirms one charged unresolved scene without discarding completed scenes or bypassing the next approval", async () => {
+  it("settles one charged unresolved scene without retrying or advancing downstream", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-paid-item-reconciliation-"));
     const worker = new FakeWorker();
     const subject = new pipeline.ProductionPipeline({
@@ -4530,12 +4823,13 @@ describe("ProductionPipeline", () => {
       actor: "owner",
       note: "Provider 账单确认镜头 2 已扣费，但没有任务号或可下载结果。",
       actualCostCny: 1.7,
-    });
+    }, { settleOnly: true });
 
     const nextAssets = resolved.nodeRuns.find((node) => node.nodeId === "assets");
-    assert.equal(resolved.status, "awaiting_spend_approval");
-    assert.notEqual(nextAssets?.operationRequestId, oldOperationId);
-    assert.deepEqual(nextAssets?.spendPlan?.items?.map((item) => item.id), ["scene-2"]);
+    assert.equal(resolved.status, "failed");
+    assert.equal(nextAssets?.outcomeUncertain, undefined);
+    assert.equal(nextAssets?.operationRequestId, undefined);
+    assert.equal(nextAssets?.spendPlan, undefined);
     assert.equal(worker.calls.filter((call) => call.capability === "asset.prepare").length, 0);
     assert.deepEqual(resolved.consumedSpendAuthorizationIds, [oldAuthorizationId]);
 
@@ -5390,7 +5684,7 @@ describe("ProductionPipeline", () => {
     assert.equal(hailuoCalls().length, 1, "the new video provider may run only after its exact quote is approved");
   });
 
-  it("records a trusted not-charged resolution and requotes only unfinished paid scenes", async () => {
+  it("settles a trusted not-charged resolution without retrying or advancing downstream", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-paid-not-charged-"));
     const worker = new FakeWorker();
     const subject = new pipeline.ProductionPipeline({
@@ -5515,12 +5809,13 @@ describe("ProductionPipeline", () => {
       itemRequestId: "unknown-scene-2",
       actor: "owner",
       note: "Provider 后台确认该任务未受理，也未产生扣费。",
-    });
+    }, { settleOnly: true });
 
     const nextAssets = resolved.nodeRuns.find((node) => node.nodeId === "assets");
-    assert.equal(resolved.status, "awaiting_spend_approval");
-    assert.notEqual(nextAssets?.operationRequestId, oldOperationId);
-    assert.deepEqual(nextAssets?.spendPlan?.items?.map((item) => item.id), ["scene-2"]);
+    assert.equal(resolved.status, "failed");
+    assert.equal(nextAssets?.outcomeUncertain, undefined);
+    assert.equal(nextAssets?.operationRequestId, undefined);
+    assert.equal(nextAssets?.spendPlan, undefined);
     assert.deepEqual(resolved.consumedSpendAuthorizationIds, [oldAuthorizationId]);
     assert.equal(worker.calls.filter((call) => call.capability === "asset.prepare").length, 0);
     const settledReceipt = resolved.executionReceipts?.find((receipt) => receipt.requestId === oldOperationId);
@@ -5944,6 +6239,51 @@ describe("ProductionPipeline", () => {
       }),
       /conflicts with its persisted request/,
     );
+  });
+
+  it("settles a legacy confirmed voice charge without leaving continuation state", async () => {
+    const { subject, worker, failed } = await uncertainPaidVoiceFixture("video-factory-legacy-voice-charged-");
+
+    const resolved = await subject.reconcilePaidNode(failed.id, {
+      nodeId: "voice",
+      expectedRunRevision: failed.revision,
+      reconciliationId: "legacy-voice-confirmed-charged",
+      outcome: "confirmed_charged",
+      actor: "owner",
+      note: "MiniMax 控制台确认旧版配音任务已扣费。",
+      actualCostCny: 0.1,
+    }, { settleOnly: true });
+
+    const voiceNode = resolved.nodeRuns.find((node) => node.nodeId === "voice");
+    assert.equal(resolved.status, "failed");
+    assert.equal(voiceNode?.status, "failed");
+    assert.equal(voiceNode?.outcomeUncertain, undefined);
+    assert.equal(voiceNode?.operationRequestId, undefined);
+    assert.equal(voiceNode?.spendPlan, undefined);
+    assert.match(voiceNode?.error ?? "", /历史付费任务已完成账单结算.*创建新版本/);
+    assert.equal(worker.calls.filter((call) => call.capability === "voice.synthesize").length, 1);
+  });
+
+  it("settles a legacy not-charged voice result without leaving continuation state", async () => {
+    const { subject, worker, failed } = await uncertainPaidVoiceFixture("video-factory-legacy-voice-not-charged-");
+
+    const resolved = await subject.reconcilePaidNode(failed.id, {
+      nodeId: "voice",
+      expectedRunRevision: failed.revision,
+      reconciliationId: "legacy-voice-confirmed-not-charged",
+      outcome: "confirmed_not_charged",
+      actor: "owner",
+      note: "MiniMax 控制台确认旧版配音任务未扣费。",
+    }, { settleOnly: true });
+
+    const voiceNode = resolved.nodeRuns.find((node) => node.nodeId === "voice");
+    assert.equal(resolved.status, "failed");
+    assert.equal(voiceNode?.status, "failed");
+    assert.equal(voiceNode?.outcomeUncertain, undefined);
+    assert.equal(voiceNode?.operationRequestId, undefined);
+    assert.equal(voiceNode?.spendPlan, undefined);
+    assert.match(voiceNode?.error ?? "", /历史付费任务已完成账单结算.*创建新版本/);
+    assert.equal(worker.calls.filter((call) => call.capability === "voice.synthesize").length, 1);
   });
 
   it("settles an explicitly rejected automatic TTS call without retrying before configuration changes", async () => {

@@ -241,6 +241,17 @@ describe("metered video provider settings", () => {
     assert.equal(setting?.models.find((model) => model.id === "MiniMax-Hailuo-2.3")?.protocol, "v1");
   });
 
+  it("uses a portrait-capable MiniMax model as the real default for 9:16 production", () => {
+    const [setting] = readMeteredVideoProviderSettings({
+      MINIMAX_API_KEY: "minimax-key",
+      MINIMAX_VIDEO_MODEL_ID: "MiniMax-Hailuo-2.3",
+    });
+
+    assert.equal(setting?.model, "MiniMax-H3");
+    assert.equal(setting?.models.find((model) => model.id === "MiniMax-H3")?.recommended, true);
+    assert.equal(Boolean(setting?.models.find((model) => model.id === "MiniMax-Hailuo-2.3")?.recommended), false);
+  });
+
   it("requires a reviewed MiniMax model profile before paid generation", () => {
     assert.throws(() => readMeteredVideoProviderSettings({
       MINIMAX_API_KEY: "minimax-key",

@@ -9,6 +9,7 @@ import {
   ProductionPipeline,
   RoleAgentLoopError,
   runRoleAgentLoop,
+  summarizeReworkImpact,
   type ScreenwriterAgent,
   type ScreenwriterAgentInput,
   type ScriptDraft,
@@ -239,6 +240,200 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.deepEqual(assetInput.findings?.map(({ findingId }) => findingId), ["vf_222222222222222222222222"]);
   });
 
+  it("reuses a verified unchanged source script before calling the screenwriter", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-reuse-"));
+    const { agent, inputs } = stubAgent(() => scriptDraft);
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent });
+    const source = await pipeline.start(brief);
+    const sourceScript = source.artifacts.find((artifact) => artifact.kind === "script");
+    assert.ok(sourceScript?.uri);
+    const previousScript = JSON.parse(await readFile(sourceScript.uri, "utf8"));
+
+    const reworked = await pipeline.start({
+      ...brief,
+      rework: {
+        sourceRunId: source.id,
+        sourceRunRevision: source.revision,
+        affectedScenePositions: [],
+        nodeInstructions: {
+          script: "没有脚本问题，沿用已验证脚本。",
+          visualDirection: "没有视觉问题，沿用已验证方案。",
+          assets: "没有素材问题，沿用已验证母片。",
+        },
+        findings: [],
+        previousScript,
+      },
+    });
+
+    assert.equal(inputs.length, 1, "the rework must decide reuse before invoking the model");
+    const reworkedScript = reworked.artifacts.find((artifact) => artifact.kind === "script");
+    assert.equal(reworkedScript?.sha256, sourceScript.sha256);
+    assert.equal(reworkedScript?.provenance.providerId, sourceScript.provenance.providerId);
+    assert.equal(reworkedScript?.provenance.model, sourceScript.provenance.model);
+    assert.equal(reworked.artifacts.some((artifact) => artifact.kind === "model_trace"), false);
+    assert.deepEqual(summarizeReworkImpact(reworked), {
+      version: "video-factory/rework-impact-v1",
+      sourceRunId: source.id,
+      affectedScenePositions: [],
+      nodes: [
+        { nodeId: "script", action: "inherited", reason: "verified_source_match" },
+        { nodeId: "visual-direction", action: "not_run", reason: "not_reached" },
+        { nodeId: "assets", action: "executed", reason: "affected_input" },
+        { nodeId: "voice", action: "executed", reason: "affected_input" },
+        { nodeId: "render", action: "executed", reason: "affected_input" },
+        { nodeId: "technical-review", action: "executed", reason: "affected_input" },
+        { nodeId: "visual-review", action: "not_run", reason: "not_reached" },
+      ],
+      calls: { scriptModel: 0, mediaCreate: 0, voice: 1, render: 1, visualReview: 0 },
+      media: { retainedSha256: [], producedSha256: [], mayCreateNewMedia: false },
+    });
+
+    const briefNode = reworked.nodeRuns.find(({ nodeId }) => nodeId === "brief");
+    assert.ok(briefNode?.outputState);
+    briefNode.outputState.versions.push({
+      id: "brief-human-rework",
+      nodeId: "brief",
+      source: "human",
+      output: {
+        rework: {
+          ...reworked.initialInput.rework,
+          sourceRunId: "run-source-after-brief-revision",
+          affectedScenePositions: [2],
+        },
+      },
+      artifactIds: [],
+      inputVersionIds: [],
+      createdAt: reworked.startedAt,
+      createdBy: "owner",
+      schemaVersion: "video-factory/brief-v1",
+    });
+    briefNode.outputState.effectiveVersionId = "brief-human-rework";
+
+    assert.equal(summarizeReworkImpact(reworked)?.sourceRunId, "run-source-after-brief-revision");
+    assert.deepEqual(summarizeReworkImpact(reworked)?.affectedScenePositions, [2]);
+
+    const fullScopeRework = { ...reworked.initialInput.rework };
+    delete fullScopeRework.affectedScenePositions;
+    briefNode.outputState.versions.push({
+      id: "brief-human-full-scope-rework",
+      nodeId: "brief",
+      source: "human",
+      output: { rework: fullScopeRework },
+      artifactIds: [],
+      inputVersionIds: [],
+      createdAt: reworked.startedAt,
+      createdBy: "owner",
+      schemaVersion: "video-factory/brief-v1",
+    });
+    briefNode.outputState.effectiveVersionId = "brief-human-full-scope-rework";
+
+    assert.deepEqual(summarizeReworkImpact(reworked)?.affectedScenePositions, [1, 2, 3]);
+  });
+
+  it("binds source script reuse to the effective source node input", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-source-input-"));
+    const { agent, inputs } = stubAgent(() => scriptDraft);
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent });
+    const source = await pipeline.start(brief);
+    const sourceScriptNode = source.nodeRuns.find(({ nodeId }) => nodeId === "script");
+    const sourceInput = sourceScriptNode?.inputState?.versions.find(
+      ({ id }) => id === sourceScriptNode.inputState?.effectiveVersionId,
+    )?.value as ScreenwriterAgentInput | undefined;
+    assert.ok(sourceInput);
+
+    const effectiveTitle = "实际由源编剧消费的人工题目";
+    const stale = await pipeline.applyNodeInputOverride(source.id, {
+      nodeId: "script",
+      actor: "editor",
+      input: { ...sourceInput, brief: { ...sourceInput.brief, title: effectiveTitle } },
+      allowTerminalEdit: true,
+    });
+    const regeneratedSource = await pipeline.resumeStale(stale.id);
+    const effectiveScriptNode = regeneratedSource.nodeRuns.find(({ nodeId }) => nodeId === "script");
+    const effectiveOutput = effectiveScriptNode?.outputState?.versions.find(
+      ({ id }) => id === effectiveScriptNode.outputState?.effectiveVersionId,
+    );
+    const effectiveScriptArtifact = effectiveOutput?.artifactIds
+      .map((id) => regeneratedSource.artifacts.find((artifact) => artifact.id === id))
+      .find((artifact) => artifact?.kind === "script");
+    assert.ok(effectiveScriptArtifact?.uri);
+    const previousScript = JSON.parse(await readFile(effectiveScriptArtifact.uri, "utf8"));
+
+    await pipeline.start({
+      ...brief,
+      title: effectiveTitle,
+      rework: {
+        sourceRunId: regeneratedSource.id,
+        sourceRunRevision: regeneratedSource.revision,
+        affectedScenePositions: [],
+        nodeInstructions: { script: "沿用", visualDirection: "沿用", assets: "沿用" },
+        findings: [],
+        previousScript,
+      },
+    });
+    assert.equal(inputs.length, 2, "matching the source node's actual input must reuse before another model call");
+
+    const sourceRunPath = path.join(workspaceRoot, "runs", regeneratedSource.id, "run.json");
+    await pipeline.withRunMaintenanceLease([regeneratedSource.id], async () => {
+      await pipeline.start({
+        ...brief,
+        title: effectiveTitle,
+        rework: {
+          sourceRunId: regeneratedSource.id,
+          sourceRunRevision: regeneratedSource.revision,
+          affectedScenePositions: [],
+          nodeInstructions: { script: "沿用", visualDirection: "沿用", assets: "沿用" },
+          findings: [],
+          previousScript,
+        },
+      });
+      const sourceMutation = JSON.parse(await readFile(sourceRunPath, "utf8"));
+      sourceMutation.revision += 1;
+      await writeFile(sourceRunPath, `${JSON.stringify(sourceMutation, null, 2)}\n`, "utf8");
+    });
+    assert.equal(inputs.length, 3, "a locked source snapshot must fail closed instead of being inherited");
+    await writeFile(sourceRunPath, `${JSON.stringify(regeneratedSource, null, 2)}\n`, "utf8");
+
+    const persistedSource = JSON.parse(await readFile(sourceRunPath, "utf8"));
+    const persistedScriptNode = persistedSource.nodeRuns.find((node: { nodeId: string }) => node.nodeId === "script");
+    const effectiveVersion = persistedScriptNode.outputState.versions.find(
+      (version: { id: string }) => version.id === persistedScriptNode.outputState.effectiveVersionId,
+    );
+    const persistedScriptArtifact = persistedSource.artifacts.find(
+      (artifact: { id: string }) => effectiveVersion.artifactIds.includes(artifact.id),
+    );
+    persistedScriptArtifact.producer.nodeId = "brief";
+    await writeFile(sourceRunPath, `${JSON.stringify(persistedSource, null, 2)}\n`, "utf8");
+    await pipeline.start({
+      ...brief,
+      title: effectiveTitle,
+      rework: {
+        sourceRunId: regeneratedSource.id,
+        sourceRunRevision: regeneratedSource.revision,
+        affectedScenePositions: [],
+        nodeInstructions: { script: "沿用", visualDirection: "沿用", assets: "沿用" },
+        findings: [],
+        previousScript,
+      },
+    });
+    assert.equal(inputs.length, 4, "an artifact with the wrong producer must not be inherited");
+    await writeFile(sourceRunPath, `${JSON.stringify(regeneratedSource, null, 2)}\n`, "utf8");
+
+    await pipeline.start({
+      ...brief,
+      title: "与源节点实际输入不同的题目",
+      rework: {
+        sourceRunId: regeneratedSource.id,
+        sourceRunRevision: regeneratedSource.revision,
+        affectedScenePositions: [],
+        nodeInstructions: { script: "沿用", visualDirection: "沿用", assets: "沿用" },
+        findings: [],
+        previousScript,
+      },
+    });
+    assert.equal(inputs.length, 5, "different actual screenwriter input must invoke the model");
+  });
+
   it("scopes identical agent loops to their production run", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-run-scope-"));
     const worker = new RecordingWorker();
@@ -413,19 +608,25 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.equal(JSON.parse(await readFile(scriptArtifact.uri, "utf8")).viewerPromise, "仍可由人工修订的最后草稿");
   });
 
-  it("refuses to form a series Internal Master when a generic script has no canon facts", async () => {
+  it("allows a series episode with no new canon facts to continue through final review", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-generic-script-"));
-    const worker = new RecordingWorker();
+    const worker = new RecordingWorker({ capability: "script.draft", canonFacts: [] });
     const run = await new ProductionPipeline({ workspaceRoot, worker }).start({
       ...brief,
       providers: { ...brief.providers, script: "python-template-v1" },
       seriesContext,
     });
 
-    assert.equal(run.status, "failed");
-    assert.equal(run.nodeRuns.at(-1)?.nodeId, "script");
-    assert.match(run.nodeRuns.at(-1)?.error ?? "", /进入素材、配音和渲染前必须确认 1 到 8 条.*定版事实/);
-    assert.deepEqual(worker.requests.map((request) => request.capability), ["script.draft"]);
+    assert.equal(run.status, "succeeded");
+    assert.deepEqual(
+      (run.nodeRuns.find((node) => node.nodeId === "script")?.output as { canonFacts?: string[] }).canonFacts,
+      [],
+    );
+    assert.deepEqual(
+      (run.nodeRuns.find((node) => node.nodeId === "final-review")?.output as { canonFacts?: string[] }).canonFacts,
+      [],
+    );
+    assert.equal(run.nodeRuns.find((node) => node.nodeId === "final-review")?.status, "succeeded");
   });
 
   it("reads series canon facts from the verified generic script artifact", async () => {
@@ -479,6 +680,7 @@ describe("ProductionPipeline codex screenwriter", () => {
           fallbackReason: "首选模型连接失败，已自动切换。",
           attemptedModelIds: ["glm-5.3", "gpt-5.4"],
           providerWaitMs: 12_340,
+          queueWaitMs: 100,
           firstOutputEventMs: 410,
           toolMs: 0,
           validationMs: 7,
@@ -512,6 +714,15 @@ describe("ProductionPipeline codex screenwriter", () => {
             iteration: 1,
             candidate: scriptDraft,
             candidateHash: "a".repeat(64),
+            candidateTrace: {
+              taskKind: "script-draft",
+              promptVersion: "video-factory/screenwriter-v2",
+              prompt: "producer prompt",
+              providerId: "openai",
+              modelId: "gpt-5.4",
+              queueWaitMs: 100,
+              providerWaitMs: 12_340,
+            },
             audit: {
               version: "video-factory/role-audit-v1",
               verdict: "pass",
@@ -527,6 +738,8 @@ describe("ProductionPipeline codex screenwriter", () => {
               providerId: "openai",
               modelId: "gpt-5.6-sol",
               reasoningEffort: "xhigh",
+              queueWaitMs: 200,
+              providerWaitMs: 8_000,
             },
           }],
         },
@@ -563,6 +776,7 @@ describe("ProductionPipeline codex screenwriter", () => {
         outcome: "succeeded",
       }],
       providerWaitMs: 12_340,
+      queueWaitMs: 100,
       firstOutputEventMs: 410,
       toolMs: 0,
       validationMs: 7,
@@ -577,7 +791,8 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.equal(scriptNode?.executionReceipt?.parameters?.agentLoopIterations, 1);
     assert.equal(scriptNode?.executionReceipt?.parameters?.auditReasoningEffort, "xhigh");
     assert.equal(scriptNode?.executionReceipt?.parameters?.modelCallCount, 2);
-    assert.equal(scriptNode?.executionReceipt?.parameters?.providerWaitMs, 12_340);
+    assert.equal(scriptNode?.executionReceipt?.parameters?.queueWaitMs, 300);
+    assert.equal(scriptNode?.executionReceipt?.parameters?.providerWaitMs, 20_340);
     assert.equal(scriptNode?.executionReceipt?.parameters?.firstOutputEventMs, 410);
     assert.equal(scriptNode?.executionReceipt?.parameters?.providerValidationMs, 7);
     assert.equal(scriptNode?.executionReceipt?.parameters?.producerMs, 12_600);
@@ -635,6 +850,49 @@ describe("ProductionPipeline codex screenwriter", () => {
     const assetsRequest = worker.requests.find((request) => request.capability === "asset.prepare");
     assert.equal(assetsRequest?.input.scriptPath, scriptArtifact.uri);
     assert.equal(worker.requests.some((request) => request.capability === "script.draft"), false);
+  });
+
+  it("propagates an explicit duration range and rejects the same 31.5s draft for a fixed 24s production", async () => {
+    const rangedDraft: ScriptDraft = {
+      scenes: [4, 6, 3, 3, 3, 4, 7, 1.5].map((duration, index) => ({
+        ...scriptDraft.scenes[index % scriptDraft.scenes.length]!,
+        position: index + 1,
+        duration,
+      })),
+    };
+    const rangedWorkspace = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-range-"));
+    const rangedAgent = stubAgent(() => rangedDraft);
+    const rangedRun = await new ProductionPipeline({
+      workspaceRoot: rangedWorkspace,
+      worker: new RecordingWorker(),
+      screenwriterAgent: rangedAgent.agent,
+    }).start({
+      ...brief,
+      durationRange: { minSeconds: 20, maxSeconds: 34 },
+    });
+
+    assert.equal(rangedRun.status, "succeeded");
+    assert.deepEqual(rangedAgent.inputs[0]?.brief.durationRange, { minSeconds: 20, maxSeconds: 34 });
+    const rangedScript = rangedRun.artifacts.find((artifact) => artifact.kind === "script");
+    assert.ok(rangedScript?.uri);
+    assert.deepEqual(JSON.parse(await readFile(rangedScript.uri, "utf8")).duration_range, {
+      minSeconds: 20,
+      maxSeconds: 34,
+    });
+
+    const fixedWorkspace = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-fixed-range-"));
+    const fixedRun = await new ProductionPipeline({
+      workspaceRoot: fixedWorkspace,
+      worker: new RecordingWorker(),
+      screenwriterAgent: stubAgent(() => rangedDraft).agent,
+    }).start({
+      ...brief,
+      durationRange: { minSeconds: 24, maxSeconds: 24 },
+    });
+
+    assert.equal(fixedRun.status, "failed");
+    assert.equal(fixedRun.nodeRuns.at(-1)?.nodeId, "script");
+    assert.match(fixedRun.nodeRuns.at(-1)?.error ?? "", /outside the 24-24s duration range/);
   });
 
   it("reruns the screenwriter from the saved human node input instead of the original brief closure", async () => {

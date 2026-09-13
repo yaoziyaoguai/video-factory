@@ -13,7 +13,10 @@ import {
   VisualReviewFallbackError,
   runRoleAgentLoop,
   validateVisualReviewReport,
+  type CodexPreparedOperation,
+  type CodexTaskExecution,
   type CodexTaskKind,
+  type CodexTaskRequestOptions,
   type VisualReviewAgent,
   type VisualReviewAgentInput,
   type VisualReviewMediaPayload,
@@ -25,6 +28,14 @@ const media: VisualReviewMediaPayload = {
   frames: [
     { timecodeMs: 0, sha256: "a".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
     { timecodeMs: 3_000, sha256: "b".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+  ],
+};
+
+const sourceRangeMedia: VisualReviewMediaPayload = {
+  durationMs: 6_000,
+  frames: [
+    { ...media.frames[0]!, sourceTimecodeMs: 4_000 },
+    { ...media.frames[1]!, sourceTimecodeMs: 7_000 },
   ],
 };
 
@@ -60,6 +71,38 @@ const passingAudit = {
 } as const;
 
 describe("CodexVisualReviewAgent", () => {
+  it("includes source timecodes in the image context and evidence snapshot identity", async () => {
+    const calls: Array<{ kind: CodexTaskKind; payload: Record<string, unknown> }> = [];
+    const subject = new CodexVisualReviewAgent({
+      media: { prepare: async () => sourceRangeMedia },
+      client: {
+        runTask: async () => report,
+        runTaskDetailed: async (kind, payload) => {
+          calls.push({ kind, payload: payload as Record<string, unknown> });
+          return { output: kind === "visual-review" ? report : passingAudit };
+        },
+      },
+      maxReviewIterations: 1,
+    });
+
+    const first = await subject.reviewDetailed({ runRoot: "/run", preparedMedia: sourceRangeMedia });
+    const second = await subject.reviewDetailed({
+      runRoot: "/run",
+      preparedMedia: {
+        ...sourceRangeMedia,
+        frames: sourceRangeMedia.frames.map((frame, index) => (
+          index === 0 ? { ...frame, sourceTimecodeMs: 5_500 } : frame
+        )),
+      },
+    });
+
+    const auditCalls = calls.filter((call) => call.kind === "role-audit");
+    assert.equal(
+      (auditCalls[0]?.payload.images as Array<Record<string, unknown>> | undefined)?.[0]?.sourceTimecodeMs,
+      4_000,
+    );
+    assert.notEqual(first.evidenceSnapshotId, second.evidenceSnapshotId);
+  });
   it("runs final Codex and GLM reviews independently over one immutable evidence snapshot", async () => {
     let prepareCalls = 0;
     const preparedInputs: VisualReviewMediaPayload[] = [];
@@ -110,7 +153,9 @@ describe("CodexVisualReviewAgent", () => {
 
     assert.equal(prepareCalls, 1);
     assert.deepEqual(new Set(calls), new Set(["glm-visual-review-v1", "codex-visual-review-v1"]));
-    assert.equal(preparedInputs[0], preparedInputs[1]);
+    // BG-08：两分支收到共同快照的独立深拷贝（同内容、不同引用——分支改写互不可见）。
+    assert.deepEqual(preparedInputs[0], preparedInputs[1]);
+    assert.notEqual(preparedInputs[0], preparedInputs[1]);
     assert.equal(execution.output.recommendation, "reject");
     assert.equal(execution.output.scores.legibility, 35);
     assert.equal(execution.output.findings.some((finding) => finding.description === "画面存在水印。"), true);
@@ -685,6 +730,34 @@ describe("CodexVisualReviewAgent", () => {
     }]);
   });
 
+  it("forwards the executable plan to source-asset media preprocessing", async () => {
+    const runRoot = await mkdtemp(path.join(tmpdir(), "video-factory-source-review-forward-"));
+    const assetPlanPath = path.join(runRoot, "assets", "asset_plan.json");
+    const executablePlanPath = path.join(runRoot, "production-preflight", "executable_plan.json");
+    await mkdir(path.dirname(assetPlanPath), { recursive: true });
+    await mkdir(path.dirname(executablePlanPath), { recursive: true });
+    await writeFile(assetPlanPath, JSON.stringify({ scene_assets: [] }));
+    await writeFile(executablePlanPath, JSON.stringify({ version: "video-factory/executable-plan-v1" }));
+    const mediaInputs: VisualReviewAgentInput[] = [];
+    const agent = new CodexVisualReviewAgent({
+      media: { prepare: async (input) => {
+        mediaInputs.push(input);
+        return media;
+      } },
+      client: { runTask: async () => report },
+    });
+    const input: VisualReviewAgentInput = {
+      assetPlanPath,
+      executablePlanPath,
+      reviewStage: "source_assets",
+      runRoot,
+    };
+
+    await agent.review(input);
+
+    assert.deepEqual(mediaInputs, [input]);
+  });
+
   it("returns the inspected media duration with detailed review evidence", async () => {
     const agent = new CodexVisualReviewAgent({
       media: { prepare: async () => media },
@@ -831,7 +904,8 @@ describe("CodexVisualReviewAgent", () => {
         assert.equal(error, uncertainFailure);
         assert.equal(error.stage, "uncertain");
         assert.equal(error.statusCode, 503);
-        assert.equal(error.creatorMessage, "模型暂时不可用，请重试或选择其他模型。");
+        // C5/CG-08：uncertain 结果的文案必须引导核对原请求，不得建议重试或换模型。
+        assert.equal(error.creatorMessage, "与模型服务的连接中断，结果未知：这次请求可能已经被模型受理。当前进度已保留，请先核对原有任务的结果，不要重新发起同样的请求。");
         assert.doesNotMatch(error.creatorMessage, /secret-primary|zai\.sock|\/private\/run/);
         return true;
       },
@@ -1272,4 +1346,88 @@ describe("CodexVisualReviewAgent", () => {
       recommendation: "approve",
     }, 6_000).recommendation, "approve");
   });
+
+  it("resumes a saved visual-review request without preprocessing the same media again", async () => {
+    let stored: unknown;
+    let interruptProducer = true;
+    let mediaCalls = 0;
+    let producerCalls = 0;
+    const observed: string[] = [];
+    const checkpoint = {
+      key: "visual-review-recovery",
+      load: async () => stored,
+      save: async (value: unknown) => { stored = structuredClone(value); },
+    };
+    const client = {
+      runTask: async () => report,
+      runTaskDetailed: async (
+        kind: CodexTaskKind,
+        payload: unknown,
+        requestId?: string,
+        _session?: unknown,
+        requestOptions?: CodexTaskRequestOptions,
+      ): Promise<CodexTaskExecution> => {
+        if (kind === "visual-review") {
+          producerCalls += 1;
+          if (interruptProducer) {
+            await requestOptions?.beforeSubmit?.(preparedOperation(kind, payload, requestId!));
+            throw new Error("visual response interrupted");
+          }
+          return { output: report };
+        }
+        return { output: passingAudit };
+      },
+      observePrepared: async (operation: CodexPreparedOperation): Promise<CodexTaskExecution> => {
+        observed.push(operation.requestId);
+        return { output: report };
+      },
+    };
+    const agent = new CodexVisualReviewAgent({
+      client,
+      media: {
+        prepare: async () => {
+          mediaCalls += 1;
+          return media;
+        },
+      },
+    });
+    const input = { videoPath: "/run/final.mp4", runRoot: "/run", agentLoopCheckpoint: checkpoint };
+
+    await assert.rejects(() => agent.reviewDetailed(input), /visual response interrupted/);
+    interruptProducer = false;
+    const execution = await agent.reviewDetailed(input);
+
+    assert.equal(execution.agentLoop?.status, "passed");
+    assert.equal(producerCalls, 1);
+    assert.equal(observed.length, 1);
+    assert.equal(mediaCalls, 1);
+    assert.match(execution.evidenceSnapshotId ?? "", /^[a-f0-9]{64}$/);
+  });
 });
+
+function preparedOperation(kind: CodexTaskKind, payload: unknown, requestId: string): CodexPreparedOperation {
+  const envelope = { protocolVersion: "video-factory/codex-bridge-v2", requestId, kind, payload };
+  const brokerBinding = {
+    version: "video-factory/task-binding-v1" as const,
+    storeId: `vfs_store_${"1".repeat(32)}`,
+    providerId: "openai",
+    modelId: "codex-default",
+  };
+  return {
+    version: "video-factory/codex-prepared-operation-v1",
+    requestId,
+    kind,
+    envelope,
+    serializedEnvelope: JSON.stringify(envelope),
+    binding: {
+      ...brokerBinding,
+      requestDigest: "2".repeat(64),
+      kind,
+      contractDigest: "3".repeat(64),
+      sessionDigest: "4".repeat(64),
+    },
+    brokerBinding,
+    route: { socketPath: "/tmp/visual-review.sock" },
+    taskFact: "not_submitted",
+  };
+}

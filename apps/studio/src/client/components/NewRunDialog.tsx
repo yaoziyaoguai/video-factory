@@ -16,11 +16,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { StudioCreatorSettings, StudioProductionInput, StudioProvider, StudioReferenceVideo, StudioReworkDraft, StudioReworkFinding, StudioTemplate } from "../../shared/api.js";
+import { defaultStudioDurationRange, type StudioCreatorSettings, type StudioProductionInput, type StudioProvider, type StudioReferenceVideo, type StudioReworkDraft, type StudioReworkFinding, type StudioTemplate } from "../../shared/api.js";
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { applyTemplateVoiceRecommendation } from "../../shared/template-voice-recommendation.js";
-import { planVisualDirection, resolveExecutableVisualPlan } from "../../shared/visual-plan.js";
+import { planVisualDirection, recommendTemplateForBrief, resolveExecutableVisualPlan } from "../../shared/visual-plan.js";
+import { visualSourceCompatibilityIssue } from "../../shared/visual-source-compatibility.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { VoiceStudio } from "./VoiceStudio.js";
 import { studioApi } from "../api.js";
@@ -125,13 +126,19 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [directorProfileId, setDirectorProfileId] = useState<StudioDirectorProfileId>("auto");
   const [platform, setPlatform] = useState("douyin");
   const [durationSeconds, setDurationSeconds] = useState(24);
+  const [durationRange, setDurationRange] = useState<StudioProductionInput["durationRange"]>(() => (
+    initialValues?.durationRange ?? defaultStudioDurationRange(initialValues?.durationSeconds ?? 24)
+  ));
+  const durationRangeTouched = useRef(false);
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([]);
   const [modelSelections, setModelSelections] = useState<Record<string, string>>({});
   const [voiceDirection, setVoiceDirection] = useState<StudioProductionInput["voiceDirection"]>(() => defaultVoiceDirection(providers));
+  const [budgetIntention, setBudgetIntention] = useState(String(initialValues?.budgetIntentionCny ?? ""));
   const [semanticRankEnabled, setSemanticRankEnabled] = useState(true);
   const [referenceVideo, setReferenceVideo] = useState<ReferenceVideoSelection>();
   const releasedReferenceId = useRef<string | undefined>(undefined);
   const voiceTouched = useRef(false);
+  const templateTouched = useRef(false);
   const templateAddedEditorialSource = useRef(false);
   const formScrollRef = useRef<HTMLDivElement>(null);
   const assetSourcePoolRef = useRef<HTMLElement>(null);
@@ -159,7 +166,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     initialValues?.template?.templateId
       ?? (initialValues?.editorial?.verdict === "produce_image_story"
         ? "photo-story"
-        : initialValues?.editorial ? "" : "knowledge-explainer"),
+        : initialValues?.editorial ? "" : recommendTemplateForBrief({ title: initialValues?.title ?? "", hook: initialValues?.angle ?? "" })),
   );
   const [templateReplacementConfirmed, setTemplateReplacementConfirmed] = useState(false);
   const [templateError, setTemplateError] = useState<string>();
@@ -192,6 +199,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const selectedMeteredSources = selectedAssetSources.filter((provider) => provider.billing === "metered");
   const selectedRecipe = RECIPES.find((recipe) => recipe.id === recipeId) ?? RECIPES[0]!;
   const selectedTemplate = templates.find((template) => template.id === selectedTemplateId);
+  const visualSourceIssue = visualSourceCompatibilityIssue(selectedTemplate, selectedAssetSources);
   const templateSelectionMissing = templatesLoaded && !selectedTemplate;
   const inheritedTemplateAvailable = !initialValues?.rework || !initialValues.template
     || templates.some((template) => (
@@ -348,7 +356,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     || (voiceSelectionAvailable === false && !initialValues?.rework)
     ? "/resources#production-roles"
     : "/resources#visual-providers";
-  const productionBlocked = missingProductionRoles.length > 0 || inheritedSelectionIssues.length > 0 || templateSelectionMissing;
+  const productionBlocked = missingProductionRoles.length > 0
+    || inheritedSelectionIssues.length > 0
+    || templateSelectionMissing
+    || visualSourceIssue !== undefined;
   const creativeSummary = {
     audience: briefSummaryValues.audience || "待填写目标受众",
     openingPromise: initialValues?.seriesContext?.episode.hook ?? (briefSummaryValues.angle || "待填写开头承诺"),
@@ -370,7 +381,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       if (initialValues?.rework) {
         setSelectedTemplateId(requestedTemplateId);
       } else {
-        const resolvedTemplate = availableTemplates.find((template) => template.id === requestedTemplateId);
+        const resolvedTemplate = availableTemplates.find((template) => template.id === requestedTemplateId)
+          ?? (!initialValues?.template && !initialValues?.editorial
+            ? availableTemplates.find((template) => template.id === "knowledge-explainer")
+            : undefined);
         setSelectedTemplateId(resolvedTemplate?.id ?? "");
         if (resolvedTemplate && !preserveCurrentChoices && !initialValues?.voiceDirection && !creatorVoiceWasCustomized(creatorSettings) && !voiceTouched.current) {
           applyUntouchedTemplateVoice(resolvedTemplate);
@@ -405,6 +419,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     initialScrollResetPending.current = true;
     if (formScrollRef.current) formScrollRef.current.scrollTop = 0;
     voiceTouched.current = false;
+    templateTouched.current = false;
+    durationRangeTouched.current = false;
     const revision = ++initializationRevision.current;
     const initialVoiceDirection = initialValues?.voiceDirection ?? creatorSettings?.voiceDirection ?? defaultVoiceDirection(providers);
     const requestedVoiceProvider = providerForVoiceProfile(initialVoiceDirection.profileId);
@@ -426,7 +442,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     const recipe = RECIPES.find((item) => item.id === initialRecipe) ?? RECIPES[0]!;
     const initialProfile = initialValues?.director?.profileId ?? creatorSettings?.productionDefaults?.directorProfileId ?? "auto";
     const requestedTemplateId = initialValues?.template?.templateId
-      ?? (imageStory ? "photo-story" : initialValues?.editorial ? "" : "knowledge-explainer");
+      ?? (imageStory
+        ? "photo-story"
+        : initialValues?.editorial
+          ? ""
+          : recommendTemplateForBrief({ title: initialValues?.title ?? "", hook: initialValues?.angle ?? "" }));
     const inheritedOrRecommendedSourceIds = initialValues?.director?.assetProviderIds
       ?? sourceIdsForRecipe(recipe, providers, creatorSettings?.defaultAssetProviderId);
     const sourceIds = requestedTemplateId === "photo-story"
@@ -437,7 +457,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setDirectorProfileId(initialProfile);
     const initialPlatform = initialValues?.platform ?? creatorSettings?.productionDefaults?.platform ?? "douyin";
     setPlatform(isProductionPlatform(initialPlatform) ? initialPlatform : "");
-    setDurationSeconds(initialValues?.durationSeconds ?? creatorSettings?.productionDefaults?.durationSeconds ?? 24);
+    const initialDurationSeconds = initialValues?.durationSeconds ?? creatorSettings?.productionDefaults?.durationSeconds ?? 24;
+    setDurationSeconds(initialDurationSeconds);
+    setDurationRange(initialValues?.durationRange ?? defaultStudioDurationRange(initialDurationSeconds));
     setAssetProviderIds(sourceIds);
     // 只有用户或入口明确指定的模型才属于本次覆盖。全局/模板默认值由服务端按优先级解析。
     setModelSelections({ ...(initialValues?.models ?? {}) });
@@ -566,10 +588,14 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     openAssetSourceControls();
   }
 
-  function selectTemplate(template: StudioTemplate) {
+  function selectTemplate(template: StudioTemplate, userInitiated = true) {
+    if (userInitiated) templateTouched.current = true;
     setSelectedTemplateId(template.id);
     setTemplateReplacementConfirmed(Boolean(initialValues?.rework));
     setDurationSeconds(template.durationSeconds);
+    if (!initialValues?.rework && !durationRangeTouched.current) {
+      setDurationRange(defaultStudioDurationRange(template.durationSeconds));
+    }
     setAssetProviderIds((current) => {
       if (template.id === "photo-story") {
         const next = includeLocalEditorialSource(current, providers);
@@ -585,6 +611,32 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     if (!initialValues?.rework && !initialValues?.voiceDirection && !creatorVoiceWasCustomized(creatorSettings) && !voiceTouched.current) {
       applyUntouchedTemplateVoice(template);
     }
+  }
+
+  function recommendUntouchedTemplate(title: string, hook: string) {
+    if (initialValues?.editorial || initialValues?.rework || initialValues?.template || templateTouched.current) return;
+    const recommendedId = recommendTemplateForBrief({ title, hook });
+    if (recommendedId === selectedTemplateId) return;
+    const template = templates.find((candidate) => candidate.id === recommendedId);
+    if (template) selectTemplate(template, false);
+  }
+
+  function changeSuggestedDuration(nextDurationSeconds: number) {
+    setDurationSeconds(nextDurationSeconds);
+    if (durationRange && !durationRangeTouched.current) {
+      setDurationRange(defaultStudioDurationRange(nextDurationSeconds));
+    }
+  }
+
+  function changeDurationRange(field: "minSeconds" | "maxSeconds", value: number) {
+    if (!durationRange || !Number.isInteger(value)) return;
+    durationRangeTouched.current = true;
+    const bounded = Math.min(180, Math.max(20, value));
+    const next = field === "minSeconds"
+      ? { minSeconds: Math.min(bounded, durationRange.maxSeconds), maxSeconds: durationRange.maxSeconds }
+      : { minSeconds: durationRange.minSeconds, maxSeconds: Math.max(bounded, durationRange.minSeconds) };
+    setDurationRange(next);
+    setDurationSeconds((current) => Math.min(next.maxSeconds, Math.max(next.minSeconds, current)));
   }
 
   function applyUntouchedTemplateVoice(template: StudioTemplate) {
@@ -690,6 +742,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         audience: requiredString(data, "audience"),
         nicheSlug: initialValues?.nicheSlug ?? topicSlug(requiredString(data, "title")),
         durationSeconds,
+        ...(durationRange ? { durationRange } : {}),
         platform,
         reviewMode: "manual",
         runPurpose: initialValues?.runPurpose ?? "production",
@@ -720,12 +773,23 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         },
         providers: providersForRun,
         models: modelsForRun,
-        workflowFeatures: { assetSemanticRank: effectiveSemanticRank, referenceGrammar: Boolean(referenceVideo) },
+        workflowFeatures: {
+          assetSemanticRank: effectiveSemanticRank,
+          referenceGrammar: Boolean(referenceVideo),
+          executablePlan: true,
+          // 新制作走 joint-v1 共同创作规划；返工沿用 initialValues 继承的来源规划形态。
+          ...(rework && initialValues?.workflowFeatures?.creativePlanning !== "joint-v1"
+            ? {}
+            : { creativePlanning: "joint-v1" as const }),
+        },
         ...(referenceVideo && isUploadedReferenceVideo(referenceVideo)
           ? { referenceVideo: { uploadId: referenceVideo.uploadId, label: referenceVideo.label } }
           : {}),
         director: { profileId: directorProfileId, assetProviderIds },
         economics,
+        ...(budgetIntention.trim() && Number.isFinite(Number(budgetIntention)) && Number(budgetIntention) > 0
+          ? { budgetIntentionCny: Number(budgetIntention) }
+          : {}),
       });
       if (referenceVideo && isUploadedReferenceVideo(referenceVideo)) releasedReferenceId.current = referenceVideo.uploadId;
       setReferenceVideo(undefined);
@@ -902,11 +966,19 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               <div className="brief-fields">
                 <label className="field field-wide">
                   <span>视频标题</span>
-                  <input name="title" required data-dialog-initial-focus={rework ? undefined : true} defaultValue={initialValues?.title ?? ""} placeholder="一句能让人停下来的具体承诺" onChange={(event) => setBriefSummaryValues((current) => ({ ...current, title: event.target.value }))} />
+                  <input name="title" required data-dialog-initial-focus={rework ? undefined : true} defaultValue={initialValues?.title ?? ""} placeholder="一句能让人停下来的具体承诺" onChange={(event) => {
+                    const title = event.target.value;
+                    setBriefSummaryValues((current) => ({ ...current, title }));
+                    recommendUntouchedTemplate(title, briefSummaryValues.angle);
+                  }} />
                 </label>
                 <label className="field field-wide">
                   <span>内容角度</span>
-                  <input name="angle" required defaultValue={initialValues?.angle ?? ""} placeholder="这条视频用什么独特角度讲清问题" onChange={(event) => setBriefSummaryValues((current) => ({ ...current, angle: event.target.value }))} />
+                  <input name="angle" required defaultValue={initialValues?.angle ?? ""} placeholder="这条视频用什么独特角度讲清问题" onChange={(event) => {
+                    const angle = event.target.value;
+                    setBriefSummaryValues((current) => ({ ...current, angle }));
+                    recommendUntouchedTemplate(briefSummaryValues.title, angle);
+                  }} />
                 </label>
                 <label className="field">
                   <span>目标受众</span>
@@ -922,19 +994,23 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   </select>
                 </label>
                 <label className="field field-compact">
-                  <span>目标时长</span>
-                  <select name="durationSeconds" value={String(durationSeconds)} onChange={(event) => setDurationSeconds(Number(event.target.value))}>
+                  <span>建议时长</span>
+                  <select name="durationSeconds" value={String(durationSeconds)} onChange={(event) => changeSuggestedDuration(Number(event.target.value))}>
                     {![20, 24, 30, 36, 40, 42, 45, 60].includes(durationSeconds) ? <option value={durationSeconds}>{durationSeconds} 秒</option> : null}
-                    <option value="20">20 秒</option>
-                    <option value="24">24 秒</option>
-                    <option value="30">30 秒</option>
-                    <option value="36">36 秒</option>
-                    <option value="40">40 秒</option>
-                    <option value="42">42 秒</option>
-                    <option value="45">45 秒</option>
-                    <option value="60">60 秒</option>
+                    {[20, 24, 30, 36, 40, 42, 45, 60]
+                      .map((seconds) => <option key={seconds} value={seconds}>{seconds} 秒</option>)}
                   </select>
                 </label>
+                {durationRange ? <>
+                  <label className="field field-compact">
+                    <span>最短时长</span>
+                    <input type="number" min={20} max={durationRange.maxSeconds} step={1} value={durationRange.minSeconds} onChange={(event) => changeDurationRange("minSeconds", Number(event.target.value))} />
+                  </label>
+                  <label className="field field-compact">
+                    <span>最长时长</span>
+                    <input type="number" min={durationRange.minSeconds} max={180} step={1} value={durationRange.maxSeconds} onChange={(event) => changeDurationRange("maxSeconds", Number(event.target.value))} />
+                  </label>
+                </> : null}
                 <label className="field field-wide">
                   <span>必须让观众看到的证据（可选）</span>
                   <textarea
@@ -1034,6 +1110,19 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   );
                 })}
               </fieldset>
+              <label className="field budget-intention-field">
+                <span>本片预算意向（元，可不填）</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="不填则不设预期"
+                  value={budgetIntention}
+                  onChange={(event) => setBudgetIntention(event.target.value)}
+                  aria-label="本片预算意向"
+                />
+                <small>只影响导演的方案取舍参考，不是付款授权；实际花费仍会在确认方案时逐次报价并等你确认。</small>
+              </label>
             </section>
 
             <section className="production-team-section" aria-labelledby="production-team-title">
@@ -1283,6 +1372,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
             </section>
 
             {missingProductionRoles.length > 0 ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />缺少正式生产能力：{missingProductionRoles.join("、")}。请先在创作设置中完成配置。<a className="button button-ghost" href={capabilitySettingsHref}>打开创作设置</a></p> : null}
+            {visualSourceIssue ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{visualSourceIssue.message}</p> : null}
             {error ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
           </div>
 

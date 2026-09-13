@@ -152,6 +152,30 @@ describe("editorial production decision", () => {
     assert.match(decision.reasons.join(" "), /规则保底候选|选题总编/);
   });
 
+  it("marks every rule-baseline decision as pending editor review so clients never show a fake zero", () => {
+    // 来源不达标（blocked）：规则结论同样没有经过总编。
+    const blocked = decideEditorialFormat({
+      ...base,
+      providerId: "trend-heuristic-v1",
+      verification: {
+        status: "blocked",
+        independentSources: 0,
+        requiredSources: 2,
+        reasons: ["当前总编规则要求至少 2 个不同域名的有效原始来源链接，补齐前不会进入制作推荐。"],
+      },
+    });
+    assert.equal(blocked.pendingEditorReview, true);
+
+    // 来源已补齐：仍未经过总编，标记必须保留，等待评估不是“总编评分 0”。
+    const ready = decideEditorialFormat({ ...base, providerId: "trend-heuristic-v1" });
+    assert.equal(ready.pendingEditorReview, true);
+
+    // 有总编产出的候选：不带 pending 标记，分数就是总编口径的结论。
+    const modelEvaluated = decideEditorialFormat(base);
+    assert.equal(modelEvaluated.pendingEditorReview, undefined);
+    assert.equal(modelEvaluated.verdict, "produce_video");
+  });
+
   it("does not let a series label bypass viral readiness, risk, visual feasibility, or the video gate", () => {
     const vague = decideEditorialFormat({
       ...base,

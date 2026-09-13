@@ -24,6 +24,7 @@ export interface WorkerArtifactDescriptor {
     sourceUrl?: string;
     creator?: string;
     scenePosition?: number;
+    notes?: string;
   };
 }
 

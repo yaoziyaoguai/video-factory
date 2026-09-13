@@ -3727,3 +3727,231 @@ describe("Topic Intelligence", () => {
     assert.equal(risky.status, "draft");
   });
 });
+
+// ---------------------------------------------------------------------------
+// preRegisteredArtifactIds：节点 execute 内已通过 context.addArtifact 登记的全局产物，
+// 经受控合同归属到当前节点的 artifactIds 与 output version——不做通用 artifact 重构，
+// 只服务"崩溃恢复后产物已存在、不得重复登记"的幂等场景。
+// ---------------------------------------------------------------------------
+describe("WorkflowRunner pre-registered artifacts", () => {
+  const planningNode = (
+    execute: (input: unknown, context: WorkflowContext) => ReturnType<NonNullable<NodeDefinition["execute"]>>,
+  ): NodeDefinition => ({
+    id: "creative-planning",
+    label: "Joint creative planning",
+    capability: "creative.planning",
+    mode: "automatic",
+    execute,
+  });
+
+  it("attaches node-owned pre-registered artifacts to the current output version without re-registering", async () => {
+    const definition: WorkflowDefinition = {
+      id: "pre-registered-planning",
+      name: "Pre-registered planning",
+      version: "1.0.0",
+      nodes: [planningNode((_input, context) => {
+        const script = context.addArtifact({
+          kind: "script",
+          uri: "/tmp/planning/script.json",
+          sha256: "a".repeat(64),
+          producer: { nodeId: "creative-planning", attempt: 1 },
+        });
+        const plan = context.addArtifact({
+          kind: "storyboard",
+          uri: "/tmp/planning/director_plan.json",
+          sha256: "b".repeat(64),
+          producer: { nodeId: "creative-planning", attempt: 1 },
+        });
+        return {
+          output: { scriptPath: script.uri },
+          // 重复 ID 由 runner 去重，不得在 artifactIds 中出现两次。
+          preRegisteredArtifactIds: [script.id, script.id, plan.id],
+        };
+      })],
+    };
+
+    const run = await new WorkflowRunner({ clock, idFactory: deterministicIds() }).run(definition, {});
+    const nodeRun = run.nodeRuns[0]!;
+
+    assert.equal(nodeRun.status, "succeeded");
+    assert.equal(run.artifacts.length, 2);
+    const expectedIds = run.artifacts.map((artifact) => artifact.id);
+    assert.deepEqual(nodeRun.artifactIds, expectedIds);
+    const version = nodeRun.outputState?.versions
+      .find((candidate) => candidate.id === nodeRun.outputState?.effectiveVersionId);
+    assert.ok(version, "the generated output version must exist");
+    assert.deepEqual(version.artifactIds, expectedIds);
+  });
+
+  it("fails closed when a pre-registered artifact id does not exist", async () => {
+    const definition: WorkflowDefinition = {
+      id: "pre-registered-missing",
+      name: "Pre-registered missing",
+      version: "1.0.0",
+      nodes: [planningNode(() => ({
+        status: "succeeded" as const,
+        output: { scriptPath: "/tmp/planning/script.json" },
+        preRegisteredArtifactIds: ["artifact-does-not-exist"],
+      }))],
+    };
+
+    const run = await new WorkflowRunner({ clock, idFactory: deterministicIds() }).run(definition, {});
+
+    assert.equal(run.status, "failed");
+    assert.match(run.nodeRuns[0]?.error ?? "", /pre-registered artifact 'artifact-does-not-exist'/);
+  });
+
+  it("fails closed when a pre-registered artifact belongs to another node", async () => {
+    let upstreamArtifactId = "";
+    const definition: WorkflowDefinition = {
+      id: "pre-registered-foreign",
+      name: "Pre-registered foreign",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "brief",
+          label: "Brief",
+          capability: "topic.intelligence",
+          mode: "automatic",
+          execute: (_input, context) => {
+            const artifact = context.addArtifact({
+              kind: "topic_candidate",
+              producer: { nodeId: "brief", attempt: 1 },
+            });
+            upstreamArtifactId = artifact.id;
+            return { output: { ready: true } };
+          },
+        },
+        planningNode(() => ({
+          status: "succeeded" as const,
+          output: { scriptPath: "/tmp/planning/script.json" },
+          preRegisteredArtifactIds: [upstreamArtifactId],
+        })),
+      ],
+    };
+    definition.nodes[1]!.dependsOn = ["brief"];
+
+    const run = await new WorkflowRunner({ clock, idFactory: deterministicIds() }).run(definition, {});
+
+    assert.equal(run.status, "failed");
+    assert.match(run.nodeRuns[1]?.error ?? "", /belongs to node 'brief'/);
+  });
+
+  it("does not leave a valid pre-registered id attached when a later id fails validation", async () => {
+    // 混合输入 [合法自有 ID, 非法 ID]：校验失败时合法 ID 也不得残留——
+    // 挂载必须原子（先全量验证，再统一归属），失败节点不得带走部分产物。
+    const cases: Array<{
+      definitionId: string;
+      invalidIds: () => string[];
+      errorPattern: RegExp;
+    }> = [
+      {
+        definitionId: "pre-registered-partial-missing",
+        invalidIds: () => ["artifact-does-not-exist"],
+        errorPattern: /pre-registered artifact 'artifact-does-not-exist'/,
+      },
+    ];
+    let upstreamArtifactId = "";
+    cases.push({
+      definitionId: "pre-registered-partial-foreign",
+      invalidIds: () => [upstreamArtifactId],
+      errorPattern: new RegExp(`belongs to node 'brief'`),
+    });
+
+    for (const testCase of cases) {
+      const nodes: NodeDefinition[] = [
+        {
+          id: "brief",
+          label: "Brief",
+          capability: "topic.intelligence",
+          mode: "automatic",
+          execute: (_input, context) => {
+            const artifact = context.addArtifact({
+              kind: "topic_candidate",
+              producer: { nodeId: "brief", attempt: 1 },
+            });
+            upstreamArtifactId = artifact.id;
+            return { output: { ready: true } };
+          },
+        },
+        planningNode((_input, context) => {
+          const script = context.addArtifact({
+            kind: "script",
+            uri: "/tmp/planning/script.json",
+            sha256: "a".repeat(64),
+            producer: { nodeId: "creative-planning", attempt: 1 },
+          });
+          return {
+            status: "succeeded" as const,
+            output: { scriptPath: script.uri },
+            preRegisteredArtifactIds: [script.id, ...testCase.invalidIds()],
+          };
+        }),
+      ];
+      nodes[1]!.dependsOn = ["brief"];
+      const definition: WorkflowDefinition = {
+        id: testCase.definitionId,
+        name: "Pre-registered partial attach",
+        version: "1.0.0",
+        nodes,
+      };
+
+      const run = await new WorkflowRunner({ clock, idFactory: deterministicIds() }).run(definition, {});
+      const planning = run.nodeRuns.find((nodeRun) => nodeRun.nodeId === "creative-planning")!;
+
+      assert.equal(run.status, "failed", `[${testCase.definitionId}]`);
+      assert.equal(planning.status, "failed", `[${testCase.definitionId}]`);
+      assert.match(planning.error ?? "", testCase.errorPattern, `[${testCase.definitionId}]`);
+      // 合法的自有预登记 ID 不得被部分挂载进失败节点。
+      assert.deepEqual(
+        planning.artifactIds,
+        [],
+        `[${testCase.definitionId}] a failed node must not keep partially attached pre-registered artifacts`,
+      );
+      assert.equal(
+        planning.outputState,
+        undefined,
+        `[${testCase.definitionId}] a failed node must not own an output version for partially attached artifacts`,
+      );
+      // 全局产物保留（addArtifact 不回滚），只是不归属失败节点。
+      assert.equal(run.artifacts.length, 2, `[${testCase.definitionId}]`);
+    }
+  });
+
+  it("keeps the existing result.artifacts contract alongside pre-registered ids", async () => {
+    const definition: WorkflowDefinition = {
+      id: "pre-registered-mixed",
+      name: "Pre-registered mixed",
+      version: "1.0.0",
+      nodes: [planningNode((_input, context) => {
+        const preRegistered = context.addArtifact({
+          kind: "executable_plan",
+          uri: "/tmp/planning/executable_plan.json",
+          sha256: "c".repeat(64),
+          producer: { nodeId: "creative-planning", attempt: 1 },
+        });
+        return {
+          output: { executablePlanPath: preRegistered.uri },
+          artifacts: [{
+            kind: "script",
+            uri: "/tmp/planning/script.json",
+            sha256: "d".repeat(64),
+            producer: { nodeId: "creative-planning", attempt: 1 },
+          }],
+          preRegisteredArtifactIds: [preRegistered.id],
+        };
+      })],
+    };
+
+    const run = await new WorkflowRunner({ clock, idFactory: deterministicIds() }).run(definition, {});
+    const nodeRun = run.nodeRuns[0]!;
+
+    assert.equal(nodeRun.status, "succeeded");
+    assert.equal(run.artifacts.length, 2);
+    // result.artifacts 的登记与挂载行为保持不变；preRegistered 只追加归属（顺序不作约束）。
+    assert.deepEqual(
+      [...nodeRun.artifactIds].sort(),
+      [...run.artifacts.map((artifact) => artifact.id)].sort(),
+    );
+  });
+});

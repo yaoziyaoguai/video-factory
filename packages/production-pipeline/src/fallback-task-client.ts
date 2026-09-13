@@ -3,6 +3,8 @@ import {
   CodexBridgeError,
   type CodexTaskExecution,
   type CodexTaskKind,
+  type CodexPreparedOperation,
+  type CodexTaskRequestOptions,
   type CodexTaskSession,
   type ModelCandidateAttempt,
 } from "./codex-chat.js";
@@ -40,8 +42,13 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
     this.candidates = [...options.candidates];
   }
 
-  override async runTask(kind: CodexTaskKind, payload: unknown, requestId?: string): Promise<unknown> {
-    return (await this.runTaskDetailed(kind, payload, requestId)).output;
+  override async runTask(
+    kind: CodexTaskKind,
+    payload: unknown,
+    requestId?: string,
+    requestOptions?: CodexTaskRequestOptions,
+  ): Promise<unknown> {
+    return (await this.runTaskDetailed(kind, payload, requestId, undefined, requestOptions)).output;
   }
 
   override async runTaskDetailed(
@@ -49,6 +56,7 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
     payload: unknown,
     requestId?: string,
     session?: CodexTaskSession,
+    requestOptions: CodexTaskRequestOptions = {},
   ): Promise<CodexTaskExecution> {
     const available = this.candidates.filter((candidate) => candidate.taskKinds.includes(kind));
     if (available.length === 0) {
@@ -74,7 +82,7 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
           }
         : undefined;
       try {
-        const execution = await candidate.client.runTaskDetailed(kind, payload, candidateRequestId, candidateSession);
+        const execution = await candidate.client.runTaskDetailed(kind, payload, candidateRequestId, candidateSession, requestOptions);
         if (session) this.rememberAffinity(session.key, candidate.providerId);
         return failures.length > 0 ? withFallbackTrace(execution, failures, modelId, candidate.providerId) : execution;
       } catch (error) {
@@ -89,6 +97,22 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
       }
     }
     throw new ModelCandidatesExhaustedError(failures);
+  }
+
+  override async observePrepared(
+    operation: CodexPreparedOperation,
+    requestOptions: CodexTaskRequestOptions = {},
+  ): Promise<CodexTaskExecution> {
+    const candidate = this.candidates.find((item) => item.providerId === operation.brokerBinding.providerId);
+    if (!candidate) {
+      throw new CodexBridgeError(
+        `The original model provider '${operation.brokerBinding.providerId}' is unavailable for recovery.`,
+        false,
+        "uncertain",
+      );
+    }
+    // 恢复必须回到快照绑定的原路由；此处不筛“当前健康”也不遍历 backup。
+    return candidate.client.observePrepared(operation, requestOptions);
   }
 
   private rememberAffinity(sessionKey: string, providerId: string): void {

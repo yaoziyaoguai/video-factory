@@ -13,8 +13,8 @@ import {
   Sparkles,
   UploadCloud,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import type {
   StudioLocalCapability,
   StudioCreatorSettings,
@@ -98,7 +98,16 @@ const AUTOMATIC_AGENT_ROLES = [
 ] as const;
 
 export function ResourcesPage() {
-  const [activeSection, setActiveSection] = useState<ResourceSectionId>(() => resourceSectionFromHash());
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+  // 初始分区跟随 URL hash：刷新或从“查看缺失能力”等入口直达时，直接落在正确分区。
+  const [activeSection, setActiveSection] = useState<ResourceSectionId>(() => resourceSectionFromHash(location.hash));
+  // 从导演台“查看缺失能力”进入时（?missing=capability 列表），高亮真正缺失的制作角色。
+  const missingCapabilities = useMemo(
+    () => new Set((searchParams.get("missing") ?? "").split(",").map((value) => value.trim()).filter(Boolean)),
+    [searchParams],
+  );
+  const arrivalSectionRef = useRef<ResourceSectionId>(activeSection);
   const [providers, setProviders] = useState<StudioProvider[]>([]);
   const [trendSources, setTrendSources] = useState<StudioTrendSource[]>([]);
   const [services, setServices] = useState<StudioTrendService[]>([]);
@@ -131,9 +140,17 @@ export function ResourcesPage() {
   const [topicStrategy, setTopicStrategy] = useState<StudioTopicStrategy>(DEFAULT_STUDIO_TOPIC_STRATEGY);
 
   useEffect(() => {
-    const syncSection = () => setActiveSection(resourceSectionFromHash());
+    const syncSection = () => setActiveSection(resourceSectionFromHash(window.location.hash));
     window.addEventListener("hashchange", syncSection);
     return () => window.removeEventListener("hashchange", syncSection);
+  }, []);
+
+  // 携带 hash 直达时把键盘焦点落到该分区，而不是停留在页面顶部。
+  useEffect(() => {
+    if (arrivalSectionRef.current === "creation-defaults") return;
+    const section = document.getElementById(arrivalSectionRef.current);
+    section?.setAttribute("tabindex", "-1");
+    section?.focus({ preventScroll: true });
   }, []);
 
   useEffect(() => {
@@ -424,6 +441,7 @@ export function ResourcesPage() {
                   definition={definition}
                   providers={providers}
                   selectedProvider={selected}
+                  {...(missingCapabilities.has(definition.capability) ? { missing: true } : {})}
                   onProviderChange={(providerId) => setRoleProviderDefaults((current) => ({ ...current, [definition.key]: providerId }))}
                 />;
               })}
@@ -472,9 +490,8 @@ export function ResourcesPage() {
   );
 }
 
-function resourceSectionFromHash(): ResourceSectionId {
-  if (typeof window === "undefined") return "creation-defaults";
-  const candidate = window.location.hash.slice(1);
+function resourceSectionFromHash(hash: string): ResourceSectionId {
+  const candidate = hash.slice(1);
   return RESOURCE_SECTION_IDS.includes(candidate as ResourceSectionId)
     ? candidate as ResourceSectionId
     : "creation-defaults";
@@ -671,10 +688,11 @@ function creatorProviderLabel(provider: StudioProvider): string {
   return !normalized || normalized === provider.id ? provider.label : normalized;
 }
 
-function RoleProviderCard({ definition, providers, selectedProvider, onProviderChange }: {
+function RoleProviderCard({ definition, providers, selectedProvider, missing = false, onProviderChange }: {
   definition: ProductionRoleDefinition;
   providers: StudioProvider[];
   selectedProvider: StudioProvider | undefined;
+  missing?: boolean;
   onProviderChange: (providerId: string) => void;
 }) {
   const candidates = providers.filter((provider) => provider.capability === definition.capability && provider.kind !== "test");
@@ -687,9 +705,9 @@ function RoleProviderCard({ definition, providers, selectedProvider, onProviderC
   const dualFinalReviewAvailable = definition.key === "visualReview"
     && providers.some((provider) => provider.id === "glm-visual-review-v1" && isProductionReady(provider))
     && providers.some((provider) => provider.id === "codex-visual-review-v1" && isProductionReady(provider));
-  return <article className={ready ? "role-configuration" : "role-configuration is-unavailable"}>
+  return <article className={`role-configuration${ready ? "" : " is-unavailable"}${missing ? " is-missing" : ""}`}>
     <header>
-      <span>{definition.label}</span>
+      <span>{definition.label}{missing ? <b className="role-missing-flag">当前缺失</b> : null}</span>
       <em className={`role-mode is-${definition.mode}`}>{roleModeLabel(definition.mode)}</em>
     </header>
     <p>{definition.responsibility}</p>
@@ -712,9 +730,9 @@ function RoleProviderCard({ definition, providers, selectedProvider, onProviderC
       </label>
       <div className="role-runtime-summary"><span>系统推荐</span><strong>{activeModel?.label ?? selectedProvider?.label ?? "尚未配置"}</strong>{backupModels.length ? <span>故障替补：{backupModels.map((model) => model.label).join("、")}</span> : null}</div>
       {dualFinalReviewAvailable
-        ? <p className="role-fallback-note">中途画面预检优先使用首选模型，只有确认请求未受理时才切换；结果不确定会暂停核对。最终成片由 GLM 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。</p>
+        ? <p className="role-fallback-note">中途画面预检优先使用首选模型；只有确认请求尚未开始，或原请求已明确结束于连接故障、服务不可用、限流、超时或无输出时才切换。结果不确定会暂停核对。最终成片由 GLM 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。</p>
         : candidates.filter((provider) => provider.id !== selectedProvider?.id && isProductionReady(provider)).length > 0
-          ? <p className="role-fallback-note">只有确认首选请求未被受理时，其余可用能力才会依次接管。若请求结果不确定，流程会暂停核对，不会切换模型或重复生成。</p>
+          ? <p className="role-fallback-note">只有确认首选请求尚未开始，或原请求已明确结束于连接故障、服务不可用、限流、超时或无输出时，其余可用能力才会依次接管。若请求结果不确定，流程会暂停核对，不会切换模型或重复生成。</p>
         : null}
     </>}
     <footer><span>{selectedProvider ? billingLabel(selectedProvider.billing) : "无可用能力"}</span><strong>{selectedProvider ? providerReadinessLabel(selectedProvider, ready) : "需要配置"}</strong></footer>

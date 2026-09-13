@@ -12,6 +12,7 @@ from PIL import Image
 from video_factory.review_media import (
     MAX_FRAME_BYTES,
     MAX_TOTAL_FRAME_BYTES,
+    _probe_video,
     _select_render_timeline_timestamps,
     prepare_asset_review_media,
     prepare_review_media,
@@ -23,6 +24,161 @@ FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None and shutil.which("ffprobe"
 
 @unittest.skipUnless(FFMPEG_AVAILABLE, "FFmpeg and ffprobe are required")
 class ReviewMediaTest(unittest.TestCase):
+    def test_source_review_binds_nonzero_sampling_to_the_executable_cut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "master.mp4"
+            video.write_bytes(b"test video")
+            executable_plan_path = root / "executable_plan.json"
+            executable_plan_path.write_text(json.dumps({
+                "version": "video-factory/executable-plan-v1",
+                "durationRange": {"minSeconds": 20, "maxSeconds": 20},
+                "fps": 30,
+                "totalFrames": 600,
+                "cuts": [{
+                    "scenePosition": 1, "beatId": "scene-1", "assetKey": "master-1",
+                    "startFrame": 0, "frameCount": 600, "sourceInFrame": 120,
+                }],
+            }), encoding="utf-8")
+            plan = root / "asset_plan.json"
+            scene_asset = {
+                "scene_position": 1, "duration_frames": 600, "source_in_frame": 120,
+                "asset_key": "master-1", "media_type": "video", "local_path": str(video),
+            }
+            plan.write_text(json.dumps({"scene_assets": [scene_asset]}), encoding="utf-8")
+            extracted = []
+
+            def extract(_video, source_start, source_end, timestamp, target):
+                extracted.append((source_start, source_end, timestamp))
+                Image.new("RGB", (320, 480), "green").save(target, format="JPEG")
+
+            with patch("video_factory.review_media._probe_video", return_value={"duration": 24}), patch(
+                "video_factory.review_media._extract_frame_from_range", side_effect=extract
+            ):
+                manifest = json.loads(prepare_asset_review_media(
+                    plan, root, executable_plan_path=executable_plan_path
+                ).read_text(encoding="utf-8"))
+            self.assertEqual(extracted, [(4, 24, 7000), (4, 24, 14000), (4, 24, 21000)])
+            self.assertEqual(
+                [frame["sourceTimecodeMs"] for frame in manifest["frames"]],
+                [7000, 14000, 21000],
+            )
+
+            plan.write_text(json.dumps({"scene_assets": [{
+                **scene_asset, "asset_key": "stale-master",
+            }]}), encoding="utf-8")
+            with patch("video_factory.review_media._extract_frame_from_range") as extract:
+                with self.assertRaisesRegex(ValueError, "Asset plan.*executable production cuts"):
+                    prepare_asset_review_media(plan, root, executable_plan_path=executable_plan_path)
+                extract.assert_not_called()
+    def test_source_review_probe_uses_video_stream_duration_not_a_longer_container_duration(self):
+        payload = {
+            "streams": [{"width": 320, "height": 480, "duration": "2.000000"}],
+            "format": {"duration": "10.000000"},
+        }
+        with patch("video_factory.review_media.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+            self.assertEqual(_probe_video(Path("source.mp4")), {"duration": 2.0})
+
+        command = run.call_args.args[0]
+        self.assertIn("stream=width,height,duration", command)
+
+    def test_source_review_samples_only_the_compiled_nonzero_source_range_and_records_both_timecodes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "master.mp4"
+            video.write_bytes(b"test video")
+            plan = root / "asset_plan.json"
+            plan.write_text(json.dumps({"scene_assets": [{
+                "scene_position": 1,
+                "duration": 10,
+                "duration_frames": 60,
+                "source_in_frame": 120,
+                "asset_key": "master-1",
+                "media_type": "video",
+                "local_path": str(video),
+            }]}), encoding="utf-8")
+            extracted = []
+
+            def extract(_video, source_start, source_end, timestamp, target):
+                extracted.append((source_start, source_end, timestamp))
+                Image.new("RGB", (320, 480), "green").save(target, format="JPEG")
+
+            with patch("video_factory.review_media._probe_video", return_value={"duration": 6}), patch(
+                "video_factory.review_media._extract_frame_from_range", side_effect=extract
+            ):
+                manifest = json.loads(prepare_asset_review_media(plan, root).read_text(encoding="utf-8"))
+
+            self.assertEqual(manifest["durationMs"], 2000)
+            self.assertEqual(extracted, [(4, 6, 4300), (4, 6, 5000), (4, 6, 5700)])
+            self.assertEqual(
+                [(frame["timestampMs"], frame["sourceTimecodeMs"]) for frame in manifest["frames"]],
+                [(300, 4300), (1000, 5000), (1700, 5700)],
+            )
+
+    def test_source_review_extracts_only_frames_inside_the_selected_color_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "color-master.mp4"
+            make_color_range_video(video)
+            plan = root / "asset_plan.json"
+            plan.write_text(json.dumps({"scene_assets": [{
+                "scene_position": 1,
+                "duration_frames": 60,
+                "source_in_frame": 60,
+                "asset_key": "green-segment",
+                "media_type": "video",
+                "local_path": str(video),
+            }]}), encoding="utf-8")
+
+            manifest = json.loads(prepare_asset_review_media(plan, root).read_text(encoding="utf-8"))
+
+            self.assertEqual([frame["sourceTimecodeMs"] for frame in manifest["frames"]], [2300, 3000, 3700])
+            for frame in manifest["frames"]:
+                with Image.open(root / frame["path"]) as image:
+                    red, green, blue = image.convert("RGB").resize((1, 1)).getpixel((0, 0))
+                self.assertGreater(green, red * 2)
+                self.assertGreater(green, blue * 2)
+
+    def test_source_review_rejects_ranges_not_covered_by_the_source_and_image_offsets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "master.mp4"
+            video.write_bytes(b"test video")
+            image = root / "still.png"
+            Image.new("RGB", (16, 16), "blue").save(image)
+            plan = root / "asset_plan.json"
+
+            plan.write_text(json.dumps({"scene_assets": [{
+                "scene_position": 1, "duration_frames": 61, "source_in_frame": 120,
+                "media_type": "video", "local_path": str(video),
+            }]}), encoding="utf-8")
+            with patch("video_factory.review_media._probe_video", return_value={"duration": 6}):
+                with self.assertRaisesRegex(ValueError, "does not cover the planned source range"):
+                    prepare_asset_review_media(plan, root)
+
+            plan.write_text(json.dumps({"scene_assets": [{
+                "scene_position": 1, "duration_frames": 30, "source_in_frame": 1,
+                "media_type": "image", "local_path": str(image),
+            }]}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "image source offset"):
+                prepare_asset_review_media(plan, root)
+
+    def test_source_review_rejects_explicit_invalid_compiled_frame_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "still.png"
+            Image.new("RGB", (16, 16), "blue").save(image)
+            plan = root / "asset_plan.json"
+            for invalid in (0, -1, 1.5, True, "30"):
+                with self.subTest(duration_frames=invalid):
+                    plan.write_text(json.dumps({"scene_assets": [{
+                        "scene_position": 1, "duration": 3, "duration_frames": invalid,
+                        "source_in_frame": 0, "media_type": "image", "local_path": str(image),
+                    }]}), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "duration_frames is invalid"):
+                        prepare_asset_review_media(plan, root)
+
     def test_source_review_uses_only_the_duration_used_by_the_edit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -36,12 +192,12 @@ class ReviewMediaTest(unittest.TestCase):
             ]}), encoding="utf-8")
             timestamps = []
 
-            def extract(_video, timestamp, target):
+            def extract(_video, _source_start, _source_end, timestamp, target):
                 timestamps.append(timestamp)
                 Image.new("RGB", (320, 480), "blue").save(target, format="JPEG")
 
             with patch("video_factory.review_media._probe_video", return_value={"duration": 10}), patch(
-                "video_factory.review_media._extract_frame", side_effect=extract
+                "video_factory.review_media._extract_frame_from_range", side_effect=extract
             ):
                 manifest = json.loads(prepare_asset_review_media(plan, root, script_path=script).read_text(encoding="utf-8"))
             self.assertEqual(manifest["durationMs"], 2000)
@@ -64,12 +220,12 @@ class ReviewMediaTest(unittest.TestCase):
             ]}), encoding="utf-8")
             timestamps = []
 
-            def extract(_video, timestamp, target):
+            def extract(_video, _source_start, _source_end, timestamp, target):
                 timestamps.append(timestamp)
                 Image.new("RGB", (320, 480), "blue").save(target, format="JPEG")
 
             with patch("video_factory.review_media._probe_video", return_value={"duration": 5}), patch(
-                "video_factory.review_media._extract_frame", side_effect=extract
+                "video_factory.review_media._extract_frame_from_range", side_effect=extract
             ):
                 manifest = json.loads(prepare_asset_review_media(
                     plan, root, scene_positions=[6]
@@ -463,6 +619,22 @@ def make_test_video(path: Path) -> None:
             "-movflags",
             "+faststart",
             str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def make_color_range_video(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=red:s=160x90:d=2:r=30",
+            "-f", "lavfi", "-i", "color=c=green:s=160x90:d=2:r=30",
+            "-f", "lavfi", "-i", "color=c=blue:s=160x90:d=2:r=30",
+            "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0,format=yuv420p",
+            "-c:v", "libx264", "-g", "180", str(path),
         ],
         check=True,
         capture_output=True,

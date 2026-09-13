@@ -135,6 +135,7 @@ def prepare_asset_review_media(
     max_frames: int = MAX_FRAMES,
     scene_positions: Optional[List[int]] = None,
     script_path: Optional[Path] = None,
+    executable_plan_path: Optional[Path] = None,
 ) -> Path:
     """Create bounded evidence frames from every materialized source asset."""
     root = Path(run_root).expanduser().resolve(strict=True)
@@ -153,6 +154,19 @@ def prepare_asset_review_media(
     assets = plan.get("scene_assets") if isinstance(plan, dict) else None
     if not isinstance(assets, list) or not assets or len(assets) > max_frames:
         raise ValueError("asset plan must contain one reviewable asset per scene within the frame limit")
+    if executable_plan_path is not None:
+        executable_plan_file = _resolve_run_file(
+            executable_plan_path, root, "executable_plan_path"
+        )
+        if executable_plan_file.stat().st_size > 512 * 1024:
+            raise ValueError("executable plan exceeds 524288 bytes")
+        try:
+            executable_plan = json.loads(executable_plan_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("executable plan must be valid UTF-8 JSON") from error
+        # 复用 worker 的唯一可执行计划校验，审片只验证绑定，不建立第二套时间规则。
+        from .worker import assert_asset_plan_matches_executable_plan
+        assert_asset_plan_matches_executable_plan(plan, executable_plan)
 
     scene_count = len(assets)
     planned_durations = {}
@@ -190,21 +204,55 @@ def prepare_asset_review_media(
         if scene_position in seen_positions:
             raise ValueError(f"asset plan scene position {scene_position} is duplicated")
         seen_positions.add(scene_position)
-        duration = planned_durations.get(scene_position, asset.get("duration"))
-        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
-            raise ValueError(f"asset plan scene {scene_position} duration is invalid")
+        if "duration_frames" in asset:
+            duration_frames = asset["duration_frames"]
+            if (not isinstance(duration_frames, int) or isinstance(duration_frames, bool)
+                    or duration_frames <= 0):
+                raise ValueError(f"asset plan scene {scene_position} duration_frames is invalid")
+            duration_ms = max(1, int(round(duration_frames * 1000 / 30)))
+        else:
+            duration_frames = None
+            duration = planned_durations.get(scene_position, asset.get("duration"))
+            if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
+                raise ValueError(f"asset plan scene {scene_position} duration is invalid")
+            duration_ms = max(1, int(round(float(duration) * 1000)))
+        source_in_frame = asset.get("source_in_frame", 0)
+        if (not isinstance(source_in_frame, int) or isinstance(source_in_frame, bool)
+                or source_in_frame < 0):
+            raise ValueError(f"asset plan scene {scene_position} source_in_frame is invalid")
         media_path = _resolve_run_file(Path(str(asset.get("local_path") or "")), root, "asset local_path")
         media_type = str(asset.get("media_type") or "").strip().lower()
         if media_type not in {"image", "video"}:
             raise ValueError(f"asset plan scene {scene_position} media_type is invalid")
+        if media_type == "image" and source_in_frame != 0:
+            raise ValueError(f"asset plan scene {scene_position} has an invalid image source offset")
         normalized_assets.append({
             "scenePosition": scene_position,
-            "durationMs": max(1, int(round(float(duration) * 1000))),
+            "durationMs": duration_ms,
+            "durationFrames": duration_frames,
+            "sourceInFrame": source_in_frame,
+            "sourceStartSeconds": source_in_frame / 30,
+            "sourceEndSeconds": (
+                (source_in_frame + duration_frames) / 30
+                if duration_frames is not None
+                else source_in_frame / 30 + duration_ms / 1000
+            ),
             "mediaPath": media_path,
             "mediaType": media_type,
         })
 
     _require_media_tools()
+    for asset in normalized_assets:
+        if asset["mediaType"] != "video":
+            continue
+        source_duration_seconds = float(_probe_video(asset["mediaPath"])["duration"])
+        source_end_seconds = asset["sourceEndSeconds"]
+        source_start_ms = int(round(asset["sourceInFrame"] * 1000 / 30))
+        if source_end_seconds > source_duration_seconds + 1e-6:
+            raise ValueError(
+                f"asset plan scene {asset['scenePosition']} source does not cover the planned source range"
+            )
+        asset["sourceStartMs"] = source_start_ms
     sample_counts = [1] * len(normalized_assets)
     remaining = max_frames - len(normalized_assets)
     video_indexes = [index for index, asset in enumerate(normalized_assets) if asset["mediaType"] == "video"]
@@ -261,20 +309,26 @@ def prepare_asset_review_media(
                     )
                     for phase_index in range(count)
                 ]
-            source_duration_ms = None
-            if asset["mediaType"] == "video":
-                source_duration_ms = max(1, int(round(float(_probe_video(asset["mediaPath"])["duration"]) * 1000)))
-                # 渲染从素材开头截取；未使用的尾段不应成为付费返工的证据。
-                source_duration_ms = min(source_duration_ms, asset["durationMs"])
+            source_start_ms = asset.get("sourceStartMs")
             for phase_index, (fraction, phase) in enumerate(phases):
                 timestamp_ms = min(total_duration_ms - 1, cursor_ms + int(round(asset["durationMs"] * fraction)))
                 filename = f"scene-{asset['scenePosition']:02d}-{phase_index:02d}.jpg"
                 frame_path = frames_dir / filename
-                if source_duration_ms is None:
+                if source_start_ms is None:
+                    source_timestamp_ms = 0
                     _copy_image_frame(asset["mediaPath"], frame_path)
                 else:
-                    source_timestamp_ms = min(source_duration_ms - 1, max(0, int(round(source_duration_ms * fraction))))
-                    _extract_frame(asset["mediaPath"], source_timestamp_ms, frame_path)
+                    source_timestamp_ms = min(
+                        source_start_ms + asset["durationMs"] - 1,
+                        source_start_ms + int(round(asset["durationMs"] * fraction)),
+                    )
+                    _extract_frame_from_range(
+                        asset["mediaPath"],
+                        asset["sourceStartSeconds"],
+                        asset["sourceEndSeconds"],
+                        source_timestamp_ms,
+                        frame_path,
+                    )
                 _bound_jpeg(frame_path, MAX_FRAME_BYTES)
                 frame_size = frame_path.stat().st_size
                 total_frame_bytes += frame_size
@@ -287,7 +341,11 @@ def prepare_asset_review_media(
                     f"asset_review_media/frames/{filename}",
                     timestamp_ms=timestamp_ms,
                 )
-                entry.update({"scenePosition": asset["scenePosition"], "phase": phase})
+                entry.update({
+                    "scenePosition": asset["scenePosition"],
+                    "phase": phase,
+                    "sourceTimecodeMs": source_timestamp_ms,
+                })
                 frame_entries.append(entry)
             cursor_ms += asset["durationMs"]
 
@@ -349,10 +407,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--render-manifest")
     parser.add_argument("--scene-positions", type=int, nargs="+")
     parser.add_argument("--script")
+    parser.add_argument("--executable-plan")
     args = parser.parse_args(argv)
     manifest = (
-        prepare_asset_review_media(Path(args.asset_plan), Path(args.run_root), args.max_frames,
-                                   args.scene_positions, Path(args.script) if args.script else None)
+        prepare_asset_review_media(
+            Path(args.asset_plan), Path(args.run_root), args.max_frames,
+            args.scene_positions, Path(args.script) if args.script else None,
+            Path(args.executable_plan) if args.executable_plan else None,
+        )
         if args.asset_plan
         else prepare_review_media(
             Path(args.video),
@@ -400,7 +462,7 @@ def _probe_video(video_path: Path) -> dict:
             "-select_streams",
             "v:0",
             "-show_entries",
-            "format=duration:stream=width,height",
+            "stream=width,height,duration",
             "-of",
             "json",
             str(video_path),
@@ -412,8 +474,8 @@ def _probe_video(video_path: Path) -> dict:
     )
     payload = json.loads(result.stdout)
     streams = payload.get("streams", [])
-    duration = float(payload.get("format", {}).get("duration") or 0)
-    if not streams or duration <= 0:
+    duration = float(streams[0].get("duration") or 0) if streams else 0
+    if duration <= 0:
         raise ValueError("video_path must contain a positive-duration video stream")
     return {"duration": duration}
 
@@ -628,6 +690,54 @@ def _extract_frame(video_path: Path, timestamp_ms: int, output_path: Path) -> No
     )
     if not output_path.is_file() or output_path.stat().st_size == 0:
         raise RuntimeError(f"FFmpeg did not produce a frame at {timestamp_ms}ms")
+
+
+def _extract_frame_from_range(
+    video_path: Path,
+    source_start_seconds: float,
+    source_end_seconds: float,
+    timestamp_ms: int,
+    output_path: Path,
+) -> None:
+    target_seconds = timestamp_ms / 1000
+    if (source_start_seconds < 0 or source_end_seconds <= source_start_seconds
+            or target_seconds < source_start_seconds or target_seconds >= source_end_seconds):
+        raise ValueError("source review timestamp must stay inside the selected source range")
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-i",
+            str(video_path),
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-vf",
+            (
+                f"trim=start={source_start_seconds:.9f}:end={source_end_seconds:.9f},"
+                f"select='gte(t,{target_seconds:.9f})',setpts=PTS-STARTPTS,"
+                f"scale=w='min({FRAME_MAX_WIDTH},iw)':h='min({FRAME_MAX_HEIGHT},ih)':"
+                "force_original_aspect_ratio=decrease:flags=lanczos"
+            ),
+            "-q:v",
+            "4",
+            "-map_metadata",
+            "-1",
+            str(output_path),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=FRAME_TIMEOUT_SECONDS,
+    )
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        raise RuntimeError(f"FFmpeg did not produce a frame at {timestamp_ms}ms inside the selected source range")
 
 
 def _copy_image_frame(source_path: Path, output_path: Path) -> None:

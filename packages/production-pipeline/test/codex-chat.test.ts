@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import {
   CODEX_BRIDGE_PROTOCOL_VERSION,
   CodexBridgeClient,
+  REQUIRED_CODEX_TASK_CONTRACT_DIGESTS,
   CodexBridgeError,
   type CodexTaskKind,
 } from "../src/codex-chat.js";
@@ -69,7 +70,18 @@ function respondWithJson(response: http.ServerResponse, status: number, body: un
 describe("CodexBridgeClient", () => {
   it("posts a structured task body to the unix socket", async () => {
     const bridge = await startBridge((_request, response) => {
-      respondWithJson(response, 200, { ok: true, output: JSON.stringify({ shots: 3 }) });
+      respondWithJson(response, 200, {
+        ok: true,
+        output: JSON.stringify({ shots: 3 }),
+        trace: {
+          taskKind: "director-plan",
+          promptVersion: "video-factory/director-v28",
+          contractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["director-plan"],
+          prompt: "p",
+          providerId: "openai",
+          modelId: "m",
+        },
+      });
     });
     try {
       const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
@@ -77,15 +89,19 @@ describe("CodexBridgeClient", () => {
       const result = await client.runTask("director-plan", { scenes: [{ position: 1 }] });
 
       assert.deepEqual(result, { shots: 3 });
-      assert.equal(bridge.requests.length, 1);
+      assert.equal(bridge.requests.filter((request) => request.method === "POST").length, 1);
       assert.equal(bridge.requests[0]?.method, "POST");
       assert.equal(bridge.requests[0]?.url, "/v1/tasks");
       assert.deepEqual(
         Object.keys(bridge.requests[0]!.body).sort(),
-        ["kind", "payload", "protocolVersion", "requestId"],
+        ["expectedContractDigest", "kind", "payload", "protocolVersion", "requestId"],
       );
       assert.equal(bridge.requests[0]?.body.protocolVersion, CODEX_BRIDGE_PROTOCOL_VERSION);
       assert.equal(bridge.requests[0]?.body.kind, "director-plan");
+      assert.equal(
+        bridge.requests[0]?.body.expectedContractDigest,
+        REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["director-plan"],
+      );
       assert.equal(typeof bridge.requests[0]?.body.requestId, "string");
       assert.deepEqual(bridge.requests[0]?.body.payload, { scenes: [{ position: 1 }] });
     } finally {
@@ -95,7 +111,11 @@ describe("CodexBridgeClient", () => {
 
   it("accepts fenced json output from the model", async () => {
     const bridge = await startBridge((_request, response) => {
-      respondWithJson(response, 200, { ok: true, output: "```json\n{\"profile\":\"urban-poetic\"}\n```" });
+      respondWithJson(response, 200, {
+        ok: true,
+        output: "```json\n{\"profile\":\"urban-poetic\"}\n```",
+        trace: { taskKind: "topic-ideas", promptVersion: "v1", contractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["topic-ideas"], prompt: "p", providerId: "openai", modelId: "m" },
+      });
     });
     try {
       const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
@@ -112,6 +132,7 @@ describe("CodexBridgeClient", () => {
     const trace = {
       taskKind: "script-draft",
       promptVersion: "video-factory/screenwriter-v2",
+      contractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["script-draft"],
       prompt: "Prompt Pack: video-factory/screenwriter-v2\nactual prompt",
       providerId: "openai",
       modelId: "gpt-5.4",
@@ -160,6 +181,7 @@ describe("CodexBridgeClient", () => {
         trace: {
           taskKind: "script-draft",
           promptVersion: "video-factory/screenwriter-v2",
+          contractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["script-draft"],
           prompt: "actual prompt",
           providerId: "openai",
           modelId: "gpt-5.4",
@@ -174,6 +196,7 @@ describe("CodexBridgeClient", () => {
         () => client.runTaskDetailed("script-draft", { brief: {} }),
         /successful model candidate attempt cannot contain a failure/,
       );
+      assert.deepEqual(bridge.requests.map((request) => request.method), ["POST"]);
     } finally {
       await bridge.close();
     }
@@ -187,6 +210,7 @@ describe("CodexBridgeClient", () => {
         trace: {
           taskKind: "script-draft",
           promptVersion: "video-factory/screenwriter-v2",
+          contractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["script-draft"],
           prompt: "actual prompt",
           providerId: "openai",
           modelId: "gpt-5.4",
@@ -214,6 +238,7 @@ describe("CodexBridgeClient", () => {
         trace: {
           taskKind: "script-draft",
           promptVersion: "video-factory/screenwriter-v2",
+          contractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["script-draft"],
           prompt: "actual prompt",
           providerId: "openai",
           modelId: "gpt-5.4",
@@ -242,6 +267,14 @@ describe("CodexBridgeClient", () => {
         ok: true,
         output: "{\"scenes\":[]}",
         sessionHandle: handle,
+        trace: {
+          taskKind: "script-draft",
+          promptVersion: "video-factory/screenwriter-v2",
+          contractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["script-draft"],
+          prompt: "session fixture",
+          providerId: "openai",
+          modelId: "gpt-5.4",
+        },
       });
     });
     try {
@@ -297,7 +330,7 @@ describe("CodexBridgeClient", () => {
         assert.match(error.message, /timed out/);
         return true;
       });
-      assert.equal(bridge.requests.length, 1);
+      assert.equal(bridge.requests.filter((request) => request.method === "POST").length, 1);
       assert.deepEqual(delays, []);
     } finally {
       await bridge.close();
@@ -329,7 +362,7 @@ describe("CodexBridgeClient", () => {
           return true;
         },
       );
-      assert.equal(bridge.requests.length, 1);
+      assert.equal(bridge.requests.filter((request) => request.method === "POST").length, 1);
     } finally {
       await bridge.close();
     }
@@ -361,7 +394,11 @@ describe("CodexBridgeClient", () => {
         respondWithJson(response, 503, { error: "codex backlog is full" });
         return;
       }
-      respondWithJson(response, 200, { ok: true, output: JSON.stringify({ recovered: true }) });
+      respondWithJson(response, 200, {
+        ok: true,
+        output: JSON.stringify({ recovered: true }),
+        trace: { taskKind: "topic-ideas", promptVersion: "v1", contractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["topic-ideas"], prompt: "p", providerId: "openai", modelId: "m" },
+      });
     });
     const delays: number[] = [];
     try {
@@ -545,7 +582,7 @@ describe("CodexBridgeClient", () => {
         assert.match(error.message, /exceeds/);
         return true;
       });
-      assert.equal(bridge.requests.length, 1);
+      assert.equal(bridge.requests.filter((request) => request.method === "POST").length, 1);
     } finally {
       await bridge.close();
     }
@@ -568,6 +605,123 @@ describe("CodexBridgeClient", () => {
         },
       );
       assert.equal(bridge.requests.length, 0);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("observes a healthy running task once without waiting for a terminal result", async () => {
+    let operation: Awaited<ReturnType<CodexBridgeClient["prepareTask"]>> | undefined;
+    const bridge = await startBridge((request, response) => {
+      if (request.url === "/health") {
+        respondWithJson(response, 200, {
+          protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+          taskBindingVersion: "video-factory/task-binding-v1",
+          storeId: `vfs_store_${"a".repeat(32)}`,
+          providerId: "openai",
+          modelId: "gpt-5.4",
+          taskModels: { "topic-ideas": "gpt-5.4" },
+        });
+        return;
+      }
+      respondWithJson(response, 200, {
+        state: "running",
+        requestId: operation?.requestId,
+        binding: operation?.binding,
+      });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, timeoutMs: 1_000 });
+      operation = await client.prepareTask("topic-ideas", { signals: [] }, "observe-running-once");
+
+      const observation = await client.observePreparedOnce(operation, { timeoutMs: 100 });
+
+      assert.deepEqual(observation, { state: "running" });
+      assert.deepEqual(bridge.requests.map((request) => request.url), ["/health", "/v1/tasks/observe-running-once"]);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("binds mixed-model tasks from the validated request payload before submission", async () => {
+    const bridge = await startBridge((_request, response) => {
+      respondWithJson(response, 200, {
+        protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+        taskBindingVersion: "video-factory/task-binding-v1",
+        storeId: `vfs_store_${"b".repeat(32)}`,
+        providerId: "zai-bigmodel-api",
+        modelId: "text-custom",
+        taskModels: { "role-audit": "text-custom", "asset-rank": "visual-custom" },
+        taskModelRoutes: {
+          "role-audit": { withoutImages: "text-custom", withImages: "visual-custom" },
+          "asset-rank": { withoutImages: "text-custom", withImages: "visual-custom" },
+        },
+      });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath });
+      const bindings = await Promise.all([
+        client.prepareTask("role-audit", { images: [] }, "role-text"),
+        client.prepareTask("role-audit", { images: [{}] }, "role-visual"),
+        client.prepareTask("asset-rank", { thumbnails: [] }, "rank-text"),
+        client.prepareTask("asset-rank", { thumbnails: [{}] }, "rank-visual"),
+      ]);
+
+      assert.deepEqual(bindings.map((operation) => operation.binding.modelId), [
+        "text-custom", "visual-custom", "text-custom", "visual-custom",
+      ]);
+      assert.equal(bridge.requests.filter((request) => request.method === "POST").length, 0);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("rejects completed results whose trace does not match the immutable task binding", async () => {
+    let operation: Awaited<ReturnType<CodexBridgeClient["prepareTask"]>> | undefined;
+    let traceOverride: Record<string, unknown> = {};
+    const bridge = await startBridge((request, response) => {
+      if (request.url === "/health") {
+        respondWithJson(response, 200, {
+          protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+          taskBindingVersion: "video-factory/task-binding-v1",
+          storeId: `vfs_store_${"c".repeat(32)}`,
+          providerId: "zai-bigmodel-api",
+          modelId: "text-custom",
+          taskModels: { "role-audit": "text-custom" },
+        });
+        return;
+      }
+      respondWithJson(response, 200, {
+        state: "completed_success",
+        ok: true,
+        requestId: operation?.requestId,
+        binding: operation?.binding,
+        output: "{}",
+        trace: {
+          taskKind: operation?.kind,
+          promptVersion: "test",
+          contractDigest: operation?.binding.contractDigest,
+          prompt: "test",
+          providerId: operation?.binding.providerId,
+          modelId: operation?.binding.modelId,
+          ...traceOverride,
+        },
+      });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath });
+      const cases = [
+        { providerId: "openai" },
+        { modelId: "other-model" },
+        { taskKind: "asset-rank" },
+        { contractDigest: "0".repeat(64) },
+      ];
+      for (const [index, mismatch] of cases.entries()) {
+        traceOverride = mismatch;
+        operation = await client.prepareTask("role-audit", { images: [] }, `trace-mismatch-${index}`);
+        assert.deepEqual(await client.observePreparedOnce(operation), { state: "conflict" });
+      }
+      assert.equal(bridge.requests.filter((request) => request.method === "POST").length, 0);
     } finally {
       await bridge.close();
     }

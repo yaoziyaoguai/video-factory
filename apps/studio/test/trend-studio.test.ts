@@ -3,10 +3,42 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import type { StudioTrendCandidate } from "../src/shared/api.js";
+import type { StudioTopicGenerationReceipt, StudioTrendCandidate } from "../src/shared/api.js";
 import { TrendStudio } from "../src/server/trend-studio.js";
 
 describe("TrendStudio", () => {
+  it("gives an explicit refresh a fresh generation nonce while ordinary reads generate none", async () => {
+    // C3-E02：换一批必须有新的生成身份；普通读取/自动刷新不触发新一轮生成。
+    const nonces: Array<string | undefined> = [];
+    let nonceCounter = 0;
+    let batch = 0;
+    const studio = new TrendStudio({
+      repositoryRoot: "/repo",
+      environment: {},
+      now: () => new Date("2026-08-30T12:00:00.000Z"),
+      createGenerationNonce: () => `nonce-${nonceCounter += 1}`,
+      trendGateway: { listServices: async () => [], listSignals: async () => [] },
+      trendAgent: { listCandidates: (options?: { generationNonce?: string }) => {
+        nonces.push(options?.generationNonce);
+        batch += 1;
+        return Promise.resolve<StudioTrendCandidate[]>([]);
+      } },
+    });
+    assert.equal(batch, 0);
+
+    // 普通读取：不带 nonce（命中缓存/既有 checkpoint，不重复生成）。
+    await studio.listCandidates();
+    assert.deepEqual(nonces, [undefined]);
+
+    // 显式换一批：携带全新的生成身份。
+    await studio.listCandidates({ forceRefresh: true });
+    assert.deepEqual(nonces, [undefined, "nonce-1"]);
+
+    // 再换一批：身份必须不同。
+    await studio.listCandidates({ forceRefresh: true });
+    assert.deepEqual(nonces, [undefined, "nonce-1", "nonce-2"]);
+  });
+
   it("reuses an in-flight refresh and exposes success without starting a second Agent run", async () => {
     let resolveRefresh: ((value: StudioTrendCandidate[]) => void) | undefined;
     let calls = 0;
@@ -93,6 +125,15 @@ describe("TrendStudio", () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-trend-cache-"));
     const cachePath = path.join(root, "candidates.json");
     const cached = [{ id: "trend-cached", title: "缓存热点" }] as StudioTrendCandidate[];
+    const generationReceipt: StudioTopicGenerationReceipt = {
+      generationId: "generation-cached-1",
+      generatedAt: "2026-08-26T08:00:00.000Z",
+      modelInvoked: true,
+      source: "editor-model",
+      candidateCount: 1,
+      providerId: "openai-codex",
+      modelId: "gpt-5.4",
+    };
     let firstCalls = 0;
     try {
       const first = new TrendStudio({
@@ -101,11 +142,16 @@ describe("TrendStudio", () => {
         environment: {},
         now: () => new Date("2026-08-26T08:00:00.000Z"),
         trendGateway: { listServices: async () => [], listSignals: async () => [] },
-        trendAgent: { listCandidates: async () => { firstCalls += 1; return cached; } },
+        trendAgent: {
+          listCandidates: async () => { firstCalls += 1; return cached; },
+          generationReceipt: () => generationReceipt,
+        },
       });
       assert.deepEqual(await first.listCandidates(), cached);
       assert.equal(firstCalls, 1);
-      assert.equal(JSON.parse(await readFile(cachePath, "utf8")).schemaVersion, 5);
+      const persisted = JSON.parse(await readFile(cachePath, "utf8"));
+      assert.equal(persisted.schemaVersion, 5);
+      assert.deepEqual(persisted.generationReceipt, generationReceipt);
 
       let restartedCalls = 0;
       const restarted = new TrendStudio({
@@ -118,6 +164,7 @@ describe("TrendStudio", () => {
       });
       assert.deepEqual(await restarted.listCandidates(), cached);
       assert.equal(restartedCalls, 0);
+      assert.deepEqual(restarted.latestGenerationReceipt(), generationReceipt);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

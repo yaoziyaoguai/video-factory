@@ -87,6 +87,8 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const shortlistCount = seriesItems.filter(isShortlisted).length;
   const notSelectedCount = seriesItems.filter(isNotSelected).length;
   const notRecommendedCount = seriesItems.filter((item) => item.editorialDecision.verdict === "skip" && item.verification.status !== "blocked").length;
+  // 规则保底（未经总编评估）与来源阻断是独立维度：被阻断的候选同样可能是“待总编评估”。
+  const ruleBaselineCount = seriesItems.filter((item) => item.editorialDecision.pendingEditorReview === true).length;
   const roundSourceBlockedCount = seriesItems.filter((item) => item.verification.status === "blocked").length;
   const visibleItems = deskItems
     .filter((item) => category === "all" || item.category === category)
@@ -158,6 +160,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
               evaluatedCount={modeItems.length}
               notRecommendedCount={notRecommendedCount}
               notSelectedCount={notSelectedCount}
+              pendingEditorCount={ruleBaselineCount}
               roundSourceBlockedCount={roundSourceBlockedCount}
               historicalSourceBlockedCount={sourceBlockedOpportunities.length}
               refreshing={modeLoading}
@@ -214,7 +217,11 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                       <button key={item.id} type="button" className={`candidate-row${selected?.id === item.id ? " is-active" : ""}`} aria-label={`查看${item.title}`} onClick={() => setSelectedId(item.id)}>
                         <span className="candidate-number">{String(index + 1).padStart(2, "0")}</span>
                         <span className="candidate-row-copy"><small>{TOPIC_CATEGORY_LABELS[item.category]} · {platformLabel(item.platform)} · {candidateStatusLabel(item)}</small><strong>{item.title}</strong><span>{item.hook}</span></span>
-                        <span className="candidate-score"><small>{item.verification.status === "blocked" ? "内容潜力" : "总编评分"}</small>{Math.round(item.verification.status === "blocked" ? item.score.final : item.editorialDecision.score)}</span>
+                        <span className="candidate-score">{item.verification.status === "blocked"
+                          ? <><small>内容潜力</small>{Math.round(item.score.final)}</>
+                          : item.editorialDecision.pendingEditorReview
+                            ? <small>待总编评估</small>
+                            : <><small>总编评分</small>{Math.round(item.editorialDecision.score)}</>}</span>
                       </button>
                     ))}
                   </div>
@@ -512,13 +519,15 @@ function normalizeMatchText(value: string): string {
 function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSources }: { item: StudioCandidateInboxItem; adopting: boolean; disabled: boolean; onAdopt: () => Promise<void>; onSupplementSources?: (candidate: StudioCandidateInboxItem) => void }) {
   const skipped = item.editorialDecision.verdict === "skip";
   const sourceBlocked = item.verification.status === "blocked";
+  // 规则保底候选未经总编评估：内容潜力继续作为参考分展示，不把“尚未评估”投影成“总编评分 0”。
+  const pendingEditor = item.editorialDecision.pendingEditorReview === true;
   const templateUnavailable = !skipped && candidateTemplateUnavailable(item);
   const blocked = sourceBlocked || skipped || templateUnavailable;
   // 系列与热点共用同一个“补充原始来源”恢复动作；补齐后由服务端重算门禁与建议。
   const canSupplementSources = sourceBlocked && onSupplementSources !== undefined;
   // 内容潜力（信号强度与制作可行性）与当前开工状态分开呈现：来源被阻断不等于选题质量为零。
-  const scoreLabel = sourceBlocked ? "内容潜力" : "总编评分";
-  const scoreValue = Math.round(sourceBlocked ? item.score.final : item.editorialDecision.score);
+  const scoreLabel = sourceBlocked || pendingEditor ? "内容潜力" : "总编评分";
+  const scoreValue = Math.round(sourceBlocked || pendingEditor ? item.score.final : item.editorialDecision.score);
   const verdictLabel = editorialVerdictLabel(item.editorialDecision.verdict);
   return (
     <article className="candidate-detail" aria-labelledby="candidate-detail-title">
@@ -531,7 +540,9 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
         <span>总编建议</span>
         <strong>{sourceBlocked
           ? (skipped ? "待补来源 · 补齐后再评估" : `补齐后建议采用 · ${verdictLabel}`)
-          : `${verdictLabel} · ${item.editorialDecision.score} 分`}</strong>
+          : pendingEditor
+            ? "来源已达标 · 等待总编评估"
+            : `${verdictLabel} · ${item.editorialDecision.score} 分`}</strong>
         <p>{item.editorialDecision.reasons[0]}</p>
         <small>{item.editorialDecision.guardrails[0]}</small>
         {item.editorialDecision.recommendedTemplate ? (
@@ -566,7 +577,9 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
       <div className={`candidate-verification is-${item.verification.status}`}><ShieldAlert aria-hidden="true" size={15} /><span><strong>{sourceBlocked
         ? "待补来源 · 暂不可采用"
         : skipped
-          ? "内容暂不推荐 · 暂不可采用"
+          ? pendingEditor
+            ? "待总编评估 · 暂不可采用"
+            : "内容暂不推荐 · 暂不可采用"
           : templateUnavailable
             ? "推荐模板暂不可用 · 暂不可采用"
             : item.verification.status === "review_required"
@@ -581,7 +594,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
       {canSupplementSources ? (
         <button className="button button-primary candidate-adopt" type="button" aria-label={`补充来源 ${item.title}`} disabled={disabled} onClick={() => onSupplementSources?.(item)}>保存来源并重新评估<ArrowRight aria-hidden="true" size={16} /></button>
       ) : (
-        <button className="button button-primary candidate-adopt" data-tour="candidate-adopt" type="button" aria-label={`采用候选 ${item.title}`} disabled={disabled || blocked} onClick={() => void onAdopt()}>{adopting ? "正在采用..." : skipped ? "当前不建议生产" : templateUnavailable ? "推荐模板暂不可用" : item.verification.status === "blocked" ? "等待补充来源" : item.verification.status === "review_required" ? "核验后采用" : "采用到制作区"}<ArrowRight aria-hidden="true" size={16} /></button>
+        <button className="button button-primary candidate-adopt" data-tour="candidate-adopt" type="button" aria-label={`采用候选 ${item.title}`} disabled={disabled || blocked} onClick={() => void onAdopt()}>{adopting ? "正在采用..." : skipped ? (pendingEditor ? "等待总编评估" : "当前不建议生产") : templateUnavailable ? "推荐模板暂不可用" : item.verification.status === "blocked" ? "等待补充来源" : item.verification.status === "review_required" ? "核验后采用" : "采用到制作区"}<ArrowRight aria-hidden="true" size={16} /></button>
       )}
     </article>
   );
@@ -606,7 +619,8 @@ function matchesDeskView(item: StudioCandidateInboxItem, view: TrendDeskView): b
 }
 
 function candidateStatusLabel(item: StudioCandidateInboxItem): string {
-  return item.verification.status === "blocked" ? "待补来源" : editorialVerdictLabel(item.editorialDecision.verdict);
+  if (item.verification.status === "blocked") return "待补来源";
+  return item.editorialDecision.pendingEditorReview ? "待总编评估" : editorialVerdictLabel(item.editorialDecision.verdict);
 }
 
 function isManualEvidence(evidence: { source: string; platform: string }): boolean {
@@ -625,6 +639,7 @@ function TrendRecoveryPanel({
   evaluatedCount,
   notRecommendedCount,
   notSelectedCount,
+  pendingEditorCount,
   roundSourceBlockedCount,
   historicalSourceBlockedCount,
   refreshing,
@@ -638,6 +653,7 @@ function TrendRecoveryPanel({
   evaluatedCount: number;
   notRecommendedCount: number;
   notSelectedCount: number;
+  pendingEditorCount: number;
   roundSourceBlockedCount: number;
   historicalSourceBlockedCount: number;
   refreshing: boolean;
@@ -652,7 +668,11 @@ function TrendRecoveryPanel({
     <section className="trend-recovery" aria-label="热点恢复路径" data-tour="trend-recovery">
       <div className="trend-recovery-copy">
         <h3>这轮没有可采用的热点建议</h3>
-        <p>{evaluatedCount > 0 ? `选题总编本轮评估了 ${evaluatedCount} 条热点候选，其中 ${notRecommendedCount} 条未推荐。` : "本轮收件箱还没有任何已评估热点候选。"}</p>
+        <p>{evaluatedCount > 0
+          ? pendingEditorCount >= evaluatedCount
+            ? `本轮 ${evaluatedCount} 条热点候选由规则保底生成，还没有经过选题总编评估；它们不会按“总编评分 0”对待。`
+            : `选题总编本轮评估了 ${evaluatedCount - pendingEditorCount} 条热点候选，其中 ${notRecommendedCount} 条未推荐。`
+          : "本轮收件箱还没有任何热点候选。"}</p>
         {roundSourceBlockedCount > 0 ? <p className="trend-recovery-blocked">本轮另有 {roundSourceBlockedCount} 条候选有内容潜力，但来源还没达到当前采用标准，先补齐来源再决定。</p> : null}
         {historicalSourceBlockedCount > 0 ? <p className="trend-recovery-blocked">另有 {historicalSourceBlockedCount} 条历史选题因来源核验被阻断。</p> : null}
       </div>

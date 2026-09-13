@@ -339,6 +339,37 @@ export function RunPage() {
     }
   }
 
+  async function queryOriginalTextTask() {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await studioApi.queryOriginalTextTask(runId);
+      setRun((current) => preferRunSnapshot(current, nextRun));
+      setConnectionWarning(undefined);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
+  async function retrieveOriginalTextTask() {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await withMutationProgress(() => studioApi.retrieveOriginalTextTask(runId));
+      setRun((current) => preferRunSnapshot(current, nextRun));
+      setConnectionWarning(undefined);
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
   async function reconcilePaidNode(nodeId: string, input: StudioPaidReconciliationDraft) {
     if (!run) return;
     const reconciliationKey = `${runId}:${nodeId}:${paidNodeSummary?.operationId ?? "unknown"}:${JSON.stringify(input)}`;
@@ -359,7 +390,7 @@ export function RunPage() {
         ...input,
       }));
       reconciliationRequests.current.delete(reconciliationKey);
-      if (nodeId === "voice" && input.outcome === "confirmed_charged") {
+      if (run.continuation?.supported === true && nodeId === "voice" && input.outcome === "confirmed_charged") {
         nextRun = await withMutationProgress(() => studioApi.retryFailedNode(runId, nodeId));
       }
       setRun((current) => preferRunSnapshot(current, nextRun));
@@ -407,7 +438,7 @@ export function RunPage() {
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
       {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
       {paidOperationError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{paidOperationError}</div> : null}
-      <RunWorkbench run={run} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
+      <RunWorkbench run={run} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onQueryOriginalTextTask={queryOriginalTextTask} onRetrieveOriginalTextTask={retrieveOriginalTextTask} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
       <NewRunDialog
         open={restarting}

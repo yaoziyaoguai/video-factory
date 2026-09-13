@@ -4,7 +4,9 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
+  BROKER_TASK_INPUT_CONTRACTS,
   BROKER_TASK_KINDS,
+  COMMON_ROLE_PREAMBLE,
   outputSchemaFor,
   outputSchemaValidationErrorFor,
   outputSemanticValidationErrorFor,
@@ -17,7 +19,7 @@ export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as 
 export { BROKER_TASK_KINDS } from "./task-definitions.js";
 export type { BrokerTaskKind } from "./task-definitions.js";
 
-const OPENAI_TASK_KINDS = ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"] as const;
+const OPENAI_TASK_KINDS = ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"] as const;
 export const ZAI_TASK_KINDS = [...BROKER_TASK_KINDS] as const satisfies readonly BrokerTaskKind[];
 export const DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID = "glm-5.3-flash";
 export const DEFAULT_ZAI_TEXT_MODEL_ID = "glm-5.3";
@@ -30,6 +32,12 @@ export interface CodexExecutorIdentity {
   modelId: string;
   taskKinds: readonly string[];
   taskModels?: Partial<Record<BrokerTaskKind, string>>;
+  taskModelRoutes?: Partial<Record<BrokerTaskKind, CodexTaskModelRoute>>;
+}
+
+export interface CodexTaskModelRoute {
+  withoutImages: string;
+  withImages: string;
 }
 
 export interface CodexExecutorProfile {
@@ -185,6 +193,9 @@ export interface CodexExecutorFailureDetails {
   completionTokens?: number;
   totalTokens?: number;
   reasoningTokens?: number;
+  fieldPath?: string;
+  taskKind?: BrokerTaskKind;
+  accepted?: boolean;
 }
 
 interface CodexExecutorErrorOptions extends ErrorOptions {
@@ -237,6 +248,24 @@ export interface DirectorPlanPayload {
   revision?: Record<string, unknown>;
 }
 
+export interface ProductionCapabilitiesPayload {
+  assetProviders: Array<{
+    id: string;
+    deliveryTypes: string[];
+    supportsReferenceImage: boolean;
+    strengths: string[];
+    constraints: string[];
+    selectedModelId?: string;
+    minDurationSeconds?: number;
+    maxDurationSeconds?: number;
+    aspectRatios?: string[];
+  }>;
+  editing: {
+    sourceRangeReuse: boolean;
+    staticEditorialCard: boolean;
+  };
+}
+
 export interface ScriptBrief {
   title: string;
   angle: string;
@@ -244,6 +273,10 @@ export interface ScriptBrief {
   nicheSlug: string;
   platform: string;
   durationSeconds: number;
+  durationRange?: { minSeconds: number; maxSeconds: number };
+  creativeTreatment?: Record<string, unknown>;
+  planningIssues?: unknown[];
+  productionCapabilities: ProductionCapabilitiesPayload;
   templateBlueprint?: Record<string, unknown>;
   visualProof?: string;
   visualPlan?: Record<string, unknown>;
@@ -272,6 +305,19 @@ export interface ScriptBrief {
 
 export interface ScriptDraftPayload {
   brief: ScriptBrief;
+  revision?: Record<string, unknown>;
+}
+
+export interface CreativeTreatmentSource {
+  sourceId: string;
+  label?: string;
+  note?: string;
+}
+
+export interface CreativeTreatmentPayload {
+  brief: Record<string, unknown>;
+  suppliedSources: CreativeTreatmentSource[];
+  referenceGrammar?: Record<string, unknown>;
   revision?: Record<string, unknown>;
 }
 
@@ -355,6 +401,7 @@ export interface ReferenceGrammarPayload {
 export type ValidatedTask = (
   | { kind: "topic-ideas"; payload: TopicIdeasPayload }
   | { kind: "series-roadmap"; payload: SeriesRoadmapPayload }
+  | { kind: "creative-treatment"; payload: CreativeTreatmentPayload }
   | { kind: "director-plan"; payload: DirectorPlanPayload }
   | { kind: "script-draft"; payload: ScriptDraftPayload }
   | { kind: "publish-copy"; payload: PublishCopyPayload }
@@ -414,6 +461,17 @@ export interface BrokerTaskExecutor {
   runTask(task: ValidatedTask, options?: CodexExecutionOptions): Promise<CodexExecutionResult>;
 }
 
+export function modelIdForTask(identity: CodexExecutorIdentity, task: ValidatedTask): string {
+  const route = identity.taskModelRoutes?.[task.kind];
+  if (route) {
+    const withImages = task.kind === "role-audit"
+      ? task.payload.images.length > 0
+      : task.kind === "asset-rank" && task.payload.thumbnails.length > 0;
+    return withImages ? route.withImages : route.withoutImages;
+  }
+  return identity.taskModels?.[task.kind] ?? identity.modelId;
+}
+
 export interface CodexTaskTrace {
   taskKind: BrokerTaskKind;
   promptVersion: string;
@@ -447,7 +505,7 @@ export function parseTaskRequest(
     throw new CodexExecutorError("Codex task request must be an object.", false);
   }
   const record = value as Record<string, unknown>;
-  assertExactKeys(record, ["protocolVersion", "requestId", "kind", "payload", "expectedContractDigest", "sessionKey", "sessionHandle"], "request");
+  assertExactKeys(record, ["protocolVersion", "requestId", "kind", "payload", "expectedContractDigest", "sessionKey", "sessionHandle", "brokerBinding"], "request");
   if (record.protocolVersion !== CODEX_BRIDGE_PROTOCOL_VERSION) {
     throw new CodexExecutorError("Unsupported codex bridge protocol version.", false);
   }
@@ -466,7 +524,7 @@ export function parseTaskRequest(
     );
   }
   const task = validateTaskPayload(kind as BrokerTaskKind, record.payload);
-  const contractProtected = kind === "visual-review" || kind === "role-audit";
+  const contractProtected = (BROKER_TASK_KINDS as readonly string[]).includes(kind);
   if (contractProtected) {
     if (typeof record.expectedContractDigest !== "string" || !/^[a-f0-9]{64}$/.test(record.expectedContractDigest)) {
       throw contractMismatchError(identity, kind, "The request is missing a valid expected task contract digest.");
@@ -476,9 +534,6 @@ export function parseTaskRequest(
       throw contractMismatchError(identity, kind, "The requested task contract is not available on this broker.");
     }
     return { ...task, expectedContractDigest: record.expectedContractDigest } as ValidatedTask;
-  }
-  if (record.expectedContractDigest !== undefined) {
-    throw new CodexExecutorError("expectedContractDigest is only supported for contract-protected tasks.", false);
   }
   return task;
 }
@@ -499,7 +554,9 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
   if (kind === "topic-ideas") {
     assertExactKeys(record, ["signals", "strategy", "revision"], "payload");
     const strategy = record.strategy === undefined ? undefined : requiredText(record.strategy, "payload.strategy");
-    if (strategy && strategy.length > 2_000) throw new CodexExecutorError("payload.strategy exceeds 2000 characters.", false);
+    if (strategy && strategy.length > BROKER_TASK_INPUT_CONTRACTS["topic-ideas"].strategyMaxLength) {
+      throw new CodexExecutorError(`payload.strategy exceeds ${BROKER_TASK_INPUT_CONTRACTS["topic-ideas"].strategyMaxLength} characters.`, false);
+    }
     const revision = record.revision === undefined ? undefined : boundedRecord(record.revision, "payload.revision", 192 * 1024);
     return {
       kind,
@@ -541,6 +598,21 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
       kind,
       payload: {
         brief: requireScriptBrief(record.brief),
+        ...(revision ? { revision } : {}),
+      },
+    };
+  }
+  if (kind === "creative-treatment") {
+    assertExactKeys(record, ["brief", "suppliedSources", "referenceGrammar", "revision"], "payload");
+    const revision = record.revision === undefined ? undefined : boundedRecord(record.revision, "payload.revision", 192 * 1024);
+    return {
+      kind,
+      payload: {
+        brief: requireCreativeTreatmentBrief(record.brief),
+        suppliedSources: requireCreativeTreatmentSources(record.suppliedSources),
+        ...(record.referenceGrammar === undefined ? {} : {
+          referenceGrammar: boundedRecord(record.referenceGrammar, "payload.referenceGrammar", 96 * 1024),
+        }),
         ...(revision ? { revision } : {}),
       },
     };
@@ -698,7 +770,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
     }
     const platform = task.kind === "publish-copy" ? task.payload.platform : undefined;
     const taskPrompt = taskPromptFor(task.kind, platform);
-    const contractDescriptor = taskContractDescriptorFor(task.kind, platform);
+    const contractDescriptor = taskContractDescriptorFor(task.kind);
     const prompt = options.sessionId
       ? buildContinuationPrompt(task, taskPrompt)
       : buildTaskPrompt(task, taskPrompt);
@@ -905,6 +977,18 @@ export class CodexExecutor implements BrokerTaskExecutor {
           "Codex output does not match visual-review schema: finding timecodeMs exceeds payload.durationMs.",
           false,
           { details: failureDetails("invalid_output", "timecode_out_of_bounds") },
+        );
+      }
+    }
+    if (task.kind === "creative-treatment") {
+      const evidence = (parsedOutput as {
+        evidenceRequirements: Array<{ suppliedSourceIds: string[] }>;
+      }).evidenceRequirements;
+      if (unreferencedCreativeTreatmentSourceId(evidence, task.payload.suppliedSources) !== undefined) {
+        throw new CodexExecutorError(
+          "Codex output does not satisfy creative-treatment semantics: evidenceRequirements.suppliedSourceIds must reference payload.suppliedSources source ids.",
+          false,
+          { details: failureDetails("invalid_output", "task_semantics") },
         );
       }
     }
@@ -1148,7 +1232,7 @@ export function buildTaskPrompt(
   if (task.kind === "topic-ideas") {
     data = {
       signals: task.payload.signals,
-      ...(task.payload.strategy ? { creatorStrategy: task.payload.strategy } : {}),
+      ...(task.payload.strategy ? { strategy: task.payload.strategy } : {}),
       ...(task.payload.revision ? { revision: task.payload.revision } : {}),
     };
   } else if (task.kind === "series-roadmap") {
@@ -1163,6 +1247,13 @@ export function buildTaskPrompt(
     };
   } else if (task.kind === "script-draft") {
     data = { brief: task.payload.brief, ...(task.payload.revision ? { revision: task.payload.revision } : {}) };
+  } else if (task.kind === "creative-treatment") {
+    data = {
+      brief: task.payload.brief,
+      suppliedSources: task.payload.suppliedSources,
+      ...(task.payload.referenceGrammar ? { referenceGrammar: task.payload.referenceGrammar } : {}),
+      ...(task.payload.revision ? { revision: task.payload.revision } : {}),
+    };
   } else if (task.kind === "publish-copy") {
     data = {
       platform: task.payload.platform,
@@ -1233,6 +1324,7 @@ export function buildTaskPrompt(
   }
   return [
     `Prompt Pack: ${prompt.version}`,
+    COMMON_ROLE_PREAMBLE,
     prompt.directive,
     "",
     `任务：${prompt.task}`,
@@ -1482,6 +1574,7 @@ function requireDirectorBrief(value: unknown): Record<string, unknown> {
   const brief = requireRecord(value, "payload.brief");
   const normalized = {
     ...brief,
+    productionCapabilities: requireProductionCapabilities(brief.productionCapabilities, "payload.brief.productionCapabilities"),
     ...(brief.templateBlueprint === undefined
       ? {}
       : { templateBlueprint: withoutLegacyCostPolicy(brief.templateBlueprint, "payload.brief.templateBlueprint") }),
@@ -1776,6 +1869,107 @@ function decodeJpegBase64(value: unknown, field: string): Buffer {
   return decoded;
 }
 
+function requireProductionCapabilities(value: unknown, field: string): ProductionCapabilitiesPayload {
+  const record = requireRecord(value, field);
+  assertExactKeys(record, ["assetProviders", "editing"], field);
+  if (!Array.isArray(record.assetProviders) || record.assetProviders.length > 32) {
+    throw new CodexExecutorError(`${field}.assetProviders must contain at most 32 entries.`, false);
+  }
+  const providerIds = new Set<string>();
+  const allowedDeliveryTypes = new Set(["editorial_card", "stock_video", "stock_image", "generated_image", "generated_video"]);
+  const assetProviders = record.assetProviders.map((entry, index) => {
+    const providerField = `${field}.assetProviders[${index}]`;
+    const provider = requireRecord(entry, providerField);
+    assertExactKeys(provider, [
+      "id", "deliveryTypes", "supportsReferenceImage", "strengths", "constraints", "selectedModelId",
+      "minDurationSeconds", "maxDurationSeconds", "aspectRatios",
+    ], providerField);
+    const id = requiredText(provider.id, `${providerField}.id`);
+    if (providerIds.has(id)) throw new CodexExecutorError(`${providerField}.id duplicates an earlier provider.`, false);
+    providerIds.add(id);
+    const parsedDeliveryTypes = stringArray(provider.deliveryTypes, `${providerField}.deliveryTypes`);
+    if (parsedDeliveryTypes.length < 1 || parsedDeliveryTypes.some((type) => !allowedDeliveryTypes.has(type))) {
+      throw new CodexExecutorError(`${providerField}.deliveryTypes contains an unsupported delivery type.`, false);
+    }
+    if (typeof provider.supportsReferenceImage !== "boolean") {
+      throw new CodexExecutorError(`${providerField}.supportsReferenceImage must be a boolean.`, false);
+    }
+    const strengths = stringArray(provider.strengths, `${providerField}.strengths`);
+    const constraints = stringArray(provider.constraints, `${providerField}.constraints`);
+    if (strengths.length > 32 || constraints.length > 32) {
+      throw new CodexExecutorError(`${providerField} strengths and constraints must contain at most 32 entries.`, false);
+    }
+    const selectedModelId = provider.selectedModelId === undefined
+      ? undefined
+      : requiredText(provider.selectedModelId, `${providerField}.selectedModelId`);
+    const duration = (key: "minDurationSeconds" | "maxDurationSeconds"): number | undefined => {
+      if (provider[key] === undefined) return undefined;
+      const parsed = Number(provider[key]);
+      if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 180) {
+        throw new CodexExecutorError(`${providerField}.${key} must be greater than 0 and at most 180.`, false);
+      }
+      return parsed;
+    };
+    const minDurationSeconds = duration("minDurationSeconds");
+    const maxDurationSeconds = duration("maxDurationSeconds");
+    if (minDurationSeconds !== undefined && maxDurationSeconds !== undefined && minDurationSeconds > maxDurationSeconds) {
+      throw new CodexExecutorError(`${providerField} duration bounds are not ordered.`, false);
+    }
+    const aspectRatios = provider.aspectRatios === undefined
+      ? undefined
+      : stringArray(provider.aspectRatios, `${providerField}.aspectRatios`);
+    if (aspectRatios?.some((ratio) => !["9:16", "16:9", "1:1", "3:4", "4:3"].includes(ratio))) {
+      throw new CodexExecutorError(`${providerField}.aspectRatios contains an unsupported ratio.`, false);
+    }
+    return {
+      id,
+      deliveryTypes: [...new Set(parsedDeliveryTypes)],
+      supportsReferenceImage: provider.supportsReferenceImage,
+      strengths,
+      constraints,
+      ...(selectedModelId ? { selectedModelId } : {}),
+      ...(minDurationSeconds !== undefined ? { minDurationSeconds } : {}),
+      ...(maxDurationSeconds !== undefined ? { maxDurationSeconds } : {}),
+      ...(aspectRatios ? { aspectRatios: [...new Set(aspectRatios)] } : {}),
+    };
+  });
+  const editing = requireRecord(record.editing, `${field}.editing`);
+  assertExactKeys(editing, ["sourceRangeReuse", "staticEditorialCard"], `${field}.editing`);
+  if (typeof editing.sourceRangeReuse !== "boolean" || typeof editing.staticEditorialCard !== "boolean") {
+    throw new CodexExecutorError(`${field}.editing fields must be booleans.`, false);
+  }
+  return {
+    assetProviders,
+    editing: {
+      sourceRangeReuse: editing.sourceRangeReuse,
+      staticEditorialCard: editing.staticEditorialCard,
+    },
+  };
+}
+
+function requireCreativeTreatmentBrief(value: unknown): Record<string, unknown> {
+  const record = requireRecord(value, "payload.brief");
+  assertExactKeys(record, [
+    "title", "angle", "audience", "nicheSlug", "platform", "durationSeconds", "durationRange",
+    "lockedViewerPromise", "editorial", "visualProof", "visualPlan", "productionCapabilities",
+  ], "payload.brief");
+  const brief: Record<string, unknown> = {
+    ...boundedRecord(record, "payload.brief", 192 * 1024),
+    productionCapabilities: requireProductionCapabilities(record.productionCapabilities, "payload.brief.productionCapabilities"),
+  };
+  if (record.visualProof !== undefined) {
+    const visualProof = requiredText(record.visualProof, "payload.brief.visualProof");
+    if (visualProof.length > 10_000) {
+      throw new CodexExecutorError("payload.brief.visualProof exceeds 10000 characters.", false);
+    }
+    brief.visualProof = visualProof;
+  }
+  if (record.visualPlan !== undefined) {
+    brief.visualPlan = boundedRecord(record.visualPlan, "payload.brief.visualPlan", 100_000);
+  }
+  return brief;
+}
+
 // script-draft 的 brief 在受理前做字段级校验：越界值直接 400，不进入 codex。
 function requireScriptBrief(value: unknown): ScriptBrief {
   const record = requireRecord(value, "payload.brief");
@@ -1783,7 +1977,9 @@ function requireScriptBrief(value: unknown): ScriptBrief {
     record,
     [
       "title", "angle", "audience", "nicheSlug", "platform", "durationSeconds", "templateBlueprint",
-      "visualProof", "visualPlan", "seriesContext", "editorial", "rework",
+      "visualProof", "visualPlan", "seriesContext", "editorial", "rework", "durationRange",
+      "creativeTreatment", "planningIssues",
+      "productionCapabilities",
     ],
     "payload.brief",
   );
@@ -1798,7 +1994,36 @@ function requireScriptBrief(value: unknown): ScriptBrief {
     nicheSlug: requiredText(record.nicheSlug, "payload.brief.nicheSlug"),
     platform: requiredText(record.platform, "payload.brief.platform"),
     durationSeconds: Number(durationSeconds),
+    productionCapabilities: requireProductionCapabilities(record.productionCapabilities, "payload.brief.productionCapabilities"),
   };
+  if (record.durationRange !== undefined) {
+    const range = requireRecord(record.durationRange, "payload.brief.durationRange");
+    assertExactKeys(range, ["minSeconds", "maxSeconds"], "payload.brief.durationRange");
+    const minSeconds = Number(range.minSeconds);
+    const maxSeconds = Number(range.maxSeconds);
+    for (const [label, value] of [["minSeconds", minSeconds], ["maxSeconds", maxSeconds]] as const) {
+      if (!Number.isInteger(value) || value < 20 || value > 180) {
+        throw new CodexExecutorError(`payload.brief.durationRange.${label} must be an integer between 20 and 180.`, false);
+      }
+    }
+    if (minSeconds > maxSeconds) {
+      throw new CodexExecutorError("payload.brief.durationRange.minSeconds must not exceed maxSeconds.", false);
+    }
+    brief.durationRange = { minSeconds, maxSeconds };
+  }
+  if (record.creativeTreatment !== undefined) {
+    brief.creativeTreatment = boundedRecord(record.creativeTreatment, "payload.brief.creativeTreatment", 192 * 1024);
+  }
+  if (record.planningIssues !== undefined) {
+    if (!Array.isArray(record.planningIssues) || record.planningIssues.length > 32
+      || !record.planningIssues.every((issue) => typeof issue === "object" && issue !== null)) {
+      throw new CodexExecutorError("payload.brief.planningIssues must be an array of at most 32 issue objects.", false);
+    }
+    if (JSON.stringify(record.planningIssues).length > 96 * 1024) {
+      throw new CodexExecutorError("payload.brief.planningIssues exceeds 96k characters.", false);
+    }
+    brief.planningIssues = record.planningIssues;
+  }
   if (record.templateBlueprint !== undefined) {
     brief.templateBlueprint = withoutLegacyCostPolicy(record.templateBlueprint, "payload.brief.templateBlueprint");
   }
@@ -1934,6 +2159,50 @@ function requirePublishBrief(value: unknown): PublishCopyBrief {
     audience: requiredText(record.audience, "payload.brief.audience"),
     nicheSlug: requiredText(record.nicheSlug, "payload.brief.nicheSlug"),
   };
+}
+
+// creative-treatment 的来源引用按 trim 后的 canonical 值判断：宿主 parseCreativeTreatment 对
+// 输入 allowed set 与输出引用两侧都先 trim 再比较，两种文本 executor 必须消费同一规则。
+export function unreferencedCreativeTreatmentSourceId(
+  evidence: ReadonlyArray<{ suppliedSourceIds: readonly string[] }>,
+  suppliedSources: ReadonlyArray<{ sourceId: string }>,
+): string | undefined {
+  const allowedSourceIds = new Set(suppliedSources.map((source) => source.sourceId.trim()));
+  for (const item of evidence) {
+    for (const sourceId of item.suppliedSourceIds) {
+      if (!allowedSourceIds.has(sourceId.trim())) return sourceId;
+    }
+  }
+  return undefined;
+}
+
+// 构思的来源集合是 evidenceRequirements.suppliedSourceIds 的唯一合法引用范围，受理前先建立该边界。
+// sourceId 按宿主规则 trim 后存储并去重：同一 canonical 值的重复输入在此处拒绝，而不是留到输出比较。
+function requireCreativeTreatmentSources(value: unknown): CreativeTreatmentSource[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 24) {
+    throw new CodexExecutorError("payload.suppliedSources must be an array of at most 24 entries.", false);
+  }
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const source = requireRecord(entry, `payload.suppliedSources[${index}]`);
+    assertExactKeys(source, ["sourceId", "label", "note"], `payload.suppliedSources[${index}]`);
+    const sourceId = requiredText(source.sourceId, `payload.suppliedSources[${index}].sourceId`).trim();
+    if (sourceId.length > 128) {
+      throw new CodexExecutorError(`payload.suppliedSources[${index}].sourceId exceeds 128 characters.`, false);
+    }
+    if (seen.has(sourceId)) {
+      throw new CodexExecutorError(`payload.suppliedSources[${index}].sourceId duplicates an earlier source id.`, false);
+    }
+    seen.add(sourceId);
+    const label = source.label === undefined ? undefined : requiredText(source.label, `payload.suppliedSources[${index}].label`);
+    const note = source.note === undefined ? undefined : requiredText(source.note, `payload.suppliedSources[${index}].note`);
+    return {
+      sourceId,
+      ...(label ? { label } : {}),
+      ...(note ? { note } : {}),
+    };
+  });
 }
 
 function stringArray(value: unknown, field: string): string[] {

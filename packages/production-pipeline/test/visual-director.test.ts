@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   validateVisualDirectorPlan,
+  type ShotTemporalBeat,
   type VisualDirectorPlan,
   type VisualDirectorPlanValidation,
 } from "../src/index.js";
@@ -27,6 +28,14 @@ function plan(shots: VisualDirectorPlan["shots"]): VisualDirectorPlan {
   };
 }
 
+function beats(...items: Array<[number, number, string]>): ShotTemporalBeat[] {
+  return items.map(([startSeconds, endSeconds, action]) => ({ startSeconds, endSeconds, action }));
+}
+
+function legacyPlan(shots: unknown[]): unknown {
+  return { ...plan([]), shots };
+}
+
 function shot(scenePosition: number, preferredProviderId: string): VisualDirectorPlan["shots"][number] {
   return {
     scenePosition,
@@ -47,6 +56,28 @@ function shot(scenePosition: number, preferredProviderId: string): VisualDirecto
 }
 
 describe("validateVisualDirectorPlan", () => {
+  it("copies the accepted viewer promise when the director omits it and rejects an attempted rewrite", () => {
+    const options: VisualDirectorPlanValidation = {
+      scenePositions: [1],
+      viewerPromise: "观众看完能完成一个明确动作。",
+      allowedProviderIds: ["pexels-stock-v1"],
+      generativeProviderIds: [],
+      providerDeliveryTypes: { "pexels-stock-v1": ["stock_video"] },
+      estimatedCnyPerClip: {},
+      economics,
+    };
+    const accepted = validateVisualDirectorPlan(plan([shot(1, "pexels-stock-v1")]), options);
+
+    assert.equal(accepted.visualBible.viewerPromise, options.viewerPromise);
+    assert.throws(() => validateVisualDirectorPlan({
+      ...plan([shot(1, "pexels-stock-v1")]),
+      visualBible: {
+        ...plan([]).visualBible,
+        viewerPromise: "导演自行改写的另一份承诺。",
+      },
+    }, options), /cannot change the accepted viewer promise/);
+  });
+
   it("accepts a different AI-selected provider for every shot and replaces model cost with server estimates", () => {
     const result = validateVisualDirectorPlan(
       plan([shot(1, "seedance-video-v1"), shot(2, "pexels-stock-v1"), shot(3, "local-editorial-v1")]),
@@ -181,15 +212,16 @@ describe("validateVisualDirectorPlan", () => {
     }), /must reference an earlier generated_image scene that is not itself reused/);
   });
 
-  it("rejects generated-video reuse that promises more footage than the source scene creates", () => {
-    assert.throws(() => validateVisualDirectorPlan(
+  it("allows a generated-video root request to grow for a covered later source range", () => {
+    const result = validateVisualDirectorPlan(
       plan([
-        { ...shot(1, "seedance-video-v1"), temporalBeats: ["[0s-2s] 建立母片", "[2s-4s] 完成母片"] },
+        { ...shot(1, "seedance-video-v1"), temporalBeats: beats([0, 2, "建立母片"], [2, 4, "完成母片"]) },
         {
           ...shot(2, "seedance-video-v1"),
           authenticityPolicy: "illustrative",
           query: "REUSE_ONLY scene 1 final segment",
-          temporalBeats: ["[0s-3s] 复用前段", "[3s-6s] 复用后段"],
+          sourceInSeconds: 4,
+          temporalBeats: beats([0, 3, "复用前段"], [3, 6, "复用后段"]),
         },
       ]),
       {
@@ -201,7 +233,10 @@ describe("validateVisualDirectorPlan", () => {
         estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
         economics,
       },
-    ), /reuses generated video from root scene 1.*only creates 4s.*requires 6s/);
+    );
+
+    assert.equal(result.shots[1]?.sourceInSeconds, 4);
+    assert.equal(result.shots[1]?.reuseFromScenePosition, 1);
   });
 
   it("resolves indirect reuse to the generated root and applies the selected model duration limit", () => {
@@ -209,30 +244,32 @@ describe("validateVisualDirectorPlan", () => {
       plan([
         {
           ...shot(1, "seedance-video-v1"),
-          temporalBeats: ["[0s-6s] 建立母片", "[6s-12s] 完成母片"],
+          temporalBeats: beats([0, 2, "建立母片"], [2, 4, "完成母片"]),
         },
         {
           ...shot(2, "seedance-video-v1"),
           authenticityPolicy: "illustrative",
           query: "REUSE_ONLY scene 1 locked master crop",
-          temporalBeats: ["[0s-2s] 复用根母片前段", "[2s-4s] 保持同一画面"],
+          sourceInSeconds: 4,
+          temporalBeats: beats([0, 2, "复用根母片前段"], [2, 4, "保持同一画面"]),
         },
         {
           ...shot(3, "seedance-video-v1"),
           authenticityPolicy: "illustrative",
           query: "REUSE_ONLY scene 2 locked master crop",
-          temporalBeats: ["[0s-2s] 继续复用", "[2s-5s] 保持同一画面"],
+          sourceInSeconds: 8,
+          temporalBeats: beats([0, 2, "继续复用"], [2, 4, "保持同一画面"]),
         },
       ]),
       {
         scenePositions: [1, 2, 3],
-        sceneDurations: { 1: 12, 2: 4, 3: 5 },
+        sceneDurations: { 1: 4, 2: 4, 3: 4 },
         allowedProviderIds: ["seedance-video-v1"],
         generativeProviderIds: ["seedance-video-v1"],
         providerDeliveryTypes: { "seedance-video-v1": ["generated_video"] },
         estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
         selectedVideoModelDurationBounds: {
-          "seedance-video-v1": { minDurationSeconds: 4, maxDurationSeconds: 5 },
+          "seedance-video-v1": { minDurationSeconds: 4, maxDurationSeconds: 12 },
         },
         economics,
       },
@@ -242,47 +279,55 @@ describe("validateVisualDirectorPlan", () => {
     assert.equal(result.shots[2]?.reuseFromScenePosition, 1);
   });
 
-  it("rejects reuse longer than the selected model can actually generate", () => {
+  it("rejects direct and indirect reuse whose source end exceeds the selected model limit", () => {
     assert.throws(() => validateVisualDirectorPlan(
       plan([
         {
           ...shot(1, "seedance-video-v1"),
-          temporalBeats: ["[0s-6s] 建立母片", "[6s-12s] 完成母片"],
+          temporalBeats: beats([0, 2, "建立母片"], [2, 4, "完成母片"]),
         },
         {
           ...shot(2, "seedance-video-v1"),
           authenticityPolicy: "illustrative",
           query: "REUSE_ONLY scene 1 locked master crop",
-          temporalBeats: ["[0s-3s] 复用根母片前段", "[3s-7s] 保持同一画面"],
+          sourceInSeconds: 4,
+          temporalBeats: beats([0, 2, "复用根母片前段"], [2, 4, "保持同一画面"]),
+        },
+        {
+          ...shot(3, "seedance-video-v1"),
+          authenticityPolicy: "illustrative",
+          query: "REUSE_ONLY scene 2 locked master crop",
+          sourceInSeconds: 8,
+          temporalBeats: beats([0, 2, "复用根母片中段"], [2, 4, "保持同一画面"]),
         },
       ]),
       {
-        scenePositions: [1, 2],
-        sceneDurations: { 1: 12, 2: 7 },
+        scenePositions: [1, 2, 3],
+        sceneDurations: { 1: 4, 2: 4, 3: 4 },
         allowedProviderIds: ["seedance-video-v1"],
         generativeProviderIds: ["seedance-video-v1"],
         providerDeliveryTypes: { "seedance-video-v1": ["generated_video"] },
         estimatedCnyPerClip: { "seedance-video-v1": 5.5 },
         selectedVideoModelDurationBounds: {
-          "seedance-video-v1": { minDurationSeconds: 4, maxDurationSeconds: 5 },
+          "seedance-video-v1": { minDurationSeconds: 4, maxDurationSeconds: 10 },
         },
         economics,
       },
-    ), /scene 2 reuses generated video from root scene 1.*only creates 5s.*requires 7s/);
+    ), /scene 3 reuses generated video from root scene 1.*requires source through 12s.*only produces 10s/);
   });
 
-  it("uses the rounded provider request duration when validating generated-video reuse", () => {
-    assert.throws(() => validateVisualDirectorPlan(
+  it("rounds the required generated-video source range up to a covering integer request", () => {
+    const result = validateVisualDirectorPlan(
       plan([
         {
           ...shot(1, "seedance-video-v1"),
-          temporalBeats: ["[0s-2s] 建立母片", "[2s-4.4s] 完成母片"],
+          temporalBeats: beats([0, 2, "建立母片"], [2, 4.4, "完成母片"]),
         },
         {
           ...shot(2, "seedance-video-v1"),
           authenticityPolicy: "illustrative",
           query: "REUSE_ONLY scene 1 locked master crop",
-          temporalBeats: ["[0s-2s] 复用根母片前段", "[2s-4.2s] 保持同一画面"],
+          temporalBeats: beats([0, 2, "复用根母片前段"], [2, 4.2, "保持同一画面"]),
         },
       ]),
       {
@@ -297,7 +342,9 @@ describe("validateVisualDirectorPlan", () => {
         },
         economics,
       },
-    ), /only creates 4s.*requires 4.2s/);
+    );
+
+    assert.equal(result.shots[1]?.reuseFromScenePosition, 1);
   });
 
   it("allows reuse of the extra footage produced by a model minimum duration", () => {
@@ -305,13 +352,13 @@ describe("validateVisualDirectorPlan", () => {
       plan([
         {
           ...shot(1, "seedance-video-v1"),
-          temporalBeats: ["[0s-2s] 建立母片", "[2s-4s] 完成母片"],
+          temporalBeats: beats([0, 2, "建立母片"], [2, 4, "完成母片"]),
         },
         {
           ...shot(2, "seedance-video-v1"),
           authenticityPolicy: "illustrative",
           query: "REUSE_ONLY scene 1 locked master crop",
-          temporalBeats: ["[0s-2s] 复用根母片前段", "[2s-5s] 保持同一画面"],
+          temporalBeats: beats([0, 2, "复用根母片前段"], [2, 5, "保持同一画面"]),
         },
       ]),
       {
@@ -442,8 +489,119 @@ describe("validateVisualDirectorPlan", () => {
     const overlap = { ...shot(1, "local-editorial-v1"), temporalBeats: ["[0s-3s] 保持全画面", "[2s-5s] 整体轻推近"] };
     const malformed = { ...shot(1, "local-editorial-v1"), temporalBeats: ["开始时保持全画面", "[2s-5s] 整体轻推近"] };
 
-    assert.throws(() => validateVisualDirectorPlan(plan([overflow]), options), /exceeds the 5s scene duration/);
-    assert.throws(() => validateVisualDirectorPlan(plan([overlap]), options), /overlaps or is out of order/);
-    assert.throws(() => validateVisualDirectorPlan(plan([malformed]), options), /must use the format/);
+    assert.throws(() => validateVisualDirectorPlan(legacyPlan([overflow]), options), /exceeds the 5s scene duration/);
+    assert.throws(() => validateVisualDirectorPlan(legacyPlan([overlap]), options), /overlaps or is out of order/);
+    assert.throws(() => validateVisualDirectorPlan(legacyPlan([malformed]), options), /must use a structured beat or legacy/);
+  });
+
+  it("accepts one full-duration temporal beat for a static delivery", () => {
+    const staticDeliveries = [
+      ["stock_image", "pexels-stock-v1", false],
+      ["generated_image", "seedream-image-v1", true],
+      ["editorial_card", "local-editorial-v1", false],
+    ] as const;
+    for (const [deliveryType, providerId, generative] of staticDeliveries) {
+      const still = {
+        ...shot(1, providerId),
+        deliveryType,
+        temporalBeats: beats([0, 5, "静态画面持续展示同一组可核对信息。"]),
+      };
+      const result = validateVisualDirectorPlan(plan([still]), {
+        scenePositions: [1],
+        sceneDurations: { 1: 5 },
+        allowedProviderIds: [providerId],
+        generativeProviderIds: generative ? [providerId] : [],
+        providerDeliveryTypes: { [providerId]: [deliveryType] },
+        estimatedCnyPerClip: generative ? { [providerId]: 1 } : {},
+        economics: generative ? { ...economics, allowMeteredProviders: true } : economics,
+      });
+      assert.deepEqual(result.shots[0]?.temporalBeats, [{
+        startSeconds: 0,
+        endSeconds: 5,
+        action: "静态画面持续展示同一组可核对信息。",
+      }]);
+    }
+  });
+
+  it("requires motion deliveries to describe at least two timed states", () => {
+    for (const [deliveryType, providerId, generative] of [
+      ["stock_video", "pexels-stock-v1", false],
+      ["generated_video", "seedance-video-v1", true],
+    ] as const) {
+      const moving = {
+        ...shot(1, providerId),
+        deliveryType,
+        temporalBeats: beats([0, 5, "一个没有动作变化的笼统描述。"]),
+      };
+      assert.throws(() => validateVisualDirectorPlan(plan([moving]), {
+        scenePositions: [1],
+        sceneDurations: { 1: 5 },
+        allowedProviderIds: [providerId],
+        generativeProviderIds: generative ? [providerId] : [],
+        providerDeliveryTypes: { [providerId]: [deliveryType] },
+        estimatedCnyPerClip: generative ? { [providerId]: 1 } : {},
+        economics: generative ? { ...economics, allowMeteredProviders: true } : economics,
+      }), /at least two timed beats/);
+    }
+  });
+
+  it("accepts structured contiguous beats and emits an explicit source start", () => {
+    const result = validateVisualDirectorPlan(plan([{
+      ...shot(1, "pexels-stock-v1"),
+      temporalBeats: [
+        { startSeconds: 0, endSeconds: 2, action: "建立环境" },
+        { startSeconds: 2, endSeconds: 5, action: "完整展示动作" },
+      ],
+    }]), {
+      scenePositions: [1],
+      sceneDurations: { 1: 5 },
+      allowedProviderIds: ["pexels-stock-v1"],
+      generativeProviderIds: [],
+      providerDeliveryTypes: { "pexels-stock-v1": ["stock_video"] },
+      estimatedCnyPerClip: {},
+      economics,
+    });
+
+    assert.deepEqual(result.shots[0]?.temporalBeats, [
+      { startSeconds: 0, endSeconds: 2, action: "建立环境" },
+      { startSeconds: 2, endSeconds: 5, action: "完整展示动作" },
+    ]);
+    assert.equal(result.shots[0]?.sourceInSeconds, 0);
+  });
+
+  it("rejects discontinuous structured beats and invalid source starts", () => {
+    const options: VisualDirectorPlanValidation = {
+      scenePositions: [1],
+      sceneDurations: { 1: 5 },
+      allowedProviderIds: ["pexels-stock-v1"],
+      generativeProviderIds: [],
+      providerDeliveryTypes: { "pexels-stock-v1": ["stock_video"] },
+      estimatedCnyPerClip: {},
+      economics,
+    };
+    assert.throws(() => validateVisualDirectorPlan(plan([{
+      ...shot(1, "pexels-stock-v1"),
+      temporalBeats: [
+        { startSeconds: 0, endSeconds: 2, action: "建立环境" },
+        { startSeconds: 2.5, endSeconds: 5, action: "动作结果" },
+      ],
+    }]), options), /must be continuous/);
+    assert.throws(() => validateVisualDirectorPlan(plan([{
+      ...shot(1, "pexels-stock-v1"),
+      sourceInSeconds: -1,
+      temporalBeats: [
+        { startSeconds: 0, endSeconds: 2, action: "建立环境" },
+        { startSeconds: 2, endSeconds: 5, action: "动作结果" },
+      ],
+    }]), options), /sourceInSeconds/);
+    assert.throws(() => validateVisualDirectorPlan(plan([{
+      ...shot(1, "local-editorial-v1"),
+      sourceInSeconds: 1,
+      temporalBeats: [{ startSeconds: 0, endSeconds: 5, action: "静态信息持续展示" }],
+    }]), {
+      ...options,
+      allowedProviderIds: ["local-editorial-v1"],
+      providerDeliveryTypes: { "local-editorial-v1": ["editorial_card"] },
+    }), /sourceInSeconds.*static/);
   });
 });

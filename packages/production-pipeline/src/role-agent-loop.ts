@@ -3,21 +3,30 @@ import type {
   AgentLoopTrace,
   CodexTaskSession,
   CodexTaskExecution,
+  CodexPreparedOperation,
+  CodexTaskRequestOptions,
   RoleAudit,
   RoleAuditIssue,
+  RoleAuditPlanningDisposition,
 } from "./codex-chat.js";
 import { CodexBridgeError } from "./codex-chat.js";
 
 const MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN = 2;
+// C5：每个 phase 的已确证未受理（409）会话重建上界。第一次重建是受控恢复；连续被拒
+// 说明模型服务异常，继续重建只会形成无界请求循环。计数持久化在 checkpoint 中，进程
+// 恢复不重置。允许一次受控重建后，第二次到达上限即停止并保留原因。
+const MAX_SESSION_REBUILDS = 2;
 
 export interface RoleAgentLoopOptions<TOutput> {
   role: string;
   criteria: string[];
   contractVersion: string;
   maxIterations: number;
+  /** 只有创作规划的 treatment/script/director 可把独立审计处置路由到规划控制流。 */
+  planningRole?: boolean;
   maxPhaseAttempts?: Partial<Record<"produce" | "audit", number>>;
   initialCandidate?: TOutput;
-  produce(revision: RoleAgentRevision<TOutput> | undefined, operation: { requestId: string; session: CodexTaskSession }): Promise<CodexTaskExecution<unknown>>;
+  produce(revision: RoleAgentRevision<TOutput> | undefined, operation: RoleAgentOperation): Promise<CodexTaskExecution<unknown>>;
   audit(input: {
     role: string;
     iteration: number;
@@ -27,10 +36,19 @@ export interface RoleAgentLoopOptions<TOutput> {
     validationFailure?: RoleAuditValidationFailure;
     requestId: string;
     session: CodexTaskSession;
+    requestOptions: CodexTaskRequestOptions;
+    preparedOperation?: CodexPreparedOperation;
   }): Promise<CodexTaskExecution<unknown>>;
   validate(value: unknown, context: RoleAgentValidationContext): TOutput;
   checkpoint?: RoleAgentLoopCheckpoint;
   now?: () => number;
+}
+
+export interface RoleAgentOperation {
+  requestId: string;
+  session: CodexTaskSession;
+  requestOptions: CodexTaskRequestOptions;
+  preparedOperation?: CodexPreparedOperation;
 }
 
 export interface RoleAgentValidationContext {
@@ -72,6 +90,10 @@ interface RoleRepairFeedback {
 export interface RoleAgentLoopCheckpoint {
   key: string;
   restartExhausted?: boolean;
+  /** @deprecated 仅供旧调用方兼容；正式恢复应传入被人工核验的原物理 requestId。 */
+  resumeCompletedFailure?: boolean;
+  /** 仅允许结清这个已被人工核验的 completed_failure；后续新失败不会继承许可。 */
+  resumeCompletedFailureRequestId?: string;
   // 仅供兼容模型接管独立审计；候选与语义轮次可恢复，Provider 会话和请求标识不可跨模型复用。
   resumeFrom?: AgentLoopTrace;
   load(): Promise<unknown | undefined>;
@@ -87,6 +109,20 @@ export class RoleAgentLoopError extends Error {
   ) {
     super(message, sourceError instanceof Error ? { cause: sourceError } : undefined);
     this.name = "RoleAgentLoopError";
+  }
+}
+
+export class RoleAgentPlanningHaltError extends RoleAgentLoopError {
+  constructor(
+    message: string,
+    agentLoop: AgentLoopTrace,
+    readonly disposition: RoleAuditPlanningDisposition,
+    readonly candidate: unknown,
+    readonly audit: RoleAudit,
+    lastTrace?: CodexTaskExecution["trace"],
+  ) {
+    super(message, agentLoop, lastTrace);
+    this.name = "RoleAgentPlanningHaltError";
   }
 }
 
@@ -116,13 +152,13 @@ interface PersistedAuditValidationFailure extends RoleAuditValidationFailure {
 }
 
 interface PersistedLoopState {
-  version: "video-factory/agent-loop-checkpoint-v7";
+  version: "video-factory/agent-loop-checkpoint-v8";
   key: string;
   contractDigest: string;
   role: string;
   maxIterations: number;
   cycle: number;
-  status: "running" | "passed" | "exhausted";
+  status: "running" | "passed" | "exhausted" | "failed";
   completed: PersistedLoopIteration[];
   pendingCandidate?: PersistedLoopCandidate;
   validationFailure?: PersistedValidationFailure;
@@ -132,9 +168,27 @@ interface PersistedLoopState {
   attemptedRequestIds: string[];
   sessions: Partial<Record<"produce" | "audit", CodexTaskSession>>;
   phaseAttempts: Record<"produce" | "audit", number>;
+  unacceptedPhaseAttempts: Record<"produce" | "audit", number>;
   phaseDurationsMs: Record<"produce" | "audit", number>;
   validationMs: number;
+  structuredRepairModelCallCount: number;
   retriedRequestIds: string[];
+  /** C5：已确证未受理（409）触发的会话重建计数；持久化、有界，防止无界重建循环。 */
+  sessionRebuilds: Record<"produce" | "audit", number>;
+  pendingOperation?: {
+    phase: "produce" | "audit";
+    iteration: number;
+    operationKey: string;
+    generation: number;
+    /** 此物理任务提交时适用的角色验收合同；恢复时不得用当前合同覆盖。 */
+    contractDigest: string;
+    operation: CodexPreparedOperation;
+  };
+}
+
+interface ExecutedRoleOperation {
+  execution: CodexTaskExecution<unknown>;
+  contractDigest: string;
 }
 
 export async function runRoleAgentLoop<TOutput>(
@@ -153,7 +207,16 @@ export async function runRoleAgentLoop<TOutput>(
   }
 
   const state = await restoreCheckpoint(options);
+  const completedFailureRecoveryRequestId = options.checkpoint?.resumeCompletedFailureRequestId
+    ?? (options.checkpoint?.resumeCompletedFailure ? state.pendingOperation?.operation.requestId : undefined);
   await resumePendingAudit(options, state);
+  const persistedPlanningHalt = options.planningRole
+    ? nonLocalPlanningDisposition(state.completed.at(-1)?.audit)
+    : undefined;
+  if (state.status === "failed" && !persistedPlanningHalt) {
+    state.status = "running";
+    await persistCheckpoint(options, state);
+  }
   if (state.status === "exhausted"
     && state.completed.length < options.maxIterations
     && (state.pendingCandidate !== undefined || state.validationFailure !== undefined)) {
@@ -179,6 +242,9 @@ export async function runRoleAgentLoop<TOutput>(
     ...(entry.auditTrace ? { auditTrace: entry.auditTrace } : {}),
     audit: entry.audit,
   }));
+  if (persistedPlanningHalt) {
+    throw planningHaltError(options, state, iterations, persistedPlanningHalt);
+  }
   if (state.status === "passed") {
     return completedExecution(options, state, iterations);
   }
@@ -206,9 +272,17 @@ export async function runRoleAgentLoop<TOutput>(
       const operationKey = loopOperationKey(state, iteration, "produce");
       let structuredOutputAttempts = 0;
       while (true) {
+        if (structuredOutputAttempts > 0) state.structuredRepairModelCallCount += 1;
         try {
-          candidateExecution = await executeOperation(options, state, operationScope, iteration, "produce", (operation) =>
-            options.produce(producerRevision(revision, validationRevision, operation.session), operation));
+          candidateExecution = (await executeOperation(
+            options,
+            state,
+            operationScope,
+            iteration,
+            "produce",
+            completedFailureRecoveryRequestId,
+            (operation) => options.produce(producerRevision(revision, validationRevision, operation.session), operation),
+          )).execution;
         } catch (error) {
           throw await failedLoopError(error, options, state, iterations, state.completed.at(-1)?.candidateTrace);
         }
@@ -226,6 +300,7 @@ export async function runRoleAgentLoop<TOutput>(
             validationError: publicValidationError(error),
           };
           state.validationFailure = validationRevision;
+          clearPendingOperation(state, operationKey);
           await persistCheckpoint(options, state);
           if (structuredOutputAttempts >= MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN) {
             throw await failedLoopError(
@@ -249,6 +324,7 @@ export async function runRoleAgentLoop<TOutput>(
         candidate,
         ...(candidateExecution.trace ? { candidateTrace: candidateExecution.trace } : {}),
       };
+      clearPendingOperation(state, operationKey);
       await persistCheckpoint(options, state);
     }
     const candidateFingerprint = JSON.stringify(candidate);
@@ -272,22 +348,55 @@ export async function runRoleAgentLoop<TOutput>(
       ? state.auditValidationFailure
       : undefined;
     while (true) {
+      if (structuredAuditAttempts > 0) state.structuredRepairModelCallCount += 1;
+      let auditContractDigest: string;
       try {
-        auditExecution = await executeOperation(options, state, operationScope, iteration, "audit", (operation) =>
-          options.audit({
+        const executedAudit = await executeOperation(
+          options,
+          state,
+          operationScope,
+          iteration,
+          "audit",
+          completedFailureRecoveryRequestId,
+          (operation) => options.audit({
             role: options.role,
             iteration,
             criteria: options.criteria,
             candidate,
             ...(revision?.audit ? { previousAudit: revision.audit } : {}),
-            ...(auditValidationFailure ? { validationFailure: auditValidationFailure } : {}),
+            ...(auditValidationFailure ? {
+              validationFailure: {
+                invalidCandidate: structuredClone(auditValidationFailure.invalidCandidate),
+                invalidCandidateHash: auditValidationFailure.invalidCandidateHash,
+                validationError: auditValidationFailure.validationError,
+              },
+            } : {}),
             ...operation,
-          }));
+          }),
+        );
+        auditExecution = executedAudit.execution;
+        auditContractDigest = executedAudit.contractDigest;
       } catch (error) {
         throw await failedLoopError(error, options, state, iterations, candidateExecution.trace);
       }
       try {
         audit = timedValidateAudit(options, state, auditExecution.output);
+        if (auditContractDigest !== state.contractDigest) {
+          // 原物理 audit 必须先结清，但旧合同的 verdict 不能认证当前 criteria。保留候选，
+          // 清掉旧审计会话并迁移到当前 checkpoint，再提交一份当前标准的独立审计。
+          acceptOperationSession(state, "audit", auditExecution.session);
+          retireAcceptedOperation(state, auditOperationKey);
+          clearPendingOperation(state, auditOperationKey);
+          delete state.sessions.audit;
+          delete state.auditValidationFailure;
+          await persistCheckpoint(options, state);
+          if (options.checkpoint && state.key !== options.checkpoint.key) {
+            state.key = options.checkpoint.key;
+            await persistCheckpoint(options, state);
+          }
+          auditValidationFailure = undefined;
+          continue;
+        }
         break;
       } catch (error) {
         structuredAuditAttempts += 1;
@@ -300,6 +409,7 @@ export async function runRoleAgentLoop<TOutput>(
           validationError: publicValidationError(error),
         };
         state.auditValidationFailure = auditValidationFailure;
+        clearPendingOperation(state, auditOperationKey);
         await persistCheckpoint(options, state);
         if (structuredAuditAttempts >= MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN) {
           throw await failedLoopError(
@@ -325,6 +435,7 @@ export async function runRoleAgentLoop<TOutput>(
       ...(auditExecution.trace ? { auditTrace: auditExecution.trace } : {}),
     });
     delete state.pendingCandidate;
+    clearPendingOperation(state, auditOperationKey);
     iterations.push({
       iteration,
       candidate: structuredClone(candidate),
@@ -337,6 +448,12 @@ export async function runRoleAgentLoop<TOutput>(
       state.status = "passed";
       await persistCheckpoint(options, state);
       return completedExecution(options, state, iterations);
+    }
+    const nonLocalDisposition = options.planningRole ? nonLocalPlanningDisposition(audit) : undefined;
+    if (nonLocalDisposition) {
+      state.status = "failed";
+      await persistCheckpoint(options, state);
+      throw planningHaltError(options, state, iterations, nonLocalDisposition);
     }
     await persistCheckpoint(options, state);
     revision = { candidate, audit };
@@ -377,7 +494,7 @@ async function resumePendingAudit<TOutput>(
       iteration: entry.iteration,
       candidate: timedValidate(options, state, entry.candidate, validationContext(entry.iteration)),
       ...(entry.candidateTrace ? { candidateTrace: structuredClone(entry.candidateTrace) } : {}),
-      audit: validateRoleAudit(entry.audit),
+      audit: validateRoleAudit(entry.audit, { planningRole: options.planningRole === true }),
       ...(entry.auditTrace ? { auditTrace: structuredClone(entry.auditTrace) } : {}),
     };
   });
@@ -423,9 +540,26 @@ async function failedLoopError<TOutput>(
   iterations: AgentLoopTrace["iterations"],
   lastTrace?: CodexTaskExecution["trace"],
 ): Promise<RoleAgentLoopError> {
+  const confirmedUnaccepted = error instanceof CodexBridgeError
+    && (error.stage === "not_accepted" || error.stage === "rejected" || error.stage === "conflict")
+    && error.failureDetails?.accepted !== true;
+  const unacceptedPhase = confirmedUnaccepted
+    ? state.pendingOperation?.phase ?? (error.failureDetails?.taskKind === "role-audit" ? "audit" : "produce")
+    : undefined;
+  if (unacceptedPhase) {
+    state.unacceptedPhaseAttempts[unacceptedPhase] += 1;
+    const wasStructuredRepair = unacceptedPhase === "produce"
+      ? state.validationFailure !== undefined
+      : state.auditValidationFailure !== undefined;
+    if (wasStructuredRepair && state.structuredRepairModelCallCount > 0) {
+      state.structuredRepairModelCallCount -= 1;
+    }
+  }
+  const { producerModelCallCount, auditModelCallCount } = actualPhaseModelCallCounts(state);
   const message = error instanceof CodexBridgeError
-    ? error.creatorMessage
+    ? `${error.creatorMessage}${safeBridgeDiagnostic(error)}`
     : error instanceof Error ? error.message : String(error);
+  if (state.status !== "exhausted") state.status = "failed";
   await persistCheckpoint(options, state);
   return new RoleAgentLoopError(
     message,
@@ -436,13 +570,22 @@ async function failedLoopError<TOutput>(
       criteria: [...options.criteria],
       status: "failed",
       maxIterations: options.maxIterations,
-      modelCallCount: state.attemptedRequestIds.length,
-      producerModelCallCount: state.phaseAttempts.produce,
-      auditModelCallCount: state.phaseAttempts.audit,
+      modelCallCount: producerModelCallCount + auditModelCallCount,
+      producerModelCallCount,
+      auditModelCallCount,
       producerMs: state.phaseDurationsMs.produce,
       auditMs: state.phaseDurationsMs.audit,
       validationMs: state.validationMs,
+      structuredRepairModelCallCount: state.structuredRepairModelCallCount,
       retryCount: state.retriedRequestIds.length,
+      ...(error instanceof CodexBridgeError ? {
+        failure: {
+          stage: error.stage,
+          ...(error.statusCode !== undefined ? { statusCode: error.statusCode } : {}),
+          ...(error.failureKind !== undefined ? { failureKind: error.failureKind } : {}),
+          ...(error.failureDetails ? { details: structuredClone(error.failureDetails) } : {}),
+        },
+      } : {}),
       iterations,
       ...(state.pendingCandidate ? {
         pendingCandidate: {
@@ -460,7 +603,7 @@ async function failedLoopError<TOutput>(
 
 async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>): Promise<PersistedLoopState> {
   const fresh = (cycle = 0): PersistedLoopState => ({
-    version: "video-factory/agent-loop-checkpoint-v7",
+    version: "video-factory/agent-loop-checkpoint-v8",
     key: options.checkpoint?.key ?? "ephemeral",
     contractDigest: roleContractDigest(options),
     role: options.role,
@@ -473,9 +616,12 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
     attemptedRequestIds: [],
     sessions: {},
     phaseAttempts: { produce: 0, audit: 0 },
+    unacceptedPhaseAttempts: { produce: 0, audit: 0 },
     phaseDurationsMs: { produce: 0, audit: 0 },
     validationMs: 0,
+    structuredRepairModelCallCount: 0,
     retriedRequestIds: [],
+    sessionRebuilds: { produce: 0, audit: 0 },
   });
   if (!options.checkpoint) return fresh();
   const loaded = await options.checkpoint.load();
@@ -487,12 +633,13 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
   const legacyV4 = loadedVersion === "video-factory/agent-loop-checkpoint-v4";
   const legacyV5 = loadedVersion === "video-factory/agent-loop-checkpoint-v5";
   const legacyV6 = loadedVersion === "video-factory/agent-loop-checkpoint-v6";
-  if (!legacyV3 && !legacyV4 && !legacyV5 && !legacyV6 && loadedVersion !== "video-factory/agent-loop-checkpoint-v7"
-    || candidate.key !== options.checkpoint.key
-    || candidate.contractDigest !== roleContractDigest(options)
+  const legacyV7 = loadedVersion === "video-factory/agent-loop-checkpoint-v7";
+  const recoverablePending = loadedVersion === "video-factory/agent-loop-checkpoint-v8"
+    && isPersistedPendingOperation(candidate.pendingOperation);
+  const structurallyInvalid = (!legacyV3 && !legacyV4 && !legacyV5 && !legacyV6 && !legacyV7 && loadedVersion !== "video-factory/agent-loop-checkpoint-v8")
     || candidate.role !== options.role
     || candidate.maxIterations !== options.maxIterations
-    || (candidate.status !== "running" && candidate.status !== "passed" && candidate.status !== "exhausted")
+    || (candidate.status !== "running" && candidate.status !== "passed" && candidate.status !== "exhausted" && candidate.status !== "failed")
     || !Number.isInteger(candidate.cycle) || Number(candidate.cycle) < 0
     || !Array.isArray(candidate.completed)
     || !isRequestState(candidate.operationGenerations, "number")
@@ -500,10 +647,20 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
     || !Array.isArray(candidate.attemptedRequestIds)
     || candidate.attemptedRequestIds.some((requestId) => typeof requestId !== "string")
     || (!legacyV3 && !isSessionState(candidate.sessions))
-    || (!legacyV3 && !legacyV4 && !legacyV5 && !isPhaseAttempts(candidate.phaseAttempts))) {
+    || (!legacyV3 && !legacyV4 && !legacyV5 && !isPhaseAttempts(candidate.phaseAttempts))
+    || (loadedVersion === "video-factory/agent-loop-checkpoint-v8"
+      && candidate.pendingOperation !== undefined
+      && !isPersistedPendingOperation(candidate.pendingOperation));
+  if (structurallyInvalid) {
+    if (recoverablePending) {
+      throw new Error("Agent loop has an accepted pending operation that is incompatible with the current role; it must be reconciled before a new request can be created.");
+    }
     return fresh();
   }
-  const completed = candidate.completed.map((entry, index): PersistedLoopIteration => {
+  const contractChanged = candidate.key !== options.checkpoint.key
+    || candidate.contractDigest !== roleContractDigest(options);
+  if (contractChanged && !recoverablePending) return fresh();
+  const completed = candidate.completed!.map((entry, index): PersistedLoopIteration => {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) throw new Error("Agent loop checkpoint iteration is invalid.");
     const value = entry as Partial<PersistedLoopIteration>;
     if (value.iteration !== index + 1) throw new Error("Agent loop checkpoint iterations are not contiguous.");
@@ -512,7 +669,7 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
       iteration: value.iteration,
       candidate: output,
       ...(value.candidateTrace ? { candidateTrace: value.candidateTrace } : {}),
-      audit: validateRoleAudit(value.audit),
+      audit: validateRoleAudit(value.audit, { planningRole: options.planningRole === true }),
       ...(value.auditTrace ? { auditTrace: value.auditTrace } : {}),
     };
   });
@@ -556,29 +713,50 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
     throw new Error("Passed agent loop checkpoint has no passing final audit.");
   }
   const restored: PersistedLoopState = {
-    version: "video-factory/agent-loop-checkpoint-v7",
-    key: candidate.key,
-    contractDigest: candidate.contractDigest,
-    role: candidate.role,
-    maxIterations: candidate.maxIterations,
+    version: "video-factory/agent-loop-checkpoint-v8",
+    key: candidate.key!,
+    // 已受理的物理任务保留原 operation/binding；结清之后的新 audit/repair 使用当前合同身份。
+    contractDigest: contractChanged ? roleContractDigest(options) : candidate.contractDigest!,
+    role: candidate.role!,
+    maxIterations: candidate.maxIterations!,
     cycle: Number(candidate.cycle),
-    status: candidate.status,
+    status: candidate.status!,
     completed,
     operationGenerations: { ...candidate.operationGenerations } as Record<string, number>,
     failedOperationRequestIds: { ...candidate.failedOperationRequestIds } as Record<string, string>,
-    attemptedRequestIds: [...candidate.attemptedRequestIds],
+    attemptedRequestIds: [...candidate.attemptedRequestIds!],
     sessions: legacyV3 ? {} : structuredClone(candidate.sessions!),
     phaseAttempts: legacyV3 || legacyV4 || legacyV5
       ? inferredPhaseAttempts(completed, pendingCandidate)
       : structuredClone(candidate.phaseAttempts!),
+    unacceptedPhaseAttempts: isPhaseAttempts(candidate.unacceptedPhaseAttempts)
+      ? structuredClone(candidate.unacceptedPhaseAttempts)
+      : { produce: 0, audit: 0 },
     phaseDurationsMs: isPhaseDurations(candidate.phaseDurationsMs)
       ? structuredClone(candidate.phaseDurationsMs)
       : { produce: 0, audit: 0 },
     validationMs: isDuration(candidate.validationMs) ? candidate.validationMs : 0,
+    structuredRepairModelCallCount: Number.isSafeInteger(candidate.structuredRepairModelCallCount)
+      && Number(candidate.structuredRepairModelCallCount) >= 0
+      ? Number(candidate.structuredRepairModelCallCount)
+      : 0,
     retriedRequestIds: Array.isArray(candidate.retriedRequestIds)
       && candidate.retriedRequestIds.every((requestId) => typeof requestId === "string")
       ? [...candidate.retriedRequestIds]
       : [],
+    // C5：旧 checkpoint 没有该字段时按 0 恢复——不重置正在进行的循环，只给新预算字段初值。
+    sessionRebuilds: isPhaseAttempts(candidate.sessionRebuilds)
+      ? structuredClone(candidate.sessionRebuilds)
+      : { produce: 0, audit: 0 },
+    ...(!legacyV3 && !legacyV4 && !legacyV5 && !legacyV6 && !legacyV7
+      && isPersistedPendingOperation(candidate.pendingOperation)
+      ? {
+        pendingOperation: {
+          ...structuredClone(candidate.pendingOperation),
+          contractDigest: candidate.pendingOperation.contractDigest ?? candidate.contractDigest!,
+        },
+      }
+      : {}),
     ...(pendingCandidate ? { pendingCandidate } : {}),
     ...(validationFailure ? { validationFailure } : {}),
     ...(auditValidationFailure ? { auditValidationFailure } : {}),
@@ -606,6 +784,7 @@ function completedExecution<TOutput>(
   const final = state.completed.at(-1);
   if (!final || final.audit.verdict !== "pass") throw new Error("Agent loop checkpoint has no passing result.");
   const finalTrace = final.candidateTrace ?? final.auditTrace;
+  const { producerModelCallCount, auditModelCallCount } = actualPhaseModelCallCounts(state);
   return {
     output: timedValidate(options, state, final.candidate, validationContext(final.iteration)),
     ...(finalTrace ? { trace: finalTrace } : {}),
@@ -616,12 +795,13 @@ function completedExecution<TOutput>(
       criteria: [...options.criteria],
       status: "passed",
       maxIterations: options.maxIterations,
-      modelCallCount: state.attemptedRequestIds.length,
-      producerModelCallCount: state.phaseAttempts.produce,
-      auditModelCallCount: state.phaseAttempts.audit,
+      modelCallCount: producerModelCallCount + auditModelCallCount,
+      producerModelCallCount,
+      auditModelCallCount,
       producerMs: state.phaseDurationsMs.produce,
       auditMs: state.phaseDurationsMs.audit,
       validationMs: state.validationMs,
+      structuredRepairModelCallCount: state.structuredRepairModelCallCount,
       retryCount: state.retriedRequestIds.length,
       iterations,
     },
@@ -635,6 +815,7 @@ function roleContractDigest<TOutput>(options: RoleAgentLoopOptions<TOutput>): st
     criteria: options.criteria,
     maxIterations: options.maxIterations,
     maxPhaseAttempts: options.maxPhaseAttempts,
+    planningRole: options.planningRole === true,
   });
 }
 
@@ -644,12 +825,24 @@ async function executeOperation<TOutput>(
   scope: string,
   iteration: number,
   phase: "produce" | "audit",
-  execute: (operation: { requestId: string; session: CodexTaskSession }) => Promise<CodexTaskExecution<unknown>>,
-): Promise<CodexTaskExecution<unknown>> {
+  completedFailureRecoveryRequestId: string | undefined,
+  execute: (operation: RoleAgentOperation) => Promise<CodexTaskExecution<unknown>>,
+): Promise<ExecutedRoleOperation> {
   const operationKey = loopOperationKey(state, iteration, phase);
   while (true) {
     const generation = state.operationGenerations[operationKey] ?? 0;
-    const requestId = operationRequestId(scope, state.contractDigest, state.cycle, iteration, phase, generation);
+    const pendingOperation = state.pendingOperation?.operationKey === operationKey
+      && state.pendingOperation.phase === phase
+      && state.pendingOperation.iteration === iteration
+      && state.pendingOperation.generation === generation
+      ? state.pendingOperation
+      : undefined;
+    const pending = pendingOperation?.operation;
+    const operationContractDigest = pendingOperation?.contractDigest ?? state.contractDigest;
+    // 合同升级可改变当前 checkpoint/request identity，但观察未结清任务仍必须沿用原 requestId，
+    // 否则一次纯查询会被误计为新的物理模型调用。
+    const requestId = pending?.requestId
+      ?? operationRequestId(scope, state.contractDigest, state.cycle, iteration, phase, generation);
     const session: CodexTaskSession = state.sessions[phase] ?? {
       key: `agent-${valueHash({ scope, contractDigest: state.contractDigest, cycle: state.cycle, phase })}`,
     };
@@ -660,7 +853,7 @@ async function executeOperation<TOutput>(
       throw new Error(`${options.role}的${phase === "audit" ? "独立审计" : "内容生成"}调用已达到本轮上限 ${attemptLimit} 次。`);
     }
     try {
-      const result = await executeTrackedOperation(options, state, requestId, session, phase, generation > 0, execute);
+      const result = await executeTrackedOperation(options, state, requestId, session, iteration, phase, generation > 0, execute);
       if (result.session) {
         if (result.session.key !== session.key) throw new Error("Agent loop received a mismatched task session key.");
         if (session.handle && result.session.handle !== session.handle) {
@@ -668,11 +861,25 @@ async function executeOperation<TOutput>(
         }
       }
       delete state.failedOperationRequestIds[operationKey];
-      return result;
+      return { execution: result, contractDigest: operationContractDigest };
     } catch (error) {
       if (error instanceof CodexBridgeError
         && error.stage === "not_accepted"
         && error.statusCode === 409) {
+        // C5：已确证未受理允许安全地换会话重试，但重建本身必须有持久化的上界——
+        // "未受理不计模型执行次数"不能同时抵消控制循环的停止条件。
+        const rebuilds = (state.sessionRebuilds[phase] ?? 0) + 1;
+        if (rebuilds > MAX_SESSION_REBUILDS) {
+          state.failedOperationRequestIds[operationKey] = requestId;
+          untrackUnacceptedOperation(state, requestId, phase);
+          await persistCheckpoint(options, state);
+          throw new Error(
+            `${options.role}的${phase === "audit" ? "独立审计" : "内容生成"}会话被连续拒绝 ${rebuilds - 1} 次，已停止自动重建；当前进度已保留，请检查模型服务状态后重试。`,
+            { cause: error },
+          );
+        }
+        state.sessionRebuilds[phase] = rebuilds;
+        clearPendingOperation(state, operationKey);
         delete state.sessions[phase];
         untrackUnacceptedOperation(state, requestId, phase);
         retireAcceptedOperation(state, operationKey);
@@ -681,6 +888,14 @@ async function executeOperation<TOutput>(
       }
       if (error instanceof CodexBridgeError && error.stage === "completed_failure") {
         retireAcceptedOperation(state, operationKey);
+        clearPendingOperation(state, operationKey);
+        if (completedFailureRecoveryRequestId === requestId
+          && (error.failureKind === "model_provider_transient" || error.failureKind === "model_provider_no_output")) {
+          // 只有 Studio 已核验终态、用户又明确点了重试，才在同一 lease 内进入下一代请求。
+          // 未知、冲突、合同拒绝和自动恢复仍然停住，不会借此切换 requestId 或 backup。
+          await persistCheckpoint(options, state);
+          continue;
+        }
         // Broker 已明确完成且失败，不能复用 requestId；但这不是候选或审计的语义失败。
         // 立即把控制权交还给工作流，保留候选供下一次人工重试继续，避免静默再跑三次长任务。
         await persistCheckpoint(options, state);
@@ -691,6 +906,9 @@ async function executeOperation<TOutput>(
         );
       }
       state.failedOperationRequestIds[operationKey] = requestId;
+      if (error instanceof CodexBridgeError && (error.stage === "rejected" || error.stage === "conflict")) {
+        clearPendingOperation(state, operationKey);
+      }
       await persistCheckpoint(options, state);
       throw error;
     }
@@ -708,6 +926,10 @@ function acceptOperationSession(
 function retireAcceptedOperation(state: PersistedLoopState, operationKey: string): void {
   state.operationGenerations[operationKey] = (state.operationGenerations[operationKey] ?? 0) + 1;
   delete state.failedOperationRequestIds[operationKey];
+}
+
+function clearPendingOperation(state: PersistedLoopState, operationKey: string): void {
+  if (state.pendingOperation?.operationKey === operationKey) delete state.pendingOperation;
 }
 
 function untrackUnacceptedOperation(
@@ -732,9 +954,10 @@ async function executeTrackedOperation<TOutput>(
   state: PersistedLoopState,
   requestId: string,
   session: CodexTaskSession,
+  iteration: number,
   phase: "produce" | "audit",
   isRetry: boolean,
-  execute: (operation: { requestId: string; session: CodexTaskSession }) => Promise<CodexTaskExecution<unknown>>,
+  execute: (operation: RoleAgentOperation) => Promise<CodexTaskExecution<unknown>>,
 ): Promise<CodexTaskExecution<unknown>> {
   if (!state.attemptedRequestIds.includes(requestId)) {
     state.attemptedRequestIds.push(requestId);
@@ -744,7 +967,31 @@ async function executeTrackedOperation<TOutput>(
   }
   const startedAt = nowMs(options);
   try {
-    return await execute({ requestId, session });
+    const operationKey = loopOperationKey(state, iteration, phase);
+    const pending = state.pendingOperation?.operationKey === operationKey
+      && state.pendingOperation.phase === phase
+      && state.pendingOperation.iteration === iteration
+      && state.pendingOperation.generation === (state.operationGenerations[operationKey] ?? 0)
+      ? structuredClone(state.pendingOperation.operation)
+      : undefined;
+    return await execute({
+      requestId,
+      session,
+      requestOptions: {
+        beforeSubmit: async (preparedOperation) => {
+          state.pendingOperation = {
+            phase,
+            iteration,
+            operationKey,
+            generation: state.operationGenerations[operationKey] ?? 0,
+            contractDigest: state.contractDigest,
+            operation: structuredClone(preparedOperation),
+          };
+          await persistCheckpoint(options, state);
+        },
+      },
+      ...(pending ? { preparedOperation: pending } : {}),
+    });
   } finally {
     state.phaseDurationsMs[phase] += elapsedMs(startedAt, nowMs(options));
     await persistCheckpoint(options, state);
@@ -837,7 +1084,7 @@ function timedValidateAudit<TOutput>(
 ): RoleAudit {
   const startedAt = nowMs(options);
   try {
-    return validateRoleAudit(value);
+    return validateRoleAudit(value, { planningRole: options.planningRole === true });
   } finally {
     state.validationMs += elapsedMs(startedAt, nowMs(options));
   }
@@ -886,7 +1133,30 @@ function isSessionState(value: unknown): value is PersistedLoopState["sessions"]
   });
 }
 
-export function validateRoleAudit(value: unknown): RoleAudit {
+function isPersistedPendingOperation(value: unknown): value is NonNullable<PersistedLoopState["pendingOperation"]> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if ((record.phase !== "produce" && record.phase !== "audit")
+    || !Number.isInteger(record.iteration) || Number(record.iteration) < 1
+    || typeof record.operationKey !== "string" || !record.operationKey
+    || !Number.isInteger(record.generation) || Number(record.generation) < 0
+    || (record.contractDigest !== undefined && (typeof record.contractDigest !== "string" || !record.contractDigest))
+    || typeof record.operation !== "object" || record.operation === null || Array.isArray(record.operation)) return false;
+  const operation = record.operation as Record<string, unknown>;
+  return operation.version === "video-factory/codex-prepared-operation-v1"
+    && typeof operation.requestId === "string"
+    && typeof operation.kind === "string"
+    && typeof operation.envelope === "object" && operation.envelope !== null
+    && typeof operation.serializedEnvelope === "string"
+    && typeof operation.binding === "object" && operation.binding !== null
+    && typeof operation.brokerBinding === "object" && operation.brokerBinding !== null
+    && typeof operation.route === "object" && operation.route !== null;
+}
+
+export function validateRoleAudit(
+  value: unknown,
+  options: { planningRole?: boolean } = {},
+): RoleAudit {
   const audit = record(value, "Role audit");
   if (audit.version !== "video-factory/role-audit-v1") throw new Error("Role audit version is invalid.");
   if (audit.verdict !== "pass" && audit.verdict !== "repair") throw new Error("Role audit verdict is invalid.");
@@ -913,6 +1183,7 @@ export function validateRoleAudit(value: unknown): RoleAudit {
   if (audit.verdict === "repair" && repairInstructions.length < 1) {
     throw new Error("Repair role audits must include repair instructions.");
   }
+  const planningDisposition = validatePlanningDisposition(audit.planningDisposition, issues, audit.verdict, options.planningRole === true);
   return {
     version: audit.version,
     verdict: audit.verdict,
@@ -920,7 +1191,117 @@ export function validateRoleAudit(value: unknown): RoleAudit {
     summary: text(audit.summary, "Role audit summary"),
     issues,
     repairInstructions,
+    ...(planningDisposition !== undefined ? { planningDisposition } : {}),
   };
+}
+
+function validatePlanningDisposition(
+  value: unknown,
+  issues: RoleAuditIssue[],
+  verdict: RoleAudit["verdict"],
+  planningRole: boolean,
+): RoleAuditPlanningDisposition | null | undefined {
+  if (!planningRole) {
+    if (value !== undefined && value !== null) {
+      throw new Error("Non-planning role audits cannot route work outside their role.");
+    }
+    return value === null ? null : undefined;
+  }
+  if (verdict === "pass") {
+    if (value !== null) throw new Error("Passing planning role audits must set planningDisposition to null.");
+    return null;
+  }
+  const disposition = record(value, "Role audit planningDisposition");
+  if (disposition.action !== "revise_here" && disposition.action !== "needs_source" && disposition.action !== "needs_user") {
+    throw new Error("Role audit planningDisposition.action is invalid.");
+  }
+  const issueIndexes = array(disposition.issueIndexes, "Role audit planningDisposition.issueIndexes", 12);
+  if (issueIndexes.length < 1) throw new Error("Role audit planningDisposition.issueIndexes must not be empty.");
+  const normalized = issueIndexes.map((entry, index) => {
+    if (!Number.isInteger(entry) || Number(entry) < 0 || Number(entry) >= issues.length) {
+      throw new Error(`Role audit planningDisposition.issueIndexes[${index}] does not identify an existing issue.`);
+    }
+    return Number(entry);
+  });
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error("Role audit planningDisposition.issueIndexes must be unique.");
+  }
+  if (normalized.some((index) => issues[index]?.severity !== "blocking")) {
+    throw new Error("Role audit planningDisposition can only identify blocking issues.");
+  }
+  return { action: disposition.action, issueIndexes: normalized };
+}
+
+function nonLocalPlanningDisposition(audit: RoleAudit | undefined): RoleAuditPlanningDisposition | undefined {
+  const disposition = audit?.planningDisposition;
+  return disposition && disposition.action !== "revise_here" ? disposition : undefined;
+}
+
+function planningHaltError<TOutput>(
+  options: RoleAgentLoopOptions<TOutput>,
+  state: PersistedLoopState,
+  iterations: AgentLoopTrace["iterations"],
+  disposition: RoleAuditPlanningDisposition,
+): RoleAgentPlanningHaltError {
+  const final = state.completed.at(-1);
+  if (!final) throw new Error("Planning halt has no persisted candidate and audit.");
+  const { producerModelCallCount, auditModelCallCount } = actualPhaseModelCallCounts(state);
+  const trace: AgentLoopTrace = {
+    version: "video-factory/agent-loop-v1",
+    role: options.role,
+    contractVersion: options.contractVersion,
+    criteria: [...options.criteria],
+    status: "failed",
+    maxIterations: options.maxIterations,
+    modelCallCount: producerModelCallCount + auditModelCallCount,
+    producerModelCallCount,
+    auditModelCallCount,
+    producerMs: state.phaseDurationsMs.produce,
+    auditMs: state.phaseDurationsMs.audit,
+    validationMs: state.validationMs,
+    structuredRepairModelCallCount: state.structuredRepairModelCallCount,
+    retryCount: state.retriedRequestIds.length,
+    iterations,
+  };
+  const selected = disposition.issueIndexes.map((index) => final.audit.issues[index]!).filter(Boolean);
+  const reason = selected.map((issue) => issue.evidence).join("；") || final.audit.summary;
+  return new RoleAgentPlanningHaltError(
+    disposition.action === "needs_source"
+      ? `${options.role}需要当前流水线尚未具备的来源：${reason}`
+      : `${options.role}需要用户确认会改变既定承诺或路线的决定：${reason}`,
+    trace,
+    structuredClone(disposition),
+    structuredClone(final.candidate),
+    structuredClone(final.audit),
+    final.auditTrace ?? final.candidateTrace,
+  );
+}
+
+function actualPhaseModelCallCounts(state: PersistedLoopState): {
+  producerModelCallCount: number;
+  auditModelCallCount: number;
+} {
+  return {
+    producerModelCallCount: Math.max(0, state.phaseAttempts.produce - state.unacceptedPhaseAttempts.produce),
+    auditModelCallCount: Math.max(0, state.phaseAttempts.audit - state.unacceptedPhaseAttempts.audit),
+  };
+}
+
+function safeBridgeDiagnostic(error: CodexBridgeError): string {
+  const details = error.failureDetails;
+  const parts = [
+    `stage=${error.stage}`,
+    ...(error.statusCode !== undefined ? [`httpStatus=${error.statusCode}`] : []),
+    ...(error.failureKind ? [`failureKind=${error.failureKind}`] : []),
+    ...(details ? [
+      `reasonCode=${details.reasonCode}`,
+      ...(details.fieldPath ? [`fieldPath=${details.fieldPath}`] : []),
+      ...(details.taskKind ? [`taskKind=${details.taskKind}`] : []),
+      ...(details.requestIdHash ? [`requestIdHash=${details.requestIdHash}`] : []),
+      ...(details.accepted !== undefined ? [`accepted=${String(details.accepted)}`] : []),
+    ] : []),
+  ];
+  return `\n诊断：${parts.join("；")}`;
 }
 
 function record(value: unknown, field: string): Record<string, unknown> {

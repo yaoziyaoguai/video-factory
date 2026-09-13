@@ -8,6 +8,8 @@ interface DirectorPanelProps {
   providers: StudioProvider[];
   providerError?: string;
   onProduce: () => void;
+  /** 最近一轮热点候选的真实生成来源：配置就绪不等于最近一次模型任务成功。 */
+  recentTopicGeneration?: "editor-model" | "rule-fallback";
 }
 
 const REQUIRED_CAPABILITIES = [
@@ -19,7 +21,7 @@ const REQUIRED_CAPABILITIES = [
   ["quality.review", "机器质检"],
 ] as const;
 
-export function DirectorPanel({ opportunity, providers, providerError, onProduce }: DirectorPanelProps) {
+export function DirectorPanel({ opportunity, providers, providerError, onProduce, recentTopicGeneration }: DirectorPanelProps) {
   const capabilities = REQUIRED_CAPABILITIES.map(([capability, label]) => ({
     capability,
     label,
@@ -27,6 +29,7 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
   }));
   const topicBlockReason = opportunityProductionBlockReason(opportunity);
   const productionReady = !providerError && !topicBlockReason && capabilities.every((item) => item.available);
+  const missingCapabilities = capabilities.filter((item) => !item.available).map((item) => item.capability);
   const hasTopicAgent = providers.some((provider) => provider.capability === "topic.intelligence" && provider.available && provider.kind !== "test");
   const topicIntelligenceCopy = opportunity.origin === "trend"
     ? "AI 提出热点角度；系统检查来源链接；关键事实仍需按来源核对"
@@ -68,8 +71,11 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
 
       <div className="model-state">
         <span>选题智能</span>
-        <strong>{hasTopicAgent ? "AI 选题总编可用" : "规则选题可用"}</strong>
+        <strong>{hasTopicAgent ? "AI 选题总编已配置" : "规则选题可用"}</strong>
         <small>{hasTopicAgent ? topicIntelligenceCopy : "当前使用可追溯规则评分，仍由你确认最终叙事"}</small>
+        {hasTopicAgent && recentTopicGeneration === "rule-fallback" ? (
+          <small>最近一轮热点生成使用了规则保底（总编模型轮未成功），候选会如实标注“待总编评估”。</small>
+        ) : null}
       </div>
 
       <div className="director-actions">
@@ -77,7 +83,7 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
         <button className="button button-director" type="button" onClick={onProduce} disabled={!productionReady} data-tour="create-production">
           新建制作<ArrowRight aria-hidden="true" size={17} />
         </button>
-        {!productionReady && !topicBlockReason ? <Link className="director-resource-link" to="/resources">查看缺失能力</Link> : null}
+        {!productionReady && !topicBlockReason ? <Link className="director-resource-link" to={`/resources?missing=${encodeURIComponent(missingCapabilities.join(","))}#production-roles`}>查看缺失能力</Link> : null}
       </div>
     </aside>
   );

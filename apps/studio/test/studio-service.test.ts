@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -14,18 +15,31 @@ import type {
   ProductionSceneRevisionDraft,
   ProductionSpendRejectionDraft,
 } from "@video-factory/production-pipeline";
-import { effectiveProductionBrief, PaidOperationManualReconciliationError, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, StaleRunRevisionError } from "@video-factory/production-pipeline";
+import { CodexBridgeClient, effectiveProductionBrief, PaidOperationManualReconciliationError, productionWorkflowVersion, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, StaleRunRevisionError, type CodexPreparedOperation } from "@video-factory/production-pipeline";
 import {
   StudioConflictError,
-  StudioService,
+  StudioService as ProductionStudioService,
   type StudioPipelinePort,
 } from "../src/server/studio-service.js";
 import { JsonOpportunityStore } from "../src/server/opportunity-store.js";
 import { JsonRunArchiveStore } from "../src/server/run-archive-store.js";
 import { loadAgentLoopProgress, ProductionStudio } from "../src/server/production-studio.js";
-import type { StudioOpportunityInput, StudioProvider, StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
+import type { StudioDecisionInput, StudioOpportunityInput, StudioProvider, StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
 
-const brief: ProductionBrief = {
+class StudioService extends ProductionStudioService {
+  constructor(options: ConstructorParameters<typeof ProductionStudioService>[0]) {
+    super({
+      codexAvailability: {
+        available: true,
+        reason: "",
+        taskKinds: ["script-draft", "director-plan", "reference-grammar", "role-audit"],
+      },
+      ...options,
+    });
+  }
+}
+
+const legacyBrief: ProductionBrief = {
   protocolVersion: "video-factory/brief-v1",
   title: "做决定前，先避开这 3 个坑",
   angle: "低风险、可收藏的生活清单",
@@ -50,6 +64,22 @@ const brief: ProductionBrief = {
   },
 };
 
+const brief: ProductionBrief = {
+  ...legacyBrief,
+  durationRange: { minSeconds: 20, maxSeconds: 34 },
+  providers: {
+    ...legacyBrief.providers,
+    director: "api-visual-director-v1",
+    assets: "ai-shot-router-v1",
+  },
+  workflowFeatures: {
+    assetSemanticRank: false,
+    referenceGrammar: false,
+    executablePlan: true,
+  },
+  director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+};
+
 function waitingRun(workspaceRoot: string): WorkflowRun<ProductionBrief> {
   const videoPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "render", "attempt-1", "final.mp4");
   return {
@@ -58,7 +88,7 @@ function waitingRun(workspaceRoot: string): WorkflowRun<ProductionBrief> {
     workflowId: "daily-production",
     workflowVersion: "1.0.0",
     status: "needs_human",
-    initialInput: brief,
+    initialInput: legacyBrief,
     startedAt: "2026-08-21T10:00:00.000Z",
     finishedAt: "2026-08-21T10:01:00.000Z",
     executionPlan: [{
@@ -127,6 +157,14 @@ function waitingRun(workspaceRoot: string): WorkflowRun<ProductionBrief> {
   };
 }
 
+function executableWaitingRun(workspaceRoot: string): WorkflowRun<ProductionBrief> {
+  return {
+    ...waitingRun(workspaceRoot),
+    workflowVersion: productionWorkflowVersion(brief),
+    initialInput: brief,
+  };
+}
+
 class FakePipeline implements StudioPipelinePort {
   run: WorkflowRun<ProductionBrief>;
   showError?: Error;
@@ -137,9 +175,23 @@ class FakePipeline implements StudioPipelinePort {
   lastAuthorization?: SpendAuthorizationDraft;
   lastSpendRejection?: ProductionSpendRejectionDraft;
   lastSceneRevision?: ProductionSceneRevisionDraft;
+  lastVoiceTimingRevision?: {
+    expectedRunRevision: number;
+    interventionId: string;
+    scenePosition: number;
+    durationSeconds: number;
+    actor: string;
+  };
   lastRetriedNodeId?: string;
+  lastRetryOptions?: {
+    recoverOriginalTextTask?: boolean;
+    resumeCompletedTextTask?: boolean;
+    resumeCompletedTextTaskRequestId?: string;
+  };
+  retryDispatchCount = 0;
   lastExecutionConfigurationNodeId?: string;
   lastReconciliation?: ProductionPaidNodeReconciliationDraft;
+  lastReconciliationOptions?: { settleOnly?: boolean };
   reconciliationError?: Error;
   pauseRequestedValue = false;
   dispatchCount = 0;
@@ -208,6 +260,12 @@ class FakePipeline implements StudioPipelinePort {
     return this.run;
   }
 
+  async requestVoiceTimingRevision(_runId: string, draft: NonNullable<FakePipeline["lastVoiceTimingRevision"]>): Promise<WorkflowRun<ProductionBrief>> {
+    this.lastVoiceTimingRevision = draft;
+    this.run = { ...this.run, revision: this.run.revision + 1, status: "stale" };
+    return this.run;
+  }
+
   async applyNodeInputOverride(_runId: string, override: NodeInputOverrideDraft): Promise<WorkflowRun<ProductionBrief>> {
     this.lastInputOverride = override;
     return this.run;
@@ -262,8 +320,13 @@ class FakePipeline implements StudioPipelinePort {
     return this.run;
   }
 
-  async retryFailedNode(_runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>> {
+  async retryFailedNode(
+    _runId: string,
+    nodeId: string,
+    options?: { recoverOriginalTextTask?: boolean; resumeCompletedTextTask?: boolean; resumeCompletedTextTaskRequestId?: string },
+  ): Promise<WorkflowRun<ProductionBrief>> {
     this.lastRetriedNodeId = nodeId;
+    this.lastRetryOptions = options;
     return this.run;
   }
 
@@ -280,8 +343,10 @@ class FakePipeline implements StudioPipelinePort {
   async reconcilePaidNode(
     _runId: string,
     draft: ProductionPaidNodeReconciliationDraft,
+    options?: { settleOnly?: boolean },
   ): Promise<WorkflowRun<ProductionBrief>> {
     this.lastReconciliation = draft;
+    this.lastReconciliationOptions = options;
     if (this.reconciliationError) throw this.reconciliationError;
     return this.run;
   }
@@ -290,8 +355,11 @@ class FakePipeline implements StudioPipelinePort {
     _runId: string,
     nodeId: string,
     listener?: ProductionRunListener,
+    options?: { recoverOriginalTextTask?: boolean; resumeCompletedTextTask?: boolean; resumeCompletedTextTaskRequestId?: string },
   ): Promise<DispatchedProductionRun> {
+    this.retryDispatchCount += 1;
     this.lastRetriedNodeId = nodeId;
+    this.lastRetryOptions = options;
     this.run = {
       ...this.run,
       revision: this.run.revision + 1,
@@ -341,6 +409,114 @@ function fileIntegrity(content: string | Buffer): { sizeBytes: number; sha256: s
 }
 
 describe("StudioService", () => {
+  it("rejects an ordinary retry after creative planning has escalated a source limitation to a manual gate", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-planning-source-gate-"));
+    const base = executableWaitingRun(workspaceRoot);
+    const jointBrief: ProductionBrief = {
+      ...brief,
+      workflowFeatures: { ...brief.workflowFeatures, creativePlanning: "joint-v1", assetSemanticRank: true },
+    };
+    const run: WorkflowRun<ProductionBrief> = {
+      ...base,
+      initialInput: jointBrief,
+      workflowVersion: productionWorkflowVersion(jointBrief),
+      status: "failed",
+      nodeRuns: [{
+        nodeId: "creative-planning",
+        status: "failed",
+        startedAt: base.startedAt,
+        finishedAt: base.finishedAt,
+        artifactIds: [],
+        qualityGateResults: [],
+        error: "Joint creative planning stopped (needs_source): 连续两轮仍缺少可自动采用的真实图库素材，自动规划已停止。 不回退旧规划流程。",
+      }],
+    };
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const detail = await service.getRun(run.id);
+    assert.equal(detail?.failure?.nodeId, "creative-planning");
+    assert.equal(detail?.failure?.retryable, false);
+
+    await assert.rejects(
+      () => service.retryFailedNode(run.id, "creative-planning"),
+      /人工调整|重新规划/,
+    );
+    assert.equal(pipeline.retryDispatchCount, 0);
+    assert.equal(pipeline.lastRetriedNodeId, undefined);
+  });
+
+  it("projects the pure rework impact summary without exposing an editing surface", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rework-impact-"));
+    const base = executableWaitingRun(workspaceRoot);
+    const run: WorkflowRun<ProductionBrief> = {
+      ...base,
+      initialInput: {
+        ...brief,
+        rework: {
+          sourceRunId: "run-source",
+          sourceRunRevision: 4,
+          affectedScenePositions: [],
+          nodeInstructions: { script: "沿用", visualDirection: "沿用", assets: "沿用" },
+          findings: [],
+        },
+      },
+      nodeRuns: [{
+        nodeId: "script",
+        status: "succeeded",
+        startedAt: base.startedAt,
+        finishedAt: base.startedAt,
+        artifactIds: ["artifact-script-inherited"],
+        qualityGateResults: [],
+        outputState: {
+          effectiveVersionId: "script-inherited-v1",
+          versions: [{
+            id: "script-inherited-v1",
+            nodeId: "script",
+            source: "generated",
+            artifactIds: ["artifact-script-inherited"],
+            inputVersionIds: [],
+            createdAt: base.startedAt,
+            createdBy: "codex-screenwriter-v1",
+            schemaVersion: "video-factory/script-draft-v1",
+          }],
+        },
+      }, ...base.nodeRuns],
+      artifacts: [{
+        id: "artifact-script-inherited",
+        kind: "script",
+        createdAt: base.startedAt,
+        sha256: "b".repeat(64),
+        sizeBytes: 2,
+        contentType: "application/json",
+        schemaVersion: "video-factory/script-draft-v1",
+        producer: { nodeId: "script", attempt: 1 },
+        provenance: {
+          providerId: "codex-screenwriter-v1",
+          notes: "Inherited unchanged from run-source artifact source-script.",
+        },
+      }, ...base.artifacts],
+    };
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(run),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+
+    const detail = await service.getRun(run.id);
+
+    assert.equal(detail?.reworkImpact?.sourceRunId, "run-source");
+    assert.deepEqual(detail?.reworkImpact?.affectedScenePositions, []);
+    assert.equal(detail?.reworkImpact?.calls.scriptModel, 0);
+    assert.equal(detail?.reworkImpact?.calls.mediaCreate, 0);
+    assert.deepEqual(detail?.reworkImpact?.nodes[0], {
+      nodeId: "script",
+      action: "inherited",
+      reason: "verified_source_match",
+    });
+  });
+
   it("builds a rejected-run draft that inherits production choices and prefills affected nodes", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rework-draft-"));
     const scriptPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "attempt-1", "script.json");
@@ -1234,6 +1410,140 @@ describe("StudioService", () => {
     assert.equal(draft?.input.rework?.sourceRunRevision, 6);
     assert.equal(draft?.input.title, brief.title);
     assert.deepEqual(draft?.input.rework?.findings, []);
+    assert.deepEqual(draft?.input.durationRange, { minSeconds: 20, maxSeconds: 34 });
+    assert.equal(draft?.input.workflowFeatures?.executablePlan, true);
+    assert.deepEqual(draft?.input.director, { profileId: "auto", assetProviderIds: ["local-editorial-v1"] });
+  });
+
+  it("rejects every incomplete executable-plan shape at the new production boundary", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-executable-start-boundary-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const production = new ProductionStudio({
+      workspaceRoot,
+      pipeline,
+      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive", "runs.json")),
+      listProviders: async () => [],
+    });
+    const director = { profileId: "auto", assetProviderIds: ["local-editorial-v1"] } as const;
+    const providers = { ...brief.providers, director: "api-visual-director-v1" };
+
+    await assert.rejects(
+      () => production.start({ ...brief, runPurpose: "production", durationRange: { minSeconds: 20, maxSeconds: 34 }, providers, director, workflowFeatures: undefined }),
+      /可执行制作方案|executablePlan/,
+    );
+    await assert.rejects(
+      () => production.start({ ...brief, runPurpose: "production", durationRange: undefined, providers, director, workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true } }),
+      /时长范围|durationRange/,
+    );
+    await assert.rejects(
+      () => production.start({ ...brief, runPurpose: "production", durationRange: { minSeconds: 20, maxSeconds: 34 }, director: undefined, workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true } }),
+      /导演|director/,
+    );
+    assert.equal(pipeline.dispatchCount, 0);
+  });
+
+  it("keeps legacy runs readable but refuses to mutate their old timeline", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-legacy-continuation-boundary-"));
+    const run = waitingRun(workspaceRoot);
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const detail = await service.getRun(run.id);
+    assert.equal(detail?.id, run.id);
+    assert.equal(detail?.continuation.supported, false);
+
+    await assert.rejects(() => service.decide(run.id, {
+      action: "approve",
+      expectedRunRevision: run.revision,
+      interventionId: "intervention-1",
+      reviewEvidenceId: null,
+    }, "studio-owner"), /创建新版本|可执行制作方案/);
+    assert.equal(pipeline.lastDecision, undefined);
+
+    await assert.rejects(() => service.requestSceneRevision(run.id, {
+      expectedRunRevision: run.revision,
+      expectedAssetVersionId: "assets-v1",
+      reviewArtifactId: "review-1",
+      findingIndex: 0,
+      reuseFromScenePosition: 1,
+      note: "旧流程不能返修。",
+    }, "studio-owner"), /创建新版本|可执行制作方案/);
+    assert.equal(pipeline.lastSceneRevision, undefined);
+
+    await assert.rejects(() => service.reinspectVisualReview(run.id, {
+      expectedRunRevision: run.revision,
+      reviewEvidenceId: "review-1",
+    }), /创建新版本|可执行制作方案/);
+
+    await assert.rejects(
+      () => service.applyNodeOverride(run.id, "render", { output: {} }, "studio-owner"),
+      /创建新版本|可执行制作方案/,
+    );
+    assert.equal(pipeline.lastOverride, undefined);
+
+    await assert.rejects(
+      () => service.applyNodeInputOverride(run.id, "render", { input: {} }, "studio-owner"),
+      /创建新版本|可执行制作方案/,
+    );
+    assert.equal(pipeline.lastInputOverride, undefined);
+
+    await assert.rejects(
+      () => service.applyNodeExecutionConfiguration(run.id, "render", {}, "studio-owner"),
+      /创建新版本|可执行制作方案/,
+    );
+    assert.equal(pipeline.lastExecutionConfigurationNodeId, undefined);
+
+    await assert.rejects(() => service.authorizeSpend(run.id, "assets", {
+      spendPlanId: "legacy-plan",
+      inputVersionIds: [],
+      providerId: "legacy-provider",
+      modelId: "legacy-model",
+      maxCostCny: 0,
+      maxAttempts: 1,
+    }, "studio-owner"), /创建新版本|可执行制作方案/);
+    assert.equal(pipeline.lastAuthorization, undefined);
+
+    await assert.rejects(() => service.rejectSpend(run.id, "assets", {
+      spendPlanId: "legacy-plan",
+      reason: "plan_not_approved",
+    }, "studio-owner"), /创建新版本|可执行制作方案/);
+    assert.equal(pipeline.lastSpendRejection, undefined);
+
+    pipeline.run = { ...run, status: "paused" };
+    await assert.rejects(() => service.resumePaused(run.id), /创建新版本|可执行制作方案/);
+    assert.equal(pipeline.run.status, "paused");
+
+    pipeline.run = { ...run, status: "stale" };
+    await assert.rejects(() => service.resumeStale(run.id), /创建新版本|可执行制作方案/);
+    assert.equal(pipeline.run.status, "stale");
+
+    pipeline.run = {
+      ...run,
+      status: "failed",
+      nodeRuns: run.nodeRuns.map((node, index) => index === 0 ? { ...node, status: "failed" as const, error: "旧流程失败" } : node),
+    };
+    await assert.rejects(() => service.retryFailedNode(run.id, run.nodeRuns[0]!.nodeId), /创建新版本|可执行制作方案/);
+    assert.equal(pipeline.lastRetriedNodeId, undefined);
+
+    pipeline.run = { ...run, status: "running" };
+    await service.requestPause(run.id);
+    assert.equal(pipeline.pauseRequestedValue, true);
+  });
+
+  it("rejects executable fields when the persisted workflow version is incompatible", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-incompatible-continuation-"));
+    const run = { ...executableWaitingRun(workspaceRoot), workflowVersion: "1.0.0" };
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    assert.equal((await service.getRun(run.id))?.continuation.supported, false);
+    await assert.rejects(() => service.decide(run.id, {
+      action: "approve",
+      expectedRunRevision: run.revision,
+      interventionId: "intervention-1",
+      reviewEvidenceId: null,
+    }, "studio-owner"), /创建新版本|可执行制作方案/);
+    assert.equal(pipeline.lastDecision, undefined);
   });
 
   it("prefills a rejected visual resource and its scene in a new-version draft", async () => {
@@ -1306,7 +1616,9 @@ describe("StudioService", () => {
       pipeline,
       archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive", "runs.json")),
       listProviders: async () => [
-        { id: "codex-screenwriter-v1", capability: "script.draft", label: "Codex 编剧", available: true, kind: "external" },
+        { id: "codex-screenwriter-v1", capability: "script.draft", label: "AI 编剧", available: true, kind: "external" },
+        { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "external" },
+        { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
         { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑画面", available: true, kind: "local" },
         { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" },
         { id: "python-ffmpeg-v1", capability: "video.render", label: "本地渲染", available: true, kind: "local" },
@@ -1342,6 +1654,8 @@ describe("StudioService", () => {
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const baseProviders = [
       { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" as const },
+      { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "external" as const },
+      { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" as const },
       { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑画面", available: true, kind: "local" as const },
       { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" as const },
       { id: "python-ffmpeg-v1", capability: "video.render", label: "本地渲染", available: true, kind: "local" as const },
@@ -1394,6 +1708,63 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
+  it("rejects a production template whose shot slots have no executable visual source", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-template-source-preflight-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const production = new ProductionStudio({
+      workspaceRoot,
+      pipeline,
+      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive", "runs.json")),
+      listProviders: async () => [
+        { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" },
+        { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "external" },
+        { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
+        { id: "seedance-video-v1", capability: "asset.prepare", label: "Seedance 视频生成", available: true, kind: "external", billing: "metered", estimatedCnyPerClip: 3.5, deliveryTypes: ["generated_video"] },
+        { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" },
+        { id: "python-ffmpeg-v1", capability: "video.render", label: "本地渲染", available: true, kind: "local" },
+        { id: "python-technical-review-v1", capability: "quality.review", label: "机器质检", available: true, kind: "local" },
+        { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 审片", available: true, kind: "external", billing: "subscription", defaultModelId: "glm-5.3-flash" },
+        { id: "codex-visual-review-v1", capability: "quality.review.visual", label: "Codex 审片", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
+        { id: "codex-role-auditor-v1", capability: "role.audit", label: "独立质量复核", available: true, kind: "external", billing: "subscription" },
+      ],
+      resolveTemplateSnapshot: async () => ({
+        templateId: "source-required",
+        templateVersion: 1,
+        resolvedAt: "2026-09-09T00:00:00.000Z",
+        resolvedBlueprint: {
+          platform: "douyin",
+          durationSeconds: 24,
+          automationLevel: "assisted",
+          storyStructure: [{ id: "evidence", label: "证据", purpose: "展示真实来源", required: true }],
+          shotSlots: [{ id: "evidence-shot", beatId: "evidence", purpose: "展示真实来源", durationSeconds: 24, allowedCapabilities: ["asset.search"], manualReplacement: true }],
+          visualSystem: { composition: "来源画面", colorIntent: "自然", subtitleDensity: "low", pacing: "measured" },
+          soundSystem: { voiceIntent: "可信", pace: "medium", musicIntent: "克制" },
+          qualityRules: [{ id: "source", label: "真实来源", dimension: "factual", required: true, threshold: 95 }],
+          capabilityRequirements: [{ capability: "asset.prepare", required: true }],
+        },
+        sourceLayers: [{ layer: "template", sourceId: "source-required@1", appliedFields: ["shotSlots"] }],
+        fieldSources: {},
+      }),
+    });
+
+    await assert.rejects(() => production.start({
+      ...brief,
+      runPurpose: "production",
+      providers: {
+        script: "python-template-v1",
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+        voice: "macos-say-v1",
+        render: "python-ffmpeg-v1",
+        technicalReview: "python-technical-review-v1",
+        visualReview: "glm-visual-review-v1",
+      },
+      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
+    }), /当前素材池无法执行模板中的 1 个镜头.*素材库/);
+    assert.equal(pipeline.dispatchCount, 0);
+  });
+
   it("prefills actionable generation changes after a content-safety failure", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rework-content-safety-"));
     const base = waitingRun(workspaceRoot);
@@ -1441,6 +1812,9 @@ describe("StudioService", () => {
       iteration: 2,
       maxIterations: 3,
       completedIterations: 1,
+      producerModelCallCount: 2,
+      auditModelCallCount: 1,
+      structuredRepairModelCallCount: 0,
       phase: "auditing",
       latestAudit: { verdict: "repair", score: 68, summary: "开场钩子仍需具体。" },
     });
@@ -1474,6 +1848,426 @@ describe("StudioService", () => {
     assert.equal(detail?.nodes.find((node) => node.id === "script")?.agentLoopProgress, undefined);
   });
 
+  it("projects a pending v8 text task without exposing its envelope and blocks ordinary retry", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-recovery-"));
+    const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "agent-loop-checkpoints");
+    const checkpointKey = "d".repeat(64);
+    const workflowOperationRequestId = "script-workflow-operation-current";
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, `${checkpointKey}.json`), JSON.stringify({
+      version: "video-factory/agent-loop-checkpoint-v8",
+      key: checkpointKey,
+      contractDigest: "fixture-contract",
+      role: "编剧",
+      maxIterations: 3,
+      cycle: 0,
+      status: "failed",
+      completed: [],
+      recoveryOwner: { runId: "run-1", nodeId: "script", workflowOperationRequestId },
+      pendingOperation: {
+        phase: "produce",
+        iteration: 1,
+        operationKey: "0:1:produce",
+        generation: 0,
+        operation: {
+          version: "video-factory/codex-prepared-operation-v1",
+          requestId: "private-request-id",
+          kind: "script-draft",
+          envelope: { prompt: "private prompt" },
+          serializedEnvelope: "{\"prompt\":\"private prompt\"}",
+          binding: {
+            version: "video-factory/task-binding-v1",
+            storeId: `vfs_store_${"b".repeat(32)}`,
+            providerId: "openai",
+            modelId: "gpt-test",
+            requestDigest: "a".repeat(64),
+            kind: "script-draft",
+            contractDigest: null,
+            sessionDigest: "c".repeat(64),
+          },
+          brokerBinding: {
+            version: "video-factory/task-binding-v1",
+            storeId: `vfs_store_${"b".repeat(32)}`,
+            providerId: "openai",
+            modelId: "gpt-test",
+          },
+          route: { socketPath: "/private/runtime/worker.sock" },
+          taskFact: "accepted_unknown",
+        },
+      },
+    }), "utf8");
+    const run = waitingRun(workspaceRoot);
+    run.status = "failed";
+    run.nodeRuns.push({
+      nodeId: "script",
+      status: "failed",
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      operationRequestId: workflowOperationRequestId,
+      artifactIds: [],
+      qualityGateResults: [],
+      error: "模型任务结果未知",
+    });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const detail = await service.getRun("run-1");
+
+    assert.deepEqual(detail?.taskRecovery, {
+      nodeId: "script",
+      phase: "produce",
+      taskState: "accepted_unknown",
+      summary: "暂时无法确认这次任务的结果。系统没有重新提交，请先查询原任务。",
+      resultAvailable: false,
+      allowedActions: ["query_original_task"],
+    });
+    assert.doesNotMatch(JSON.stringify(detail), /private-request-id|private prompt|worker\.sock/);
+    await assert.rejects(() => service.retryFailedNode("run-1", "script"), /请先查询原任务/);
+    assert.equal(pipeline.lastRetriedNodeId, undefined);
+  });
+
+  it("queries and concurrently retrieves one completed original text task without resubmitting it", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-completed-"));
+    const bridge = await startTextRecoveryBridge();
+    try {
+      const operation = await new CodexBridgeClient({ socketPath: bridge.socketPath }).prepareTask(
+        "script-draft",
+        { brief: { title: "恢复原脚本" } },
+        "studio-recovery-completed",
+      );
+      bridge.operation = operation;
+      await writePendingTextCheckpoint(workspaceRoot, operation);
+      const staleOperation = await new CodexBridgeClient({ socketPath: bridge.socketPath }).prepareTask(
+        "script-draft",
+        { brief: { title: "更晚写入但属于旧方案的脚本" } },
+        "studio-recovery-stale-mtime",
+      );
+      await writePendingTextCheckpoint(workspaceRoot, staleOperation, {
+        checkpointKey: "e".repeat(64),
+        workflowOperationRequestId: "script-workflow-operation-old",
+      });
+      const checkpointBeforeQuery = JSON.parse(await readFile(path.join(
+        workspaceRoot,
+        "runs",
+        "run-1",
+        "nodes",
+        "script",
+        "agent-loop-checkpoints",
+        `${"d".repeat(64)}.json`,
+      ), "utf8")) as Record<string, unknown>;
+      const pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "failed"));
+      const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+      const queried = await service.queryOriginalTextTask("run-1");
+      assert.equal(bridge.posts, 0);
+      assert.equal(bridge.queries, 1);
+      assert.deepEqual(queried.taskRecovery?.allowedActions, ["query_original_task", "retrieve_and_continue"]);
+      assert.equal(queried.taskRecovery?.taskState, "completed_success");
+      assert.equal(bridge.operation?.requestId, operation.requestId, "newer mtime from an old plan must not replace the current binding");
+      const checkpointAfterQuery = JSON.parse(await readFile(path.join(
+        workspaceRoot,
+        "runs",
+        "run-1",
+        "nodes",
+        "script",
+        "agent-loop-checkpoints",
+        `${"d".repeat(64)}.json`,
+      ), "utf8")) as Record<string, unknown>;
+      assert.deepEqual(checkpointAfterQuery.operationGenerations, checkpointBeforeQuery.operationGenerations);
+      assert.deepEqual(checkpointAfterQuery.phaseAttempts, checkpointBeforeQuery.phaseAttempts);
+      const rebuiltService = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+      assert.equal((await rebuiltService.getRun("run-1"))?.taskRecovery?.taskState, "completed_success");
+
+      const [first, second] = await Promise.all([
+        service.retrieveOriginalTextTask("run-1"),
+        service.retrieveOriginalTextTask("run-1"),
+      ]);
+      assert.equal(first.status, "running");
+      assert.equal(second.status, "running");
+      assert.equal(pipeline.retryDispatchCount, 1);
+      assert.equal(pipeline.lastRetriedNodeId, "script");
+      assert.equal(bridge.posts, 0);
+    } finally {
+      await bridge.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("queries an original result while paused without unpausing or allowing retrieval", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-paused-"));
+    const bridge = await startTextRecoveryBridge();
+    try {
+      const operation = await new CodexBridgeClient({ socketPath: bridge.socketPath }).prepareTask(
+        "script-draft",
+        { brief: { title: "暂停中的恢复" } },
+        "studio-recovery-paused",
+      );
+      bridge.operation = operation;
+      await writePendingTextCheckpoint(workspaceRoot, operation);
+      const pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "paused"));
+      const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+      const queried = await service.queryOriginalTextTask("run-1");
+      assert.equal(queried.status, "paused");
+      assert.deepEqual(queried.taskRecovery?.allowedActions, ["query_original_task"]);
+      assert.match(queried.taskRecovery?.summary ?? "", /不会解除暂停/);
+      await assert.rejects(() => service.retrieveOriginalTextTask("run-1"), /先显式继续自动制作/);
+      assert.equal(pipeline.retryDispatchCount, 0);
+      assert.equal(bridge.posts, 0);
+    } finally {
+      await bridge.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not attach a late original-task observation after the run revision changes", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-stale-observation-"));
+    let pipeline!: FakePipeline;
+    const bridge = await startTextRecoveryBridge(() => {
+      pipeline.run = { ...pipeline.run, revision: pipeline.run.revision + 1 };
+    });
+    try {
+      const operation = await new CodexBridgeClient({ socketPath: bridge.socketPath }).prepareTask(
+        "script-draft",
+        { brief: { title: "旧版本恢复" } },
+        "studio-recovery-stale",
+      );
+      bridge.operation = operation;
+      await writePendingTextCheckpoint(workspaceRoot, operation);
+      pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "failed"));
+      const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+      await assert.rejects(() => service.queryOriginalTextTask("run-1"), /制作方案已更新/);
+      await assert.rejects(
+        () => readFile(path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "text-task-recovery.json"), "utf8"),
+        (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "ENOENT",
+      );
+      assert.equal(pipeline.retryDispatchCount, 0);
+      assert.equal(bridge.posts, 0);
+    } finally {
+      await bridge.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("allows an ordinary retry only after the broker proves the original task was not accepted", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-not-accepted-"));
+    const bridge = await startTextRecoveryBridge(undefined, "not_accepted");
+    try {
+      const operation = await new CodexBridgeClient({ socketPath: bridge.socketPath }).prepareTask(
+        "script-draft",
+        { brief: { title: "未受理恢复" } },
+        "studio-recovery-not-accepted",
+      );
+      bridge.operation = operation;
+      await writePendingTextCheckpoint(workspaceRoot, operation);
+      const pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "failed"));
+      const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+      const queried = await service.queryOriginalTextTask("run-1");
+      assert.equal(queried.taskRecovery?.taskState, "not_accepted");
+      assert.deepEqual(queried.taskRecovery?.allowedActions, ["query_original_task", "retry_failed_step"]);
+      const retried = await service.retryFailedNode("run-1", "script");
+      assert.equal(retried.status, "running");
+      assert.equal(pipeline.retryDispatchCount, 1);
+      assert.equal(bridge.posts, 0);
+    } finally {
+      await bridge.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("opens a real retry path after a verified transient completed failure without reusing the old request", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-terminal-failure-"));
+    const bridge = await startTextRecoveryBridge(undefined, "completed_failure");
+    try {
+      const operation = await new CodexBridgeClient({ socketPath: bridge.socketPath }).prepareTask(
+        "script-draft",
+        { brief: { title: "终态失败恢复" } },
+        "studio-recovery-terminal-failure",
+      );
+      bridge.operation = operation;
+      await writePendingTextCheckpoint(workspaceRoot, operation);
+      const pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "failed"));
+      const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+      const queried = await service.queryOriginalTextTask("run-1");
+      assert.equal(queried.taskRecovery?.taskState, "completed_failure");
+      assert.deepEqual(queried.taskRecovery?.allowedActions, ["query_original_task", "retry_failed_step", "adjust_plan"]);
+      assert.match(queried.taskRecovery?.terminalError ?? "", /暂时不可用|稍后重试/);
+      assert.equal(bridge.posts, 0, "querying a terminal result must remain GET-only");
+
+      const retried = await service.retryFailedNode("run-1", "script");
+      assert.equal(retried.status, "running");
+      assert.deepEqual(pipeline.lastRetryOptions, {
+        recoverOriginalTextTask: true,
+        resumeCompletedTextTask: true,
+        resumeCompletedTextTaskRequestId: operation.requestId,
+      });
+      assert.equal(pipeline.retryDispatchCount, 1);
+      assert.equal(bridge.posts, 0, "Studio must delegate the explicit recovery to the leased pipeline instead of posting itself");
+    } finally {
+      await bridge.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps last verified task time separate from a later failed query and survives service rebuild", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-observation-time-"));
+    const bridge = await startTextRecoveryBridge(undefined, "running");
+    let now = new Date("2026-09-13T01:00:00.000Z");
+    try {
+      const operation = await new CodexBridgeClient({ socketPath: bridge.socketPath }).prepareTask(
+        "script-draft",
+        { brief: { title: "查询时间分离" } },
+        "studio-recovery-observation-time",
+      );
+      bridge.operation = operation;
+      await writePendingTextCheckpoint(workspaceRoot, operation);
+      const pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "failed"));
+      const makeService = () => new StudioService({
+        workspaceRoot,
+        pipeline,
+        commandAvailable: allCommandsAvailable,
+        environment: {},
+        now: () => now,
+      });
+      const service = makeService();
+
+      const first = await service.queryOriginalTextTask("run-1");
+      assert.equal(first.taskRecovery?.taskState, "running");
+      assert.equal(first.taskRecovery?.lastVerifiedAt, "2026-09-13T01:00:00.000Z");
+      now = new Date("2026-09-13T01:05:00.000Z");
+      bridge.taskState = "query_failure";
+      const second = await service.queryOriginalTextTask("run-1");
+      assert.equal(second.taskRecovery?.taskState, "running");
+      assert.equal(second.taskRecovery?.lastVerifiedAt, "2026-09-13T01:00:00.000Z");
+      assert.equal(second.taskRecovery?.lastAttemptAt, "2026-09-13T01:05:00.000Z");
+      assert.match(second.taskRecovery?.observationError ?? "", /上一次可信状态已保留/);
+
+      const rebuilt = await makeService().getRun("run-1");
+      assert.equal(rebuilt?.taskRecovery?.lastVerifiedAt, "2026-09-13T01:00:00.000Z");
+      assert.equal(rebuilt?.taskRecovery?.lastAttemptAt, "2026-09-13T01:05:00.000Z");
+      assert.equal(bridge.posts, 0);
+    } finally {
+      await bridge.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an initial failed observation unknown instead of inventing a running fact", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-first-query-failure-"));
+    const bridge = await startTextRecoveryBridge(undefined, "query_failure");
+    try {
+      const operation = await new CodexBridgeClient({ socketPath: bridge.socketPath }).prepareTask(
+        "script-draft",
+        { brief: { title: "首次查询失败" } },
+        "studio-recovery-first-query-failure",
+      );
+      bridge.operation = operation;
+      await writePendingTextCheckpoint(workspaceRoot, operation);
+      const pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "failed"));
+      const service = new StudioService({
+        workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {},
+        now: () => new Date("2026-09-13T01:10:00.000Z"),
+      });
+
+      const result = await service.queryOriginalTextTask("run-1");
+      assert.equal(result.taskRecovery?.taskState, "accepted_unknown");
+      assert.equal(result.taskRecovery?.lastVerifiedAt, undefined);
+      assert.equal(result.taskRecovery?.lastAttemptAt, "2026-09-13T01:10:00.000Z");
+      assert.match(result.taskRecovery?.observationError ?? "", /不会把原任务描述为仍在实时运行/);
+      assert.deepEqual(result.taskRecovery?.allowedActions, ["query_original_task"]);
+      assert.equal(bridge.posts, 0);
+    } finally {
+      await bridge.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves a verified completed result when a later query attempt fails", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-completed-query-failure-"));
+    const bridge = await startTextRecoveryBridge(undefined, "completed_success");
+    let now = new Date("2026-09-13T01:20:00.000Z");
+    try {
+      const operation = await new CodexBridgeClient({ socketPath: bridge.socketPath }).prepareTask(
+        "script-draft",
+        { brief: { title: "完成后查询失败" } },
+        "studio-recovery-completed-query-failure",
+      );
+      bridge.operation = operation;
+      await writePendingTextCheckpoint(workspaceRoot, operation);
+      const pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "failed"));
+      const service = new StudioService({
+        workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {}, now: () => now,
+      });
+
+      await service.queryOriginalTextTask("run-1");
+      now = new Date("2026-09-13T01:25:00.000Z");
+      bridge.taskState = "query_failure";
+      const result = await service.queryOriginalTextTask("run-1");
+      assert.equal(result.taskRecovery?.taskState, "completed_success");
+      assert.equal(result.taskRecovery?.lastVerifiedAt, "2026-09-13T01:20:00.000Z");
+      assert.equal(result.taskRecovery?.lastAttemptAt, "2026-09-13T01:25:00.000Z");
+      assert.deepEqual(result.taskRecovery?.allowedActions, ["query_original_task", "retrieve_and_continue"]);
+      assert.equal(bridge.posts, 0);
+    } finally {
+      await bridge.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let a late running response overwrite a terminal observation from another Studio instance", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-late-running-"));
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    let queryCount = 0;
+    const bridge = await startTextRecoveryBridge(async () => {
+      queryCount += 1;
+      if (queryCount === 1) {
+        markFirstStarted();
+        await firstGate;
+      }
+    }, "running");
+    try {
+      const operation = await new CodexBridgeClient({ socketPath: bridge.socketPath }).prepareTask(
+        "script-draft",
+        { brief: { title: "迟到状态不能回退终态" } },
+        "studio-recovery-late-running",
+      );
+      bridge.operation = operation;
+      await writePendingTextCheckpoint(workspaceRoot, operation);
+      const pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "failed"));
+      const older = new StudioService({
+        workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {},
+        now: () => new Date("2026-09-13T02:00:00.000Z"),
+      });
+      const newer = new StudioService({
+        workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {},
+        now: () => new Date("2026-09-13T02:01:00.000Z"),
+      });
+
+      const lateRunning = older.queryOriginalTextTask("run-1");
+      await firstStarted;
+      bridge.taskState = "completed_failure";
+      const terminal = await newer.queryOriginalTextTask("run-1");
+      assert.equal(terminal.taskRecovery?.taskState, "completed_failure");
+      releaseFirst();
+      const merged = await lateRunning;
+
+      assert.equal(merged.taskRecovery?.taskState, "completed_failure");
+      assert.equal(merged.taskRecovery?.lastVerifiedAt, "2026-09-13T02:01:00.000Z");
+      assert.deepEqual(merged.taskRecovery?.allowedActions, ["query_original_task", "retry_failed_step", "adjust_plan"]);
+      assert.equal(bridge.posts, 0);
+    } finally {
+      releaseFirst();
+      await bridge.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("reads v4 progress without exposing persistent role-session handles", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-agent-progress-v4-"));
     const directory = path.join(workspaceRoot, "runs", "run-v4", "nodes", "script", "agent-loop-checkpoints");
@@ -1491,6 +2285,9 @@ describe("StudioService", () => {
       iteration: 1,
       maxIterations: 3,
       completedIterations: 0,
+      producerModelCallCount: 1,
+      auditModelCallCount: 0,
+      structuredRepairModelCallCount: 0,
       phase: "auditing",
     });
   });
@@ -1519,6 +2316,9 @@ describe("StudioService", () => {
       iteration: 2,
       maxIterations: 3,
       completedIterations: 1,
+      producerModelCallCount: 1,
+      auditModelCallCount: 1,
+      structuredRepairModelCallCount: 0,
       phase: "repairing",
       latestAudit: { verdict: "repair", score: 62, summary: "镜头状态变化需要补齐。" },
     });
@@ -1602,7 +2402,7 @@ describe("StudioService", () => {
 
   it("maps persisted runs to queue and detail DTOs", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
-    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const pipeline = new FakePipeline(executableWaitingRun(workspaceRoot));
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
     const summaries = await service.listRuns();
@@ -1728,6 +2528,59 @@ describe("StudioService", () => {
       interventions: [],
     };
     assert.equal((await service.listRuns())[0]?.finalReviewOutcome, undefined);
+  });
+
+  it("routes a voice timing change through the safe planning command without accepting a plan path", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-voice-timing-decision-"));
+    const run = executableWaitingRun(workspaceRoot);
+    const intervention = {
+      id: "voice-timing-1",
+      nodeId: "voice",
+      reason: "自然配音超出当前镜头；请调整统一方案。",
+      requiredAction: "request_changes" as const,
+      options: ["request_changes", "reject"] as const,
+      createdAt: "2026-09-09T10:00:00.000Z",
+    };
+    const pipeline = new FakePipeline({
+      ...run,
+      revision: 4,
+      nodeRuns: [{
+        nodeId: "voice",
+        status: "needs_human",
+        startedAt: intervention.createdAt,
+        finishedAt: intervention.createdAt,
+        artifactIds: [],
+        qualityGateResults: [],
+        intervention,
+        output: { conflict: {
+          code: "VOICE_DOES_NOT_FIT",
+          scenePosition: 1,
+          plannedSeconds: 8,
+          speechSeconds: 8.2,
+          requiredSeconds: 8.2,
+          audioArtifact: { kind: "voiceover_raw", uri: "/managed/raw.mp3", sha256: "a".repeat(64), sizeBytes: 12, contentType: "audio/mpeg" },
+        } },
+      }],
+      interventions: [intervention],
+    });
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await service.decide("run-1", {
+      action: "request_changes",
+      expectedRunRevision: 4,
+      interventionId: "voice-timing-1",
+      reviewEvidenceId: null,
+      voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
+    } as unknown as StudioDecisionInput, "trusted-owner");
+
+    assert.deepEqual(pipeline.lastVoiceTimingRevision, {
+      expectedRunRevision: 4,
+      interventionId: "voice-timing-1",
+      scenePosition: 1,
+      durationSeconds: 8.2,
+      actor: "trusted-owner",
+    });
+    assert.equal(pipeline.lastDecision, undefined);
   });
 
   it("does not invent the source visual review node for an older visual-review workflow", async () => {
@@ -2145,11 +2998,33 @@ describe("StudioService", () => {
       pipeline: new FakePipeline(waitingRun(workspaceRoot)),
       commandAvailable: allCommandsAvailable,
       environment: {},
-      trendAgent: { listCandidates: async () => [candidate] },
+      trendAgent: {
+        listCandidates: async () => [candidate],
+        generationReceipt: () => ({
+          generationId: "generation-service-1",
+          generatedAt: "2026-09-07T08:00:00.000Z",
+          modelInvoked: true,
+          source: "rule-fallback",
+          candidateCount: 1,
+          failureCategory: "accepted_unknown",
+          failureReason: "原任务已经接收，但当前查询暂时失败。",
+        }),
+      },
     });
 
-    const beforeDeletion = (await service.listCandidateInbox({ origins: ["trend"] })).items[0];
+    const trendInbox = await service.listCandidateInbox({ origins: ["trend"] });
+    const beforeDeletion = trendInbox.items[0];
     assert.equal(beforeDeletion?.editorialDecision.recommendedTemplate?.id, "photo-story");
+    assert.deepEqual(trendInbox.topicGeneration, {
+      generationId: "generation-service-1",
+      generatedAt: "2026-09-07T08:00:00.000Z",
+      modelInvoked: true,
+      source: "rule-fallback",
+      candidateCount: 1,
+      failureCategory: "accepted_unknown",
+      failureReason: "原任务已经接收，但当前查询暂时失败。",
+    });
+    assert.equal((await service.listCandidateInbox({ origins: ["series"] })).topicGeneration, undefined);
 
     const catalog = await service.listTemplates();
     await service.deleteTemplate("photo-story", catalog.storeRevision);
@@ -2525,8 +3400,34 @@ describe("StudioService", () => {
     const blocked = (await service.listSeries())[0]!;
     assert.equal(blocked.episodes[0]?.status, "in_production");
     assert.equal(blocked.canon.facts.length, 0);
+    const scriptNode = pipeline.run.nodeRuns.find((node) => node.nodeId === "script")!;
     const finalReview = pipeline.run.nodeRuns.find((node) => node.nodeId === "final-review")!;
+    pipeline.run.revision = 8;
+    await writeFile(scriptPath, `${JSON.stringify({
+      viewerPromise: "完成一次真实实验",
+      narrativeArc: "从尝试推进到可复用方法",
+      canonFacts: [],
+      scenes: [{ narration: "本集没有形成需要后集继承的新事实。" }],
+    })}\n`, "utf8");
+    scriptNode.output = { scriptPath, canonFacts: [] };
+    scriptNode.outputState!.versions[0]!.output = { scriptPath, canonFacts: [] };
+    finalReview.output = { review: {}, canonFacts: [] };
+    finalReview.outputState!.versions[0]!.output = { review: {}, canonFacts: [] };
+    const emptyCanon = (await service.listSeries())[0]!;
+    assert.equal(emptyCanon.episodes[0]?.status, "ready");
+    assert.deepEqual(emptyCanon.canon.facts, []);
+    assert.match(emptyCanon.episodes[0]?.continuity.memorySummary ?? "", /没有新增系列事实/);
+
     const approvedCanonFacts = ["已经完成一次低成本实验。", "记录步骤后可以复现实验结果。"];
+    pipeline.run.revision = 9;
+    await writeFile(scriptPath, `${JSON.stringify({
+      viewerPromise: "完成一次真实实验",
+      narrativeArc: "从尝试推进到可复用方法",
+      canonFacts: approvedCanonFacts,
+      scenes: [{ narration: "下一集继续验证长期效果。" }],
+    })}\n`, "utf8");
+    scriptNode.output = { scriptPath, canonFacts: approvedCanonFacts };
+    scriptNode.outputState!.versions[0]!.output = { scriptPath, canonFacts: approvedCanonFacts };
     finalReview.output = { review: {}, canonFacts: approvedCanonFacts };
     finalReview.outputState!.versions[0]!.output = { review: {}, canonFacts: approvedCanonFacts };
     await service.archiveRuns(["run-1"]);
@@ -2683,7 +3584,7 @@ describe("StudioService", () => {
 
   it("forwards the paid reconciliation id, revision, and outcome without changing them", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-paid-reconciliation-"));
-    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const pipeline = new FakePipeline(executableWaitingRun(workspaceRoot));
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
     await service.reconcilePaidNode("run-1", "assets", {
@@ -2702,7 +3603,7 @@ describe("StudioService", () => {
 
   it("adds the trusted actor to a manual paid reconciliation", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-manual-paid-resolution-"));
-    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const pipeline = new FakePipeline(executableWaitingRun(workspaceRoot));
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
     await service.reconcilePaidNode("run-1", "assets", {
@@ -2726,9 +3627,45 @@ describe("StudioService", () => {
     });
   });
 
+  it("allows legacy paid reconciliation only for settle-only outcomes", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-legacy-paid-settlement-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    for (const outcome of ["resume_original", "requote"] as const) {
+      await assert.rejects(() => service.reconcilePaidNode("run-1", "assets", {
+        expectedRunRevision: 0,
+        reconciliationId: `legacy-${outcome}`,
+        outcome,
+      }), /创建新版本|旧流程|只能.*结算/);
+    }
+    assert.equal(pipeline.lastReconciliation, undefined);
+
+    await service.reconcilePaidNode("run-1", "assets", {
+      expectedRunRevision: 0,
+      reconciliationId: "legacy-confirmed-charged",
+      outcome: "confirmed_charged",
+      itemRequestId: "paid-scene-1",
+      note: "Provider 控制台确认已扣费。",
+      actualCostCny: 2.4,
+    }, "billing-reviewer");
+    assert.equal(pipeline.lastReconciliation?.outcome, "confirmed_charged");
+    assert.deepEqual(pipeline.lastReconciliationOptions, { settleOnly: true });
+
+    await service.reconcilePaidNode("run-1", "assets", {
+      expectedRunRevision: 0,
+      reconciliationId: "legacy-confirmed-not-charged",
+      outcome: "confirmed_not_charged",
+      itemRequestId: "paid-scene-1",
+      note: "Provider 控制台确认未扣费。",
+    }, "billing-reviewer");
+    assert.equal(pipeline.lastReconciliation?.outcome, "confirmed_not_charged");
+    assert.deepEqual(pipeline.lastReconciliationOptions, { settleOnly: true });
+  });
+
   it("turns an unqueryable paid task into an explicit manual-reconciliation conflict", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-manual-reconciliation-"));
-    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const pipeline = new FakePipeline(executableWaitingRun(workspaceRoot));
     pipeline.reconciliationError = new PaidOperationManualReconciliationError("assets", []);
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
@@ -2744,7 +3681,7 @@ describe("StudioService", () => {
 
   it("returns a running snapshot after retry dispatch without waiting for the long model task", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-background-retry-"));
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     const failedNodeId = run.nodeRuns[0]!.nodeId;
     run.status = "failed";
     run.nodeRuns[0] = { ...run.nodeRuns[0]!, status: "failed", error: "temporary model failure" };
@@ -2763,7 +3700,7 @@ describe("StudioService", () => {
 
   it("allows a settled rejected asset pilot to be rechecked in the same run", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-background-pilot-recheck-"));
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     const assetNodeId = run.nodeRuns[0]!.nodeId;
     run.status = "rejected";
     run.nodeRuns[0] = {
@@ -2847,7 +3784,7 @@ describe("StudioService", () => {
 
     await assert.rejects(
       () => service.startRun(undefined, "empty-production-request-1"),
-      /制作参数不符合要求/,
+      /制作参数.*(?:不正确|不符合要求)/,
     );
     assert.equal(pipeline.dispatchCount, 0);
   });
@@ -2990,7 +3927,7 @@ describe("StudioService", () => {
         available: true,
         reason: "",
         modelId: "gpt-5.6-sol",
-        taskKinds: ["script-draft", "role-audit"],
+        taskKinds: ["script-draft", "director-plan", "role-audit"],
       },
     });
     await service.updateCreatorSettings({
@@ -3028,7 +3965,7 @@ describe("StudioService", () => {
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
       director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
-      workflowFeatures: { assetSemanticRank: false, referenceGrammar: true },
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: true, executablePlan: true },
       referenceVideo: { uploadId: uploaded.uploadId, label: uploaded.label },
     };
 
@@ -3423,7 +4360,11 @@ describe("StudioService", () => {
         maxCostCny: 4,
       },
     };
-    const pipeline = new FakePipeline({ ...waitingRun(workspaceRoot), initialInput });
+    const pipeline = new FakePipeline({
+      ...waitingRun(workspaceRoot),
+      workflowVersion: productionWorkflowVersion(initialInput),
+      initialInput,
+    });
     const service = new StudioService({
       workspaceRoot,
       pipeline,
@@ -3442,6 +4383,7 @@ describe("StudioService", () => {
         maxPaidShots: 0,
         maxCostCny: 0,
       },
+      expectedRunRevision: 0,
     }, "vfqa");
 
     assert.deepEqual(pipeline.run.initialInput.director?.assetProviderIds, ["local-editorial-v1"]);
@@ -3465,7 +4407,11 @@ describe("StudioService", () => {
       modelSelectionSources: { "seedance-video-v1": "node_override" },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
     };
-    const pipeline = new FakePipeline({ ...waitingRun(workspaceRoot), initialInput });
+    const pipeline = new FakePipeline({
+      ...waitingRun(workspaceRoot),
+      workflowVersion: productionWorkflowVersion(initialInput),
+      initialInput,
+    });
     const service = new StudioService({
       workspaceRoot,
       pipeline,
@@ -3477,6 +4423,7 @@ describe("StudioService", () => {
 
     await service.applyNodeExecutionConfiguration("run-1", "assets", {
       modelSelections: { "seedance-video-v1": "doubao-seedance-2-0-fast-260128" },
+      expectedRunRevision: 0,
     }, "vfqa");
 
     assert.equal(pipeline.run.initialInput.models?.["seedance-video-v1"], "doubao-seedance-2-0-fast-260128");
@@ -3498,7 +4445,11 @@ describe("StudioService", () => {
       modelSelectionSources: { "seedance-video-v1": "node_override" },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
     };
-    const pipeline = new FakePipeline({ ...waitingRun(workspaceRoot), initialInput });
+    const pipeline = new FakePipeline({
+      ...waitingRun(workspaceRoot),
+      workflowVersion: productionWorkflowVersion(initialInput),
+      initialInput,
+    });
     const service = new StudioService({
       workspaceRoot,
       pipeline,
@@ -3510,6 +4461,7 @@ describe("StudioService", () => {
 
     await service.applyNodeExecutionConfiguration("run-1", "assets", {
       modelSelections: { "seedance-video-v1": "doubao-seedance-1-5-pro-251215" },
+      expectedRunRevision: 0,
     }, "vfqa");
 
     assert.equal(pipeline.run.initialInput.models?.["seedance-video-v1"], "doubao-seedance-1-5-pro-251215");
@@ -3696,7 +4648,7 @@ describe("StudioService", () => {
 
   it("resolves the active intervention and enforces a rejection reason", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
-    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const pipeline = new FakePipeline(executableWaitingRun(workspaceRoot));
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
     await service.decide("run-1", {
@@ -3709,7 +4661,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.lastDecision?.interventionId, "intervention-1");
     assert.equal(pipeline.lastDecision?.action, "approve");
 
-    pipeline.run = waitingRun(workspaceRoot);
+    pipeline.run = executableWaitingRun(workspaceRoot);
     await assert.rejects(
       () => service.decide("run-1", {
         action: "reject",
@@ -3723,7 +4675,7 @@ describe("StudioService", () => {
 
   it("routes a scene-localized revision through the same run", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-scene-revision-"));
-    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const pipeline = new FakePipeline(executableWaitingRun(workspaceRoot));
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
     const result = await service.requestSceneRevision("run-1", {
@@ -3749,7 +4701,7 @@ describe("StudioService", () => {
 
   it("maps concurrent review updates to a refreshable conflict", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
-    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const pipeline = new FakePipeline(executableWaitingRun(workspaceRoot));
     pipeline.decide = async () => {
       throw new StaleRunRevisionError("run-1", 0, 1);
     };
@@ -3768,7 +4720,7 @@ describe("StudioService", () => {
 
   it("rejects node edits while a run is active and validates output against the current node schema", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     run.status = "running";
     run.nodeRuns.unshift({
       nodeId: "script",
@@ -3807,7 +4759,7 @@ describe("StudioService", () => {
 
   it("requires explicit confirmation before editing a terminal run", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     run.status = "succeeded";
     run.nodeRuns.unshift({ nodeId: "script", status: "succeeded", output: { hook: "旧钩子" }, artifactIds: [], qualityGateResults: [] });
     const pipeline = new FakePipeline(run);
@@ -3828,7 +4780,7 @@ describe("StudioService", () => {
 
   it("blocks every edit path until an uncertain paid result is reconciled", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-uncertain-edit-"));
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     run.status = "failed";
     run.nodeRuns.unshift({
       nodeId: "script",
@@ -3889,7 +4841,7 @@ describe("StudioService", () => {
 
   it("rejects a stale spend confirmation and authorizes only the current server plan", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     run.status = "awaiting_spend_approval";
     run.nodeRuns.unshift({
       nodeId: "assets",
@@ -3958,7 +4910,7 @@ describe("StudioService", () => {
 
   it("returns an exact active asset quote to the director with structured cost feedback", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-spend-feedback-"));
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     run.status = "awaiting_spend_approval";
     run.nodeRuns.unshift({
       nodeId: "assets",
@@ -4016,7 +4968,7 @@ describe("StudioService", () => {
 
   it("stores an edited JSON artifact as an immutable human version and rewires the node output", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     const scriptPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "attempt-1", "script.json");
     await mkdir(path.dirname(scriptPath), { recursive: true });
     await writeFile(scriptPath, `${JSON.stringify({ title: "旧脚本", scenes: [{ narration: "旧旁白" }] })}\n`, "utf8");
@@ -4089,7 +5041,7 @@ describe("StudioService", () => {
 
   it("keeps the private candidate inventory in sync with a human candidate edit", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     const nodeRoot = path.join(workspaceRoot, "runs", "run-1", "nodes", "asset-candidates", "attempt-1");
     const candidateSearchPath = path.join(nodeRoot, "asset_candidates.json");
     const candidateInventoryPath = path.join(nodeRoot, "asset_candidate_inventory.private.json");
@@ -4141,8 +5093,9 @@ describe("StudioService", () => {
         assets: "ai-shot-router-v1",
       },
       director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
-      workflowFeatures: { assetSemanticRank: true, referenceGrammar: false },
+      workflowFeatures: { assetSemanticRank: true, referenceGrammar: false, executablePlan: true },
     };
+    run.workflowVersion = productionWorkflowVersion(run.initialInput);
     run.nodeRuns.unshift({
       nodeId: "asset-candidates",
       status: "succeeded",
@@ -4248,11 +5201,15 @@ describe("StudioService", () => {
 
     await service.applyNodeInputOverride("run-1", "assets", {
       input: { candidateInventoryPath: "[系统托管文件]", selectedAssetIds: ["one"] },
+      expectedRunRevision: 0,
+      expectedVersionId: "assets-input-v1",
     }, "trusted-owner");
     assert.equal(pipeline.lastInputOverride, undefined);
 
     await service.applyNodeInputOverride("run-1", "assets", {
       input: { candidateInventoryPath: "[系统托管文件]", selectedAssetIds: ["two"] },
+      expectedRunRevision: 0,
+      expectedVersionId: "assets-input-v1",
     }, "trusted-owner");
     assert.deepEqual(pipeline.lastInputOverride?.input, { candidateInventoryPath, selectedAssetIds: ["two"] });
 
@@ -4284,7 +5241,7 @@ describe("StudioService", () => {
 
   it("rejects document edits that do not target the node's current JSON artifact", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     run.nodeRuns.unshift({
       nodeId: "script",
       status: "succeeded",
@@ -4332,7 +5289,7 @@ describe("StudioService", () => {
     await writeFile(originalPath, "original-video", "utf8");
     await writeFile(replacementPath, "replacement-video", "utf8");
 
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     run.nodeRuns.unshift({
       nodeId: "assets",
       status: "succeeded",
@@ -4404,7 +5361,7 @@ describe("StudioService", () => {
     };
     await mkdir(path.dirname(packagePath), { recursive: true });
     await writeFile(packagePath, JSON.stringify(publishPackage), "utf8");
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     run.nodeRuns.push({
       nodeId: "publish-package",
       status: "succeeded",
@@ -4465,7 +5422,7 @@ describe("StudioService", () => {
     await mkdir(path.dirname(assetPlanPath), { recursive: true });
     await writeFile(assetPlanPath, JSON.stringify(plan), "utf8");
     await writeFile(mediaPath, "video", "utf8");
-    const run = waitingRun(workspaceRoot);
+    const run = executableWaitingRun(workspaceRoot);
     run.nodeRuns.unshift({ nodeId: "assets", status: "succeeded", output: { assetPlanPath }, artifactIds: ["plan", "media"], qualityGateResults: [] });
     run.artifacts.push(
       { id: "plan", kind: "asset_plan", uri: assetPlanPath, createdAt: "2026-08-21T10:00:00.000Z", contentType: "application/json", producer: { nodeId: "assets", attempt: 1 }, provenance: { providerId: "asset-worker" } },
@@ -4780,5 +5737,142 @@ function passingGreenlightAgent() {
         promptVersion: "video-factory/series-greenlight-v1",
       },
     }),
+  };
+}
+
+function textRecoveryRun(workspaceRoot: string, status: "failed" | "paused"): WorkflowRun<ProductionBrief> {
+  const run = executableWaitingRun(workspaceRoot);
+  run.status = status;
+  run.nodeRuns.push({
+    nodeId: "script",
+    status: "failed",
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    operationRequestId: "script-workflow-operation-current",
+    artifactIds: [],
+    qualityGateResults: [],
+    error: "模型任务结果未知",
+  });
+  return run;
+}
+
+async function writePendingTextCheckpoint(
+  workspaceRoot: string,
+  operation: CodexPreparedOperation,
+  options: { checkpointKey?: string; workflowOperationRequestId?: string } = {},
+): Promise<void> {
+  const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "agent-loop-checkpoints");
+  const checkpointKey = options.checkpointKey ?? "d".repeat(64);
+  await mkdir(directory, { recursive: true });
+  await writeFile(path.join(directory, `${checkpointKey}.json`), JSON.stringify({
+    version: "video-factory/agent-loop-checkpoint-v8",
+    key: checkpointKey,
+    contractDigest: "fixture-contract",
+    role: "编剧",
+    maxIterations: 3,
+    cycle: 0,
+    status: "failed",
+    completed: [],
+    operationGenerations: { "0:1:produce": 0 },
+    phaseAttempts: { produce: 1, audit: 0 },
+    recoveryOwner: {
+      runId: "run-1",
+      nodeId: "script",
+      workflowOperationRequestId: options.workflowOperationRequestId ?? "script-workflow-operation-current",
+    },
+    pendingOperation: {
+      phase: "produce",
+      iteration: 1,
+      operationKey: "0:1:produce",
+      generation: 0,
+      operation,
+    },
+  }), "utf8");
+}
+
+async function startTextRecoveryBridge(
+  onQuery?: () => void | Promise<void>,
+  initialTaskState: "running" | "completed_success" | "completed_failure" | "not_accepted" | "query_failure" = "completed_success",
+): Promise<{
+  socketPath: string;
+  operation?: CodexPreparedOperation;
+  taskState: "running" | "completed_success" | "completed_failure" | "not_accepted" | "query_failure";
+  readonly posts: number;
+  readonly queries: number;
+  close(): Promise<void>;
+}> {
+  const directory = await mkdtemp(path.join(tmpdir(), "video-factory-text-recovery-bridge-"));
+  const socketPath = path.join(directory, "worker.sock");
+  let operation: CodexPreparedOperation | undefined;
+  let taskState = initialTaskState;
+  let posts = 0;
+  let queries = 0;
+  const server = http.createServer(async (request, response) => {
+    if (request.url === "/health") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        protocolVersion: "video-factory/codex-bridge-v2",
+        taskBindingVersion: "video-factory/task-binding-v1",
+        storeId: `vfs_store_${"c".repeat(32)}`,
+        providerId: "openai",
+        modelId: "gpt-5.4",
+        taskKinds: ["script-draft"],
+        taskContracts: { "script-draft": REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["script-draft"] },
+      }));
+      return;
+    }
+    if (request.method === "POST") {
+      posts += 1;
+      response.writeHead(500);
+      response.end();
+      return;
+    }
+    queries += 1;
+    const responseState = taskState;
+    await onQuery?.();
+    if (responseState === "query_failure") {
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end("{}");
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      state: responseState,
+      requestId: operation?.requestId,
+      binding: operation?.binding,
+      ...(responseState === "completed_success" ? {
+        ok: true,
+        output: "{}",
+        trace: {
+        taskKind: "script-draft",
+        promptVersion: "fixture",
+        contractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["script-draft"],
+        prompt: "fixture",
+        providerId: "openai",
+        modelId: "gpt-5.4",
+        },
+      } : responseState === "completed_failure" ? {
+        outcome: {
+          stage: "execute",
+          message: "Provider unavailable",
+          failureKind: "model_provider_transient",
+        },
+      } : responseState === "not_accepted" ? { accepted: false } : {}),
+    }));
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  return {
+    socketPath,
+    get operation() { return operation; },
+    set operation(value) { operation = value; },
+    get taskState() { return taskState; },
+    set taskState(value) { taskState = value; },
+    get posts() { return posts; },
+    get queries() { return queries; },
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    },
   };
 }

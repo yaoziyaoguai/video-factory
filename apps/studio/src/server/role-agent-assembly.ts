@@ -1,4 +1,5 @@
 import {
+  CodexCreativeTreatmentAgent,
   CodexScreenwriterAgent,
   CodexVisualDirectorAgent,
   CodexVisualReviewAgent,
@@ -32,6 +33,8 @@ export interface RoleAgentAssembly {
   screenwriterAgent?: ScreenwriterAgent;
   directorAgent?: VisualDirectorAgent;
   visualReviewAgents: VisualReviewAgent[];
+  /** 前期构思 producer 候选按 broker 顺序排列；构思进入正式生产图时的消费与接管策略由接入方决定。 */
+  treatmentAgents: Array<{ agent: CodexCreativeTreatmentAgent; providerId: "openai" | "zai-bigmodel-api" }>;
 }
 
 export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleAgentAssembly {
@@ -79,6 +82,29 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
   const screenwriterCandidates = [codexScreenwriter, glmScreenwriter]
     .filter((agent): agent is CodexScreenwriterAgent => Boolean(agent));
 
+  const treatmentAvailability = auditedRoleCandidateAvailability(codexSettings, zaiCodexSettings, "creative-treatment");
+  const codexTreatment = codexClient && treatmentAvailability.codex
+    ? new CodexCreativeTreatmentAgent({
+        client: codexClient,
+        modelId: codexModelFor("creative-treatment"),
+        sessionMode: "stateless",
+      })
+    : undefined;
+  const glmTreatment = zaiCodexClient && treatmentAvailability.zai
+    ? new CodexCreativeTreatmentAgent({
+        client: zaiCodexClient,
+        auditClient: zaiCodexClient,
+        modelId: zaiModelFor("creative-treatment"),
+        sessionMode: "stateless",
+      })
+    : undefined;
+  const treatmentAgents = [codexTreatment, glmTreatment]
+    .filter((agent): agent is CodexCreativeTreatmentAgent => Boolean(agent))
+    .map((agent) => ({
+      agent,
+      providerId: (agent === codexTreatment ? "openai" : "zai-bigmodel-api") as "openai" | "zai-bigmodel-api",
+    }));
+
   const reviewAvailability = auditedRoleCandidateAvailability(codexSettings, zaiCodexSettings, "visual-review");
   const codexReview = codexClient && reviewAvailability.codex
     ? new CodexVisualReviewAgent({
@@ -118,6 +144,7 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
       }),
     } : {}),
     visualReviewAgents: orderedVisualReviewAgents(codexReview, glmReview, options.reviewMedia),
+    treatmentAgents,
   };
 }
 

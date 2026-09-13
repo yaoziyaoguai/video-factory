@@ -29,6 +29,7 @@ const completedRun: StudioRunDetail = {
   decisions: [{ id: "decision-1", action: "approve", actor: "director", createdAt: "2026-08-25T00:01:00.000Z" }],
   videoArtifactId: "video",
   publishPackageArtifactId: "package",
+  continuation: { supported: true },
 };
 
 const loadPublishPackage = async () => ({
@@ -55,6 +56,33 @@ function confirmedInput(requestId = "publish-request-1") {
 }
 
 describe("PublishingStudio", () => {
+  it("blocks a legacy completed run before any publisher call", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-legacy-publishing-"));
+    let calls = 0;
+    const publisher: PlatformPublisher = {
+      target: { id: "douyin", label: "抖音", mode: "official_api", status: "ready" },
+      publish: async () => { calls += 1; return { externalId: "douyin-legacy", reviewStatus: "processing" }; },
+    };
+    const subject = new PublishingStudio({
+      workspaceRoot,
+      getRun: async () => ({
+        ...completedRun,
+        continuation: { supported: false, reason: "这条制作来自旧版工作流，只能查看现有结果。" },
+      }),
+      loadPublishPackage,
+      publishers: [publisher],
+    });
+
+    const readiness = await subject.readiness("run-1");
+    assert.equal(readiness.ready, false);
+    assert.equal(readiness.checks.find((check) => check.id === "continuation")?.status, "blocked");
+    await assert.rejects(
+      () => subject.publish("run-1", { ...confirmedInput(), platformIds: ["douyin"] }),
+      /旧版|重新制作|不能发布/,
+    );
+    assert.equal(calls, 0);
+  });
+
   it("blocks unfinished runs and incomplete legal confirmations before any external call", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publishing-"));
     let calls = 0;

@@ -6,14 +6,26 @@ import {
   CODEX_BRIDGE_PROTOCOL_VERSION,
   BROKER_TASK_KINDS,
   CodexExecutorError,
+  modelIdForTask,
   parseTaskRequest,
   type BrokerTaskExecutor,
+  type CodexExecutorIdentity,
   type CodexTaskTrace,
   type CodexExecutionOptions,
   type CodexExecutorFailureDetails,
   type ValidatedTask,
 } from "./codex-executor.js";
 import { taskContractDescriptorFor } from "./task-definitions.js";
+import {
+  TASK_BINDING_VERSION,
+  durableTaskBinding,
+  expectedBrokerBinding,
+  isDurableTaskBinding,
+  isStoreId,
+  queryBinding,
+  sameTaskBinding,
+  type DurableTaskBinding,
+} from "./task-binding.js";
 
 const DEFAULT_SOCKET_MODE = 0o660;
 const DEFAULT_CONCURRENCY = 1;
@@ -23,6 +35,8 @@ const DEFAULT_MAX_BODY_BYTES = 9 * 1024 * 1024;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const DEFAULT_RETRY_AFTER_SECONDS = 5;
 const STALE_PROBE_TIMEOUT_MS = 500;
+const STORE_ID_FILE = ".store-id";
+const OWNER_LOCK_FILE = ".owner.lock";
 
 export type TaskOutcome =
   | { ok: true; output: string; trace?: CodexTaskTrace; sessionId?: string; sessionHandle?: string }
@@ -126,13 +140,27 @@ class BrokerTaskQueue {
           ...next.executionOptions,
           signal: next.controller.signal,
         });
+        const expectedModelId = modelIdForTask(this.executor.identity, next.task);
         if (next.task.expectedContractDigest && result.trace?.contractDigest !== next.task.expectedContractDigest) {
           throw new CodexExecutorError("Executor returned a result for a different task contract.", false, {
             details: {
               category: "invalid_output",
               reasonCode: "contract_mismatch",
               providerId: this.executor.identity.providerId,
-              modelId: this.executor.identity.taskModels?.[next.task.kind] ?? this.executor.identity.modelId,
+              modelId: expectedModelId,
+            },
+          });
+        }
+        if (!result.trace
+          || result.trace.taskKind !== next.task.kind
+          || result.trace.providerId !== this.executor.identity.providerId
+          || result.trace.modelId !== expectedModelId) {
+          throw new CodexExecutorError("Executor returned a result for a different task binding.", false, {
+            details: {
+              category: "invalid_output",
+              reasonCode: "binding_mismatch",
+              providerId: this.executor.identity.providerId,
+              modelId: expectedModelId,
             },
           });
         }
@@ -178,8 +206,16 @@ export class CodexBrokerServer {
   private readonly shutdownTimeoutMs: number;
   private listening = false;
   private closePromise: Promise<void> | undefined;
-  private readonly idempotentTasks = new Map<string, { digest: string; outcome: Promise<TaskOutcome> }>();
+  private readonly idempotentTasks = new Map<string, {
+    binding: DurableTaskBinding;
+    acceptance: Promise<void>;
+    outcome?: Promise<TaskOutcome>;
+  }>();
   private readonly sessionTails = new Map<string, Promise<void>>();
+  private readonly backgroundTasks = new Set<Promise<void>>();
+  private readonly backgroundFailures = new Map<string, string>();
+  private ownerLock: OwnerLock | undefined;
+  private storeId: string | undefined;
 
   constructor(private readonly options: CodexBrokerServerOptions) {
     this.concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
@@ -197,18 +233,28 @@ export class CodexBrokerServer {
   }
 
   async start(): Promise<void> {
-    await removeStaleSocket(this.options.socketPath);
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error) => reject(error);
-      this.server.once("error", onError);
-      this.server.listen(this.options.socketPath, () => {
-        this.server.off("error", onError);
-        this.listening = true;
-        resolve();
+    try {
+      if (this.options.idempotencyDirectory) {
+        this.ownerLock = await acquireOwnerLock(this.options.idempotencyDirectory);
+        this.storeId = await ensureStoreId(this.options.idempotencyDirectory);
+      }
+      await removeStaleSocket(this.options.socketPath);
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error) => reject(error);
+        this.server.once("error", onError);
+        this.server.listen(this.options.socketPath, () => {
+          this.server.off("error", onError);
+          this.listening = true;
+          resolve();
+        });
       });
-    });
-    // socket 权限即认证：组内进程可连接，其他人不可。
-    await chmod(this.options.socketPath, DEFAULT_SOCKET_MODE);
+      // socket 权限即认证：组内进程可连接，其他人不可。
+      await chmod(this.options.socketPath, DEFAULT_SOCKET_MODE);
+    } catch (error) {
+      await releaseOwnerLock(this.ownerLock);
+      this.ownerLock = undefined;
+      throw error;
+    }
   }
 
   // 幂等：重复调用复用同一次关闭流程；未 start 直接 close 不抛错。
@@ -231,9 +277,19 @@ export class CodexBrokerServer {
     });
     // queued 立即 503；active 任务有界等待，其响应在此期间正常写出，不粗暴断连。
     await this.queue.close(this.shutdownTimeoutMs);
+    const backgroundSettled = await waitForBackgroundTasks(this.backgroundTasks, this.shutdownTimeoutMs);
     // 只关闭空闲 keep-alive；活跃请求仍需把已完成/拒绝结果完整写回客户端。
     this.server.closeIdleConnections();
     await serverClosed;
+    const ownerLock = this.ownerLock;
+    if (backgroundSettled) {
+      await releaseOwnerLock(ownerLock);
+    } else {
+      // deadline 只结束关闭等待，不代表 Provider 已停止。旧执行仍可能落盘时继续持有 owner，
+      // 待全部后台生命周期真正结束再释放，避免新进程与旧进程同时写同一 durable store。
+      void Promise.allSettled([...this.backgroundTasks]).then(() => releaseOwnerLock(ownerLock));
+    }
+    this.ownerLock = undefined;
   }
 
   private acceptingRequests = true;
@@ -241,8 +297,10 @@ export class CodexBrokerServer {
   healthReport(): Record<string, unknown> {
     return {
       protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+      taskBindingVersion: TASK_BINDING_VERSION,
+      ...(this.storeId ? { storeId: this.storeId } : {}),
       taskContracts: Object.fromEntries(
-        (["visual-review", "role-audit"] as const)
+        BROKER_TASK_KINDS
           .filter((kind) => this.options.executor.identity.taskKinds.includes(kind))
           .map((kind) => [kind, taskContractDescriptorFor(kind).digest]),
       ),
@@ -271,7 +329,11 @@ export class CodexBrokerServer {
         await this.handleTask(request, response);
         return;
       }
-      if (url === "/health" || url === "/v1/tasks") {
+      if (url.startsWith("/v1/tasks/") && request.method === "GET") {
+        await this.handleTaskQuery(request, response, url.slice("/v1/tasks/".length));
+        return;
+      }
+      if (url === "/health" || url === "/v1/tasks" || url.startsWith("/v1/tasks/")) {
         this.sendJson(response, 405, { error: "Method not allowed." });
         return;
       }
@@ -300,10 +362,15 @@ export class CodexBrokerServer {
       task = parseTaskRequest(parsed, this.options.executor.identity);
       session = taskSessionRequest(parsed);
     } catch (error) {
-      const message = error instanceof CodexExecutorError ? error.message : "Invalid codex task request.";
+      const failureDetails = error instanceof CodexExecutorError
+        ? rejectedRequestFailureDetails(error, parsed, this.options.executor.identity)
+        : undefined;
       this.sendJson(response, 400, {
-        error: message,
-        ...(error instanceof CodexExecutorError && error.details ? { failureDetails: error.details } : {}),
+        error: failureDetails?.fieldPath
+          ? `Request field '${failureDetails.fieldPath}' does not satisfy the broker input contract.`
+          : "Request does not satisfy the broker input contract.",
+        ...(failureDetails ? { failureDetails } : {}),
+        failureKind: "contract_rejected",
       });
       return;
     }
@@ -320,6 +387,89 @@ export class CodexBrokerServer {
       ...digestSubject,
       session,
     })).digest("hex");
+
+    // durable 模式（生产配置）：accept/poll。POST 只在 durable acceptance 落定后返回
+    // 202/冲突；查询端点只读取同一 durable record，不提交 executor、不切 backup。
+    if (this.options.idempotencyDirectory) {
+      if (!this.storeId) throw new Error("Codex broker durable store identity is unavailable.");
+      let requestedBinding;
+      try {
+        requestedBinding = expectedBrokerBinding(parsed);
+      } catch (error) {
+        this.sendJson(response, 400, { error: error instanceof Error ? error.message : "Codex broker binding is invalid.", failureKind: "contract_rejected" });
+        return;
+      }
+      const modelId = modelIdForTask(this.options.executor.identity, task);
+      const actualBrokerBinding = {
+        version: TASK_BINDING_VERSION,
+        storeId: this.storeId,
+        providerId: this.options.executor.identity.providerId,
+        modelId,
+      } as const;
+      if (requestedBinding && JSON.stringify(requestedBinding) !== JSON.stringify(actualBrokerBinding)) {
+        this.sendJson(response, 409, {
+          error: "Codex request expected a different broker identity.",
+          failureKind: "binding_conflict",
+        });
+        return;
+      }
+      const binding = durableTaskBinding({
+        request: parsed,
+        ...actualBrokerBinding,
+        kind: task.kind,
+        ...(task.expectedContractDigest ? { contractDigest: task.expectedContractDigest } : {}),
+        ...(session ? { session } : {}),
+      });
+      const durable = await this.lookupDurable(requestId, binding, digest);
+      if (durable.kind === "conflict") {
+        this.sendBindingConflict(response);
+        return;
+      }
+      if (durable.kind === "completed") {
+        if (durable.record.state !== "completed") throw new Error("unreachable durable replay state");
+        const materialized = await this.materializeSessionRecord("sessionRecord" in durable.record
+          ? durable.record.sessionRecord
+          : undefined);
+        void materialized;
+        this.sendCompletedEnvelope(response, requestId, durable.binding, durable.record.outcome);
+        return;
+      }
+      if (durable.kind === "running") {
+        this.sendTaskFact(response, 202, requestId, "running", durable.binding);
+        return;
+      }
+      if (durable.kind === "accepted_unknown") {
+        this.sendTaskFact(response, 202, requestId, "accepted_unknown", durable.binding);
+        return;
+      }
+      if (durable.kind === "not_accepted") {
+        this.sendTaskFact(response, 409, requestId, "not_accepted", durable.binding);
+        return;
+      }
+      let sessionId: string | undefined;
+      try {
+        sessionId = await this.resolveSessionId(task.kind, session);
+      } catch (error) {
+        const message = error instanceof CodexExecutorError ? error.message : "Invalid codex task session.";
+        this.sendJson(response, 409, { error: message });
+        return;
+      }
+      try {
+        const accepted = await this.acceptDurableTask(requestId, digest, binding, task, session, sessionId);
+        if (accepted === "conflict") {
+          this.sendBindingConflict(response);
+          return;
+        }
+      } catch (error) {
+        this.sendJson(response, 500, { error: "Codex broker could not commit the accepted task result; retry the same requestId." });
+        return;
+      }
+      const active = this.idempotentTasks.get(requestId);
+      this.sendTaskFact(response, 202, requestId, active ? "running" : "accepted_unknown", binding);
+      return;
+    }
+
+    // 非 durable 模式（测试/降级配置）：保留长轮询语义，断连取消队列任务。
     let sessionId: string | undefined;
     try {
       sessionId = await this.resolveSessionId(task.kind, session);
@@ -330,27 +480,284 @@ export class CodexBrokerServer {
     }
     let outcome: TaskOutcome;
     try {
-      if (this.options.idempotencyDirectory) {
-        outcome = await this.submitIdempotent(requestId, digest, task, session, sessionId);
-      } else {
-        outcome = await this.withSessionLock(session, async () => {
-          const submission = this.queue.submit(task, {
-            ...(sessionId ? { sessionId } : {}),
-            persistSession: session !== undefined,
-          });
-          const cancelIfDisconnected = (): void => {
-            if (!response.writableEnded) submission.cancel();
-          };
-          response.once("close", cancelIfDisconnected);
-          const executed = await submission.outcome;
-          response.off("close", cancelIfDisconnected);
-          return this.finalizeSession(task.kind, session, sessionId, executed);
+      outcome = await this.withSessionLock(session, async () => {
+        const submission = this.queue.submit(task, {
+          ...(sessionId ? { sessionId } : {}),
+          persistSession: session !== undefined,
         });
-      }
+        const cancelIfDisconnected = (): void => {
+          if (!response.writableEnded) submission.cancel();
+        };
+        response.once("close", cancelIfDisconnected);
+        const executed = await submission.outcome;
+        response.off("close", cancelIfDisconnected);
+        return this.finalizeSession(task.kind, session, sessionId, executed);
+      });
     } catch {
       this.sendJson(response, 500, { error: "Codex broker could not commit the accepted task result; retry the same requestId." });
       return;
     }
+    this.sendOutcome(response, outcome);
+  }
+
+  // 只读查询：仅消费 durable record，不提交 executor、不改变任务事实。
+  private async handleTaskQuery(
+    request: http.IncomingMessage,
+    response: http.ServerResponse,
+    rawRequestId: string,
+  ): Promise<void> {
+    const requestId = decodeURIComponent(rawRequestId);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestId)) {
+      this.sendJson(response, 400, { error: "Codex task requestId is invalid." });
+      return;
+    }
+    if (!this.options.idempotencyDirectory) {
+      this.sendJson(response, 409, { error: "Codex broker durable task records are not enabled.", failureKind: "binding_conflict" });
+      return;
+    }
+    let expected: DurableTaskBinding | undefined;
+    try {
+      expected = queryBinding(request.headers);
+    } catch (error) {
+      this.sendJson(response, 400, { error: error instanceof Error ? error.message : "Codex task query binding is invalid.", failureKind: "contract_rejected" });
+      return;
+    }
+    if (!expected) {
+      this.sendJson(response, 400, { error: "Codex task query requires the original immutable binding.", failureKind: "contract_rejected" });
+      return;
+    }
+    if (expected.storeId !== this.storeId) {
+      this.sendBindingConflict(response);
+      return;
+    }
+    const active = this.idempotentTasks.get(requestId);
+    if (active) {
+      await active.acceptance.catch(() => undefined);
+    }
+    const record = await readIdempotencyRecord(this.durableRecordPath(requestId));
+    if (!record || record.requestId !== requestId) {
+      this.sendJson(response, 404, { error: `No verifiable durable record for Codex requestId '${requestId}'.`, failureKind: "query_unverifiable" });
+      return;
+    }
+    if (record.version !== 3 || !sameTaskBinding(record.binding, expected)) {
+      if (record.version !== 3) {
+        this.sendJson(response, 200, { requestId, state: "accepted_unknown", legacyRecord: true });
+      } else {
+        this.sendBindingConflict(response);
+      }
+      return;
+    }
+    if (record.state === "not_accepted") {
+      this.sendTaskFact(response, 200, requestId, "not_accepted", record.binding);
+      return;
+    }
+    if (record.state === "accepted") {
+      const state = this.idempotentTasks.has(requestId) ? "running" : "accepted_unknown";
+      this.sendTaskFact(response, 200, requestId, state, record.binding, this.backgroundFailures.get(requestId));
+      return;
+    }
+    // completed 用 200 信封返回原始 outcome：查询永远不把任务事实伪装成查询层 HTTP 错误。
+    try {
+      await this.materializeSessionRecord(record.sessionRecord);
+      this.backgroundFailures.delete(requestId);
+    } catch {
+      this.backgroundFailures.set(requestId, "session_registry_persistence_failed");
+    }
+    this.sendCompletedEnvelope(response, requestId, record.binding, record.outcome, this.backgroundFailures.get(requestId));
+  }
+
+  private durableRecordPath(requestId: string): string {
+    return path.join(
+      this.options.idempotencyDirectory!,
+      `${createHash("sha256").update(requestId).digest("hex")}.json`,
+    );
+  }
+
+  private async lookupDurable(
+    requestId: string,
+    binding: DurableTaskBinding,
+    legacyDigest: string,
+  ): Promise<{ kind: "conflict" } | { kind: "running" | "accepted_unknown" | "not_accepted"; binding: DurableTaskBinding } | { kind: "completed"; record: CompletedIdempotencyRecord; binding: DurableTaskBinding } | { kind: "absent" }> {
+    if (!this.options.idempotencyDirectory) return { kind: "absent" };
+    const record = await readIdempotencyRecord(this.durableRecordPath(requestId));
+    if (!record) return { kind: "absent" };
+    if (record.requestId !== requestId) return { kind: "conflict" };
+    if (record.version !== 3) {
+      if (record.digest !== legacyDigest || record.state !== "completed") return { kind: "conflict" };
+      const trace = record.outcome.ok ? record.outcome.trace : undefined;
+      if (!trace || trace.providerId !== binding.providerId || trace.modelId !== binding.modelId) return { kind: "conflict" };
+      return { kind: "completed", record: { ...record, version: 3, binding }, binding };
+    }
+    if (!sameTaskBinding(record.binding, binding)) return { kind: "conflict" };
+    if (record.state === "completed") return { kind: "completed", record, binding: record.binding };
+    if (record.state === "not_accepted") return { kind: "not_accepted", binding: record.binding };
+    return {
+      kind: this.idempotentTasks.has(requestId) ? "running" : "accepted_unknown",
+      binding: record.binding,
+    };
+  }
+
+  // durable 受理（两段式，BR-01）：先等待 accepted record 落盘成功，才允许返回 202；
+  // 之后执行在后台继续，完成/不确定/503 各按原语义落盘。
+  private async acceptDurableTask(
+    requestId: string,
+    digest: string,
+    binding: DurableTaskBinding,
+    task: ValidatedTask,
+    session: TaskSessionRequest | undefined,
+    sessionId: string | undefined,
+  ): Promise<"accepted" | "conflict"> {
+    const active = this.idempotentTasks.get(requestId);
+    if (active) {
+      if (!sameTaskBinding(active.binding, binding)) return "conflict";
+      await active.acceptance;
+      return "accepted";
+    }
+    let entry!: {
+      binding: DurableTaskBinding;
+      acceptance: Promise<void>;
+      outcome?: Promise<TaskOutcome>;
+    };
+    const acceptance = (async () => {
+      await mkdir(this.options.idempotencyDirectory!, { recursive: true });
+      const recordPath = this.durableRecordPath(requestId);
+      const previous = await readIdempotencyRecord(recordPath);
+      if (previous) {
+        if (previous.version !== 3 || !sameTaskBinding(previous.binding, binding)) throw new BindingConflictError();
+        return;
+      }
+      await writeIdempotencyRecord(recordPath, { version: 3, requestId, digest, binding, state: "accepted" });
+      const outcome = this.withSessionLock(session, () =>
+        this.executeDurableTask(recordPath, requestId, digest, binding, task, session, sessionId));
+      entry.outcome = outcome;
+      this.trackBackgroundTask(requestId, outcome);
+    })();
+    entry = { binding, acceptance };
+    this.idempotentTasks.set(requestId, entry);
+    try {
+      await acceptance;
+    } catch (error) {
+      const current = this.idempotentTasks.get(requestId);
+      if (current === entry) this.idempotentTasks.delete(requestId);
+      if (error instanceof BindingConflictError) return "conflict";
+      throw error;
+    }
+    return "accepted";
+  }
+
+  // 后台执行：只被 acceptDurableTask 在 accepted record 落盘之后调度。
+  private async executeDurableTask(
+    recordPath: string,
+    requestId: string,
+    digest: string,
+    binding: DurableTaskBinding,
+    task: ValidatedTask,
+    session: TaskSessionRequest | undefined,
+    sessionId: string | undefined,
+  ): Promise<TaskOutcome> {
+    const outcome = await this.queue.submit(task, {
+      ...(sessionId ? { sessionId } : {}),
+      persistSession: session !== undefined,
+    }).outcome;
+    if (!outcome.ok && outcome.status === 503) {
+      // 队列拒绝＝从未进入 Provider；保留带绑定的终结证据，封住原物理 ID。
+      await writeIdempotencyRecord(recordPath, { version: 3, requestId, digest, binding, state: "not_accepted", outcome });
+      return outcome;
+    }
+    if (!outcome.ok && outcome.outcomeUncertain) {
+      // 结果未知：accepted record 保持原状，查询继续返回 running/unknown。
+      return outcome;
+    }
+    const completion = this.prepareSessionCompletion(task.kind, session, sessionId, outcome);
+    await writeIdempotencyRecord(recordPath, {
+      version: 3,
+      requestId,
+      digest,
+      binding,
+      state: "completed",
+      outcome: completion.outcome,
+      ...(completion.sessionRecord ? { sessionRecord: completion.sessionRecord } : {}),
+    });
+    try {
+      await this.materializeSessionRecord(completion.sessionRecord);
+    } catch {
+      // session registry 是可再生索引；权威 completed record 已落盘，不得因索引失败抹掉结果。
+      this.backgroundFailures.set(requestId, "session_registry_persistence_failed");
+    }
+    return completion.outcome;
+  }
+
+  private trackBackgroundTask(requestId: string, outcome: Promise<TaskOutcome>): void {
+    const tracked = outcome.then(
+      () => undefined,
+      () => {
+        // 后台落盘失败只能改变“观察是否可用”，不能伪造任务终态，也不能让进程因 unhandled rejection 退出。
+        this.backgroundFailures.set(requestId, "completion_persistence_failed");
+      },
+    );
+    this.backgroundTasks.add(tracked);
+    void tracked.then(() => {
+      this.backgroundTasks.delete(tracked);
+      const current = this.idempotentTasks.get(requestId);
+      if (current?.outcome === outcome) this.idempotentTasks.delete(requestId);
+    });
+  }
+
+  private sendBindingConflict(response: http.ServerResponse): void {
+    this.sendJson(response, 409, {
+      error: "Codex requestId is already bound to different task data.",
+      failureKind: "binding_conflict",
+    });
+  }
+
+  private sendTaskFact(
+    response: http.ServerResponse,
+    status: number,
+    requestId: string,
+    state: "running" | "accepted_unknown" | "not_accepted",
+    binding: DurableTaskBinding,
+    observationError?: string,
+  ): void {
+    this.sendJson(response, status, {
+      accepted: state !== "not_accepted",
+      requestId,
+      state,
+      binding,
+      ...(observationError ? { observationError } : {}),
+    });
+  }
+
+  private sendCompletedEnvelope(
+    response: http.ServerResponse,
+    requestId: string,
+    binding: DurableTaskBinding,
+    outcome: TaskOutcome,
+    observationError?: string,
+  ): void {
+    this.sendJson(response, 200, {
+      state: outcome.ok ? "completed_success" : "completed_failure",
+      requestId,
+      binding,
+      ok: outcome.ok,
+      ...(outcome.ok ? {
+        output: outcome.output,
+        ...(outcome.trace ? { trace: outcome.trace } : {}),
+        ...(outcome.sessionHandle ? { sessionHandle: outcome.sessionHandle } : {}),
+      } : {
+        outcome: {
+          ok: false,
+          status: outcome.status,
+          message: outcome.message,
+          ...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}),
+          ...(outcome.failureDetails ? { failureDetails: outcome.failureDetails } : {}),
+          ...(outcome.outcomeUncertain ? { outcomeUncertain: true } : {}),
+        },
+      }),
+      ...(observationError ? { observationError } : {}),
+    });
+  }
+
+  private sendOutcome(response: http.ServerResponse, outcome: TaskOutcome): void {
     if (outcome.ok) {
       this.sendJson(response, 200, {
         ok: true,
@@ -371,90 +778,6 @@ export class CodexBrokerServer {
       },
       outcome.status === 503 ? DEFAULT_RETRY_AFTER_SECONDS : undefined,
     );
-  }
-
-  private submitIdempotent(
-    requestId: string,
-    digest: string,
-    task: ValidatedTask,
-    session: TaskSessionRequest | undefined,
-    sessionId: string | undefined,
-  ): Promise<TaskOutcome> {
-    const active = this.idempotentTasks.get(requestId);
-    if (active) {
-      return active.digest === digest
-        ? active.outcome
-        : Promise.resolve({ ok: false, status: 409, message: "Codex requestId is already bound to different task data." });
-    }
-    const outcome = this.withSessionLock(session, () => this.runIdempotent(requestId, digest, task, session, sessionId)).finally(() => {
-      const current = this.idempotentTasks.get(requestId);
-      if (current?.outcome === outcome) this.idempotentTasks.delete(requestId);
-    });
-    this.idempotentTasks.set(requestId, { digest, outcome });
-    return outcome;
-  }
-
-  private async runIdempotent(
-    requestId: string,
-    digest: string,
-    task: ValidatedTask,
-    session: TaskSessionRequest | undefined,
-    sessionId: string | undefined,
-  ): Promise<TaskOutcome> {
-    if (!this.options.idempotencyDirectory) {
-      return this.finalizeSession(
-        task.kind,
-        session,
-        sessionId,
-        await this.queue.submit(task, {
-          ...(sessionId ? { sessionId } : {}),
-          persistSession: session !== undefined,
-        }).outcome,
-      );
-    }
-    await mkdir(this.options.idempotencyDirectory, { recursive: true });
-    const recordPath = path.join(
-      this.options.idempotencyDirectory,
-      `${createHash("sha256").update(requestId).digest("hex")}.json`,
-    );
-    const previous = await readIdempotencyRecord(recordPath);
-    if (previous) {
-      if (previous.requestId !== requestId || previous.digest !== digest) {
-        return { ok: false, status: 409, message: "Codex requestId is already bound to different task data." };
-      }
-      if (previous.state === "completed") {
-        await this.materializeSessionRecord("sessionRecord" in previous ? previous.sessionRecord : undefined);
-        return previous.outcome;
-      }
-      return {
-        ok: false,
-        status: 409,
-        message: "A previously accepted Codex task has an uncertain outcome. It will not be replayed automatically; inspect the broker task record first.",
-      };
-    }
-    await writeIdempotencyRecord(recordPath, { version: 1, requestId, digest, state: "accepted" });
-    let outcome = await this.queue.submit(task, {
-      ...(sessionId ? { sessionId } : {}),
-      persistSession: session !== undefined,
-    }).outcome;
-    if (!outcome.ok && outcome.status === 503) {
-      await rm(recordPath, { force: true });
-      return outcome;
-    }
-    if (!outcome.ok && outcome.outcomeUncertain) {
-      return outcome;
-    }
-    const completion = this.prepareSessionCompletion(task.kind, session, sessionId, outcome);
-    await writeIdempotencyRecord(recordPath, {
-      version: 2,
-      requestId,
-      digest,
-      state: "completed",
-      outcome: completion.outcome,
-      ...(completion.sessionRecord ? { sessionRecord: completion.sessionRecord } : {}),
-    });
-    await this.materializeSessionRecord(completion.sessionRecord);
-    return completion.outcome;
   }
 
   private async resolveSessionId(kind: ValidatedTask["kind"], session: TaskSessionRequest | undefined): Promise<string | undefined> {
@@ -595,10 +918,47 @@ export class CodexBrokerServer {
   }
 }
 
+function rejectedRequestFailureDetails(
+  error: CodexExecutorError,
+  request: unknown,
+  identity: CodexExecutorIdentity,
+): CodexExecutorFailureDetails {
+  const record = typeof request === "object" && request !== null && !Array.isArray(request)
+    ? request as Record<string, unknown>
+    : {};
+  const taskKind = typeof record.kind === "string" && (BROKER_TASK_KINDS as readonly string[]).includes(record.kind)
+    ? record.kind as CodexExecutorFailureDetails["taskKind"]
+    : undefined;
+  const requestId = typeof record.requestId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.requestId)
+    ? record.requestId
+    : undefined;
+  const fieldPath = /\b((?:request|payload)(?:\.[A-Za-z][A-Za-z0-9_]*|\[\d+\])+)/.exec(error.message)?.[1];
+  return {
+    category: error.details?.category ?? "invalid_request",
+    reasonCode: error.details?.reasonCode ?? "input_contract",
+    providerId: error.details?.providerId ?? identity.providerId,
+    modelId: error.details?.modelId
+      ?? (taskKind ? identity.taskModels?.[taskKind] : undefined)
+      ?? identity.modelId
+      ?? "unknown",
+    ...(requestId ? { requestIdHash: createHash("sha256").update(requestId).digest("hex") } : {}),
+    ...(taskKind ? { taskKind } : {}),
+    ...(fieldPath ? { fieldPath } : {}),
+    accepted: false,
+  };
+}
+
 type IdempotencyRecord =
   | { version: 1; requestId: string; digest: string; state: "accepted" }
   | { version: 1; requestId: string; digest: string; state: "completed"; outcome: TaskOutcome }
-  | { version: 2; requestId: string; digest: string; state: "completed"; outcome: TaskOutcome; sessionRecord?: SessionRecord };
+  | { version: 2; requestId: string; digest: string; state: "completed"; outcome: TaskOutcome; sessionRecord?: SessionRecord }
+  | { version: 3; requestId: string; digest: string; binding: DurableTaskBinding; state: "accepted" }
+  | { version: 3; requestId: string; digest: string; binding: DurableTaskBinding; state: "not_accepted"; outcome: TaskOutcome }
+  | { version: 3; requestId: string; digest: string; binding: DurableTaskBinding; state: "completed"; outcome: TaskOutcome; sessionRecord?: SessionRecord };
+
+type CompletedIdempotencyRecord = Extract<IdempotencyRecord, { state: "completed" }>;
+
+class BindingConflictError extends Error {}
 
 interface TaskSessionRequest {
   key: string;
@@ -641,10 +1001,21 @@ function taskSessionRequest(value: unknown): TaskSessionRequest | undefined {
 async function readIdempotencyRecord(recordPath: string): Promise<IdempotencyRecord | undefined> {
   try {
     const value = JSON.parse(await readFile(recordPath, "utf8")) as Record<string, unknown>;
-    if ((value.version !== 1 && value.version !== 2) || typeof value.requestId !== "string" || typeof value.digest !== "string") {
+    if ((value.version !== 1 && value.version !== 2 && value.version !== 3)
+      || typeof value.requestId !== "string" || typeof value.digest !== "string") {
       throw new Error("Codex idempotency record is invalid.");
     }
     if (value.state === "accepted" && value.version === 1) return value as Extract<IdempotencyRecord, { state: "accepted" }>;
+    if (value.version === 3 && isDurableTaskBinding(value.binding)) {
+      if (value.state === "accepted") return value as Extract<IdempotencyRecord, { version: 3; state: "accepted" }>;
+      if (value.state === "not_accepted" && value.outcome && typeof value.outcome === "object") {
+        return value as Extract<IdempotencyRecord, { version: 3; state: "not_accepted" }>;
+      }
+      if (value.state === "completed" && value.outcome && typeof value.outcome === "object"
+        && (value.sessionRecord === undefined || isSessionRecord(value.sessionRecord))) {
+        return value as Extract<IdempotencyRecord, { version: 3; state: "completed" }>;
+      }
+    }
     if (value.state === "completed" && value.outcome && typeof value.outcome === "object"
       && (value.sessionRecord === undefined || isSessionRecord(value.sessionRecord))) {
       return value as Extract<IdempotencyRecord, { state: "completed" }>;
@@ -830,4 +1201,82 @@ function isSocketReachable(socketPath: string): Promise<boolean> {
     request.on("error", () => settle(false));
     request.end();
   });
+}
+
+interface OwnerLock {
+  path: string;
+  token: string;
+}
+
+async function acquireOwnerLock(directory: string): Promise<OwnerLock> {
+  await mkdir(directory, { recursive: true });
+  const lockPath = path.join(directory, OWNER_LOCK_FILE);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const token = randomUUID();
+    try {
+      await writeFile(lockPath, `${JSON.stringify({ version: 1, pid: process.pid, token })}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      });
+      return { path: lockPath, token };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const owner = await readOwnerLock(lockPath);
+      if (!owner || processIsAlive(owner.pid)) {
+        throw new Error(`Codex durable store '${directory}' already has an active or unverifiable owner.`);
+      }
+      // 只有锁记录可解析且 PID 已确认退出时，才回收崩溃遗留锁。
+      await unlink(lockPath);
+    }
+  }
+  throw new Error(`Codex durable store '${directory}' owner lock could not be acquired.`);
+}
+
+async function readOwnerLock(lockPath: string): Promise<{ pid: number; token: string } | undefined> {
+  try {
+    const value = JSON.parse(await readFile(lockPath, "utf8")) as Record<string, unknown>;
+    if (value.version !== 1 || !Number.isSafeInteger(value.pid) || Number(value.pid) < 1
+      || typeof value.token !== "string" || !/^[a-f0-9-]{36}$/i.test(value.token)) return undefined;
+    return { pid: Number(value.pid), token: value.token };
+  } catch {
+    return undefined;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function releaseOwnerLock(lock: OwnerLock | undefined): Promise<void> {
+  if (!lock) return;
+  const owner = await readOwnerLock(lock.path);
+  if (owner?.token === lock.token) await unlink(lock.path).catch(() => undefined);
+}
+
+async function ensureStoreId(directory: string): Promise<string> {
+  const storePath = path.join(directory, STORE_ID_FILE);
+  try {
+    const existing = (await readFile(storePath, "utf8")).trim();
+    if (!isStoreId(existing)) throw new Error(`Codex durable store '${directory}' has an invalid store id.`);
+    return existing;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const storeId = `vfs_store_${randomBytes(16).toString("hex")}`;
+  await writeFile(storePath, `${storeId}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  return storeId;
+}
+
+async function waitForBackgroundTasks(tasks: Set<Promise<void>>, timeoutMs: number): Promise<boolean> {
+  if (tasks.size === 0) return true;
+  return Promise.race([
+    Promise.allSettled([...tasks]).then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
 }

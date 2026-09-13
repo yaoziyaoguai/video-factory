@@ -1,10 +1,14 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StudioCostDashboard as CostDto, StudioNode, StudioProvider } from "../src/shared/api.js";
+import { studioApi } from "../src/client/api.js";
 import { CostDashboard, RunCostDetailPanel } from "../src/client/components/CostDashboard.js";
 import { NodeWorkspace } from "../src/client/components/NodeWorkspace.js";
+
+// C2 制作范围授权需要当前方案 digest：工作区测试统一携带一个合法形态的 fixture 值。
+const TEST_PLAN_DIGEST = "b".repeat(64);
 
 const succeededNode: StudioNode = {
   id: "script",
@@ -138,7 +142,9 @@ describe("node production workspaces", () => {
       },
     };
 
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={node}
       providers={providers}
       runStatus="paused"
@@ -167,6 +173,7 @@ describe("node production workspaces", () => {
         ...succeededNode.executionReceipt!,
         parameters: {
           ...succeededNode.executionReceipt!.parameters,
+          queueWaitMs: 260,
           providerWaitMs: 12_340,
           firstOutputEventMs: 410,
           providerValidationMs: 7,
@@ -181,7 +188,9 @@ describe("node production workspaces", () => {
       },
     };
 
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={node}
       runStatus="succeeded"
       artifacts={[]}
@@ -192,11 +201,12 @@ describe("node production workspaces", () => {
 
     await userEvent.click(screen.getByText("这一步为什么用了这些时间"));
     expect(screen.getByText("步骤总耗时").parentElement).toHaveTextContent("21 秒");
-    expect(screen.getByText("最终模型等待").parentElement).toHaveTextContent("12 秒");
-    expect(screen.getByText("首次响应").parentElement).toHaveTextContent("不到 1 秒");
-    expect(screen.getByText("内容生成累计").parentElement).toHaveTextContent("13 秒");
-    expect(screen.getByText("独立复核累计").parentElement).toHaveTextContent("8.2 秒");
-    expect(screen.getByText("结果校验").parentElement).toHaveTextContent("不到 1 秒");
+    expect(screen.getByText("排队等待").parentElement).toHaveTextContent("不到 1 秒");
+    expect(screen.getByText("Provider 执行").parentElement).toHaveTextContent("12 秒");
+    expect(screen.getByText("本地处理").parentElement).toHaveTextContent("8.4 秒");
+    expect(screen.queryByText("首次响应")).not.toBeInTheDocument();
+    expect(screen.queryByText("内容生成累计")).not.toBeInTheDocument();
+    expect(screen.queryByText("独立复核累计")).not.toBeInTheDocument();
     expect(screen.getByText("模型调用").parentElement).toHaveTextContent("2 次");
     expect(screen.getByText("自动重试").parentElement).toHaveTextContent("1 次");
     expect(screen.queryByText(/Prompt Pack|screenwriter-v2/)).not.toBeInTheDocument();
@@ -211,6 +221,7 @@ describe("node production workspaces", () => {
         fallbackReason: "前 1 个候选模型调用失败，已自动切换。",
         parameters: {
           ...succeededNode.executionReceipt!.parameters,
+          queueWaitMs: 8_000,
           providerWaitMs: 12_000,
           producerMs: 60_000,
           auditMs: 20_000,
@@ -221,10 +232,12 @@ describe("node production workspaces", () => {
       },
     };
 
-    render(<NodeWorkspace node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     await userEvent.click(screen.getByText("这一步为什么用了这些时间"));
-    expect(screen.getByText("替补前等待与调度").parentElement).toHaveTextContent("1 分 40 秒");
+    expect(screen.getByText("排队等待").parentElement).toHaveTextContent("8.0 秒");
+    expect(screen.getByText("Provider 执行").parentElement).toHaveTextContent("12 秒");
+    expect(screen.getByText("本地处理与候选切换").parentElement).toHaveTextContent("2 分 40 秒");
     expect(screen.getByText("候选切换").parentElement).toHaveTextContent("1 次");
     expect(screen.getByText("最终模型调用").parentElement).toHaveTextContent("2 次");
     expect(screen.queryByText(/^模型调用$/)).not.toBeInTheDocument();
@@ -260,7 +273,9 @@ describe("node production workspaces", () => {
       },
     };
 
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={node}
       providers={providers}
       runStatus="paused"
@@ -279,6 +294,7 @@ describe("node production workspaces", () => {
     await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
 
     expect(onConfigure).toHaveBeenCalledWith("script", {
+      expectedRunRevision: 2,
       providerId: "codex-screenwriter-v1",
       modelSelections: { "codex-screenwriter-v1": null },
     });
@@ -313,7 +329,9 @@ describe("node production workspaces", () => {
       },
     };
 
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={node}
       providers={providers}
       runStatus="paused"
@@ -351,7 +369,9 @@ describe("node production workspaces", () => {
       },
     };
 
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={node}
       providers={providers}
       runStatus="paused"
@@ -370,6 +390,7 @@ describe("node production workspaces", () => {
     await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
 
     expect(onConfigure).toHaveBeenCalledWith("assets", {
+      expectedRunRevision: 2,
       modelSelections: { "pexels-stock-v1": null, "seedance-video-v1": null },
       assetProviderIds: ["pexels-stock-v1", "seedance-video-v1"],
       economics: { allowMeteredProviders: true },
@@ -414,7 +435,9 @@ describe("node production workspaces", () => {
       },
     };
 
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={node}
       providers={providers}
       runStatus="failed"
@@ -431,6 +454,7 @@ describe("node production workspaces", () => {
     await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
 
     expect(onConfigure).toHaveBeenCalledWith("asset-source-review", {
+      expectedRunRevision: 2,
       providerId: "codex-visual-review-v1",
       modelSelections: { "codex-visual-review-v1": null },
       confirmTerminalEdit: true,
@@ -469,7 +493,9 @@ describe("node production workspaces", () => {
       },
     };
 
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={node}
       providers={providers}
       runStatus="paused"
@@ -489,6 +515,7 @@ describe("node production workspaces", () => {
     await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
 
     expect(onConfigure).toHaveBeenCalledWith("assets", {
+      expectedRunRevision: 2,
       modelSelections: { "pexels-stock-v1": null },
       assetProviderIds: ["pexels-stock-v1"],
       economics: { allowMeteredProviders: false },
@@ -497,7 +524,7 @@ describe("node production workspaces", () => {
 
   it("shows provenance and saves a valid human output version", async () => {
     const onOverride = vi.fn(async () => undefined);
-    render(<NodeWorkspace node={succeededNode} runStatus="stale" artifacts={[]} busy={false} onOverride={onOverride} onInputOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={succeededNode} runStatus="stale" artifacts={[]} busy={false} onOverride={onOverride} onInputOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     expect(screen.getByText("本次使用 AI 编剧")).toBeInTheDocument();
     expect(screen.queryByText("codex-screenwriter-v1")).not.toBeInTheDocument();
@@ -532,7 +559,7 @@ describe("node production workspaces", () => {
         }],
       },
     };
-    render(<NodeWorkspace node={briefNode} runStatus="paused" artifacts={[]} busy={false} onOverride={onOverride} onAuthorize={async () => undefined} />);
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={briefNode} runStatus="paused" artifacts={[]} busy={false} onOverride={onOverride} onAuthorize={async () => undefined} />);
 
     await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
     await userEvent.clear(screen.getByRole("textbox", { name: "标题" }));
@@ -559,7 +586,7 @@ describe("node production workspaces", () => {
         },
       },
     };
-    const { container } = render(<NodeWorkspace node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    const { container } = render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     const summary = container.querySelector("summary");
     expect(summary).toHaveTextContent("智能复核未完成，已使用基础方案");
@@ -580,7 +607,7 @@ describe("node production workspaces", () => {
         latestAudit: { verdict: "repair" as const, score: 68, summary: "generated_image的on_screen_text仍有blocking。" },
       },
     };
-    render(<NodeWorkspace node={node} runStatus="running" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} runStatus="running" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     expect(screen.getByText("第 2 / 3 轮 · 独立复核中")).toBeInTheDocument();
     expect(screen.getByText("上一轮 68 分：AI 图片生成的屏幕文字仍有必须修改的问题。")).toBeInTheDocument();
@@ -595,19 +622,21 @@ describe("node production workspaces", () => {
       onOverride: async () => undefined,
       onAuthorize: async () => undefined,
     };
-    const { container, rerender } = render(<NodeWorkspace {...props} />);
+    const { container, rerender } = render(<NodeWorkspace runId="run-nw" runRevision={2} acceptedPlanDigest={TEST_PLAN_DIGEST} {...props} />);
     const workspace = container.querySelector<HTMLDetailsElement>("#node-workspace-script")!;
 
     await userEvent.click(workspace.querySelector("summary")!);
     expect(workspace).toHaveAttribute("open");
-    rerender(<NodeWorkspace {...props} node={{ ...succeededNode }} />);
+    rerender(<NodeWorkspace runId="run-nw" runRevision={2} acceptedPlanDigest={TEST_PLAN_DIGEST} {...props} node={{ ...succeededNode }} />);
 
     expect(workspace).toHaveAttribute("open");
   });
 
   it("requests a cooperative pause before editing a completed upstream node", async () => {
     const onRequestPause = vi.fn(async () => undefined);
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={succeededNode}
       runStatus="running"
       artifacts={[]}
@@ -626,7 +655,9 @@ describe("node production workspaces", () => {
 
   it("allows editing after the workflow has safely paused between nodes", async () => {
     const onOverride = vi.fn(async () => undefined);
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={succeededNode}
       runStatus="paused"
       artifacts={[]}
@@ -645,7 +676,9 @@ describe("node production workspaces", () => {
 
   it("blocks an invalid upstream brief before sending an input override", async () => {
     const onInputOverride = vi.fn(async () => undefined);
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={succeededNode}
       runStatus="stale"
       artifacts={[]}
@@ -673,7 +706,7 @@ describe("node production workspaces", () => {
         fallbackReason,
       },
     };
-    const { container } = render(<NodeWorkspace node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    const { container } = render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     const summary = container.querySelector("summary");
     expect(summary).toHaveTextContent("智能复核未完成，已使用基础方案");
@@ -695,7 +728,7 @@ describe("node production workspaces", () => {
         actualModelIds: ["glm-5.3-flash", "gpt-backup"],
       },
     };
-    const { container } = render(<NodeWorkspace node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    const { container } = render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     const summary = container.querySelector("summary");
     expect(summary).toHaveTextContent("首选模型暂时不可用，替补模型已完成");
@@ -715,7 +748,7 @@ describe("node production workspaces", () => {
         actualModelIds: ["glm-5.3", "gpt-5.6-sol"],
       },
     };
-    const { container } = render(<NodeWorkspace node={node} runStatus="failed" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    const { container } = render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} runStatus="failed" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     const summary = container.querySelector("summary");
     expect(summary).toHaveTextContent("已尝试替补模型，但本步骤仍未完成");
@@ -743,7 +776,7 @@ describe("node production workspaces", () => {
         snapshotSource: "created",
       },
     };
-    render(<NodeWorkspace node={pendingNode} runStatus="running" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={pendingNode} runStatus="running" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     expect(screen.getByText(/AI 视觉导演/)).toBeInTheDocument();
     expect(screen.queryByText("api-visual-director-v1")).not.toBeInTheDocument();
@@ -774,13 +807,14 @@ describe("node production workspaces", () => {
       qualityGateResults: [],
       executionConfiguration: { providerId: provider.id, modelSelections: { [provider.id]: "glm-old" } },
     };
-    render(<NodeWorkspace node={node} providers={[provider]} runStatus="failed" artifacts={[]} busy={false} onOverride={async () => undefined} onConfigure={onConfigure} onAuthorize={async () => undefined} />);
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} providers={[provider]} runStatus="failed" artifacts={[]} busy={false} onOverride={async () => undefined} onConfigure={onConfigure} onAuthorize={async () => undefined} />);
 
     await userEvent.click(screen.getByRole("button", { name: "调整" }));
     await userEvent.selectOptions(screen.getByRole("combobox", { name: /^首选模型/ }), "glm-new");
     await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
 
     expect(onConfigure).toHaveBeenCalledWith("visual-review", {
+      expectedRunRevision: 2,
       providerId: provider.id,
       modelSelections: { [provider.id]: "glm-new" },
       confirmTerminalEdit: true,
@@ -801,7 +835,7 @@ describe("node production workspaces", () => {
         meteredFailedAttemptCount: 1,
       },
     };
-    render(<NodeWorkspace node={node} providers={[{
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} providers={[{
       ...seedanceProvider,
       modelProfiles: [{ ...seedanceProvider.modelProfiles![0]!, id: "seedance-2.5", label: "Seedance 2.5" }],
     }]} runStatus="stale" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
@@ -814,7 +848,9 @@ describe("node production workspaces", () => {
 
   it("shows the effective node input and saves a human input version", async () => {
     const onInputOverride = vi.fn(async () => undefined);
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={succeededNode}
       runStatus="stale"
       artifacts={[]}
@@ -832,11 +868,75 @@ describe("node production workspaces", () => {
 
     expect(onInputOverride).toHaveBeenCalledWith("script", {
       input: { brief: { title: "人工题目" } },
+      expectedRunRevision: 2,
+      expectedVersionId: "input-generated",
+    });
+  });
+
+  it("binds the input draft to the revision observed when the editor opened", async () => {
+    const onInputOverride = vi.fn(async () => undefined);
+    const node = { ...succeededNode };
+    const { rerender } = render(<NodeWorkspace
+      runId="run-nw"
+      runRevision={2}
+      acceptedPlanDigest={TEST_PLAN_DIGEST}
+      node={node}
+      runStatus="paused"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onInputOverride={onInputOverride}
+      onAuthorize={async () => undefined}
+    />);
+
+    await userEvent.click(screen.getByText("查看和调整这个角色收到的内容"));
+    await userEvent.click(screen.getByRole("button", { name: "编辑输入" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "基线期间的题目" } });
+
+    // 编辑期间后台数据刷新（revision 推进、输入版本替换）：草稿基线不变，
+    // 保存仍以打开编辑器时观察到的 token 提交，服务端冲突时用户草稿不丢。
+    rerender(<NodeWorkspace
+      runId="run-nw"
+      runRevision={7}
+      acceptedPlanDigest={TEST_PLAN_DIGEST}
+      node={{
+        ...node,
+        inputState: {
+          ...node.inputState!,
+          effectiveVersionId: "input-v5",
+          versions: [...node.inputState!.versions, {
+            id: "input-v5",
+            source: "human" as const,
+            value: { brief: { title: "后台新题目" } },
+            upstreamVersionIds: ["brief-v1"],
+            createdAt: "2026-08-27T01:00:00.000Z",
+            createdBy: "someone-else",
+            schemaVersion: "script-input-v1",
+          }],
+        },
+      }}
+      runStatus="paused"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onInputOverride={onInputOverride}
+      onAuthorize={async () => undefined}
+    />);
+
+    expect(screen.getByRole("textbox", { name: "标题" })).toHaveValue("基线期间的题目");
+    await userEvent.click(screen.getByRole("button", { name: "保存人工输入" }));
+
+    expect(onInputOverride).toHaveBeenCalledWith("script", {
+      input: { brief: { title: "基线期间的题目" } },
+      expectedRunRevision: 2,
+      expectedVersionId: "input-generated",
     });
   });
 
   it("previews the actual synthesized audio in the voice delivery", () => {
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={{ ...succeededNode, id: "voice", label: "配音", role: "声音导演", output: { voice: "female-chengshu", rate: 185 } }}
       runStatus="succeeded"
       artifacts={[
@@ -869,7 +969,9 @@ describe("node production workspaces", () => {
 
   it("edits voice instructions as node input instead of pretending generated audio metadata is editable", async () => {
     const onInputOverride = vi.fn(async () => undefined);
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={{
         ...succeededNode,
         id: "voice",
@@ -923,11 +1025,15 @@ describe("node production workspaces", () => {
         pause_scale: 1,
         mastering_preset: "natural",
       },
+      expectedRunRevision: 2,
+      expectedVersionId: "voice-input-generated",
     });
   });
 
   it("keeps materialized scene assets read-only until a real replacement is supplied", () => {
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={{
         ...succeededNode,
         id: "assets",
@@ -947,7 +1053,9 @@ describe("node production workspaces", () => {
   });
 
   it("previews every materialized scene image and video instead of only showing routing text", () => {
-    const { container } = render(<NodeWorkspace
+    const { container } = render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={{
         ...succeededNode,
         id: "assets",
@@ -973,7 +1081,9 @@ describe("node production workspaces", () => {
   });
 
   it("uses a multiline editor for every visual-review suggestion", async () => {
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={{
         ...succeededNode,
         id: "visual-review",
@@ -997,7 +1107,9 @@ describe("node production workspaces", () => {
 
   it("labels an existing voice artifact as outdated after a human edit", () => {
     const generated = succeededNode.outputState!.versions[0]!;
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={{
         ...succeededNode,
         id: "voice",
@@ -1022,7 +1134,9 @@ describe("node production workspaces", () => {
   });
 
   it("labels reconstructed legacy input without presenting it as original execution evidence", async () => {
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={{
         ...succeededNode,
         inputState: {
@@ -1074,8 +1188,10 @@ describe("node production workspaces", () => {
       };
     const nodes = [succeededNode, directorNode];
     const { container } = render(<>
-      <NodeWorkspace node={succeededNode} nodes={nodes} runStatus="stale" artifacts={[]} busy={false} onOverride={async () => undefined} onInputOverride={async () => undefined} onAuthorize={async () => undefined} />
-      <NodeWorkspace
+      <NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={succeededNode} nodes={nodes} runStatus="stale" artifacts={[]} busy={false} onOverride={async () => undefined} onInputOverride={async () => undefined} onAuthorize={async () => undefined} />
+      <NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={directorNode}
       nodes={nodes}
       runStatus="stale"
@@ -1117,7 +1233,9 @@ describe("node production workspaces", () => {
         }],
       },
     };
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={node}
       runStatus="stale"
       artifacts={[{
@@ -1191,29 +1309,121 @@ describe("node production workspaces", () => {
         }],
       },
     };
-    render(<NodeWorkspace node={paidNode} nodes={[scriptNode, paidNode]} providers={[hailuoProvider]} runStatus="awaiting_spend_approval" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={onAuthorize} />);
+    render(<NodeWorkspace node={paidNode} nodes={[scriptNode, paidNode]} providers={[hailuoProvider]} runStatus="awaiting_spend_approval" runId="run-1" runRevision={5} acceptedPlanDigest={"a".repeat(64)} artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={onAuthorize} />);
 
     const inputReview = screen.getByText("查看和调整这个角色收到的内容").closest("details");
-    const spendGate = screen.getByRole("button", { name: "检查并确认" }).closest("section");
+    const spendGate = screen.getByRole("button", { name: /获取费用报价/ }).closest("section");
     expect(inputReview).toHaveAttribute("open");
     expect(inputReview?.compareDocumentPosition(spendGate!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-
-    await userEvent.click(screen.getByRole("button", { name: "检查并确认" }));
-    const dialog = screen.getByRole("dialog", { name: "确认本次费用" });
-    expect(within(dialog).getByText("编剧 · 脚本")).toBeInTheDocument();
-    expect(within(dialog).getByText("人工版本")).toBeInTheDocument();
-    expect(within(dialog).queryByText("script-v2")).not.toBeInTheDocument();
+    // 报价绑定人工版本与模型信息在确认面板可见（C2：scope 确认取代逐项对话框）。
     expect(screen.getAllByText(/MiniMax Hailuo 02/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/最高 ¥3.00/).length).toBeGreaterThan(0);
-    await userEvent.click(screen.getByRole("button", { name: "确认并执行" }));
 
-    expect(onAuthorize).toHaveBeenCalledWith("assets", {
-      spendPlanId: "plan-1",
-      inputVersionIds: ["script-v2"],
-      providerId: "hailuo-video-v1",
-      modelId: "MiniMax-Hailuo-02",
-      maxCostCny: 3,
-      maxAttempts: 1,
+    const quoteSpy = vi.spyOn(studioApi, "prepareProductionQuote").mockResolvedValue({
+      quoteId: "quote-nw-1",
+      acceptedPlanDigest: "a".repeat(64),
+      estimatedCostCny: 2.4,
+      maximumCostCny: 3,
+      scopeSummary: { content: "测试报价", assets: [], uncertainty: [] },
+      feasible: true,
+    });
+    const scopeSpy = vi.spyOn(studioApi, "authorizeProductionScope").mockResolvedValue({ id: "run-1" } as never);
+    // 第一阶段：只取报价，不授权——用户必须先看见服务端金额。
+    await userEvent.click(screen.getByRole("button", { name: /获取费用报价/ }));
+    await waitFor(() => {
+      expect(quoteSpy).toHaveBeenCalledWith("run-1", { expectedRunRevision: 5, acceptedPlanDigest: "a".repeat(64) });
+      expect(scopeSpy).not.toHaveBeenCalled();
+    });
+    expect(await screen.findByText("测试报价")).toBeTruthy();
+    // 第二阶段：明确接受已展示的同一份报价。
+    await userEvent.click(screen.getByRole("button", { name: /确认并授权（最高 ¥3.00）/ }));
+    await waitFor(() => {
+      expect(scopeSpy).toHaveBeenCalledWith("run-1", {
+        expectedRunRevision: 5,
+        quoteId: "quote-nw-1",
+        acceptedPlanDigest: "a".repeat(64),
+        idempotencyKey: "scope-run-1-quote-nw-1",
+      });
+    });
+
+    // C2：面板不再逐项调用 onAuthorize——授权由 scope 命令在服务端派生子凭证
+    // （production-authorization-api.test.ts 覆盖派生细节），onAuthorize 保持 0 次调用。
+    expect(onAuthorize).not.toHaveBeenCalled();
+  });
+
+  it("offers the funding three actions from the structured assessment", async () => {
+    const onRejectSpend = vi.fn(async () => undefined);
+    const onRequestPause = vi.fn(async () => undefined);
+    const paidNode: StudioNode = {
+      id: "assets",
+      label: "画面",
+      role: "素材导演",
+      status: "awaiting_spend_approval",
+      artifactIds: [],
+      qualityGateResults: [],
+      spendPlan: {
+        id: "plan-1",
+        inputVersionIds: ["script-v2"],
+        providerId: "seedance-video-v1",
+        modelId: "seedance-v1",
+        estimatedCostCny: 7.2,
+        maxCostCny: 14.4,
+        maxAttempts: 2,
+        createdAt: "2026-08-27T00:00:00.000Z",
+      },
+      spendAssessment: {
+        action: "request_approval",
+        reason: "amount",
+        approvedAmountCents: 720,
+        settledCents: 0,
+        reservedCents: 0,
+        pendingUnknownCents: 0,
+        requestedMaximumCents: 1440,
+        additionalCents: 720,
+        resultingMaximumCents: 1440,
+        blockedAssets: [],
+      },
+    };
+    render(<NodeWorkspace node={paidNode} providers={[seedanceProvider]} runStatus="awaiting_spend_approval" runId="run-1" runRevision={7} acceptedPlanDigest={"a".repeat(64)} artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} onRejectSpend={onRejectSpend} onRequestPause={onRequestPause} />);
+
+    // 结构化评估驱动三动作：同意追加（精确差额）/ 调整方案 / 暂不继续。
+    expect(screen.getByText("当前授权余额不够完成这份方案。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /同意追加 ¥7.20 并继续/ })).toBeInTheDocument();
+
+    // "暂不继续"走持久暂停，不发起任何授权。
+    await userEvent.click(screen.getByRole("button", { name: /暂不继续/ }));
+    await waitFor(() => expect(onRequestPause).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: /同意追加 ¥7.20 并继续/ })).toBeEnabled();
+
+    // "调整方案"打开既有返工意见面板（预填降本意见），不直接花。
+    await userEvent.click(screen.getByRole("button", { name: /调整方案/ }));
+    expect(await screen.findByRole("dialog", { name: "保存费用反馈" })).toBeInTheDocument();
+
+    // "同意追加"先 prepare（生成服务端 funding request）再 amend，客户端不自报差额。
+    const quoteSpy = vi.spyOn(studioApi, "prepareProductionQuote").mockResolvedValue({
+      quoteId: "quote-funding-1",
+      acceptedPlanDigest: "a".repeat(64),
+      estimatedCostCny: 7.2,
+      maximumCostCny: 14.4,
+      scopeSummary: { content: "缺口报价", assets: [], uncertainty: [] },
+      fundingRequestId: "funding-1",
+      fundingAuthorizationId: "auth-active-1",
+      additionalCents: 720,
+      feasible: true,
+    });
+    const amendSpy = vi.spyOn(studioApi, "amendProductionScope").mockResolvedValue({ id: "run-1" } as never);
+    await userEvent.click(screen.getByRole("button", { name: /同意追加 ¥7.20 并继续/ }));
+    await waitFor(() => {
+      expect(quoteSpy).toHaveBeenCalledWith("run-1", {
+        expectedRunRevision: 7,
+        acceptedPlanDigest: "a".repeat(64),
+        requestedMaximumCny: 14.4,
+      });
+      expect(amendSpy).toHaveBeenCalledWith("run-1", "auth-active-1", {
+        expectedRunRevision: 7,
+        fundingRequestId: "funding-1",
+        idempotencyKey: "amend-run-1-funding-1",
+      });
     });
   });
 
@@ -1242,9 +1452,12 @@ describe("node production workspaces", () => {
       },
     };
     render(<NodeWorkspace
+      runId="run-2"
+      runRevision={7}
       node={paidNode}
       providers={[seedanceProvider]}
       runStatus="awaiting_spend_approval"
+      acceptedPlanDigest={"b".repeat(64)}
       artifacts={[]}
       busy={false}
       onOverride={async () => undefined}
@@ -1252,13 +1465,10 @@ describe("node production workspaces", () => {
       onRejectSpend={onRejectSpend}
     />);
 
+    // C2：报价条目与模型在确认面板内可见（scope 确认取代逐项对话框），未识别模型不出现。
     expect(screen.getByText("镜头 1 · Seedance 视频生成 · Seedance 1")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "检查并确认" }));
-    const authorizationDialog = screen.getByRole("dialog", { name: "确认本次费用" });
-    expect(authorizationDialog).toHaveTextContent("报价中列出的 2 个画面任务");
-    expect(within(authorizationDialog).getByText("镜头 1 · Seedance 视频生成")).toBeInTheDocument();
-    expect(authorizationDialog).not.toHaveTextContent("未识别模型");
-    await userEvent.click(within(authorizationDialog).getByRole("button", { name: "返回检查" }));
+    expect(screen.getByText("镜头 2 · Seedance 视频生成 · Seedance 1")).toBeInTheDocument();
+    expect(screen.queryByText(/未识别模型/)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "这份报价不合适" }));
     const dialog = screen.getByRole("dialog", { name: "保存费用反馈" });
     expect(within(dialog).getByRole("heading", { name: "把这份报价退回导演" })).toBeInTheDocument();
@@ -1290,7 +1500,9 @@ describe("node production workspaces", () => {
       scenes: [{ narration: "旧旁白" }],
     }), { status: 200, headers: { "content-type": "application/json" } })));
     const onOverride = vi.fn(async () => undefined);
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={{ ...succeededNode, artifactIds: ["artifact-script"], output: { scriptPath: "/runs/run-1/script.json" } }}
       runStatus="stale"
       artifacts={[{
@@ -1343,7 +1555,9 @@ describe("node production workspaces", () => {
         }],
       },
     };
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={node}
       runStatus="stale"
       artifacts={[
@@ -1361,7 +1575,7 @@ describe("node production workspaces", () => {
 
   it("requires confirmation before editing a terminal run and closes the modal with Escape", async () => {
     const onOverride = vi.fn(async () => undefined);
-    render(<NodeWorkspace node={succeededNode} runStatus="succeeded" artifacts={[]} busy={false} onOverride={onOverride} onAuthorize={async () => undefined} />);
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={succeededNode} runStatus="succeeded" artifacts={[]} busy={false} onOverride={onOverride} onAuthorize={async () => undefined} />);
 
     await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
     await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
@@ -1376,7 +1590,9 @@ describe("node production workspaces", () => {
   });
 
   it("renders stale output as an explicit warning and disables artifacts without a URL", () => {
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={{ ...succeededNode, outputState: { ...succeededNode.outputState!, stale: true } }}
       runStatus="stale"
       artifacts={[{ id: "missing", kind: "script", createdAt: "2026-08-27T00:00:00.000Z" }]}
@@ -1391,7 +1607,9 @@ describe("node production workspaces", () => {
   });
 
   it("does not offer editing when a failed node produced no structured output", () => {
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={{ id: "render", label: "渲染", role: "剪辑师", status: "failed", artifactIds: [], qualityGateResults: [] }}
       runStatus="failed"
       artifacts={[]}
@@ -1420,7 +1638,9 @@ describe("node production workspaces", () => {
       artifactIds: [],
       qualityGateResults: [],
     };
-    render(<NodeWorkspace
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
       node={scriptNode}
       nodes={[scriptNode, uncertainAssetNode]}
       providers={[{

@@ -13,6 +13,14 @@ export interface VisualPlanDeliveryCapabilities {
   editorialCard: boolean;
 }
 
+type VideoArgumentForm = "controlled-demonstration" | "explanation";
+
+export function recommendTemplateForBrief(input: Pick<VisualDirectionInput, "title" | "hook">): "product-demo" | "knowledge-explainer" {
+  return argumentFormFor(`${input.title} ${input.hook}`) === "controlled-demonstration"
+    ? "product-demo"
+    : "knowledge-explainer";
+}
+
 // 机会的已保存 visualPlan 是规范真相（含合法省略号“…”的计划不得在展示层被重算替换）；
 // 缺失时才使用确定性 fallback。展示与开工 payload 必须读取同一个 resolved plan。
 export function resolveOpportunityVisualPlan(
@@ -24,7 +32,8 @@ export function resolveOpportunityVisualPlan(
 export function planVisualDirection(input: VisualDirectionInput): StudioVisualPlan {
   const topic = compactTopic(input.title);
   const category = input.category ?? inferVisualCategory(`${input.title} ${input.hook}`);
-  const direction = input.visualStyle?.trim() || defaultDirection(category);
+  const argumentForm = argumentFormFor(`${input.title} ${input.hook}`);
+  const direction = input.visualStyle?.trim() || defaultDirection(category, argumentForm);
   const contextSource = contextSourceFor(category);
 
   return {
@@ -42,8 +51,8 @@ export function planVisualDirection(input: VisualDirectionInput): StudioVisualPl
         id: "context",
         role: "证据与语境",
         duration: "3-14 秒",
-        description: contextDescription(category, topic),
-        searchQuery: contextQuery(category, topic),
+        description: contextDescription(category, topic, argumentForm),
+        searchQuery: contextQuery(category, topic, argumentForm),
         source: contextSource,
       },
       {
@@ -114,7 +123,10 @@ function contextSourceFor(category: StudioTopicCategory): StudioVisualSource {
   return "stock";
 }
 
-function contextDescription(category: StudioTopicCategory, topic: string): string {
+function contextDescription(category: StudioTopicCategory, topic: string, argumentForm: VideoArgumentForm): string {
+  if (argumentForm === "controlled-demonstration") {
+    return `固定主体、机位和环境等相同条件，只改变承诺中的一个变量，连续呈现“${topic}”的过程；无法维持连续证据时必须停下，不能用无关素材冒充实验。`;
+  }
   if (category === "technology") return `录制真实操作、界面反馈和失败步骤，让“${topic}”能被复现，而不是只放科技空镜。`;
   if (category === "finance-career") return `用真实页面、账单或工作动作解释“${topic}”，敏感数据必须打码。`;
   if (category === "society") return `只使用有来源的现场环境、公开资料和时间线，不把无关画面包装成事件现场。`;
@@ -123,7 +135,8 @@ function contextDescription(category: StudioTopicCategory, topic: string): strin
   return `用人物动作、生活环境和关键物件建立语境，让“${topic}”发生在真实场景里。`;
 }
 
-function contextQuery(category: StudioTopicCategory, topic: string): string {
+function contextQuery(category: StudioTopicCategory, topic: string, argumentForm: VideoArgumentForm): string {
+  if (argumentForm === "controlled-demonstration") return `${topic} 同一主体 相同条件 单一变量 连续过程 前后结果`;
   const suffix: Record<StudioTopicCategory, string> = {
     society: "公开资料 城市环境 新闻现场",
     "finance-career": "工作桌面 数据页面 操作录屏",
@@ -144,7 +157,8 @@ function contextQuery(category: StudioTopicCategory, topic: string): string {
   return `${topic} ${suffix[category]}`;
 }
 
-function defaultDirection(category: StudioTopicCategory): string {
+function defaultDirection(category: StudioTopicCategory, argumentForm: VideoArgumentForm): string {
+  if (argumentForm === "controlled-demonstration") return "受控实证、连续过程与同条件前后结果";
   if (category === "technology") return "真实屏幕操作配人物反应";
   if (category === "finance-career") return "工作现场、数据证据与人物选择";
   if (category === "health-sports") return "动作特写、场地关系与数据卡片";
@@ -157,6 +171,15 @@ function defaultDirection(category: StudioTopicCategory): string {
   if (category === "agriculture-rural") return "生产动作、田间关系与真实劳动细节";
   if (category === "society") return "来源明确的公开资料与克制现场语境";
   return "人物近景、生活动作与环境细节";
+}
+
+function argumentFormFor(value: string): VideoArgumentForm {
+  const controlledComparison = /(?:同一|同样|相同|其他条件不变)[\s\S]{0,40}(?:只|仅)[\s\S]{0,24}(?:改变|调整|移动|更换|增加|减少|加|不加|换)/;
+  const explicitExperiment = /(?:前后|两组|对照|对比)[\s\S]{0,20}(?:验证|实测|实验|测试)|(?:验证|实测|实验|测试)[\s\S]{0,20}(?:前后|两组|对照|对比|差别|变化|效果|结果)/;
+  const promisedDemonstration = /实测|实验|测试验证|现场验证|亲自验证/;
+  return controlledComparison.test(value) || explicitExperiment.test(value) || promisedDemonstration.test(value)
+    ? "controlled-demonstration"
+    : "explanation";
 }
 
 function inferVisualCategory(value: string): StudioTopicCategory {

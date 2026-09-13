@@ -1,4 +1,5 @@
 import { render, screen, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { studioApi } from "../src/client/api.js";
@@ -43,7 +44,7 @@ beforeEach(() => {
 describe("TemplatesPage", () => {
   it("puts template editing first and keeps supporting evidence and model overrides collapsed until requested", async () => {
     const user = userEvent.setup();
-    render(<TemplatesPage />);
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "知识解释" });
     const gallery = screen.getByRole("radiogroup", { name: "视频模板" });
@@ -65,7 +66,7 @@ describe("TemplatesPage", () => {
   it("creates a new editable template from a minimal blank grammar", async () => {
     const user = userEvent.setup();
     vi.spyOn(crypto, "randomUUID").mockReturnValue("12345678-1234-4123-8123-123456789abc");
-    render(<TemplatesPage />);
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "知识解释" });
     await user.click(screen.getByRole("button", { name: "新建空白模板" }));
@@ -86,7 +87,7 @@ describe("TemplatesPage", () => {
   it("protects unsaved changes when selecting another template or refreshing", async () => {
     const user = userEvent.setup();
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
-    render(<TemplatesPage />);
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "知识解释" });
     await user.click(screen.getByRole("radio", { name: /我的系列/ }));
@@ -104,7 +105,7 @@ describe("TemplatesPage", () => {
   it("does not replace unsaved edits when the selected template card is clicked again", async () => {
     const user = userEvent.setup();
     const confirm = vi.spyOn(window, "confirm");
-    render(<TemplatesPage />);
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "知识解释" });
     await user.click(screen.getByRole("radio", { name: /我的系列/ }));
@@ -120,7 +121,7 @@ describe("TemplatesPage", () => {
 
   it("opens a published template as the next editable version under the same id", async () => {
     const user = userEvent.setup();
-    render(<TemplatesPage />);
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "知识解释" });
     await user.click(screen.getByRole("button", { name: "编辑下一版本" }));
@@ -134,7 +135,7 @@ describe("TemplatesPage", () => {
 
   it("deletes only after confirmation and exposes an explicit built-in restore action", async () => {
     const user = userEvent.setup();
-    render(<TemplatesPage />);
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "知识解释" });
     expect(screen.getByRole("button", { name: "恢复“证据图解”" })).toBeInTheDocument();
@@ -152,7 +153,7 @@ describe("TemplatesPage", () => {
   it("stores a template model override without hard-coding it into the provider", async () => {
     const user = userEvent.setup();
     const save = vi.spyOn(studioApi, "saveTemplateDraft");
-    render(<TemplatesPage />);
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "知识解释" });
     await user.click(screen.getByRole("radio", { name: /我的系列/ }));
@@ -168,7 +169,7 @@ describe("TemplatesPage", () => {
   it("saves edited shot responsibilities with the template draft", async () => {
     const user = userEvent.setup();
     const save = vi.spyOn(studioApi, "saveTemplateDraft");
-    render(<TemplatesPage />);
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "知识解释" });
     await user.click(screen.getByRole("radio", { name: /我的系列/ }));
@@ -191,7 +192,7 @@ describe("TemplatesPage", () => {
 
   it("requires an explicit confirmation before publishing a template", async () => {
     const user = userEvent.setup();
-    render(<TemplatesPage />);
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "知识解释" });
     await user.click(screen.getByRole("radio", { name: /我的系列/ }));
@@ -207,7 +208,7 @@ describe("TemplatesPage", () => {
     const user = userEvent.setup();
     const save = vi.spyOn(studioApi, "saveTemplateDraft");
     vi.mocked(studioApi.publishTemplate).mockRejectedValueOnce(new Error("发布校验暂时不可用"));
-    render(<TemplatesPage />);
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "知识解释" });
     await user.click(screen.getByRole("radio", { name: /我的系列/ }));
@@ -221,6 +222,14 @@ describe("TemplatesPage", () => {
     await user.type(screen.getByLabelText("适用说明"), "；补充修改");
     await user.click(screen.getByRole("button", { name: "保存草稿" }));
     expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ name: "已保存但尚未发布" }), 4);
+  });
+
+  it("opens the template targeted by a global-search deep link", async () => {
+    render(<MemoryRouter initialEntries={["/templates?template=my-series"]}><TemplatesPage /></MemoryRouter>);
+
+    // 深链模板直接成为当前编辑对象，而不是回落到第一个模板。
+    expect(await screen.findByRole("heading", { name: "我的系列" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /我的系列/ })).toBeChecked();
   });
 });
 

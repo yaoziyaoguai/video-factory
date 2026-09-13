@@ -44,6 +44,54 @@ describe("ProductionBrief", () => {
     });
   });
 
+  it("preserves an explicit duration range without inventing one for persisted legacy briefs", () => {
+    const ranged = pipeline.parseBrief({
+      ...validBrief,
+      durationSeconds: 24,
+      durationRange: { minSeconds: 20, maxSeconds: 34 },
+    });
+
+    assert.deepEqual(ranged.durationRange, { minSeconds: 20, maxSeconds: 34 });
+    assert.equal(pipeline.parsePersistedBrief(validBrief).durationRange, undefined);
+  });
+
+  it("fails closed when the executable-plan workflow omits its planning inputs", () => {
+    const executablePlanWorkflow = {
+      assetSemanticRank: false,
+      referenceGrammar: false,
+      executablePlan: true,
+    };
+    assert.throws(
+      () => pipeline.parseBrief({ ...validBrief, workflowFeatures: executablePlanWorkflow }),
+      /executablePlan.*durationRange.*director/,
+    );
+    assert.throws(
+      () => pipeline.parseBrief({
+        ...validBrief,
+        durationRange: { minSeconds: 20, maxSeconds: 34 },
+        workflowFeatures: executablePlanWorkflow,
+      }),
+      /executablePlan.*durationRange.*director/,
+    );
+    assert.equal(pipeline.parsePersistedBrief(validBrief).durationRange, undefined);
+  });
+
+  it("rejects invalid duration ranges and a suggestion outside the selected range", () => {
+    for (const durationRange of [
+      { minSeconds: 19, maxSeconds: 34 },
+      { minSeconds: 35, maxSeconds: 34 },
+      { minSeconds: 20.5, maxSeconds: 34 },
+      { minSeconds: 20, maxSeconds: 181 },
+    ]) {
+      assert.throws(() => pipeline.parseBrief({ ...validBrief, durationRange }), /durationRange/);
+    }
+    assert.throws(() => pipeline.parseBrief({
+      ...validBrief,
+      durationSeconds: 24,
+      durationRange: { minSeconds: 30, maxSeconds: 40 },
+    }), /durationSeconds.*durationRange/);
+  });
+
   it("keeps test productions explicit and rejects unknown purposes", () => {
     assert.equal(pipeline.parseBrief({ ...validBrief, runPurpose: "test" }).runPurpose, "test");
     assert.throws(
@@ -459,6 +507,105 @@ describe("ProductionBrief", () => {
     const { sha256: _sha256, ...unboundReference } = input.referenceVideo;
     assert.throws(() => pipeline.parseBrief({ ...input, referenceVideo: unboundReference }), /referenceVideo\.sha256/);
     assert.throws(() => pipeline.parseBrief({ ...input, referenceVideo: { ...input.referenceVideo, sha256: "not-a-hash" } }), /referenceVideo\.sha256/);
+  });
+
+  it("accepts the joint-v1 creative planning marker and never invents it for legacy briefs", () => {
+    // joint-v1 是新制作入口显式写入的共同创作规划标记：round-trip 必须原样保留，普通
+    // parseBrief/parsePersistedBrief 不给缺失字段补标——历史 run 按其原工作流读取/恢复。
+    const jointDirector = { profileId: "auto", assetProviderIds: ["local-editorial-v1"] };
+    const jointProviders = { ...validBrief.providers, director: "api-visual-director-v1" };
+    const jointWorkflow = {
+      assetSemanticRank: false,
+      referenceGrammar: false,
+      executablePlan: true,
+      creativePlanning: "joint-v1",
+    };
+    const jointBrief = pipeline.parseBrief({
+      ...validBrief,
+      durationRange: { minSeconds: 20, maxSeconds: 34 },
+      providers: jointProviders,
+      director: jointDirector,
+      workflowFeatures: jointWorkflow,
+    });
+    assert.equal(jointBrief.workflowFeatures?.creativePlanning, "joint-v1");
+    assert.equal(jointBrief.workflowFeatures?.executablePlan, true);
+
+    assert.equal(pipeline.parseBrief(validBrief).workflowFeatures, undefined);
+    assert.equal(pipeline.parsePersistedBrief(validBrief).workflowFeatures, undefined);
+
+    // joint-v1 拓扑必然编译可执行方案：缺 durationRange 或导演配置在合同层 fail closed。
+    const { durationRange: _ignored, ...withoutRange } = {
+      ...validBrief,
+      durationRange: { minSeconds: 20, maxSeconds: 34 },
+    };
+    assert.throws(
+      () => pipeline.parseBrief({
+        ...withoutRange,
+        providers: jointProviders,
+        director: jointDirector,
+        workflowFeatures: jointWorkflow,
+      }),
+      /creativePlanning.*durationRange.*director/,
+    );
+    assert.throws(
+      () => pipeline.parseBrief({
+        ...validBrief,
+        durationRange: { minSeconds: 20, maxSeconds: 34 },
+        providers: { ...validBrief.providers, director: "api-visual-director-v1" },
+        workflowFeatures: jointWorkflow,
+      }),
+      /creativePlanning.*durationRange.*director/,
+    );
+
+    // 标记只接受 "joint-v1" 字面量：其他值拒绝，不得静默降级回旧规划流程。
+    for (const invalid of ["joint-v2", true, null]) {
+      assert.throws(
+        () => pipeline.parseBrief({
+          ...validBrief,
+          durationRange: { minSeconds: 20, maxSeconds: 34 },
+          providers: jointProviders,
+          director: jointDirector,
+          workflowFeatures: { ...jointWorkflow, creativePlanning: invalid },
+        }),
+        /workflowFeatures\.creativePlanning/,
+      );
+    }
+  });
+
+  it("round-trips every protected task contract digest and rejects unknown kinds or malformed digests", () => {
+    // 与 production-pipeline 写入 brief 的三项 digest 相同：parser 白名单必须与
+    // REQUIRED_CODEX_TASK_CONTRACT_DIGESTS 的受保护任务集合一致，否则 run 在 brief 节点 fail closed。
+    const digests = pipeline.REQUIRED_CODEX_TASK_CONTRACT_DIGESTS;
+    const taskContractDigests = {
+      "visual-review": digests["visual-review"],
+      "role-audit": digests["role-audit"],
+      "creative-treatment": digests["creative-treatment"],
+    };
+
+    const brief = pipeline.parseBrief({ ...validBrief, taskContractDigests });
+    assert.deepEqual(brief.taskContractDigests, taskContractDigests);
+
+    assert.throws(
+      () => pipeline.parseBrief({
+        ...validBrief,
+        taskContractDigests: { ...taskContractDigests, "shell-exec": "a".repeat(64) },
+      }),
+      /taskContractDigests contains an unsupported task kind/,
+    );
+    assert.throws(
+      () => pipeline.parseBrief({
+        ...validBrief,
+        taskContractDigests: { ...taskContractDigests, "creative-treatment": "not-a-sha-256-digest" },
+      }),
+      /taskContractDigests\.creative-treatment must be a SHA-256 digest/,
+    );
+    assert.throws(
+      () => pipeline.parseBrief({
+        ...validBrief,
+        taskContractDigests: { "visual-review": digests["visual-review"].toUpperCase() },
+      }),
+      /taskContractDigests\.visual-review must be a SHA-256 digest/,
+    );
   });
 
   it("rejects incompatible protocol versions and incomplete provider bindings", () => {

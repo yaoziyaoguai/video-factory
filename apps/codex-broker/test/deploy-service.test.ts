@@ -132,6 +132,7 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario): Promis
     mkdir(previousRelease, { recursive: true }),
     mkdir(systemdDirectory, { recursive: true }),
     mkdir(path.join(candidateBroker, "dist"), { recursive: true }),
+    mkdir(path.join(candidateBroker, "node_modules", "undici"), { recursive: true }),
     mkdir(path.join(candidateBroker, "deploy"), { recursive: true }),
     mkdir(binDirectory, { recursive: true }),
     mkdir(stateDirectory, { recursive: true }),
@@ -144,6 +145,11 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario): Promis
     writeFile(openAiUnitPath, "[Unit]\nDescription=old-openai\n", "utf8"),
     writeFile(zaiUnitPath, "[Unit]\nDescription=old-zai\n", "utf8"),
     writeFile(path.join(candidateBroker, "dist", "main.js"), "export {};\n", "utf8"),
+    writeFile(
+      path.join(candidateBroker, "node_modules", "undici", "package.json"),
+      '{"name":"undici","type":"commonjs"}\n',
+      "utf8",
+    ),
     writeFile(
       path.join(candidateBroker, "deploy", "vf-codex-broker.service"),
       "[Unit]\nDescription=new-openai\n",
@@ -306,11 +312,11 @@ case " $* " in
         elif [ "$current_release" = "$TEST_PREVIOUS_RELEASE" ]; then
           echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"zai","providerId":"zai-bigmodel-api","modelId":"glm-5.3","taskKinds":["director-plan","script-draft","visual-review"],"taskModels":{"director-plan":"glm-5.3","script-draft":"glm-5.3","visual-review":"glm-5.3-flash"}}'
         else
-          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"zai","providerId":"zai-bigmodel-api","modelId":"glm-5.3","taskKinds":["topic-ideas","series-roadmap","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"glm-5.3","series-roadmap":"glm-5.3","director-plan":"glm-5.3","script-draft":"glm-5.3","publish-copy":"glm-5.3","asset-rank":"glm-5.3-flash","reference-grammar":"glm-5.3-flash","visual-review":"glm-5.3-flash","role-audit":"glm-5.3"}}'
+          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"zai","providerId":"zai-bigmodel-api","modelId":"glm-5.3","taskKinds":["topic-ideas","series-roadmap","creative-treatment","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"glm-5.3","series-roadmap":"glm-5.3","creative-treatment":"glm-5.3","director-plan":"glm-5.3","script-draft":"glm-5.3","publish-copy":"glm-5.3","asset-rank":"glm-5.3-flash","reference-grammar":"glm-5.3-flash","visual-review":"glm-5.3-flash","role-audit":"glm-5.3"}}'
         fi
         ;;
       *)
-        echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"openai","providerId":"openai","modelId":"gpt-test","taskKinds":["topic-ideas","series-roadmap","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"gpt-test","series-roadmap":"gpt-test","director-plan":"gpt-test","script-draft":"gpt-test","publish-copy":"gpt-test","asset-rank":"gpt-test","reference-grammar":"gpt-test","visual-review":"gpt-test","role-audit":"gpt-test"}}'
+        echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"openai","providerId":"openai","modelId":"gpt-test","taskKinds":["topic-ideas","series-roadmap","creative-treatment","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"gpt-test","series-roadmap":"gpt-test","creative-treatment":"gpt-test","director-plan":"gpt-test","script-draft":"gpt-test","publish-copy":"gpt-test","asset-rank":"gpt-test","reference-grammar":"gpt-test","visual-review":"gpt-test","role-audit":"gpt-test"}}'
         ;;
     esac
     ;;
@@ -535,8 +541,13 @@ describe("production deployment transaction", () => {
 
     assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=1200000$/m);
     assert.match(studioMain, /timeoutMs: 2_460_000/);
+    assert.match(
+      dockerfile,
+      /^COPY --from=production-dependencies \/app\/node_modules\/undici apps\/codex-broker\/node_modules\/undici$/m,
+    );
     assert.match(dockerfile, /^COPY apps\/codex-broker\/deploy apps\/codex-broker\/deploy$/m);
     assert.match(deploy, /Candidate image does not contain a complete broker release/);
+    assert.match(deploy, /! -f "\$staging\/broker\/node_modules\/undici\/package\.json"/);
     assert.match(deploy, /vf-zai-codex-broker\.service/);
     const validationPosition = deploy.indexOf('! -f "$staging/broker/dist/main.js"');
     const switchPosition = deploy.indexOf('ln -sfn "$candidate_broker_release" "$broker_root/current"');
@@ -751,7 +762,7 @@ exit 42
     assert.match(deploy, /restart_brokers director-plan,script-draft,visual-review 1/);
     assert.match(
       deploy,
-      /broker_health "\$zai_broker_socket" zai zai-bigmodel-api \\\n\s+topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit/,
+      /broker_health "\$zai_broker_socket" zai zai-bigmodel-api \\\n\s+topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit/,
     );
   });
 

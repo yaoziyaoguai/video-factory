@@ -1,6 +1,7 @@
 import fcntl
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -14,11 +15,23 @@ from urllib.request import Request, urlopen
 from .kokoro_voice import synthesize_kokoro_audio
 
 
-MAX_SCENE_TEMPO = 1.35
-
-
 class _MiniMaxTerminalError(RuntimeError):
     pass
+
+
+class VoiceDoesNotFitError(RuntimeError):
+    code = "VOICE_DOES_NOT_FIT"
+
+    def __init__(self, scene_position: int, planned_seconds: float, speech_seconds: float, raw_audio_path: Path):
+        self.scene_position = scene_position
+        self.planned_seconds = round(planned_seconds, 3)
+        self.speech_seconds = round(speech_seconds, 3)
+        self.required_seconds = math.ceil(speech_seconds * 30 - 1e-9) / 30
+        self.raw_audio_path = raw_audio_path.resolve()
+        super().__init__(
+            f"{self.code}: scene {scene_position} requires {self.required_seconds:.3f}s "
+            f"for natural voice but the accepted cut is {self.planned_seconds:.3f}s."
+        )
 
 
 def synthesize_voiceover_plan(
@@ -83,14 +96,17 @@ def synthesize_voiceover_plan(
             )
         source_speech_duration = probe_audio_duration(raw_path)
         scene_duration = float(scene["duration"])
-        available_speech_duration = max(scene_duration - 0.2, 0.5)
-        tempo = scene_tempo(source_speech_duration, available_speech_duration)
-        speech_duration = source_speech_duration / tempo
-        target_duration = max(scene_duration, speech_duration + 0.2)
+        if source_speech_duration > scene_duration + 1e-6:
+            raise VoiceDoesNotFitError(
+                scene_position=position,
+                planned_seconds=scene_duration,
+                speech_seconds=source_speech_duration,
+                raw_audio_path=raw_path,
+            )
+        speech_duration = source_speech_duration
+        target_duration = scene_duration
         normalized_path = output_dir / f"scene_{position:02d}.m4a"
         audio_filter = mastering["filter"]
-        if tempo > 1.001:
-            audio_filter = f"atempo={tempo:.5f},{audio_filter}"
         subprocess.run(
             [
                 "ffmpeg",
@@ -122,7 +138,7 @@ def synthesize_voiceover_plan(
                 "audio_path": str(normalized_path.resolve()),
                 "source_speech_duration": round(source_speech_duration, 3),
                 "speech_duration": round(speech_duration, 3),
-                "tempo": round(tempo, 3),
+                "tempo": 1.0,
                 "duration": round(target_duration, 3),
                 "narration": str(scene["narration"]),
             }
@@ -195,7 +211,13 @@ def _prepare_minimax_operation(
     ledger_path = output_dir.parent / ".voice-operations" / (
         hashlib.sha256(operation_id.encode("utf-8")).hexdigest() + ".json"
     )
-    source_fingerprint = hashlib.sha256(script_path.read_bytes()).hexdigest()
+    source_fingerprint = hashlib.sha256(json.dumps([
+        {
+            "scenePosition": int(scene["position"]),
+            "narration": str(scene["narration"]),
+        }
+        for scene in scenes
+    ], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     items = []
     for scene in scenes:
         position = int(scene["position"])
@@ -241,8 +263,61 @@ def _prepare_minimax_operation(
         if ledger_path.is_file():
             return _read_minimax_operation(ledger_path, ledger)
         ledger["ledgerPath"] = str(ledger_path)
-        _write_json_durably(ledger_path, _ledger_without_private_fields(ledger))
+        with _minimax_reuse_lock(ledger_path.parent):
+            _reuse_prior_minimax_items(ledger_path, ledger)
+            _write_json_durably(ledger_path, _ledger_without_private_fields(ledger))
         return ledger
+
+
+def _reuse_prior_minimax_items(ledger_path: Path, ledger: dict[str, Any]) -> None:
+    node_directory = ledger_path.parent.parent.resolve()
+    for item in ledger["items"]:
+        matching_pending_operation = None
+        for candidate_path in sorted(ledger_path.parent.glob("*.json")):
+            if candidate_path == ledger_path:
+                continue
+            try:
+                candidate_ledger = json.loads(candidate_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                not isinstance(candidate_ledger, dict)
+                or candidate_ledger.get("version") != "video-factory/paid-operation-v2"
+                or candidate_ledger.get("providerId") != ledger["providerId"]
+                or candidate_ledger.get("modelId") != ledger["modelId"]
+                or not isinstance(candidate_ledger.get("items"), list)
+            ):
+                continue
+            candidate = next((
+                value for value in candidate_ledger["items"]
+                if isinstance(value, dict)
+                and value.get("inputFingerprint") == item["inputFingerprint"]
+            ), None)
+            if candidate is None:
+                continue
+            if candidate.get("state") == "materialized":
+                raw_path = _verified_materialized_minimax_path(candidate, node_directory)
+                item.update({
+                    "state": "materialized",
+                    "stateHistory": ["prepared", "reused_materialized"],
+                    "localPath": str(raw_path),
+                    "sha256": candidate["sha256"],
+                    "sizeBytes": candidate["sizeBytes"],
+                    "reusedFromOperationId": candidate_ledger.get("operationId"),
+                    "reusedFromItemRequestId": candidate.get("itemRequestId"),
+                })
+                break
+            if candidate.get("state") in {"prepared", "unknown", "submitted", "provider_succeeded"}:
+                matching_pending_operation = candidate_ledger.get("operationId")
+        if item["state"] != "materialized" and matching_pending_operation:
+            raise RuntimeError(
+                f"Matching MiniMax operation '{matching_pending_operation}' has not reached a reusable terminal state; "
+                "refusing a duplicate request."
+            )
+    ledger["completed"] = all(item["state"] == "materialized" for item in ledger["items"])
+    if ledger["completed"]:
+        ledger["actualCostCny"] = 0
+        ledger["actualCostSource"] = "configured_rate"
 
 
 def _synthesize_minimax_operation_item(
@@ -261,22 +336,7 @@ def _synthesize_minimax_operation_item(
         operation.update(persisted)
         item = next(item for item in operation["items"] if item["scenePosition"] == position)
         if item["state"] == "materialized":
-            raw_path = Path(str(item.get("localPath", ""))).resolve()
-            node_directory = ledger_path.parent.parent.resolve()
-            if not raw_path.is_relative_to(node_directory) or not raw_path.is_file():
-                raise RuntimeError(
-                    f"MiniMax paid item '{item['itemRequestId']}' lost its materialized raw audio; refusing a duplicate request."
-                )
-            content = raw_path.read_bytes()
-            if (
-                hashlib.sha256(content).hexdigest() != item.get("sha256")
-                or len(content) != item.get("sizeBytes")
-            ):
-                raise RuntimeError(
-                    f"MiniMax paid item '{item['itemRequestId']}' raw audio no longer matches its ledger identity; "
-                    "refusing a duplicate request."
-                )
-            return raw_path
+            return _verified_materialized_minimax_path(item, ledger_path.parent.parent.resolve())
         if item["state"] == "unknown":
             raise RuntimeError(
                 f"MiniMax paid item '{item['itemRequestId']}' has an unknown provider outcome and requires "
@@ -322,14 +382,35 @@ def _synthesize_minimax_operation_item(
     item.pop("error", None)
     item["stateHistory"].append("materialized")
     operation["completed"] = all(candidate["state"] == "materialized" for candidate in operation["items"])
-    materialized_count = sum(candidate["state"] == "materialized" for candidate in operation["items"])
+    submitted_count = sum(
+        "unknown" in candidate.get("stateHistory", [])
+        for candidate in operation["items"]
+    )
     operation["actualCostCny"] = round(
-        operation["estimatedCostCny"] * materialized_count / len(operation["items"]),
+        operation["estimatedCostCny"] * submitted_count / len(operation["items"]),
         2,
     )
     operation["actualCostSource"] = "configured_rate"
     _write_json_durably(ledger_path, _ledger_without_private_fields(operation))
     return result
+
+
+def _verified_materialized_minimax_path(item: dict[str, Any], node_directory: Path) -> Path:
+    raw_path = Path(str(item.get("localPath", ""))).resolve()
+    if not raw_path.is_relative_to(node_directory) or not raw_path.is_file():
+        raise RuntimeError(
+            f"MiniMax paid item '{item['itemRequestId']}' lost its materialized raw audio; refusing a duplicate request."
+        )
+    content = raw_path.read_bytes()
+    if (
+        hashlib.sha256(content).hexdigest() != item.get("sha256")
+        or len(content) != item.get("sizeBytes")
+    ):
+        raise RuntimeError(
+            f"MiniMax paid item '{item['itemRequestId']}' raw audio no longer matches its ledger identity; "
+            "refusing a duplicate request."
+        )
+    return raw_path
 
 
 def _ledger_without_private_fields(ledger: dict[str, Any]) -> dict[str, Any]:
@@ -376,6 +457,18 @@ def _read_minimax_operation(ledger_path: Path, expected: dict[str, Any]) -> dict
 def _minimax_operation_lock(ledger_path: Path):
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = ledger_path.with_suffix(ledger_path.suffix + ".lock")
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _minimax_reuse_lock(ledger_directory: Path):
+    ledger_directory.mkdir(parents=True, exist_ok=True)
+    lock_path = ledger_directory / ".reuse.lock"
     with lock_path.open("a+b") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
@@ -606,13 +699,6 @@ def probe_audio_duration(path: Path) -> float:
         text=True,
     )
     return float(result.stdout.strip())
-
-
-def scene_tempo(source_duration: float, available_duration: float) -> float:
-    """在可懂度上限内压缩旁白，优先兑现分镜时长。"""
-    if available_duration <= 0:
-        raise ValueError("available_duration must be positive")
-    return min(max(source_duration / available_duration, 1.0), MAX_SCENE_TEMPO)
 
 
 def default_voice(provider: str) -> str:

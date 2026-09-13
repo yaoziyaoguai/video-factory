@@ -64,6 +64,20 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
       curated: true,
     }]),
     previewVoice: async () => undefined,
+    prepareProductionQuote: async () => ({
+      quoteId: "quote-1",
+      acceptedPlanDigest: "a".repeat(64),
+      estimatedCostCny: 4.8,
+      maximumCostCny: 4.8,
+      scopeSummary: {
+        content: "测试报价",
+        assets: [],
+        uncertainty: [],
+      },
+      feasible: true,
+    }),
+    authorizeProductionScope: async () => runDetail(),
+    amendProductionScope: async () => runDetail(),
     reworkDraft: async () => undefined,
     reinspectVisualReview: async () => runDetail(),
     getCreatorSettings: async () => ({
@@ -188,6 +202,8 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     requestPause: async () => ({ ...runDetail("running"), pauseRequested: true }),
     resumePaused: async () => runDetail("running"),
     resumeStale: async () => runDetail("running"),
+    queryOriginalTextTask: async () => runDetail("failed"),
+    retrieveOriginalTextTask: async () => runDetail("running"),
     retryFailedNode: async () => runDetail("running"),
     inspectPaidNode: async (_runId, nodeId) => ({
       nodeId,
@@ -563,6 +579,8 @@ describe("Studio API", () => {
       resumePaused: async () => { calls.push("resume"); return runDetail("running"); },
       resumeStale: async () => { calls.push("regenerate"); return runDetail("running"); },
       retryFailedNode: async (_runId, nodeId) => { calls.push(`retry:${nodeId}`); return runDetail("running"); },
+      queryOriginalTextTask: async () => { calls.push("query-original"); return runDetail("failed"); },
+      retrieveOriginalTextTask: async () => { calls.push("retrieve-original"); return runDetail("running"); },
       inspectPaidNode: async (runId, nodeId) => {
         calls.push(`inspect-paid:${runId}:${nodeId}`);
         return { nodeId, operationId: "paid-operation-1", recommendedOutcome: "resume_original", requiresManualReconciliation: false, items: [] };
@@ -576,14 +594,16 @@ describe("Studio API", () => {
 
     const costs = await app.inject({ method: "GET", url: "/api/costs" });
     const override = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/override", payload: { actor: "editor", output: { hook: "人工钩子" } } });
-    const inputOverride = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/input-override", payload: { actor: "forged", input: { title: "人工题目" } } });
-    const configuration = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/assets/execution-configuration", payload: { actor: "forged", modelSelections: { "hailuo-video-v1": "MiniMax-H3" }, assetProviderIds: ["local-editorial-v1", "hailuo-video-v1"], economics: { allowMeteredProviders: true, maxPaidShots: 2, maxCostCny: 8 } } });
+    const inputOverride = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/input-override", payload: { actor: "forged", input: { title: "人工题目" }, expectedRunRevision: 1, expectedVersionId: "script-input-v1" } });
+    const configuration = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/assets/execution-configuration", payload: { actor: "forged", expectedRunRevision: 0, modelSelections: { "hailuo-video-v1": "MiniMax-H3" }, assetProviderIds: ["local-editorial-v1", "hailuo-video-v1"], economics: { allowMeteredProviders: true, maxPaidShots: 2, maxCostCny: 8 } } });
     const spend = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/assets/spend-authorizations", payload: { spendPlanId: "plan-1", inputVersionIds: ["version-1"], providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02", maxCostCny: 3, maxAttempts: 1, approvedBy: "owner" } });
     const missingSpendPlan = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/assets/spend-authorizations", payload: { inputVersionIds: ["version-1"], providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02", maxCostCny: 3, maxAttempts: 1 } });
     const pause = await app.inject({ method: "POST", url: "/api/runs/run-1/pause" });
     const resume = await app.inject({ method: "POST", url: "/api/runs/run-1/resume" });
     const regenerate = await app.inject({ method: "POST", url: "/api/runs/run-1/regenerate-stale" });
     const retry = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/voice/retry" });
+    const queryOriginal = await app.inject({ method: "POST", url: "/api/runs/run-1/task-recovery/query" });
+    const retrieveOriginal = await app.inject({ method: "POST", url: "/api/runs/run-1/task-recovery/retrieve" });
     const paidItems = await app.inject({ method: "GET", url: "/api/runs/run-1/nodes/assets/paid-operation" });
     const reconcile = await app.inject({
       method: "POST",
@@ -603,9 +623,11 @@ describe("Studio API", () => {
     assert.equal(resume.statusCode, 200);
     assert.equal(regenerate.statusCode, 200);
     assert.equal(retry.statusCode, 200);
+    assert.equal(queryOriginal.statusCode, 200);
+    assert.equal(retrieveOriginal.statusCode, 200);
     assert.equal(paidItems.statusCode, 200);
     assert.equal(reconcile.statusCode, 200);
-    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "config:assets:MiniMax-H3:true:studio-owner", "spend:assets:plan-1:MiniMax-Hailuo-02:studio-owner", "pause", "resume", "regenerate", "retry:voice", "inspect-paid:run-1:assets", "reconcile-paid:run-1:assets:1:reconcile-assets-1:resume_original"]);
+    assert.deepEqual(calls, ["override:script:人工钩子:studio-owner", "input:script:人工题目:studio-owner", "config:assets:MiniMax-H3:true:studio-owner", "spend:assets:plan-1:MiniMax-Hailuo-02:studio-owner", "pause", "resume", "regenerate", "retry:voice", "query-original", "retrieve-original", "inspect-paid:run-1:assets", "reconcile-paid:run-1:assets:1:reconcile-assets-1:resume_original"]);
     await app.close();
   });
 
@@ -1343,7 +1365,17 @@ describe("Studio API", () => {
     const app = buildStudioApp({ service: fakeService() });
 
     const list = await app.inject({ method: "GET", url: "/api/runs" });
-    const started = await app.inject({ method: "POST", url: "/api/runs", headers: { "idempotency-key": "start-run-2" }, payload: { title: "第二条视频" } });
+    const started = await app.inject({
+      method: "POST",
+      url: "/api/runs",
+      headers: { "idempotency-key": "start-run-2" },
+      payload: {
+        title: "第二条视频",
+        durationRange: { minSeconds: 20, maxSeconds: 34 },
+        workflowFeatures: { executablePlan: true },
+        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      },
+    });
     const detail = await app.inject({ method: "GET", url: "/api/runs/run-1" });
     const decision = await app.inject({
       method: "POST",
@@ -1365,6 +1397,36 @@ describe("Studio API", () => {
     assert.equal(detail.statusCode, 200);
     assert.equal(decision.statusCode, 200);
     assert.equal(decision.json().status, "succeeded");
+    await app.close();
+  });
+
+  it("rejects a direct production start that omits the executable plan contract", async () => {
+    let startCalls = 0;
+    const startRun = async () => {
+      startCalls += 1;
+      return { runId: "run-2", status: "running" as const };
+    };
+    const app = buildStudioApp({ service: fakeService({ startRun }) });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/runs",
+      headers: { "idempotency-key": "legacy-start-1" },
+      payload: {
+        protocolVersion: "video-factory/brief-v1",
+        title: "不能落回旧时间线",
+        angle: "验证新建边界",
+        audience: "短视频创作者",
+        nicheSlug: "executable-boundary",
+        durationSeconds: 24,
+        platform: "douyin",
+        reviewMode: "manual",
+      },
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.match(response.json().error, /可执行制作方案|时长范围|导演/);
+    assert.equal(startCalls, 0);
     await app.close();
   });
 
@@ -1440,6 +1502,7 @@ describe("Studio API", () => {
       },
       inheritedNodeIds: ["brief", "script", "visual-direction", "visual-review"],
       requiredAffectedScenePositions: [],
+      scopeState: "resolved" as const,
     };
     const app = buildStudioApp({ service: fakeService({
       reworkDraft: async (runId) => runId === "run-1"

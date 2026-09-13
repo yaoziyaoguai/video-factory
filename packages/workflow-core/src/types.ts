@@ -80,6 +80,8 @@ export interface Provenance {
   licenseNote?: string;
   promptVersion?: string;
   model?: string;
+  producerRequestDigest?: string;
+  producerRequestSchemaVersion?: string;
   notes?: string;
   scenePosition?: number;
 }
@@ -150,6 +152,8 @@ export interface ExecutionConfigurationOverrideDraft<TInitialInput = unknown> {
   nodeId: string;
   actor: string;
   initialInput: TInitialInput;
+  /** 调用方观察到的 run revision：持锁修改点必须复核，防止预检查后的并发写入被覆盖。 */
+  expectedRunRevision?: number;
 }
 
 export interface QualityGateResult {
@@ -252,6 +256,8 @@ export interface NodeInputOverrideDraft<TInput = unknown> {
   actor: string;
   input: TInput;
   expectedVersionId?: string;
+  /** 调用方观察到的 run revision：持锁修改点必须复核，防止预检查后的并发写入被覆盖。 */
+  expectedRunRevision?: number;
   allowTerminalEdit?: boolean;
   schemaVersion?: string;
 }
@@ -311,6 +317,12 @@ export interface SpendAuthorizationDraft {
   maxCostCny: number;
   maxAttempts: number;
   approvedBy: string;
+  // C1：由制作范围授权（production scope）派生子凭证时的来源证明。仅作内部审计字段，
+  // 不参与 exact matcher 的相等比较。
+  derivedFromScopeId?: string;
+  // C1：scope 派生的逐素材剩余 create 预算（assetKey → 剩余次数）。范围收窄发生在预留层，
+  // 不改变必须与报价计划逐字段一致的 maxCostCny/maxAttempts；worker 在每个 create 边界执行。
+  itemCreateBudgets?: Record<string, number>;
 }
 
 export interface SpendAuthorization extends SpendAuthorizationDraft {
@@ -347,6 +359,10 @@ interface NodeExecutionBase<TOutput = unknown> {
   error?: string;
   // 计费执行已成功落定，但同一节点内的免费后置检查失败时，不应误锁为付费结果未知。
   providerOutcomeKnown?: boolean;
+  // 节点 execute 内已通过 context.addArtifact 登记的全局产物（如崩溃恢复后已存在的正式产物）：
+  // 由 runner 校验归属（producer.nodeId 必须精确等于当前节点）后去重挂入 nodeRun.artifactIds，
+  // 不重复登记。服务幂等恢复场景，不改变 result.artifacts 的既有合同。
+  preRegisteredArtifactIds?: string[];
 }
 
 export type NodeExecutionResult<TOutput = unknown> =
@@ -388,6 +404,9 @@ export interface NodeRun<TOutput = unknown> {
   outputState?: NodeOutputState<TOutput>;
   spendPlan?: SpendPlan;
   spendAuthorizationId?: string;
+  // C1：报价等待节点上最近一次"范围未覆盖"的结构化评估（原因/金额/缺失目标），
+  // 供服务端投影给 C2；凭范围自动继续或重新报价时清除。
+  spendAssessment?: Record<string, unknown>;
   error?: string;
 }
 

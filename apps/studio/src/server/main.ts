@@ -100,7 +100,7 @@ const referenceGrammarAgent = auditedTaskClient && auditedTaskReady("reference-g
   media: reviewMedia,
   modelId: auditedModelFor("reference-grammar"),
 }) : undefined;
-const { screenwriterAgent, directorAgent, visualReviewAgents } = buildRoleAgentAssembly({
+const { screenwriterAgent, directorAgent, visualReviewAgents, treatmentAgents } = buildRoleAgentAssembly({
   codexSettings,
   zaiCodexSettings,
   ...(codexClient ? { codexClient } : {}),
@@ -119,6 +119,7 @@ const pipeline = new ProductionPipeline({
   }),
   ...(screenwriterAgent ? { screenwriterAgent } : {}),
   ...(directorAgent ? { directorAgent } : {}),
+  ...(treatmentAgents.length > 0 ? { treatmentAgents } : {}),
   ...(publishCopyWriter ? { publishCopyWriter } : {}),
   ...(assetSemanticRanker ? { assetSemanticRanker } : {}),
   ...(referenceGrammarAgent ? { referenceGrammarAgent } : {}),

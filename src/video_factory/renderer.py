@@ -106,8 +106,11 @@ def attach_voiceover_plan(manifest_path: Path, voiceover_plan: Optional[dict]) -
     if set(durations) != positions:
         raise RuntimeError("Voiceover plan scene positions do not match the render manifest.")
     for slide in manifest["slides"]:
-        slide["duration"] = durations[int(slide["position"])]
-    manifest["duration_target"] = round(sum(durations.values()), 3)
+        position = int(slide["position"])
+        if abs(float(slide["duration"]) - durations[position]) > 1e-6:
+            raise RuntimeError(
+                f"Voiceover scene {position} does not match the accepted render timeline."
+            )
     manifest["voiceover_plan"] = voiceover_plan
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -364,23 +367,50 @@ def render_scene_clip(
     height: int,
     frame_count: Optional[int] = None,
 ) -> tuple[Path, list[str]]:
-    duration = float(scene["duration"])
-    resolved_frame_count = frame_count if frame_count is not None else round(duration * RENDER_FPS)
+    if "duration_frames" in asset:
+        requested_frame_count = asset["duration_frames"]
+        if (
+            not isinstance(requested_frame_count, int)
+            or isinstance(requested_frame_count, bool)
+            or requested_frame_count <= 0
+        ):
+            raise RuntimeError(f"Scene {scene['position']} has an invalid compiled frame count.")
+    else:
+        requested_frame_count = frame_count if frame_count is not None else round(float(scene["duration"]) * RENDER_FPS)
+        if (
+            not isinstance(requested_frame_count, int)
+            or isinstance(requested_frame_count, bool)
+            or requested_frame_count <= 0
+        ):
+            raise RuntimeError(f"Scene {scene['position']} has an invalid render frame count.")
+    if frame_count is not None and asset.get("duration_frames") is not None and requested_frame_count != frame_count:
+        raise RuntimeError(f"Scene {scene['position']} compiled frame count does not match the render timeline.")
+    resolved_frame_count = requested_frame_count
+    duration = resolved_frame_count / RENDER_FPS
+    source_in_frame = asset.get("source_in_frame", 0)
+    if not isinstance(source_in_frame, int) or isinstance(source_in_frame, bool) or source_in_frame < 0:
+        raise RuntimeError(f"Scene {scene['position']} has an invalid source frame offset.")
     asset_path = Path(str(asset["local_path"]))
     clip_path = clips_dir / f"scene_{scene['position']:02d}.mp4"
     if asset["media_type"] == "video":
-        if is_generated_video_asset(asset):
-            source_duration = probe_media_duration(asset_path)
-            input_args = ["-i", str(asset_path)]
-            timing_filter = f",setpts={duration / source_duration:.6f}*PTS"
-        else:
-            input_args = ["-stream_loop", "-1", "-t", f"{duration:.3f}", "-i", str(asset_path)]
-            timing_filter = ""
+        source_start = source_in_frame / RENDER_FPS
+        source_end = (source_in_frame + resolved_frame_count) / RENDER_FPS
+        source_duration = probe_media_duration(asset_path)
+        if source_end > source_duration + 1e-6:
+            raise RuntimeError(
+                f"Scene {scene['position']} requires source frames through {source_end:.3f}s, "
+                f"but the selected video ends at {source_duration:.3f}s."
+            )
+        input_args = ["-i", str(asset_path)]
         background_filter = (
+            f"trim=start={source_start:.9f}:end={source_end:.9f},"
+            "setpts=PTS-STARTPTS,fps=30,"
             f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},setsar=1{timing_filter}"
+            f"crop={width}:{height},setsar=1"
         )
     elif asset["media_type"] == "image":
+        if source_in_frame != 0:
+            raise RuntimeError(f"Scene {scene['position']} cannot apply a source frame offset to an image.")
         input_args = [
             "-framerate",
             "30",
@@ -413,7 +443,7 @@ def render_scene_clip(
             f"[bg][1:v]overlay=0:0,"
             f"drawbox=x=0:y={height - 10}:w='min(iw,iw*t/{duration:.3f})':h=10:"
             "color=white@0.72:t=fill,"
-            "tpad=stop_mode=clone:stop_duration=1,format=yuv420p[v]"
+            "format=yuv420p[v]"
         ),
         "-map",
         "[v]",
@@ -431,6 +461,13 @@ def render_scene_clip(
         str(clip_path),
     ]
     subprocess.run(command, check=True, capture_output=True, text=True)
+    if clip_path.is_file():
+        actual_frame_count = probe_media_frame_count(clip_path)
+        if actual_frame_count != resolved_frame_count:
+            clip_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Scene {scene['position']} rendered {actual_frame_count} frames; expected {resolved_frame_count}."
+            )
     return clip_path, command
 
 
@@ -447,24 +484,16 @@ def timeline_frame_counts(scenes: list[dict]) -> list[int]:
     return frame_counts
 
 
-def is_generated_video_asset(asset: dict) -> bool:
-    return str(asset.get("provider") or "") in {
-        "seedance-video-v1",
-        "wan-video-v1",
-        "kling-video-v1",
-        "hailuo-video-v1",
-        "vidu-video-v1",
-    }
-
-
 def probe_media_duration(path: Path) -> float:
     result = subprocess.run(
         [
             "ffprobe",
             "-v",
             "error",
+            "-select_streams",
+            "v:0",
             "-show_entries",
-            "format=duration",
+            "stream=duration",
             "-of",
             "default=noprint_wrappers=1:nokey=1",
             str(path),
@@ -475,8 +504,36 @@ def probe_media_duration(path: Path) -> float:
     )
     duration = float(result.stdout.strip())
     if duration <= 0:
-        raise RuntimeError(f"Generated video has an invalid duration: {path}")
+        raise RuntimeError(f"Video has an invalid duration: {path}")
     return duration
+
+
+def probe_media_frame_count(path: Path) -> int:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        frame_count = int(result.stdout.strip())
+    except ValueError as error:
+        raise RuntimeError(f"Video has no readable frame count: {path}") from error
+    if frame_count <= 0:
+        raise RuntimeError(f"Video has no readable frames: {path}")
+    return frame_count
 
 
 def write_scene_frames(manifest: dict, frames_dir: Path, width: int, height: int) -> list[tuple[Path, float]]:

@@ -406,7 +406,36 @@ describe("JsonSeriesStore", () => {
       toNext: staleEpisode.continuity.toNext,
     }, { ...staleEpisode.planning, auditStatus: "passed", auditIterations: 1 }, "2026-08-24T09:11:30.000Z");
     assert.equal(rebased.episodes[1]?.canonBaseRevision, 1);
-    assert.equal((await store.adoptEpisode("series-1", 2, "2026-08-24T09:12:00.000Z")).episodes[1]?.status, "selected");
+    const selectedSecond = await store.adoptEpisode("series-1", 2, "2026-08-24T09:12:00.000Z");
+    assert.equal(selectedSecond.episodes[1]?.status, "selected");
+    await store.linkRun("series-1", selectedSecond.episodes[1]!.id, "run-2", "2026-08-24T09:13:00.000Z");
+    await store.reconcileRuns([
+      {
+        id: "run-1",
+        status: "succeeded",
+        revision: 7,
+        canonProposal: {
+          memorySummary: "第 1 集内部定版：报销整理在 20 分钟内可完成，但票据模糊时必须人工复核。",
+          statements: ["报销整理在 20 分钟内可完成，但票据模糊时必须人工复核。"],
+          sourceOutputVersionIds: ["script-v2", "render-v1"],
+        },
+      },
+      {
+        id: "run-2",
+        status: "succeeded",
+        revision: 3,
+        canonProposal: {
+          memorySummary: "第 2 集已完成内部定版，本集没有新增系列事实。",
+          statements: [],
+          sourceOutputVersionIds: ["script-2", "final-review-2"],
+        },
+      },
+    ], "2026-08-24T09:14:00.000Z");
+    const emptyCanonEpisode = (await store.list())[0]!;
+    assert.equal(emptyCanonEpisode.episodes[1]?.status, "ready");
+    assert.deepEqual(emptyCanonEpisode.canon.facts.map((fact) => fact.statement), [
+      "报销整理在 20 分钟内可完成，但票据模糊时必须人工复核。",
+    ]);
 
     await store.markRunPublished("run-1", "2026-08-24T10:00:00.000Z");
     const published = (await store.list())[0]!;

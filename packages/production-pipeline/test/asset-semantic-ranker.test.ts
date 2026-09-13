@@ -6,6 +6,8 @@ import {
   parseAssetCandidateReport,
   type CodexTaskExecution,
   type CodexTaskKind,
+  type CodexPreparedOperation,
+  type CodexTaskRequestOptions,
   validateAssetSemanticRanking,
 } from "../src/index.js";
 
@@ -177,6 +179,31 @@ describe("asset semantic ranking", () => {
     assert.equal(typeof payload.thumbnails[0]?.jpegBase64, "string");
   });
 
+  it("keeps checkpoint-only planning intent out of the broker asset-rank payload", async () => {
+    const report = {
+      ...parseAssetCandidateReport(rawReport),
+      planningIntent: {
+        semanticIntentVersion: "video-factory/ranking-semantic-intent-v1",
+        rankingIntent: { subject: "同一部手机", action: "比较三个动作" },
+      },
+    };
+    const seen: Array<Record<string, unknown>> = [];
+    const ranker = new CodexAssetSemanticRanker({
+      client: {
+        runTask: async (_kind, payload) => {
+          seen.push(payload as Record<string, unknown>);
+          return deterministicAssetRanking(report);
+        },
+      },
+      fetchThumbnail: async () => undefined,
+    });
+
+    await ranker.rank(report);
+
+    assert.deepEqual(Object.keys(seen[0] ?? {}).sort(), ["scenes", "thumbnails", "version"]);
+    assert.equal(Object.hasOwn(seen[0] ?? {}, "planningIntent"), false);
+  });
+
   it("drops thumbnails larger than the broker per-image boundary before sending", async () => {
     const report = parseAssetCandidateReport(rawReport);
     const seen: unknown[] = [];
@@ -198,7 +225,104 @@ describe("asset semantic ranking", () => {
     const payload = seen[0] as { thumbnails: unknown[] };
     assert.deepEqual(payload.thumbnails, []);
   });
+
+  it("resumes the saved ranking request and reuses its thumbnail snapshot", async () => {
+    const report = parseAssetCandidateReport(rawReport);
+    let stored: unknown;
+    let interruptProducer = true;
+    let producerCalls = 0;
+    let thumbnailFetches = 0;
+    const observed: string[] = [];
+    const ranking = deterministicAssetRanking(report);
+    ranking.source = "model";
+    ranking.providerId = "codex-asset-ranker-v1";
+    ranking.modelId = "codex-default";
+    const checkpoint = {
+      key: "asset-rank-recovery",
+      load: async () => stored,
+      save: async (value: unknown) => { stored = structuredClone(value); },
+    };
+    const client = {
+      runTask: async () => ranking,
+      runTaskDetailed: async (
+        kind: CodexTaskKind,
+        payload: unknown,
+        requestId?: string,
+        _session?: unknown,
+        requestOptions?: CodexTaskRequestOptions,
+      ): Promise<CodexTaskExecution> => {
+        if (kind === "asset-rank") {
+          producerCalls += 1;
+          if (interruptProducer) {
+            await requestOptions?.beforeSubmit?.(preparedOperation(kind, payload, requestId!));
+            throw new Error("ranking response interrupted");
+          }
+          return { output: ranking };
+        }
+        return { output: passingAudit() };
+      },
+      observePrepared: async (operation: CodexPreparedOperation): Promise<CodexTaskExecution> => {
+        observed.push(operation.requestId);
+        return { output: ranking };
+      },
+    };
+    const ranker = new CodexAssetSemanticRanker({
+      client,
+      fetchThumbnail: async () => {
+        thumbnailFetches += 1;
+        return Buffer.from([0xff, 0xd8, 0xff, 0x00, 0xff, 0xd9]);
+      },
+    });
+
+    await assert.rejects(() => ranker.rankDetailed(report, checkpoint), /ranking response interrupted/);
+    assert.ok((stored as { pendingOperation?: unknown }).pendingOperation);
+    interruptProducer = false;
+    const execution = await ranker.rankDetailed(report, checkpoint);
+
+    assert.equal(execution.agentLoop?.status, "passed");
+    assert.equal(producerCalls, 1);
+    assert.equal(observed.length, 1);
+    assert.equal(thumbnailFetches, 2, "recovery must reuse the original two thumbnails instead of downloading them again");
+  });
 });
+
+function passingAudit() {
+  return {
+    version: "video-factory/role-audit-v1",
+    verdict: "pass",
+    score: 92,
+    summary: "排序候选与证据一致。",
+    issues: [],
+    repairInstructions: [],
+  };
+}
+
+function preparedOperation(kind: CodexTaskKind, payload: unknown, requestId: string): CodexPreparedOperation {
+  const envelope = { protocolVersion: "video-factory/codex-bridge-v2", requestId, kind, payload };
+  const brokerBinding = {
+    version: "video-factory/task-binding-v1" as const,
+    storeId: `vfs_store_${"a".repeat(32)}`,
+    providerId: "openai",
+    modelId: "codex-default",
+  };
+  return {
+    version: "video-factory/codex-prepared-operation-v1",
+    requestId,
+    kind,
+    envelope,
+    serializedEnvelope: JSON.stringify(envelope),
+    binding: {
+      ...brokerBinding,
+      requestDigest: "b".repeat(64),
+      kind,
+      contractDigest: "c".repeat(64),
+      sessionDigest: "d".repeat(64),
+    },
+    brokerBinding,
+    route: { socketPath: "/tmp/asset-rank.sock" },
+    taskFact: "not_submitted",
+  };
+}
 
 function candidate(provider: string, assetId: string, score: number, width: number, height: number) {
   return {

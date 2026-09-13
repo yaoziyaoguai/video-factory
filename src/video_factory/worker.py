@@ -12,7 +12,7 @@ from .domain import Scene
 from .script_service import draft_script_from_values, draft_to_dict
 from .stock_assets import prepare_routed_scene_assets, prepare_scene_assets, search_routed_scene_asset_candidates
 from .technical_review import review_video
-from .voiceover import synthesize_voiceover_plan
+from .voiceover import VoiceDoesNotFitError, synthesize_voiceover_plan
 from .renderer import render_job_manifest
 
 
@@ -100,7 +100,7 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
-    script_path = require_existing_path(request["input"], "scriptPath")
+    script_path, executable_plan = materialize_executable_script(request["input"], output_dir)
     script = json.loads(script_path.read_text(encoding="utf-8"))
     scenes = [
         Scene(
@@ -155,6 +155,8 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             media_type=str(parameters.get("mediaType", "video")),
             limit=int(parameters.get("limit", 6)),
         )
+    if executable_plan is not None:
+        project_executable_timings_into_asset_plan(plan_path, executable_plan)
     plan_artifact = describe_artifact(
         path=plan_path,
         kind="asset_plan",
@@ -243,7 +245,7 @@ def search_assets(request: Dict[str, Any], output_dir: Path, started_at: float) 
 
 def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
     input_values = request["input"]
-    script_path = require_existing_path(input_values, "scriptPath")
+    script_path, _executable_plan = materialize_executable_script(input_values, output_dir)
     parameters = request.get("parameters", {})
     provider = str(parameters.get("provider", "macos-say"))
     voice = str(input_values.get("voice") or parameters.get("voice") or "") or None
@@ -272,6 +274,42 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
             model_id=optional_string(parameters.get("modelId")) if provider == "minimax" else None,
             estimated_cost_cny=float(configured_cost) if provider == "minimax" and valid_configured_cost else None,
         )
+    except VoiceDoesNotFitError as error:
+        audio_artifact = describe_artifact(
+            path=error.raw_audio_path,
+            kind="voiceover_raw",
+            content_type=media_content_type(error.raw_audio_path),
+            request=request,
+            license_note="Materialized natural-speed narration retained for timeline replanning.",
+            scene_position=error.scene_position,
+        )
+        diagnostics: Dict[str, Any] = {}
+        if provider == "minimax":
+            diagnostics = minimax_failure_diagnostics(output_dir, request["commandId"])
+        return {
+            "protocolVersion": WORKER_PROTOCOL_VERSION,
+            "commandId": request["commandId"],
+            "status": "rejected",
+            "error": {"code": error.code, "message": str(error)},
+            "output": {
+                "conflict": {
+                    "code": error.code,
+                    "scenePosition": error.scene_position,
+                    "plannedSeconds": error.planned_seconds,
+                    "speechSeconds": error.speech_seconds,
+                    "requiredSeconds": error.required_seconds,
+                    "audioArtifact": audio_artifact,
+                    **({"executablePlanPath": str(input_values["executablePlanPath"])}
+                       if input_values.get("executablePlanPath") else {}),
+                    **({"operationId": request["commandId"]} if provider == "minimax" else {}),
+                }
+            },
+            "artifacts": [audio_artifact],
+            "diagnostics": {
+                "durationMs": round((time.monotonic() - started_at) * 1000, 3),
+                **diagnostics,
+            },
+        }
     except Exception as error:
         if provider != "minimax":
             raise
@@ -307,7 +345,8 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
     if provider == "minimax" and valid_configured_cost:
         synthesized_scenes = plan.get("scenes")
         metered_attempt_count = len(synthesized_scenes) if isinstance(synthesized_scenes, list) else 1
-        diagnostics = {
+        persisted_diagnostics = minimax_failure_diagnostics(output_dir, request["commandId"])
+        diagnostics = persisted_diagnostics if persisted_diagnostics.get("providerOutcomeKnown") is True else {
             "actualCostCny": round(float(configured_cost), 2),
             "actualCostSource": "configured_rate",
             "meteredAttemptCount": metered_attempt_count,
@@ -370,9 +409,15 @@ def minimax_failure_diagnostics(output_dir: Path, operation_id: str) -> Dict[str
 
 
 def render_video(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
-    script_path = require_existing_path(request["input"], "scriptPath")
+    script_path, executable_plan = materialize_executable_script(request["input"], output_dir)
     asset_plan_path = require_existing_path(request["input"], "assetPlanPath")
     voiceover_plan_path = require_existing_path(request["input"], "voiceoverPlanPath")
+    if executable_plan is not None:
+        try:
+            asset_plan = json.loads(asset_plan_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise WorkerProtocolError(f"Asset plan is not valid JSON: {error}") from error
+        assert_asset_plan_matches_executable_plan(asset_plan, executable_plan)
     resolution = str(request.get("parameters", {}).get("resolution", "1080x1920"))
     manifest_path = render_job_manifest(
         job_id=1,
@@ -412,7 +457,7 @@ def render_video(request: Dict[str, Any], output_dir: Path, started_at: float) -
 def run_technical_review(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
     video_path = require_existing_path(request["input"], "videoPath")
     asset_plan_path = require_existing_path(request["input"], "assetPlanPath")
-    script_path = require_existing_path(request["input"], "scriptPath")
+    script_path, _executable_plan = materialize_executable_script(request["input"], output_dir)
     parameters = request.get("parameters", {})
     review_path = review_video(
         video_path=video_path,
@@ -440,6 +485,171 @@ def run_technical_review(request: Dict[str, Any], output_dir: Path, started_at: 
     if report["status"] != "passed":
         response["status"] = "rejected"
     return response
+
+
+def materialize_executable_script(
+    input_payload: Dict[str, Any],
+    output_dir: Path,
+) -> tuple[Path, Dict[str, Any] | None]:
+    script_path = require_existing_path(input_payload, "scriptPath")
+    executable_plan_value = input_payload.get("executablePlanPath")
+    if executable_plan_value is None:
+        return script_path, None
+    executable_plan_path = require_existing_path(input_payload, "executablePlanPath")
+    try:
+        script = json.loads(script_path.read_text(encoding="utf-8"))
+        executable_plan = json.loads(executable_plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkerProtocolError(f"Executable production input is not valid JSON: {error}") from error
+    if not isinstance(script, dict) or not isinstance(script.get("scenes"), list):
+        raise WorkerProtocolError("Executable production script must contain scenes")
+    timings = validate_executable_plan(executable_plan)
+    scenes = script["scenes"]
+    scene_by_position = {
+        scene.get("position"): scene
+        for scene in scenes
+        if isinstance(scene, dict) and isinstance(scene.get("position"), int)
+    }
+    if len(scene_by_position) != len(scenes) or set(scene_by_position) != set(timings):
+        raise WorkerProtocolError("Executable production plan scenes do not match the script")
+    projected_scenes = []
+    for scene in scenes:
+        timing = timings[scene["position"]]
+        projected_scenes.append({
+            **scene,
+            "duration": timing["duration_frames"] / 30,
+            **timing,
+        })
+    projected = {
+        **script,
+        "duration_target": executable_plan["totalFrames"] / 30,
+        "duration_range": executable_plan["durationRange"],
+        "scenes": projected_scenes,
+    }
+    projected_path = output_dir / "executable_script.json"
+    projected_path.write_text(json.dumps(projected, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return projected_path, executable_plan
+
+
+def validate_executable_plan(value: Any) -> Dict[int, Dict[str, Any]]:
+    if not isinstance(value, dict) or value.get("version") != "video-factory/executable-plan-v1":
+        raise WorkerProtocolError("Unsupported executable production plan version")
+    if (
+        value.get("fps") != 30
+        or not isinstance(value.get("totalFrames"), int)
+        or isinstance(value.get("totalFrames"), bool)
+        or value["totalFrames"] <= 0
+    ):
+        raise WorkerProtocolError("Executable production plan has invalid frame metadata")
+    duration_range = value.get("durationRange")
+    if not isinstance(duration_range, dict):
+        raise WorkerProtocolError("Executable production plan has no duration range")
+    min_seconds = duration_range.get("minSeconds")
+    max_seconds = duration_range.get("maxSeconds")
+    if (
+        not isinstance(min_seconds, int)
+        or isinstance(min_seconds, bool)
+        or not isinstance(max_seconds, int)
+        or isinstance(max_seconds, bool)
+        or min_seconds < 20
+        or max_seconds > 180
+        or min_seconds > max_seconds
+        or value["totalFrames"] < min_seconds * 30
+        or value["totalFrames"] > max_seconds * 30
+    ):
+        raise WorkerProtocolError("Executable production plan has an invalid duration range")
+    cuts = value.get("cuts")
+    if not isinstance(cuts, list) or not cuts:
+        raise WorkerProtocolError("Executable production plan has no cuts")
+    timings: Dict[int, Dict[str, Any]] = {}
+    next_start = 0
+    for index, cut in enumerate(cuts):
+        if not isinstance(cut, dict):
+            raise WorkerProtocolError(f"Executable production cut {index + 1} is invalid")
+        scene_position = cut.get("scenePosition")
+        start_frame = cut.get("startFrame")
+        duration_frames = cut.get("frameCount")
+        source_in_frame = cut.get("sourceInFrame")
+        asset_key = cut.get("assetKey")
+        if (
+            not isinstance(scene_position, int)
+            or isinstance(scene_position, bool)
+            or scene_position != index + 1
+            or not isinstance(start_frame, int)
+            or isinstance(start_frame, bool)
+            or start_frame != next_start
+            or not isinstance(duration_frames, int)
+            or isinstance(duration_frames, bool)
+            or duration_frames <= 0
+            or not isinstance(source_in_frame, int)
+            or isinstance(source_in_frame, bool)
+            or source_in_frame < 0
+            or not isinstance(asset_key, str)
+            or not asset_key.strip()
+        ):
+            raise WorkerProtocolError(f"Executable production cut {index + 1} has invalid timing")
+        timings[scene_position] = {
+            "start_frame": start_frame,
+            "duration_frames": duration_frames,
+            "source_in_frame": source_in_frame,
+            "asset_key": asset_key,
+        }
+        next_start += duration_frames
+    if next_start != value["totalFrames"]:
+        raise WorkerProtocolError("Executable production cuts do not equal totalFrames")
+    return timings
+
+
+def project_executable_timings_into_asset_plan(plan_path: Path, executable_plan: Dict[str, Any]) -> None:
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    if not isinstance(plan, dict) or not isinstance(plan.get("scene_assets"), list):
+        raise WorkerProtocolError("Asset plan must contain scene_assets")
+    timings = validate_executable_plan(executable_plan)
+    positions = set()
+    for index, scene_asset in enumerate(plan["scene_assets"]):
+        if not isinstance(scene_asset, dict) or not isinstance(scene_asset.get("scene_position"), int):
+            raise WorkerProtocolError(f"Asset plan scene {index + 1} has no valid scene position")
+        position = scene_asset["scene_position"]
+        timing = timings.get(position)
+        if timing is None or position in positions:
+            raise WorkerProtocolError("Asset plan scenes do not match executable production cuts")
+        positions.add(position)
+        scene_asset.update({
+            **timing,
+            "duration": timing["duration_frames"] / 30,
+        })
+    if positions != set(timings):
+        raise WorkerProtocolError("Asset plan scenes do not match executable production cuts")
+    plan["duration_target"] = executable_plan["totalFrames"] / 30
+    plan["duration_range"] = executable_plan["durationRange"]
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def assert_asset_plan_matches_executable_plan(
+    asset_plan: Any,
+    executable_plan: Dict[str, Any],
+) -> None:
+    if not isinstance(asset_plan, dict) or not isinstance(asset_plan.get("scene_assets"), list):
+        raise WorkerProtocolError("Asset plan must contain scene_assets")
+    timings = validate_executable_plan(executable_plan)
+    seen_positions = set()
+    for index, scene_asset in enumerate(asset_plan["scene_assets"]):
+        if not isinstance(scene_asset, dict):
+            raise WorkerProtocolError(f"Asset plan scene {index + 1} does not match executable production cuts")
+        position = scene_asset.get("scene_position")
+        if (not isinstance(position, int) or isinstance(position, bool)
+                or position in seen_positions or position not in timings):
+            raise WorkerProtocolError("Asset plan scenes do not match executable production cuts")
+        seen_positions.add(position)
+        timing = timings[position]
+        if any(scene_asset.get(field) != timing[field] for field in (
+            "duration_frames", "source_in_frame", "asset_key",
+        )):
+            raise WorkerProtocolError(
+                f"Asset plan scene {position} does not match executable production cuts"
+            )
+    if seen_positions != set(timings):
+        raise WorkerProtocolError("Asset plan scenes do not match executable production cuts")
 
 
 def require_existing_path(input_payload: Dict[str, Any], field: str) -> Path:

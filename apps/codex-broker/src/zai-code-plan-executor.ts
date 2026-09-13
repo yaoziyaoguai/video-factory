@@ -7,6 +7,8 @@ import {
   ZAI_TASK_KINDS,
   buildTaskPrompt,
   codexExecutorProfileFor,
+  modelIdForTask,
+  unreferencedCreativeTreatmentSourceId,
   type BrokerTaskExecutor,
   type CodexExecutionOptions,
   type CodexExecutionResult,
@@ -67,6 +69,10 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
         kind,
         IMAGE_TASK_KINDS.has(kind) ? this.visualModelId : this.textModelId,
       ])),
+      taskModelRoutes: {
+        "asset-rank": { withoutImages: this.textModelId, withImages: this.visualModelId },
+        "role-audit": { withoutImages: this.textModelId, withImages: this.visualModelId },
+      },
     };
     this.apiKey = environment.ZAI_BIGMODEL_API_KEY?.trim() ?? "";
     if (!this.apiKey) throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
@@ -86,7 +92,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
   ): Promise<CodexExecutionResult> {
     const platform = task.kind === "publish-copy" ? task.payload.platform : undefined;
     const taskPrompt = taskPromptFor(task.kind, platform);
-    const contractDescriptor = taskContractDescriptorFor(task.kind, platform);
+    const contractDescriptor = taskContractDescriptorFor(task.kind);
     const prompt = [
       buildTaskPrompt(task, taskPrompt),
       "",
@@ -99,7 +105,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     if (options.signal?.aborted) abort();
     const timeout = setTimeout(() => controller.abort(new Error("timeout")), this.timeoutMs);
     const images = taskImages(task);
-    const modelId = images.length > 0 ? this.visualModelId : this.textModelId;
+    const modelId = modelIdForTask(this.identity, task);
     const reasoningEffort = zaiReasoningEffort(modelId, this.effort);
     const requestStartedAt = this.now();
     let responseHeadersReceived = false;
@@ -264,6 +270,23 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
           },
         );
       }
+      if (task.kind === "creative-treatment") {
+        const evidence = (parsed as {
+          evidenceRequirements: Array<{ suppliedSourceIds: string[] }>;
+        }).evidenceRequirements;
+        if (unreferencedCreativeTreatmentSourceId(evidence, task.payload.suppliedSources) !== undefined) {
+          throw new CodexExecutorError(
+            "ZAI output does not satisfy creative-treatment semantics: evidenceRequirements.suppliedSourceIds must reference payload.suppliedSources source ids.",
+            false,
+            {
+              details: {
+                ...invalidOutputDetails(this.identity.providerId, modelId, providerWaitMs, "task_semantics"),
+                ...responseDiagnostics,
+              },
+            },
+          );
+        }
+      }
       return {
         output,
         trace: {
@@ -341,7 +364,56 @@ function contractRepairPreservesSemantics(kind: BrokerTaskKind, before: unknown,
   if (kind === "role-audit") {
     return JSON.stringify(protectedRoleAuditContent(before)) === JSON.stringify(protectedRoleAuditContent(after));
   }
+  if (kind === "creative-treatment") {
+    return creativeTreatmentRepairPreservesSemantics(before, after);
+  }
   return true;
+}
+
+// creative-treatment 的结构修复只允许删除 strict schema 不支持的额外字段、补齐第一次结果缺失的合同字段；
+// 第一次结果中已经存在的合同字段值（含嵌套对象与数组条目）逐字冻结，防止借补结构改写构思内容。
+const CREATIVE_TREATMENT_REPAIRED_NESTED_KEYS: Record<string, readonly string[]> = {
+  hook: ["narrationIntent", "visualIntent"],
+  progression: ["beatId", "purpose", "viewerGain"],
+  evidenceRequirements: ["beatId", "claim", "requirement", "suppliedSourceIds"],
+  feasibilityQuestions: ["beatId", "question"],
+};
+
+function creativeTreatmentRepairPreservesSemantics(before: unknown, after: unknown): boolean {
+  if (!isRecord(before) || !isRecord(after)) return true;
+  for (const [field, beforeValue] of Object.entries(before)) {
+    // 只认规则表的自有属性：直接索引会把 "constructor"、"toString"、"__proto__" 这类
+    // 额外字段名解析成 Object.prototype 的继承属性，把可删除的结构外字段误判为合同内容，
+    // "__proto__" 还会拿到不可迭代的原型对象导致本地比较异常。
+    if (Object.hasOwn(CREATIVE_TREATMENT_REPAIRED_NESTED_KEYS, field)) {
+      const nestedKeys = CREATIVE_TREATMENT_REPAIRED_NESTED_KEYS[field]!;
+      if (!treatmentNestedValuePreserved(beforeValue, after[field], nestedKeys)) return false;
+      continue;
+    }
+    if (field === "version" || field === "viewerPromise" || field === "payoff"
+      || field === "visualPrinciples" || field === "soundPrinciples") {
+      if (JSON.stringify(beforeValue) !== JSON.stringify(after[field])) return false;
+    }
+    // 其余字段是 strict schema 不支持的额外内容，修复时允许删除，不参与比较。
+  }
+  return true;
+}
+
+function treatmentNestedValuePreserved(before: unknown, after: unknown, keys: readonly string[]): boolean {
+  if (before === undefined) return true;
+  if (Array.isArray(before)) {
+    if (!Array.isArray(after) || after.length !== before.length) return false;
+    return before.every((entry, index) => treatmentNestedValuePreserved(entry, after[index], keys));
+  }
+  if (isRecord(before)) {
+    if (!isRecord(after)) return false;
+    for (const key of keys) {
+      if (before[key] === undefined) continue;
+      if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) return false;
+    }
+    return true;
+  }
+  return JSON.stringify(before) === JSON.stringify(after);
 }
 
 function protectedVisualReviewContent(value: unknown): unknown {

@@ -8,6 +8,8 @@ import {
 } from "./model-fallback.js";
 import type { AgentLoopTrace } from "./codex-chat.js";
 import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
+import type { CreativeTreatment } from "./creative-treatment.js";
+import type { CreativeTreatmentAgent, CreativeTreatmentAgentInput } from "./codex-creative-treatment.js";
 import type { VisualDirectorAgent, VisualDirectorAgentInput } from "./visual-director.js";
 
 interface RoleCandidate<TAgent> {
@@ -28,6 +30,17 @@ export interface FallbackScreenwriterAgentOptions {
 
 export interface FallbackVisualDirectorAgentOptions {
   candidates: Array<RoleCandidate<VisualDirectorAgent>>;
+  /**
+   * 兼容保留的旧字段名：它只控制“新阶段准入窗口”，不是整个角色的硬 wall-clock 总耗时。
+   * 默认 45 分钟仅在启动新候选/新 agent-loop stage 之前被检查；已交给 durable broker 的请求仍按
+   * 客户端单次超时继续等待，不会被 Abort 强杀，也不会因此切换 Provider（at-most-once 优先）。
+   */
+  totalTimeoutMs?: number;
+  now?: () => number;
+}
+
+export interface FallbackCreativeTreatmentAgentOptions {
+  candidates: Array<RoleCandidate<CreativeTreatmentAgent>>;
   /**
    * 兼容保留的旧字段名：它只控制“新阶段准入窗口”，不是整个角色的硬 wall-clock 总耗时。
    * 默认 45 分钟仅在启动新候选/新 agent-loop stage 之前被检查；已交给 durable broker 的请求仍按
@@ -90,6 +103,53 @@ export class FallbackScreenwriterAgent implements ScreenwriterAgent {
         ? agent.draftDetailed(candidateInput)
         : agent.draft(candidateInput).then((output) => ({ output })),
     );
+  }
+}
+
+// 前期构思的模型候选路由：与编剧/导演同一 runCandidates 合同——selectedModelId 只改变候选顺序，
+// Provider 故障按既有分类切换，schema/业务/质量失败不切换；不新造第二套模型路由器。
+export class FallbackCreativeTreatmentAgent implements CreativeTreatmentAgent {
+  readonly id: string;
+  readonly modelId: string;
+  private readonly stageAdmissionWindowMs: number;
+  private readonly now: () => number;
+  private readonly providerIdByAgent: Map<CreativeTreatmentAgent, string>;
+
+  constructor(private readonly options: FallbackCreativeTreatmentAgentOptions) {
+    const first = validateCandidates(options.candidates, "creative treatment");
+    this.id = first.agent.id;
+    this.modelId = requiredModelId(first.agent);
+    this.stageAdmissionWindowMs = positiveStageAdmissionWindow(options.totalTimeoutMs);
+    this.now = options.now ?? Date.now;
+    this.providerIdByAgent = new Map(options.candidates.map((candidate) => [candidate.agent, candidate.providerId]));
+  }
+
+  async treat(input: CreativeTreatmentAgentInput): Promise<CreativeTreatment> {
+    return (await this.treatDetailed(input)).output as CreativeTreatment;
+  }
+
+  async treatDetailed(input: CreativeTreatmentAgentInput): Promise<CodexTaskExecution<CreativeTreatment>> {
+    const boundedInput = withStageAdmissionDeadline(input, this.stageAdmissionWindowMs, this.now);
+    return await runCandidates(
+      this.options.candidates,
+      input.selectedModelId,
+      boundedInput,
+      (agent, candidateInput) => agent.treatDetailed
+        ? agent.treatDetailed(candidateInput)
+        : agent.treat(candidateInput).then((output: CreativeTreatment) => ({
+          output,
+          // 本地 treat() 适配没有 broker 侧 prompt 合同可引用；trace 只记录可核验的事实：
+          // 该候选的 broker provider 与 model 确实执行了本次构思任务（与失败尝试记录的
+          // providerId 同一含义），不伪造 prompt 版本。
+          trace: {
+            taskKind: "creative-treatment" as const,
+            promptVersion: "local-treat-adapter",
+            prompt: "",
+            providerId: this.providerIdByAgent.get(agent) ?? agent.id,
+            modelId: requiredModelId(agent),
+          },
+        })),
+    ) as CodexTaskExecution<CreativeTreatment>;
   }
 }
 

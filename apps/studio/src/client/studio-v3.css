@@ -681,11 +681,12 @@ body { background: var(--canvas); }
 .studio-v3 .filtered-empty { min-height: 180px; }
 
 .studio-v3 .custom-entry { display: grid; min-height: 250px; grid-template-columns: minmax(260px, .8fr) minmax(480px, 1.2fr); align-items: center; gap: 34px; padding: 34px; background: #f8f9f9; }
-.studio-v3 .custom-entry h2 { margin: 5px 0 0; color: #f4f4ef; font-family: "Manrope Variable", "Noto Sans SC Variable", "PingFang SC", sans-serif; font-size: 28px; }
-.studio-v3 .custom-entry > div:first-child > p:last-child { margin: 10px 0 0; color: #abb2ab; font-size: 12px; line-height: 1.75; }
+.studio-v3 .custom-entry h2 { margin: 5px 0 0; color: var(--ink); font-family: "Manrope Variable", "Noto Sans SC Variable", "PingFang SC", sans-serif; font-size: 28px; }
+.studio-v3 .custom-entry > div:first-child > p:last-child { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.75; }
 .studio-v3 .custom-entry-actions { display: grid; gap: 8px; }
 .studio-v3 .custom-entry-action { display: grid; min-width: 0; min-height: 78px; grid-template-columns: 36px minmax(0, 1fr) 20px; align-items: center; gap: 12px; padding: 13px 15px; color: var(--ink); text-align: left; background: #ffffff; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
-.studio-v3 .custom-entry-action:hover { background: #353c36; border-color: #687168; }
+.studio-v3 .custom-entry-action:hover { color: #ffffff; background: #353c36; border-color: #687168; }
+.studio-v3 .custom-entry-action:hover small { color: #e4e8e4; }
 .studio-v3 .custom-entry-action > svg:first-child { color: #ff9b84; }
 .studio-v3 .custom-entry-action > span { display: grid; gap: 3px; }
 .studio-v3 .custom-entry-action strong { font-size: 13px; }
@@ -1158,3 +1159,29 @@ body { background: var(--canvas); }
 .studio-v3 .source-supplement-hint b { color: var(--ink); }
 .studio-v3 .source-supplement-error { margin: 0; color: var(--danger, #a13026); font-size: 12px; font-weight: 600; }
 .studio-v3 .opportunity-supplement-sources { margin-top: 8px; }
+
+/* joint-v1 创作规划阶段面板：真实状态、当前模型与阶段级操作（B4 最小接线）。 */
+.studio-v3 .node-planning-stages { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.studio-v3 .node-planning-stages > header small { display: block; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.studio-v3 .planning-stage-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.studio-v3 .planning-stage { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.studio-v3 .planning-stage-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.studio-v3 .planning-stage-name { font-weight: 700; font-size: 13px; }
+.studio-v3 .planning-stage-status { font-size: 11px; font-weight: 650; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.studio-v3 .planning-stage-status.status-completed { color: #1f6b3f; border-color: #9fd4b2; }
+.studio-v3 .planning-stage-status.status-running { color: #7a5a12; border-color: #e5c875; }
+.studio-v3 .planning-stage-status.status-failed { color: var(--danger, #a13026); border-color: #e3b3ad; }
+.studio-v3 .planning-stage-model { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+.studio-v3 .planning-stage-issue { display: flex; gap: 6px; margin: 0; color: var(--danger, #a13026); font-size: 12px; line-height: 1.6; }
+.studio-v3 .planning-stage-model-select { display: grid; gap: 4px; max-width: 360px; }
+.studio-v3 .planning-stage-model-select small { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+
+/* C2：制作范围授权确认面板。 */
+.studio-v3 .spend-gate-actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.studio-v3 .spend-scope-maximum { display: grid; gap: 4px; max-width: 300px; }
+.studio-v3 .spend-scope-maximum input { min-height: 38px; }
+.studio-v3 .spend-scope-maximum small { color: var(--muted); font-size: 11px; line-height: 1.5; }
+
+/* C2：新建制作预算意向。 */
+.studio-v3 .budget-intention-field { display: grid; gap: 4px; max-width: 360px; margin-top: 10px; }
+.studio-v3 .budget-intention-field small { color: var(--muted); font-size: 11px; line-height: 1.5; }

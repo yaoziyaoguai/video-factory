@@ -33,6 +33,8 @@ export function TodayPage() {
   const requestedMode = searchParams.get("mode");
   const entryMode = requestedMode === "series" ? "series" : requestedMode === "manual" || requestedMode === "custom" ? "custom" : "trend";
   const initialCandidateId = searchParams.get("candidate") ?? undefined;
+  // 深链（全局搜索、保存机会后的下一步）用 opportunity 参数直接选中对应机会。
+  const initialOpportunityId = searchParams.get("opportunity") ?? undefined;
   const [opportunities, setOpportunities] = useState<StudioOpportunity[]>([]);
   const [providers, setProviders] = useState<StudioProvider[]>([]);
   const [runs, setRuns] = useState<StudioRunSummary[]>([]);
@@ -41,7 +43,7 @@ export function TodayPage() {
   const [seriesInbox, setSeriesInbox] = useState<StudioCandidateInbox>();
   const [series, setSeries] = useState<StudioSeries[]>([]);
   const [activeSeriesId, setActiveSeriesId] = useState<string>();
-  const [selectedId, setSelectedId] = useState<string>();
+  const [selectedId, setSelectedId] = useState<string | undefined>(initialOpportunityId);
   const [opportunityDialogOpen, setOpportunityDialogOpen] = useState(false);
   const [opportunityDialogMode, setOpportunityDialogMode] = useState<"manual" | "json">("manual");
   const [seriesDialogOpen, setSeriesDialogOpen] = useState(false);
@@ -61,6 +63,12 @@ export function TodayPage() {
   const [candidateActionError, setCandidateActionError] = useState<string>();
   const [adoptingCandidateId, setAdoptingCandidateId] = useState<string>();
   const [nextStepNotice, setNextStepNotice] = useState<string>();
+  const [nextStepNoticeAction, setNextStepNoticeAction] = useState<{ to: string; label: string }>();
+  // 提示统一入口：不带跳转动作的提示会清掉旧链接，避免“去查看”指向过期目标。
+  const announceNotice = useCallback((text: string) => {
+    setNextStepNoticeAction(undefined);
+    setNextStepNotice(text);
+  }, []);
   const [sourceSupplementTarget, setSourceSupplementTarget] = useState<
     { kind: "candidate"; candidate: StudioCandidateInboxItem } | { kind: "opportunity"; opportunity: StudioOpportunity }
   >();
@@ -90,27 +98,27 @@ export function TodayPage() {
           setTrendRefreshFinishedAt(status.finishedAt ?? new Date().toISOString());
           const collectedCount = status.candidateCount ?? refreshedInbox.items.length;
           const decidedCount = Math.max(0, collectedCount - refreshedInbox.items.length);
-          setNextStepNotice(decidedCount > 0
+          announceNotice(decidedCount > 0
             ? `本次采集 ${collectedCount} 条，其中 ${decidedCount} 条已进入制作区；当前有 ${refreshedInbox.items.length} 条待判断。`
             : `热点候选已更新完成，当前有 ${refreshedInbox.items.length} 条待判断。`);
           setTrendRefreshPending(false);
           return;
         }
         if (status.state === "failed") {
-          setNextStepNotice(status.error ?? "热点更新失败，请稍后手动重试。");
+          announceNotice(status.error ?? "热点更新失败，请稍后手动重试。");
           setTrendRefreshPending(false);
           return;
         }
       } catch {
         nextFailures = consecutiveFailures + 1;
         if (nextFailures >= 3) {
-          setNextStepNotice("暂时无法确认热点更新状态，当前缓存仍可使用；请稍后再试。");
+          announceNotice("暂时无法确认热点更新状态，当前缓存仍可使用；请稍后再试。");
           setTrendRefreshPending(false);
           return;
         }
       }
       if (attempt >= 39) {
-        setNextStepNotice("热点更新仍未完成，当前缓存可以继续使用；稍后可再次查看或手动刷新。");
+        announceNotice("热点更新仍未完成，当前缓存可以继续使用；稍后可再次查看或手动刷新。");
         setTrendRefreshPending(false);
         return;
       }
@@ -133,7 +141,7 @@ export function TodayPage() {
         setTrendRefreshPending(true);
         try {
           const receipt = await studioApi.refreshTrendCandidates();
-          setNextStepNotice(receipt.status === "already_running"
+          announceNotice(receipt.status === "already_running"
             ? "热点后台更新已在进行，当前缓存仍可继续选择。"
             : "热点后台更新已开始，当前缓存仍可继续选择。");
           scheduleTrendRefreshPoll(receipt.refreshId);
@@ -218,6 +226,9 @@ export function TodayPage() {
     if (entryMode === "series") void loadSeriesWorkspace();
   }, [entryMode, load, loadSeriesWorkspace, loadTrendInbox]);
   const inbox = entryMode === "trend" ? trendInbox : entryMode === "series" ? seriesInbox : undefined;
+  // 能力 ready 与最近一次真实生成分开投影；来源只取服务端本轮 receipt，
+  // 空候选或混有旧缓存时也不再从候选集合猜测模型是否成功。
+  const recentTopicGeneration = trendInbox?.topicGeneration?.source;
   const trendMeta = useMemo(() => ({ ...buildTrendMeta(trendInbox), ...(trendRefreshFinishedAt ? { refreshedAt: trendRefreshFinishedAt } : {}) }), [trendInbox, trendRefreshFinishedAt]);
   const initialSeriesId = initialCandidateId
     ? seriesInbox?.items.find((item) => item.id === initialCandidateId)?.seriesId
@@ -316,16 +327,26 @@ export function TodayPage() {
     : !providersError && providers.some((provider) => provider.capability === "series.plan" && provider.available && provider.kind !== "test");
 
   useEffect(() => {
+    // 机会仍在加载时不要重置选中项：深链（?opportunity=）带入的初始 id 必须等到列表就绪后再校验。
+    if (opportunitiesLoading) return;
     setSelectedId((current) => current && displayedOpportunities.some((item) => item.id === current)
       ? current
       : displayedOpportunities[0]?.id);
-  }, [displayedOpportunities]);
+  }, [displayedOpportunities, opportunitiesLoading]);
 
   async function createOpportunity(input: StudioOpportunityInput) {
     const created = await studioApi.createOpportunity({ ...input, origin: input.origin ?? "manual" });
     setOpportunities((current) => [created, ...current]);
     setSelectedId(created.id);
     setOpportunityDialogOpen(false);
+    // 保存成功必须可见、可继续：自定义机会进入「从想法开始」的待制作区，
+    // 跨页状态以服务端机会状态为准，这里只负责告诉用户它去了哪里、下一步做什么。
+    if (entryMode === "custom") {
+      announceNotice(`已保存《${created.title}》。它已进入下方待制作区，可以直接开始制作。`);
+      return;
+    }
+    announceNotice(`已保存《${created.title}》。它已进入「从想法开始」的待制作区，当前入口继续展示热点候选。`);
+    setNextStepNoticeAction({ to: `/topics?mode=custom&opportunity=${encodeURIComponent(created.id)}`, label: "去查看并制作" });
   }
 
   async function adoptCandidate(candidate: StudioCandidateInboxItem, verificationConfirmed = false) {
@@ -345,7 +366,7 @@ export function TodayPage() {
       } : current;
       if (candidate.origin === "trend") setTrendInbox(updateInbox);
       else setSeriesInbox(updateInbox);
-      setNextStepNotice("已采用。下一步：检查证据与镜头计划，再开始制作。");
+      announceNotice("已采用。下一步：检查证据与镜头计划，再开始制作。");
       window.requestAnimationFrame(() => {
         adoptedSectionRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
         adoptedSectionRef.current?.focus({ preventScroll: true });
@@ -371,7 +392,7 @@ export function TodayPage() {
       const updated = await studioApi.updateSeriesEpisodePlan(seriesId, episodeNumber, input);
       setSeries((current) => current.map((item) => item.id === updated.id ? updated : item));
       await loadSeriesCandidates();
-      setNextStepNotice(`第 ${episodeNumber} 集路线图已保存为人工版本，后续角色会基于这个版本重新审计。`);
+      announceNotice(`第 ${episodeNumber} 集路线图已保存为人工版本，后续角色会基于这个版本重新审计。`);
     } catch (caught) {
       const message = `路线图保存失败：${errorMessage(caught)}`;
       setCandidateActionError(message);
@@ -383,7 +404,7 @@ export function TodayPage() {
     const updated = await studioApi.linkLegacySeriesRun(seriesId, episodeNumber, runId);
     setSeries((current) => current.map((item) => item.id === updated.id ? updated : item));
     await loadSeriesWorkspace();
-    setNextStepNotice(`第 ${episodeNumber} 集已关联历史成片，后续单集将按最新已定版内容解锁。`);
+    announceNotice(`第 ${episodeNumber} 集已关联历史成片，后续单集将按最新已定版内容解锁。`);
   }
 
   async function startProduction(input: StudioProductionInput) {
@@ -433,7 +454,7 @@ export function TodayPage() {
         setOpportunities(await studioApi.opportunities(origin));
       }
       setSourceSupplementTarget(undefined);
-      setNextStepNotice("来源已保存；开工门槛与制作建议已按最新来源重算。");
+      announceNotice("来源已保存；开工门槛与制作建议已按最新来源重算。");
     } catch (caught) {
       setSourceSupplementError(`来源保存失败：${errorMessage(caught)}`);
       throw caught;
@@ -469,7 +490,7 @@ export function TodayPage() {
       ) : null}
       <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} trendRefreshPending={trendRefreshPending} sourceBlockedOpportunities={sourceBlockedOpportunities} onFocusSourceBlocked={focusSourceBlockedOpportunity} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
       {candidateActionError ? <div className="inline-error topic-action-error" role="alert"><AlertCircle aria-hidden="true" size={18} />{candidateActionError}</div> : null}
-      {nextStepNotice ? <div className="next-step-notice" role="status"><CheckCircle2 aria-hidden="true" size={18} /><strong>{nextStepNotice}</strong><button type="button" onClick={() => setNextStepNotice(undefined)} aria-label="关闭下一步提示">知道了</button></div> : null}
+      {nextStepNotice ? <div className="next-step-notice" role="status"><CheckCircle2 aria-hidden="true" size={18} /><strong>{nextStepNotice}</strong>{nextStepNoticeAction ? <Link className="button button-secondary" to={nextStepNoticeAction.to}>{nextStepNoticeAction.label}</Link> : null}<button type="button" onClick={() => { setNextStepNotice(undefined); setNextStepNoticeAction(undefined); }} aria-label="关闭下一步提示">知道了</button></div> : null}
 
       <section ref={adoptedSectionRef} tabIndex={-1} className="adopted-opportunities" aria-labelledby="adopted-opportunities-title">
         <header>
@@ -494,13 +515,13 @@ export function TodayPage() {
           entryMode === "series" ? (
             <div className="series-production-workspace">
               <OpportunityFocus key={selected.id} opportunity={selected} />
-              <DirectorPanel opportunity={selected} providers={providers} {...(providersLoading || providersError ? { providerError: providersLoading ? "正在读取能力状态..." : `能力状态读取失败：${providersError}` } : {})} onProduce={openProductionDialog} />
+              <DirectorPanel opportunity={selected} providers={providers} {...(recentTopicGeneration ? { recentTopicGeneration } : {})} {...(providersLoading || providersError ? { providerError: providersLoading ? "正在读取能力状态..." : `能力状态读取失败：${providersError}` } : {})} onProduce={openProductionDialog} />
             </div>
           ) : (
             <div className="director-workspace">
               <OpportunityRail opportunities={displayedOpportunities} selectedId={selected.id} onSelect={setSelectedId} onCreate={() => openOpportunityDialog("manual")} />
               <OpportunityFocus key={selected.id} opportunity={selected} {...(selected.origin === "trend" && selected.verification?.status === "blocked" ? { onSupplementSources: () => setSourceSupplementTarget({ kind: "opportunity", opportunity: selected }) } : {})} />
-              <DirectorPanel opportunity={selected} providers={providers} {...(providersLoading || providersError ? { providerError: providersLoading ? "正在读取能力状态..." : `能力状态读取失败：${providersError}` } : {})} onProduce={openProductionDialog} />
+              <DirectorPanel opportunity={selected} providers={providers} {...(recentTopicGeneration ? { recentTopicGeneration } : {})} {...(providersLoading || providersError ? { providerError: providersLoading ? "正在读取能力状态..." : `能力状态读取失败：${providersError}` } : {})} onProduce={openProductionDialog} />
             </div>
           )
         ) : <div className="awaiting-adoption"><RadioTower aria-hidden="true" size={22} /><span>{entryMode === "series" ? "当前没有待制作单集；从路线图采用下一集，或到制作记录继续已有工作。" : "当前没有待制作机会；从上方采用新候选，已开始制作的内容请到制作记录继续。"}</span><Link className="button button-secondary" to="/projects">查看制作记录</Link></div>}

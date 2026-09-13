@@ -2,30 +2,44 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { lock } from "proper-lockfile";
 import { NodeVersionConflictError } from "@video-factory/workflow-core";
 import type { ArtifactDraft, HumanDecisionDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
 import type { ProductionTemplateSnapshot } from "@video-factory/template-core";
 import {
   canRetryRejectedReviewNode,
+  canonicalProductionAssetIntentDigest,
+  canonicalQualityContractDigest,
+  CodexBridgeClient,
+  CodexBridgeError,
+  CREATIVE_TREATMENT_PROVIDER_ID,
   effectiveProductionBrief,
   PaidOperationManualReconciliationError,
   parseBrief,
   parsePersistedBrief,
   productionWorkflowVersion,
   reworkSceneDependencyClosure,
+  summarizeReworkImpact,
   RunLockedError,
   StaleRunRevisionError,
   type DispatchedProductionRun,
+  type CreativePlanningStageInspection,
+  type CodexPreparedOperation,
   type ProductionBrief,
   type ProductionPaidNodeReconciliationDraft,
   type ProductionPaidNodeSummary,
   type ProductionRunListener,
   type ProductionSceneRevisionDraft,
   type ProductionSpendRejectionDraft,
+  type ProductionVoiceTimingRevisionDraft,
   type ProductionVisualReinspectionDraft,
+  type ProductionAuthorizationScope,
 } from "@video-factory/production-pipeline";
 import {
   StudioInputError,
+  STUDIO_PLANNING_EDITABLE_STAGES,
+  assertStudioExecutableProductionInput,
+  defaultStudioDurationRange,
   type StartRunResponse,
   type StudioArtifact,
   type StudioArtifactResource,
@@ -36,6 +50,11 @@ import {
   type StudioNode,
   type StudioNodeInputOverrideInput,
   type StudioNodeExecutionConfigurationInput,
+  type StudioPlanningEditableStage,
+  type StudioProductionAmendmentInput,
+  type StudioProductionAuthorizationInput,
+  type StudioProductionQuote,
+  type StudioProductionQuoteInput,
   type StudioNodeOverrideInput,
   type StudioPaidNodeSummary,
   type StudioPaidReconciliationInput,
@@ -49,6 +68,7 @@ import {
   type StudioSpendRejectionInput,
 } from "../shared/api.js";
 import { modelSupportsCapability } from "../shared/model-compatibility.js";
+import { visualSourceCompatibilityIssue } from "../shared/visual-source-compatibility.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 import type { RejectedVisualResource } from "./resource-governance-studio.js";
 import { validateNodeOverrideOutput } from "./node-output-validator.js";
@@ -65,10 +85,14 @@ export interface StudioPipelinePort {
   dispatch(input: unknown, listener?: ProductionRunListener): Promise<DispatchedProductionRun>;
   decide(runId: string, decision: {
     interventionId: string;
-    action: "approve" | "reject";
+    action: "approve" | "request_changes" | "reject";
     actor: string;
     note?: string;
   }): Promise<WorkflowRun<ProductionBrief>>;
+  requestVoiceTimingRevision(
+    runId: string,
+    draft: ProductionVoiceTimingRevisionDraft,
+  ): Promise<WorkflowRun<ProductionBrief>>;
   dispatchDecision?(
     runId: string,
     decision: HumanDecisionDraft,
@@ -91,6 +115,7 @@ export interface StudioPipelinePort {
     nodeId: string,
     brief: ProductionBrief,
     actor: string,
+    expectedRunRevision?: number,
   ): Promise<WorkflowRun<ProductionBrief>>;
   authorizeSpend(runId: string, authorization: SpendAuthorizationDraft): Promise<WorkflowRun<ProductionBrief>>;
   rejectSpend(runId: string, rejection: ProductionSpendRejectionDraft): Promise<WorkflowRun<ProductionBrief>>;
@@ -105,21 +130,35 @@ export interface StudioPipelinePort {
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun>;
   requestPause(runId: string): Promise<void>;
+  clearPauseRequest?(runId: string): Promise<void>;
   pauseRequested(runId: string): Promise<boolean>;
   resumePaused(runId: string): Promise<WorkflowRun<ProductionBrief>>;
   dispatchResumePaused?(runId: string, listener?: ProductionRunListener): Promise<DispatchedProductionRun>;
   resumeStale(runId: string): Promise<WorkflowRun<ProductionBrief>>;
   dispatchResumeStale?(runId: string, listener?: ProductionRunListener): Promise<DispatchedProductionRun>;
-  retryFailedNode(runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>>;
+  retryFailedNode(
+    runId: string,
+    nodeId: string,
+    options?: { recoverOriginalTextTask?: boolean; resumeCompletedTextTask?: boolean; resumeCompletedTextTaskRequestId?: string },
+  ): Promise<WorkflowRun<ProductionBrief>>;
   inspectPaidNode(runId: string, nodeId: string): Promise<ProductionPaidNodeSummary>;
+  /** joint-v1 规划阶段只读检视：pipeline 拥有 checkpoint/commit 的领域读取，Studio 只映射 DTO。 */
+  inspectCreativePlanningStages?(runId: string): Promise<CreativePlanningStageInspection[] | undefined>;
+  /** C1/C2：制作范围授权的宿主接受与读取。 */
+  acceptProductionAuthorization?(runId: string, scope: unknown): Promise<WorkflowRun<ProductionBrief>>;
+  readProductionAuthorization?(runId: string): Promise<ProductionAuthorizationScope | undefined>;
+  /** C2/CG-01：授权已提交但续链未完成时的幂等续链恢复。 */
+  resumeCoveredSpendApproval?(runId: string): Promise<WorkflowRun<ProductionBrief>>;
   reconcilePaidNode(
     runId: string,
     draft: ProductionPaidNodeReconciliationDraft,
+    options?: { settleOnly?: boolean },
   ): Promise<WorkflowRun<ProductionBrief>>;
   dispatchRetryFailedNode?(
     runId: string,
     nodeId: string,
     listener?: ProductionRunListener,
+    options?: { recoverOriginalTextTask?: boolean; resumeCompletedTextTask?: boolean; resumeCompletedTextTaskRequestId?: string },
   ): Promise<DispatchedProductionRun>;
   withRunMaintenanceLease<T>(runIds: string[], action: () => Promise<T>): Promise<T>;
 }
@@ -176,6 +215,7 @@ export class ProductionStudio {
   private readonly listeners = new Map<string, Set<(run: StudioRunDetail) => void>>();
   private readonly completions = new Set<Promise<void>>();
   private readonly startsInFlight = new Map<string, { digest: string; operation: Promise<StartRunResponse> }>();
+  private readonly textTaskRetrievals = new Map<string, Promise<StudioRunDetail>>();
   private historicalNodeDurations: Record<string, number[]> = {};
 
   constructor(private readonly options: ProductionStudioOptions) {}
@@ -198,11 +238,20 @@ export class ProductionStudio {
         this.options.pipeline.pauseRequested(runId),
       ]);
       this.historicalNodeDurations = collectNodeDurationHistory(historyRuns);
+      const productionPlanDigest = await currentExecutablePlanDigest(run, this.options.workspaceRoot);
       const detail = {
         ...withArchiveState(this.toDetail(run), archived[run.id]),
         ...(pauseRequested ? { pauseRequested: true } : {}),
+        ...(productionPlanDigest ? { productionPlanDigest } : {}),
       };
-      return await withAgentLoopProgress(detail, this.options.workspaceRoot);
+      return await withTaskRecovery(
+        await withPlanningStages(
+          await withAgentLoopProgress(detail, this.options.workspaceRoot, run.nodeRuns),
+          this.options.pipeline,
+        ),
+        this.options.workspaceRoot,
+        run.nodeRuns,
+      );
     } catch (error) {
       if (hasCode(error, "ENOENT")) return undefined;
       throw error;
@@ -235,8 +284,9 @@ export class ProductionStudio {
         ? `${rejectedResources.length} 项入片素材未通过授权审核，必须替换后重新核验。`
         : failedNodeReason ?? detail.failure?.summary);
     const findings = [...reworkFindings(detail), ...resourceReworkFindings(run.id, rejectedResources)];
-    const previousScript = await this.readReworkDocument(run, "script", "script");
-    const previousDirectorPlan = await this.readReworkDocument(run, "visual-direction", "storyboard");
+    const planningNodeIds = this.reworkPlanningNodeIds(run);
+    const previousScript = await this.readReworkDocument(run, planningNodeIds.script, "script");
+    const previousDirectorPlan = await this.readReworkDocument(run, planningNodeIds.director, "storyboard");
     const unmaterializedAssetScenePositions = await this.unmaterializedAssetScenePositions(
       run,
       previousScript,
@@ -256,6 +306,17 @@ export class ProductionStudio {
       previousDirectorPlan,
       ...(manualRejectionReason ? { manualRejectionReason } : {}),
     });
+    const draftScope = {
+      findings,
+      unmaterializedAssetScenePositions,
+      previousScript,
+      previousDirectorPlan,
+      ...(manualRejectionReason ? { manualRejectionReason } : {}),
+      recommended: affectedScenePositions,
+    };
+    // B5-R1：无法定位的拒绝说明进入 needs_scope——草稿打开等待用户选择范围，
+    // 不默认全片，也不以空范围静默开跑。
+    const needsScope = reworkScopeUnresolved(draftScope);
     // 历史运行可能把热点来源误存成目标平台；返工页仍需打开，让创作者明确重选。
     const brief = effectiveProductionBrief(run);
     const inheritedReferenceVideo = brief.workflowFeatures?.referenceGrammar && brief.referenceVideo
@@ -270,6 +331,10 @@ export class ProductionStudio {
         ))
         ? "codex-screenwriter-v1"
         : brief.providers.script;
+    const reworkDirector = brief.director ?? {
+      profileId: "auto",
+      assetProviderIds: [brief.providers.assets === "ai-shot-router-v1" ? "local-editorial-v1" : brief.providers.assets],
+    };
     const rework = {
       sourceRunId: run.id,
       sourceRunRevision: run.revision,
@@ -287,6 +352,7 @@ export class ProductionStudio {
       audience: brief.audience,
       nicheSlug: brief.nicheSlug,
       durationSeconds: brief.durationSeconds,
+      durationRange: structuredClone(brief.durationRange ?? defaultStudioDurationRange(brief.durationSeconds)),
       platform: brief.platform,
       reviewMode: "manual",
       runPurpose: brief.runPurpose ?? "production",
@@ -296,10 +362,21 @@ export class ProductionStudio {
           templateVersion: brief.templateSnapshot.templateVersion,
         },
       } : {}),
-      providers: { ...structuredClone(brief.providers), script: reworkScriptProviderId },
+      providers: {
+        ...structuredClone(brief.providers),
+        script: reworkScriptProviderId,
+        director: brief.providers.director ?? "api-visual-director-v1",
+        assets: brief.director ? brief.providers.assets : "ai-shot-router-v1",
+      },
       ...(brief.models ? { models: structuredClone(brief.models) } : {}),
-      ...(brief.workflowFeatures ? { workflowFeatures: structuredClone(brief.workflowFeatures) } : {}),
-      ...(brief.director ? { director: structuredClone(brief.director) } : {}),
+      workflowFeatures: {
+        assetSemanticRank: brief.workflowFeatures?.assetSemanticRank ?? false,
+        referenceGrammar: brief.workflowFeatures?.referenceGrammar ?? false,
+        executablePlan: true,
+        // 新分配的返工版本统一使用 joint-v1；来源历史 run 保持原样。
+        creativePlanning: "joint-v1" as const,
+      },
+      director: structuredClone(reworkDirector),
       economics: structuredClone(brief.economics),
       voiceDirection: structuredClone(brief.voiceDirection),
       ...(brief.editorial ? { editorial: structuredClone(brief.editorial) } : {}),
@@ -320,6 +397,8 @@ export class ProductionStudio {
         ...(findings.length ? ["visual-review"] : []),
       ],
       requiredAffectedScenePositions,
+      scopeState: needsScope ? "needs_scope" as const : "resolved" as const,
+      ...(needsScope ? { scopePrompt: "这条返工还无法确定影响范围。请选择要重做的镜头，或确认整片重做。" } : {}),
       ...(inheritedReferenceVideo ? {
         inheritedReferenceVideo: {
           label: inheritedReferenceVideo.label,
@@ -389,6 +468,14 @@ export class ProductionStudio {
       throw new StudioConflictError("上一版参考视频内容已经变化，请重新上传后再制作。");
     }
     return { label: reference.label, mimeType: reference.mimeType, bytes };
+  }
+
+  // joint-v1 的正式脚本/导演方案由 creative-planning 节点产出；返工读取上一版文档时按拓扑
+  // 选择正确的 producer 节点，legacy run 维持原节点。
+  private reworkPlanningNodeIds(run: WorkflowRun<ProductionBrief>): { script: string; director: string } {
+    return effectiveProductionBrief(run).workflowFeatures?.creativePlanning === "joint-v1"
+      ? { script: "creative-planning", director: "creative-planning" }
+      : { script: "script", director: "visual-direction" };
   }
 
   private async readReworkDocument(
@@ -624,6 +711,7 @@ export class ProductionStudio {
   }
 
   async start(input: unknown, idempotencyKey?: string, idempotencyInput: unknown = input): Promise<StartRunResponse> {
+    assertStudioExecutableProductionInput(input);
     const replay = await this.replayStart(idempotencyInput, idempotencyKey);
     if (replay) return replay;
     let brief = parseBriefWithInputError(input);
@@ -632,6 +720,17 @@ export class ProductionStudio {
     }
     if (brief.rework && brief.providers.script !== "codex-screenwriter-v1") {
       throw new StudioInputError("按审片意见返工需要使用支持自由文本修改的 AI 编剧，请在编剧一栏选择 AI 编剧后再开工。");
+    }
+    if (isRecord(input) && brief.workflowFeatures?.creativePlanning !== "joint-v1") {
+      // 所有新分配的制作（包括历史版本派生的返工）都使用 joint-v1。
+      // 历史 run 本身仍按原拓扑读取与恢复。
+      brief = parseBriefWithInputError({
+        ...input,
+        workflowFeatures: {
+          ...(isRecord(input.workflowFeatures) ? input.workflowFeatures : {}),
+          creativePlanning: "joint-v1" as const,
+        },
+      });
     }
     const inheritedTemplateSnapshot = await this.reworkSourceTemplateSnapshot(input, brief);
     if (inheritedTemplateSnapshot) {
@@ -697,9 +796,10 @@ export class ProductionStudio {
     if (!isDeepStrictEqual(brief.rework.findings, canonicalFindings)) {
       throw new StudioConflictError("审片问题已经变化或被修改，请重新读取原制作的返工草稿。");
     }
+    const sourcePlanningNodeIds = this.reworkPlanningNodeIds(source);
     const [canonicalPreviousScript, canonicalPreviousDirectorPlan] = await Promise.all([
-      this.readReworkDocument(source, "script", "script"),
-      this.readReworkDocument(source, "visual-direction", "storyboard"),
+      this.readReworkDocument(source, sourcePlanningNodeIds.script, "script"),
+      this.readReworkDocument(source, sourcePlanningNodeIds.director, "storyboard"),
     ]);
     if (!isDeepStrictEqual(brief.rework.previousScript, canonicalPreviousScript)
       || !isDeepStrictEqual(brief.rework.previousDirectorPlan, canonicalPreviousDirectorPlan)) {
@@ -715,7 +815,41 @@ export class ProductionStudio {
       if (canonicalAffectedScenePositions.length > 0) {
         throw new StudioConflictError("未物化镜头范围已经变化或被修改，请回到原制作重新读取返工草稿。");
       }
+      // B5-R1 needs_scope：拒绝说明无法定位时，空范围不允许静默开跑——
+      // 用户必须选择镜头范围或显式确认整片重做。
+      if (manualRejectionReason && canonicalFindings.length === 0
+        && reworkScopeUnresolved({
+          findings: canonicalFindings,
+          unmaterializedAssetScenePositions: canonicalAffectedScenePositions,
+          previousScript: canonicalPreviousScript,
+          previousDirectorPlan: canonicalPreviousDirectorPlan,
+          manualRejectionReason,
+          recommended: [],
+        })) {
+        throw new StudioConflictError("这条返工还无法确定影响范围。请选择要重做的镜头，或明确确认整片重做后再开始。");
+      }
     } else {
+      // BG-04：needs_scope 守卫同样覆盖显式空数组路径——拒绝说明无法定位时，
+      // 用户必须先选择镜头范围或确认整片重做，空范围不允许静默开跑。
+      if (submittedAffectedScenePositions.length === 0 && manualRejectionReason && canonicalFindings.length === 0) {
+        const canonicalRecommended = recommendedReworkScenePositions({
+          findings: canonicalFindings,
+          unmaterializedAssetScenePositions: canonicalAffectedScenePositions,
+          previousScript: canonicalPreviousScript,
+          previousDirectorPlan: canonicalPreviousDirectorPlan,
+          ...(manualRejectionReason ? { manualRejectionReason } : {}),
+        });
+        if (reworkScopeUnresolved({
+          findings: canonicalFindings,
+          unmaterializedAssetScenePositions: canonicalAffectedScenePositions,
+          previousScript: canonicalPreviousScript,
+          previousDirectorPlan: canonicalPreviousDirectorPlan,
+          manualRejectionReason,
+          recommended: canonicalRecommended,
+        })) {
+          throw new StudioConflictError("这条返工还无法确定影响范围。请选择要重做的镜头，或明确确认整片重做后再开始。");
+        }
+      }
       const canonicalRequiredPositions = recommendedReworkScenePositions({
         findings: canonicalFindings,
         unmaterializedAssetScenePositions: canonicalAffectedScenePositions,
@@ -765,7 +899,430 @@ export class ProductionStudio {
   private async dispatchedDetail(dispatched: DispatchedProductionRun): Promise<StudioRunDetail> {
     this.trackCompletion(dispatched);
     const running = await this.loadRequiredRun(dispatched.runId);
-    const detail = await withAgentLoopProgress(this.toDetail(running), this.options.workspaceRoot);
+    const detail = await withAgentLoopProgress(
+      this.toDetail(running),
+      this.options.workspaceRoot,
+      running.nodeRuns,
+    );
+    this.publish(detail);
+    return detail;
+  }
+
+  // C2：报价准备——只计算并保存不可变 quote，不调用任何媒体 Provider。
+  async prepareProductionQuote(runId: string, input: StudioProductionQuoteInput, _actor = "studio-owner"): Promise<StudioProductionQuote> {
+    const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
+    if (current.status !== "awaiting_spend_approval" && current.status !== "approval_invalidated") {
+      throw new StudioInputError("当前制作没有等待确认的报价，请先完成制作方案再确认费用。");
+    }
+    if (current.revision !== input.expectedRunRevision) {
+      throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
+    }
+    const waiting = current.nodeRuns.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
+    const plan = waiting?.spendPlan;
+    if (!plan) throw new StudioInputError("当前制作没有等待确认的报价。");
+    const authoritativePlanDigest = await currentExecutablePlanDigest(current, this.options.workspaceRoot);
+    if (!authoritativePlanDigest || authoritativePlanDigest !== input.acceptedPlanDigest) {
+      throw new StudioConflictError("制作方案已经变化，请刷新后重新获取报价。");
+    }
+    if (input.requestedMaximumCny !== undefined && (!Number.isFinite(input.requestedMaximumCny) || input.requestedMaximumCny <= 0 || input.requestedMaximumCny > 1_000_000)) {
+      throw new StudioInputError("本次最高授权额必须是 0.01 到 10000 元之间的有效金额。");
+    }
+    // 金额以整数分为权威：非整数分（如 6.006 元 → 600.6 分）拒绝，不能静默四舍五入成
+    // 601 分——展示金额与签发金额必须完全一致（RC2-03）。容差只吸收二进制浮点表示误差
+    // （6.01 × 100 = 600.999…），不放过真实的小数分。
+    if (input.requestedMaximumCny !== undefined) {
+      const centsValue = input.requestedMaximumCny * 100;
+      if (Math.abs(centsValue - Math.round(centsValue)) > 1e-6) {
+        throw new StudioInputError("本次最高授权额必须精确到分（0.01 元），不能带更小的零头。");
+      }
+    }
+    if (input.requestedMaximumCny !== undefined && input.requestedMaximumCny < plan.estimatedCostCny) {
+      throw new StudioInputError(`当前方案预计花费 ¥${plan.estimatedCostCny.toFixed(2)}，高于你填写的最高授权额；请提高额度或调整方案。`);
+    }
+    const allowedModels = input.allowedModels ?? (plan.items ?? []).map((item) => ({
+      providerId: item.providerId,
+      modelId: item.modelId,
+    }));
+    const availableModels = new Set((plan.items ?? []).map((item) => `${item.providerId}\0${item.modelId}`));
+    if (allowedModels.some((model) => !availableModels.has(`${model.providerId}\0${model.modelId}`))) {
+      throw new StudioInputError("所选模型不在当前方案的可执行范围内，请重新选择方案列出的模型。");
+    }
+    for (const item of plan.items ?? []) {
+      if (!allowedModels.some((model) => model.providerId === item.providerId && model.modelId === item.modelId)) {
+        throw new StudioInputError(`当前方案的“${item.label}”没有保留可执行模型，请调整方案。`);
+      }
+    }
+    const maximumCostCny = input.requestedMaximumCny ?? plan.maxCostCny;
+    const brief = effectiveProductionBrief(current);
+    const qualityContractDigest = productionQualityContractDigest(brief);
+    const permittedAssets = (plan.items ?? []).map((item) => ({
+      assetKey: item.id,
+      intentDigest: canonicalProductionAssetIntentDigest(authoritativePlanDigest, item.id),
+      models: allowedModels.filter((model) => model.providerId === item.providerId && model.modelId === item.modelId),
+      maxCreateAttempts: plan.maxAttempts,
+    }));
+    const active = typeof this.options.pipeline.readProductionAuthorization === "function"
+      ? await this.options.pipeline.readProductionAuthorization(runId)
+      : undefined;
+    const maximumCents = Math.round(maximumCostCny * 100);
+    const additionalCents = active ? Math.max(0, maximumCents - active.approvedAmountCents) : 0;
+    const fundingRequestId = active ? `funding-${randomUUID()}` : undefined;
+    const quote: StudioProductionQuote = {
+      quoteId: `quote-${randomUUID()}`,
+      acceptedPlanDigest: authoritativePlanDigest,
+      estimatedCostCny: plan.estimatedCostCny,
+      maximumCostCny,
+      scopeSummary: {
+        content: `${brief.title}｜${brief.angle}｜面向${brief.audience}`,
+        assets: (plan.items ?? []).map((item) => ({
+          assetKey: item.id,
+          label: item.label,
+          estimatedCostCny: item.estimatedCostCny,
+          allowedModels: permittedAssets.find((asset) => asset.assetKey === item.id)?.models ?? [],
+          maxCreateAttempts: plan.maxAttempts,
+        })),
+        uncertainty: plan.items?.length ? ["实际结果仍需素材预检、技术质检和双模型审片。"] : [],
+      },
+      ...(fundingRequestId ? {
+        fundingRequestId,
+        // 追加命令的 URL 合同需要活动授权 id（funding.authorizationId == current active head）。
+        fundingAuthorizationId: active!.id,
+        additionalCents,
+        missingGoals: (plan.items ?? []).map((item) => item.label),
+        preservedWork: current.artifacts.map((artifact) => artifact.kind),
+        purpose: "完成当前方案尚未覆盖的图片或视频制作与有限修复",
+      } : {}),
+      feasible: true,
+    };
+    // 不可变落盘：同一 run 的报价记录按 quoteId 保存，供授权命令核对。
+    const quotesDir = path.join(this.options.workspaceRoot, "runs", runId, "production-quotes");
+    await mkdir(quotesDir, { recursive: true });
+    await writeFile(
+      path.join(quotesDir, `${quote.quoteId}.json`),
+      `${JSON.stringify({
+        ...quote,
+        runId,
+        expectedRunRevision: input.expectedRunRevision,
+        qualityContractDigest,
+        permittedAssets,
+        maxAttempts: plan.maxAttempts,
+        createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
+      }, null, 2)}\n`,
+      "utf8",
+    );
+    if (fundingRequestId) {
+      const fundingDirectory = path.join(this.options.workspaceRoot, "runs", runId, "production-funding-requests");
+      await mkdir(fundingDirectory, { recursive: true });
+      await writePrivateTextAtomically(
+        path.join(fundingDirectory, `${fundingRequestId}.json`),
+        `${JSON.stringify({
+          version: "video-factory/production-funding-request-v1",
+          id: fundingRequestId,
+          runId,
+          authorizationId: active!.id,
+          expectedRunRevision: input.expectedRunRevision,
+          acceptedPlanDigest: authoritativePlanDigest,
+          qualityContractDigest,
+          additionalCents,
+          permittedAssets,
+          missingGoals: quote.missingGoals,
+          preservedWork: quote.preservedWork,
+          purpose: quote.purpose,
+          feasible: true,
+        }, null, 2)}\n`,
+      );
+    }
+    return quote;
+  }
+
+  // C2：授权业务命令——只接受服务端已保存的 quote；幂等重放同 key 同结果。
+  async authorizeProductionScope(runId: string, input: StudioProductionAuthorizationInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    assertIdempotencyKey(input.idempotencyKey);
+    const requestDigest = startRequestDigest({ runId, actor, target: input.quoteId, input });
+    const authRecordPath = commandReceiptPath(this.options.workspaceRoot, runId, "production-authorization", input.idempotencyKey);
+    // 幂等重放：同 key 同 digest 恢复历史命令结果——恢复必须复用 prepared receipt 保存的
+    // 原始 scope（不重新生成 approvedAt/金额），并区分"授权已提交"与"续链已完成"。
+    try {
+      const previous = JSON.parse(await readFile(authRecordPath, "utf8")) as {
+        digest: string;
+        status?: string;
+        authorizationId?: string;
+        scope?: unknown;
+      };
+      if (previous.digest !== requestDigest) {
+        throw new StudioConflictError("这个授权请求编号已被另一组参数使用，请重新打开确认面板。");
+      }
+      const active = await this.options.pipeline.readProductionAuthorization?.(runId);
+      if (active?.id === previous.authorizationId) {
+        // 授权已提交：若续链尚未完成（进程在 run CAS 与续链之间中断），重新执行幂等的
+        // governed continuation；然后补齐 accepted receipt。
+        const continued = await this.options.pipeline.resumeCoveredSpendApproval?.(runId);
+        if (previous.status !== "accepted") {
+          const persisted = continued ?? await this.options.pipeline.show(runId);
+          await writePrivateTextAtomically(authRecordPath, `${JSON.stringify({
+            version: "video-factory/production-command-v1",
+            status: "accepted",
+            digest: requestDigest,
+            runId,
+            actor,
+            authorizationId: previous.authorizationId,
+            resultingRunRevision: persisted.revision,
+          }, null, 2)}\n`);
+        } else {
+          await this.options.pipeline.resumeCoveredSpendApproval?.(runId);
+        }
+        const replayed = await this.get(runId);
+        if (!replayed) throw new StudioNotFoundError("没有找到这条制作记录。");
+        return replayed;
+      }
+      if (previous.status === "accepted") {
+        // 历史已接受的命令（可能已被后续授权替代）：返回当前 run，不恢复旧授权、不再次提交。
+        const replayed = await this.get(runId);
+        if (!replayed) throw new StudioNotFoundError("没有找到这条制作记录。");
+        return replayed;
+      }
+      // prepared 且授权未提交：以保存的原始 scope 重放同一次接受（字节一致才能通过
+      // 宿主的"同内容幂等接受"检查；revision 过期则被拒，不会签发过期授权）。
+      if (previous.status === "prepared" && previous.scope && typeof this.options.pipeline.acceptProductionAuthorization === "function") {
+        const updated = await this.options.pipeline.acceptProductionAuthorization(runId, previous.scope);
+        await writePrivateTextAtomically(authRecordPath, `${JSON.stringify({
+          version: "video-factory/production-command-v1",
+          status: "accepted",
+          digest: requestDigest,
+          runId,
+          actor,
+          authorizationId: previous.authorizationId,
+          resultingRunRevision: updated.revision,
+        }, null, 2)}\n`);
+        const detail = this.toDetail(updated);
+        this.publish(detail);
+        return detail;
+      }
+    } catch (error) {
+      if (error instanceof StudioConflictError) throw error;
+      if (!hasCode(error, "ENOENT") && !(error instanceof SyntaxError)) throw error;
+    }
+    const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
+    if (current.revision !== input.expectedRunRevision) {
+      throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
+    }
+    // 核对服务端保存的不可变 quote：不存在 / digest 不一致 / revision 过期都拒绝。
+    let quote: StudioProductionQuote & {
+      id?: string;
+      runId: string;
+      expectedRunRevision: number;
+      qualityContractDigest: string;
+      permittedAssets: ProductionAuthorizationScope["permittedAssets"];
+    };
+    try {
+      quote = JSON.parse(await readFile(path.join(this.options.workspaceRoot, "runs", runId, "production-quotes", `${input.quoteId}.json`), "utf8"));
+    } catch {
+      throw new StudioInputError("这份报价不存在或已过期，请重新确认方案后获取新报价。");
+    }
+    if (quote.quoteId !== input.quoteId || quote.runId !== runId || quote.acceptedPlanDigest !== input.acceptedPlanDigest) {
+      throw new StudioInputError("报价与当前确认的方案不一致，请重新获取报价。");
+    }
+    if (quote.expectedRunRevision !== input.expectedRunRevision) {
+      throw new StudioConflictError("这份报价基于更早的制作版本，请刷新后重新确认。");
+    }
+    // 由可信服务构造 scope（客户端不能自报 approvedBy/金额/质量合同），走 C1 接受 + 自动继续。
+    const active = typeof this.options.pipeline.readProductionAuthorization === "function"
+      ? await this.options.pipeline.readProductionAuthorization(runId)
+      : undefined;
+    const authorizationId = `auth-${createHash("sha256").update(requestDigest).digest("hex").slice(0, 32)}`;
+    const scope = {
+      version: "video-factory/production-authorization-v1" as const,
+      id: authorizationId,
+      runId,
+      approvalRevision: current.revision,
+      acceptedPlanDigest: input.acceptedPlanDigest,
+      qualityContractDigest: quote.qualityContractDigest,
+      approvedAmountCents: Math.max(active?.approvedAmountCents ?? 0, Math.round(quote.maximumCostCny * 100)),
+      approvedBy: actor,
+      approvedAt: (this.options.now ?? (() => new Date()))().toISOString(),
+      permittedAssets: quote.permittedAssets,
+      ...(active ? { supersedesAuthorizationId: active.id } : {}),
+    };
+    if (typeof this.options.pipeline.acceptProductionAuthorization !== "function") {
+      throw new StudioInputError("当前环境没有启用制作范围授权。");
+    }
+    await mkdir(path.dirname(authRecordPath), { recursive: true });
+    await writePrivateTextAtomically(authRecordPath, `${JSON.stringify({
+      version: "video-factory/production-command-v1",
+      status: "prepared",
+      digest: requestDigest,
+      runId,
+      actor,
+      authorizationId,
+      scope,
+    }, null, 2)}\n`);
+    const currentActive = await this.options.pipeline.readProductionAuthorization?.(runId);
+    const updated = currentActive?.id === authorizationId
+      ? await this.options.pipeline.show(runId)
+      : await this.options.pipeline.acceptProductionAuthorization(runId, scope);
+    await writePrivateTextAtomically(authRecordPath, `${JSON.stringify({
+      version: "video-factory/production-command-v1",
+      status: "accepted",
+      digest: requestDigest,
+      runId,
+      actor,
+      authorizationId,
+      resultingRunRevision: updated.revision,
+    }, null, 2)}\n`);
+    const detail = this.toDetail(updated);
+    this.publish(detail);
+    return detail;
+  }
+
+  // C2：追加——delta 加在当前授权之上，supersede 当前 head，旧花费/占用不清零。
+  async amendProductionScope(runId: string, authorizationId: string, input: StudioProductionAmendmentInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    assertIdempotencyKey(input.idempotencyKey);
+    // 幂等：同 key 同 digest 的重放恢复历史命令结果——复用 prepared receipt 保存的原始
+    // amendment scope（不重新生成 approvedAt/金额），区分"授权已提交"与"续链已完成"。
+    const amendDigest = startRequestDigest({ runId, actor, target: authorizationId, input });
+    const amendRecordPath = commandReceiptPath(this.options.workspaceRoot, runId, "production-amendment", input.idempotencyKey);
+    try {
+      const previous = JSON.parse(await readFile(amendRecordPath, "utf8")) as {
+        digest: string;
+        status?: string;
+        authorizationId?: string;
+        scope?: unknown;
+      };
+      if (previous.digest !== amendDigest) {
+        throw new StudioConflictError("这个追加请求编号已被另一组参数使用，请重新发起追加。");
+      }
+      const active = await this.options.pipeline.readProductionAuthorization?.(runId);
+      if (active?.id === previous.authorizationId) {
+        // 追加授权已提交：续链可能尚未完成（run CAS 后中断）——幂等恢复 governed
+        // continuation，然后补齐 accepted receipt。delta 不会重复：续链不签发新授权。
+        const continued = await this.options.pipeline.resumeCoveredSpendApproval?.(runId);
+        if (previous.status !== "accepted") {
+          const persisted = continued ?? await this.options.pipeline.show(runId);
+          await writePrivateTextAtomically(amendRecordPath, `${JSON.stringify({
+            version: "video-factory/production-command-v1",
+            status: "accepted",
+            digest: amendDigest,
+            runId,
+            actor,
+            authorizationId: previous.authorizationId,
+            resultingRunRevision: persisted.revision,
+          }, null, 2)}\n`);
+        } else {
+          await this.options.pipeline.resumeCoveredSpendApproval?.(runId);
+        }
+        const replayed = await this.get(runId);
+        if (!replayed) throw new StudioNotFoundError("没有找到这条制作记录。");
+        return replayed;
+      }
+      if (previous.status === "accepted") {
+        // 历史已接受的追加（可能已被后续授权替代）：返回当前 run，不恢复旧授权、不再追加。
+        const replayed = await this.get(runId);
+        if (!replayed) throw new StudioNotFoundError("没有找到这条制作记录。");
+        return replayed;
+      }
+      // prepared 且追加授权未提交：以保存的原始 amendment scope 重放同一次接受；
+      // revision 过期（世界已前进）时被宿主拒绝，不会用过期授权重复 delta。
+      if (previous.status === "prepared" && previous.scope && typeof this.options.pipeline.acceptProductionAuthorization === "function") {
+        const updated = await this.options.pipeline.acceptProductionAuthorization(runId, previous.scope);
+        await writePrivateTextAtomically(amendRecordPath, `${JSON.stringify({
+          version: "video-factory/production-command-v1",
+          status: "accepted",
+          digest: amendDigest,
+          runId,
+          actor,
+          authorizationId: previous.authorizationId,
+          resultingRunRevision: updated.revision,
+        }, null, 2)}\n`);
+        const detail = this.toDetail(updated);
+        this.publish(detail);
+        return detail;
+      }
+    } catch (error) {
+      if (error instanceof StudioConflictError) throw error;
+      if (!hasCode(error, "ENOENT") && !(error instanceof SyntaxError)) throw error;
+    }
+    const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
+    if (current.revision !== input.expectedRunRevision) {
+      throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
+    }
+    if (typeof this.options.pipeline.readProductionAuthorization !== "function"
+      || typeof this.options.pipeline.acceptProductionAuthorization !== "function") {
+      throw new StudioInputError("当前环境没有启用制作范围授权。");
+    }
+    const active = await this.options.pipeline.readProductionAuthorization(runId);
+    if (!active) throw new StudioInputError("这条制作还没有已接受的授权，无法追加。");
+    if (active.id !== authorizationId) {
+      throw new StudioConflictError("这份追加请求对应的授权已经变化，请刷新后重试。");
+    }
+    const fundingPath = path.join(this.options.workspaceRoot, "runs", runId, "production-funding-requests", `${input.fundingRequestId}.json`);
+    let funding: {
+      version: string;
+      id: string;
+      runId: string;
+      authorizationId: string;
+      expectedRunRevision: number;
+      acceptedPlanDigest: string;
+      qualityContractDigest: string;
+      additionalCents: number;
+      permittedAssets: ProductionAuthorizationScope["permittedAssets"];
+      feasible: boolean;
+    };
+    try {
+      funding = JSON.parse(await readFile(fundingPath, "utf8"));
+    } catch {
+      throw new StudioInputError("追加请求不存在或已过期，请重新读取当前缺口。");
+    }
+    if (funding.version !== "video-factory/production-funding-request-v1"
+      || funding.id !== input.fundingRequestId
+      || funding.runId !== runId
+      || funding.authorizationId !== authorizationId
+      || funding.expectedRunRevision !== input.expectedRunRevision
+      || !funding.feasible
+      || !Number.isSafeInteger(funding.additionalCents)
+      || funding.additionalCents < 0) {
+      throw new StudioConflictError("追加请求已不适用于当前制作，请刷新后重新确认。");
+    }
+    const nextAuthorizationId = `auth-${createHash("sha256").update(amendDigest).digest("hex").slice(0, 32)}`;
+    const amendment = {
+      version: "video-factory/production-authorization-v1" as const,
+      id: nextAuthorizationId,
+      runId,
+      approvalRevision: current.revision,
+      acceptedPlanDigest: funding.acceptedPlanDigest,
+      qualityContractDigest: funding.qualityContractDigest,
+      approvedAmountCents: active.approvedAmountCents + funding.additionalCents,
+      approvedBy: actor,
+      approvedAt: (this.options.now ?? (() => new Date()))().toISOString(),
+      permittedAssets: funding.permittedAssets,
+      supersedesAuthorizationId: active.id,
+    };
+    await mkdir(path.dirname(amendRecordPath), { recursive: true });
+    await writePrivateTextAtomically(amendRecordPath, `${JSON.stringify({
+      version: "video-factory/production-command-v1",
+      status: "prepared",
+      digest: amendDigest,
+      runId,
+      actor,
+      authorizationId: nextAuthorizationId,
+      scope: amendment,
+    }, null, 2)}\n`);
+    const currentHead = await this.options.pipeline.readProductionAuthorization(runId);
+    const updated = currentHead?.id === nextAuthorizationId
+      ? await this.options.pipeline.show(runId)
+      : await this.options.pipeline.acceptProductionAuthorization(runId, amendment);
+    await writePrivateTextAtomically(amendRecordPath, `${JSON.stringify({
+      version: "video-factory/production-command-v1",
+      status: "accepted",
+      digest: amendDigest,
+      runId,
+      actor,
+      authorizationId: nextAuthorizationId,
+      resultingRunRevision: updated.revision,
+    }, null, 2)}\n`);
+    const detail = this.toDetail(updated);
     this.publish(detail);
     return detail;
   }
@@ -815,11 +1372,30 @@ export class ProductionStudio {
 
   async decide(runId: string, input: StudioDecisionInput, actor: string): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
     if (current.status !== "needs_human") throw new StudioConflictError("这条制作当前不在人工终审阶段。");
     const intervention = current.nodeRuns.find((node) => node.status === "needs_human")?.intervention;
     if (!intervention) throw new StudioConflictError("这条制作没有待处理的人工决定。");
     if (input.interventionId !== intervention.id || input.expectedRunRevision !== current.revision) {
       throw new StudioConflictError("你查看的成片或审片意见已经更新，请重新查看后再确认。");
+    }
+    if (!intervention.options?.includes(input.action)) {
+      throw new StudioConflictError("当前确认点不支持这个操作，请刷新后重试。");
+    }
+    if (input.action === "request_changes") {
+      if (intervention.nodeId !== "voice" || !input.voiceTiming) {
+        throw new StudioConflictError("当前确认点没有可调整的配音时间方案。");
+      }
+      const updated = await this.options.pipeline.requestVoiceTimingRevision(runId, {
+        expectedRunRevision: input.expectedRunRevision,
+        interventionId: input.interventionId,
+        scenePosition: input.voiceTiming.scenePosition,
+        durationSeconds: input.voiceTiming.durationSeconds,
+        actor,
+      });
+      const detail = this.toDetail(updated);
+      this.publish(detail);
+      return detail;
     }
     if (input.action === "reject" && !input.note?.trim()) throw new StudioConflictError("打回时必须填写原因。");
     const decision: HumanDecisionDraft & { action: "approve" | "reject" } = {
@@ -858,6 +1434,7 @@ export class ProductionStudio {
     actor: string,
   ): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
     if (current.status !== "needs_human") {
       throw new StudioConflictError("这条制作当前不在人工终审阶段。");
     }
@@ -888,6 +1465,7 @@ export class ProductionStudio {
     input: ProductionVisualReinspectionDraft,
   ): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
     if (current.revision !== input.expectedRunRevision) {
       throw new StudioConflictError("你查看的审片意见已经更新，请刷新后再补查。");
     }
@@ -911,7 +1489,9 @@ export class ProductionStudio {
 
   async requestPause(runId: string): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
-    if (current.status !== "running") throw new StudioConflictError("这条制作当前不在自动执行中。");
+    if (!["running", "awaiting_spend_approval", "approval_invalidated"].includes(current.status)) {
+      throw new StudioConflictError("这条制作当前不能暂停新的图片或视频任务。");
+    }
     await this.options.pipeline.requestPause(runId);
     const detail = { ...this.toDetail(current), pauseRequested: true };
     this.publish(detail);
@@ -920,7 +1500,15 @@ export class ProductionStudio {
 
   async resumePaused(runId: string): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
-    if (current.status !== "paused") throw new StudioConflictError("这条制作当前没有暂停。");
+    const pauseRequested = await this.options.pipeline.pauseRequested(runId);
+    if (current.status !== "paused" && !pauseRequested) throw new StudioConflictError("这条制作当前没有暂停。");
+    if (current.status !== "paused") {
+      await this.options.pipeline.clearPauseRequest?.(runId);
+      const detail = this.toDetail(current);
+      this.publish(detail);
+      return detail;
+    }
+    assertExecutableRunContinuation(current);
     if (this.options.pipeline.dispatchResumePaused) {
       const dispatched = await this.options.pipeline.dispatchResumePaused(
         runId,
@@ -941,6 +1529,7 @@ export class ProductionStudio {
     actor: string,
   ): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
     if (current.status === "running") {
       throw new StudioConflictError("制作仍在执行，暂时不能修改节点。请等待它停在确认点后再编辑。");
     }
@@ -1020,7 +1609,9 @@ export class ProductionStudio {
     input: StudioNodeInputOverrideInput,
     actor: string,
   ): Promise<StudioRunDetail> {
+    assertPlanningStageScope(nodeId, input.planningStageId, "输入");
     const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
     if (current.status === "running") {
       throw new StudioConflictError("制作仍在执行，暂时不能修改节点输入。请等待它停在确认点后再编辑。");
     }
@@ -1037,6 +1628,10 @@ export class ProductionStudio {
     const effectiveInputVersion = node.inputState?.versions.find(
       (version) => version.id === node.inputState?.effectiveVersionId,
     );
+    if (input.expectedRunRevision !== current.revision
+      || input.expectedVersionId !== effectiveInputVersion?.id) {
+      throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
+    }
     const restoredInput = restoreManagedFileReferences(input.input, effectiveInputVersion?.value);
     if (node.inputState?.stale !== true && isDeepStrictEqual(restoredInput, effectiveInputVersion?.value)) {
       return this.toDetail(current);
@@ -1046,7 +1641,10 @@ export class ProductionStudio {
         nodeId,
         actor,
         input: restoredInput,
-        ...(effectiveInputVersion ? { expectedVersionId: effectiveInputVersion.id } : {}),
+        expectedVersionId: input.expectedVersionId,
+        // caller tokens 原样进入持锁修改点：pipeline 在 lease 内复核，预检查后的并发
+        // 写入在这里失败，而不是被节点版本未变的假象放过。
+        expectedRunRevision: input.expectedRunRevision,
         allowTerminalEdit: isTerminalRun(current.status) && input.confirmTerminalEdit === true,
       });
       const detail = this.toDetail(updated);
@@ -1066,7 +1664,9 @@ export class ProductionStudio {
     input: StudioNodeExecutionConfigurationInput,
     actor: string,
   ): Promise<StudioRunDetail> {
+    assertPlanningStageScope(nodeId, input.planningStageId, "执行配置");
     const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
     if (current.status === "running") {
       throw new StudioConflictError("制作仍在执行，请先暂停，再修改这个节点的模型或预算。");
     }
@@ -1076,19 +1676,26 @@ export class ProductionStudio {
     if (current.nodeRuns.some((candidate) => candidate.outcomeUncertain)) {
       throw new StudioConflictError("这条制作还有付费结果尚未核对，暂时不能修改模型或画面来源。请先完成任务与账单核对。");
     }
+    if (input.expectedRunRevision !== current.revision) {
+      throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
+    }
     const currentBrief = effectiveProductionBrief(current);
+    assertPlanningStageModelScope(nodeId, input, currentBrief);
     const updatedBrief = applyNodeExecutionConfiguration(currentBrief, nodeId, input);
     const providers = await this.assertProvidersAvailable(updatedBrief);
+    const jointPlanning = currentBrief.workflowFeatures?.creativePlanning === "joint-v1";
+    const replanNodeId = jointPlanning ? "creative-planning" : "visual-direction";
     const invalidationNodeId = nodeId === "assets"
       && (
         input.assetProviderIds !== undefined
           && !sameProviderIdSet(currentBrief.director?.assetProviderIds, updatedBrief.director?.assetProviderIds)
         || videoModelContractChanged(currentBrief, updatedBrief, providers)
       )
-      ? "visual-direction"
+      ? replanNodeId
       : nodeId;
     try {
-      const updated = await this.options.pipeline.applyNodeExecutionConfiguration(runId, invalidationNodeId, updatedBrief, actor);
+      // caller revision（不是重新加载的服务端 revision）贯穿到 pipeline 持锁修改点。
+      const updated = await this.options.pipeline.applyNodeExecutionConfiguration(runId, invalidationNodeId, updatedBrief, actor, input.expectedRunRevision);
       const detail = this.toDetail(updated);
       this.publish(detail);
       return detail;
@@ -1230,6 +1837,7 @@ export class ProductionStudio {
     approvedBy: string,
   ): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
     const plan = current.nodeRuns.find((node) => node.nodeId === nodeId)?.spendPlan;
     if (!plan) throw new StudioConflictError("这个节点当前没有待确认的费用计划，请刷新页面后重试。");
     if (
@@ -1283,6 +1891,7 @@ export class ProductionStudio {
     rejectedBy: string,
   ): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
     const node = current.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
     const plan = node?.spendPlan;
     if (!plan || plan.id !== input.spendPlanId
@@ -1328,6 +1937,7 @@ export class ProductionStudio {
   async resumeStale(runId: string): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
     if (current.status !== "stale") throw new StudioConflictError("这条制作当前没有需要重新生成的旧结果。");
+    assertExecutableRunContinuation(current);
     try {
       if (this.options.pipeline.dispatchResumeStale) {
         const dispatched = await this.options.pipeline.dispatchResumeStale(
@@ -1349,22 +1959,190 @@ export class ProductionStudio {
   }
 
   async retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail> {
+    return this.retryFailedNodeInternal(runId, nodeId, false);
+  }
+
+  async queryOriginalTextTask(runId: string): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
+    const detail = this.toDetail(current);
+    const pending = await loadPendingTextTask(this.options.workspaceRoot, runId, detail.nodes, current.nodeRuns);
+    if (!pending) throw new StudioConflictError("这条制作没有可查询的原模型任务，请刷新后查看最新状态。");
+    const receiptPath = textTaskRecoveryReceiptPath(this.options.workspaceRoot, runId, pending.nodeId);
+    const previousReceipt = await readTextTaskRecoveryReceipt(receiptPath);
+    const currentReceipt = previousReceipt
+      && textTaskRecoveryReceiptMatches(previousReceipt, current.revision, pending)
+      ? previousReceipt
+      : undefined;
+    const client = new CodexBridgeClient({
+      socketPath: pending.operation.route.socketPath,
+      timeoutMs: 3_000,
+      maxAttempts: 1,
+    });
+    const attemptedAt = (this.options.now?.() ?? new Date()).toISOString();
+    const observation = await client.observePreparedOnce(pending.operation, { timeoutMs: 3_000 });
+    const receipt = observation.state === "query_failure"
+      ? textTaskRecoveryReceipt(
+        current.revision,
+        pending,
+        currentReceipt?.taskState ?? "accepted_unknown",
+        {
+          attemptedAt,
+          ...(currentReceipt?.lastVerifiedAt ? { lastVerifiedAt: currentReceipt.lastVerifiedAt } : {}),
+          observationError: currentReceipt?.lastVerifiedAt
+            ? "本次查询没有取得新状态；原任务的上一次可信状态已保留，请稍后再查。"
+            : "本次查询没有取得状态；系统不会把原任务描述为仍在实时运行，也没有重新提交。",
+          ...(currentReceipt?.terminalError ? { terminalError: currentReceipt.terminalError } : {}),
+          ...(currentReceipt?.failureKind ? { failureKind: currentReceipt.failureKind } : {}),
+        },
+      )
+      : textTaskRecoveryReceipt(
+        current.revision,
+        pending,
+        observation.state,
+        {
+          attemptedAt,
+          lastVerifiedAt: attemptedAt,
+          ...(observation.state === "completed_failure"
+            ? {
+              terminalError: observation.error.creatorMessage,
+              ...(observation.error.failureKind ? { failureKind: observation.error.failureKind } : {}),
+            }
+            : {}),
+        },
+      );
+    const latest = await this.loadRequiredRun(runId);
+    const latestPending = await loadPendingTextTask(
+      this.options.workspaceRoot,
+      runId,
+      this.toDetail(latest).nodes,
+      latest.nodeRuns,
+    );
+    if (latest.revision !== current.revision
+      || latestPending?.identityDigest !== pending.identityDigest) {
+      throw new StudioConflictError("制作方案已更新，旧模型任务的结果不会附到新版本；请刷新后查看。");
+    }
+    await withTextTaskRecoveryReceiptLock(receiptPath, async () => {
+      // 网络观察已经结束；锁内只做最新 run/task 身份复核和很短的 read/merge/commit。
+      const committing = await this.loadRequiredRun(runId);
+      const committingPending = await loadPendingTextTask(
+        this.options.workspaceRoot,
+        runId,
+        this.toDetail(committing).nodes,
+        committing.nodeRuns,
+      );
+      if (committing.revision !== current.revision
+        || committingPending?.identityDigest !== pending.identityDigest) {
+        throw new StudioConflictError("制作方案已更新，旧模型任务的结果不会附到新版本；请刷新后查看。");
+      }
+      const persistedReceipt = await readTextTaskRecoveryReceipt(receiptPath);
+      const mergedReceipt = mergeTextTaskRecoveryReceipt(
+        persistedReceipt && textTaskRecoveryReceiptMatches(persistedReceipt, current.revision, pending)
+          ? persistedReceipt
+          : undefined,
+        receipt,
+      );
+      await writePrivateTextAtomically(receiptPath, `${JSON.stringify(mergedReceipt, null, 2)}\n`);
+    });
+    return (await this.get(runId))!;
+  }
+
+  async retrieveOriginalTextTask(runId: string): Promise<StudioRunDetail> {
+    const active = this.textTaskRetrievals.get(runId);
+    if (active) return active;
+    const operation = this.retrieveOriginalTextTaskOnce(runId).finally(() => {
+      if (this.textTaskRetrievals.get(runId) === operation) this.textTaskRetrievals.delete(runId);
+    });
+    this.textTaskRetrievals.set(runId, operation);
+    return operation;
+  }
+
+  private async retrieveOriginalTextTaskOnce(runId: string): Promise<StudioRunDetail> {
+    const current = await this.loadRequiredRun(runId);
+    if (current.status === "paused") {
+      throw new StudioConflictError("原任务结果已保留；请先显式继续自动制作，暂停状态不会被查询结果解除。");
+    }
+    if (current.status === "running") {
+      throw new StudioConflictError("原任务结果将由当前制作进程接续；现在只允许查询，不能并发推进同一步骤。");
+    }
+    const detail = this.toDetail(current);
+    const pending = await loadPendingTextTask(this.options.workspaceRoot, runId, detail.nodes, current.nodeRuns);
+    if (!pending) throw new StudioConflictError("这条制作没有可取回的原模型任务，请刷新后查看最新状态。");
+    const receipt = await readTextTaskRecoveryReceipt(
+      textTaskRecoveryReceiptPath(this.options.workspaceRoot, runId, pending.nodeId),
+    );
+    if (!receipt
+      || !textTaskRecoveryReceiptMatches(receipt, current.revision, pending)
+      || receipt.taskState !== "completed_success") {
+      throw new StudioConflictError("原任务结果尚未核验完成，请先查询原任务。");
+    }
+    return this.retryFailedNodeInternal(runId, pending.nodeId, true);
+  }
+
+  private async retryFailedNodeInternal(runId: string, nodeId: string, recoveredTextTask: boolean): Promise<StudioRunDetail> {
+    const current = await this.loadRequiredRun(runId);
+    const pendingTextTask = await loadPendingTextTask(
+      this.options.workspaceRoot,
+      runId,
+      this.toDetail(current).nodes,
+      current.nodeRuns,
+      nodeId,
+    );
+    let resumeCompletedTextTask = false;
+    if (pendingTextTask && !recoveredTextTask) {
+      const receipt = await readTextTaskRecoveryReceipt(
+        textTaskRecoveryReceiptPath(this.options.workspaceRoot, runId, pendingTextTask.nodeId),
+      );
+      const currentReceipt = receipt && textTaskRecoveryReceiptMatches(receipt, current.revision, pendingTextTask)
+        ? receipt
+        : undefined;
+      resumeCompletedTextTask = currentReceipt?.taskState === "completed_failure"
+        && retryableCompletedTextFailure(currentReceipt);
+      if (!currentReceipt
+        || (currentReceipt.taskState !== "not_accepted" && !resumeCompletedTextTask)) {
+        throw new StudioConflictError("原模型任务可能已经受理，不能普通重试；请先查询原任务。");
+      }
+    }
     const retryingFailure = current.status === "failed"
       && current.nodeRuns.find((node) => node.nodeId === nodeId)?.status === "failed";
     if (!retryingFailure && !canRetryRejectedReviewNode(current, nodeId)) {
       throw new StudioConflictError("这个节点当前不能重试，请刷新页面检查最新状态。");
     }
+    assertExecutableRunContinuation(current);
     try {
       if (this.options.pipeline.dispatchRetryFailedNode) {
         const dispatched = await this.options.pipeline.dispatchRetryFailedNode(
           runId,
           nodeId,
           (run) => this.publish(this.toDetail(run)),
+          recoveredTextTask || resumeCompletedTextTask
+            ? {
+              recoverOriginalTextTask: true,
+              ...(resumeCompletedTextTask
+                ? {
+                  resumeCompletedTextTask: true,
+                  resumeCompletedTextTaskRequestId: pendingTextTask!.operation.requestId,
+                }
+                : {}),
+            }
+            : undefined,
         );
         return await this.dispatchedDetail(dispatched);
       }
-      const updated = await this.options.pipeline.retryFailedNode(runId, nodeId);
+      const updated = await this.options.pipeline.retryFailedNode(
+        runId,
+        nodeId,
+        recoveredTextTask || resumeCompletedTextTask
+          ? {
+            recoverOriginalTextTask: true,
+            ...(resumeCompletedTextTask
+              ? {
+                resumeCompletedTextTask: true,
+                resumeCompletedTextTaskRequestId: pendingTextTask!.operation.requestId,
+              }
+              : {}),
+          }
+          : undefined,
+      );
       const detail = this.toDetail(updated);
       this.publish(detail);
       return detail;
@@ -1388,7 +2166,12 @@ export class ProductionStudio {
     actor = "studio-owner",
   ): Promise<StudioRunDetail> {
     try {
+      const current = await this.loadRequiredRun(runId);
+      const continuationSupported = supportsRunContinuation(current);
       const manualResolution = input.outcome === "confirmed_not_charged" || input.outcome === "confirmed_charged";
+      if (!continuationSupported && !manualResolution) {
+        throw new StudioConflictError("这条历史制作只能核对并结算已有账单；若要继续制作，请从当前记录创建新版本。");
+      }
       const updated = await this.options.pipeline.reconcilePaidNode(runId, {
         nodeId,
         expectedRunRevision: input.expectedRunRevision,
@@ -1399,7 +2182,7 @@ export class ProductionStudio {
         ...(manualResolution ? { actor } : {}),
         ...(input.note ? { note: input.note } : {}),
         ...(input.actualCostCny !== undefined ? { actualCostCny: input.actualCostCny } : {}),
-      });
+      }, continuationSupported ? undefined : { settleOnly: true });
       const detail = this.toDetail(updated);
       this.publish(detail);
       return detail;
@@ -1501,6 +2284,8 @@ export class ProductionStudio {
       ...(brief.providers.visualReview ? [brief.providers.visualReview] : []),
       ...(brief.director?.assetProviderIds ?? []),
       ...(brief.workflowFeatures?.referenceGrammar ? ["codex-reference-grammar-v1"] : []),
+      // joint-v1 规划包含前期构思阶段：构思能力键在模型选择校验范围内。
+      ...(brief.workflowFeatures?.creativePlanning === "joint-v1" ? [CREATIVE_TREATMENT_PROVIDER_ID] : []),
     ]);
     if (brief.workflowFeatures?.referenceGrammar) {
       const referenceProvider = providers.find((provider) => provider.id === "codex-reference-grammar-v1");
@@ -1566,6 +2351,18 @@ export class ProductionStudio {
         }
       }
     }
+    if (brief.runPurpose !== "test" && brief.templateSnapshot) {
+      const selectedSources = providers.filter((provider) => (
+        selectedVisualSources.has(provider.id)
+        && provider.capability === "asset.prepare"
+        && provider.available
+      ));
+      const sourceIssue = visualSourceCompatibilityIssue(
+        brief.templateSnapshot.resolvedBlueprint,
+        selectedSources,
+      );
+      if (sourceIssue) throw new StudioInputError(sourceIssue.message);
+    }
     return providers;
   }
 
@@ -1574,15 +2371,27 @@ export class ProductionStudio {
   }
 }
 
-async function withAgentLoopProgress(detail: StudioRunDetail, workspaceRoot: string): Promise<StudioRunDetail> {
+async function withAgentLoopProgress(
+  detail: StudioRunDetail,
+  workspaceRoot: string,
+  nodeRuns: WorkflowRun<ProductionBrief>["nodeRuns"],
+): Promise<StudioRunDetail> {
   const nodes = await Promise.all(detail.nodes.map(async (node) => {
-    const progress = await loadAgentLoopProgress(workspaceRoot, detail.id, node.id);
+    const workflowOperationRequestId = nodeRuns.find((run) => run.nodeId === node.id)?.operationRequestId;
+    const progress = await loadAgentLoopProgress(
+      workspaceRoot,
+      detail.id,
+      node.id,
+      workflowOperationRequestId,
+    );
     const activeProgress = progress && ["producing", "auditing", "repairing"].includes(progress.phase);
     return progress && (!activeProgress || node.status === "running") ? { ...node, agentLoopProgress: progress } : node;
   }));
   const active = nodes.find((node) => node.id === detail.currentAction?.nodeId)
     ?? nodes.find((node) => node.status === "running");
-  const actionLabel = active?.agentLoopProgress ? agentLoopActionLabel(active.role ?? "制作角色", active.agentLoopProgress) : undefined;
+  const actionLabel = active?.agentLoopProgress
+    ? agentLoopActionLabel(active.agentLoopProgress.role ?? active.role ?? "制作角色", active.agentLoopProgress)
+    : undefined;
   return {
     ...detail,
     nodes,
@@ -1590,21 +2399,342 @@ async function withAgentLoopProgress(detail: StudioRunDetail, workspaceRoot: str
   };
 }
 
+// joint-v1 规划阶段的详情增强：沿用"先纯投影、再异步增强"的既有模式。
+// pipeline 未实现检视、run 非 joint-v1（返回 undefined）或读取失败时原样返回——
+// 规划阶段是增强信息，绝不能因为它让详情接口失败或伪造数据。
+async function withPlanningStages(
+  detail: StudioRunDetail,
+  pipeline: StudioPipelinePort,
+): Promise<StudioRunDetail> {
+  if (typeof pipeline.inspectCreativePlanningStages !== "function") return detail;
+  let stages: CreativePlanningStageInspection[] | undefined;
+  try {
+    stages = await pipeline.inspectCreativePlanningStages(detail.id);
+  } catch {
+    return detail;
+  }
+  if (!stages) return detail;
+  return {
+    ...detail,
+    planningStages: stages.map((stage) => ({
+      id: stage.id,
+      status: stage.status,
+      ...(stage.effectiveModelId !== undefined ? { effectiveModelId: stage.effectiveModelId } : {}),
+      ...(stage.providerId !== undefined ? { providerId: stage.providerId } : {}),
+      artifactIds: [...stage.artifactIds],
+      ...(stage.issue !== undefined && stage.issue !== "" ? { issue: redactManagedPathText(stage.issue) } : {}),
+      allowedActions: [...stage.allowedActions],
+    })),
+  };
+}
+
+interface PendingTextTask {
+  nodeId: string;
+  phase: "produce" | "audit";
+  role: string;
+  checkpointKey: string;
+  workflowOperationRequestId: string;
+  identityDigest: string;
+  operation: CodexPreparedOperation;
+}
+
+interface TextTaskRecoveryReceipt {
+  version: "video-factory/text-task-recovery-v3";
+  runRevision: number;
+  taskIdentityDigest: string;
+  taskState: "running" | "accepted_unknown" | "completed_success" | "completed_failure" | "not_accepted" | "conflict";
+  lastAttemptAt: string;
+  lastVerifiedAt?: string;
+  observationError?: string;
+  terminalError?: string;
+  failureKind?: "model_provider_transient" | "model_provider_no_output" | "contract_rejected" | "binding_conflict";
+}
+
+async function withTaskRecovery(
+  detail: StudioRunDetail,
+  workspaceRoot: string,
+  nodeRuns: WorkflowRun<ProductionBrief>["nodeRuns"],
+): Promise<StudioRunDetail> {
+  const pending = await loadPendingTextTask(workspaceRoot, detail.id, detail.nodes, nodeRuns);
+  if (!pending) return detail;
+  const receipt = await readTextTaskRecoveryReceipt(
+    textTaskRecoveryReceiptPath(workspaceRoot, detail.id, pending.nodeId),
+  );
+  const currentReceipt = receipt
+    && textTaskRecoveryReceiptMatches(receipt, detail.revision, pending)
+    ? receipt
+    : undefined;
+  const taskState = currentReceipt?.taskState ?? "accepted_unknown";
+  const resultAvailable = taskState === "completed_success";
+  const allowedActions: NonNullable<StudioRunDetail["taskRecovery"]>["allowedActions"] = ["query_original_task"];
+  if (detail.status === "failed" && resultAvailable) allowedActions.push("retrieve_and_continue");
+  if (detail.status === "failed" && taskState === "not_accepted") allowedActions.push("retry_failed_step");
+  if (detail.status === "failed" && taskState === "completed_failure") {
+    if (currentReceipt && retryableCompletedTextFailure(currentReceipt)) allowedActions.push("retry_failed_step");
+    allowedActions.push("adjust_plan");
+  }
+  return {
+    ...detail,
+    taskRecovery: {
+      nodeId: pending.nodeId,
+      phase: pending.phase,
+      taskState,
+      resultAvailable,
+      allowedActions,
+      summary: taskRecoverySummary(taskState, detail.status === "paused"),
+      ...(currentReceipt?.lastVerifiedAt ? { lastVerifiedAt: currentReceipt.lastVerifiedAt } : {}),
+      ...(currentReceipt?.lastAttemptAt ? { lastAttemptAt: currentReceipt.lastAttemptAt } : {}),
+      ...(currentReceipt?.observationError
+        ? { observationError: redactManagedPathText(currentReceipt.observationError) }
+        : {}),
+      ...(currentReceipt?.terminalError
+        ? { terminalError: redactManagedPathText(currentReceipt.terminalError) }
+        : {}),
+    },
+  };
+}
+
+async function loadPendingTextTask(
+  workspaceRoot: string,
+  runId: string,
+  nodes: Array<{ id: string }>,
+  nodeRuns: WorkflowRun<ProductionBrief>["nodeRuns"],
+  requestedNodeId?: string,
+): Promise<PendingTextTask | undefined> {
+  const operationRequestIds = new Map(nodeRuns.flatMap((node) => (
+    node.operationRequestId ? [[node.nodeId, node.operationRequestId] as const] : []
+  )));
+  const candidates: PendingTextTask[] = [];
+  for (const node of nodes) {
+    if (requestedNodeId && node.id !== requestedNodeId) continue;
+    const workflowOperationRequestId = operationRequestIds.get(node.id);
+    if (!workflowOperationRequestId) continue;
+    const directory = path.join(workspaceRoot, "runs", runId, "nodes", node.id, "agent-loop-checkpoints");
+    let files: string[];
+    try {
+      files = (await readdir(directory)).filter((name) => name.endsWith(".json"));
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) continue;
+      throw error;
+    }
+    for (const name of files) {
+      const filePath = path.join(directory, name);
+      try {
+        const value = JSON.parse(await readFile(filePath, "utf8")) as unknown;
+        if (!isRecord(value) || value.version !== "video-factory/agent-loop-checkpoint-v8") continue;
+        const checkpointKey = name.slice(0, -".json".length);
+        const recoveryOwner = value.recoveryOwner;
+        if (value.key !== checkpointKey
+          || typeof value.role !== "string"
+          || !isRecord(recoveryOwner)
+          || recoveryOwner.runId !== runId
+          || recoveryOwner.nodeId !== node.id
+          || recoveryOwner.workflowOperationRequestId !== workflowOperationRequestId) continue;
+        const pending = value.pendingOperation;
+        if (!isRecord(pending)
+          || (pending.phase !== "produce" && pending.phase !== "audit")
+          || !Number.isInteger(pending.iteration)
+          || Number(pending.iteration) < 1
+          || !Number.isInteger(pending.generation)
+          || Number(pending.generation) < 0
+          || pending.operationKey !== `${String(value.cycle)}:${String(pending.iteration)}:${pending.phase}`
+          || !isRecord(pending.operation)) continue;
+        const operation = pending.operation as unknown as CodexPreparedOperation;
+        if (operation.version !== "video-factory/codex-prepared-operation-v1"
+          || (pending.phase === "audit") !== (operation.kind === "role-audit")
+          || !isRecord(operation.binding)
+          || typeof operation.binding.requestDigest !== "string"
+          || operation.binding.kind !== operation.kind
+          || !isRecord(operation.route)
+          || typeof operation.route.socketPath !== "string") continue;
+        const role = value.role;
+        if (pending.phase === "produce" && !producerRoleMatchesTask(role, operation.kind)) continue;
+        const identityDigest = createHash("sha256").update(JSON.stringify({
+          runId,
+          nodeId: node.id,
+          role,
+          checkpointKey,
+          workflowOperationRequestId,
+          phase: pending.phase,
+          operationKey: pending.operationKey,
+          generation: pending.generation,
+          requestId: operation.requestId,
+          binding: operation.binding,
+          brokerBinding: operation.brokerBinding,
+        })).digest("hex");
+        candidates.push({
+          nodeId: node.id,
+          phase: pending.phase,
+          role,
+          checkpointKey,
+          workflowOperationRequestId,
+          identityDigest,
+          operation,
+        });
+      } catch {
+        // 单个损坏 checkpoint 不得让整条 run 详情失效；其本身也不能成为恢复授权。
+      }
+    }
+  }
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+function producerRoleMatchesTask(role: string, kind: CodexPreparedOperation["kind"]): boolean {
+  const expectedRole: Partial<Record<CodexPreparedOperation["kind"], string>> = {
+    "creative-treatment": "导演前期构思",
+    "script-draft": "编剧",
+    "director-plan": "导演",
+    "publish-copy": "发行编辑",
+    "asset-rank": "候选画面复核",
+    "reference-grammar": "参考片分析师",
+    "visual-review": "视觉审片员",
+  };
+  return expectedRole[kind] === role;
+}
+
+function textTaskRecoveryReceipt(
+  runRevision: number,
+  pending: PendingTextTask,
+  taskState: TextTaskRecoveryReceipt["taskState"],
+  options: {
+    attemptedAt: string;
+    lastVerifiedAt?: string;
+    observationError?: string;
+    terminalError?: string;
+    failureKind?: TextTaskRecoveryReceipt["failureKind"];
+  },
+): TextTaskRecoveryReceipt {
+  return {
+    version: "video-factory/text-task-recovery-v3",
+    runRevision,
+    taskIdentityDigest: pending.identityDigest,
+    taskState,
+    lastAttemptAt: options.attemptedAt,
+    ...(options.lastVerifiedAt ? { lastVerifiedAt: options.lastVerifiedAt } : {}),
+    ...(options.observationError ? { observationError: options.observationError } : {}),
+    ...(options.terminalError ? { terminalError: options.terminalError } : {}),
+    ...(options.failureKind ? { failureKind: options.failureKind } : {}),
+  };
+}
+
+function textTaskRecoveryReceiptMatches(
+  receipt: TextTaskRecoveryReceipt,
+  runRevision: number,
+  pending: PendingTextTask,
+): boolean {
+  return receipt.runRevision === runRevision
+    && receipt.taskIdentityDigest === pending.identityDigest;
+}
+
+function textTaskRecoveryReceiptPath(workspaceRoot: string, runId: string, nodeId: string): string {
+  return path.join(workspaceRoot, "runs", runId, "nodes", nodeId, "text-task-recovery.json");
+}
+
+async function readTextTaskRecoveryReceipt(receiptPath: string): Promise<TextTaskRecoveryReceipt | undefined> {
+  try {
+    const raw = JSON.parse(await readFile(receiptPath, "utf8")) as Record<string, unknown>;
+    if (raw.version !== "video-factory/text-task-recovery-v2" && raw.version !== "video-factory/text-task-recovery-v3") return undefined;
+    const value = raw as Partial<TextTaskRecoveryReceipt> & { observedAt?: unknown };
+    const lastAttemptAt = raw.version === "video-factory/text-task-recovery-v3" ? value.lastAttemptAt : value.observedAt;
+    const lastVerifiedAt = raw.version === "video-factory/text-task-recovery-v3"
+      ? value.lastVerifiedAt
+      : value.observationError ? undefined : value.observedAt;
+    if (
+      !Number.isInteger(value.runRevision) || Number(value.runRevision) < 0
+      || typeof value.taskIdentityDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.taskIdentityDigest)
+      || !["running", "accepted_unknown", "completed_success", "completed_failure", "not_accepted", "conflict"].includes(String(value.taskState))
+      || typeof lastAttemptAt !== "string"
+      || (lastVerifiedAt !== undefined && typeof lastVerifiedAt !== "string")) return undefined;
+    return {
+      ...value,
+      version: "video-factory/text-task-recovery-v3",
+      lastAttemptAt,
+      ...(typeof lastVerifiedAt === "string" ? { lastVerifiedAt } : {}),
+    } as TextTaskRecoveryReceipt;
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return undefined;
+    return undefined;
+  }
+}
+
+function retryableCompletedTextFailure(receipt: TextTaskRecoveryReceipt): boolean {
+  return receipt.failureKind === "model_provider_transient"
+    || receipt.failureKind === "model_provider_no_output";
+}
+
+function terminalTextTaskState(state: TextTaskRecoveryReceipt["taskState"]): boolean {
+  return state === "completed_success" || state === "completed_failure" || state === "not_accepted" || state === "conflict";
+}
+
+function mergeTextTaskRecoveryReceipt(
+  current: TextTaskRecoveryReceipt | undefined,
+  next: TextTaskRecoveryReceipt,
+): TextTaskRecoveryReceipt {
+  if (!current
+    || current.runRevision !== next.runRevision
+    || current.taskIdentityDigest !== next.taskIdentityDigest) return next;
+  if (terminalTextTaskState(current.taskState) && !terminalTextTaskState(next.taskState)) {
+    return {
+      ...current,
+      lastAttemptAt: current.lastAttemptAt > next.lastAttemptAt ? current.lastAttemptAt : next.lastAttemptAt,
+      ...(next.observationError ? { observationError: next.observationError } : {}),
+    };
+  }
+  if (terminalTextTaskState(current.taskState) && terminalTextTaskState(next.taskState)
+    && current.taskState !== next.taskState) return current;
+  return next;
+}
+
+function taskRecoverySummary(taskState: TextTaskRecoveryReceipt["taskState"], paused: boolean): string {
+  const pauseSuffix = paused ? "结果不会解除暂停；请在确认后显式继续。" : "";
+  if (taskState === "running") return `原模型任务仍在处理中；查询不会重新提交或消耗新的创作轮次。${pauseSuffix}`;
+  if (taskState === "completed_success") return `已找到之前任务的结果，无需重新生成。${pauseSuffix}`;
+  if (taskState === "completed_failure") return "原任务已经结束但未完成；已有成果已保留，请查看原因后决定下一步。";
+  if (taskState === "not_accepted") return "模型服务已确认原任务没有执行，可以安全地有限重试。";
+  if (taskState === "conflict") return "原任务身份与当前记录不匹配，已停止自动执行；已有成果不受影响。";
+  return `暂时无法确认这次任务的结果。系统没有重新提交，请先查询原任务。${pauseSuffix}`;
+}
+
 export async function loadAgentLoopProgress(
   workspaceRoot: string,
   runId: string,
   nodeId: string,
+  workflowOperationRequestId?: string,
 ): Promise<StudioAgentLoopProgress | undefined> {
   const directory = path.join(workspaceRoot, "runs", runId, "nodes", nodeId, "agent-loop-checkpoints");
   try {
     const files = (await readdir(directory)).filter((name) => name.endsWith(".json"));
     const candidates = await Promise.all(files.map(async (name) => {
       const filePath = path.join(directory, name);
-      return { filePath, modifiedAt: (await stat(filePath)).mtimeMs };
+      const [fileStat, value] = await Promise.all([
+        stat(filePath),
+        readFile(filePath, "utf8").then((content) => JSON.parse(content) as unknown),
+      ]);
+      return { filePath, modifiedAt: fileStat.mtimeMs, value, progress: parseAgentLoopProgress(value) };
     }));
-    const latest = candidates.sort((left, right) => right.modifiedAt - left.modifiedAt)[0];
-    if (!latest) return undefined;
-    return parseAgentLoopProgress(JSON.parse(await readFile(latest.filePath, "utf8")) as unknown);
+    if (!workflowOperationRequestId) {
+      return candidates
+        .filter((candidate) => candidate.progress)
+        .sort((left, right) => right.modifiedAt - left.modifiedAt)[0]?.progress;
+    }
+    const owned = candidates.filter((candidate) => {
+      if (!isRecord(candidate.value)) return false;
+      const owner = candidate.value.recoveryOwner;
+      return isRecord(owner)
+        && owner.runId === runId
+        && owner.nodeId === nodeId
+        && owner.workflowOperationRequestId === workflowOperationRequestId;
+    });
+    const pending = owned.filter((candidate) => isRecord(candidate.value) && isRecord(candidate.value.pendingOperation));
+    if (pending.length === 1) return pending[0]?.progress;
+    if (pending.length > 1) return undefined;
+    const active = owned.filter((candidate) => candidate.progress
+      && ["producing", "auditing", "repairing"].includes(candidate.progress.phase));
+    if (active.length === 1) return active[0]?.progress;
+    if (active.length > 1) return undefined;
+    const stopped = owned.filter((candidate) => candidate.progress
+      && ["failed", "exhausted", "halted"].includes(candidate.progress.phase));
+    return stopped.length === 1 ? stopped[0]?.progress : undefined;
   } catch (error) {
     if (hasCode(error, "ENOENT")) return undefined;
     return undefined;
@@ -1616,37 +2746,70 @@ function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undef
     || (value.version !== "video-factory/agent-loop-checkpoint-v3"
       && value.version !== "video-factory/agent-loop-checkpoint-v4"
       && value.version !== "video-factory/agent-loop-checkpoint-v5"
-      && value.version !== "video-factory/agent-loop-checkpoint-v6")) return undefined;
+      && value.version !== "video-factory/agent-loop-checkpoint-v6"
+      && value.version !== "video-factory/agent-loop-checkpoint-v7"
+      && value.version !== "video-factory/agent-loop-checkpoint-v8")) return undefined;
   const maxIterations = Number(value.maxIterations);
+  const role = typeof value.role === "string" && value.role.trim() ? value.role.trim() : undefined;
   const completed = Array.isArray(value.completed) ? value.completed : [];
+  const phaseAttempts = isRecord(value.phaseAttempts) ? value.phaseAttempts : {};
+  const unacceptedPhaseAttempts = isRecord(value.unacceptedPhaseAttempts) ? value.unacceptedPhaseAttempts : {};
+  const rawProducerAttempts = Number.isSafeInteger(phaseAttempts.produce) && Number(phaseAttempts.produce) >= 0
+    ? Number(phaseAttempts.produce)
+    : completed.length + (isRecord(value.pendingCandidate) ? 1 : 0);
+  const rawAuditAttempts = Number.isSafeInteger(phaseAttempts.audit) && Number(phaseAttempts.audit) >= 0
+    ? Number(phaseAttempts.audit)
+    : completed.length;
+  const producerModelCallCount = Math.max(0, rawProducerAttempts - (
+    Number.isSafeInteger(unacceptedPhaseAttempts.produce) ? Number(unacceptedPhaseAttempts.produce) : 0
+  ));
+  const auditModelCallCount = Math.max(0, rawAuditAttempts - (
+    Number.isSafeInteger(unacceptedPhaseAttempts.audit) ? Number(unacceptedPhaseAttempts.audit) : 0
+  ));
+  const structuredRepairModelCallCount = Number.isSafeInteger(value.structuredRepairModelCallCount)
+    && Number(value.structuredRepairModelCallCount) >= 0
+    ? Number(value.structuredRepairModelCallCount)
+    : 0;
   const status = value.status;
   if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 3) return undefined;
-  if (status !== "running" && status !== "passed" && status !== "exhausted") return undefined;
+  if (status !== "running" && status !== "passed" && status !== "exhausted" && status !== "failed") return undefined;
   const pending = isRecord(value.pendingCandidate) ? Number(value.pendingCandidate.iteration) : undefined;
   const iteration = Number.isInteger(pending)
     ? Math.min(maxIterations, Math.max(1, Number(pending)))
     : Math.min(maxIterations, Math.max(1, completed.length + (status === "running" ? 1 : 0)));
   const latest = completed.at(-1);
   const audit = isRecord(latest) && isRecord(latest.audit) ? latest.audit : undefined;
+  const planningDisposition = audit && isRecord(audit.planningDisposition)
+    && (audit.planningDisposition.action === "needs_source" || audit.planningDisposition.action === "needs_user")
+    ? audit.planningDisposition.action
+    : undefined;
   const verdict = audit?.verdict === "pass" || audit?.verdict === "repair" ? audit.verdict : undefined;
   const score = Number(audit?.score);
   const summary = typeof audit?.summary === "string" ? redactManagedPathText(audit.summary) : undefined;
   const latestAudit: StudioAgentLoopProgress["latestAudit"] = verdict && Number.isInteger(score) && score >= 0 && score <= 100 && summary
     ? { verdict, score, summary }
     : undefined;
+  // v7 的 status "failed" 是角色调用终态失败（Provider/基础设施故障等）——与"轮次耗尽未能
+  // 通过审计"分开呈现，不误报为 audit exhausted。
   const phase: StudioAgentLoopProgress["phase"] = status === "passed"
     ? "passed"
     : status === "exhausted"
       ? "exhausted"
-      : pending !== undefined
-        ? "auditing"
-        : completed.length > 0
-          ? "repairing"
-          : "producing";
+      : status === "failed"
+        ? planningDisposition ? "halted" : "failed"
+        : pending !== undefined
+          ? "auditing"
+          : completed.length > 0
+            ? "repairing"
+            : "producing";
   return {
+    ...(role ? { role } : {}),
     iteration,
     maxIterations,
     completedIterations: completed.length,
+    producerModelCallCount,
+    auditModelCallCount,
+    structuredRepairModelCallCount,
     phase,
     ...(latestAudit ? { latestAudit } : {}),
   };
@@ -1658,6 +2821,8 @@ function agentLoopActionLabel(role: string, progress: StudioAgentLoopProgress): 
   if (progress.phase === "repairing") return `${prefix}：按上一轮审计修订`;
   if (progress.phase === "passed") return `${prefix}：独立审计已通过`;
   if (progress.phase === "exhausted") return `${prefix}：三轮审计未通过`;
+  if (progress.phase === "halted") return `${prefix}：已识别外部前提，等待调整方案`;
+  if (progress.phase === "failed") return `${prefix}：模型调用失败，可重试或调整模型`;
   return `${prefix}：正在生成候选交付`;
 }
 
@@ -1833,6 +2998,30 @@ function startRequestDigest(input: unknown): string {
   return createHash("sha256").update(JSON.stringify(input) ?? "undefined").digest("hex");
 }
 
+function commandReceiptPath(
+  workspaceRoot: string,
+  runId: string,
+  kind: "production-authorization" | "production-amendment",
+  idempotencyKey: string,
+): string {
+  const name = createHash("sha256").update(idempotencyKey).digest("hex");
+  return path.join(workspaceRoot, "runs", runId, ".commands", kind, `${name}.json`);
+}
+
+function productionQualityContractDigest(brief: ProductionBrief): string {
+  return canonicalQualityContractDigest({
+    angle: brief.angle,
+    audience: brief.audience,
+    durationRange: brief.durationRange ?? { minSeconds: 0, maxSeconds: 0 },
+    directorProfileId: brief.director?.profileId ?? "",
+    ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
+    ...(brief.visualPlan
+      ? { visualPlanDigest: createHash("sha256").update(JSON.stringify(brief.visualPlan)).digest("hex") }
+      : {}),
+    ...(brief.editorial ? { editorial: brief.editorial } : {}),
+  });
+}
+
 async function readStartRecord(recordPath: string): Promise<StartRecord> {
   try {
     const value = JSON.parse(await readFile(recordPath, "utf8")) as StartRecord;
@@ -1933,9 +3122,19 @@ function visibleWorkflowNodes(run: WorkflowRun<ProductionBrief>): Array<{ id: st
     return [...knownNodes, ...unknownNodes];
   }
   const brief = effectiveProductionBrief(run);
-  const workflowNodes = brief.director
-    ? WORKFLOW_NODES
-    : WORKFLOW_NODES.filter((item) => item.id !== "visual-direction");
+  // joint-v1 拓扑：四段旧规划节点收敛为一个 creative-planning 节点（brief 之后、参考语法之后），
+  // 编辑与检视都指向它。
+  const legacyPlanningNodeIds = new Set(["script", "visual-direction", "asset-candidates", "asset-semantic-rank"]);
+  const jointPlanning = brief.workflowFeatures?.creativePlanning === "joint-v1";
+  const workflowNodes = jointPlanning
+    ? [
+        ...WORKFLOW_NODES.filter((item) => item.id === "brief" || item.id === "reference-grammar"),
+        { id: "creative-planning", label: "创作规划", role: "创作规划制片" },
+        ...WORKFLOW_NODES.filter((item) => item.id !== "brief" && item.id !== "reference-grammar" && !legacyPlanningNodeIds.has(item.id)),
+      ]
+    : brief.director
+      ? WORKFLOW_NODES
+      : WORKFLOW_NODES.filter((item) => item.id !== "visual-direction");
   const semanticNodes = brief.workflowFeatures?.assetSemanticRank
     ? workflowNodes
     : workflowNodes.filter((item) => item.id !== "asset-candidates" && item.id !== "asset-semantic-rank");
@@ -1971,6 +3170,7 @@ function toRunDetail(
     ...(artifact.provenance.licenseNote ? { licenseNote: artifact.provenance.licenseNote } : {}),
     ...(artifact.uri && !isPrivateArtifactKind(artifact.kind) ? { contentUrl: `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}/content` } : {}),
   }));
+  const reworkImpact = summarizeReworkImpact(run);
   const nodeRuns = new Map(run.nodeRuns.map((node) => [node.nodeId, node]));
   const executionPlans = new Map((run.executionPlan ?? []).map((plan) => [plan.nodeId, plan]));
   const visibleNodes = visibleWorkflowNodes(run);
@@ -2054,6 +3254,8 @@ function toRunDetail(
       } : {}),
       ...(node?.spendPlan ? { spendPlan: { ...node.spendPlan, inputVersionIds: [...node.spendPlan.inputVersionIds] } } : {}),
       ...(node?.spendAuthorizationId ? { spendAuthorizationId: node.spendAuthorizationId } : {}),
+      // C1 结构化评估原样透出（含原因/金额/缺失目标），供 C2 展示；执行侧字段不进入 UI。
+      ...(node?.spendAssessment ? { spendAssessment: structuredClone(node.spendAssessment) as unknown as NonNullable<StudioRunDetail["nodes"][number]["spendAssessment"]> } : {}),
       ...nodeExecutionConfiguration(brief, id),
     };
   });
@@ -2105,6 +3307,7 @@ function toRunDetail(
     ...(activeIntervention ? { activeIntervention } : {}),
     ...(videoArtifactId ? { videoArtifactId } : {}),
     ...(publishPackageArtifactId ? { publishPackageArtifactId } : {}),
+    ...(reworkImpact ? { reworkImpact } : {}),
     continuation: continuationSupported
       ? { supported: true }
       : legacyRunContinuation(),
@@ -2128,8 +3331,12 @@ function legacyRunContinuation(): NonNullable<StudioRunSummary["continuation"]> 
 }
 
 function supportsRunContinuation(run: WorkflowRun<ProductionBrief>): boolean {
+  const brief = effectiveProductionBrief(run);
   return run.workflowId === "daily-production"
-    && run.workflowVersion === productionWorkflowVersion(run.initialInput);
+    && run.workflowVersion === productionWorkflowVersion(run.initialInput)
+    && brief.workflowFeatures?.executablePlan === true
+    && Boolean(brief.durationRange)
+    && Boolean(brief.director);
 }
 
 function canCreateReworkFrom(run: WorkflowRun<ProductionBrief>): boolean {
@@ -2410,32 +3617,62 @@ function recommendedReworkScenePositions(options: {
 }): number[] {
   const universe = verifiedReworkScenePositions(options.previousScript, options.previousDirectorPlan);
   const affected = new Set(options.unmaterializedAssetScenePositions);
-  let requiresWholeFilm = false;
   for (const finding of options.findings) {
     if (finding.action === "inspect_existing_media") continue;
     const targetsVisualWork = finding.targetNodeIds.some((nodeId) => nodeId === "visual-direction" || nodeId === "assets");
     const targetsLocatedScriptWork = finding.targetNodeIds.includes("script") && finding.scenePosition !== undefined;
     if (!targetsVisualWork && !targetsLocatedScriptWork) continue;
     if (finding.scenePosition === undefined || universe && !universe.includes(finding.scenePosition)) {
-      requiresWholeFilm = true;
+      // 无法定位的问题必须由用户明确选择范围；不能把不确定性解释为全片返工许可。
+      continue;
     } else {
       affected.add(finding.scenePosition);
     }
   }
-  if (options.findings.length === 0 && options.manualRejectionReason) {
+  if (options.manualRejectionReason) {
+    // 用户显式说出"整体/全部"是对全片范围的明确选择——这不是"找不到范围就默认全片"。
+    if (holisticReworkIntent(options.manualRejectionReason)) {
+      for (const position of universe ?? []) affected.add(position);
+    }
     const mentionedPositions = reworkScenePositionsFromText(options.manualRejectionReason)
       .filter((position) => !universe || universe.includes(position));
     if (mentionedPositions.length > 0) {
       for (const position of mentionedPositions) affected.add(position);
-    } else {
-      requiresWholeFilm = true;
     }
   }
-  if (universe && requiresWholeFilm) return universe;
   return reworkSceneDependencyClosure(
     [...affected],
     isRecord(options.previousDirectorPlan) ? options.previousDirectorPlan.shots : undefined,
   ).filter((position) => !universe || universe.includes(position));
+}
+
+// 用户拒绝说明中的全片意图表述：与"无法定位"严格区分——前者是明确的范围选择。
+function verifiedReworkUniverseOrEmpty(previousScript: unknown, previousDirectorPlan: unknown): number[] {
+  return verifiedReworkScenePositions(previousScript, previousDirectorPlan) ?? [];
+}
+
+function holisticReworkIntent(note: string): boolean {
+  // 否定式（"不要全部""不必整体"）不算全片意图。
+  const negated = /(不要|不必|无需|不能|别)\s*(把|将)?\s*(整体|全部|整个|所有)/.test(note);
+  return !negated && /整体|全部|整个|所有(镜头|画面|内容)|每(个|一)(镜头|镜)/.test(note);
+}
+
+// note-only：有拒绝说明、但既非全片意图、也没有可解析镜头、且 findings 未定位到任何镜头
+// ——范围待定。草稿仍打开让用户选择，但不能以空范围静默开跑。
+function reworkScopeUnresolved(options: {
+  findings: StudioReworkFinding[];
+  unmaterializedAssetScenePositions: number[];
+  previousScript: unknown;
+  previousDirectorPlan: unknown;
+  manualRejectionReason?: string;
+  recommended: number[];
+}): boolean {
+  if (!options.manualRejectionReason) return false;
+  if (holisticReworkIntent(options.manualRejectionReason)) return false;
+  if (reworkScenePositionsFromText(options.manualRejectionReason).length > 0) return false;
+  if (options.recommended.length > 0) return false;
+  const universe = verifiedReworkScenePositions(options.previousScript, options.previousDirectorPlan) ?? [];
+  return universe.length > 0;
 }
 
 function latestManualRejectionReason(run: WorkflowRun<ProductionBrief>): string | undefined {
@@ -2501,7 +3738,11 @@ function buildReworkNodeInstructions(
     };
   }
   return {
-    script: `${rejection}以上一版脚本为底稿，保留未被要求修改的叙事与事实，只修改下列内容：\n${scriptLines.join("\n") || "- 当前没有定位到脚本文字问题；只根据本次重做原因做必要修改，不重写无关段落。"}`.trim(),
+    // BG-06：仅修 media/director 的返工（无脚本定位问题、非全片意图）不给编剧生成默认
+    // 指令——空指令让跨 run seed 得以继承编剧阶段，不重跑无关 producer。
+    script: scriptLines.length === 0 && !holisticReworkIntent(rejectionReason ?? "")
+      ? ""
+      : `${rejection}以上一版脚本为底稿，保留未被要求修改的叙事与事实，只修改下列内容：\n${scriptLines.join("\n") || "- 当前没有定位到脚本文字问题；只根据本次重做原因做必要修改，不重写无关段落。"}`.trim(),
     visualDirection: `${rejection}以上一版导演方案为底稿，保留未被要求修改的全片视觉规则与镜头，只重做下列问题：\n${visualLines.join("\n") || (findings.length > 0 ? "- 本轮结构化问题未直接指向导演方案；仍按本次重做原因复核并改写受影响镜头。" : "- 当前没有结构化视觉问题；依据本次重做原因定位并改写受影响镜头。")}`.trim(),
     assets: `${rejection}严格执行修订后的逐镜路由；保留未受影响母片，不得用说明卡、无关图库素材或内部术语掩盖失败：\n${assetLines.join("\n") || failedAssetInstruction}`.trim(),
   };
@@ -2548,6 +3789,12 @@ function parseBriefWithInputError(value: unknown): ProductionBrief {
   }
 }
 
+function assertExecutableRunContinuation(run: WorkflowRun<ProductionBrief>): void {
+  if (!supportsRunContinuation(run)) {
+    throw new StudioConflictError("这条历史制作没有可执行制作方案，不能继续旧流程；请从当前记录创建新版本后再制作。");
+  }
+}
+
 function productionInputMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("voiceDirection.profileId") && message.includes("providers.voice")) {
@@ -2567,6 +3814,8 @@ function productionInputMessage(error: unknown): string {
 const NODE_PROVIDER_FIELDS: Partial<Record<string, keyof ProductionBrief["providers"]>> = {
   script: "script",
   "visual-direction": "director",
+  // joint-v1 规划节点的执行能力挂在编剧能力上；阶段级模型键由 planningStageId 路由。
+  "creative-planning": "script",
   assets: "assets",
   "asset-source-review": "visualReview",
   voice: "voice",
@@ -2574,6 +3823,60 @@ const NODE_PROVIDER_FIELDS: Partial<Record<string, keyof ProductionBrief["provid
   "technical-review": "technicalReview",
   "visual-review": "visualReview",
 };
+
+// planningStageId 只属于 creative-planning，且只允许白名单阶段：直连服务调用与 HTTP parser
+// 同一校验（服务层不信任调用方已过 parser）。
+function assertPlanningStageScope(
+  nodeId: string,
+  planningStageId: StudioPlanningEditableStage | undefined,
+  actionLabel: string,
+): void {
+  if (planningStageId === undefined) return;
+  if (!(STUDIO_PLANNING_EDITABLE_STAGES as readonly string[]).includes(String(planningStageId))) {
+    throw new StudioInputError("创作规划的 planningStageId 只能是 treatment、script 或 director。");
+  }
+  if (nodeId !== "creative-planning") {
+    throw new StudioInputError(`只有创作规划节点可以携带阶段编号；“${nodeId}”的${actionLabel}修改不接受 planningStageId。`);
+  }
+}
+
+// 阶段级模型键白名单：script 阶段只能改编剧能力模型，director 阶段只能改导演能力模型，
+// treatment 阶段只能改前期构思能力模型；阶段未声明时沿用节点整体（编剧）合同。
+function assertPlanningStageModelScope(
+  nodeId: string,
+  input: StudioNodeExecutionConfigurationInput,
+  brief: ProductionBrief,
+): void {
+  if (nodeId !== "creative-planning") return;
+  const allowedKeys = new Set<string>();
+  allowedKeys.add(brief.providers.script);
+  if (brief.providers.director) allowedKeys.add(brief.providers.director);
+  allowedKeys.add(CREATIVE_TREATMENT_PROVIDER_ID);
+  if (input.planningStageId === undefined) {
+    // 未声明阶段的整体修改沿用节点合同（编剧/导演/构思三个键都在节点能力范围内）。
+  } else if (input.planningStageId === "script") {
+    allowedKeys.clear();
+    allowedKeys.add(brief.providers.script);
+  } else if (input.planningStageId === "director") {
+    allowedKeys.clear();
+    if (brief.providers.director) allowedKeys.add(brief.providers.director);
+  } else {
+    allowedKeys.clear();
+    allowedKeys.add(CREATIVE_TREATMENT_PROVIDER_ID);
+  }
+  if (input.providerId !== undefined && input.planningStageId !== undefined && input.planningStageId !== "script") {
+    throw new StudioInputError("只有创作规划的编剧阶段可以切换执行能力；构思和导演阶段只调整模型。");
+  }
+  for (const providerId of Object.keys(input.modelSelections ?? {})) {
+    if (!allowedKeys.has(providerId)) {
+      throw new StudioInputError(
+        `这次修改针对创作规划的“${
+          input.planningStageId === "treatment" ? "前期构思" : input.planningStageId === "director" ? "导演" : "编剧"
+        }”阶段，不能调整其他能力的模型。`,
+      );
+    }
+  }
+}
 
 function sameProviderIdSet(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
   const leftIds = new Set(left ?? []);
@@ -2704,6 +4007,30 @@ function withReviewScopeCurrent(nodeId: string, value: unknown, current: boolean
       reviewScope: { ...report.reviewScope, current },
     },
   };
+}
+
+// 当前生效 executable plan 的内容 digest（制作范围授权的方案锚）。从报价等待节点或
+// assets 节点的有效输入读取；不落盘、不重算规划。
+async function currentExecutablePlanDigest(
+  run: WorkflowRun<ProductionBrief>,
+  workspaceRoot: string,
+): Promise<string | undefined> {
+  const candidates = ["assets", "creative-planning", "production-preflight"];
+  for (const nodeId of candidates) {
+    const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+    const state = node?.inputState;
+    if (!state || state.stale) continue;
+    const effective = state.versions.find((version) => version.id === state.effectiveVersionId)?.value;
+    if (!isRecord(effective) || typeof effective.executablePlanPath !== "string") continue;
+    try {
+      const runRoot = path.join(workspaceRoot, "runs", run.id);
+      await assertContainedFile(runRoot, effective.executablePlanPath);
+      return createHash("sha256").update(await readFile(effective.executablePlanPath)).digest("hex");
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
 }
 
 function redactManagedPathText(value: string): string {
@@ -2958,13 +4285,30 @@ function boundedStringArray(value: unknown, maxItems: number): string[] {
 
 async function writePrivateTextAtomically(destination: string, content: string): Promise<void> {
   await mkdir(path.dirname(destination), { recursive: true });
-  const temporaryPath = `${destination}.${process.pid}.tmp`;
-  await writeFile(temporaryPath, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  const temporaryPath = `${destination}.${process.pid}.${randomUUID()}.tmp`;
   try {
+    await writeFile(temporaryPath, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
     await rename(temporaryPath, destination);
-  } catch (error) {
+  } finally {
     await rm(temporaryPath, { force: true });
-    throw error;
+  }
+}
+
+async function withTextTaskRecoveryReceiptLock<T>(
+  receiptPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await mkdir(path.dirname(receiptPath), { recursive: true });
+  const release = await lock(receiptPath, {
+    realpath: false,
+    stale: 30_000,
+    update: 10_000,
+    retries: { retries: 100, minTimeout: 5, maxTimeout: 50 },
+  });
+  try {
+    return await operation();
+  } finally {
+    await release().catch(() => undefined);
   }
 }
 

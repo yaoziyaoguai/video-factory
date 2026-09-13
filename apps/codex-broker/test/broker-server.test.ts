@@ -10,6 +10,7 @@ import {
   CodexExecutor,
   CodexExecutorError,
   codexExecutorProfileFor,
+  modelIdForTask,
   parseTaskRequest,
   type CodexExecutionOptions,
   type CodexExecutionResult,
@@ -30,7 +31,23 @@ class ScriptedExecutor extends CodexExecutor {
 
   async runTask(task: ValidatedTask, options: CodexExecutionOptions = {}): Promise<CodexExecutionResult> {
     this.calls.push(task);
-    return this.script(task, options);
+    const result = await this.script(task, options);
+    // 合同保护任务（含 topic-ideas）要求 trace 证明同一合同；与真实 CodexExecutor 一致。
+    if (task.expectedContractDigest && result.trace?.contractDigest === undefined) {
+      return {
+        ...result,
+        trace: {
+          taskKind: task.kind,
+          promptVersion: taskContractDescriptorFor(task.kind).promptVersion,
+          contractDigest: task.expectedContractDigest,
+          prompt: "test",
+          providerId: this.identity.providerId,
+          modelId: modelIdForTask(this.identity, task),
+          ...result.trace,
+        },
+      };
+    }
+    return result;
   }
 }
 
@@ -99,16 +116,19 @@ interface BrokerResponse {
 
 function brokerRequest(
   socketPath: string,
-  options: { method: string; path: string; body?: string; chunked?: boolean },
+  options: { method: string; path: string; body?: string; chunked?: boolean; headers?: Record<string, string> },
 ): Promise<BrokerResponse> {
   return new Promise((resolve, reject) => {
     const request = http.request({
       socketPath,
       method: options.method,
       path: options.path,
-      headers: options.body !== undefined && !options.chunked
-        ? { "content-length": String(Buffer.byteLength(options.body)) }
-        : undefined,
+      headers: {
+        ...options.headers,
+        ...(options.body !== undefined && !options.chunked
+          ? { "content-length": String(Buffer.byteLength(options.body)) }
+          : {}),
+      },
     }, (response) => {
       const chunks: Buffer[] = [];
       response.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -122,6 +142,63 @@ function brokerRequest(
     if (options.body !== undefined) request.write(options.body);
     request.end();
   });
+}
+
+// durable 模式（accept/poll）：POST 返回 202 后轮询 GET 原任务直到终态。
+async function postTaskAwaitOutcome(
+  socketPath: string,
+  body: string,
+): Promise<BrokerResponse> {
+  const first = await brokerRequest(socketPath, { method: "POST", path: "/v1/tasks", body });
+  if (first.status !== 202) return first;
+  const requestId = (JSON.parse(first.body) as { requestId: string }).requestId;
+  const binding = (JSON.parse(first.body) as { binding: Record<string, unknown> }).binding;
+  for (;;) {
+    const poll = await brokerRequest(socketPath, {
+      method: "GET",
+      path: `/v1/tasks/${encodeURIComponent(requestId)}`,
+      headers: queryHeaders(binding),
+    });
+    if (poll.status === 200) {
+      const state = JSON.parse(poll.body) as {
+        accepted?: boolean;
+        state?: string;
+        ok?: boolean;
+        outcome?: { status: number; message: string; failureKind?: string; failureDetails?: unknown; outcomeUncertain?: boolean };
+      };
+      if (state.accepted === true) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        continue;
+      }
+      if (state.state === "completed_failure" && state.ok !== true) {
+        // 完成失败以 200 信封交付：还原为原始错误状态供既有断言使用。
+        return {
+          status: state.outcome?.status ?? 500,
+          headers: poll.headers,
+          body: JSON.stringify({
+            error: state.outcome?.message ?? "Codex task failed.",
+            ...(state.outcome?.failureKind ? { failureKind: state.outcome.failureKind } : {}),
+            ...(state.outcome?.failureDetails ? { failureDetails: state.outcome.failureDetails } : {}),
+            ...(state.outcome?.outcomeUncertain ? { outcomeUncertain: true } : {}),
+          }),
+        };
+      }
+    }
+    return poll;
+  }
+}
+
+function queryHeaders(binding: Record<string, unknown>): Record<string, string> {
+  return {
+    "x-video-factory-binding-version": String(binding.version),
+    "x-video-factory-store-id": String(binding.storeId),
+    "x-video-factory-provider-id": String(binding.providerId),
+    "x-video-factory-model-id": String(binding.modelId),
+    "x-video-factory-request-digest": String(binding.requestDigest),
+    "x-video-factory-task-kind": String(binding.kind),
+    "x-video-factory-contract-digest": binding.contractDigest === null ? "none" : String(binding.contractDigest),
+    "x-video-factory-session-digest": String(binding.sessionDigest),
+  };
 }
 
 function abortableBrokerRequest(
@@ -172,6 +249,8 @@ function topicTaskBody(label: string): string {
     payload: {
       signals: [{ id: "signal-1", platform: "douyin", rank: 1, title: `热点 ${label}` }],
     },
+    // topic-ideas 现在是合同保护任务：真实客户端（REQUIRED_CODEX_TASK_CONTRACT_DIGESTS）总是携带摘要。
+    expectedContractDigest: taskContractDescriptorFor("topic-ideas").digest,
   });
 }
 
@@ -180,6 +259,7 @@ function scriptTaskBody(label: string): string {
     protocolVersion: "video-factory/codex-bridge-v2",
     requestId: `script-${label.replace(/[^A-Za-z0-9._:-]/g, "-")}`,
     kind: "script-draft",
+    expectedContractDigest: taskContractDescriptorFor("script-draft").digest,
     payload: {
       brief: {
         title: `脚本 ${label}`,
@@ -188,6 +268,10 @@ function scriptTaskBody(label: string): string {
         nicheSlug: "qa",
         platform: "douyin",
         durationSeconds: 24,
+        productionCapabilities: {
+          assetProviders: [],
+          editing: { sourceRangeReuse: true, staticEditorialCard: false },
+        },
       },
     },
   });
@@ -240,6 +324,9 @@ describe("CodexBrokerServer routes", () => {
       assert.equal(report.providerId, "openai");
       assert.equal(report.modelId, "codex-default");
       assert.deepEqual(report.taskKinds, BROKER_TASK_KINDS);
+      assert.deepEqual(report.taskContracts, Object.fromEntries(
+        BROKER_TASK_KINDS.map((kind) => [kind, taskContractDescriptorFor(kind).digest]),
+      ));
       assert.equal(report.active, 0);
       assert.equal(report.queued, 0);
       assert.equal(report.capacity, 1);
@@ -301,13 +388,15 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
     });
     try {
       const body = topicTaskBody("durable");
-      const first = brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
-      const second = brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
+      const first = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
+      const second = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
+      assert.equal(first.status, 202);
+      assert.equal(second.status, 202);
       await waitFor(() => calls === 1);
       release.resolve();
-      assert.equal((await first).status, 200);
-      assert.equal((await second).status, 200);
-      assert.equal((await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body })).status, 200);
+      const replayOutcome = await postTaskAwaitOutcome(broker.socketPath, body);
+      assert.equal(replayOutcome.status, 200);
+      assert.equal(JSON.parse(replayOutcome.body).ok, true);
       assert.equal(calls, 1);
 
       const changed = JSON.parse(body) as { payload: { signals: Array<{ title: string }> } };
@@ -347,21 +436,27 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
 
       const first = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
 
-      assert.equal(first.status, 500);
-      const firstEnvelope = JSON.parse(first.body) as Record<string, unknown>;
-      assert.equal(firstEnvelope.outcomeUncertain, true);
-      assert.equal(calls, 1);
+      assert.equal(first.status, 202);
+      const firstEnvelope = JSON.parse(first.body) as { accepted: boolean; binding: Record<string, unknown> };
+      assert.equal(firstEnvelope.accepted, true);
+      await waitFor(() => calls === 1);
       const record = JSON.parse(await readFile(path.join(
         broker.directory,
         "idempotency",
         `${createHash("sha256").update(requestId).digest("hex")}.json`,
       ), "utf8")) as { version: number; state: string };
-      assert.equal(record.version, 1);
+      assert.equal(record.version, 3);
       assert.equal(record.state, "accepted");
 
+      const query = await brokerRequest(broker.socketPath, {
+        method: "GET", path: `/v1/tasks/${encodeURIComponent(requestId)}`,
+        headers: queryHeaders(firstEnvelope.binding),
+      });
+      assert.equal(query.status, 200);
+      assert.equal(JSON.parse(query.body).state, "accepted_unknown");
+
       const replay = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
-      assert.equal(replay.status, 409);
-      assert.match(JSON.parse(replay.body).error, /uncertain outcome/);
+      assert.equal(replay.status, 202);
       assert.equal(calls, 1);
     } finally {
       await broker.close();
@@ -447,7 +542,19 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
           requestId: body.requestId,
           digest,
           state: "completed",
-          outcome: { ok: true, output: "{\"ideas\":[]}", sessionHandle: handle },
+          outcome: {
+            ok: true,
+            output: "{\"ideas\":[]}",
+            sessionHandle: handle,
+            trace: {
+              taskKind: "topic-ideas",
+              promptVersion: taskContractDescriptorFor("topic-ideas").promptVersion,
+              contractDigest: taskContractDescriptorFor("topic-ideas").digest,
+              prompt: "legacy fixture",
+              providerId: "openai",
+              modelId: "codex-default",
+            },
+          },
           sessionRecord: {
             version: 1,
             handle,
@@ -468,11 +575,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       assert.equal(JSON.parse(recovered.body).sessionHandle, handle);
       assert.equal(calls, 0);
 
-      const resumed = await brokerRequest(broker.socketPath, {
-        method: "POST",
-        path: "/v1/tasks",
-        body: JSON.stringify({ ...body, requestId: "atomic-session-resume", sessionHandle: handle }),
-      });
+      const resumed = await postTaskAwaitOutcome(broker.socketPath, JSON.stringify({ ...body, requestId: "atomic-session-resume", sessionHandle: handle }));
       assert.equal(resumed.status, 200);
       assert.equal(calls, 1);
     } finally {
@@ -649,7 +752,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
             contractDigest: task.expectedContractDigest!,
             prompt: "test",
             providerId: "zai-bigmodel-api",
-            modelId: "glm-test",
+            modelId: "glm-5.3",
           },
         };
       },
@@ -665,7 +768,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
             contractDigest: task.expectedContractDigest!,
             prompt: "test",
             providerId: "openai",
-            modelId: "gpt-test",
+            modelId: "codex-default",
           },
         };
       },
@@ -691,13 +794,56 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
     }
   });
 
+  it("rejects executor results whose trace does not match the accepted task binding", async () => {
+    const cases = [
+      { name: "provider", trace: { providerId: "zai-bigmodel-api" }, reasonCode: "binding_mismatch" },
+      { name: "model", trace: { modelId: "other-model" }, reasonCode: "binding_mismatch" },
+      { name: "kind", trace: { taskKind: "script-draft" as const }, reasonCode: "binding_mismatch" },
+      { name: "digest", trace: { contractDigest: "0".repeat(64) }, reasonCode: "contract_mismatch" },
+    ];
+    for (const testCase of cases) {
+      let calls = 0;
+      const broker = await startBroker({
+        script: (task) => {
+          calls += 1;
+          return {
+            output: "{\"ideas\":[]}",
+            trace: {
+              taskKind: task.kind,
+              promptVersion: taskContractDescriptorFor(task.kind).promptVersion,
+              contractDigest: task.expectedContractDigest!,
+              prompt: "test",
+              providerId: "openai",
+              modelId: "codex-default",
+              ...testCase.trace,
+            },
+          };
+        },
+      });
+      try {
+        const response = await brokerRequest(broker.socketPath, {
+          method: "POST",
+          path: "/v1/tasks",
+          body: topicTaskBody(`wrong-trace-${testCase.name}`),
+        });
+        assert.equal(response.status, 422);
+        assert.equal(JSON.parse(response.body).failureDetails.reasonCode, testCase.reasonCode);
+        assert.equal(calls, 1);
+      } finally {
+        await broker.close();
+      }
+    }
+  });
+
   it("returns the executor output and maps malformed requests and oversized bodies", async () => {
     const broker = await startBroker();
     const small = await startBroker({ maxBodyBytes: 32 });
     try {
-      const ok = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body: topicTaskBody("ok") });
+      const ok = await postTaskAwaitOutcome(broker.socketPath, topicTaskBody("ok"));
       assert.equal(ok.status, 200);
-      assert.deepEqual(JSON.parse(ok.body), { ok: true, output: "{\"ideas\":[]}" });
+      const okEnvelope = JSON.parse(ok.body) as { ok: boolean; output: string };
+      assert.equal(okEnvelope.ok, true);
+      assert.equal(okEnvelope.output, "{\"ideas\":[]}");
       assert.equal((await healthReport(broker.socketPath)).completed, 1);
 
       const badJson = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body: "not json" });
@@ -710,15 +856,26 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
         method: "POST", path: "/v1/tasks", body: JSON.stringify(badProtocol),
       });
       assert.equal(rejectedProtocol.status, 400);
-      assert.match(JSON.parse(rejectedProtocol.body).error, /protocol version/);
+      assert.match(JSON.parse(rejectedProtocol.body).error, /broker input contract/);
 
       const forbidden = JSON.parse(topicTaskBody("forbidden")) as { payload: Record<string, unknown> };
-      forbidden.payload.command = "rm -rf /";
+      forbidden.payload.command = "sk-test-secret /Users/private/project";
       const rejectedKey = await brokerRequest(broker.socketPath, {
         method: "POST", path: "/v1/tasks", body: JSON.stringify(forbidden),
       });
       assert.equal(rejectedKey.status, 400);
-      assert.match(JSON.parse(rejectedKey.body).error, /not allowed/);
+      assert.match(JSON.parse(rejectedKey.body).error, /broker input contract/);
+      const rejectedKeyBody = JSON.parse(rejectedKey.body) as {
+        error: string;
+        failureDetails: Record<string, unknown>;
+      };
+      assert.equal(rejectedKeyBody.failureDetails.fieldPath, "payload.command");
+      assert.equal(rejectedKeyBody.failureDetails.reasonCode, "input_contract");
+      assert.equal(rejectedKeyBody.failureDetails.taskKind, "topic-ideas");
+      assert.equal(rejectedKeyBody.failureDetails.accepted, false);
+      assert.match(String(rejectedKeyBody.failureDetails.requestIdHash), /^[a-f0-9]{64}$/);
+      assert.doesNotMatch(JSON.stringify(rejectedKeyBody), /sk-test-secret|\/Users\/private/);
+      assert.equal((await healthReport(broker.socketPath)).completed, 1, "rejected input must not reach the executor");
 
       const declaredTooBig = await brokerRequest(small.socketPath, {
         method: "POST", path: "/v1/tasks", body: "x".repeat(64),
@@ -852,9 +1009,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
     try {
       const body = topicTaskBody("no-output");
       const requestId = String((JSON.parse(body) as { requestId: string }).requestId);
-      const response = await brokerRequest(broker.socketPath, {
-        method: "POST", path: "/v1/tasks", body,
-      });
+      const response = await postTaskAwaitOutcome(broker.socketPath, body);
 
       assert.equal(response.status, 422);
       assert.equal(JSON.parse(response.body).error, "the model returned an empty result.");
@@ -864,7 +1019,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
         "idempotency",
         `${createHash("sha256").update(requestId).digest("hex")}.json`,
       ), "utf8")) as { version: number; state: string; outcome: Record<string, unknown> };
-      assert.equal(record.version, 2);
+      assert.equal(record.version, 3);
       assert.equal(record.state, "completed");
       assert.equal(record.outcome.ok, false);
       assert.equal(record.outcome.status, 422);
@@ -873,15 +1028,16 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       const replayed = await brokerRequest(broker.socketPath, {
         method: "POST", path: "/v1/tasks", body,
       });
-      assert.equal(replayed.status, 422);
-      assert.equal(JSON.parse(replayed.body).failureKind, "model_provider_no_output");
+      assert.equal(replayed.status, 200);
+      assert.equal(JSON.parse(replayed.body).state, "completed_failure");
+      assert.equal(JSON.parse(replayed.body).outcome.failureKind, "model_provider_no_output");
       assert.equal(calls, 1);
     } finally {
       await broker.close();
     }
   });
 
-  it("keeps a legacy completed failure immutable and requires a new requestId for recovery", async () => {
+  it("keeps an unverifiable legacy completed failure immutable and requires a new requestId for recovery", async () => {
     let calls = 0;
     const broker = await startBroker({
       durableIdempotency: true,
@@ -919,16 +1075,12 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       const replayed = await brokerRequest(broker.socketPath, {
         method: "POST", path: "/v1/tasks", body: JSON.stringify(oldBody),
       });
-      assert.equal(replayed.status, 422);
-      assert.equal(JSON.parse(replayed.body).failureKind, undefined);
+      assert.equal(replayed.status, 409);
+      assert.equal(JSON.parse(replayed.body).failureKind, "binding_conflict");
       assert.equal(calls, 0);
       assert.equal(await readFile(recordPath, "utf8"), legacyRecord);
 
-      const recovered = await brokerRequest(broker.socketPath, {
-        method: "POST",
-        path: "/v1/tasks",
-        body: JSON.stringify({ ...oldBody, requestId: "recovered-no-output" }),
-      });
+      const recovered = await postTaskAwaitOutcome(broker.socketPath, JSON.stringify({ ...oldBody, requestId: "recovered-no-output" }));
       assert.equal(recovered.status, 422);
       assert.equal(JSON.parse(recovered.body).failureKind, "model_provider_no_output");
       assert.equal(calls, 1);
@@ -960,7 +1112,7 @@ describe("CodexBrokerServer queue", () => {
               promptVersion: "queue-test-v1",
               prompt: "queue test",
               providerId: "openai",
-              modelId: "gpt-5.6-sol",
+              modelId: "codex-default",
             },
           };
         });
@@ -1142,7 +1294,9 @@ describe("CodexBrokerServer lifecycle", () => {
 
       const activeDone = await active;
       assert.equal(activeDone.status, 200);
-      assert.deepEqual(JSON.parse(activeDone.body), { ok: true, output: "{\"late\":true}" });
+      const activeEnvelope = JSON.parse(activeDone.body) as { ok: boolean; output: string };
+      assert.equal(activeEnvelope.ok, true);
+      assert.equal(activeEnvelope.output, "{\"late\":true}");
       const queuedDone = await queued;
       assert.equal(queuedDone.status, 503);
       assert.match(JSON.parse(queuedDone.body).error, /shutting down/);

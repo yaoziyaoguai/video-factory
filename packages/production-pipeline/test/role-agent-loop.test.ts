@@ -1,10 +1,130 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CodexBridgeError, runRoleAgentLoop, validateRoleAudit } from "../src/index.js";
+import { CodexBridgeError, RoleAgentLoopError, runRoleAgentLoop, validateRoleAudit } from "../src/index.js";
 
 describe("role agent loop audit boundary", () => {
   const producerHandle = `vfs_${"p".repeat(32)}`;
   const auditHandle = `vfs_${"a".repeat(32)}`;
+
+  function changedContractFailedAuditFixture(
+    oldFailureKind: "model_provider_transient" | "model_provider_no_output",
+    currentOutcomes: Array<"pass" | "completed_failure" | "uncertain">,
+  ) {
+    let stored: unknown;
+    let originalAuditRequestId = "";
+    let seedOldAudit = true;
+    let produceCalls = 0;
+    let oldAuditObservations = 0;
+    let currentAuditSubmissions = 0;
+    let currentAuditObservations = 0;
+    const execute = (contractVersion: string, criteria: string[], resumeRequestId?: string) => runRoleAgentLoop<{ title: string }>({
+      role: "编剧",
+      contractVersion,
+      criteria,
+      maxIterations: 3,
+      checkpoint: {
+        key: "changed-contract-failed-audit",
+        ...(resumeRequestId ? { resumeCompletedFailureRequestId: resumeRequestId } : {}),
+        load: async () => stored,
+        save: async (value) => { stored = structuredClone(value); },
+      },
+      produce: async () => {
+        produceCalls += 1;
+        return { output: { title: "保留的候选" } };
+      },
+      audit: async (operation) => {
+        if (operation.preparedOperation) {
+          const payload = operation.preparedOperation.envelope.payload as { contract?: unknown };
+          if (payload.contract === "old") {
+            oldAuditObservations += 1;
+            throw new CodexBridgeError("old audit failed", false, "completed_failure", 502, oldFailureKind);
+          }
+          currentAuditObservations += 1;
+          return { output: passingAudit() };
+        }
+        if (seedOldAudit) {
+          seedOldAudit = false;
+          originalAuditRequestId = operation.requestId;
+          const prepared = preparedOperation(operation, "role-audit");
+          prepared.envelope.payload = { contract: "old" };
+          await operation.requestOptions.beforeSubmit?.(prepared);
+          throw new CodexBridgeError("old audit reply lost", false, "uncertain");
+        }
+        currentAuditSubmissions += 1;
+        const prepared = preparedOperation(operation, "role-audit");
+        prepared.envelope.payload = { contract: "current" };
+        await operation.requestOptions.beforeSubmit?.(prepared);
+        const outcome = currentOutcomes.shift() ?? "pass";
+        if (outcome === "completed_failure") {
+          throw new CodexBridgeError("current audit failed", false, "completed_failure", 502, "model_provider_transient");
+        }
+        if (outcome === "uncertain") {
+          throw new CodexBridgeError("current audit reply lost", false, "uncertain");
+        }
+        return { output: passingAudit() };
+      },
+      validate: titleCandidate,
+    });
+    return {
+      execute,
+      originalRequestId: () => originalAuditRequestId,
+      counts: () => ({ produceCalls, oldAuditObservations, currentAuditSubmissions, currentAuditObservations }),
+      stored: () => stored,
+    };
+  }
+
+  it("stops after a bounded number of session rebuilds when every produce request is rejected as not accepted", async () => {
+    // C5/CG-06：已确证未受理允许安全换会话，但重建必须有持久化上界——连续 409 不能
+    // 形成无界请求循环。上限 2 次受控重建后停止并保留原因。
+    let stored: unknown;
+    let produceCalls = 0;
+    const requestIds: string[] = [];
+    const execute = () => runRoleAgentLoop<{ title: string }>({
+      role: "编剧",
+      contractVersion: "screenwriter-rebuild-bound-v1",
+      criteria: ["标题具体"],
+      maxIterations: 3,
+      checkpoint: {
+        key: "rebuild-bound",
+        load: async () => stored,
+        save: async (value) => { stored = structuredClone(value); },
+      },
+      produce: async (_revision, { requestId }) => {
+        produceCalls += 1;
+        requestIds.push(requestId);
+        throw new CodexBridgeError(
+          "Codex bridge returned HTTP 409. Codex role session is unknown or belongs to a different production role.",
+          false,
+          "not_accepted",
+          409,
+        );
+      },
+      audit: async () => ({ output: passingAudit() }),
+      validate: (value) => value as { title: string },
+    });
+
+    // 第 1、2 次未受理允许受控重建（每次 requestId 都不同）；第 3 次触达上界并停止。
+    let firstFailure: unknown;
+    await assert.rejects(
+      execute,
+      (error: unknown) => {
+        firstFailure = error;
+        return error instanceof Error && /会话被连续拒绝/.test(error.message);
+      },
+    );
+    assert.equal(firstFailure instanceof RoleAgentLoopError ? firstFailure.agentLoop.modelCallCount : -1, 0);
+    assert.equal(firstFailure instanceof RoleAgentLoopError ? firstFailure.agentLoop.producerModelCallCount : -1, 0);
+    assert.equal(firstFailure instanceof RoleAgentLoopError ? firstFailure.agentLoop.auditModelCallCount : -1, 0);
+    assert.equal(produceCalls, 3);
+    assert.equal(new Set(requestIds).size, 3, "each rebuild must use a fresh request identity");
+
+    // 重建预算持久化在 checkpoint：新进程恢复后不重置预算，再一次 409 立即停止。
+    produceCalls = 0;
+    requestIds.length = 0;
+    await assert.rejects(execute, /会话被连续拒绝/);
+    assert.equal(produceCalls, 1);
+  });
+
   it("rejects a low-score pass even when the broker is bypassed", () => {
     assert.throws(() => validateRoleAudit({
       version: "video-factory/role-audit-v1",
@@ -112,6 +232,10 @@ describe("role agent loop audit boundary", () => {
     assert.equal(result.agentLoop?.auditMs, 1);
     assert.equal(result.agentLoop?.validationMs, 4);
     assert.equal(result.agentLoop?.retryCount, 1);
+    assert.equal(result.agentLoop?.modelCallCount, 3);
+    assert.equal(result.agentLoop?.producerModelCallCount, 2);
+    assert.equal(result.agentLoop?.auditModelCallCount, 1);
+    assert.equal(result.agentLoop?.structuredRepairModelCallCount, 1);
     assert.equal("inferenceMs" in (result.agentLoop ?? {}), false);
     assert.equal("ttftMs" in (result.agentLoop ?? {}), false);
   });
@@ -142,10 +266,422 @@ describe("role agent loop audit boundary", () => {
       validate: titleCandidate,
     });
 
-    await assert.rejects(execute, /模型没有完成此步骤/);
-    await assert.rejects(execute, /模型没有完成此步骤/);
+    // C5/CG-08：uncertain 结果的创作者文案必须引导核对原请求，不得建议重试/换模型。
+    await assert.rejects(execute, /结果未知[^"]*核对原有任务/);
+    await assert.rejects(execute, /结果未知[^"]*核对原有任务/);
     assert.equal(requestIds.length, 2);
     assert.equal(requestIds[0], requestIds[1]);
+  });
+
+  it("observes an accepted pending operation before applying a changed role contract", async () => {
+    let stored: unknown;
+    let interrupted = true;
+    const submitted: string[] = [];
+    const observed: string[] = [];
+    const execute = (contractVersion: string, criteria: string[]) => runRoleAgentLoop<{ title: string }>({
+      role: "编剧",
+      contractVersion,
+      criteria,
+      maxIterations: 3,
+      checkpoint: {
+        key: "accepted-input",
+        load: async () => stored,
+        save: async (value) => { stored = structuredClone(value); },
+      },
+      produce: async (_revision, operation) => {
+        if (operation.preparedOperation) {
+          observed.push(operation.preparedOperation.requestId);
+          throw new CodexBridgeError("original task is still running", false, "uncertain");
+        }
+        submitted.push(operation.requestId);
+        await operation.requestOptions.beforeSubmit?.({
+          version: "video-factory/codex-prepared-operation-v1",
+          requestId: operation.requestId,
+          kind: "script-draft",
+          envelope: { payload: { title: "原输入" } },
+          serializedEnvelope: '{"payload":{"title":"原输入"}}',
+          binding: { requestDigest: "a".repeat(64) } as never,
+          brokerBinding: {} as never,
+          route: { socketPath: "/tmp/not-connected.sock" },
+          taskFact: "accepted_unknown",
+        });
+        if (interrupted) {
+          interrupted = false;
+          throw new CodexBridgeError("accepted but observation interrupted", false, "uncertain");
+        }
+        return { output: { title: "unexpected new request" } };
+      },
+      audit: async () => ({ output: passingAudit() }),
+      validate: titleCandidate,
+    });
+
+    await assert.rejects(() => execute("screenwriter-old", ["标题具体"]), /结果未知/);
+    const originalRequestId = (stored as { pendingOperation: { operation: { requestId: string } } }).pendingOperation.operation.requestId;
+    await assert.rejects(() => execute("screenwriter-new", ["标题具体且动作可见"]), /结果未知/);
+
+    assert.deepEqual(submitted, [originalRequestId]);
+    assert.deepEqual(observed, [originalRequestId]);
+    assert.equal((stored as { phaseAttempts: { produce: number } }).phaseAttempts.produce, 1, "pure observation must not consume another model call");
+  });
+
+  it("retires a verified transient terminal failure and creates one new generation only on explicit recovery", async () => {
+    let stored: unknown;
+    let first = true;
+    const submitted: string[] = [];
+    const observed: string[] = [];
+    const baseCheckpoint = {
+      key: "terminal-recovery",
+      load: async () => stored,
+      save: async (value: unknown) => { stored = structuredClone(value); },
+    };
+    const execute = (resumeCompletedFailure: boolean) => runRoleAgentLoop<{ title: string }>({
+      role: "编剧",
+      contractVersion: "screenwriter-current",
+      criteria: ["标题具体"],
+      maxIterations: 3,
+      checkpoint: { ...baseCheckpoint, resumeCompletedFailure },
+      produce: async (_revision, operation) => {
+        if (operation.preparedOperation) {
+          observed.push(operation.preparedOperation.requestId);
+          throw new CodexBridgeError("provider unavailable", false, "completed_failure", 422, "model_provider_transient");
+        }
+        submitted.push(operation.requestId);
+        await operation.requestOptions.beforeSubmit?.({
+          version: "video-factory/codex-prepared-operation-v1",
+          requestId: operation.requestId,
+          kind: "script-draft",
+          envelope: { payload: { title: "输入" } },
+          serializedEnvelope: '{"payload":{"title":"输入"}}',
+          binding: { requestDigest: "b".repeat(64) } as never,
+          brokerBinding: {} as never,
+          route: { socketPath: "/tmp/not-connected.sock" },
+          taskFact: "accepted_unknown",
+        });
+        if (first) {
+          first = false;
+          throw new CodexBridgeError("accepted but interrupted", false, "uncertain");
+        }
+        return { output: { title: "恢复后的新成果" } };
+      },
+      audit: async () => ({ output: passingAudit() }),
+      validate: titleCandidate,
+    });
+
+    await assert.rejects(() => execute(false), /结果未知/);
+    const originalRequestId = submitted[0]!;
+    const result = await execute(true);
+
+    assert.equal(result.output.title, "恢复后的新成果");
+    assert.deepEqual(observed, [originalRequestId]);
+    assert.equal(submitted.length, 2, "one explicit recovery may create exactly one next-generation request");
+    assert.notEqual(submitted[1], originalRequestId, "the terminal physical request id must never be reused");
+    assert.equal(result.agentLoop?.producerModelCallCount, 2);
+    assert.equal(result.agentLoop?.iterations.length, 1, "terminal infrastructure failure does not spend a quality audit round");
+  });
+
+  it("consumes a produce recovery grant on the verified request and stops on the next completed failure", async () => {
+    let stored: unknown;
+    let setup = true;
+    let originalRequestId = "";
+    const submitted: string[] = [];
+    const observed: string[] = [];
+    const execute = (resumeRequestId?: string) => runRoleAgentLoop<{ title: string }>({
+      role: "编剧",
+      contractVersion: "screenwriter-recovery-scope-v1",
+      criteria: ["标题具体"],
+      maxIterations: 3,
+      checkpoint: {
+        key: "produce-recovery-scope",
+        ...(resumeRequestId ? { resumeCompletedFailureRequestId: resumeRequestId } : {}),
+        load: async () => stored,
+        save: async (value) => { stored = structuredClone(value); },
+      },
+      produce: async (_revision, operation) => {
+        if (operation.preparedOperation) {
+          observed.push(operation.preparedOperation.requestId);
+        } else {
+          submitted.push(operation.requestId);
+          await operation.requestOptions.beforeSubmit?.(preparedOperation(operation, "script-draft"));
+        }
+        if (setup) {
+          setup = false;
+          originalRequestId = operation.requestId;
+          throw new CodexBridgeError("accepted but interrupted", false, "uncertain");
+        }
+        throw new CodexBridgeError("provider unavailable", false, "completed_failure", 502, "model_provider_transient");
+      },
+      audit: async () => ({ output: passingAudit() }),
+      validate: titleCandidate,
+    });
+
+    await assert.rejects(() => execute(), /结果未知/);
+    await assert.rejects(() => execute(originalRequestId), /内容生成暂时失败/);
+
+    assert.deepEqual(observed, [originalRequestId]);
+    assert.equal(submitted.length, 2, "one grant creates one replacement request only");
+    assert.notEqual(submitted[1], originalRequestId);
+    assert.equal((stored as { completed: unknown[] }).completed.length, 0);
+    assert.equal((stored as { status: string }).status, "failed");
+  });
+
+  it("consumes an audit recovery grant without repeating produce or leaking it into a later phase", async () => {
+    let stored: unknown;
+    let setup = true;
+    let originalAuditRequestId = "";
+    let produceCalls = 0;
+    const auditSubmissions: string[] = [];
+    const auditObservations: string[] = [];
+    const execute = (resumeRequestId?: string) => runRoleAgentLoop<{ title: string }>({
+      role: "编剧",
+      contractVersion: "screenwriter-audit-recovery-scope-v1",
+      criteria: ["标题具体"],
+      maxIterations: 3,
+      checkpoint: {
+        key: "audit-recovery-scope",
+        ...(resumeRequestId ? { resumeCompletedFailureRequestId: resumeRequestId } : {}),
+        load: async () => stored,
+        save: async (value) => { stored = structuredClone(value); },
+      },
+      produce: async () => {
+        produceCalls += 1;
+        return { output: { title: "保留的候选" } };
+      },
+      audit: async (operation) => {
+        if (operation.preparedOperation) {
+          auditObservations.push(operation.preparedOperation.requestId);
+        } else {
+          auditSubmissions.push(operation.requestId);
+          await operation.requestOptions.beforeSubmit?.(preparedOperation(operation, "role-audit"));
+        }
+        if (setup) {
+          setup = false;
+          originalAuditRequestId = operation.requestId;
+          throw new CodexBridgeError("accepted audit interrupted", false, "uncertain");
+        }
+        throw new CodexBridgeError("audit provider unavailable", false, "completed_failure", 502, "model_provider_transient");
+      },
+      validate: titleCandidate,
+    });
+
+    await assert.rejects(() => execute(), /结果未知/);
+    await assert.rejects(() => execute(originalAuditRequestId), /独立审计暂时失败/);
+
+    assert.equal(produceCalls, 1);
+    assert.deepEqual(auditObservations, [originalAuditRequestId]);
+    assert.equal(auditSubmissions.length, 2);
+    assert.deepEqual((stored as { pendingCandidate: { candidate: unknown } }).pendingCandidate.candidate, { title: "保留的候选" });
+  });
+
+  it("does not let a produce recovery grant authorize a new audit failure", async () => {
+    let stored: unknown;
+    let setup = true;
+    let originalProduceRequestId = "";
+    let produceSubmissions = 0;
+    let auditSubmissions = 0;
+    const execute = (resumeRequestId?: string) => runRoleAgentLoop<{ title: string }>({
+      role: "编剧",
+      contractVersion: "screenwriter-phase-isolation-v1",
+      criteria: ["标题具体"],
+      maxIterations: 3,
+      checkpoint: {
+        key: "phase-isolation",
+        ...(resumeRequestId ? { resumeCompletedFailureRequestId: resumeRequestId } : {}),
+        load: async () => stored,
+        save: async (value) => { stored = structuredClone(value); },
+      },
+      produce: async (_revision, operation) => {
+        if (!operation.preparedOperation) {
+          produceSubmissions += 1;
+          await operation.requestOptions.beforeSubmit?.(preparedOperation(operation, "script-draft"));
+        }
+        if (setup) {
+          setup = false;
+          originalProduceRequestId = operation.requestId;
+          throw new CodexBridgeError("accepted produce interrupted", false, "uncertain");
+        }
+        if (operation.preparedOperation) {
+          throw new CodexBridgeError("old produce failed", false, "completed_failure", 502, "model_provider_transient");
+        }
+        return { output: { title: "恢复后的候选" } };
+      },
+      audit: async (operation) => {
+        auditSubmissions += 1;
+        throw new CodexBridgeError("new audit failed", false, "completed_failure", 502, "model_provider_transient");
+      },
+      validate: titleCandidate,
+    });
+
+    await assert.rejects(() => execute(), /结果未知/);
+    await assert.rejects(() => execute(originalProduceRequestId), /独立审计暂时失败/);
+
+    assert.equal(produceSubmissions, 2);
+    assert.equal(auditSubmissions, 1, "a grant for the old produce request must not retry audit");
+    assert.deepEqual((stored as { pendingCandidate: { candidate: unknown } }).pendingCandidate.candidate, { title: "恢复后的候选" });
+  });
+
+  it("does not let a recovery grant from an earlier role authorize a later role request", async () => {
+    let laterRoleCalls = 0;
+    await assert.rejects(
+      () => runRoleAgentLoop<{ title: string }>({
+        role: "导演",
+        contractVersion: "director-role-isolation-v1",
+        criteria: ["逐镜可执行"],
+        maxIterations: 3,
+        checkpoint: {
+          key: "later-role",
+          resumeCompletedFailureRequestId: "earlier-screenwriter-request",
+          load: async () => undefined,
+          save: async () => undefined,
+        },
+        produce: async () => {
+          laterRoleCalls += 1;
+          throw new CodexBridgeError("director provider unavailable", false, "completed_failure", 502, "model_provider_transient");
+        },
+        audit: async () => ({ output: passingAudit() }),
+        validate: titleCandidate,
+      }),
+      /内容生成暂时失败/,
+    );
+    assert.equal(laterRoleCalls, 1);
+  });
+
+  for (const changedContract of [
+    { name: "contractVersion", contractVersion: "screenwriter-contract-v2", criteria: ["标题具体"] },
+    { name: "criteria", contractVersion: "screenwriter-contract-v1", criteria: ["标题具体", "事实有来源"] },
+  ]) {
+    it(`settles an old pending audit but re-audits after a ${changedContract.name} change and survives another interruption`, async () => {
+      let stored: unknown;
+      let firstAudit = true;
+      let currentAuditInterrupted = true;
+      let produceCalls = 0;
+      let oldAuditObservations = 0;
+      let currentAuditSubmissions = 0;
+      let currentAuditObservations = 0;
+      const execute = (contractVersion: string, criteria: string[]) => runRoleAgentLoop<{ title: string }>({
+        role: "编剧",
+        contractVersion,
+        criteria,
+        maxIterations: 3,
+        checkpoint: {
+          key: "pending-audit-contract-change",
+          load: async () => stored,
+          save: async (value) => { stored = structuredClone(value); },
+        },
+        produce: async () => {
+          produceCalls += 1;
+          return { output: { title: "沿用的候选" } };
+        },
+        audit: async (operation) => {
+          if (operation.preparedOperation) {
+            const payload = operation.preparedOperation.envelope.payload as { contract?: unknown };
+            if (payload.contract === "old") oldAuditObservations += 1;
+            else currentAuditObservations += 1;
+            return { output: passingAudit() };
+          }
+          if (firstAudit) {
+            firstAudit = false;
+            const prepared = preparedOperation(operation, "role-audit");
+            prepared.envelope.payload = { contract: "old" };
+            await operation.requestOptions.beforeSubmit?.(prepared);
+            throw new CodexBridgeError("old audit reply lost", false, "uncertain");
+          }
+          currentAuditSubmissions += 1;
+          const prepared = preparedOperation(operation, "role-audit");
+          prepared.envelope.payload = { contract: "current" };
+          await operation.requestOptions.beforeSubmit?.(prepared);
+          if (currentAuditInterrupted) {
+            currentAuditInterrupted = false;
+            throw new CodexBridgeError("current audit reply lost", false, "uncertain");
+          }
+          return { output: passingAudit() };
+        },
+        validate: titleCandidate,
+      });
+
+      await assert.rejects(() => execute("screenwriter-contract-v1", ["标题具体"]), /结果未知/);
+      await assert.rejects(() => execute(changedContract.contractVersion, changedContract.criteria), /结果未知/);
+      const result = await execute(changedContract.contractVersion, changedContract.criteria);
+
+      assert.equal(produceCalls, 1, "contract-only changes retain the candidate");
+      assert.equal(oldAuditObservations, 1);
+      assert.equal(currentAuditSubmissions, 1);
+      assert.equal(currentAuditObservations, 1);
+      assert.equal(result.agentLoop?.status, "passed");
+      assert.equal(result.agentLoop?.contractVersion, changedContract.contractVersion);
+    });
+  }
+
+  for (const changedContract of [
+    {
+      name: "contractVersion with transient old failure",
+      contractVersion: "screenwriter-combined-v2",
+      criteria: ["标题具体"],
+      failureKind: "model_provider_transient" as const,
+    },
+    {
+      name: "criteria with no-output old failure",
+      contractVersion: "screenwriter-combined-v1",
+      criteria: ["标题具体", "事实有来源"],
+      failureKind: "model_provider_no_output" as const,
+    },
+  ]) {
+    it(`accepts the first current audit after ${changedContract.name}`, async () => {
+      const fixture = changedContractFailedAuditFixture(changedContract.failureKind, ["pass"]);
+      await assert.rejects(() => fixture.execute("screenwriter-combined-v1", ["标题具体"]), /结果未知/);
+
+      const result = await fixture.execute(
+        changedContract.contractVersion,
+        changedContract.criteria,
+        fixture.originalRequestId(),
+      );
+
+      assert.equal(result.agentLoop?.status, "passed");
+      assert.deepEqual(fixture.counts(), {
+        produceCalls: 1,
+        oldAuditObservations: 1,
+        currentAuditSubmissions: 1,
+        currentAuditObservations: 0,
+      });
+    });
+  }
+
+  it("stops when the first current audit fails after settling an old-contract failure", async () => {
+    const fixture = changedContractFailedAuditFixture("model_provider_transient", ["completed_failure"]);
+    await assert.rejects(() => fixture.execute("screenwriter-combined-v1", ["标题具体"]), /结果未知/);
+    await assert.rejects(
+      () => fixture.execute("screenwriter-combined-v2", ["标题具体"], fixture.originalRequestId()),
+      /独立审计暂时失败/,
+    );
+
+    assert.deepEqual(fixture.counts(), {
+      produceCalls: 1,
+      oldAuditObservations: 1,
+      currentAuditSubmissions: 1,
+      currentAuditObservations: 0,
+    });
+    assert.equal((fixture.stored() as { status: string }).status, "failed");
+    assert.deepEqual(
+      (fixture.stored() as { pendingCandidate: { candidate: unknown } }).pendingCandidate.candidate,
+      { title: "保留的候选" },
+    );
+  });
+
+  it("observes the current audit after interruption without repeating the producer", async () => {
+    const fixture = changedContractFailedAuditFixture("model_provider_no_output", ["uncertain"]);
+    await assert.rejects(() => fixture.execute("screenwriter-combined-v1", ["标题具体"]), /结果未知/);
+    await assert.rejects(
+      () => fixture.execute("screenwriter-combined-v1", ["标题具体", "事实有来源"], fixture.originalRequestId()),
+      /结果未知/,
+    );
+    const result = await fixture.execute("screenwriter-combined-v1", ["标题具体", "事实有来源"]);
+
+    assert.equal(result.agentLoop?.status, "passed");
+    assert.deepEqual(fixture.counts(), {
+      produceCalls: 1,
+      oldAuditObservations: 1,
+      currentAuditSubmissions: 1,
+      currentAuditObservations: 1,
+    });
   });
 
   it("opens a fresh bounded session with full repair context when the broker loses an old handle", async () => {
@@ -365,7 +901,7 @@ describe("role agent loop audit boundary", () => {
 
     await assert.rejects(execute, /独立审计暂时失败.*尚未消耗质量审计轮次/);
     assert.equal(auditCalls, 1);
-    assert.equal((stored as { status?: string }).status, "running");
+    assert.equal((stored as { status?: string }).status, "failed");
     assert.equal((stored as { phaseAttempts?: { audit: number } }).phaseAttempts?.audit, 1);
     assert.deepEqual((stored as { pendingCandidate?: { candidate: unknown } }).pendingCandidate?.candidate, { title: "已生成候选" });
 
@@ -396,7 +932,10 @@ describe("role agent loop audit boundary", () => {
       },
       produce: async (revision, operation) => {
         producerRevisions.push(structuredClone(revision));
-        producerOperations.push(structuredClone(operation));
+        producerOperations.push({
+          requestId: operation.requestId,
+          session: structuredClone(operation.session),
+        });
         produceCalls += 1;
         return {
           output: produceCalls === 1 ? { invalid: true } : { title: "通过校验的候选" },
@@ -431,7 +970,6 @@ describe("role agent loop audit boundary", () => {
     assert.equal(auditOperations[1]?.session.handle, auditHandle);
     assert.deepEqual(auditValidationFailures[0], undefined);
     assert.deepEqual(auditValidationFailures[1], {
-      iteration: 1,
       invalidCandidate: { invalid: true },
       invalidCandidateHash: (auditValidationFailures[1] as { invalidCandidateHash: string }).invalidCandidateHash,
       validationError: "Role audit version is invalid.",
@@ -466,6 +1004,34 @@ describe("role agent loop audit boundary", () => {
     assert.equal(produceCalls, 4);
     assert.equal(auditCalls, 3);
     assert.equal(result.agentLoop?.iterations.length, 3);
+  });
+
+  it("records a failed checkpoint when structured output retries are exhausted and resumes it", async () => {
+    let stored: unknown;
+    let produceCalls = 0;
+    const execute = () => runRoleAgentLoop<{ title: string }>({
+      role: "导演",
+      contractVersion: "director-structured-failure-v1",
+      criteria: ["逐镜可执行"],
+      maxIterations: 3,
+      checkpoint: {
+        key: "structured-failure-terminal-state",
+        load: async () => stored,
+        save: async (value) => { stored = structuredClone(value); },
+      },
+      produce: async () => ({
+        output: ++produceCalls <= 2 ? { invalid: true } : { title: "恢复后的完整候选" },
+      }),
+      audit: async () => ({ output: passingAudit() }),
+      validate: titleCandidate,
+    });
+
+    await assert.rejects(execute, /本轮质量审计尚未消耗/);
+    assert.equal((stored as { status?: string }).status, "failed");
+
+    const resumed = await execute();
+    assert.deepEqual(resumed.output, { title: "恢复后的完整候选" });
+    assert.equal(produceCalls, 3);
   });
 
   it("reactivates an older checkpoint that mistook malformed output for semantic exhaustion", async () => {
@@ -551,7 +1117,7 @@ describe("role agent loop audit boundary", () => {
 
     assert.deepEqual(result.output, { title: "旧检查点候选" });
     assert.equal(produceCalls, 0);
-    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v7");
+    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v8");
   });
 
   it("migrates v5 checkpoints so historical infrastructure failures do not exhaust semantic rounds", async () => {
@@ -592,7 +1158,7 @@ describe("role agent loop audit boundary", () => {
     });
 
     assert.deepEqual(result.output, { title: "保留的导演候选" });
-    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v7");
+    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v8");
   });
 
   it("audits an existing human candidate before asking the producer to repair it", async () => {
@@ -621,6 +1187,81 @@ describe("role agent loop audit boundary", () => {
     assert.equal(auditCalls, 1);
     assert.equal(result.agentLoop?.iterations.length, 1);
   });
+
+  it("persists a planning source halt before another producer call and replays it after restart", async () => {
+    let stored: unknown;
+    let produceCalls = 0;
+    let auditCalls = 0;
+    const execute = () => runRoleAgentLoop<{ title: string }>({
+      role: "编剧",
+      planningRole: true,
+      contractVersion: "screenwriter-planning-disposition-v1",
+      criteria: ["真实实验承诺必须有来源"],
+      maxIterations: 3,
+      checkpoint: {
+        key: "planning-needs-source",
+        load: async () => stored,
+        save: async (value) => { stored = structuredClone(value); },
+      },
+      produce: async () => {
+        produceCalls += 1;
+        return { output: { title: "展示真实实验结果" } };
+      },
+      audit: async () => {
+        auditCalls += 1;
+        return { output: {
+          version: "video-factory/role-audit-v1",
+          verdict: "repair",
+          score: 55,
+          summary: "缺少实验记录",
+          issues: [{
+            severity: "blocking",
+            criterion: "事实来源",
+            evidence: "当前输入没有受控实验记录或采集能力",
+            repairInstruction: "补充真实记录，或由用户确认改变承诺",
+          }],
+          repairInstructions: ["补充真实记录"],
+          planningDisposition: { action: "needs_source", issueIndexes: [0] },
+        } };
+      },
+      validate: titleCandidate,
+    });
+
+    let haltFailure: unknown;
+    await assert.rejects(execute, (error: unknown) => {
+      haltFailure = error;
+      return error instanceof Error
+        && error.name === "RoleAgentPlanningHaltError"
+        && /尚未具备的来源/.test(error.message);
+    });
+    assert.equal(haltFailure instanceof RoleAgentLoopError ? haltFailure.agentLoop.modelCallCount : -1, 2);
+    assert.equal(haltFailure instanceof RoleAgentLoopError ? haltFailure.agentLoop.producerModelCallCount : -1, 1);
+    assert.equal(haltFailure instanceof RoleAgentLoopError ? haltFailure.agentLoop.auditModelCallCount : -1, 1);
+    assert.equal(produceCalls, 1);
+    assert.equal(auditCalls, 1);
+    await assert.rejects(execute, (error: unknown) => error instanceof Error && error.name === "RoleAgentPlanningHaltError");
+    assert.equal(produceCalls, 1, "restart must not create another producer task for the same unresolved input");
+    assert.equal(auditCalls, 1, "restart must replay the persisted halt without another audit");
+  });
+
+  it("requires explicit and valid planning dispositions only for planning roles", () => {
+    assert.throws(
+      () => validateRoleAudit(passingAudit(), { planningRole: true }),
+      /must set planningDisposition to null/,
+    );
+    assert.deepEqual(
+      validateRoleAudit({ ...passingAudit(), planningDisposition: null }, { planningRole: true }).planningDisposition,
+      null,
+    );
+    assert.throws(
+      () => validateRoleAudit({ ...repairingAudit(), planningDisposition: { action: "needs_source", issueIndexes: [1] } }, { planningRole: true }),
+      /does not identify an existing issue/,
+    );
+    assert.throws(
+      () => validateRoleAudit({ ...repairingAudit(), planningDisposition: { action: "needs_source", issueIndexes: [0] } }),
+      /Non-planning role audits cannot route/,
+    );
+  });
 });
 
 function titleCandidate(value: unknown): { title: string } {
@@ -629,6 +1270,23 @@ function titleCandidate(value: unknown): { title: string } {
     throw new Error("candidate invalid");
   }
   return { title: (value as { title: string }).title };
+}
+
+function preparedOperation(
+  operation: { requestId: string },
+  kind: "script-draft" | "role-audit",
+) {
+  return {
+    version: "video-factory/codex-prepared-operation-v1" as const,
+    requestId: operation.requestId,
+    kind,
+    envelope: { payload: { contract: "current" } },
+    serializedEnvelope: '{"payload":{"contract":"current"}}',
+    binding: { requestDigest: "f".repeat(64) } as never,
+    brokerBinding: {} as never,
+    route: { socketPath: "/tmp/not-connected.sock" },
+    taskFact: "accepted_unknown" as const,
+  };
 }
 
 function passingAudit() {

@@ -13,6 +13,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from video_factory.domain import SceneAsset, StockAssetCandidate
+from video_factory.voiceover import VoiceDoesNotFitError
 from video_factory.worker import WorkerProtocolError, handle_request, validate_request
 
 
@@ -109,6 +110,201 @@ class WorkerContractTest(unittest.TestCase):
 
             with self.assertRaisesRegex(WorkerProtocolError, "explicit director route.*editorial_card"):
                 handle_request(request)
+
+    def test_asset_worker_projects_the_executable_plan_into_scene_timings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({
+                "duration_target": 24,
+                "scenes": [
+                    {
+                        "position": position,
+                        "narration": f"第 {position} 段旁白",
+                        "duration": duration,
+                        "visual_strategy": "stock",
+                        "visual_prompt": f"第 {position} 段动作",
+                        "search_terms": [],
+                    }
+                    for position, duration in ((1, 10), (2, 10), (3, 11.5))
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
+            executable_plan_path = root / "executable_plan.json"
+            executable_plan_path.write_text(json.dumps({
+                "version": "video-factory/executable-plan-v1",
+                "scriptArtifactId": "artifact-script",
+                "directorArtifactId": "artifact-director",
+                "candidateArtifactIds": [],
+                "durationRange": {"minSeconds": 20, "maxSeconds": 34},
+                "fps": 30,
+                "totalFrames": 945,
+                "cuts": [
+                    {
+                        "scenePosition": 1,
+                        "beatId": "legacy-scene-1",
+                        "assetKey": "asset-scene-1",
+                        "startFrame": 0,
+                        "frameCount": 300,
+                        "sourceInFrame": 0,
+                    },
+                    {
+                        "scenePosition": 2,
+                        "beatId": "legacy-scene-2",
+                        "assetKey": "asset-scene-1",
+                        "startFrame": 300,
+                        "frameCount": 300,
+                        "sourceInFrame": 120,
+                    },
+                    {
+                        "scenePosition": 3,
+                        "beatId": "legacy-scene-3",
+                        "assetKey": "asset-scene-3",
+                        "startFrame": 600,
+                        "frameCount": 345,
+                        "sourceInFrame": 0,
+                    },
+                ],
+            }), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "assets")
+            request["input"] = {
+                "scriptPath": str(script_path),
+                "executablePlanPath": str(executable_plan_path),
+            }
+            request["parameters"] = {
+                "providerId": "mock-stock-v1",
+                "provider": "mock",
+                "mediaType": "video",
+            }
+
+            response = handle_request(request)
+
+            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
+            self.assertEqual(plan["duration_target"], 31.5)
+            self.assertEqual(plan["duration_range"], {"minSeconds": 20, "maxSeconds": 34})
+            self.assertEqual([
+                {
+                    key: scene[key]
+                    for key in ("scene_position", "start_frame", "duration_frames", "source_in_frame", "asset_key", "duration")
+                }
+                for scene in plan["scene_assets"]
+            ], [
+                {"scene_position": 1, "start_frame": 0, "duration_frames": 300, "source_in_frame": 0, "asset_key": "asset-scene-1", "duration": 10},
+                {"scene_position": 2, "start_frame": 300, "duration_frames": 300, "source_in_frame": 120, "asset_key": "asset-scene-1", "duration": 10},
+                {"scene_position": 3, "start_frame": 600, "duration_frames": 345, "source_in_frame": 0, "asset_key": "asset-scene-3", "duration": 11.5},
+            ])
+
+    def test_worker_rejects_a_corrupt_executable_plan_before_preparing_media(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({
+                "scenes": [{
+                    "position": 1,
+                    "narration": "旁白",
+                    "duration": 20,
+                    "visual_strategy": "stock",
+                    "visual_prompt": "动作",
+                }],
+            }), encoding="utf-8")
+            executable_plan_path = root / "executable_plan.json"
+            executable_plan = {
+                "version": "video-factory/executable-plan-v1",
+                "durationRange": {"minSeconds": 20, "maxSeconds": 34},
+                "fps": 30,
+                "totalFrames": 600,
+                "cuts": [{
+                    "scenePosition": 1,
+                    "assetKey": "asset-scene-1",
+                    "startFrame": 0,
+                    "frameCount": 599,
+                    "sourceInFrame": 0,
+                }],
+            }
+            executable_plan_path.write_text(json.dumps(executable_plan), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "assets")
+            request["input"] = {
+                "scriptPath": str(script_path),
+                "executablePlanPath": str(executable_plan_path),
+            }
+            request["parameters"] = {"providerId": "mock-stock-v1", "provider": "mock"}
+
+            with self.assertRaisesRegex(WorkerProtocolError, "cuts do not equal totalFrames"):
+                handle_request(request)
+
+            executable_plan["totalFrames"] = True
+            executable_plan_path.write_text(json.dumps(executable_plan), encoding="utf-8")
+            with self.assertRaisesRegex(WorkerProtocolError, "invalid frame metadata"):
+                handle_request(request)
+
+    def test_video_render_binds_the_asset_plan_to_the_executable_cut_before_rendering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [{
+                "position": 1, "narration": "旁白", "duration": 20,
+                "visual_strategy": "stock", "visual_prompt": "移动镜头",
+            }]}), encoding="utf-8")
+            executable_plan_path = root / "executable_plan.json"
+            executable_plan = {
+                "version": "video-factory/executable-plan-v1",
+                "durationRange": {"minSeconds": 20, "maxSeconds": 20},
+                "fps": 30,
+                "totalFrames": 600,
+                "cuts": [{
+                    "scenePosition": 1, "beatId": "scene-1", "assetKey": "master-1",
+                    "startFrame": 0, "frameCount": 600, "sourceInFrame": 120,
+                }],
+            }
+            executable_plan_path.write_text(json.dumps(executable_plan), encoding="utf-8")
+            asset_plan_path = root / "asset_plan.json"
+            valid_asset = {
+                "scene_position": 1, "media_type": "video", "local_path": str(root / "master.mp4"),
+                "duration_frames": 600, "source_in_frame": 120, "asset_key": "master-1",
+            }
+            asset_plan_path.write_text(json.dumps({"scene_assets": [valid_asset]}), encoding="utf-8")
+            voice_plan_path = root / "voice.json"
+            voice_plan_path.write_text("{}", encoding="utf-8")
+            rendered_video = root / "rendered.mp4"
+            render_manifest = root / "render_manifest.json"
+
+            def fake_render(**kwargs):
+                bound_plan = json.loads(Path(kwargs["asset_plan_path"]).read_text(encoding="utf-8"))
+                self.assertEqual(
+                    {key: bound_plan["scene_assets"][0][key] for key in ("duration_frames", "source_in_frame", "asset_key")},
+                    {"duration_frames": 600, "source_in_frame": 120, "asset_key": "master-1"},
+                )
+                rendered_video.write_bytes(b"video")
+                render_manifest.write_text(json.dumps({"output_file": str(rendered_video)}), encoding="utf-8")
+                return render_manifest
+
+            request = self.valid_request("video.render", root / "render-valid")
+            request["input"] = {
+                "scriptPath": str(script_path),
+                "executablePlanPath": str(executable_plan_path),
+                "assetPlanPath": str(asset_plan_path),
+                "voiceoverPlanPath": str(voice_plan_path),
+            }
+            with patch("video_factory.worker.render_job_manifest", side_effect=fake_render) as render:
+                self.assertEqual(handle_request(request)["status"], "succeeded")
+                render.assert_called_once()
+
+            invalid_assets = [
+                {key: value for key, value in valid_asset.items() if key != "source_in_frame"},
+                {**valid_asset, "duration_frames": 599},
+                {**valid_asset, "source_in_frame": 0},
+                {**valid_asset, "asset_key": "stale-master"},
+                [valid_asset, valid_asset],
+                [],
+            ]
+            for index, invalid in enumerate(invalid_assets):
+                with self.subTest(case=index):
+                    scenes = invalid if isinstance(invalid, list) else [invalid]
+                    asset_plan_path.write_text(json.dumps({"scene_assets": scenes}), encoding="utf-8")
+                    request["outputDir"] = str(root / f"render-invalid-{index}")
+                    with patch("video_factory.worker.render_job_manifest") as render:
+                        with self.assertRaisesRegex(WorkerProtocolError, "Asset plan.*executable production cuts"):
+                            handle_request(request)
+                        render.assert_not_called()
 
     def test_ai_router_materializes_each_scene_from_the_director_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -912,6 +1108,146 @@ class WorkerContractTest(unittest.TestCase):
             self.assertEqual(response["diagnostics"]["actualCostSource"], "configured_rate")
             self.assertEqual(response["diagnostics"]["meteredAttemptCount"], 2)
             self.assertEqual(response["diagnostics"]["meteredFailedAttemptCount"], 0)
+
+    def test_voice_timing_conflict_preserves_materialized_audio_and_paid_operation_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [
+                {
+                    "position": 1, "narration": "第一段自然旁白", "duration": 8,
+                    "visual_strategy": "stock", "visual_prompt": "第一个动作",
+                },
+                {
+                    "position": 2, "narration": "第二段自然旁白", "duration": 12,
+                    "visual_strategy": "stock", "visual_prompt": "第二个动作",
+                },
+            ]}), encoding="utf-8")
+            executable_plan_path = root / "executable_plan.json"
+            executable_plan_path.write_text(json.dumps({
+                "version": "video-factory/executable-plan-v1",
+                "durationRange": {"minSeconds": 20, "maxSeconds": 34},
+                "fps": 30,
+                "totalFrames": 600,
+                "cuts": [
+                    {
+                        "scenePosition": 1, "assetKey": "asset-scene-1",
+                        "startFrame": 0, "frameCount": 240, "sourceInFrame": 0,
+                    },
+                    {
+                        "scenePosition": 2, "assetKey": "asset-scene-2",
+                        "startFrame": 240, "frameCount": 360, "sourceInFrame": 0,
+                    },
+                ],
+            }), encoding="utf-8")
+            output_dir = root / "nodes" / "voice" / "attempt-1"
+            output_dir.mkdir(parents=True)
+            raw_path = output_dir / "scene_01_raw.mp3"
+            raw_path.write_bytes(b"paid-natural-voice")
+            ledger_path = output_dir.parent / ".voice-operations" / (
+                hashlib.sha256(b"command-1").hexdigest() + ".json"
+            )
+            ledger_path.parent.mkdir(parents=True)
+            ledger_path.write_text(json.dumps({
+                "version": "video-factory/paid-operation-v2",
+                "operationId": "command-1",
+                "completed": True,
+                "providerId": "minimax-tts-v1",
+                "modelId": "speech-test",
+                "estimatedCostCny": 0.5,
+                "actualCostCny": 0.5,
+                "actualCostSource": "configured_rate",
+                "items": [{
+                    "itemRequestId": "voice-scene-1",
+                    "state": "materialized",
+                    "stateHistory": ["prepared", "unknown", "materialized"],
+                    "localPath": str(raw_path.resolve()),
+                }],
+            }), encoding="utf-8")
+            request = self.valid_request("voice.synthesize", output_dir)
+            request["input"] = {
+                "scriptPath": str(script_path),
+                "executablePlanPath": str(executable_plan_path),
+            }
+            request["parameters"] = {
+                "providerId": "minimax-tts-v1",
+                "provider": "minimax",
+                "modelId": "speech-test",
+                "estimatedCostCny": 0.5,
+            }
+
+            with patch(
+                "video_factory.worker.synthesize_voiceover_plan",
+                side_effect=VoiceDoesNotFitError(1, 8, 8.2, raw_path),
+            ):
+                response = handle_request(request)
+
+            self.assertEqual(response["status"], "rejected")
+            self.assertEqual(response["error"]["code"], "VOICE_DOES_NOT_FIT")
+            conflict = response["output"]["conflict"]
+            self.assertEqual(conflict["scenePosition"], 1)
+            self.assertEqual(conflict["plannedSeconds"], 8)
+            self.assertEqual(conflict["speechSeconds"], 8.2)
+            self.assertEqual(conflict["requiredSeconds"], 8.2)
+            self.assertEqual(conflict["audioArtifact"]["uri"], str(raw_path.resolve()))
+            self.assertEqual(conflict["audioArtifact"]["sha256"], hashlib.sha256(b"paid-natural-voice").hexdigest())
+            self.assertEqual(response["artifacts"][0], conflict["audioArtifact"])
+            self.assertEqual(response["diagnostics"]["actualCostCny"], 0.5)
+            self.assertEqual(response["diagnostics"]["meteredAttemptCount"], 1)
+            self.assertTrue(response["diagnostics"]["providerOutcomeKnown"])
+
+    def test_reused_minimax_voice_reports_zero_new_provider_calls_and_cost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [{
+                "position": 1, "narration": "复用已有自然旁白", "duration": 8.4,
+            }]}), encoding="utf-8")
+            output_dir = root / "nodes" / "voice" / "attempt-2"
+            output_dir.mkdir(parents=True)
+            track_path = output_dir / "narration.m4a"
+            track_path.write_bytes(b"normalized-reused-audio")
+            plan_path = output_dir / "voiceover_plan.json"
+            plan_path.write_text(json.dumps({
+                "track_path": str(track_path.resolve()),
+                "scenes": [{"position": 1}],
+            }), encoding="utf-8")
+            ledger_path = output_dir.parent / ".voice-operations" / (
+                hashlib.sha256(b"command-1").hexdigest() + ".json"
+            )
+            ledger_path.parent.mkdir(parents=True)
+            ledger_path.write_text(json.dumps({
+                "version": "video-factory/paid-operation-v2",
+                "operationId": "command-1",
+                "completed": True,
+                "providerId": "minimax-tts-v1",
+                "modelId": "speech-test",
+                "estimatedCostCny": 0.5,
+                "actualCostCny": 0,
+                "actualCostSource": "configured_rate",
+                "items": [{
+                    "itemRequestId": "voice-scene-1-reuse",
+                    "state": "materialized",
+                    "stateHistory": ["prepared", "reused_materialized"],
+                }],
+            }), encoding="utf-8")
+            request = self.valid_request("voice.synthesize", output_dir)
+            request["input"] = {"scriptPath": str(script_path)}
+            request["parameters"] = {
+                "providerId": "minimax-tts-v1",
+                "provider": "minimax",
+                "modelId": "speech-test",
+                "estimatedCostCny": 0.5,
+            }
+
+            with patch("video_factory.worker.synthesize_voiceover_plan", return_value=plan_path):
+                response = handle_request(request)
+
+            self.assertEqual(response["status"], "succeeded")
+            self.assertEqual(response["diagnostics"]["actualCostCny"], 0)
+            self.assertEqual(response["diagnostics"]["meteredAttemptCount"], 0)
+            self.assertEqual(response["diagnostics"]["meteredFailedAttemptCount"], 0)
+            self.assertTrue(response["diagnostics"]["providerOutcomeKnown"])
 
     def test_minimax_voice_reports_a_definitive_provider_rejection(self):
         with tempfile.TemporaryDirectory() as tmp:

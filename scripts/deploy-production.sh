@@ -263,11 +263,11 @@ install_broker_units_from_release() {
 }
 
 restart_brokers() {
-  local zai_expected_kinds="${1:-topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit}"
+  local zai_expected_kinds="${1:-topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit}"
   local zai_allow_extra_kinds="${2:-0}" failed=0
   if ! systemctl restart "$broker_service" \
     || ! wait_for_broker_health "$broker_socket" 20 openai openai \
-      topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
+      topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
     failed=1
   fi
   if [[ "$zai_broker_enabled" -eq 1 ]]; then
@@ -379,6 +379,7 @@ stage_broker_release() {
     return 1
   fi
   if [[ ! -f "$staging/broker/dist/main.js"
+    || ! -f "$staging/broker/node_modules/undici/package.json"
     || ! -f "$staging/broker/deploy/vf-codex-broker.service"
     || ! -f "$staging/broker/deploy/vf-zai-codex-broker.service" ]]; then
     echo "Candidate image does not contain a complete broker release." >&2
@@ -439,12 +440,12 @@ if ! wait_for_health 36; then
 fi
 
 if ! broker_health "$broker_socket" openai openai \
-  topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
+  topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
   echo "Codex broker became unhealthy after the app deployment." >&2
   exit 1
 fi
 if [[ "$zai_broker_enabled" -eq 1 ]] && ! broker_health "$zai_broker_socket" zai zai-bigmodel-api \
-  topic-ideas,series-roadmap,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
+  topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
   echo "ZAI Code Plan broker became unhealthy after the app deployment." >&2
   exit 1
 fi

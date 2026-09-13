@@ -243,6 +243,8 @@ export interface StudioEditorialDecision {
   reasons: string[];
   guardrails: string[];
   recommendedTemplate?: StudioTemplateRecommendation;
+  // 规则保底候选尚未经过选题总编模型评估：分数不是总编结论，客户端必须显示“待总编评估”而不是“总编评分 0”。
+  pendingEditorReview?: boolean;
 }
 
 export interface StudioCandidateVerification {
@@ -279,6 +281,11 @@ export interface StudioTrendCandidate {
   rationale: string;
   visualProof?: string;
   providerId: string;
+  // 规则保底的结构化诊断：模型轮失败时必须留痕，不得静默冒充模型成果。
+  generationFallback?: {
+    reason: string;
+    category: "model_unavailable" | "accepted_unknown" | "contract_rejected" | "model_error";
+  };
   generatedAt: string;
   evidence: StudioOpportunityEvidence[];
   score: StudioOpportunityScore;
@@ -302,6 +309,18 @@ export interface StudioTrendRefreshStatus {
   finishedAt?: string;
   candidateCount?: number;
   error?: string;
+}
+
+export interface StudioTopicGenerationReceipt {
+  generationId: string;
+  generatedAt: string;
+  modelInvoked: boolean;
+  source: "editor-model" | "rule-fallback";
+  candidateCount: number;
+  providerId?: string;
+  modelId?: string;
+  failureCategory?: "model_unavailable" | "accepted_unknown" | "contract_rejected" | "model_error";
+  failureReason?: string;
 }
 
 export interface StudioCandidateInboxItem extends StudioTrendCandidate {
@@ -340,6 +359,7 @@ export interface StudioCandidateInbox {
   items: StudioCandidateInboxItem[];
   facets: StudioCandidateInboxFacets;
   generatedAt: string;
+  topicGeneration?: StudioTopicGenerationReceipt;
 }
 
 export type StudioSeriesStatus = "active" | "paused";
@@ -694,6 +714,21 @@ export interface StudioRunResultAvailability {
   detail: string;
 }
 
+export type StudioTaskRecoveryAction = "query_original_task" | "retrieve_and_continue" | "retry_failed_step" | "adjust_plan";
+
+export interface StudioTaskRecovery {
+  nodeId: string;
+  phase: "produce" | "audit";
+  taskState: "running" | "accepted_unknown" | "completed_success" | "completed_failure" | "not_accepted" | "conflict";
+  summary: string;
+  resultAvailable: boolean;
+  allowedActions: StudioTaskRecoveryAction[];
+  lastVerifiedAt?: string;
+  lastAttemptAt?: string;
+  observationError?: string;
+  terminalError?: string;
+}
+
 export interface StudioRunArchiveInput {
   runIds: string[];
 }
@@ -713,10 +748,50 @@ export interface StudioRunDetail extends StudioRunSummary {
   currentAction?: StudioRunCurrentAction;
   failure?: StudioRunFailure;
   resultAvailability?: StudioRunResultAvailability;
+  taskRecovery?: StudioTaskRecovery;
   activeIntervention?: StudioIntervention;
   videoArtifactId?: string;
   publishPackageArtifactId?: string;
   pauseRequested?: boolean;
+  reworkImpact?: StudioReworkImpactSummary;
+  /** joint-v1 创作规划的真实子阶段（只读投影）；legacy run 无此字段。 */
+  planningStages?: StudioPlanningStage[];
+  /** 当前生效 executable plan 的 sha256（制作范围授权的 acceptedPlanDigest 锚）。 */
+  productionPlanDigest?: string;
+}
+
+export interface StudioPlanningStage {
+  id: "treatment" | "script" | "director" | "candidates" | "rank" | "integrate" | "compile";
+  status: "pending" | "running" | "completed" | "failed";
+  effectiveModelId?: string;
+  /** 模型阶段当前绑定的能力提供者 id（UI 模型选择据此解析）。 */
+  providerId?: string;
+  artifactIds: string[];
+  issue?: string;
+  allowedActions: Array<"edit_input" | "change_model" | "view_artifacts">;
+}
+
+export interface StudioReworkImpactSummary {
+  version: "video-factory/rework-impact-v1";
+  sourceRunId: string;
+  affectedScenePositions: number[];
+  nodes: Array<{
+    nodeId: string;
+    action: "inherited" | "partial" | "executed" | "not_run";
+    reason: "verified_source_match" | "mixed_reuse_and_execution" | "affected_input" | "not_reached";
+  }>;
+  calls: {
+    scriptModel: number | "unknown";
+    mediaCreate: number;
+    voice: number;
+    render: number;
+    visualReview: number;
+  };
+  media: {
+    retainedSha256: string[];
+    producedSha256: string[];
+    mayCreateNewMedia: boolean;
+  };
 }
 
 export interface StudioCreativeSummary {
@@ -750,8 +825,23 @@ export interface StudioNode {
   plannedExecution?: StudioNodeExecutionPlan;
   spendPlan?: StudioSpendPlan;
   spendAuthorizationId?: string;
+  /** C1 结构化覆盖评估：报价等待节点上"范围未覆盖"的可区分原因与精确金额。 */
+  spendAssessment?: StudioSpendAssessment;
   agentLoopProgress?: StudioAgentLoopProgress;
   executionConfiguration?: StudioNodeExecutionConfiguration;
+}
+
+export interface StudioSpendAssessment {
+  action: "execute" | "request_approval";
+  reason?: "amount" | "scope" | "attempts" | "quality" | "evidence";
+  approvedAmountCents: number;
+  settledCents: number;
+  reservedCents: number;
+  pendingUnknownCents: number;
+  requestedMaximumCents: number;
+  additionalCents: number;
+  resultingMaximumCents: number;
+  blockedAssets: Array<{ assetKey: string; reason: string }>;
 }
 
 export interface StudioNodeExecutionConfiguration {
@@ -764,10 +854,16 @@ export interface StudioNodeExecutionConfiguration {
 }
 
 export interface StudioAgentLoopProgress {
+  /** 当前角色 checkpoint 自身的角色名；联合规划节点切换角色时据此避免轮次看似倒退。 */
+  role?: string;
   iteration: number;
   maxIterations: number;
   completedIterations: number;
-  phase: "producing" | "auditing" | "repairing" | "passed" | "exhausted";
+  producerModelCallCount?: number;
+  auditModelCallCount?: number;
+  structuredRepairModelCallCount?: number;
+  /** "failed"：角色调用终态失败（含 Provider/基础设施故障），不是审计轮次耗尽。 */
+  phase: "producing" | "auditing" | "repairing" | "passed" | "exhausted" | "failed" | "halted";
   latestAudit?: {
     verdict: "pass" | "repair";
     score: number;
@@ -878,19 +974,80 @@ export interface StudioNodeOverrideInput {
   confirmTerminalEdit?: boolean;
 }
 
+/** joint-v1 创作规划里允许携带 planningStageId 的可编辑阶段白名单。 */
+export type StudioPlanningEditableStage = "treatment" | "script" | "director";
+
+export const STUDIO_PLANNING_EDITABLE_STAGES: readonly StudioPlanningEditableStage[] = ["treatment", "script", "director"];
+
 export interface StudioNodeInputOverrideInput {
   input: unknown;
+  expectedRunRevision: number;
+  expectedVersionId: string;
+  /** 仅 nodeId=creative-planning 可携带；声明本次编辑针对的创作规划阶段。 */
+  planningStageId?: StudioPlanningEditableStage;
   confirmTerminalEdit?: boolean;
 }
 
 export interface StudioNodeExecutionConfigurationInput {
+  expectedRunRevision: number;
   providerId?: string;
   modelSelections?: Record<string, string | null>;
   assetProviderIds?: string[];
+  /** 仅 nodeId=creative-planning 可携带；声明本次模型/执行配置调整针对的创作规划阶段。 */
+  planningStageId?: StudioPlanningEditableStage;
   economics?: {
     allowMeteredProviders: boolean;
   };
   confirmTerminalEdit?: boolean;
+}
+
+/** 配置编辑器草稿类型：不含并发 token；wire DTO 在保存时补上编辑器打开/点击时观察到的基线。 */
+export type StudioNodeExecutionConfigurationDraft = Omit<StudioNodeExecutionConfigurationInput, "expectedRunRevision">;
+
+export interface StudioProductionQuoteInput {
+  expectedRunRevision: number;
+  acceptedPlanDigest: string;
+  requestedMaximumCny?: number;
+  allowedModels?: Array<{ providerId: string; modelId: string }>;
+}
+
+export interface StudioProductionQuote {
+  quoteId: string;
+  acceptedPlanDigest: string;
+  estimatedCostCny: number;
+  maximumCostCny: number;
+  scopeSummary: {
+    content: string;
+    assets: Array<{
+      assetKey: string;
+      label: string;
+      estimatedCostCny: number;
+      allowedModels: Array<{ providerId: string; modelId: string }>;
+      maxCreateAttempts: number;
+    }>;
+    uncertainty: string[];
+  };
+  fundingRequestId?: string;
+  /** 追加命令 URL 合同需要的活动授权 id（funding.authorizationId == current active head）。 */
+  fundingAuthorizationId?: string;
+  additionalCents?: number;
+  missingGoals?: string[];
+  preservedWork?: string[];
+  purpose?: string;
+  feasible: boolean;
+}
+
+export interface StudioProductionAuthorizationInput {
+  expectedRunRevision: number;
+  quoteId: string;
+  acceptedPlanDigest: string;
+  idempotencyKey: string;
+}
+
+export interface StudioProductionAmendmentInput {
+  expectedRunRevision: number;
+  fundingRequestId: string;
+  idempotencyKey: string;
 }
 
 export interface StudioSpendAuthorizationInput {
@@ -1286,6 +1443,9 @@ export interface StudioReworkDraft {
   input: StudioProductionInput;
   inheritedNodeIds: string[];
   requiredAffectedScenePositions: number[];
+  /** needs_scope：拒绝说明无法定位到镜头，等待用户选择范围；不能以空范围开跑。 */
+  scopeState: "resolved" | "needs_scope";
+  scopePrompt?: string;
   inheritedReferenceVideo?: Pick<StudioReferenceVideo, "label" | "mimeType" | "sizeBytes">;
 }
 
@@ -1296,6 +1456,7 @@ export interface StudioProductionInput {
   audience: string;
   nicheSlug: string;
   durationSeconds: number;
+  durationRange?: { minSeconds: number; maxSeconds: number };
   platform: string;
   reviewMode: "manual" | "automatic";
   runPurpose?: "production" | "test";
@@ -1327,6 +1488,9 @@ export interface StudioProductionInput {
   workflowFeatures?: {
     assetSemanticRank: boolean;
     referenceGrammar: boolean;
+    executablePlan?: boolean;
+    /** 新制作显式写入 "joint-v1"（共同创作规划）；历史 run 不补标记。 */
+    creativePlanning?: "joint-v1";
   };
   referenceVideo?: {
     uploadId: string;
@@ -1340,6 +1504,30 @@ export interface StudioProductionInput {
     recipeId: StudioProductionRecipeId;
     allowMeteredProviders: boolean;
   };
+  /** 本片预算意向（可选，仅规划参考）：不设置默认；不构成付费授权。 */
+  budgetIntentionCny?: number;
+}
+
+export function defaultStudioDurationRange(durationSeconds: number): { minSeconds: number; maxSeconds: number } {
+  return {
+    minSeconds: Math.max(20, Math.floor(durationSeconds * 0.6)),
+    maxSeconds: Math.min(180, Math.ceil(durationSeconds * 1.4)),
+  };
+}
+
+export function assertStudioExecutableProductionInput(value: unknown): void {
+  const input = requiredObject(value, "制作参数");
+  const workflowFeatures = input.workflowFeatures;
+  if (typeof workflowFeatures !== "object" || workflowFeatures === null || Array.isArray(workflowFeatures)
+    || (workflowFeatures as Record<string, unknown>).executablePlan !== true) {
+    throw new StudioInputError("新建制作必须启用可执行制作方案（workflowFeatures.executablePlan=true）。");
+  }
+  if (typeof input.durationRange !== "object" || input.durationRange === null || Array.isArray(input.durationRange)) {
+    throw new StudioInputError("新建制作必须填写可编辑的成片时长范围。");
+  }
+  if (typeof input.director !== "object" || input.director === null || Array.isArray(input.director)) {
+    throw new StudioInputError("新建制作必须选择导演角色和画面来源。");
+  }
 }
 
 export interface StudioReferenceVideo {
@@ -1351,13 +1539,26 @@ export interface StudioReferenceVideo {
   createdAt: string;
 }
 
-export interface StudioDecisionInput {
-  action: "approve" | "reject";
+interface StudioDecisionInputBase {
   expectedRunRevision: number;
   interventionId: string;
   reviewEvidenceId: string | null;
   note?: string;
 }
+
+export type StudioDecisionInput = StudioDecisionInputBase & (
+  | {
+    action: "request_changes";
+    voiceTiming: {
+      scenePosition: number;
+      durationSeconds: number;
+    };
+  }
+  | {
+    action: "approve" | "reject";
+    voiceTiming?: never;
+  }
+);
 
 export interface StudioSceneRevisionInput {
   expectedRunRevision: number;
@@ -1719,8 +1920,11 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
     throw new StudioInputError("审片决定格式不正确。");
   }
   const input = value as Record<string, unknown>;
-  if (input.action !== "approve" && input.action !== "reject") {
-    throw new StudioInputError("请选择批准或打回。");
+  if (input.executablePlanPath !== undefined) {
+    throw new StudioInputError("调整方案不支持提交系统托管文件路径。");
+  }
+  if (input.action !== "approve" && input.action !== "request_changes" && input.action !== "reject") {
+    throw new StudioInputError("请选择批准、调整方案或打回。");
   }
   if (input.note !== undefined && typeof input.note !== "string") {
     throw new StudioInputError("审片说明必须是文字。");
@@ -1735,13 +1939,39 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
   if (reviewEvidenceId !== null && !/^[a-f0-9]{64}$/.test(reviewEvidenceId)) {
     throw new StudioInputError("审片证据编号必须是 SHA-256 摘要。");
   }
-  return {
-    action: input.action,
+  let voiceTiming: StudioDecisionInput["voiceTiming"];
+  if (input.action === "request_changes") {
+    if (typeof input.voiceTiming !== "object" || input.voiceTiming === null || Array.isArray(input.voiceTiming)) {
+      throw new StudioInputError("调整配音方案时必须填写镜头和新时长。");
+    }
+    const timing = input.voiceTiming as Record<string, unknown>;
+    if (Object.keys(timing).some((field) => field !== "scenePosition" && field !== "durationSeconds")) {
+      throw new StudioInputError("配音时长调整包含不支持的字段。");
+    }
+    if (!Number.isSafeInteger(timing.scenePosition) || Number(timing.scenePosition) < 1) {
+      throw new StudioInputError("配音镜头编号必须是正整数。");
+    }
+    if (typeof timing.durationSeconds !== "number" || !Number.isFinite(timing.durationSeconds)
+      || timing.durationSeconds <= 0 || timing.durationSeconds > 180) {
+      throw new StudioInputError("配音镜头时长必须大于 0 秒且不超过 180 秒。");
+    }
+    voiceTiming = {
+      scenePosition: Number(timing.scenePosition),
+      durationSeconds: timing.durationSeconds,
+    };
+  } else if (input.voiceTiming !== undefined) {
+    throw new StudioInputError("只有调整方案时才能提交配音时长。");
+  }
+  const parsed = {
     expectedRunRevision: Number(input.expectedRunRevision),
     interventionId,
     reviewEvidenceId,
     ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}),
   };
+  if (input.action === "request_changes") {
+    return { ...parsed, action: "request_changes", voiceTiming: voiceTiming! };
+  }
+  return { ...parsed, action: input.action };
 }
 
 export function parseStudioSceneRevisionInput(value: unknown): StudioSceneRevisionInput {

@@ -242,6 +242,10 @@ describe("CodexScreenwriterAgent", () => {
       nicheSlug: "life-avoidance",
       visualProof,
       visualPlan,
+      productionCapabilities: {
+        assetProviders: [],
+        editing: { sourceRangeReuse: true, staticEditorialCard: false },
+      },
     });
     assert.deepEqual((auditClient.calls[1]!.payload as Record<string, unknown>).previousAudit, repairAudit);
   });
@@ -396,6 +400,34 @@ describe("CodexScreenwriterAgent", () => {
     assert.deepEqual(secondAuditedCandidate, execution.output);
   });
 
+  it("rejects a changed candidate when an empty scope bypasses pre-call script reuse", async () => {
+    const input = screenwriterInput();
+    const previousScript = {
+      viewerPromise: "上一版观众承诺",
+      narrativeArc: "上一版叙事弧",
+      canonFacts: [],
+      scenes: [validScene(1), validScene(2), validScene(3)],
+    };
+    input.brief.rework = {
+      sourceRunId: "run-empty-scope",
+      instruction: "没有脚本变化。",
+      findings: [],
+      affectedScenePositions: [],
+      previousScript,
+    };
+    const changed = {
+      ...previousScript,
+      scenes: [validScene(1, { narration: "模型不应改写第一镜。" }), validScene(2), validScene(3)],
+    };
+    const client = new SequencedCodexClient([changed]);
+    const agent = new CodexScreenwriterAgent({ client });
+
+    await assert.rejects(
+      () => agent.draft(input),
+      /empty affectedScenePositions must reuse the verified previous script before model execution/i,
+    );
+  });
+
   it("uses the shared wall-clock deadline as an admission gate without shortening accepted operations", async () => {
     const client = new SequencedCodexClient([validDraft(), {
       version: "video-factory/role-audit-v1",
@@ -412,7 +444,8 @@ describe("CodexScreenwriterAgent", () => {
 
     assert.equal(client.calls.length, 2);
     for (const call of client.calls) {
-      assert.equal(call.requestOptions, undefined);
+      assert.equal(call.requestOptions?.timeoutMs, undefined);
+      assert.equal(typeof (call.requestOptions as { beforeSubmit?: unknown } | undefined)?.beforeSubmit, "function");
       assert.equal("wallClockDeadlineAtMs" in (call.payload as Record<string, unknown>), false);
     }
   });
@@ -465,8 +498,101 @@ describe("CodexScreenwriterAgent", () => {
     assert.equal(codexClient.calls.length, 1);
     assert.equal(codexClient.calls[0]?.kind, "script-draft");
     const payload = codexClient.calls[0]!.payload as Record<string, unknown>;
-    assert.deepEqual(payload, { brief: input.brief });
+    assert.deepEqual(payload, {
+      brief: {
+        ...input.brief,
+        productionCapabilities: {
+          assetProviders: [],
+          editing: { sourceRangeReuse: true, staticEditorialCard: false },
+        },
+      },
+    });
     assert.equal("directive" in payload, false);
+  });
+
+  it("uses the explicit duration range in production, validation, and audit context", async () => {
+    const rangedDraft = {
+      scenes: Array.from({ length: 10 }, (_, index) => validScene(index + 1, { duration: 6 })),
+    };
+    const input = screenwriterInput();
+    input.brief.durationSeconds = 30;
+    input.brief.durationRange = { minSeconds: 20, maxSeconds: 90 };
+    const producerClient = new SequencedCodexClient([rangedDraft]);
+    const auditClient = new SequencedCodexClient([{
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 92,
+      summary: "时长和内容均可执行。",
+      issues: [],
+      repairInstructions: [],
+    }]);
+    const agent = new CodexScreenwriterAgent({ client: producerClient, auditClient, maxReviewIterations: 1 });
+
+    const execution = await agent.draftDetailed(input);
+
+    assert.equal(execution.output.scenes.reduce((sum, scene) => sum + scene.duration, 0), 60);
+    assert.deepEqual(
+      (producerClient.calls[0]!.payload as { brief: ScreenwriterAgentInput["brief"] }).brief.durationRange,
+      { minSeconds: 20, maxSeconds: 90 },
+    );
+    const auditContract = (auditClient.calls[0]!.payload as {
+      context: { currentRoleContract: Record<string, unknown> };
+    }).context.currentRoleContract;
+    assert.deepEqual(auditContract.durationRange, { minSeconds: 20, maxSeconds: 90 });
+    assert.deepEqual(auditContract.acceptedSceneDurationTotal, { minSeconds: 20, maxSeconds: 90 });
+    assert.throws(
+      () => validateScriptDraft(rangedDraft, {
+        durationSeconds: 24,
+        durationRange: { minSeconds: 24, maxSeconds: 24 },
+      }),
+      /outside the 24-24s duration range/,
+    );
+    const overRangeDraft = {
+      scenes: Array.from({ length: 13 }, (_, index) => validScene(index + 1, { duration: 7 })),
+    };
+    assert.throws(
+      () => validateScriptDraft(overRangeDraft, {
+        durationSeconds: 30,
+        durationRange: { minSeconds: 20, maxSeconds: 90 },
+      }),
+      /outside the 20-90s duration range/,
+    );
+    assert.throws(
+      () => validateScriptDraft(rangedDraft, { durationSeconds: 30 }),
+      /outside 0\.6-1\.4x of the 30s target/,
+    );
+  });
+
+  it("gives the auditor host-computed exact duration and canon boundary facts", async () => {
+    const durations = [2.5, 3.5, 4, 3.5, 3.5, 5, 2.5, 3.5, 2.5, 3.5];
+    const draft = {
+      canonFacts: [],
+      scenes: durations.map((duration, index) => validScene(index + 1, { duration })),
+    };
+    const input = screenwriterInput();
+    input.brief.durationSeconds = 30;
+    input.brief.durationRange = { minSeconds: 20, maxSeconds: 34 };
+    const producerClient = new SequencedCodexClient([draft]);
+    const auditClient = new SequencedCodexClient([{
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 92,
+      summary: "宿主时长事实合规。",
+      issues: [],
+      repairInstructions: [],
+    }]);
+    const agent = new CodexScreenwriterAgent({ client: producerClient, auditClient, maxReviewIterations: 1 });
+
+    await agent.draftDetailed(input);
+
+    const facts = (auditClient.calls[0]!.payload as {
+      context: { currentRoleContract: { candidateFacts: Record<string, unknown> } };
+    }).context.currentRoleContract.candidateFacts;
+    assert.equal(facts.sceneCount, 10);
+    assert.equal(facts.totalDurationSeconds, 34);
+    assert.deepEqual(facts.durationRange, { minSeconds: 20, maxSeconds: 34 });
+    assert.equal(facts.durationWithinRange, true);
+    assert.deepEqual((facts.canonFacts as Record<string, unknown>).allowedCount, { min: 0, max: 8 });
   });
 
   it("rejects invalid brief targets before sending anything to codex", async () => {
@@ -491,20 +617,33 @@ describe("CodexScreenwriterAgent", () => {
     assert.deepEqual(validateScriptDraft(validDraft(), { durationSeconds: 24 }), validDraft());
   });
 
-  it("requires explicit canon facts for a series script", () => {
-    const standaloneDraft = { ...validDraft(), canonFacts: [] };
-    assert.deepEqual(
-      validateScriptDraft(standaloneDraft, { durationSeconds: 24 }),
-      standaloneDraft,
+  it("requires an explicit 0-8 canon facts array for a series script", () => {
+    for (const count of [0, 1, 8]) {
+      const accepted = {
+        ...validDraft(),
+        canonFacts: Array.from({ length: count }, (_, index) => `本集已建立事实 ${index + 1}`),
+      };
+      assert.deepEqual(validateScriptDraft(accepted, { durationSeconds: 24 }), accepted);
+      assert.deepEqual(validateScriptDraft(accepted, { durationSeconds: 24, requireCanonFacts: true }), accepted);
+    }
+    assert.throws(
+      () => validateScriptDraft(validDraft(), { durationSeconds: 24, requireCanonFacts: true }),
+      /must contain a canonFacts array/,
     );
     assert.throws(
-      () => validateScriptDraft(standaloneDraft, { durationSeconds: 24, requireCanonFacts: true }),
-      /between 1 and 8 canonFacts/,
+      () => validateScriptDraft({ ...validDraft(), canonFacts: null }, { durationSeconds: 24, requireCanonFacts: true }),
+      /canonFacts must be an array/,
     );
-    const draft = { ...validDraft(), canonFacts: ["本集已经验证：先记录问题再选择工具。"] };
-    assert.deepEqual(
-      validateScriptDraft(draft, { durationSeconds: 24, requireCanonFacts: true }),
-      draft,
+    assert.throws(
+      () => validateScriptDraft({ ...validDraft(), canonFacts: Array.from({ length: 9 }, (_, index) => `事实 ${index + 1}`) }, {
+        durationSeconds: 24,
+        requireCanonFacts: true,
+      }),
+      /0 to 8 strings/,
+    );
+    assert.throws(
+      () => validateScriptDraft({ ...validDraft(), canonFacts: [""] }, { durationSeconds: 24, requireCanonFacts: true }),
+      /canonFacts\[0\]/,
     );
   });
 

@@ -1,4 +1,5 @@
-import type { CodexBridgeClient, CodexTaskExecution } from "./codex-chat.js";
+import type { CodexBridgeClient, CodexPreparedOperation, CodexTaskExecution } from "./codex-chat.js";
+import { pendingRoleAgentOperation } from "./role-agent-checkpoint.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
 export interface AssetCandidate {
@@ -63,7 +64,7 @@ export interface AssetSemanticRanker {
 }
 
 export interface CodexAssetSemanticRankerOptions {
-  client: Pick<CodexBridgeClient, "runTask"> & Partial<Pick<CodexBridgeClient, "runTaskDetailed">>;
+  client: Pick<CodexBridgeClient, "runTask"> & Partial<Pick<CodexBridgeClient, "runTaskDetailed" | "observePrepared">>;
   providerId?: string;
   modelId?: string;
   fetchThumbnail?: (url: string) => Promise<Buffer | undefined>;
@@ -101,7 +102,16 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
   async rankDetailed(report: AssetCandidateReport, checkpoint?: RoleAgentLoopCheckpoint): Promise<CodexTaskExecution<AssetSemanticRanking>> {
     const client = this.options.client;
     if (typeof client.runTaskDetailed !== "function") return { output: await this.rank(report) };
-    const payload = await this.rankPayload(report);
+    const runTaskDetailed = client.runTaskDetailed.bind(client);
+    const observePrepared = typeof client.observePrepared === "function" ? client.observePrepared.bind(client) : undefined;
+    const pendingOperation = await pendingRoleAgentOperation(checkpoint, ["asset-rank", "role-audit"]);
+    const recoveredPayload = pendingOperation ? recoveredAssetRankPayload(pendingOperation, report) : undefined;
+    let payloadPromise: Promise<AssetCandidateReport & { thumbnails: AssetRankThumbnail[] }> | undefined = recoveredPayload
+      ? Promise.resolve(recoveredPayload)
+      : undefined;
+    const payload = (): Promise<AssetCandidateReport & { thumbnails: AssetRankThumbnail[] }> => (
+      payloadPromise ??= this.rankPayload(report)
+    );
     return runRoleAgentLoop({
       role: "候选画面复核",
       contractVersion: ASSET_RANK_AGENT_CONTRACT_VERSION,
@@ -113,11 +123,22 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
         "没有把候选锁定，也没有新增、删除或替换候选素材",
       ],
       maxIterations: this.options.maxReviewIterations ?? 3,
-      produce: (revision, { requestId, session }) => client.runTaskDetailed!("asset-rank", {
-        ...payload,
+      produce: async (revision, { requestId, session, requestOptions, preparedOperation }) => {
+        if (preparedOperation) {
+          if (!observePrepared) throw new Error("Codex asset ranker cannot recover a prepared operation with this client.");
+          return observePrepared(preparedOperation, requestOptions);
+        }
+        return runTaskDetailed("asset-rank", {
+        ...await payload(),
         ...(revision ? { revision } : {}),
-      }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session }) => client.runTaskDetailed!("role-audit", {
+        }, requestId, session, requestOptions);
+      },
+      audit: async ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session, requestOptions, preparedOperation }) => {
+        if (preparedOperation) {
+          if (!observePrepared) throw new Error("Codex asset ranker cannot recover a prepared audit with this client.");
+          return observePrepared(preparedOperation, requestOptions);
+        }
+        return runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
@@ -139,7 +160,7 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
-        images: payload.thumbnails.map((thumbnail, index) => ({
+        images: (await payload()).thumbnails.map((thumbnail, index) => ({
           imageIndex: index + 1,
           scenePosition: thumbnail.scenePosition,
           provider: thumbnail.provider,
@@ -147,7 +168,8 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
           sha256: thumbnail.sha256,
           jpegBase64: thumbnail.jpegBase64,
         })),
-      }, requestId, session),
+        }, requestId, session, requestOptions);
+      },
       validate: (value) => validateAssetSemanticRanking(value, report),
       ...(checkpoint ? { checkpoint } : {}),
     });
@@ -155,10 +177,35 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
 
   private async rankPayload(report: AssetCandidateReport): Promise<AssetCandidateReport & { thumbnails: AssetRankThumbnail[] }> {
     return {
-      ...report,
+      // report 可能带有只用于 checkpoint 身份的 planningIntent；Broker 的严格合同只接收
+      // 公开候选字段，必须在边界处显式投影，避免恢复路径把内部元数据泄漏进请求。
+      version: report.version,
+      scenes: report.scenes,
       thumbnails: await collectRankThumbnails(report, this.options.fetchThumbnail ?? downloadCandidateThumbnail),
     };
   }
+}
+
+function recoveredAssetRankPayload(
+  operation: CodexPreparedOperation,
+  report: AssetCandidateReport,
+): (AssetCandidateReport & { thumbnails: AssetRankThumbnail[] }) | undefined {
+  const envelopePayload = record(operation.envelope.payload, "saved asset-rank payload");
+  const rawThumbnails = operation.kind === "asset-rank"
+    ? envelopePayload.thumbnails
+    : envelopePayload.images;
+  if (!Array.isArray(rawThumbnails)) return undefined;
+  const thumbnails = rawThumbnails.map((value, index): AssetRankThumbnail => {
+    const item = record(value, `saved asset-rank thumbnail ${index}`);
+    return {
+      scenePosition: integer(item.scenePosition, "saved asset-rank scenePosition", 1),
+      provider: text(item.provider, "saved asset-rank provider"),
+      assetId: text(item.assetId, "saved asset-rank assetId"),
+      sha256: text(item.sha256, "saved asset-rank sha256"),
+      jpegBase64: text(item.jpegBase64, "saved asset-rank jpegBase64"),
+    };
+  });
+  return { version: report.version, scenes: report.scenes, thumbnails };
 }
 
 async function collectRankThumbnails(

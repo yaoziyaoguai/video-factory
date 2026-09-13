@@ -28,6 +28,7 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
     renderManifestPath?: string;
     scenePositions?: number[];
     scriptPath?: string;
+    executablePlanPath?: string;
   }): Promise<VisualReviewMediaPayload> {
     const command = [
       "-m", "video_factory.review_media",
@@ -37,6 +38,7 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
       ...(input.renderManifestPath ? ["--render-manifest", input.renderManifestPath] : []),
       ...(input.scenePositions ? ["--scene-positions", ...input.scenePositions.map(String)] : []),
       ...(input.assetPlanPath && input.scriptPath ? ["--script", input.scriptPath] : []),
+      ...(input.assetPlanPath && input.executablePlanPath ? ["--executable-plan", input.executablePlanPath] : []),
     ];
     let stdout: string;
     try {
@@ -79,12 +81,15 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
       if (createHash("sha256").update(jpeg).digest("hex") !== sha256) throw new Error("Review frame SHA-256 does not match its manifest.");
       const scenePosition = frame.scenePosition;
       const phase = frame.phase;
+      const sourceTimecodeMs = frame.sourceTimecodeMs;
       if (scenePosition !== undefined && (!Number.isInteger(scenePosition) || Number(scenePosition) < 1)) throw new Error("Review frame scene mapping is invalid.");
       if (phase !== undefined && !["opening", "middle", "closing", "hook", "midpoint", "keyframe"].includes(String(phase))) throw new Error("Review frame phase is invalid.");
+      if (sourceTimecodeMs !== undefined && (!Number.isInteger(sourceTimecodeMs) || Number(sourceTimecodeMs) < 0)) throw new Error("Review frame source timecode is invalid.");
       frames.push({
         timecodeMs: Number(timecodeMs),
         sha256,
         jpegBase64: jpeg.toString("base64"),
+        ...(sourceTimecodeMs !== undefined ? { sourceTimecodeMs: Number(sourceTimecodeMs) } : {}),
         ...(scenePosition !== undefined ? { scenePosition: Number(scenePosition) } : {}),
         ...(phase !== undefined ? { phase: phase as "opening" | "middle" | "closing" | "hook" | "midpoint" | "keyframe" } : {}),
       });

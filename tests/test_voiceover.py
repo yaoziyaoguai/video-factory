@@ -11,7 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from video_factory.voiceover import scene_tempo, synthesize_minimax_audio, synthesize_voiceover_plan
+import video_factory.voiceover as voiceover_module
+from video_factory.voiceover import VoiceDoesNotFitError, synthesize_minimax_audio, synthesize_voiceover_plan
 
 
 class _Response:
@@ -29,10 +30,133 @@ class _Response:
 
 
 class MiniMaxVoiceoverTest(unittest.TestCase):
-    def test_scene_tempo_preserves_voice_quality_with_a_bounded_speedup(self):
-        self.assertEqual(scene_tempo(3.646, 1.9), 1.35)
-        self.assertEqual(scene_tempo(1.5, 1.9), 1.0)
-        self.assertEqual(scene_tempo(6.0, 1.9), 1.35)
+    def test_natural_voice_reports_a_timing_conflict_without_speeding_or_truncating_raw_audio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [{
+                "position": 1,
+                "narration": "自然语速和必要停顿必须完整保留。",
+                "duration": 8,
+            }]}), encoding="utf-8")
+            output_dir = root / "voice"
+            raw_path = output_dir / "scene_01_raw.mp3"
+
+            def synthesize_raw(**_kwargs):
+                output_dir.mkdir(parents=True, exist_ok=True)
+                raw_path.write_bytes(b"materialized-natural-voice")
+                return raw_path
+
+            with patch("video_factory.voiceover.require_ffmpeg"), patch(
+                "video_factory.voiceover.synthesize_raw_audio", side_effect=synthesize_raw
+            ), patch("video_factory.voiceover.probe_audio_duration", return_value=8.2), patch(
+                "video_factory.voiceover.subprocess.run"
+            ) as ffmpeg:
+                with self.assertRaises(RuntimeError) as caught:
+                    synthesize_voiceover_plan(
+                        script_path=script_path,
+                        output_dir=output_dir,
+                        provider="minimax",
+                    )
+
+            conflict = caught.exception
+            self.assertEqual(getattr(conflict, "code", None), "VOICE_DOES_NOT_FIT")
+            self.assertEqual(getattr(conflict, "scene_position", None), 1)
+            self.assertEqual(getattr(conflict, "speech_seconds", None), 8.2)
+            self.assertEqual(getattr(conflict, "required_seconds", None), 8.2)
+            self.assertEqual(getattr(conflict, "raw_audio_path", None), raw_path.resolve())
+            self.assertEqual(raw_path.read_bytes(), b"materialized-natural-voice")
+            ffmpeg.assert_not_called()
+
+    def test_natural_voice_that_fits_the_cut_is_padded_only_for_the_remaining_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [{
+                "position": 1,
+                "narration": "自然配音保留原速，并补齐镜头剩余时间。",
+                "duration": 8,
+            }]}), encoding="utf-8")
+            output_dir = root / "voice"
+            raw_path = output_dir / "scene_01_raw.mp3"
+
+            def synthesize_raw(**_kwargs):
+                output_dir.mkdir(parents=True, exist_ok=True)
+                raw_path.write_bytes(b"natural-voice-with-room")
+                return raw_path
+
+            def ffmpeg(command, **_kwargs):
+                Path(command[-1]).write_bytes(b"normalized-audio")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch("video_factory.voiceover.require_ffmpeg"), patch(
+                "video_factory.voiceover.synthesize_raw_audio", side_effect=synthesize_raw
+            ), patch("video_factory.voiceover.probe_audio_duration", return_value=7.9), patch(
+                "video_factory.voiceover.subprocess.run", side_effect=ffmpeg
+            ) as ffmpeg_run:
+                plan_path = synthesize_voiceover_plan(
+                    script_path=script_path,
+                    output_dir=output_dir,
+                    provider="minimax",
+                )
+
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            normalize_command = ffmpeg_run.call_args_list[0].args[0]
+            self.assertEqual(plan["scenes"][0]["source_speech_duration"], 7.9)
+            self.assertEqual(plan["scenes"][0]["duration"], 8)
+            self.assertEqual(plan["scenes"][0]["tempo"], 1.0)
+            command_text = " ".join(normalize_command)
+            self.assertIn("apad=pad_dur=8.000", command_text)
+            self.assertNotIn("atempo", command_text)
+
+    def test_timing_conflict_rounds_up_to_a_safe_30fps_cut_that_recovers_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            scene = {
+                "position": 1,
+                "narration": "边界外的自然配音必须扩到下一完整帧。",
+                "duration": 8.2,
+            }
+            script_path.write_text(json.dumps({"scenes": [scene]}), encoding="utf-8")
+            output_dir = root / "voice"
+            raw_path = output_dir / "scene_01_raw.mp3"
+
+            def synthesize_raw(**_kwargs):
+                output_dir.mkdir(parents=True, exist_ok=True)
+                raw_path.write_bytes(b"frame-boundary-voice")
+                return raw_path
+
+            def ffmpeg(command, **_kwargs):
+                Path(command[-1]).write_bytes(b"normalized-audio")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch("video_factory.voiceover.require_ffmpeg"), patch(
+                "video_factory.voiceover.synthesize_raw_audio", side_effect=synthesize_raw
+            ), patch("video_factory.voiceover.probe_audio_duration", return_value=8.20049), patch(
+                "video_factory.voiceover.subprocess.run", side_effect=ffmpeg
+            ):
+                with self.assertRaises(VoiceDoesNotFitError) as caught:
+                    synthesize_voiceover_plan(
+                        script_path=script_path,
+                        output_dir=output_dir,
+                        provider="minimax",
+                    )
+
+                conflict = caught.exception
+                self.assertEqual(round(conflict.required_seconds * 30), 247)
+                self.assertGreaterEqual(conflict.required_seconds, 8.20049)
+                script_path.write_text(json.dumps({
+                    "scenes": [{**scene, "duration": conflict.required_seconds}],
+                }), encoding="utf-8")
+                plan_path = synthesize_voiceover_plan(
+                    script_path=script_path,
+                    output_dir=output_dir,
+                    provider="minimax",
+                )
+
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            self.assertEqual(round(plan["scenes"][0]["duration"] * 30), 247)
 
     def test_writes_hex_audio_from_the_minimax_speech_api(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -284,6 +408,68 @@ class MiniMaxVoiceoverTest(unittest.TestCase):
             self.assertIn("attempt-1", item["localPath"])
             self.assertEqual(item["stateHistory"], ["prepared", "unknown", "materialized"])
             self.assertTrue(plan_path.is_file())
+
+    def test_reuses_materialized_minimax_audio_after_an_explicit_timeline_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_script_path = root / "script-8.0.json"
+            second_script_path = root / "script-8.4.json"
+            scene = {"position": 1, "narration": "自然旁白只生成一次。"}
+            first_script_path.write_text(json.dumps({"scenes": [{**scene, "duration": 8}]}), encoding="utf-8")
+            second_script_path.write_text(json.dumps({"scenes": [{**scene, "duration": 8.4}]}), encoding="utf-8")
+            request_count = 0
+
+            def urlopen(_request, timeout):
+                nonlocal request_count
+                self.assertEqual(timeout, 90)
+                request_count += 1
+                return _Response({
+                    "data": {"audio": b"ID3-replanned-audio".hex(), "status": 2},
+                    "base_resp": {"status_code": 0, "status_msg": "success"},
+                })
+
+            def ffmpeg(command, **_kwargs):
+                Path(command[-1]).write_bytes(b"normalized-audio")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch("video_factory.voiceover.require_ffmpeg"), patch(
+                "video_factory.voiceover.urlopen", side_effect=urlopen
+            ), patch("video_factory.voiceover.probe_audio_duration", return_value=8.2), patch(
+                "video_factory.voiceover.subprocess.run", side_effect=ffmpeg
+            ), patch.dict("os.environ", {"MINIMAX_API_KEY": "test-key"}, clear=False):
+                with self.assertRaises(VoiceDoesNotFitError):
+                    synthesize_voiceover_plan(
+                        script_path=first_script_path,
+                        output_dir=root / "nodes" / "voice" / "attempt-1",
+                        provider="minimax",
+                        operation_id="voice-before-replan",
+                        provider_id="minimax-tts-v1",
+                        model_id="speech-test",
+                        estimated_cost_cny=0.5,
+                    )
+
+                plan_path = synthesize_voiceover_plan(
+                    script_path=second_script_path,
+                    output_dir=root / "nodes" / "voice" / "attempt-2",
+                    provider="minimax",
+                    operation_id="voice-after-replan",
+                    provider_id="minimax-tts-v1",
+                    model_id="speech-test",
+                    estimated_cost_cny=0.5,
+                )
+
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            second_ledger_path = root / "nodes" / "voice" / ".voice-operations" / (
+                hashlib.sha256(b"voice-after-replan").hexdigest() + ".json"
+            )
+            second_item = json.loads(second_ledger_path.read_text(encoding="utf-8"))["items"][0]
+            self.assertEqual(request_count, 1)
+            self.assertEqual(plan["scenes"][0]["tempo"], 1.0)
+            self.assertEqual(plan["scenes"][0]["duration"], 8.4)
+            self.assertIn("attempt-1", second_item["localPath"])
+            self.assertEqual(second_item["state"], "materialized")
+            self.assertEqual(second_item["stateHistory"], ["prepared", "reused_materialized"])
+            self.assertEqual(second_item["reusedFromOperationId"], "voice-before-replan")
 
     def test_refuses_to_repeat_a_minimax_request_with_an_unknown_outcome(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -628,6 +814,103 @@ class MiniMaxVoiceoverTest(unittest.TestCase):
             self.assertEqual(request_count, 1)
             self.assertEqual([status for status, _ in results].count("succeeded"), 1)
             self.assertTrue(any("manual reconciliation" in detail for status, detail in results if status == "failed"))
+
+    def test_concurrent_operations_reuse_one_paid_voice_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [{
+                "position": 1,
+                "narration": "不同操作编号的相同配音输入也只能付费生成一次。",
+                "duration": 2,
+            }]}), encoding="utf-8")
+            first_operation_id = "voice-operation-concurrent-a"
+            second_operation_id = "voice-operation-concurrent-b"
+            first_prepared = threading.Event()
+            release_first_operation = threading.Event()
+            request_lock = threading.Lock()
+            request_count = 0
+            original_prepare = voiceover_module._prepare_minimax_operation
+
+            def coordinated_prepare(*args, **kwargs):
+                operation = original_prepare(*args, **kwargs)
+                if kwargs["operation_id"] == first_operation_id:
+                    first_prepared.set()
+                    release_first_operation.wait(2)
+                return operation
+
+            def urlopen(_request, timeout):
+                nonlocal request_count
+                self.assertEqual(timeout, 90)
+                with request_lock:
+                    request_count += 1
+                return _Response({
+                    "data": {"audio": b"ID3-shared-operation-audio".hex(), "status": 2},
+                    "base_resp": {"status_code": 0, "status_msg": "success"},
+                })
+
+            def ffmpeg(command, **_kwargs):
+                Path(command[-1]).write_bytes(b"normalized-audio")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            def run(operation_id):
+                try:
+                    plan_path = synthesize_voiceover_plan(
+                        script_path=script_path,
+                        output_dir=root / "nodes" / "voice" / f"attempt-{operation_id[-1]}",
+                        provider="minimax",
+                        operation_id=operation_id,
+                        provider_id="minimax-tts-v1",
+                        model_id="speech-test",
+                        estimated_cost_cny=0.5,
+                    )
+                    return operation_id, "succeeded", str(plan_path)
+                except RuntimeError as error:
+                    return operation_id, "failed", str(error)
+
+            with patch("video_factory.voiceover.require_ffmpeg"), patch(
+                "video_factory.voiceover.urlopen", side_effect=urlopen
+            ), patch("video_factory.voiceover.probe_audio_duration", return_value=1.0), patch(
+                "video_factory.voiceover.subprocess.run", side_effect=ffmpeg
+            ), patch("video_factory.voiceover._prepare_minimax_operation", side_effect=coordinated_prepare), patch.dict(
+                "os.environ", {"MINIMAX_API_KEY": "test-key"}, clear=False
+            ), ThreadPoolExecutor(max_workers=2) as executor:
+                first_future = executor.submit(run, first_operation_id)
+                self.assertTrue(first_prepared.wait(2))
+                first_ledger_path = root / "nodes" / "voice" / ".voice-operations" / (
+                    hashlib.sha256(first_operation_id.encode("utf-8")).hexdigest() + ".json"
+                )
+                first_ledger = json.loads(first_ledger_path.read_text(encoding="utf-8"))
+                self.assertEqual(first_ledger["items"][0]["state"], "prepared")
+
+                second_result = executor.submit(run, second_operation_id).result(timeout=2)
+                calls_before_first_continues = request_count
+                release_first_operation.set()
+                first_result = first_future.result(timeout=2)
+
+                self.assertEqual(second_result[1], "failed")
+                self.assertIn("not reached a reusable terminal state", second_result[2])
+                self.assertEqual(calls_before_first_continues, 0)
+                self.assertEqual(first_result[1], "succeeded")
+                self.assertEqual(request_count, 1)
+                recovery = synthesize_voiceover_plan(
+                    script_path=script_path,
+                    output_dir=root / "nodes" / "voice" / "attempt-recovery",
+                    provider="minimax",
+                    operation_id=second_operation_id,
+                    provider_id="minimax-tts-v1",
+                    model_id="speech-test",
+                    estimated_cost_cny=0.5,
+                )
+
+            ledgers = [
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in (root / "nodes" / "voice" / ".voice-operations").glob("*.json")
+            ]
+            recovered_ledger = next(ledger for ledger in ledgers if ledger["operationId"] == second_operation_id)
+            self.assertTrue(recovery.is_file())
+            self.assertTrue(all(ledger["items"][0]["state"] == "materialized" for ledger in ledgers))
+            self.assertEqual(recovered_ledger["items"][0]["reusedFromOperationId"], first_operation_id)
 
 
 if __name__ == "__main__":

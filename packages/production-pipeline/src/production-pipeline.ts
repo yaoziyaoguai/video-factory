@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as nodeFs from "node:fs";
-import { copyFile, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { parseProductionBlueprint } from "@video-factory/template-core";
 import { check as checkFileLock, lock as lockFile } from "proper-lockfile";
 import {
@@ -14,9 +15,11 @@ import {
   type Capability,
   type HumanDecisionDraft,
   type NodeInputOverrideDraft,
+  type NodeRun,
   type NodeOverrideDraft,
   type NodeDefinition,
   type NodeExecutionReceiptDraft,
+  type NodeExecutionReceipt,
   type ExecutionConfigurationSource,
   type ExecutionParameterValue,
   type NodeExecutionResult,
@@ -33,7 +36,9 @@ import {
   deterministicAssetRanking,
   parseAssetCandidateReport,
   validateAssetSemanticRanking,
+  type AssetCandidateReport,
   type AssetSemanticRanker,
+  type AssetSemanticRanking,
 } from "./asset-semantic-ranker.js";
 import { REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION, fallbackShotGrammar, validateShotGrammar, type ReferenceGrammarAgent, type ReferenceGrammarExecution, type ShotGrammar } from "./reference-grammar.js";
 import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, type AgentLoopTrace, type CodexTaskExecution, type CodexTaskKind, type CodexTaskTrace, type ModelCandidateAttempt } from "./codex-chat.js";
@@ -51,10 +56,17 @@ import {
   type VideoGenerationRuntimeProfile,
 } from "./generative-asset-worker.js";
 import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
-import { ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
+import { FallbackCreativeTreatmentAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
+import {
+  compileExecutableProductionPlan,
+  parseExecutableProductionPlan,
+  type ExecutablePlanScene,
+  type ExecutablePlanShot,
+  type ExecutableProductionPlan,
+} from "./executable-production-plan.js";
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
 import { IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport, type IndependentVisualReviewExecution, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport, type VisualReviewScope } from "./codex-visual-review.js";
-import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
+import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, parseVoiceDoesNotFitConflict, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
 import { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
 import type { WorkerResponse } from "./python-worker-client.js";
 import {
@@ -62,11 +74,41 @@ import {
   type VisualAssetProviderCapability,
   type VisualDirectorAgent,
   type VisualDirectorAgentInput,
+  type VisualDirectorPlan,
 } from "./visual-director.js";
+import type { CreativeTreatmentAgent, CreativeTreatmentAgentInput } from "./codex-creative-treatment.js";
+import { CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION } from "./codex-creative-treatment.js";
+import { CREATIVE_TREATMENT_PROVIDER_ID } from "./creative-treatment.js";
+import { PRODUCTION_AUTHORIZATION_VERSION, assessProductionSpendPlan, canonicalProductionAssetIntentDigest, canonicalQualityContractDigest, foldProductionSpendLedger, parseProductionAuthorizationScope, resolveProductionSpendDecision, scopeCoversSpendPlan, type ProductionAuthorizationScope, type ProductionSpendPlanAssessment } from "./production-authorization.js";
+import {
+  AUTOMATIC_CANDIDATE_SEMANTIC_MINIMUM,
+  createCreativePlanningGraph,
+  executablePlanCompilePort,
+  initialPlanningGraphState,
+  rankingSemanticIntent,
+  runCreativePlanning,
+  type CreativePlanningGraph,
+  type CreativePlanningInput,
+  type CreativePlanningPorts,
+  type PlanningGraphState,
+  type PlanningStageId,
+} from "./creative-planning.js";
+import { CreativePlanningStore, planningCheckpointSqlitePath } from "./creative-planning-store.js";
+import { summarizeProductionCapabilities, type ProductionCapabilities } from "./production-capabilities.js";
 
 interface WorkerClient {
   run(request: Record<string, unknown>): Promise<WorkerResponse>;
 }
+
+const SCREENWRITER_PRODUCER_REQUEST_SCHEMA_VERSION = "video-factory/screenwriter-producer-request-v1";
+const DIRECTOR_PRODUCER_REQUEST_SCHEMA_VERSION = "video-factory/director-producer-request-v1";
+
+interface ProducerRequestIdentity {
+  digest: string;
+  schemaVersion: string;
+}
+
+type SourceRunSnapshot = <T>(sourceRunId: string, snapshot: () => Promise<T>) => Promise<T>;
 
 export interface ProductionPipelineOptions {
   workspaceRoot: string;
@@ -81,9 +123,23 @@ export interface ProductionPipelineOptions {
   assetSemanticRanker?: AssetSemanticRanker;
   referenceGrammarAgent?: ReferenceGrammarAgent;
   referenceVideoRoot?: string;
+  /** joint-v1 创作规划的角色绑定：真实构思 agent 与其宿主 provider（如 openai/zai-bigmodel-api）。 */
+  treatmentAgents?: Array<{ providerId: string; agent: CreativeTreatmentAgent }>;
+  /** 崩溃窗口注入点：图完成/正式产物登记后抛错，用于恢复语义测试；生产不得配置。 */
+  /** 仅测试注入的规划崩溃窗口：真实子进程测试用硬 kill，不用 throw 代替进程死亡。 */
+  planningFailpoints?: {
+    afterGraph?: () => void;
+    afterArtifacts?: () => void;
+    /** commit 结束标记写入后、run CAS 保存前：外部 commit 只是 prepared 证据。 */
+    afterCommit?: () => void;
+    /** 闭包播种 checkpoint 成功后、执行记录落盘前：模型 provenance 必须随 checkpoint 存活。 */
+    afterSeed?: () => void;
+  };
   clock?: () => string;
   idFactory?: (prefix: string) => string;
   executionLeaseHeartbeatMs?: number;
+  /** 执行租约过期窗口（默认 30s）：真实进程崩溃测试据此等待真实过期，不手工删锁。 */
+  executionLeaseStaleMs?: number;
 }
 
 export type ProductionRunListener = (run: WorkflowRun<ProductionBrief>) => Promise<void> | void;
@@ -110,6 +166,14 @@ export interface ProductionSceneRevisionDraft {
   reuseFromScenePosition: number;
   actor: string;
   note: string;
+}
+
+export interface ProductionVoiceTimingRevisionDraft {
+  expectedRunRevision: number;
+  interventionId: string;
+  scenePosition: number;
+  durationSeconds: number;
+  actor: string;
 }
 
 export interface ProductionVisualReinspectionDraft {
@@ -153,6 +217,171 @@ export interface ProductionPaidNodeSummary {
   failureKind?: "unknown_outcome" | "terminal_failure" | "missing_evidence";
   requiresManualReconciliation: boolean;
   items: ProductionPaidOperationItemSummary[];
+}
+
+export interface ProductionReworkImpactSummary {
+  version: "video-factory/rework-impact-v1";
+  sourceRunId: string;
+  affectedScenePositions: number[];
+  nodes: Array<{
+    nodeId: string;
+    action: "inherited" | "partial" | "executed" | "not_run";
+    reason: "verified_source_match" | "mixed_reuse_and_execution" | "affected_input" | "not_reached";
+  }>;
+  calls: {
+    /** legacy 为逐 receipt 统计；joint 阶段无逐 producer 统计时如实报 "unknown"。 */
+    scriptModel: number | "unknown";
+    mediaCreate: number;
+    voice: number;
+    render: number;
+    visualReview: number;
+  };
+  media: {
+    retainedSha256: string[];
+    producedSha256: string[];
+    mayCreateNewMedia: boolean;
+  };
+}
+
+export function summarizeReworkImpact(
+  run: WorkflowRun<ProductionBrief>,
+): ProductionReworkImpactSummary | undefined {
+  const rework = effectiveProductionBrief(run).rework;
+  if (!rework) return undefined;
+  const effectiveNodeArtifacts = (nodeId: string): Artifact[] => {
+    const current = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+    const version = current?.outputState?.versions.find(
+      (candidate) => candidate.id === current.outputState?.effectiveVersionId,
+    );
+    return (version?.artifactIds ?? []).flatMap((id) => {
+      const artifact = run.artifacts.find((candidate) => candidate.id === id);
+      return artifact?.producer?.nodeId === nodeId ? [artifact] : [];
+    });
+  };
+  const inheritanceState = (nodeId: string): "none" | "partial" | "inherited" => {
+    const artifacts = effectiveNodeArtifacts(nodeId).filter((artifact) => (
+      nodeId !== "assets" || artifact.kind === "media_asset"
+    ));
+    const inheritedCount = artifacts.filter((artifact) => (
+      artifact.provenance.notes?.startsWith("Inherited ") === true
+    )).length;
+    if (inheritedCount === 0) return "none";
+    return inheritedCount === artifacts.length ? "inherited" : "partial";
+  };
+  const node = (nodeId: string) => run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+  const nodeSummary = (nodeId: string): ProductionReworkImpactSummary["nodes"][number] => {
+    const current = node(nodeId);
+    if (!current) return { nodeId, action: "not_run", reason: "not_reached" };
+    const effectiveVersion = current.outputState?.versions.find(
+      (candidate) => candidate.id === current.outputState?.effectiveVersionId,
+    );
+    const hasGeneratedArtifact = effectiveVersion?.source === "generated"
+      && effectiveNodeArtifacts(nodeId).length > 0;
+    if (current.status === "pending"
+      || current.status === "skipped"
+      || (!current.executionReceipt && !hasGeneratedArtifact)) {
+      return { nodeId, action: "not_run", reason: "not_reached" };
+    }
+    const state = inheritanceState(nodeId);
+    if (state === "partial") return { nodeId, action: "partial", reason: "mixed_reuse_and_execution" };
+    return state === "inherited"
+      ? { nodeId, action: "inherited", reason: "verified_source_match" }
+      : { nodeId, action: "executed", reason: "affected_input" };
+  };
+  const mediaArtifacts = effectiveNodeArtifacts("assets").filter((artifact) => (
+    artifact.kind === "media_asset" && artifact.sha256
+  ));
+  const retainedSha256 = mediaArtifacts.flatMap((artifact) => (
+    artifact.provenance.notes?.startsWith("Inherited verified materialized media")
+      ? [artifact.sha256!]
+      : []
+  ));
+  const producedSha256 = mediaArtifacts.flatMap((artifact) => (
+    artifact.provenance.notes?.startsWith("Inherited verified materialized media")
+      ? []
+      : [artifact.sha256!]
+  ));
+  const assetsNode = node("assets");
+  const receipts = collectReworkImpactReceipts(run);
+  const nodeReceipts = (nodeId: string) => receipts.filter((receipt) => receipt.nodeId === nodeId);
+  const mediaCreate = nodeReceipts("assets").reduce(
+    (total, receipt) => total + (receipt.meteredAttemptCount ?? 0),
+    0,
+  );
+  // N7：joint-v1 的编剧角色在 creative-planning 节点内执行；节点级 receipt 没有逐 producer
+  // 统计时如实报 "unknown"，不得把真实执行显示成 0/not_run。
+  const jointPlanning = usesJointCreativePlanning(effectiveProductionBrief(run));
+  const planningReceipts = nodeReceipts("creative-planning");
+  const legacyScriptReceipts = nodeReceipts("script");
+  const scriptModel: number | "unknown" = inheritanceState("script") === "inherited"
+    ? 0
+    : legacyScriptReceipts.length > 0
+      ? legacyScriptReceipts.reduce((total, receipt) => {
+          const count = receipt.parameters?.producerModelCallCount
+            ?? receipt.parameters?.modelCallCount;
+          return total + (typeof count === "number" && Number.isFinite(count) ? count : 1);
+        }, 0)
+      : jointPlanning
+        ? (planningReceipts.length > 0
+          ? "unknown"
+          : run.nodeRuns.some((candidate) => candidate.nodeId === "creative-planning"
+            && (candidate.status === "succeeded" || candidate.status === "failed"))
+            ? "unknown"
+            : 0)
+        : 0;
+  const affectedScenePositions = reworkAffectedScenePositions({
+    findings: rework.findings,
+    ...(rework.previousScript ? { previousScenes: rework.previousScript.scenes } : {}),
+    ...(rework.previousDirectorPlan ? { previousShots: rework.previousDirectorPlan.shots } : {}),
+    ...(rework.previousScript
+      ? { currentScenes: rework.previousScript.scenes }
+      : rework.previousDirectorPlan
+        ? { currentScenes: shotsAsScenePositions(rework.previousDirectorPlan.shots) }
+        : { currentScenes: [] }),
+    ...(rework.previousDirectorPlan ? { currentShots: rework.previousDirectorPlan.shots } : {}),
+    ...(rework.affectedScenePositions !== undefined
+      ? { affectedScenePositions: rework.affectedScenePositions }
+      : {}),
+  });
+  return {
+    version: "video-factory/rework-impact-v1",
+    sourceRunId: rework.sourceRunId,
+    affectedScenePositions,
+    nodes: [
+      ...(jointPlanning ? ["creative-planning"] : ["script", "visual-direction"]),
+      "assets", "voice", "render", "technical-review", "visual-review",
+    ].map(nodeSummary),
+    calls: {
+      scriptModel,
+      mediaCreate,
+      voice: nodeReceipts("voice").length,
+      render: nodeReceipts("render").length,
+      visualReview: nodeReceipts("visual-review").length,
+    },
+    media: {
+      retainedSha256: [...new Set(retainedSha256)].sort(),
+      producedSha256: [...new Set(producedSha256)].sort(),
+      mayCreateNewMedia: mediaCreate > 0 || (assetsNode?.spendPlan?.estimatedCostCny ?? 0) > 0,
+    },
+  };
+}
+
+function collectReworkImpactReceipts(run: WorkflowRun<ProductionBrief>): NodeExecutionReceipt[] {
+  const receipts = [...(run.executionReceipts ?? [])];
+  for (const node of run.nodeRuns) {
+    if (!node.executionReceipt) continue;
+    const duplicate = receipts.some((receipt) => (
+      receipt.nodeId === node.executionReceipt?.nodeId
+      && (receipt.requestId
+        ? receipt.requestId === node.executionReceipt?.requestId
+        : receipt.startedAt === node.executionReceipt?.startedAt
+          && receipt.finishedAt === node.executionReceipt?.finishedAt
+          && receipt.providerId === node.executionReceipt?.providerId
+          && receipt.modelId === node.executionReceipt?.modelId)
+    ));
+    if (!duplicate) receipts.push(node.executionReceipt);
+  }
+  return receipts;
 }
 
 interface PaidNodeReconciliationRecord {
@@ -248,12 +477,31 @@ export interface ProductionProviderRuntimeMetadata {
 }
 
 function productionNodeIds(brief: ProductionBrief): string[] {
+  if (usesJointCreativePlanning(brief)) {
+    // joint-v1 顶层只有一条规划链：brief → 可选 reference-grammar → creative-planning。
+    // 旧 script/visual-direction/asset-candidates/asset-semantic-rank/production-preflight
+    // 规划节点不再创建（图库候选与排序进入 creative-planning 图内）。
+    return [
+      "brief",
+      ...(brief.workflowFeatures?.referenceGrammar ? ["reference-grammar"] : []),
+      "creative-planning",
+      "assets",
+      ...(brief.providers.visualReview ? ["asset-source-review"] : []),
+      "voice",
+      "render",
+      "technical-review",
+      ...(brief.providers.visualReview ? ["visual-review"] : []),
+      "final-review",
+      "publish-package",
+    ];
+  }
   return [
     "brief",
     "script",
     ...(brief.workflowFeatures?.referenceGrammar ? ["reference-grammar"] : []),
     ...(brief.director ? ["visual-direction"] : []),
     ...(brief.workflowFeatures?.assetSemanticRank ? ["asset-candidates", "asset-semantic-rank"] : []),
+    ...(usesExecutablePlan(brief) ? ["production-preflight"] : []),
     "assets",
     ...(brief.providers.visualReview ? ["asset-source-review"] : []),
     "voice",
@@ -266,21 +514,39 @@ function productionNodeIds(brief: ProductionBrief): string[] {
 }
 
 export function productionWorkflowVersion(
-  brief: Pick<ProductionBrief, "providers" | "workflowFeatures" | "director">,
+  brief: Pick<ProductionBrief, "providers" | "workflowFeatures" | "director" | "durationRange">,
 ): string {
-  return brief.providers.visualReview
+  // joint-v1 共同创作规划是独立拓扑：恢复与审计必须能把它与旧规划链区分开。
+  if (usesJointCreativePlanning(brief)) return "1.6.1";
+  const minorVersion = brief.providers.visualReview
     ? brief.workflowFeatures?.referenceGrammar
-      ? "1.10.0"
+      ? 10
       : brief.workflowFeatures?.assetSemanticRank
-        ? "1.9.0"
-        : "1.8.0"
+        ? 9
+        : 8
     : brief.workflowFeatures?.referenceGrammar
-      ? "1.4.0"
+      ? 4
       : brief.workflowFeatures?.assetSemanticRank
-        ? "1.3.0"
+        ? 3
         : brief.director
-          ? "1.1.0"
-          : "1.0.0";
+          ? 1
+          : 0;
+  const patchVersion = usesExecutablePlan(brief) ? 1 : 0;
+  return `1.${minorVersion}.${patchVersion}`;
+}
+
+function usesExecutablePlan(
+  brief: Pick<ProductionBrief, "workflowFeatures" | "director" | "durationRange">,
+): boolean {
+  return brief.workflowFeatures?.executablePlan === true || Boolean(brief.durationRange && brief.director);
+}
+
+// joint-v1 标记：brief 合同在解析期已保证 durationRange + director，未标记的历史 brief
+// 一律走旧拓扑（不新增第二条兼容生产路径）。
+function usesJointCreativePlanning(
+  brief: Pick<ProductionBrief, "workflowFeatures">,
+): boolean {
+  return brief.workflowFeatures?.creativePlanning === "joint-v1";
 }
 
 function withPersistedBrief(
@@ -409,7 +675,10 @@ export class ProductionPipeline {
         throw error;
       },
     );
-    return { runId, completion: completionWithLeaseRelease };
+    // C1：若停在报价等待且制作范围授权完全覆盖当前报价，由宿主派生子凭证自动继续；
+    // 未覆盖（无授权/方案变化/超范围/余额不足）保持人工等待，不改变既有逐请求授权语义。
+    const dispatched: DispatchedProductionRun = { runId, completion: completionWithLeaseRelease };
+    return this.continueCoveredSpendApproval(runId, dispatched, listener);
   }
 
   async show(runId: string): Promise<WorkflowRun<ProductionBrief>> {
@@ -437,15 +706,19 @@ export class ProductionPipeline {
 
   async requestPause(runId: string): Promise<void> {
     const run = await this.store.load<ProductionBrief>(runId);
-    if (run.status !== "running") {
-      throw new Error(`Run '${runId}' is not running.`);
+    if (!["running", "awaiting_spend_approval", "approval_invalidated"].includes(run.status)) {
+      throw new Error(`Run '${runId}' cannot be paused from status '${run.status}'.`);
     }
     await writeFile(this.pauseRequestPath(runId), `${JSON.stringify({ requestedAt: this.clock() })}\n`, "utf8");
     const latest = await this.store.load<ProductionBrief>(runId);
-    if (latest.status !== "running") {
-      await rm(this.pauseRequestPath(runId), { force: true });
-      throw new Error(`Run '${runId}' is no longer running.`);
+    if (!["running", "awaiting_spend_approval", "approval_invalidated"].includes(latest.status)) {
+      throw new Error(`Run '${runId}' can no longer be paused.`);
     }
+  }
+
+  async clearPauseRequest(runId: string): Promise<void> {
+    await this.store.load<ProductionBrief>(runId);
+    await rm(this.pauseRequestPath(runId), { force: true });
   }
 
   async pauseRequested(runId: string): Promise<boolean> {
@@ -475,7 +748,7 @@ export class ProductionPipeline {
   }
 
   async recoverInterruptedRuns(options: { leaseStaleAfterMs?: number } = {}): Promise<number> {
-    const leaseStaleAfterMs = options.leaseStaleAfterMs ?? DEFAULT_EXECUTION_LEASE_STALE_MS;
+    const leaseStaleAfterMs = options.leaseStaleAfterMs ?? this.options.executionLeaseStaleMs ?? DEFAULT_EXECUTION_LEASE_STALE_MS;
     const interrupted = (await this.store.list<ProductionBrief>())
       .filter((run) => run.status === "pending" || run.status === "running");
     let recovered = 0;
@@ -546,14 +819,16 @@ export class ProductionPipeline {
       active: true,
     };
     const requestedHeartbeatMs = this.options.executionLeaseHeartbeatMs ?? DEFAULT_EXECUTION_LEASE_HEARTBEAT_MS;
-    const heartbeatMs = Math.max(1_000, Math.min(requestedHeartbeatMs, DEFAULT_EXECUTION_LEASE_STALE_MS / 2));
+    // stale 窗口可按 options 缩短（进程崩溃测试用真实过期恢复，不手工删锁）；生产保持默认。
+    const staleMs = this.options.executionLeaseStaleMs ?? DEFAULT_EXECUTION_LEASE_STALE_MS;
+    const heartbeatMs = Math.max(1_000, Math.min(requestedHeartbeatMs, staleMs / 2));
     const lockPath = this.executionLeaseLockPath(runId);
     const lockRemoval = { acquired: false, force: false };
     try {
       const release = await lockFile(handle.path, {
         realpath: false,
         lockfilePath: lockPath,
-        stale: DEFAULT_EXECUTION_LEASE_STALE_MS,
+        stale: staleMs,
         update: heartbeatMs,
         retries: 0,
         fs: executionLeaseFileSystem(handle, lockPath, lockRemoval),
@@ -709,6 +984,134 @@ export class ProductionPipeline {
     });
   }
 
+  async requestVoiceTimingRevision(
+    runId: string,
+    draft: ProductionVoiceTimingRevisionDraft,
+  ): Promise<WorkflowRun<ProductionBrief>> {
+    await this.runPersistedTransition(runId, async (previous) => {
+      if (previous.revision !== draft.expectedRunRevision) {
+        throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
+      }
+      if (previous.status !== "needs_human" || !draft.actor.trim()) {
+        throw new Error(`Run '${runId}' is not waiting for a voice timing change.`);
+      }
+      const voiceNode = previous.nodeRuns.find((node) => node.nodeId === "voice" && node.status === "needs_human");
+      if (!voiceNode) throw new Error("Voice timing revision requires the active voice node.");
+      const intervention = voiceNode?.intervention;
+      if (intervention?.id !== draft.interventionId || !intervention.options?.includes("request_changes")) {
+        throw new Error("Voice timing revision requires the active planning intervention.");
+      }
+      const voiceOutput = requireOutputRecord(voiceNode.output, "voice output");
+      const conflict = parseVoiceDoesNotFitConflict(voiceOutput.conflict);
+      if (draft.scenePosition !== conflict.scenePosition) {
+        throw new Error("Voice timing revision scene is no longer current.");
+      }
+      if (!Number.isFinite(draft.durationSeconds) || draft.durationSeconds < conflict.requiredSeconds
+        || draft.durationSeconds > 180) {
+        throw new Error("Voice timing revision must cover the complete natural speech and remain within 180 seconds.");
+      }
+
+      const brief = parsePersistedBrief(previous.initialInput);
+      if (!brief.durationRange || !brief.director) {
+        throw new Error("Voice timing revision requires an executable production plan.");
+      }
+      const planOwnerNodeId = usesJointCreativePlanning(brief) ? "creative-planning" : "production-preflight";
+      const preflightNode = previous.nodeRuns.find((node) => node.nodeId === planOwnerNodeId);
+      const preflightVersion = preflightNode?.outputState?.versions.find(
+        (version) => version.id === preflightNode.outputState?.effectiveVersionId,
+      );
+      if (!preflightVersion) throw new Error("Current executable production plan version is unavailable.");
+      const preflightOutput = requireOutputRecord(preflightVersion.output ?? preflightNode?.output, `${planOwnerNodeId} output`);
+      const currentPlanPath = requiredOutputString(preflightOutput, "executablePlanPath");
+      const currentPlanArtifact = previous.artifacts.find((artifact) => (
+        preflightVersion.artifactIds.includes(artifact.id)
+        && artifact.kind === "executable_plan"
+        && artifact.uri === currentPlanPath
+        && artifact.producer?.nodeId === planOwnerNodeId
+      ));
+      if (!currentPlanArtifact?.uri) throw new Error("Current executable production plan artifact is unavailable.");
+      await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), currentPlanArtifact);
+      const currentPlan = parseExecutableProductionPlan(JSON.parse(await readFile(currentPlanArtifact.uri, "utf8")));
+      const requestedFrameCount = Math.ceil(draft.durationSeconds * currentPlan.fps - 1e-6);
+      const requiredFrameCount = Math.ceil(conflict.requiredSeconds * currentPlan.fps - 1e-6);
+      if (requestedFrameCount < requiredFrameCount) {
+        throw new Error("Voice timing revision loses part of the natural speech after frame quantization.");
+      }
+      let nextStartFrame = 0;
+      const cuts = currentPlan.cuts.map((cut) => {
+        const frameCount = cut.scenePosition === draft.scenePosition ? requestedFrameCount : cut.frameCount;
+        const revisedCut = { ...cut, startFrame: nextStartFrame, frameCount };
+        nextStartFrame += frameCount;
+        return revisedCut;
+      });
+      if (!cuts.some((cut) => cut.scenePosition === draft.scenePosition)) {
+        throw new Error("Voice timing revision scene is missing from the executable production plan.");
+      }
+      const revisedPlan = parseExecutableProductionPlan({
+        ...currentPlan,
+        totalFrames: nextStartFrame,
+        cuts,
+      });
+      const revisionDirectory = path.join(
+        this.runsRoot,
+        runId,
+        "nodes",
+        planOwnerNodeId,
+        "revisions",
+        `revision-${previous.revision + 1}`,
+      );
+      await mkdir(revisionDirectory, { recursive: true });
+      const revisedPlanPath = path.join(revisionDirectory, "executable_plan.json");
+      const revisedPlanContent = `${JSON.stringify(revisedPlan, null, 2)}\n`;
+      await writeTextAtomically(revisedPlanPath, revisedPlanContent);
+      const definition = this.createWorkflow(brief);
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+      });
+      return runner.applyNodeRevision(definition, withExecutableBrief(previous, brief), {
+        nodeId: planOwnerNodeId,
+        actor: draft.actor.trim(),
+        output: { ...preflightOutput, executablePlanPath: revisedPlanPath },
+        artifacts: [fileArtifact(
+          "executable_plan",
+          revisedPlanPath,
+          revisedPlanContent,
+          "application/json",
+          currentPlanArtifact.schemaVersion ?? "video-factory/executable-plan-v1",
+          planOwnerNodeId,
+          [currentPlanArtifact.id, ...voiceNode.artifactIds],
+          "human-voice-timing-revision-v1",
+          "Creator accepted a longer cut for the complete natural-speed narration.",
+        )],
+        // F6 残留收口：新版本保留当前方案的规划支撑引用集（joint 为整组 planning 证据，
+        // legacy 为同版本其余产物），使修订后的 current version 仍满足引用闭包——
+        // 声音修订进入同一正式发布合同，而不是留下只装一个新 plan 文件的断链版本。
+        retainedArtifactIds: preflightVersion.artifactIds.filter((artifactId) => artifactId !== currentPlanArtifact.id),
+        invalidateDescendantNodeIds: [
+          "asset-source-review",
+          "assets",
+          "voice",
+          "render",
+          "technical-review",
+          "visual-review",
+          "final-review",
+          "publish-package",
+        ].filter((nodeId) => productionNodeIds(brief).includes(nodeId)),
+        expectedVersionId: preflightVersion.id,
+        schemaVersion: preflightVersion.schemaVersion,
+        decision: {
+          interventionId: intervention.id,
+          action: "request_changes",
+          actor: draft.actor.trim(),
+          note: `镜头 ${draft.scenePosition} 时长调整为 ${requestedFrameCount / currentPlan.fps} 秒。`,
+        },
+      });
+    });
+    return this.resumeStale(runId);
+  }
+
   private async prepareVisualDirectionOverride(
     previous: WorkflowRun<ProductionBrief>,
     override: NodeOverrideDraft,
@@ -772,8 +1175,24 @@ export class ProductionPipeline {
 
   async applyNodeInputOverride(runId: string, override: NodeInputOverrideDraft): Promise<WorkflowRun<ProductionBrief>> {
     return this.runPersistedTransition(runId, async (previous) => {
-      await verifyNodeInputOverrideBoundary(this.store.runDirectory(runId), override);
       const brief = parsePersistedBrief(previous.initialInput);
+      // B4 对外编辑合同（joint-v1）：caller tokens 必填，省略即拒绝，不提供无 token 豁免
+      // 路径；legacy 拓扑保持既有行为（token 提供时仍然参与复核）。
+      if (usesJointCreativePlanning(brief)) {
+        if (!Number.isSafeInteger(override.expectedRunRevision) || Number(override.expectedRunRevision) < 0) {
+          throw new Error(`Joint planning input override for '${runId}' requires a non-negative expectedRunRevision.`);
+        }
+        if (typeof override.expectedVersionId !== "string" || !override.expectedVersionId.trim()) {
+          throw new Error(`Joint planning input override for '${runId}' requires the expected input version id.`);
+        }
+      }
+      // 持锁复核 caller revision：服务预检查读取的 revision 与此刻真实 head 之间可能已有
+      // 后台写入（异步 dispatch 的 checkpoint 会推进 revision），stale token 在这里失败，
+      // 而不是靠节点输入版本未变放过一次基于过期观察的覆盖。
+      if (override.expectedRunRevision !== undefined && previous.revision !== override.expectedRunRevision) {
+        throw new StaleRunRevisionError(runId, override.expectedRunRevision, previous.revision);
+      }
+      await verifyNodeInputOverrideBoundary(this.store.runDirectory(runId), override);
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
         clock: this.clock,
@@ -958,6 +1377,10 @@ export class ProductionPipeline {
         ],
         retainedArtifactIds,
         invalidateDescendantNodeIds: [
+          "asset-source-review",
+          // BG-07：assets 失效后 voice 是其后代——旁白时间线基于旧 asset plan 计算，
+          // 不得沿用；后续 render/review 已在列表中。
+          "voice",
           "render",
           "technical-review",
           "visual-review",
@@ -983,8 +1406,19 @@ export class ProductionPipeline {
     nodeId: string,
     nextBriefInput: ProductionBrief,
     actor: string,
+    expectedRunRevision?: number,
   ): Promise<WorkflowRun<ProductionBrief>> {
     return this.runPersistedTransition(runId, async (previous) => {
+      const jointEdit = usesJointCreativePlanning(parsePersistedBrief(previous.initialInput));
+      // B4 对外编辑合同（joint-v1）：caller revision 必填；legacy 保持既有可选行为。
+      if (jointEdit && (!Number.isSafeInteger(expectedRunRevision) || Number(expectedRunRevision) < 0)) {
+        throw new Error(`Joint planning execution configuration override for '${runId}' requires a non-negative expectedRunRevision.`);
+      }
+      // 与输入覆盖同一持锁复核合同：配置编辑不得用预检查后新加载的服务端 revision 代替
+      // caller revision；两者不一致说明预检查后有并发写入，必须在写入前失败。
+      if (expectedRunRevision !== undefined && previous.revision !== expectedRunRevision) {
+        throw new StaleRunRevisionError(runId, expectedRunRevision, previous.revision);
+      }
       const nextBrief = parseBrief(nextBriefInput);
       const runner = new WorkflowRunner({
         providers: this.createRegistry(nextBrief),
@@ -1008,8 +1442,12 @@ export class ProductionPipeline {
     runId: string,
     authorization: SpendAuthorizationDraft,
     listener?: ProductionRunListener,
+    // C1：持锁 CAS 边界内的额外校验（如 scope head 未被 supersede 的复核）。
+    // 在 runner 接受子凭证之前执行；抛错即整个派发事务失败、零副作用。
+    guard?: (previous: WorkflowRun<ProductionBrief>) => Promise<void>,
   ): Promise<DispatchedProductionRun> {
     return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
+      if (guard) await guard(previous);
       const brief = parsePersistedBrief(previous.initialInput);
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
@@ -1090,7 +1528,12 @@ export class ProductionPipeline {
       const stale = runner.applyExecutionConfigurationOverride(
         this.createWorkflow(nextBrief),
         withExecutableBrief(previous, brief),
-        { nodeId: "visual-direction", actor: rejection.rejectedBy.trim(), initialInput: nextBrief },
+        {
+          // joint-v1 拓扑没有独立 visual-direction 节点：报价退回的失效目标是 creative-planning。
+          nodeId: usesJointCreativePlanning(nextBrief) ? "creative-planning" : "visual-direction",
+          actor: rejection.rejectedBy.trim(),
+          initialInput: nextBrief,
+        },
       );
       return stale;
     }, listener);
@@ -1105,7 +1548,7 @@ export class ProductionPipeline {
     runId: string,
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun> {
-    return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
+    const dispatched = await this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       const brief = parsePersistedBrief(previous.initialInput);
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
@@ -1116,16 +1559,22 @@ export class ProductionPipeline {
       });
       return runner.resumeStale(this.createWorkflow(brief), withExecutableBrief(previous, brief));
     }, listener);
+    return this.continueCoveredSpendApproval(runId, dispatched, listener);
   }
 
-  async retryFailedNode(runId: string, nodeId: string): Promise<WorkflowRun<ProductionBrief>> {
-    const dispatched = await this.dispatchRetryFailedNode(runId, nodeId);
+  async retryFailedNode(
+    runId: string,
+    nodeId: string,
+    options?: { recoverOriginalTextTask?: boolean; resumeCompletedTextTask?: boolean; resumeCompletedTextTaskRequestId?: string },
+  ): Promise<WorkflowRun<ProductionBrief>> {
+    const dispatched = await this.dispatchRetryFailedNode(runId, nodeId, undefined, options);
     return dispatched.completion;
   }
 
   async reconcilePaidNode(
     runId: string,
     draft: ProductionPaidNodeReconciliationDraft,
+    options?: { settleOnly?: boolean },
   ): Promise<WorkflowRun<ProductionBrief>> {
     if (!draft.nodeId.trim()) throw new Error("Paid reconciliation node id is required.");
     if (!draft.reconciliationId.trim() || draft.reconciliationId.trim().length > 128) {
@@ -1142,6 +1591,9 @@ export class ProductionPipeline {
       throw new Error("A provider task id can only resume the original paid operation.");
     }
     const manualResolution = draft.outcome === "confirmed_not_charged" || draft.outcome === "confirmed_charged";
+    if (options?.settleOnly === true && !manualResolution) {
+      throw new Error("Settle-only paid reconciliation requires a confirmed manual outcome.");
+    }
     const itemRequestId = draft.itemRequestId?.trim();
     if (draft.itemRequestId !== undefined && (!itemRequestId || itemRequestId.length > 256)) {
       throw new Error("Paid reconciliation item request id must contain between 1 and 256 characters.");
@@ -1363,6 +1815,11 @@ export class ProductionPipeline {
           settlementActualCostSource,
           this.clock(),
         );
+        if (options?.settleOnly === true) {
+          const settledNode = result.nodeRuns.find((node) => node.nodeId === draft.nodeId)!;
+          delete settledNode.spendPlan;
+          settledNode.error = "这笔历史付费任务已完成账单结算；旧版制作不会恢复执行，请创建新版本继续制作。";
+        }
         await this.assertExecutionLease(lease);
         await this.store.save(result, previous.revision);
         await this.assertExecutionLease(lease);
@@ -1427,9 +1884,12 @@ export class ProductionPipeline {
           if (!consumed.includes(authorizationId)) consumed.push(authorizationId);
         }
         retryNode.status = "failed";
-        retryNode.error = "配音请求已按服务商明确拒绝结清；请先调整配音设置，再点击“重试失败步骤”创建新任务。";
+        retryNode.error = options?.settleOnly === true
+          ? "这笔历史付费任务已完成账单结算；旧版制作不会恢复执行，请创建新版本继续制作。"
+          : "配音请求已按服务商明确拒绝结清；请先调整配音设置，再点击“重试失败步骤”创建新任务。";
         retryNode.finishedAt = this.clock();
         delete retryNode.spendAuthorizationId;
+        if (options?.settleOnly === true) delete retryNode.spendPlan;
         delete retryNode.outcomeUncertain;
         delete retryNode.interrupted;
         delete retryNode.operationRequestId;
@@ -1460,6 +1920,33 @@ export class ProductionPipeline {
         retryNode.operationRequestId = operationId!;
         retryNode.outcomeUncertain = true;
         retryNode.interrupted = true;
+        retrySource.revision += 1;
+        retrySource.status = "failed";
+        retrySource.finishedAt = this.clock();
+        await this.assertExecutionLease(lease);
+        await this.store.save(retrySource, previous.revision);
+        await this.assertExecutionLease(lease);
+        await writePaidNodeReconciliationRecord(recordPath, {
+          ...reconciliationRecord,
+          status: "completed",
+          resultingRunRevision: retrySource.revision,
+        });
+        return retrySource;
+      }
+      if (options?.settleOnly === true) {
+        const authorizationId = retryNode.spendAuthorizationId;
+        if (authorizationId) {
+          const consumed = (retrySource.consumedSpendAuthorizationIds ??= []);
+          if (!consumed.includes(authorizationId)) consumed.push(authorizationId);
+        }
+        delete retryNode.spendAuthorizationId;
+        delete retryNode.spendPlan;
+        delete retryNode.outcomeUncertain;
+        delete retryNode.interrupted;
+        delete retryNode.operationRequestId;
+        retryNode.status = "failed";
+        retryNode.error = "这笔历史付费任务已完成账单结算；旧版制作不会恢复执行，请创建新版本继续制作。";
+        retryNode.finishedAt = this.clock();
         retrySource.revision += 1;
         retrySource.status = "failed";
         retrySource.finishedAt = this.clock();
@@ -1592,8 +2079,248 @@ export class ProductionPipeline {
     }
   }
 
-  async inspectPaidNode(runId: string, nodeId: string): Promise<ProductionPaidNodeSummary> {
+  // C1：接受制作范围授权（用户确认方案/追加额度的业务许可）。校验全部在宿主内完成——
+  // approvalRevision 必须等于当前 run revision（lease 内单写者核验），supersedes 必须指向
+  // 本 run 已接受的授权，不接受重复 id。记录原子落盘，不注册为节点产物（宿主级许可）。
+  async acceptProductionAuthorization(runId: string, scopeInput: unknown): Promise<WorkflowRun<ProductionBrief>> {
+    const updated = await this.runPersistedTransition(runId, async (previous) => {
+      const scope = parseProductionAuthorizationScope(scopeInput);
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(scope.id)) {
+        throw new Error("Production authorization id must be a filename-safe identifier (letters, digits, underscore, hyphen; max 128).");
+      }
+      if (scope.supersedesAuthorizationId !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(scope.supersedesAuthorizationId)) {
+        throw new Error("Production authorization supersedes id must be a filename-safe identifier.");
+      }
+      if (scope.runId !== previous.id) {
+        throw new Error(`Production authorization '${scope.id}' belongs to run '${scope.runId}', not '${previous.id}'.`);
+      }
+      if (scope.approvalRevision !== previous.revision) {
+        throw new StaleRunRevisionError(runId, scope.approvalRevision, previous.revision);
+      }
+      const directory = path.join(this.runsRoot, runId, "production-authorization");
+      const destination = path.join(directory, `${scope.id}.json`);
+      const scopeContent = `${JSON.stringify(scope, null, 2)}\n`;
+      const committedRecords = productionAuthorizationRecords(previous.artifacts);
+      const committedScopeIds = new Set(committedRecords.map((record) => record.id));
+      try {
+        const existing = await readFile(destination, "utf8");
+        if (existing !== scopeContent || committedScopeIds.has(scope.id)) {
+          throw new Error(`Production authorization '${scope.id}' has already been accepted with different state.`);
+        }
+      } catch (error) {
+        if (!hasCode(error, "ENOENT")) throw error;
+      }
+      // 链完整性无条件校验（与读取共用同一严格校验器，含内容摘要/身份/前驱/环检查）：
+      // 目录里已有授权时，新授权必须 supersede 当前 head（唯一幸存者）；未提供前驱只允许
+      // 在尚无任何授权时（首份）。损坏链返回 integrity_error 并 fail closed。
+      const chain = await inspectProductionAuthorizationChain(directory, previous.id, committedRecords);
+      if (chain.state === "integrity_error") {
+        throw new Error(
+          `Production authorization chain of run '${previous.id}' failed integrity validation (${chain.reason}); refusing to accept '${scope.id}'.`,
+        );
+      }
+      const currentHeadId = chain.state === "committed" ? chain.head.id : undefined;
+      if (scope.supersedesAuthorizationId) {
+        if (currentHeadId !== scope.supersedesAuthorizationId) {
+          throw new Error(
+            `Production authorization '${scope.id}' must supersede the current active authorization '${currentHeadId ?? "none"}', not '${scope.supersedesAuthorizationId}'.`,
+          );
+        }
+      } else if (currentHeadId !== undefined) {
+        throw new Error(
+          `Production authorization '${scope.id}' must supersede the current active authorization '${currentHeadId}'; the run already holds an active authorization.`,
+        );
+      }
+      await writeTextAtomically(destination, scopeContent);
+      // 接受授权是 run 状态变化：revision + 1，使后续追加/编辑的 approvalRevision 重新对齐。
+      return {
+        ...previous,
+        revision: previous.revision + 1,
+        artifacts: [
+          ...previous.artifacts,
+          {
+            id: `production-authorization:${scope.id}`,
+            kind: "production_authorization",
+            uri: destination,
+            createdAt: this.clock(),
+            provenance: {
+              providerId: "video-factory-production-authorization",
+              producerRequestDigest: createHash("sha256").update(scopeContent).digest("hex"),
+            },
+            sha256: createHash("sha256").update(scopeContent).digest("hex"),
+            sizeBytes: Buffer.byteLength(scopeContent),
+            contentType: "application/json",
+            schemaVersion: PRODUCTION_AUTHORIZATION_VERSION,
+          },
+        ],
+      };
+    });
+    // transition 之外续链（lease 已释放）：若 run 正停在报价等待且该授权完全覆盖当前报价，
+    // 立即派生子凭证继续制作；未覆盖则保持人工等待。继续链失败按原语义冒泡（授权已落盘，不回滚）。
+    if (updated.status === "awaiting_spend_approval" || updated.status === "approval_invalidated") {
+      return this.continueCoveredSpendApproval(runId, { runId, completion: Promise.resolve(updated) }).completion;
+    }
+    return updated;
+  }
+
+  // 当前有效的制作范围授权：已被追加替代的授权不再生效，取最新接受的一份。
+  // 与接受路径共用同一严格链校验器（内容摘要/身份/前驱/环全覆盖）；损坏链抛完整性
+  // 错误，绝不按"尚无授权"处理。
+  async readProductionAuthorization(runId: string): Promise<ProductionAuthorizationScope | undefined> {
+    const directory = path.join(this.runsRoot, runId, "production-authorization");
     const run = await this.store.load<ProductionBrief>(runId);
+    const chain = await inspectProductionAuthorizationChain(
+      directory,
+      runId,
+      productionAuthorizationRecords(run.artifacts),
+    );
+    if (chain.state === "integrity_error") {
+      throw new Error(`Production authorization state of run '${runId}' failed integrity validation (${chain.reason}).`);
+    }
+    if (chain.state === "absent") return undefined;
+    return chain.head;
+  }
+
+  // C1：报价等待的制作范围自动继续（可信宿主派生子凭证，复用既有 authorizeSpend，不新建
+  // 第二套授权路径）。覆盖评估锚定当前 executable plan 内容 digest（方案变了必须重新确认）
+  // 与质量合同投影；逐项核验 assetKey/模型/金额/次数，余额按 paid ledger 保守汇总。
+  // 派生的子凭证与当前报价计划在 matcher 逐字段一致（maxCostCny/maxAttempts 不再收窄——
+  // 收窄过的凭证必然被原 exact matcher 拒绝）；scope 逐素材次数预算经 itemCreateBudgets
+  // 随子凭证下发，由 worker 在每个 create 边界强制执行。任何一项不覆盖都保持人工等待，
+  // 并把结构化 assessment 落到等待节点供 C2 展示。
+  private continueCoveredSpendApproval(
+    runId: string,
+    dispatched: DispatchedProductionRun,
+    listener?: ProductionRunListener,
+  ): DispatchedProductionRun {
+    // 惰性链：不阻塞 dispatch 返回（调用方依赖“首检查点后立即返回”的合同）；
+    // completion 落定后才检查是否可凭 scope 自动继续。
+    const chained: Promise<WorkflowRun<ProductionBrief>> = (async () => {
+      let current = dispatched;
+      for (let hop = 0; hop < 8; hop += 1) {
+        const run = await current.completion;
+        if (run.status !== "awaiting_spend_approval" && run.status !== "approval_invalidated") return run;
+        // 损坏授权链在此抛完整性错误（fail closed），绝不当作"尚无授权"继续。
+        const scope = await this.readProductionAuthorization(runId);
+        if (!scope) return run;
+        const waiting = run.nodeRuns.find((node) => (
+          (node.status === "awaiting_spend_approval" || node.status === "approval_invalidated") && node.spendPlan
+        ));
+        const plan = waiting?.spendPlan;
+        if (!plan) return run;
+        // 唯一 ledger 快照：覆盖判定与派生预算共用同一次读取——第二次读取失败被
+        // 当作零占用会让"次数/余额已消耗"凭空消失（审计 N6 残留）。
+        const ledgerSnapshot = await inspectPaidAssetLedger(
+          path.join(this.runsRoot, runId, "nodes", plan.nodeId),
+        ).catch(() => null);
+        const result = await assessProductionScopePendingQuote({
+          scope,
+          run,
+          runsRoot: this.runsRoot,
+          spendPlan: plan,
+          paidItems: ledgerSnapshot,
+        });
+        if (!result.covered) {
+          if (result.assessment) {
+            // 评估已持久化：返回更新后的 run（内存里的 run 快照不含新写入的 assessment）。
+            const updated = await this.recordNodeSpendAssessment(runId, plan.nodeId, run.revision, result.assessment);
+            if (updated) return updated;
+          }
+          return run;
+        }
+        const foldedLedger = foldProductionSpendLedger(ledgerSnapshot ?? []);
+        // 逐素材剩余 create 预算（scope 用户批准的每素材上限 - ledger 已用次数）。
+        // 全覆盖评估保证每个新 create 项至少剩 1 次；预算随子凭证下发，由 worker 在
+        // create 边界执行——收窄发生在预留层，不改动必须与报价计划逐字段一致的凭证。
+        const itemCreateBudgets: Record<string, number> = {};
+        for (const quoteItem of plan.items ?? []) {
+          const permitted = scope.permittedAssets.find((asset) => asset.assetKey === quoteItem.id);
+          if (!permitted) continue;
+          const remaining = permitted.maxCreateAttempts - (foldedLedger.attemptsByAsset[quoteItem.id] ?? 0);
+          if (remaining >= 1) itemCreateBudgets[quoteItem.id] = remaining;
+        }
+        // 金额上界已并入整份计划评估（planMaximumCents）：assessment 覆盖"条目合计与
+        // 计划最高占用取大"的完整口径，这里不再重复检查。
+        const expectedScopeId = scope.id;
+        current = await this.dispatchSpendAuthorization(runId, {
+          spendPlanId: plan.id,
+          nodeId: plan.nodeId,
+          inputVersionIds: plan.inputVersionIds,
+          providerId: plan.providerId,
+          modelId: plan.modelId,
+          // 与当前报价计划逐字段一致（原 exact matcher 原样通过）；
+          // 范围约束在 itemCreateBudgets（预留层）与 scope 余额核对（此处）执行。
+          maxCostCny: plan.maxCostCny,
+          maxAttempts: plan.maxAttempts,
+          // 子凭证的批准者记录其派生来源；人类批准者仍是接受 scope 时的 approvedBy。
+          approvedBy: `${scope.approvedBy}（制作范围授权 ${scope.id}）`,
+          derivedFromScopeId: scope.id,
+          itemCreateBudgets,
+        }, listener, async () => {
+          // supersession 防护（C1-R1）：派发事务持锁边界内重读授权链，确认 head 仍是覆盖
+          // 判定所用的 scope；已被替代的 scope 不得为尚未开始的新请求签发子授权。
+          const latest = await this.readProductionAuthorization(runId);
+          if (latest?.id !== expectedScopeId) {
+            throw new Error(
+              `Production authorization '${expectedScopeId}' is no longer the active authorization of run '${runId}'; refusing to derive a child spend credential.`,
+            );
+          }
+        });
+      }
+      return current.completion;
+    })();
+    return { runId, completion: chained };
+  }
+
+  // C1-R5：把"范围未覆盖"的结构化评估落到等待节点（CAS 持久化），供 C2 投影展示；
+  // 节点已离开等待状态或 revision 已前进而并发变化时不覆盖任何新状态。
+  // 返回写入后的最新 run；无法写入（并发变化）时返回 undefined。
+  private async recordNodeSpendAssessment(
+    runId: string,
+    nodeId: string,
+    expectedRevision: number,
+    assessment: ProductionSpendPlanAssessment,
+  ): Promise<WorkflowRun<ProductionBrief> | undefined> {
+    // 预检查：不可写状态直接放弃，不进入 CAS（save 合同要求 revision + 1，不接受无变更返回）。
+    const current = await this.store.load<ProductionBrief>(runId);
+    const currentTarget = current.nodeRuns.find((node) => node.nodeId === nodeId);
+    if (current.revision !== expectedRevision || !currentTarget
+      || (currentTarget.status !== "awaiting_spend_approval" && currentTarget.status !== "approval_invalidated")) {
+      return undefined;
+    }
+    try {
+      return await this.runPersistedTransition(runId, async (previous) => {
+        // 持锁边界内二次核对：预检查后发生并发变化时放弃（save 以异常失败，由外层捕获）。
+        const target = previous.nodeRuns.find((node) => node.nodeId === nodeId);
+        if (previous.revision !== expectedRevision || !target
+          || (target.status !== "awaiting_spend_approval" && target.status !== "approval_invalidated")) {
+          throw new StaleRunRevisionError(runId, expectedRevision, previous.revision);
+        }
+        return {
+          ...previous,
+          revision: previous.revision + 1,
+          nodeRuns: previous.nodeRuns.map((node) => (
+            node.nodeId === nodeId
+              ? { ...node, spendAssessment: assessment as unknown as Record<string, unknown> }
+              : node
+          )),
+        };
+      });
+    } catch {
+      // 评估落盘是尽力而为的投影：并发状态变化时放弃写入，不阻断等待语义本身。
+      return undefined;
+    }
+  }
+
+  // C2/CG-01：授权命令的续链恢复——授权已提交但 governed continuation 未完成（进程在
+  // run CAS 之后、续链完成之前中断）时，重新触发同一条 continuation。幂等：run 不在
+  // 报价等待状态时原样返回；仍在等待且未覆盖时记录评估并保持等待，不签发任何新凭证。
+  async resumeCoveredSpendApproval(runId: string): Promise<WorkflowRun<ProductionBrief>> {
+    const run = await this.store.load<ProductionBrief>(runId);
+    return this.continueCoveredSpendApproval(runId, { runId, completion: Promise.resolve(run) }).completion;
+  }
+
+  async inspectPaidNode(runId: string, nodeId: string): Promise<ProductionPaidNodeSummary> {    const run = await this.store.load<ProductionBrief>(runId);
     const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
     if (!node) throw new Error(`Unknown workflow node '${nodeId}'.`);
     const operationId = node.operationRequestId;
@@ -1659,6 +2386,262 @@ export class ProductionPipeline {
     };
   }
 
+  // joint-v1 规划阶段的只读检视（Studio 详情消费）：阶段列表来自当前路线的真实拓扑，
+  // 状态只由 checkpoint 快照、role-agent checkpoint 与经严格校验的 planning commit 推导。
+  // 读取绝不 invoke 图、绝不触发角色/Provider；checkpoint 缺失如实全 pending，
+  // 身份错配或存储损坏返回 undefined（fail closed，不回退旧 NodeRun 也不伪造状态）。
+  async inspectCreativePlanningStages(runId: string): Promise<CreativePlanningStageInspection[] | undefined> {
+    const run = await this.store.load<ProductionBrief>(runId);
+    const brief = effectiveProductionBrief(run);
+    if (brief.workflowFeatures?.creativePlanning !== "joint-v1") return undefined;
+    const libraryRoute = brief.workflowFeatures?.assetSemanticRank === true;
+    const stageIds = libraryRoute ? PLANNING_STAGE_ORDER_LIBRARY : PLANNING_STAGE_ORDER_FIXED;
+    const bindingModelOf = (stage: PlanningStageId) => this.planningBindingModelId(stage, brief);
+    const planningNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning");
+    const inputState = planningNode?.inputState;
+    if (!planningNode || !inputState || inputState.stale) {
+      // 规划尚未启动（上游失败或未轮到），或当前有效输入已被上游改动标记过时：
+      // 新 thread 尚未确定，不得拿旧输入身份的 checkpoint 冒充当前进度；模型阶段仍显示当前绑定。
+      return planningStagesAllPending(stageIds, bindingModelOf, (stage) => this.planningBindingProviderId(stage, brief));
+    }
+    const effectiveInput = inputState.versions.find(
+      (version) => version.id === inputState.effectiveVersionId,
+    )?.value;
+    if (!isObjectRecord(effectiveInput) || !isObjectRecord(effectiveInput.brief)) return undefined;
+    const referenceGrammarEnabled = brief.workflowFeatures?.referenceGrammar === true;
+    let inputDigest: string;
+    try {
+      const referenceGrammar = referenceGrammarEnabled && typeof effectiveInput.referenceGrammarPath === "string"
+        ? await readShotGrammarFile(effectiveInput.referenceGrammarPath)
+        : undefined;
+      // 正式校验当前输入 brief：坏输入（字段级非法）不得进入身份计算，fail closed。
+      inputDigest = jointPlanningInputDigest(mergeCurrentBrief(effectiveInput.brief, brief), referenceGrammar);
+    } catch {
+      // 参考语法文件缺失/损坏，或当前输入 brief 不满足正式合同：无法确定输入身份，fail closed。
+      return undefined;
+    }
+    // checkpoint 存储尚不存在说明该工作区从未启动过 joint 规划：如实全 pending，
+    // 且读取路径不得创建存储文件。
+    let sqliteExists = true;
+    try {
+      await stat(planningCheckpointSqlitePath(path.dirname(this.runsRoot)));
+    } catch {
+      sqliteExists = false;
+    }
+    if (!sqliteExists) return planningStagesAllPending(stageIds, bindingModelOf, (stage) => this.planningBindingProviderId(stage, brief));
+    let values: Partial<PlanningGraphState>;
+    let cursor: readonly string[] = [];
+    try {
+      const store = CreativePlanningStore.open(path.dirname(this.runsRoot));
+      try {
+        const snapshot = await createInspectionPlanningGraph(store, libraryRoute)
+          .getState(store.threadConfig(runId, inputDigest));
+        values = (snapshot?.values ?? {}) as Partial<PlanningGraphState>;
+        cursor = snapshot?.next ?? [];
+      } finally {
+        store.close();
+      }
+    } catch {
+      // 存储损坏或不可读（含身份校验失败）：不伪造任何阶段状态。
+      return undefined;
+    }
+    if (values.inputDigest == null) {
+      // thread 无 checkpoint（规划未开始，或输入已进入新 thread）：如实全 pending。
+      return planningStagesAllPending(stageIds, bindingModelOf, (stage) => this.planningBindingProviderId(stage, brief));
+    }
+    // 快照身份必须与当前请求完全对齐：错 thread/错 run/错 digest 一律 fail closed，
+    // 与 runCreativePlanning 的恢复防线同一纪律。
+    if (values.runId !== runId || values.inputDigest !== inputDigest) return undefined;
+
+    const completedStages = new Set(stageIds.filter((stage) => planningStageArtifactPresent(stage, values)));
+    const runningStage = cursor.find((node) => (stageIds as readonly string[]).includes(node));
+    const structuredIssueByStage = new Map<PlanningStageId, string>();
+    for (const issue of Array.isArray(values.issues) ? values.issues : []) {
+      if (!isObjectRecord(issue)) continue;
+      const stage = typeof issue.target === "string" ? planningIssueTargetStage(issue.target) : undefined;
+      if (!stage) continue;
+      const reason = typeof issue.reason === "string" ? issue.reason : "";
+      const requiredChange = typeof issue.requiredChange === "string" ? issue.requiredChange : "";
+      const text = `${reason}${requiredChange ? `（${requiredChange}）` : ""}`.trim();
+      if (text && !structuredIssueByStage.has(stage)) structuredIssueByStage.set(stage, text);
+    }
+    // 失败阶段归属：结构化 issue 的目标阶段优先（duplicate_issue/回退耗尽停止时，承担
+    // 未决问题的导演已有产物，不能因产物存在就标 completed、把 integrate 标 failed）；
+    // 无结构化 issue 时回退到“第一个无产物阶段”；图已完成而正式发布失败（所有阶段都有
+    // 产物却没有 commit 接受）时，失败归属于正式方案阶段——不能把发布失败显示成全部完成。
+    // role trace 严格绑定当前 inputDigest：只读执行历史里本 digest 的记录，不读其他
+    // thread（旧执行）的 v7 checkpoint 或旧 trace——编辑换 digest 后旧 trace 不再冒充。
+    const roleModelTraces = await readJointPlanningModelTraces(
+      path.join(this.runsRoot, runId, "nodes", "creative-planning", "planning-history.json"),
+      inputDigest,
+    );
+    const publicationVerified = completedStages.size === stageIds.length && planningNode.status === "succeeded";
+    const planningCommitted = publicationVerified
+      ? await this.planningCommitArtifactIds(runId, inputDigest, values, libraryRoute, run)
+      : {};
+    // F9 残留：节点已 succeeded、图产物齐全，但正式 commit/registry 核验失败（映射为空）
+    // ——发布没有成立，必须在正式方案阶段暴露可行动失败，而不是全绿。
+    const commitVerificationFailed = publicationVerified
+      && Object.values(planningCommitted).every((ids) => !(ids && ids.length > 0));
+    const failedStage: PlanningStageId | undefined = planningNode.status === "failed"
+      ? stageIds.find((stage) => structuredIssueByStage.has(stage))
+        ?? stageIds.find((stage) => !completedStages.has(stage))
+        ?? (completedStages.size === stageIds.length ? "compile" : undefined)
+      : commitVerificationFailed
+        ? "compile"
+        : undefined;
+    return stageIds.map((stage) => {
+      // 状态优先级：当前失败 > checkpoint cursor 正在执行 > 已有产物（旧完成）> 待开始。
+      // 阶段重跑时旧产物不得把当前活动覆盖成 completed；发布失败不得显示全部 completed。
+      const status: CreativePlanningStageInspection["status"] = stage === failedStage
+        ? "failed"
+        : stage === runningStage
+          ? "running"
+          : completedStages.has(stage)
+            ? "completed"
+            : "pending";
+      const artifactIds = planningCommitted[stage] ?? [];
+      // 来源诚实合同：pending/running 显示当前绑定（用户据此判断这次会用什么）；已完成
+      // 模型阶段必须来自真实执行 trace——来源未知时显式 unknown，不用首选绑定冒充
+      // （如 fallback 后的实际模型、跨崩溃窗口丢失的 provenance）；确定性阶段无模型字段。
+      const modelStage = stage === "treatment" || stage === "script" || stage === "director" || stage === "rank";
+      const effectiveModelId = status === "completed"
+        ? roleModelTraces[stage] ?? (modelStage ? "unknown" : undefined)
+        : roleModelTraces[stage] ?? this.planningBindingModelId(stage, brief);
+      const providerId = this.planningBindingProviderId(stage, brief);
+      const issue = status === "failed"
+        ? structuredIssueByStage.get(stage)
+          ?? (commitVerificationFailed && stage === "compile"
+            ? "正式方案还没有通过核验，请重试生成或重新规划。"
+            : planningFailureForCreators(planningNode.error ?? ""))
+        : structuredIssueByStage.get(stage);
+      const allowedActions: CreativePlanningStageAction[] = [
+        ...(stage === "treatment" || stage === "script" || stage === "director"
+          ? (["edit_input", "change_model"] as const)
+          : []),
+        ...(artifactIds.length > 0 ? (["view_artifacts"] as const) : []),
+      ];
+      return {
+        id: stage,
+        status,
+        ...(effectiveModelId !== undefined ? { effectiveModelId } : {}),
+        ...(providerId !== undefined ? { providerId } : {}),
+        artifactIds: [...artifactIds],
+        ...(issue !== undefined && issue !== "" ? { issue } : {}),
+        allowedActions,
+      };
+    });
+  }
+
+  // 尚未执行的角色阶段回退到当前有效绑定的首选模型；已执行的以执行历史的真实 trace
+  // 为准（含 fallback 后的实际模型）。确定性阶段（candidates/integrate/compile）没有模型。
+  private planningBindingModelId(stage: PlanningStageId, brief: ProductionBrief): string | undefined {
+    switch (stage) {
+      case "treatment": return effectiveTreatmentModelId(brief, this.options.treatmentAgents ?? []);
+      case "script": return brief.models?.[brief.providers.script] ?? this.options.screenwriterAgent?.modelId;
+      case "director": return brief.providers.director !== undefined
+        ? brief.models?.[brief.providers.director] ?? this.options.directorAgent?.modelId
+        : this.options.directorAgent?.modelId;
+      case "rank": return this.options.assetSemanticRanker?.modelId;
+      default: return undefined;
+    }
+  }
+
+  // 模型阶段当前绑定的能力提供者：UI 的模型选择据此解析，不按能力目录顺序猜测。
+  private planningBindingProviderId(stage: PlanningStageId, brief: ProductionBrief): string | undefined {
+    switch (stage) {
+      case "treatment": return this.options.treatmentAgents?.length ? CREATIVE_TREATMENT_PROVIDER_ID : undefined;
+      case "script": return brief.providers.script;
+      case "director": return brief.providers.director;
+      case "rank": return this.options.assetSemanticRanker?.id;
+      default: return undefined;
+    }
+  }
+
+  // 整份规划正式落定后，把阶段映射到 planning commit 严格绑定过的 run 正式产物 id。
+  // 任何一步验证不通过都返回空映射：进行中的规划只能呈现 checkpoint 真实持有的阶段身份，
+  // 不得给出不存在的 StudioArtifact id。
+  private async planningCommitArtifactIds(
+    runId: string,
+    inputDigest: string,
+    values: Partial<PlanningGraphState>,
+    libraryRoute: boolean,
+    run: WorkflowRun<ProductionBrief>,
+  ): Promise<Partial<Record<PlanningStageId, string[]>>> {
+    const script = values.scriptArtifact;
+    const treatment = values.treatmentArtifact;
+    const finalPlan = values.integratedPlan ?? values.directorPlan;
+    const candidates = values.candidatesArtifact;
+    const ranking = values.ranking;
+    const executablePlan = values.executablePlan;
+    if (!treatment || !script || !finalPlan || !executablePlan) return {};
+    if (libraryRoute && (!candidates || !ranking)) return {};
+    // 与执行侧同一公式重算 commit key：同输入身份必然命中执行时写入的同一 commit 文件。
+    const planningCommitKey = createHash("sha256").update(JSON.stringify({
+      version: PLANNING_COMMIT_VERSION,
+      runId,
+      inputDigest,
+      planning: {
+        treatment: treatment.artifactId,
+        script: script.artifactId,
+        directorPlan: finalPlan.artifactId,
+        ...(libraryRoute && candidates ? { candidates: candidates.artifactId } : {}),
+        ...(libraryRoute && ranking ? { ranking: ranking.artifactId } : {}),
+        executablePlan: executablePlan.artifactId,
+      },
+    })).digest("hex");
+    let commit: JointPlanningCommit;
+    try {
+      const existing = await readJointPlanningCommit(
+        path.join(this.runsRoot, runId, "planning", "commits", `${planningCommitKey}.json`),
+      );
+      if (existing === undefined) return {};
+      commit = await verifyJointPlanningCommit({
+        commit: existing,
+        planningCommitKey,
+        inputDigest,
+        runId,
+        runRoot: path.join(this.runsRoot, runId),
+        artifacts: run.artifacts,
+        expectedKinds: jointPlanningExpectedKinds(libraryRoute),
+      });
+    } catch {
+      return {};
+    }
+    const idsOfKind = (kind: string) => commit.artifacts
+      .filter((entry) => entry.kind === kind)
+      .map((entry) => entry.artifactId);
+    // BG-01 尾巴：声音时长修订等人工修订会替换 planning 节点当前 effective version 的
+    // 成员（如新 executable_plan）。stage 投影必须反映"当前接受版本"，不能永远指向
+    // 原始 graph commit 的产物。
+    const planningNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning");
+    const currentVersionIds = new Set(
+      planningNode?.outputState?.versions.find(
+        (version) => version.id === planningNode.outputState?.effectiveVersionId,
+      )?.artifactIds ?? [],
+    );
+    const currentVersionExecutablePlan = currentVersionIds.size > 0
+      ? run.artifacts
+        .filter((artifact) => (
+          currentVersionIds.has(artifact.id)
+          && artifact.kind === "executable_plan"
+          && artifact.producer?.nodeId === "creative-planning"
+        ))
+        .map((artifact) => artifact.id)
+      : [];
+    return {
+      treatment: idsOfKind("creative_treatment"),
+      script: idsOfKind("script"),
+      director: idsOfKind("storyboard"),
+      ...(libraryRoute ? {
+        candidates: idsOfKind("asset_candidates"),
+        rank: idsOfKind("asset_ranking"),
+        integrate: idsOfKind("storyboard"),
+      } : {}),
+      compile: currentVersionExecutablePlan.length > 0 ? currentVersionExecutablePlan : idsOfKind("executable_plan"),
+    };
+  }
+
   private paidReconciliationPath(runId: string, reconciliationId: string): string {
     const name = createHash("sha256").update(reconciliationId).digest("hex");
     return path.join(this.store.runDirectory(runId), ".paid-reconciliations", `${name}.json`);
@@ -1668,10 +2651,14 @@ export class ProductionPipeline {
     runId: string,
     nodeId: string,
     listener?: ProductionRunListener,
+    options?: { recoverOriginalTextTask?: boolean; resumeCompletedTextTask?: boolean; resumeCompletedTextTaskRequestId?: string },
   ): Promise<DispatchedProductionRun> {
-    return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
+    const dispatched = await this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       const retryRejectedReview = canRetryRejectedReviewNode(previous, nodeId);
       const brief = parsePersistedBrief(previous.initialInput);
+      const recoveryWorkflowOperationRequestId = options?.recoverOriginalTextTask
+        ? previous.nodeRuns.find((node) => node.nodeId === nodeId)?.operationRequestId
+        : undefined;
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
         clock: this.clock,
@@ -1680,12 +2667,21 @@ export class ProductionPipeline {
         shouldPause: () => this.consumePauseRequest(runId),
       });
       return runner.retryFailedNode(
-        this.createWorkflow(brief),
+        this.createWorkflow(brief, undefined, {
+          ...(options?.resumeCompletedTextTask ? { resumeCompletedTextTaskNodeId: nodeId } : {}),
+          ...(options?.resumeCompletedTextTaskRequestId
+            ? { resumeCompletedTextTaskRequestId: options.resumeCompletedTextTaskRequestId }
+            : {}),
+          ...(recoveryWorkflowOperationRequestId
+            ? { recoverTextTask: { nodeId, workflowOperationRequestId: recoveryWorkflowOperationRequestId } }
+            : {}),
+        }),
         withExecutableBrief(previous, brief),
         nodeId,
         retryRejectedReview ? { allowRejectedNode: true } : undefined,
       );
     }, listener);
+    return this.continueCoveredSpendApproval(runId, dispatched, listener);
   }
 
   async dispatchVisualReinspection(
@@ -1837,12 +2833,10 @@ export class ProductionPipeline {
           await notifyListener(listener, run);
           resolveCheckpoint();
         }
-        if (run.status !== "paused") await rm(this.pauseRequestPath(runId), { force: true });
         await this.releaseExecutionLease(lease);
         return run;
       },
       async (error: unknown) => {
-        await rm(this.pauseRequestPath(runId), { force: true });
         await this.releaseExecutionLease(lease);
         rejectCheckpoint(error);
         throw error;
@@ -1913,8 +2907,18 @@ export class ProductionPipeline {
   private createWorkflow(
     brief: ProductionBrief,
     approvalDecision?: HumanDecisionDraft,
-    options: { allowUnavailableProviders?: boolean } = {},
+    options: {
+      allowUnavailableProviders?: boolean;
+      resumeCompletedTextTaskNodeId?: string;
+      resumeCompletedTextTaskRequestId?: string;
+      recoverTextTask?: { nodeId: string; workflowOperationRequestId: string };
+    } = {},
   ): WorkflowDefinition {
+    const resumeCompletedTextTaskNodeId = options.resumeCompletedTextTaskNodeId;
+    const resumeCompletedTextTaskRequestId = options.resumeCompletedTextTaskRequestId;
+    const withSourceRunSnapshot: SourceRunSnapshot = (sourceRunId, snapshot) => (
+      this.withRunMaintenanceLease([sourceRunId], snapshot)
+    );
     const assetReworkScenePositions = brief.rework
       ? reworkAffectedScenePositions({
         findings: brief.rework.findings,
@@ -1993,66 +2997,122 @@ export class ProductionPipeline {
         validateInputOverride: (input) => validateBriefInputOverride(input, brief),
         validateOverride: (output) => validateBriefInputOverride(output, brief),
       },
-      ...(brief.providers.script === "codex-screenwriter-v1"
-        ? [screenwriterNode(brief, this.options.screenwriterAgent, this.runsRoot, options.allowUnavailableProviders === true)]
-        : [workerNode(
-            "script",
-            "Draft script",
-            "script.draft",
-            brief.providers.script,
-            ["brief"],
-            ["brief"],
-            (context) => ({ brief: currentEffectiveBriefFromContext(context, brief) }),
-            "编剧",
-          )]),
+      ...(usesJointCreativePlanning(brief)
+        // joint-v1 不创建外层 script/visual-direction/asset-candidates/asset-semantic-rank/
+        // production-preflight：四段规划收敛为一个 creative-planning 节点。
+        ? []
+        : brief.providers.script === "codex-screenwriter-v1"
+          ? [screenwriterNode(
+              brief,
+              this.options.screenwriterAgent,
+              this.options,
+              this.runsRoot,
+              withSourceRunSnapshot,
+              options.allowUnavailableProviders === true,
+            )]
+          : [workerNode(
+              "script",
+              "Draft script",
+              "script.draft",
+              brief.providers.script,
+              ["brief"],
+              ["brief"],
+              (context) => ({ brief: currentEffectiveBriefFromContext(context, brief) }),
+              "编剧",
+            )]),
       ...(brief.workflowFeatures?.referenceGrammar ? [referenceGrammarNode(brief, this.options, this.runsRoot)] : []),
-      ...(brief.director ? [directorNode(brief, this.options, this.runsRoot)] : []),
-      ...(brief.workflowFeatures?.assetSemanticRank ? [
-        workerNode(
-          "asset-candidates",
-          "Discover asset candidates",
-          "asset.search",
-          "asset-candidate-search-v1",
-          ["visual-direction"],
-          ["script", "visual-direction"],
-          (context) => ({
-            scriptPath: outputPath(context, "script", "scriptPath"),
-            directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath"),
-          }),
-          "素材研究员",
-        ),
-        assetSemanticRankNode(brief, this.options, this.runsRoot),
-      ] : []),
+      ...(usesJointCreativePlanning(brief)
+        ? [creativePlanningNode(
+          brief,
+          this.options,
+          this.runsRoot,
+          options.allowUnavailableProviders === true,
+          resumeCompletedTextTaskNodeId,
+          resumeCompletedTextTaskRequestId,
+          options.recoverTextTask,
+        )]
+        : [
+            ...(brief.director ? [directorNode(brief, this.options, this.runsRoot, withSourceRunSnapshot)] : []),
+            ...(brief.workflowFeatures?.assetSemanticRank ? [
+              workerNode(
+                "asset-candidates",
+                "Discover asset candidates",
+                "asset.search",
+                "asset-candidate-search-v1",
+                ["visual-direction"],
+                ["script", "visual-direction"],
+                (context) => ({
+                  scriptPath: outputPath(context, "script", "scriptPath"),
+                  directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath"),
+                }),
+                "素材研究员",
+              ),
+              assetSemanticRankNode(brief, this.options, this.runsRoot),
+            ] : []),
+            ...(brief.durationRange && brief.director
+              ? [productionPreflightNode(brief, this.runsRoot)]
+              : []),
+          ]),
       workerNode(
         "assets",
         "Prepare assets",
         "asset.prepare",
         brief.providers.assets,
-        [brief.workflowFeatures?.assetSemanticRank ? "asset-semantic-rank" : brief.director ? "visual-direction" : "script"],
-        brief.workflowFeatures?.assetSemanticRank ? ["script", "visual-direction", "asset-candidates", "asset-semantic-rank"] : brief.director ? ["script", "visual-direction"] : ["script"],
-        (context) => ({
-          scriptPath: outputPath(context, "script", "scriptPath"),
-          ...(brief.director ? { directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath") } : {}),
-          ...(brief.workflowFeatures?.assetSemanticRank ? { candidateRankingPath: outputPath(context, "asset-semantic-rank", "candidateRankingPath") } : {}),
-          ...(brief.workflowFeatures?.assetSemanticRank ? { candidateInventoryPath: outputPath(context, "asset-candidates", "candidateInventoryPath") } : {}),
-          ...(brief.rework ? {
-            rework: {
-              sourceRunId: brief.rework.sourceRunId,
-              sourceRunRevision: brief.rework.sourceRunRevision,
-              nodeInstructions: brief.rework.nodeInstructions,
-              // 素材节点只接收 visual-direction/assets 的 findings（与 reworkAffectedScenePositions
-              // 内部对 visual findings 的同一过滤语义）；script-only finding 不透传给素材，
-              // 其场景实际变化仍经 current/previous script 逐镜差异进入统一 affected 闭包。
-              findings: brief.rework.findings.filter((finding) => finding.action !== "inspect_existing_media"
-                && finding.targetNodeIds.some((target) => target === "visual-direction" || target === "assets")),
-              ...(assetReworkScenePositions.length || brief.rework.affectedScenePositions !== undefined
-                ? { affectedScenePositions: assetReworkScenePositions }
-                : {}),
-              ...(brief.rework.previousScript ? { previousScript: brief.rework.previousScript } : {}),
-              ...(brief.rework.previousDirectorPlan ? { previousDirectorPlan: brief.rework.previousDirectorPlan } : {}),
-            },
-          } : {}),
-        }),
+        [usesJointCreativePlanning(brief)
+          ? "creative-planning"
+          : brief.durationRange && brief.director
+            ? "production-preflight"
+            : brief.workflowFeatures?.assetSemanticRank
+              ? "asset-semantic-rank"
+              : brief.director
+                ? "visual-direction"
+                : "script"],
+        usesJointCreativePlanning(brief)
+          ? ["creative-planning"]
+          : brief.durationRange && brief.director
+            ? ["production-preflight"]
+            : brief.workflowFeatures?.assetSemanticRank
+              ? ["script", "visual-direction", "asset-candidates", "asset-semantic-rank"]
+              : brief.director
+                ? ["script", "visual-direction"]
+                : ["script"],
+        (context) => {
+          // 唯一规划产物投影：joint/legacy 的路径选择收敛到 currentPlanningOutputPaths；
+          // joint 的候选路径经 planningCandidatePaths 严格校验，legacy 保持可选字段兼容。
+          const joint = usesJointCreativePlanning(brief);
+          const planning = currentPlanningOutputPaths(context, brief);
+          const candidates = !brief.workflowFeatures?.assetSemanticRank
+            ? undefined
+            : joint
+              ? planningCandidatePaths(planning)
+              : {
+                ...(planning.candidateRankingPath ? { candidateRankingPath: planning.candidateRankingPath } : {}),
+                ...(planning.candidateInventoryPath ? { candidateInventoryPath: planning.candidateInventoryPath } : {}),
+              };
+          return {
+            scriptPath: planning.scriptPath,
+            ...(planning.directorPlanPath !== undefined ? { directorPlanPath: planning.directorPlanPath } : {}),
+            ...(planning.executablePlanPath !== undefined ? { executablePlanPath: planning.executablePlanPath } : {}),
+            ...(candidates ?? {}),
+            ...(brief.rework ? {
+              rework: {
+                sourceRunId: brief.rework.sourceRunId,
+                sourceRunRevision: brief.rework.sourceRunRevision,
+                nodeInstructions: brief.rework.nodeInstructions,
+                // 素材节点只接收 visual-direction/assets 的 findings（与 reworkAffectedScenePositions
+                // 内部对 visual findings 的同一过滤语义）；script-only finding 不透传给素材，
+                // 其场景实际变化仍经 current/previous script 逐镜差异进入统一 affected 闭包。
+                findings: brief.rework.findings.filter((finding) => finding.action !== "inspect_existing_media"
+                  && finding.targetNodeIds.some((target) => target === "visual-direction" || target === "assets")),
+                ...(assetReworkScenePositions.length || brief.rework.affectedScenePositions !== undefined
+                  ? { affectedScenePositions: assetReworkScenePositions }
+                  : {}),
+                ...(brief.rework.previousScript ? { previousScript: brief.rework.previousScript } : {}),
+                ...(brief.rework.previousDirectorPlan ? { previousDirectorPlan: brief.rework.previousDirectorPlan } : {}),
+              },
+            } : {}),
+          };
+        },
         "素材导演",
       ),
       ...(brief.providers.visualReview ? [sourceAssetVisualReviewNode(brief, this.runsRoot)] : []),
@@ -2061,15 +3121,21 @@ export class ProductionPipeline {
         "Synthesize voice",
         "voice.synthesize",
         brief.providers.voice,
-        ["script", brief.providers.visualReview ? "asset-source-review" : "assets"],
-        ["script", "assets"],
-        (context) => ({
-          scriptPath: outputPath(context, "script", "scriptPath"),
-          voice: brief.voiceDirection.profileId.slice(brief.voiceDirection.profileId.indexOf(":") + 1),
-          rate: brief.voiceDirection.rate,
-          pause_scale: brief.voiceDirection.pauseScale,
-          mastering_preset: brief.voiceDirection.masteringPreset,
-        }),
+        [usesJointCreativePlanning(brief) ? "creative-planning" : "script", brief.providers.visualReview ? "asset-source-review" : "assets"],
+        usesJointCreativePlanning(brief)
+          ? ["creative-planning", "assets"]
+          : brief.durationRange && brief.director ? ["production-preflight", "assets"] : ["script", "assets"],
+        (context) => {
+          const planning = currentPlanningOutputPaths(context, brief);
+          return {
+            scriptPath: planning.scriptPath,
+            ...(planning.executablePlanPath !== undefined ? { executablePlanPath: planning.executablePlanPath } : {}),
+            voice: brief.voiceDirection.profileId.slice(brief.voiceDirection.profileId.indexOf(":") + 1),
+            rate: brief.voiceDirection.rate,
+            pause_scale: brief.voiceDirection.pauseScale,
+            mastering_preset: brief.voiceDirection.masteringPreset,
+          };
+        },
         "声音导演",
         validateVoiceNodeInput,
       ),
@@ -2079,12 +3145,18 @@ export class ProductionPipeline {
         "video.render",
         brief.providers.render,
         ["assets", "voice"],
-        ["script", "assets", "voice"],
-        (context) => ({
-          scriptPath: outputPath(context, "script", "scriptPath"),
-          assetPlanPath: outputPath(context, "assets", "assetPlanPath"),
-          voiceoverPlanPath: outputPath(context, "voice", "voiceoverPlanPath"),
-        }),
+        usesJointCreativePlanning(brief)
+          ? ["creative-planning", "assets", "voice"]
+          : brief.durationRange && brief.director ? ["production-preflight", "assets", "voice"] : ["script", "assets", "voice"],
+        (context) => {
+          const planning = currentPlanningOutputPaths(context, brief);
+          return {
+            scriptPath: planning.scriptPath,
+            ...(planning.executablePlanPath !== undefined ? { executablePlanPath: planning.executablePlanPath } : {}),
+            assetPlanPath: outputPath(context, "assets", "assetPlanPath"),
+            voiceoverPlanPath: outputPath(context, "voice", "voiceoverPlanPath"),
+          };
+        },
         "剪辑师",
       ),
       workerNode(
@@ -2093,12 +3165,18 @@ export class ProductionPipeline {
         "quality.review",
         brief.providers.technicalReview,
         ["render"],
-        ["script", "assets", "render"],
-        (context) => ({
-          videoPath: outputPath(context, "render", "videoPath"),
-          assetPlanPath: outputPath(context, "assets", "assetPlanPath"),
-          scriptPath: outputPath(context, "script", "scriptPath"),
-        }),
+        usesJointCreativePlanning(brief)
+          ? ["creative-planning", "assets", "render"]
+          : brief.durationRange && brief.director ? ["production-preflight", "assets", "render"] : ["script", "assets", "render"],
+        (context) => {
+          const planning = currentPlanningOutputPaths(context, brief);
+          return {
+            videoPath: outputPath(context, "render", "videoPath"),
+            assetPlanPath: outputPath(context, "assets", "assetPlanPath"),
+            scriptPath: planning.scriptPath,
+            ...(planning.executablePlanPath !== undefined ? { executablePlanPath: planning.executablePlanPath } : {}),
+          };
+        },
         "技术质检",
       ),
       ...(brief.providers.visualReview ? [visualReviewNode(brief, this.runsRoot)] : []),
@@ -2111,7 +3189,10 @@ export class ProductionPipeline {
         dependsOn: [brief.providers.visualReview ? "visual-review" : "technical-review"],
         getInput: (context) => ({
           review: context.outputs.get(brief.providers.visualReview ? "visual-review" : "technical-review"),
-          canonFacts: outputStringArray(context.outputs.get("script"), "canonFacts"),
+          canonFacts: outputStringArray(
+            context.outputs.get(usesJointCreativePlanning(brief) ? "creative-planning" : "script"),
+            "canonFacts",
+          ),
         }),
         execute: (input, context) => {
           const reviewedInput = validateFinalReviewInput(input, Boolean(brief.seriesContext));
@@ -2165,7 +3246,11 @@ export class ProductionPipeline {
         getInput: (context) => {
           const currentBrief = currentEffectiveBriefFromContext(context, brief);
           return {
-            scriptPath: outputPath(context, "script", "scriptPath"),
+            scriptPath: outputPath(
+              context,
+              usesJointCreativePlanning(brief) ? "creative-planning" : "script",
+              "scriptPath",
+            ),
             brief: {
               title: currentBrief.title,
               angle: currentBrief.angle,
@@ -2185,7 +3270,7 @@ export class ProductionPipeline {
           await verifyStoredArtifacts(currentArtifacts);
           const artifactIds = currentArtifacts.map((artifact) => artifact.id);
           const scriptParentIds = currentArtifacts
-            .filter((artifact) => artifact.producer?.nodeId === "script")
+            .filter((artifact) => artifact.producer?.nodeId === (usesJointCreativePlanning(brief) ? "creative-planning" : "script"))
             .map((artifact) => artifact.id);
           const publishAttempt = await reserveAttemptDirectory(path.join(this.runsRoot, context.runId, "publish"));
           let copyOutcome: PublishCopyOutcome;
@@ -2200,6 +3285,8 @@ export class ProductionPipeline {
                 "publish-package",
                 { brief: publishBrief, scriptPath: packageInput.scriptPath },
                 PUBLISH_COPY_AGENT_CONTRACT_VERSION,
+                undefined,
+                context.operationRequestId,
               ),
             });
           } catch (error) {
@@ -2437,6 +3524,7 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
   }
 
   async quoteSpend(input: Record<string, unknown>, context: WorkflowContext): Promise<SpendQuote> {
+    await verifyExecutablePlanInput(input, context, this.runsRoot);
     if (this.capability !== "asset.prepare") {
       return { estimatedCostCny: this.estimatedCostCny, maxCostCny: this.maxCostCny };
     }
@@ -2602,6 +3690,7 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
   }
 
   async run(input: Record<string, unknown>, context: WorkflowContext): Promise<WorkerResponse> {
+    await verifyExecutablePlanInput(input, context, this.runsRoot);
     const attempt = await reserveAttemptDirectory(path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId));
     const outputDir = attempt.directory;
     const parameters: Record<string, unknown> = { ...this.config.parameters, providerId: this.config.id };
@@ -2626,6 +3715,11 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
         parameters.maxCostCny = authorization.maxCostCny;
         parameters.maxAttempts = authorization.maxAttempts;
         parameters.estimatedCostCny = this.estimatedCostCny;
+        // C1：scope 派生的逐素材 create 预算随子凭证下发；worker 在每个 create 边界执行，
+        // 超预算的 create 在越过付费边界前 fail closed（停在可操作状态，不静默降级）。
+        if (authorization.itemCreateBudgets) {
+          parameters.itemCreateBudgets = { ...authorization.itemCreateBudgets };
+        }
       }
     }
     const response = await this.worker.run({
@@ -2722,7 +3816,7 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
   readonly label = "Codex 视觉导演";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly parameters = { promptPack: "video-factory/director-v25" };
+  readonly parameters = { promptPack: "video-factory/director-v28" };
 
   constructor(
     private readonly agent: VisualDirectorAgent,
@@ -2752,7 +3846,7 @@ class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, Codex
 
 class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTaskExecution<unknown>> {
   readonly capability: Capability = "script.draft";
-  readonly label = "Codex 编剧";
+  readonly label = "AI 编剧";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
   readonly parameters = { promptPack: "video-factory/screenwriter-v14" };
@@ -2798,7 +3892,7 @@ class VisualReviewProvider implements Provider<VisualReviewAgentInput, VisualRev
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
   get approvalPolicy(): ApprovalPolicy { return this.metadata?.approvalPolicy ?? "none"; }
   get configurationSource(): ExecutionConfigurationSource { return "system_default"; }
-  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v13", agentLoopMaxIterations: 3, independentAudit: true }; }
+  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v14", agentLoopMaxIterations: 3, independentAudit: true }; }
   get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number { return roundCurrency((this.metadata?.estimatedCostCny ?? 0) * this.maxAttempts); }
   get maxAttempts(): number { return Math.max(3, this.metadata?.maxAttempts ?? 3); }
@@ -2835,6 +3929,219 @@ class UnavailableVisualReviewProvider implements Provider<VisualReviewAgentInput
   }
 }
 
+function productionPreflightNode(brief: ProductionBrief, runsRoot: string): NodeDefinition {
+  const dependsOn = brief.workflowFeatures?.assetSemanticRank
+    ? ["asset-semantic-rank"]
+    : ["visual-direction"];
+  return {
+    id: "production-preflight",
+    label: "Compile executable production plan",
+    role: "制片编译",
+    capability: "production.plan.compile",
+    mode: "automatic",
+    dependsOn,
+    getInput: (context) => ({
+      scriptPath: outputPath(context, "script", "scriptPath"),
+      directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath"),
+      ...(brief.workflowFeatures?.assetSemanticRank ? {
+        candidateSearchPath: outputPath(context, "asset-candidates", "candidateSearchPath"),
+        candidateRankingPath: outputPath(context, "asset-semantic-rank", "candidateRankingPath"),
+      } : {}),
+    }),
+    validateInputOverride: (input) => {
+      const value = requireOutputRecord(input, "production-preflight input");
+      return {
+        scriptPath: requiredOutputString(value, "scriptPath"),
+        directorPlanPath: requiredOutputString(value, "directorPlanPath"),
+        ...(brief.workflowFeatures?.assetSemanticRank ? {
+          candidateSearchPath: requiredOutputString(value, "candidateSearchPath"),
+          candidateRankingPath: requiredOutputString(value, "candidateRankingPath"),
+        } : {}),
+      };
+    },
+    execute: async (input, context) => {
+      const currentBrief = currentEffectiveBriefFromContext(context, brief);
+      if (!currentBrief.durationRange || !currentBrief.director) {
+        throw new Error("Production preflight requires a duration range and director plan.");
+      }
+      const request = requireOutputRecord(input, "production-preflight input");
+      const runRoot = path.join(runsRoot, context.runId);
+      const scriptArtifact = await currentSourceArtifact({
+        context,
+        runRoot,
+        nodeId: "script",
+        kind: "script",
+        uri: requiredOutputString(request, "scriptPath"),
+        schemaVersion: ["video-factory/script-draft-v1", "video-factory/script-v1"],
+      });
+      const directorArtifact = await currentSourceArtifact({
+        context,
+        runRoot,
+        nodeId: "visual-direction",
+        kind: "storyboard",
+        uri: requiredOutputString(request, "directorPlanPath"),
+        schemaVersion: "video-factory/director-plan-v1",
+      });
+      if (!directorArtifact.parentArtifactIds?.includes(scriptArtifact.id)) {
+        throw new Error("Current director artifact is not derived from the current script artifact.");
+      }
+
+      const candidateArtifacts: Artifact[] = [];
+      if (currentBrief.workflowFeatures?.assetSemanticRank) {
+        const candidateArtifact = await currentSourceArtifact({
+          context,
+          runRoot,
+          nodeId: "asset-candidates",
+          kind: "asset_candidates",
+          uri: requiredOutputString(request, "candidateSearchPath"),
+          schemaVersion: "video-factory/asset_candidates-v1",
+        });
+        if (!candidateArtifact.parentArtifactIds?.includes(scriptArtifact.id)
+          || !candidateArtifact.parentArtifactIds?.includes(directorArtifact.id)) {
+          throw new Error("Current candidate artifact is not derived from the current script and director artifacts.");
+        }
+        const rankingArtifact = await currentSourceArtifact({
+          context,
+          runRoot,
+          nodeId: "asset-semantic-rank",
+          kind: "asset_ranking",
+          uri: requiredOutputString(request, "candidateRankingPath"),
+          schemaVersion: "video-factory/asset-ranking-v1",
+        });
+        if (!rankingArtifact.parentArtifactIds?.includes(candidateArtifact.id)) {
+          throw new Error("Current ranking artifact is not derived from the current candidate artifact.");
+        }
+        candidateArtifacts.push(candidateArtifact, rankingArtifact);
+      }
+
+      const [script, directorPlan] = await Promise.all([
+        readJsonObject(scriptArtifact.uri!, "current script artifact"),
+        readJsonObject(directorArtifact.uri!, "current director artifact"),
+      ]);
+      const plan = compileExecutableProductionPlan({
+        scriptArtifactId: scriptArtifact.id,
+        directorArtifactId: directorArtifact.id,
+        candidateArtifactIds: candidateArtifacts.map((artifact) => artifact.id),
+        durationRange: currentBrief.durationRange,
+        scenes: executablePlanScenes(script.scenes),
+        shots: executablePlanShots(directorPlan.shots),
+      });
+      const attempt = await reserveAttemptDirectory(path.join(runRoot, "nodes", "production-preflight"));
+      const planPath = path.join(attempt.directory, "executable_plan.json");
+      const content = `${JSON.stringify(plan, null, 2)}\n`;
+      await writeTextAtomically(planPath, content);
+      const parentArtifactIds = [scriptArtifact.id, directorArtifact.id, ...candidateArtifacts.map((artifact) => artifact.id)];
+      return {
+        status: "succeeded",
+        output: { executablePlanPath: planPath },
+        artifacts: [fileArtifact(
+          "executable_plan",
+          planPath,
+          content,
+          "application/json",
+          "video-factory/executable-plan-v1",
+          "production-preflight",
+          parentArtifactIds,
+          "video-factory-ts-v1",
+          "Deterministically compiled production timing and source references.",
+          attempt.attempt,
+        )],
+      };
+    },
+    validateOverride: (output) => validatePathOutput(output, "executablePlanPath", "production-preflight"),
+  };
+}
+
+async function currentSourceArtifact(options: {
+  context: WorkflowContext;
+  runRoot: string;
+  nodeId: string;
+  kind: string;
+  uri: string;
+  schemaVersion: string | readonly string[];
+}): Promise<Artifact> {
+  const artifact = [...options.context.artifacts].reverse().find((candidate) => (
+    candidate.producer?.nodeId === options.nodeId
+    && candidate.kind === options.kind
+    && candidate.uri === options.uri
+  ));
+  if (!artifact) {
+    throw new Error(`Current ${options.nodeId} output is missing its source artifact.`);
+  }
+  const allowedSchemas = typeof options.schemaVersion === "string"
+    ? [options.schemaVersion]
+    : options.schemaVersion;
+  if (!artifact.schemaVersion || !allowedSchemas.includes(artifact.schemaVersion)) {
+    throw new Error(`Artifact '${artifact.id}' uses unsupported schema '${String(artifact.schemaVersion)}'.`);
+  }
+  await verifyStoredArtifactWithinRoot(options.runRoot, artifact);
+  return artifact;
+}
+
+async function readJsonObject(uri: string, label: string): Promise<Record<string, unknown>> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(uri, "utf8"));
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return requireOutputRecord(value, label);
+}
+
+async function executablePlanDurationMs(uri: string): Promise<number> {
+  const plan = await readJsonObject(uri, "executable production plan");
+  if (plan.version !== "video-factory/executable-plan-v1" || plan.fps !== 30
+    || !Number.isInteger(plan.totalFrames) || Number(plan.totalFrames) <= 0) {
+    throw new Error("Executable production plan has invalid duration metadata.");
+  }
+  return Number(plan.totalFrames) / 30 * 1_000;
+}
+
+function executablePlanScenes(value: unknown): ExecutablePlanScene[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error("Current script artifact has no scenes.");
+  return value.map((entry, index) => {
+    const scene = requireOutputRecord(entry, `script scene ${index + 1}`);
+    const position = Number(scene.position);
+    const duration = Number(scene.duration);
+    if (!Number.isInteger(position) || position < 1 || !Number.isFinite(duration) || duration <= 0) {
+      throw new Error(`Script scene ${index + 1} has invalid timing.`);
+    }
+    const beatId = optionalOutputString(scene.beatId);
+    return { position, duration, ...(beatId ? { beatId } : {}) };
+  });
+}
+
+function executablePlanShots(value: unknown): ExecutablePlanShot[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error("Current director artifact has no shots.");
+  return value.map((entry, index) => {
+    const shot = requireOutputRecord(entry, `director shot ${index + 1}`);
+    const scenePosition = Number(shot.scenePosition);
+    if (!Number.isInteger(scenePosition) || scenePosition < 1 || !Array.isArray(shot.temporalBeats)) {
+      throw new Error(`Director shot ${index + 1} has invalid timing.`);
+    }
+    const temporalBeats = shot.temporalBeats.map((beat, beatIndex) => {
+      const record = requireOutputRecord(beat, `director shot ${index + 1} temporal beat ${beatIndex + 1}`);
+      const startSeconds = Number(record.startSeconds);
+      const endSeconds = Number(record.endSeconds);
+      const action = optionalOutputString(record.action);
+      if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || !action) {
+        throw new Error(`Director shot ${index + 1} temporal beat ${beatIndex + 1} is invalid.`);
+      }
+      return { startSeconds, endSeconds, action };
+    });
+    const reuseFromScenePosition = shot.reuseFromScenePosition === undefined
+      ? undefined
+      : Number(shot.reuseFromScenePosition);
+    const sourceInSeconds = shot.sourceInSeconds === undefined ? 0 : Number(shot.sourceInSeconds);
+    return {
+      scenePosition,
+      temporalBeats,
+      ...(reuseFromScenePosition !== undefined ? { reuseFromScenePosition } : {}),
+      sourceInSeconds,
+    };
+  });
+}
+
 function referenceGrammarNode(
   brief: ProductionBrief,
   options: ProductionPipelineOptions,
@@ -2845,6 +4152,7 @@ function referenceGrammarNode(
   if (!reference || !agent || !options.referenceVideoRoot) {
     throw new Error("Reference grammar requires a configured reference-video store and Codex analysis agent.");
   }
+  const jointPlanning = usesJointCreativePlanning(brief);
   return {
     id: "reference-grammar",
     label: "Analyze reference grammar",
@@ -2862,7 +4170,8 @@ function referenceGrammarNode(
       estimatedCostCny: 0,
     },
     mode: "automatic",
-    dependsOn: ["script"],
+    // joint-v1 没有 script 节点：参考语法直接依赖 brief，产出在 creative-planning 之前。
+    dependsOn: jointPlanning ? ["brief"] : ["script"],
     getInput: () => ({ uploadId: reference.uploadId, label: reference.label, sha256: reference.sha256 }),
     validateInputOverride: (input) => {
       const value = requireOutputRecord(input, "reference-grammar input");
@@ -2893,13 +4202,31 @@ function referenceGrammarNode(
       if (!sourceStats.isFile() || sourceStats.size !== reference.sizeBytes) throw new Error("Reference video size no longer matches its upload record.");
       await verifyArtifactBytes(sourceRealPath, reference.sha256, reference.sizeBytes);
       const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "reference-grammar"));
-      const parentArtifactIds = context.artifacts
-        .filter((artifact) => artifact.producer?.nodeId === "script")
-        .map((artifact) => artifact.id);
       const extension = reference.mimeType === "video/webm" ? ".webm" : reference.mimeType === "video/quicktime" ? ".mov" : ".mp4";
       const copiedVideoPath = path.join(attempt.directory, `reference${extension}`);
       await copyFile(sourceRealPath, copiedVideoPath);
       await verifyArtifactBytes(copiedVideoPath, reference.sha256, reference.sizeBytes);
+      // joint-v1：受控参考视频在本节点内先行登记，shot_grammar 直接绑定该产物，而不是
+      // 指向 joint 拓扑中不存在的 script 产物（旧拓扑仍挂 script 产物，行为不变）。
+      let parentArtifactIds: string[];
+      if (jointPlanning) {
+        const registeredReference = context.addArtifact(await binaryFileArtifact(
+          "reference_video",
+          copiedVideoPath,
+          reference.mimeType,
+          "video-factory/reference-video-v1",
+          "reference-grammar",
+          [],
+          "creator-upload",
+          "Creator-supplied reference video; retained only as private run input.",
+          attempt.attempt,
+        ));
+        parentArtifactIds = [registeredReference.id];
+      } else {
+        parentArtifactIds = context.artifacts
+          .filter((artifact) => artifact.producer?.nodeId === "script")
+          .map((artifact) => artifact.id);
+      }
       let execution: ReferenceGrammarExecution | undefined;
       let failedAgentLoop: AgentLoopTrace | undefined;
       let failedTrace: CodexTaskTrace | undefined;
@@ -2917,6 +4244,8 @@ function referenceGrammarNode(
                 "reference-grammar",
                 { sha256: reference.sha256, label: requiredOutputString(request, "label") },
                 REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION,
+                undefined,
+                context.operationRequestId,
               ),
             })
           : { output: await agent.analyze({ videoPath: copiedVideoPath, runRoot: attempt.directory, sourceLabel: requiredOutputString(request, "label") }) };
@@ -2999,7 +4328,9 @@ function referenceGrammarNode(
           requestId: context.nextId("reference-grammar"),
         },
         artifacts: [
-          await binaryFileArtifact(
+          // joint-v1 的 reference_video 已在上方通过 context.addArtifact 预登记（shot_grammar
+          // 需要引用其 id）；这里不得重复返回，否则同一文件会注册成两个产物。
+          ...(jointPlanning ? [] : [await binaryFileArtifact(
             "reference_video",
             copiedVideoPath,
             reference.mimeType,
@@ -3009,7 +4340,7 @@ function referenceGrammarNode(
             "creator-upload",
             "Creator-supplied reference video; retained only as private run input.",
             attempt.attempt,
-          ),
+          )]),
           fileArtifact(
             "shot_grammar",
             grammarPath,
@@ -3036,10 +4367,2208 @@ function referenceGrammarNode(
   };
 }
 
+// joint-v1 下游统一读取入口：所有正式规划产物路径都来自 creative-planning 节点输出，
+// 下游节点不得再按旧拓扑读取 script/visual-direction/production-preflight 等节点。
+// directorPlan/executablePlan/candidate 字段按拓扑可省略（legacy 无导演/无预检/无图库时缺省），
+// joint 的图库路线在 planningCandidatePaths 中对候选路径严格 fail closed。
+interface JointPlanningOutputPaths {
+  scriptPath: string;
+  directorPlanPath?: string;
+  executablePlanPath?: string;
+  candidateSearchPath?: string;
+  candidateRankingPath?: string;
+  /** worker 私有库存路径：与公开报告内容/路径不同，真实离线物化消费它。 */
+  candidateInventoryPath?: string;
+}
+
+function planningOutputs(context: WorkflowContext): JointPlanningOutputPaths {
+  const planning = {
+    scriptPath: outputPath(context, "creative-planning", "scriptPath"),
+    directorPlanPath: outputPath(context, "creative-planning", "directorPlanPath"),
+    executablePlanPath: outputPath(context, "creative-planning", "executablePlanPath"),
+  };
+  const output = context.outputs.get("creative-planning");
+  const planningOutput = output !== undefined ? requireOutputRecord(output, "creative-planning") : undefined;
+  const candidateSearchPath = optionalOutputString(planningOutput?.candidateSearchPath);
+  const candidateRankingPath = optionalOutputString(planningOutput?.candidateRankingPath);
+  // 私有库存路径独立于公开报告：与旧拓扑同名字段，物化消费库存本身。
+  const candidateInventoryPath = optionalOutputString(planningOutput?.candidateInventoryPath);
+  return {
+    ...planning,
+    ...(candidateSearchPath && candidateRankingPath ? { candidateSearchPath, candidateRankingPath } : {}),
+    ...(candidateSearchPath && candidateRankingPath && candidateInventoryPath ? { candidateInventoryPath } : {}),
+  };
+}
+
+// 规划产物路径的唯一兼容投影：joint 读 creative-planning 节点输出，legacy 读旧规划节点；
+// 下游 worker 节点只消费本投影，不再各自判断拓扑。图库路线的私有库存路径两种拓扑同名字段。
+function currentPlanningOutputPaths(context: WorkflowContext, brief: ProductionBrief): JointPlanningOutputPaths {
+  if (usesJointCreativePlanning(brief)) return planningOutputs(context);
+  const directorPlanPath = brief.director ? outputPath(context, "visual-direction", "directorPlanPath") : undefined;
+  const executablePlanPath = brief.durationRange && brief.director
+    ? outputPath(context, "production-preflight", "executablePlanPath")
+    : undefined;
+  const candidateRankingPath = brief.workflowFeatures?.assetSemanticRank
+    ? outputPath(context, "asset-semantic-rank", "candidateRankingPath")
+    : undefined;
+  const candidateInventoryPath = brief.workflowFeatures?.assetSemanticRank
+    ? outputPath(context, "asset-candidates", "candidateInventoryPath")
+    : undefined;
+  return {
+    scriptPath: outputPath(context, "script", "scriptPath"),
+    ...(directorPlanPath !== undefined ? { directorPlanPath } : {}),
+    ...(executablePlanPath !== undefined ? { executablePlanPath } : {}),
+    ...(candidateRankingPath !== undefined ? { candidateRankingPath } : {}),
+    ...(candidateInventoryPath !== undefined ? { candidateInventoryPath } : {}),
+  };
+}
+
+// 图库路线的候选/排序路径：正式产物缺失必须在此 fail closed，而不是让下游拿到空值。
+function planningCandidatePaths(planning: JointPlanningOutputPaths): {
+  candidateRankingPath: string;
+  candidateInventoryPath: string;
+} {
+  if (!planning.candidateSearchPath || !planning.candidateRankingPath) {
+    throw new Error("Joint creative planning did not produce candidate paths for the library planning route.");
+  }
+  if (!planning.candidateInventoryPath) {
+    throw new Error("Joint creative planning did not preserve the private candidate inventory path; the public candidate report must not be used as the materialization inventory.");
+  }
+  return {
+    candidateRankingPath: planning.candidateRankingPath,
+    candidateInventoryPath: planning.candidateInventoryPath,
+  };
+}
+
+// joint-v1 打包入口：creative-planning 的全部正式产物按 producer 绑定收集。
+function jointPlanningPackagingEntry(context: WorkflowContext): Array<{ nodeId: string; paths: string[] }> {
+  const planning = planningOutputs(context);
+  const paths = [planning.scriptPath, planning.directorPlanPath, planning.executablePlanPath]
+    .filter((entry): entry is string => entry !== undefined);
+  paths.push(...(planning.candidateSearchPath ? [planning.candidateSearchPath] : []));
+  paths.push(...(planning.candidateRankingPath ? [planning.candidateRankingPath] : []));
+  return [{
+    nodeId: "creative-planning",
+    paths,
+  }];
+}
+
+// joint-v1 规划输入身份：brief 的 durable 领域字段（剔除运行期 taskContractDigests）加上
+// 已接受的参考语法内容。身份变化进入新 thread，不得命中旧图结果。
+function jointPlanningInputDigest(brief: ProductionBrief, referenceGrammar: ShotGrammar | undefined): string {
+  return createHash("sha256").update(JSON.stringify({
+    brief,
+    ...(referenceGrammar ? { referenceGrammar } : {}),
+  })).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// joint-v1 规划编辑闭包：阶段输入身份、执行历史与跨 thread 保留。
+// 编辑产生新 input digest（新 thread）；宿主按“阶段实际输入是否变化”把未受影响的上游
+// 阶段产物播种进新 thread（updateState + asOf 游标），实现 treatment/script/director 的
+// 依赖闭包失效——不重复调用未受影响的角色，也不删除旧 thread 的 checkpoint。
+// ---------------------------------------------------------------------------
+
+// 构思阶段的实际输入投影：与 treatment port 构造的 brief 字段一一对应，加上模型选择身份。
+// 选择身份用原始值（不做候选匹配回退）：不可用的选择不得在身份层被归一成默认候选，
+// 否则闭包会跳过本应 fail closed 的重新执行（runCandidates 对不可用选择直接拒绝）。
+function treatmentStageInputIdentity(
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+  bindings: ReadonlyArray<{ providerId: string; agent: CreativeTreatmentAgent }>,
+  referenceGrammar: ShotGrammar | undefined,
+): unknown {
+  const lockedViewerPromise = acceptedViewerPromise(brief);
+  return {
+    brief: {
+      title: brief.title,
+      angle: brief.angle,
+      audience: brief.audience,
+      nicheSlug: brief.nicheSlug,
+      platform: brief.platform,
+      durationSeconds: brief.durationSeconds,
+      ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
+      ...(brief.editorial ? { editorial: brief.editorial } : {}),
+      ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
+      ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
+      ...(lockedViewerPromise ? { lockedViewerPromise } : {}),
+      productionCapabilities: productionCapabilitiesFor(brief, options),
+    },
+    // 参考语法是构思的实际输入（风格/结构参考）：内容变化必须重做构思阶段。
+    ...(referenceGrammar ? { referenceGrammar } : {}),
+    providerId: bindings.find((binding) => binding.agent.modelId === brief.models?.[CREATIVE_TREATMENT_PROVIDER_ID])?.providerId
+      ?? bindings[0]?.providerId,
+    selectedModelId: brief.models?.[CREATIVE_TREATMENT_PROVIDER_ID] ?? bindings[0]?.agent.modelId,
+    contractVersion: CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION,
+  };
+}
+
+// 已接受的观众承诺：系列上下文承载宿主锁定的本集承诺。没有系列上下文时不构造承诺，
+// 构思角色自行生成（与 lockedViewerPromise 合同一致）。
+function acceptedViewerPromise(brief: ProductionBrief): string | undefined {
+  const promise = brief.seriesContext?.episode.viewerPromise;
+  return typeof promise === "string" && promise.trim() ? promise : undefined;
+}
+
+// 编剧阶段的实际输入投影：编剧 brief（含模板/实证/系列/实质相关的返工上下文）与生效模型
+// 身份。与 screenwriterBrief 共用同一 rework 投影——media-only 返工不改变编剧真实输入，
+// 身份保持与源 run 一致，跨 run 播种才能在 producer 调用之前继承编剧阶段。
+function scriptStageInputIdentity(brief: ProductionBrief, options: ProductionPipelineOptions): unknown {
+  return {
+    brief: screenwriterBrief(brief, options),
+    providerId: brief.providers.script,
+    selectedModelId: brief.models?.[brief.providers.script] ?? options.screenwriterAgent?.modelId,
+    contractVersion: SCREENWRITER_AGENT_CONTRACT_VERSION,
+  };
+}
+
+// 导演实际收到的素材路由输入：provider 目录条目 + 运行时模型画像的完整投影。端口构造与
+// 阶段身份共用同一 helper——目录条目（标签/计费/交付类型/约束/价格）任何变化都改变导演的
+// 真实输入，身份不得只看 provider id 与模型选择而漏掉这些字段。目录缺失该 provider 时
+// 明确失败（与旧 visual-direction 节点同一行为）。
+function directorAssetProviderInputs(
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+): NonNullable<VisualDirectorAgentInput["assetProviders"]> {
+  const catalog = new Map((options.assetProviders ?? []).map((provider) => [provider.id, provider]));
+  return (brief.director?.assetProviderIds ?? []).map((id) => {
+    const provider = catalog.get(id);
+    if (!provider) throw new Error(`Asset provider '${id}' is not available to the AI director.`);
+    const selectedVideoModel = selectedVideoModelRuntime(
+      brief,
+      provider.id,
+      options.providerRuntimeMetadata ?? [],
+    );
+    return {
+      id: provider.id,
+      label: provider.label,
+      billing: provider.billing,
+      modes: [...provider.modes],
+      deliveryTypes: [...provider.deliveryTypes],
+      supportsReferenceImage: provider.supportsReferenceImage ?? false,
+      strengths: [...(provider.strengths ?? provider.modes)],
+      constraints: [...(provider.constraints ?? [])],
+      estimatedCnyPerClip: provider.estimatedCnyPerClip ?? 0,
+      ...(selectedVideoModel ? {
+        selectedModelId: selectedVideoModel.modelId,
+        minDurationSeconds: selectedVideoModel.minDurationSeconds,
+        maxDurationSeconds: selectedVideoModel.maxDurationSeconds,
+        ...(selectedVideoModel.aspectRatios ? { aspectRatios: [...selectedVideoModel.aspectRatios] } : {}),
+      } : {}),
+    };
+  });
+}
+
+function productionCapabilitiesFor(
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+): ProductionCapabilities {
+  return summarizeProductionCapabilities(brief.director ? directorAssetProviderInputs(brief, options) : []);
+}
+
+// 导演阶段的实际输入投影：导演 brief 的 brief 侧字段、参考语法、素材路由完整投影、
+// 费用反馈、返工上下文与生效模型。稿件侧输入（viewerPromise/scenes）由被携带的 script 产物
+// 身份承担。rework 投影与 director 端口构造的 rework 段一致——返工意见变化必须重做导演阶段。
+function directorStageInputIdentity(
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+  referenceGrammar: ShotGrammar | undefined,
+): unknown {
+  const reworkFindings = brief.rework?.findings
+    .filter((finding) => finding.targetNodeIds.includes("visual-direction") && finding.action !== "inspect_existing_media")
+    .map(modelFacingReworkFinding) ?? [];
+  return {
+    brief: {
+      title: brief.title,
+      angle: brief.angle,
+      audience: brief.audience,
+      platform: brief.platform,
+      durationSeconds: brief.durationSeconds,
+      ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
+      ...(brief.director ? { requestedProfileId: brief.director.profileId } : {}),
+      ...(brief.templateSnapshot ? { templateSnapshot: brief.templateSnapshot } : {}),
+      ...(brief.editorial ? { editorial: brief.editorial } : {}),
+      ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
+      ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
+      ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
+    },
+    referenceGrammar: referenceGrammar ?? null,
+    assetProviders: directorAssetProviderInputs(brief, options),
+    economics: { allowMeteredProviders: brief.economics.allowMeteredProviders },
+    spendFeedback: brief.spendFeedback?.slice(-10) ?? [],
+    ...(brief.rework ? {
+      rework: {
+        sourceRunId: brief.rework.sourceRunId,
+        visualDirectionInstruction: brief.rework.nodeInstructions.visualDirection,
+        assetInstruction: brief.rework.nodeInstructions.assets,
+        findings: reworkFindings,
+        ...(brief.rework.affectedScenePositions !== undefined
+          ? { affectedScenePositions: [...brief.rework.affectedScenePositions] }
+          : {}),
+        // 上一版方案/脚本的完整内容参与影响范围推导，身份按内容 digest 记录。
+        ...(brief.rework.previousScript ? { previousScriptDigest: stablePlanningDigestJson(brief.rework.previousScript) } : {}),
+        ...(brief.rework.previousDirectorPlan ? { previousDirectorPlanDigest: stablePlanningDigestJson(brief.rework.previousDirectorPlan) } : {}),
+      },
+    } : {}),
+    selectedModelId: brief.providers.director !== undefined
+      ? brief.models?.[brief.providers.director] ?? options.directorAgent?.modelId
+      : options.directorAgent?.modelId,
+    providerId: brief.providers.director,
+    contractVersion: VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
+  };
+}
+
+// 排序证据失效时同步移除阶段产物引用：与 creative-planning 的 withoutArtifactStages 同语义。
+function withoutPlanningStageArtifacts(
+  artifactIds: Partial<Record<PlanningStageId, string[]>>,
+  stages: readonly PlanningStageId[],
+): Partial<Record<PlanningStageId, string[]>> {
+  const removed = new Set<string>(stages);
+  return Object.fromEntries(
+    Object.entries(artifactIds).filter(([stage]) => !removed.has(stage)),
+  ) as Partial<Record<PlanningStageId, string[]>>;
+}
+
+function jointPlanningStageInputs(
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+  referenceGrammar: ShotGrammar | undefined,
+): { treatment: string; script: string; director: string; rank: string } {
+  const digestOf = (value: unknown) => createHash("sha256").update(stablePlanningDigestJson(value)).digest("hex");
+  return {
+    treatment: digestOf(treatmentStageInputIdentity(brief, options, options.treatmentAgents ?? [], referenceGrammar)),
+    script: digestOf(scriptStageInputIdentity(brief, options)),
+    director: digestOf(directorStageInputIdentity(brief, options, referenceGrammar)),
+    // ranker 身份进入阶段兼容身份：只换 provider/model/合同版本必须失效排序证据并真实重排，
+    // 不得重放 completed graph 的旧排序；无图库路线同样记录（无 ranker 的身份），保持形状稳定。
+    rank: digestOf({
+      rankerId: options.assetSemanticRanker?.id ?? null,
+      modelId: options.assetSemanticRanker?.modelId ?? null,
+      contractVersion: ASSET_RANK_AGENT_CONTRACT_VERSION,
+      // 排序语义意图的构造规则版本：语义投影字段变化也让旧排序证据失效。
+      semanticIntentVersion: RANKING_SEMANTIC_INTENT_VERSION,
+    }),
+  };
+}
+
+// 排序语义投影的构造规则版本：rankingSemanticIntent 的字段集合变化时递增，使旧排序证据失效。
+const RANKING_SEMANTIC_INTENT_VERSION = "video-factory/ranking-semantic-intent-v1";
+
+// 与 creative-planning.ts 的 stablePlanningJson 同语义：对象键排序、数组保序、过滤 undefined。
+function stablePlanningDigestJson(value: unknown): string {
+  if (value === undefined) return "null";
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map((entry) => stablePlanningDigestJson(entry)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).filter((key) => record[key] !== undefined).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stablePlanningDigestJson(record[key])}`).join(",")}}`;
+}
+
+const JOINT_PLANNING_HISTORY_VERSION = "video-factory/planning-history-v1";
+
+// 每次“到达完成态”的 joint 规划执行记录：阶段输入身份 + 各阶段的真实执行模型/provider trace。
+// 新 digest 执行时据此把未受影响的上游产物播种进新 thread；检视据此读取当前 digest 的
+// role trace——不读取其他 digest（旧执行）的 trace。provider 与 model 分开保存：正式
+// provenance 不得把模型字符串写进 provider 命名空间。candidateInventoryPath 是搜索端口的
+// worker 私有产物路径（非正式 artifact）：图库路线物化消费它，恢复时按 digest 找回。
+interface JointPlanningExecutionRecord {
+  version: string;
+  inputDigest: string;
+  libraryRoute: boolean;
+  stageInputs: { treatment: string; script: string; director: string; rank: string };
+  modelTraces: Partial<Record<PlanningStageId, string>>;
+  providerTraces?: Partial<Record<PlanningStageId, string>>;
+  candidateInventoryPath?: string;
+  /** 私有库存文件内容指纹：与路径一同恢复并校验。 */
+  candidateInventorySha256?: string;
+  recordedAt: string;
+  /** 单调执行序号：每次执行（含同 digest 重放）取 max+1——墙上时钟相等/回拨不影响
+      "最近执行前驱"判定。 */
+  executionSeq: number;
+}
+
+async function readJointPlanningHistory(historyPath: string): Promise<JointPlanningExecutionRecord[]> {
+  let raw: string;
+  try {
+    raw = await readFile(historyPath, "utf8");
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return [];
+    throw error;
+  }
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed)) throw new Error("Joint planning history must be a JSON array.");
+  return parsed.filter((entry): entry is JointPlanningExecutionRecord => (
+    typeof entry === "object" && entry !== null && (entry as { version?: string }).version === JOINT_PLANNING_HISTORY_VERSION
+    && Number.isSafeInteger((entry as { executionSeq?: unknown }).executionSeq)
+  ));
+}
+
+// 按 inputDigest 幂等登记：同 digest 重放合并已记录的 traces（崩溃恢复不抹掉原 trace），
+// 并以最新执行的阶段身份/库存路径为准（身份更新后旧身份不再参与守卫比较）。
+async function upsertJointPlanningExecutionRecord(
+  historyPath: string,
+  record: Omit<JointPlanningExecutionRecord, "executionSeq"> & Partial<Pick<JointPlanningExecutionRecord, "executionSeq">>,
+): Promise<void> {
+  const history = await readJointPlanningHistory(historyPath);
+  // 同 digest 的每次执行（含重放）都推进单调序号：前驱按实际执行顺序选取，不依赖墙上时钟。
+  const nextSeq = history.reduce((max, entry) => Math.max(max, entry.executionSeq), 0) + 1;
+  const sequenced: JointPlanningExecutionRecord = { ...record, executionSeq: record.executionSeq ?? nextSeq };
+  const merged = history.map((entry) => {
+    if (entry.inputDigest !== sequenced.inputDigest) return entry;
+    return {
+      ...entry,
+      modelTraces: { ...entry.modelTraces, ...sequenced.modelTraces },
+      providerTraces: { ...entry.providerTraces, ...sequenced.providerTraces },
+      stageInputs: sequenced.stageInputs,
+      ...(sequenced.candidateInventoryPath !== undefined
+        ? { candidateInventoryPath: sequenced.candidateInventoryPath }
+        : entry.candidateInventoryPath !== undefined
+          ? { candidateInventoryPath: entry.candidateInventoryPath }
+          : {}),
+      recordedAt: sequenced.recordedAt,
+      executionSeq: nextSeq,
+    };
+  });
+  if (!merged.some((entry) => entry.inputDigest === sequenced.inputDigest)) merged.push(sequenced);
+  await writeTextAtomically(historyPath, `${JSON.stringify(merged, null, 2)}\n`);
+}
+
+// 闭包前驱取“最近一次执行”的记录（recordedAt 最大；同刻取数组中更靠后者），排除当前 digest。
+// 不用数组末位：A→B→A 重放会原地更新 A 的记录，数组顺序仍是 [A,B]，而实际最新执行是 A。
+function latestJointPlanningRecord(
+  history: readonly JointPlanningExecutionRecord[],
+  excludeDigest: string,
+): JointPlanningExecutionRecord | undefined {
+  let best: JointPlanningExecutionRecord | undefined;
+  for (const entry of history) {
+    if (entry.inputDigest === excludeDigest) continue;
+    if (!best || entry.executionSeq > best.executionSeq) best = entry;
+  }
+  return best;
+}
+
+
+// 读取当前 head 授权 id（未被 supersede 的唯一幸存者；多幸存者/损坏 → undefined）。
+// C1-R1：committed 授权链的唯一严格校验器。接受（写入新授权）与读取（派生子凭证）共用同一
+// 实现；损坏/外 run/分叉/零幸存者/缺失前驱/环/游离记录/文件身份不符/内容摘要不符一律返回
+// integrity_error——损坏状态绝不能被解释成"尚无授权"而接受新的首份授权。
+type ProductionAuthorizationChainState =
+  | { state: "absent" }
+  | { state: "committed"; head: ProductionAuthorizationScope }
+  | { state: "integrity_error"; reason: string };
+
+interface ProductionAuthorizationArtifactRecord {
+  /** 不含 "production-authorization:" 前缀的授权 id（与文件名和 scope.id 一致）。 */
+  id: string;
+  uri: string;
+  sha256: string;
+}
+
+async function inspectProductionAuthorizationChain(
+  directory: string,
+  runId: string,
+  artifacts: ReadonlyArray<ProductionAuthorizationArtifactRecord>,
+): Promise<ProductionAuthorizationChainState> {
+  if (artifacts.length === 0) return { state: "absent" };
+  const scopes: ProductionAuthorizationScope[] = [];
+  for (const record of artifacts) {
+    const expectedPath = path.join(directory, `${record.id}.json`);
+    if (record.uri !== expectedPath) {
+      return { state: "integrity_error", reason: `committed authorization '${record.id}' has an unexpected path '${record.uri}'` };
+    }
+    let content: string;
+    try {
+      content = await readFile(expectedPath, "utf8");
+    } catch (error) {
+      return { state: "integrity_error", reason: `committed authorization '${record.id}' is unreadable: ${(error as Error).message}` };
+    }
+    if (record.sha256 !== createHash("sha256").update(content).digest("hex")) {
+      return { state: "integrity_error", reason: `committed authorization '${record.id}' fails its content digest` };
+    }
+    let scope: ProductionAuthorizationScope;
+    try {
+      scope = parseProductionAuthorizationScope(JSON.parse(content));
+    } catch (error) {
+      return { state: "integrity_error", reason: `committed authorization '${record.id}' is invalid: ${(error as Error).message}` };
+    }
+    if (scope.runId !== runId) {
+      return { state: "integrity_error", reason: `committed authorization '${record.id}' belongs to run '${scope.runId}'` };
+    }
+    if (scope.id !== record.id) {
+      return { state: "integrity_error", reason: `authorization file '${record.id}' holds scope id '${scope.id}'` };
+    }
+    scopes.push(scope);
+  }
+  const superseded = new Set(scopes.flatMap((scope) => (
+    scope.supersedesAuthorizationId ? [scope.supersedesAuthorizationId] : []
+  )));
+  const survivors = scopes.filter((scope) => !superseded.has(scope.id));
+  if (survivors.length === 0) {
+    return { state: "integrity_error", reason: "every committed authorization is superseded; the chain has no head" };
+  }
+  if (survivors.length > 1) {
+    return { state: "integrity_error", reason: `${survivors.length} non-superseded authorizations form a forked chain` };
+  }
+  // 从唯一 head 沿 supersedes 引用回溯：全部 committed 记录必须可达、无环、无缺失前驱。
+  const byId = new Map(scopes.map((scope) => [scope.id, scope]));
+  const head = survivors[0]!;
+  const reachable = new Set<string>([head.id]);
+  let cursor: ProductionAuthorizationScope | undefined = head;
+  while (cursor?.supersedesAuthorizationId) {
+    const predecessorId = cursor.supersedesAuthorizationId;
+    if (reachable.has(predecessorId)) {
+      return { state: "integrity_error", reason: `authorization chain contains a cycle at '${predecessorId}'` };
+    }
+    const predecessor = byId.get(predecessorId);
+    if (!predecessor) {
+      return { state: "integrity_error", reason: `authorization '${cursor.id}' supersedes '${predecessorId}' which is not committed` };
+    }
+    reachable.add(predecessorId);
+    cursor = predecessor;
+  }
+  if (reachable.size !== scopes.length) {
+    const orphan = scopes.find((scope) => !reachable.has(scope.id))!;
+    return { state: "integrity_error", reason: `authorization '${orphan.id}' is not part of the chain headed by '${head.id}'` };
+  }
+  return { state: "committed", head };
+}
+
+function productionAuthorizationRecords(artifacts: ReadonlyArray<{ id: string; kind: string; uri?: string; sha256?: string }>): ProductionAuthorizationArtifactRecord[] {
+  return artifacts
+    .filter((artifact) => artifact.kind === "production_authorization")
+    .map((artifact) => ({
+      id: artifact.id.replace(/^production-authorization:/, ""),
+      uri: artifact.uri ?? "",
+      sha256: artifact.sha256 ?? "",
+    }));
+}
+
+// 把未受影响的上游阶段产物播种进新 thread。播种条件是逐级依赖的：script 只有在 treatment
+// 本身被携带时才可能被携带；director 依赖 script 的携带。图库路线的候选/排序证据在前驱存在
+// 时一并携带——图自身的 fingerprint 路由会在导演重跑后校验证据新鲜度：候选获取身份变化强制
+// 重搜、排序实际输入变化强制重排、两者一致才直接复检；携带过期的证据不会被错误复用。
+// ranker 身份变化时只携带候选、不携带排序证据（游标停在 director 之后，图路由真实重排）。
+// 返回被携带阶段的模型/provider trace：新 digest 的记录继承产物 provenance，不声称新的执行。
+async function seedJointPlanningThread(options: {
+  graph: CreativePlanningGraph;
+  store: CreativePlanningStore;
+  runId: string;
+  inputDigest: string;
+  planningInput: CreativePlanningInput;
+  libraryRoute: boolean;
+  prior: JointPlanningExecutionRecord | undefined;
+  /** 跨 run 播种时前驱 checkpoint 所属的源 run（默认当前 run）。 */
+  priorRunId?: string;
+  stageInputs: { treatment: string; script: string; director: string; rank: string };
+  historyPath?: string;
+}): Promise<{
+  modelTraces: Partial<Record<PlanningStageId, string>>;
+  providerTraces: Partial<Record<PlanningStageId, string>>;
+  candidateInventoryPath?: string;
+} | undefined> {
+  const prior = options.prior;
+  if (!prior || prior.inputDigest === options.inputDigest) return undefined;
+  let priorValues: Partial<PlanningGraphState>;
+  try {
+    const snapshot = await options.graph.getState(
+      options.store.threadConfig(options.priorRunId ?? options.runId, prior.inputDigest),
+    );
+    priorValues = (snapshot?.values ?? {}) as Partial<PlanningGraphState>;
+  } catch {
+    return undefined;
+  }
+  if (priorValues.inputDigest !== prior.inputDigest || priorValues.runId !== (options.priorRunId ?? options.runId)) return undefined;
+  const base = initialPlanningGraphState(options.planningInput);
+  const values: Record<string, unknown> = { ...base };
+  const carriedTraces: Partial<Record<PlanningStageId, string>> = {};
+  const carriedProviderTraces: Partial<Record<PlanningStageId, string>> = {};
+  const carriedStageInputIdentities: Partial<Record<PlanningStageId, string>> = {};
+  let asNode: string | undefined;
+  let scriptCarried = false;
+  const carriedProviderSource = prior.providerTraces ?? {};
+  if (priorValues.treatmentArtifact && prior.stageInputs.treatment === options.stageInputs.treatment) {
+    values.treatmentArtifact = priorValues.treatmentArtifact;
+    values.artifactIds = { ...(values.artifactIds as Record<string, unknown>), treatment: [priorValues.treatmentArtifact.artifactId] };
+    if (prior.modelTraces.treatment) carriedTraces.treatment = prior.modelTraces.treatment;
+    if (carriedProviderSource.treatment) carriedProviderTraces.treatment = carriedProviderSource.treatment;
+    carriedStageInputIdentities.treatment = prior.stageInputs.treatment;
+    asNode = "treatment";
+    if (priorValues.scriptArtifact && prior.stageInputs.script === options.stageInputs.script) {
+      values.scriptArtifact = priorValues.scriptArtifact;
+      values.artifactIds = { ...(values.artifactIds as Record<string, unknown>), script: [priorValues.scriptArtifact.artifactId] };
+      if (prior.modelTraces.script) carriedTraces.script = prior.modelTraces.script;
+      if (carriedProviderSource.script) carriedProviderTraces.script = carriedProviderSource.script;
+      carriedStageInputIdentities.script = prior.stageInputs.script;
+      asNode = "script";
+      scriptCarried = true;
+      if (priorValues.directorPlan && prior.stageInputs.director === options.stageInputs.director) {
+        values.directorPlan = priorValues.directorPlan;
+        values.artifactIds = { ...(values.artifactIds as Record<string, unknown>), director: [priorValues.directorPlan.artifactId] };
+        if (prior.modelTraces.director) carriedTraces.director = prior.modelTraces.director;
+        if (carriedProviderSource.director) carriedProviderTraces.director = carriedProviderSource.director;
+        carriedStageInputIdentities.director = prior.stageInputs.director;
+        asNode = "director";
+      }
+    }
+  }
+  if (!asNode) return undefined;
+  // ranker 身份必须显式匹配才携带排序证据：前驱记录缺失 rank 身份（旧格式/身份未知）与
+  // 身份不一致同等对待——只携带候选，游标停在 director 之后由图路由真实重排。这与同
+  // digest 恢复守卫对"身份未知"的定义一致：不默认兼容。
+  const rankIdentityUnchanged = prior.stageInputs.rank !== undefined
+    && prior.stageInputs.rank === options.stageInputs.rank;
+  // 私有库存路径与候选证据同源：候选被携带时它的库存路径一并继承，新 digest 的
+  // 节点输出仍指向真实库存文件，而不是丢失后拿公开报告顶替。
+  let carriedCandidateInventoryPath: string | undefined;
+  if (options.libraryRoute && prior.libraryRoute && scriptCarried
+    && priorValues.candidatesArtifact) {
+    // 候选证据与候选获取 fingerprint 一并播种：director 未携带时游标停在 script（下一步
+    // 重跑导演），路由会用新方案核验证据；携带排序证据时游标推进到 rank 之后。
+    values.candidatesArtifact = priorValues.candidatesArtifact;
+    values.candidateSearchFingerprint = priorValues.candidateSearchFingerprint;
+    // 私有库存绑定与候选证据同一 checkpoint 持久化：播种后恢复仍指向真实库存文件。
+    if (priorValues.candidateInventoryBinding) {
+      values.candidateInventoryBinding = priorValues.candidateInventoryBinding;
+      // BG-09：内容指纹与路径一同播种，恢复校验才有依据。
+      if (priorValues.candidateInventorySha256) {
+        values.candidateInventorySha256 = priorValues.candidateInventorySha256;
+      }
+    }
+    values.artifactIds = {
+      ...(values.artifactIds as Record<string, unknown>),
+      candidates: [priorValues.candidatesArtifact.artifactId],
+    };
+    if (priorValues.candidateInventoryBinding) carriedCandidateInventoryPath = priorValues.candidateInventoryBinding;
+    else if (prior.candidateInventoryPath) carriedCandidateInventoryPath = prior.candidateInventoryPath;
+    if (rankIdentityUnchanged && priorValues.ranking) {
+      values.ranking = priorValues.ranking;
+      values.rankingInputFingerprint = priorValues.rankingInputFingerprint;
+      values.artifactIds = {
+        ...(values.artifactIds as Record<string, unknown>),
+        rank: [priorValues.ranking.artifactId],
+      };
+      // BG-03：排序证据携带时其 rank compatibility identity 必须同 checkpoint 保存——
+      // 无 history 恢复分支据此核对 ranker 身份，不得绕过失效。
+      carriedStageInputIdentities.rank = prior.stageInputs.rank;
+      if (prior.modelTraces.rank) carriedTraces.rank = prior.modelTraces.rank;
+      if (carriedProviderSource.rank) carriedProviderTraces.rank = carriedProviderSource.rank;
+      if (asNode === "director") asNode = "rank";
+    }
+  }
+  values.carriedModelTraces = carriedTraces;
+  values.carriedProviderTraces = carriedProviderTraces;
+  values.carriedStageInputIdentities = carriedStageInputIdentities;
+  await options.graph.updateState(options.store.threadConfig(options.runId, options.inputDigest), values, asNode);
+  return {
+    modelTraces: carriedTraces,
+    providerTraces: carriedProviderTraces,
+    ...(carriedCandidateInventoryPath !== undefined ? { candidateInventoryPath: carriedCandidateInventoryPath } : {}),
+  };
+}
+
+// 构思生效模型：用户选择（brief.models 的构思能力键）优先，且必须命中真实候选；
+// 未选择时按候选顺序取首个——与执行侧 runCandidates 的排序合同一致。
+function effectiveTreatmentModelId(
+  brief: ProductionBrief,
+  bindings: ReadonlyArray<{ providerId: string; agent: CreativeTreatmentAgent }>,
+): string | undefined {
+  const selected = brief.models?.[CREATIVE_TREATMENT_PROVIDER_ID];
+  if (selected) {
+    const match = bindings.find((binding) => binding.agent.modelId === selected);
+    if (match) return match.agent.modelId;
+  }
+  return bindings[0]?.agent.modelId;
+}
+
+// 图内产物 id：内容摘要派生，重放/恢复得到相同产物时 id 稳定。
+function planningArtifactId(stage: string, output: unknown): string {
+  return `${stage}:${createHash("sha256").update(JSON.stringify(output)).digest("hex")}`;
+}
+
+// joint-v1 规划输出的正式合同：必需路径缺失即拒绝；图库路线必须给出候选检索、排序路径与
+// 私有库存路径（物化消费库存，不得拿公开报告顶替），无图库路线不伪造候选路径。
+function validateJointPlanningOutput(output: unknown, libraryRoute: boolean): Record<string, unknown> {
+  const value = requireOutputRecord(output, "creative-planning");
+  const normalized: Record<string, unknown> = {
+    ...value,
+    scriptPath: requiredOutputString(value, "scriptPath"),
+    directorPlanPath: requiredOutputString(value, "directorPlanPath"),
+    executablePlanPath: requiredOutputString(value, "executablePlanPath"),
+  };
+  if (libraryRoute) {
+    normalized.candidateSearchPath = requiredOutputString(value, "candidateSearchPath");
+    normalized.candidateRankingPath = requiredOutputString(value, "candidateRankingPath");
+    normalized.candidateInventoryPath = requiredOutputString(value, "candidateInventoryPath");
+  }
+  return normalized;
+}
+
+// ---------------------------------------------------------------------------
+// joint-v1 planning commit 协议：崩溃窗口的幂等恢复标记。
+// commit 是"图完成 + 正式产物登记"的结束标记：key 绑定 runId、当前 inputDigest 与完成态
+// 图内产物身份（内容派生 id），不含 attempt/路径/时间——同输入重放必然命中同 key。
+// 已有 commit 时严格校验（身份、producer、路径受控、sha256），任何不一致 fail closed。
+// ---------------------------------------------------------------------------
+
+const PLANNING_COMMIT_VERSION = "video-factory/planning-commit-v1";
+
+interface JointPlanningCommitEntry {
+  kind: string;
+  artifactId: string;
+  path: string;
+  sha256: string;
+}
+
+interface JointPlanningCommit {
+  version: string;
+  runId: string;
+  planningCommitKey: string;
+  inputDigest: string;
+  artifacts: JointPlanningCommitEntry[];
+}
+
+function jointPlanningExpectedKinds(libraryRoute: boolean): string[] {
+  return libraryRoute
+    ? ["creative_treatment", "script", "storyboard", "asset_candidates", "asset_ranking", "executable_plan"]
+    : ["creative_treatment", "script", "storyboard", "executable_plan"];
+}
+
+// 读同 key 的既有 commit：文件不存在返回 undefined（未写结束标记），其他读错误冒泡。
+async function readJointPlanningCommit(commitPath: string): Promise<unknown> {
+  try {
+    return JSON.parse(await readFile(commitPath, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+// 严格校验既有 commit 与 run 内产物一一对应；缺失、篡改、重复或身份冲突全部 fail closed。
+function planningCommitValidationError(reason: string): Error {
+  return new Error(`Joint planning commit validation failed: ${reason}`);
+}
+
+async function verifyJointPlanningCommit(options: {
+  commit: unknown;
+  planningCommitKey: string;
+  inputDigest: string;
+  runId: string;
+  runRoot: string;
+  artifacts: readonly Artifact[];
+  expectedKinds: readonly string[];
+}): Promise<JointPlanningCommit> {
+  if (typeof options.commit !== "object" || options.commit === null || Array.isArray(options.commit)) {
+    throw planningCommitValidationError("commit must be a JSON object");
+  }
+  const record = options.commit as Record<string, unknown>;
+  if (record.version !== PLANNING_COMMIT_VERSION) {
+    throw planningCommitValidationError(`unsupported planning commit version '${String(record.version)}'`);
+  }
+  if (record.runId !== options.runId) {
+    throw planningCommitValidationError(`planning commit belongs to run '${String(record.runId)}', not '${options.runId}'`);
+  }
+  if (record.planningCommitKey !== options.planningCommitKey) {
+    throw planningCommitValidationError("planning commit key does not match its file name");
+  }
+  if (record.inputDigest !== options.inputDigest) {
+    throw planningCommitValidationError("planning commit input digest does not match the current planning input");
+  }
+  if (!Array.isArray(record.artifacts)) {
+    throw planningCommitValidationError("planning commit artifacts must be an array");
+  }
+  const entries = record.artifacts as Array<Record<string, unknown>>;
+  const committedKinds = entries.map((entry) => String(entry.kind)).sort();
+  const expectedKinds = [...options.expectedKinds].sort();
+  if (
+    committedKinds.length !== expectedKinds.length
+    || committedKinds.some((kind, index) => kind !== expectedKinds[index])
+  ) {
+    throw planningCommitValidationError(`planning commit artifact kinds ${JSON.stringify(committedKinds)} do not match ${JSON.stringify(expectedKinds)}`);
+  }
+  const seenArtifactIds = new Set<string>();
+  for (const entry of entries) {
+    const kind = String(entry.kind);
+    if (typeof entry.artifactId !== "string") {
+      throw planningCommitValidationError("commit entry artifactId must be a string");
+    }
+    if (typeof entry.path !== "string") {
+      throw planningCommitValidationError("commit entry path must be a string");
+    }
+    if (typeof entry.sha256 !== "string") {
+      throw planningCommitValidationError("commit entry sha256 must be a string");
+    }
+    if (seenArtifactIds.has(entry.artifactId)) {
+      throw planningCommitValidationError(`planning commit references artifact '${entry.artifactId}' more than once`);
+    }
+    seenArtifactIds.add(entry.artifactId);
+    // commit 与 run artifact 必须一一对应：持久化 run 中同 id 出现多份身份记录时
+    // 不得静默取第一个（.find 的歧义），必须明确失败。
+    const matches = options.artifacts.filter((candidate) => candidate.id === entry.artifactId);
+    if (matches.length !== 1) {
+      throw planningCommitValidationError(
+        matches.length === 0
+          ? `unknown planning artifact '${entry.artifactId}'`
+          : `planning artifact '${entry.artifactId}' is registered ${matches.length} times in the run`,
+      );
+    }
+    const artifact = matches[0]!;
+    if (artifact.producer?.nodeId !== "creative-planning") {
+      throw planningCommitValidationError(`planning artifact '${entry.artifactId}' belongs to node '${artifact.producer?.nodeId ?? "unknown"}'`);
+    }
+    if (artifact.provenance?.producerRequestDigest !== options.planningCommitKey) {
+      throw planningCommitValidationError(`planning artifact '${entry.artifactId}' is not bound to this planning commit key`);
+    }
+    if (artifact.kind !== kind) {
+      throw planningCommitValidationError(`planning artifact '${entry.artifactId}' kind '${artifact.kind}' does not match committed kind '${kind}'`);
+    }
+    if (artifact.uri !== entry.path) {
+      throw planningCommitValidationError(`committed path for '${kind}' does not match the registered artifact`);
+    }
+    // 路径穿越防御：词法前缀可被 "<runRoot>/../outside" 绕过，必须按 resolve 后的
+    // 相对位置判断；relative 为空（entry 即 runRoot 本身）同样不允许。
+    const resolvedRunRoot = path.resolve(options.runRoot);
+    const resolvedEntryPath = path.resolve(options.runRoot, entry.path);
+    const relativeToRunRoot = path.relative(resolvedRunRoot, resolvedEntryPath);
+    if (!relativeToRunRoot || relativeToRunRoot.startsWith(`..${path.sep}`) || path.isAbsolute(relativeToRunRoot)) {
+      throw planningCommitValidationError(`committed path for '${kind}' escapes the run directory`);
+    }
+    let content: Buffer;
+    try {
+      content = await readFile(path.resolve(options.runRoot, entry.path));
+    } catch {
+      throw planningCommitValidationError(`committed file for '${kind}' is missing`);
+    }
+    const diskSha256 = createHash("sha256").update(content).digest("hex");
+    if (diskSha256 !== entry.sha256) {
+      throw planningCommitValidationError(`committed file for '${kind}' does not match its sha256`);
+    }
+    // 三方一致：commit 条目、run artifact 身份记录与磁盘内容必须同指纹。“内容连同 commit
+    // sha256 一起篡改”不得通过——run artifact 记录是独立第三方。
+    if (artifact.sha256 !== entry.sha256) {
+      throw planningCommitValidationError(
+        `committed sha256 for '${kind}' does not match the registered artifact record`,
+      );
+    }
+  }
+  const executableEntry = entries.find((entry) => entry.kind === "executable_plan")!;
+  const executablePlan = parseExecutableProductionPlan(JSON.parse(
+    await readFile(path.resolve(options.runRoot, String(executableEntry.path)), "utf8"),
+  ));
+  const committedId = (kind: string) => String(entries.find((entry) => entry.kind === kind)!.artifactId);
+  const expectedCandidateIds = entries
+    .filter((entry) => entry.kind === "asset_candidates" || entry.kind === "asset_ranking")
+    .map((entry) => String(entry.artifactId));
+  if (executablePlan.treatmentArtifactId !== committedId("creative_treatment")
+    || executablePlan.scriptArtifactId !== committedId("script")
+    || executablePlan.directorArtifactId !== committedId("storyboard")
+    || !isDeepStrictEqual(executablePlan.candidateArtifactIds, expectedCandidateIds)) {
+    throw planningCommitValidationError("executable plan references do not resolve to this run's committed planning artifacts");
+  }
+  return {
+    version: PLANNING_COMMIT_VERSION,
+    runId: options.runId,
+    planningCommitKey: options.planningCommitKey,
+    inputDigest: options.inputDigest,
+    artifacts: entries.map((entry) => ({
+      kind: String(entry.kind),
+      artifactId: String(entry.artifactId),
+      path: String(entry.path),
+      sha256: String(entry.sha256),
+    })),
+  };
+}
+
+//（原 verifyJointPlanningLeftovers 已由 leftovers 分支内的逐 kind 校验/续齐逻辑取代。）
+
+async function verifyOrphanedJointPlanningCommit(options: {
+    commit: unknown;
+    planningCommitKey: string;
+    inputDigest: string;
+    runId: string;
+    runRoot: string;
+    expectedKinds: string[];
+    expectedContents: Array<{ kind: string; content: string }>;
+  }): Promise<void> {
+    if (!isObjectRecord(options.commit)
+      || options.commit.version !== PLANNING_COMMIT_VERSION
+      || options.commit.runId !== options.runId
+      || options.commit.planningCommitKey !== options.planningCommitKey
+      || options.commit.inputDigest !== options.inputDigest
+      || !Array.isArray(options.commit.artifacts)) {
+      throw planningCommitValidationError("orphaned planning commit envelope is invalid");
+    }
+    const entries = options.commit.artifacts as Array<Record<string, unknown>>;
+    const kinds = entries.map((entry) => String(entry.kind)).sort();
+    const expectedKinds = [...options.expectedKinds].sort();
+    if (!isDeepStrictEqual(kinds, expectedKinds)) {
+      throw planningCommitValidationError("orphaned planning commit artifact kinds are incomplete");
+    }
+    for (const expected of options.expectedContents) {
+      const entry = entries.find((candidate) => candidate.kind === expected.kind);
+      if (!entry || typeof entry.path !== "string" || typeof entry.sha256 !== "string") {
+        throw planningCommitValidationError(`orphaned planning commit is missing '${expected.kind}'`);
+      }
+      const resolvedRoot = path.resolve(options.runRoot);
+      const resolvedPath = path.resolve(options.runRoot, entry.path);
+      const relative = path.relative(resolvedRoot, resolvedPath);
+      if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        throw planningCommitValidationError(`orphaned planning path for '${expected.kind}' escapes the run directory`);
+      }
+      const content = await readFile(resolvedPath, "utf8");
+      if (content !== expected.content
+        || createHash("sha256").update(content).digest("hex") !== entry.sha256) {
+        throw planningCommitValidationError(`orphaned planning file for '${expected.kind}' does not match the replayed graph outcome`);
+    }
+  }
+}
+
+async function writeJointPlanningCommit(commitPath: string, commit: JointPlanningCommit): Promise<void> {
+  // 临时文件 + rename 原子写：读端要么看不到 commit，要么看到完整 commit。
+  await mkdir(path.dirname(commitPath), { recursive: true });
+  await writeTextAtomically(commitPath, `${JSON.stringify(commit, null, 2)}\n`);
+}
+
+// ---------------------------------------------------------------------------
+// joint-v1 planning stage 只读投影（Studio 详情消费）。数据只来自三处真实证据：
+// 当前有效规划输入 digest 对应的 SQLite checkpoint thread、planning 节点的 role-agent
+// v7 checkpoint（真实执行模型）与经严格校验的正式 planning commit（正式产物 id）。
+// 读取不得 invoke 图、不得触发任何角色/Provider 调用；身份错配或存储损坏 fail closed
+// （返回 undefined），checkpoint 尚不存在则如实全 pending——两种情况都不伪造阶段状态。
+// ---------------------------------------------------------------------------
+
+export type CreativePlanningStageAction = "edit_input" | "change_model" | "view_artifacts";
+
+export interface CreativePlanningStageInspection {
+  id: PlanningStageId;
+  status: "pending" | "running" | "completed" | "failed";
+  effectiveModelId?: string;
+  /** 模型阶段当前绑定的能力提供者 id：UI 据此解析模型选择，不按能力目录顺序猜测。 */
+  providerId?: string;
+  artifactIds: string[];
+  issue?: string;
+  allowedActions: CreativePlanningStageAction[];
+}
+
+const PLANNING_STAGE_ORDER_LIBRARY: readonly PlanningStageId[] = ["treatment", "script", "director", "candidates", "rank", "integrate", "compile"];
+const PLANNING_STAGE_ORDER_FIXED: readonly PlanningStageId[] = ["treatment", "script", "director", "compile"];
+
+function planningStageArtifactPresent(stage: PlanningStageId, values: Partial<PlanningGraphState>): boolean {
+  switch (stage) {
+    case "treatment": return values.treatmentArtifact != null;
+    case "script": return values.scriptArtifact != null;
+    case "director": return values.directorPlan != null;
+    case "candidates": return values.candidatesArtifact != null;
+    case "rank": return values.ranking != null;
+    case "integrate": return values.integratedPlan != null;
+    case "compile": return values.executablePlan != null;
+  }
+}
+
+// 结构化 issue 的责任目标 → 承担该问题的规划阶段（与图内责任路由同构：source 类问题指向
+// 候选获取、user 类问题回到构思输入）。快照可能来自损坏数据：无法识别的目标返回 undefined。
+function planningIssueTargetStage(target: string): PlanningStageId | undefined {
+  switch (target) {
+    case "script": return "script";
+    case "director": return "director";
+    case "source": return "candidates";
+    case "user": return "treatment";
+    default: return undefined;
+  }
+}
+
+function planningStagesAllPending(
+  stageIds: readonly PlanningStageId[],
+  bindingModelOf: (stage: PlanningStageId) => string | undefined,
+  bindingProviderOf: (stage: PlanningStageId) => string | undefined,
+): CreativePlanningStageInspection[] {
+  return stageIds.map((stage) => {
+    const effectiveModelId = bindingModelOf(stage);
+    const providerId = bindingProviderOf(stage);
+    return {
+      id: stage,
+      status: "pending",
+      ...(effectiveModelId !== undefined ? { effectiveModelId } : {}),
+      ...(providerId !== undefined ? { providerId } : {}),
+      artifactIds: [],
+      allowedActions: stage === "treatment" || stage === "script" || stage === "director"
+        ? ["edit_input", "change_model"]
+        : [],
+    };
+  });
+}
+
+// 规划节点失败文本的创作者视图：内部停止原因（halt reason、“不回退旧规划流程”等实现细节）
+// 不进入阶段问题文案；结构化 detail 本身已是面向用户的中文说明。
+export // C1：dispatch 层的 scope 覆盖评估（结构化，不压成 bool）。方案锚定：报价所依据的
+// executable plan 文件内容 digest 必须等于 scope.acceptedPlanDigest——方案变化必须重新
+// 确认，不接受“沿用旧授权跑新方案”；质量合同同边界核对。逐项：quoteItem.id 即素材键
+// （scene-N），模型必须在 permittedAssets.models 内，金额/次数经结构化 assessment 用
+// ledger 保守汇总核验。
+type ProductionScopeQuoteAssessment =
+  | { covered: true; assessment: ProductionSpendPlanAssessment; planDigest: string }
+  | {
+    covered: false;
+    kind: "missing_plan" | "unreadable_plan" | "plan_digest" | "quality_contract" | "empty_quote" | "ledger_evidence" | "quote_items";
+    assessment?: ProductionSpendPlanAssessment;
+  };
+
+async function assessProductionScopePendingQuote(options: {
+  scope: ProductionAuthorizationScope;
+  run: WorkflowRun<ProductionBrief>;
+  runsRoot: string;
+  spendPlan: NonNullable<WorkflowRun<ProductionBrief>["nodeRuns"][number]["spendPlan"]>;
+  paidItems: readonly {
+    itemRequestId: string;
+    quoteItemId: string;
+    state: string;
+    estimatedCostCny: number;
+    actualCostCny?: number;
+    taskId?: string;
+    carriedForwardFromItemRequestId?: string;
+  }[] | null;
+}): Promise<ProductionScopeQuoteAssessment> {
+  // 账本证据不可得 → 覆盖判定 fail closed：不能把未知余额当作零占用自动授权。
+  if (options.paidItems === null) return { covered: false, kind: "ledger_evidence" };
+  const waiting = options.run.nodeRuns.find((node) => node.nodeId === options.spendPlan.nodeId);
+  if (!waiting?.inputState) return { covered: false, kind: "missing_plan" };
+  const effectiveInput = waiting.inputState.versions.find(
+    (version) => version.id === waiting.inputState?.effectiveVersionId,
+  )?.value;
+  const planPath = isObjectRecord(effectiveInput) && typeof effectiveInput.executablePlanPath === "string"
+    ? effectiveInput.executablePlanPath
+    : undefined;
+  if (!planPath) return { covered: false, kind: "missing_plan" };
+  let planDigest: string;
+  try {
+    planDigest = createHash("sha256").update(await readFile(planPath)).digest("hex");
+  } catch {
+    return { covered: false, kind: "unreadable_plan" };
+  }
+  if (planDigest !== options.scope.acceptedPlanDigest) return { covered: false, kind: "plan_digest" };
+  // 质量合同消费侧核对：executable plan bytes 不含质量承诺字段，方案文件未变而质量合同
+  // 变化时，旧 scope 不得自动继续——canonical 投影与接受侧同一函数。
+  const effectiveBrief = effectiveProductionBrief(options.run);
+  if (canonicalQualityContractDigest(qualityContractProjection(effectiveBrief)) !== options.scope.qualityContractDigest) {
+    return { covered: false, kind: "quality_contract" };
+  }
+  const spendState = foldProductionSpendLedger(options.paidItems as Parameters<typeof foldProductionSpendLedger>[0]);
+  const attemptsByAsset = spendState.attemptsByAsset;
+  const quoteItems = options.spendPlan.items ?? [];
+  if (quoteItems.length === 0) return { covered: false, kind: "empty_quote" };
+  // fold 版覆盖评估（整份计划口径）：金额需求 = 条目合计与计划最高占用取大，顺序无关；
+  // 非金额阻断优先于金额缺口报告。
+  const assessment = assessProductionSpendPlan({
+    scope: options.scope,
+    state: spendState,
+    planMaximumCents: Math.round(options.spendPlan.maxCostCny * 100),
+    plan: {
+      items: quoteItems.map((quoteItem) => ({
+        assetKey: quoteItem.id,
+        intentDigest: canonicalProductionAssetIntentDigest(planDigest, quoteItem.id),
+        providerId: quoteItem.providerId,
+        modelId: quoteItem.modelId,
+        quoteCents: Math.round(quoteItem.estimatedCostCny * 100),
+        attempt: (attemptsByAsset[quoteItem.id] ?? 0) + 1,
+      })),
+    },
+  });
+  return assessment.action === "execute"
+    ? { covered: true, assessment, planDigest }
+    : { covered: false, kind: "quote_items", assessment };
+}
+
+// 质量合同的 brief 投影：与 canonicalQualityContractDigest 的输入对齐（visualPlan 按内容
+// digest 参与，不序列化整个对象）。
+function qualityContractProjection(brief: ProductionBrief) {
+  return {
+    angle: brief.angle,
+    audience: brief.audience,
+    durationRange: brief.durationRange ?? { minSeconds: 0, maxSeconds: 0 },
+    directorProfileId: brief.director?.profileId ?? "",
+    ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
+    ...(brief.visualPlan
+      ? { visualPlanDigest: createHash("sha256").update(JSON.stringify(brief.visualPlan)).digest("hex") }
+      : {}),
+    ...(brief.editorial ? { editorial: brief.editorial } : {}),
+  };
+}
+
+export function planningFailureForCreators(error: string): string {
+  const redacted = redactAbsolutePaths(error);
+  const halt = /Joint creative planning stopped \((needs_user|needs_source|duplicate_issue|cross_role_revisions_exhausted)\):\s*(.*?)(?:\s*不回退旧规划流程。)?$/.exec(redacted);
+  if (halt) {
+    const detail = halt[2]!.trim();
+    const headline = halt[1] === "needs_user"
+      ? "有需要你决定的问题，规划暂停："
+      : halt[1] === "needs_source"
+        ? "需要的素材来源目前不可得，规划暂停："
+        : halt[1] === "duplicate_issue"
+          ? "同一问题修改后再次出现，已停止自动重试："
+          : "多次调整仍未通过质量复核，已停止自动重试：";
+    return `${headline}${detail}`;
+  }
+  return redacted
+    .replace(/\s*不回退旧规划流程。/g, "")
+    .replace(/Joint creative planning/g, "创作规划");
+}
+
+// 当前 inputDigest 的 role trace：只读执行历史中本 digest 的记录；历史缺失或损坏时返回
+// 空映射（阶段显示回退到当前绑定模型），不读取其他 digest 的旧执行 trace，也不阻断检视。
+async function readJointPlanningModelTraces(
+  historyPath: string,
+  inputDigest: string,
+): Promise<Partial<Record<PlanningStageId, string>>> {
+  try {
+    const history = await readJointPlanningHistory(historyPath);
+    const record = history.find((entry) => entry.inputDigest === inputDigest);
+    if (!record) return {};
+    return { ...record.modelTraces };
+  } catch {
+    return {};
+  }
+}
+
+// 检视图与执行图同 checkpointer、同拓扑：getState 只读快照、不会执行节点，端口全部换成
+// 抛错替身——即使将来有人误在检视路径上触发执行，也只会失败，绝不会调用角色或 Provider。
+function createInspectionPlanningGraph(
+  store: CreativePlanningStore,
+  libraryRoute: boolean,
+): CreativePlanningGraph {
+  const refusingPort = (stage: string) => async (): Promise<never> => {
+    throw new Error(`Creative planning inspection must not execute the '${stage}' stage.`);
+  };
+  const ports: CreativePlanningPorts = {
+    treatment: refusingPort("treatment"),
+    screenwriter: refusingPort("script"),
+    director: refusingPort("director"),
+    ...(libraryRoute ? {
+      searchCandidates: refusingPort("candidates"),
+      rank: refusingPort("rank"),
+      integrateDirector: refusingPort("integrate"),
+    } : {}),
+    compile: refusingPort("compile"),
+  };
+  return createCreativePlanningGraph({ ports, checkpointer: store.saver });
+}
+
+// joint-v1 创作规划节点：旧四段规划链（构思/稿件/导演/编译，含图库候选与排序）收敛为一个
+// 顶层节点，内部完全复用 B3 固定拓扑图与 SQLite checkpoint。角色调用沿用旧节点的真实
+// agent、provider 注册表与合同校验；任一角色失败让本节点失败，绝不回退旧规划链。
+function creativePlanningNode(
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+  runsRoot: string,
+  allowUnavailableProvider = false,
+  resumeCompletedTextTaskNodeId?: string,
+  resumeCompletedTextTaskRequestId?: string,
+  recoverTextTask?: { nodeId: string; workflowOperationRequestId: string },
+): NodeDefinition {
+  const treatmentBindings = options.treatmentAgents ?? [];
+  const libraryRoute = brief.workflowFeatures?.assetSemanticRank === true;
+  const referenceGrammarEnabled = brief.workflowFeatures?.referenceGrammar === true;
+  const directorProviderId = brief.providers.director;
+  if (!directorProviderId) {
+    throw new Error("Joint creative planning requires the AI director provider binding.");
+  }
+  if (!allowUnavailableProvider) {
+    if (treatmentBindings.length === 0) {
+      throw new Error("Joint creative planning requires configured creative treatment agents.");
+    }
+    if (libraryRoute && !options.assetSemanticRanker) {
+      throw new Error("Joint creative planning with the library route requires the asset semantic ranker.");
+    }
+  }
+  return {
+    id: "creative-planning",
+    label: "Joint creative planning",
+    role: "创作规划制片",
+    capability: "creative.planning",
+    providerId: brief.providers.script,
+    mode: "automatic",
+    dependsOn: [referenceGrammarEnabled ? "reference-grammar" : "brief"],
+    getInput: (context) => ({
+      brief: currentEffectiveBriefFromContext(context, brief),
+      ...(referenceGrammarEnabled ? { referenceGrammarPath: outputPath(context, "reference-grammar", "referenceGrammarPath") } : {}),
+    }),
+    validateInputOverride: (input) => {
+      const value = requireOutputRecord(input, "creative-planning input");
+      if (typeof value.brief !== "object" || value.brief === null || Array.isArray(value.brief)) {
+        throw new Error("creative-planning input brief must be an object.");
+      }
+      // 编辑期即正式校验 brief：坏输入在覆盖时被拒绝（字段级错误），不等到执行才失败。
+      mergeCurrentBrief(value.brief, brief);
+      return {
+        brief: value.brief,
+        ...(referenceGrammarEnabled ? { referenceGrammarPath: requiredOutputString(value, "referenceGrammarPath") } : {}),
+      };
+    },
+    execute: async (input, context) => {
+      const request = requireOutputRecord(input, "creative-planning input");
+      // 规划只消费当前请求的 brief（含人工输入覆盖）；不从 context 重新读取旧 brief——
+      // 否则编辑不会真正进入下一次规划。
+      const currentBrief = mergeCurrentBrief(request.brief, brief);
+      const durationRange = currentBrief.durationRange;
+      const currentDirection = currentBrief.director;
+      if (!durationRange || !currentDirection) {
+        throw new Error("Joint creative planning requires durationRange and a director direction.");
+      }
+      // 当前有效 brief 的导演绑定：端口解析与正式产物 provenance 共用（缺失即 fail closed）。
+      const currentDirectorProviderId = currentBrief.providers.director;
+      if (!currentDirectorProviderId) {
+        throw new Error("Joint creative planning requires the AI director provider binding.");
+      }
+      if (treatmentBindings.length === 0) throw new Error("Joint creative planning requires a creative treatment agent binding.");
+      // 构思模型路由复用既有候选合同：selectedModelId 只改变候选顺序，Provider 故障按既有分类切换。
+      const treatmentAgent = new FallbackCreativeTreatmentAgent({ candidates: treatmentBindings });
+      const referenceGrammar = referenceGrammarEnabled
+        ? await readShotGrammarFile(requiredOutputString(request, "referenceGrammarPath"))
+        : undefined;
+      const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "creative-planning"));
+      const inputDigest = jointPlanningInputDigest(currentBrief, referenceGrammar);
+      const stageInputs = jointPlanningStageInputs(currentBrief, options, referenceGrammar);
+      const historyPath = path.join(runsRoot, context.runId, "nodes", "creative-planning", "planning-history.json");
+      // 当前 digest 的模型/provider trace 以既有记录为底（同 digest 重放不重跑端口，不得丢原
+      // trace），播种携带的阶段继承其产物 provenance；本执行新增的 trace 逐端口合并写回。
+      const existingHistory = await readJointPlanningHistory(historyPath);
+      const recordedForDigest = existingHistory.find((entry) => entry.inputDigest === inputDigest);
+      const modelTraces: Partial<Record<PlanningStageId, string>> = {
+        ...(recordedForDigest?.modelTraces ?? {}),
+      };
+      // 实际执行 provider 与实际执行 model 分开收集：正式 provenance 按各自命名空间填写，
+      // 缺失时显式 unknown，不用首选配置冒充。
+      const providerTraces: Partial<Record<PlanningStageId, string>> = {
+        ...(recordedForDigest?.providerTraces ?? {}),
+      };
+      // 图库路线的 worker 私有库存路径：搜索完成后写回执行记录，恢复按 digest 找回。
+      let candidateInventoryPath: string | undefined = recordedForDigest?.candidateInventoryPath;
+      let candidateInventorySha256: string | undefined = recordedForDigest?.candidateInventorySha256;
+      const recordExecutionTraces = async () => upsertJointPlanningExecutionRecord(historyPath, {
+        version: JOINT_PLANNING_HISTORY_VERSION,
+        inputDigest,
+        libraryRoute,
+        stageInputs,
+        modelTraces,
+        providerTraces,
+        ...(candidateInventoryPath !== undefined ? { candidateInventoryPath } : {}),
+        ...(candidateInventorySha256 !== undefined ? { candidateInventorySha256 } : {}),
+        recordedAt: new Date().toISOString(),
+      });
+      const store = CreativePlanningStore.open(path.dirname(runsRoot));
+      let scriptArtifact: PlanningGraphState["scriptArtifact"];
+      let treatmentArtifact: PlanningGraphState["treatmentArtifact"];
+      let finalPlanArtifact: PlanningGraphState["integratedPlan"];
+      let candidatesArtifact: PlanningGraphState["candidatesArtifact"];
+      let rankingArtifact: PlanningGraphState["ranking"];
+      let executablePlanArtifact: PlanningGraphState["executablePlan"];
+      // 图库路线的额外端口单独注解：spread 表达式内部得不到上下文类型推导。
+      const libraryPorts: Pick<CreativePlanningPorts, "searchCandidates" | "rank" | "integrateDirector"> = {
+          searchCandidates: async (planningContext) => {
+              const script = planningContext.script;
+              const directorPlan = planningContext.directorPlan;
+              if (!script || !directorPlan) {
+                throw new Error("Creative planning candidate search requires the script and director plan artifacts.");
+              }
+              const searchAttempt = await reserveAttemptDirectory(path.join(attempt.directory, "candidate-search"));
+              // worker asset.search 合同按文件路径消费稿件与导演方案：把图内已接受的产物落盘成输入。
+              const searchScriptPath = path.join(searchAttempt.directory, "script.json");
+              const searchDirectorPlanPath = path.join(searchAttempt.directory, "director_plan.json");
+              await writeTextAtomically(
+                searchScriptPath,
+                `${JSON.stringify(scriptDocument(screenwriterBrief(currentBrief), script.output), null, 2)}\n`,
+              );
+              await writeTextAtomically(searchDirectorPlanPath, `${JSON.stringify(directorPlan.output, null, 2)}\n`);
+              const response = await options.worker.run({
+                protocolVersion: WORKER_PROTOCOL_VERSION,
+                commandId: context.nextId("command"),
+                runId: context.runId,
+                nodeRunId: "creative-planning",
+                attempt: searchAttempt.attempt,
+                capability: "asset.search",
+                input: { scriptPath: searchScriptPath, directorPlanPath: searchDirectorPlanPath },
+                parameters: { providerId: "asset-candidate-search-v1", provider: "ai-router", mediaType: "video", limit: 6 },
+                outputDir: searchAttempt.directory,
+              });
+              if (response.status !== "succeeded") {
+                throw new Error(`Joint creative planning candidate search failed: ${response.error?.message ?? "worker command failed"}.`);
+              }
+              await verifyWorkerArtifacts(response, searchAttempt.directory);
+              await verifyWorkerPrivateOutputPath(response.output?.candidateInventoryPath, searchAttempt.directory);
+              // 私有库存是独立于公开报告的 worker 产物：绑定进入图状态（随候选 checkpoint
+              // 持久化）与执行记录，下游物化消费库存本身，而不是拿公开报告冒充库存。
+              const inventoryPath = requiredOutputString(response.output, "candidateInventoryPath");
+              // BG-09：绑定同时记录内容指纹——恢复/消费前校验文件未被替换。
+              const inventoryBytes = await readFile(inventoryPath);
+              const inventorySha256 = createHash("sha256").update(inventoryBytes).digest("hex");
+              candidateInventoryPath = inventoryPath;
+              candidateInventorySha256 = inventorySha256;
+              await recordExecutionTraces();
+              const report = parseAssetCandidateReport(JSON.parse(await readFile(
+                requiredOutputString(response.output, "candidateSearchPath"),
+                "utf8",
+              )));
+              return { artifactId: planningArtifactId("asset-candidates", report), output: report, candidateInventoryPath: inventoryPath, candidateInventorySha256: inventorySha256 };
+            },
+            rank: async (planningContext) => {
+              const ranker = options.assetSemanticRanker;
+              if (!ranker) throw new Error("Joint creative planning library route requires the asset semantic ranker.");
+              const candidates = planningContext.candidates;
+              if (!candidates) throw new Error("Creative planning rank requires the candidates artifact.");
+              const rankDirectorPlan = planningContext.directorPlan;
+              if (!rankDirectorPlan) throw new Error("Creative planning rank requires the director plan artifact.");
+              // 排序请求携带当前画面语义（与图内证据覆盖同一投影），不是只有内容摘要式
+              // artifact id：主体/动作/真实性要求变化必然改变请求与 checkpoint 身份。
+              const currentRankingRequest = {
+                ...candidates.output,
+                planningIntent: {
+                  scriptArtifactId: planningContext.script?.artifactId,
+                  directorArtifactId: rankDirectorPlan.artifactId,
+                  issues: planningContext.issues,
+                  semanticIntentVersion: RANKING_SEMANTIC_INTENT_VERSION,
+                  rankingIntent: rankingSemanticIntent(rankDirectorPlan.output),
+                },
+              };
+              const execution = ranker.rankDetailed
+                ? await ranker.rankDetailed(
+                    currentRankingRequest,
+                    nodeAgentLoopCheckpoint(
+                      runsRoot,
+                      context.runId,
+                      "creative-planning",
+                      {
+                        stage: "rank",
+                        report: currentRankingRequest,
+                        // 与外层 stage identity 同一 ranker 身份投影：checkpoint 身份由
+                        // 同一真实执行输入派生，provider/model/合同变化必然换 checkpoint。
+                        ranker: {
+                          id: ranker.id,
+                          modelId: ranker.modelId ?? null,
+                          contractVersion: ASSET_RANK_AGENT_CONTRACT_VERSION,
+                        },
+                      },
+                      ASSET_RANK_AGENT_CONTRACT_VERSION,
+                      undefined,
+                      context.operationRequestId,
+                      resumeCompletedTextTaskNodeId,
+                      resumeCompletedTextTaskRequestId,
+                      recoverTextTask?.nodeId === "creative-planning" ? recoverTextTask.workflowOperationRequestId : undefined,
+                    ),
+                  )
+                : { output: await ranker.rank(currentRankingRequest) };
+              const ranking = validateAssetSemanticRanking({
+                ...execution.output,
+                source: "model",
+                providerId: execution.trace?.providerId ?? ranker.id,
+                modelId: execution.trace?.modelId ?? ranker.modelId,
+              }, candidates.output);
+              if (execution.trace?.modelId) {
+                modelTraces.rank = execution.trace.modelId;
+                providerTraces.rank = execution.trace.providerId;
+                await recordExecutionTraces();
+              }
+              return { artifactId: planningArtifactId("asset-ranking", ranking), output: ranking };
+            },
+            integrateDirector: async (planningContext) => {
+              const draft = planningContext.directorPlan;
+              const ranking = planningContext.ranking;
+              if (!draft || !ranking) {
+                throw new Error("Creative planning integrate requires the draft plan and ranking artifacts.");
+              }
+              // 整合出口合同只允许改 rationale（候选/排序证据身份不得变化），因此这里是确定性
+              // 整合：为采用候选的 stock 镜头写入语义排序采用说明，不调用模型。
+              const adopted = new Map(ranking.output.scenes.flatMap((scene) => scene.candidates
+                .filter((candidate) => candidate.locked || candidate.semanticScore >= AUTOMATIC_CANDIDATE_SEMANTIC_MINIMUM)
+                .slice(0, 1)
+                .map((candidate) => [scene.scenePosition, candidate] as const)));
+              const integrated: VisualDirectorPlan = {
+                ...draft.output,
+                shots: draft.output.shots.map((shot) => {
+                  const candidate = adopted.get(shot.scenePosition);
+                  if (!candidate || (shot.deliveryType !== "stock_video" && shot.deliveryType !== "stock_image")) return shot;
+                  return { ...shot, rationale: `${shot.rationale} 语义排序采用 ${candidate.provider}/${candidate.assetId}。` };
+                }),
+              };
+              return { artifactId: planningArtifactId("director-plan-integrated", integrated), output: integrated };
+            },
+      };
+      try {
+        // 端口适配：图内角色调用沿用旧节点的真实 agent、provider 注册表与合同校验。
+        const ports: CreativePlanningPorts = {
+          treatment: async () => {
+            const lockedViewerPromise = acceptedViewerPromise(currentBrief);
+            const treatmentBrief: CreativeTreatmentAgentInput["brief"] = {
+              title: currentBrief.title,
+              angle: currentBrief.angle,
+              audience: currentBrief.audience,
+              nicheSlug: currentBrief.nicheSlug,
+              platform: currentBrief.platform,
+              durationSeconds: currentBrief.durationSeconds,
+              durationRange,
+              ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
+              ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
+              ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
+              // 用户/系列已接受的承诺进入构思的真实输入：宿主锁定它，模型输出被覆盖对齐。
+              ...(lockedViewerPromise ? { lockedViewerPromise } : {}),
+              productionCapabilities: productionCapabilitiesFor(currentBrief, options),
+            };
+            const treatmentInput: CreativeTreatmentAgentInput = {
+              brief: treatmentBrief,
+              suppliedSources: [],
+              planningMode: true,
+              // 参考语法是风格/结构参考（不冒充事实证据），与剧本/导演共用同一已接受语法。
+              ...(referenceGrammar ? { referenceGrammar } : {}),
+              // 与 script/director/rank 同一边界：构思角色经 role-agent-loop 落 v7 checkpoint，
+              // 只读投影据此报告真实执行模型（含 fallback 后的实际模型）。每个候选模型一份
+              // durable checkpoint——fallback 到 B 后中断，B 的中间角色状态同样可恢复。
+              agentLoopCheckpoint: nodeAgentLoopCheckpoint(
+                runsRoot,
+                context.runId,
+                "creative-planning",
+                { stage: "treatment", brief: treatmentBrief, ...(referenceGrammar ? { referenceGrammar } : {}) },
+                CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION,
+                undefined,
+                context.operationRequestId,
+                resumeCompletedTextTaskNodeId,
+                resumeCompletedTextTaskRequestId,
+                recoverTextTask?.nodeId === "creative-planning" ? recoverTextTask.workflowOperationRequestId : undefined,
+              ),
+              agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
+                runsRoot,
+                context.runId,
+                "creative-planning",
+                { stage: "treatment", brief: treatmentBrief, ...(referenceGrammar ? { referenceGrammar } : {}) },
+                CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION,
+                modelId,
+                context.operationRequestId,
+                resumeCompletedTextTaskNodeId,
+                resumeCompletedTextTaskRequestId,
+                recoverTextTask?.nodeId === "creative-planning" ? recoverTextTask.workflowOperationRequestId : undefined,
+              ),
+              ...(currentBrief.models?.[CREATIVE_TREATMENT_PROVIDER_ID]
+                ? { selectedModelId: currentBrief.models[CREATIVE_TREATMENT_PROVIDER_ID] }
+                : {}),
+            };
+            const treatmentExecution = await treatmentAgent.treatDetailed(treatmentInput);
+            if (treatmentExecution.trace?.modelId) {
+              modelTraces.treatment = treatmentExecution.trace.modelId;
+              providerTraces.treatment = treatmentExecution.trace.providerId;
+              await recordExecutionTraces();
+            }
+            return { artifactId: planningArtifactId("creative-treatment", treatmentExecution.output), output: treatmentExecution.output };
+          },
+          screenwriter: async (planningContext) => {
+            const provider = context.resolveProvider<ScreenwriterAgentInput, CodexTaskExecution<unknown>>({
+              capability: "script.draft",
+              providerId: currentBrief.providers.script,
+            });
+            const requestBrief: ScreenwriterAgentInput["brief"] = {
+              ...screenwriterBrief(currentBrief, options),
+              ...(planningContext.treatment ? { creativeTreatment: planningContext.treatment.output } : {}),
+              ...(planningContext.issues.length ? { planningIssues: planningContext.issues } : {}),
+              productionCapabilities: productionCapabilitiesFor(currentBrief, options),
+            };
+            const execution = await provider.run({
+              brief: requestBrief,
+              planningMode: true,
+              ...(currentBrief.models?.[currentBrief.providers.script] ? { selectedModelId: currentBrief.models[currentBrief.providers.script] } : {}),
+              agentLoopCheckpoint: nodeAgentLoopCheckpoint(
+                runsRoot,
+                context.runId,
+                "creative-planning",
+                { stage: "script", brief: requestBrief, treatmentArtifactId: planningContext.treatment?.artifactId },
+                SCREENWRITER_AGENT_CONTRACT_VERSION,
+                undefined,
+                context.operationRequestId,
+                resumeCompletedTextTaskNodeId,
+                resumeCompletedTextTaskRequestId,
+                recoverTextTask?.nodeId === "creative-planning" ? recoverTextTask.workflowOperationRequestId : undefined,
+              ),
+            }, context);
+            if (execution.trace?.modelId) {
+              modelTraces.script = execution.trace.modelId;
+              providerTraces.script = execution.trace.providerId;
+              await recordExecutionTraces();
+            }
+            const draft = validateScriptDraft(execution.output, {
+              durationSeconds: requestBrief.durationSeconds,
+              ...(requestBrief.durationRange ? { durationRange: requestBrief.durationRange } : {}),
+              requireCanonFacts: Boolean(requestBrief.seriesContext),
+            });
+            return { artifactId: planningArtifactId("script-draft", draft), output: draft };
+          },
+          director: async (planningContext) => {
+            const script = planningContext.script;
+            if (!script) throw new Error("Creative planning director requires the script artifact.");
+            const document = scriptDocument(screenwriterBrief(currentBrief), script.output);
+            const viewerPromise = optionalOutputString(document.viewerPromise);
+            const narrativeArc = optionalOutputString(document.narrativeArc);
+            const scenes = parseDirectorScenes(document.scenes);
+            // 素材路由输入与阶段身份共用同一投影 helper；目录缺失 provider 时明确失败。
+            const assetProviders = directorAssetProviderInputs(currentBrief, options);
+            const provider = context.resolveProvider<VisualDirectorAgentInput, CodexTaskExecution<unknown>>({
+              capability: "storyboard.plan",
+              providerId: currentDirectorProviderId,
+            });
+            const costFeedback = currentBrief.spendFeedback?.slice(-10).reverse().map((feedback) => ({
+              reason: feedback.reason,
+              previousEstimatedCostCny: feedback.previousEstimatedCostCny,
+              ...(feedback.targetEstimatedCostCny !== undefined
+                ? { targetEstimatedCostCny: feedback.targetEstimatedCostCny }
+                : {}),
+              ...(feedback.note ? { note: feedback.note } : {}),
+            }));
+            const directorEconomics = { allowMeteredProviders: currentBrief.economics.allowMeteredProviders };
+            // joint-v1 的导演阶段与旧 visual-direction 节点同一 rework 消费合同：返工意见、
+            // 影响范围与上一版方案进入导演 brief；A5 的“输入未变不重跑”由阶段输入身份
+            // （directorStageInputIdentity 含 rework 投影）与闭包播种承担。
+            const affectedScenePositions = currentBrief.rework
+              ? reworkAffectedScenePositions({
+                findings: currentBrief.rework.findings,
+                ...(currentBrief.rework.previousScript ? { previousScenes: currentBrief.rework.previousScript.scenes } : {}),
+                ...(currentBrief.rework.previousDirectorPlan ? { previousShots: currentBrief.rework.previousDirectorPlan.shots } : {}),
+                currentScenes: script.output.scenes,
+                ...(currentBrief.rework.affectedScenePositions !== undefined
+                  ? { affectedScenePositions: currentBrief.rework.affectedScenePositions }
+                  : {}),
+              })
+              : [];
+            const producerBrief: VisualDirectorAgentInput["brief"] = {
+              title: currentBrief.title,
+              angle: currentBrief.angle,
+              audience: currentBrief.audience,
+              platform: currentBrief.platform,
+              durationSeconds: currentBrief.durationSeconds,
+              durationRange,
+              ...(viewerPromise ? { viewerPromise } : {}),
+              ...(narrativeArc ? { narrativeArc } : {}),
+              requestedProfileId: currentDirection.profileId,
+              ...(currentBrief.templateSnapshot ? { templateBlueprint: currentBrief.templateSnapshot.resolvedBlueprint } : {}),
+              ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
+              ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
+              ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
+              ...(referenceGrammar ? { referenceGrammar } : {}),
+              ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
+              ...(currentBrief.rework ? {
+                rework: {
+                  sourceRunId: currentBrief.rework.sourceRunId,
+                  visualDirectionInstruction: currentBrief.rework.nodeInstructions.visualDirection,
+                  assetInstruction: currentBrief.rework.nodeInstructions.assets,
+                  findings: currentBrief.rework.findings
+                    .filter((finding) => finding.targetNodeIds.includes("visual-direction") && finding.action !== "inspect_existing_media")
+                    .map(modelFacingReworkFinding),
+                  ...(affectedScenePositions.length || currentBrief.rework.affectedScenePositions !== undefined
+                    ? { affectedScenePositions }
+                    : {}),
+                  ...(currentBrief.rework.previousDirectorPlan ? { previousDirectorPlan: currentBrief.rework.previousDirectorPlan } : {}),
+                },
+              } : {}),
+              ...(planningContext.treatment ? { creativeTreatment: planningContext.treatment.output } : {}),
+              ...(planningContext.issues.length ? { planningIssues: planningContext.issues } : {}),
+              productionCapabilities: summarizeProductionCapabilities(assetProviders),
+            };
+            const execution = await provider.run({
+              brief: producerBrief,
+              scenes,
+              assetProviders,
+              economics: directorEconomics,
+              planningMode: true,
+              selectedModelId: currentBrief.models?.[currentBrief.providers.director ?? ""] ?? provider.modelId ?? "codex-default",
+              ...(costFeedback?.length ? { costFeedback } : {}),
+              agentLoopCheckpoint: nodeAgentLoopCheckpoint(
+                runsRoot,
+                context.runId,
+                "creative-planning",
+                {
+                  stage: "director",
+                  brief: producerBrief,
+                  scenes,
+                  assetProviders,
+                  economics: directorEconomics,
+                  ...(referenceGrammar ? { referenceGrammar } : {}),
+                  ...(costFeedback?.length ? { costFeedback } : {}),
+                  ...(planningContext.issues.length ? { issues: planningContext.issues } : {}),
+                },
+                VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
+                undefined,
+                context.operationRequestId,
+                resumeCompletedTextTaskNodeId,
+                resumeCompletedTextTaskRequestId,
+                recoverTextTask?.nodeId === "creative-planning" ? recoverTextTask.workflowOperationRequestId : undefined,
+              ),
+            }, context);
+            if (execution.trace?.modelId) {
+              modelTraces.director = execution.trace.modelId;
+              providerTraces.director = execution.trace.providerId;
+              await recordExecutionTraces();
+            }
+            const plan = validateVisualDirectorPlan(execution.output, visualDirectorPlanValidation(
+              currentBrief,
+              scenes,
+              options.assetProviders ?? [],
+              options.providerRuntimeMetadata ?? [],
+              viewerPromise,
+            ));
+            return { artifactId: planningArtifactId("director-plan", plan), output: plan };
+          },
+          ...(libraryRoute ? libraryPorts : {}),
+          compile: executablePlanCompilePort,
+        };
+        const graph = createCreativePlanningGraph({ ports, checkpointer: store.saver });
+        const threadConfig = store.threadConfig(context.runId, inputDigest);
+        // 编辑闭包：新 digest 的 thread 在启动前按阶段输入身份播种未受影响的上游产物，
+        // 携带阶段同时继承其模型 provenance。已有 checkpoint（恢复/重放）不播种——直接走
+        // runCreativePlanning 的恢复分支。前驱取最近一次执行的记录（recordedAt 最大），
+        // 不是数组末位：A→B→A 重放后 A 是最新执行，下一次编辑必须以 A 为前驱。
+        const existingSnapshot = await graph.getState(threadConfig);
+        const existingValues = (existingSnapshot?.values ?? {}) as Partial<PlanningGraphState>;
+        if (existingValues.inputDigest != null) {
+          const carriedStageInputs = existingValues.carriedStageInputIdentities ?? {};
+          for (const stage of ["treatment", "script", "director"] as const) {
+            const carriedIdentity = carriedStageInputs[stage];
+            if (carriedIdentity !== undefined && carriedIdentity !== stageInputs[stage]) {
+              throw new Error(`Creative planning cannot resume this thread: carried ${stage} evidence is incompatible with the current stage contract.`);
+            }
+          }
+          Object.assign(modelTraces, existingValues.carriedModelTraces ?? {});
+          Object.assign(providerTraces, existingValues.carriedProviderTraces ?? {});
+          // 线索 B 守卫：同 digest 重放前比对执行记录的阶段输入身份与当前计算值——素材目录
+          // 或运行环境在 digest 不变的情况下变化（重启换目录条目等），旧 thread 的导演方案
+          // 基于不同真实输入构建，不得静默重放；fail closed，由用户修改输入开新 thread。
+          const recorded = existingHistory.find((entry) => entry.inputDigest === inputDigest);
+          if (recorded && (
+            recorded.stageInputs.treatment !== stageInputs.treatment
+            || recorded.stageInputs.script !== stageInputs.script
+            || recorded.stageInputs.director !== stageInputs.director
+          )) {
+            throw new Error(
+              "Creative planning cannot resume this thread: the real inputs of a planning stage "
+              + "(asset catalog, runtime models, or role bindings) changed while the planning input stayed the same. "
+              + "Edit the planning input to open a new planning thread.",
+            );
+          }
+          // ranker 身份（provider/model/合同版本/语义投影规则）变化：只失效排序证据及其下游，
+          // 候选与未变阶段保留。游标重置回 director 之后，图路由因 ranking=null 走真实重排
+          // （不重搜）——不得重放 completed graph 的旧排序。旧记录无 rank 身份时按"身份未知"
+          // 处理，同样强制一次真实重排。
+          if (libraryRoute && recorded && recorded.stageInputs.rank !== stageInputs.rank) {
+            await graph.updateState(threadConfig, {
+              ranking: null,
+              rankingInputFingerprint: null,
+              integratedPlan: null,
+              executablePlan: null,
+              artifactIds: withoutPlanningStageArtifacts(existingValues.artifactIds ?? {}, ["rank", "integrate", "compile"]),
+            }, "director");
+            delete modelTraces.rank;
+            delete providerTraces.rank;
+            // 记录当前身份：重排完成前再次中断时，恢复仍按新身份继续，不重复失效。
+            recorded.stageInputs = { ...recorded.stageInputs, rank: stageInputs.rank };
+            await upsertJointPlanningExecutionRecord(historyPath, {
+              version: JOINT_PLANNING_HISTORY_VERSION,
+              inputDigest,
+              libraryRoute,
+              stageInputs,
+              modelTraces,
+              providerTraces,
+              ...(candidateInventoryPath !== undefined ? { candidateInventoryPath } : {}),
+              ...(candidateInventorySha256 !== undefined ? { candidateInventorySha256 } : {}),
+              recordedAt: new Date().toISOString(),
+            });
+          }
+          // BG-03：无 history 恢复分支（recorded 为空，如跨进程/跨 run 播种后 history 未写）
+          // 用 checkpoint 内的 carried rank identity 核对——缺失或不一致都强制真实重排，
+          // 不得让换掉的 ranker 重放播种进来的旧排序。
+          if (libraryRoute && !recorded) {
+            const carriedRankIdentity = carriedStageInputs.rank;
+            if (carriedRankIdentity !== stageInputs.rank && existingValues.ranking != null) {
+              await graph.updateState(threadConfig, {
+                ranking: null,
+                rankingInputFingerprint: null,
+                integratedPlan: null,
+                executablePlan: null,
+                artifactIds: withoutPlanningStageArtifacts(existingValues.artifactIds ?? {}, ["rank", "integrate", "compile"]),
+              }, "director");
+              delete modelTraces.rank;
+              delete providerTraces.rank;
+            }
+          }
+        }
+        if (((existingSnapshot?.values ?? {}) as Partial<PlanningGraphState>).inputDigest == null) {
+          // F3：media/director-only 返工的新 run 不重跑未受影响的规划角色——当前 run 的
+          // history 为空时，从返工源 run 的执行记录与 checkpoint 播种；阶段身份不匹配的
+          // 阶段照旧不携带（导演/编剧实质变化仍会重跑）。
+          const reworkSourceRunId = currentBrief.rework?.sourceRunId;
+          let prior = latestJointPlanningRecord(existingHistory, inputDigest);
+          let priorRunId: string | undefined;
+          // 只对 media/director-only 返工跨 run 播种：编剧被点名重做时（有脚本指令或
+          // script 责任 findings），编剧/导演阶段本来就要重跑，不启用源 run 继承。
+          if (!prior && reworkSourceRunId
+            && screenwriterReworkContext(currentBrief) === undefined
+            && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(reworkSourceRunId)) {
+            const sourceHistory = await readJointPlanningHistory(path.join(
+              runsRoot,
+              reworkSourceRunId,
+              "nodes",
+              "creative-planning",
+              "planning-history.json",
+            ));
+            const candidate = latestJointPlanningRecord(sourceHistory, inputDigest);
+            if (candidate) {
+              prior = candidate;
+              priorRunId = reworkSourceRunId;
+            }
+          }
+          const carried = await seedJointPlanningThread({
+            graph,
+            store,
+            runId: context.runId,
+            inputDigest,
+            planningInput: { runId: context.runId, inputDigest, durationRange },
+            libraryRoute,
+            prior,
+            ...(priorRunId ? { priorRunId } : {}),
+            stageInputs,
+            historyPath,
+          });
+          if (carried) {
+            Object.assign(modelTraces, carried.modelTraces);
+            Object.assign(providerTraces, carried.providerTraces);
+            if (carried.candidateInventoryPath) candidateInventoryPath = carried.candidateInventoryPath;
+            // 播种 checkpoint 已落盘、执行记录尚未写：崩溃窗口在此收口（种子 provenance
+            // 必须随 checkpoint 存活，不依赖 history 文件）。
+            options.planningFailpoints?.afterSeed?.();
+          }
+        }
+        // 执行前先落执行记录：后续阶段失败/中断的部分完成执行也能作为下一次编辑的闭包前驱，
+        // 已执行阶段的 trace 不因中途失败丢失（端口完成时还会逐阶段合并写回）。
+        await recordExecutionTraces();
+        const outcome = await runCreativePlanning(graph, {
+          input: { runId: context.runId, inputDigest, durationRange },
+          threadId: store.threadId(context.runId, inputDigest),
+        });
+        if (outcome.status !== "completed") {
+          throw new Error(`Joint creative planning stopped (${outcome.halt.reason}): ${outcome.halt.detail} 不回退旧规划流程。`);
+        }
+        // 完成态只携带 executable plan：稿件/导演方案/候选/排序从终态 checkpoint 读取，
+        // 保证崩溃恢复（同 thread 重放）也能重建全部正式产物。
+        const finalState = ((await graph.getState(threadConfig))?.values ?? {}) as Partial<PlanningGraphState>;
+        // 私有库存绑定的权威来源是 checkpoint 状态（随候选持久化）：播种/崩溃恢复后
+        // 不依赖尚未写入的 history；本地闭包变量只覆盖本次执行内的新搜索。
+        if (finalState.candidateInventoryBinding) {
+          candidateInventoryPath = finalState.candidateInventoryBinding;
+          candidateInventorySha256 = finalState.candidateInventorySha256 ?? undefined;
+          // BG-09：恢复时校验库存文件内容指纹——文件缺失或被替换即 fail closed，
+          // 不得让下游物化消费被替换的库存。
+          if (candidateInventorySha256) {
+            const disk = await readFile(candidateInventoryPath).catch(() => undefined);
+            const diskSha = disk ? createHash("sha256").update(disk).digest("hex") : undefined;
+            if (diskSha !== candidateInventorySha256) {
+              throw new Error("Joint creative planning library route: the persisted candidate inventory file is missing or was replaced; refusing to consume it.");
+            }
+          }
+        }
+        scriptArtifact = finalState.scriptArtifact ?? null;
+        treatmentArtifact = finalState.treatmentArtifact ?? null;
+        finalPlanArtifact = finalState.integratedPlan ?? finalState.directorPlan ?? null;
+        candidatesArtifact = finalState.candidatesArtifact ?? null;
+        rankingArtifact = finalState.ranking ?? null;
+        executablePlanArtifact = finalState.executablePlan ?? outcome.executablePlan;
+        await recordExecutionTraces();
+      } catch (error) {
+        if (error instanceof RoleAgentLoopError) {
+          const trace = error.lastTrace;
+          return failedAgentLoopNodeResult({
+            error,
+            attemptDirectory: attempt.directory,
+            nodeId: "creative-planning",
+            attempt: attempt.attempt,
+            parentArtifactIds: context.artifacts.map((artifact) => artifact.id),
+            provider: {
+              id: trace?.providerId ?? currentBrief.providers.script,
+              modelId: trace?.modelId ?? "unknown",
+              transport: "unix_socket",
+              billing: "subscription",
+              configurationSource: "system_default",
+              parameters: { planningRoute: libraryRoute ? "library" : "fixed" },
+              estimatedCostCny: 0,
+            },
+            providerLabel: "joint-v1 创作规划",
+          });
+        }
+        throw error;
+      } finally {
+        store.close();
+      }
+      // 必需正式产物缺失即 fail closed（try/finally 之后统一判定，不静默补齐）。
+      if (!treatmentArtifact || !scriptArtifact || !finalPlanArtifact || !executablePlanArtifact) {
+        throw new Error("Joint creative planning ended without its formal treatment, script, director plan, or executable plan artifacts.");
+      }
+      if (libraryRoute && (!candidatesArtifact || !rankingArtifact)) {
+        throw new Error("Joint creative planning library route ended without its candidate artifacts.");
+      }
+      options.planningFailpoints?.afterGraph?.();
+      const briefArtifactIds = context.artifacts
+        .filter((artifact) => artifact.producer?.nodeId === "brief")
+        .map((artifact) => artifact.id);
+      const grammarArtifactIds = referenceGrammarEnabled
+        ? context.artifacts
+          .filter((artifact) => artifact.producer?.nodeId === "reference-grammar")
+          .map((artifact) => artifact.id)
+        : [];
+      // 规划节点 receipt 的实际模型：只用真实执行 trace；来源缺失时显式 unknown，
+      // 不用首选配置或角色默认模型冒充实际执行来源。
+      const planningReceipt = {
+        providerId: treatmentAgent.id,
+        providerLabel: "joint-v1 创作规划",
+        modelId: modelTraces.treatment ?? "unknown",
+        transport: "unix_socket" as const,
+        billing: "subscription" as const,
+        configurationSource: "system_default" as const,
+        parameters: { planningRoute: libraryRoute ? "library" : "fixed" },
+        estimatedCostCny: 0,
+        requestId: context.nextId("creative-planning"),
+      };
+      // 图库路线的私有库存路径必须可得（登记/复用/残留三条分支都从执行记录或本次执行恢复），
+      // 缺失即 fail closed——不允许下游拿公开报告冒充库存。
+      const committedCandidateInventoryPath = () => {
+        if (!libraryRoute) return undefined;
+        if (!candidateInventoryPath) {
+          throw new Error("Joint creative planning library route lost its private candidate inventory path.");
+        }
+        return candidateInventoryPath;
+      };
+      // 正式内容只从重放后的图内产物序列化：登记与窗口 (b) 残留校验共用同一内容源，
+      // 保证"崩溃前登记的产物"与"恢复重放的图产物"逐字节可比。
+      const scriptContent = `${JSON.stringify(scriptDocument(screenwriterBrief(currentBrief), scriptArtifact.output), null, 2)}\n`;
+      const treatmentContent = `${JSON.stringify(treatmentArtifact.output, null, 2)}\n`;
+      const directorPlanContent = `${JSON.stringify(finalPlanArtifact.output, null, 2)}\n`;
+      const candidateContent = libraryRoute && candidatesArtifact
+        ? `${JSON.stringify(candidatesArtifact.output, null, 2)}\n`
+        : undefined;
+      const rankingContent = libraryRoute && rankingArtifact
+        ? `${JSON.stringify(rankingArtifact.output, null, 2)}\n`
+        : undefined;
+      const expectedKinds = jointPlanningExpectedKinds(libraryRoute);
+      const expectedFormalContents: Array<{ kind: string; content: string }> = [
+        { kind: "creative_treatment", content: treatmentContent },
+        { kind: "script", content: scriptContent },
+        { kind: "storyboard", content: directorPlanContent },
+        ...(candidateContent !== undefined ? [{ kind: "asset_candidates", content: candidateContent }] : []),
+        ...(rankingContent !== undefined ? [{ kind: "asset_ranking", content: rankingContent }] : []),
+      ];
+      // commit key 绑定 runId、当前 inputDigest 与完成态图内产物身份（内容派生 id）：
+      // 不含 attempt/路径/时间，同输入重放必然命中同 key。
+      const planningCommitKey = createHash("sha256").update(JSON.stringify({
+        version: PLANNING_COMMIT_VERSION,
+        runId: context.runId,
+        inputDigest,
+        planning: {
+          treatment: treatmentArtifact.artifactId,
+          script: scriptArtifact.artifactId,
+          directorPlan: finalPlanArtifact.artifactId,
+          ...(candidateContent !== undefined && candidatesArtifact ? { candidates: candidatesArtifact.artifactId } : {}),
+          ...(rankingContent !== undefined && rankingArtifact ? { ranking: rankingArtifact.artifactId } : {}),
+          executablePlan: executablePlanArtifact.artifactId,
+        },
+      })).digest("hex");
+      const planningCommitPath = path.join(runsRoot, context.runId, "planning", "commits", `${planningCommitKey}.json`);
+      const committedSha256 = (kind: string) => createHash("sha256")
+        .update(expectedFormalContents.find((entry) => entry.kind === kind)!.content)
+        .digest("hex");
+
+      // 已有 commit（此前已完整落定）：严格校验后原样复用，不重复登记、不重写正式文件。
+      const existingCommit = await readJointPlanningCommit(planningCommitPath);
+      if (existingCommit !== undefined) {
+        const commitArtifactIds = isObjectRecord(existingCommit) && Array.isArray(existingCommit.artifacts)
+          ? existingCommit.artifacts.flatMap((entry) => (
+              isObjectRecord(entry) && typeof entry.artifactId === "string" ? [entry.artifactId] : []
+            ))
+          : [];
+        const registeredCount = commitArtifactIds.filter((id) => context.artifacts.some((artifact) => artifact.id === id)).length;
+        if (registeredCount === 0) {
+          // 进程可能在 commit rename 后、run CAS 前死亡。此时 commit 只是完整的 prepared
+          // 证据，不是已接受结果；核对文件后重新登记，并在本次 run CAS 中发布新的正式身份。
+          await verifyOrphanedJointPlanningCommit({
+            commit: existingCommit,
+            planningCommitKey,
+            inputDigest,
+            runId: context.runId,
+            runRoot: path.join(runsRoot, context.runId),
+            expectedKinds,
+            expectedContents: expectedFormalContents,
+          });
+        } else if (registeredCount !== commitArtifactIds.length) {
+          // BG-02：部分登记 + 已写 commit + run CAS 前崩溃（或恢复续齐后再次崩溃）——
+          // commit 里引用的产物只有一部分持久化。不在此处拒绝：落入下方 leftovers
+          // 续齐分支，按重放内容补登记缺失 kind 后整组重写同一 commit。
+        } else {
+          const commit = await verifyJointPlanningCommit({
+            commit: existingCommit,
+            planningCommitKey,
+            inputDigest,
+            runId: context.runId,
+            runRoot: path.join(runsRoot, context.runId),
+            artifacts: context.artifacts,
+            expectedKinds,
+          });
+          const committedPath = (kind: string) => {
+            const entry = commit.artifacts.find((candidate) => candidate.kind === kind);
+            if (!entry) throw new Error(`Joint planning commit is missing its '${kind}' entry.`);
+            return entry.path;
+          };
+          return {
+            status: "succeeded",
+            output: {
+              scriptPath: committedPath("script"),
+              directorPlanPath: committedPath("storyboard"),
+              executablePlanPath: committedPath("executable_plan"),
+              canonFacts: scriptArtifact.output.canonFacts ?? [],
+              ...(libraryRoute ? {
+                candidateSearchPath: committedPath("asset_candidates"),
+                candidateRankingPath: committedPath("asset_ranking"),
+                candidateInventoryPath: committedCandidateInventoryPath(),
+              } : {}),
+            },
+            preRegisteredArtifactIds: commit.artifacts.map((entry) => entry.artifactId),
+            receipt: planningReceipt,
+          };
+        }
+      }
+
+      // 无 commit 但存在本 key 绑定的正式产物（窗口 (b) 及 F1 部分登记）：
+      // 部分集合（文件写入失败随失败 checkpoint 持久化的半组 registry）与完整集合都可恢复：
+      // 已登记产物逐 kind 按重放内容字节校验；缺失 kind 在本次受控保存内补登记；
+      // 最终仍以整组 commit 一次接受——不放松完整性，也不让部分状态永久卡死。
+      const leftoverArtifacts = context.artifacts.filter((artifact) =>
+        artifact.producer?.nodeId === "creative-planning"
+        && artifact.provenance?.producerRequestDigest === planningCommitKey);
+      if (leftoverArtifacts.length > 0) {
+        const leftoverByKind = new Map(leftoverArtifacts.map((artifact) => [artifact.kind, artifact]));
+        const unexpectedLeftovers = leftoverArtifacts.filter((artifact) => !expectedKinds.includes(artifact.kind));
+        if (unexpectedLeftovers.length > 0) {
+          throw planningCommitValidationError(
+            `pre-registered planning artifacts contain unexpected kinds ${JSON.stringify(unexpectedLeftovers.map((artifact) => artifact.kind))}`,
+          );
+        }
+        const duplicatedLeftoverKinds = expectedKinds.filter((kind) => leftoverArtifacts.filter((artifact) => artifact.kind === kind).length > 1);
+        if (duplicatedLeftoverKinds.length > 0) {
+          throw planningCommitValidationError(`pre-registered planning artifacts duplicate kinds ${JSON.stringify(duplicatedLeftoverKinds)}`);
+        }
+        // 非正式方案 kind：重放内容与已登记字节必须一致，缺失即补登记（同一 attempt 目录
+        // 重新写入受控文件）；executable_plan 依赖全部 id，最后统一重绑计算。
+        const recoveredIds = new Map<string, string>();
+        const recoveredEntries: Array<{ kind: string; artifactId: string; path: string; sha256: string }> = [];
+        // 父关系按证据链：稿件←treatment(+brief/语法)；导演方案←稿件；候选←稿件+方案；排序←候选。
+        const parentOf = (kind: string): string[] => {
+          if (kind === "script") {
+            return [recoveredIds.get("creative_treatment")!, ...briefArtifactIds, ...grammarArtifactIds];
+          }
+          if (kind === "storyboard") return [recoveredIds.get("script")!, ...grammarArtifactIds];
+          if (kind === "asset_candidates") return [recoveredIds.get("script")!, recoveredIds.get("storyboard")!];
+          if (kind === "asset_ranking") return [recoveredIds.get("asset_candidates")!];
+          return [...briefArtifactIds, ...grammarArtifactIds];
+        };
+        const freshlyRegistered = new Set<string>();
+        for (const kind of expectedKinds) {
+          if (kind === "executable_plan") continue;
+          const leftover = leftoverByKind.get(kind);
+          const content = expectedFormalContents.find((entry) => entry.kind === kind)!.content;
+          if (leftover) {
+            const disk = await readFile(path.resolve(leftover.uri ?? ""), "utf8").catch(() => undefined);
+            if (disk === undefined || createHash("sha256").update(disk).digest("hex") !== leftover.sha256
+              || disk !== content) {
+              throw planningCommitValidationError(`pre-registered '${kind}' does not match the replayed planning content`);
+            }
+            recoveredIds.set(kind, leftover.id);
+            recoveredEntries.push({ kind, artifactId: leftover.id, path: leftover.uri!, sha256: leftover.sha256 });
+            continue;
+          }
+          const kindPath = path.join(attempt.directory, `${kind}.json`);
+          await writeTextAtomically(kindPath, content);
+          const registered = context.addArtifact(fileArtifact(
+            kind,
+            kindPath,
+            content,
+            "application/json",
+            kind === "creative_treatment" ? "video-factory/creative-treatment-v1"
+              : kind === "script" ? "video-factory/script-draft-v1"
+                : kind === "storyboard" ? "video-factory/director-plan-v1"
+                  : kind === "asset_candidates" ? "video-factory/asset-candidates-v1"
+                    : "video-factory/asset-ranking-v1",
+            "creative-planning",
+            parentOf(kind),
+            // BG-02 附带修复：续齐登记的 provenance 按 kind 写真实来源，不再一律 unknown。
+            kind === "creative_treatment" ? (providerTraces.treatment ?? "unknown")
+              : kind === "script" ? currentBrief.providers.script
+                : kind === "storyboard" ? currentDirectorProviderId
+                  : kind === "asset_ranking" && rankingArtifact ? rankingArtifact.output.providerId
+                    : "asset-candidate-search-v1",
+            "Recovered joint planning artifact; provenance inherited from the replayed graph evidence.",
+            attempt.attempt,
+            planningCommitKey,
+          ));
+          freshlyRegistered.add(kind);
+          recoveredIds.set(kind, registered.id);
+          recoveredEntries.push({ kind, artifactId: registered.id, path: kindPath, sha256: createHash("sha256").update(content).digest("hex") });
+        }
+        // 已登记残留产物的父关系必须符合证据链：缺失说明它来自不同证据链，fail closed。
+        for (const entry of recoveredEntries) {
+          if (entry.kind === "executable_plan" || freshlyRegistered.has(entry.kind)) continue;
+          const artifact = context.artifacts.find((candidate) => candidate.id === entry.artifactId)!;
+          const expectedParents = parentOf(entry.kind);
+          const missingParents = expectedParents.filter((parentId) => !(artifact.parentArtifactIds ?? []).includes(parentId));
+          if (missingParents.length > 0) {
+            throw planningCommitValidationError(
+              `pre-registered '${entry.kind}' is missing expected parent links ${JSON.stringify(missingParents)}`,
+            );
+          }
+        }
+        const recoveredPlanContent = `${JSON.stringify(parseExecutableProductionPlan({
+          ...executablePlanArtifact.output,
+          treatmentArtifactId: recoveredIds.get("creative_treatment")!,
+          scriptArtifactId: recoveredIds.get("script")!,
+          directorArtifactId: recoveredIds.get("storyboard")!,
+          candidateArtifactIds: libraryRoute
+            ? [recoveredIds.get("asset_candidates")!, recoveredIds.get("asset_ranking")!]
+            : [],
+        }), null, 2)}\n`;
+        const planLeftover = leftoverByKind.get("executable_plan");
+        let planEntry: { kind: string; artifactId: string; path: string; sha256: string };
+        if (planLeftover) {
+          const disk = await readFile(path.resolve(runsRoot, context.runId, planLeftover.uri ?? ""), "utf8").catch(() => undefined);
+          if (disk === undefined || disk !== recoveredPlanContent
+            || createHash("sha256").update(disk).digest("hex") !== planLeftover.sha256) {
+            throw planningCommitValidationError("pre-registered 'executable_plan' does not match the replayed planning content");
+          }
+          planEntry = { kind: "executable_plan", artifactId: planLeftover.id, path: planLeftover.uri!, sha256: planLeftover.sha256 };
+        } else {
+          const executablePlanContent = recoveredPlanContent;
+          const executablePlanPath = path.join(attempt.directory, "executable_plan.json");
+          await writeTextAtomically(executablePlanPath, executablePlanContent);
+          const registered = context.addArtifact(fileArtifact(
+            "executable_plan",
+            executablePlanPath,
+            executablePlanContent,
+            "application/json",
+            "video-factory/executable-plan-v1",
+            "creative-planning",
+            expectedKinds.filter((kind) => kind !== "executable_plan").map((kind) => recoveredIds.get(kind)!),
+            "video-factory-ts-v1",
+            "Deterministically compiled production timing and source references.",
+            attempt.attempt,
+            planningCommitKey,
+          ));
+          planEntry = { kind: "executable_plan", artifactId: registered.id, path: executablePlanPath, sha256: createHash("sha256").update(executablePlanContent).digest("hex") };
+        }
+        const committedEntries = [...recoveredEntries, planEntry];
+        const reusedPath = (kind: string) => {
+          const entry = committedEntries.find((candidate) => candidate.kind === kind);
+          if (!entry) throw new Error(`Joint planning recovery is missing its '${kind}' entry.`);
+          return entry.path;
+        };
+        await writeJointPlanningCommit(planningCommitPath, {
+          version: PLANNING_COMMIT_VERSION,
+          runId: context.runId,
+          planningCommitKey,
+          inputDigest,
+          artifacts: committedEntries,
+        });
+        return {
+          status: "succeeded",
+          output: {
+            scriptPath: reusedPath("script"),
+            directorPlanPath: reusedPath("storyboard"),
+            executablePlanPath: reusedPath("executable_plan"),
+            canonFacts: scriptArtifact.output.canonFacts ?? [],
+            ...(libraryRoute ? {
+              candidateSearchPath: reusedPath("asset_candidates"),
+              candidateRankingPath: reusedPath("asset_ranking"),
+              candidateInventoryPath: committedCandidateInventoryPath(),
+            } : {}),
+          },
+          preRegisteredArtifactIds: committedEntries.map((entry) => entry.artifactId),
+          receipt: planningReceipt,
+        };
+      }
+
+      // 全新登记：正式产物登记顺序即证据链：稿件 ← brief(+语法)；导演方案 ← 稿件(+语法)；
+      // 候选 ← 稿件+方案；排序 ← 候选；可执行方案 ← 前述全部。provenance 绑定 commit key，
+      // 供窗口 (b) 恢复发现与 commit 身份校验使用。
+      // F1 残留收口：除可执行方案（内容依赖登记 id）外的全部文件先落盘——任何写入失败都
+      // 发生在"零登记"状态；登记段本身不再夹带可失败的文件 I/O，部分 registry 只可能由
+      // 进程死亡产生，而 leftovers 恢复分支对部分集合可续齐（见下）。
+      const treatmentPath = path.join(attempt.directory, "creative_treatment.json");
+      const scriptPath = path.join(attempt.directory, "script.json");
+      const directorPlanPath = path.join(attempt.directory, "director_plan.json");
+      const candidateSearchPath = path.join(attempt.directory, "candidate_search.json");
+      const candidateRankingPath = path.join(attempt.directory, "candidate_ranking.json");
+      await writeTextAtomically(treatmentPath, treatmentContent);
+      await writeTextAtomically(scriptPath, scriptContent);
+      await writeTextAtomically(directorPlanPath, directorPlanContent);
+      const willRegisterCandidates = candidateContent !== undefined && rankingContent !== undefined && candidatesArtifact && rankingArtifact;
+      if (willRegisterCandidates) {
+        await writeTextAtomically(candidateSearchPath, candidateContent!);
+        await writeTextAtomically(candidateRankingPath, rankingContent!);
+      }
+      const registeredTreatment = context.addArtifact(fileArtifact(
+        "creative_treatment",
+        treatmentPath,
+        treatmentContent,
+        "application/json",
+        "video-factory/creative-treatment-v1",
+        "creative-planning",
+        [...briefArtifactIds, ...grammarArtifactIds],
+        // provider 与 model 分离：正式 provenance 记录实际执行 provider（含 fallback 后的
+        // 真实来源）；缺失时显式 unknown，不把模型字符串或首选配置写进 provider 命名空间。
+        providerTraces.treatment ?? "unknown",
+        "Accepted creative treatment for this production plan.",
+        attempt.attempt,
+        planningCommitKey,
+      ));
+      const registeredScript = context.addArtifact(fileArtifact(
+        "script",
+        scriptPath,
+        scriptContent,
+        "application/json",
+        "video-factory/script-draft-v1",
+        "creative-planning",
+        [registeredTreatment.id, ...briefArtifactIds, ...grammarArtifactIds],
+        currentBrief.providers.script,
+        "AI-generated script; facts and claims require human review before publication.",
+        attempt.attempt,
+        planningCommitKey,
+      ));
+      const registeredDirectorPlan = context.addArtifact(fileArtifact(
+        "storyboard",
+        directorPlanPath,
+        directorPlanContent,
+        "application/json",
+        "video-factory/director-plan-v1",
+        "creative-planning",
+        [registeredScript.id, ...grammarArtifactIds],
+        currentDirectorProviderId,
+        "AI-generated director plan; source choices and factual framing require review.",
+        attempt.attempt,
+        planningCommitKey,
+      ));
+      const planningEvidenceParentIds = [registeredTreatment.id, registeredScript.id, registeredDirectorPlan.id];
+      const committedCandidateIds: string[] = [];
+      let candidatePaths: { candidateSearchPath: string; candidateRankingPath: string } | undefined;
+      if (willRegisterCandidates) {
+        const registeredCandidates = context.addArtifact(fileArtifact(
+          "asset_candidates",
+          candidateSearchPath,
+          candidateContent!,
+          "application/json",
+          "video-factory/asset-candidates-v1",
+          "creative-planning",
+          [registeredScript.id, registeredDirectorPlan.id],
+          "asset-candidate-search-v1",
+          "Preview-only candidate metadata; no source media was downloaded by this node.",
+          attempt.attempt,
+          planningCommitKey,
+        ));
+        const registeredRanking = context.addArtifact(fileArtifact(
+          "asset_ranking",
+          candidateRankingPath,
+          rankingContent!,
+          "application/json",
+          "video-factory/asset-ranking-v1",
+          "creative-planning",
+          [registeredCandidates.id],
+          rankingArtifact!.output.providerId,
+          "Candidate ranking only; no source media was downloaded or altered.",
+          attempt.attempt,
+          planningCommitKey,
+        ));
+        planningEvidenceParentIds.push(registeredCandidates.id, registeredRanking.id);
+        committedCandidateIds.push(registeredCandidates.id, registeredRanking.id);
+        candidatePaths = { candidateSearchPath, candidateRankingPath };
+      }
+      const reboundExecutablePlan = parseExecutableProductionPlan({
+        ...executablePlanArtifact.output,
+        treatmentArtifactId: registeredTreatment.id,
+        scriptArtifactId: registeredScript.id,
+        directorArtifactId: registeredDirectorPlan.id,
+        candidateArtifactIds: committedCandidateIds,
+      });
+      const executablePlanContent = `${JSON.stringify(reboundExecutablePlan, null, 2)}\n`;
+      const executablePlanPath = path.join(attempt.directory, "executable_plan.json");
+      await writeTextAtomically(executablePlanPath, executablePlanContent);
+      const registeredExecutablePlan = context.addArtifact(fileArtifact(
+        "executable_plan",
+        executablePlanPath,
+        executablePlanContent,
+        "application/json",
+        "video-factory/executable-plan-v1",
+        "creative-planning",
+        planningEvidenceParentIds,
+        "video-factory-ts-v1",
+        "Deterministically compiled production timing and source references.",
+        attempt.attempt,
+        planningCommitKey,
+      ));
+      options.planningFailpoints?.afterArtifacts?.();
+      // 全部正式产物已登记、commit 结束标记尚未写——afterArtifacts 崩溃窗口在此之后收口。
+      await writeJointPlanningCommit(planningCommitPath, {
+        version: PLANNING_COMMIT_VERSION,
+        runId: context.runId,
+        planningCommitKey,
+        inputDigest,
+        artifacts: [
+          { kind: "creative_treatment", artifactId: registeredTreatment.id, path: treatmentPath, sha256: createHash("sha256").update(treatmentContent).digest("hex") },
+          { kind: "script", artifactId: registeredScript.id, path: scriptPath, sha256: committedSha256("script") },
+          { kind: "storyboard", artifactId: registeredDirectorPlan.id, path: directorPlanPath, sha256: committedSha256("storyboard") },
+          ...(candidatePaths ? [
+            { kind: "asset_candidates", artifactId: context.artifacts.find((artifact) => artifact.id
+              && artifact.kind === "asset_candidates"
+              && artifact.provenance?.producerRequestDigest === planningCommitKey
+              && artifact.uri === candidatePaths.candidateSearchPath)!.id, path: candidatePaths.candidateSearchPath, sha256: committedSha256("asset_candidates") },
+            { kind: "asset_ranking", artifactId: context.artifacts.find((artifact) =>
+              artifact.kind === "asset_ranking"
+              && artifact.provenance?.producerRequestDigest === planningCommitKey
+              && artifact.uri === candidatePaths.candidateRankingPath)!.id, path: candidatePaths.candidateRankingPath, sha256: committedSha256("asset_ranking") },
+          ] : []),
+          { kind: "executable_plan", artifactId: registeredExecutablePlan.id, path: executablePlanPath, sha256: createHash("sha256").update(executablePlanContent).digest("hex") },
+        ],
+      });
+      // commit 已写、run CAS 尚未保存：外部 commit 只是 prepared 证据，不是已接受结果。
+      options.planningFailpoints?.afterCommit?.();
+      return {
+        status: "succeeded",
+        output: {
+          scriptPath,
+          directorPlanPath,
+          executablePlanPath,
+          canonFacts: scriptArtifact.output.canonFacts ?? [],
+          ...(candidatePaths ? { ...candidatePaths, candidateInventoryPath: committedCandidateInventoryPath() } : {}),
+        },
+        preRegisteredArtifactIds: [
+          registeredTreatment.id,
+          registeredScript.id,
+          registeredDirectorPlan.id,
+          ...(candidatePaths ? [
+            context.artifacts.find((artifact) =>
+              artifact.kind === "asset_candidates"
+              && artifact.provenance?.producerRequestDigest === planningCommitKey
+              && artifact.uri === candidatePaths.candidateSearchPath)!.id,
+            context.artifacts.find((artifact) =>
+              artifact.kind === "asset_ranking"
+              && artifact.provenance?.producerRequestDigest === planningCommitKey
+              && artifact.uri === candidatePaths.candidateRankingPath)!.id,
+          ] : []),
+          registeredExecutablePlan.id,
+        ],
+        receipt: planningReceipt,
+      };
+    },
+    validateOverride: (output) => validateJointPlanningOutput(output, libraryRoute),
+  };
+}
+
 function directorNode(
   brief: ProductionBrief,
   options: ProductionPipelineOptions,
   runsRoot: string,
+  withSourceRunSnapshot: SourceRunSnapshot,
 ): NodeDefinition {
   const direction = brief.director;
   const providerId = brief.providers.director;
@@ -3128,49 +6657,85 @@ function directorNode(
             : {}),
         })
         : [];
+      const producerBrief: VisualDirectorAgentInput["brief"] = {
+        title: currentBrief.title,
+        angle: currentBrief.angle,
+        audience: currentBrief.audience,
+        platform: currentBrief.platform,
+        durationSeconds: currentBrief.durationSeconds,
+        ...(currentBrief.durationRange ? { durationRange: currentBrief.durationRange } : {}),
+        ...(viewerPromise ? { viewerPromise } : {}),
+        ...(narrativeArc ? { narrativeArc } : {}),
+        requestedProfileId: currentDirection.profileId,
+        ...(currentBrief.templateSnapshot ? { templateBlueprint: currentBrief.templateSnapshot.resolvedBlueprint } : {}),
+        ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
+        ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
+        ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
+        productionCapabilities: summarizeProductionCapabilities(assetProviders),
+        ...(referenceGrammar ? { referenceGrammar } : {}),
+        ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
+        ...(currentBrief.rework ? {
+          rework: {
+            sourceRunId: currentBrief.rework.sourceRunId,
+            visualDirectionInstruction: currentBrief.rework.nodeInstructions.visualDirection,
+            assetInstruction: currentBrief.rework.nodeInstructions.assets,
+            findings: currentBrief.rework.findings
+              .filter((finding) => finding.targetNodeIds.includes("visual-direction") && finding.action !== "inspect_existing_media")
+              .map(modelFacingReworkFinding),
+            ...(affectedScenePositions.length || currentBrief.rework.affectedScenePositions !== undefined
+              ? { affectedScenePositions }
+              : {}),
+            ...(currentBrief.rework.previousDirectorPlan ? { previousDirectorPlan: currentBrief.rework.previousDirectorPlan } : {}),
+          },
+        } : {}),
+      };
+      const producerInput: VisualDirectorAgentInput = {
+        brief: producerBrief,
+        scenes,
+        assetProviders,
+        economics: directorEconomics,
+        selectedModelId: provider.modelId ?? "codex-default",
+        ...(costFeedback?.length ? { costFeedback } : {}),
+      };
+      const producerIdentity = producerRequestIdentity(DIRECTOR_PRODUCER_REQUEST_SCHEMA_VERSION, {
+        contractVersion: VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
+        promptPack: "video-factory/director-v28",
+        request: {
+          ...producerInput,
+          brief: producerBriefWithoutRework(producerInput.brief),
+          scenes: producerInput.scenes.map(directorSceneProducerIdentity),
+        },
+      });
+      const inherited = await inheritUnchangedReworkDirector({
+        brief: currentBrief,
+        context,
+        runsRoot,
+        attemptDirectory: attempt.directory,
+        attempt: attempt.attempt,
+        agent: options.directorAgent,
+        scriptPath,
+        producerIdentity,
+        withSourceRunSnapshot,
+        planValidation: visualDirectorPlanValidation(
+          currentBrief,
+          scenes,
+          options.assetProviders ?? [],
+          options.providerRuntimeMetadata ?? [],
+          viewerPromise,
+        ),
+      });
+      if (inherited) return inherited;
       try {
         execution = await provider.run({
-          brief: {
-            title: currentBrief.title,
-            angle: currentBrief.angle,
-            audience: currentBrief.audience,
-            platform: currentBrief.platform,
-            durationSeconds: currentBrief.durationSeconds,
-            ...(viewerPromise ? { viewerPromise } : {}),
-            ...(narrativeArc ? { narrativeArc } : {}),
-            requestedProfileId: currentDirection.profileId,
-            ...(currentBrief.templateSnapshot ? { templateBlueprint: currentBrief.templateSnapshot.resolvedBlueprint } : {}),
-            ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
-            ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
-            ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
-            ...(referenceGrammar ? { referenceGrammar } : {}),
-            ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
-            ...(currentBrief.rework ? {
-              rework: {
-                sourceRunId: currentBrief.rework.sourceRunId,
-                visualDirectionInstruction: currentBrief.rework.nodeInstructions.visualDirection,
-                assetInstruction: currentBrief.rework.nodeInstructions.assets,
-                findings: currentBrief.rework.findings
-                  .filter((finding) => finding.targetNodeIds.includes("visual-direction") && finding.action !== "inspect_existing_media")
-                  .map(modelFacingReworkFinding),
-                ...(affectedScenePositions.length || currentBrief.rework.affectedScenePositions !== undefined
-                  ? { affectedScenePositions }
-                  : {}),
-                ...(currentBrief.rework.previousDirectorPlan ? { previousDirectorPlan: currentBrief.rework.previousDirectorPlan } : {}),
-              },
-            } : {}),
-          },
-          scenes,
-          assetProviders,
-          economics: directorEconomics,
-          ...(currentBrief.models?.[providerId] ? { selectedModelId: currentBrief.models[providerId] } : {}),
-          ...(costFeedback?.length ? { costFeedback } : {}),
+          ...producerInput,
           agentLoopCheckpoint: nodeAgentLoopCheckpoint(
             runsRoot,
             context.runId,
             "visual-direction",
             { brief: currentBrief, scenes, assetProviders, economics: directorEconomics, ...(costFeedback?.length ? { costFeedback } : {}), ...(referenceGrammar ? { referenceGrammar } : {}) },
             VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
+            undefined,
+            context.operationRequestId,
           ),
           agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
             runsRoot,
@@ -3179,6 +6744,7 @@ function directorNode(
             { brief: currentBrief, scenes, assetProviders, economics: directorEconomics, ...(costFeedback?.length ? { costFeedback } : {}), ...(referenceGrammar ? { referenceGrammar } : {}) },
             VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
             modelId,
+            context.operationRequestId,
           ),
         }, context);
       } catch (error) {
@@ -3237,8 +6803,13 @@ function directorNode(
       return {
         status: "succeeded",
         output: { directorPlanPath: planPath },
-        ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, "Codex 视觉导演", "subscription", execution.agentLoop, provider.configurationSource) } : {}),
-        artifacts: [fileArtifact(
+        receipt: producerRequestReceipt(
+          provider,
+          execution,
+          "Codex 视觉导演",
+          producerIdentity,
+        ),
+        artifacts: [withProducerRequestIdentity(fileArtifact(
           "storyboard",
           planPath,
           content,
@@ -3249,10 +6820,326 @@ function directorNode(
           providerId,
           "AI-generated director plan; source choices and factual framing require review.",
           attempt.attempt,
-        ), ...(traceArtifact ? [traceArtifact] : []), ...(loopArtifact ? [loopArtifact] : [])],
+        ), producerIdentity), ...(traceArtifact ? [traceArtifact] : []), ...(loopArtifact ? [loopArtifact] : [])],
       };
     },
     validateOverride: (output) => validatePathOutput(output, "directorPlanPath", "visual-direction"),
+  };
+}
+
+async function inheritUnchangedReworkDirector(options: {
+  brief: ProductionBrief;
+  context: WorkflowContext;
+  runsRoot: string;
+  attemptDirectory: string;
+  attempt: number;
+  agent: VisualDirectorAgent | undefined;
+  scriptPath: string;
+  producerIdentity: ProducerRequestIdentity;
+  withSourceRunSnapshot: SourceRunSnapshot;
+  planValidation: Parameters<typeof validateVisualDirectorPlan>[1];
+}): Promise<NodeExecutionResult<Record<string, unknown>> | undefined> {
+  const rework = options.brief.rework;
+  if (!rework
+    || !rework.previousDirectorPlan
+    || options.brief.workflowFeatures?.referenceGrammar
+    || rework.findings.some((finding) => (
+      finding.targetNodeIds.includes("visual-direction")
+      && finding.action !== "inspect_existing_media"
+  ))) {
+    return undefined;
+  }
+  try {
+    return await options.withSourceRunSnapshot(rework.sourceRunId, async () => {
+  let sourceRun: WorkflowRun<ProductionBrief>;
+  try {
+    sourceRun = JSON.parse(await readFile(
+      path.join(options.runsRoot, rework.sourceRunId, "run.json"),
+      "utf8",
+    )) as WorkflowRun<ProductionBrief>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+  if (sourceRun.revision !== rework.sourceRunRevision) return undefined;
+  const sourceNode = sourceRun.nodeRuns.find((node) => node.nodeId === "visual-direction");
+  const sourceExecution = effectiveNodeExecutionInput(sourceNode);
+  if (!sourceExecution) return undefined;
+  let sourceBrief: ProductionBrief;
+  try {
+    sourceBrief = effectiveProductionBrief(sourceRun);
+  } catch {
+    return undefined;
+  }
+  if (!isDeepStrictEqual(directorReuseIdentity(options.brief), directorReuseIdentity(sourceBrief))) return undefined;
+
+  const currentModelId = options.brief.models?.[options.brief.providers.director!]
+    ?? options.agent?.modelId
+    ?? "codex-default";
+  if (sourceNode?.status !== "succeeded"
+    || sourceNode.outputState?.stale === true
+    || sourceNode.executionReceipt?.modelId !== currentModelId
+    || sourceNode.executionReceipt?.parameters?.promptPack !== "video-factory/director-v28"
+    || sourceNode.executionReceipt?.parameters?.producerRequestSchemaVersion !== options.producerIdentity.schemaVersion
+    || sourceNode.executionReceipt?.parameters?.producerRequestDigest !== options.producerIdentity.digest) {
+    return undefined;
+  }
+  let sourceDirectorPlanPath: string;
+  try {
+    sourceDirectorPlanPath = requiredOutputString(
+      requireOutputRecord(sourceExecution.output, "source visual-direction output"),
+      "directorPlanPath",
+    );
+  } catch {
+    return undefined;
+  }
+  const sourceArtifacts = sourceExecution.artifactIds
+    .map((id) => sourceRun.artifacts.find((artifact) => artifact.id === id))
+    .filter((artifact): artifact is Artifact => (
+      artifact?.kind === "storyboard"
+      && artifact.producer?.nodeId === "visual-direction"
+      && artifact.uri !== undefined
+      && path.resolve(artifact.uri) === path.resolve(sourceDirectorPlanPath)
+    ));
+  if (sourceArtifacts.length !== 1) return undefined;
+  const sourceArtifact = sourceArtifacts[0]!;
+  let sourceScriptPath: string;
+  try {
+    sourceScriptPath = requiredOutputString(
+      requireOutputRecord(sourceExecution.input, "source visual-direction input"),
+      "scriptPath",
+    );
+  } catch {
+    return undefined;
+  }
+  const sourceScriptArtifacts = sourceRun.artifacts.filter((artifact) => (
+    artifact.producer?.nodeId === "script"
+    && sourceArtifact?.parentArtifactIds?.includes(artifact.id)
+    && artifact.uri !== undefined
+    && path.resolve(artifact.uri) === path.resolve(sourceScriptPath)
+  ));
+  const currentScriptArtifacts = options.context.artifacts.filter((artifact) => (
+    artifact.producer?.nodeId === "script"
+    && artifact.uri !== undefined
+    && path.resolve(artifact.uri) === path.resolve(options.scriptPath)
+  ));
+  if (sourceScriptArtifacts.length !== 1 || currentScriptArtifacts.length !== 1) return undefined;
+  const sourceScriptArtifact = sourceScriptArtifacts[0]!;
+  const currentScriptArtifact = currentScriptArtifacts[0]!;
+  if (!sourceArtifact?.uri
+    || sourceArtifact.schemaVersion !== "video-factory/director-plan-v1"
+    || sourceArtifact.contentType !== "application/json"
+    || !sourceArtifact.sha256
+    || sourceArtifact.sizeBytes === undefined
+    || sourceArtifact.provenance.producerRequestSchemaVersion !== options.producerIdentity.schemaVersion
+    || sourceArtifact.provenance.producerRequestDigest !== options.producerIdentity.digest
+    || !sourceScriptArtifact?.uri
+    || !sourceScriptArtifact.sha256
+    || sourceScriptArtifact.sizeBytes === undefined
+    || path.resolve(sourceScriptArtifact.uri) !== path.resolve(sourceScriptPath)
+    || !currentScriptArtifact?.uri
+    || !currentScriptArtifact.sha256
+    || currentScriptArtifact.sizeBytes === undefined) {
+    return undefined;
+  }
+  try {
+    await verifyStoredArtifactWithinRoot(path.join(options.runsRoot, rework.sourceRunId), sourceArtifact);
+    await verifyStoredArtifactWithinRoot(path.join(options.runsRoot, rework.sourceRunId), sourceScriptArtifact);
+    await verifyStoredArtifactWithinRoot(path.join(options.runsRoot, options.context.runId), currentScriptArtifact);
+    const sourceScript = requireOutputRecord(JSON.parse(await readFile(sourceScriptArtifact.uri, "utf8")), "source director script");
+    const currentScript = requireOutputRecord(JSON.parse(await readFile(currentScriptArtifact.uri, "utf8")), "current director script");
+    if (!isDeepStrictEqual(directorScriptReuseIdentity(sourceScript), directorScriptReuseIdentity(currentScript))) return undefined;
+    const document = requireOutputRecord(JSON.parse(await readFile(sourceArtifact.uri, "utf8")), "source director plan");
+    if (!isDeepStrictEqual(document, rework.previousDirectorPlan)) return undefined;
+    validateVisualDirectorPlan(document, options.planValidation);
+  } catch {
+    return undefined;
+  }
+  const directorPlanPath = path.join(options.attemptDirectory, "director_plan.json");
+  try {
+    await copyFile(sourceArtifact.uri, directorPlanPath);
+    await verifyArtifactBytes(directorPlanPath, sourceArtifact.sha256, sourceArtifact.sizeBytes);
+  } catch {
+    await rm(directorPlanPath, { force: true });
+    return undefined;
+  }
+  return {
+    status: "succeeded",
+    output: { directorPlanPath },
+    artifacts: [{
+      kind: sourceArtifact.kind,
+      uri: directorPlanPath,
+      sha256: sourceArtifact.sha256,
+      sizeBytes: sourceArtifact.sizeBytes,
+      contentType: sourceArtifact.contentType,
+      schemaVersion: sourceArtifact.schemaVersion,
+      parentArtifactIds: [currentScriptArtifact.id],
+      provenance: {
+        ...sourceArtifact.provenance,
+        notes: `Inherited unchanged from ${rework.sourceRunId} artifact ${sourceArtifact.id}.`,
+      },
+      producer: { nodeId: "visual-direction", attempt: options.attempt },
+    }],
+  };
+    });
+  } catch (error) {
+    if (error instanceof RunLockedError) return undefined;
+    throw error;
+  }
+}
+
+function effectiveNodeExecutionInput(
+  node: NodeRun | undefined,
+): { input: unknown; output: unknown; artifactIds: string[] } | undefined {
+  if (!node?.inputState || node.inputState.stale || !node.outputState || node.outputState.stale) return undefined;
+  const inputVersion = node.inputState.versions.find(
+    (version) => version.id === node.inputState?.effectiveVersionId,
+  );
+  const outputVersion = node.outputState.versions.find(
+    (version) => version.id === node.outputState?.effectiveVersionId,
+  );
+  if (!inputVersion || !outputVersion?.inputVersionIds.includes(inputVersion.id)) return undefined;
+  return { input: inputVersion.value, output: outputVersion.output, artifactIds: outputVersion.artifactIds };
+}
+
+function producerRequestIdentity(schemaVersion: string, value: unknown): ProducerRequestIdentity {
+  return {
+    schemaVersion,
+    digest: createHash("sha256").update(JSON.stringify(canonicalJsonValue(value))).digest("hex"),
+  };
+}
+
+function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (!isObjectRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, entry]) => entry !== undefined && typeof entry !== "function")
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalJsonValue(entry)]),
+  );
+}
+
+function withProducerRequestIdentity(
+  artifact: ArtifactDraft,
+  identity: ProducerRequestIdentity,
+): ArtifactDraft {
+  return {
+    ...artifact,
+    provenance: {
+      ...artifact.provenance,
+      producerRequestDigest: identity.digest,
+      producerRequestSchemaVersion: identity.schemaVersion,
+    },
+  };
+}
+
+function receiptWithProducerRequestIdentity(
+  receipt: NodeExecutionReceiptDraft,
+  identity: ProducerRequestIdentity,
+): NodeExecutionReceiptDraft {
+  return {
+    ...receipt,
+    parameters: {
+      ...(receipt.parameters ?? {}),
+      producerRequestDigest: identity.digest,
+      producerRequestSchemaVersion: identity.schemaVersion,
+    },
+  };
+}
+
+function producerRequestReceipt(
+  provider: Pick<Provider, "id" | "label" | "modelId" | "transport" | "billing" | "configurationSource" | "parameters">,
+  execution: Pick<CodexTaskExecution<unknown>, "trace" | "agentLoop">,
+  providerLabel: string,
+  identity: ProducerRequestIdentity,
+): NodeExecutionReceiptDraft {
+  const receipt = execution.trace
+    ? modelTraceReceipt(
+      execution.trace,
+      providerLabel,
+      "subscription",
+      execution.agentLoop,
+      provider.configurationSource,
+    )
+    : {
+      providerId: provider.id,
+      providerLabel: provider.label ?? providerLabel,
+      modelId: provider.modelId ?? "unspecified",
+      transport: provider.transport ?? "local_process",
+      billing: provider.billing ?? "subscription",
+      ...(provider.configurationSource ? { configurationSource: provider.configurationSource } : {}),
+      ...(provider.parameters ? { parameters: { ...provider.parameters } } : {}),
+    };
+  return receiptWithProducerRequestIdentity(receipt, identity);
+}
+
+function producerBriefWithoutRework(
+  brief: VisualDirectorAgentInput["brief"],
+): Omit<VisualDirectorAgentInput["brief"], "rework"> {
+  const { rework: _rework, ...producerBrief } = brief;
+  return producerBrief;
+}
+
+function directorSceneProducerIdentity(
+  scene: VisualDirectorAgentInput["scenes"][number],
+): Record<string, unknown> {
+  return {
+    position: scene.position,
+    ...(scene.purpose ? { purpose: scene.purpose } : {}),
+    duration: scene.duration,
+    visualPrompt: scene.visualPrompt,
+    visualStrategy: scene.visualStrategy,
+    visibleAction: scene.visibleAction,
+    ...(scene.onScreenText ? { onScreenText: scene.onScreenText } : {}),
+    successCriteria: scene.successCriteria,
+    failureConditions: scene.failureConditions,
+    searchTerms: scene.searchTerms,
+  };
+}
+
+function directorScriptReuseIdentity(script: Record<string, unknown>): Record<string, unknown> {
+  const scenes = parseDirectorScenes(script.scenes).map((scene) => ({
+    position: scene.position,
+    ...(scene.purpose ? { purpose: scene.purpose } : {}),
+    duration: scene.duration,
+    visualPrompt: scene.visualPrompt,
+    visualStrategy: scene.visualStrategy,
+    visibleAction: scene.visibleAction,
+    ...(scene.onScreenText ? { onScreenText: scene.onScreenText } : {}),
+    successCriteria: scene.successCriteria,
+    failureConditions: scene.failureConditions,
+    searchTerms: scene.searchTerms,
+  }));
+  return {
+    viewerPromise: optionalOutputString(script.viewerPromise),
+    narrativeArc: optionalOutputString(script.narrativeArc),
+    scenes,
+  };
+}
+
+function directorReuseIdentity(brief: ProductionBrief): Record<string, unknown> {
+  const providerIds = brief.director?.assetProviderIds ?? [];
+  return {
+    title: brief.title,
+    angle: brief.angle,
+    audience: brief.audience,
+    platform: brief.platform,
+    durationSeconds: brief.durationSeconds,
+    durationRange: brief.durationRange,
+    templateBlueprint: brief.templateSnapshot?.resolvedBlueprint,
+    editorial: brief.editorial,
+    visualProof: brief.visualProof,
+    visualPlan: brief.visualPlan,
+    seriesContext: brief.seriesContext,
+    direction: brief.director,
+    allowMeteredProviders: brief.economics.allowMeteredProviders,
+    directorProviderId: brief.providers.director,
+    modelSelections: Object.fromEntries(
+      [brief.providers.director, ...providerIds]
+        .filter((providerId): providerId is string => Boolean(providerId))
+        .map((providerId) => [providerId, brief.models?.[providerId]]),
+    ),
   };
 }
 
@@ -3270,7 +7157,9 @@ async function readShotGrammarFile(grammarPath: string): Promise<ShotGrammar> {
 function screenwriterNode(
   brief: ProductionBrief,
   agent: ScreenwriterAgent | undefined,
+  options: ProductionPipelineOptions,
   runsRoot: string,
+  withSourceRunSnapshot: SourceRunSnapshot,
   allowUnavailableProvider = false,
 ): NodeDefinition {
   const providerId = brief.providers.script;
@@ -3288,14 +7177,36 @@ function screenwriterNode(
     getInput: (context) => {
       const currentBrief = currentEffectiveBriefFromContext(context, brief);
       return {
-        brief: screenwriterBrief(currentBrief),
+        brief: screenwriterBrief(currentBrief, options),
         ...(currentBrief.models?.[providerId] ? { selectedModelId: currentBrief.models[providerId] } : {}),
       };
     },
     validateInputOverride: (input) => validateScreenwriterInput(input),
     execute: async (input, context) => {
       const request = validateScreenwriterInput(input);
+      const producerBrief = { ...request.brief };
+      delete producerBrief.rework;
+      const producerIdentity = producerRequestIdentity(SCREENWRITER_PRODUCER_REQUEST_SCHEMA_VERSION, {
+        contractVersion: SCREENWRITER_AGENT_CONTRACT_VERSION,
+        promptPack: "video-factory/screenwriter-v14",
+        request: {
+          brief: producerBrief,
+          selectedModelId: request.selectedModelId ?? agent?.modelId ?? "codex-default",
+        },
+      });
       const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "script"));
+      const inherited = await inheritUnchangedReworkScript({
+        productionRework: currentEffectiveBriefFromContext(context, brief).rework,
+        request,
+        context,
+        runsRoot,
+        attemptDirectory: attempt.directory,
+        attempt: attempt.attempt,
+        agent,
+        producerIdentity,
+        withSourceRunSnapshot,
+      });
+      if (inherited) return inherited;
       const provider = context.resolveProvider<ScreenwriterAgentInput, CodexTaskExecution<unknown>>({
         capability: "script.draft",
         providerId,
@@ -3313,6 +7224,8 @@ function screenwriterNode(
             "script",
             request,
             SCREENWRITER_AGENT_CONTRACT_VERSION,
+            undefined,
+            context.operationRequestId,
           ),
           agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
             runsRoot,
@@ -3321,12 +7234,14 @@ function screenwriterNode(
             request,
             SCREENWRITER_AGENT_CONTRACT_VERSION,
             modelId,
+            context.operationRequestId,
           ),
         }, context);
       } catch (error) {
         if (error instanceof RoleAgentLoopError) {
           const rejectedDraft = lastAgentLoopCandidate(error, (value) => validateScriptDraft(value, {
             durationSeconds: request.brief.durationSeconds,
+            ...(request.brief.durationRange ? { durationRange: request.brief.durationRange } : {}),
             requireCanonFacts: Boolean(request.brief.seriesContext),
           }));
           const preserved = rejectedDraft
@@ -3346,7 +7261,7 @@ function screenwriterNode(
             attempt: attempt.attempt,
             parentArtifactIds,
             provider,
-            providerLabel: "Codex 编剧",
+            providerLabel: "AI 编剧",
             ...(preserved ? { output: preserved.output, additionalArtifacts: [preserved.artifact] } : {}),
           });
         }
@@ -3359,7 +7274,7 @@ function screenwriterNode(
             attempt: attempt.attempt,
             parentArtifactIds,
             provider,
-            providerLabel: "Codex 编剧",
+            providerLabel: "AI 编剧",
           });
         }
         throw error;
@@ -3367,6 +7282,7 @@ function screenwriterNode(
       const requestedBrief = request.brief;
       const draft = validateScriptDraft(execution.output, {
         durationSeconds: requestedBrief.durationSeconds,
+        ...(requestedBrief.durationRange ? { durationRange: requestedBrief.durationRange } : {}),
         requireCanonFacts: Boolean(requestedBrief.seriesContext),
       });
       const scriptPath = path.join(attempt.directory, "script.json");
@@ -3390,8 +7306,8 @@ function screenwriterNode(
       return {
         status: "succeeded",
         output: { scriptPath, canonFacts: draft.canonFacts ?? [] },
-        ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, "Codex 编剧", "subscription", execution.agentLoop, provider.configurationSource) } : {}),
-        artifacts: [fileArtifact(
+        receipt: producerRequestReceipt(provider, execution, "AI 编剧", producerIdentity),
+        artifacts: [withProducerRequestIdentity(fileArtifact(
           "script",
           scriptPath,
           content,
@@ -3402,11 +7318,149 @@ function screenwriterNode(
           providerId,
           "AI-generated script; facts and claims require human review before publication.",
           attempt.attempt,
-        ), ...(traceArtifact ? [traceArtifact] : []), ...(loopArtifact ? [loopArtifact] : [])],
+        ), producerIdentity), ...(traceArtifact ? [traceArtifact] : []), ...(loopArtifact ? [loopArtifact] : [])],
       };
     },
     validateOverride: (output) => validateScriptNodeOutput(output),
   };
+}
+
+async function inheritUnchangedReworkScript(options: {
+  productionRework: ProductionBrief["rework"];
+  request: ScreenwriterAgentInput;
+  context: WorkflowContext;
+  runsRoot: string;
+  attemptDirectory: string;
+  attempt: number;
+  agent: ScreenwriterAgent | undefined;
+  producerIdentity: ProducerRequestIdentity;
+  withSourceRunSnapshot: SourceRunSnapshot;
+}): Promise<NodeExecutionResult<Record<string, unknown>> | undefined> {
+  const rework = options.productionRework;
+  if (!rework
+    || rework.affectedScenePositions === undefined
+    || rework.affectedScenePositions.length !== 0
+    || !rework.previousScript
+    || rework.findings.some((finding) => (
+      finding.targetNodeIds.includes("script") && finding.action !== "inspect_existing_media"
+  ))) {
+    return undefined;
+  }
+
+  try {
+    return await options.withSourceRunSnapshot(rework.sourceRunId, async () => {
+  let sourceRun: WorkflowRun<ProductionBrief>;
+  try {
+    sourceRun = JSON.parse(await readFile(
+      path.join(options.runsRoot, rework.sourceRunId, "run.json"),
+      "utf8",
+    )) as WorkflowRun<ProductionBrief>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+  if (sourceRun.revision !== rework.sourceRunRevision) return undefined;
+  const sourceNode = sourceRun.nodeRuns.find((node) => node.nodeId === "script");
+  const sourceExecution = effectiveNodeExecutionInput(sourceNode);
+  if (!sourceExecution) return undefined;
+  let sourceRequest: ScreenwriterAgentInput;
+  try {
+    sourceRequest = validateScreenwriterInput(sourceExecution.input);
+  } catch {
+    return undefined;
+  }
+  const { rework: _currentRework, ...currentModelInput } = options.request.brief;
+  const { rework: _sourceRework, ...sourceModelInput } = sourceRequest.brief;
+  if (!isDeepStrictEqual(currentModelInput, sourceModelInput)) return undefined;
+  const currentModelId = options.request.selectedModelId ?? options.agent?.modelId ?? "codex-default";
+  if (sourceNode?.status !== "succeeded"
+    || sourceNode.outputState?.stale === true
+    || sourceNode.executionReceipt?.modelId !== currentModelId
+    || sourceNode.executionReceipt?.parameters?.promptPack !== "video-factory/screenwriter-v14"
+    || sourceNode.executionReceipt?.parameters?.producerRequestSchemaVersion !== options.producerIdentity.schemaVersion
+    || sourceNode.executionReceipt?.parameters?.producerRequestDigest !== options.producerIdentity.digest) {
+    return undefined;
+  }
+  let sourceScriptPath: string;
+  try {
+    sourceScriptPath = requiredOutputString(
+      requireOutputRecord(sourceExecution.output, "source script output"),
+      "scriptPath",
+    );
+  } catch {
+    return undefined;
+  }
+  const sourceArtifacts = sourceExecution.artifactIds
+    .map((id) => sourceRun.artifacts.find((artifact) => artifact.id === id))
+    .filter((artifact): artifact is Artifact => (
+      artifact?.kind === "script"
+      && artifact.producer?.nodeId === "script"
+      && artifact.uri !== undefined
+      && path.resolve(artifact.uri) === path.resolve(sourceScriptPath)
+    ));
+  if (sourceArtifacts.length !== 1) return undefined;
+  const sourceArtifact = sourceArtifacts[0]!;
+  if (!sourceArtifact?.uri
+    || sourceArtifact.schemaVersion !== "video-factory/script-draft-v1"
+    || sourceArtifact.contentType !== "application/json"
+    || !sourceArtifact.sha256
+    || sourceArtifact.sizeBytes === undefined
+    || sourceArtifact.provenance.producerRequestSchemaVersion !== options.producerIdentity.schemaVersion
+    || sourceArtifact.provenance.producerRequestDigest !== options.producerIdentity.digest) {
+    return undefined;
+  }
+  try {
+    await verifyStoredArtifactWithinRoot(path.join(options.runsRoot, rework.sourceRunId), sourceArtifact);
+  } catch {
+    return undefined;
+  }
+  let document: Record<string, unknown>;
+  let draft: ScriptDraft;
+  try {
+    document = requireOutputRecord(JSON.parse(await readFile(sourceArtifact.uri, "utf8")), "source script");
+    if (!isDeepStrictEqual(document, rework.previousScript)) return undefined;
+    draft = validateScriptDraft(document, {
+      durationSeconds: options.request.brief.durationSeconds,
+      ...(options.request.brief.durationRange ? { durationRange: options.request.brief.durationRange } : {}),
+      requireCanonFacts: Boolean(options.request.brief.seriesContext),
+    });
+  } catch {
+    return undefined;
+  }
+
+  const scriptPath = path.join(options.attemptDirectory, "script.json");
+  try {
+    await copyFile(sourceArtifact.uri, scriptPath);
+    await verifyArtifactBytes(scriptPath, sourceArtifact.sha256, sourceArtifact.sizeBytes);
+  } catch {
+    await rm(scriptPath, { force: true });
+    return undefined;
+  }
+  return {
+    status: "succeeded",
+    output: { scriptPath, canonFacts: draft.canonFacts ?? [] },
+    artifacts: [{
+      kind: sourceArtifact.kind,
+      uri: scriptPath,
+      sha256: sourceArtifact.sha256,
+      sizeBytes: sourceArtifact.sizeBytes,
+      contentType: sourceArtifact.contentType,
+      schemaVersion: sourceArtifact.schemaVersion,
+      parentArtifactIds: options.context.artifacts
+        .filter((artifact) => artifact.producer?.nodeId === "brief")
+        .map((artifact) => artifact.id),
+      provenance: {
+        ...sourceArtifact.provenance,
+        notes: `Inherited unchanged from ${rework.sourceRunId} artifact ${sourceArtifact.id}.`,
+      },
+      producer: { nodeId: "script", attempt: options.attempt },
+    }],
+  };
+    });
+  } catch (error) {
+    if (error instanceof RunLockedError) return undefined;
+    throw error;
+  }
 }
 
 function scriptDocument(brief: ScreenwriterAgentInput["brief"], draft: ScriptDraft): Record<string, unknown> {
@@ -3417,6 +7471,7 @@ function scriptDocument(brief: ScreenwriterAgentInput["brief"], draft: ScriptDra
     ...(draft.canonFacts ? { canonFacts: draft.canonFacts } : {}),
     hook: draft.scenes[0]!.narration,
     duration_target: brief.durationSeconds,
+    ...(brief.durationRange ? { duration_range: { ...brief.durationRange } } : {}),
     disclosure_required: true,
     niche_slug: brief.nicheSlug,
     structure: "AI 编剧短视频结构",
@@ -3664,7 +7719,24 @@ function optionalOutputStringList(value: unknown): string[] {
   return value.flatMap((entry) => typeof entry === "string" && entry.trim() ? [entry.trim()] : []);
 }
 
-function screenwriterBrief(brief: ProductionBrief): ScreenwriterAgentInput["brief"] {
+// 编剧面对的返工上下文只在实质相关时进入其真实输入与阶段身份：仅修 media/director 的
+// 返工（无编剧指令、无 script 责任 findings）不得让编剧阶段在身份层“天然不同”而被重跑。
+function screenwriterReworkContext(brief: ProductionBrief): ProductionBrief["rework"] | undefined {
+  const rework = brief.rework;
+  if (!rework) return undefined;
+  const instruction = rework.nodeInstructions.script?.trim();
+  const scriptFindings = rework.findings.filter((finding) => (
+    finding.targetNodeIds.includes("script") && finding.action !== "inspect_existing_media"
+  ));
+  if (!instruction && scriptFindings.length === 0) return undefined;
+  return rework;
+}
+
+function screenwriterBrief(
+  brief: ProductionBrief,
+  options?: ProductionPipelineOptions,
+): ScreenwriterAgentInput["brief"] {
+  const rework = screenwriterReworkContext(brief);
   return {
     title: brief.title,
     angle: brief.angle,
@@ -3672,22 +7744,26 @@ function screenwriterBrief(brief: ProductionBrief): ScreenwriterAgentInput["brie
     nicheSlug: brief.nicheSlug,
     platform: brief.platform,
     durationSeconds: brief.durationSeconds,
+    productionCapabilities: options
+      ? productionCapabilitiesFor(brief, options)
+      : summarizeProductionCapabilities([]),
+    ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
     ...(brief.templateSnapshot ? { templateBlueprint: brief.templateSnapshot.resolvedBlueprint } : {}),
     ...(brief.editorial ? { editorial: brief.editorial } : {}),
     ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
     ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
     ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
-    ...(brief.rework ? {
+    ...(rework ? {
       rework: {
-        sourceRunId: brief.rework.sourceRunId,
-        instruction: brief.rework.nodeInstructions.script,
-        findings: brief.rework.findings
+        sourceRunId: rework.sourceRunId,
+        instruction: rework.nodeInstructions.script,
+        findings: rework.findings
           .filter((finding) => finding.targetNodeIds.includes("script") && finding.action !== "inspect_existing_media")
           .map(modelFacingReworkFinding),
-        ...(brief.rework.affectedScenePositions !== undefined
-          ? { affectedScenePositions: [...brief.rework.affectedScenePositions] }
+        ...(rework.affectedScenePositions !== undefined
+          ? { affectedScenePositions: [...rework.affectedScenePositions] }
           : {}),
-        ...(brief.rework.previousScript ? { previousScript: brief.rework.previousScript } : {}),
+        ...(rework.previousScript ? { previousScript: rework.previousScript } : {}),
       },
     } : {}),
   };
@@ -3731,6 +7807,9 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
     platform: requiredOutputString(rawBrief, "platform"),
     durationSeconds,
   };
+  if (rawBrief.durationRange !== undefined) {
+    brief.durationRange = parseScriptDurationRange(rawBrief.durationRange, durationSeconds);
+  }
   if (rawBrief.templateBlueprint !== undefined) {
     brief.templateBlueprint = parseProductionBlueprint(rawBrief.templateBlueprint);
   }
@@ -3796,6 +7875,7 @@ function parseScreenwriterAffectedScenePositions(value: unknown): number[] {
 function validateVisualReviewInput(
   value: unknown,
   directorEnabled: boolean,
+  executablePlanRequired = false,
 ): VisualReviewAgentInput & { renderManifestPath: string } {
   const input = requireOutputRecord(value, "visual-review input");
   const request: VisualReviewAgentInput & { renderManifestPath: string } = {
@@ -3806,6 +7886,7 @@ function validateVisualReviewInput(
     renderManifestPath: requiredOutputString(input, "renderManifestPath"),
   };
   if (directorEnabled) request.directorPlanPath = requiredOutputString(input, "directorPlanPath");
+  if (executablePlanRequired) request.executablePlanPath = requiredOutputString(input, "executablePlanPath");
   if (input.selectedModelId !== undefined) {
     request.selectedModelId = requiredOutputString(input, "selectedModelId");
   }
@@ -3823,23 +7904,43 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
     providerId,
     mode: "automatic",
     dependsOn: ["assets"],
-    getInput: (context) => ({
+    getInput: (context) => {
+      const planning = usesJointCreativePlanning(brief) ? planningOutputs(context) : undefined;
+      return {
       assetPlanPath: outputPath(context, "assets", "assetPlanPath"),
       reviewStage: "source_assets",
       runRoot: path.join(runsRoot, context.runId),
-      scriptPath: outputPath(context, "script", "scriptPath"),
-      ...(brief.director ? { directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath") } : {}),
+      scriptPath: planning ? planning.scriptPath : outputPath(context, "script", "scriptPath"),
+      ...(planning
+        ? { directorPlanPath: planning.directorPlanPath, executablePlanPath: planning.executablePlanPath }
+        : {
+            ...(brief.director ? { directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath") } : {}),
+            ...(brief.durationRange && brief.director
+              ? { executablePlanPath: outputPath(context, "production-preflight", "executablePlanPath") }
+              : {}),
+          }),
       ...(brief.models?.[providerId] ? { selectedModelId: brief.models[providerId] } : {}),
-    }),
-    validateInputOverride: (input) => validateSourceAssetVisualReviewInput(input, Boolean(brief.director)),
+      };
+    },
+    validateInputOverride: (input) => validateSourceAssetVisualReviewInput(
+      input,
+      Boolean(brief.director),
+      Boolean(brief.durationRange && brief.director),
+    ),
     execute: async (input, context) => {
-      const request = validateSourceAssetVisualReviewInput(input, Boolean(brief.director));
+      const request = validateSourceAssetVisualReviewInput(
+        input,
+        Boolean(brief.director),
+        Boolean(brief.durationRange && brief.director),
+      );
       const provider = context.resolveProvider<VisualReviewAgentInput, VisualReviewExecution>({
         capability: "quality.review.visual",
         providerId,
       });
       const parentArtifactIds = context.artifacts
-        .filter((artifact) => artifact.producer && ["script", "visual-direction", "assets"].includes(artifact.producer.nodeId))
+        .filter((artifact) => artifact.producer && (usesJointCreativePlanning(brief)
+          ? ["creative-planning", "assets"]
+          : ["script", "visual-direction", "production-preflight", "assets"]).includes(artifact.producer.nodeId))
         .map((artifact) => artifact.id);
       const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "asset-source-review"));
       let execution: VisualReviewExecution;
@@ -3852,6 +7953,8 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
             "asset-source-review",
             request,
             VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+            undefined,
+            context.operationRequestId,
           ),
           agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
             runsRoot,
@@ -3860,6 +7963,7 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
             request,
             VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
             modelId,
+            context.operationRequestId,
           ),
         }, context);
       } catch (error) {
@@ -3899,15 +8003,23 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
         ...(execution.sampling?.coveredScenePositions ?? []),
         ...execution.output.findings.flatMap((finding) => finding.scenePosition ? [finding.scenePosition] : []),
       ])].sort((left, right) => left - right);
+      const planDurationMs = request.executablePlanPath
+        ? await executablePlanDurationMs(request.executablePlanPath)
+        : brief.durationSeconds * 1_000;
       const report: VisualReviewReport = {
         ...execution.output,
         reviewScope: {
           reviewStage: "source_assets",
           evidenceId: execution.evidenceSnapshotId ?? visualReviewEvidenceId(context, parentArtifactIds),
-          sourceNodeIds: ["script", ...(brief.director ? ["visual-direction"] : []), "assets"],
+          sourceNodeIds: [
+            "script",
+            ...(brief.director ? ["visual-direction"] : []),
+            ...(brief.durationRange && brief.director ? ["production-preflight"] : []),
+            "assets",
+          ],
           sourceArtifactIds: [...parentArtifactIds].sort(),
           scenePositions: sourceScenePositions,
-          timelineDurationMs: execution.inspectedDurationMs ?? brief.durationSeconds * 1_000,
+          timelineDurationMs: execution.inspectedDurationMs ?? planDurationMs,
           actualModels: [{
             providerId: execution.executedProviderId ?? execution.trace?.providerId ?? provider.id,
             modelId: execution.executedModelId ?? execution.trace?.modelId ?? provider.modelId ?? provider.id,
@@ -3957,7 +8069,25 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
   };
 }
 
-function validateSourceAssetVisualReviewInput(value: unknown, directorEnabled: boolean): VisualReviewAgentInput {
+function parseScriptDurationRange(value: unknown, durationSeconds: number): NonNullable<ScreenwriterAgentInput["brief"]["durationRange"]> {
+  const input = requireOutputRecord(value, "script input brief.durationRange");
+  const minSeconds = Number(input.minSeconds);
+  const maxSeconds = Number(input.maxSeconds);
+  if (!Number.isInteger(minSeconds) || !Number.isInteger(maxSeconds)
+    || minSeconds < 20 || maxSeconds > 180 || minSeconds > maxSeconds) {
+    throw new Error("script input brief.durationRange must use ordered integer bounds between 20 and 180.");
+  }
+  if (durationSeconds < minSeconds || durationSeconds > maxSeconds) {
+    throw new Error("script input brief.durationSeconds must fall within durationRange.");
+  }
+  return { minSeconds, maxSeconds };
+}
+
+function validateSourceAssetVisualReviewInput(
+  value: unknown,
+  directorEnabled: boolean,
+  executablePlanRequired = false,
+): VisualReviewAgentInput {
   const input = requireOutputRecord(value, "source asset visual review input");
   const request: VisualReviewAgentInput = {
     assetPlanPath: requiredOutputString(input, "assetPlanPath"),
@@ -3966,6 +8096,7 @@ function validateSourceAssetVisualReviewInput(value: unknown, directorEnabled: b
     scriptPath: requiredOutputString(input, "scriptPath"),
   };
   if (directorEnabled) request.directorPlanPath = requiredOutputString(input, "directorPlanPath");
+  if (executablePlanRequired) request.executablePlanPath = requiredOutputString(input, "executablePlanPath");
   if (input.selectedModelId !== undefined) request.selectedModelId = requiredOutputString(input, "selectedModelId");
   return request;
 }
@@ -4031,22 +8162,42 @@ function visualReviewNode(
     providerId,
     mode: "automatic",
     dependsOn: ["render", "technical-review"],
-    getInput: (context) => ({
+    getInput: (context) => {
+      const planning = usesJointCreativePlanning(brief) ? planningOutputs(context) : undefined;
+      return {
       videoPath: outputPath(context, "render", "videoPath"),
       reviewStage: "rendered_video",
       runRoot: path.join(runsRoot, context.runId),
-      scriptPath: outputPath(context, "script", "scriptPath"),
-      ...(brief.director ? { directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath") } : {}),
+      scriptPath: planning ? planning.scriptPath : outputPath(context, "script", "scriptPath"),
+      ...(planning
+        ? { directorPlanPath: planning.directorPlanPath, executablePlanPath: planning.executablePlanPath }
+        : {
+            ...(brief.director ? { directorPlanPath: outputPath(context, "visual-direction", "directorPlanPath") } : {}),
+            ...(brief.durationRange && brief.director
+              ? { executablePlanPath: outputPath(context, "production-preflight", "executablePlanPath") }
+              : {}),
+          }),
       renderManifestPath: outputPath(context, "render", "renderManifestPath"),
       ...(brief.models?.[providerId] ? { selectedModelId: brief.models[providerId] } : {}),
-    }),
-    validateInputOverride: (input) => validateVisualReviewInput(input, Boolean(brief.director)),
+      };
+    },
+    validateInputOverride: (input) => validateVisualReviewInput(
+      input,
+      Boolean(brief.director),
+      Boolean(brief.durationRange && brief.director),
+    ),
     execute: async (input, context) => {
       const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "visual-review"));
-      const request = validateVisualReviewInput(input, Boolean(brief.director));
+      const request = validateVisualReviewInput(
+        input,
+        Boolean(brief.director),
+        Boolean(brief.durationRange && brief.director),
+      );
       const checkpointCycle = await currentVisualReinspectionCycle(runsRoot, context.runId);
       const parentArtifactIds = context.artifacts
-        .filter((artifact) => artifact.producer && ["render", "technical-review"].includes(artifact.producer.nodeId))
+        .filter((artifact) => artifact.producer && (usesJointCreativePlanning(brief)
+          ? ["creative-planning", "render", "technical-review"]
+          : ["production-preflight", "render", "technical-review"]).includes(artifact.producer.nodeId))
         .map((artifact) => artifact.id);
       const provider = context.resolveProvider<VisualReviewAgentInput, VisualReviewExecution>({
         capability: "quality.review.visual",
@@ -4063,6 +8214,8 @@ function visualReviewNode(
             "visual-review",
             request,
             `${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}|cycle:${checkpointCycle}`,
+            undefined,
+            context.operationRequestId,
           ),
           agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
             runsRoot,
@@ -4071,6 +8224,7 @@ function visualReviewNode(
             request,
             `${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}|cycle:${checkpointCycle}`,
             modelId,
+            context.operationRequestId,
           ),
           independentReviewCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
             runsRoot,
@@ -4079,6 +8233,7 @@ function visualReviewNode(
             request,
             `independent-final-visual-review-result-v2|${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}|cycle:${checkpointCycle}`,
             modelId,
+            context.operationRequestId,
           ),
         }, context);
       } catch (error) {
@@ -4148,15 +8303,22 @@ function visualReviewNode(
         ...(execution.sampling?.coveredScenePositions ?? []),
         ...localizedReport.findings.flatMap((finding) => finding.scenePosition ? [finding.scenePosition] : []),
       ])].sort((left, right) => left - right);
+      const planDurationMs = request.executablePlanPath
+        ? await executablePlanDurationMs(request.executablePlanPath)
+        : brief.durationSeconds * 1_000;
       const report: VisualReviewReport = {
         ...localizedReport,
         reviewScope: {
           reviewStage: "rendered_video",
           evidenceId: execution.evidenceSnapshotId ?? visualReviewEvidenceId(context, parentArtifactIds),
-          sourceNodeIds: ["render", "technical-review"],
+          sourceNodeIds: [
+            ...(brief.durationRange && brief.director ? ["production-preflight"] : []),
+            "render",
+            "technical-review",
+          ],
           sourceArtifactIds: [...parentArtifactIds].sort(),
           scenePositions,
-          timelineDurationMs: execution.inspectedDurationMs ?? brief.durationSeconds * 1_000,
+          timelineDurationMs: execution.inspectedDurationMs ?? planDurationMs,
           actualModels: actualModelProofs,
         },
         ...(independentReviews ? { independentReviews } : {}),
@@ -4331,6 +8493,8 @@ function assetSemanticRankNode(
                   "asset-semantic-rank",
                   report,
                   ASSET_RANK_AGENT_CONTRACT_VERSION,
+                  undefined,
+                  context.operationRequestId,
                 ),
               )
             : { output: await ranker.rank(report) };
@@ -4790,6 +8954,7 @@ function workerResponseToNodeResult(
       ...(artifact.provenance.sourceUrl ? { sourceUrl: artifact.provenance.sourceUrl } : {}),
       ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
       ...(artifact.provenance.scenePosition ? { scenePosition: artifact.provenance.scenePosition } : {}),
+      ...(artifact.provenance.notes ? { notes: artifact.provenance.notes } : {}),
     },
   }));
   const providerOutcomeKnown = response.diagnostics?.providerOutcomeKnown;
@@ -4802,6 +8967,33 @@ function workerResponseToNodeResult(
       error,
       artifacts,
       ...(providerOutcomeKnown !== undefined ? { providerOutcomeKnown } : {}),
+    };
+  }
+  if (response.status === "rejected" && response.error?.code === "VOICE_DOES_NOT_FIT") {
+    const output = requireOutputRecord(response.output, "voice timing conflict output");
+    const conflict = parseVoiceDoesNotFitConflict(output.conflict);
+    const rawArtifact = response.artifacts.find((artifact) => (
+      artifact.kind === conflict.audioArtifact.kind
+      && artifact.uri === conflict.audioArtifact.uri
+      && artifact.sha256 === conflict.audioArtifact.sha256
+      && artifact.sizeBytes === conflict.audioArtifact.sizeBytes
+    ));
+    if (!rawArtifact) {
+      throw new Error("Voice timing conflict does not include its materialized raw audio artifact.");
+    }
+    return {
+      status: "needs_human",
+      error,
+      output: { conflict },
+      artifacts,
+      ...(providerOutcomeKnown !== undefined ? { providerOutcomeKnown } : {}),
+      intervention: {
+        reason: `镜头 ${conflict.scenePosition} 的自然配音需要 ${conflict.requiredSeconds} 秒，`
+          + `已接受 cut 只有 ${conflict.plannedSeconds} 秒。请在现有规划/人工修改入口提交新的统一 plan，`
+          + "并核对素材覆盖；如需新媒体，仍须按现有报价与授权流程处理。",
+        requiredAction: "request_changes",
+        options: ["request_changes", "reject"],
+      },
     };
   }
   if (response.status === "rejected") {
@@ -4834,10 +9026,7 @@ async function validateSeriesWorkerScriptResponse(response: WorkerResponse): Pro
   } catch {
     throw new Error("系列编剧返回的最终脚本不是可读取的 JSON。");
   }
-  const canonFacts = outputStringArray(scriptDocument, "canonFacts");
-  if (canonFacts.length === 0) {
-    throw new Error("系列脚本在进入素材、配音和渲染前必须确认 1 到 8 条可供后集依赖的定版事实。");
-  }
+  const canonFacts = outputStringArray(scriptDocument, "canonFacts", true);
   return { ...response, output: { ...output, canonFacts } };
 }
 
@@ -4903,6 +9092,8 @@ function modelTraceReceipt(
   loop?: AgentLoopTrace,
   configurationSource: ExecutionConfigurationSource = "system_default",
 ): NodeExecutionReceiptDraft {
+  const queueWaitMs = loopTraceDurationMs(loop, "queueWaitMs") ?? trace.queueWaitMs;
+  const providerWaitMs = loopTraceDurationMs(loop, "providerWaitMs") ?? trace.providerWaitMs;
   return {
     providerId: trace.providerId,
     providerLabel,
@@ -4913,8 +9104,8 @@ function modelTraceReceipt(
     parameters: {
       promptPack: trace.promptVersion,
       ...(trace.reasoningEffort ? { reasoningEffort: trace.reasoningEffort } : {}),
-      ...(trace.queueWaitMs !== undefined ? { queueWaitMs: trace.queueWaitMs } : {}),
-      ...(trace.providerWaitMs !== undefined ? { providerWaitMs: trace.providerWaitMs } : {}),
+      ...(queueWaitMs !== undefined ? { queueWaitMs } : {}),
+      ...(providerWaitMs !== undefined ? { providerWaitMs } : {}),
       ...(trace.firstOutputEventMs !== undefined ? { firstOutputEventMs: trace.firstOutputEventMs } : {}),
       ...(trace.toolMs !== undefined ? { toolMs: trace.toolMs } : {}),
       ...(trace.validationMs !== undefined ? { providerValidationMs: trace.validationMs } : {}),
@@ -4934,6 +9125,19 @@ function modelTraceReceipt(
     ...(trace.fallbackFromModelId ? { fallbackReason: trace.fallbackReason ?? `首选模型 ${trace.fallbackFromModelId} 调用失败，已切换候选模型。` } : {}),
     ...(trace.attemptedModelIds?.length ? { actualModelIds: trace.attemptedModelIds } : {}),
   };
+}
+
+function loopTraceDurationMs(
+  loop: AgentLoopTrace | undefined,
+  field: "queueWaitMs" | "providerWaitMs",
+): number | undefined {
+  if (!loop) return undefined;
+  const traces = loop.iterations.flatMap((iteration) => [iteration.candidateTrace, iteration.auditTrace]);
+  if (loop.pendingCandidate?.candidateTrace) traces.push(loop.pendingCandidate.candidateTrace);
+  const durations = traces
+    .map((item) => item?.[field])
+    .filter((value): value is number => Number.isSafeInteger(value) && Number(value) >= 0);
+  return durations.length > 0 ? durations.reduce((total, value) => total + value, 0) : undefined;
 }
 
 function validateWorkerNodeOverride(nodeId: string, output: unknown): Record<string, unknown> {
@@ -5034,10 +9238,7 @@ function validateScriptNodeOutput(output: unknown): Record<string, unknown> {
 function validateFinalReviewInput(input: unknown, requireCanonFacts = false): Record<string, unknown> {
   const value = requireOutputRecord(input, "final-review");
   if (!("review" in value)) throw new Error("final-review input must contain the reviewed delivery.");
-  const canonFacts = outputStringArray(value, "canonFacts");
-  if (requireCanonFacts && canonFacts.length === 0) {
-    throw new Error("系列成片在终审前必须从最终脚本确认 1 到 8 条可供后集依赖的定版事实。");
-  }
+  const canonFacts = outputStringArray(value, "canonFacts", requireCanonFacts);
   const reviewArtifactIds = value.reviewArtifactIds === undefined
     ? undefined
     : finalReviewArtifactIdsFromOutput(value);
@@ -5266,10 +9467,16 @@ function outputPath(context: WorkflowContext, nodeId: string, field: string): st
   return value;
 }
 
-function outputStringArray(output: unknown, field: string): string[] {
-  if (typeof output !== "object" || output === null || Array.isArray(output)) return [];
+function outputStringArray(output: unknown, field: string, requireField = false): string[] {
+  if (typeof output !== "object" || output === null || Array.isArray(output)) {
+    if (requireField) throw new Error(`${field} must be present as an array with at most 8 strings.`);
+    return [];
+  }
   const value = (output as Record<string, unknown>)[field];
-  if (value === undefined) return [];
+  if (value === undefined) {
+    if (requireField) throw new Error(`${field} must be present as an array with at most 8 strings.`);
+    return [];
+  }
   if (!Array.isArray(value) || value.length > 8) throw new Error(`${field} must contain at most 8 strings.`);
   return value.map((entry, index) => {
     if (typeof entry !== "string" || !entry.trim() || entry.length > 240) {
@@ -5426,6 +9633,10 @@ function reviseAssetPlanByReuse(
     ...reused,
     scene_position: current.scene_position,
     ...(current.duration !== undefined ? { duration: current.duration } : {}),
+    ...(current.duration_frames !== undefined ? { duration_frames: current.duration_frames } : {}),
+    ...(current.source_in_frame !== undefined ? { source_in_frame: current.source_in_frame } : {}),
+    ...(current.asset_key !== undefined ? { asset_key: current.asset_key } : {}),
+    ...(current.crop !== undefined ? { crop: structuredClone(current.crop) } : {}),
     ...(current.query !== undefined ? { query: current.query } : {}),
     reuse_from_scene_position: reusePosition,
   });
@@ -5599,6 +9810,8 @@ function fileArtifact(
   providerId: string,
   licenseNote: string,
   attempt = 1,
+  // 创作规划 commit 协议：把正式产物与 planningCommitKey 绑定，供崩溃恢复发现与校验。
+  producerRequestDigest?: string,
 ): ArtifactDraft {
   return {
     kind,
@@ -5609,7 +9822,12 @@ function fileArtifact(
     schemaVersion,
     parentArtifactIds,
     producer: { nodeId, attempt },
-    provenance: { providerId, providerVersion: "1", licenseNote },
+    provenance: {
+      providerId,
+      providerVersion: "1",
+      licenseNote,
+      ...(producerRequestDigest !== undefined ? { producerRequestDigest } : {}),
+    },
   };
 }
 
@@ -5682,12 +9900,12 @@ async function failedAgentLoopNodeResult(options: {
           ...(options.provider.parameters ?? {}),
           agentLoop: "failed",
           agentLoopIterations: options.error.agentLoop.iterations.length,
-          modelCallCount: Math.max(1, options.error.agentLoop.modelCallCount ?? 1),
+          modelCallCount: options.error.agentLoop.modelCallCount ?? 0,
         },
       };
   if (options.provider.billing === "metered") {
     const meteredAttemptCount = Math.max(
-      1,
+      0,
       options.error.agentLoop.producerModelCallCount
         ?? options.error.agentLoop.iterations.length + (options.error.agentLoop.pendingCandidate ? 1 : 0),
     );
@@ -5991,13 +10209,29 @@ function nodeAgentLoopCheckpoint(
   input: unknown,
   contractVersion: string,
   modelId?: string,
+  workflowOperationRequestId?: string,
+  resumeCompletedTextTaskNodeId?: string,
+  resumeCompletedTextTaskRequestId?: string,
+  recoverWorkflowOperationRequestId?: string,
 ): ReturnType<typeof fileRoleAgentLoopCheckpoint> {
   // 同一制作内沿用 running checkpoint；人工重试 exhausted 节点时开启新 cycle，避免回放旧失败终态。
   const key = roleAgentCheckpointKey({ runId, nodeId, input, contractVersion, ...(modelId ? { modelId } : {}) });
   return fileRoleAgentLoopCheckpoint(
     path.join(runsRoot, runId, "nodes", nodeId, "agent-loop-checkpoints", `${key}.json`),
     key,
-    { restartExhausted: true },
+    {
+      restartExhausted: true,
+      ...(resumeCompletedTextTaskNodeId === nodeId && resumeCompletedTextTaskRequestId
+        ? { resumeCompletedFailureRequestId: resumeCompletedTextTaskRequestId }
+        : {}),
+      recoverOwnedPending: true,
+      ...(recoverWorkflowOperationRequestId
+        ? { recoverPendingOwner: { runId, nodeId, workflowOperationRequestId: recoverWorkflowOperationRequestId } }
+        : {}),
+      ...(workflowOperationRequestId
+        ? { recoveryOwner: { runId, nodeId, workflowOperationRequestId } }
+        : {}),
+    },
   );
 }
 
@@ -6039,13 +10273,17 @@ async function reserveAttemptDirectory(root: string): Promise<{ directory: strin
 
 async function currentArtifactsForPackaging(context: WorkflowContext, brief: ProductionBrief): Promise<Artifact[]> {
   const nodeOutputs = [
-    { nodeId: "script", paths: [outputPath(context, "script", "scriptPath")] },
+    ...(usesJointCreativePlanning(brief)
+      ? jointPlanningPackagingEntry(context)
+      : [
+          { nodeId: "script", paths: [outputPath(context, "script", "scriptPath")] },
+          ...(brief.director ? [{ nodeId: "visual-direction", paths: [outputPath(context, "visual-direction", "directorPlanPath")] }] : []),
+          ...(brief.workflowFeatures?.assetSemanticRank ? [
+            { nodeId: "asset-candidates", paths: [outputPath(context, "asset-candidates", "candidateSearchPath")] },
+            { nodeId: "asset-semantic-rank", paths: [outputPath(context, "asset-semantic-rank", "candidateRankingPath")] },
+          ] : []),
+        ]),
     ...(brief.workflowFeatures?.referenceGrammar ? [{ nodeId: "reference-grammar", paths: [outputPath(context, "reference-grammar", "referenceGrammarPath")] }] : []),
-    ...(brief.director ? [{ nodeId: "visual-direction", paths: [outputPath(context, "visual-direction", "directorPlanPath")] }] : []),
-    ...(brief.workflowFeatures?.assetSemanticRank ? [
-      { nodeId: "asset-candidates", paths: [outputPath(context, "asset-candidates", "candidateSearchPath")] },
-      { nodeId: "asset-semantic-rank", paths: [outputPath(context, "asset-semantic-rank", "candidateRankingPath")] },
-    ] : []),
     { nodeId: "assets", paths: [outputPath(context, "assets", "assetPlanPath")] },
     { nodeId: "voice", paths: [outputPath(context, "voice", "voiceoverPlanPath"), outputPath(context, "voice", "trackPath")] },
     { nodeId: "render", paths: [outputPath(context, "render", "videoPath"), outputPath(context, "render", "renderManifestPath")] },
@@ -6370,6 +10608,172 @@ async function verifyStoredArtifacts(artifacts: readonly Artifact[]): Promise<vo
       throw new Error(`Artifact '${artifact.id}' is missing integrity metadata.`);
     }
     await verifyArtifactBytes(artifact.uri, artifact.sha256, artifact.sizeBytes);
+  }
+}
+
+async function verifyExecutablePlanInput(
+  input: Record<string, unknown>,
+  context: WorkflowContext,
+  runsRoot: string,
+): Promise<void> {
+  const planPath = optionalOutputString(input.executablePlanPath);
+  if (!planPath) return;
+  const artifact = [...context.artifacts].reverse().find((candidate) => (
+    candidate.kind === "executable_plan"
+    // joint-v1 的可执行方案由 creative-planning 编译登记，不再经过 production-preflight。
+    && (candidate.producer?.nodeId === "production-preflight" || candidate.producer?.nodeId === "creative-planning")
+    && candidate.uri === planPath
+  ));
+  if (!artifact || artifact.schemaVersion !== "video-factory/executable-plan-v1") {
+    throw new Error("Executable production plan input is not bound to the current planning artifact.");
+  }
+  await verifyStoredArtifactWithinRoot(path.join(runsRoot, context.runId), artifact);
+  const plan = parseExecutableProductionPlan(JSON.parse(await readFile(planPath, "utf8")));
+  await verifyExecutablePlanReferenceClosure(plan, artifact, context, path.join(runsRoot, context.runId));
+}
+
+// 报价/执行前的正式引用闭包：可执行方案必须是规划节点当前 output 指向的正式方案，
+// 其内部 treatment/script/director/candidate 引用必须唯一解析到本 run 产物。缺失、跨 run、
+// 旧版（不属于当前接受 output / 与引用集不同一次规划 commit）、重复登记或篡改一律
+// fail closed。严格性按显式拓扑判定：creative-planning 产物为 joint（引用集必须共享同一
+// commit digest，且 plan 自带 digest 时必须一致——缺 digest 不再隐式跳过）；production-
+// preflight 为 legacy（唯一解析 + kind + 完整性）。joint 还核验证据链父关系。
+// 读取规划节点当前 effective output version 的 artifactIds（BG-01 membership 绑定）。
+// run.json 缺失/不可解析/节点不存在时返回 undefined：调用方跳过 membership 检查，
+// 但引用唯一性/parent/SHA 校验仍然全部执行——不能因读取失败放松闭包。
+async function currentPlanningVersionArtifactIds(
+  runJsonPath: string,
+  nodeId: string,
+): Promise<string[] | undefined> {
+  try {
+    const run = JSON.parse(await readFile(runJsonPath, "utf8")) as Record<string, unknown>;
+    if (!Array.isArray(run.nodeRuns)) return undefined;
+    const node = (run.nodeRuns as Array<Record<string, unknown>>).find(
+      (value) => typeof value === "object" && value !== null && value.nodeId === nodeId,
+    );
+    if (typeof node !== "object" || node === null || typeof node.outputState !== "object" || node.outputState === null) return undefined;
+    const state = node.outputState as { effectiveVersionId?: unknown; versions?: unknown };
+    if (typeof state.effectiveVersionId !== "string" || !Array.isArray(state.versions)) return undefined;
+    const version = (state.versions as Array<Record<string, unknown>>).find(
+      (candidate) => typeof candidate === "object" && candidate !== null && candidate.id === state.effectiveVersionId,
+    );
+    if (typeof version !== "object" || version === null || !Array.isArray(version.artifactIds)) return undefined;
+    return version.artifactIds.filter((id): id is string => typeof id === "string");
+  } catch {
+    return undefined;
+  }
+}
+
+async function verifyExecutablePlanReferenceClosure(
+  plan: ExecutableProductionPlan,
+  planArtifact: Artifact,
+  context: WorkflowContext,
+  runRoot: string,
+): Promise<void> {
+  // 当前接受绑定：被消费的 plan 必须正是规划节点当前 output 指向的文件；
+  // 旧版本/被替换的方案不得继续驱动报价与执行。
+  const ownerOutput = planArtifact.producer?.nodeId
+    ? context.outputs.get(planArtifact.producer.nodeId)
+    : undefined;
+  const currentPlanPath = ownerOutput !== undefined
+    ? optionalOutputString(requireOutputRecord(ownerOutput, "planning output").executablePlanPath)
+    : undefined;
+  if (!currentPlanPath || currentPlanPath !== planArtifact.uri) {
+    throw new Error("Executable plan input is not the current accepted planning output; the run has a newer plan.");
+  }
+  const references: Array<{ id: string; kind: string; parentOf?: string }> = [];
+  if (plan.treatmentArtifactId !== undefined) references.push({ id: plan.treatmentArtifactId, kind: "creative_treatment", parentOf: "script" });
+  references.push(
+    { id: plan.scriptArtifactId, kind: "script" },
+    { id: plan.directorArtifactId, kind: "storyboard" },
+  );
+  const candidateKinds = ["asset_candidates", "asset_ranking"];
+  if (plan.candidateArtifactIds.length > 0) {
+    if (plan.candidateArtifactIds.length !== candidateKinds.length) {
+      throw new Error("Executable plan candidate references must bind exactly one candidates artifact and one ranking artifact.");
+    }
+    plan.candidateArtifactIds.forEach((id, index) => references.push({
+      id,
+      kind: candidateKinds[index]!,
+      ...(candidateKinds[index] === "asset_ranking" ? { parentOf: "asset_candidates" } : {}),
+    }));
+  }
+  const producerNodeId = planArtifact.producer?.nodeId;
+  const joint = producerNodeId === "creative-planning";
+  const planDigest = planArtifact.provenance?.producerRequestDigest;
+  if (joint && plan.treatmentArtifactId === undefined) {
+    // joint 路线的 treatment 是必需引用：可省略仅限 legacy（production-preflight）历史拓扑。
+    throw new Error("Executable plans produced by the joint planning stage must reference their creative treatment artifact.");
+  }
+  const referencedArtifacts = new Map<string, Artifact>();
+  const seen = new Set<string>();
+  for (const reference of references) {
+    if (seen.has(reference.id)) {
+      throw new Error(`Executable plan references artifact '${reference.id}' more than once.`);
+    }
+    seen.add(reference.id);
+    const matches = context.artifacts.filter((candidate) => candidate.id === reference.id);
+    if (matches.length !== 1) {
+      throw new Error(
+        matches.length === 0
+          ? `Executable plan reference '${reference.id}' (${reference.kind}) does not resolve in this run.`
+          : `Executable plan reference '${reference.id}' resolves to ${matches.length} registered artifacts.`,
+      );
+    }
+    const referenced = matches[0]!;
+    referencedArtifacts.set(reference.kind, referenced);
+    if (referenced.kind !== reference.kind) {
+      throw new Error(`Executable plan reference '${reference.id}' is kind '${referenced.kind}', expected '${reference.kind}'.`);
+    }
+    if (joint && referenced.producer?.nodeId !== producerNodeId) {
+      throw new Error(`Executable plan reference '${reference.id}' was produced by '${referenced.producer?.nodeId ?? "unknown"}', not the planning producer.`);
+    }
+    await verifyStoredArtifactWithinRoot(runRoot, referenced);
+  }
+  if (joint) {
+    // BG-01：闭包绑定当前 effective output version membership——plan 与全部引用必须同属
+    // 规划节点当前接受版本的 artifactIds，不能只从全局历史 registry 解析。
+    // （legacy 的支撑产物分布在不同节点版本中，membership 仅约束 joint。）
+    if (ownerOutput !== undefined) {
+      const currentVersionArtifactIds = await currentPlanningVersionArtifactIds(
+        path.join(path.dirname(runRoot), context.runId, "run.json"),
+        producerNodeId ?? "",
+      );
+      if (currentVersionArtifactIds !== undefined) {
+        const membership = new Set(currentVersionArtifactIds);
+        if (!membership.has(planArtifact.id)) {
+          throw new Error("Executable plan artifact is not a member of the current accepted planning output version.");
+        }
+        for (const reference of references) {
+          if (!membership.has(reference.id)) {
+            throw new Error(`Executable plan reference '${reference.id}' (${reference.kind}) is not a member of the current accepted planning output version.`);
+          }
+        }
+      }
+    }
+    // 引用集必须同属一次规划 commit：digest 不一致或缺失都说明证据集不构成一个当前
+    // 接受集合——不以“plan 缺 digest”为由隐式降级。
+    const digests = new Set(references.map((reference) => referencedArtifacts.get(reference.kind)!.provenance?.producerRequestDigest));
+    if (digests.size !== 1 || digests.has(undefined)) {
+      throw new Error("Executable plan references do not share one planning commit; the evidence set is not a current accepted set.");
+    }
+    if (planDigest !== undefined && planDigest !== [...digests][0]) {
+      throw new Error("Executable plan belongs to a different planning commit than its references; the reference closure is stale.");
+    }
+    // 证据链父关系：稿件←构思；导演方案←稿件；排序←候选。
+    const parentExpectations: Array<[string, string]> = [
+      ["script", "creative_treatment"],
+      ["storyboard", "script"],
+      ["asset_ranking", "asset_candidates"],
+    ];
+    for (const [childKind, parentKind] of parentExpectations) {
+      const child = referencedArtifacts.get(childKind);
+      const parent = referencedArtifacts.get(parentKind);
+      if (!child || !parent) continue;
+      if (!(child.parentArtifactIds ?? []).includes(parent.id)) {
+        throw new Error(`Executable plan reference closure is broken: '${childKind}' does not link its '${parentKind}' evidence parent.`);
+      }
+    }
   }
 }
 

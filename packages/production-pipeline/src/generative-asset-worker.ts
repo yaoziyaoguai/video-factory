@@ -20,6 +20,7 @@ import type {
 } from "./image-generation.js";
 import { ProviderRequestRejectedError } from "./provider-request-error.js";
 import type { AssetPilotReviewer } from "./asset-pilot-review.js";
+import { quantizeDurationsToFrames } from "./executable-timeline.js";
 
 interface WorkerClient {
   run(request: Record<string, unknown>): Promise<WorkerResponse>;
@@ -98,7 +99,19 @@ interface ScriptScene {
 
 const METERED_CREATE_ATTEMPTED = Symbol("meteredCreateAttempted");
 
-class AssetPilotReviewError extends Error {}
+/** BG-05：返工携带的 reference/身份证明无法核验时抛出——run 停在素材检查点，
+ * 列出缺证明的母片；新媒体 create 必须为 0，等用户补证或确认重生成。 */
+class ReworkEvidenceRequiredError extends Error {
+  constructor(readonly scenePositions: number[]) {
+    super(
+      "以下母片的继承证明无法核验（reference SHA/来源与实际继承源不一致）：镜头 "
+      + scenePositions.join("、")
+      + "。请先补证或调整返工范围；确认重新生成后再继续，本次未产生任何新购买。",
+    );
+    this.name = "ReworkEvidenceRequiredError";
+  }
+}
+class AssetPilotReviewError extends Error {};
 
 interface GenerationJob {
   scenePosition: number;
@@ -180,6 +193,7 @@ interface RoutedShot {
   environment?: string;
   visibleAction?: string;
   temporalBeats: string[];
+  sourceInSeconds: number;
   shotSize?: string;
   camera?: string;
   lighting?: string;
@@ -308,6 +322,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     }
 
     const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0, 100_000);
+    const itemCreateBudgets = optionalNumberRecord(parameters.itemCreateBudgets, "itemCreateBudgets");
     const unavailableReview = this.pilotReviewUnavailable(request, parameters);
     if (unavailableReview) return unavailableReview;
     const input = requiredRecord(request.input, "Worker input");
@@ -338,6 +353,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const preparedOperation = scenes.length
       ? await preparePaidAssetOperation(outputDir, operationId, baseItems)
       : undefined;
+    const priorCreateAttemptsByQuoteItem = preparedOperation?.priorCreateAttemptsByQuoteItem ?? {};
     const estimatedCost = preparedOperation?.createCostCny ?? 0;
     if (estimatedCost > 0 && maxCostCny <= 0) {
       throw new Error("Paid asset execution requires a positive spend authorization.");
@@ -418,6 +434,10 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
               ledger: openedLedger?.ledger,
               ledgerItem,
               allowCreate: openedLedger?.created !== false,
+              ...(Object.keys(itemCreateBudgets).length ? {
+                itemCreateBudgets,
+                priorCreateAttempts: priorCreateAttemptsByQuoteItem[`scene-${scene.position}`],
+              } : {}),
             });
         applyAcceptedTask(job, generated.taskId, sceneCost);
         if (job.carriedForward) {
@@ -445,6 +465,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
             request,
             `AI-generated ${binding.mediaType}; review provider terms, likeness rights, and AIGC disclosure before publishing.`,
             scene.position,
+            "Inherited verified materialized media from an earlier paid operation.",
           ));
           await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts });
           continue;
@@ -611,6 +632,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const directorPlanPath = requiredString(input.directorPlanPath, "directorPlanPath");
     const outputDir = requiredString(request.outputDir, "outputDir");
     const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0, 100_000);
+    const itemCreateBudgets = optionalNumberRecord(parameters.itemCreateBudgets, "itemCreateBudgets");
     const script = requiredRecord(JSON.parse(await readFile(scriptPath, "utf8")), "Script");
     const scenes = parseScenes(script.scenes);
     const sceneByPosition = new Map(scenes.map((scene) => [scene.position, scene]));
@@ -619,6 +641,38 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     assertExactScenePositions("Director plan", routedShots.map((shot) => shot.scenePosition), scenes);
     const modelSelections = optionalStringRecord(parameters.modelSelections, "modelSelections");
     const byScenePosition = new Map(routedShots.map((route) => [route.scenePosition, route]));
+    const rootByScenePosition = new Map<number, RoutedShot>();
+    for (const route of routedShots) {
+      const visited = new Set<number>([route.scenePosition]);
+      let current = route;
+      while (true) {
+        const reuseFrom = assetReuseSourceScenePosition(current);
+        if (reuseFrom === undefined) {
+          rootByScenePosition.set(route.scenePosition, current);
+          break;
+        }
+        const source = byScenePosition.get(reuseFrom);
+        if (reuseFrom >= current.scenePosition || !source || visited.has(reuseFrom)) {
+          throw new Error(`Scene ${current.scenePosition} must reuse an earlier director scene, received ${reuseFrom}.`);
+        }
+        visited.add(reuseFrom);
+        current = source;
+      }
+    }
+    const timelineScenes = [...scenes].sort((left, right) => left.position - right.position);
+    const frameCountsByScenePosition = new Map(
+      quantizeDurationsToFrames(timelineScenes.map((scene) => scene.duration))
+        .map((frameCount, index) => [timelineScenes[index]!.position, frameCount] as const),
+    );
+    const requiredFramesByRoot = new Map<number, number>();
+    for (const route of routedShots) {
+      const root = rootByScenePosition.get(route.scenePosition)!;
+      const requiredFrames = Math.round(route.sourceInSeconds * 30) + frameCountsByScenePosition.get(route.scenePosition)!;
+      requiredFramesByRoot.set(
+        root.scenePosition,
+        Math.max(requiredFramesByRoot.get(root.scenePosition) ?? 0, requiredFrames),
+      );
+    }
     const generatedRoutes = routedShots.flatMap((route) => {
       const reuseFrom = assetReuseSourceScenePosition(route);
       const referenceFrom = route.referenceFromScenePosition;
@@ -660,14 +714,21 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         throw new Error(`Provider '${providerId}' is not configured.`);
       }
       const compiledPrompt = compileGenerationPrompt(providerId, route, scene);
+      const requiredUseDurationSeconds = (
+        requiredFramesByRoot.get(route.scenePosition) ?? frameCountsByScenePosition.get(route.scenePosition)!
+      ) / 30;
+      const requestScene = binding.mediaType === "video"
+        ? { ...scene, duration: requiredUseDurationSeconds }
+        : scene;
       return [{
         route,
         scene,
         providerId,
         ...(modelId ? { modelId } : {}),
         binding,
+        requiredUseDurationSeconds,
         resolvedRequest: binding.resolveRequest(
-          scene,
+          requestScene,
           compiledPrompt,
           route.referenceFromScenePosition === undefined
             ? undefined
@@ -718,6 +779,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const preparedOperation = generatedRoutes.length
       ? await preparePaidAssetOperation(outputDir, operationId, baseItems, reworkCarryForwardItems)
       : undefined;
+    const priorCreateAttemptsByQuoteItem = preparedOperation?.priorCreateAttemptsByQuoteItem ?? {};
     const estimatedCost = preparedOperation?.createCostCny ?? 0;
     if (estimatedCost > 0 && maxCostCny <= 0) {
       throw new Error("Paid asset execution requires a positive spend authorization.");
@@ -779,7 +841,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     }
     // 先试动作节拍/验收条件最多的独立镜头；参考图子镜仍按母片先行的原顺序执行。
     const executionRoutes = [...generatedRoutes].sort((a, b) => Number(pilotPositions.has(b.scene.position)) - Number(pilotPositions.has(a.scene.position)));
-    for (const { route, scene, binding, providerId, resolvedRequest: baseResolvedRequest } of executionRoutes) {
+    for (const { route, scene, binding, providerId, requiredUseDurationSeconds, resolvedRequest: baseResolvedRequest } of executionRoutes) {
       let resolvedRequest = baseResolvedRequest;
       let sceneCost = binding.estimateCny(resolvedRequest);
       let ledgerItem = openedLedger?.ledger.items.find((item) => item.scenePosition === scene.position);
@@ -843,6 +905,10 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
               ledgerItem,
               allowCreate: openedLedger?.created !== false,
               ...(referenceImages ? { referenceImages } : {}),
+              ...(Object.keys(itemCreateBudgets).length ? {
+                itemCreateBudgets,
+                priorCreateAttempts: priorCreateAttemptsByQuoteItem[`scene-${scene.position}`],
+              } : {}),
             });
         applyAcceptedTask(job, generated.taskId, sceneCost);
         if (job.carriedForward) {
@@ -860,7 +926,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           );
           if (ledgerPath && openedLedger) await writeGenerationLedger(ledgerPath, openedLedger.ledger);
           applySucceeded(job, generated.taskId, generated.url);
-          const mediaMetadata = await this.validateGeneratedMedia(materialized.path, binding.mediaType, scene.duration);
+          const mediaMetadata = await this.validateGeneratedMedia(materialized.path, binding.mediaType, requiredUseDurationSeconds);
           replaceSceneAsset(plan, assets, scene, generated.taskId, materialized.path, providerId, binding.mediaType, mediaMetadata);
           mediaArtifacts.push(await describeFile(
             materialized.path,
@@ -870,6 +936,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
             request,
             `AI-generated ${binding.mediaType} selected by the director plan; review terms, likeness rights, and AIGC disclosure.`,
             scene.position,
+            "Inherited verified materialized media from the rework source run.",
           ));
           await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts });
           continue;
@@ -883,7 +950,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           this.resolveHost,
           this.downloadTimeoutMs,
         );
-        const mediaMetadata = await this.validateGeneratedMedia(media.path, binding.mediaType, scene.duration);
+        const mediaMetadata = await this.validateGeneratedMedia(media.path, binding.mediaType, requiredUseDurationSeconds);
         applySucceeded(job, generated.taskId, generated.url);
         await writeJobs(jobsPath, jobs);
         if (ledgerPath && openedLedger && ledgerItem) {
@@ -1265,7 +1332,8 @@ export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): n
   if (approved.size !== scope.affectedScenePositions.length) {
     throw new Error("返工镜头范围与当前脚本不一致，请重新确认返工范围。");
   }
-  const visualFindings = (Array.isArray(scope.findings) ? scope.findings : []).filter((finding) => (
+  const findings = Array.isArray(scope.findings) ? scope.findings : [];
+  const visualFindings = findings.filter((finding) => (
     isRecord(finding)
     && Array.isArray(finding.targetNodeIds)
     && finding.targetNodeIds.some((target) => target === "visual-direction" || target === "assets")
@@ -1279,12 +1347,18 @@ export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): n
       for (const validPosition of validPositions) required.add(validPosition);
       continue;
     }
+    if (position > 0 && !validPositions.has(position)) {
+      throw new Error(`返工 finding 指向镜头 ${position}，但当前脚本中不存在该镜头，请修正问题定位或重新确认返工范围。`);
+    }
     if (position > 0) required.add(position);
   }
   const previousSceneRecords = positionedRecords(scope.previousScenes, "position");
   if (previousSceneRecords.size > 0) {
     for (const [position, scene] of currentSceneRecords) {
-      if (!isDeepStrictEqual(scene, previousSceneRecords.get(position))) required.add(position);
+      if (!isDeepStrictEqual(
+        scriptVisualIntent(scene),
+        scriptVisualIntent(previousSceneRecords.get(position)),
+      )) required.add(position);
     }
   }
   const requiredClosure = reworkSceneDependencyClosure([...required], scope.previousShots, scope.currentShots);
@@ -1297,12 +1371,27 @@ export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): n
   return [...approved].sort((left, right) => left - right);
 }
 
+function scriptVisualIntent(scene: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!scene) return undefined;
+  return {
+    visualStrategy: scene.visual_strategy,
+    visualPrompt: scene.visual_prompt,
+  };
+}
+
 export function reworkSceneDependencyClosure(
   scenePositions: readonly number[],
   ...shotSets: unknown[]
 ): number[] {
   const affected = new Set(scenePositions.filter((position) => Number.isInteger(position) && position > 0));
-  for (const shots of shotSets) expandAffectedDependencies(affected, shots);
+  // 旧版与新版方案的依赖边必须一起求不动点。逐份求闭包会漏掉
+  // “新方案 2→1、旧方案 3→2”这类跨集合传播。
+  let expanded = true;
+  while (expanded) {
+    const sizeBefore = affected.size;
+    for (const shots of shotSets) expandAffectedDependencies(affected, shots);
+    expanded = affected.size !== sizeBefore;
+  }
   return [...affected].sort((left, right) => left - right);
 }
 
@@ -1326,8 +1415,11 @@ function expandAffectedDependencies(affected: Set<number>, shots: unknown): void
 function shotDependencyPosition(shot: Record<string, unknown>): number | undefined {
   const reference = Number(shot.referenceFromScenePosition);
   if (Number.isInteger(reference) && reference >= 1) return reference;
-  if (typeof shot.query !== "string") return undefined;
-  return assetReuseSourceScenePosition({ query: shot.query });
+  const reuse = Number(shot.reuseFromScenePosition);
+  return assetReuseSourceScenePosition({
+    query: typeof shot.query === "string" ? shot.query : "",
+    ...(Number.isInteger(reuse) && reuse >= 1 ? { reuseFromScenePosition: reuse } : {}),
+  });
 }
 
 async function findReworkCarryForwardItems(
@@ -1349,33 +1441,35 @@ async function findReworkCarryForwardItems(
   const routedShots = parseRoutedShots(options.currentDirectorPlan.shots);
   // 与导演节点使用同一套统一影响闭包；结构化 affectedScenePositions 决定用户选择，
   // 旧 run 缺少该字段时由闭包保守按全片处理。
-  const affectedScenes = new Set<number>(reworkAffectedScenePositions({
-    findings: rework.findings,
-    previousScenes: rework.previousScript.scenes,
-    previousShots: rework.previousDirectorPlan.shots,
-    currentScenes: options.currentScript.scenes,
-    currentShots: options.currentDirectorPlan.shots,
-    ...(Array.isArray(rework.affectedScenePositions)
-      ? { affectedScenePositions: rework.affectedScenePositions.map(Number) }
-      : {}),
-  }));
-  const currentScenes = positionedRecords(options.currentScript.scenes, "position");
-  const previousScenes = positionedRecords(rework.previousScript.scenes, "position");
-  // 为什么不用整条 shot deepEqual：estimatedCostCny、confidence、rationale 等字段只影响
-  // 展示与估算，费率调整会让执行语义完全相同的镜头被判为不可复用并重复付费生成；
-  // 因此这里改用执行语义指纹比较——即 parseRoutedShots 提取的字段（Provider 路由与
-  // 交付类型、query 与 generationPrompt、节拍/构图/光线等生成参数、reuse/reference 依赖），
-  // 而 script 场景内容仍按整场景严格比较，账本身份门禁（provider/model/source
-  // fingerprint/media type/duration/reference）仍由 preparePaidAssetOperation 把守。
-  const previousExecutionShots = previousExecutionShotsByPosition(rework.previousDirectorPlan);
-  const reusableScenes = new Set(routedShots.flatMap((shot) => {
-    if (affectedScenes.has(shot.scenePosition)
-      || !isDeepStrictEqual(currentScenes.get(shot.scenePosition), previousScenes.get(shot.scenePosition))
-      || !isDeepStrictEqual(shot, previousExecutionShots.get(shot.scenePosition))) {
-      return [];
-    }
-    return [shot.scenePosition];
-  }));
+  const explicitlyRejectedMedia = new Set<number>(
+    Array.isArray(rework.findings)
+      ? rework.findings.flatMap((finding) => (
+          isRecord(finding)
+          && Array.isArray(finding.targetNodeIds)
+          && finding.targetNodeIds.includes("assets")
+          && finding.action !== "inspect_existing_media"
+          && Number.isInteger(finding.scenePosition)
+            ? [Number(finding.scenePosition)]
+            : []
+        ))
+      : [],
+  );
+  // 人工批准的重做范围（affectedScenePositions）是显式重生成意图：范围内镜头不再继承
+  // 旧母片；空范围表示"全部保留"；旧 run 缺字段时保守按全片重做（不继承）。范围外镜头
+  // 仍可携带，再由 safelyCarriableReworkItems 的执行身份/引用证明逐项核验淘汰。
+  const regenerationScope = new Set<number>(
+    rework.affectedScenePositions === undefined || !Array.isArray(rework.affectedScenePositions)
+      ? routedShots.map((route) => route.scenePosition)
+      : rework.affectedScenePositions.filter((position) => Number.isInteger(position) && Number(position) > 0),
+  );
+  // 先保留所有未被明确判定为素材不合格、也不在批准重做范围内的候选，再以当前归一化
+  // 请求逐项比较。script/director 责任变化本身不等于媒体请求变化；真实 effect/request
+  // 改变仍由 safelyCarriableReworkItems 的执行身份核验淘汰。
+  const reusableScenes = new Set(routedShots.flatMap((shot) => (
+    explicitlyRejectedMedia.has(shot.scenePosition) || regenerationScope.has(shot.scenePosition)
+      ? []
+      : [shot.scenePosition]
+  )));
   if (reusableScenes.size === 0) return [];
 
   const sourceItems = await effectiveSourcePaidAssetItems(
@@ -1383,18 +1477,10 @@ async function findReworkCarryForwardItems(
     sourceRunId,
     Number(sourceRunRevision),
   );
-  return safelyCarriableReworkItems(sourceItems, reusableScenes, routedShots, options.modelSelections);
+  return safelyCarriableReworkItems(sourceItems, reusableScenes, routedShots, options.modelSelections, regenerationScope);
 }
 
 // previous 计划若缺少执行语义必需字段则无法证明任何镜头可安全继承，fail closed 按新生成报价。
-function previousExecutionShotsByPosition(previousDirectorPlan: Record<string, unknown>): Map<number, RoutedShot> {
-  try {
-    return new Map(parseRoutedShots(previousDirectorPlan.shots).map((shot) => [shot.scenePosition, shot]));
-  } catch {
-    return new Map();
-  }
-}
-
 // 参考图生成的母片与独立生成母片一样可以跨 run 继承，但必须能证明引用链身份：
 // 引用源镜头同样可安全继承且为 materialized image，source item 记录的 referenceImageSha256
 // 与实际继承源的 SHA-256 一致，且与当前路由声明的 referenceFromScenePosition 相同。
@@ -1404,6 +1490,7 @@ function safelyCarriableReworkItems(
   reusableScenes: Set<number>,
   routedShots: RoutedShot[],
   modelSelections: Readonly<Record<string, string>>,
+  regenerationScope?: Set<number>,
 ): PaidAssetOperationItem[] {
   const routedByPosition = new Map(routedShots.map((route) => [route.scenePosition, route]));
   const carried: PaidAssetOperationItem[] = [];
@@ -1445,6 +1532,14 @@ function safelyCarriableReworkItems(
     }
     if (!progressed) break;
     remaining = deferred;
+  }
+  // BG-05：证明失败且未被人工批准重生成的母片进入 needs_evidence——不得静默转购买。
+  const needsEvidence = remaining
+    .filter((item) => !regenerationScope?.has(item.scenePosition))
+    .map((item) => item.scenePosition)
+    .sort((left, right) => left - right);
+  if (needsEvidence.length > 0) {
+    throw new ReworkEvidenceRequiredError([...new Set(needsEvidence)]);
   }
   return carried;
 }
@@ -1577,6 +1672,17 @@ function optionalStringRecord(value: unknown, field: string): Record<string, str
   }));
 }
 
+function optionalNumberRecord(value: unknown, field: string): Record<string, number> {
+  if (value === undefined) return {};
+  const input = requiredRecord(value, field);
+  return Object.fromEntries(Object.entries(input).map(([key, item]) => {
+    if (typeof item !== "number" || !Number.isSafeInteger(item) || item < 0) {
+      throw new Error(`${field}.${key} must be a non-negative integer.`);
+    }
+    return [key, item];
+  }));
+}
+
 function parseScenes(value: unknown): ScriptScene[] {
   if (!Array.isArray(value)) {
     throw new Error("Script scenes must be an array.");
@@ -1641,6 +1747,7 @@ export function normalizeVideoGenerationDurationSeconds(
     || minimum > maximum) {
     throw new Error("Video generation duration bounds are invalid.");
   }
+  const requiredFrames = Math.round(sceneDurationSeconds * 30);
   if (bounds?.allowedDurationsSeconds) {
     const allowed = [...new Set(bounds.allowedDurationsSeconds)].sort((left, right) => left - right);
     if (allowed.length === 0
@@ -1649,9 +1756,17 @@ export function normalizeVideoGenerationDurationSeconds(
       || allowed.at(-1) !== maximum) {
       throw new Error("Video generation allowed durations are invalid.");
     }
-    return allowed.find((duration) => duration >= sceneDurationSeconds) ?? maximum;
+    const normalized = allowed.find((duration) => duration * 30 >= requiredFrames) ?? maximum;
+    if (normalized * 30 < requiredFrames) {
+      throw new Error(`Video generation model cannot cover the required ${sceneDurationSeconds}s source range.`);
+    }
+    return normalized;
   }
-  return Math.max(minimum, Math.min(maximum, Math.round(sceneDurationSeconds)));
+  const normalized = Math.max(minimum, Math.ceil(requiredFrames / 30));
+  if (normalized > maximum) {
+    throw new Error(`Video generation model cannot cover the required ${sceneDurationSeconds}s source range.`);
+  }
+  return normalized;
 }
 
 function preferredResolution(resolutions: string[] | undefined): VideoGenerationRequest["resolution"] | undefined {
@@ -1931,6 +2046,13 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
     const camera = optionalString(shot.camera);
     const lighting = optionalString(shot.lighting);
     const deliveryType = optionalString(shot.deliveryType);
+    const sourceInSeconds = shot.sourceInSeconds === undefined
+      ? 0
+      : boundedNumber(shot.sourceInSeconds, `Director shot ${index + 1} sourceInSeconds`, 0, 180);
+    if (["stock_image", "generated_image", "editorial_card"].includes(deliveryType ?? "")
+      && sourceInSeconds !== 0) {
+      throw new Error(`Director shot ${index + 1} sourceInSeconds must be 0 for static media.`);
+    }
     const preferredProviderId = requiredString(shot.preferredProviderId, `Director shot ${index + 1} preferredProviderId`);
     const reuseFromScenePosition = shot.reuseFromScenePosition === undefined
       ? undefined
@@ -1955,7 +2077,8 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
       ...(subject ? { subject } : {}),
       ...(environment ? { environment } : {}),
       ...(visibleAction ? { visibleAction } : {}),
-      temporalBeats: optionalStringArray(shot.temporalBeats, `Director shot ${index + 1} temporalBeats`),
+      temporalBeats: temporalBeatStrings(shot.temporalBeats, `Director shot ${index + 1} temporalBeats`),
+      sourceInSeconds,
       ...(shotSize ? { shotSize } : {}),
       ...(camera ? { camera } : {}),
       ...(lighting ? { lighting } : {}),
@@ -2046,6 +2169,20 @@ function optionalStringArray(value: unknown, label: string): string[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) throw new Error(`${label} must be an array.`);
   return value.map((entry, index) => requiredString(entry, `${label}[${index}]`));
+}
+
+function temporalBeatStrings(value: unknown, label: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array.`);
+  return value.map((entry, index) => {
+    if (typeof entry === "string") return requiredString(entry, `${label}[${index}]`);
+    const beat = requiredRecord(entry, `${label}[${index}]`);
+    const startSeconds = boundedNumber(beat.startSeconds, `${label}[${index}].startSeconds`, 0, 180);
+    const endSeconds = boundedNumber(beat.endSeconds, `${label}[${index}].endSeconds`, 0, 180);
+    if (endSeconds <= startSeconds) throw new Error(`${label}[${index}] must have a positive duration.`);
+    const action = requiredString(beat.action, `${label}[${index}].action`);
+    return `[${startSeconds}s-${endSeconds}s] ${action}`;
+  });
 }
 
 function applyProgress(
@@ -2422,7 +2559,6 @@ function createPaidAssetOperationItem(
   const inputFingerprint = createHash("sha256").update(JSON.stringify({
     scenePosition: scene.position,
     request,
-    sourceFingerprint,
   })).digest("hex");
   const itemRequestId = `paid-item-${createHash("sha256")
     .update(`${operationId}\0${inputFingerprint}`)
@@ -2453,6 +2589,8 @@ async function preparePaidAssetOperation(
   items: PaidAssetOperationItem[];
   existing: boolean;
   createCostCny: number;
+  /** 历史 create 计数（按素材键）：跨操作叶子条目中真实发生 create 的次数（携带不计数）。 */
+  priorCreateAttemptsByQuoteItem: Record<string, number>;
 }> {
   const ledgerPath = generationLedgerPath(outputDir, operationId);
   try {
@@ -2460,7 +2598,13 @@ async function preparePaidAssetOperation(
     if (!paidOperationInputsMatch(persisted.items, items)) {
       throw new Error("This paid generation operation no longer matches its persisted item inputs.");
     }
-    return { ledgerPath, items: persisted.items, existing: true, createCostCny: 0 };
+    return {
+      ledgerPath,
+      items: persisted.items,
+      existing: true,
+      createCostCny: 0,
+      priorCreateAttemptsByQuoteItem: await countPriorCreateAttempts(path.dirname(ledgerPath), operationId),
+    };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
@@ -2468,6 +2612,7 @@ async function preparePaidAssetOperation(
   const previousItems = paidAssetLedgerLeaves(
     await previousPaidAssetItems(path.dirname(ledgerPath), operationId),
   );
+  const priorCreateAttemptsByQuoteItem = countLocalCreateAttempts(previousItems);
   const carriedItems: PaidAssetOperationItem[] = [];
   for (const item of items) {
     const previousCandidates = previousItems.filter((candidate) => (
@@ -2485,8 +2630,10 @@ async function preparePaidAssetOperation(
         && Boolean(candidate.resultUrl)
       ));
     if (reusable) {
+      // N1：跨 run 携带必须保留已核验的实际输入身份（reference SHA、resolved digest、
+      // input fingerprint），当前 run 的操作 id 可以变，但内容身份不得退回未解析状态。
       const carriedBase = reworkCandidates.includes(reusable)
-        ? item
+        ? paidItemWithReferenceIdentity(operationId, item, reusable)
         : reusable.inputFingerprint === item.inputFingerprint
           ? item
           : paidItemWithReferenceIdentity(operationId, item, reusable);
@@ -2524,7 +2671,33 @@ async function preparePaidAssetOperation(
       (sum, item) => sum + (item.carriedForwardFromItemRequestId ? 0 : item.estimatedCostCny),
       0,
     )),
+    priorCreateAttemptsByQuoteItem,
   };
+}
+
+/** 叶子条目内的 create 事实计数：携带条目是复用不计数，未携带且已发生 create 的计一次。 */
+function countLocalCreateAttempts(leafItems: readonly PaidAssetOperationItem[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const item of leafItems) {
+    if (item.carriedForwardFromItemRequestId) continue;
+    const created = item.state === "submitted"
+      || item.state === "provider_succeeded"
+      || item.state === "materialized"
+      || item.state === "unknown"
+      || (item.state === "terminal_failed" && (Boolean(item.taskId) || item.actualCostCny !== undefined));
+    if (!created) continue;
+    counts[item.quoteItemId] = (counts[item.quoteItemId] ?? 0) + 1;
+  }
+  return counts;
+}
+
+async function countPriorCreateAttempts(nodeDirectory: string, operationId: string): Promise<Record<string, number>> {
+  try {
+    const previousItems = paidAssetLedgerLeaves(await previousPaidAssetItems(nodeDirectory, operationId));
+    return countLocalCreateAttempts(previousItems);
+  } catch {
+    return {};
+  }
 }
 
 async function firstVerifiedMaterializedItem(
@@ -2635,8 +2808,10 @@ async function previousPaidAssetItems(directory: string, operationId?: string): 
   for (const name of names) {
     if (name === currentName) continue;
     const value = requiredRecord(JSON.parse(await readFile(path.join(directory, name), "utf8")), "Paid operation ledger");
-    if (value.version !== "video-factory/paid-operation-v2" || !Array.isArray(value.items)) continue;
-    items.push(...value.items as PaidAssetOperationItem[]);
+    if (typeof value.operationId !== "string") {
+      throw new Error(`Paid operation ledger '${name}' is incompatible or corrupted.`);
+    }
+    items.push(...parsePaidAssetOperationLedger(value, value.operationId).items);
   }
   return items;
 }
@@ -2693,9 +2868,10 @@ export async function inspectPaidAssetLedger(
   for (const name of names) {
     const record = requiredRecord(JSON.parse(await readFile(path.join(directory, name), "utf8")), "Paid operation ledger");
     if (record.version !== "video-factory/paid-operation-v2" || typeof record.operationId !== "string" || !Array.isArray(record.items)) {
-      continue;
+      throw new Error(`Paid operation ledger '${name}' is incompatible or corrupted.`);
     }
-    for (const item of record.items as PaidAssetOperationItem[]) {
+    const ledger = parsePaidAssetOperationLedger(record, record.operationId);
+    for (const item of ledger.items) {
       if (sourceFingerprint && item.sourceFingerprint !== sourceFingerprint) continue;
       summaries.push({
       operationId: record.operationId,
@@ -2794,6 +2970,14 @@ function paidExecutionParametersMatch(
   left: PaidAssetOperationItem["parameters"],
   right: PaidAssetOperationItem["parameters"],
 ): boolean {
+  const referenceIdentityIsDeferred = left.referenceFromScenePosition !== undefined
+    && right.referenceFromScenePosition !== undefined
+    && (left.referenceImageSha256 === undefined || right.referenceImageSha256 === undefined);
+  if (!referenceIdentityIsDeferred
+    && typeof left.executionDigest === "string"
+    && typeof right.executionDigest === "string") {
+    return left.executionDigest === right.executionDigest;
+  }
   const fields = [
     "mediaType",
     "durationSeconds",
@@ -2803,6 +2987,9 @@ function paidExecutionParametersMatch(
     "referenceFromScenePosition",
   ] as const;
   if (fields.some((field) => left[field] !== right[field])) return false;
+  if (left.referenceImageSha256 !== undefined
+    && right.referenceImageSha256 !== undefined
+    && left.referenceImageSha256 !== right.referenceImageSha256) return false;
   const leftPrompt = left.compiledPromptSha256;
   const rightPrompt = right.compiledPromptSha256;
   // 旧账本没有保存 Prompt 摘要；其复用仍受脚本、导演执行语义与 source fingerprint 门禁约束。
@@ -2860,6 +3047,10 @@ async function generatePaidAssetItem(options: {
   ledgerItem: PaidAssetOperationItem | undefined;
   allowCreate: boolean;
   referenceImages?: [string, ...string[]];
+  /** C1：scope 派生的逐素材 create 预算（assetKey → 允许的总 create 次数）。 */
+  itemCreateBudgets?: Record<string, number>;
+  /** 本素材在历史操作中已发生的 create 次数（携带不计数）。 */
+  priorCreateAttempts?: number;
 }): Promise<{ taskId: string; url: string }> {
   const { ledgerItem } = options;
   const recordProgress = async (progress: VideoGenerationProgress | ImageGenerationProgress): Promise<void> => {
@@ -2931,6 +3122,22 @@ async function generatePaidAssetItem(options: {
   }
   if (ledgerItem && !options.allowCreate) {
     throw new Error(`Paid item '${ledgerItem.itemRequestId}' was prepared but not submitted; a new spend authorization is required.`);
+  }
+  // C1：逐素材 create 预算（scope 用户批准的每素材次数上限）在越过付费边界前强制执行。
+  // 预算耗尽的 create 停在可操作状态，绝不静默超授权重试。
+  if (ledgerItem && options.itemCreateBudgets) {
+    const budget = options.itemCreateBudgets[ledgerItem.quoteItemId];
+    if (budget !== undefined) {
+      if (!Number.isSafeInteger(budget) || budget < 0) {
+        throw new Error(`Paid item '${ledgerItem.itemRequestId}' carries an invalid create budget.`);
+      }
+      const priorCreates = options.priorCreateAttempts ?? 0;
+      if (priorCreates + 1 > budget) {
+        throw new Error(
+          `Asset '${ledgerItem.quoteItemId}' has reached its authorized create budget (${priorCreates}/${budget}); a new spend authorization is required before another create.`,
+        );
+      }
+    }
   }
   if (ledgerItem && options.ledgerPath && options.ledger) {
     ledgerItem.state = "unknown";
@@ -3065,6 +3272,7 @@ async function describeFile(
   request: Record<string, unknown>,
   licenseNote: string,
   scenePosition?: number,
+  notes?: string,
 ): Promise<WorkerArtifactDescriptor> {
   const bytes = await readFile(uri);
   return {
@@ -3079,6 +3287,7 @@ async function describeFile(
       attempt: boundedInteger(request.attempt, "attempt", 1, 10_000),
       licenseNote,
       ...(scenePosition ? { scenePosition } : {}),
+      ...(notes ? { notes } : {}),
     },
   };
 }

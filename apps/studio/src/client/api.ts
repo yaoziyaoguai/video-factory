@@ -271,6 +271,18 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/spend-rejections`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
+  prepareProductionQuote: (runId: string, input: import("../shared/api.js").StudioProductionQuoteInput) => requestJson<import("../shared/api.js").StudioProductionQuote>(
+    `/api/runs/${encodeURIComponent(runId)}/production-quotes`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  authorizeProductionScope: (runId: string, input: import("../shared/api.js").StudioProductionAuthorizationInput) => requestJson<import("../shared/api.js").StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/production-authorizations`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  amendProductionScope: (runId: string, authorizationId: string, input: import("../shared/api.js").StudioProductionAmendmentInput) => requestJson<import("../shared/api.js").StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/production-authorizations/${encodeURIComponent(authorizationId)}/amendments`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
   regenerateStale: (runId: string) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/regenerate-stale`,
     { method: "POST" },
@@ -281,6 +293,14 @@ export const studioApi = {
   ),
   resumePaused: (runId: string) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/resume`,
+    { method: "POST" },
+  ),
+  queryOriginalTextTask: (runId: string) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/task-recovery/query`,
+    { method: "POST" },
+  ),
+  retrieveOriginalTextTask: (runId: string) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/task-recovery/retrieve`,
     { method: "POST" },
   ),
   retryFailedNode: (runId: string, nodeId: string) => requestJson<StudioRunDetail>(

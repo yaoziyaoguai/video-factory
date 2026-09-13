@@ -16,7 +16,7 @@ class CandidateWorker {
     if (capability === "asset.prepare") throw new Error("stop after ranking");
     if (capability === "script.draft") {
       const scriptPath = path.join(outputDir, "script.json");
-      const content = JSON.stringify({ scenes: [{ position: 1, narration: "城市清晨", duration: 6, visual_strategy: "stock", visual_prompt: "早高峰地铁", visible_action: "乘客走入车厢", success_criteria: ["动作可见"], failure_conditions: ["空镜"] }] });
+      const content = JSON.stringify({ scenes: [{ position: 1, narration: "城市清晨", duration: 24, visual_strategy: "stock", visual_prompt: "早高峰地铁", visible_action: "乘客走入车厢", success_criteria: ["动作可见"], failure_conditions: ["空镜"] }] });
       await writeFile(scriptPath, content);
       return response(request, { scriptPath }, scriptPath, content, "script");
     }
@@ -76,7 +76,7 @@ describe("ProductionPipeline semantic ranking fallback", () => {
             preferredProviderId: "pexels-stock-v1",
             deliveryType: "stock_video" as const,
             alternativeProviderIds: [],
-            temporalBeats: ["[0s-3s] 保持主体清晰", "[3s-6s] 保持动作连续"],
+            temporalBeats: [`[0s-${scene.duration / 2}s] 保持主体清晰`, `[${scene.duration / 2}s-${scene.duration}s] 保持动作连续`],
             query: "generated city commute",
             generationPrompt: "生成通勤画面",
             rationale: "没有图库候选时按导演计划生成。",
@@ -102,6 +102,17 @@ describe("ProductionPipeline semantic ranking fallback", () => {
     const output = ranking?.output as { ranking?: { fallbackReason?: string; scenes?: unknown[] } } | undefined;
     assert.match(output?.ranking?.fallbackReason ?? "", /没有图库候选需要排序/);
     assert.equal(output?.ranking?.scenes?.length, 1);
+    const executablePlanPath = (run.nodeRuns.find((node) => node.nodeId === "production-preflight")?.output as {
+      executablePlanPath?: string;
+    } | undefined)?.executablePlanPath;
+    assert.ok(executablePlanPath);
+    const executablePlan = JSON.parse(await readFile(executablePlanPath, "utf8")) as {
+      candidateArtifactIds: string[];
+    };
+    assert.deepEqual(
+      executablePlan.candidateArtifactIds.map((id) => run.artifacts.find((artifact) => artifact.id === id)?.kind),
+      ["asset_candidates", "asset_ranking"],
+    );
   });
 
   it("records the failed model and reason in the immutable execution receipt", async () => {
@@ -133,7 +144,7 @@ describe("ProductionPipeline semantic ranking fallback", () => {
             preferredProviderId: "pexels-stock-v1",
             deliveryType: "stock_video",
             alternativeProviderIds: [],
-            temporalBeats: ["[0s-3s] 人群接近车门", "[3s-6s] 人群进入车厢"],
+            temporalBeats: [`[0s-${scene.duration / 2}s] 人群接近车门`, `[${scene.duration / 2}s-${scene.duration}s] 人群进入车厢`],
             query: "city subway commute",
             generationPrompt: "通勤人群进入地铁车厢",
             rationale: "实拍素材更可信。",
@@ -155,6 +166,7 @@ describe("ProductionPipeline semantic ranking fallback", () => {
       audience: "城市青年",
       nicheSlug: "city-commute",
       durationSeconds: 24,
+      durationRange: { minSeconds: 20, maxSeconds: 34 },
       platform: "douyin",
       runPurpose: "test",
       reviewMode: "manual",
@@ -259,7 +271,7 @@ describe("ProductionPipeline semantic ranking fallback", () => {
             preferredProviderId: "pexels-stock-v1",
             deliveryType: "stock_video",
             alternativeProviderIds: [],
-            temporalBeats: ["[0s-3s] 人群接近车门", "[3s-6s] 人群进入车厢"],
+            temporalBeats: [`[0s-${scene.duration / 2}s] 人群接近车门`, `[${scene.duration / 2}s-${scene.duration}s] 人群进入车厢`],
             query: "city subway commute",
             generationPrompt: "通勤人群进入地铁车厢",
             rationale: "实拍素材更可信。",
@@ -298,6 +310,7 @@ function semanticBrief(title: string): ProductionBrief {
     audience: "城市青年",
     nicheSlug: "city-commute",
     durationSeconds: 24,
+    durationRange: { minSeconds: 20, maxSeconds: 34 },
     platform: "douyin",
     runPurpose: "test",
     reviewMode: "manual",

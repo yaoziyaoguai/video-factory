@@ -54,6 +54,13 @@ describe("readCodexProviderSettings", () => {
     assert.equal(settings.modelId, "");
     assert.equal(settings.reason, "");
     assert.ok(settings.taskKinds.includes("reference-grammar"));
+    // 前期构思角色与 role-audit 一起构成健康候选：没有独立审计能力的 broker 不能承担构思生产。
+    assert.ok(settings.taskKinds.includes("creative-treatment"));
+    assert.ok(settings.taskKinds.includes("role-audit"));
+    assert.deepEqual(
+      auditedRoleCandidateAvailability(settings, { available: false, taskKinds: [] }, "creative-treatment"),
+      { codex: true, zai: false },
+    );
   });
 
   it("reports an exact reason for each failure status on the default path", async () => {
@@ -103,7 +110,7 @@ describe("readCodexProviderSettings", () => {
       "role-audit": "gpt-5.6-sol",
       "visual-review": "gpt-5.6-sol",
     };
-    let taskKinds = ["topic-ideas", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"];
+    let taskKinds = ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"];
     const server = http.createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
@@ -153,6 +160,52 @@ describe("readCodexProviderSettings", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("fails closed when creative-treatment is advertised without the pinned contract digest", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "vf-codex-settings-treatment-digest-"));
+    const socketPath = path.join(directory, "worker.sock");
+    const pinnedDigests = REQUIRED_CODEX_TASK_CONTRACT_DIGESTS as Record<string, string>;
+    let taskContracts: Record<string, string> = { ...pinnedDigests, "creative-treatment": "0".repeat(64) };
+    const server = http.createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        protocolVersion: "video-factory/codex-bridge-v2",
+        profileId: "openai",
+        providerId: "openai",
+        modelId: "gpt-5.6-terra",
+        taskKinds: ["creative-treatment", "role-audit"],
+        taskModels: { "creative-treatment": "gpt-5.6-terra", "role-audit": "gpt-5.6-terra" },
+        taskContracts,
+      }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    try {
+      const wrongDigest = await readCodexProviderSettings({ VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath });
+      assert.equal(wrongDigest.available, false);
+      assert.match(wrongDigest.reason, /不兼容的协议版本/);
+
+      taskContracts = { ...pinnedDigests };
+      delete taskContracts["creative-treatment"];
+      const missingDigest = await readCodexProviderSettings({ VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath });
+      assert.equal(missingDigest.available, false);
+      assert.match(missingDigest.reason, /不兼容的协议版本/);
+
+      taskContracts = { ...pinnedDigests };
+      const ready = await readCodexProviderSettings({ VIDEO_FACTORY_CODEX_SOCKET_PATH: socketPath });
+      assert.equal(ready.available, true);
+      assert.ok(ready.taskKinds.includes("creative-treatment"));
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("readZaiCodexProviderSettings", () => {
@@ -175,6 +228,10 @@ describe("readZaiCodexProviderSettings", () => {
         "visual-review": "glm-5.3-flash",
         "role-audit": "glm-5.3-flash",
       },
+      taskModelRoutes: {
+        "asset-rank": { withoutImages: "glm-5.3", withImages: "glm-5.3-flash" },
+        "role-audit": { withoutImages: "glm-5.3", withImages: "glm-5.3-flash" },
+      },
       taskContracts: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS,
     };
     const server = http.createServer((_request, response) => {
@@ -193,8 +250,21 @@ describe("readZaiCodexProviderSettings", () => {
       const ready = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
       assert.equal(ready.available, true);
       assert.equal(ready.taskModels?.["visual-review"], "glm-5.3-flash");
+      assert.deepEqual(ready.taskModelRoutes, identity.taskModelRoutes);
 
-      identity = { ...identity, modelId: "glm-5.3-preview" };
+      identity = { ...identity, taskModelRoutes: { "role-audit": { withImages: "glm-5.3-flash" } } };
+      const malformedRoute = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
+      assert.equal(malformedRoute.available, false);
+      assert.match(malformedRoute.reason, /不兼容的协议版本/);
+
+      identity = {
+        ...identity,
+        modelId: "glm-5.3-preview",
+        taskModelRoutes: {
+          "asset-rank": { withoutImages: "glm-5.3", withImages: "glm-5.3-flash" },
+          "role-audit": { withoutImages: "glm-5.3", withImages: "glm-5.3-flash" },
+        },
+      };
       const brokerSelectedModel = await readZaiCodexProviderSettings({
         VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath,
         ZAI_TEXT_MODEL_ID: "studio-does-not-own-this-setting",
@@ -216,6 +286,52 @@ describe("readZaiCodexProviderSettings", () => {
     } });
     assert.equal(probedPath, DEFAULT_ZAI_CODEX_SOCKET_PATH);
     assert.notEqual(DEFAULT_ZAI_CODEX_SOCKET_PATH, DEFAULT_CODEX_SOCKET_PATH);
+  });
+
+  it("fails closed when ZAI advertises creative-treatment without the pinned contract digest", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "vf-zai-settings-treatment-digest-"));
+    const socketPath = path.join(directory, "worker.sock");
+    const pinnedDigests = REQUIRED_CODEX_TASK_CONTRACT_DIGESTS as Record<string, string>;
+    let taskContracts: Record<string, string> = { ...pinnedDigests, "creative-treatment": "0".repeat(64) };
+    const server = http.createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        protocolVersion: "video-factory/codex-bridge-v2",
+        profileId: "zai",
+        providerId: "zai-bigmodel-api",
+        modelId: "glm-5.3",
+        taskKinds: ["creative-treatment", "role-audit"],
+        taskModels: { "creative-treatment": "glm-5.3", "role-audit": "glm-5.3-flash" },
+        taskContracts,
+      }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    try {
+      const wrongDigest = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
+      assert.equal(wrongDigest.available, false);
+      assert.match(wrongDigest.reason, /不兼容的协议版本/);
+
+      taskContracts = { ...pinnedDigests };
+      delete taskContracts["creative-treatment"];
+      const missingDigest = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
+      assert.equal(missingDigest.available, false);
+      assert.match(missingDigest.reason, /不兼容的协议版本/);
+
+      taskContracts = { ...pinnedDigests };
+      const ready = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
+      assert.equal(ready.available, true);
+      assert.ok(ready.taskKinds.includes("creative-treatment"));
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
 

@@ -214,6 +214,87 @@ describe("run observability", () => {
     expect(result.failure?.recoveryActions).toContain("稍后重试配音");
   });
 
+  it("explains a director contract failure with the affected scene and a concrete recovery", () => {
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:03:00.000Z",
+      now: "2026-08-30T10:03:00.000Z",
+      nodes: [
+        node("script", "脚本", "succeeded"),
+        node("visual-direction", "导演方案", "failed", {
+          role: "导演",
+          error: "导演连续两次返回了无法使用的结果；本轮质量审计尚未消耗，可从已保存进度继续。shots[6].temporalBeats must contain at least two timed beats.",
+        }),
+        node("asset-candidates", "素材候选", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure).toMatchObject({
+      nodeId: "visual-direction",
+      summary: "导演方案中第 7 镜的时间描述没有通过结构校验",
+      retryable: true,
+    });
+    expect(result.failure?.recoveryActions).toEqual([
+      "重试导演方案；已完成的脚本不会重新生成",
+      "若同一镜头再次失败，在导演方案中检查该镜的动作与时长",
+    ]);
+  });
+
+  it("surfaces the final director audit reason and routes an unfulfillable promise upstream", () => {
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      now: "2026-08-30T10:10:00.000Z",
+      nodes: [
+        node("script", "脚本", "succeeded"),
+        node("visual-direction", "导演方案", "failed", {
+          role: "导演",
+          error: "导演经过 2 轮修改后仍未通过独立审计。核心承诺要求同机位连续实验，但当前图库镜头无法兑现。",
+        }),
+        node("assets", "画面", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure?.summary).toContain("核心承诺要求同机位连续实验，但当前图库镜头无法兑现");
+    expect(result.failure?.recoveryActions).toEqual([
+      "调整视频承诺，确保现有画面能力能够真实兑现",
+      "或准备连续实拍/自有素材后重新规划；脚本不会自动重跑",
+    ]);
+  });
+
+  it("treats a repeated real-source availability stop as a manual gate instead of a retryable failure", () => {
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      now: "2026-08-30T10:16:00.000Z",
+      nodes: [
+        node("creative-planning", "创作规划", "failed", {
+          role: "创作团队",
+          error: "Joint creative planning stopped (needs_source): 连续两轮仍缺少可自动采用的真实图库素材，自动规划已停止。上传或实拍可追溯的真实素材；若不再主张实证，可改为非实证概念表达；也可以停止本次制作。AI 生成画面不能冒充真实实验证据。 不回退旧规划流程。",
+        }),
+        node("assets", "画面", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure).toMatchObject({
+      nodeId: "creative-planning",
+      retryable: false,
+      summary: "真实素材目前不可得，自动规划已停下等待人工选择",
+    });
+    expect(result.failure?.recoveryActions).toEqual([
+      "上传或实拍可追溯的真实素材后重新规划",
+      "将内容改为不主张实验事实的概念表达后重新规划",
+      "停止本次制作",
+    ]);
+  });
+
   it("marks a preserved render as a usable partial result when a later review fails", () => {
     const result = buildRunObservability({
       status: "failed",

@@ -1,7 +1,7 @@
 export type MeteredVideoProviderSettings = MiniMaxProviderSettings | SeedanceProviderSettings | WanProviderSettings;
 
 export const DEFAULT_SEEDANCE_MODEL_ID = "doubao-seedance-2-5-260628";
-export const DEFAULT_MINIMAX_VIDEO_MODEL_ID = "MiniMax-Hailuo-2.3";
+export const DEFAULT_MINIMAX_VIDEO_MODEL_ID = "MiniMax-H3";
 export const DEFAULT_WAN_VIDEO_MODEL_ID = "wan3.0-video";
 
 export interface VideoModelRuntimeProfile {
@@ -71,8 +71,8 @@ export function readMeteredVideoProviderSettings(
     });
   }
 
-  if (environment.MINIMAX_API_KEY && environment.MINIMAX_VIDEO_MODEL_ID) {
-    const model = environment.MINIMAX_VIDEO_MODEL_ID;
+  if (environment.MINIMAX_API_KEY) {
+    const model = portraitMiniMaxDefault(environment.MINIMAX_VIDEO_MODEL_ID);
     const models = reviewedMiniMaxProfiles(model);
     const configuredProfile = models.find((profile) => profile.id === model);
     if (!configuredProfile) {
@@ -114,7 +114,7 @@ export function readMeteredVideoProviderSettings(
 
 export function reviewedVideoModelCatalog(environment: NodeJS.ProcessEnv): Record<MeteredVideoProviderSettings["providerId"], VideoModelRuntimeProfile[]> {
   const seedanceModel = environment.SEEDANCE_MODEL_ID?.trim() || DEFAULT_SEEDANCE_MODEL_ID;
-  const miniMaxModel = environment.MINIMAX_VIDEO_MODEL_ID?.trim() || DEFAULT_MINIMAX_VIDEO_MODEL_ID;
+  const miniMaxModel = portraitMiniMaxDefault(environment.MINIMAX_VIDEO_MODEL_ID);
   const wanModel = environment.WAN_MODEL_ID?.trim() || DEFAULT_WAN_VIDEO_MODEL_ID;
   return {
     "seedance-video-v1": reviewedSeedanceProfiles(
@@ -126,6 +126,11 @@ export function reviewedVideoModelCatalog(environment: NodeJS.ProcessEnv): Recor
     "hailuo-video-v1": reviewedMiniMaxProfiles(miniMaxModel),
     "wan-video-v1": reviewedWanProfiles(wanModel),
   };
+}
+
+function portraitMiniMaxDefault(configuredModel: string | undefined): string {
+  const model = configuredModel?.trim() || DEFAULT_MINIMAX_VIDEO_MODEL_ID;
+  return model === "MiniMax-Hailuo-2.3" ? DEFAULT_MINIMAX_VIDEO_MODEL_ID : model;
 }
 
 function reviewedMiniMaxProfiles(configuredModel: string): VideoModelRuntimeProfile[] {

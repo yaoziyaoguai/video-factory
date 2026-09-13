@@ -39,7 +39,8 @@ export interface EditorialDecisionInput {
 const STATIC_UPDATE_PATTERN = /通报|公告|回应|声明|会议(?:召开|举行|通报|决定)|发布会|任免|判决|调查进展|数据公布|逝世|去世|政策发布|外交|冲突|伤亡|事故|地震|台风|暴雨|救灾/;
 const PUBLIC_UPDATE_ACTOR_PATTERN = /(?:警方|法院|检察院|政府|官方|部门|机构|公司|企业|平台|学校|医院|当事人).{0,12}(?:通报|公告|回应|声明|发布会|任免|判决|调查进展|数据公布)/;
 const PUBLIC_EVENT_CONTEXT_PATTERN = /社会事件|公共安全|外交|国际|战争|灾害|伤亡|遇难|失联|地震|台风|暴雨|救灾/;
-const EVERYDAY_GUIDANCE_PATTERN = /亲子|孩子|家长|家庭|厨房|做饭|居家|同事|沟通|相处|如何|怎么|三步|方法|教程|化解|避免|预防|防止/;
+const EVERYDAY_CONTEXT_PATTERN = /亲子|孩子|家长|家庭|厨房|做饭|居家|同事|沟通|相处/;
+const GUIDANCE_METHOD_PATTERN = /如何|怎么|三步|方法|教程|化解|避免|预防|防止|检查/;
 const ACTION_PATTERN = /实测|实验|挑战|教程|对比|体验|探店|旅行|美食|运动|比赛|改造|制作|开箱|测评|操作|演示|工作流|三步|一天/;
 const COMPARISON_PATTERN = /对比|横评|测评|谁更适合|怎么选|选哪个|\bA\s*(?:还是|vs\.?)\s*B\b/i;
 const HOOK_PATTERN = /[？?]|\d|为什么|如何|到底|能不能|不是.+而是|别.+先|实测|对比|横评|省下|少花|多赚|变化/;
@@ -51,12 +52,17 @@ export function decideEditorialFormat(
   publishedTemplates: readonly EditorialTemplateOption[],
 ): StudioEditorialDecision {
   const decision = decideProductionPotential(input, publishedTemplates);
-  if (input.verification.status !== "blocked") return decision;
+  // 规则保底候选的所有结论都没有经过选题总编：无论走哪个分支，都要如实标记等待评估，
+  // 避免把"尚未评估"投影成"总编评分 0 · 暂不生产"。
+  const marked = input.providerId === "trend-heuristic-v1"
+    ? { ...decision, pendingEditorReview: true }
+    : decision;
+  if (input.verification.status !== "blocked") return marked;
   return {
-    ...decision,
+    ...marked,
     guardrails: [
       `开工门槛：${input.verification.reasons[0] ?? "当前证据未达到生产标准。"}`,
-      ...decision.guardrails,
+      ...marked.guardrails,
     ],
   };
 }
@@ -93,7 +99,9 @@ function decideProductionPotential(
   const productionIntentText = `${topicText} ${visualPlanText}`;
   const staticUpdate = isPublicStaticUpdate(input, topicText);
   const comparison = COMPARISON_PATTERN.test(productionIntentText);
-  const hasAction = comparison || ACTION_PATTERN.test(productionIntentText);
+  const hasAction = comparison
+    || ACTION_PATTERN.test(productionIntentText)
+    || isEverydayGuidance(productionIntentText);
   const videoValue = Math.round(
     input.score.visualFeasibility * 0.34
     + input.score.novelty * 0.2
@@ -187,8 +195,12 @@ function recommendMotionTemplate(
 function isPublicStaticUpdate(input: EditorialDecisionInput, topicText: string): boolean {
   if (!STATIC_UPDATE_PATTERN.test(topicText)) return false;
   const hasPublicEventContext = PUBLIC_UPDATE_ACTOR_PATTERN.test(topicText) || PUBLIC_EVENT_CONTEXT_PATTERN.test(topicText);
-  if (EVERYDAY_GUIDANCE_PATTERN.test(topicText) && !hasPublicEventContext) return false;
+  if (isEverydayGuidance(topicText) && !hasPublicEventContext) return false;
   return hasPublicEventContext || input.category === "society" || input.risk !== "low";
+}
+
+function isEverydayGuidance(text: string): boolean {
+  return EVERYDAY_CONTEXT_PATTERN.test(text) && GUIDANCE_METHOD_PATTERN.test(text);
 }
 
 function viralReadinessIssues(input: EditorialDecisionInput): string[] {

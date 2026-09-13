@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   CodexReferenceGrammarAgent,
+  type CodexPreparedOperation,
   type CodexTaskExecution,
   type CodexTaskKind,
+  type CodexTaskRequestOptions,
 } from "../src/index.js";
 
 function grammar(camera: string): Record<string, unknown> {
@@ -86,4 +88,104 @@ describe("CodexReferenceGrammarAgent", () => {
     assert.equal(typeof auditPayload.images[0]?.jpegBase64, "string");
     assert.equal(auditPayload.context.upstreamFacts.frames[0]?.imageIndex, 1);
   });
+
+  it("observes a saved audit and does not resample the reference video", async () => {
+    let stored: unknown;
+    let interruptAudit = true;
+    let mediaCalls = 0;
+    let producerCalls = 0;
+    let auditCalls = 0;
+    const observed: string[] = [];
+    const checkpoint = {
+      key: "reference-audit-recovery",
+      load: async () => stored,
+      save: async (value: unknown) => { stored = structuredClone(value); },
+    };
+    const client = {
+      runTask: async () => grammar("稳定推进"),
+      runTaskDetailed: async (
+        kind: CodexTaskKind,
+        payload: unknown,
+        requestId?: string,
+        _session?: unknown,
+        requestOptions?: CodexTaskRequestOptions,
+      ): Promise<CodexTaskExecution> => {
+        if (kind === "reference-grammar") {
+          producerCalls += 1;
+          return { output: grammar("稳定推进") };
+        }
+        auditCalls += 1;
+        if (interruptAudit) {
+          await requestOptions?.beforeSubmit?.(preparedOperation(kind, payload, requestId!));
+          throw new Error("reference audit response interrupted");
+        }
+        return { output: passingAudit() };
+      },
+      observePrepared: async (operation: CodexPreparedOperation): Promise<CodexTaskExecution> => {
+        observed.push(operation.requestId);
+        return { output: passingAudit() };
+      },
+    };
+    const agent = new CodexReferenceGrammarAgent({
+      client,
+      media: {
+        prepare: async () => {
+          mediaCalls += 1;
+          return {
+            durationMs: 10_000,
+            frames: [{ timecodeMs: 5_000, sha256: "a".repeat(64), jpegBase64: "/9j/2Q==" }],
+          };
+        },
+      },
+    });
+    const input = { videoPath: "/tmp/reference.mp4", runRoot: "/tmp", sourceLabel: "用户参考片", agentLoopCheckpoint: checkpoint };
+
+    await assert.rejects(() => agent.analyzeDetailed(input), /reference audit response interrupted/);
+    interruptAudit = false;
+    const execution = await agent.analyzeDetailed(input);
+
+    assert.equal(execution.agentLoop?.status, "passed");
+    assert.equal(producerCalls, 1);
+    assert.equal(auditCalls, 1);
+    assert.equal(observed.length, 1);
+    assert.equal(mediaCalls, 1);
+  });
 });
+
+function passingAudit() {
+  return {
+    version: "video-factory/role-audit-v1",
+    verdict: "pass",
+    score: 93,
+    summary: "参考片语法与证据边界一致。",
+    issues: [],
+    repairInstructions: [],
+  };
+}
+
+function preparedOperation(kind: CodexTaskKind, payload: unknown, requestId: string): CodexPreparedOperation {
+  const envelope = { protocolVersion: "video-factory/codex-bridge-v2", requestId, kind, payload };
+  const brokerBinding = {
+    version: "video-factory/task-binding-v1" as const,
+    storeId: `vfs_store_${"e".repeat(32)}`,
+    providerId: "openai",
+    modelId: "codex-default",
+  };
+  return {
+    version: "video-factory/codex-prepared-operation-v1",
+    requestId,
+    kind,
+    envelope,
+    serializedEnvelope: JSON.stringify(envelope),
+    binding: {
+      ...brokerBinding,
+      requestDigest: "f".repeat(64),
+      kind,
+      contractDigest: "a".repeat(64),
+      sessionDigest: "b".repeat(64),
+    },
+    brokerBinding,
+    route: { socketPath: "/tmp/reference.sock" },
+    taskFact: "not_submitted",
+  };
+}

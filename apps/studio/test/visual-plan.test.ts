@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { planVisualDirection, resolveExecutableVisualPlan } from "../src/shared/visual-plan.js";
+import { planVisualDirection, recommendTemplateForBrief, resolveExecutableVisualPlan } from "../src/shared/visual-plan.js";
 
 describe("planVisualDirection", () => {
   it("builds a three-beat executable plan for an ordinary-life topic", () => {
@@ -28,6 +28,28 @@ describe("planVisualDirection", () => {
     assert.match(plan.strategy, /真实桌面操作与生活空镜/);
     assert.equal(plan.beats[1]?.source, "stock");
     assert.equal(plan.beats.every((beat) => Boolean(beat.searchQuery)), true);
+  });
+
+  it("uses the promised proof method across domains instead of letting topic keywords choose the video structure", () => {
+    const controlledDemonstrations = [
+      ["为什么手机拍咖啡总显得灰", "同一杯、同一手机、同一机位，只移动一盏侧灯验证差别。"],
+      ["防晒霜真的能挡住紫外线吗", "同一光源下做涂抹前后对照实验。"],
+      ["盐为什么让冰融得更快", "两块同样的冰只给一块加盐，记录完整变化。"],
+    ] as const;
+
+    for (const [title, hook] of controlledDemonstrations) {
+      const plan = planVisualDirection({ title, hook });
+      assert.match(plan.strategy, /受控实证/);
+      assert.match(plan.beats[1]?.description ?? "", /相同条件|只改变|连续过程/);
+      assert.equal(recommendTemplateForBrief({ title, hook }), "product-demo");
+    }
+
+    const recipe = planVisualDirection({
+      title: "在家怎样做一杯手冲咖啡",
+      hook: "按三个步骤做出干净风味。",
+    });
+    assert.match(recipe.strategy, /制作动作、食材质感/);
+    assert.equal(recommendTemplateForBrief({ title: "在家怎样做一杯手冲咖啡", hook: "按三个步骤做出干净风味。" }), "knowledge-explainer");
   });
 
   it("resolves historical creator and screen directions against the selected production pool", () => {

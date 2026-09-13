@@ -255,6 +255,9 @@ export function buildPublishTargetCatalog(): StudioPublishTarget[] {
 
 function complianceChecks(run: StudioRunDetail, publishPackage: unknown, effectiveResourceReviewCount?: number): StudioPublishCheck[] {
   const checks: StudioPublishCheck[] = [];
+  checks.push(run.continuation?.supported === true
+    ? { id: "continuation", label: "制作流程版本", status: "passed", detail: "当前制作使用可继续执行的生产流程。" }
+    : { id: "continuation", label: "制作流程版本", status: "blocked", detail: "旧版制作只能查看、下载或作为新版本来源，不能直接发布。" });
   const humanApproved = run.decisions.some((decision) => decision.action === "approve");
   checks.push(run.status === "succeeded" && Boolean(run.publishPackageArtifactId) && humanApproved
     ? { id: "approval", label: "终审与发布包", status: "passed", detail: "已通过人工终审并生成发布包。" }

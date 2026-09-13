@@ -1,6 +1,6 @@
 import { AlertTriangle, Check, ChevronDown, CircleDollarSign, Clock3, FilePenLine, Pause, Save, Settings2, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
+import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProductionQuote, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { studioApi } from "../api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
@@ -8,17 +8,29 @@ import { catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, pr
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
+import { PlanningStagesPanel } from "./PlanningStagesPanel.js";
+import type { StudioPlanningEditableStage, StudioPlanningStage } from "../../shared/api.js";
+
+// 编辑器内的输入草稿类型：不含并发 token。wire DTO（含 expectedRunRevision/expectedVersionId）
+// 只在保存时由保存逻辑用打开编辑器时捕获的基线构造。
+type StudioNodeInputDraft = { input: unknown };
 
 interface NodeWorkspaceProps {
   node: StudioNode;
   nodes?: StudioNode[];
   providers?: StudioProvider[];
   runStatus: StudioRunStatus;
+  /** C2：制作范围授权需要 run 身份与当前方案 digest。 */
+  runId: string;
+  runRevision: number;
+  acceptedPlanDigest: string;
   artifacts: StudioArtifact[];
   busy: boolean;
   readOnly?: boolean;
   pauseBusy?: boolean;
   pauseRequested?: boolean;
+  /** joint-v1 创作规划节点的真实阶段投影；其他节点不传。 */
+  planningStages?: StudioPlanningStage[];
   onRequestPause?: () => Promise<void>;
   onOverride: (nodeId: string, input: StudioNodeOverrideInput) => Promise<void>;
   onInputOverride?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
@@ -27,7 +39,7 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, artifacts, busy, readOnly = false, pauseBusy = false, pauseRequested = false, onRequestPause, onOverride, onInputOverride = async () => undefined, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, busy, readOnly = false, pauseBusy = false, pauseRequested = false, planningStages, onRequestPause, onOverride, onInputOverride = async () => undefined, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
   const shouldOpenForAttention = node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
@@ -38,15 +50,23 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const [rejectingSpend, setRejectingSpend] = useState(false);
   const [spendRejectionReason, setSpendRejectionReason] = useState<StudioSpendRejectionInput["reason"]>("too_expensive");
   const [targetEstimatedCostCny, setTargetEstimatedCostCny] = useState("");
+  const [scopeMaximumCny, setScopeMaximumCny] = useState("");
+  const [scopeAuthorizing, setScopeAuthorizing] = useState(false);
+  // C2：已向服务端取得、正在向用户展示的报价；授权只接受这份报价。
+  const [pendingQuote, setPendingQuote] = useState<{ quote: StudioProductionQuote; preparedAtRevision: number }>();
   const [spendRejectionNote, setSpendRejectionNote] = useState("");
   const [draft, setDraft] = useState(() => pretty(node.output ?? effectiveOutput(node) ?? {}));
   const [inputDraft, setInputDraft] = useState(() => pretty(effectiveInput(node) ?? {}));
+  const [editingPlanningStageId, setEditingPlanningStageId] = useState<StudioPlanningEditableStage>();
+  // 输入草稿基线绑定打开编辑器时观察到的 run revision 与输入版本：保存时使用基线，
+  // 后台 props 刷新不得把旧草稿的提交基准无声升级到新版本。
+  const [inputEditBaseline, setInputEditBaseline] = useState<{ runRevision: number; versionId: string }>();
   const [error, setError] = useState<string>();
   const [documentPreview, setDocumentPreview] = useState<unknown>();
   const [documentLoading, setDocumentLoading] = useState(false);
   const [documentError, setDocumentError] = useState<string>();
   const [terminalOverride, setTerminalOverride] = useState<StudioNodeOverrideInput>();
-  const [terminalInputOverride, setTerminalInputOverride] = useState<StudioNodeInputOverrideInput>();
+  const [terminalInputOverride, setTerminalInputOverride] = useState<StudioNodeInputDraft>();
   const spendDialogRef = useDialogFocus<HTMLElement>(authorizing, () => {
     setError(undefined);
     setAuthorizing(false);
@@ -193,6 +213,23 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   function cancelInputEditing() {
     setError(undefined);
     setEditingInput(false);
+    setEditingPlanningStageId(undefined);
+    setInputEditBaseline(undefined);
+  }
+
+  // 打开输入编辑器的唯一入口：草稿内容与并发基线（run revision + 输入版本）都在这一刻固定。
+  function beginInputEditing(stageId?: StudioPlanningEditableStage) {
+    setError(undefined);
+    setEditingPlanningStageId(stageId);
+    setInputDraft(pretty(effectiveInput(node) ?? {}));
+    setInputEditBaseline({ runRevision, versionId: effectiveInputVersion?.id ?? "" });
+    setEditingInput(true);
+    setWorkspaceOpen(true);
+    setInputReviewOpen(true);
+  }
+
+  function beginPlanningStageInputEdit(stageId: StudioPlanningStage["id"]) {
+    beginInputEditing(stageId as StudioPlanningEditableStage);
   }
 
   async function saveOverride(confirmTerminalEdit = false, preparedOverride?: StudioNodeOverrideInput) {
@@ -221,7 +258,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     }
   }
 
-  async function saveInputOverride(confirmTerminalEdit = false, preparedOverride?: StudioNodeInputOverrideInput) {
+  async function saveInputOverride(confirmTerminalEdit = false, preparedOverride?: StudioNodeInputDraft) {
     setError(undefined);
     try {
       const parsed = preparedOverride ?? { input: JSON.parse(inputDraft) as unknown };
@@ -234,8 +271,23 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         setTerminalInputOverride(parsed);
         return;
       }
-      await onInputOverride(node.id, { ...parsed, ...(confirmTerminalEdit ? { confirmTerminalEdit: true } : {}) });
+      // 提交基线使用打开编辑器时捕获的版本：props 在编辑期间更新不会替换基线；
+      // 基线缺失（理论不可达）时拒绝提交，不无声改用当前 props。
+      const baseline = inputEditBaseline;
+      if (!baseline) {
+        setError("编辑会话已失效，请重新打开编辑后再保存。");
+        return;
+      }
+      await onInputOverride(node.id, {
+        ...parsed,
+        expectedRunRevision: baseline.runRevision,
+        expectedVersionId: baseline.versionId,
+        ...(editingPlanningStageId ? { planningStageId: editingPlanningStageId } : {}),
+        ...(confirmTerminalEdit ? { confirmTerminalEdit: true } : {}),
+      });
       setEditingInput(false);
+      setEditingPlanningStageId(undefined);
+      setInputEditBaseline(undefined);
       setTerminalInputOverride(undefined);
     } catch (caught) {
       setError(caught instanceof SyntaxError ? "JSON 格式不正确，请检查括号和引号。" : caught instanceof Error ? caught.message : String(caught));
@@ -257,6 +309,83 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       setAuthorizing(false);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  // C2：制作范围授权的两阶段流——第一次点击只向服务端索取不可变报价并展示；
+  // 用户看到明确金额后第二次点击才接受同一份报价。prepare 不授权，accept 不重算价。
+  async function prepareProductionScopeQuote() {
+    if (!node.spendPlan) return;
+    setError(undefined);
+    const maximum = scopeMaximumCny.trim() ? Number(scopeMaximumCny) : undefined;
+    if (maximum !== undefined && (!Number.isFinite(maximum) || maximum <= 0)) {
+      setError("本次最高授权额必须是大于 0 的有效金额。");
+      return;
+    }
+    if (maximum !== undefined && maximum < node.spendPlan.estimatedCostCny) {
+      setError(`当前方案预计花费 ¥${node.spendPlan.estimatedCostCny.toFixed(2)}，高于你填写的最高授权额；请提高额度或调整方案。`);
+      return;
+    }
+    setScopeAuthorizing(true);
+    try {
+      const quote = await studioApi.prepareProductionQuote(runId, {
+        expectedRunRevision: runRevision,
+        acceptedPlanDigest: acceptedPlanDigest,
+        ...(maximum !== undefined ? { requestedMaximumCny: maximum } : {}),
+      });
+      setPendingQuote({ quote, preparedAtRevision: runRevision });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setScopeAuthorizing(false);
+    }
+  }
+
+  async function acceptPendingScopeQuote() {
+    if (!pendingQuote) return;
+    setError(undefined);
+    setScopeAuthorizing(true);
+    try {
+      await studioApi.authorizeProductionScope(runId, {
+        expectedRunRevision: pendingQuote.preparedAtRevision,
+        quoteId: pendingQuote.quote.quoteId,
+        acceptedPlanDigest: pendingQuote.quote.acceptedPlanDigest,
+        idempotencyKey: `scope-${runId}-${pendingQuote.quote.quoteId}`,
+      });
+      setPendingQuote(undefined);
+      setAuthorizing(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setScopeAuthorizing(false);
+    }
+  }
+
+  // C2：funding 三动作之"同意追加并继续"——追加额只能来自服务端保存的 funding request
+  // （prepare 在已有活动授权时生成），客户端不能自报差额。
+  async function acceptFundingAmendment() {
+    const assessment = node.spendAssessment;
+    if (!assessment || assessment.action !== "request_approval") return;
+    setError(undefined);
+    setScopeAuthorizing(true);
+    try {
+      const quote = await studioApi.prepareProductionQuote(runId, {
+        expectedRunRevision: runRevision,
+        acceptedPlanDigest: acceptedPlanDigest,
+        requestedMaximumCny: assessment.resultingMaximumCents / 100,
+      });
+      if (!quote.fundingRequestId || !quote.fundingAuthorizationId) {
+        throw new Error("服务端没有生成追加请求，请刷新后重新获取。");
+      }
+      await studioApi.amendProductionScope(runId, quote.fundingAuthorizationId, {
+        expectedRunRevision: runRevision,
+        fundingRequestId: quote.fundingRequestId,
+        idempotencyKey: `amend-${runId}-${quote.fundingRequestId}`,
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setScopeAuthorizing(false);
     }
   }
 
@@ -309,13 +438,15 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
           <strong>{agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
           {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{creatorFacingTechnicalText(humanizeCreativeText(node.agentLoopProgress.latestAudit.summary))}</span> : <span>正在生成本轮方案，完成后由独立 AI 做质量复核。</span>}
+          <span>实际模型调用：创作 {node.agentLoopProgress.producerModelCallCount ?? 0} 次，审计 {node.agentLoopProgress.auditModelCallCount ?? 0} 次{(node.agentLoopProgress.structuredRepairModelCallCount ?? 0) > 0 ? `（其中结构修复 ${node.agentLoopProgress.structuredRepairModelCallCount} 次）` : ""}。查询、刷新和等待不计为新调用。</span>
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>{fallbackHeading}</strong>：{fallbackReason}</span></p> : null}
-        {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />这一步的结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成。</p> : null}
+        {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />这一步的结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成；仍然适用的部分会自动保留，不会全部重做。</p> : null}
         {node.executionConfiguration ? <NodeExecutionConfigurationEditor
           node={node}
           providers={providers}
           runStatus={runStatus}
+          runRevision={runRevision}
           busy={busy}
           readOnly={readOnly}
           paidRecoveryLocked={paidRecoveryLocked}
@@ -335,6 +466,25 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           <button className="button button-ghost" type="button" disabled={pauseBusy || pauseRequested} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{pauseRequested ? "等待暂停" : "暂停后修改"}</button>
         </div> : null}
 
+        {node.id === "creative-planning" && planningStages && planningStages.length > 0 ? (
+          <PlanningStagesPanel
+            stages={planningStages}
+            providers={providers}
+            busy={busy}
+            readOnly={readOnly || runStatus === "running"}
+            onEditStageInput={beginPlanningStageInputEdit}
+            onConfigureStage={async (input) => {
+              setError(undefined);
+              try {
+                await onConfigure(node.id, { ...input, expectedRunRevision: runRevision });
+              } catch (caught) {
+                setError(caught instanceof Error ? caught.message : String(caught));
+              }
+            }}
+          />
+
+        ) : null}
+
         {canEditInput && hasReviewableInput ? <details className="node-input-adjustment" open={inputReviewOpen} onToggle={(event) => setInputReviewOpen(event.currentTarget.open)}>
           <summary><FilePenLine aria-hidden="true" size={15} />查看和调整这个角色收到的内容</summary>
           <div className="node-input-review">
@@ -348,7 +498,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
               </div>
             </section> : null}
             {hasEditableInput ? <section className="node-output-preview">
-              <header><div><strong>本步骤专用设置</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 前序内容已变化，需复核" : ""}</small></div>{!editingInput ? <button className="button button-ghost" type="button" onClick={() => setEditingInput(true)}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
+              <header><div><strong>{editingPlanningStageId ? `正在修改创作规划「${editingPlanningStageId === "treatment" ? "前期构思" : editingPlanningStageId === "script" ? "脚本" : "导演方案"}」阶段的输入` : "本步骤专用设置"}</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 前序内容已变化，需复核" : ""}{editingPlanningStageId ? " · 保存后从该阶段开始重新规划" : ""}</small></div>{!editingInput ? <button className="button button-ghost" type="button" onClick={() => beginInputEditing()}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
               {effectiveInputVersion?.source === "reconstructed" ? <p className="node-version-note">旧任务没有保存当时的原始输入；这里展示的是按当前上游内容推断出的可编辑版本。</p> : null}
               {editingInput ? <NodeStructuredEditor nodeId={`${node.id}-input`} value={safeParse(inputDraft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setInputDraft(pretty(value)); }} /> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
               {editingInput ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelInputEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveInputOverride()}><Save aria-hidden="true" size={15} />保存人工输入</button></footer> : null}
@@ -359,8 +509,66 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         {node.spendPlan ? (
           <section className="spend-gate" aria-label={`${node.label}费用确认`}>
             <div><CircleDollarSign aria-hidden="true" size={20} /><span><strong>执行前费用确认</strong><small>预计 ¥{node.spendPlan.estimatedCostCny.toFixed(2)}，最高 ¥{node.spendPlan.maxCostCny.toFixed(2)} · 最多 {node.spendPlan.maxAttempts} 次</small>{node.spendPlan.items?.map((item) => <small key={item.id}><span>{item.label} · {providerLabel(item.providerId) ?? "画面服务"} · {providerModelLabel(providers.find((provider) => provider.id === item.providerId), item.modelId)}</span> · ¥{item.estimatedCostCny.toFixed(2)}</small>)}</span></div>
-            {node.spendAuthorizationId ? <span className="spend-authorized"><ShieldCheck aria-hidden="true" size={15} />已授权</span> : readOnly ? <small>历史报价仅供查看</small> : (
-              <div className="spend-gate-actions">{node.id === "assets" ? <button className="button button-ghost" type="button" disabled={busy} onClick={() => { setError(undefined); setRejectingSpend(true); }}>这份报价不合适</button> : null}<button className="button button-primary" type="button" disabled={busy} onClick={() => { setError(undefined); setAuthorizing(true); }}><ShieldCheck aria-hidden="true" size={16} />检查并确认</button></div>
+            {node.spendAuthorizationId ? <span className="spend-authorized"><ShieldCheck aria-hidden="true" size={15} />已授权</span> : readOnly ? <small>历史报价仅供查看</small> : node.spendAssessment?.action === "request_approval" ? (
+              <div className="spend-gate-actions spend-funding" aria-label="费用缺口">
+                <p><strong>{spendAssessmentHeadline(node.spendAssessment)}</strong></p>
+                <dl className="spend-quote-summary">
+                  <div><dt>已批准</dt><dd>¥{(node.spendAssessment.approvedAmountCents / 100).toFixed(2)}</dd></div>
+                  <div><dt>已发生/在途</dt><dd>¥{((node.spendAssessment.settledCents + node.spendAssessment.reservedCents + node.spendAssessment.pendingUnknownCents) / 100).toFixed(2)}</dd></div>
+                  <div><dt>本次方案最高需要</dt><dd>¥{(node.spendAssessment.requestedMaximumCents / 100).toFixed(2)}</dd></div>
+                  {node.spendAssessment.reason === "amount" ? <div><dt>需要追加</dt><dd>¥{(node.spendAssessment.additionalCents / 100).toFixed(2)}（追加后累计 ¥{(node.spendAssessment.resultingMaximumCents / 100).toFixed(2)}）</dd></div> : null}
+                </dl>
+                <small>既有成果已保留；追加只覆盖当前方案所需，授权额仍是上限。也可以调整方案，或先不继续。</small>
+                <div className="spend-gate-buttons">
+                  {node.spendAssessment.reason === "amount" ? <button className="button button-primary" type="button" disabled={busy || scopeAuthorizing} onClick={() => void acceptFundingAmendment()}>
+                    <ShieldCheck aria-hidden="true" size={16} />{scopeAuthorizing ? "正在确认…" : `同意追加 ¥${(node.spendAssessment.additionalCents / 100).toFixed(2)} 并继续`}
+                  </button> : null}
+                  {node.id === "assets" ? <button className="button button-ghost" type="button" disabled={busy || scopeAuthorizing} onClick={() => { setError(undefined); setRejectingSpend(true); }}>调整方案</button> : null}
+                  {onRequestPause ? <button className="button button-ghost" type="button" disabled={busy || scopeAuthorizing || pauseRequested} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{pauseRequested ? "已请求暂停" : "暂不继续"}</button> : null}
+                </div>
+              </div>
+            ) : pendingQuote ? (
+              <div className="spend-gate-actions">
+                <dl className="spend-quote-summary" aria-label="服务端费用报价">
+                  <div><dt>预计费用</dt><dd>¥{pendingQuote.quote.estimatedCostCny.toFixed(2)}</dd></div>
+                  <div><dt>最高授权</dt><dd>¥{pendingQuote.quote.maximumCostCny.toFixed(2)}</dd></div>
+                  <div><dt>制作内容</dt><dd>{pendingQuote.quote.scopeSummary.content}</dd></div>
+                  {pendingQuote.quote.scopeSummary.assets.map((asset) => (
+                    <div key={asset.assetKey}>
+                      <dt>{asset.label}</dt>
+                      <dd>¥{asset.estimatedCostCny.toFixed(2)} · 最多 {asset.maxCreateAttempts} 次 · {asset.allowedModels.map((model) => providerModelLabel(providers.find((provider) => provider.id === model.providerId), model.modelId) ?? model.modelId).join("、")}</dd>
+                    </div>
+                  ))}
+                  {pendingQuote.quote.scopeSummary.uncertainty.map((note) => <div key={note}><dt>不确定项</dt><dd>{note}</dd></div>)}
+                </dl>
+                <small>确认后本次制作会自动继续，范围内的有限修复不再逐项打扰；授权额是上限，不是目标。</small>
+                <div className="spend-gate-buttons">
+                  {node.id === "assets" ? <button className="button button-ghost" type="button" disabled={busy || scopeAuthorizing} onClick={() => { setError(undefined); setRejectingSpend(true); }}>这份报价不合适</button> : null}
+                  <button className="button button-ghost" type="button" disabled={busy || scopeAuthorizing} onClick={() => setPendingQuote(undefined)}>重新填写额度</button>
+                  <button className="button button-primary" type="button" disabled={busy || scopeAuthorizing} onClick={() => void acceptPendingScopeQuote()}>
+                    <ShieldCheck aria-hidden="true" size={16} />{scopeAuthorizing ? "正在确认…" : `确认并授权（最高 ¥${pendingQuote.quote.maximumCostCny.toFixed(2)}）`}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="spend-gate-actions">
+                <label className="field spend-scope-maximum">
+                  <span>本次最高授权额（元，可不填）</span>
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    placeholder={`默认 ¥${node.spendPlan.maxCostCny.toFixed(2)}`}
+                    value={scopeMaximumCny}
+                    onChange={(event) => { setScopeMaximumCny(event.target.value); setPendingQuote(undefined); }}
+                  />
+                  <small>先获取报价，确认金额后再授权；授权额是上限，不是目标。</small>
+                </label>
+                {node.id === "assets" ? <button className="button button-ghost" type="button" disabled={busy || scopeAuthorizing} onClick={() => { setError(undefined); setRejectingSpend(true); }}>这份报价不合适</button> : null}
+                <button className="button button-primary" type="button" disabled={busy || scopeAuthorizing || !acceptedPlanDigest} onClick={() => void prepareProductionScopeQuote()}>
+                  <ShieldCheck aria-hidden="true" size={16} />{scopeAuthorizing ? "正在获取报价…" : "获取费用报价"}
+                </button>
+              </div>
             )}
           </section>
         ) : null}
@@ -368,7 +576,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <section className="node-output-preview node-creator-delivery">
           <header><div><strong>{node.role ?? "制作角色"}的交付</strong><small>{deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
           {node.id === "assets" && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
-            <header><strong>{visualsAreCurrent ? "实际素材画面" : "上次生成的素材画面"}</strong><small>{visualArtifacts.length} 个可预览素材{visualsAreCurrent ? "" : " · 上游变化后需重新生成"}</small></header>
+            <header><strong>{visualsAreCurrent ? "实际素材画面" : "上次生成的素材画面"}</strong><small>{visualArtifacts.length} 个可预览素材{visualsAreCurrent ? "" : " · 将重新检查适用性，只重做不再适用的部分"}</small></header>
             <div>
               {visualArtifacts.map((artifact, index) => <figure key={artifact.id}>
                 {artifact.contentType?.startsWith("video/")
@@ -448,8 +656,28 @@ function agentLoopPhaseLabel(progress: NonNullable<StudioNode["agentLoopProgress
         ? "独立复核已通过"
         : progress.phase === "exhausted"
           ? "三轮复核未通过"
+          : progress.phase === "halted"
+            ? "发现当前角色无法解决的前提，已停住"
           : "AI 创作中";
   return `第 ${progress.iteration} / ${progress.maxIterations} 轮 · ${phase}`;
+}
+
+// C1/C2：结构化评估的创作者文案——只说发生了什么、保留了什么、下一步；金额之外的
+// 原因（scope/attempts/quality）加钱解决不了，不提供"只加钱继续"的入口。
+function spendAssessmentHeadline(assessment: NonNullable<StudioNode["spendAssessment"]>): string {
+  if (assessment.reason === "amount") {
+    return "当前授权余额不够完成这份方案。";
+  }
+  if (assessment.reason === "attempts") {
+    return "部分镜头的重试次数已达到你批准的上限，无法继续自动修复。";
+  }
+  if (assessment.reason === "quality") {
+    return "方案效果在授权后发生了变化，需要你重新确认后才能继续。";
+  }
+  if (assessment.reason === "scope") {
+    return "这份方案有内容不在已批准的范围里，需要你重新确认。";
+  }
+  return "当前费用凭证不足以继续这份方案。";
 }
 
 function revealExpandedWorkspace(workspace: HTMLDetailsElement): void {
@@ -612,10 +840,12 @@ function configuredAssetProviderIds(nodes: StudioNode[]): string[] {
     : [];
 }
 
-function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, readOnly, paidRecoveryLocked, onSave }: {
+function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevision, busy, readOnly, paidRecoveryLocked, onSave }: {
   node: StudioNode;
   providers: StudioProvider[];
   runStatus: StudioRunStatus;
+  /** 保存时以打开编辑器那一刻观察到的 revision 为并发基线，不随 props 后台刷新升级。 */
+  runRevision: number;
   busy: boolean;
   readOnly: boolean;
   paidRecoveryLocked: boolean;
@@ -623,6 +853,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, re
 }) {
   const configuration = node.executionConfiguration!;
   const [editing, setEditing] = useState(false);
+  const [editBaselineRevision, setEditBaselineRevision] = useState<number>();
   const [providerId, setProviderId] = useState(configuration.providerId);
   const [modelSelections, setModelSelections] = useState<Record<string, string>>({ ...configuration.modelSelections });
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([...(configuration.assetProviderIds ?? [])]);
@@ -674,11 +905,17 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, re
       setError("至少保留一个画面来源。");
       return;
     }
+    // 基线缺失（理论不可达：保存入口只在编辑器打开时可达）时拒绝提交，不无声改用当前 props。
+    if (editBaselineRevision === undefined) {
+      setError("编辑会话已失效，请重新打开编辑后再保存。");
+      return;
+    }
     try {
       const providerModels = node.id === "assets"
         ? Object.fromEntries(assetProviderIds.map((id) => [id, modelSelections[id] ?? null]))
         : { [providerId]: modelSelections[providerId] ?? null };
       await onSave({
+        expectedRunRevision: editBaselineRevision,
         ...(node.id === "assets" ? {} : { providerId }),
         modelSelections: providerModels,
         ...(node.id === "assets" ? {
@@ -690,6 +927,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, re
         ...(failedRecovery ? { confirmTerminalEdit: true } : {}),
       });
       setEditing(false);
+      setEditBaselineRevision(undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -703,7 +941,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, re
           ? "更换画面来源，或切换到时长、任务能力不同的视频模型，会让导演重新规划；同一来源下，只有能力兼容的模型切换才从画面素材继续。保存后旧费用确认会自动失效。"
           : "保存后继续制作才会生效，旧费用确认会自动失效"
         : executionConfigurationSummary(node, providers)}</small></div>
-      {canEdit && !editing ? <button className="button button-ghost" type="button" onClick={() => setEditing(true)}>调整</button> : null}
+      {canEdit && !editing ? <button className="button button-ghost" type="button" onClick={() => { setEditBaselineRevision(runRevision); setEditing(true); }}>调整</button> : null}
     </header>
     {editing ? <div className="node-execution-config-editor">
       {node.id !== "assets" ? <>
@@ -739,7 +977,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, busy, re
         </div> : null}
       </>}
       {error ? <p className="node-workspace-error" role="alert">{error}</p> : null}
-      <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => { setError(undefined); setEditing(false); }}>取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void save()}><Save aria-hidden="true" size={15} />保存选择</button></footer>
+      <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => { setError(undefined); setEditing(false); setEditBaselineRevision(undefined); }}>取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void save()}><Save aria-hidden="true" size={15} />保存选择</button></footer>
     </div> : null}
   </section>;
 }
@@ -927,38 +1165,29 @@ function executionTimingDetails(
   const totalMs = elapsedReceiptMs(receipt.startedAt, receipt.finishedAt);
   const queueWaitMs = timingParameter(parameters.queueWaitMs);
   const providerWaitMs = timingParameter(parameters.providerWaitMs);
-  const firstOutputEventMs = timingParameter(parameters.firstOutputEventMs);
-  const toolMs = timingParameter(parameters.toolMs);
-  const providerValidationMs = timingParameter(parameters.providerValidationMs);
-  const producerMs = timingParameter(parameters.producerMs);
-  const auditMs = timingParameter(parameters.auditMs);
-  const loopValidationMs = timingParameter(parameters.loopValidationMs);
   const modelCallCount = nonNegativeIntegerParameter(parameters.modelCallCount);
   const retryCount = nonNegativeIntegerParameter(parameters.retryCount);
   const fallbackCandidateCount = Math.max(0, (receipt.actualModelIds?.length ?? 1) - 1);
-  const fallbackAndDispatchMs = fallbackCandidateCount > 0
-    && totalMs !== undefined
-    && producerMs !== undefined
-    && auditMs !== undefined
-    ? Math.max(0, totalMs - producerMs - auditMs)
+  const localProcessingMs = totalMs !== undefined
+    && queueWaitMs !== undefined
+    && providerWaitMs !== undefined
+    && queueWaitMs + providerWaitMs <= totalMs
+    ? totalMs - queueWaitMs - providerWaitMs
     : undefined;
-  if ([queueWaitMs, providerWaitMs, firstOutputEventMs, toolMs, providerValidationMs, producerMs, auditMs, loopValidationMs]
-    .every((value) => value === undefined)
+  if (queueWaitMs === undefined
+    && providerWaitMs === undefined
+    && localProcessingMs === undefined
     && modelCallCount === undefined
-    && retryCount === undefined) return undefined;
+    && retryCount === undefined
+    && fallbackCandidateCount === 0) return undefined;
 
   const items = [
     totalMs === undefined ? undefined : { label: "步骤总耗时", value: formatDuration(totalMs) },
-    queueWaitMs === undefined ? undefined : { label: "等待执行席位", value: formatDuration(queueWaitMs) },
-    providerWaitMs === undefined ? undefined : { label: "最终模型等待", value: formatDuration(providerWaitMs) },
-    firstOutputEventMs === undefined ? undefined : { label: "首次响应", value: formatDuration(firstOutputEventMs) },
-    producerMs === undefined ? undefined : { label: "内容生成累计", value: formatDuration(producerMs) },
-    auditMs === undefined ? undefined : { label: "独立复核累计", value: formatDuration(auditMs) },
-    fallbackAndDispatchMs === undefined ? undefined : { label: "替补前等待与调度", value: formatDuration(fallbackAndDispatchMs) },
-    toolMs === undefined ? undefined : { label: "工具处理", value: formatDuration(toolMs) },
-    providerValidationMs === undefined && loopValidationMs === undefined
+    queueWaitMs === undefined ? undefined : { label: "排队等待", value: formatDuration(queueWaitMs) },
+    providerWaitMs === undefined ? undefined : { label: "Provider 执行", value: formatDuration(providerWaitMs) },
+    localProcessingMs === undefined
       ? undefined
-      : { label: "结果校验", value: formatDuration((providerValidationMs ?? 0) + (loopValidationMs ?? 0)) },
+      : { label: fallbackCandidateCount > 0 ? "本地处理与候选切换" : "本地处理", value: formatDuration(localProcessingMs) },
     fallbackCandidateCount > 0 ? { label: "候选切换", value: `${fallbackCandidateCount} 次` } : undefined,
     modelCallCount === undefined ? undefined : { label: fallbackCandidateCount > 0 ? "最终模型调用" : "模型调用", value: `${modelCallCount} 次` },
     retryCount === undefined ? undefined : { label: "自动重试", value: `${retryCount} 次` },

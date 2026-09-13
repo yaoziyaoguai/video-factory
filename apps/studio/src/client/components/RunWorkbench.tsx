@@ -27,17 +27,21 @@ interface RunWorkbenchProps {
   onRegenerateStale?: () => Promise<void>;
   onRequestPause?: () => Promise<void>;
   onResumePaused?: () => Promise<void>;
+  onQueryOriginalTextTask?: () => Promise<void>;
+  onRetrieveOriginalTextTask?: () => Promise<void>;
   onRetryFailedNode?: (nodeId: string) => Promise<void>;
   paidNodeSummary?: StudioPaidNodeSummary;
   onReconcilePaidNode?: (nodeId: string, input: StudioPaidReconciliationDraft) => Promise<void>;
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onRequestSceneRevision, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onRequestSceneRevision, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
   const [approvalOverrideNote, setApprovalOverrideNote] = useState("");
+  const [replanningVoice, setReplanningVoice] = useState(false);
+  const [voiceDurationSeconds, setVoiceDurationSeconds] = useState("");
   const [decisionSnapshot, setDecisionSnapshot] = useState<Pick<StudioDecisionInput, "expectedRunRevision" | "interventionId" | "reviewEvidenceId">>();
   const previewRef = useRef<HTMLVideoElement>(null);
   const closeRejectDecision = () => {
@@ -50,6 +54,11 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   };
   const rejectDialogRef = useDialogFocus<HTMLElement>(rejecting, closeRejectDecision, decisionPending);
   const approveDialogRef = useDialogFocus<HTMLElement>(approving, closeApproveDecision, decisionPending);
+  const closeVoiceTimingDecision = () => {
+    setReplanningVoice(false);
+    setDecisionSnapshot(undefined);
+  };
+  const voiceTimingDialogRef = useDialogFocus<HTMLElement>(replanningVoice, closeVoiceTimingDecision, decisionPending);
   const readOnly = run.continuation?.supported === false;
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
   const creatorNodes = run.nodes.filter((node) => nodeHasCreatorContent(node, run));
@@ -60,12 +69,34 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const visiblePaidNodeSummary = paidNodeSummary?.nodeId === uncertainPaidNode?.id ? paidNodeSummary : undefined;
   const uncertainPaidNodeProviderId = (uncertainPaidNode?.executionReceipt ?? uncertainPaidNode?.plannedExecution)?.providerId;
   const visualReview = visualReviewDecision(run);
+  const voiceTiming = voiceTimingConflict(run);
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
   const assetVersionId = run.nodes.find((node) => node.id === "assets")?.outputState?.effectiveVersionId;
   const isCostReplan = run.status === "stale" && hasDirectorCostFeedback(run);
   const sourceAssetFailure = run.failure && isSourceAssetReviewFailure(run.failure)
     ? sourceAssetReviewBreakdown(run.failure)
     : undefined;
+  const taskRecoveryPanel = run.taskRecovery ? <section className="task-recovery-panel" aria-label="原模型任务恢复" role="status">
+    <strong>{run.taskRecovery.resultAvailable ? "原任务结果可以取回" : "已保留原模型任务"}</strong>
+    <p>{run.taskRecovery.summary}</p>
+    {run.taskRecovery.lastVerifiedAt ? <p><time dateTime={run.taskRecovery.lastVerifiedAt}>上次确认：{formatRecoveryTime(run.taskRecovery.lastVerifiedAt)}</time></p> : null}
+    {run.taskRecovery.observationError ? <p className="run-failure-summary">最近查询：{run.taskRecovery.observationError}</p> : null}
+    {run.taskRecovery.terminalError ? <p className="run-failure-summary">原任务失败原因：{run.taskRecovery.terminalError}</p> : null}
+    <div className="task-recovery-actions">
+      {run.taskRecovery.allowedActions.includes("query_original_task") && onQueryOriginalTextTask ? <button
+        className="button button-secondary"
+        type="button"
+        disabled={nodeMutationPending}
+        onClick={() => void onQueryOriginalTextTask()}
+      ><Activity aria-hidden="true" size={16} />{nodeMutationPending ? "正在查询原任务..." : "查询原任务"}</button> : null}
+      {run.taskRecovery.allowedActions.includes("retrieve_and_continue") && onRetrieveOriginalTextTask ? <button
+        className="button button-primary"
+        type="button"
+        disabled={nodeMutationPending}
+        onClick={() => void onRetrieveOriginalTextTask()}
+      ><Play aria-hidden="true" size={16} />{nodeMutationPending ? "正在取回..." : "取回结果并继续"}</button> : null}
+    </div>
+  </section> : null;
 
   const renderNodeWorkspace = (node: StudioRunDetail["nodes"][number]) => <NodeWorkspace
     key={node.id}
@@ -75,7 +106,11 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
     runStatus={run.status}
     artifacts={run.artifacts.filter((artifact) => node.artifactIds.includes(artifact.id) || artifact.producerNodeId === node.id)}
     busy={nodeMutationPending}
+    runId={run.id}
+    runRevision={run.revision}
+    acceptedPlanDigest={run.productionPlanDigest ?? ""}
     readOnly={readOnly}
+    {...(node.id === "creative-planning" && run.planningStages ? { planningStages: run.planningStages } : {})}
     pauseBusy={pausePending}
     pauseRequested={run.pauseRequested === true}
     {...(onRequestPause ? { onRequestPause } : {})}
@@ -92,6 +127,8 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
       setRejecting(false);
       setRejectNote("");
       setApprovalOverrideNote("");
+      setReplanningVoice(false);
+      setVoiceDurationSeconds("");
       setDecisionSnapshot(undefined);
     }
   }, [run.activeIntervention]);
@@ -105,6 +142,17 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
     });
     if (kind === "approve") setApproving(true);
     else setRejecting(true);
+  };
+
+  const openVoiceTimingDecision = () => {
+    if (!run.activeIntervention || !voiceTiming) return;
+    setDecisionSnapshot({
+      expectedRunRevision: run.revision,
+      interventionId: run.activeIntervention.id,
+      reviewEvidenceId: null,
+    });
+    setVoiceDurationSeconds(String(voiceTiming.requiredSeconds));
+    setReplanningVoice(true);
   };
 
   return (
@@ -150,6 +198,8 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
         {activeNodeModel(run, providers) ? <p className="run-active-provider">当前能力：{activeNodeModel(run, providers)}</p> : null}
         {onRequestPause ? <button className="button button-ghost run-pause-button" type="button" disabled={pausePending || run.pauseRequested === true} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{run.pauseRequested ? "当前步骤完成后暂停" : "暂停后检查或修改"}</button> : null}
       </section> : null}
+
+      {taskRecoveryPanel}
 
       {showReviewSurface ? <div className="review-layout">
         <section className="video-stage" aria-labelledby="preview-title" data-tour="run-preview">
@@ -203,6 +253,14 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               <p className="eyebrow">历史制作记录</p>
               <h2>这条旧版制作仅供查看</h2>
               <p>{run.continuation?.reason}</p>
+              {visiblePaidNodeSummary ? <PaidOperationPanel
+                summary={visiblePaidNodeSummary}
+                providers={providers}
+                busy={nodeMutationPending}
+                settlementOnly
+                {...(uncertainPaidNodeProviderId ? { providerIdHint: uncertainPaidNodeProviderId } : {})}
+                {...(onReconcilePaidNode ? { onReconcile: onReconcilePaidNode } : {})}
+              /> : null}
               {onRestart ? <button className="button button-primary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
             </section>
           ) : run.activeIntervention ? (
@@ -258,7 +316,14 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 <p className="agent-review-guidance">待补查项只会重新审查当前成片，不会重新购买画面或配音。已确认缺陷才进入调整方案；批准则会覆盖视觉审片建议并生成发布包。</p>
               </div> : null}
               <div className="decision-actions">
-                {visualReviewRequiresRevision ? <>
+                {voiceTiming ? <>
+                  <button className="button button-primary" type="button" disabled={decisionPending} onClick={openVoiceTimingDecision}>
+                    <RotateCcw aria-hidden="true" size={17} />调整方案
+                  </button>
+                  <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
+                    <XCircle aria-hidden="true" size={17} />终止制作
+                  </button>
+                </> : visualReviewRequiresRevision ? <>
                   <button className="button button-primary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
                     <RotateCcw aria-hidden="true" size={17} />修改后再审
                   </button>
@@ -331,8 +396,8 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               /> : null}
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />准备各平台发布包</button> : null}
               {run.status === "succeeded" && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
-              {(run.status === "failed" || run.status === "rejected") && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && retryableNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{sourceAssetFailure && run.status === "rejected" ? "重新检查已有试片" : run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤"}</button> : null}
-              {(run.status === "failed" || run.status === "rejected") && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
+              {(run.status === "failed" || run.status === "rejected") && (run.failure?.retryable !== false || run.taskRecovery?.allowedActions.includes("retry_failed_step")) && !hasUncertainPaidOutcome(run) && (!run.taskRecovery || run.taskRecovery.allowedActions.includes("retry_failed_step")) && onRetryFailedNode && retryableNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{sourceAssetFailure && run.status === "rejected" ? "重新检查已有试片" : run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤"}</button> : null}
+              {(run.status === "failed" || run.status === "rejected") && !hasUncertainPaidOutcome(run) && (!run.taskRecovery || run.taskRecovery.allowedActions.includes("adjust_plan")) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
               {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />{isCostReplan ? "按降本意见重新规划并报价" : "按人工版本继续生成"}</button> : null}
               {run.status === "paused" && onResumePaused ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onResumePaused()}><Play aria-hidden="true" size={16} />继续自动制作</button> : null}
             </section>
@@ -350,6 +415,45 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
 
       {costDetail ? <RunCostDetailPanel detail={costDetail} providers={providers} /> : null}
 
+      {replanningVoice && voiceTiming ? (
+        <div className="dialog-backdrop" role="presentation">
+          <section ref={voiceTimingDialogRef} className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="voice-timing-title" tabIndex={-1}>
+            <header className="dialog-header">
+              <div><p className="eyebrow">调整统一方案</p><h2 id="voice-timing-title">调整配音时长</h2></div>
+              <button className="icon-button" type="button" onClick={closeVoiceTimingDecision} disabled={decisionPending} title="关闭"><X aria-hidden="true" size={19} /></button>
+            </header>
+            <p>自然配音需要 {voiceTiming.requiredSeconds} 秒，当前镜头只有 {voiceTiming.plannedSeconds} 秒。接受新时长后，系统会重排统一时间轴并重新检查素材、画面和成片。</p>
+            <label className="field field-wide">
+              <span>{`镜头 ${voiceTiming.scenePosition} 时长（秒）`}</span>
+              <input
+                type="number"
+                min={voiceTiming.requiredSeconds}
+                max={180}
+                step="0.001"
+                value={voiceDurationSeconds}
+                onChange={(event) => setVoiceDurationSeconds(event.target.value)}
+                data-dialog-initial-focus
+              />
+            </label>
+            <footer className="dialog-actions">
+              <button className="button button-ghost" type="button" onClick={closeVoiceTimingDecision} disabled={decisionPending}>取消</button>
+              <button
+                className="button button-primary"
+                type="button"
+                disabled={decisionPending || !decisionSnapshot || !Number.isFinite(Number(voiceDurationSeconds)) || Number(voiceDurationSeconds) < voiceTiming.requiredSeconds}
+                onClick={() => decisionSnapshot && void onDecision({
+                  action: "request_changes",
+                  ...decisionSnapshot,
+                  voiceTiming: {
+                    scenePosition: voiceTiming.scenePosition,
+                    durationSeconds: Number(voiceDurationSeconds),
+                  },
+                })}
+              ><RotateCcw aria-hidden="true" size={17} />接受新时长并继续制作</button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
       {rejecting ? (
         <div className="dialog-backdrop" role="presentation">
           <section ref={rejectDialogRef} className="reject-dialog" role="dialog" aria-modal="true" aria-labelledby="reject-title" tabIndex={-1}>
@@ -407,11 +511,49 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   );
 }
 
-function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconcile }: {
+function formatRecoveryTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function voiceTimingConflict(run: StudioRunDetail): {
+  scenePosition: number;
+  plannedSeconds: number;
+  requiredSeconds: number;
+} | undefined {
+  if (run.activeIntervention?.nodeId !== "voice"
+    || !run.activeIntervention.options.includes("request_changes")) return undefined;
+  const node = run.nodes.find((candidate) => candidate.id === "voice");
+  if (!node || typeof node.output !== "object" || node.output === null || Array.isArray(node.output)) return undefined;
+  const conflict = (node.output as Record<string, unknown>).conflict;
+  if (typeof conflict !== "object" || conflict === null || Array.isArray(conflict)) return undefined;
+  const value = conflict as Record<string, unknown>;
+  if (value.code !== "VOICE_DOES_NOT_FIT"
+    || !Number.isInteger(value.scenePosition)
+    || typeof value.plannedSeconds !== "number"
+    || typeof value.requiredSeconds !== "number") return undefined;
+  return {
+    scenePosition: Number(value.scenePosition),
+    plannedSeconds: value.plannedSeconds,
+    requiredSeconds: value.requiredSeconds,
+  };
+}
+
+function PaidOperationPanel({ summary, providers, providerIdHint, busy, settlementOnly = false, onReconcile }: {
   summary: StudioPaidNodeSummary;
   providers: StudioProvider[];
   providerIdHint?: string;
   busy: boolean;
+  settlementOnly?: boolean;
   onReconcile?: (nodeId: string, input: StudioPaidReconciliationDraft) => Promise<void>;
 }) {
   const [taskId, setTaskId] = useState("");
@@ -420,9 +562,10 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
   const [actualCost, setActualCost] = useState("");
   const [manualConfirmed, setManualConfirmed] = useState(false);
   const [selectedItemRequestId, setSelectedItemRequestId] = useState("");
-  const outcome = summary.recommendedOutcome === "resume_original" || summary.recommendedOutcome === "requote"
+  const outcome = !settlementOnly && (summary.recommendedOutcome === "resume_original" || summary.recommendedOutcome === "requote")
     ? summary.recommendedOutcome
     : undefined;
+  const requiresManualReconciliation = settlementOnly || summary.requiresManualReconciliation;
   const missingTaskItems = summary.items.filter((item) => (
     (item.state === "submitted" || item.state === "unknown") && !item.taskId
   ));
@@ -445,7 +588,7 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
   const consoleEntries = providerConsoleEntries(providers, summary.items.length
     ? summary.items.map((item) => item.providerId)
     : providerIdHint ? [providerIdHint] : []);
-  if (isVoiceCall && summary.requiresManualReconciliation && (
+  if (!settlementOnly && isVoiceCall && summary.requiresManualReconciliation && (
     summary.failureKind === "terminal_failure"
     || summary.recommendedOutcome === "confirmed_not_charged"
   )) {
@@ -463,7 +606,7 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
       ><Check aria-hidden="true" size={16} />按零费用结清并调整配音</button> : null}
     </section>;
   }
-  if (isVoiceCall && summary.requiresManualReconciliation) {
+  if (!settlementOnly && isVoiceCall && summary.requiresManualReconciliation) {
     const connectionInterrupted = summary.failureKind === "unknown_outcome";
     return <section className="paid-operation-panel requires-manual" aria-label="配音恢复">
       <header><strong>{connectionInterrupted ? "配音连接中断" : "配音结果无法确认"}</strong><small>按预估费用保守记账</small></header>
@@ -481,12 +624,12 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
       ><RotateCcw aria-hidden="true" size={16} />按预估记账并重新配音</button> : null}
     </section>;
   }
-  const title = summary.requiresManualReconciliation
+  const title = requiresManualReconciliation
     ? providerLookupBlocked ? "原任务已无法自动查询" : "这次请求是否扣费还不确定"
     : outcome === "requote"
       ? "未完成的画面需要重新报价"
       : "已找到可恢复的付费任务";
-  return <section className={`paid-operation-panel${summary.requiresManualReconciliation ? " requires-manual" : ""}`} aria-label="付费任务证据">
+  return <section className={`paid-operation-panel${requiresManualReconciliation ? " requires-manual" : ""}`} aria-label="付费任务证据">
     <header><strong>{title}</strong><small>{isVoiceCall ? "一次配音调用" : `${summary.items.length} 个镜头`}</small></header>
     <div className="paid-operation-items">
       {summary.items.map((item) => <article key={`${item.operationId}:${item.itemRequestId}`}>
@@ -496,12 +639,14 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
         <small>{paidOperationCostLabel(item)}</small>
       </article>)}
     </div>
-    {summary.requiresManualReconciliation ? <div className="paid-operation-explanation">
+    {requiresManualReconciliation ? <div className="paid-operation-explanation">
       <p><strong>发生了什么：</strong>{providerLookupBlocked
         ? "系统保留了服务商任务编号，但服务商已明确拒绝继续查询，无法再自动确认结果。"
         : isVoiceCall ? "请求发出后连接中断，系统没有收到明确结果。" : "服务商可能已经收到请求，但系统没有拿到足够的任务证据。"}</p>
       <p><strong>为什么需要核对：</strong>直接重试可能产生重复任务和重复扣费，所以系统已经停住，不会自动重试或重新制作。</p>
-      <p><strong>下一步：</strong>{providerLookupBlocked
+      <p><strong>下一步：</strong>{settlementOnly
+        ? "旧版制作只保存本次账单核对结果，不会恢复服务商任务、重新报价或继续下游制作。"
+        : providerLookupBlocked
         ? "请用页面显示的任务编号到服务商控制台核对结果和账单，再按真实情况登记“未扣费”或“已扣费”。"
         : isVoiceCall ? "请在配音服务商控制台按本次调用记录与账单核对，再登记结果。" : "请到服务商控制台核对任务与账单；找到任务编号时可先录入并继续查询原任务。"}</p>
       <p><strong>核对入口：</strong>{consoleEntries.length
@@ -516,8 +661,8 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
       <p><strong>为什么可以恢复：</strong>系统保留了原任务编号，会继续查询并下载原结果，不会创建新任务或新增报价。</p>
       <p><strong>下一步：</strong>继续获取原任务结果。</p>
     </div>}
-    {summary.requiresManualReconciliation && onReconcile ? <div className="paid-reconciliation-controls">
-      {canAttachTaskId ? <div className="paid-task-id-control">
+    {requiresManualReconciliation && onReconcile ? <div className="paid-reconciliation-controls">
+      {!settlementOnly && canAttachTaskId ? <div className="paid-task-id-control">
         <label className="field field-wide">
           <span>服务商任务编号</span>
           <input value={taskId} onChange={(event) => setTaskId(event.target.value)} maxLength={256} placeholder="从服务商控制台复制" />
@@ -578,7 +723,7 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, onReconc
         >{manualOutcome === "confirmed_charged" ? "确认已扣费：计入已记录费用" : "确认未扣费：不计入已记录费用"}</button>
       </fieldset>
     </div> : null}
-    {!summary.requiresManualReconciliation && outcome && onReconcile ? <button
+    {!requiresManualReconciliation && outcome && onReconcile ? <button
       className="button button-primary"
       type="button"
       disabled={busy}
@@ -932,7 +1077,7 @@ function runStateMessage(run: StudioRunDetail): string {
   if (run.status === "stale" && hasDirectorCostFeedback(run)) {
     return "你已把上一份画面报价退回导演，降本意见已经保存。继续后会先调整方案，再给你一份新报价。";
   }
-  if (run.status === "stale") return "上游内容已被人工修改，后续旧结果不会继续使用，需要重新生成。";
+  if (run.status === "stale") return "上游内容已被人工修改；系统会重新检查每一步是否仍然适用，只重做失效的部分，保留仍然有效的成果。";
   if (run.status === "paused") return "制作已经安全暂停。现在可以修改已完成角色的输入或交付；不修改也可以直接继续。";
   if (run.pauseRequested) return "已请求暂停；当前步骤会先安全完成，系统将在下一步开始前停下。";
   return "制作正在自动执行，详情页会实时更新；连接中断时会明确提示。";

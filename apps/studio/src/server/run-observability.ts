@@ -228,6 +228,61 @@ function isDefinitiveZeroAttemptFailure(node: StudioNode): boolean {
 
 function normalizeFailure(raw: string, node: StudioNode, provider?: string): Pick<StudioRunFailure, "category" | "summary" | "retryable" | "recoveryActions"> {
   const service = provider ?? node.role ?? node.label;
+  const planningHalt = node.id === "creative-planning"
+    ? /Joint creative planning stopped \((needs_user|needs_source|duplicate_issue|cross_role_revisions_exhausted)\):/.exec(raw)
+    : null;
+  if (planningHalt) {
+    if (planningHalt[1] === "needs_source") {
+      return {
+        category: "node_failure",
+        summary: "真实素材目前不可得，自动规划已停下等待人工选择",
+        retryable: false,
+        recoveryActions: [
+          "上传或实拍可追溯的真实素材后重新规划",
+          "将内容改为不主张实验事实的概念表达后重新规划",
+          "停止本次制作",
+        ],
+      };
+    }
+    return {
+      category: "node_failure",
+      summary: planningHalt[1] === "needs_user"
+        ? "规划遇到需要你决定的问题，自动执行已暂停"
+        : "多轮规划没有取得实质进展，自动执行已停止",
+      retryable: false,
+      recoveryActions: ["查看规划阶段的问题", "调整输入或方案后重新规划", "停止本次制作"],
+    };
+  }
+  const directorAuditFailure = node.id === "visual-direction"
+    ? /导演经过\s+\d+\s+轮修改后仍未通过独立审计。\s*([^\n]+)/.exec(raw)
+    : null;
+  if (directorAuditFailure) {
+    const auditSummary = directorAuditFailure[1]!.trim().replace(/[。；;]+$/, "");
+    return {
+      category: "node_failure",
+      summary: `导演方案未通过质量复核：${auditSummary}`,
+      retryable: true,
+      recoveryActions: [
+        "调整视频承诺，确保现有画面能力能够真实兑现",
+        "或准备连续实拍/自有素材后重新规划；脚本不会自动重跑",
+      ],
+    };
+  }
+  const directorBeatFailure = node.id === "visual-direction"
+    ? /shots\[(\d+)\]\.temporalBeats/.exec(raw)
+    : null;
+  if (directorBeatFailure) {
+    const scenePosition = Number(directorBeatFailure[1]) + 1;
+    return {
+      category: "node_failure",
+      summary: `导演方案中第 ${scenePosition} 镜的时间描述没有通过结构校验`,
+      retryable: true,
+      recoveryActions: [
+        "重试导演方案；已完成的脚本不会重新生成",
+        "若同一镜头再次失败，在导演方案中检查该镜的动作与时长",
+      ],
+    };
+  }
   if (node.id === "visual-review" && /最终双模型审片尚未完成|已完成分支保留/.test(raw)) {
     return {
       category: "node_failure",

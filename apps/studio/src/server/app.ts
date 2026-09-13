@@ -6,6 +6,13 @@ import { StudioConflictError, StudioNotFoundError } from "./studio-service.js";
 import { StudioVoicePreviewUnavailableError } from "./local-capabilities.js";
 import {
   StudioInputError,
+  STUDIO_PLANNING_EDITABLE_STAGES,
+  type StudioPlanningEditableStage,
+  type StudioProductionAmendmentInput,
+  type StudioProductionAuthorizationInput,
+  type StudioProductionQuote,
+  type StudioProductionQuoteInput,
+  assertStudioExecutableProductionInput,
   parseStudioCandidateAdoptionInput,
   parseStudioCandidateSourcesInput,
   parseStudioCreatorSettingsPatch,
@@ -133,12 +140,17 @@ export interface StudioServicePort {
   reinspectVisualReview(runId: string, input: StudioVisualReinspectionInput): Promise<StudioRunDetail>;
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
+  prepareProductionQuote(runId: string, input: StudioProductionQuoteInput, actor?: string): Promise<StudioProductionQuote>;
+  authorizeProductionScope(runId: string, input: StudioProductionAuthorizationInput, actor?: string): Promise<StudioRunDetail>;
+  amendProductionScope(runId: string, authorizationId: string, input: StudioProductionAmendmentInput, actor?: string): Promise<StudioRunDetail>;
   applyNodeExecutionConfiguration(runId: string, nodeId: string, input: StudioNodeExecutionConfigurationInput, actor: string): Promise<StudioRunDetail>;
   authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy: string): Promise<StudioRunDetail>;
   rejectSpend(runId: string, nodeId: string, input: StudioSpendRejectionInput, rejectedBy: string): Promise<StudioRunDetail>;
   requestPause(runId: string): Promise<StudioRunDetail>;
   resumePaused(runId: string): Promise<StudioRunDetail>;
   resumeStale(runId: string): Promise<StudioRunDetail>;
+  queryOriginalTextTask(runId: string): Promise<StudioRunDetail>;
+  retrieveOriginalTextTask(runId: string): Promise<StudioRunDetail>;
   retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail>;
   inspectPaidNode(runId: string, nodeId: string): Promise<StudioPaidNodeSummary>;
   reconcilePaidNode(runId: string, nodeId: string, input: StudioPaidReconciliationInput, actor: string): Promise<StudioRunDetail>;
@@ -416,6 +428,7 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     if (typeof idempotencyKey !== "string" || !SAFE_ROUTE_ID.test(idempotencyKey)) {
       throw new StudioInputError("创建制作必须携带有效的 Idempotency-Key，以避免重复计费。");
     }
+    assertStudioExecutableProductionInput(request.body);
     const response = await options.service.startRun(request.body, idempotencyKey);
     return reply.code(202).send(response);
   });
@@ -528,6 +541,35 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     );
   });
 
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/production-quotes", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    return options.service.prepareProductionQuote(
+      request.params.runId,
+      parseProductionQuoteInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/production-authorizations", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    return options.service.authorizeProductionScope(
+      request.params.runId,
+      parseProductionAuthorizationInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
+  app.post<{ Params: { runId: string; authorizationId: string } }>("/api/runs/:runId/production-authorizations/:authorizationId/amendments", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.authorizationId, "授权编号");
+    return options.service.amendProductionScope(
+      request.params.runId,
+      request.params.authorizationId,
+      parseProductionAmendmentInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/pause", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     return options.service.requestPause(request.params.runId);
@@ -536,6 +578,16 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/resume", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     return options.service.resumePaused(request.params.runId);
+  });
+
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/task-recovery/query", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    return options.service.queryOriginalTextTask(request.params.runId);
+  });
+
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/task-recovery/retrieve", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    return options.service.retrieveOriginalTextTask(request.params.runId);
   });
 
   app.post<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/retry", async (request) => {
@@ -814,6 +866,72 @@ function requireNonNegativeInteger(value: unknown, field: string): number {
   return Number(value);
 }
 
+function parseProductionQuoteInput(value: unknown): StudioProductionQuoteInput {
+  const input = requireRecord(value, "报价准备请求");
+  const expectedRunRevision = requireRevision(input.expectedRunRevision);
+  const acceptedPlanDigest = requireText(input.acceptedPlanDigest, "方案摘要");
+  if (!/^[a-f0-9]{64}$/.test(acceptedPlanDigest)) throw new StudioInputError("方案摘要格式不正确。");
+  let requestedMaximumCny: number | undefined;
+  if (input.requestedMaximumCny !== undefined) {
+    if (typeof input.requestedMaximumCny !== "number" || !Number.isFinite(input.requestedMaximumCny)) {
+      throw new StudioInputError("本次最高授权额必须是有效金额。");
+    }
+    requestedMaximumCny = input.requestedMaximumCny;
+  }
+  let allowedModels: Array<{ providerId: string; modelId: string }> | undefined;
+  if (input.allowedModels !== undefined) {
+    if (!Array.isArray(input.allowedModels) || input.allowedModels.length === 0) {
+      throw new StudioInputError("允许模型必须是非空数组。");
+    }
+    allowedModels = input.allowedModels.map((entry, index) => {
+      const model = requireRecord(entry, `允许模型 ${index + 1}`);
+      return {
+        providerId: requireText(model.providerId, "能力编号"),
+        modelId: requireText(model.modelId, "模型编号"),
+      };
+    });
+  }
+  return {
+    expectedRunRevision,
+    acceptedPlanDigest,
+    ...(requestedMaximumCny !== undefined ? { requestedMaximumCny } : {}),
+    ...(allowedModels ? { allowedModels } : {}),
+  };
+}
+
+function parseProductionAuthorizationInput(value: unknown): StudioProductionAuthorizationInput {
+  const input = requireRecord(value, "授权请求");
+  return {
+    expectedRunRevision: requireRevision(input.expectedRunRevision),
+    quoteId: requireOpaqueCommandId(input.quoteId, "报价编号"),
+    acceptedPlanDigest: requireText(input.acceptedPlanDigest, "方案摘要"),
+    idempotencyKey: requireText(input.idempotencyKey, "授权请求编号"),
+  };
+}
+
+function parseProductionAmendmentInput(value: unknown): StudioProductionAmendmentInput {
+  const input = requireRecord(value, "追加请求");
+  return {
+    expectedRunRevision: requireRevision(input.expectedRunRevision),
+    fundingRequestId: requireOpaqueCommandId(input.fundingRequestId, "追加请求编号"),
+    idempotencyKey: requireText(input.idempotencyKey, "幂等编号"),
+  };
+}
+
+function requireOpaqueCommandId(value: unknown, field: string): string {
+  const id = requireText(value, field);
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new StudioInputError(`${field}格式不正确。`);
+  return id;
+}
+
+function requireRevision(value: unknown): number {
+  const revision = value;
+  if (!Number.isSafeInteger(revision) || (revision as number) < 0) {
+    throw new StudioInputError("制作版本号必须是有效的非负整数。");
+  }
+  return revision as number;
+}
+
 function parseNodeOverrideInput(value: unknown): StudioNodeOverrideInput {
   const input = requireRecord(value, "节点修改请求");
   if (input.confirmTerminalEdit !== undefined && typeof input.confirmTerminalEdit !== "boolean") {
@@ -843,14 +961,29 @@ function parseNodeOverrideInput(value: unknown): StudioNodeOverrideInput {
   };
 }
 
+function parsePlanningStageId(value: unknown, label: string): StudioPlanningEditableStage | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !(STUDIO_PLANNING_EDITABLE_STAGES as readonly string[]).includes(value)) {
+    throw new StudioInputError(`${label}的 planningStageId 只能是 treatment、script 或 director。`);
+  }
+  return value as StudioPlanningEditableStage;
+}
+
 function parseNodeInputOverrideInput(value: unknown): StudioNodeInputOverrideInput {
   const input = requireRecord(value, "节点输入修改请求");
   if (!("input" in input)) throw new StudioInputError("节点输入内容不能为空。");
   if (input.confirmTerminalEdit !== undefined && typeof input.confirmTerminalEdit !== "boolean") {
     throw new StudioInputError("终态编辑确认必须是布尔值。");
   }
+  const planningStageId = parsePlanningStageId(input.planningStageId, "节点输入修改请求");
+  if (planningStageId !== undefined && typeof input.input !== "object") {
+    throw new StudioInputError("携带阶段编号的节点输入修改必须提供结构化输入内容。");
+  }
   return {
     input: input.input,
+    expectedRunRevision: requireRevision(input.expectedRunRevision),
+    expectedVersionId: requireText(input.expectedVersionId, "输入版本"),
+    ...(planningStageId ? { planningStageId } : {}),
     ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
   };
 }
@@ -881,10 +1014,13 @@ function parseNodeExecutionConfigurationInput(value: unknown): StudioNodeExecuti
   if (input.confirmTerminalEdit !== undefined && typeof input.confirmTerminalEdit !== "boolean") {
     throw new StudioInputError("终态编辑确认必须是布尔值。");
   }
+  const planningStageId = parsePlanningStageId(input.planningStageId, "节点执行配置");
   return {
+    expectedRunRevision: requireRevision(input.expectedRunRevision),
     ...(input.providerId === undefined ? {} : { providerId: requireText(input.providerId, "执行能力") }),
     ...(modelSelections ? { modelSelections } : {}),
     ...(assetProviderIds ? { assetProviderIds } : {}),
+    ...(planningStageId ? { planningStageId } : {}),
     ...(economics ? { economics } : {}),
     ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
   };

@@ -1,14 +1,32 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import {
+  TASK_BINDING_VERSION,
+  parseBrokerBinding,
+  parseTaskBinding,
+  sameTaskBinding,
+  taskBinding,
+  taskBindingHeaders,
+  type CodexBrokerBinding,
+  type CodexTaskBinding,
+} from "./codex-task-binding.js";
 
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
 export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
-  "visual-review": "0d1a2ec35d50b2b8e350b7cddd2ad23a31a9bd6518764fdd609c34d54b700a69",
-  "role-audit": "88f86bc1796d81bd538b0ac1263cfc43f46b001cada2383497dd8bd68945e7ba",
+  "topic-ideas": "16df6ddc097508f91530d4df20dc2643bd849bde0971524567a345f0138b5b58",
+  "series-roadmap": "19b961d58dcc4e87dbc7c4e710766b417e57f89f565ad07b776fb54017874b3f",
+  "creative-treatment": "583dea22aae4391cac720d70e444f9d5f2936f1f991ad6683e491f757e11da03",
+  "director-plan": "51f57d086c6fc9187d541b972bdc5a25fc9d9d90ee23496c2ce20ef7d36274a9",
+  "script-draft": "a084c1da68d2be39ffc4cc85445e67b684e2a1014d1144b4d6eb58bc9a35ed8a",
+  "publish-copy": "db27873c44bb30623d5fceb6e5d3811912b32aeea3762fc7d18f3cb9cd58e9bd",
+  "asset-rank": "c52416dc97cbd09ff747fa48f69fe65caa9a4c43fe5f1e3d3325dbb8031d5ba1",
+  "reference-grammar": "49a25cf42265929fa0bc244967acc7f36e53c7de2546957798a6f1631e447ca7",
+  "visual-review": "3461a6524c9113a7793a91b63a696cd77edf6db369c0078cae996023b9f0b7d2",
+  "role-audit": "1e32f55a94f0b69ef530200ecb888431ec0ea1b60cb2c6c172dc4195f2838169",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。
-export const CODEX_TASK_KINDS = ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"] as const;
+export const CODEX_TASK_KINDS = ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"] as const;
 export type CodexTaskKind = (typeof CODEX_TASK_KINDS)[number];
 
 interface ModelCandidateAttemptBase {
@@ -62,10 +80,28 @@ export interface CodexTaskSession {
 
 export interface CodexTaskRequestOptions {
   timeoutMs?: number;
+  beforeSubmit?: (operation: CodexPreparedOperation) => Promise<void>;
 }
 
-export type CodexBridgeFailureStage = "not_accepted" | "completed_failure" | "uncertain";
-export type CodexBridgeFailureKind = "model_provider_transient" | "model_provider_no_output";
+export interface CodexPreparedOperation {
+  version: "video-factory/codex-prepared-operation-v1";
+  requestId: string;
+  kind: CodexTaskKind;
+  envelope: Record<string, unknown>;
+  serializedEnvelope: string;
+  binding: CodexTaskBinding;
+  brokerBinding: CodexBrokerBinding;
+  route: { socketPath: string };
+  taskFact: "not_submitted" | "possibly_submitted" | "accepted" | "running" | "accepted_unknown";
+  observationError?: { at: string; message: string };
+}
+
+// 任务事实阶段：not_accepted=确证未受理（可安全重试）；rejected=受理前被确定性拒绝
+// （合同/校验，重发相同 payload 必然复现，必须停止并诊断）；conflict=请求身份与既有
+// durable 记录冲突（禁止自动重试）；uncertain=已受理且结果未知；completed_failure=已受理
+// 且确定性失败。rejected/conflict/uncertain 都不能触发新 requestId 或 backup。
+export type CodexBridgeFailureStage = "not_accepted" | "completed_failure" | "uncertain" | "rejected" | "conflict";
+export type CodexBridgeFailureKind = "model_provider_transient" | "model_provider_no_output" | "contract_rejected" | "binding_conflict";
 
 export type ModelProviderFailureCategory =
   | "authentication"
@@ -90,6 +126,9 @@ export interface ModelProviderFailureDetails {
   completionTokens?: number;
   totalTokens?: number;
   reasoningTokens?: number;
+  fieldPath?: string;
+  taskKind?: CodexTaskKind;
+  accepted?: boolean;
 }
 
 export interface RoleAuditIssue {
@@ -106,6 +145,12 @@ export interface RoleAudit {
   summary: string;
   issues: RoleAuditIssue[];
   repairInstructions: string[];
+  planningDisposition?: RoleAuditPlanningDisposition | null;
+}
+
+export interface RoleAuditPlanningDisposition {
+  action: "revise_here" | "needs_source" | "needs_user";
+  issueIndexes: number[];
 }
 
 export interface AgentLoopIterationTrace {
@@ -134,10 +179,17 @@ export interface AgentLoopTrace {
   modelCallCount?: number;
   producerModelCallCount?: number;
   auditModelCallCount?: number;
+  structuredRepairModelCallCount?: number;
   producerMs?: number;
   auditMs?: number;
   validationMs?: number;
   retryCount?: number;
+  failure?: {
+    stage: CodexBridgeFailureStage;
+    statusCode?: number;
+    failureKind?: CodexBridgeFailureKind;
+    details?: ModelProviderFailureDetails;
+  };
   iterations: AgentLoopIterationTrace[];
   pendingCandidate?: AgentLoopPendingCandidateTrace;
 }
@@ -149,6 +201,12 @@ export interface CodexTaskExecution<TOutput = unknown> {
   session?: CodexTaskSession;
 }
 
+export type CodexPreparedObservation =
+  | { state: "running" | "accepted_unknown" | "not_accepted" | "conflict" }
+  | { state: "query_failure"; observationError: string }
+  | { state: "completed_success"; execution: CodexTaskExecution }
+  | { state: "completed_failure"; error: CodexBridgeError };
+
 const TASK_PATH = "/v1/tasks";
 // 只有"确证发生在任务受理之前"的连接错误才可安全重试；中途断连无法证明未受理，不重放。
 const RETRYABLE_CONNECT_CODES = new Set(["ECONNREFUSED", "ENOENT"]);
@@ -157,6 +215,8 @@ const DEFAULT_TIMEOUT_MS = 660_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_RETRY_DELAY_MS = 500;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
+const DEFAULT_POLL_INTERVAL_MS = 1_000;
+const submissionObservationErrors = new WeakSet<CodexBridgeError>();
 
 export class CodexBridgeError extends Error {
   readonly creatorMessage: string;
@@ -173,7 +233,7 @@ export class CodexBridgeError extends Error {
     super(message);
     this.name = "CodexBridgeError";
     this.failureDetails = failureDetails;
-    this.creatorMessage = creatorMessageFor(message, failureDetails, statusCode, failureKind);
+    this.creatorMessage = creatorMessageFor(message, this.stage, failureDetails, statusCode, failureKind);
   }
 }
 
@@ -186,6 +246,8 @@ export interface CodexBridgeClientOptions {
   maxAttempts?: number;
   retryDelayMs?: number;
   maxResponseBytes?: number;
+  /** accept/poll 轮询间隔；生产默认 1s，测试可调小。 */
+  pollIntervalMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
 }
 
@@ -194,6 +256,7 @@ export class CodexBridgeClient {
   private readonly maxAttempts: number;
   private readonly retryDelayMs: number;
   private readonly maxResponseBytes: number;
+  private readonly pollIntervalMs: number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
 
   constructor(private readonly options: CodexBridgeClientOptions) {
@@ -201,6 +264,7 @@ export class CodexBridgeClient {
     this.maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
     this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
     this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+    this.pollIntervalMs = Math.max(10, options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
     this.sleep = options.sleep ?? defaultSleep;
   }
 
@@ -229,29 +293,62 @@ export class CodexBridgeClient {
       throw new CodexBridgeError("Codex bridge requestId is invalid.", false);
     }
     if (session !== undefined) validateTaskSession(session);
-    const body = JSON.stringify({
-      protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
-      requestId,
-      kind,
-      payload,
-      ...(REQUIRED_CODEX_TASK_CONTRACT_DIGESTS[kind as keyof typeof REQUIRED_CODEX_TASK_CONTRACT_DIGESTS]
-        ? { expectedContractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS[kind as keyof typeof REQUIRED_CODEX_TASK_CONTRACT_DIGESTS] }
-        : {}),
-      ...(session ? { sessionKey: session.key, ...(session.handle ? { sessionHandle: session.handle } : {}) } : {}),
-    });
     const expectedContractDigest = REQUIRED_CODEX_TASK_CONTRACT_DIGESTS[kind as keyof typeof REQUIRED_CODEX_TASK_CONTRACT_DIGESTS];
     const requestTimeoutMs = requestOptions.timeoutMs === undefined
       ? this.timeoutMs
       : positiveRequestTimeout(requestOptions.timeoutMs);
     const deadlineAtMs = Date.now() + requestTimeoutMs;
+    const baseEnvelope = taskEnvelope(kind, payload, requestId, session, expectedContractDigest);
+    let prepared = requestOptions.beforeSubmit
+      ? await this.prepareOperation(kind, payload, requestId, session, expectedContractDigest, Math.max(1, deadlineAtMs - Date.now()))
+      : undefined;
+    if (prepared && requestOptions.beforeSubmit) await requestOptions.beforeSubmit(structuredClone(prepared));
+    let acceptedOperation: CodexPreparedOperation | undefined;
     let lastError: CodexBridgeError | undefined;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       try {
         const remainingMs = deadlineAtMs - Date.now();
         if (remainingMs <= 0) throw requestDeadlineError(requestTimeoutMs);
-        return await this.send(body, session?.key, remainingMs, expectedContractDigest);
+        const envelope = prepared?.envelope ?? baseEnvelope;
+        const serializedEnvelope = prepared?.serializedEnvelope ?? JSON.stringify(envelope);
+        const submission = await this.submit(
+          serializedEnvelope,
+          requestId,
+          kind,
+          session,
+          remainingMs,
+          expectedContractDigest,
+          prepared?.binding,
+        );
+        if (submission.kind === "completed") return submission.execution;
+        const accepted = prepared
+          ? { ...prepared, binding: submission.binding, taskFact: "accepted" as const }
+          : preparedFromAccepted(this.options.socketPath, envelope, serializedEnvelope, submission.binding);
+        acceptedOperation = accepted;
+        return await this.awaitOutcome(accepted, session?.key, expectedContractDigest, deadlineAtMs);
       } catch (error) {
-        if (!(error instanceof CodexBridgeError) || !error.transient || attempt === this.maxAttempts) throw error;
+        if (!(error instanceof CodexBridgeError)) throw error;
+        if (!error.transient) {
+          // POST 可能已送达却丢失回包：先根据原始快照取得可验绑定，只查询原任务。
+          if (error.stage === "uncertain" && !acceptedOperation && submissionObservationErrors.has(error)) {
+            try {
+              prepared ??= await this.prepareObservationAfterLostResponse(
+                kind,
+                baseEnvelope,
+                requestId,
+                session,
+                expectedContractDigest,
+                Math.max(1, deadlineAtMs - Date.now()),
+              );
+              prepared.taskFact = "possibly_submitted";
+              return await this.awaitOutcome(prepared, session?.key, expectedContractDigest, deadlineAtMs);
+            } catch (observationError) {
+              if (observationError instanceof CodexBridgeError) throw observationError;
+            }
+          }
+          throw error;
+        }
+        if (attempt === this.maxAttempts) throw error;
         lastError = error;
         const retryDelayMs = this.retryDelayMs * 2 ** (attempt - 1);
         if (retryDelayMs >= deadlineAtMs - Date.now()) throw requestDeadlineError(requestTimeoutMs);
@@ -261,7 +358,222 @@ export class CodexBridgeClient {
     throw lastError ?? new CodexBridgeError("Codex bridge request failed.", false);
   }
 
-  private send(body: string, sessionKey: string | undefined, timeoutMs: number, expectedContractDigest?: string): Promise<CodexTaskExecution> {
+  async prepareTask(
+    kind: CodexTaskKind,
+    payload: unknown,
+    requestId: string = randomUUID(),
+    session?: CodexTaskSession,
+    timeoutMs: number = this.timeoutMs,
+  ): Promise<CodexPreparedOperation> {
+    if (!isCodexTaskKind(kind)) throw new CodexBridgeError(`Unsupported codex task kind '${String(kind)}'.`, false);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestId)) throw new CodexBridgeError("Codex bridge requestId is invalid.", false);
+    if (session) validateTaskSession(session);
+    const expectedContractDigest = REQUIRED_CODEX_TASK_CONTRACT_DIGESTS[kind as keyof typeof REQUIRED_CODEX_TASK_CONTRACT_DIGESTS];
+    return this.prepareOperation(kind, payload, requestId, session, expectedContractDigest, timeoutMs);
+  }
+
+  async observePrepared(
+    operation: CodexPreparedOperation,
+    requestOptions: CodexTaskRequestOptions = {},
+  ): Promise<CodexTaskExecution> {
+    validatePreparedOperation(operation, this.options.socketPath);
+    const timeoutMs = requestOptions.timeoutMs === undefined ? this.timeoutMs : positiveRequestTimeout(requestOptions.timeoutMs);
+    const session = taskSessionFromEnvelope(operation.envelope);
+    return this.awaitOutcome(
+      structuredClone(operation),
+      session?.key,
+      operation.binding.contractDigest ?? undefined,
+      Date.now() + timeoutMs,
+    );
+  }
+
+  // 用户主动查询只读取一次 durable 状态。running 是可信任务事实，不应被一个短 UI
+  // 查询期限包装成超时或断连；查询本身失败也与原任务事实分开返回。
+  async observePreparedOnce(
+    operation: CodexPreparedOperation,
+    requestOptions: CodexTaskRequestOptions = {},
+  ): Promise<CodexPreparedObservation> {
+    validatePreparedOperation(operation, this.options.socketPath);
+    const timeoutMs = requestOptions.timeoutMs === undefined ? this.timeoutMs : positiveRequestTimeout(requestOptions.timeoutMs);
+    let observation: QueryObservation;
+    try {
+      observation = await this.query(operation, timeoutMs);
+    } catch (error) {
+      return {
+        state: "query_failure",
+        observationError: error instanceof Error ? error.message : "Codex bridge query failed.",
+      };
+    }
+    if (observation.kind !== "completed") return observation.kind === "query_failure"
+      ? { state: "query_failure", observationError: "Codex broker did not return a readable task state." }
+      : { state: observation.kind };
+    try {
+      const envelope = parseJsonOrThrow(observation.raw, "Codex bridge query returned a non-JSON response body.");
+      if (typeof envelope !== "object" || envelope === null) {
+        return { state: "query_failure", observationError: "Codex bridge query response must be an object." };
+      }
+      const queryRecord = envelope as Record<string, unknown>;
+      validateResponseIdentity(queryRecord, operation);
+      if (queryRecord.state === "completed_success" && queryRecord.ok === true) {
+        const session = taskSessionFromEnvelope(operation.envelope);
+        return {
+          state: "completed_success",
+          execution: parseEnvelope(
+            observation.raw,
+            session?.key,
+            operation.binding.contractDigest ?? undefined,
+            operation,
+          ),
+        };
+      }
+      if (queryRecord.state === "completed_failure") {
+        return {
+          state: "completed_failure",
+          error: completedFailureError((queryRecord.outcome ?? {}) as Record<string, unknown>),
+        };
+      }
+      return { state: "query_failure", observationError: "Codex broker returned an unrecognized task state." };
+    } catch (error) {
+      if (error instanceof CodexBridgeError && error.stage === "conflict") return { state: "conflict" };
+      return {
+        state: "query_failure",
+        observationError: error instanceof Error ? error.message : "Codex bridge query response is invalid.",
+      };
+    }
+  }
+
+  private async prepareOperation(
+    kind: CodexTaskKind,
+    payload: unknown,
+    requestId: string,
+    session: CodexTaskSession | undefined,
+    expectedContractDigest: string | undefined,
+    timeoutMs: number,
+  ): Promise<CodexPreparedOperation> {
+    const brokerBinding = await this.readBrokerBinding(kind, payload, timeoutMs);
+    const envelope = taskEnvelope(kind, payload, requestId, session, expectedContractDigest, brokerBinding);
+    const serializedEnvelope = JSON.stringify(envelope);
+    return {
+      version: "video-factory/codex-prepared-operation-v1",
+      requestId,
+      kind,
+      envelope,
+      serializedEnvelope,
+      binding: taskBinding({ request: envelope, broker: brokerBinding, kind, ...(expectedContractDigest ? { contractDigest: expectedContractDigest } : {}), ...(session ? { session } : {}) }),
+      brokerBinding,
+      route: { socketPath: this.options.socketPath },
+      taskFact: "not_submitted",
+    };
+  }
+
+  private async prepareObservationAfterLostResponse(
+    kind: CodexTaskKind,
+    envelope: Record<string, unknown>,
+    requestId: string,
+    session: CodexTaskSession | undefined,
+    expectedContractDigest: string | undefined,
+    timeoutMs: number,
+  ): Promise<CodexPreparedOperation> {
+    const brokerBinding = await this.readBrokerBinding(kind, envelope.payload, timeoutMs);
+    const serializedEnvelope = JSON.stringify(envelope);
+    return {
+      version: "video-factory/codex-prepared-operation-v1",
+      requestId,
+      kind,
+      envelope,
+      serializedEnvelope,
+      binding: taskBinding({ request: envelope, broker: brokerBinding, kind, ...(expectedContractDigest ? { contractDigest: expectedContractDigest } : {}), ...(session ? { session } : {}) }),
+      brokerBinding,
+      route: { socketPath: this.options.socketPath },
+      taskFact: "possibly_submitted",
+    };
+  }
+
+  // 观察原任务直到完成或截止：查询失败不改变任务事实（accepted/unknown 保持 unknown），
+  // 只有 Broker 权威确认 not_accepted 才抛出 transient 错误交还给有界重试。
+  private async awaitOutcome(
+    operation: CodexPreparedOperation,
+    sessionKey: string | undefined,
+    expectedContractDigest: string | undefined,
+    deadlineAtMs: number,
+  ): Promise<CodexTaskExecution> {
+    for (;;) {
+      const remainingMs = deadlineAtMs - Date.now();
+      if (remainingMs <= 0) {
+        throw new CodexBridgeError(
+          `Codex task '${operation.requestId}' is still running after the wait deadline; its outcome stays accepted/unknown and will not be resubmitted.`,
+          false,
+          "uncertain",
+          undefined,
+          "model_provider_no_output",
+        );
+      }
+      let observation: QueryObservation;
+      try {
+        observation = await this.query(operation, Math.min(remainingMs, this.pollIntervalMs * 10));
+      } catch (error) {
+        // 查询自身的 transport/超时失败：原任务事实不变，继续在截止时间内轮询。
+        await this.sleep(this.pollIntervalMs);
+        continue;
+      }
+      if (observation.kind === "running" || observation.kind === "accepted_unknown") {
+        operation.taskFact = observation.kind;
+        await this.sleep(this.pollIntervalMs);
+        continue;
+      }
+      if (observation.kind === "not_accepted") {
+        throw new CodexBridgeError(
+          `Codex bridge proved task '${operation.requestId}' was not accepted.`,
+          true,
+          "not_accepted",
+          404,
+          "model_provider_transient",
+        );
+      }
+      if (observation.kind === "conflict") {
+        throw new CodexBridgeError(
+          `Codex bridge query for task '${operation.requestId}' reports a binding conflict.`,
+          false,
+          "conflict",
+          409,
+          "binding_conflict",
+        );
+      }
+      if (observation.kind === "query_failure") {
+        // 查询自身的失败不是任务事实：在截止时间内继续轮询原任务。
+        await this.sleep(this.pollIntervalMs);
+        continue;
+      }
+      const envelope = parseJsonOrThrow(observation.raw, "Codex bridge query returned a non-JSON response body.");
+      if (typeof envelope !== "object" || envelope === null) {
+        throw new CodexBridgeError("Codex bridge query response must be an object.", false);
+      }
+      const queryRecord = envelope as Record<string, unknown>;
+      validateResponseIdentity(queryRecord, operation);
+      if (queryRecord.state !== "completed_success" && queryRecord.state !== "completed_failure") {
+        // 既不是 running 也不是合法完成信封：按查询故障处理，不改变任务事实。
+        await this.sleep(this.pollIntervalMs);
+        continue;
+      }
+      if (queryRecord.ok === true) {
+        return parseEnvelope(observation.raw, sessionKey, expectedContractDigest, operation);
+      }
+      const outcome = (queryRecord.outcome ?? {}) as Record<string, unknown>;
+      throw completedFailureError(outcome);
+    }
+  }
+
+  // POST /v1/tasks：durable acceptance 后返回 202（accepted）；若该 requestId 已有
+  // durable completed record，则直接重放 200 outcome。
+  private submit(
+    body: string,
+    requestId: string,
+    kind: CodexTaskKind,
+    session: CodexTaskSession | undefined,
+    timeoutMs: number,
+    expectedContractDigest?: string,
+    expectedBinding?: CodexTaskBinding,
+  ): Promise<{ kind: "accepted"; binding: CodexTaskBinding } | { kind: "completed"; execution: CodexTaskExecution }> {
     return new Promise((resolve, reject) => {
       const request = http.request({
         socketPath: this.options.socketPath,
@@ -273,61 +585,269 @@ export class CodexBridgeClient {
         },
         signal: AbortSignal.timeout(timeoutMs),
       }, (response) => {
-        this.consume(response, request, sessionKey, resolve, reject, expectedContractDigest);
+        const chunks: Buffer[] = [];
+        let received = 0;
+        let oversized = false;
+        response.on("data", (chunk: Buffer) => {
+          if (oversized) return;
+          received += chunk.length;
+          if (received > this.maxResponseBytes) {
+            oversized = true;
+            request.destroy();
+            const error = new CodexBridgeError(`Codex bridge response exceeds ${this.maxResponseBytes} bytes.`, false);
+            submissionObservationErrors.add(error);
+            reject(error);
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("error", (error) => {
+          const mapped = mapTransportError(error, this.options.socketPath, this.timeoutMs);
+          if (mapped.stage === "uncertain") submissionObservationErrors.add(mapped);
+          reject(mapped);
+        });
+        response.on("end", () => {
+          if (oversized) return;
+          const status = response.statusCode ?? 0;
+          const raw = Buffer.concat(chunks).toString("utf8");
+          if (status === 202) {
+            try {
+              const binding = bindingFromResponse(raw, {
+                requestId,
+                kind,
+                request: JSON.parse(body),
+                session,
+                expectedContractDigest,
+                ...(expectedBinding ? { expectedBinding } : {}),
+              });
+              resolve({ kind: "accepted", binding });
+            } catch (error) {
+              reject(error);
+            }
+            return;
+          }
+          if (status === 200) {
+            try {
+              const operation = operationFromResponse(
+                this.options.socketPath,
+                raw,
+                body,
+                requestId,
+                kind,
+                session,
+                expectedContractDigest,
+                expectedBinding,
+              );
+              resolve({ kind: "completed", execution: parseEnvelope(raw, session?.key, expectedContractDigest, operation) });
+            } catch (error) {
+              reject(error);
+            }
+            return;
+          }
+          const error = mapFailureResponse(status, raw);
+          if (error.stage === "uncertain") submissionObservationErrors.add(error);
+          reject(error);
+        });
       });
-      request.on("error", (error) => reject(mapTransportError(error, this.options.socketPath, timeoutMs)));
+      request.on("error", (error) => {
+        const mapped = mapTransportError(error, this.options.socketPath, timeoutMs);
+        if (mapped.stage === "uncertain") submissionObservationErrors.add(mapped);
+        reject(mapped);
+      });
       request.end(body);
     });
   }
 
-  private consume(
-    response: http.IncomingMessage,
-    request: http.ClientRequest,
-    sessionKey: string | undefined,
-    resolve: (value: CodexTaskExecution) => void,
-    reject: (reason?: unknown) => void,
-    expectedContractDigest?: string,
-  ): void {
-    const chunks: Buffer[] = [];
-    let received = 0;
-    let oversized = false;
-    response.on("data", (chunk: Buffer) => {
-      if (oversized) return;
-      received += chunk.length;
-      if (received > this.maxResponseBytes) {
-        oversized = true;
-        request.destroy();
-        reject(new CodexBridgeError(`Codex bridge response exceeds ${this.maxResponseBytes} bytes.`, false));
-        return;
-      }
-      chunks.push(chunk);
+  // GET /v1/tasks/:requestId：只读观察原 durable 任务。
+  private query(operation: CodexPreparedOperation, timeoutMs: number): Promise<QueryObservation> {
+    return new Promise((resolve, reject) => {
+      const request = http.request({
+        socketPath: this.options.socketPath,
+        path: `${TASK_PATH}/${encodeURIComponent(operation.requestId)}`,
+        method: "GET",
+        headers: { accept: "application/json", ...taskBindingHeaders(operation.binding) },
+        signal: AbortSignal.timeout(timeoutMs),
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        let oversized = false;
+        response.on("data", (chunk: Buffer) => {
+          if (oversized) return;
+          if (chunks.reduce((total, item) => total + item.length, 0) > this.maxResponseBytes) {
+            oversized = true;
+            request.destroy();
+            reject(new CodexBridgeError(`Codex bridge response exceeds ${this.maxResponseBytes} bytes.`, false));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("error", (error) => reject(mapTransportError(error, this.options.socketPath, this.timeoutMs)));
+        response.on("end", () => {
+          if (oversized) return;
+          const status = response.statusCode ?? 0;
+          const raw = Buffer.concat(chunks).toString("utf8");
+          if (status === 200) {
+            try {
+              const state = parseJsonOrThrow(raw, "Codex bridge query returned a non-JSON response body.");
+              if (typeof state !== "object" || state === null) {
+                reject(new CodexBridgeError("Codex bridge query response must be an object.", false));
+                return;
+              }
+              const record = state as Record<string, unknown>;
+              if (record.state === "running" || record.state === "accepted_unknown") {
+                try {
+                  validateResponseIdentity(record, operation);
+                  resolve({ kind: record.state });
+                } catch (error) {
+                  reject(error);
+                }
+                return;
+              }
+              if (record.state === "not_accepted") {
+                try {
+                  validateResponseIdentity(record, operation);
+                  resolve({ kind: "not_accepted" });
+                } catch (error) {
+                  reject(error);
+                }
+                return;
+              }
+              resolve({ kind: "completed", status: 200, raw });
+            } catch (error) {
+              reject(error);
+            }
+            return;
+          }
+          if (status === 404) {
+            resolve({ kind: "query_failure" });
+            return;
+          }
+          if (status === 409 && raw.includes("binding_conflict")) {
+            resolve({ kind: "conflict" });
+            return;
+          }
+          // 查询端点的任务完成信封固定使用 200；其余 HTTP 状态只是本次观察失败，
+          // 不能把 5xx/错误路由响应当作原任务终态解析。
+          resolve({ kind: "query_failure" });
+        });
+      });
+      request.on("error", (error) => reject(mapTransportError(error, this.options.socketPath, timeoutMs)));
+      request.end();
     });
-    response.on("error", (error) => reject(mapTransportError(error, this.options.socketPath, this.timeoutMs)));
-    response.on("end", () => {
-      if (oversized) return;
-      const status = response.statusCode ?? 0;
-      const raw = Buffer.concat(chunks).toString("utf8");
-      if (status !== 200) {
-        const retryable = status === 503;
-        const notAccepted = retryable || isUnknownRoleSessionRejection(status, raw);
-        const failureKind = bridgeFailureKind(raw);
-        const failureDetails = bridgeFailureDetails(raw);
-        reject(new CodexBridgeError(
-          `Codex bridge returned HTTP ${status}.${errorDetail(raw)}`,
-          retryable,
-          notAccepted ? "not_accepted" : status === 422 ? "completed_failure" : "uncertain",
-          status,
-          failureKind,
-          failureDetails,
-        ));
-        return;
-      }
-      try {
-        resolve(parseEnvelope(raw, sessionKey, expectedContractDigest));
-      } catch (error) {
-        reject(error);
-      }
+  }
+
+  private readBrokerBinding(kind: CodexTaskKind, payload: unknown, timeoutMs: number): Promise<CodexBrokerBinding> {
+    return new Promise((resolve, reject) => {
+      const request = http.request({
+        socketPath: this.options.socketPath,
+        path: "/health",
+        method: "GET",
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(timeoutMs),
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        let received = 0;
+        response.on("data", (chunk: Buffer) => {
+          received += chunk.length;
+          if (received <= this.maxResponseBytes) chunks.push(chunk);
+        });
+        response.on("error", (error) => reject(mapTransportError(error, this.options.socketPath, timeoutMs)));
+        response.on("end", () => {
+          if (received > this.maxResponseBytes) {
+            reject(new CodexBridgeError(`Codex broker health response exceeds ${this.maxResponseBytes} bytes.`, false, "conflict"));
+            return;
+          }
+          if (response.statusCode !== 200) {
+            reject(new CodexBridgeError("Codex broker identity could not be verified before submission.", false, "conflict", response.statusCode));
+            return;
+          }
+          try {
+            resolve(parseBrokerBinding(JSON.parse(Buffer.concat(chunks).toString("utf8")), kind, payload));
+          } catch (error) {
+            reject(new CodexBridgeError(error instanceof Error ? error.message : "Codex broker identity is invalid.", false, "conflict"));
+          }
+        });
+      });
+      request.on("error", (error) => reject(mapTransportError(error, this.options.socketPath, timeoutMs)));
+      request.end();
     });
+  }
+
+  private consume(): void {
+    // 已被 submit()/query() 的内联处理取代；保留占位以满足历史调用方引用检查。
+  }
+}
+
+type QueryObservation =
+  | { kind: "running" }
+  | { kind: "accepted_unknown" }
+  | { kind: "not_accepted" }
+  | { kind: "conflict" }
+  | { kind: "query_failure" }
+  | { kind: "completed"; status: number; raw: string };
+
+// 非 200 响应 → 结构化失败：400=受理前合同拒绝（rejected）；409 binding conflict=冲突；
+// 409 未知会话=确证未受理；503=队列拒绝未受理；422=已受理且确定性失败；其余=uncertain。
+function mapFailureResponse(status: number, raw: string): CodexBridgeError {
+  const failureKind = bridgeFailureKind(raw) ?? bodyFailureKind(raw);
+  if (status === 400) {
+    return new CodexBridgeError(
+      `Codex bridge returned HTTP ${status}.${errorDetail(raw)}`,
+      false,
+      "rejected",
+      status,
+      failureKind ?? "contract_rejected",
+      bridgeFailureDetails(raw),
+    );
+  }
+  if (status === 409 && bodyFailureKind(raw) === "binding_conflict") {
+    return new CodexBridgeError(
+      `Codex bridge returned HTTP ${status}.${errorDetail(raw)}`,
+      false,
+      "conflict",
+      status,
+      "binding_conflict",
+      bridgeFailureDetails(raw),
+    );
+  }
+  if (status === 409 && bodyTaskState(raw) === "not_accepted") {
+    return new CodexBridgeError(
+      `Codex bridge returned HTTP ${status}.${errorDetail(raw)}`,
+      true,
+      "not_accepted",
+      status,
+      failureKind,
+      bridgeFailureDetails(raw),
+    );
+  }
+  const retryable = status === 503;
+  const notAccepted = retryable || isUnknownRoleSessionRejection(status, raw);
+  return new CodexBridgeError(
+    `Codex bridge returned HTTP ${status}.${errorDetail(raw)}`,
+    retryable,
+    notAccepted ? "not_accepted" : status === 422 ? "completed_failure" : "uncertain",
+    status,
+    failureKind,
+    bridgeFailureDetails(raw),
+  );
+}
+
+function bodyTaskState(raw: string): string | undefined {
+  try {
+    const parsed = JSON.parse(raw) as { state?: unknown };
+    return typeof parsed.state === "string" ? parsed.state : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function bodyFailureKind(raw: string): CodexBridgeFailureKind | undefined {
+  try {
+    const parsed = JSON.parse(raw) as { failureKind?: unknown };
+    if (parsed.failureKind === "binding_conflict") return "binding_conflict";
+    if (parsed.failureKind === "contract_rejected") return "contract_rejected";
+    return undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -353,12 +873,18 @@ function requestDeadlineError(timeoutMs: number): CodexBridgeError {
   return new CodexBridgeError(`Text agent wall-clock deadline exhausted after ${timeoutMs}ms.`, false, "not_accepted");
 }
 
-function parseEnvelope(raw: string, sessionKey?: string, expectedContractDigest?: string): CodexTaskExecution {
+function parseEnvelope(
+  raw: string,
+  sessionKey?: string,
+  expectedContractDigest?: string,
+  operation?: CodexPreparedOperation,
+): CodexTaskExecution {
   const envelope = parseJsonOrThrow(raw, "Codex bridge returned a non-JSON response body.");
   if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) {
     throw new CodexBridgeError("Codex bridge response envelope must be an object.", false);
   }
   const record = envelope as Record<string, unknown>;
+  if (operation) validateResponseIdentity(record, operation);
   if (record.ok !== true || typeof record.output !== "string") {
     throw new CodexBridgeError("Codex bridge response envelope is missing ok/output.", false);
   }
@@ -370,6 +896,19 @@ function parseEnvelope(raw: string, sessionKey?: string, expectedContractDigest?
   }
   const output = parseJsonOrThrow(stripCodeFence(record.output), "Codex bridge output is not valid JSON.");
   const trace = record.trace === undefined ? undefined : parseTrace(record.trace);
+  if (operation && (!trace
+    || trace.taskKind !== operation.kind
+    || trace.providerId !== operation.binding.providerId
+    || trace.modelId !== operation.binding.modelId
+    || trace.contractDigest !== (operation.binding.contractDigest ?? undefined))) {
+    throw new CodexBridgeError(
+      "Codex bridge result trace does not match the immutable task binding.",
+      false,
+      "conflict",
+      409,
+      "binding_conflict",
+    );
+  }
   if (expectedContractDigest && trace?.contractDigest !== expectedContractDigest) {
     throw new CodexBridgeError("Codex bridge task contract does not match the requested contract.", false, "uncertain");
   }
@@ -380,6 +919,181 @@ function parseEnvelope(raw: string, sessionKey?: string, expectedContractDigest?
       ? { session: { key: sessionKey, handle: record.sessionHandle } }
       : {}),
   };
+}
+
+function taskEnvelope(
+  kind: CodexTaskKind,
+  payload: unknown,
+  requestId: string,
+  session: CodexTaskSession | undefined,
+  expectedContractDigest: string | undefined,
+  brokerBinding?: CodexBrokerBinding,
+): Record<string, unknown> {
+  return {
+    protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+    requestId,
+    kind,
+    payload,
+    ...(expectedContractDigest ? { expectedContractDigest } : {}),
+    ...(session ? { sessionKey: session.key, ...(session.handle ? { sessionHandle: session.handle } : {}) } : {}),
+    ...(brokerBinding ? { brokerBinding } : {}),
+  };
+}
+
+function taskSessionFromEnvelope(envelope: Record<string, unknown>): CodexTaskSession | undefined {
+  if (typeof envelope.sessionKey !== "string") return undefined;
+  return {
+    key: envelope.sessionKey,
+    ...(typeof envelope.sessionHandle === "string" ? { handle: envelope.sessionHandle } : {}),
+  };
+}
+
+function preparedFromAccepted(
+  socketPath: string,
+  envelope: Record<string, unknown>,
+  serializedEnvelope: string,
+  binding: CodexTaskBinding,
+): CodexPreparedOperation {
+  return {
+    version: "video-factory/codex-prepared-operation-v1",
+    requestId: String(envelope.requestId),
+    kind: String(envelope.kind) as CodexTaskKind,
+    envelope: structuredClone(envelope),
+    serializedEnvelope,
+    binding,
+    brokerBinding: {
+      version: binding.version,
+      storeId: binding.storeId,
+      providerId: binding.providerId,
+      modelId: binding.modelId,
+    },
+    route: { socketPath },
+    taskFact: "accepted",
+  };
+}
+
+function bindingFromResponse(
+  raw: string,
+  expected: {
+    requestId: string;
+    kind: CodexTaskKind;
+    request: unknown;
+    session: CodexTaskSession | undefined;
+    expectedContractDigest: string | undefined;
+    expectedBinding?: CodexTaskBinding;
+  },
+): CodexTaskBinding {
+  const value = parseJsonOrThrow(raw, "Codex bridge task response is not valid JSON.");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new CodexBridgeError("Codex bridge task response must be an object.", false, "conflict");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.requestId !== expected.requestId) {
+    throw new CodexBridgeError("Codex bridge returned a response for a different requestId.", false, "conflict", 409, "binding_conflict");
+  }
+  let binding: CodexTaskBinding;
+  try {
+    binding = parseTaskBinding(record.binding);
+  } catch (error) {
+    throw new CodexBridgeError(error instanceof Error ? error.message : "Codex bridge task binding is invalid.", false, "conflict", 409, "binding_conflict");
+  }
+  const expectedFromResponse = taskBinding({
+    request: expected.request,
+    broker: {
+      version: TASK_BINDING_VERSION,
+      storeId: binding.storeId,
+      providerId: binding.providerId,
+      modelId: binding.modelId,
+    },
+    kind: expected.kind,
+    ...(expected.expectedContractDigest ? { contractDigest: expected.expectedContractDigest } : {}),
+    ...(expected.session ? { session: expected.session } : {}),
+  });
+  if (!sameTaskBinding(binding, expected.expectedBinding ?? expectedFromResponse)) {
+    throw new CodexBridgeError("Codex bridge returned a response for a different immutable task binding.", false, "conflict", 409, "binding_conflict");
+  }
+  return binding;
+}
+
+function operationFromResponse(
+  socketPath: string,
+  raw: string,
+  body: string,
+  requestId: string,
+  kind: CodexTaskKind,
+  session: CodexTaskSession | undefined,
+  expectedContractDigest: string | undefined,
+  expectedBinding: CodexTaskBinding | undefined,
+): CodexPreparedOperation | undefined {
+  const value = parseJsonOrThrow(raw, "Codex bridge returned a non-JSON response body.");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  // 非 durable 的嵌入式测试边界仍可使用旧长响应；正式 Broker 的 completed 信封必须带绑定。
+  if (record.binding === undefined && record.requestId === undefined && !expectedBinding) return undefined;
+  const request = JSON.parse(body) as Record<string, unknown>;
+  const binding = bindingFromResponse(raw, {
+    requestId,
+    kind,
+    request,
+    session,
+    expectedContractDigest,
+    ...(expectedBinding ? { expectedBinding } : {}),
+  });
+  return preparedFromAccepted(socketPath, request, body, binding);
+}
+
+function validateResponseIdentity(record: Record<string, unknown>, operation: CodexPreparedOperation): void {
+  if (record.requestId !== operation.requestId) {
+    throw new CodexBridgeError("Codex bridge returned a response for a different requestId.", false, "conflict", 409, "binding_conflict");
+  }
+  let binding: CodexTaskBinding;
+  try {
+    binding = parseTaskBinding(record.binding);
+  } catch (error) {
+    throw new CodexBridgeError(error instanceof Error ? error.message : "Codex bridge task binding is invalid.", false, "conflict", 409, "binding_conflict");
+  }
+  if (!sameTaskBinding(binding, operation.binding)) {
+    throw new CodexBridgeError("Codex bridge response does not belong to the prepared task.", false, "conflict", 409, "binding_conflict");
+  }
+}
+
+function validatePreparedOperation(operation: CodexPreparedOperation, socketPath: string): void {
+  if (operation.version !== "video-factory/codex-prepared-operation-v1"
+    || operation.route.socketPath !== socketPath
+    || operation.envelope.requestId !== operation.requestId
+    || operation.envelope.kind !== operation.kind
+    || JSON.stringify(operation.envelope) !== operation.serializedEnvelope) {
+    throw new CodexBridgeError("Saved Codex operation is invalid or belongs to another route.", false, "conflict", 409, "binding_conflict");
+  }
+  const recomputed = taskBinding({
+    request: operation.envelope,
+    broker: operation.brokerBinding,
+    kind: operation.kind,
+    ...(operation.binding.contractDigest ? { contractDigest: operation.binding.contractDigest } : {}),
+    ...(taskSessionFromEnvelope(operation.envelope) ? { session: taskSessionFromEnvelope(operation.envelope)! } : {}),
+  });
+  if (!sameTaskBinding(recomputed, operation.binding)) {
+    throw new CodexBridgeError("Saved Codex operation binding does not match its immutable envelope.", false, "conflict", 409, "binding_conflict");
+  }
+}
+
+function completedFailureError(outcome: Record<string, unknown>): CodexBridgeError {
+  const raw = JSON.stringify({
+    error: outcome.message ?? "Codex task failed.",
+    ...(typeof outcome.failureKind === "string" ? { failureKind: outcome.failureKind } : {}),
+    ...(outcome.failureDetails ? { failureDetails: outcome.failureDetails } : {}),
+    ...(outcome.outcomeUncertain === true ? { outcomeUncertain: true } : {}),
+  });
+  const status = Number(outcome.status ?? 500);
+  const failureKind = bridgeFailureKind(raw) ?? bodyFailureKind(raw);
+  return new CodexBridgeError(
+    `Codex task completed with failure status ${status}.${errorDetail(raw)}`,
+    false,
+    "completed_failure",
+    status,
+    failureKind,
+    bridgeFailureDetails(raw),
+  );
 }
 
 function validateTaskSession(session: CodexTaskSession): void {
@@ -498,6 +1212,8 @@ function parseModelCandidateAttempts(value: unknown): ModelCandidateAttempt[] | 
         && attempt.failureStage !== "not_accepted"
         && attempt.failureStage !== "completed_failure"
         && attempt.failureStage !== "uncertain"
+        && attempt.failureStage !== "rejected"
+        && attempt.failureStage !== "conflict"
         && attempt.failureStage !== "transport")
       || (attempt.failureReason !== undefined
         && (typeof attempt.failureReason !== "string" || !attempt.failureReason))) {
@@ -607,7 +1323,10 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       || !isOptionalTokenCount(details.promptTokens)
       || !isOptionalTokenCount(details.completionTokens)
       || !isOptionalTokenCount(details.totalTokens)
-      || !isOptionalTokenCount(details.reasoningTokens)) {
+      || !isOptionalTokenCount(details.reasoningTokens)
+      || (details.fieldPath !== undefined && !isSafeFieldPath(details.fieldPath))
+      || (details.taskKind !== undefined && !isCodexTaskKind(String(details.taskKind)))
+      || (details.accepted !== undefined && typeof details.accepted !== "boolean")) {
       return undefined;
     }
     return {
@@ -623,10 +1342,19 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       ...(typeof details.completionTokens === "number" ? { completionTokens: details.completionTokens } : {}),
       ...(typeof details.totalTokens === "number" ? { totalTokens: details.totalTokens } : {}),
       ...(typeof details.reasoningTokens === "number" ? { reasoningTokens: details.reasoningTokens } : {}),
+      ...(typeof details.fieldPath === "string" ? { fieldPath: details.fieldPath } : {}),
+      ...(typeof details.taskKind === "string" ? { taskKind: details.taskKind as CodexTaskKind } : {}),
+      ...(typeof details.accepted === "boolean" ? { accepted: details.accepted } : {}),
     };
   } catch {
     return undefined;
   }
+}
+
+function isSafeFieldPath(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length <= 240
+    && /^(?:request|payload)(?:\.[A-Za-z][A-Za-z0-9_]*|\[\d+\])+$/.test(value);
 }
 
 function isOptionalTokenCount(value: unknown): boolean {
@@ -637,12 +1365,32 @@ function isBoundedIdentifier(value: unknown, maxLength: number): value is string
   return typeof value === "string" && value.length > 0 && value.length <= maxLength && !/[\r\n\t]/.test(value);
 }
 
+// C5：创作者文案必须消费受理阶段。uncertain（结果未知：超时/中途断连等）意味着请求
+// 可能已被受理，绝不能建议"重试或换模型"——那会诱导重复 create；只有确证未受理
+// （not_accepted）才允许给出重试/换模型的建议。
 function creatorMessageFor(
   message: string,
+  stage: CodexBridgeFailureStage,
   details: ModelProviderFailureDetails | undefined,
   statusCode: number | undefined,
   failureKind: CodexBridgeFailureKind | undefined,
 ): string {
+  if (stage === "uncertain") {
+    if (/still running after the wait deadline/i.test(message)) {
+      return "原模型任务仍在处理中，当前进度已保留；可以稍后再次查询，不会重新提交。";
+    }
+    const reason = details?.category === "timeout" || statusCode === 408 || /timed?\s*out|timeout/i.test(message)
+      ? "模型调用超时"
+      : "与模型服务的连接中断";
+    return `${reason}，结果未知：这次请求可能已经被模型受理。当前进度已保留，请先核对原有任务的结果，不要重新发起同样的请求。`;
+  }
+  if (stage === "rejected") {
+    const field = details?.fieldPath ? `字段 ${details.fieldPath} 不符合输入合同；` : "请求与任务合同不一致；";
+    return `模型服务拒绝了本次请求（${field}错误代码 ${details?.reasonCode ?? "contract_rejected"}），任务没有开始执行；不会产生模型调用或费用。`;
+  }
+  if (stage === "conflict") {
+    return "请求身份与已有任务记录冲突，已停止自动执行；原有任务不受影响。请查看诊断信息。";
+  }
   switch (details?.category) {
     case "rate_limited":
       return "模型请求过多，请稍后重试或选择其他模型。";

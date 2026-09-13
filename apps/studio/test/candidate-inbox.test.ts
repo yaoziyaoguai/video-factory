@@ -794,6 +794,73 @@ describe("CandidateInboxStudio", () => {
     assert.equal(listed?.verification.independentSources, 2);
   });
 
+  it("marks a supplemented rule-baseline candidate as pending editor review instead of a fake zero", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-supplement-pending-editor-"));
+    const opportunities = new OpportunityStudio({
+      opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
+    });
+    const series = new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) });
+    // 模拟无总编模型的环境：规则保底候选 + 来源不足，用户按要求补齐来源。
+    let current: StudioTrendCandidate = {
+      ...trendCandidate,
+      id: "trend-heuristic-supplement",
+      providerId: "trend-heuristic-v1",
+      evidence: [trendCandidate.evidence[0]!],
+    };
+    const inbox = new CandidateInboxStudio({
+      trends: {
+        listCandidates: async () => [current],
+        appendCandidateSources: async (_candidateId, evidenceUrls) => {
+          current = {
+            ...current,
+            evidence: [...current.evidence, ...evidenceUrls.map((url) => ({
+              source: "manual-supplement",
+              platform: "manual",
+              keyword: "人工补充来源",
+              strength: 60,
+              evidenceUrl: url,
+              collectedAt: "2026-09-12T05:00:00.000Z",
+            }))],
+          };
+          return current;
+        },
+      },
+      series,
+      opportunities,
+      publishedTemplates: async () => BUILTIN_TEMPLATES,
+    });
+    const modelCandidate: StudioCandidateInboxItem = {
+      ...trendCandidate,
+      id: "trend-model-evaluated",
+      title: "总编评估过的候选",
+      editorialDecision: { verdict: "skip", score: 0, reasons: ["总编评估后认为不值得生产。"], guardrails: ["补充独特角度后再评估。"] },
+    };
+    const inboxWithModelCandidate = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [current, modelCandidate] },
+      series,
+      opportunities,
+      publishedTemplates: async () => BUILTIN_TEMPLATES,
+    });
+
+    const [blocked] = (await inbox.list({ origins: ["trend"] })).items;
+    // 来源被阻断时已经标记“尚未经过总编”，补齐来源后标记必须保留。
+    assert.equal(blocked?.editorialDecision.pendingEditorReview, true);
+
+    const supplemented = await inbox.supplementTrendCandidateSources("trend-heuristic-supplement", {
+      evidenceUrls: ["https://news.example.org/report"],
+    });
+
+    // 来源已达标，但没有任何总编模型评估过：服务端如实投影 pendingEditorReview，
+    // 客户端据此显示“待总编评估”，而不是“总编评分 0 · 暂不生产”。
+    assert.equal(supplemented.verification.status, "ready");
+    assert.equal(supplemented.editorialDecision.pendingEditorReview, true);
+
+    // 有真实模型评估的候选不受影响：0 分就是总编结论，不带 pending 标记。
+    const [modelEvaluated] = (await inboxWithModelCandidate.list({ origins: ["trend"] }))
+      .items.filter((item) => item.id === modelCandidate.id);
+    assert.equal(modelEvaluated?.editorialDecision.pendingEditorReview, undefined);
+  });
+
   it("serializes source supplementation before adoption so the opportunity keeps the latest evidence", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-supplement-adopt-race-"));
     const opportunities = new OpportunityStudio({

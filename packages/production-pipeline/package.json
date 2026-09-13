@@ -15,6 +15,9 @@
     "video-factory-production": "./dist/cli.js"
   },
   "dependencies": {
+    "@langchain/core": "1.2.9",
+    "@langchain/langgraph": "1.4.14",
+    "@langchain/langgraph-checkpoint-sqlite": "1.0.4",
     "@video-factory/template-core": "0.1.0",
     "@video-factory/workflow-core": "0.1.0",
     "proper-lockfile": "^4.1.2"

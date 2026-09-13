@@ -58,6 +58,10 @@ import type {
   StudioPaidReconciliationInput,
   StudioSpendAuthorizationInput,
   StudioSpendRejectionInput,
+  StudioProductionAmendmentInput,
+  StudioProductionAuthorizationInput,
+  StudioProductionQuote,
+  StudioProductionQuoteInput,
   StudioVoicePreviewInput,
   StudioVoiceProfile,
 } from "../shared/api.js";
@@ -301,8 +305,11 @@ export class StudioService {
     if (!status) throw new StudioNotFoundError("没有找到这次热点更新任务。");
     return status;
   }
-  listCandidateInbox(input: StudioCandidateInboxQuery): Promise<StudioCandidateInbox> {
-    return this.candidateInbox.list(input);
+  async listCandidateInbox(input: StudioCandidateInboxQuery): Promise<StudioCandidateInbox> {
+    const inbox = await this.candidateInbox.list(input);
+    const includesTrend = input.origins === undefined || input.origins.includes("trend");
+    const topicGeneration = includesTrend ? this.trends.latestGenerationReceipt() : undefined;
+    return topicGeneration ? { ...inbox, topicGeneration } : inbox;
   }
   adoptCandidate(candidateId: string, input: StudioCandidateAdoptionInput): Promise<StudioOpportunity> {
     return this.candidateInbox.adopt(candidateId, input);
@@ -631,13 +638,25 @@ export class StudioService {
     return this.production.reinspectVisualReview(runId, input);
   }
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor = "studio-owner"): Promise<StudioRunDetail> {
-    return this.withSeriesRunEditLease(runId, async () => this.production.applyNodeOverride(runId, nodeId, input, actor));
+    return this.withLease(runId, async () => this.production.applyNodeOverride(runId, nodeId, input, actor));
   }
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor = "studio-owner"): Promise<StudioRunDetail> {
-    return this.withSeriesRunEditLease(runId, async () => this.production.applyNodeInputOverride(runId, nodeId, input, actor));
+    return this.withLease(runId, async () => this.production.applyNodeInputOverride(runId, nodeId, input, actor));
+  }
+
+  prepareProductionQuote(runId: string, input: StudioProductionQuoteInput, actor = "studio-owner"): Promise<StudioProductionQuote> {
+    return this.withLease(runId, async () => this.production.prepareProductionQuote(runId, input, actor));
+  }
+
+  authorizeProductionScope(runId: string, input: StudioProductionAuthorizationInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    return this.withLease(runId, async () => this.production.authorizeProductionScope(runId, input, actor));
+  }
+
+  amendProductionScope(runId: string, authorizationId: string, input: StudioProductionAmendmentInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    return this.withLease(runId, async () => this.production.amendProductionScope(runId, authorizationId, input, actor));
   }
   applyNodeExecutionConfiguration(runId: string, nodeId: string, input: StudioNodeExecutionConfigurationInput, actor = "studio-owner"): Promise<StudioRunDetail> {
-    return this.withSeriesRunEditLease(runId, async () => this.production.applyNodeExecutionConfiguration(runId, nodeId, input, actor));
+    return this.withLease(runId, async () => this.production.applyNodeExecutionConfiguration(runId, nodeId, input, actor));
   }
   authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.authorizeSpend(runId, nodeId, input, approvedBy);
@@ -648,11 +667,28 @@ export class StudioService {
   requestPause(runId: string): Promise<StudioRunDetail> { return this.production.requestPause(runId); }
   resumePaused(runId: string): Promise<StudioRunDetail> { return this.production.resumePaused(runId); }
   resumeStale(runId: string): Promise<StudioRunDetail> { return this.production.resumeStale(runId); }
+  queryOriginalTextTask(runId: string): Promise<StudioRunDetail> { return this.production.queryOriginalTextTask(runId); }
+  async retrieveOriginalTextTask(runId: string): Promise<StudioRunDetail> {
+    const current = await this.production.get(runId);
+    if (!current) throw new StudioNotFoundError("没有找到这条制作记录。");
+    if (current.seriesId && current.episodeNumber) await this.series.resumeRun(current.seriesId, current.episodeNumber, runId);
+    try {
+      const updated = await this.production.retrieveOriginalTextTask(runId);
+      if (current.seriesId) await this.reconcileSeriesRuns();
+      return updated;
+    } catch (error) {
+      if (current.seriesId) await this.reconcileSeriesRuns().catch(() => undefined);
+      throw error;
+    }
+  }
   async retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail> {
     const current = await this.production.get(runId);
     if (!current) throw new StudioNotFoundError("没有找到这条制作记录。");
     if (current.nodes.find((node) => node.id === nodeId)?.outcomeUncertain) {
       throw new StudioConflictError("付费服务可能已经受理这次请求。请先到服务商控制台核对任务和账单，系统不会自动再次扣费。");
+    }
+    if (current.failure?.nodeId === nodeId && current.failure.retryable === false) {
+      throw new StudioConflictError("这个问题需要人工调整素材或方案后重新规划，不能直接重试同一步骤。");
     }
     if (current.seriesId && current.episodeNumber) {
       await this.series.resumeRun(current.seriesId, current.episodeNumber, runId);
@@ -698,15 +734,18 @@ export class StudioService {
     return batch;
   }
 
-  private async withSeriesRunEditLease(
+  private async withLease<T>(
     runId: string,
-    operation: () => Promise<StudioRunDetail>,
-  ): Promise<StudioRunDetail> {
+    operation: () => Promise<T>,
+  ): Promise<T> {
     const leaseId = `edit-${randomUUID()}`;
     await this.series.acquireRunEditLease(runId, leaseId);
     try {
       const updated = await operation();
-      if (updated.seriesId) await this.reconcileSeriesRuns();
+      // 只有返回 run detail 的操作才可能携带 series 联动；quote 等其他返回类型跳过。
+      if (typeof updated === "object" && updated !== null && "seriesId" in updated && updated.seriesId) {
+        await this.reconcileSeriesRuns();
+      }
       return updated;
     } finally {
       await this.series.releaseRunEditLease(runId, leaseId);
@@ -837,9 +876,11 @@ async function canonProposalForRun(
     .filter((node) => node.id === "script" || node.id === "render" || node.id === "visual-review" || node.id === "final-review")
     .map((node) => node.outputState?.effectiveVersionId)
     .filter((value): value is string => Boolean(value))];
-  if (statements.length === 0 || JSON.stringify(approvedStatements) !== JSON.stringify(statements)) return undefined;
+  if (JSON.stringify(approvedStatements) !== JSON.stringify(statements)) return undefined;
   return {
-    memorySummary: `第 ${run.episodeNumber} 集内部定版事实：${statements.join("；")}`,
+    memorySummary: statements.length > 0
+      ? `第 ${run.episodeNumber} 集内部定版事实：${statements.join("；")}`
+      : `第 ${run.episodeNumber} 集已完成内部定版，本集没有新增系列事实。`,
     statements,
     sourceOutputVersionIds: [...new Set(sourceOutputVersionIds)],
   };

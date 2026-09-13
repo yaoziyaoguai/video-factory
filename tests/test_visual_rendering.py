@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from video_factory.domain import Scene
-from video_factory.renderer import font_resource, render_asset_video, render_scene_clip, wrap_text_by_pixels as wrap_caption_text, write_caption_overlay, write_scene_frames
+from video_factory.renderer import attach_voiceover_plan, font_resource, probe_media_duration, render_asset_video, render_scene_clip, wrap_text_by_pixels as wrap_caption_text, write_caption_overlay, write_scene_frames
 from video_factory.stock_assets import local_card_content, local_card_semantic_style, local_card_spec, local_card_style, wrap_text_by_pixels as wrap_card_text
 
 
@@ -17,6 +17,42 @@ class FixedWidthDraw:
 
 
 class VisualRenderingTest(unittest.TestCase):
+    def test_voiceover_cannot_rewrite_the_accepted_render_timeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            track_path = root / "narration.m4a"
+            track_path.write_bytes(b"natural-voice")
+            manifest_path = root / "render_manifest.json"
+            manifest = {
+                "duration_target": 20,
+                "slides": [
+                    {"position": 1, "duration": 8},
+                    {"position": 2, "duration": 12},
+                ],
+            }
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            voiceover_plan = {
+                "track_path": str(track_path),
+                "scenes": [
+                    {"position": 1, "duration": 8.4},
+                    {"position": 2, "duration": 12},
+                ],
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "accepted render timeline"):
+                attach_voiceover_plan(manifest_path, voiceover_plan)
+
+            self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8")), manifest)
+
+    def test_source_duration_probe_reads_the_video_stream(self):
+        with patch("video_factory.renderer.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, "2.000000\n", "")
+            self.assertEqual(probe_media_duration(Path("source.mp4")), 2.0)
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("-select_streams") + 1], "v:0")
+        self.assertEqual(command[command.index("-show_entries") + 1], "stream=duration")
+
     def test_font_inventory_does_not_claim_an_unverified_license_is_recorded(self):
         self.assertFalse(font_resource(Path("/fonts/NotoSansCJK-Regular.ttc"))["license_verified"])
         self.assertFalse(font_resource(None)["license_verified"])
@@ -242,6 +278,8 @@ class VisualRenderingTest(unittest.TestCase):
 
             def fake_run(command, check, capture_output, text):
                 self.assertTrue(check)
+                if command[0] == "ffprobe":
+                    return subprocess.CompletedProcess(command, 0, "2.000000\n", "")
                 return subprocess.CompletedProcess(command, 0, "", "")
 
             with patch("video_factory.renderer.subprocess.run", side_effect=fake_run):
@@ -270,7 +308,7 @@ class VisualRenderingTest(unittest.TestCase):
         self.assertNotIn("enable='lt(t,2.85)'", image_filter)
         self.assertNotIn("zoompan", video_command[video_command.index("-filter_complex") + 1])
 
-    def test_generated_video_clips_fit_the_complete_source_motion_into_the_scene(self):
+    def test_generated_video_clips_keep_normal_speed_and_use_only_the_planned_range(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             scene = {"position": 1, "duration": 3.0}
@@ -297,7 +335,181 @@ class VisualRenderingTest(unittest.TestCase):
 
         video_filter = command[command.index("-filter_complex") + 1]
         self.assertNotIn("-stream_loop", command)
-        self.assertIn("setpts=0.510638*PTS", video_filter)
+        self.assertIn("trim=start=0.000000000:end=3.000000000", video_filter)
+        self.assertIn("setpts=PTS-STARTPTS,fps=30", video_filter)
+        self.assertNotIn("*PTS", video_filter)
+        self.assertNotIn("tpad=", video_filter)
+
+    def test_explicit_invalid_compiled_frame_count_is_rejected_instead_of_using_scene_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for invalid in (0, -1, 1.5, True, "90"):
+                with self.subTest(duration_frames=invalid):
+                    with self.assertRaisesRegex(RuntimeError, "invalid compiled frame count"):
+                        render_scene_clip(
+                            {"position": 1, "duration": 3.0},
+                            {
+                                "media_type": "image",
+                                "local_path": str(root / "card.png"),
+                                "duration_frames": invalid,
+                            },
+                            root / "caption.png",
+                            root,
+                            1080,
+                            1920,
+                        )
+
+    def test_rejects_an_image_source_offset_and_a_video_range_past_the_source_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(RuntimeError, "source frame offset to an image"):
+                render_scene_clip(
+                    {"position": 1, "duration": 1.0},
+                    {
+                        "media_type": "image",
+                        "local_path": str(root / "card.png"),
+                        "duration_frames": 30,
+                        "source_in_frame": 1,
+                    },
+                    root / "caption.png",
+                    root,
+                    1080,
+                    1920,
+                    frame_count=30,
+                )
+            with patch("video_factory.renderer.probe_media_duration", return_value=2.0):
+                with self.assertRaisesRegex(RuntimeError, "selected video ends"):
+                    render_scene_clip(
+                        {"position": 2, "duration": 1.0},
+                        {
+                            "media_type": "video",
+                            "local_path": str(root / "short.mp4"),
+                            "duration_frames": 31,
+                            "source_in_frame": 30,
+                        },
+                        root / "caption.png",
+                        root,
+                        1080,
+                        1920,
+                        frame_count=31,
+                    )
+
+    def test_accepts_a_video_range_that_ends_exactly_at_the_source_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch("video_factory.renderer.probe_media_duration", return_value=2.0), patch(
+                "video_factory.renderer.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ):
+                _, command = render_scene_clip(
+                    {"position": 1, "duration": 1.0},
+                    {
+                        "media_type": "video",
+                        "local_path": str(root / "exact-tail.mp4"),
+                        "duration_frames": 30,
+                        "source_in_frame": 30,
+                    },
+                    root / "caption.png",
+                    root,
+                    1080,
+                    1920,
+                    frame_count=30,
+                )
+
+        video_filter = command[command.index("-filter_complex") + 1]
+        self.assertIn("trim=start=1.000000000:end=2.000000000", video_filter)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_vfr_video_is_sampled_at_30fps_without_retiming_the_selected_range(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_path = root / "vfr.mp4"
+            subprocess.run([
+                "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=s=90x160:r=30:d=2",
+                "-vf", "setpts='if(lt(N,30),N/(15*TB),(2+(N-30)/60)/TB)'",
+                "-fps_mode", "vfr", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source_path),
+            ], check=True, capture_output=True)
+            caption_path = root / "caption.png"
+            Image.new("RGBA", (90, 160), (0, 0, 0, 0)).save(caption_path)
+
+            clip_path, command = render_scene_clip(
+                {"position": 1, "duration": 2},
+                {
+                    "media_type": "video",
+                    "local_path": str(source_path),
+                    "duration_frames": 60,
+                    "source_in_frame": 0,
+                },
+                caption_path,
+                root,
+                90,
+                160,
+                frame_count=60,
+            )
+            probe = subprocess.run([
+                "ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+                "-show_entries", "stream=nb_read_frames", "-of", "default=nw=1:nk=1", str(clip_path),
+            ], check=True, capture_output=True, text=True)
+
+        self.assertEqual(probe.stdout.strip(), "60")
+        video_filter = command[command.index("-filter_complex") + 1]
+        self.assertIn("setpts=PTS-STARTPTS,fps=30", video_filter)
+        self.assertNotIn("*PTS", video_filter)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_video_clip_uses_the_compiled_source_range_without_looping_or_retiming(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_path = root / "red-green-blue.mp4"
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "color=c=red:s=90x160:r=30:d=4",
+                "-f", "lavfi", "-i", "color=c=green:s=90x160:r=30:d=4",
+                "-f", "lavfi", "-i", "color=c=blue:s=90x160:r=30:d=4",
+                "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+                "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source_path),
+            ], check=True, capture_output=True)
+            caption_path = root / "caption.png"
+            Image.new("RGBA", (90, 160), (0, 0, 0, 0)).save(caption_path)
+
+            clip_path, command = render_scene_clip(
+                {"position": 1, "duration": 4},
+                {
+                    "provider": "pexels",
+                    "media_type": "video",
+                    "local_path": str(source_path),
+                    "duration_frames": 120,
+                    "source_in_frame": 120,
+                },
+                caption_path,
+                root,
+                90,
+                160,
+                frame_count=120,
+            )
+            probe = subprocess.run([
+                "ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+                "-show_entries", "stream=nb_read_frames", "-of", "default=nw=1:nk=1", str(clip_path),
+            ], check=True, capture_output=True, text=True)
+            colors = []
+            for index, timestamp in enumerate((0.1, 3.9)):
+                frame_path = root / f"sample-{index}.png"
+                subprocess.run([
+                    "ffmpeg", "-y", "-ss", str(timestamp), "-i", str(clip_path),
+                    "-frames:v", "1", str(frame_path),
+                ], check=True, capture_output=True)
+                colors.append(Image.open(frame_path).convert("RGB").getpixel((45, 80)))
+
+        self.assertEqual(probe.stdout.strip(), "120")
+        self.assertNotIn("-stream_loop", command)
+        self.assertNotIn("tpad=", command[command.index("-filter_complex") + 1])
+        for red, green, blue in colors:
+            self.assertGreater(green, red * 2)
+            self.assertGreater(green, blue * 2)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_24_second_render_contains_exactly_720_video_frames(self):

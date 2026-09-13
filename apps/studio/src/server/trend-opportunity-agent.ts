@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   CodexBridgeClient,
+  CodexBridgeError,
   fileRoleAgentLoopCheckpoint,
   roleAgentCheckpointKey,
   runRoleAgentLoop,
@@ -12,14 +13,16 @@ import type {
   StudioTrendSignal,
   StudioTrendSignalQuery,
   StudioTopicCategory,
+  StudioTopicGenerationReceipt,
   StudioTopicStrategy,
   StudioVisualPlan,
 } from "../shared/api.js";
 import { parseStudioVisualPlan } from "../shared/api.js";
 import { planVisualDirection } from "../shared/visual-plan.js";
 import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
+import { topicIdeasModelPayload } from "./topic-ideas-payload.js";
 
-const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v7|role-audit-v3|topic-ideas-validator-v4|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v2";
+const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v7|role-audit-v3|topic-ideas-validator-v5|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v2|angle-identity-v1";
 
 export interface TrendSignalPort {
   listSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
@@ -48,7 +51,8 @@ export interface TrendModelSignal extends StudioTrendSignal {
 
 export interface TrendIdeaModel {
   id: string;
-  generate(signals: TrendModelSignal[], strategy?: StudioTopicStrategy): Promise<TrendModelIdea[]>;
+  generate(signals: TrendModelSignal[], strategy?: StudioTopicStrategy, generationNonce?: string): Promise<TrendModelIdea[]>;
+  lastExecutionIdentity?(): { providerId: string; modelId: string } | undefined;
 }
 
 export interface TrendOpportunityAgentOptions {
@@ -58,17 +62,23 @@ export interface TrendOpportunityAgentOptions {
   strategy?: () => Promise<StudioTopicStrategy>;
 }
 
+export interface TrendCandidateGenerationOptions {
+  /** C3-E02：“换一批”的生成身份——同一信号+策略下不同 nonce 产生真正的新一批提案。 */
+  generationNonce?: string;
+}
+
 // 候选台是总编做过取舍的短名单，不是把聚合榜单换一种样式全部搬进来。
 const TREND_CANDIDATE_LIMIT = 12;
 
 export class TrendOpportunityAgent {
   private readonly now: () => Date;
+  private lastReceipt: StudioTopicGenerationReceipt | undefined;
 
   constructor(private readonly options: TrendOpportunityAgentOptions) {
     this.now = options.now ?? (() => new Date());
   }
 
-  async listCandidates(): Promise<StudioTrendCandidate[]> {
+  async listCandidates(options: TrendCandidateGenerationOptions = {}): Promise<StudioTrendCandidate[]> {
     const signals = await this.options.signals.listSignals({ limit: 160 });
     const strategy = await this.options.strategy?.().catch(() => undefined);
     const compareCandidates = topicCandidateComparator(strategy);
@@ -77,36 +87,72 @@ export class TrendOpportunityAgent {
       ...group[0]!,
       relatedSignals: group.slice(1),
     }));
+    let modelFallbackDiagnostic: RuleFallbackDiagnostic | undefined;
     if (this.options.model) {
       try {
-        const ideas = await generateModelIdeas(this.options.model, modelSignals, strategy);
-        const modelCandidates = new Map<string, StudioTrendCandidate>();
+        const ideas = await generateModelIdeas(this.options.model, modelSignals, strategy, options.generationNonce);
+        // C3-E01：同一 canonical 事件允许多个真正不同的创作方向（不同受众/收益/表现方式），
+        // 只有重复角度才去重——不能按 signalId 吞掉同事件的其他角度。
+        const modelCandidates: StudioTrendCandidate[] = [];
+        const angleKeys = new Set<string>();
         for (const idea of ideas) {
           const group = signalGroups.find((items) => items[0]?.id === idea.signalId);
-          if (group && !modelCandidates.has(idea.signalId)) {
-            const candidate = this.fromModelIdea(idea, group);
-            if (candidate) modelCandidates.set(idea.signalId, candidate);
-          }
+          if (!group) continue;
+          const candidate = this.fromModelIdea(idea, group);
+          if (!candidate) continue;
+          const key = editorialAngleKey(candidate);
+          if (angleKeys.has(key)) continue;
+          angleKeys.add(key);
+          modelCandidates.push(candidate);
         }
         // 模型成功返回（含合法空短名单与全部被事实校验拒绝）就是总编本轮的最终取舍；
         // 此时不再回填规则候选，否则未经独立复核的内容会混进推荐。
-        const selectedByModel = [...modelCandidates.values()]
+        const selectedByModel = modelCandidates
           .filter((candidate) => !matchesExcludedDirection(candidate, strategy))
           .sort(compareCandidates)
           .slice(0, 8);
-        return selectCandidatePortfolio(selectedByModel, [], TREND_CANDIDATE_LIMIT, compareCandidates);
-      } catch {
-        // 只有模型执行真正失败时，才退回可追溯的规则候选保底。
+        const selected = selectCandidatePortfolio(selectedByModel, [], TREND_CANDIDATE_LIMIT, compareCandidates);
+        const identity = this.options.model.lastExecutionIdentity?.();
+        this.lastReceipt = {
+          generationId: options.generationNonce ?? `topic-${this.now().getTime()}`,
+          generatedAt: this.now().toISOString(),
+          modelInvoked: true,
+          source: "editor-model",
+          candidateCount: selected.length,
+          providerId: identity?.providerId ?? this.options.model.id,
+          ...(identity?.modelId ? { modelId: identity.modelId } : {}),
+        };
+        return selected;
+      } catch (error) {
+        // 模型轮真正失败才退回规则保底；失败必须带结构化诊断，不得静默冒充模型成果。
+        modelFallbackDiagnostic = ruleFallbackDiagnostic(error);
       }
     }
-    return selectCandidatePortfolio(
+    const fallback = this.options.model ? modelFallbackDiagnostic : undefined;
+    const selected = selectCandidatePortfolio(
       [],
-      signalGroups.map((group) => this.fromSignal(group, strategy))
+      signalGroups.map((group) => this.fromSignal(group, strategy, fallback))
         .filter((candidate) => !matchesExcludedDirection(candidate, strategy))
         .sort(compareCandidates),
       TREND_CANDIDATE_LIMIT,
       compareCandidates,
     );
+    this.lastReceipt = {
+      generationId: options.generationNonce ?? `topic-${this.now().getTime()}`,
+      generatedAt: this.now().toISOString(),
+      modelInvoked: Boolean(this.options.model),
+      source: "rule-fallback",
+      candidateCount: selected.length,
+      ...(modelFallbackDiagnostic ? {
+        failureCategory: modelFallbackDiagnostic.category,
+        failureReason: modelFallbackDiagnostic.reason,
+      } : {}),
+    };
+    return selected;
+  }
+
+  generationReceipt(): StudioTopicGenerationReceipt | undefined {
+    return this.lastReceipt ? structuredClone(this.lastReceipt) : undefined;
   }
 
   private fromModelIdea(idea: TrendModelIdea, signals: StudioTrendSignal[]): StudioTrendCandidate | null {
@@ -140,7 +186,11 @@ export class TrendOpportunityAgent {
     });
   }
 
-  private fromSignal(signals: StudioTrendSignal[], strategy?: StudioTopicStrategy): StudioTrendCandidate {
+  private fromSignal(
+    signals: StudioTrendSignal[],
+    strategy?: StudioTopicStrategy,
+    fallback?: RuleFallbackDiagnostic,
+  ): StudioTrendCandidate {
     const signal = signals[0]!;
     const risk = complianceRisk(signal.title);
     const track = inferTrack(signal.title);
@@ -162,6 +212,7 @@ export class TrendOpportunityAgent {
           : `该热点涉及需要核验的公共议题；系统未扩写事实，只保留原始信号与核验问题。`
         : `${platformLabel(signal.platform)}榜单排名 ${signal.rank}，采用零成本规则评分并保留原始证据。`,
       providerId: "trend-heuristic-v1",
+      ...(fallback ? { generationFallback: fallback } : {}),
       novelty: risk >= 60 ? 40 : track === "breaking-news" ? 48 : 72,
       monetization: risk >= 60 ? 25 : track === "ai-daily-life" ? 76 : 55,
       seriesPotential: risk >= 60 ? 38 : track === "breaking-news" ? 45 : 78,
@@ -180,6 +231,7 @@ export class TrendOpportunityAgent {
     visualProof?: string;
     visualPlan?: StudioVisualPlan;
     providerId: string;
+    generationFallback?: RuleFallbackDiagnostic;
     novelty: number;
     monetization: number;
     seriesPotential: number;
@@ -188,7 +240,7 @@ export class TrendOpportunityAgent {
   }): StudioTrendCandidate {
     const strength = Math.max(20, Math.min(100, 100 - input.signal.rank));
     const risk = complianceRisk(input.signal.title);
-    const candidate = scoreTopicCandidate(candidateId(input.signal.id, input.title), {
+    const candidate = scoreTopicCandidate(candidateId(input.signal.id, input.title, input.audience, input.track), {
       platform: input.signal.platform,
       track: input.track,
       audience: input.audience,
@@ -219,6 +271,7 @@ export class TrendOpportunityAgent {
       track: clean(input.track, "general-trend"),
       audience: clean(input.audience, "中文短视频用户"),
       painPoint: clean(input.painPoint, "需要快速理解热点与自己的关系"),
+      ...(input.generationFallback ? { generationFallback: input.generationFallback } : {}),
       hook,
       rationale: clean(input.rationale, "来自本地热点网关的可追溯候选。", RATIONALE_TEXT_LIMIT),
       ...(input.visualProof ? { visualProof: clean(input.visualProof, "", VISUAL_PROOF_TEXT_LIMIT) } : {}),
@@ -232,13 +285,13 @@ export class TrendOpportunityAgent {
   }
 }
 
-async function generateModelIdeas(model: TrendIdeaModel, signals: TrendModelSignal[], strategy?: StudioTopicStrategy): Promise<TrendModelIdea[]> {
+async function generateModelIdeas(model: TrendIdeaModel, signals: TrendModelSignal[], strategy?: StudioTopicStrategy, generationNonce?: string): Promise<TrendModelIdea[]> {
   try {
     // 空短名单是模型的合法结论（本轮无值得推荐），不触发第二次调用。
-    return await model.generate(signals.slice(0, 24), strategy);
+    return await model.generate(signals.slice(0, 24), strategy, generationNonce);
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error;
-    return model.generate(signals.slice(0, 12), strategy);
+    return model.generate(signals.slice(0, 12), strategy, generationNonce);
   }
 }
 
@@ -246,6 +299,7 @@ async function generateModelIdeas(model: TrendIdeaModel, signals: TrendModelSign
 export class CodexTopicIdeaModel implements TrendIdeaModel {
   readonly id = "api-topic-editor-v1";
   private readonly client: CodexBridgeClient;
+  private executionIdentity: { providerId: string; modelId: string } | undefined;
 
   constructor(
     client: CodexBridgeClient,
@@ -255,30 +309,10 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
     this.client = client;
   }
 
-  async generate(signals: TrendModelSignal[], strategy?: StudioTopicStrategy): Promise<TrendModelIdea[]> {
-    const request = {
-      signals: signals.map((item) => ({
-        id: item.id,
-        sourceId: item.sourceId,
-        platform: item.platform,
-        rank: item.rank,
-        title: item.title,
-        heat: item.heat ?? null,
-        ...(item.url ? { url: item.url } : {}),
-        collectedAt: item.collectedAt,
-        relatedSignals: item.relatedSignals.map((related) => ({
-          id: related.id,
-          sourceId: related.sourceId,
-          platform: related.platform,
-          rank: related.rank,
-          title: related.title,
-          heat: related.heat ?? null,
-          ...(related.url ? { url: related.url } : {}),
-          collectedAt: related.collectedAt,
-        })),
-      })),
-      ...(strategy ? { creatorStrategy: formatTopicStrategy(strategy) } : {}),
-    };
+  async generate(signals: TrendModelSignal[], strategy?: StudioTopicStrategy, generationNonce?: string): Promise<TrendModelIdea[]> {
+    // canonical payload 只含 signals/strategy；generationNonce 只进入生成身份（checkpoint key）。
+    const { payload, generationNonce: identityNonce } = topicIdeasModelPayload(signals, strategy, generationNonce);
+    const request = { ...payload, ...(identityNonce ? { generationNonce: identityNonce } : {}) };
     const execution = await runRoleAgentLoop<{ ideas: TrendModelIdea[] }>({
       role: "选题总编",
       contractVersion: TOPIC_EDITOR_AGENT_CONTRACT_VERSION,
@@ -291,11 +325,15 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         "先评内容潜力与适合的视频形态；来源数量门槛由下游执行，不得仅因来源暂时不足删除有潜力且可补源的角度",
       ],
       maxIterations: this.maxReviewIterations,
-      produce: (revision, { requestId, session }) => this.client.runTaskDetailed("topic-ideas", {
-        ...request,
+      produce: (revision, { requestId, session, requestOptions, preparedOperation }) => preparedOperation
+        ? this.client.observePrepared(preparedOperation, requestOptions)
+        : this.client.runTaskDetailed("topic-ideas", {
+        ...payload,
         ...(revision ? { revision } : {}),
-      }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session }) => this.client.runTaskDetailed("role-audit", {
+      }, requestId, session, requestOptions),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session, requestOptions, preparedOperation }) => preparedOperation
+        ? this.client.observePrepared(preparedOperation, requestOptions)
+        : this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
@@ -322,7 +360,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
-      }, requestId, session),
+      }, requestId, session, requestOptions),
       validate: parseTopicIdeasOutput,
       ...(this.checkpointDirectory ? {
         checkpoint: fileRoleAgentLoopCheckpoint(
@@ -331,21 +369,15 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         ),
       } : {}),
     });
+    this.executionIdentity = execution.trace
+      ? { providerId: execution.trace.providerId, modelId: execution.trace.modelId }
+      : undefined;
     return execution.output.ideas;
   }
-}
 
-function formatTopicStrategy(strategy: StudioTopicStrategy): string {
-  return [
-    strategy.positioning ? `内容定位：${strategy.positioning}` : undefined,
-    strategy.targetAudience ? `核心受众：${strategy.targetAudience}` : undefined,
-    strategy.preferredDirections ? `优先题材：\n${strategy.preferredDirections}` : undefined,
-    strategy.excludedDirections ? `明确避开：\n${strategy.excludedDirections}` : undefined,
-    strategy.sourcePolicy === "traceable_source"
-      ? "来源工作流：来源开工门槛由下游执行；总编不得按来源数量淘汰角度。来源不足但内容与视觉潜力成立的角度仍须输出，供创作者补充原始来源；下游通常要求至少一个有效原始来源，高风险事实仍需额外核验。"
-      : "来源工作流：来源开工门槛由下游执行；总编不得按来源数量淘汰角度。来源不足但内容与视觉潜力成立的角度仍须输出，供创作者补充来源；下游再核对原始来源或两个不同域名的独立来源。",
-    strategy.customInstruction ? `补充原则：${strategy.customInstruction}` : undefined,
-  ].filter((value): value is string => Boolean(value)).join("\n\n").slice(0, 6_000);
+  lastExecutionIdentity(): { providerId: string; modelId: string } | undefined {
+    return this.executionIdentity ? { ...this.executionIdentity } : undefined;
+  }
 }
 
 function parseTopicIdeasOutput(value: unknown): { ideas: TrendModelIdea[] } {
@@ -363,6 +395,21 @@ function parseModelIdea(value: unknown): TrendModelIdea[] {
   const item = value as Record<string, unknown>;
   const textKeys = ["signalId", "title", "track", "audience", "painPoint", "hook", "rationale"] as const;
   if (textKeys.some((key) => typeof item[key] !== "string" || !(item[key] as string).trim())) return [];
+  // C3/CG-07：角色合同声明 everyIdeaMustProvideSpecificVisualPlan 与 0–100 整数评分，
+  // 解析器必须真实执行——缺失的视觉方案不能在通过审计后由展示层默认补齐。
+  if (item.visualPlan === undefined) return [];
+  let visualPlan: StudioVisualPlan;
+  try {
+    visualPlan = parseStudioVisualPlan(item.visualPlan);
+  } catch {
+    return [];
+  }
+  const scores = {
+    novelty: number(item.novelty),
+    seriesPotential: number(item.seriesPotential),
+    monetization: number(item.monetization),
+  };
+  if (Object.values(scores).some((score) => !Number.isInteger(score) || score < 0 || score > 100)) return [];
   return [{
     signalId: item.signalId as string,
     title: item.title as string,
@@ -372,12 +419,10 @@ function parseModelIdea(value: unknown): TrendModelIdea[] {
     hook: item.hook as string,
     rationale: item.rationale as string,
     ...(typeof item.visualProof === "string" && item.visualProof.trim() ? { visualProof: item.visualProof } : {}),
-    ...(item.visualPlan === undefined ? {} : { visualPlan: parseStudioVisualPlan(item.visualPlan) }),
+    visualPlan,
     ...(item.visualFeasibility !== undefined ? { visualFeasibility: number(item.visualFeasibility) } : {}),
     ...(item.productionCostEfficiency !== undefined ? { productionCostEfficiency: number(item.productionCostEfficiency) } : {}),
-    novelty: number(item.novelty),
-    seriesPotential: number(item.seriesPotential),
-    monetization: number(item.monetization),
+    ...scores,
   }];
 }
 
@@ -401,8 +446,20 @@ function complianceRisk(title: string): number {
   return level === "high" ? 72 : level === "review" ? 60 : 16;
 }
 
-function candidateId(signalId: string, title: string): string {
-  return `trend-${createHash("sha1").update(`${signalId}:${title}`).digest("hex").slice(0, 14)}`;
+// C3/CG-04：候选 id 与角度去重共用同一身份投影（canonical 事件 + 编辑角度）。
+// 同事件同标题不同受众是两个可独立寻址的候选；跨事件的相同标题/受众不会被误合并。
+function candidateId(signalId: string, title: string, audience: string, track: string): string {
+  return `trend-${createHash("sha1").update(`${signalId}:${title}:${audience}:${track}`).digest("hex").slice(0, 14)}`;
+}
+
+// C3-E01：角度身份 = 归一化标题 + 受众 + 题材。同事件下受众或收益不同的方向是
+// 不同的 angleId；只有三者全部相同（同一角度重复提交）才去重。
+function editorialAngleKey(candidate: StudioTrendCandidate): string {
+  return [
+    normalizeTopicText(candidate.title),
+    normalizeTopicText(candidate.audience),
+    normalizeTopicText(candidate.track),
+  ].join("|");
 }
 
 function clean(value: string, fallback: string, limit = 180): string {
@@ -466,10 +523,12 @@ function groundModelIdea(idea: TrendModelIdea, signals: StudioTrendSignal[]): Tr
   const visualPlanClaims = idea.visualPlan
     ? [idea.visualPlan.strategy, ...idea.visualPlan.beats.map((beat) => beat.description)]
     : [];
+  // 非高风险题材允许"3 步""5 招"一类创作结构数量（CG-05）；高风险新闻里的数字一律按事实处理。
+  const allowStructuralQuantities = riskLevel !== "high";
   const bodyUnsafe = [idea.audience, idea.painPoint, idea.hook, idea.rationale, idea.visualProof ?? "", ...visualPlanClaims]
-    .some((value) => unsupportedClaim(value, sourceText, sourceNumbers)
+    .some((value) => unsupportedClaim(value, sourceText, sourceNumbers, allowStructuralQuantities)
       || (riskLevel === "high" && unsupportedHighRiskAssertion(value, sourceText)));
-  const titleUnsafe = unsupportedClaim(idea.title, sourceText, sourceNumbers)
+  const titleUnsafe = unsupportedClaim(idea.title, sourceText, sourceNumbers, allowStructuralQuantities)
     || (riskLevel === "high" && unsupportedHighRiskAssertion(idea.title, sourceText))
     || !isEditoriallyDistinct(idea.title, signal.title);
   if (bodyUnsafe || titleUnsafe) {
@@ -627,8 +686,19 @@ function groundedEditorialTitle(sourceTitle: string, track: string): string {
   return `${sourceTitle}：它与普通人的关系该如何核验？`;
 }
 
-function unsupportedClaim(value: string, sourceTitle: string, sourceNumbers: Set<string>): boolean {
-  const unsupportedNumber = numberTokens(value).some((token) => !sourceNumbers.has(token));
+function unsupportedClaim(
+  value: string,
+  sourceTitle: string,
+  sourceNumbers: Set<string>,
+  allowStructuralQuantities = false,
+): boolean {
+  // C3/CG-05：数字分两类——事件事实数值必须来自原始信号；"3 步""5 招"一类描述视频
+  // 自身组织的方法计数是创作结构，不要求热点标题逐字提供。豁免仅在非高风险题材启用
+  // （高风险新闻里的数字一律按事实处理），且只认封闭的结构量词集合。
+  const unsupportedNumber = numberTokens(value).some((token) => (
+    !sourceNumbers.has(token)
+    && !(allowStructuralQuantities && isStructuralQuantity(value, token))
+  ));
   const unsupportedAttribution = /透露|表示|宣称|宣布|数据显示|官方数据|调查显示|研究表明|合理估算|据报道|训练日程|内部消息|独家|采访素材/.test(value);
   // 给原信号词组加中文/英文引号不算虚构；只有引住来源里不存在的内容才视为新增引语。
   const unsupportedQuote = quotedSegments(value).some((segment) => !containsPhrase(sourceTitle, segment));
@@ -638,15 +708,34 @@ function unsupportedClaim(value: string, sourceTitle: string, sourceNumbers: Set
   return unsupportedNumber || unsupportedAttribution || unsupportedQuote || unsupportedLatinTerm || unsupportedClickbait;
 }
 
+const STRUCTURAL_QUANTITY_PATTERN = /(?:步|招|种方法|个方法|个技巧|条建议|个习惯)/;
+
+function isStructuralQuantity(value: string, token: string): boolean {
+  if (!/^\d{1,2}$/.test(token)) return false;
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`${escaped}\\s*${STRUCTURAL_QUANTITY_PATTERN.source}`).test(value);
+}
+
 // 高风险题材还要拦住没有数字、引语等明显特征的中文新增事实。
 // 新增问题、核验角度和观看框架可以保留；带有确定性事实标记且引入来源外实体/状态的陈述必须回退。
+// 高风险题材还要拦住没有数字、引语等明显特征的中文新增事实。
+// C3/CG-05：按子句检查——问句子句（核验问题、观看角度）是合法创作内容；但陈述子句
+// 里的新增事实断言不能因为同一句里带问号就整体豁免（"救援已经结束，为何还要关注？"）。
+// 新增问题与核验框架仍允许；只有带确定性事实标记且引入来源外实体的陈述才回退。
 function unsupportedHighRiskAssertion(value: string, sourceText: string): boolean {
   const normalized = value.trim();
   if (!normalized || containsPhrase(sourceText, normalized)) return false;
-  if (/[？?]|为什么|为何|如何|哪些|什么|是否|能否|该不该|怎么/.test(normalized)) return false;
-  if (!/(?:已经|早已|曾|正在|将要|导致|造成|升级|伤亡|病危|传言|网传|网络|数据|未公开|未披露|未确认|已确认|证实|公布|披露)/.test(normalized)) return false;
   const sourceTerms = meaningfulTopicTerms(sourceText);
-  return [...meaningfulTopicTerms(normalized)].some((term) => !sourceTerms.has(term) && !HIGH_RISK_EDITORIAL_TERMS.has(term));
+  return splitAssertionClauses(normalized).some((clause) => {
+    // 疑问子句是核验问题，不是事实断言。
+    if (/[？?]/.test(clause) || /(为什么|为何|如何|哪些|什么|是否|能否|该不该|怎么)/.test(clause)) return false;
+    if (!/(?:已经|早已|曾|正在|将要|导致|造成|升级|伤亡|病危|传言|网传|网络|数据|未公开|未披露|未确认|已确认|证实|公布|披露)/.test(clause)) return false;
+    return [...meaningfulTopicTerms(clause)].some((term) => !sourceTerms.has(term) && !HIGH_RISK_EDITORIAL_TERMS.has(term));
+  });
+}
+
+function splitAssertionClauses(value: string): string[] {
+  return value.split(/[。！？!?，、；\n]+/).map((part) => part.trim()).filter(Boolean);
 }
 
 const HIGH_RISK_EDITORIAL_TERMS = new Set([
@@ -723,4 +812,30 @@ function directionMatches(candidate: StudioTrendCandidate, direction: string): b
   if (terms.size === 0) return false;
   const contentTerms = meaningfulTopicTerms(content);
   return [...terms].every((term) => contentTerms.has(term));
+}
+
+
+export interface RuleFallbackDiagnostic {
+  reason: string;
+  category: "model_unavailable" | "accepted_unknown" | "contract_rejected" | "model_error";
+}
+
+// 规则回退的结构化诊断：把桥接错误分类为可诊断事实，绝不让规则候选冒充模型成果。
+function ruleFallbackDiagnostic(error: unknown): RuleFallbackDiagnostic {
+  if (error instanceof CodexBridgeError) {
+    if (error.stage === "not_accepted") {
+      return { category: "model_unavailable", reason: error.creatorMessage };
+    }
+    if (error.stage === "uncertain") {
+      return { category: "accepted_unknown", reason: error.creatorMessage };
+    }
+    if (error.stage === "rejected") {
+      return { category: "contract_rejected", reason: error.message };
+    }
+    return { category: "model_error", reason: error.creatorMessage };
+  }
+  return {
+    category: "model_error",
+    reason: error instanceof Error ? error.message : String(error),
+  };
 }

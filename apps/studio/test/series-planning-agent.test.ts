@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
-import { CodexBridgeClient, type CodexTaskExecution, type CodexTaskKind } from "@video-factory/production-pipeline";
+import {
+  CodexBridgeClient,
+  type CodexPreparedOperation,
+  type CodexTaskExecution,
+  type CodexTaskKind,
+  type CodexTaskRequestOptions,
+} from "@video-factory/production-pipeline";
 import { CodexSeriesPlanningAgent, parseSeriesRoadmapOutput } from "../src/server/series-planning-agent.js";
 import type { SeriesRecord } from "../src/server/series-store.js";
 
@@ -241,7 +250,145 @@ describe("CodexSeriesPlanningAgent", () => {
       /changed creator-owned fromPrevious/,
     );
   });
+
+  it("resumes the saved series generation result before starting its audit", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "vf-series-generate-recovery-"));
+    const client = new InterruptingSeriesClient("series-roadmap", {
+      episodes: [
+        draft(1, "真实任务实验", "先验证一项真实任务", "看见真实任务能否完成"),
+        draft(2, "成本与时间复盘", "再核算实际成本", "得到明确成本判断"),
+      ],
+    });
+    try {
+      const agent = new CodexSeriesPlanningAgent(client, 3, directory);
+      await assert.rejects(() => agent.generate(series, 2), /series response interrupted/);
+
+      const result = await agent.generate(series, 2);
+
+      assert.equal(result.planning.auditStatus, "passed");
+      assert.equal(client.calls.filter((kind) => kind === "series-roadmap").length, 1);
+      assert.deepEqual(client.observedKinds, ["series-roadmap"]);
+      assert.equal(client.calls.filter((kind) => kind === "role-audit").length, 1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("resumes the saved greenlight audit without regenerating the human episode", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "vf-series-greenlight-recovery-"));
+    const episode = {
+      id: "episode-recovery",
+      seriesId: series.id,
+      episodeNumber: 1,
+      seasonNumber: 1,
+      arc: series.currentSeason.arc,
+      pillar: "真实任务实验",
+      title: "人工标题",
+      viewerPromise: "验证真实任务",
+      hook: "先看结果",
+      payoff: "给出结论",
+      canonBaseRevision: 0,
+      status: "planned" as const,
+      continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: ["继续验证"], canonChecks: [] },
+      planning: {
+        source: "human" as const,
+        role: "主创手工改写",
+        auditRole: "待审计",
+        auditStatus: "human_override" as const,
+        auditIterations: 0,
+        providerId: "human",
+        modelId: "manual",
+        promptVersion: "video-factory/series-episode-edit-v1",
+      },
+      createdAt: series.createdAt,
+      updatedAt: series.updatedAt,
+    };
+    const client = new InterruptingSeriesClient("role-audit", { episodes: [draft(1, "真实任务实验", "人工标题", "验证真实任务")] });
+    try {
+      const agent = new CodexSeriesPlanningAgent(client, 3, directory);
+      const current = { ...series, episodes: [episode] };
+      await assert.rejects(() => agent.reviewEpisode(current, episode), /series response interrupted/);
+
+      const result = await agent.reviewEpisode(current, episode);
+
+      assert.equal(result.planning.auditStatus, "passed");
+      assert.deepEqual(client.calls, ["role-audit"]);
+      assert.deepEqual(client.observedKinds, ["role-audit"]);
+      assert.equal(result.draft.title, "人工标题");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
+
+class InterruptingSeriesClient extends CodexBridgeClient {
+  readonly calls: CodexTaskKind[] = [];
+  readonly observedKinds: CodexTaskKind[] = [];
+  private interrupted = false;
+
+  constructor(private readonly interruptKind: CodexTaskKind, private readonly roadmap: Record<string, unknown>) {
+    super({ socketPath: "/tmp/series-recovery.sock" });
+  }
+
+  async runTaskDetailed(
+    kind: CodexTaskKind,
+    payload: unknown,
+    requestId = "series-recovery",
+    _session?: unknown,
+    requestOptions: CodexTaskRequestOptions = {},
+  ): Promise<CodexTaskExecution> {
+    this.calls.push(kind);
+    if (kind === this.interruptKind && !this.interrupted) {
+      this.interrupted = true;
+      await requestOptions.beforeSubmit?.(preparedOperation(kind, payload, requestId));
+      throw new Error("series response interrupted");
+    }
+    return { output: kind === "series-roadmap" ? this.roadmap : passingAudit() };
+  }
+
+  async observePrepared(operation: CodexPreparedOperation): Promise<CodexTaskExecution> {
+    this.observedKinds.push(operation.kind);
+    return { output: operation.kind === "series-roadmap" ? this.roadmap : passingAudit() };
+  }
+}
+
+function passingAudit() {
+  return {
+    version: "video-factory/role-audit-v1",
+    verdict: "pass",
+    score: 94,
+    summary: "系列规划与当前正史一致。",
+    issues: [],
+    repairInstructions: [],
+  };
+}
+
+function preparedOperation(kind: CodexTaskKind, payload: unknown, requestId: string): CodexPreparedOperation {
+  const envelope = { protocolVersion: "video-factory/codex-bridge-v2", requestId, kind, payload };
+  const brokerBinding = {
+    version: "video-factory/task-binding-v1" as const,
+    storeId: `vfs_store_${"5".repeat(32)}`,
+    providerId: "openai",
+    modelId: "codex-default",
+  };
+  return {
+    version: "video-factory/codex-prepared-operation-v1",
+    requestId,
+    kind,
+    envelope,
+    serializedEnvelope: JSON.stringify(envelope),
+    binding: {
+      ...brokerBinding,
+      requestDigest: "6".repeat(64),
+      kind,
+      contractDigest: "7".repeat(64),
+      sessionDigest: "8".repeat(64),
+    },
+    brokerBinding,
+    route: { socketPath: "/tmp/series-recovery.sock" },
+    taskFact: "not_submitted",
+  };
+}
 
 function draft(episodeNumber: number, pillar: string, title: string, viewerPromise: string) {
   return {

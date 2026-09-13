@@ -34,6 +34,12 @@ export interface CodexProviderSettings {
   reason: string;
   taskKinds: string[];
   taskModels?: Record<string, string>;
+  taskModelRoutes?: Record<string, CodexTaskModelRoute>;
+}
+
+interface CodexTaskModelRoute {
+  withoutImages: string;
+  withImages: string;
 }
 
 export interface CodexProviderSettingsOptions {
@@ -63,6 +69,7 @@ interface CodexSocketProbeResult {
   taskKinds: string[];
   modelId?: string;
   taskModels?: Record<string, string>;
+  taskModelRoutes?: Record<string, CodexTaskModelRoute>;
 }
 
 interface CodexHealthIdentity {
@@ -71,6 +78,7 @@ interface CodexHealthIdentity {
   modelId?: string;
   taskKinds: readonly string[];
   taskModels?: Record<string, string>;
+  taskModelRoutes?: Record<string, CodexTaskModelRoute>;
 }
 
 // 同步层：只解析 env 与默认路径，供 provider catalog 等同步调用方使用。
@@ -111,7 +119,7 @@ export async function readCodexProviderSettings(
     profileId: "openai",
     providerId: "openai",
     ...(configuredModelId ? { modelId: configuredModelId } : {}),
-    taskKinds: ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
+    taskKinds: ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
   }, options);
 }
 
@@ -122,7 +130,7 @@ export async function readZaiCodexProviderSettings(
   return readProviderSettings(resolveZaiCodexSocketPath(environment), {
     profileId: "zai",
     providerId: "zai-bigmodel-api",
-    taskKinds: ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
+    taskKinds: ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
   }, options);
 }
 
@@ -139,6 +147,7 @@ async function readProviderSettings(
         taskKinds: rawResult === "ready" ? [...(expectedIdentity?.taskKinds ?? [])] : [],
         ...(expectedIdentity?.modelId ? { modelId: expectedIdentity.modelId } : {}),
         ...(expectedIdentity?.taskModels ? { taskModels: expectedIdentity.taskModels } : {}),
+        ...(expectedIdentity?.taskModelRoutes ? { taskModelRoutes: expectedIdentity.taskModelRoutes } : {}),
       }
     : rawResult;
   const status = result.status;
@@ -152,6 +161,7 @@ async function readProviderSettings(
     reason: available ? "" : codexUnavailableReason(status, resolution.socketPath),
     taskKinds: available ? [...result.taskKinds] : [],
     ...(available && result.taskModels ? { taskModels: result.taskModels } : {}),
+    ...(available && result.taskModelRoutes ? { taskModelRoutes: result.taskModelRoutes } : {}),
   };
 }
 
@@ -196,6 +206,7 @@ function probeCodexHealth(
       taskKinds: string[] = [],
       modelId?: string,
       taskModels?: Record<string, string>,
+      taskModelRoutes?: Record<string, CodexTaskModelRoute>,
     ): void => {
       if (settled) return;
       settled = true;
@@ -204,6 +215,7 @@ function probeCodexHealth(
         taskKinds,
         ...(modelId ? { modelId } : {}),
         ...(taskModels ? { taskModels } : {}),
+        ...(taskModelRoutes ? { taskModelRoutes } : {}),
       });
     };
     const request = http.request({
@@ -255,11 +267,17 @@ function probeCodexHealth(
             settle("protocol_mismatch");
             return;
           }
+          const taskModelRoutes = parseTaskModelRoutes(body.taskModelRoutes, taskKinds);
+          if (body.taskModelRoutes !== undefined && taskModelRoutes === undefined) {
+            settle("protocol_mismatch");
+            return;
+          }
           settle(
             expectedIdentity && !matchesIdentity(body, expectedIdentity) ? "identity_mismatch" : "ready",
             taskKinds,
             body.modelId.trim(),
             taskModels,
+            taskModelRoutes,
           );
         } catch {
           settle("protocol_mismatch");
@@ -290,6 +308,26 @@ function parseTaskModels(value: unknown, taskKinds: readonly string[]): Record<s
   for (const [taskKind, modelId] of Object.entries(value)) {
     if (!taskKinds.includes(taskKind) || typeof modelId !== "string" || !modelId.trim()) return undefined;
     result[taskKind] = modelId.trim();
+  }
+  return result;
+}
+
+function parseTaskModelRoutes(value: unknown, taskKinds: readonly string[]): Record<string, CodexTaskModelRoute> | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const result: Record<string, CodexTaskModelRoute> = {};
+  for (const [taskKind, route] of Object.entries(value)) {
+    if ((taskKind !== "role-audit" && taskKind !== "asset-rank")
+      || !taskKinds.includes(taskKind)
+      || typeof route !== "object" || route === null || Array.isArray(route)) return undefined;
+    const values = route as Record<string, unknown>;
+    if (Object.keys(values).some((key) => key !== "withoutImages" && key !== "withImages")
+      || typeof values.withoutImages !== "string" || !values.withoutImages.trim()
+      || typeof values.withImages !== "string" || !values.withImages.trim()) return undefined;
+    result[taskKind] = {
+      withoutImages: values.withoutImages.trim(),
+      withImages: values.withImages.trim(),
+    };
   }
   return result;
 }

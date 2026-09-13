@@ -31,6 +31,21 @@ const signals: StudioTrendSignal[] = [
   },
 ];
 
+
+// CG-07：topic-ideas 校验器 v5 起强制要求每个 idea 携带具体视觉方案；纯 payload 捕获类
+// fixture 用这个最小合规方案补齐。
+const MINIMAL_FIXTURE_VISUAL_PLAN = {
+  strategy: "用前后对照呈现验证过程。",
+  beats: [{
+    id: "contrast-beat",
+    role: "结果兑现",
+    duration: "0-6 秒",
+    description: "同一对象调整前后的对照画面。",
+    searchQuery: "before after close up",
+    source: "creator" as const,
+  }],
+};
+
 const modelSignals = signals.map((signal) => ({ ...signal, relatedSignals: [] }));
 
 class CapturingCodexClient extends CodexBridgeClient {
@@ -161,6 +176,7 @@ describe("TrendOpportunityAgent", () => {
         painPoint: "工具很多，却没有减少疲惫",
         hook: "先看它是否真的节省时间。",
         rationale: "适合做低成本生活实验。",
+        visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
@@ -194,6 +210,7 @@ describe("TrendOpportunityAgent", () => {
         painPoint: "工具很多，却没有减少疲惫",
         hook: "真正偷走你下班时间的，可能不是加班。",
         rationale: "适合做低成本生活实验。",
+        visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
@@ -211,14 +228,14 @@ describe("TrendOpportunityAgent", () => {
     });
 
     const payload = codexClient.calls[0]!.payload as { creatorStrategy?: string };
-    assert.match(payload.creatorStrategy ?? "", /内容定位：替普通人解释技术变化/);
-    assert.match(payload.creatorStrategy ?? "", /核心受众：关注 AI 但不想看营销稿的职场人/);
-    assert.match(payload.creatorStrategy ?? "", /优先题材：\n真实工作影响\n可复现实验/);
-    assert.match(payload.creatorStrategy ?? "", /来源开工门槛由下游执行/);
-    assert.match(payload.creatorStrategy ?? "", /来源不足但内容与视觉潜力成立的角度仍须输出/);
-    assert.doesNotMatch(payload.creatorStrategy ?? "", /才进入制作推荐/);
-    assert.match(payload.creatorStrategy ?? "", /必须能在 30 秒内兑现标题承诺/);
-    assert.equal((payload.creatorStrategy ?? "").length <= 6_000, true);
+    assert.match(payload.strategy ?? "", /内容定位：替普通人解释技术变化/);
+    assert.match(payload.strategy ?? "", /核心受众：关注 AI 但不想看营销稿的职场人/);
+    assert.match(payload.strategy ?? "", /优先题材：\n真实工作影响\n可复现实验/);
+    assert.match(payload.strategy ?? "", /来源开工门槛由下游执行/);
+    assert.match(payload.strategy ?? "", /来源不足但内容与视觉潜力成立的角度仍须输出/);
+    assert.doesNotMatch(payload.strategy ?? "", /才进入制作推荐/);
+    assert.match(payload.strategy ?? "", /必须能在 30 秒内兑现标题承诺/);
+    assert.equal((payload.strategy ?? "").length <= 6_000, true);
   });
 
   it("keeps the source gate downstream when an older strategy has no source policy", async () => {
@@ -231,6 +248,7 @@ describe("TrendOpportunityAgent", () => {
         painPoint: "工具很多，却没有减少疲惫",
         hook: "先看它是否真的节省时间。",
         rationale: "适合做低成本生活实验。",
+        visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
@@ -241,8 +259,8 @@ describe("TrendOpportunityAgent", () => {
     await model.generate(modelSignals, { customInstruction: "" });
 
     const payload = codexClient.calls[0]!.payload as { creatorStrategy?: string };
-    assert.match(payload.creatorStrategy ?? "", /来源开工门槛由下游执行/);
-    assert.match(payload.creatorStrategy ?? "", /来源不足.*仍须输出/);
+    assert.match(payload.strategy ?? "", /来源开工门槛由下游执行/);
+    assert.match(payload.strategy ?? "", /来源不足.*仍须输出/);
   });
 
   it("keeps the final custom rule after all bounded strategy fields", async () => {
@@ -255,6 +273,7 @@ describe("TrendOpportunityAgent", () => {
         painPoint: "工具很多，却没有减少疲惫",
         hook: "真正偷走你下班时间的，可能不是加班。",
         rationale: "适合做低成本生活实验。",
+        visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
@@ -272,8 +291,8 @@ describe("TrendOpportunityAgent", () => {
     });
 
     const payload = codexClient.calls[0]!.payload as { creatorStrategy?: string };
-    assert.match(payload.creatorStrategy ?? "", /最后这条原则不能丢失/);
-    assert.equal((payload.creatorStrategy ?? "").length <= 6_000, true);
+    assert.match(payload.strategy ?? "", /最后这条原则不能丢失/);
+    assert.equal((payload.strategy ?? "").length <= 6_000, true);
   });
 
   it("builds traceable zero-cost candidates when no semantic model is ready", async () => {
@@ -293,6 +312,49 @@ describe("TrendOpportunityAgent", () => {
     assert.equal(candidates[0]?.visualPlan?.beats.length, 3);
     assert.match(candidates[0]?.visualPlan?.beats[0]?.searchQuery ?? "", /普通人开始用 AI/);
     assert.equal(candidates[0]?.visualPlan?.beats.some((beat) => beat.source === "local-card"), false);
+  });
+
+  it("keeps multiple genuinely different angles for the same canonical event and dedupes repeated angles", async () => {
+    // C3-E01：同一热点发散出三个受众/收益都不同的方向——全部保留，不按 signalId 吞掉；
+    // 第四个 idea 是重复角度（标题/受众/题材与第一条相同），去重后不出现第二份。
+    const idea = (title: string, audience: string, hook: string) => ({
+      signalId: "signal-ai",
+      title,
+      track: "ai-daily-life",
+      audience,
+      painPoint: "工具很多，却没有减少疲惫",
+      hook,
+      rationale: "热点有规模，且能转化为低成本生活实验。",
+      novelty: 85,
+      seriesPotential: 88,
+      monetization: 72,
+    });
+    const model: TrendIdeaModel = {
+      id: "api-topic-editor-v1",
+      generate: async () => [
+        idea("下班后的 AI 时间账本", "想提高生活掌控感的上班族", "真正偷走你下班时间的，可能不是加班。"),
+        // 重复角度：标题/受众/题材与第一条完全一致。
+        idea("下班后的 AI 时间账本", "想提高生活掌控感的上班族", "真正偷走你下班时间的，可能不是加班。"),
+        idea("AI 帮长辈识破仿冒来电", "家里有老人的子女", "长辈接到的陌生来电，可能一秒就能被 AI 拆穿。"),
+        idea("小团队的 AI 排班实验", "自己开店的小微店主", "三个人的店，用 AI 排班后谁的任务变轻了。"),
+      ],
+    };
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [signals[0]!] },
+      model,
+      now: () => new Date("2026-08-24T08:05:00.000Z"),
+    });
+
+    const candidates = await agent.listCandidates();
+    const titles = candidates.map((candidate) => candidate.title);
+    assert.equal(candidates.length, 3, "three distinct angles must all survive");
+    assert.ok(titles.includes("下班后的 AI 时间账本"));
+    assert.ok(titles.includes("AI 帮长辈识破仿冒来电"));
+    assert.ok(titles.includes("小团队的 AI 排班实验"));
+    // 三个方向的 candidateId 各不相同（同一事件下的不同 angleId）。
+    assert.equal(new Set(candidates.map((candidate) => candidate.id)).size, 3);
+    // 受众各不相同：发散的是受众与收益，不只是换标题。
+    assert.equal(new Set(candidates.map((candidate) => candidate.audience)).size, 3);
   });
 
   it("uses a local idea model while preserving source evidence and bounded scores", async () => {
@@ -401,6 +463,7 @@ describe("TrendOpportunityAgent", () => {
           painPoint: "工具很多，却没有减少疲惫",
           hook: "真正偷走你下班时间的，可能不是加班。",
           rationale: "适合做低成本生活实验。",
+          visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
           novelty: 85,
           seriesPotential: 88,
           monetization: 72,
@@ -605,12 +668,22 @@ describe("TrendOpportunityAgent", () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => signals },
       model: { id: "api-topic-editor-v1", generate: async () => { throw new Error("model offline"); } },
+      now: () => new Date("2026-09-12T10:00:00.000Z"),
     });
 
-    const candidates = await agent.listCandidates();
+    const candidates = await agent.listCandidates({ generationNonce: "fallback-generation-1" });
 
     assert.equal(candidates[0]?.providerId, "trend-heuristic-v1");
     assert.match(candidates[0]?.rationale ?? "", /排名/);
+    assert.deepEqual(agent.generationReceipt(), {
+      generationId: "fallback-generation-1",
+      generatedAt: "2026-09-12T10:00:00.000Z",
+      modelInvoked: true,
+      source: "rule-fallback",
+      candidateCount: candidates.length,
+      failureCategory: "model_error",
+      failureReason: "model offline",
+    });
   });
 
   it("does not let a vague rule fallback become producible when the semantic model fails", async () => {
@@ -654,13 +727,22 @@ describe("TrendOpportunityAgent", () => {
           return [];
         },
       },
+      now: () => new Date("2026-09-12T10:01:00.000Z"),
     });
 
-    const candidates = await agent.listCandidates();
+    const candidates = await agent.listCandidates({ generationNonce: "empty-generation-1" });
 
     // 模型成功返回空就是“本轮无值得推荐”：不二次调用，也不回填规则候选冒充推荐。
     assert.equal(modelCalls, 1);
     assert.deepEqual(candidates, []);
+    assert.deepEqual(agent.generationReceipt(), {
+      generationId: "empty-generation-1",
+      generatedAt: "2026-09-12T10:01:00.000Z",
+      modelInvoked: true,
+      source: "editor-model",
+      candidateCount: 0,
+      providerId: "api-topic-editor-v1",
+    });
   });
 
   it("keeps a single-source high-potential idea visible for downstream source supplementation", async () => {
@@ -777,6 +859,73 @@ describe("TrendOpportunityAgent", () => {
 
     assert.equal(calls, 2);
     assert.equal(candidate?.providerId, "api-topic-editor-v1");
+  });
+
+  it("keeps evergreen method-structure quantities in non-news titles without a source number", async () => {
+    // CG-05：常青教程的"3 步"是视频自身组织结构，不是事件事实——不要求热点标题提供。
+    const model: TrendIdeaModel = {
+      id: "api-topic-editor-v1",
+      generate: async () => [{
+        signalId: "signal-ai",
+        title: "用3步整理被 AI 打乱的桌面文件",
+        track: "ai-daily-life",
+        audience: "被文件塞满桌面的上班族",
+        painPoint: "桌面越用越乱，找不到要用的文件",
+        hook: "桌面乱不是你的问题，是方法的问题。",
+        rationale: "热点有讨论度，整理方法可以常青复用。",
+        visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
+        novelty: 80,
+        seriesPotential: 70,
+        monetization: 60,
+      }],
+    };
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [signals[0]!] },
+      model,
+      now: () => new Date("2026-08-24T08:05:00.000Z"),
+    });
+    const candidates = await agent.listCandidates();
+    assert.equal(candidates.length, 1, "a legitimate 3-step evergreen structure must not be rejected");
+    assert.match(candidates[0]?.title ?? "", /3步/);
+  });
+
+  it("blocks an unsupported factual premise even when it hides behind a question mark", async () => {
+    // CG-05：高风险事件里"断言 + 问句"的组合——"救援已经结束"是新增事实，不能因
+    // 同句带问号就整体豁免；必须回退到只引用原始信号的保守核验问句。
+    const model: TrendIdeaModel = {
+      id: "api-topic-editor-v1",
+      generate: async () => [{
+        signalId: "signal-quake",
+        title: "救援已经结束，为何还要持续关注？",
+        track: "breaking-news",
+        audience: "关注救灾进展的公众",
+        painPoint: "信息混乱，难以判断进展",
+        hook: "救援已经结束，为何还要持续关注？",
+        rationale: "热点关注度极高。",
+        visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
+        novelty: 90,
+        seriesPotential: 60,
+        monetization: 40,
+      }],
+    };
+    const quakeSignal: StudioTrendSignal = {
+      id: "signal-quake",
+      sourceId: "newsnow",
+      platform: "weibo",
+      title: "某地地震救援进展",
+      rank: 1,
+      collectedAt: "2026-08-24T08:00:00.000Z",
+    };
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [quakeSignal] },
+      model,
+      now: () => new Date("2026-08-24T08:05:00.000Z"),
+    });
+    const candidates = await agent.listCandidates();
+    assert.equal(candidates.length, 1, "the high-risk idea degrades to a grounded question instead of disappearing");
+    const title = candidates[0]?.title ?? "";
+    assert.doesNotMatch(title, /已经结束/, "the fabricated premise must not survive grounding");
+    assert.doesNotMatch(candidates[0]?.rationale ?? "", /救援已经结束/);
   });
 
   it("rejects model ideas that add unsupported numbers, quotes, or interview claims", async () => {

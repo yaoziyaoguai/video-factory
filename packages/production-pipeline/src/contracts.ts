@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS } from "./codex-chat.js";
+import type { DurationRange } from "./executable-timeline.js";
 
 export const BRIEF_PROTOCOL_VERSION = "video-factory/brief-v1" as const;
 export const WORKER_PROTOCOL_VERSION = "video-factory/worker-v1" as const;
@@ -62,6 +64,86 @@ export interface ProductionVoiceDirection {
   rate: number;
   pauseScale: number;
   masteringPreset: ProductionMasteringPreset;
+}
+
+export interface VoiceDoesNotFitConflict {
+  code: "VOICE_DOES_NOT_FIT";
+  scenePosition: number;
+  plannedSeconds: number;
+  speechSeconds: number;
+  requiredSeconds: number;
+  executablePlanPath?: string;
+  operationId?: string;
+  audioArtifact: {
+    kind: "voiceover_raw";
+    uri: string;
+    sha256: string;
+    sizeBytes: number;
+    contentType: string;
+  };
+}
+
+export function parseVoiceDoesNotFitConflict(value: unknown): VoiceDoesNotFitConflict {
+  const input = requireRecord(value, "voice timing conflict");
+  if (input.code !== "VOICE_DOES_NOT_FIT") {
+    throw new Error("voice timing conflict code must be 'VOICE_DOES_NOT_FIT'.");
+  }
+  const scenePosition = boundedNumber(input.scenePosition, "voice timing conflict scenePosition", 1, 10_000, true);
+  const plannedSeconds = boundedNumber(input.plannedSeconds, "voice timing conflict plannedSeconds", 0.001, 180, false);
+  const speechSeconds = boundedNumber(
+    input.speechSeconds,
+    "voice timing conflict speechSeconds",
+    0.001,
+    Number.MAX_SAFE_INTEGER,
+    false,
+  );
+  const requiredSeconds = boundedNumber(
+    input.requiredSeconds,
+    "voice timing conflict requiredSeconds",
+    0.001,
+    Number.MAX_SAFE_INTEGER,
+    false,
+  );
+  if (requiredSeconds <= plannedSeconds || requiredSeconds < speechSeconds) {
+    throw new Error("voice timing conflict requiredSeconds must exceed the accepted cut and cover the speech.");
+  }
+  const artifact = requireRecord(input.audioArtifact, "voice timing conflict audioArtifact");
+  if (artifact.kind !== "voiceover_raw") {
+    throw new Error("voice timing conflict audioArtifact.kind must be 'voiceover_raw'.");
+  }
+  const sha256 = requireString(artifact.sha256, "voice timing conflict audioArtifact.sha256");
+  if (!/^[a-f0-9]{64}$/i.test(sha256)) {
+    throw new Error("voice timing conflict audioArtifact.sha256 must be a 64-character hexadecimal digest.");
+  }
+  const sizeBytes = boundedNumber(
+    artifact.sizeBytes,
+    "voice timing conflict audioArtifact.sizeBytes",
+    0,
+    Number.MAX_SAFE_INTEGER,
+    true,
+  );
+  const executablePlanPath = input.executablePlanPath === undefined
+    ? undefined
+    : requireString(input.executablePlanPath, "voice timing conflict executablePlanPath");
+  const operationId = input.operationId === undefined
+    ? undefined
+    : requireString(input.operationId, "voice timing conflict operationId");
+  return {
+    code: "VOICE_DOES_NOT_FIT",
+    scenePosition,
+    plannedSeconds,
+    speechSeconds,
+    requiredSeconds,
+    ...(executablePlanPath ? { executablePlanPath } : {}),
+    ...(operationId ? { operationId } : {}),
+    audioArtifact: {
+      kind: "voiceover_raw",
+      uri: requireString(artifact.uri, "voice timing conflict audioArtifact.uri"),
+      sha256,
+      sizeBytes,
+      contentType: requireString(artifact.contentType, "voice timing conflict audioArtifact.contentType"),
+    },
+  };
 }
 
 export interface ProductionEditorialDirection {
@@ -143,6 +225,7 @@ export interface ProductionReworkContext {
   rejectionReason?: string;
   affectedScenePositions?: number[];
   nodeInstructions: {
+    /** 空串表示编剧未被点名（media/director-only 返工），跨 run seed 据此继承编剧阶段。 */
     script: string;
     visualDirection: string;
     assets: string;
@@ -156,6 +239,9 @@ export interface ProductionReworkContext {
 export interface ProductionWorkflowFeatures {
   assetSemanticRank: boolean;
   referenceGrammar: boolean;
+  executablePlan?: boolean;
+  /** joint-v1 共同创作规划标记：仅由新制作入口显式写入，parser 不为缺失字段补标。 */
+  creativePlanning?: "joint-v1";
 }
 
 export type ProductionModelSelectionSource = "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
@@ -238,6 +324,7 @@ export interface ProductionBrief {
   audience: string;
   nicheSlug: string;
   durationSeconds: number;
+  durationRange?: DurationRange;
   platform: string;
   reviewMode: "manual" | "automatic";
   runPurpose?: "production" | "test";
@@ -260,7 +347,7 @@ export interface ProductionBrief {
     opportunityId: string;
   };
   rework?: ProductionReworkContext;
-  taskContractDigests?: Partial<Record<"visual-review" | "role-audit", string>>;
+  taskContractDigests?: Partial<Record<"visual-review" | "role-audit" | "creative-treatment", string>>;
 }
 
 export function parseBrief(value: unknown): ProductionBrief {
@@ -292,6 +379,15 @@ export function parseBrief(value: unknown): ProductionBrief {
   const templateSnapshot = value.templateSnapshot === undefined
     ? undefined
     : parseProductionTemplateSnapshot(value.templateSnapshot);
+  // joint-v1 拓扑必然编译可执行方案：缺 durationRange 或导演配置在合同层 fail closed，
+  // 不得静默降级回旧规划流程。该检查先于 executablePlan 的通用检查：joint-v1 总是同时
+  // 携带 executablePlan，先报更具体的拓扑标记。
+  if (workflowFeatures.creativePlanning && (!value.durationRange || !director)) {
+    throw new Error("workflowFeatures.creativePlanning requires both durationRange and director planning inputs.");
+  }
+  if (workflowFeatures.executablePlan && (!value.durationRange || !director)) {
+    throw new Error("workflowFeatures.executablePlan requires both durationRange and director planning inputs.");
+  }
   if (workflowFeatures.assetSemanticRank && !director) {
     throw new Error("workflowFeatures.assetSemanticRank requires an AI director configuration.");
   }
@@ -312,6 +408,7 @@ export function parseBrief(value: unknown): ProductionBrief {
   if (!Number.isInteger(durationSeconds) || Number(durationSeconds) < 20 || Number(durationSeconds) > 180) {
     throw new Error("durationSeconds must be an integer between 20 and 180.");
   }
+  const durationRange = parseDurationRange(value.durationRange, Number(durationSeconds));
   if (value.reviewMode !== "manual" && value.reviewMode !== "automatic") {
     throw new Error("reviewMode must be 'manual' or 'automatic'.");
   }
@@ -326,6 +423,7 @@ export function parseBrief(value: unknown): ProductionBrief {
     audience: requireString(value.audience, "audience"),
     nicheSlug: requireString(value.nicheSlug, "nicheSlug"),
     durationSeconds: Number(durationSeconds),
+    ...(durationRange ? { durationRange } : {}),
     platform: requireProductionPlatform(value.platform),
     reviewMode: value.reviewMode,
     runPurpose: value.runPurpose ?? "production",
@@ -341,7 +439,10 @@ export function parseBrief(value: unknown): ProductionBrief {
     },
     ...(Object.keys(models).length ? { models } : {}),
     ...(Object.keys(modelSelectionSources).length ? { modelSelectionSources } : {}),
-    ...(workflowFeatures.assetSemanticRank || workflowFeatures.referenceGrammar ? { workflowFeatures } : {}),
+    ...(workflowFeatures.assetSemanticRank || workflowFeatures.referenceGrammar || workflowFeatures.executablePlan
+      || workflowFeatures.creativePlanning
+      ? { workflowFeatures }
+      : {}),
     ...(referenceVideo ? { referenceVideo } : {}),
     ...(director ? { director } : {}),
     economics,
@@ -357,10 +458,26 @@ export function parseBrief(value: unknown): ProductionBrief {
   };
 }
 
+function parseDurationRange(value: unknown, durationSeconds: number): DurationRange | undefined {
+  if (value === undefined) return undefined;
+  const input = requireRecord(value, "durationRange");
+  const minSeconds = boundedNumber(input.minSeconds, "durationRange.minSeconds", 20, 180, true);
+  const maxSeconds = boundedNumber(input.maxSeconds, "durationRange.maxSeconds", 20, 180, true);
+  if (minSeconds > maxSeconds) {
+    throw new Error("durationRange.minSeconds must not exceed durationRange.maxSeconds.");
+  }
+  if (durationSeconds < minSeconds || durationSeconds > maxSeconds) {
+    throw new Error("durationSeconds must fall within durationRange.");
+  }
+  return { minSeconds, maxSeconds };
+}
+
 function parseTaskContractDigests(value: unknown): ProductionBrief["taskContractDigests"] {
   if (value === undefined) return undefined;
   const input = requireRecord(value, "taskContractDigests");
-  const allowed = new Set(["visual-review", "role-audit"]);
+  // 白名单必须与 REQUIRED_CODEX_TASK_CONTRACT_DIGESTS 的受保护任务集合一致：
+  // production-pipeline 会把全部受保护 digest 写入 brief，缺一个 kind 就会在 brief 节点 fail closed。
+  const allowed = new Set(Object.keys(REQUIRED_CODEX_TASK_CONTRACT_DIGESTS));
   if (Object.keys(input).some((key) => !allowed.has(key))) {
     throw new Error("taskContractDigests contains an unsupported task kind.");
   }
@@ -412,8 +529,11 @@ function parseReworkContext(value: unknown): ProductionReworkContext | undefined
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sourceRunId)) throw new Error("rework.sourceRunId is invalid.");
   const sourceRunRevision = boundedNumber(input.sourceRunRevision, "rework.sourceRunRevision", 0, 1_000_000, true);
   const instructions = requireRecord(input.nodeInstructions, "rework.nodeInstructions");
+  // BG-06：media/director-only 返工允许 script 指令为空串——空指令表示编剧阶段不点名，
+  // 跨 run seed 据此继承编剧；visualDirection/assets 仍必填非空。
+  const scriptInstruction = boundedOptionalReworkText(instructions.script, "rework.nodeInstructions.script");
   const nodeInstructions = {
-    script: boundedReworkText(instructions.script, "rework.nodeInstructions.script"),
+    script: scriptInstruction,
     visualDirection: boundedReworkText(instructions.visualDirection, "rework.nodeInstructions.visualDirection"),
     assets: boundedReworkText(instructions.assets, "rework.nodeInstructions.assets"),
   };
@@ -552,8 +672,8 @@ export function parseProductionReworkFindings(
   value: unknown,
   field = "rework.findings",
 ): ProductionReworkFinding[] {
-  if (!Array.isArray(value) || value.length > 50) {
-    throw new Error(`${field} must contain at most 50 entries.`);
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new Error(`${field} must contain at most 100 entries.`);
   }
   const allowedTargets = new Set(["script", "visual-direction", "assets"]);
   const findingIds = new Set<string>();
@@ -684,6 +804,12 @@ function parseReworkActualModels(value: unknown, field: string): Array<{ provide
       modelId: boundedReworkText(model.modelId, `${field}[${index}].modelId`, 240),
     };
   });
+}
+
+// BG-06：允许空串（编剧未点名）但拒绝非字符串或超长的 rework 文本。
+function boundedOptionalReworkText(value: unknown, field: string, maxLength = 6_000): string {
+  if (typeof value === "string" && value.trim() === "") return "";
+  return boundedReworkText(value, field, maxLength);
 }
 
 function boundedReworkText(value: unknown, field: string, maxLength = 6_000): string {
@@ -897,7 +1023,18 @@ function parseWorkflowFeatures(value: unknown): ProductionWorkflowFeatures {
   if (typeof input.assetSemanticRank !== "boolean" || typeof input.referenceGrammar !== "boolean") {
     throw new Error("workflowFeatures must contain boolean assetSemanticRank and referenceGrammar values.");
   }
-  return { assetSemanticRank: input.assetSemanticRank, referenceGrammar: input.referenceGrammar };
+  if (input.executablePlan !== undefined && typeof input.executablePlan !== "boolean") {
+    throw new Error("workflowFeatures.executablePlan must be a boolean when provided.");
+  }
+  if (input.creativePlanning !== undefined && input.creativePlanning !== "joint-v1") {
+    throw new Error("workflowFeatures.creativePlanning must be the literal 'joint-v1' when provided.");
+  }
+  return {
+    assetSemanticRank: input.assetSemanticRank,
+    referenceGrammar: input.referenceGrammar,
+    ...(input.executablePlan === true ? { executablePlan: true } : {}),
+    ...(input.creativePlanning === "joint-v1" ? { creativePlanning: "joint-v1" } : {}),
+  };
 }
 
 function parseReferenceVideo(value: unknown): ProductionReferenceVideo | undefined {

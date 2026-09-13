@@ -1,4 +1,4 @@
-export { BRIEF_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION, parseBrief, parsePersistedBrief, parseProductionSeriesContext } from "./contracts.js";
+export { BRIEF_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION, parseBrief, parsePersistedBrief, parseProductionSeriesContext, parseVoiceDoesNotFitConflict } from "./contracts.js";
 export type {
   ProductionBrief,
   ProductionDirectorDirection,
@@ -14,11 +14,39 @@ export type {
   ProductionSpendFeedback,
   ProductionSpendFeedbackReason,
   ProductionVoiceDirection,
+  VoiceDoesNotFitConflict,
 } from "./contracts.js";
+export {
+  assertMediaCoverage,
+  assertVoiceFits,
+  compileTimeline,
+  PlanContractError,
+} from "./executable-timeline.js";
+export {
+  compileExecutableProductionPlan,
+  EXECUTABLE_PRODUCTION_PLAN_VERSION,
+  parseExecutableProductionPlan,
+} from "./executable-production-plan.js";
+export type {
+  CompileExecutableProductionPlanInput,
+  ExecutablePlanScene,
+  ExecutablePlanShot,
+  ExecutableProductionPlan,
+} from "./executable-production-plan.js";
+export type {
+  CompiledCut,
+  CompiledTimeline,
+  CutInput,
+  DurationRange,
+  MaterializedMedia,
+  PlanErrorCode,
+  VoiceTiming,
+} from "./executable-timeline.js";
 export { DIRECTOR_PLAN_VERSION, VISUAL_DIRECTOR_PROFILES, validateVisualDirectorPlan } from "./visual-director.js";
 export type {
   ShotAuthenticityPolicy,
   ShotDecision,
+  ShotTemporalBeat,
   VisualAssetDeliveryType,
   VisualBible,
   VisualAssetProviderCapability,
@@ -36,13 +64,14 @@ export {
   CodexBridgeClient,
   CodexBridgeError,
 } from "./codex-chat.js";
-export type { CodexBridgeClientOptions, CodexTaskExecution, CodexTaskKind, CodexTaskSession, CodexTaskTrace, ModelCandidateAttempt } from "./codex-chat.js";
+export type { CodexBridgeClientOptions, CodexPreparedOperation, CodexTaskExecution, CodexTaskKind, CodexTaskRequestOptions, CodexTaskSession, CodexTaskTrace, ModelCandidateAttempt } from "./codex-chat.js";
 export type { AgentLoopTrace, AgentLoopIterationTrace, RoleAudit, RoleAuditIssue } from "./codex-chat.js";
 export { RoleAgentLoopError, runRoleAgentLoop, validateRoleAudit } from "./role-agent-loop.js";
 export { fallbackRequestId, isModelProviderFailure, publicModelFailure } from "./model-fallback.js";
 export { FallbackCodexTaskClient } from "./fallback-task-client.js";
 export type { FallbackTaskClientCandidate, FallbackTaskClientOptions } from "./fallback-task-client.js";
-export { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
+export { fileRoleAgentLoopCheckpoint, pendingRoleAgentOperation, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
+export { summarizeProductionCapabilities, type ProductionCapabilities, type ProductionCapabilityAssetProvider } from "./production-capabilities.js";
 export type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 export { CodexReferenceGrammarAgent, fallbackShotGrammar, validateShotGrammar } from "./reference-grammar.js";
 export type {
@@ -71,10 +100,66 @@ export type {
 } from "./asset-semantic-ranker.js";
 export { CodexVisualReviewAgent, FallbackVisualReviewAgent, IndependentDualVisualReviewAgent, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport } from "./codex-visual-review.js";
 export type { CodexVisualReviewAgentOptions, FallbackVisualReviewAgentOptions, IndependentDualVisualReviewAgentOptions, IndependentVisualReviewExecution, VisualReviewAgent, VisualReviewAgentInput, VisualReviewExecution, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport, VisualReviewScope } from "./codex-visual-review.js";
-export { FallbackScreenwriterAgent, FallbackVisualDirectorAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
-export type { FallbackScreenwriterAgentOptions, FallbackVisualDirectorAgentOptions } from "./fallback-role-agents.js";
+export { FallbackCreativeTreatmentAgent, FallbackScreenwriterAgent, FallbackVisualDirectorAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
+export type { FallbackCreativeTreatmentAgentOptions, FallbackScreenwriterAgentOptions, FallbackVisualDirectorAgentOptions } from "./fallback-role-agents.js";
+export {
+  CREATIVE_TREATMENT_CAPABILITY,
+  CREATIVE_TREATMENT_PROVIDER_ID,
+  CREATIVE_TREATMENT_TASK_KIND,
+  CREATIVE_TREATMENT_VERSION,
+  lockCreativeTreatmentViewerPromise,
+  parseCreativeTreatment,
+} from "./creative-treatment.js";
+export type { CreativeTreatment } from "./creative-treatment.js";
+export {
+  CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION,
+  CodexCreativeTreatmentAgent,
+} from "./codex-creative-treatment.js";
+export type {
+  CodexCreativeTreatmentAgentOptions,
+  CreativeTreatmentAgent,
+  CreativeTreatmentAgentInput,
+  CreativeTreatmentSource,
+} from "./codex-creative-treatment.js";
 export { CodexVisualDirectorAgent } from "./codex-visual-director.js";
 export type { CodexVisualDirectorAgentOptions } from "./codex-visual-director.js";
+export {
+  AUTOMATIC_CANDIDATE_SEMANTIC_MINIMUM,
+  candidateSearchFingerprint,
+  compileInputFromContext,
+  createCreativePlanningGraph,
+  defaultAvailabilityReviewer,
+  executablePlanCompilePort,
+  initialPlanningGraphState,
+  MAX_CROSS_ROLE_REVISIONS,
+  planningIssueDigest,
+  projectCreativePlanningState,
+  runCreativePlanning,
+} from "./creative-planning.js";
+export type {
+  AvailabilityReviewInput,
+  AvailabilityReviewer,
+  CreateCreativePlanningGraphOptions,
+  CreativePlanningContext,
+  CreativePlanningGraph,
+  CreativePlanningInput,
+  CreativePlanningPorts,
+  CreativePlanningRunOutcome,
+  CreativePlanningState,
+  PlanningArtifact,
+  PlanningGraphState,
+  PlanningHalt,
+  PlanningHaltReason,
+  PlanningIssue,
+  PlanningPort,
+  PlanningStageId,
+} from "./creative-planning.js";
+export {
+  CreativePlanningStore,
+  planningCheckpointSqlitePath,
+  planningThreadId,
+} from "./creative-planning-store.js";
+export type { PlanningThreadConfig } from "./creative-planning-store.js";
 export {
   CodexScreenwriterAgent,
   validateScriptDraft,
@@ -104,16 +189,36 @@ export type {
   WorkerArtifactDescriptor,
   WorkerResponse,
 } from "./python-worker-client.js";
-export { canRetryRejectedReviewNode, effectiveProductionBrief, PaidOperationManualReconciliationError, ProductionPipeline, productionWorkflowVersion } from "./production-pipeline.js";
+export { canRetryRejectedReviewNode, effectiveProductionBrief, PaidOperationManualReconciliationError, planningFailureForCreators, ProductionPipeline, productionWorkflowVersion, summarizeReworkImpact } from "./production-pipeline.js";
+export {
+  PRODUCTION_AUTHORIZATION_VERSION,
+  canonicalProductionAssetIntentDigest,
+  canonicalQualityContractDigest,
+  foldProductionSpendLedger,
+  parseProductionAuthorizationScope,
+  resolveProductionSpendDecision,
+  scopeCoversSpendPlan,
+} from "./production-authorization.js";
 export type {
+  ProductionAuthorizationScope,
+  ProductionLedgerItem,
+  ProductionSpendDecision,
+  ProductionSpendRequest,
+  ProductionSpendState,
+} from "./production-authorization.js";
+export type {
+  CreativePlanningStageAction,
+  CreativePlanningStageInspection,
   DispatchedProductionRun,
   ProductionPaidNodeSummary,
   ProductionPaidNodeReconciliationDraft,
   ProductionPaidOperationItemSummary,
   ProductionPipelineOptions,
+  ProductionReworkImpactSummary,
   ProductionProviderRuntimeMetadata,
   ProductionRunListener,
   ProductionSceneRevisionDraft,
+  ProductionVoiceTimingRevisionDraft,
   ProductionVisualReinspectionDraft,
   ProductionSpendRejectionDraft,
 } from "./production-pipeline.js";

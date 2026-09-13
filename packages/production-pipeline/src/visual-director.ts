@@ -7,10 +7,14 @@ import {
   type ProductionVisualPlan,
 } from "./contracts.js";
 import type { ProductionBlueprint } from "@video-factory/template-core";
+import { quantizeDurationsToFrames, type DurationRange } from "./executable-timeline.js";
 import type { CodexTaskExecution } from "./codex-chat.js";
 import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { ShotGrammar } from "./reference-grammar.js";
 import type { VideoAspectRatio } from "./video-generation.js";
+import type { CreativeTreatment } from "./creative-treatment.js";
+import type { PlanningIssue } from "./creative-planning.js";
+import type { ProductionCapabilities } from "./production-capabilities.js";
 import {
   assetReuseSourceScenePosition,
   normalizeVideoGenerationDurationSeconds,
@@ -18,7 +22,6 @@ import {
 } from "./generative-asset-worker.js";
 import {
   assertGeneratedVisualDoesNotClaimEvidence,
-  requiresUnsupportedGeneratedIdentity,
 } from "./visual-evidence-boundary.js";
 
 export const DIRECTOR_PLAN_VERSION = "video-factory/director-plan-v1" as const;
@@ -138,7 +141,8 @@ export interface ShotDecision {
   subject?: string;
   environment?: string;
   visibleAction?: string;
-  temporalBeats?: string[];
+  temporalBeats?: ShotTemporalBeat[];
+  sourceInSeconds?: number;
   shotSize?: string;
   camera?: string;
   lighting?: string;
@@ -151,6 +155,28 @@ export interface ShotDecision {
   continuityNote: string;
   confidence: number;
   estimatedCostCny: number;
+}
+
+export interface ShotTemporalBeat {
+  startSeconds: number;
+  endSeconds: number;
+  action: string;
+}
+
+export function reuseSourceEndFrame(
+  scenePosition: number,
+  sourceInSeconds: number,
+  sceneDurations: Readonly<Record<number, number>>,
+): number | undefined {
+  const orderedPositions = Object.keys(sceneDurations)
+    .map(Number)
+    .sort((left, right) => left - right);
+  const sceneIndex = orderedPositions.indexOf(scenePosition);
+  if (sceneIndex < 0) return undefined;
+  const frameCounts = quantizeDurationsToFrames(
+    orderedPositions.map((position) => sceneDurations[position]!),
+  );
+  return Math.round(sourceInSeconds * 30) + frameCounts[sceneIndex]!;
 }
 
 export interface VisualDirectorPlan {
@@ -189,6 +215,7 @@ export interface VisualDirectorAgentInput {
     audience: string;
     platform: string;
     durationSeconds: number;
+    durationRange?: DurationRange;
     viewerPromise?: string;
     narrativeArc?: string;
     requestedProfileId: ProductionDirectorProfileId;
@@ -202,6 +229,9 @@ export interface VisualDirectorAgentInput {
     visualPlan?: ProductionVisualPlan;
     referenceGrammar?: ShotGrammar;
     seriesContext?: ProductionSeriesContext;
+    creativeTreatment?: CreativeTreatment;
+    planningIssues?: PlanningIssue[];
+    productionCapabilities?: ProductionCapabilities;
     rework?: {
       sourceRunId: string;
       visualDirectionInstruction: string;
@@ -242,6 +272,8 @@ export interface VisualDirectorAgentInput {
   }>;
   economics: VisualDirectorEconomics;
   selectedModelId?: string;
+  /** 正式 joint creative-planning 开启机器可读的非局部审计处置。 */
+  planningMode?: boolean;
   costFeedback?: Array<{
     reason: ProductionSpendFeedbackReason;
     previousEstimatedCostCny: number;
@@ -302,8 +334,11 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       ? { antiPatterns: optionalStringArray(visualBibleInput.antiPatterns, "visualBible.antiPatterns")! }
       : {}),
   };
-  if (options.viewerPromise !== undefined && visualBible.viewerPromise !== options.viewerPromise) {
-    throw new Error("Director visualBible.viewerPromise must preserve the screenwriter viewerPromise exactly.");
+  if (options.viewerPromise !== undefined) {
+    if (visualBible.viewerPromise !== undefined && visualBible.viewerPromise !== options.viewerPromise) {
+      throw new Error("Director visualBible cannot change the accepted viewer promise.");
+    }
+    visualBible.viewerPromise = options.viewerPromise;
   }
   if (!Array.isArray(input.shots)) throw new Error("Director plan shots must be an array.");
 
@@ -340,17 +375,22 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
     if (authenticityPolicy === "evidence" && [preferredProviderId, ...alternativeProviderIds].some((id) => generative.has(id))) {
       throw new Error(`Director plan evidence shot ${scenePosition} cannot use a generative provider.`);
     }
-    const beats = optionalStringArray(shot.temporalBeats, `shots[${index}].temporalBeats`);
+    const beats = parseTemporalBeats(shot.temporalBeats, `shots[${index}].temporalBeats`);
     const sceneDuration = options.sceneDurations?.[scenePosition];
     if (sceneDuration !== undefined) {
-      validateTemporalBeats(beats, sceneDuration, `shots[${index}].temporalBeats`);
+      validateTemporalBeats(beats, sceneDuration, `shots[${index}].temporalBeats`, deliveryType);
     }
     const visibleAction = optionalText(shot.visibleAction, `shots[${index}].visibleAction`);
+    const sourceInSeconds = optionalNonNegativeNumber(shot.sourceInSeconds, `shots[${index}].sourceInSeconds`) ?? 0;
+    if ((deliveryType === "stock_image" || deliveryType === "generated_image" || deliveryType === "editorial_card")
+      && sourceInSeconds !== 0) {
+      throw new Error(`shots[${index}].sourceInSeconds must be 0 for static media.`);
+    }
     const generationPrompt = text(shot.generationPrompt, `shots[${index}].generationPrompt`);
     const successCriteria = optionalStringArray(shot.successCriteria, `shots[${index}].successCriteria`);
     if (deliveryType === "editorial_card") {
       assertStaticEditorialCard(
-        [visibleAction, ...(beats ?? []), generationPrompt, ...(successCriteria ?? [])],
+        [visibleAction, ...(beats ?? []).map(({ action }) => action), generationPrompt, ...(successCriteria ?? [])],
         `shots[${index}]`,
       );
     }
@@ -396,7 +436,7 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
         optionalText(shot.subject, `shots[${index}].subject`),
         optionalText(shot.environment, `shots[${index}].environment`),
         visibleAction,
-        ...(beats ?? []),
+        ...(beats ?? []).map(({ action }) => action),
         generationPrompt,
         rationale,
         ...(successCriteria ?? []),
@@ -423,6 +463,7 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       ...(beats !== undefined
         ? { temporalBeats: beats }
         : {}),
+      sourceInSeconds,
       ...(optionalText(shot.shotSize, `shots[${index}].shotSize`) !== undefined
         ? { shotSize: optionalText(shot.shotSize, `shots[${index}].shotSize`)! }
         : {}),
@@ -457,25 +498,9 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
   }
 
   const shotsByPosition = new Map(shots.map((shot) => [shot.scenePosition, shot]));
-  const independentGeneratedShots = shots.filter((shot) => (
-    (shot.deliveryType === "generated_image" || shot.deliveryType === "generated_video")
-    && assetReuseSourceScenePosition(shot) === undefined
-    && shot.referenceFromScenePosition === undefined
-  ));
-  if (independentGeneratedShots.length > 1
-    && requiresUnsupportedGeneratedIdentity([
-      visualBible.continuity,
-      ...independentGeneratedShots.flatMap((shot) => [
-        shot.subject,
-        shot.generationPrompt,
-        shot.rationale,
-        shot.continuityNote,
-        ...(shot.negativeConstraints ?? []),
-        ...(shot.referenceRequirements ?? []),
-      ]),
-    ])) {
-    throw new Error("Director plan cannot claim the same person, object, or experiment subject across independently generated scenes; use executable reuse/reference routing or replan the visual argument.");
-  }
+  // 跨镜主体是否构成叙事依赖是整份方案的语义判断，由既有独立导演审计负责；这里仅
+  // 校验可执行的 reuse/reference 关系。自由文本不能用关键词在 parser 阶段提前误杀。
+  const reuseRoots = new Map<number, ShotDecision>();
   for (const shot of shots) {
     if (shot.referenceFromScenePosition !== undefined) {
       const source = shotsByPosition.get(shot.referenceFromScenePosition);
@@ -501,20 +526,43 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       );
     }
     shot.reuseFromScenePosition = root.scenePosition;
-    const rootDuration = options.sceneDurations?.[root.scenePosition];
-    const targetDuration = options.sceneDurations?.[shot.scenePosition];
-    const durationBounds = options.selectedVideoModelDurationBounds?.[root.preferredProviderId];
-    const generatedDuration = rootDuration === undefined
-      ? durationBounds?.maxDurationSeconds
-      : normalizeVideoGenerationDurationSeconds(rootDuration, durationBounds);
-    if (root.deliveryType === "generated_video"
-      && generatedDuration !== undefined
-      && targetDuration !== undefined
-      && targetDuration > generatedDuration) {
-      throw new Error(
-        `Director plan scene ${shot.scenePosition} reuses generated video from root scene ${root.scenePosition}, `
-        + `but that source only creates ${generatedDuration}s and the reused scene requires ${targetDuration}s.`,
+    reuseRoots.set(shot.scenePosition, root);
+  }
+
+  if (options.sceneDurations) {
+    const requiredByRoot = new Map<number, { frames: number; consumer: ShotDecision }>();
+    for (const shot of shots) {
+      const root = reuseRoots.get(shot.scenePosition) ?? shot;
+      if (root.deliveryType !== "generated_video") continue;
+      const requiredFrames = reuseSourceEndFrame(
+        shot.scenePosition,
+        shot.sourceInSeconds ?? 0,
+        options.sceneDurations,
       );
+      if (requiredFrames === undefined) continue;
+      const previous = requiredByRoot.get(root.scenePosition);
+      if (!previous || requiredFrames > previous.frames) {
+        requiredByRoot.set(root.scenePosition, { frames: requiredFrames, consumer: shot });
+      }
+    }
+    for (const [rootPosition, requirement] of requiredByRoot) {
+      const root = shotsByPosition.get(rootPosition)!;
+      const durationBounds = options.selectedVideoModelDurationBounds?.[root.preferredProviderId];
+      const requiredSeconds = requirement.frames / 30;
+      const maximum = durationBounds?.maxDurationSeconds ?? 15;
+      if (requirement.frames > maximum * 30) {
+        throw new Error(
+          `Director plan scene ${requirement.consumer.scenePosition} reuses generated video from root scene ${rootPosition}, `
+          + `requires source through ${requiredSeconds}s, but that source only produces ${maximum}s.`,
+        );
+      }
+      const generatedDuration = normalizeVideoGenerationDurationSeconds(requiredSeconds, durationBounds);
+      if (generatedDuration * 30 < requirement.frames) {
+        throw new Error(
+          `Director plan scene ${requirement.consumer.scenePosition} reuses generated video from root scene ${rootPosition}, `
+          + `requires source through ${requiredSeconds}s, but that source only produces ${generatedDuration}s.`,
+        );
+      }
     }
   }
 
@@ -648,19 +696,50 @@ function optionalStringArray(value: unknown, field: string, allowEmpty = false):
   return value.map((entry, index) => text(entry, `${field}[${index}]`));
 }
 
-function validateTemporalBeats(beats: string[] | undefined, duration: number, field: string): void {
+function validateTemporalBeats(
+  beats: ShotTemporalBeat[] | undefined,
+  duration: number,
+  field: string,
+  deliveryType: VisualAssetDeliveryType,
+): void {
   if (!Number.isFinite(duration) || duration <= 0) throw new Error(`${field} scene duration is invalid.`);
-  if (!beats || beats.length < 2) throw new Error(`${field} must contain at least two timed beats.`);
+  const isStatic = deliveryType === "stock_image"
+    || deliveryType === "generated_image"
+    || deliveryType === "editorial_card";
+  if (!beats || beats.length < (isStatic ? 1 : 2)) {
+    throw new Error(`${field} must contain at least ${isStatic ? "one" : "two"} timed beat${isStatic ? "" : "s"}.`);
+  }
   let previousEnd = 0;
   beats.forEach((beat, index) => {
-    const match = /^\[\s*(\d+(?:\.\d+)?)s\s*-\s*(\d+(?:\.\d+)?)s\s*\]\s*\S[\s\S]*$/i.exec(beat);
-    if (!match) throw new Error(`${field}[${index}] must use the format [0s-2s] description.`);
-    const start = Number(match[1]);
-    const end = Number(match[2]);
-    if (end <= start) throw new Error(`${field}[${index}] must end after it starts.`);
-    if (start < previousEnd) throw new Error(`${field}[${index}] overlaps or is out of order.`);
-    if (end > duration) throw new Error(`${field}[${index}] exceeds the ${duration}s scene duration.`);
-    previousEnd = end;
+    if (beat.endSeconds <= beat.startSeconds) throw new Error(`${field}[${index}] must end after it starts.`);
+    if (beat.startSeconds < previousEnd) throw new Error(`${field}[${index}] overlaps or is out of order.`);
+    if (Math.abs(beat.startSeconds - previousEnd) > 1e-6) throw new Error(`${field} must be continuous without gaps.`);
+    if (beat.endSeconds > duration) throw new Error(`${field}[${index}] exceeds the ${duration}s scene duration.`);
+    previousEnd = beat.endSeconds;
+  });
+}
+
+function parseTemporalBeats(value: unknown, field: string): ShotTemporalBeat[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 10) {
+    throw new Error(`${field} must be an array of 1 to 10 structured beats.`);
+  }
+  return value.map((entry, index) => {
+    if (typeof entry === "string") {
+      const match = /^\[\s*(\d+(?:\.\d+)?)s\s*-\s*(\d+(?:\.\d+)?)s\s*\]\s*(\S[\s\S]*)$/i.exec(entry);
+      if (!match) throw new Error(`${field}[${index}] must use a structured beat or legacy [0s-2s] description.`);
+      return {
+        startSeconds: Number(match[1]),
+        endSeconds: Number(match[2]),
+        action: match[3]!.trim(),
+      };
+    }
+    const input = record(entry, `${field}[${index}]`);
+    return {
+      startSeconds: finiteNumber(input.startSeconds, `${field}[${index}].startSeconds`),
+      endSeconds: finiteNumber(input.endSeconds, `${field}[${index}].endSeconds`),
+      action: text(input.action, `${field}[${index}].action`),
+    };
   });
 }
 
@@ -684,6 +763,18 @@ function bounded(value: unknown, field: string, minimum: number, maximum: number
     throw new Error(`${field} must be between ${minimum} and ${maximum}.`);
   }
   return value;
+}
+
+function finiteNumber(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${field} must be a finite number.`);
+  return value;
+}
+
+function optionalNonNegativeNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const parsed = finiteNumber(value, field);
+  if (parsed < 0) throw new Error(`${field} must be non-negative.`);
+  return parsed;
 }
 
 function roundMoney(value: number): number {

@@ -8,8 +8,50 @@ import {
   parseStudioOpportunityStatusInput,
   parseStudioPublishInput,
   parseStudioSeriesInput,
+  parseStudioDecisionInput,
   parseStudioVoicePreviewInput,
 } from "../src/shared/api.js";
+
+describe("run intervention API contracts", () => {
+  it("accepts a bounded voice timing change without accepting a managed file path", () => {
+    assert.deepEqual(parseStudioDecisionInput({
+      action: "request_changes",
+      expectedRunRevision: 4,
+      interventionId: "voice-timing-1",
+      reviewEvidenceId: null,
+      voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
+    }), {
+      action: "request_changes",
+      expectedRunRevision: 4,
+      interventionId: "voice-timing-1",
+      reviewEvidenceId: null,
+      voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
+    });
+    assert.throws(() => parseStudioDecisionInput({
+      action: "request_changes",
+      expectedRunRevision: 4,
+      interventionId: "voice-timing-1",
+      reviewEvidenceId: null,
+      executablePlanPath: "/etc/passwd",
+      voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
+    }), /不支持|字段/);
+    assert.throws(() => parseStudioDecisionInput({
+      action: "request_changes",
+      expectedRunRevision: 4,
+      interventionId: "voice-timing-1",
+      reviewEvidenceId: null,
+    }), /必须填写镜头和新时长/);
+    for (const action of ["approve", "reject"] as const) {
+      assert.throws(() => parseStudioDecisionInput({
+        action,
+        expectedRunRevision: 4,
+        interventionId: "voice-timing-1",
+        reviewEvidenceId: null,
+        voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
+      }), /只有调整方案时/);
+    }
+  });
+});
 
 describe("candidate source supplement API contracts", () => {
   it("accepts 1 to 10 trimmed urls and canonicalizes fragments and duplicates", () => {

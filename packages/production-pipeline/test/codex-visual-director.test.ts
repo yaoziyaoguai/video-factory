@@ -157,7 +157,11 @@ function validPlan(): Record<string, unknown> {
       subject: "下班后停在便利店门口的上班族",
       environment: "雨夜街角与便利店暖光",
       visibleAction: "人物收起雨伞并抬头看向店内",
-      temporalBeats: ["[0s-2s] 雨伞占据前景，人物进入", "[2s-5s] 收伞并抬头，暖光落在脸侧"],
+      temporalBeats: [
+        { startSeconds: 0, endSeconds: 2, action: "雨伞占据前景，人物进入" },
+        { startSeconds: 2, endSeconds: 5, action: "收伞并抬头，暖光落在脸侧" },
+      ],
+      sourceInSeconds: 0,
       shotSize: "中近景",
       camera: "轻微手持跟进后稳定",
       lighting: "冷色雨夜环境光与暖色店内光对照",
@@ -188,6 +192,7 @@ describe("CodexVisualDirectorAgent", () => {
 
   it("routes stateless ZAI production and independent OpenAI audit to separate clients", async () => {
     const input = directorInput();
+    input.brief.durationRange = { minSeconds: 20, maxSeconds: 34 };
     const visualProof = "两条真实标题的措辞差异可以直接并列核对。";
     const visualPlan = {
       strategy: "用来源标题并列和确定性标尺逐项核对。",
@@ -280,13 +285,19 @@ describe("CodexVisualDirectorAgent", () => {
     const producerBrief = (producerClient.calls[0]!.payload as { brief: VisualDirectorAgentInput["brief"] }).brief;
     assert.equal(producerBrief.visualProof, visualProof);
     assert.deepEqual(producerBrief.visualPlan, visualPlan);
+    assert.deepEqual(producerBrief.durationRange, { minSeconds: 20, maxSeconds: 34 });
     assert.equal(auditPayload.context.upstreamFacts.brief.visualProof, visualProof);
     assert.deepEqual(auditPayload.context.upstreamFacts.brief.visualPlan, visualPlan);
     const contract = auditPayload.context.currentRoleContract;
+    assert.deepEqual(contract.durationRange, { minSeconds: 20, maxSeconds: 34 });
     const auditCriteria = (auditClient.calls[0]!.payload as { criteria: string[] }).criteria.join("\n");
     assert.match(
       auditCriteria,
-      /现有 Provider 没有一致性能力.*不能降为 advisory.*阻断.*重规划可执行叙事/,
+      /视觉圣经、逐镜职责与已接受构思、脚本承诺一致.*视觉推进/,
+    );
+    assert.match(
+      auditCriteria,
+      /真正的跨镜身份与因果要求有执行依据.*否定句中的词语不构成肯定要求/,
     );
     assert.equal("directorProfiles" in contract, false);
     assert.deepEqual(contract.availableDirectorProfileIds, [
@@ -308,8 +319,9 @@ describe("CodexVisualDirectorAgent", () => {
       constraints: [
         "N 只能引用更早且可成功解析的导演镜头。",
         "多级复用始终解析到同一个根母片，不能形成循环。",
-        "复用从母片开头使用相同媒体内容，不会产生新的动作、光线变化、后续片段或画面状态。",
-        "生成视频母片的真实长度按所选模型的最短/最长时长和整数秒规则归一化；复用镜头不得更长。",
+        "视频可从母片明确的非负起点按正常速度使用；只有母片完整覆盖该源区间时才允许复用。",
+        "静态图片的 sourceInSeconds 必须为 0；所有媒体都不得循环、变速、定格或补帧凑时长。",
+        "生成视频母片的请求时长按全部直接与多级复用区间的最远终点，以及所选模型的时长规则归一化。",
       ],
     });
     assert.deepEqual(contract.timelineExecution, {
@@ -458,11 +470,8 @@ describe("CodexVisualDirectorAgent", () => {
     };
     assert.ok(auditPayload.criteria.some((criterion) => (
       criterion.includes("visualDirectionInstruction 与 assetInstruction")
-      && criterion.includes("不得把 assetInstruction 驱动的改动判为越权")
-    )));
-    assert.ok(auditPayload.criteria.some((criterion) => (
-      criterion.includes("findings 只追踪分配给 visual-direction 的 findingId")
-      && criterion.includes("不得宣称问题已经复验通过")
+      && criterion.includes("仅修改授权范围并继承其余镜头")
+      && criterion.includes("没有新审片证据不能标 verified")
     )));
     assert.deepEqual(auditPayload.context.currentRoleContract.reworkAuthorization.requiredInstructions, {
       visualDirection: input.brief.rework.visualDirectionInstruction,
@@ -691,7 +700,10 @@ describe("CodexVisualDirectorAgent", () => {
 
     assert.equal(plan.shots[0]!.generationPrompt, "雨夜城市人物近景");
     assert.equal(plan.shots[1]!.generationPrompt, "修正后的第二镜");
-    assert.deepEqual(plan.shots[1]!.temporalBeats, ["[0s-2s] 雨势减弱", "[2s-4s] 人物走入街角"]);
+    assert.deepEqual(plan.shots[1]!.temporalBeats, [
+      { startSeconds: 0, endSeconds: 2, action: "雨势减弱" },
+      { startSeconds: 2, endSeconds: 4, action: "人物走入街角" },
+    ]);
   });
 
   it("adopts the previous shot when the candidate drifts invalidly on an unaffected scene", async () => {
@@ -729,7 +741,10 @@ describe("CodexVisualDirectorAgent", () => {
 
     const plan = await agent.plan(input);
 
-    assert.deepEqual(plan.shots[0]!.temporalBeats, ["[0s-2s] 雨伞占据前景，人物进入", "[2s-5s] 收伞并抬头，暖光落在脸侧"]);
+    assert.deepEqual(plan.shots[0]!.temporalBeats, [
+      { startSeconds: 0, endSeconds: 2, action: "雨伞占据前景，人物进入" },
+      { startSeconds: 2, endSeconds: 5, action: "收伞并抬头，暖光落在脸侧" },
+    ]);
     assert.equal(plan.shots[1]!.generationPrompt, "修正后的第二镜");
   });
 
@@ -960,6 +975,117 @@ describe("CodexVisualDirectorAgent", () => {
     assert.equal(client.calls.length, 0);
   });
 
+  it("requires renewed scope before the model when an unaffected reuse source offset exceeds the model limit", async () => {
+    const input = directorInput();
+    input.scenes[0] = { ...input.scenes[0]!, duration: 4 };
+    input.scenes.push({
+      ...input.scenes[0]!,
+      position: 2,
+      duration: 4,
+      narration: "从母片后半段继续",
+      visualPrompt: "从第四秒复用第一镜母片",
+    });
+    input.assetProviders = [{
+      id: "seedance-video-v1",
+      label: "Seedance",
+      billing: "metered",
+      modes: ["AI 视频"],
+      deliveryTypes: ["generated_video"],
+      strengths: ["动态镜头"],
+      constraints: ["当前模型最多生成 6 秒"],
+      minDurationSeconds: 4,
+      maxDurationSeconds: 6,
+      estimatedCnyPerClip: 2,
+    }];
+    input.economics = { allowMeteredProviders: true };
+    const baseShot = (validPlan().shots as Array<Record<string, unknown>>)[0]!;
+    const previousPlan = validPlan();
+    previousPlan.shots = [{
+      ...structuredClone(baseShot),
+      scenePosition: 1,
+      preferredProviderId: "seedance-video-v1",
+      deliveryType: "generated_video",
+      query: "generated master",
+      temporalBeats: ["[0s-2s] 建立母片", "[2s-4s] 完成母片"],
+    }, {
+      ...structuredClone(baseShot),
+      scenePosition: 2,
+      preferredProviderId: "seedance-video-v1",
+      deliveryType: "generated_video",
+      query: "REUSE_ONLY scene 1 later source range",
+      sourceInSeconds: 4,
+      temporalBeats: ["[0s-2s] 使用后半段", "[2s-4s] 完成复用"],
+    }];
+    input.brief.rework = {
+      sourceRunId: "run-reuse-offset-duration-drift",
+      visualDirectionInstruction: "只重做镜头 1。",
+      assetInstruction: "镜头 2 继续沿用已有母片。",
+      findings: [],
+      affectedScenePositions: [1],
+      previousDirectorPlan: previousPlan,
+    };
+    const client = new CapturingCodexClient(() => previousPlan);
+    const agent = new CodexVisualDirectorAgent({ client });
+
+    await assert.rejects(() => agent.plan(input), /scenes 2.*no longer executable/);
+    assert.equal(client.calls.length, 0);
+  });
+
+  it("requires renewed scope before the model when an unaffected generated-video root exceeds the model limit", async () => {
+    const input = directorInput();
+    input.scenes[0] = { ...input.scenes[0]!, duration: 8 };
+    input.scenes.push({
+      ...input.scenes[0]!,
+      position: 2,
+      duration: 4,
+      narration: "重做第二镜",
+      visualPrompt: "新的第二镜",
+    });
+    input.assetProviders = [{
+      id: "seedance-video-v1",
+      label: "Seedance",
+      billing: "metered",
+      modes: ["AI 视频"],
+      deliveryTypes: ["generated_video"],
+      strengths: ["动态镜头"],
+      constraints: ["当前模型最多生成 4 秒"],
+      minDurationSeconds: 4,
+      maxDurationSeconds: 4,
+      estimatedCnyPerClip: 2,
+    }];
+    input.economics = { allowMeteredProviders: true };
+    const baseShot = (validPlan().shots as Array<Record<string, unknown>>)[0]!;
+    const previousPlan = validPlan();
+    previousPlan.shots = [{
+      ...structuredClone(baseShot),
+      scenePosition: 1,
+      preferredProviderId: "seedance-video-v1",
+      deliveryType: "generated_video",
+      query: "eight second generated master",
+      temporalBeats: ["[0s-4s] 建立母片", "[4s-8s] 完成母片"],
+    }, {
+      ...structuredClone(baseShot),
+      scenePosition: 2,
+      preferredProviderId: "seedance-video-v1",
+      deliveryType: "generated_video",
+      query: "replacement scene",
+      temporalBeats: ["[0s-2s] 建立新镜头", "[2s-4s] 完成新镜头"],
+    }];
+    input.brief.rework = {
+      sourceRunId: "run-generated-root-duration-drift",
+      visualDirectionInstruction: "只重做镜头 2。",
+      assetInstruction: "只替换镜头 2 的素材。",
+      findings: [],
+      affectedScenePositions: [2],
+      previousDirectorPlan: previousPlan,
+    };
+    const client = new CapturingCodexClient(() => previousPlan);
+    const agent = new CodexVisualDirectorAgent({ client });
+
+    await assert.rejects(() => agent.plan(input), /scenes 1.*no longer executable/);
+    assert.equal(client.calls.length, 0);
+  });
+
   it("does not ask the model to repair configuration drift outside the approved scene set", async () => {
     const input = directorInput();
     input.scenes.push({
@@ -1121,7 +1247,19 @@ describe("CodexVisualDirectorAgent", () => {
     const profiles = payload.directorProfiles as Array<{ id: string }>;
     assert.equal(profiles.length, 6);
     assert.equal(profiles[0]?.id, "documentary-observer");
-    assert.deepEqual(payload.brief, input.brief);
+    assert.deepEqual(payload.brief, {
+      ...input.brief,
+      productionCapabilities: {
+        assetProviders: [{
+          id: "local-editorial-v1",
+          deliveryTypes: ["editorial_card"],
+          supportsReferenceImage: false,
+          strengths: ["标题卡、数据卡与清单步骤"],
+          constraints: ["不包含真实人物动作或现场环境"],
+        }],
+        editing: { sourceRangeReuse: true, staticEditorialCard: true },
+      },
+    });
     assert.deepEqual(payload.scenes, input.scenes);
     assert.deepEqual(payload.assetProviders, input.assetProviders);
     assert.deepEqual(payload.economics, input.economics);
@@ -1325,7 +1463,7 @@ describe("CodexVisualDirectorAgent", () => {
     await assert.rejects(() => agent.plan(input), /generated visual as real-world evidence/);
   });
 
-  it("rejects unsupported identity continuity across independently generated scenes", async () => {
+  it("lets the independent audit block unsupported identity continuity instead of keyword-rejecting the plan", async () => {
     const input = directorInput();
     input.scenes = [1, 2].map((position) => ({
       position,
@@ -1360,9 +1498,76 @@ describe("CodexVisualDirectorAgent", () => {
       generationPrompt: `第 ${position} 个独立生成画面`,
       continuityNote: "同一人物与杯子保持一致",
     }));
+    const producerClient = new SequencedCodexClient([plan], "zai-bigmodel-api", "glm-5.3");
+    const auditClient = new SequencedCodexClient([{
+      version: "video-factory/role-audit-v1",
+      verdict: "repair",
+      score: 55,
+      summary: "方案把两个独立生成镜头当作同一人物与物件，当前路由无法兑现。",
+      issues: [{
+        severity: "blocking",
+        criterion: "跨镜身份依赖必须有可执行复用或参考依据",
+        evidence: "两个镜头均独立生成，却要求同一人物和杯子保持不变。",
+        repairInstruction: "改用同一母片复用、受支持的参考图，或重写为无需同一主体的叙事。",
+      }],
+      repairInstructions: ["为身份连续性提供可执行路由，或删除该叙事依赖。"],
+    }], "openai", "gpt-5.6-sol");
+    const agent = new CodexVisualDirectorAgent({
+      client: producerClient,
+      auditClient,
+      maxReviewIterations: 1,
+      modelId: "glm-5.3",
+      sessionMode: "stateless",
+    });
+
+    await assert.rejects(() => agent.planDetailed({ ...input, selectedModelId: "glm-5.3" }), /仍未通过独立审计/);
+    assert.deepEqual(producerClient.calls.map(({ kind }) => kind), ["director-plan"]);
+    assert.deepEqual(auditClient.calls.map(({ kind }) => kind), ["role-audit"]);
+  });
+
+  it("accepts independently generated scenes that explicitly disclaim shared identity", async () => {
+    const input = directorInput();
+    input.scenes = [1, 2].map((position) => ({
+      position,
+      narration: `第 ${position} 幕`,
+      duration: 5,
+      visualPrompt: `生成镜头 ${position}`,
+      visualStrategy: "generated" as const,
+      visibleAction: "人物完成一个独立动作",
+      successCriteria: ["动作可见"],
+      failureConditions: ["动作缺失"],
+      searchTerms: ["人物动作"],
+    }));
+    input.assetProviders = [{
+      id: "seedream-image-v1",
+      label: "Seedream",
+      billing: "free",
+      modes: ["AI 图片"],
+      deliveryTypes: ["generated_image"],
+      strengths: ["解释性画面"],
+      constraints: ["不得作为事实证据"],
+      estimatedCnyPerClip: 0,
+    }];
+    const plan = validPlan();
+    plan.visualBible = {
+      ...(plan.visualBible as Record<string, unknown>),
+      continuity: "只统一构图和色彩，不承诺跨镜是同一人物或同一物件。",
+    };
+    plan.shots = [1, 2].map((position) => ({
+      ...(structuredClone((validPlan().shots as Array<Record<string, unknown>>)[0]!)),
+      scenePosition: position,
+      preferredProviderId: "seedream-image-v1",
+      deliveryType: "generated_image",
+      authenticityPolicy: "illustrative",
+      subject: "无可识别身份特征的人物与普通物件",
+      generationPrompt: `第 ${position} 个独立生成画面`,
+      continuityNote: "只延续视觉母题，不宣称人物或物件与其他镜头属于同一实体。",
+    }));
     const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => plan) });
 
-    await assert.rejects(() => agent.plan(input), /same person, object, or experiment subject/);
+    const result = await agent.plan(input);
+
+    assert.equal(result.shots.length, 2);
   });
 
   it("keeps the historical provider id for persisted briefs", () => {

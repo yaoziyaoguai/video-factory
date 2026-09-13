@@ -1134,11 +1134,23 @@ class PipelineTest(unittest.TestCase):
                 ]
             )
 
+            rendered_frame_counts = {}
+
             def fake_subprocess_run(command, check, capture_output, text):
                 if command[0] == "ffmpeg":
                     Path(command[-1]).write_bytes(b"fake-mp4")
+                    if "-frames:v" in command:
+                        rendered_frame_counts[str(Path(command[-1]))] = command[command.index("-frames:v") + 1]
                     return subprocess.CompletedProcess(command, 0, "", "")
                 if command[0] == "ffprobe":
+                    if "-count_frames" in command:
+                        self.assertEqual(command[command.index("-show_entries") + 1], "stream=nb_read_frames")
+                        return subprocess.CompletedProcess(
+                            command,
+                            0,
+                            f"{rendered_frame_counts[str(Path(command[-1]))]}\n",
+                            "",
+                        )
                     payload = {
                         "streams": [
                             {

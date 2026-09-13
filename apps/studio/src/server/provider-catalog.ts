@@ -190,7 +190,7 @@ export function buildProviderCatalog(
     provider({
       id: "codex-screenwriter-v1",
       capability: "script.draft",
-      label: "Codex 编剧",
+      label: "AI 编剧",
       available: codexRoleAvailable("script-draft") || zaiRoleAvailable("script-draft"),
       kind: "external",
       billing: "subscription",
@@ -214,6 +214,21 @@ export function buildProviderCatalog(
       defaultModelId: codexRoleAvailable("director-plan") ? modelForTask("director-plan") : zaiModelForTask("director-plan"),
       modelProfiles: roleModelProfiles("api-visual-director-v1", "director-plan"),
       requirement: roleRequirement("director-plan"),
+    }),
+    provider({
+      // B4：前期构思接入 joint-v1 正式生产图，目录登记构思能力卡片（模型选择/健康检查用）。
+      id: "codex-creative-treatment-v1",
+      capability: "creative.treatment",
+      label: "AI 前期构思",
+      available: codexRoleAvailable("creative-treatment") || zaiRoleAvailable("creative-treatment"),
+      kind: "external",
+      billing: "subscription",
+      description: "在脚本写定前确定观众承诺、开头吸引、推进与兑现，并标注素材可行性风险；首选模型调用故障时按健康候选顺序切换。",
+      modes: ["观众承诺", "内容推进", "可行性风险", "订阅能力"],
+      latency: "seconds",
+      defaultModelId: codexRoleAvailable("creative-treatment") ? modelForTask("creative-treatment") : zaiModelForTask("creative-treatment"),
+      modelProfiles: roleModelProfiles("codex-creative-treatment-v1", "creative-treatment"),
+      requirement: roleRequirement("creative-treatment"),
     }),
     provider({
       id: "codex-reference-grammar-v1",
@@ -377,7 +392,9 @@ export function buildProviderCatalog(
       deliveryTypes: assetProviderDeliveryTypes("hailuo-video-v1"),
       latency: "minutes",
       ...(miniMaxSettings ? { estimatedCnyPerClip: miniMaxSettings.estimatedCnyPerClip } : {}),
-      defaultModelId: miniMaxSettings?.model ?? (environment.MINIMAX_VIDEO_MODEL_ID?.trim() || DEFAULT_MINIMAX_VIDEO_MODEL_ID),
+      defaultModelId: miniMaxSettings?.model
+        ?? reviewedVideoModels["hailuo-video-v1"].find((model) => model.recommended)?.id
+        ?? DEFAULT_MINIMAX_VIDEO_MODEL_ID,
       modelProfiles: (miniMaxSettings?.models ?? reviewedVideoModels["hailuo-video-v1"]).map((model) => ({
         ...model,
         providerId: "hailuo-video-v1",

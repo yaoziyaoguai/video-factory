@@ -1,5 +1,6 @@
-import type { CodexBridgeClient, CodexTaskExecution } from "./codex-chat.js";
+import type { CodexBridgeClient, CodexPreparedOperation, CodexTaskExecution } from "./codex-chat.js";
 import type { VisualReviewMediaPayload, VisualReviewMediaPreprocessor } from "./codex-visual-review.js";
+import { pendingRoleAgentOperation } from "./role-agent-checkpoint.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
 export interface ReferenceGrammarBeat {
@@ -52,7 +53,7 @@ export interface ReferenceGrammarAgent {
 }
 
 export interface CodexReferenceGrammarAgentOptions {
-  client: Pick<CodexBridgeClient, "runTask"> & Partial<Pick<CodexBridgeClient, "runTaskDetailed">>;
+  client: Pick<CodexBridgeClient, "runTask"> & Partial<Pick<CodexBridgeClient, "runTaskDetailed" | "observePrepared">>;
   media: VisualReviewMediaPreprocessor;
   providerId?: string;
   modelId?: string;
@@ -76,11 +77,18 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
   }
 
   async analyzeDetailed(input: ReferenceGrammarAgentInput): Promise<ReferenceGrammarExecution> {
-    const payload = await this.payload(input);
     const client = this.options.client;
     if (typeof client.runTaskDetailed !== "function") {
+      const payload = await this.payload(input);
       return { output: validateShotGrammar(await client.runTask("reference-grammar", payload), payload.durationMs), inspectedDurationMs: payload.durationMs };
     }
+    const runTaskDetailed = client.runTaskDetailed.bind(client);
+    const observePrepared = typeof client.observePrepared === "function" ? client.observePrepared.bind(client) : undefined;
+    const pendingOperation = await pendingRoleAgentOperation(input.agentLoopCheckpoint, ["reference-grammar", "role-audit"]);
+    let resolvedPayload = pendingOperation ? recoveredReferenceGrammarPayload(pendingOperation, input.sourceLabel) : undefined;
+    const payload = async (): Promise<VisualReviewMediaPayload & { sourceLabel: string }> => (
+      resolvedPayload ??= await this.payload(input)
+    );
     const execution = await runRoleAgentLoop<ShotGrammar>({
       role: "参考片分析师",
       contractVersion: REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION,
@@ -91,11 +99,24 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
         "avoidCopying 明确排除人物身份、对白、品牌、独特情节和标志性资产",
       ],
       maxIterations: this.options.maxReviewIterations ?? 3,
-      produce: (revision, { requestId, session }) => client.runTaskDetailed!("reference-grammar", {
-        ...payload,
-        ...(revision ? { revision } : {}),
-      }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session }) => client.runTaskDetailed!("role-audit", {
+      produce: async (revision, { requestId, session, requestOptions, preparedOperation }) => {
+        if (preparedOperation) {
+          if (!observePrepared) throw new Error("Codex reference grammar cannot recover a prepared operation with this client.");
+          return observePrepared(preparedOperation, requestOptions);
+        }
+        const taskPayload = await payload();
+        return runTaskDetailed("reference-grammar", {
+          ...taskPayload,
+          ...(revision ? { revision } : {}),
+        }, requestId, session, requestOptions);
+      },
+      audit: async ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session, requestOptions, preparedOperation }) => {
+        if (preparedOperation) {
+          if (!observePrepared) throw new Error("Codex reference grammar cannot recover a prepared audit with this client.");
+          return observePrepared(preparedOperation, requestOptions);
+        }
+        const taskPayload = await payload();
+        return runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
@@ -105,9 +126,9 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
             doesNotOwn: ["新视频脚本", "新视频镜头方案", "参考视频版权结论"],
           },
           upstreamFacts: {
-            durationMs: payload.durationMs,
-            sourceLabel: payload.sourceLabel,
-            frames: payload.frames.map((frame, index) => ({
+            durationMs: taskPayload.durationMs,
+            sourceLabel: taskPayload.sourceLabel,
+            frames: taskPayload.frames.map((frame, index) => ({
               imageIndex: index + 1,
               timecodeMs: frame.timecodeMs,
               sha256: frame.sha256,
@@ -121,7 +142,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
-        images: payload.frames.map((frame, index) => ({
+        images: taskPayload.frames.map((frame, index) => ({
           imageIndex: index + 1,
           timecodeMs: frame.timecodeMs,
           sha256: frame.sha256,
@@ -129,13 +150,14 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
           ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
           ...(frame.phase ? { phase: frame.phase } : {}),
         })),
-      }, requestId, session),
-      validate: (value) => validateShotGrammar(value, payload.durationMs),
+        }, requestId, session, requestOptions);
+      },
+      validate: (value) => validateShotGrammar(value, resolvedPayload?.durationMs ?? grammarDuration(value)),
       ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
     });
     return {
       output: execution.output,
-      inspectedDurationMs: payload.durationMs,
+      inspectedDurationMs: resolvedPayload?.durationMs ?? execution.output.durationMs,
       ...(execution.trace ? { trace: execution.trace } : {}),
       ...(execution.agentLoop ? { agentLoop: execution.agentLoop } : {}),
     };
@@ -145,6 +167,46 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
     const media = await this.options.media.prepare({ videoPath: input.videoPath, runRoot: input.runRoot });
     return { durationMs: media.durationMs, frames: media.frames, sourceLabel: input.sourceLabel };
   }
+}
+
+function recoveredReferenceGrammarPayload(
+  operation: CodexPreparedOperation,
+  fallbackSourceLabel: string,
+): (VisualReviewMediaPayload & { sourceLabel: string }) | undefined {
+  const envelopePayload = record(operation.envelope.payload, "saved reference-grammar payload");
+  const source = operation.kind === "reference-grammar"
+    ? envelopePayload
+    : record(record(envelopePayload.context, "saved reference audit context").upstreamFacts, "saved reference audit facts");
+  const rawFrames = operation.kind === "reference-grammar" ? source.frames : envelopePayload.images;
+  if (!Array.isArray(rawFrames)) return undefined;
+  const durationMs = integer(source.durationMs, "saved reference durationMs", 1, Number.MAX_SAFE_INTEGER);
+  const frames = rawFrames.map((value, index) => {
+    const frame = record(value, `saved reference frame ${index}`);
+    const phase = frame.phase;
+    if (phase !== undefined && !["opening", "middle", "closing", "hook", "midpoint", "keyframe"].includes(String(phase))) {
+      throw new Error("Saved reference frame phase is invalid.");
+    }
+    return {
+      timecodeMs: integer(frame.timecodeMs, `saved reference frame ${index} timecodeMs`, 0, durationMs),
+      sha256: text(frame.sha256, `saved reference frame ${index} sha256`),
+      jpegBase64: text(frame.jpegBase64, `saved reference frame ${index} jpegBase64`),
+      ...(frame.scenePosition === undefined ? {} : {
+        scenePosition: integer(frame.scenePosition, `saved reference frame ${index} scenePosition`, 1, Number.MAX_SAFE_INTEGER),
+      }),
+      ...(phase === undefined ? {} : { phase: phase as "opening" | "middle" | "closing" | "hook" | "midpoint" | "keyframe" }),
+    };
+  });
+  return {
+    durationMs,
+    frames,
+    sourceLabel: typeof source.sourceLabel === "string" && source.sourceLabel.trim()
+      ? source.sourceLabel.trim()
+      : fallbackSourceLabel,
+  };
+}
+
+function grammarDuration(value: unknown): number {
+  return integer(record(value, "shot grammar").durationMs, "shot grammar durationMs", 1, Number.MAX_SAFE_INTEGER);
 }
 
 export function validateShotGrammar(value: unknown, durationMs: number): ShotGrammar {

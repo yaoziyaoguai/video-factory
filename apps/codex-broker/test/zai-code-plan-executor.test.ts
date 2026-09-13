@@ -4,6 +4,15 @@ import { describe, it } from "node:test";
 import { CodexExecutorError, codexExecutorProfileFor, parseTaskRequest } from "../src/codex-executor.js";
 import { BROKER_TASK_KINDS, taskContractDescriptorFor } from "../src/task-definitions.js";
 import { ZaiCodePlanExecutor } from "../src/zai-code-plan-executor.js";
+import {
+  creativeTreatmentRequest,
+  creativeTreatmentSourceContractCases,
+  creativeTreatmentWhitespaceInvalidCases,
+  ghostBeatCreativeTreatmentOutput,
+  legalCreativeTreatmentOutput,
+  legalCreativeTreatmentOutputWithSourceRefs,
+  paddedLegalCreativeTreatmentOutput,
+} from "./fixtures/creative-treatment.js";
 
 const API_KEY = "test-only-zai-key";
 const ZAI_CODING_PLAN_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
@@ -12,6 +21,7 @@ function scriptDraftTask() {
   return parseTaskRequest({
     protocolVersion: "video-factory/codex-bridge-v2",
     kind: "script-draft",
+    expectedContractDigest: taskContractDescriptorFor("script-draft").digest,
     payload: {
       brief: {
         title: "下班后先做一件事",
@@ -20,6 +30,10 @@ function scriptDraftTask() {
         nicheSlug: "after-work",
         platform: "douyin",
         durationSeconds: 20,
+        productionCapabilities: {
+          assetProviders: [],
+          editing: { sourceRangeReuse: true, staticEditorialCard: false },
+        },
       },
     },
   }, codexExecutorProfileFor("zai").identity);
@@ -51,9 +65,23 @@ function directorPlanTask() {
   return parseTaskRequest({
     protocolVersion: "video-factory/codex-bridge-v2",
     kind: "director-plan",
+    expectedContractDigest: taskContractDescriptorFor("director-plan").digest,
     payload: {
       directorProfiles: [{ id: "documentary-observer" }],
-      brief: { title: "下班后先做一件事", requestedProfileId: "auto" },
+      brief: {
+        title: "下班后先做一件事",
+        requestedProfileId: "auto",
+        productionCapabilities: {
+          assetProviders: [{
+            id: "pexels-stock-v1",
+            deliveryTypes: ["stock_video"],
+            supportsReferenceImage: false,
+            strengths: ["真实环境与动作"],
+            constraints: ["不能保证精确人物身份"],
+          }],
+          editing: { sourceRangeReuse: true, staticEditorialCard: false },
+        },
+      },
       scenes: [{ position: 1, narration: "先放下手机。", duration: 4 }],
       assetProviders: [{ id: "pexels-stock-v1", deliveryTypes: ["stock_video"] }],
       economics: { allowMeteredProviders: false },
@@ -68,7 +96,6 @@ function validDirectorPlan(): Record<string, unknown> {
     resolvedProfileId: "documentary-observer",
     profileRationale: "真实动作适合观察式表达",
     visualBible: {
-      viewerPromise: "看清一个可执行动作",
       narrativeApproach: "问题到行动",
       motif: "手机与手部",
       pacing: "短促",
@@ -92,7 +119,11 @@ function validDirectorPlan(): Record<string, unknown> {
       subject: "一只手和手机",
       environment: "室内桌面",
       visibleAction: "手把手机放到桌面",
-      temporalBeats: ["[0s-2s] 手持手机", "[2s-4s] 手机落到桌面"],
+      temporalBeats: [
+        { startSeconds: 0, endSeconds: 2, action: "手持手机" },
+        { startSeconds: 2, endSeconds: 4, action: "手机落到桌面" },
+      ],
+      sourceInSeconds: 0,
       shotSize: "近景",
       camera: "固定机位",
       lighting: "自然侧光",
@@ -107,6 +138,14 @@ function validDirectorPlan(): Record<string, unknown> {
       estimatedCostCny: 0,
     }],
   };
+}
+
+function creativeTreatmentTask(suppliedSources: Array<Record<string, unknown>> = [{ sourceId: "source-1", label: "原始报道" }]) {
+  return parseTaskRequest({
+    ...creativeTreatmentRequest(),
+    expectedContractDigest: taskContractDescriptorFor("creative-treatment").digest,
+    payload: { ...creativeTreatmentRequest().payload, suppliedSources },
+  }, codexExecutorProfileFor("zai").identity);
 }
 
 function visualReviewTask() {
@@ -182,6 +221,26 @@ function roleAuditTask(withImage: boolean) {
   }, codexExecutorProfileFor("zai").identity);
 }
 
+function assetRankTask(withThumbnail: boolean) {
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]);
+  return parseTaskRequest({
+    protocolVersion: "video-factory/codex-bridge-v2",
+    kind: "asset-rank",
+    expectedContractDigest: taskContractDescriptorFor("asset-rank").digest,
+    payload: {
+      version: "video-factory/asset-candidates-v1",
+      scenes: [],
+      thumbnails: withThumbnail ? [{
+        scenePosition: 1,
+        provider: "pexels",
+        assetId: "asset-1",
+        sha256: createHash("sha256").update(jpeg).digest("hex"),
+        jpegBase64: jpeg.toString("base64"),
+      }] : [],
+    },
+  }, codexExecutorProfileFor("zai").identity);
+}
+
 function validRoleAudit(): Record<string, unknown> {
   return {
     version: "video-factory/role-audit-v1",
@@ -190,6 +249,7 @@ function validRoleAudit(): Record<string, unknown> {
     summary: "候选交付满足本轮验收标准。",
     issues: [],
     repairInstructions: [],
+    planningDisposition: null,
   };
 }
 
@@ -540,6 +600,244 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(result.trace?.modelId, "glm-5.3");
   });
 
+  it("runs creative-treatment on the text model and rejects the same invalid fixture as the OpenAI executor", async () => {
+    let capturedUrl = "";
+    let capturedPrompt = "";
+    let capturedBody: Record<string, unknown> | undefined;
+    const output = legalCreativeTreatmentOutput();
+    const fetchFn: typeof fetch = async (input, init) => {
+      capturedUrl = String(input);
+      capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const content = (capturedBody?.messages as Array<{ content: string }>)[0]?.content ?? "";
+      capturedPrompt = typeof content === "string" ? content : "";
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(output) } }],
+      }), { status: 200 });
+    };
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn,
+      effort: "max",
+    });
+
+    const result = await executor.runTask(creativeTreatmentTask());
+
+    assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
+    assert.equal(capturedBody?.model, "glm-5.3");
+    assert.equal(capturedBody?.reasoning_effort, "max");
+    assert.match(capturedPrompt, /你在脚本写定前建立本片创作方向/);
+    assert.match(capturedPrompt, /source-1/);
+    assert.deepEqual(JSON.parse(result.output), output);
+    assert.equal(result.trace?.taskKind, "creative-treatment");
+    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v3");
+
+    await assert.rejects(
+      async () => executor.runTask(creativeTreatmentTask([])),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.transient, false);
+        assert.match(error.message, /suppliedSourceIds/);
+        return true;
+      },
+    );
+  });
+
+  it("rejects the shared ghost-beat fixture at the same semantic boundary as the OpenAI executor", async () => {
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(ghostBeatCreativeTreatmentOutput()) } }],
+      }), { status: 200 }),
+    });
+
+    await assert.rejects(
+      async () => executor.runTask(creativeTreatmentTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.transient, false);
+        assert.match(error.message, /evidenceRequirements\[0\]\.beatId must reference a progression beat/);
+        return true;
+      },
+    );
+  });
+
+  it("rejects every whitespace-invalid creative-treatment output from the shared matrix", async () => {
+    for (const testCase of creativeTreatmentWhitespaceInvalidCases()) {
+      const invalidOutput = legalCreativeTreatmentOutput();
+      testCase.apply(invalidOutput);
+      const executor = new ZaiCodePlanExecutor({
+        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+        fetchFn: async () => new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(invalidOutput) } }],
+        }), { status: 200 }),
+      });
+
+      await assert.rejects(
+        async () => executor.runTask(creativeTreatmentTask()),
+        (error: unknown) => {
+          assert.ok(error instanceof CodexExecutorError, `${testCase.field}: expected CodexExecutorError`);
+          assert.equal(error.transient, false);
+          assert.match(error.message, /must not be blank/, `${testCase.field} must be rejected as blank`);
+          assert.ok(error.message.includes(testCase.field), `${testCase.field} must be named in: ${error.message}`);
+          return true;
+        },
+      );
+    }
+  });
+
+  it("accepts padded legal creative-treatment text because the host trims it", async () => {
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(paddedLegalCreativeTreatmentOutput()) } }],
+      }), { status: 200 }),
+    });
+
+    const result = await executor.runTask(creativeTreatmentTask());
+
+    assert.equal(JSON.parse(result.output).viewerPromise, " 学会识别资料支持的结论边界 ");
+  });
+
+  it("applies trim-canonical source-id rules at the payload and output boundaries", async () => {
+    for (const testCase of creativeTreatmentSourceContractCases()) {
+      if (testCase.outcome === "payload-rejected") {
+        await assert.rejects(
+          async () => creativeTreatmentTask(testCase.suppliedSources),
+          (error: unknown) => {
+            assert.ok(error instanceof CodexExecutorError, `${testCase.label}: expected CodexExecutorError`);
+            assert.match(error.message, /sourceId/, testCase.label);
+            return true;
+          },
+        );
+        continue;
+      }
+      const output = legalCreativeTreatmentOutputWithSourceRefs(testCase.suppliedSourceIds);
+      const executor = new ZaiCodePlanExecutor({
+        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+        fetchFn: async () => new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(output) } }],
+        }), { status: 200 }),
+      });
+      if (testCase.outcome === "accepted") {
+        const result = await executor.runTask(creativeTreatmentTask(testCase.suppliedSources));
+        assert.deepEqual(
+          (JSON.parse(result.output) as { evidenceRequirements: Array<{ suppliedSourceIds: string[] }> }).evidenceRequirements[0]!.suppliedSourceIds,
+          testCase.suppliedSourceIds,
+          testCase.label,
+        );
+      } else {
+        await assert.rejects(
+          async () => executor.runTask(creativeTreatmentTask(testCase.suppliedSources)),
+          (error: unknown) => {
+            assert.ok(error instanceof CodexExecutorError, `${testCase.label}: expected CodexExecutorError`);
+            assert.equal(error.transient, false);
+            assert.match(error.message, /suppliedSourceIds/, testCase.label);
+            return true;
+          },
+        );
+      }
+    }
+  });
+
+  it("repairs creative-treatment structure without touching existing contract content", async () => {
+    let attempt = 0;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => {
+        attempt += 1;
+        const output = attempt === 1
+          ? {
+            ...legalCreativeTreatmentOutput(),
+            draftNote: "结构外备注",
+            hook: { ...(legalCreativeTreatmentOutput().hook as Record<string, unknown>), draftNote: "嵌套备注" },
+          }
+          : legalCreativeTreatmentOutput();
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(output) } }],
+        }), { status: 200 });
+      },
+    });
+
+    const result = await executor.runTask(creativeTreatmentTask());
+
+    assert.equal(attempt, 2);
+    assert.deepEqual(JSON.parse(result.output), legalCreativeTreatmentOutput());
+  });
+
+  // JSON.parse 按 DefineOwnProperty 语义把 "__proto__"、"constructor"、"toString" 等键
+  // 落成自有数据属性，等价于模型真实返回的 JSON；对象字面量与展开写法构造不出这类自有字段。
+  function creativeTreatmentOutputWithOwnExtraField(field: string, value: unknown): Record<string, unknown> {
+    const legal = legalCreativeTreatmentOutput();
+    return JSON.parse(`{${JSON.stringify(field)}:${JSON.stringify(value)},${JSON.stringify(legal).slice(1)}`) as Record<string, unknown>;
+  }
+
+  // 额外字段即使与 Object.prototype 继承属性同名，也只是 strict schema 不支持的结构外内容；
+  // 第二次结果只删除该字段且不改任何合同内容时必须成功，不允许撞上 repair 规则表的继承属性。
+  for (const { field, value } of [
+    { field: "draftNote", value: "结构外备注" },
+    { field: "constructor", value: "结构外备注" },
+    { field: "toString", value: "结构外备注" },
+    { field: "__proto__", value: { note: "结构外备注" } },
+  ] as const) {
+    it(`allows a creative-treatment repair that only drops the extra own field ${JSON.stringify(field)}`, async () => {
+      let attempt = 0;
+      const executor = new ZaiCodePlanExecutor({
+        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+        fetchFn: async () => {
+          attempt += 1;
+          const output = attempt === 1
+            ? creativeTreatmentOutputWithOwnExtraField(field, value)
+            : legalCreativeTreatmentOutput();
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: JSON.stringify(output) } }],
+          }), { status: 200 });
+        },
+      });
+
+      const result = await executor.runTask(creativeTreatmentTask());
+
+      assert.equal(attempt, 2);
+      assert.deepEqual(JSON.parse(result.output), legalCreativeTreatmentOutput());
+    });
+  }
+
+  it("rejects a creative-treatment repair that rewrites existing hook or progression content", async () => {
+    // 第一次输出带结构外字段触发 repair；第二次输出 schema 合法但改写了已有合同内容。
+    const schemaInvalidBaseline = () => ({ ...legalCreativeTreatmentOutput(), draftNote: "结构外备注" });
+    const rewrittenHook = () => ({
+      ...legalCreativeTreatmentOutput(),
+      hook: { narrationIntent: "被改写的开头", visualIntent: "展示原始资料的关键差异" },
+    });
+    const rewrittenProgression = () => {
+      const legal = legalCreativeTreatmentOutput();
+      const progression = [...legal.progression as Array<Record<string, unknown>>];
+      progression[1] = { ...progression[1]!, purpose: "被改写的段落职责" };
+      return { ...legal, progression };
+    };
+    for (const drift of [rewrittenHook, rewrittenProgression]) {
+      let attempt = 0;
+      const executor = new ZaiCodePlanExecutor({
+        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+        fetchFn: async () => {
+          attempt += 1;
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: JSON.stringify(attempt === 1 ? schemaInvalidBaseline() : drift()) } }],
+          }), { status: 200 });
+        },
+      });
+      await assert.rejects(
+        async () => executor.runTask(creativeTreatmentTask()),
+        (error: unknown) => {
+          assert.ok(error instanceof CodexExecutorError);
+          assert.equal(error.transient, false);
+          assert.match(error.message, /format repair changed protected content/);
+          assert.equal((error as CodexExecutorError & { details?: { reasonCode?: string } }).details?.reasonCode, "repair_semantic_drift");
+          return true;
+        },
+      );
+    }
+  });
+
   it("sends a role audit with images to Chat Completions with the visual model", async () => {
     let capturedUrl = "";
     let capturedBody: Record<string, unknown> | undefined;
@@ -566,15 +864,56 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("advertises every broker task with the configured text and visual models", () => {
-    const executor = new ZaiCodePlanExecutor({ env: { ZAI_BIGMODEL_API_KEY: API_KEY } });
+    const executor = new ZaiCodePlanExecutor({
+      env: {
+        ZAI_BIGMODEL_API_KEY: API_KEY,
+        ZAI_TEXT_MODEL_ID: "text-custom",
+        ZAI_VISUAL_REVIEW_MODEL_ID: "visual-custom",
+      },
+    });
 
     assert.deepEqual(executor.identity.taskKinds, BROKER_TASK_KINDS);
     for (const kind of BROKER_TASK_KINDS) {
       const expected = ["asset-rank", "reference-grammar", "visual-review"].includes(kind)
-        ? "glm-5.3-flash"
-        : "glm-5.3";
+        ? "visual-custom"
+        : "text-custom";
       assert.equal(executor.identity.taskModels?.[kind], expected);
     }
+    assert.deepEqual(executor.identity.taskModelRoutes, {
+      "asset-rank": { withoutImages: "text-custom", withImages: "visual-custom" },
+      "role-audit": { withoutImages: "text-custom", withImages: "visual-custom" },
+    });
+  });
+
+  it("uses the same declared model route for asset ranking with and without thumbnails", async () => {
+    const models: unknown[] = [];
+    const executor = new ZaiCodePlanExecutor({
+      env: {
+        ZAI_BIGMODEL_API_KEY: API_KEY,
+        ZAI_TEXT_MODEL_ID: "text-custom",
+        ZAI_VISUAL_REVIEW_MODEL_ID: "visual-custom",
+      },
+      fetchFn: async (_input, init) => {
+        models.push((JSON.parse(String(init?.body)) as Record<string, unknown>).model);
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            version: "video-factory/asset-ranking-v1",
+            source: "model",
+            providerId: "zai-bigmodel-api",
+            modelId: "test",
+            summary: "没有候选需要排序。",
+            scenes: [],
+          }) } }],
+        }), { status: 200 });
+      },
+    });
+
+    const withoutThumbnail = await executor.runTask(assetRankTask(false));
+    const withThumbnail = await executor.runTask(assetRankTask(true));
+
+    assert.deepEqual(models, ["text-custom", "visual-custom"]);
+    assert.equal(withoutThumbnail.trace?.modelId, "text-custom");
+    assert.equal(withThumbnail.trace?.modelId, "visual-custom");
   });
 
   it("does not expose API error bodies or the credential", async () => {

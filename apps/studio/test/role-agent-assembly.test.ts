@@ -133,6 +133,40 @@ describe("buildRoleAgentAssembly", () => {
     assert.deepEqual(result.visualReviewAgents.map((agent) => agent.modelId), ["glm-review", "gpt-review"]);
   });
 
+  it("assembles treatment producers for both brokers and fails closed without the task contract", () => {
+    const both = buildRoleAgentAssembly({
+      codexSettings: settings("openai", ["creative-treatment", "role-audit"], { "creative-treatment": "gpt-director" }),
+      zaiCodexSettings: settings("zai", ["creative-treatment", "role-audit"], { "creative-treatment": "glm-director" }),
+      codexClient: client,
+      zaiCodexClient: client,
+      reviewMedia,
+      environment: {},
+    });
+    assert.deepEqual(
+      both.treatmentAgents.map(({ agent, providerId }) => [agent.modelId, providerId]),
+      [["gpt-director", "openai"], ["glm-director", "zai-bigmodel-api"]],
+    );
+
+    const withoutTreatment = buildRoleAgentAssembly({
+      codexSettings: settings("openai", ["script-draft", "role-audit"], {}),
+      zaiCodexSettings: settings("zai", ["script-draft", "role-audit"], {}),
+      codexClient: client,
+      zaiCodexClient: client,
+      reviewMedia,
+      environment: {},
+    });
+    assert.deepEqual(withoutTreatment.treatmentAgents, []);
+
+    const withoutAuditor = buildRoleAgentAssembly({
+      codexSettings: settings("openai", ["creative-treatment"], {}),
+      zaiCodexSettings: unavailable,
+      codexClient: client,
+      reviewMedia,
+      environment: {},
+    });
+    assert.deepEqual(withoutAuditor.treatmentAgents, []);
+  });
+
   it("runs the assembled OpenAI screenwriter through its GLM backup after a transient outage", async () => {
     const openai = new ControlledCodexClient("openai", "gpt-writer", () => {
       throw new CodexBridgeError("OpenAI service temporarily unavailable.", true, "not_accepted", 503);

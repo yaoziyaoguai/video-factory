@@ -11,6 +11,7 @@ const MAX_FRAME_BYTES = 256 * 1024;
 interface FrameDescriptor {
   path: string;
   timestampMs: number;
+  sourceTimecodeMs?: number;
   sha256: string;
   scenePosition?: number;
   phase?: "opening" | "middle" | "closing" | "hook" | "midpoint" | "keyframe";
@@ -63,12 +64,15 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
     try {
       const jpeg = makeJpeg(64);
       const assetPlanPath = path.join(harness.runRoot, "assets", "asset_plan.json");
+      const executablePlanPath = path.join(harness.runRoot, "production-preflight", "executable_plan.json");
       await mkdir(path.dirname(assetPlanPath), { recursive: true });
       await writeFile(assetPlanPath, "{}", "utf8");
+      await mkdir(path.dirname(executablePlanPath), { recursive: true });
+      await writeFile(executablePlanPath, "{}", "utf8");
       await writeFrame(harness, "review_media/frame.jpg", jpeg);
       await writeManifest(harness, [frame("review_media/frame.jpg", 100, jpeg)]);
 
-      await harness.preprocessor.prepare({ assetPlanPath, runRoot: harness.runRoot });
+      await harness.preprocessor.prepare({ assetPlanPath, executablePlanPath, runRoot: harness.runRoot });
 
       assert.deepEqual(
         (await readFile(harness.capturePath, "utf8")).trim().split("\n"),
@@ -81,6 +85,8 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
           harness.runRoot,
           "--max-frames",
           "24",
+          "--executable-plan",
+          executablePlanPath,
         ],
       );
     } finally {
@@ -110,6 +116,34 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
       });
       assert.equal(result.frames[0]?.scenePosition, 1);
       assert.equal(result.frames[0]?.phase, "hook");
+    } finally {
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves a valid source timecode and rejects an invalid one", async () => {
+    const harness = await createHarness();
+    try {
+      const jpeg = makeJpeg(64);
+      await writeFrame(harness, "review_media/frame.jpg", jpeg);
+      await writeManifest(harness, [{
+        ...frame("review_media/frame.jpg", 250, jpeg),
+        sourceTimecodeMs: 4_250,
+        scenePosition: 1,
+      }]);
+
+      const result = await harness.preprocessor.prepare({ videoPath: harness.videoPath, runRoot: harness.runRoot });
+      assert.equal(result.frames[0]?.sourceTimecodeMs, 4_250);
+
+      await writeManifest(harness, [{
+        ...frame("review_media/frame.jpg", 250, jpeg),
+        sourceTimecodeMs: -1,
+        scenePosition: 1,
+      }]);
+      await assert.rejects(
+        () => harness.preprocessor.prepare({ videoPath: harness.videoPath, runRoot: harness.runRoot }),
+        /source timecode is invalid/,
+      );
     } finally {
       await rm(harness.root, { recursive: true, force: true });
     }

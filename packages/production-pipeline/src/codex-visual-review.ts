@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { AgentLoopTrace, CodexBridgeClient, CodexTaskExecution, ModelCandidateAttempt } from "./codex-chat.js";
+import type { AgentLoopTrace, CodexBridgeClient, CodexPreparedOperation, CodexTaskExecution, ModelCandidateAttempt } from "./codex-chat.js";
 import {
   failedModelCandidateAttempt,
   fallbackRequestId,
@@ -10,11 +10,13 @@ import {
   publicModelFailure,
 } from "./model-fallback.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
+import { pendingRoleAgentOperation } from "./role-agent-checkpoint.js";
 
 export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v13|role-audit-v3|visual-review-validator-v4|evidence-state-v2|pilot-scope-v2";
 
 export interface VisualReviewFramePayload {
   timecodeMs: number;
+  sourceTimecodeMs?: number;
   sha256: string;
   jpegBase64: string;
   scenePosition?: number;
@@ -41,10 +43,13 @@ export interface VisualReviewAgentInput {
   runRoot: string;
   scriptPath?: string;
   directorPlanPath?: string;
+  executablePlanPath?: string;
   renderManifestPath?: string;
   requestId?: string;
   selectedModelId?: string;
   preparedMedia?: VisualReviewMediaPayload;
+  /** 双审共同证据快照 id：分支收到的证据副本携带，汇总据此核对实际消费身份。 */
+  evidenceSnapshotId?: string;
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
   agentLoopCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
   independentReviewCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
@@ -66,6 +71,7 @@ export interface VisualReviewMediaPreprocessor {
     renderManifestPath?: string;
     scenePositions?: number[];
     scriptPath?: string;
+    executablePlanPath?: string;
   }): Promise<VisualReviewMediaPayload>;
 }
 
@@ -146,8 +152,8 @@ export interface VisualReviewAgent {
 }
 
 export interface CodexVisualReviewAgentOptions {
-  client: Pick<CodexBridgeClient, "runTask"> & Partial<Pick<CodexBridgeClient, "runTaskDetailed">>;
-  auditClient?: Pick<CodexBridgeClient, "runTaskDetailed">;
+  client: Pick<CodexBridgeClient, "runTask"> & Partial<Pick<CodexBridgeClient, "runTaskDetailed" | "observePrepared">>;
+  auditClient?: Pick<CodexBridgeClient, "runTaskDetailed"> & Partial<Pick<CodexBridgeClient, "observePrepared">>;
   media: VisualReviewMediaPreprocessor;
   providerId?: string;
   modelId?: string;
@@ -337,17 +343,25 @@ export class IndependentDualVisualReviewAgent implements VisualReviewAgent {
           )
         : undefined;
       if (cached) return cached;
+      // BG-08：每个分支收到共同证据的独立深拷贝——分支内的原地改写不会泄漏给另一分支
+      // 或共同快照；分支执行前后对共同快照做完整性核对。
+      const branchMedia = structuredClone(preparedMedia);
       const execution = await runVisualReviewAgent(agent, {
         ...input,
-        preparedMedia,
+        preparedMedia: branchMedia,
+        evidenceSnapshotId,
         selectedModelId: agent.modelId,
         ...(input.requestId ? { requestId: `${input.requestId}:${agent.id}` } : {}),
         ...(input.agentLoopCheckpointForModel
           ? { agentLoopCheckpoint: input.agentLoopCheckpointForModel(agent.modelId) }
           : {}),
       });
+      if (visualEvidenceSnapshotId(preparedMedia) !== evidenceSnapshotId) {
+        throw new Error("Shared visual review evidence was mutated during an independent review branch.");
+      }
       const validated = {
         ...execution,
+        evidenceSnapshotId,
         output: validateVisualReviewReport(
           execution.output,
           preparedMedia.durationMs,
@@ -394,6 +408,34 @@ export class IndependentDualVisualReviewAgent implements VisualReviewAgent {
     }));
     if (new Set(independentReviews.map((review) => review.providerId)).size !== 2
       || new Set(independentReviews.map((review) => review.modelId)).size !== 2) {
+      // 两个名义分支落到同一实际身份时，只保留第一份合法证据。把第二分支缓存标成
+      // 不可复用，下一次仅补跑冲突边，而不是永久重放同一对撞结果。
+      const conflictingCheckpoint = input.independentReviewCheckpointForModel?.(agents[1]!.modelId);
+      // BG-08：碰撞重试有界——墓碑记录累计次数，连续 2 次碰撞即停止并要求人工介入，
+      // 不无限重置重试，也不引入第三审片模型。
+      const priorTombstone = typeof conflictingCheckpoint?.load === "function"
+        ? await conflictingCheckpoint.load()
+        : undefined;
+      const priorAttempts = typeof priorTombstone === "object" && priorTombstone !== null
+        && !Array.isArray(priorTombstone)
+        && (priorTombstone as Record<string, unknown>).version === "video-factory/independent-visual-review-collision-v1"
+        ? Number((priorTombstone as Record<string, unknown>).attempts ?? 0)
+        : 0;
+      if (priorAttempts >= 1) {
+        throw new IndependentVisualReviewError([
+          {
+            providerId: independentReviews[1]?.providerId ?? agents[1]!.id,
+            modelId: independentReviews[1]?.modelId ?? agents[1]!.modelId,
+            error: new Error("两次修复后双审分支仍落到同一实际身份，无法自动恢复独立性；请人工核对模型配置后再继续。"),
+          },
+        ], independentReviews);
+      }
+      await conflictingCheckpoint?.save({
+        version: "video-factory/independent-visual-review-collision-v1",
+        contractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+        evidenceSnapshotId,
+        attempts: priorAttempts + 1,
+      });
       throw new IndependentVisualReviewError([
         {
           providerId: independentReviews[1]?.providerId ?? agents[1]!.id,
@@ -417,9 +459,10 @@ function visualEvidenceSnapshotId(media: VisualReviewMediaPayload): string {
   return createHash("sha256").update(JSON.stringify({
     contractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
     durationMs: media.durationMs,
-    frames: media.frames.map(({ timecodeMs, sha256, scenePosition, phase }, index) => ({
+    frames: media.frames.map(({ timecodeMs, sourceTimecodeMs, sha256, scenePosition, phase }, index) => ({
       frameIndex: index + 1,
       timecodeMs,
+      ...(sourceTimecodeMs !== undefined ? { sourceTimecodeMs } : {}),
       sha256,
       ...(scenePosition !== undefined ? { scenePosition } : {}),
       ...(phase ? { phase } : {}),
@@ -548,10 +591,15 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
     if (input.selectedModelId && input.selectedModelId !== this.modelId) {
       throw new Error(`Selected model '${input.selectedModelId}' is not available for visual review.`);
     }
-    const { payload, sampling } = await this.preparePayload(input);
+    const requestId = normalizedRequestId(input.requestId);
+    const checkpoint = input.agentLoopCheckpoint ?? requestScopedCheckpoint(requestId);
+    const pendingOperation = await pendingRoleAgentOperation(checkpoint, ["visual-review", "role-audit"]);
+    const recoveredPayload = pendingOperation ? recoveredVisualReviewPayload(pendingOperation) : undefined;
+    const { payload, sampling } = recoveredPayload
+      ? { payload: recoveredPayload, sampling: undefined }
+      : await this.preparePayload(input);
     const evidenceSnapshotId = visualEvidenceSnapshotId(payload);
     const client = this.options.client;
-    const requestId = normalizedRequestId(input.requestId);
     if (typeof client.runTaskDetailed !== "function") {
       return {
         output: validateVisualReviewReport(
@@ -567,10 +615,13 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
       };
     }
     const runProducerTask = client.runTaskDetailed.bind(client);
+    const observeProducerTask = typeof client.observePrepared === "function" ? client.observePrepared.bind(client) : undefined;
     const runAuditTask = this.options.auditClient
       ? this.options.auditClient.runTaskDetailed.bind(this.options.auditClient)
       : runProducerTask;
-    const checkpoint = input.agentLoopCheckpoint ?? requestScopedCheckpoint(requestId);
+    const observeAuditTask = typeof this.options.auditClient?.observePrepared === "function"
+      ? this.options.auditClient.observePrepared.bind(this.options.auditClient)
+      : observeProducerTask;
     const execution = await runRoleAgentLoop<VisualReviewReport>({
       role: "视觉审片员",
       contractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
@@ -590,11 +641,22 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
       ],
       maxIterations: this.maxReviewIterations,
       ...(this.options.maxProducerCalls ? { maxPhaseAttempts: { produce: this.options.maxProducerCalls } } : {}),
-      produce: (revision, operation) => runProducerTask("visual-review", {
+      produce: (revision, operation) => {
+        if (operation.preparedOperation) {
+          if (!observeProducerTask) throw new Error("Codex visual reviewer cannot recover a prepared operation with this client.");
+          return observeProducerTask(operation.preparedOperation, operation.requestOptions);
+        }
+        return runProducerTask("visual-review", {
         ...payload,
         ...(revision ? { revision } : {}),
-      }, operation.requestId, this.options.producerSessionMode === "stateless" ? undefined : operation.session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId: auditRequestId }) => runAuditTask("role-audit", {
+        }, operation.requestId, this.options.producerSessionMode === "stateless" ? undefined : operation.session, operation.requestOptions);
+      },
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId: auditRequestId, requestOptions, preparedOperation }) => {
+        if (preparedOperation) {
+          if (!observeAuditTask) throw new Error("Codex visual reviewer cannot recover a prepared audit with this client.");
+          return observeAuditTask(preparedOperation, requestOptions);
+        }
+        return runAuditTask("role-audit", {
         role,
         iteration,
         criteria,
@@ -608,10 +670,12 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
           jpegBase64: frame.jpegBase64,
           ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
           ...(frame.timecodeMs !== undefined ? { timecodeMs: frame.timecodeMs } : {}),
+          ...(frame.sourceTimecodeMs !== undefined ? { sourceTimecodeMs: frame.sourceTimecodeMs } : {}),
           ...(frame.phase ? { phase: frame.phase } : {}),
         })),
       // 审计请求已经自包含候选、证据帧与合同；不要求 Provider 创建可续写会话。
-      }, auditRequestId, undefined),
+        }, auditRequestId, undefined, requestOptions);
+      },
       validate: (value) => validateVisualReviewReport(value, payload.durationMs, input.scenePositions, payload.frames),
       ...(checkpoint ? { checkpoint } : {}),
     });
@@ -646,6 +710,44 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
       ...(sampling ? { sampling } : {}),
     };
   }
+}
+
+function recoveredVisualReviewPayload(operation: CodexPreparedOperation): VisualReviewMediaPayload | undefined {
+  const envelopePayload = record(operation.envelope.payload, "saved visual-review payload");
+  const source = operation.kind === "visual-review"
+    ? envelopePayload
+    : record(record(envelopePayload.context, "saved visual audit context").evidence, "saved visual audit evidence");
+  const rawFrames = operation.kind === "visual-review" ? source.frames : envelopePayload.images;
+  if (!Array.isArray(rawFrames) || !Number.isInteger(source.durationMs) || Number(source.durationMs) < 1) return undefined;
+  const durationMs = Number(source.durationMs);
+  const frames = rawFrames.map((value, index): VisualReviewFramePayload => {
+    const frame = record(value, `saved visual-review frame ${index}`);
+    if (!Number.isInteger(frame.timecodeMs) || Number(frame.timecodeMs) < 0 || Number(frame.timecodeMs) > durationMs) {
+      throw new Error(`Saved visual-review frame ${index} timecode is invalid.`);
+    }
+    const phase = frame.phase === undefined
+      ? undefined
+      : enumValue(frame.phase, ["opening", "middle", "closing", "hook", "midpoint", "keyframe"] as const, `saved frame ${index} phase`);
+    return {
+      timecodeMs: Number(frame.timecodeMs),
+      ...(Number.isInteger(frame.sourceTimecodeMs) && Number(frame.sourceTimecodeMs) >= 0
+        ? { sourceTimecodeMs: Number(frame.sourceTimecodeMs) }
+        : {}),
+      sha256: text(frame.sha256, `saved frame ${index} sha256`),
+      jpegBase64: text(frame.jpegBase64, `saved frame ${index} jpegBase64`),
+      ...(Number.isInteger(frame.scenePosition) && Number(frame.scenePosition) >= 1
+        ? { scenePosition: Number(frame.scenePosition) }
+        : {}),
+      ...(phase ? { phase } : {}),
+    };
+  });
+  return {
+    durationMs,
+    frames,
+    ...(typeof source.reviewContext === "object" && source.reviewContext !== null && !Array.isArray(source.reviewContext)
+      ? { reviewContext: structuredClone(source.reviewContext as Record<string, unknown>) }
+      : {}),
+  };
 }
 
 function requestScopedCheckpoint(requestId: string | undefined): RoleAgentLoopCheckpoint | undefined {
@@ -754,9 +856,10 @@ async function buildReviewContext(
     input.directorPlanPath ? readRunJson(input.runRoot, input.directorPlanPath, "director plan") : undefined,
     input.renderManifestPath ? readRunJson(input.runRoot, input.renderManifestPath, "render manifest") : undefined,
     input.assetPlanPath ? readRunJson(input.runRoot, input.assetPlanPath, "asset plan") : undefined,
+    input.executablePlanPath ? readRunJson(input.runRoot, input.executablePlanPath, "executable production plan") : undefined,
   ]);
-  const [script, directorPlan, renderManifest, assetPlan] = entries;
-  if (!script && !directorPlan && !renderManifest && !assetPlan && !sampling && !input.reviewStage) return undefined;
+  const [script, directorPlan, renderManifest, assetPlan, executablePlan] = entries;
+  if (!script && !directorPlan && !renderManifest && !assetPlan && !executablePlan && !sampling && !input.reviewStage) return undefined;
   const context = {
     ...(input.reviewStage ? { reviewStage: input.reviewStage } : {}),
     ...(input.scenePositions ? { pilotScenePositions: input.scenePositions } : {}),
@@ -780,6 +883,7 @@ async function buildReviewContext(
     ...(directorPlan ? { directorPlan: compactDirectorPlan(directorPlan) } : {}),
     ...(renderManifest ? { renderManifest: compactRenderManifest(renderManifest) } : {}),
     ...(assetPlan ? { assetPlan: compactAssetPlan(assetPlan) } : {}),
+    ...(executablePlan ? { executablePlan } : {}),
   };
   if (Buffer.byteLength(JSON.stringify(context), "utf8") > 128 * 1024) {
     throw new Error("Visual review context exceeds 131072 bytes after compaction.");
@@ -867,6 +971,8 @@ export function validateAggregatedVisualReviewReport(
   if (!Array.isArray(report.independentReviews) || report.independentReviews.length !== 2) {
     throw new Error("Aggregated visual review must preserve two independent branch reports.");
   }
+  // 容量合同：单分支各 50 条；双审汇总是两分支去重并集，合法上界为两者之和。
+  // 两个合法分支合并出 51+ 条不再被更靠前的边界拒绝（无静默截断）。
   return validateVisualReviewReportWithLimit(value, durationMs, scenePositions, evidenceFrames, 100);
 }
 

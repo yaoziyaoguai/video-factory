@@ -9,6 +9,7 @@ import type {
   StudioTrendSource,
   StudioTrendRefreshReceipt,
   StudioTrendRefreshStatus,
+  StudioTopicGenerationReceipt,
 } from "../shared/api.js";
 import { canonicalizeSourceUrl, manualSupplementEvidence } from "../shared/api.js";
 import { buildTrendSourceCatalog } from "./provider-catalog.js";
@@ -23,8 +24,10 @@ export interface TrendStudioOptions {
   cachePath?: string;
   cacheTtlMs?: number;
   trendGateway?: Pick<TrendGateway, "listServices" | "listSignals">;
-  trendAgent?: Pick<TrendOpportunityAgent, "listCandidates">;
+  trendAgent?: Pick<TrendOpportunityAgent, "listCandidates"> & Partial<Pick<TrendOpportunityAgent, "generationReceipt">>;
   createRefreshId?: () => string;
+  /** C3-E02：“换一批”的生成身份来源（默认随机 UUID）。 */
+  createGenerationNonce?: () => string;
 }
 
 export interface TrendCandidateReadOptions {
@@ -33,7 +36,7 @@ export interface TrendCandidateReadOptions {
 
 export class TrendStudio {
   private readonly gateway: Pick<TrendGateway, "listServices" | "listSignals">;
-  private readonly agent: Pick<TrendOpportunityAgent, "listCandidates"> | undefined;
+  private readonly agent: (Pick<TrendOpportunityAgent, "listCandidates"> & Partial<Pick<TrendOpportunityAgent, "generationReceipt">>) | undefined;
   private candidateCache: { expiresAt: number; values: StudioTrendCandidate[] } | undefined;
   private candidateLoading: Promise<StudioTrendCandidate[]> | undefined;
   private candidateLoadingForced = false;
@@ -42,6 +45,7 @@ export class TrendStudio {
   private nextAutomaticRefreshAt = 0;
   private readonly candidateRefreshes = new Map<string, StudioTrendRefreshStatus>();
   private activeRefreshId: string | undefined;
+  private lastGenerationReceipt: StudioTopicGenerationReceipt | undefined;
   // 人工补充来源与候选缓存分开持久化：后台刷新只重写缓存，补充永不丢失，也不延长缓存 TTL。
   private readonly sourceSupplements = new Map<string, { evidenceUrls: string[]; updatedAt: string }>();
   private supplementsHydration: Promise<void> | undefined;
@@ -119,6 +123,10 @@ export class TrendStudio {
 
   candidateRefreshStatus(refreshId: string): StudioTrendRefreshStatus | undefined {
     return this.candidateRefreshes.get(refreshId);
+  }
+
+  latestGenerationReceipt(): StudioTopicGenerationReceipt | undefined {
+    return this.lastGenerationReceipt ? structuredClone(this.lastGenerationReceipt) : undefined;
   }
 
   // 人工补充来源：只追加、不覆盖原 evidence；与候选已有 URL 幂等去重；
@@ -250,12 +258,19 @@ export class TrendStudio {
 
   private startCandidateLoad(forceRefresh: boolean): Promise<StudioTrendCandidate[]> {
     const work = (async () => {
-      const values = await this.loadCandidates();
+      // C3-E02：显式刷新（换一批）携带新的生成身份——同信号下真正重出一批提案；
+      // 普通读取/自动刷新不带 nonce，命中缓存或既有 checkpoint，不重复生成。
+      const values = await this.loadCandidates(forceRefresh
+        ? (this.options.createGenerationNonce ?? randomUUID)()
+        : undefined);
       const cachedAt = this.options.now().toISOString();
+      const generationReceipt = this.agent?.generationReceipt?.()
+        ?? generationReceiptFromCandidates(values, cachedAt);
       // 缓存写入与人工来源写入共用同一进程内文件队列，避免两套原子写交错。
-      await this.queueFileMutation(() => this.persistCache({ schemaVersion: CANDIDATE_CACHE_SCHEMA_VERSION, cachedAt, values }));
+      await this.queueFileMutation(() => this.persistCache({ schemaVersion: CANDIDATE_CACHE_SCHEMA_VERSION, cachedAt, values, generationReceipt }));
       // 只有持久化生命周期结束后才发布新缓存，避免调用方看到新值时后台仍在改文件。
       this.candidateCache = { expiresAt: Date.parse(cachedAt) + (this.options.cacheTtlMs ?? DAILY_CACHE_TTL_MS), values };
+      this.lastGenerationReceipt = generationReceipt;
       this.nextAutomaticRefreshAt = 0;
       return this.mergeCandidateSupplements(values);
     })();
@@ -271,9 +286,11 @@ export class TrendStudio {
     return loading;
   }
 
-  private async loadCandidates(): Promise<StudioTrendCandidate[]> {
-    if (this.agent) return this.agent.listCandidates();
-    return new TrendOpportunityAgent({ signals: this.gateway }).listCandidates();
+  private async loadCandidates(generationNonce?: string): Promise<StudioTrendCandidate[]> {
+    if (this.agent) return this.agent.listCandidates({ ...(generationNonce ? { generationNonce } : {}) });
+    return new TrendOpportunityAgent({ signals: this.gateway }).listCandidates(
+      { ...(generationNonce ? { generationNonce } : {}) },
+    );
   }
 
   private hydrateCache(): Promise<void> {
@@ -290,6 +307,7 @@ export class TrendStudio {
         expiresAt: Date.parse(parsed.cachedAt) + (this.options.cacheTtlMs ?? DAILY_CACHE_TTL_MS),
         values: parsed.values,
       };
+      this.lastGenerationReceipt = parsed.generationReceipt;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
     }
@@ -318,6 +336,7 @@ interface PersistedCandidateCache {
   schemaVersion: typeof CANDIDATE_CACHE_SCHEMA_VERSION;
   cachedAt: string;
   values: StudioTrendCandidate[];
+  generationReceipt?: StudioTopicGenerationReceipt;
 }
 
 const CANDIDATE_CACHE_SCHEMA_VERSION = 5;
@@ -356,5 +375,30 @@ function isPersistedCandidateCache(value: unknown): value is PersistedCandidateC
   return record.schemaVersion === CANDIDATE_CACHE_SCHEMA_VERSION
     && typeof record.cachedAt === "string"
     && Number.isFinite(Date.parse(record.cachedAt))
-    && Array.isArray(record.values);
+    && Array.isArray(record.values)
+    && (record.generationReceipt === undefined || isTopicGenerationReceipt(record.generationReceipt));
+}
+
+function generationReceiptFromCandidates(values: StudioTrendCandidate[], generatedAt: string): StudioTopicGenerationReceipt {
+  const modelCandidate = values.find((candidate) => candidate.providerId !== "trend-heuristic-v1");
+  const fallback = values.find((candidate) => candidate.generationFallback)?.generationFallback;
+  return {
+    generationId: `topic-${Date.parse(generatedAt)}`,
+    generatedAt,
+    modelInvoked: Boolean(modelCandidate || fallback),
+    source: modelCandidate ? "editor-model" : "rule-fallback",
+    candidateCount: values.length,
+    ...(modelCandidate ? { providerId: modelCandidate.providerId } : {}),
+    ...(fallback ? { failureCategory: fallback.category, failureReason: fallback.reason } : {}),
+  };
+}
+
+function isTopicGenerationReceipt(value: unknown): value is StudioTopicGenerationReceipt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const receipt = value as Record<string, unknown>;
+  return typeof receipt.generationId === "string"
+    && typeof receipt.generatedAt === "string" && Number.isFinite(Date.parse(receipt.generatedAt))
+    && typeof receipt.modelInvoked === "boolean"
+    && (receipt.source === "editor-model" || receipt.source === "rule-fallback")
+    && Number.isInteger(receipt.candidateCount) && Number(receipt.candidateCount) >= 0;
 }

@@ -5,6 +5,7 @@ import {
 } from "./generative-asset-worker.js";
 import {
   VISUAL_DIRECTOR_PROFILES,
+  reuseSourceEndFrame,
   validateVisualDirectorPlan,
   type VisualAssetDeliveryType,
   type VisualDirectorAgent,
@@ -13,10 +14,11 @@ import {
   type VisualDirectorPlanValidation,
 } from "./visual-director.js";
 import { runRoleAgentLoop, type RoleAgentValidationContext } from "./role-agent-loop.js";
+import { summarizeProductionCapabilities } from "./production-capabilities.js";
 
 export interface CodexVisualDirectorAgentOptions {
   client?: CodexBridgeClient;
-  auditClient?: Pick<CodexBridgeClient, "runTaskDetailed">;
+  auditClient?: Pick<CodexBridgeClient, "runTaskDetailed" | "observePrepared">;
   socketPath?: string;
   timeoutMs?: number;
   maxAttempts?: number;
@@ -30,14 +32,14 @@ export interface CodexVisualDirectorAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
-export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v25|role-audit-v3|director-validator-v5|visual-plan-v2";
+export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v31|role-audit-v5|director-validator-v6|visual-plan-v2|production-capabilities-v2|planning-disposition-v1";
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
 export class CodexVisualDirectorAgent implements VisualDirectorAgent {
   readonly id = "api-visual-director-v1";
   readonly modelId: string;
   private readonly client: CodexBridgeClient;
-  private readonly auditClient: Pick<CodexBridgeClient, "runTaskDetailed"> | undefined;
+  private readonly auditClient: Pick<CodexBridgeClient, "runTaskDetailed" | "observePrepared"> | undefined;
   private readonly maxReviewIterations: number;
   private readonly sessionMode: "stateful" | "stateless";
 
@@ -65,9 +67,11 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
   // 模型输出为 unknown：先经 validateVisualDirectorPlan 硬校验，malformed/不合法直接抛错，没有任何 fallback。
   async plan(input: VisualDirectorAgentInput): Promise<VisualDirectorPlan> {
     this.assertSelectedModel(input.selectedModelId);
+    validateDirectorDurationRange(input);
     const {
       agentLoopCheckpoint: _checkpoint,
       selectedModelId: _selectedModelId,
+      planningMode: _planningMode,
       wallClockDeadlineAtMs,
       ...directorInput
     } = input;
@@ -80,47 +84,53 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
 
   async planDetailed(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<VisualDirectorPlan>> {
     this.assertSelectedModel(input.selectedModelId);
+    validateDirectorDurationRange(input);
     const {
       agentLoopCheckpoint,
       selectedModelId: _selectedModelId,
+      planningMode,
       wallClockDeadlineAtMs,
       ...directorInput
     } = input;
+    const normalizedDirectorInput = directorInputForModel(directorInput);
     const basePayload = {
       directorProfiles: VISUAL_DIRECTOR_PROFILES,
-      ...directorInputForModel(directorInput),
+      ...normalizedDirectorInput,
     };
     const auditClient = this.auditClient ?? this.client;
     return runRoleAgentLoop({
       role: "导演",
+      planningRole: planningMode === true,
       contractVersion: VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
       criteria: [
-        "视觉圣经与题材、模板和参考语法一致；输入含编剧 viewerPromise 时必须逐字保留，narrativeArc 与每个 scene purpose 必须原样进入导演判断，不能另起观众承诺",
-        "上游画面方案中的观众收益与视觉论证意图得到兑现；方案可以按 Provider 能力重规划，但不能被模板通用镜头机械覆盖，也不能被当作已经验证的事实",
-        "每镜头的动作、逐秒节拍、构图、声音设计与验收条件可真实执行；脚本 onScreenText 与 soundCue 由下游继承，不得要求导演重复输出不存在的字段",
-        "素材 Provider、交付类型和能力约束完全匹配；方案费用可真实报价，费用反馈用于优先降低成本，无法达到目标时仍须给出可执行方案供创作者决定",
-        "付费前必须核对画幅与时长可交付、禁文字要求、每镜成功条件和跨镜一致性；要求同一主体或单变量对照时必须有可执行的复用或参考图依据，不能把独立文生视频的相似提示当作一致性保证；应在方案阶段缩小或改写不可控的视觉承诺",
-        "当观众承诺或核心论证依赖精确跨镜身份，而现有 Provider 没有一致性能力时，不能降为 advisory 后继续付费；必须作为 blocking 阻断，并要求导演重规划可执行叙事，使观众无需假定对象未更换",
-        "相邻镜头连续性成立，生成式画面不被伪装为现实因果、真实实验、产品效果或事件证据",
-        "系列视觉母题、角色/声音锚点、canon 与前后集连续性得到保持",
-        "返工时 visualDirectionInstruction 与 assetInstruction 都是人工授权且必须落实的修改要求；允许据此改变 visualBible、逐镜 Provider、交付类型、复用路由、query 和 generationPrompt，不得把 assetInstruction 驱动的改动判为越权，同时保留真正未受影响的镜头",
-        "返工 findings 只追踪分配给 visual-direction 的 findingId；当前节点可以说明已落实修改，但不得宣称问题已经复验通过",
+        "视觉圣经、逐镜职责与已接受构思、脚本承诺一致，有清楚的视觉推进而非风格堆砌。",
+        "Shot Spec、temporalBeats、Provider、deliveryType、提示词与成功条件彼此一致且可执行；静态不假装动态。",
+        "sourceInSeconds、母片覆盖、复用与参考图关系有效，实际使用区间完整兑现；多余生成尾部不改变成片时间轴。",
+        "真正的跨镜身份与因果要求有执行依据，独立生成和免责声明不能伪装保证；否定句中的词语不构成肯定要求。",
+        "事实证据、生成示意、正式卡片与后期文字职责分清，不混入伪标签、内部说明、虚构库存或未声明能力。",
+        "选择池内 Provider 只形成报价；质量满足后降本，无费用硬上限、提前审批要求、漏镜头或失败卡片兜底。",
+        "模板、参考语法、系列规则和上游 planningIssues 得到落实，不能要求逐字重复或擅自改变已接受收益。",
+        "rework 同时落实 visualDirectionInstruction 与 assetInstruction，仅修改授权范围并继承其余镜头；没有新审片证据不能标 verified。",
       ],
       maxIterations: this.maxReviewIterations,
-      produce: (revision, { requestId, session }) => this.client.runTaskDetailed("director-plan", {
+      produce: (revision, { requestId, session, requestOptions, preparedOperation }) => preparedOperation
+        ? this.client.observePrepared(preparedOperation, requestOptions)
+        : this.client.runTaskDetailed("director-plan", {
         ...basePayload,
         ...(revision ? { revision } : {}),
-      }, requestId, this.sessionMode === "stateless" ? undefined : session, requestOptionsForDeadline(wallClockDeadlineAtMs)),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId }) => auditClient.runTaskDetailed("role-audit", {
+      }, requestId, this.sessionMode === "stateless" ? undefined : session, { ...requestOptionsForDeadline(wallClockDeadlineAtMs), ...requestOptions }),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, requestOptions, preparedOperation }) => preparedOperation
+        ? auditClient.observePrepared(preparedOperation, requestOptions)
+        : auditClient.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
-        context: visualDirectorAuditContext(directorInput, candidate),
+        context: visualDirectorAuditContext(normalizedDirectorInput, candidate),
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
       // 当前候选与上一轮审计已经完整随请求发送，独立审计不继承历史以免输入随轮次翻倍。
-      }, requestId, undefined, requestOptionsForDeadline(wallClockDeadlineAtMs)),
+      }, requestId, undefined, { ...requestOptionsForDeadline(wallClockDeadlineAtMs), ...requestOptions }),
       validate: (value, context) => validateDirectorCandidate(value, input, context),
       ...(agentLoopCheckpoint ? { checkpoint: agentLoopCheckpoint } : {}),
     });
@@ -137,19 +147,27 @@ function directorInputForModel(
   input: Omit<VisualDirectorAgentInput, "agentLoopCheckpoint" | "selectedModelId" | "wallClockDeadlineAtMs">,
 ): typeof input {
   const rework = input.brief.rework;
-  if (!rework?.previousDirectorPlan || rework.affectedScenePositions === undefined) return input;
+  const normalizedInput = {
+    ...input,
+    brief: {
+      ...input.brief,
+      productionCapabilities: input.brief.productionCapabilities
+        ?? summarizeProductionCapabilities(input.assetProviders),
+    },
+  };
+  if (!rework?.previousDirectorPlan || rework.affectedScenePositions === undefined) return normalizedInput;
   const affectedScenes = new Set(rework.affectedScenePositions);
   assertNoUnauthorizedConfigurationDrift(
     affectedScenes,
     rework.previousDirectorPlan,
     validationFor(input),
   );
-  if (affectedScenes.size >= input.scenes.length) return input;
+  if (affectedScenes.size >= input.scenes.length) return normalizedInput;
   const previousShots = rawPlanShotsByPosition(rework.previousDirectorPlan, "Director previous plan");
   return {
-    ...input,
+    ...normalizedInput,
     brief: {
-      ...input.brief,
+      ...normalizedInput.brief,
       rework: {
         ...rework,
         affectedScenePositions: [...affectedScenes].sort((left, right) => left - right),
@@ -283,7 +301,7 @@ function previousReuseDurationInfeasible(
       query: typeof current.query === "string" ? current.query : "",
     });
     if (reuseFrom === undefined) {
-      return current !== shot && reuseDurationExceedsGeneratedLength(current, scenePosition, validation);
+      return reuseDurationExceedsGeneratedLength(shot, current, scenePosition, validation);
     }
     if (visited.has(reuseFrom)) return false;
     const source = previousShots.get(reuseFrom);
@@ -294,6 +312,7 @@ function previousReuseDurationInfeasible(
 }
 
 function reuseDurationExceedsGeneratedLength(
+  shot: Record<string, unknown>,
   root: Record<string, unknown>,
   scenePosition: number,
   validation: VisualDirectorPlanValidation,
@@ -302,13 +321,17 @@ function reuseDurationExceedsGeneratedLength(
   const providerId = typeof root.preferredProviderId === "string" ? root.preferredProviderId : undefined;
   if (!providerId) return false;
   const bounds = validation.selectedVideoModelDurationBounds?.[providerId];
-  const rootDuration = validation.sceneDurations?.[Number(root.scenePosition)];
-  const targetDuration = validation.sceneDurations?.[scenePosition];
-  if (targetDuration === undefined) return false;
-  const generatedDuration = rootDuration === undefined
-    ? bounds?.maxDurationSeconds
-    : normalizeVideoGenerationDurationSeconds(rootDuration, bounds);
-  return generatedDuration !== undefined && targetDuration > generatedDuration;
+  const sourceInSeconds = typeof shot.sourceInSeconds === "number" ? shot.sourceInSeconds : 0;
+  const requiredEndFrame = validation.sceneDurations
+    ? reuseSourceEndFrame(scenePosition, sourceInSeconds, validation.sceneDurations)
+    : undefined;
+  if (requiredEndFrame === undefined) return false;
+  try {
+    normalizeVideoGenerationDurationSeconds(requiredEndFrame / 30, bounds);
+    return false;
+  } catch (error) {
+    return error instanceof Error && error.message.includes("cannot cover the required");
+  }
 }
 
 function mergeReworkCandidateShots(
@@ -407,12 +430,16 @@ function visualDirectorAuditContext(
         audience: brief.audience,
         platform: brief.platform,
         durationSeconds: brief.durationSeconds,
+        ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
         ...(brief.viewerPromise ? { viewerPromise: brief.viewerPromise } : {}),
         ...(brief.narrativeArc ? { narrativeArc: brief.narrativeArc } : {}),
         requestedProfileId: brief.requestedProfileId,
         ...(brief.editorial ? { editorial: brief.editorial } : {}),
         ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
         ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
+        ...(brief.creativeTreatment ? { creativeTreatment: brief.creativeTreatment } : {}),
+        ...(brief.planningIssues ? { planningIssues: brief.planningIssues } : {}),
+        productionCapabilities: brief.productionCapabilities,
         ...(reworkForAudit ? { rework: reworkForAudit } : {}),
         ...(brief.rework ? {
           verificationBoundary: "findingId 仅追踪修改要求；只有后续视觉审片的新报告批准后才算 verified，当前导演审计不得宣称已复验。",
@@ -488,6 +515,7 @@ function visualDirectorAuditContext(
       })),
     },
     currentRoleContract: {
+      ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
       availableDirectorProfileIds: VISUAL_DIRECTOR_PROFILES.map(({ id }) => id),
       selectedDirectorProfile,
       assetReuse: {
@@ -496,8 +524,9 @@ function visualDirectorAuditContext(
         constraints: [
           "N 只能引用更早且可成功解析的导演镜头。",
           "多级复用始终解析到同一个根母片，不能形成循环。",
-          "复用从母片开头使用相同媒体内容，不会产生新的动作、光线变化、后续片段或画面状态。",
-          "生成视频母片的真实长度按所选模型的最短/最长时长和整数秒规则归一化；复用镜头不得更长。",
+          "视频可从母片明确的非负起点按正常速度使用；只有母片完整覆盖该源区间时才允许复用。",
+          "静态图片的 sourceInSeconds 必须为 0；所有媒体都不得循环、变速、定格或补帧凑时长。",
+          "生成视频母片的请求时长按全部直接与多级复用区间的最远终点，以及所选模型的时长规则归一化。",
         ],
       },
       timelineExecution: {
@@ -532,6 +561,7 @@ function visualDirectorAuditContext(
         ...(provider.maxDurationSeconds !== undefined ? { maxDurationSeconds: provider.maxDurationSeconds } : {}),
         ...(provider.aspectRatios ? { aspectRatios: provider.aspectRatios } : {}),
       })),
+      productionCapabilities: brief.productionCapabilities,
       economics: input.economics,
       spendApprovalBoundary: {
         enabledAssetProvidersAreAuthorizedForPlanning: true,
@@ -560,6 +590,22 @@ function visualDirectorAuditContext(
     },
     downstreamBoundary: "审查镜头计划是否能被已声明 Provider 执行；不得要求当前节点提供尚未生成或下载的真实画面，也不得要求创作者提前批准当前节点提出的付费路线。导演选择 metered Provider 只生成报价，真实调用仍由下游人工费用确认控制。AIGC 标识、内容声明、文件标记与平台披露由渲染与发布链路负责，不得成为视觉圣经或逐镜计划的通过条件。",
   };
+}
+
+function validateDirectorDurationRange(input: VisualDirectorAgentInput): void {
+  const { durationSeconds, durationRange } = input.brief;
+  if (!Number.isInteger(durationSeconds) || durationSeconds < 20 || durationSeconds > 180) {
+    throw new Error("Director brief.durationSeconds must be an integer between 20 and 180.");
+  }
+  if (!durationRange) return;
+  if (!Number.isInteger(durationRange.minSeconds) || !Number.isInteger(durationRange.maxSeconds)
+    || durationRange.minSeconds < 20 || durationRange.maxSeconds > 180
+    || durationRange.minSeconds > durationRange.maxSeconds) {
+    throw new Error("Director brief.durationRange must use ordered integer bounds between 20 and 180.");
+  }
+  if (durationSeconds < durationRange.minSeconds || durationSeconds > durationRange.maxSeconds) {
+    throw new Error("Director brief.durationSeconds must fall within durationRange.");
+  }
 }
 
 function isDownstreamDisclosureConstraint(value: string): boolean {

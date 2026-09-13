@@ -1,7 +1,7 @@
 import { ChartNoAxesCombined, ChevronDown, CircleHelp, Clapperboard, Images, Layers3, LayoutTemplate, LogOut, Radar, Search, Settings2, Sparkles, UserRound, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import type { StudioRunSummary } from "../../shared/api.js";
+import type { StudioOpportunity, StudioRunSummary, StudioTemplate } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { GuideDock } from "../onboarding/GuideDock.js";
 import { useCreatorTour } from "../onboarding/use-creator-tour.js";
@@ -13,6 +13,9 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchRuns, setSearchRuns] = useState<StudioRunSummary[]>([]);
+  const [searchTemplates, setSearchTemplates] = useState<StudioTemplate[]>([]);
+  const [searchOpportunities, setSearchOpportunities] = useState<StudioOpportunity[]>([]);
+  const [searchLoaded, setSearchLoaded] = useState(false);
   const searchDialogRef = useRef<HTMLElement>(null);
   const searchReturnFocusRef = useRef<HTMLElement | null>(null);
   const location = useLocation();
@@ -30,10 +33,16 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
       searchReturnFocusRef.current = document.activeElement;
     }
     setSearchOpen(true);
-    if (searchRuns.length === 0) {
-      void studioApi.runs().then(setSearchRuns).catch(() => undefined);
+    // 搜索范围 = 制作记录 + 选题机会 + 当前有效模板 + 功能入口；首次打开时一次性装配。
+    if (!searchLoaded) {
+      setSearchLoaded(true);
+      void Promise.all([
+        studioApi.runs().then(setSearchRuns).catch(() => undefined),
+        studioApi.templates().then((catalog) => setSearchTemplates(catalog.templates)).catch(() => undefined),
+        studioApi.opportunities().then(setSearchOpportunities).catch(() => undefined),
+      ]);
     }
-  }, [searchRuns.length]);
+  }, [searchLoaded]);
 
   const closeSearch = useCallback(() => {
     const returnFocus = searchReturnFocusRef.current;
@@ -79,6 +88,15 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
     || `${item.label} ${item.description} ${item.keywords}`.toLocaleLowerCase("zh-CN").includes(normalizedQuery)), [normalizedQuery]);
   const matchingRuns = useMemo(() => searchRuns.filter((run) => normalizedQuery
     && run.title.toLocaleLowerCase("zh-CN").includes(normalizedQuery)).slice(0, 6), [normalizedQuery, searchRuns]);
+  const matchingOpportunities = useMemo(() => searchOpportunities
+    // 只有还没进入制作的选题留在选题中心；已有制作记录的机会通过制作记录搜到。
+    .filter((item) => (item.status === "draft" || item.status === "shortlisted")
+      && !searchRuns.some((run) => run.opportunityId === item.id))
+    .filter((item) => normalizedQuery
+      && `${item.title} ${item.hook} ${item.audience}`.toLocaleLowerCase("zh-CN").includes(normalizedQuery))
+    .slice(0, 5), [normalizedQuery, searchOpportunities, searchRuns]);
+  const matchingTemplates = useMemo(() => searchTemplates.filter((item) => normalizedQuery
+    && `${item.name} ${item.description}`.toLocaleLowerCase("zh-CN").includes(normalizedQuery)).slice(0, 5), [normalizedQuery, searchTemplates]);
   return (
     <div className="app-shell studio-v3">
       <a className="skip-link" href="#main-content">跳到主要内容</a>
@@ -111,9 +129,9 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
         </div>
       </aside>
       <header className="studio-topbar">
-        <button className="studio-search-trigger" type="button" onClick={openSearch} aria-label="搜索项目、模板或功能">
+        <button className="studio-search-trigger" type="button" onClick={openSearch} aria-label="搜索项目、选题、模板或功能">
           <Search aria-hidden="true" size={17} />
-          <span>搜索项目、模板或功能</span>
+          <span>搜索项目、选题、模板或功能</span>
           <kbd>{navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl"} K</kbd>
         </button>
         <div className="studio-topbar-context">
@@ -153,8 +171,8 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
           <section ref={searchDialogRef} className="studio-search-dialog" role="dialog" aria-modal="true" aria-labelledby="studio-search-title" onKeyDown={handleSearchKeyDown} onMouseDown={(event) => event.stopPropagation()}>
             <div className="studio-search-field">
               <Search aria-hidden="true" size={19} />
-              <label className="sr-only" htmlFor="studio-global-search" id="studio-search-title">搜索项目、模板或功能</label>
-              <input id="studio-global-search" autoFocus value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="输入项目名称或功能，例如“模板”" />
+              <label className="sr-only" htmlFor="studio-global-search" id="studio-search-title">搜索项目、选题、模板或功能</label>
+              <input id="studio-global-search" autoFocus value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索制作记录、选题、模板或功能" />
               <button type="button" onClick={closeSearch} aria-label="关闭搜索"><X aria-hidden="true" size={18} /></button>
             </div>
             <div className="studio-search-results">
@@ -164,9 +182,31 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
                   <span><Clapperboard aria-hidden="true" size={16} /></span>
                   <div className="studio-search-result-copy">
                     <strong>{run.title}</strong>
-                    <small>{formatSearchRunTime(run.startedAt)} · {shortRunId(run.id)}</small>
+                    <small>{formatSearchRunTime(run.startedAt)}</small>
                   </div>
                   <small>{statusLabel(run.status)}</small>
+                </NavLink>
+              ))}
+              {matchingOpportunities.length ? <p>选题机会</p> : null}
+              {matchingOpportunities.map((item) => (
+                <NavLink key={item.id} to={opportunitySearchTarget(item)} onClick={closeSearch}>
+                  <span><Sparkles aria-hidden="true" size={16} /></span>
+                  <div className="studio-search-result-copy">
+                    <strong>{item.title}</strong>
+                    <small>{opportunityOriginLabel(item.origin)} · 待制作</small>
+                  </div>
+                  <small>去继续</small>
+                </NavLink>
+              ))}
+              {matchingTemplates.length ? <p>模板</p> : null}
+              {matchingTemplates.map((item) => (
+                <NavLink key={item.id} to={`/templates?template=${encodeURIComponent(item.id)}`} onClick={closeSearch}>
+                  <span><LayoutTemplate aria-hidden="true" size={16} /></span>
+                  <div className="studio-search-result-copy">
+                    <strong>{item.name}</strong>
+                    <small>{item.builtIn ? "内置模板" : item.status === "draft" ? "草稿" : "已发布"}</small>
+                  </div>
+                  <small>打开</small>
                 </NavLink>
               ))}
               {matchingDestinations.length ? <p>功能</p> : null}
@@ -177,7 +217,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
                   <small>{item.description}</small>
                 </NavLink>
               ))}
-              {!matchingRuns.length && !matchingDestinations.length ? <div className="studio-search-empty">没有匹配结果。换一个更短的关键词试试。</div> : null}
+              {!matchingRuns.length && !matchingOpportunities.length && !matchingTemplates.length && !matchingDestinations.length ? <div className="studio-search-empty">没有匹配的制作记录、选题机会、模板或功能。换一个更短的关键词试试。</div> : null}
             </div>
           </section>
         </div>
@@ -198,8 +238,17 @@ function formatSearchRunTime(value: string): string {
   }).format(date);
 }
 
-function shortRunId(value: string): string {
-  return `制作 ${value.length > 8 ? value.slice(-8) : value}`;
+// 选题机会按来源跳到对应入口，并用 opportunity 参数直接选中该机会。
+function opportunitySearchTarget(opportunity: StudioOpportunity): string {
+  if (opportunity.origin === "series") return `/topics?mode=series&opportunity=${encodeURIComponent(opportunity.id)}`;
+  if (opportunity.origin === "manual") return `/topics?mode=custom&opportunity=${encodeURIComponent(opportunity.id)}`;
+  return `/topics?opportunity=${encodeURIComponent(opportunity.id)}`;
+}
+
+function opportunityOriginLabel(origin: StudioOpportunity["origin"] | undefined): string {
+  if (origin === "series") return "系列";
+  if (origin === "manual") return "自有想法";
+  return "热点";
 }
 
 function AccountMenu({ username, onLogout, compact = false }: { username: string; onLogout(): Promise<void>; compact?: boolean }) {

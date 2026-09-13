@@ -94,11 +94,15 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
         "话题标签覆盖内容主题与目标受众，且没有重复、空白或无关热词",
       ],
       maxIterations: this.maxReviewIterations,
-      produce: (revision, { requestId, session }) => this.client.runTaskDetailed("publish-copy", {
+      produce: (revision, { requestId, session, requestOptions, preparedOperation }) => preparedOperation
+        ? this.client.observePrepared(preparedOperation, requestOptions)
+        : this.client.runTaskDetailed("publish-copy", {
         ...request,
         ...(revision ? { revision } : {}),
-      }, requestId, session),
-      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session }) => this.client.runTaskDetailed("role-audit", {
+      }, requestId, session, requestOptions),
+      audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session, requestOptions, preparedOperation }) => preparedOperation
+        ? this.client.observePrepared(preparedOperation, requestOptions)
+        : this.client.runTaskDetailed("role-audit", {
         role,
         iteration,
         criteria,
@@ -114,7 +118,7 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
-      }, requestId, session),
+      }, requestId, session, requestOptions),
       validate: validatePublishCopy,
       ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
     });

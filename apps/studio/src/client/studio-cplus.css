@@ -147,6 +147,12 @@
 .studio-v3 .run-failure-impact span { color: #5e6b67; font-size: 11px; line-height: 1.55; }
 .studio-v3 .run-saved-work { margin: 0; color: #69717d; font-size: 10px; }
 .studio-v3 .run-recovery-list { display: grid; gap: 5px; margin: 0; padding-left: 18px; color: #525966; font-size: 11px; line-height: 1.55; }
+.studio-v3 .task-recovery-panel { display: grid; gap: 8px; padding: 12px; border: 1px solid #d8cfae; border-radius: 10px; background: #fffaf0; }
+.studio-v3 .task-recovery-panel > p { margin: 0; color: #525966; font-size: 12px; line-height: 1.6; }
+.studio-v3 .task-recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 520px) {
+  .studio-v3 .task-recovery-actions { display: grid; grid-template-columns: 1fr; }
+}
 .studio-v3 .run-technical-diagnosis { color: #727986; font-size: 10px; }
 .studio-v3 .run-technical-diagnosis summary { width: fit-content; cursor: pointer; font-weight: 700; }
 .studio-v3 .run-technical-diagnosis code { display: block; margin-top: 7px; padding: 9px; overflow-wrap: anywhere; color: #69707b; background: #f3f4f6; border-radius: 4px; line-height: 1.55; }
@@ -2086,6 +2092,8 @@ body:has(.studio-v3) {
   border-radius: 6px;
 }
 .studio-v3 .role-configuration.is-unavailable { background: #faf6f5; border-color: #e6d8d5; }
+.studio-v3 .role-configuration.is-missing { border-color: #2f64a6; box-shadow: 0 0 0 2px rgb(47 100 166 / 22%); }
+.studio-v3 .role-missing-flag { margin-left: 7px; padding: 2px 7px; color: #ffffff; background: #2f64a6; border-radius: 999px; font-size: 9px; font-weight: 800; vertical-align: 2px; }
 .studio-v3 .role-configuration > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .studio-v3 .role-configuration > header > span { font-family: "Manrope Variable", "Noto Sans SC Variable", "PingFang SC", sans-serif; font-size: 15px; font-weight: 760; }
 .studio-v3 .role-configuration > p { min-height: 38px; margin: 0; color: #697078; font-size: 11px; line-height: 1.65; }

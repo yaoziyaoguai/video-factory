@@ -155,6 +155,33 @@ function sourceBlockedOpportunity(id: string, title: string): StudioOpportunity 
   };
 }
 
+function searchTemplate(id: string, name: string): StudioTemplate {
+  return {
+    id,
+    version: 1,
+    status: "published",
+    name,
+    description: `${name}模板`,
+    category: "knowledge",
+    platforms: ["douyin"],
+    durationSeconds: 24,
+    automationLevel: "assisted",
+    storyStructure: [
+      { id: "hook", label: "开场", purpose: "抓住注意", required: true },
+      { id: "body", label: "正文", purpose: "展开内容", required: true },
+      { id: "close", label: "收束", purpose: "留下结论", required: true },
+    ],
+    shotSlots: [{ id: "shot", beatId: "hook", purpose: "开场", durationSeconds: 4, allowedCapabilities: ["asset.search"], manualReplacement: true }],
+    visualSystem: { composition: "主体清晰", colorIntent: "自然", subtitleDensity: "medium", pacing: "measured" },
+    soundSystem: { voiceIntent: "自然可信", pace: "medium", musicIntent: "克制" },
+    qualityRules: [{ id: "facts", label: "事实", dimension: "factual", required: true, threshold: 80 }],
+    capabilityRequirements: [{ capability: "script.draft", required: true }],
+    createdAt: "2026-09-12T00:00:00.000Z",
+    updatedAt: "2026-09-12T00:00:00.000Z",
+    builtIn: false,
+  };
+}
+
 function inbox(items: StudioCandidateInboxItem[]) {
   return {
     items,
@@ -892,8 +919,8 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([{ ...runningRun, title: "窗边一杯水的六秒光影" }]);
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
-    await user.click(screen.getByRole("button", { name: "搜索项目、模板或功能" }));
-    await user.type(screen.getByRole("textbox", { name: "搜索项目、模板或功能" }), "窗边一杯水");
+    await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "窗边一杯水");
 
     expect(await screen.findByRole("link", { name: /窗边一杯水的六秒光影/ })).toHaveAttribute("href", "/projects/run-1");
   });
@@ -904,14 +931,14 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([{ ...runningRun, title: "失败的制作", status: "failed" }]);
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
-    await user.click(screen.getByRole("button", { name: "搜索项目、模板或功能" }));
-    await user.type(screen.getByRole("textbox", { name: "搜索项目、模板或功能" }), "失败的制作");
+    await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "失败的制作");
 
     expect(await screen.findByRole("link", { name: /失败的制作/ })).toHaveTextContent("失败");
     expect(screen.getByRole("link", { name: /失败的制作/ })).not.toHaveTextContent("制作中");
   });
 
-  it("distinguishes same-name rework runs with time and a short production id", async () => {
+  it("distinguishes same-name rework runs by creation time without exposing internal ids", async () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
     vi.spyOn(studioApi, "runs").mockResolvedValue([
@@ -920,13 +947,15 @@ describe("Creative OS", () => {
     ]);
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
-    await user.click(screen.getByRole("button", { name: "搜索项目、模板或功能" }));
-    await user.type(screen.getByRole("textbox", { name: "搜索项目、模板或功能" }), "同名返工作品");
+    await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "同名返工作品");
 
     const results = await screen.findAllByRole("link", { name: /同名返工作品/ });
     expect(results).toHaveLength(2);
-    expect(results[0]).toHaveTextContent("制作 rk-alpha");
-    expect(results[1]).toHaveTextContent("制作 ork-beta");
+    expect(results[0]).toHaveTextContent("09/06");
+    expect(results[1]).toHaveTextContent("09/07");
+    expect(results[0]).not.toHaveTextContent("rework-alpha");
+    expect(results[1]).not.toHaveTextContent("rework-beta");
     expect(results[0]).not.toHaveTextContent(results[1]?.textContent ?? "");
   });
 
@@ -936,16 +965,16 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
-    const trigger = screen.getByRole("button", { name: "搜索项目、模板或功能" });
+    const trigger = screen.getByRole("button", { name: "搜索项目、选题、模板或功能" });
     await user.click(trigger);
-    const search = screen.getByRole("textbox", { name: "搜索项目、模板或功能" });
+    const search = screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" });
     await user.type(search, "模板");
     await user.keyboard("{Escape}");
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
     await user.click(trigger);
-    expect(screen.getByRole("textbox", { name: "搜索项目、模板或功能" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" })).toHaveValue("");
   });
 
   it("keeps opportunity selection, evidence, and production action in one workspace", async () => {
@@ -1024,7 +1053,7 @@ describe("Creative OS", () => {
 
     await user.click(await screen.findByRole("button", { name: "新建制作" }));
 
-    expect(screen.getByRole("combobox", { name: "目标时长" })).toHaveValue("45");
+    expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("45");
   });
 
   it("uses the creator target platform instead of the opportunity source platform", async () => {
@@ -1199,7 +1228,7 @@ describe("Creative OS", () => {
     await user.click(within(dialog).getByRole("button", { name: "重新读取" }));
     expect(settingsRequest).toHaveBeenCalledTimes(2);
     expect(await screen.findByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
-    expect(screen.getByRole("combobox", { name: "目标时长" })).toHaveValue("45");
+    expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("45");
     expect(screen.queryByText(/未能读取你的创作设置/)).not.toBeInTheDocument();
   });
 
@@ -1232,7 +1261,7 @@ describe("Creative OS", () => {
     await user.click(within(dialog).getByRole("button", { name: "重新读取" }));
     expect(settingsRequest).toHaveBeenCalledTimes(2);
     expect(await screen.findByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
-    expect(screen.getByRole("combobox", { name: "目标时长" })).toHaveValue("45");
+    expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("45");
     expect(screen.queryByText(/未能读取你的创作设置/)).not.toBeInTheDocument();
   });
 
@@ -1255,7 +1284,7 @@ describe("Creative OS", () => {
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument());
-    expect(screen.getByText(/本轮收件箱还没有任何已评估热点候选/)).toBeInTheDocument();
+    expect(screen.getByText(/本轮收件箱还没有任何热点候选/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "查看缺来源的选题" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeEnabled();
     expect(screen.getByRole("link", { name: "继续已有系列" })).toHaveAttribute("href", "/topics?mode=series");
@@ -1864,6 +1893,269 @@ describe("Creative OS", () => {
     expect(screen.queryByText("推荐形态")).not.toBeInTheDocument();
   });
 
+  it("shows an honest pending-editor state once sources are complete instead of a fake zero score", async () => {
+    const user = userEvent.setup();
+    const heuristicCandidate: StudioCandidateInboxItem = {
+      ...candidate(81, "technology"),
+      title: "补齐来源后的规则保底候选",
+      providerId: "trend-heuristic-v1",
+      verification: { status: "ready", independentSources: 2, requiredSources: 2, reasons: ["常规风险候选，可进入制作区继续核验。"] },
+      editorialDecision: {
+        verdict: "skip",
+        score: 0,
+        reasons: ["当前只是热点规则保底候选，还没有经过选题总编形成具体、可拍的创作角度。"],
+        guardrails: ["等待选题总编恢复，或由创作者补齐明确受众、观看收益、两秒钩子和可执行视频形态后再评估。"],
+        pendingEditorReview: true,
+      },
+    };
+    const modelEvaluated: StudioCandidateInboxItem = {
+      ...unselectedCandidate(82),
+      title: "总编评了零分的候选",
+    };
+    render(<MemoryRouter><TopicEntryWorkspace
+      initialMode="trend"
+      selectedSeriesId={undefined}
+      inbox={inbox([heuristicCandidate, modelEvaluated])}
+      series={[]}
+      historicalRuns={[]}
+      loading={{}}
+      trendMeta={{ platformCount: 1, candidateCount: 2 }}
+      onRetry={vi.fn()}
+      onRefreshTrends={vi.fn()}
+      onAdopt={vi.fn()}
+      onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()}
+      onUpdateSeriesEpisode={vi.fn()}
+      onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()}
+      onViewProductionRecords={vi.fn()}
+      onManual={vi.fn()}
+      onImport={vi.fn()}
+    /></MemoryRouter>);
+
+    // 两条候选都不是可采用：先经过恢复面板，再进入未入选视图。
+    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看未入选（2 条）" }));
+
+    // 规则保底候选：分数芯片显示“待总编评估”，绝不把“尚未评估”投影成“总编评分 0”。
+    const heuristicRow = screen.getByRole("button", { name: `查看${heuristicCandidate.title}` });
+    const heuristicChip = heuristicRow.querySelector(".candidate-score");
+    expect(heuristicChip).toHaveTextContent("待总编评估");
+    expect(heuristicChip).not.toHaveTextContent("0");
+    await user.click(heuristicRow);
+    expect(screen.getByLabelText("内容潜力 78 分")).toBeInTheDocument();
+    expect(screen.getByText("来源已达标 · 等待总编评估")).toBeInTheDocument();
+    expect(screen.getByText("待总编评估 · 暂不可采用")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `采用候选 ${heuristicCandidate.title}` })).toHaveTextContent("等待总编评估");
+    expect(screen.queryByLabelText("总编评分 0 分")).not.toBeInTheDocument();
+
+    // 真实总编评出的 0 分仍如实显示为“总编评分 0”，不与“尚未评估”混淆。
+    await user.click(screen.getByRole("button", { name: `查看${modelEvaluated.title}` }));
+    expect(screen.getByLabelText("总编评分 0 分")).toBeInTheDocument();
+    expect(screen.getByText("暂不生产 · 0 分")).toBeInTheDocument();
+  });
+
+  it("does not claim the topic editor evaluated a rule-only round in the recovery panel", async () => {
+    const pendingFirst: StudioCandidateInboxItem = {
+      ...unselectedCandidate(91),
+      title: "规则保底候选一",
+      editorialDecision: {
+        ...unselectedCandidate(91).editorialDecision,
+        reasons: ["当前只是热点规则保底候选，还没有经过选题总编形成具体、可拍的创作角度。"],
+        pendingEditorReview: true,
+      },
+    };
+    const pendingSecond: StudioCandidateInboxItem = {
+      ...pendingFirst,
+      id: "trend-92",
+      title: "规则保底候选二",
+    };
+    render(<MemoryRouter><TopicEntryWorkspace
+      initialMode="trend"
+      selectedSeriesId={undefined}
+      inbox={inbox([pendingFirst, pendingSecond])}
+      series={[]}
+      historicalRuns={[]}
+      loading={{}}
+      trendMeta={{ platformCount: 1, candidateCount: 2 }}
+      onRetry={vi.fn()}
+      onRefreshTrends={vi.fn()}
+      onAdopt={vi.fn()}
+      onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()}
+      onUpdateSeriesEpisode={vi.fn()}
+      onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()}
+      onViewProductionRecords={vi.fn()}
+      onManual={vi.fn()}
+      onImport={vi.fn()}
+    /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
+    // 规则保底轮次不得谎称“选题总编已评估”。
+    expect(screen.getByText(/2 条热点候选由规则保底生成，还没有经过选题总编评估/)).toBeInTheDocument();
+    expect(screen.queryByText(/选题总编本轮评估了/)).not.toBeInTheDocument();
+  });
+
+  it("confirms a saved manual opportunity with its next step and a link into the custom entry", async () => {
+    const user = userEvent.setup();
+    const created: StudioOpportunity = {
+      ...opportunity,
+      id: "opp-manual-saved",
+      title: "QA自有想法：三种手机充电习惯的耗电真相",
+      origin: "manual",
+      status: "draft",
+    };
+    vi.spyOn(studioApi, "opportunities").mockImplementation(async (origin) => (origin === "manual" ? [created] : []));
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "economy-daily",
+      roleProviderDefaults: {},
+      modelDefaults: {},
+      topicStrategy: { customInstruction: "" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+    vi.spyOn(studioApi, "createOpportunity").mockResolvedValue(created);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+
+    // 先等热点收件箱完成加载并稳定在恢复面板，避免点击命中被替换的加载态按钮。
+    await waitFor(() => expect(screen.getByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "录入自己的选题" }));
+    await user.type(await screen.findByLabelText("选题标题"), created.title);
+    await user.type(screen.getByLabelText("目标受众"), "经常出门又不方便充电的通勤族");
+    await user.type(screen.getByLabelText("核心痛点"), "手机一天要充三次，不知道哪些习惯在耗电");
+    await user.type(screen.getByLabelText("开场钩子"), "这三个充电习惯，正在偷偷吃掉你的电量。");
+    await user.click(screen.getByRole("button", { name: "保存机会" }));
+
+    // 保存成功必须可见、可继续：提示 + 指向自定义入口待制作区的下一步链接。
+    expect(await screen.findByText(/已保存《QA自有想法：三种手机充电习惯的耗电真相》/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "去查看并制作" })).toHaveAttribute("href", "/topics?mode=custom&opportunity=opp-manual-saved");
+
+    // 点击链接进入自定义入口后，刚保存的机会已选中并处于待制作区。
+    await user.click(screen.getByRole("link", { name: "去查看并制作" }));
+    expect(await screen.findByRole("button", { name: new RegExp(created.title) })).toHaveClass("is-active");
+  });
+
+  it("selects the deep-linked opportunity when the custom entry is reopened", async () => {
+    const created: StudioOpportunity = {
+      ...opportunity,
+      id: "opp-deep-link",
+      title: "深链定位的机会",
+      origin: "manual",
+      status: "draft",
+    };
+    const other: StudioOpportunity = { ...created, id: "opp-other", title: "另一条机会" };
+    vi.spyOn(studioApi, "opportunities").mockImplementation(async (origin) => (origin === "manual" ? [other, created] : []));
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "economy-daily",
+      roleProviderDefaults: {},
+      modelDefaults: {},
+      topicStrategy: { customInstruction: "" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+    render(<MemoryRouter initialEntries={["/topics?mode=custom&opportunity=opp-deep-link"]}><TodayPage /></MemoryRouter>);
+
+    // 刷新或直接访问深链 URL 后，仍定位到同一个机会，而不是回落到列表第一个。
+    expect(await screen.findByRole("button", { name: /深链定位的机会/ })).toHaveClass("is-active");
+    expect(screen.getByRole("button", { name: /另一条机会/ })).not.toHaveClass("is-active");
+  });
+
+  it("finds saved topic opportunities and current templates from global search", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "templates").mockResolvedValue({
+      storeRevision: 1,
+      templates: [searchTemplate("my-review-flow", "三步复盘法")],
+      deletedBuiltIns: [],
+    });
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([{
+      ...opportunity,
+      id: "opp-searchable",
+      title: "电池耗电的三个真相",
+      origin: "manual",
+      status: "draft",
+    }]);
+    render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
+
+    await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "电池");
+
+    // 机会：按来源跳到对应入口并带上 opportunity 深链参数。
+    expect(await screen.findByRole("link", { name: /电池耗电的三个真相/ })).toHaveAttribute("href", "/topics?mode=custom&opportunity=opp-searchable");
+
+    await user.clear(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "复盘");
+
+    // 模板：跳到模板工坊并直接打开对应模板。
+    expect(await screen.findByRole("link", { name: /三步复盘法/ })).toHaveAttribute("href", "/templates?template=my-review-flow");
+  });
+
+  it("describes the real search scope when nothing matches", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 1, templates: [searchTemplate("my-review-flow", "三步复盘法")], deletedBuiltIns: [] });
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
+
+    await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "量子物理讲义");
+
+    expect(await screen.findByText("没有匹配的制作记录、选题机会、模板或功能。换一个更短的关键词试试。")).toBeInTheDocument();
+  });
+
+  it("links missing director capabilities straight to the production-roles section", () => {
+    const partialProviders = providers.filter((provider) => provider.capability !== "script.draft" && provider.capability !== "voice.synthesize");
+    render(<MemoryRouter><DirectorPanel opportunity={opportunity} providers={partialProviders} onProduce={vi.fn()} /></MemoryRouter>);
+
+    const link = screen.getByRole("link", { name: "查看缺失能力" });
+    expect(link).toHaveAttribute("href", "/resources?missing=script.draft%2Cvoice.synthesize#production-roles");
+  });
+
+  it("lands on the production-roles section and highlights the missing roles when arriving from the director panel", async () => {
+    vi.spyOn(studioApi, "providers").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSources").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSignals").mockResolvedValue([]);
+    vi.spyOn(studioApi, "localCapabilities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "voices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "economy-daily",
+      roleProviderDefaults: {},
+      modelDefaults: {},
+      topicStrategy: { customInstruction: "" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+    vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
+    render(<MemoryRouter initialEntries={["/resources?missing=script.draft,voice.synthesize#production-roles"]}><ResourcesPage /></MemoryRouter>);
+
+    // 直接落在制作分工分区，创作默认不再挡在前面（jsdom 不应用 CSS，用分区激活标记断言）。
+    expect(await screen.findByRole("heading", { name: "按角色配置生产能力" })).toBeInTheDocument();
+    expect(document.getElementById("production-roles")).toHaveAttribute("data-active", "true");
+    expect(document.getElementById("creation-defaults")).not.toHaveAttribute("data-active");
+
+    // 真正缺失的两个角色被高亮标记，其余角色不受影响。
+    const flags = screen.getAllByText("当前缺失");
+    expect(flags).toHaveLength(2);
+    expect(flags[0]?.closest("article")).toHaveTextContent("编剧");
+    expect(flags[1]?.closest("article")).toHaveTextContent("配音执行");
+
+    // 键盘焦点落到目标分区，而不是停留在页面顶部。
+    expect(document.getElementById("production-roles")).toHaveFocus();
+  });
+
   it("reports this round's source-blocked candidates in the recovery panel and opens them", async () => {
     const user = userEvent.setup();
     const blockedCandidate: StudioCandidateInboxItem = {
@@ -2253,7 +2545,7 @@ describe("Creative OS", () => {
   it("blocks production when a required node capability is unavailable", () => {
     render(<MemoryRouter><DirectorPanel opportunity={opportunity} providers={providers.filter((provider) => provider.capability !== "video.render")} onProduce={() => undefined} /></MemoryRouter>);
     expect(screen.getByRole("button", { name: "新建制作" })).toBeDisabled();
-    expect(screen.getByRole("link", { name: "查看缺失能力" })).toHaveAttribute("href", "/resources");
+    expect(screen.getByRole("link", { name: "查看缺失能力" })).toHaveAttribute("href", "/resources?missing=video.render#production-roles");
   });
 
   it("does not count a test provider as formal production readiness", () => {
@@ -2749,7 +3041,7 @@ describe("Creative OS", () => {
 
     expect(await screen.findByRole("heading", { name: "按角色配置生产能力" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "编剧首选能力" })).toHaveValue("python-template-v1");
-    expect(screen.getByText("只有确认首选请求未被受理时，其余可用能力才会依次接管。若请求结果不确定，流程会暂停核对，不会切换模型或重复生成。")).toBeInTheDocument();
+    expect(screen.getByText(/只有确认首选请求尚未开始.*连接故障.*无输出/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "去画面来源配置" })).toHaveAttribute("href", "#visual-providers");
     expect(screen.getByRole("link", { name: "去声音演员表配置" })).toHaveAttribute("href", "#voice-casting");
     expect(screen.queryByRole("combobox", { name: "画面执行首选能力" })).not.toBeInTheDocument();
@@ -2759,7 +3051,7 @@ describe("Creative OS", () => {
     const roleSection = screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section");
     expect(within(roleSection!).getByText("GPT-5.6 Terra")).toBeInTheDocument();
     expect(within(roleSection!).getByText("故障替补：GPT-5.6 Sol")).toBeInTheDocument();
-    expect(within(roleSection!).getByText("中途画面预检优先使用首选模型，只有确认请求未受理时才切换；结果不确定会暂停核对。最终成片由 GLM 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。")).toBeInTheDocument();
+    expect(within(roleSection!).getByText(/中途画面预检优先使用首选模型.*连接故障.*最终成片由 GLM 与 Codex/)).toBeInTheDocument();
     expect(screen.getByText("独立质量复核")).toBeInTheDocument();
     expect(screen.getByText("独立复核 · 最多三轮")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));

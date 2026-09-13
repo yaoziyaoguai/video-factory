@@ -1,15 +1,18 @@
 import { AlertCircle, Check, LayoutTemplate, Pencil, Plus, RefreshCw, RotateCcw, Save, Send, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import type { StudioProvider, StudioTemplate, StudioTemplateExperimentScorecard } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { providerModelLabel } from "../presentation.js";
 import { TemplateGallery, templateCategoryLabel } from "../templates/TemplateGallery.js";
 
 export function TemplatesPage() {
+  const [searchParams] = useSearchParams();
+  // 全局搜索等入口通过 ?template=<id> 深链直接打开对应模板。
   const [templates, setTemplates] = useState<StudioTemplate[]>([]);
   const [deletedBuiltIns, setDeletedBuiltIns] = useState<StudioTemplate[]>([]);
   const [revision, setRevision] = useState(0);
-  const [selectedId, setSelectedId] = useState("knowledge-explainer");
+  const [selectedId, setSelectedId] = useState(() => searchParams.get("template") ?? "knowledge-explainer");
   const [draft, setDraft] = useState<StudioTemplate>();
   const [savedDraft, setSavedDraft] = useState<string>();
   const [loading, setLoading] = useState(true);
@@ -124,9 +127,7 @@ export function TemplatesPage() {
       setDraft(next ? structuredClone(next) : undefined);
       setSavedDraft(next ? JSON.stringify(next) : undefined);
       setDeleteConfirmOpen(false);
-      setNotice(deleted.builtIn
-        ? "模板已从生产目录隐藏；需要时可在“已删除的内置模板”中恢复。"
-        : "模板已删除；历史制作仍保留当时使用的模板快照。");
+      setNotice(undefined);
     } catch (caught) {
       setNotice(`删除失败：${errorMessage(caught)}`);
     } finally {

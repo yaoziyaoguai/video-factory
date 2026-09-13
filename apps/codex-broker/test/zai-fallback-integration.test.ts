@@ -21,6 +21,10 @@ const brief: ScreenwriterAgentInput["brief"] = {
   nicheSlug: "fallback-integration",
   platform: "douyin",
   durationSeconds: 24,
+  productionCapabilities: {
+    assetProviders: [],
+    editing: { sourceRangeReuse: true, staticEditorialCard: false },
+  },
 };
 
 it("starts a backup after an accepted ZAI request definitively ends with an upstream outage", async () => {

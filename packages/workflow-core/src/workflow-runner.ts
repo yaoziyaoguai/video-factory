@@ -1350,6 +1350,32 @@ export class WorkflowRunner {
         nodeRun.artifactIds.push(artifact.id);
       }
 
+      // 幂等恢复合同：execute 内已登记的全局产物经受控校验后归属到当前节点。
+      // 不存在或属于其他节点的 id 必须 fail closed（走上方节点失败语义），
+      // 不得把别人的产物挂进本节点的 output version。
+      // 挂载必须原子：先完整校验全部 id（含去重），全部合法后才统一追加——
+      // 混合输入中后一个 id 非法时，合法 id 也不得残留在失败节点的 artifactIds 里。
+      const preRegisteredArtifactIds: string[] = [];
+      for (const artifactId of result.preRegisteredArtifactIds ?? []) {
+        const artifact = context.artifacts.find((candidate) => candidate.id === artifactId);
+        if (!artifact) {
+          throw new Error(`pre-registered artifact '${artifactId}' does not exist`);
+        }
+        if (artifact.producer?.nodeId !== node.id) {
+          throw new Error(
+            `pre-registered artifact '${artifactId}' belongs to node '${artifact.producer?.nodeId ?? "unknown"}'`,
+          );
+        }
+        if (!preRegisteredArtifactIds.includes(artifactId)) {
+          preRegisteredArtifactIds.push(artifactId);
+        }
+      }
+      for (const artifactId of preRegisteredArtifactIds) {
+        if (!nodeRun.artifactIds.includes(artifactId)) {
+          nodeRun.artifactIds.push(artifactId);
+        }
+      }
+
       if (result.output !== undefined) {
         nodeRun.output = result.output;
       }

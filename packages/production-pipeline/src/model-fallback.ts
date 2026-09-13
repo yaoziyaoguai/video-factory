@@ -29,7 +29,7 @@ export function isTransientRoleAuditProviderFailure(error: unknown): error is Ro
 function hasFallbackEligibleProviderFailure(error: unknown): boolean {
   for (const candidate of errorChain(error)) {
     if (!(candidate instanceof CodexBridgeError)) continue;
-    if (candidate.stage === "uncertain") return false;
+    if (candidate.stage === "uncertain" || candidate.stage === "rejected" || candidate.stage === "conflict") return false;
     if (TERMINAL_MODEL_FAILURE_PATTERN.test(candidate.message)) return false;
     if (candidate.failureDetails?.category === "authentication"
       || candidate.failureDetails?.category === "invalid_request"
