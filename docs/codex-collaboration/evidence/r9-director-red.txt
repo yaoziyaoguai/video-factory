@@ -1,0 +1,89 @@
+✖ R9-C01: stock_video permits one continuous five-second state (1.410541ms)
+✖ R9-C01: generated_video permits one continuous five-second state (0.124708ms)
+✖ R9-C02: two beats do not excuse an uncovered final second (0.481208ms)
+✔ R9-C03: a gap remains invalid (0.7345ms)
+✔ R9-C04: ordinary complete multi-beat footage remains valid (0.198416ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 2
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 539.144542
+
+✖ failing tests:
+
+test at docs/codex-collaboration/evidence/r9-director-contract.test.mjs:37:3
+✖ R9-C01: stock_video permits one continuous five-second state (1.410541ms)
+  AssertionError [ERR_ASSERTION]: Got unwanted exception.
+  Actual message: "shots[0].temporalBeats must contain at least two timed beats."
+      at TestContext.<anonymous> (file:///Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r9-director-contract.test.mjs:39:12)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.start (node:internal/test_runner/test:1262:17)
+      at startSubtestAfterBootstrap (node:internal/test_runner/harness:387:17) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: Error: shots[0].temporalBeats must contain at least two timed beats.
+        at validateTemporalBeats (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/visual-director.ts:710:11)
+        at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/visual-director.ts:381:7)
+        at Array.map (<anonymous>)
+        at validateVisualDirectorPlan (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/visual-director.ts:349:29)
+        at file:///Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r9-director-contract.test.mjs:39:31
+        at getActual (node:assert:580:5)
+        at strict.doesNotThrow (node:assert:748:32)
+        at TestContext.<anonymous> (file:///Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r9-director-contract.test.mjs:39:12)
+        at Test.runInAsyncScope (node:async_hooks:226:14)
+        at Test.run (node:internal/test_runner/test:1402:25),
+    expected: undefined,
+    operator: 'doesNotThrow',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r9-director-contract.test.mjs:37:3
+✖ R9-C01: generated_video permits one continuous five-second state (0.124708ms)
+  AssertionError [ERR_ASSERTION]: Got unwanted exception.
+  Actual message: "shots[0].temporalBeats must contain at least two timed beats."
+      at TestContext.<anonymous> (file:///Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r9-director-contract.test.mjs:39:12)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: Error: shots[0].temporalBeats must contain at least two timed beats.
+        at validateTemporalBeats (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/visual-director.ts:710:11)
+        at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/visual-director.ts:381:7)
+        at Array.map (<anonymous>)
+        at validateVisualDirectorPlan (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/visual-director.ts:349:29)
+        at file:///Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r9-director-contract.test.mjs:39:31
+        at getActual (node:assert:580:5)
+        at strict.doesNotThrow (node:assert:748:32)
+        at TestContext.<anonymous> (file:///Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r9-director-contract.test.mjs:39:12)
+        at Test.runInAsyncScope (node:async_hooks:226:14)
+        at Test.run (node:internal/test_runner/test:1402:25),
+    expected: undefined,
+    operator: 'doesNotThrow',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r9-director-contract.test.mjs:43:1
+✖ R9-C02: two beats do not excuse an uncovered final second (0.481208ms)
+  AssertionError [ERR_ASSERTION]: Missing expected exception.
+      at TestContext.<anonymous> (file:///Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r9-director-contract.test.mjs:48:10)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: undefined,
+    operator: 'throws',
+    diff: 'simple'
+  }
