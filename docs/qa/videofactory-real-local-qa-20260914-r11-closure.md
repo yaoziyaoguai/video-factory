@@ -396,3 +396,181 @@
 | --- | --- | --- |
 | 成片终审帧预算与主张类型不匹配 | **未修，需裁决** | 终审走 `_select_render_timeline_samples`，每镜恰 3 帧是**刻意的可审计设计**；但契约含时间性主张 → 8/17 条只能报 `not_observed` 退回人工。同源问题刚在素材侧修好（本轮 `review_media.py` 提交），成片侧未动 —— 动它会改变审片分数，故不改 |
 | 两模型对同批帧结论相反 | **已复核，不据此付费返工** | `gpt-5.6-sol` 报场景4 `critical/failed`（缺蒸汽/暖边）；操作员逐帧复核场景4 三张采样帧（9875/10750/11625ms，落在方案 `cuts` 场景4 区间 9500–12000ms 内），三帧**均有**杯沿暖色亮边与细薄蒸汽丝 → 证据与模型结论冲突时先复核，不先花钱 |
+
+---
+
+## 花费闸门假阳性修复 + GLM 流式（revision 20 在途）
+
+完整事实与代码位置见 `docs/codex-collaboration/RESULT.md` §10–§13，此处只列结论与证据。
+
+### 假阳性花费闸门（报价与执行两套判据）—— **已修**
+
+| 项目 | 结果 | 证据 |
+| --- | --- | --- |
+| 根因 | 报价按**整份脚本+方案的字节指纹**判复用，执行按**逐条素材请求身份指纹**判复用 → 单镜换素材即让全部付费镜重新计入报价 → 次数预算已耗尽 → `reason="attempts"` → 按设计无授权按钮 → 用户卡死 | `production-pipeline.ts:4449+` vs `generative-asset-worker.ts:2723-2726` |
+| 修复 | 把执行期的判据前移到报价：worker 只读取证 `forecastPaidAssetSpend`，宿主 `forecastReusableAssetQuoteItemIds` → `provenReusableItemIds`；报价与执行共用同一份实现，结构上不再分叉 | `RESULT.md` §10 |
+| 确定性用例 | worker ×2、宿主 ×2 全通过（含"只改免费镜字节 ⇒ 该付费镜移出报价"与"请求身份真变 ⇒ 留在报价"两个方向） | `generative-asset-worker.test.ts` / `production-pipeline.test.ts` |
+| mutation 校验 | 两轮均证明用例能捕获目标缺陷（改指纹 / 删调用），且源码已完全复原 | `RESULT.md` §10 |
+| 回归 | **857 tests / 856 pass / 1 skipped / 0 fail** | 正确 Node（v26.8.1）下的 `production-pipeline` + `workflow-core` 全量 |
+| fail closed | 未削弱：执行期 `estimatedCost > 0 && maxCostCny <= 0` 与 `itemCreateBudgets` 仍在 | 同上 |
+
+### GLM 非流式实测与流式修复（②）—— **代码已改并构建，未重启部署**
+
+| 项目 | 结果 | 证据 |
+| --- | --- | --- |
+| 实测（真实调用） | r20 素材阶段 5 笔已完成 GLM 调用，`firstOutputEventMs` **恒等于** `providerWaitMs`（288 663 / 157 739 / 281 443 / 262 801 / **471 781** ms） | broker 幂等记录 trace |
+| 含义 | 整包响应下等待期无可观测事件 → "长思考"与"连接卡死"在证据上不可区分，只能等满 20 min 整体超时 | 同上 |
+| 修复 | `stream: true` + SSE 读取器；`firstOutputEventMs` 变真实首事件耗时；新增首事件期限（默认 10 min，心跳不重置）；路由按 content-type 而非参数 | `apps/codex-broker/src/zai-code-plan-executor.ts` |
+| 质量约束 | **未降模型、未降 thinking、未减证据量** —— 改的只是等待期是否可观测 | 同上 |
+| 确定性用例 | 新增/更新 6 个，并**当场否掉我 3 个错误实现**（绝对时刻当耗时 / `releaseLock` 顶掉诊断 / 期限只盖首分片） | `zai-code-plan-executor.test.ts`；`RESULT.md` §11 |
+| 门禁 | broker 219/219、broker typecheck 0、studio typecheck 0、studio 全量 405+540 全通过 | 见 `RESULT.md` §11 |
+| **未验证** | 真实 GLM 在 `stream: true` 下的首事件实测；Provider 是否接受该参数；10 min 期限相对实测最长 472 s 的余量 | 需重启 broker；在途有已付费真实调用，不能打断 |
+
+### 待裁决 B（终审帧预算 vs 时间性主张）—— **操作员推荐：本次不改**
+
+3 帧/镜与合同 `motion` 需 >3 帧的结构性错配**是刻意的诚实设计**（不可判的主张必须记 `not_observed` 并走 `inspect_existing_media`，不能把"采样不够"写成"作品不成立"）。改动只会让**部分镜头**获得 motion 判定能力并改变审片结果，需真实终审验证；本片 7 场景不受影响。已写明重新评估的触发条件，见 `RESULT.md` §12。
+
+### r20 终态（已结束）
+
+- r20（`run-f8e2635f` rev 20）**已 `failed`**，`assets` 节点 03:42:53Z → 04:13:24Z。授权生效后 `actualCostCny: 0`、`meteredAttemptCount: 0` ⇒ **★ 实际付费增量 ¥0.00**，镜头 3、6 均 `carriedForward: true`（未重买）。完整核验见 `checks/step-r20-authorize-reuse.txt`。
+- 失败原因不是花费，而是下节记录的并发媒体预处理冲突。r20 既已结束，"不重建 dist / 不重启 broker"的约束随之解除。
+
+---
+
+## 试片双模型复审的并发媒体预处理冲突（r20 真实失败根因）—— **已修**
+
+### 现象
+
+r20 `assets` 节点失败，`run.json` 原文：
+
+> 镜头 6 已生成，但试片审查暂未完成，后续付费生成已停止。重试时会复用该镜头并恢复审查。试片双模型复审尚未完成：**gpt-5.6-sol 调用失败**。重试只会继续未完成的模型分支。
+
+界面上操作员只能看到 **"调用失败"** —— 这正是 `publicModelFailure()` 的兜底分支，即"错误链里没有任何可识别特征"的信号。
+
+### 先排除三类常见解释
+
+| 候选解释 | 排除依据 |
+| --- | --- |
+| 模型输出错误 | gpt 分支的请求**根本没发出去**：openai 幂等库 11:44 之后无任何记录 |
+| 提示词 / 验证合同矛盾 | 该分支尚未进入提示词组装，合同校验无从触发 |
+| 传输恢复错误 | 无请求即无传输；broker 侧无对应任务 |
+
+### 证据链（六条，全部实测）
+
+1. `asset-pilot-reviews/91cd47f2…/`（场景 6 证据目录）**只有 GLM 的 `checkpoint-0d872417…json`**，没有 gpt 的 `checkpoint-419255f2…json`，也没有 `review.json` ⇒ gpt 分支死在 `runRoleAgentLoop` 之前。
+2. 循环之前唯一能失败的路径是 `preparePayload()` → `PythonReviewMediaPreprocessor.prepare()`。
+3. **Python 层并发复现**：临时根 `/tmp/vf-media-race-probe/`（**未触碰真实 run 目录**）6 组并发对里 2 组有一个进程死于
+   `OSError: [Errno 66] Directory not empty: '.asset-review-media-8aigc3lv' -> 'asset_review_media'`（`review_media.py:832 _publish_directory`），且**无残留 backup 目录** ⇒ 命中 `had_output == False` 的交错分支。
+4. **Node 层闭环**：同一份输入 6 轮并发里 1 轮得到
+   `Visual-review media preprocessing failed. The source video and local paths were not sent to the client.` → 操作员侧即 **"调用失败"**，与 r20 报告**逐字一致**。
+5. 失败率与时序相关（Python 2/6、Node 1/6），解释了"同一次运行里场景 3 过、场景 6 挂"。
+6. r20 素材阶段 03:42–04:13Z 确有 gpt 分支进来过，否则不会在失败记录里留下 `gpt-5.6-sol` 这个名字。
+
+⇒ 结论：**既不是模型输出错误，也不是提示词/合同矛盾，也不是传输恢复错误，而是本地媒体预处理的并发写冲突，加上错误被裸 `catch` 吞掉。**
+
+### 根因
+
+双分支复审在同一进程内**并发**调用同一个媒体预处理器，两次调用**身份相同**。于是两个 Python 子进程各自建临时 stage 目录，又先后把 stage `os.replace` 到**同一个** `<runRoot>/asset_review_media`；交错时后者以 `Directory not empty` 退出。而 `review-media-preprocessor.ts` 的裸 `catch` 把退出码与 stderr 全丢掉，只留一句泛化消息 —— 于是一个本地文件系统竞态伪装成了"模型调用失败"。
+
+### 修复
+
+| # | 内容 | 位置 |
+| --- | --- | --- |
+| 1（主修） | `prepare()` 拆为入口 + `prepareFresh()`；按**预处理身份**（`runRoot` / `assetPlanPath` / `videoPath` / `renderManifestPath` / `scenePositions` / `scriptPath` / `executablePlanPath`）做 **in-flight 去重**，`settle` 即删、**不做跨次缓存**；每个调用方拿 `structuredClone` 副本，保住既有 BG-08「分支内原地改写不泄漏给另一分支」不变式 | `apps/studio/src/server/review-media-preprocessor.ts` |
+| 2（可诊断性） | 裸 `catch` → 错误消息带**机器产生的失败分类**（`exit code N` / `terminated by SIGx` / `timed out after 600s`）；子进程 stderr（可能含本地绝对路径）**只进服务端日志**（默认 `console.error`，本地部署落在 `.local/runtime/…/studio.log`），错误消息里**一个子进程字节都不带**，既有"不外泄本地路径"的断言原样保留 | 同上 |
+| 3（明确不做） | 不给 `review_media.py::_publish_directory` 加"容忍并发发布方"的补丁。唯一可行语义（发现目标已存在就接受对方产物）在**两个不同审查**撞车时会**静默发布错误证据**，属于必须避免的隐性错误。多进程限制登记为已知约束，靠调用方按身份串行化 | `src/video_factory/review_media.py`（未改） |
+
+### 为什么这不是特例补丁
+
+去重键是**内容无关的预处理身份**，不是"这一条片子的场景 6"。任何题材、任何镜头数、任何模型组合走同一条路径；合并的是"同一份证据的并发请求"这一通用情形，并且**只合并同时进行的**：顺序到达的同身份请求仍各跑一次（素材变了必须重新采帧）。
+
+### 确定性用例（新增 3 个）
+
+| 用例 | 断言 | 修复前 |
+| --- | --- | --- |
+| 并发相同请求只跑一次子进程、两个调用方各拿一份独立副本 | 子进程计数 = 1；两份 payload 内容相等但对象不同；改写其一不影响其二 | **RED**：`actual: 2, expected: 1` |
+| 不同身份各跑一次、且 settle 之后不复用 | 并发不同身份 = 2 个子进程；顺序重发同身份 = 第 3 个子进程 | GREEN（防"过度合并 / 变成缓存"的反向护栏） |
+| 失败分类对操作员可见、真实原因只留在服务端 | 错误消息含 `exit code 23` 且不含 `harness.root` 与 stderr 内容；注入的服务端 sink 恰好收到 1 条、含真实 stderr 与失败命令 basename | **RED**：消息里只有泛化句，无任何分类 |
+
+**mutation 校验**：把源码临时还原到修复前（`git checkout --`），2 个用例转 RED 且报错逐字命中目标缺陷；复原后 15/15 GREEN。
+
+### 门禁
+
+| 检查 | 结果 |
+| --- | --- |
+| `tsc -p tsconfig.server.json` / `tsconfig.client.json` | 0 错误 |
+| studio 全量（`vitest run` + `node --test`） | vitest 405/405；node --test 543 pass / 0 fail |
+| `npm run test:ts` | **867 tests / 866 pass / 1 skipped / 0 fail** |
+| `npm run test:broker`（含 `build:pipeline`） | **219/219** |
+| `npm run studio:build` | 成功；`dist/server/server/review-media-preprocessor.js` 内可 grep 到修复 |
+| 质量门槛 | **未删断言、未降分、未加题材特判、未削弱任何 fail-closed** |
+
+---
+
+## 修复后的受控复验（r21）：原失败消失，主线被一次**合法**的双模型否决拦在场景 6
+
+复验脚本：`harness/step-r21-retry-pilot-review.mjs`；逐字输出：`checks/step-r21-retry-pilot-review.txt`。
+方式：对 r20 那条失败节点发一次 `POST /api/runs/:runId/nodes/assets/retry`（即产品自己的"重试该步骤"按钮），不做任何人工干预。
+
+### 复验前的判据设计（为什么这次算"复验"而不是"重做"）
+
+r20 的错误逐字写着"试片审查暂未完成……重试时会复用该镜头并恢复审查"，且试片证据目录里只有 glm 分支的 checkpoint。所以这次只应补跑 gpt 那一个分支，**一份素材都不该重买**。据此定三条判据，任一不成立即记为失败：
+
+1. 实际付费增量必须为 ¥0.00；
+2. 场景素材文件哈希逐字节不变（复用的是同一个文件，不是重买了一个同名文件）；
+3. gpt 分支要么补跑成功，要么给出可定位的新原因——不允许再退回"调用失败"。
+
+### 逐字结果（三条判据全中）
+
+| 项 | 复验前 | 复验后 |
+| --- | --- | --- |
+| run 状态 | `failed` revision 20 | `rejected` revision 21 |
+| metered 花费 | ¥17.00（3 笔） | **¥17.00（3 笔）** |
+| 素材 attempt | `attempt-3` | `attempt-4` |
+| 场景 1–7 素材哈希 | — | **0 个变动**（`scene_03…59c7735c`、`scene_04…5086504d`、`scene_05…f2b061c7`、`scene_06…9551ebba` 逐一相同） |
+| `91cd47f2` 试片证据 | glm `true`｜gpt **`false`**｜结论 **`false`** | glm `true`｜gpt **`true`**｜结论 **`true`** |
+
+- ★ **实际付费增量 ¥0.00**（判据 1 成立）
+- ★ **素材变动场景数 0**（判据 2 成立）
+- ★ **gpt 分支补跑完成**（判据 3 成立）——r20 那句"gpt-5.6-sol 调用失败"**已消失**
+
+补跑后的报告自身也记下了两个分支都到齐，不再依赖 checkpoint 文件的时有时无（那正是我此前误判过的地方）：
+
+```
+"actualModels": [
+  { "providerId": "zai-bigmodel-api", "modelId": "glm-5.3-flash" },
+  { "providerId": "openai",          "modelId": "gpt-5.6-sol"  }
+]
+```
+
+### 但结果是 `assets = rejected`：一次**合法的**双模型否决，不是故障
+
+这必须与 r20 严格区分：r20 是"两个分支有一个根本没跑起来"；这次是两个分支**都跑完了**，并且**结论相反**。
+
+- 采样：`mode: "scene_sequence"`，24 帧覆盖场景 6 整条 4.5 秒素材（94ms → 4406ms，约 188ms 间隔）。**两个模型看的是同一批帧**，证据完全一致。
+- `glm-5.3-flash`（`satisfied`，2344ms 起）：认为停步后"肩线与头部朝向墙面光影轻微调整"。
+- `gpt-5.6-sol`（`failed`，`severity: critical`，`nextAction: rework_asset`，3656–4406ms）：认为"主体已经停住，但头部与肩线直至结尾基本保持同一朝向，未形成可辨认的轻转向墙面光影"。
+- 合并取保守侧：`recommendation = "reject"`，`confidence 0.78`。
+
+### 操作员零成本复核（沿用场景 4 的先例：证据与模型结论冲突时先看画面，不先花钱）
+
+逐帧读了 24 帧中的 6 帧（`scene-06-12/14/17/19/21/23`，跨越两个主张窗口），**每一帧都是同一个静态背影：肩线正对镜头保持不动，头部朝向在帧间只有生成噪声级的微抖，读不出一次有方向的"转向"**。`scene-06-19/21/23`（即 gpt 主张的 3656–4406ms 窗口）三帧姿势几乎重合，期间只有背景行人继续穿过。
+
+**方案本身确实要求这个转向**——不是我替它加的判据：
+
+```
+"visual_prompt": "…人物在一面带树影的明亮墙边明确减速，停住约一秒，肩线或头部轻轻转向墙上的光影…"
+"success_criteria": ["同一连续镜头完整覆盖快走、减速、停住和轻转四个阶段", …]
+```
+
+**结论：gpt-5.6-sol 的否决有画面依据，这是一次真实的素材缺陷（素材没兑现它自己方案里的成功判据），不是模型误判、不是 r20 那类被误报成"调用失败"的本地故障。** 因此**不**按场景 4 的先例走"登记冲突、不据此返工"——场景 4 那次是模型结论与画面证据相左，这次是画面证据支持否决。
+
+### 状态
+
+| 结论 | 判定 |
+| --- | --- |
+| 并发媒体预处理修复让 r20 的失败分支跑通 | **通过** |
+| 付费增量 ¥0.00 / 素材 0 变动（未重买已生成素材） | **通过** |
+| 原"gpt-5.6-sol 调用失败"消失 | **通过** |
+| 主线恢复到成片 | **阻塞**：场景 6 素材未通过试片双模型复审，需重做该镜素材并重新报价 |
+| 本次复验推翻了"gpt 从不写 checkpoint"这一旧判断 | 已更正：该文件时有时无，判据改用 `review.json` + `reviewScope.actualModels` |

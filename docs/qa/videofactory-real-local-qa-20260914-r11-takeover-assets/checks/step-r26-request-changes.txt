@@ -1,0 +1,11 @@
+=== 改方案前：{"status":"needs_human","revision":0,"metered":0,"node":"needs_human"} ===
+  已勾选 镜头 4
+  已勾选 镜头 6
+=== 已发送改方案请求，等待重出草稿 ===
+    [15s] {"status":"running","revision":1,"metered":0,"node":"running"}
+
+=== 改方案后：{"status":"needs_human","revision":1,"metered":0,"node":"needs_human"} ===
+★ 付费增量 ¥-17.00（改方案不应花钱）
+
+  blockingIssues: [{"target":"source","scenePositions":[4],"reason":"图库候选不足：该镜头没有达到自动采用语义阈值的候选","requiredChange":"调整检索词，改用已启用的生成或复用路线，或人工补充合适素材；也可以停止本次制作。"}]
+  intervention reason: 当前分镜方案需要你决定：素材条件无法满足已确认的画面路线，系统已保留方案且不会自动改写。
