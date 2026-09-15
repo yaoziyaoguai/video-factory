@@ -296,7 +296,8 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(body.reasoning_effort, "max");
     assert.deepEqual(body.thinking, { type: "enabled", clear_thinking: false });
     assert.deepEqual(body.response_format, { type: "json_object" });
-    assert.equal(body.stream, false);
+    // 流式是契约的一部分：等待期若没有可观测事件，"模型在思考"与"连接已卡死"就无法区分。
+    assert.equal(body.stream, true);
     assert.doesNotMatch(JSON.stringify(body), new RegExp(API_KEY));
     const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
     assert.equal(messages[0]?.role, "user");
@@ -1343,5 +1344,183 @@ describe("ZaiCodePlanExecutor", () => {
     });
 
     await assert.rejects(() => executor.runTask(visualReviewTask()), /timed out/);
+  });
+
+  it("measures the first output event on an SSE stream and assembles deltas split across chunks", async () => {
+    const payload = JSON.stringify(validReport());
+    const encoder = new TextEncoder();
+    // 故意把 JSON 在中间切开，证明跨分片的行缓冲与 delta 累加都是真的而不是一次整包读取。
+    const frames: Array<{ delayMs: number; text: string }> = [
+      { delayMs: 0, text: ": keep-alive\n\n" },
+      { delayMs: 0, text: `data: ${JSON.stringify({ choices: [{ delta: { content: payload.slice(0, 40) } }] })}\n\n` },
+      { delayMs: 150, text: `data: ${JSON.stringify({ choices: [{ delta: { content: payload.slice(40) } }] })}\n\n` },
+      {
+        delayMs: 150,
+        text: `data: ${JSON.stringify({
+          choices: [{ delta: {}, finish_reason: "stop" }],
+          usage: {
+            prompt_tokens: 1_200,
+            completion_tokens: 3_400,
+            total_tokens: 4_600,
+            completion_tokens_details: { reasoning_tokens: 2_700 },
+          },
+        })}\n\n`,
+      },
+      { delayMs: 150, text: "data: [DONE]\n\n" },
+    ];
+    const fetchFn: typeof fetch = async (_input, init) => new Response(new ReadableStream({
+      start(controller) {
+        let index = 0;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const push = (): void => {
+          const frame = frames[index];
+          index += 1;
+          if (frame === undefined) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(encoder.encode(frame.text));
+          timer = setTimeout(push, frame.delayMs);
+        };
+        push();
+        init?.signal?.addEventListener("abort", () => {
+          if (timer !== undefined) clearTimeout(timer);
+          controller.error(init.signal?.reason);
+        }, { once: true });
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream", "x-request-id": "zai-streamed-request" } });
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn,
+      timeoutMs: 5_000,
+    });
+
+    const result = await executor.runTask(visualReviewTask());
+
+    assert.deepEqual(JSON.parse(result.output), validReport());
+    assert.equal(result.trace?.finishReason, "stop");
+    assert.equal(result.trace?.promptTokens, 1_200);
+    assert.equal(result.trace?.completionTokens, 3_400);
+    assert.equal(result.trace?.totalTokens, 4_600);
+    assert.equal(result.trace?.reasoningTokens, 2_700);
+    assert.equal(result.trace?.requestIdHash, createHash("sha256").update("zai-streamed-request").digest("hex"));
+    const firstOutputEventMs = result.trace?.firstOutputEventMs;
+    const providerWaitMs = result.trace?.providerWaitMs;
+    assert.equal(typeof firstOutputEventMs, "number");
+    assert.equal(typeof providerWaitMs, "number");
+    // 首字节测得出来且显著早于整体时长：这正是"模型在长时间思考"与"连接已经死在等"的区分依据。
+    assert.ok(
+      (firstOutputEventMs ?? 0) + 100 < (providerWaitMs ?? 0),
+      `expected the first output event (${firstOutputEventMs} ms) well before the whole wait (${providerWaitMs} ms)`,
+    );
+    assert.doesNotMatch(JSON.stringify(result.trace), new RegExp(API_KEY));
+  });
+
+  it("fails fast when an SSE stream never produces an output event", async () => {
+    const encoder = new TextEncoder();
+    let aborted = false;
+    const fetchFn: typeof fetch = async (_input, init) => new Response(new ReadableStream({
+      start(controller) {
+        // 只发心跳、从不出字：连接看起来还活着，但已经没有任何产出。
+        const timer = setInterval(() => controller.enqueue(encoder.encode(": keep-alive\n\n")), 10);
+        init?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          clearInterval(timer);
+          controller.error(init.signal?.reason);
+        }, { once: true });
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8" } });
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn,
+      timeoutMs: 5_000,
+      firstOutputEventTimeoutMs: 60,
+    });
+    const startedAt = Date.now();
+
+    await assert.rejects(
+      () => executor.runTask(visualReviewTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.match(error.message, /no output event within 60 ms/);
+        assert.equal(error.transient, true);
+        assert.equal(error.failureKind, "model_provider_no_output");
+        assert.equal(error.outcomeUncertain, true);
+        assert.equal(error.details?.category, "timeout");
+        assert.equal(error.details?.reasonCode, "response_first_output_timeout");
+        assert.equal(error.details?.providerId, "zai-bigmodel-api");
+        assert.equal(error.details?.modelId, "glm-5.3-flash");
+        assert.equal(error.details?.executionLayer, "provider_transport");
+        assert.equal(error.details?.headersReceived, true);
+        assert.equal(error.details?.remoteQueryable, false);
+        assert.ok((error.details?.providerWaitMs ?? 0) >= 60);
+        return true;
+      },
+    );
+
+    // 卡死必须在整体超时之前暴露，否则等待期又变回不可观测。
+    assert.ok(Date.now() - startedAt < 1_000);
+    assert.equal(aborted, true);
+  });
+
+  it("treats a stream that ends without content as provider no-output", async () => {
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => new Response("data: [DONE]\n\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(scriptDraftTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.transient, false);
+        assert.equal(error.failureKind, "model_provider_no_output");
+        assert.equal(error.details?.reasonCode, "no_output");
+        return true;
+      },
+    );
+  });
+
+  it("rejects a stream frame that is not a data event", async () => {
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => new Response(
+        'event: ping\ndata: {"choices":[{"delta":{"content":"{}"}}]}\n\n',
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(visualReviewTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.transient, false);
+        assert.equal(error.details?.category, "invalid_output");
+        assert.equal(error.details?.reasonCode, "output_contract");
+        return true;
+      },
+    );
+  });
+
+  it("keeps a whole JSON response on the envelope path even when its body looks like SSE", async () => {
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => new Response(
+        'data: {"choices":[{"delta":{"content":"{}"}}]}\n\n',
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    });
+
+    await assert.rejects(
+      () => executor.runTask(visualReviewTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.details?.reasonCode, "invalid_json");
+        return true;
+      },
+    );
   });
 });

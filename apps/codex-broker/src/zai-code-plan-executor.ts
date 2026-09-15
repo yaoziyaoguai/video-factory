@@ -29,6 +29,11 @@ import {
 
 const ZAI_CODING_PLAN_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
 const DEFAULT_TIMEOUT_MS = 1_200_000;
+/**
+ * 首个输出事件的等待上限。它是"连接还在不在"的判据，不是生成预算：
+ * 取整体超时的一半，既能让卡死的连接早于整体超时暴露，也不会截断正常的长时间思考。
+ */
+const DEFAULT_FIRST_OUTPUT_EVENT_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_TOKENS = 65_536;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_CONTRACT_REPAIR_OUTPUT_BYTES = 64 * 1024;
@@ -44,6 +49,7 @@ export interface ZaiCodePlanExecutorOptions {
   fetchFn?: typeof fetch;
   effort?: string;
   timeoutMs?: number;
+  firstOutputEventTimeoutMs?: number;
   now?: () => number;
 }
 
@@ -54,6 +60,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
   private readonly dispatcher: Dispatcher;
   private readonly effort: string;
   private readonly timeoutMs: number;
+  private readonly firstOutputEventTimeoutMs: number;
   private readonly textModelId: string;
   private readonly visualModelId: string;
   private readonly now: () => number;
@@ -80,6 +87,8 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     this.fetchFn = options.fetchFn ?? (undiciFetch as unknown as typeof fetch);
     this.effort = options.effort ?? "max";
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.firstOutputEventTimeoutMs = options.firstOutputEventTimeoutMs
+      ?? Math.min(DEFAULT_FIRST_OUTPUT_EVENT_TIMEOUT_MS, this.timeoutMs);
     this.dispatcher = new Agent({
       headersTimeout: this.timeoutMs,
       bodyTimeout: this.timeoutMs,
@@ -142,7 +151,8 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
           top_p: 0.95,
           max_tokens: DEFAULT_MAX_TOKENS,
           response_format: { type: "json_object" },
-          stream: false,
+          // 流式：等待期必须有可观测事件，否则"思考中"与"连接卡死"无法区分。
+          stream: true,
         }),
         signal: controller.signal,
         dispatcher: this.dispatcher,
@@ -166,18 +176,47 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
         );
       }
       const requestIdDiagnostics = requestIdHashFor(response);
-      const raw = await readBoundedResponse(response);
-      const providerWaitMs = elapsedMs(requestStartedAt, this.now());
-      const validationStartedAt = this.now();
-      const envelope = responseEnvelope(raw, (reasonCode) => ({
+      const envelopeFailureDetails = (reasonCode: "invalid_json" | "output_contract") => ({
         ...invalidOutputDetails(
           this.identity.providerId,
           modelId,
-          providerWaitMs,
+          elapsedMs(requestStartedAt, this.now()),
           reasonCode,
         ),
         ...requestIdDiagnostics,
-      }));
+      });
+      // Provider 是否按 SSE 回包由它自己的 content-type 决定：忽略 stream 参数而整包返回时，
+      // 仍按原路径解析，不把两种合法行为中的任何一种当成错误。
+      const envelope = isEventStreamResponse(response)
+        ? await readStreamedCompletion(response, {
+          elapsed: () => elapsedMs(requestStartedAt, this.now()),
+          firstOutputEventTimeoutMs: this.firstOutputEventTimeoutMs,
+          abort: (reason) => controller.abort(reason),
+          failureDetails: envelopeFailureDetails,
+          onFirstOutputEventTimeout: () => new CodexExecutorError(
+            `ZAI Chat Completion produced no output event within ${this.firstOutputEventTimeoutMs} ms.`,
+            true,
+            {
+              failureKind: "model_provider_no_output",
+              details: {
+                category: "timeout",
+                reasonCode: "response_first_output_timeout",
+                providerId: this.identity.providerId,
+                modelId,
+                providerWaitMs: elapsedMs(requestStartedAt, this.now()),
+                executionLayer: "provider_transport",
+                headersReceived: true,
+                localExecutionEnded: true,
+                remoteQueryable: false,
+                ...requestIdDiagnostics,
+              },
+              outcomeUncertain: true,
+            },
+          ),
+        })
+        : await readEnvelope(await readBoundedResponse(response), envelopeFailureDetails);
+      const providerWaitMs = elapsedMs(requestStartedAt, this.now());
+      const validationStartedAt = this.now();
       const responseDiagnostics = {
         ...requestIdDiagnostics,
         ...envelope.diagnostics,
@@ -318,7 +357,8 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
           modelId,
           reasoningEffort,
           providerWaitMs,
-          firstOutputEventMs: providerWaitMs,
+          // 流式下这是真实的首个输出事件耗时；整包响应无从测得分段事件，只能退回总耗时。
+          firstOutputEventMs: envelope.firstOutputEventMs ?? providerWaitMs,
           toolMs: 0,
           validationMs: elapsedMs(validationStartedAt, this.now()),
           modelAttemptCount: requestAttempt,
@@ -658,6 +698,173 @@ async function readErrorCode(response: Response): Promise<string | undefined> {
     reader.releaseLock();
   }
   return responseErrorCode(Buffer.concat(chunks).toString("utf8"));
+}
+
+/**
+ * 流式响应的读取结果。两种传输（SSE 与整包 JSON）都归一到同一个形状，
+ * 下游的合同校验、修复与 trace 才不必各写一份。
+ */
+interface ZaiCompletionRead {
+  content: string | undefined;
+  diagnostics: ZaiResponseDiagnostics;
+  /** 首个 Provider 输出事件的耗时；整包响应下无从测得分段事件，因此缺省。 */
+  firstOutputEventMs?: number;
+}
+
+/**
+ * 读取 SSE 流式补全。
+ *
+ * 为什么必须流式：整包响应下等待期没有任何可观测事件，trace 里的 firstOutputEventMs
+ * 只能等于 providerWaitMs，于是"模型在长时间思考"与"连接已经死在等"在证据上无法区分，
+ * 只能等满整体超时。改成流式后首字节可测，卡死也有独立判据。
+ *
+ * 判据只针对第一个输出事件：思考多长是模型的事，不该被这里限制；整体时长仍由 timeoutMs 管。
+ * 期限从开始读响应体算起、且心跳不重置它——只发 keep-alive 却始终不出字的连接同样属于卡死，
+ * 若按"空闲"计时，这种连接会一直骗过判据直到整体超时。
+ */
+async function readStreamedCompletion(
+  response: Response,
+  options: {
+    /** 相对本次请求起点的耗时。首事件时间必须是耗时而不是绝对时刻，否则 trace 无法解读。 */
+    elapsed: () => number;
+    firstOutputEventTimeoutMs: number;
+    /** 超过这个时间没有收到任何输出事件就判定为卡死；返回该情况下要抛出的错误。 */
+    onFirstOutputEventTimeout: () => CodexExecutorError;
+    abort: (reason: Error) => void;
+    failureDetails: (reasonCode: "invalid_json" | "output_contract") => CodexExecutorFailureDetails;
+  },
+): Promise<ZaiCompletionRead> {
+  if (!response.body) {
+    throw new CodexExecutorError("ZAI Chat Completion returned an empty stream.", false, {
+      details: options.failureDetails("output_contract"),
+    });
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const deadline = firstOutputEventDeadline(options);
+  let buffer = "";
+  let content = "";
+  let received = 0;
+  let lastUsage: Record<string, unknown> | undefined;
+  let finishReason: string | undefined;
+  let firstOutputEventMs: number | undefined;
+  try {
+    while (true) {
+      const chunk = firstOutputEventMs === undefined
+        ? await Promise.race([reader.read(), deadline.expired])
+        : await reader.read();
+      if (chunk.done) break;
+      received += chunk.value.byteLength;
+      if (received > MAX_RESPONSE_BYTES) {
+        throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false);
+      }
+      buffer += decoder.decode(chunk.value, { stream: true });
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).replace(/\r$/, "");
+        buffer = buffer.slice(newline + 1);
+        // 空行与以 ':' 开头的心跳（keep-alive）注释都不承载数据。
+        if (line && !line.startsWith(":")) {
+          if (!line.startsWith("data:")) {
+            throw new CodexExecutorError("ZAI Chat Completion stream contained a non-data event.", false, {
+              details: options.failureDetails("output_contract"),
+            });
+          }
+          const payload = line.slice(5).trim();
+          if (payload !== "[DONE]") {
+            const event = parseStreamEvent(payload, options);
+            if (firstOutputEventMs === undefined) {
+              firstOutputEventMs = options.elapsed();
+              deadline.clear();
+            }
+            const choice = Array.isArray(event.choices) ? event.choices[0] : undefined;
+            if (isRecord(choice)) {
+              const delta = isRecord(choice.delta) ? choice.delta : undefined;
+              if (typeof delta?.content === "string") content += delta.content;
+              if (typeof choice.finish_reason === "string" && choice.finish_reason.length > 0) {
+                finishReason = choice.finish_reason;
+              }
+            }
+            if (isRecord(event.usage)) lastUsage = event.usage;
+          }
+        }
+        newline = buffer.indexOf("\n");
+      }
+    }
+  } finally {
+    deadline.clear();
+    // 首事件超时路径上仍有一次读在途，此时 releaseLock 会抛 TypeError 并顶掉真正的失败原因；
+    // 先取消（在途读会以 done 收尾并被清空），再释放锁。
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  return {
+    content: content === "" ? undefined : content,
+    diagnostics: responseDiagnostics(
+      lastUsage ? { usage: lastUsage } : {},
+      finishReason ? { finish_reason: finishReason } : {},
+    ),
+    ...(firstOutputEventMs !== undefined ? { firstOutputEventMs } : {}),
+  };
+}
+
+/** 首个输出事件的绝对期限；之后的间隔由整体 timeoutMs 与 bodyTimeout 负责。 */
+function firstOutputEventDeadline(options: {
+  firstOutputEventTimeoutMs: number;
+  onFirstOutputEventTimeout: () => CodexExecutorError;
+  abort: (reason: Error) => void;
+}): { expired: Promise<never>; clear: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      // 顺序要紧：先让期限带着真实判据落地，再中断连接。反过来的话，中断会让在途的那次读
+      // 先以中断原因拒绝，Promise.race 就用那个原因结算，真正的诊断被顶掉。
+      const failure = options.onFirstOutputEventTimeout();
+      reject(failure);
+      options.abort(failure);
+    }, options.firstOutputEventTimeoutMs);
+  });
+  // 首个事件已经到达时这个 Promise 会被 clear 掉、永远不落地；空 catch 只是兜住这种情形。
+  expired.catch(() => undefined);
+  return {
+    expired,
+    clear: () => {
+      if (timer !== undefined) clearTimeout(timer);
+    },
+  };
+}
+
+function parseStreamEvent(
+  payload: string,
+  options: { failureDetails: (reasonCode: "invalid_json" | "output_contract") => CodexExecutorFailureDetails },
+): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    throw new CodexExecutorError("ZAI Chat Completion stream event is not valid JSON.", false, {
+      details: options.failureDetails("invalid_json"),
+    });
+  }
+  if (!isRecord(parsed)) {
+    throw new CodexExecutorError("ZAI Chat Completion stream event is not an object.", false, {
+      details: options.failureDetails("output_contract"),
+    });
+  }
+  return parsed;
+}
+
+function isEventStreamResponse(response: Response): boolean {
+  return (response.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream");
+}
+
+/** 整包 JSON 响应归一到与流式相同的形状；这里没有分段事件可测，所以不给首事件时间。 */
+function readEnvelope(
+  raw: string,
+  failureDetails: (reasonCode: "invalid_json" | "output_contract") => CodexExecutorFailureDetails,
+): ZaiCompletionRead {
+  const envelope = responseEnvelope(raw, failureDetails);
+  return { content: envelope.content, diagnostics: envelope.diagnostics };
 }
 
 async function readBoundedResponse(response: Response): Promise<string> {
