@@ -66,6 +66,24 @@ export interface ProductionVoiceDirection {
   masteringPreset: ProductionMasteringPreset;
 }
 
+export type ProductionArticleReadStatus = "read" | "partial" | "title_only" | "blocked" | "failed";
+
+/** 由 Studio 服务端保存并投影的热点正文快照；客户端不能自行声明已核实。 */
+export interface ProductionArticleSourceSnapshot {
+  sourceId: string;
+  originalUrl: string;
+  finalUrl: string;
+  pageTitle: string;
+  fetchedAt: string;
+  publishedAt?: string;
+  contentSha256?: string;
+  extractorVersion: string;
+  readStatus: ProductionArticleReadStatus;
+  reason?: string;
+  paragraphs: Array<{ id: string; text: string }>;
+  truncated: boolean;
+}
+
 export interface VoiceDoesNotFitConflict {
   code: "VOICE_DOES_NOT_FIT";
   scenePosition: number;
@@ -174,6 +192,8 @@ export interface ProductionReworkFinding {
   startTimecodeMs?: number;
   endTimecodeMs?: number;
   scenePosition?: number;
+  /** 这条问题要靠哪类证据判定；见 VisualReviewFinding.claimType。缺失表示旧版报告，不代表 static。 */
+  claimType?: "static" | "motion" | "non_visual";
   evidenceStatus?: "satisfied" | "failed" | "not_observed" | "not_applicable";
   evidenceFrameSha256?: string | null;
   nextAction?: "inspect_existing_media" | "replan_upstream" | "rework_asset" | "none";
@@ -242,6 +262,8 @@ export interface ProductionWorkflowFeatures {
   executablePlan?: boolean;
   /** joint-v1 共同创作规划标记：仅由新制作入口显式写入，parser 不为缺失字段补标。 */
   creativePlanning?: "joint-v1";
+  /** 新制作强制启用的三阶段用户确认合同。 */
+  creativeReview?: "user-confirmed-v1";
 }
 
 export type ProductionModelSelectionSource = "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
@@ -336,19 +358,32 @@ export interface ProductionBrief {
   referenceVideo?: ProductionReferenceVideo;
   director?: ProductionDirectorDirection;
   economics: ProductionEconomics;
+  budgetIntentionCny?: number;
   spendFeedback?: ProductionSpendFeedback[];
   voiceDirection: ProductionVoiceDirection;
   editorial?: ProductionEditorialDirection;
   visualProof?: string;
+  visualIntent?: string;
   visualPlan?: ProductionVisualPlan;
   seriesContext?: ProductionSeriesContext;
   creationContext?: {
     origin: "trend" | "series" | "manual";
     opportunityId: string;
   };
+  articleSources?: ProductionArticleSourceSnapshot[];
   rework?: ProductionReworkContext;
   taskContractDigests?: Partial<Record<"visual-review" | "role-audit" | "creative-treatment", string>>;
 }
+
+const PRODUCTION_BRIEF_INPUT_KEYS = new Set([
+  "protocolVersion", "title", "angle", "audience", "nicheSlug", "durationSeconds", "durationRange",
+  "platform", "reviewMode", "runPurpose", "providers", "models", "modelSelectionSources", "workflowFeatures",
+  "referenceVideo", "director", "economics", "spendFeedback", "voiceDirection", "editorial", "visualProof",
+  "visualIntent", "visualPlan", "seriesContext", "creationContext", "rework", "taskContractDigests",
+  "articleSources", "budgetIntentionCny",
+  // 模板字段只为旧调用方提供明确的弃用剥离；它们不会进入有效 brief。
+  "template", "templateSnapshot",
+]);
 
 export function parseBrief(value: unknown): ProductionBrief {
   if (!isRecord(value)) {
@@ -359,6 +394,8 @@ export function parseBrief(value: unknown): ProductionBrief {
       `Unsupported brief protocolVersion: ${String(value.protocolVersion)}; expected ${BRIEF_PROTOCOL_VERSION}.`,
     );
   }
+  const unknownField = Object.keys(value).find((key) => !PRODUCTION_BRIEF_INPUT_KEYS.has(key));
+  if (unknownField) throw new Error(`Brief field '${unknownField}' is not allowed.`);
 
   const providers = requireRecord(value.providers, "providers");
   const models = parseModelSelections(value.models);
@@ -367,18 +404,19 @@ export function parseBrief(value: unknown): ProductionBrief {
   const referenceVideo = parseReferenceVideo(value.referenceVideo);
   const director = parseDirectorDirection(value.director, providers);
   const economics = parseEconomics(value.economics);
+  const budgetIntentionCny = value.budgetIntentionCny === undefined ? undefined
+    : boundedNumber(value.budgetIntentionCny, "budgetIntentionCny", 0, 100_000, false);
   const spendFeedback = parseSpendFeedback(value.spendFeedback);
   const voiceDirection = parseVoiceDirection(value.voiceDirection);
   const editorial = parseEditorialDirection(value.editorial);
   const visualProof = value.visualProof === undefined ? undefined : requireString(value.visualProof, "visualProof");
+  const visualIntent = value.visualIntent === undefined ? undefined : optionalBoundedText(value.visualIntent, "visualIntent", 1000);
   const visualPlan = parseProductionVisualPlan(value.visualPlan);
   const seriesContext = parseProductionSeriesContext(value.seriesContext);
   const creationContext = parseCreationContext(value.creationContext);
+  const articleSources = parseProductionArticleSources(value.articleSources);
   const rework = parseReworkContext(value.rework);
   const taskContractDigests = parseTaskContractDigests(value.taskContractDigests);
-  const templateSnapshot = value.templateSnapshot === undefined
-    ? undefined
-    : parseProductionTemplateSnapshot(value.templateSnapshot);
   // joint-v1 拓扑必然编译可执行方案：缺 durationRange 或导演配置在合同层 fail closed，
   // 不得静默降级回旧规划流程。该检查先于 executablePlan 的通用检查：joint-v1 总是同时
   // 携带 executablePlan，先报更具体的拓扑标记。
@@ -427,7 +465,6 @@ export function parseBrief(value: unknown): ProductionBrief {
     platform: requireProductionPlatform(value.platform),
     reviewMode: value.reviewMode,
     runPurpose: value.runPurpose ?? "production",
-    ...(templateSnapshot ? { templateSnapshot } : {}),
     providers: {
       script: requireString(providers.script, "providers.script"),
       ...(director ? { director: requireString(providers.director, "providers.director") } : {}),
@@ -446,16 +483,110 @@ export function parseBrief(value: unknown): ProductionBrief {
     ...(referenceVideo ? { referenceVideo } : {}),
     ...(director ? { director } : {}),
     economics,
+    ...(budgetIntentionCny !== undefined ? { budgetIntentionCny } : {}),
     ...(spendFeedback.length ? { spendFeedback } : {}),
     voiceDirection,
     ...(editorial ? { editorial } : {}),
     ...(visualProof ? { visualProof } : {}),
+    ...(visualIntent ? { visualIntent } : {}),
     ...(visualPlan ? { visualPlan } : {}),
     ...(seriesContext ? { seriesContext } : {}),
     ...(creationContext ? { creationContext } : {}),
+    ...(articleSources.length ? { articleSources } : {}),
     ...(rework ? { rework } : {}),
     ...(taskContractDigests ? { taskContractDigests } : {}),
   };
+}
+
+export function parseProductionArticleSources(value: unknown): ProductionArticleSourceSnapshot[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 16) {
+    throw new Error("articleSources must contain at most 16 entries.");
+  }
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const source = requireRecord(entry, `articleSources[${index}]`);
+    const allowed = new Set([
+      "sourceId", "originalUrl", "finalUrl", "pageTitle", "fetchedAt", "publishedAt", "contentSha256",
+      "extractorVersion", "readStatus", "reason", "paragraphs", "truncated",
+    ]);
+    const unknown = Object.keys(source).find((key) => !allowed.has(key));
+    if (unknown) throw new Error(`articleSources[${index}] field '${unknown}' is not allowed.`);
+    const sourceId = requireString(source.sourceId, `articleSources[${index}].sourceId`).trim();
+    if (!sourceId || sourceId.length > 128 || seen.has(sourceId)) {
+      throw new Error(`articleSources[${index}].sourceId must be unique and at most 128 characters.`);
+    }
+    seen.add(sourceId);
+    const readStatus = source.readStatus;
+    if (!(["read", "partial", "title_only", "blocked", "failed"] as const).includes(readStatus as ProductionArticleReadStatus)) {
+      throw new Error(`articleSources[${index}].readStatus is invalid.`);
+    }
+    const originalUrl = requireHttpUrl(source.originalUrl, `articleSources[${index}].originalUrl`);
+    const finalUrl = requireHttpUrl(source.finalUrl, `articleSources[${index}].finalUrl`);
+    const fetchedAt = requireIsoTimestamp(source.fetchedAt, `articleSources[${index}].fetchedAt`);
+    const publishedAt = source.publishedAt === undefined
+      ? undefined
+      : requireIsoTimestamp(source.publishedAt, `articleSources[${index}].publishedAt`);
+    const contentSha256 = source.contentSha256 === undefined
+      ? undefined
+      : requireArticleSha256(source.contentSha256, `articleSources[${index}].contentSha256`);
+    const paragraphsValue = source.paragraphs;
+    if (!Array.isArray(paragraphsValue) || paragraphsValue.length > 128) {
+      throw new Error(`articleSources[${index}].paragraphs must contain at most 128 entries.`);
+    }
+    const paragraphIds = new Set<string>();
+    let characterCount = 0;
+    const paragraphs = paragraphsValue.map((paragraph, paragraphIndex) => {
+      const item = requireRecord(paragraph, `articleSources[${index}].paragraphs[${paragraphIndex}]`);
+      if (Object.keys(item).some((key) => key !== "id" && key !== "text")) {
+        throw new Error(`articleSources[${index}].paragraphs[${paragraphIndex}] contains an unsupported field.`);
+      }
+      const id = requireString(item.id, `articleSources[${index}].paragraphs[${paragraphIndex}].id`).trim();
+      const text = requireString(item.text, `articleSources[${index}].paragraphs[${paragraphIndex}].text`).trim();
+      if (!id || id.length > 64 || paragraphIds.has(id) || !text || text.length > 8_000) {
+        throw new Error(`articleSources[${index}].paragraphs[${paragraphIndex}] is invalid.`);
+      }
+      paragraphIds.add(id);
+      characterCount += text.length;
+      return { id, text };
+    });
+    if (characterCount > 8_000) throw new Error(`articleSources[${index}] exceeds the 8000 character excerpt limit.`);
+    const hasBody = readStatus === "read" || readStatus === "partial";
+    if (hasBody !== Boolean(contentSha256) || (hasBody && paragraphs.length === 0) || (!hasBody && paragraphs.length > 0)) {
+      throw new Error(`articleSources[${index}] body evidence does not match readStatus.`);
+    }
+    if (typeof source.truncated !== "boolean" || (readStatus === "partial") !== source.truncated) {
+      throw new Error(`articleSources[${index}].truncated does not match readStatus.`);
+    }
+    return {
+      sourceId,
+      originalUrl,
+      finalUrl,
+      pageTitle: requireString(source.pageTitle, `articleSources[${index}].pageTitle`).trim(),
+      fetchedAt,
+      ...(publishedAt ? { publishedAt } : {}),
+      ...(contentSha256 ? { contentSha256 } : {}),
+      extractorVersion: requireString(source.extractorVersion, `articleSources[${index}].extractorVersion`).trim(),
+      readStatus: readStatus as ProductionArticleReadStatus,
+      ...(source.reason === undefined ? {} : { reason: requireString(source.reason, `articleSources[${index}].reason`).trim() }),
+      paragraphs,
+      truncated: source.truncated,
+    };
+  });
+}
+
+function requireHttpUrl(value: unknown, label: string): string {
+  const raw = requireString(value, label);
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new Error(`${label} must be a valid URL.`); }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`${label} must use HTTP or HTTPS.`);
+  return url.toString();
+}
+
+function requireArticleSha256(value: unknown, label: string): string {
+  const text = requireString(value, label);
+  if (!/^[a-f0-9]{64}$/.test(text)) throw new Error(`${label} must be a sha256 digest.`);
+  return text;
 }
 
 function parseDurationRange(value: unknown, durationSeconds: number): DurationRange | undefined {
@@ -707,6 +838,8 @@ export function parseProductionReworkFindings(
       }
       return target as ProductionReworkFinding["targetNodeIds"][number];
     }))];
+    const claimType = optionalEnum(finding.claimType,
+      ["static", "motion", "non_visual"] as const, `${itemField}.claimType`);
     const evidenceStatus = optionalEnum(finding.evidenceStatus,
       ["satisfied", "failed", "not_observed", "not_applicable"] as const, `${itemField}.evidenceStatus`);
     const nextAction = optionalEnum(finding.nextAction,
@@ -740,6 +873,7 @@ export function parseProductionReworkFindings(
       ...(startTimecodeMs === undefined ? {} : { startTimecodeMs }),
       ...(endTimecodeMs === undefined ? {} : { endTimecodeMs }),
       ...(scenePosition === undefined ? {} : { scenePosition }),
+      ...(claimType ? { claimType } : {}),
       ...(evidenceStatus ? { evidenceStatus } : {}),
       ...(evidenceFrameSha256 !== undefined ? { evidenceFrameSha256 } : {}),
       ...(nextAction ? { nextAction } : {}),
@@ -1029,11 +1163,18 @@ function parseWorkflowFeatures(value: unknown): ProductionWorkflowFeatures {
   if (input.creativePlanning !== undefined && input.creativePlanning !== "joint-v1") {
     throw new Error("workflowFeatures.creativePlanning must be the literal 'joint-v1' when provided.");
   }
+  if (input.creativeReview !== undefined && input.creativeReview !== "user-confirmed-v1") {
+    throw new Error("workflowFeatures.creativeReview must be the literal 'user-confirmed-v1' when provided.");
+  }
+  if (input.creativeReview === "user-confirmed-v1" && input.creativePlanning !== "joint-v1") {
+    throw new Error("workflowFeatures.creativeReview requires creativePlanning 'joint-v1'.");
+  }
   return {
     assetSemanticRank: input.assetSemanticRank,
     referenceGrammar: input.referenceGrammar,
     ...(input.executablePlan === true ? { executablePlan: true } : {}),
     ...(input.creativePlanning === "joint-v1" ? { creativePlanning: "joint-v1" } : {}),
+    ...(input.creativeReview === "user-confirmed-v1" ? { creativeReview: "user-confirmed-v1" } : {}),
   };
 }
 
@@ -1283,6 +1424,20 @@ function requireString(value: unknown, field: string): string {
     throw new Error(`${field} must be a non-empty string.`);
   }
   return value.trim();
+}
+
+function boundedText(value: unknown, field: string, maximum: number): string {
+  const normalized = requireString(value, field);
+  if (normalized.length > maximum) throw new Error(`${field} must contain at most ${maximum} characters.`);
+  return normalized;
+}
+
+function optionalBoundedText(value: unknown, field: string, maximum: number): string | undefined {
+  if (typeof value !== "string") throw new Error(`${field} must be a string.`);
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  if (normalized.length > maximum) throw new Error(`${field} must contain at most ${maximum} characters.`);
+  return normalized;
 }
 
 function requireStringArray(value: unknown, field: string): string[] {

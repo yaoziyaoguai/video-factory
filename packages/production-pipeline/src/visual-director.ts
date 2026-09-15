@@ -1,12 +1,12 @@
 import {
   PRODUCTION_DIRECTOR_PROFILE_IDS,
   type ProductionDirectorProfileId,
+  type ProductionArticleSourceSnapshot,
   type ProductionReworkFinding,
   type ProductionSeriesContext,
   type ProductionSpendFeedbackReason,
   type ProductionVisualPlan,
 } from "./contracts.js";
-import type { ProductionBlueprint } from "@video-factory/template-core";
 import { quantizeDurationsToFrames, type DurationRange } from "./executable-timeline.js";
 import type { CodexTaskExecution } from "./codex-chat.js";
 import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
@@ -15,6 +15,8 @@ import type { VideoAspectRatio } from "./video-generation.js";
 import type { CreativeTreatment } from "./creative-treatment.js";
 import type { PlanningIssue } from "./creative-planning.js";
 import type { ProductionCapabilities } from "./production-capabilities.js";
+import type { CreativeDiscussionAgentInput } from "./codex-creative-discussion.js";
+import type { CreativeDiscussionResult } from "./creative-review.js";
 import {
   assetReuseSourceScenePosition,
   normalizeVideoGenerationDurationSeconds,
@@ -215,23 +217,41 @@ export interface VisualDirectorAgentInput {
     audience: string;
     platform: string;
     durationSeconds: number;
+    budgetIntentionCny?: number;
     durationRange?: DurationRange;
     viewerPromise?: string;
     narrativeArc?: string;
     requestedProfileId: ProductionDirectorProfileId;
-    templateBlueprint?: ProductionBlueprint;
     editorial?: {
       verdict: "produce_video" | "produce_image_story";
       reasons: string[];
       guardrails: string[];
     };
     visualProof?: string;
+    visualIntent?: string;
     visualPlan?: ProductionVisualPlan;
     referenceGrammar?: ShotGrammar;
     seriesContext?: ProductionSeriesContext;
+    articleSources?: ProductionArticleSourceSnapshot[];
     creativeTreatment?: CreativeTreatment;
     planningIssues?: PlanningIssue[];
+    planningRevision?: {
+      previousPlan: VisualDirectorPlan;
+      previousPlanDigest: string;
+      affectedScenePositions: number[];
+      availabilityHistory: Array<{
+        identityDigest: string;
+        reasonCode?: string;
+        scenePositions?: number[];
+        beatIds?: string[];
+        evidence: NonNullable<PlanningIssue["availabilityBlocker"]>["evidence"];
+      }>;
+    };
     productionCapabilities?: ProductionCapabilities;
+    voiceTiming?: {
+      rate: number;
+      pauseScale: number;
+    };
     rework?: {
       sourceRunId: string;
       visualDirectionInstruction: string;
@@ -283,6 +303,8 @@ export interface VisualDirectorAgentInput {
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
   agentLoopCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
   wallClockDeadlineAtMs?: number;
+  /** R11 创作确认：初稿只生成；确认时只审传入的当前稿。 */
+  creativeReviewExecution?: { mode: "draft" } | { mode: "check"; candidate: VisualDirectorPlan };
 }
 
 export interface VisualAssetProviderCapability {
@@ -303,6 +325,7 @@ export interface VisualDirectorAgent {
   modelId?: string;
   plan(input: VisualDirectorAgentInput): Promise<unknown>;
   planDetailed?(input: VisualDirectorAgentInput): Promise<CodexTaskExecution<unknown>>;
+  discussDetailed?(input: CreativeDiscussionAgentInput): Promise<CodexTaskExecution<CreativeDiscussionResult>>;
 }
 
 export function validateVisualDirectorPlan(value: unknown, options: VisualDirectorPlanValidation): VisualDirectorPlan {
@@ -428,9 +451,9 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       }
     }
     const generatedDelivery = deliveryType === "generated_image" || deliveryType === "generated_video";
-    if (options.sceneVisualStrategies?.[scenePosition] === "stock" && generatedDelivery) {
-      throw new Error(`Director plan scene ${scenePosition} requires real stock footage and cannot be changed to generated media.`);
-    }
+    // 编剧的 visual_strategy 是获取路线建议，不等于用户锁定的真实性合同。真正需要实证的
+    // 镜头已由 authenticityPolicy=evidence 与允许 Provider 池共同约束；普通 illustrative 镜头
+    // 可以由视觉导演在用户启用的路线内从图库改为生成，避免图库无候选时形成不可执行死路。
     if (generatedDelivery) {
       assertGeneratedVisualDoesNotClaimEvidence([
         optionalText(shot.subject, `shots[${index}].subject`),
@@ -700,23 +723,24 @@ function validateTemporalBeats(
   beats: ShotTemporalBeat[] | undefined,
   duration: number,
   field: string,
-  deliveryType: VisualAssetDeliveryType,
+  _deliveryType: VisualAssetDeliveryType,
 ): void {
   if (!Number.isFinite(duration) || duration <= 0) throw new Error(`${field} scene duration is invalid.`);
-  const isStatic = deliveryType === "stock_image"
-    || deliveryType === "generated_image"
-    || deliveryType === "editorial_card";
-  if (!beats || beats.length < (isStatic ? 1 : 2)) {
-    throw new Error(`${field} must contain at least ${isStatic ? "one" : "two"} timed beat${isStatic ? "" : "s"}.`);
+  if (!beats || beats.length < 1 || beats.length > 10) {
+    throw new Error(`${field} must contain 1 to 10 timed beats.`);
   }
+  const frameToleranceSeconds = 1 / 30;
   let previousEnd = 0;
   beats.forEach((beat, index) => {
     if (beat.endSeconds <= beat.startSeconds) throw new Error(`${field}[${index}] must end after it starts.`);
-    if (beat.startSeconds < previousEnd) throw new Error(`${field}[${index}] overlaps or is out of order.`);
-    if (Math.abs(beat.startSeconds - previousEnd) > 1e-6) throw new Error(`${field} must be continuous without gaps.`);
-    if (beat.endSeconds > duration) throw new Error(`${field}[${index}] exceeds the ${duration}s scene duration.`);
+    if (beat.startSeconds < previousEnd - frameToleranceSeconds) throw new Error(`${field}[${index}] overlaps or is out of order.`);
+    if (Math.abs(beat.startSeconds - previousEnd) > frameToleranceSeconds) throw new Error(`${field} must be continuous without gaps.`);
+    if (beat.endSeconds > duration + frameToleranceSeconds) throw new Error(`${field}[${index}] exceeds the ${duration}s scene duration.`);
     previousEnd = beat.endSeconds;
   });
+  if (Math.abs(previousEnd - duration) > frameToleranceSeconds) {
+    throw new Error(`${field} must cover the complete ${duration}s scene duration.`);
+  }
 }
 
 function parseTemporalBeats(value: unknown, field: string): ShotTemporalBeat[] | undefined {

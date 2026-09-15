@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { NodeVersionConflictError, type Artifact, type WorkflowRun } from "@video-factory/workflow-core";
+import { NodeVersionConflictError, type Artifact, type HumanReviewDisposition, type WorkflowRun } from "@video-factory/workflow-core";
 import type { WorkerResponse } from "../src/index.js";
 import * as pipeline from "../src/index.js";
 
@@ -229,17 +229,41 @@ async function assertCandidateFailureTrace(
 const visualProducerContractDigest = pipeline.REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["visual-review"];
 const visualAuditContractDigest = pipeline.REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["role-audit"];
 
+/** 审片报告里当前这一轮的全部问题，按内容摘要给出稳定键。 */
+function currentReviewItems(run: WorkflowRun<pipeline.ProductionBrief>) {
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === "visual-review");
+  const report = (node?.output as { report?: pipeline.VisualReviewReport } | undefined)?.report;
+  return (report?.findings ?? []).map((finding) => ({
+    itemKey: pipeline.visualReviewFindingKey(finding),
+    finding,
+  }));
+}
+
+/**
+ * 模拟操作员在成片终审上的表态：默认逐条不采纳并写明理由。
+ * 真实操作员的默认路径就是"审片的每条建议我都看过、维持现状"，只有确实要改的才采纳。
+ */
+function rejectAllReviewedItems(run: WorkflowRun<pipeline.ProductionBrief>) {
+  return currentReviewItems(run).map(({ itemKey, finding }) => ({
+    itemKey,
+    decision: "reject" as const,
+    reason: `已核对：${finding.suggestion}`,
+  }));
+}
+
 function humanDecisionFor(
   run: WorkflowRun<pipeline.ProductionBrief>,
   action: "approve" | "reject",
   actor: string,
   note?: string,
+  reviewDispositions?: HumanReviewDisposition[] | "default",
 ) {
   const node = run.nodeRuns.find((candidate) => candidate.nodeId === "final-review" && candidate.status === "needs_human");
   const interventionId = node?.intervention?.id;
   assert.ok(interventionId);
   const output = node.output as Record<string, unknown>;
   const reviewEvidenceId = typeof output.reviewEvidenceId === "string" ? output.reviewEvidenceId : null;
+  const dispositions = reviewDispositions === "default" ? rejectAllReviewedItems(run) : reviewDispositions;
   return {
     interventionId,
     action,
@@ -247,6 +271,8 @@ function humanDecisionFor(
     expectedRunRevision: run.revision,
     reviewEvidenceId,
     ...(note ? { note } : {}),
+    // 没有审片结论时不该送一份空表态：空表在核心侧是"提供了却没内容"，不是"没什么可表态"。
+    ...(dispositions && dispositions.length > 0 ? { reviewDispositions: dispositions } : {}),
   };
 }
 
@@ -527,7 +553,7 @@ describe("ProductionPipeline", () => {
                 endTimecodeMs: 9_000,
                 scenePosition: 1,
                 targetNodeId: "assets",
-                evidenceStatus: "failed",
+                claimType: "static", evidenceStatus: "failed",
                 evidenceFrameSha256: null,
                 nextAction: "rework_asset",
                 category: "continuity",
@@ -602,7 +628,7 @@ describe("ProductionPipeline", () => {
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "glm-5.3-flash");
     assert.equal(
       waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/visual-review-v14",
+      "video-factory/visual-review-v18",
     );
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.billing, "subscription");
@@ -800,7 +826,7 @@ describe("ProductionPipeline", () => {
                 endTimecodeMs: 7_500,
                 scenePosition: 2,
                 targetNodeId: "assets",
-                evidenceStatus: "failed",
+                claimType: "static", evidenceStatus: "failed",
                 evidenceFrameSha256: null,
                 nextAction: "rework_asset",
                 category: "legibility",
@@ -1187,7 +1213,7 @@ describe("ProductionPipeline", () => {
           summary: "第二镜需要替换。",
           scores: { composition: 80, continuity: 65, pacing: 80, legibility: 80, safety: 95 },
           findings: [{ timecodeMs: 6_000, startTimecodeMs: 6_000, endTimecodeMs: 6_000,
-            scenePosition: 2, targetNodeId: "assets", evidenceStatus: "failed",
+            scenePosition: 2, targetNodeId: "assets", claimType: "static", evidenceStatus: "failed",
             evidenceFrameSha256: null, nextAction: "rework_asset", category: "continuity",
             severity: "warning", description: "动作不连续。", suggestion: "复用第一镜。" }],
           confidence: 0.9,
@@ -1257,6 +1283,17 @@ describe("ProductionPipeline", () => {
     assert.equal(worker.calls.length, callsBeforeRevision);
     assert.equal((await subject.loadPersisted(waiting.id)).revision, waiting.revision);
     assert.equal(waiting.decisions.length, 0);
+
+    // 报告是制品，会跨构建存活：升级之后，旧运行里那份报告仍是"当前有效版本"，但它是按
+    // 更早的审片合同裁出来的结论。所以每份落盘报告都必须带上产出它的合同版本，消费方
+    // 才能把"旧合同的报告"与"真的坏掉的报告"分开说（见 assertCurrentVisualReviewContract）。
+    // 这里只断言写出来的那一半：报告字节与制品哈希绑定，旧合同的文件没法在同一个构建里
+    // 伪造并同时保持哈希自洽。
+    assert.equal(
+      (JSON.parse(await readFile(reviewArtifact.uri!, "utf8")) as { reviewScope: { reviewContractVersion?: string } })
+        .reviewScope.reviewContractVersion,
+      pipeline.VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+    );
 
     const reviewedAgain = await subject.requestSceneRevision(waiting.id, revisionRequest);
 
@@ -1539,7 +1576,7 @@ describe("ProductionPipeline", () => {
 
     const approved = await subject.decide(
       reviewedAgain.id,
-      humanDecisionFor(reviewedAgain, "approve", "director", "返修后批准。"),
+      humanDecisionFor(reviewedAgain, "approve", "director", "返修后批准。", "default"),
     );
     const publishArtifact = approved.artifacts.find((artifact) => artifact.kind === "publish_package");
     assert.ok(publishArtifact?.uri);
@@ -1548,6 +1585,146 @@ describe("ProductionPipeline", () => {
     };
     assert.equal(publishPackage.artifacts.some((artifact) => artifact.id === sceneOneMedia.id), true);
     assert.equal(publishPackage.artifacts.some((artifact) => artifact.id === sceneTwoMedia.id), false);
+  });
+
+  it("rewrites one scene's narration without rebuying any visual asset", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-narration-revision-"));
+    const worker = new FakeWorker();
+    const visualReviewAgent: pipeline.VisualReviewAgent = {
+      id: "glm-visual-review-v1",
+      modelId: "glm-5.3-flash",
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async (input) => {
+        const output: pipeline.VisualReviewReport = {
+          version: "video-factory/visual-review-v1",
+          summary: "画面成立。",
+          scores: { composition: 90, continuity: 90, pacing: 88, legibility: 90, safety: 95 },
+          findings: [],
+          confidence: 0.95,
+          recommendation: "approve",
+        };
+        if (input.reviewStage === "source_assets") return { output, inspectedDurationMs: 10_000 };
+        return completedDualVisualReview(input, output);
+      },
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      providerRuntimeMetadata: [{
+        id: "glm-visual-review-v1",
+        label: "GLM-5.3-Flash 视觉审片",
+        modelId: "glm-5.3-flash",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 3,
+      }],
+      visualReviewAgents: [visualReviewAgent],
+    });
+    const waiting = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+    });
+    assert.equal(waiting.status, "needs_human");
+    const scriptNodeRun = waiting.nodeRuns.find((node) => node.nodeId === "script")!;
+    const scriptVersionId = scriptNodeRun.outputState!.effectiveVersionId;
+    const scriptPathBefore = String((scriptNodeRun.output as Record<string, unknown>).scriptPath);
+    const assetsVersionIdBefore = waiting.nodeRuns.find((node) => node.nodeId === "assets")!.outputState!.effectiveVersionId;
+    const assetMediaBefore = waiting.artifacts.filter((artifact) => artifact.kind === "media_asset").map((artifact) => artifact.id);
+    // 画面是这条路径里唯一不该动的东西：它的制品身份与版本都必须原样留下。
+    const assetArtifactIdsBefore = [...(waiting.nodeRuns.find((node) => node.nodeId === "assets")!
+      .outputState!.versions.find((version) => version.id === assetsVersionIdBefore)!.artifactIds)];
+    const callsBeforeRevision = worker.calls.length;
+
+    await assert.rejects(
+      () => subject.requestNarrationRevision(waiting.id, {
+        expectedRunRevision: waiting.revision - 1,
+        scenePosition: 2,
+        narration: "改过的第二幕",
+        actor: "director",
+        note: "第二幕口播改得更直白。",
+      }),
+      pipeline.StaleRunRevisionError,
+    );
+    await assert.rejects(
+      () => subject.requestNarrationRevision(waiting.id, {
+        expectedRunRevision: waiting.revision,
+        scenePosition: 9,
+        narration: "不存在的镜头",
+        actor: "director",
+        note: "镜位写错。",
+      }),
+      /is no longer in the current script/,
+    );
+    await assert.rejects(
+      () => subject.requestNarrationRevision(waiting.id, {
+        expectedRunRevision: waiting.revision,
+        scenePosition: 2,
+        narration: "   ",
+        actor: "director",
+        note: "空文字不能提交。",
+      }),
+      /must not be empty/,
+    );
+    await assert.rejects(
+      () => subject.requestNarrationRevision(waiting.id, {
+        expectedRunRevision: waiting.revision,
+        scenePosition: 2,
+        narration: "字".repeat(601),
+        actor: "director",
+        note: "超长文字不能提交。",
+      }),
+      /not a valid single line of narration/,
+    );
+    assert.equal(worker.calls.length, callsBeforeRevision);
+    assert.equal((await subject.loadPersisted(waiting.id)).revision, waiting.revision);
+
+    const revised = await subject.requestNarrationRevision(waiting.id, {
+      expectedRunRevision: waiting.revision,
+      scenePosition: 2,
+      narration: "改过的第二幕",
+      actor: "director",
+      note: "第二幕口播改得更直白。",
+    });
+
+    assert.equal(revised.id, waiting.id);
+    assert.equal(revised.status, "needs_human");
+    assert.equal(revised.decisions.at(-1)?.action, "request_changes");
+    // 脚本是配音与字幕共同的来源，所以配音必须按新文字重合成；画面已经付过钱，
+    // 这一行字不影响任何一帧，重新买素材是纯浪费。
+    assert.deepEqual(worker.calls.slice(callsBeforeRevision).map((call) => call.capability), [
+      "voice.synthesize", "video.render", "quality.review",
+    ]);
+    const scriptNodeAfter = revised.nodeRuns.find((node) => node.nodeId === "script")!;
+    assert.equal(scriptNodeAfter.outputState?.versions.length, 2);
+    assert.notEqual(scriptNodeAfter.outputState?.effectiveVersionId, scriptVersionId);
+    const scriptPathAfter = String((scriptNodeAfter.output as Record<string, unknown>).scriptPath);
+    assert.notEqual(scriptPathAfter, scriptPathBefore);
+    const revisedScript = JSON.parse(await readFile(scriptPathAfter, "utf8")) as {
+      scenes: Array<{ position: number; narration: string; duration: number; visual_prompt: string }>;
+    };
+    assert.equal(revisedScript.scenes[1]?.narration, "改过的第二幕");
+    // 没被点到的那一镜一个字都不能变。
+    assert.equal(revisedScript.scenes[0]?.narration, "第一幕");
+    assert.equal(revisedScript.scenes[0]?.visual_prompt, "城市早餐摊");
+    assert.equal(revisedScript.scenes[1]?.visual_prompt, "食物制作特写");
+    const assetsAfter = revised.nodeRuns.find((node) => node.nodeId === "assets")!;
+    assert.equal(assetsAfter.outputState?.effectiveVersionId, assetsVersionIdBefore);
+    assert.deepEqual(assetsAfter.outputState?.versions.length, 1);
+    assert.deepEqual(
+      revised.artifacts.filter((artifact) => artifact.kind === "media_asset").map((artifact) => artifact.id),
+      assetMediaBefore,
+    );
+    assert.equal(assetArtifactIdsBefore.length > 0, true);
+    assert.deepEqual(
+      assetsAfter.outputState?.versions.find((version) => version.id === assetsAfter.outputState?.effectiveVersionId)
+        ?.artifactIds,
+      assetArtifactIdsBefore,
+    );
+    const voiceAfter = revised.nodeRuns.find((node) => node.nodeId === "voice")!;
+    assert.equal(voiceAfter.outputState?.versions.length, 2);
+    assert.equal(revised.nodeRuns.find((node) => node.nodeId === "render")?.outputState?.versions.length, 2);
+    assert.equal(revised.nodeRuns.find((node) => node.nodeId === "visual-review")?.outputState?.versions.length, 2);
   });
 
   it("rejects formal production before any worker runs when dual visual review is incomplete", async () => {
@@ -1634,7 +1811,7 @@ describe("ProductionPipeline", () => {
     assert.equal(waiting.status, "needs_human");
     const runPath = path.join(workspaceRoot, "runs", waiting.id, "run.json");
     const original = await readFile(runPath, "utf8");
-    const decision = humanDecisionFor(waiting, "approve", "director", "双审证据完整，批准发布。");
+    const decision = humanDecisionFor(waiting, "approve", "director", "双审证据完整，批准发布。", "default");
     const assertTamperRejected = async (
       mutate: (visualReport: Record<string, unknown>, finalReviewOutput: Record<string, unknown>) => void,
       error: RegExp,
@@ -1692,6 +1869,13 @@ describe("ProductionPipeline", () => {
       const scope = visualReport.reviewScope as { actualModels: Array<Record<string, unknown>> };
       scope.actualModels[1]!.producerContractDigest = "f".repeat(64);
     }, /did not use the same producer and audit contracts/);
+    // 升级前裁出来的证据：两个分支同属一份更早的审片合同。它必须被拒，而且拒绝文案要说清
+    // 该做什么——只报"不匹配"等于把操作员留在原地（见 assertDualVisualReviewReady 的注释）。
+    await assertTamperRejected((visualReport) => {
+      const scope = visualReport.reviewScope as { actualModels: Array<Record<string, unknown>> };
+      scope.actualModels[0]!.producerContractDigest = "0".repeat(64);
+      scope.actualModels[1]!.producerContractDigest = "0".repeat(64);
+    }, /请先补查现有成片/);
     await assertTamperRejected((visualReport) => {
       const reviews = visualReport.independentReviews as Array<Record<string, unknown>>;
       reviews[1]!.modelId = "unexpected-review-model";
@@ -1706,6 +1890,28 @@ describe("ProductionPipeline", () => {
     const approved = await subject.decide(waiting.id, decision);
     assert.equal(approved.status, "succeeded");
     assert.ok(approved.artifacts.some((artifact) => artifact.kind === "publish_package"));
+
+    // 合同升级前建立、升级后按当前合同重跑过审片的 run：brief 里冻结的仍是旧合同摘要。
+    // 冻结值不该继续当发布闸门——那会让这类 run 永远发不出去，而它的证据其实已经是当前
+    // 合同重跑出来的。这里断言的是恢复路径真的存在：证据合规就放行。
+    const legacy = await subject.start({
+      ...brief,
+      runPurpose: "production",
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+    });
+    assert.equal(legacy.status, "needs_human");
+    const legacyPath = path.join(workspaceRoot, "runs", legacy.id, "run.json");
+    const legacyPersisted = JSON.parse(await readFile(legacyPath, "utf8")) as {
+      initialInput: { taskContractDigests: Record<string, string> };
+    };
+    legacyPersisted.initialInput.taskContractDigests["visual-review"] = "0".repeat(64);
+    await writeFile(legacyPath, JSON.stringify(legacyPersisted), "utf8");
+    const legacyApproved = await subject.decide(
+      legacy.id,
+      humanDecisionFor(legacy, "approve", "director", "审片已按当前合同重跑，批准发布。", "default"),
+    );
+    assert.equal(legacyApproved.status, "succeeded");
   });
 
   it("fails closed when the Code Plan visual reviewer has no subscription metadata", async () => {
@@ -1754,7 +1960,7 @@ describe("ProductionPipeline", () => {
               summary: "字幕遮挡了主体。",
               scores: { composition: 45, continuity: 70, pacing: 70, legibility: 30, safety: 90 },
               findings: [{ timecodeMs: 1_000, startTimecodeMs: 1_000, endTimecodeMs: 1_000,
-                scenePosition: 1, targetNodeId: "assets", evidenceStatus: "failed",
+                scenePosition: 1, targetNodeId: "assets", claimType: "static", evidenceStatus: "failed",
                 evidenceFrameSha256: null, nextAction: "rework_asset", category: "legibility",
                 severity: "critical", description: "字幕不可读", suggestion: "重新排版" }],
               confidence: 0.9,
@@ -2157,7 +2363,7 @@ describe("ProductionPipeline", () => {
     const secondProcess = new ProductionPipeline!(options);
     const approved = await secondProcess.decide(
       waiting.id,
-      humanDecisionFor(waiting, "approve", "director", "Picture, subtitles and narration are aligned."),
+      humanDecisionFor(waiting, "approve", "director", "Picture, subtitles and narration are aligned.", "default"),
     );
 
     assert.equal(approved.status, "succeeded");
@@ -2421,7 +2627,7 @@ describe("ProductionPipeline", () => {
         endTimecodeMs: 3_500,
         scenePosition: 1,
         targetNodeId: "assets",
-        evidenceStatus: "not_observed",
+        claimType: "static", evidenceStatus: "not_observed",
         evidenceFrameSha256: null,
         nextAction: "inspect_existing_media",
         category: "continuity",
@@ -2432,6 +2638,9 @@ describe("ProductionPipeline", () => {
       recommendation: "revise",
     };
     const branchCalls = { glm: 0, codex: 0 };
+    // 按"哪个模型、在哪一阶段"记账：试片与成片终审各自要两个不同模型，
+    // 只看总数会把"某阶段只跑了一个模型"和"另一阶段多跑了一次"混成同一个数字。
+    const reviewCalls: Array<{ id: string; stage: "source_assets" | "rendered_video" }> = [];
     const reviewer = (
       id: "glm-visual-review-v1" | "codex-visual-review-v1",
       modelId: "glm-5.3-flash" | "gpt-5.6-sol",
@@ -2441,7 +2650,8 @@ describe("ProductionPipeline", () => {
       modelId,
       independentRoleAudit: true,
       review: async () => { throw new Error("Detailed review must be used."); },
-      reviewDetailed: async () => {
+      reviewDetailed: async (input) => {
+        reviewCalls.push({ id, stage: input.reviewStage === "source_assets" ? "source_assets" : "rendered_video" });
         branchCalls[counter] += 1;
         const output = branchCalls[counter] === 1 ? pendingReport : cleanReport;
         return {
@@ -2461,7 +2671,15 @@ describe("ProductionPipeline", () => {
       sourceAgent: {
         id: "glm-source-review-v1",
         modelId: "glm-5.3-flash",
-        review: async () => cleanReport,
+        review: async () => { throw new Error("Detailed review must be used."); },
+        reviewDetailed: async (input) => {
+          reviewCalls.push({ id: "glm-source-review-v1", stage: input.reviewStage === "source_assets" ? "source_assets" : "rendered_video" });
+          return {
+            output: cleanReport,
+            executedProviderId: "glm-source-review-v1",
+            executedModelId: "glm-5.3-flash",
+          };
+        },
       },
       media: {
         prepare: async () => ({
@@ -2494,7 +2712,15 @@ describe("ProductionPipeline", () => {
       models: { "glm-visual-review-v1": "glm-5.3-flash" },
     });
     assert.equal(waiting.status, "needs_human");
-    assert.deepEqual(branchCalls, { glm: 1, codex: 1 });
+    // 试片也必须是两个不同模型的独立复审：它是"要不要继续花钱"的闸门。
+    assert.deepEqual(
+      reviewCalls.filter((call) => call.stage === "source_assets").map((call) => call.id).sort(),
+      ["codex-visual-review-v1", "glm-source-review-v1"],
+    );
+    assert.deepEqual(
+      reviewCalls.filter((call) => call.stage === "rendered_video").map((call) => call.id).sort(),
+      ["codex-visual-review-v1", "glm-visual-review-v1"],
+    );
     const workerCallsBefore = worker.calls.map((call) => String(call.capability));
     const visualDelivery = waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.output as {
       report: { reviewScope: { evidenceId: string } };
@@ -2507,12 +2733,145 @@ describe("ProductionPipeline", () => {
     const reinspected = await dispatched.completion;
 
     assert.equal(reinspected.status, "needs_human");
-    assert.deepEqual(branchCalls, { glm: 2, codex: 2 });
+    // 补查重跑成片双审，但不重跑试片：素材没变，试片结论仍然成立。
+    assert.equal(reviewCalls.filter((call) => call.stage === "rendered_video").length, 4);
+    assert.equal(reviewCalls.filter((call) => call.stage === "source_assets").length, 2);
     assert.deepEqual(worker.calls.map((call) => String(call.capability)), workerCallsBefore);
     assert.equal(worker.calls.filter((call) => call.capability === "asset.prepare").length, 1);
     assert.equal(worker.calls.filter((call) => call.capability === "voice.synthesize").length, 1);
     assert.equal(worker.calls.filter((call) => call.capability === "video.render").length, 1);
     assert.equal(worker.calls.filter((call) => call.capability === "quality.review").length, 1);
+  });
+
+  it("requires a recorded per-item disposition on every review finding before final approval", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-final-dispositions-"));
+    const worker = new FakeWorker();
+    const pendingReport: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "成片可进入人工终审，第一镜有一处抽帧看不全。",
+      scores: { composition: 88, continuity: 82, pacing: 88, legibility: 90, safety: 95 },
+      findings: [{
+        timecodeMs: 3_000,
+        startTimecodeMs: 2_500,
+        endTimecodeMs: 3_500,
+        scenePosition: 1,
+        targetNodeId: "assets",
+        claimType: "static",
+        evidenceStatus: "not_observed",
+        evidenceFrameSha256: null,
+        nextAction: "inspect_existing_media",
+        category: "continuity",
+        severity: "info",
+        description: "第一镜的主体在抽帧里看不全。",
+        suggestion: "补查第一镜现有成片的过程帧。",
+      }],
+      confidence: 0.88,
+      recommendation: "approve",
+    };
+    const reviewer = (
+      id: "glm-visual-review-v1" | "codex-visual-review-v1",
+      modelId: "glm-5.3-flash" | "gpt-5.6-sol",
+    ): pipeline.VisualReviewAgent => ({
+      id,
+      modelId,
+      independentRoleAudit: true,
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async (input) => ({
+        output: pendingReport,
+        executedProviderId: id,
+        executedModelId: modelId,
+        ...(passedVisualReviewLoop(pendingReport, id, modelId).iterations[0]!.candidateTrace
+          ? { trace: passedVisualReviewLoop(pendingReport, id, modelId).iterations[0]!.candidateTrace }
+          : {}),
+        agentLoop: passedVisualReviewLoop(pendingReport, id, modelId),
+      }),
+    });
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      providerRuntimeMetadata: [{
+        id: "glm-visual-review-v1",
+        label: "GLM + Codex 双模型审片",
+        modelId: "glm-5.3-flash",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 1,
+      }],
+      visualReviewAgents: [new pipeline.IndependentDualVisualReviewAgent({
+        primary: reviewer("glm-visual-review-v1", "glm-5.3-flash"),
+        secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol"),
+        sourceAgent: {
+          id: "glm-source-review-v1",
+          modelId: "glm-5.3-flash",
+          review: async (input) => ({
+            version: "video-factory/visual-review-v1",
+            summary: "源素材可以进入后续制作。",
+            scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 95 },
+            findings: [],
+            confidence: 0.95,
+            recommendation: "approve",
+          }),
+        },
+        media: {
+          prepare: async () => ({
+            durationMs: 10_000,
+            frames: [
+              { timecodeMs: 3_000, sha256: "a".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+              { timecodeMs: 8_000, sha256: "b".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 2 },
+            ],
+          }),
+        },
+      })],
+    });
+    const waiting = await subject.start({
+      ...brief,
+      runPurpose: "production",
+      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+    });
+
+    const reviewedItems = currentReviewItems(waiting);
+    assert.equal(reviewedItems.length, 1);
+    const itemKey = reviewedItems[0]!.itemKey;
+    const reason = "已逐帧核对现有成片，主体完整，抽帧看不全不等于画面缺失。";
+
+    // 整片一句"没问题"不算表态：这条建议没有任何归属。
+    await assert.rejects(
+      () => subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director", "整体没问题。")),
+      /逐条表态/,
+    );
+    // 采纳意味着还要按它返修，与"批准发布"自相矛盾。
+    await assert.rejects(
+      () => subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director", undefined, [
+        { itemKey, decision: "accept" },
+      ])),
+      /尚未返修/,
+    );
+    // 不采纳是"维持现状"，必须写明凭什么维持，否则事后无法复核。
+    await assert.rejects(
+      () => subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director", undefined, [
+        { itemKey, decision: "reject" },
+      ])),
+      /written reason/,
+    );
+    // 指向不存在的问题同样不能顶替真实表态。
+    await assert.rejects(
+      () => subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director", undefined, [
+        { itemKey: "0".repeat(64), decision: "reject", reason },
+      ])),
+      /逐条表态/,
+    );
+
+    const approved = await subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director", undefined, [
+      { itemKey, decision: "reject", reason },
+    ]));
+
+    assert.equal(approved.status, "succeeded");
+    assert.deepEqual(approved.decisions.map((decision) => decision.reviewDispositions), [[
+      { itemKey, decision: "reject", reason },
+    ]]);
+    assert.ok(approved.artifacts.some((artifact) => artifact.kind === "publish_package"));
   });
 
   it("fails closed when a known metered worker has no runtime metadata", async () => {
@@ -2690,7 +3049,7 @@ describe("ProductionPipeline", () => {
           startTimecodeMs: 3_500,
           endTimecodeMs: 4_500,
           scenePosition: 1,
-          evidenceStatus: "failed",
+          claimType: "static", evidenceStatus: "failed",
           evidenceFrameSha256: "a".repeat(64),
           nextAction: "replan_upstream",
           category: "continuity",
@@ -3015,7 +3374,7 @@ describe("ProductionPipeline", () => {
     const reworked = await subject.start({
       ...source.initialInput,
       title: effectiveTitle,
-      voiceDirection: { ...source.initialInput.voiceDirection, rate: 190 },
+      voiceDirection: { ...source.initialInput.voiceDirection, masteringPreset: "intimate" },
       rework: {
         sourceRunId: source.id,
         sourceRunRevision: source.revision,
@@ -3120,7 +3479,7 @@ describe("ProductionPipeline", () => {
     assert.equal(directorCalls, 6, "a same-kind artifact at the wrong effective output path must not be inherited");
   });
 
-  it("revalidates an injected director plan against the script visual strategy", async () => {
+  it("allows the director to reroute an illustrative stock suggestion to an executable generated source", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-director-host-validation-"));
     const worker = new FakeWorker();
     const directorAgent: pipeline.VisualDirectorAgent = {
@@ -3130,7 +3489,7 @@ describe("ProductionPipeline", () => {
         version: "video-factory/director-plan-v1",
         requestedProfileId: input.brief.requestedProfileId,
         resolvedProfileId: "documentary-observer",
-        profileRationale: "尝试把实拍要求改为生成画面。",
+          profileRationale: "把普通示意从图库调整为可执行的生成画面。",
         visualBible: {
           narrativeApproach: "逐镜说明",
           pacing: "均匀",
@@ -3143,7 +3502,7 @@ describe("ProductionPipeline", () => {
         shots: input.scenes.map((scene) => ({
           scenePosition: scene.position,
           narrativeRole: "解释",
-          authenticityPolicy: "illustrative",
+          authenticityPolicy: "evidence",
           preferredProviderId: "fixture-generated-image-v1",
           deliveryType: "generated_image",
           alternativeProviderIds: [],
@@ -3153,7 +3512,7 @@ describe("ProductionPipeline", () => {
           ],
           query: scene.visualPrompt,
           generationPrompt: `竖屏插画：${scene.visualPrompt}`,
-          rationale: "生成插画便于统一风格。",
+          rationale: "错误地把生成插画当作事实证据。",
           continuityNote: "保持相同色调。",
           confidence: 0.8,
           estimatedCostCny: 0,
@@ -3179,9 +3538,15 @@ describe("ProductionPipeline", () => {
       director: { profileId: "auto", assetProviderIds: ["fixture-generated-image-v1"] },
     });
 
-    assert.equal(failed.status, "failed");
-    assert.match(failed.nodeRuns.find((node) => node.nodeId === "visual-direction")?.error ?? "", /requires real stock footage/);
-    assert.deepEqual(worker.calls.map((call) => call.capability), ["script.draft"]);
+    assert.equal(failed.status, "needs_human");
+    assert.equal(failed.nodeRuns.find((node) => node.nodeId === "visual-direction")?.status, "succeeded");
+    assert.deepEqual(worker.calls.map((call) => call.capability), [
+      "script.draft",
+      "asset.prepare",
+      "voice.synthesize",
+      "video.render",
+      "quality.review",
+    ]);
   });
 
   it("runs an AI director before assets and passes its per-shot plan to the router", async () => {
@@ -3385,7 +3750,7 @@ describe("ProductionPipeline", () => {
     assert.ok(directorPrimaryCheckpoint);
     assert.ok(directorBackupCheckpoint);
     assert.notEqual(directorPrimaryCheckpoint.key, directorBackupCheckpoint.key);
-    assert.deepEqual(directorInput?.brief.templateBlueprint, templateSnapshot.resolvedBlueprint);
+    assert.equal("templateGuidance" in (directorInput?.brief ?? {}), false);
     assert.deepEqual(directorInput?.brief.rework, {
       sourceRunId: "run-rejected-1",
       visualDirectionInstruction: "第二镜改成与第一镜一致的自然纪实构图。",
@@ -3878,7 +4243,7 @@ describe("ProductionPipeline", () => {
 
     const historical = await subject.show(waiting.id);
     assert.equal(historical.initialInput.platform, "douyin");
-    const resumed = await subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director"));
+    const resumed = await subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director", undefined, "default"));
     assert.equal(resumed.status, "succeeded");
     assert.equal(resumed.initialInput.platform, "douyin");
   });
@@ -4575,6 +4940,85 @@ describe("ProductionPipeline", () => {
     );
     const persistedLedger = JSON.parse(await readFile(ledgerPath, "utf8"));
     assert.equal(persistedLedger.items[0].state, "terminal_failed");
+  });
+
+  it("re-quotes an older local budget preflight failure that predates the paid ledger", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-legacy-budget-preflight-"));
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      providerRuntimeMetadata: [{
+        id: "hailuo-video-v1",
+        label: "MiniMax H3",
+        modelId: "MiniMax-H3",
+        transport: "http_api",
+        billing: "metered",
+        estimatedCostCny: 6.5,
+        maxAttempts: 1,
+      }],
+    });
+    const interrupted = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, assets: "hailuo-video-v1" },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    });
+    const assetsNode = interrupted.nodeRuns.find((node) => node.nodeId === "assets")!;
+    const originalPlan = assetsNode.spendPlan!;
+    const operationId = "legacy-budget-preflight-operation";
+    const authorizationId = "legacy-budget-preflight-authorization";
+    interrupted.spendAuthorizations = [{
+      id: authorizationId,
+      spendPlanId: originalPlan.id,
+      nodeId: originalPlan.nodeId,
+      inputVersionIds: originalPlan.inputVersionIds,
+      providerId: originalPlan.providerId,
+      modelId: originalPlan.modelId,
+      maxCostCny: originalPlan.maxCostCny,
+      maxAttempts: originalPlan.maxAttempts,
+      approvedBy: "owner",
+      approvedAt: "2026-09-14T07:15:30.000Z",
+    }];
+    assetsNode.status = "failed";
+    assetsNode.operationRequestId = operationId;
+    assetsNode.spendAuthorizationId = authorizationId;
+    assetsNode.outcomeUncertain = true;
+    assetsNode.error = `Estimated cost ¥${originalPlan.maxCostCny + 3} exceeds the authorized maximum ¥${originalPlan.maxCostCny}.`;
+    assetsNode.executionReceipt = {
+      nodeId: "assets",
+      capability: "asset.prepare",
+      providerId: "ai-shot-router-v1",
+      providerLabel: "AI 逐镜路由（含付费镜头）",
+      modelId: originalPlan.modelId,
+      transport: "local_process",
+      billing: "metered",
+      status: "failed",
+      estimatedCostCny: originalPlan.estimatedCostCny,
+      spendAuthorizationId: authorizationId,
+      authorizedCostCny: originalPlan.maxCostCny,
+      startedAt: "2026-09-14T07:17:02.437Z",
+      finishedAt: "2026-09-14T07:17:02.485Z",
+    };
+    interrupted.status = "failed";
+    interrupted.finishedAt = "2026-09-14T07:17:02.485Z";
+    await writeFile(
+      path.join(workspaceRoot, "runs", interrupted.id, "run.json"),
+      `${JSON.stringify(interrupted, null, 2)}\n`,
+      "utf8",
+    );
+
+    const summary = await subject.inspectPaidNode(interrupted.id, "assets");
+    assert.equal(summary.requiresManualReconciliation, false);
+    assert.equal(summary.recommendedOutcome, "requote");
+    assert.deepEqual(summary.items, []);
+
+    const requoted = await subject.reconcilePaidNode(interrupted.id, {
+      nodeId: "assets",
+      expectedRunRevision: interrupted.revision,
+      reconciliationId: "reconcile-legacy-budget-preflight",
+      outcome: "requote",
+    });
+    assert.equal(requoted.status, "awaiting_spend_approval");
+    assert.equal(requoted.nodeRuns.find((node) => node.nodeId === "assets")?.status, "awaiting_spend_approval");
   });
 
   it("creates an incremental quote for a terminal failure while preserving a materialized scene", async () => {
@@ -6868,7 +7312,7 @@ describe("ProductionPipeline", () => {
       },
     };
     const waiting = await new pipeline.ProductionPipeline(options).start(brief);
-    const decision = humanDecisionFor(waiting, "approve", "director");
+    const decision = humanDecisionFor(waiting, "approve", "director", undefined, "default");
 
     const results = await Promise.allSettled([
       new pipeline.ProductionPipeline(options).decide(waiting.id, decision),
@@ -7813,7 +8257,7 @@ describe("ProductionPipeline", () => {
     assert.deepEqual(plan?.items?.map((item) => item.estimatedCostCny), [2.5, 2.5]);
   });
 
-  it("excludes a REUSE_ONLY scene from the paid asset quote", async () => {
+  it("quotes a reused video master once at the full source range required by all cuts", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-reuse-quote-"));
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
@@ -7847,6 +8291,7 @@ describe("ProductionPipeline", () => {
             ],
             query: index === 0 ? scene.visualPrompt : "REUSE_ONLY scene one",
             generationPrompt: scene.visualPrompt,
+            ...(index === 0 ? { sourceInSeconds: 0 } : { reuseFromScenePosition: 1, sourceInSeconds: 5 }),
             rationale: index === 0 ? "生成母片。" : "复用已生成母片。",
             continuityNote: "保持同一色温。",
             confidence: 0.8,
@@ -7871,6 +8316,16 @@ describe("ProductionPipeline", () => {
         billing: "metered",
         estimatedCostCny: 2.4,
         maxAttempts: 1,
+        modelProfiles: [{
+          modelId: "seedance-v1",
+          estimatedCostCny: 2.4,
+          taskTypes: ["text-to-video"],
+          resolutions: ["720p"],
+          minDurationSeconds: 4,
+          maxDurationSeconds: 15,
+          supportsAudio: false,
+          estimatedCnyPerSecond: 0.5,
+        }],
       }],
     });
 
@@ -7883,7 +8338,8 @@ describe("ProductionPipeline", () => {
 
     const plan = paused.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
     assert.deepEqual(plan?.items?.map((item) => item.id), ["scene-1"]);
-    assert.equal(plan?.estimatedCostCny, 2.4);
+    assert.equal(plan?.estimatedCostCny, 5);
+    assert.equal(plan?.items?.[0]?.estimatedCostCny, 5);
   });
 
   it("executes an all-free AI shot plan without asking for a zero-cost approval", async () => {
@@ -8309,6 +8765,73 @@ describe("ProductionPipeline", () => {
     assert.equal((await completion).status, "needs_human");
   });
 
+  it("re-quotes after a local budget preflight failure without asking the user to reconcile provider billing", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-budget-preflight-"));
+    class BudgetPreflightWorker extends GeneratedScriptWorker {
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        if (request.capability !== "asset.prepare") return super.run(request);
+        this.calls.push(request);
+        return {
+          protocolVersion: "video-factory/worker-v1",
+          commandId: String(request.commandId),
+          status: "failed",
+          artifacts: [],
+          error: {
+            code: "ASSET_AUTHORIZATION_INSUFFICIENT",
+            message: "Estimated cost ¥9.5 exceeds the authorized maximum ¥6.5.",
+          },
+          diagnostics: {
+            providerOutcomeKnown: true,
+            meteredAttemptCount: 0,
+            meteredFailedAttemptCount: 0,
+            actualCostCny: 0,
+            actualCostSource: "configured_rate",
+          },
+        };
+      }
+    }
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new BudgetPreflightWorker(),
+      providerRuntimeMetadata: [{
+        id: "hailuo-video-v1",
+        label: "MiniMax H3",
+        modelId: "MiniMax-H3",
+        transport: "http_api",
+        billing: "metered",
+        estimatedCostCny: 3.25,
+        maxAttempts: 1,
+      }],
+    });
+    const waiting = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, assets: "hailuo-video-v1" },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    });
+    const plan = waiting.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
+    assert.ok(plan);
+
+    const failed = await subject.authorizeSpend(waiting.id, {
+      spendPlanId: plan.id,
+      nodeId: plan.nodeId,
+      inputVersionIds: plan.inputVersionIds,
+      providerId: plan.providerId,
+      modelId: plan.modelId,
+      maxCostCny: plan.maxCostCny,
+      maxAttempts: plan.maxAttempts,
+      approvedBy: "owner",
+    });
+    const failedAssets = failed.nodeRuns.find((node) => node.nodeId === "assets");
+    assert.equal(failed.status, "failed");
+    assert.equal(failedAssets?.outcomeUncertain, undefined);
+    assert.equal(failedAssets?.executionReceipt?.meteredAttemptCount, 0);
+    assert.equal(failedAssets?.executionReceipt?.actualCostCny, 0);
+
+    const requoted = await subject.retryFailedNode(failed.id, "assets");
+    assert.equal(requoted.status, "awaiting_spend_approval");
+    assert.equal(requoted.nodeRuns.find((node) => node.nodeId === "assets")?.status, "awaiting_spend_approval");
+  });
+
   it("fails a node when the worker artifact bytes do not match its descriptor", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
     class LyingWorker extends FakeWorker {
@@ -8376,7 +8899,7 @@ describe("ProductionPipeline", () => {
       assert.equal(createHash("sha256").update(bytes).digest("hex"), artifact.sha256, artifact.kind);
     }
 
-    const approved = await subject.decide(rerun.id, humanDecisionFor(rerun, "approve", "director"));
+    const approved = await subject.decide(rerun.id, humanDecisionFor(rerun, "approve", "director", undefined, "default"));
     assert.equal(approved.status, "succeeded");
     const packageArtifact = approved.artifacts.find((artifact) => artifact.kind === "publish_package");
     assert.ok(packageArtifact?.uri);
@@ -8400,7 +8923,7 @@ describe("ProductionPipeline", () => {
     assert.ok(renderArtifact?.uri);
     await writeFile(renderArtifact.uri, "changed-after-review", "utf8");
 
-    const failed = await subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director"));
+    const failed = await subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director", undefined, "default"));
 
     assert.equal(failed.status, "failed");
     assert.match(failed.nodeRuns.at(-1)?.error ?? "", /sha256 does not match/);
@@ -8462,7 +8985,7 @@ describe("ProductionPipeline", () => {
     }
     const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new IndexedAssetWorker() });
     const waiting = await subject.start(brief);
-    const finished = await subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director"));
+    const finished = await subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director", undefined, "default"));
     const manifestArtifact = finished.artifacts.find((artifact) => artifact.kind === "resource_manifest");
     assert.ok(manifestArtifact?.uri);
     const manifest = JSON.parse(await readFile(manifestArtifact.uri, "utf8")) as { items: Array<Record<string, unknown>> };

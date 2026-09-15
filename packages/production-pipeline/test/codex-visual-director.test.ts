@@ -207,6 +207,20 @@ describe("CodexVisualDirectorAgent", () => {
     };
     input.brief.visualProof = visualProof;
     input.brief.visualPlan = visualPlan;
+    input.brief.voiceTiming = { rate: 192, pauseScale: 1.2 };
+    const articleSources = [{
+      sourceId: "source-report",
+      originalUrl: "https://news.example/report",
+      finalUrl: "https://news.example/report",
+      pageTitle: "公开报告",
+      fetchedAt: "2026-09-14T08:00:00.000Z",
+      contentSha256: "a".repeat(64),
+      extractorVersion: "readability-v1",
+      readStatus: "read" as const,
+      paragraphs: [{ id: "p1", text: "正文中的可核对事实。" }],
+      truncated: false,
+    }];
+    input.brief.articleSources = articleSources;
     input.assetProviders[0]!.constraints.push("成片必须保留 AIGC 标识");
     const firstPlan = validPlan();
     const repairedPlan = validPlan();
@@ -275,7 +289,12 @@ describe("CodexVisualDirectorAgent", () => {
     const auditPayload = auditClient.calls[0]!.payload as {
       context: {
         upstreamFacts: {
-          brief: { visualProof?: string; visualPlan?: unknown };
+          brief: {
+            visualProof?: string;
+            visualPlan?: unknown;
+            voiceTiming?: unknown;
+            articleSources?: unknown;
+          };
           scenes: Array<Record<string, unknown>>;
         };
         currentRoleContract: Record<string, unknown>;
@@ -286,8 +305,12 @@ describe("CodexVisualDirectorAgent", () => {
     assert.equal(producerBrief.visualProof, visualProof);
     assert.deepEqual(producerBrief.visualPlan, visualPlan);
     assert.deepEqual(producerBrief.durationRange, { minSeconds: 20, maxSeconds: 34 });
+    assert.deepEqual(producerBrief.voiceTiming, { rate: 192, pauseScale: 1.2 });
+    assert.deepEqual(producerBrief.articleSources, articleSources);
     assert.equal(auditPayload.context.upstreamFacts.brief.visualProof, visualProof);
     assert.deepEqual(auditPayload.context.upstreamFacts.brief.visualPlan, visualPlan);
+    assert.deepEqual(auditPayload.context.upstreamFacts.brief.voiceTiming, { rate: 192, pauseScale: 1.2 });
+    assert.deepEqual(auditPayload.context.upstreamFacts.brief.articleSources, articleSources);
     const contract = auditPayload.context.currentRoleContract;
     assert.deepEqual(contract.durationRange, { minSeconds: 20, maxSeconds: 34 });
     const auditCriteria = (auditClient.calls[0]!.payload as { criteria: string[] }).criteria.join("\n");
@@ -463,6 +486,7 @@ describe("CodexVisualDirectorAgent", () => {
             findingOwnership: string;
             affectedScenePositions: number[];
             preservationRule: string;
+            preservedShotAuthority: string;
             verificationBoundary: string;
           };
         };
@@ -471,6 +495,11 @@ describe("CodexVisualDirectorAgent", () => {
     assert.ok(auditPayload.criteria.some((criterion) => (
       criterion.includes("visualDirectionInstruction 与 assetInstruction")
       && criterion.includes("仅修改授权范围并继承其余镜头")
+      // 未受影响镜头由宿主逐字继承，候选无法改写；审计不得要求方案为它们改写字段，
+      // 否则审计会向一个结构上无法执行的要求开闸，把返工卡成永久失败。
+      && criterion.includes("未受影响镜头")
+      && criterion.includes("宿主逐字继承")
+      && criterion.includes("不得要求")
       && criterion.includes("没有新审片证据不能标 verified")
     )));
     assert.deepEqual(auditPayload.context.currentRoleContract.reworkAuthorization.requiredInstructions, {
@@ -486,13 +515,69 @@ describe("CodexVisualDirectorAgent", () => {
     assert.deepEqual(auditPayload.context.currentRoleContract.reworkAuthorization.affectedScenePositions, [1]);
     assert.match(auditPayload.context.currentRoleContract.reworkAuthorization.findingOwnership, /assetInstruction 无需额外 findingId/);
     assert.match(auditPayload.context.currentRoleContract.reworkAuthorization.preservationRule, /不得.*撤销 assetInstruction/);
+    // 只把“未受影响镜头归宿主所有、候选不可改写”说清楚，同时保留冲突职责：
+    // 为未受影响镜头安排新付费生成、丢弃既有母片或直接违反补查要求仍必须阻断。
+    const preservedShotAuthority = auditPayload.context.currentRoleContract.reworkAuthorization.preservedShotAuthority;
+    assert.match(preservedShotAuthority, /未受影响镜头/);
+    assert.match(preservedShotAuthority, /宿主/);
+    assert.match(preservedShotAuthority, /不得要求/);
+    assert.match(preservedShotAuthority, /仍必须阻断/);
     assert.match(auditPayload.context.currentRoleContract.reworkAuthorization.verificationBoundary, /不得宣称后续视觉审片已经验证通过/);
     const auditRework = (auditClient.calls[0]!.payload as {
       context: { upstreamFacts: { brief: { rework: Record<string, unknown> } } };
     }).context.upstreamFacts.brief.rework;
-    assert.equal("previousDirectorPlan" in auditRework, false);
+    // 本用例只有镜头 1 且全部受影响，生产模型侧的收窄是空操作，审计基线应与原始基线同形。
+    assert.deepEqual(
+      (auditRework.previousDirectorPlan as { shots: Array<{ scenePosition: number }> })
+        .shots.map(({ scenePosition }) => scenePosition),
+      [1],
+    );
     assert.equal(auditRework.visualDirectionInstruction, input.brief.rework.visualDirectionInstruction);
     assert.deepEqual(auditRework.affectedScenePositions, [1]);
+  });
+
+  it("gives the independent audit the un-narrowed rework baseline so inherited shots are not read as new paid routes", async () => {
+    const { input, previousPlan } = scopedReworkWithSecondScene();
+    const candidate = structuredClone(previousPlan);
+    // 生产模型只需给出受影响镜头；未受影响的镜头 1 由宿主逐字继承。
+    (candidate.shots as Array<Record<string, unknown>>)[1]!.generationPrompt = "修正后的第二镜";
+    candidate.shots = [(candidate.shots as Array<Record<string, unknown>>)[1]!];
+    const producerClient = new SequencedCodexClient([candidate], "openai", "gpt-5.6-sol");
+    const auditClient = new SequencedCodexClient([{
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 95,
+      summary: "返工范围正确。",
+      issues: [],
+      repairInstructions: [],
+    }], "openai", "gpt-5.6-sol");
+    const agent = new CodexVisualDirectorAgent({
+      client: producerClient,
+      auditClient,
+      maxReviewIterations: 1,
+      modelId: "gpt-5.6-sol",
+    });
+
+    await agent.planDetailed({ ...input, selectedModelId: "gpt-5.6-sol" });
+
+    const producerRework = (producerClient.calls[0]!.payload as {
+      brief: { rework: { previousDirectorPlan: { shots: Array<{ scenePosition: number }> } } };
+    }).brief.rework;
+    const auditRework = (auditClient.calls[0]!.payload as {
+      context: {
+        upstreamFacts: { brief: { rework: {
+          affectedScenePositions: number[];
+          previousDirectorPlan: { shots: Array<{ scenePosition: number; generationPrompt: string }> };
+        } } };
+      };
+    }).context.upstreamFacts.brief.rework;
+
+    // 生产模型只拿到受影响镜头 2 的基线……
+    assert.deepEqual(producerRework.previousDirectorPlan.shots.map(({ scenePosition }) => scenePosition), [2]);
+    // ……审计必须拿到未收窄的完整基线，才能核对“其余镜头逐字继承”而不是靠 visual_strategy 反推。
+    assert.deepEqual(auditRework.previousDirectorPlan.shots.map(({ scenePosition }) => scenePosition), [1, 2]);
+    assert.equal(auditRework.previousDirectorPlan.shots[0]!.generationPrompt, "雨夜城市人物近景");
+    assert.deepEqual(auditRework.affectedScenePositions, [2]);
   });
 
   it("keeps unaffected shots byte-for-byte from the previous director plan during scoped rework", async () => {
@@ -1258,6 +1343,7 @@ describe("CodexVisualDirectorAgent", () => {
           constraints: ["不包含真实人物动作或现场环境"],
         }],
         editing: { sourceRangeReuse: true, staticEditorialCard: true },
+        audio: { narration: false, pauseControl: "unsupported", musicTrack: false, soundEffectsTrack: false },
       },
     });
     assert.deepEqual(payload.scenes, input.scenes);
@@ -1417,7 +1503,7 @@ describe("CodexVisualDirectorAgent", () => {
     await assert.rejects(() => agent.plan(input), /evidence shot.*generative provider/);
   });
 
-  it("does not let the director replace a script-required real stock shot with generated media", async () => {
+  it("lets the director replace an illustrative stock suggestion with an allowed generated route", async () => {
     const input = directorInput();
     input.scenes[0]!.visualStrategy = "stock";
     input.assetProviders.push({
@@ -1436,7 +1522,8 @@ describe("CodexVisualDirectorAgent", () => {
     shot.deliveryType = "generated_image";
     const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => plan) });
 
-    await assert.rejects(() => agent.plan(input), /requires real stock footage/);
+    const result = await agent.plan(input);
+    assert.equal(result.shots[0]?.deliveryType, "generated_image");
   });
 
   it("rejects generated shots that claim real verification", async () => {

@@ -50,7 +50,7 @@ const INPUT_DIGEST = "b3-accepted-input-digest-0001";
 
 function treatmentFixture(): CreativeTreatment {
   return {
-    version: "video-factory/creative-treatment-v1",
+    version: "video-factory/creative-treatment-v2",
     viewerPromise: "看完能掌握测试主题的三个要点",
     hook: { narrationIntent: "直接抛出问题", visualIntent: "对比画面开场" },
     progression: [
@@ -841,8 +841,8 @@ describe("B3 固定创作规划图", () => {
 
           assert.equal(outcome.status, "halted");
           assert.equal(outcome.halt.reason, "needs_source");
-          assert.match(outcome.halt.detail, /上传|实拍/);
-          assert.match(outcome.halt.detail, /非实证|停止/);
+          assert.match(outcome.halt.detail, /调整检索词|生成|复用/);
+          assert.doesNotMatch(outcome.halt.detail, /实验|实证/);
           assert.equal(outcome.state.issues[0]?.target, "source");
           assert.equal(calls.director.length, 2, "第二次确认来源路线无进展后不得再调用第三组导演");
           assert.equal(calls.search.length, 2);
@@ -1301,6 +1301,7 @@ describe("B3 固定创作规划图", () => {
             "searchCandidates",
             "rank",
             "compile",
+            "discuss",
           ]);
           for (const key of accessedPortKeys) {
             assert.ok(allowedPortKeys.has(key), `图访问了规划合同之外的依赖面：${key}`);
@@ -2346,6 +2347,29 @@ describe("B3 固定创作规划图", () => {
   // -------------------------------------------------------------------------
 
   describe("19 复用镜头可得性（P05）", () => {
+    it("把模型协议中的 null 复用根视为未设置，并保留后续镜头的合法母片复用", async () => {
+      const plan = reuseDirectorPlanFixture();
+      Object.assign(plan.shots[0]!, { reuseFromScenePosition: null });
+
+      const compiled = await executablePlanCompilePort({
+        runId: RUN_ID,
+        inputDigest: `${INPUT_DIGEST}-19-null-root`,
+        base: { ...baseInput(), inputDigest: `${INPUT_DIGEST}-19-null-root` },
+        stage: "compile",
+        issues: [],
+        treatment: { artifactId: "treatment:null-root", output: treatmentFixture() },
+        script: { artifactId: "script:null-root", output: scriptFixture() },
+        directorPlan: { artifactId: "director:null-root", output: plan },
+        candidates: null,
+        ranking: null,
+        integratedPlan: null,
+        availabilityHistory: [],
+      });
+
+      assert.equal(compiled.output.cuts[0]!.assetKey, "asset-scene-1");
+      assert.equal(compiled.output.cuts[1]!.assetKey, "asset-scene-1");
+    });
+
     it("stock 母片有高分候选 + 合法复用镜头自身候选为空：不产生错误 director 回退并完成", async () => {
       await withWorkspace(async (workspaceRoot) => {
         const store = CreativePlanningStore.open(workspaceRoot);

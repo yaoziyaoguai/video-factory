@@ -1,5 +1,7 @@
 export { BRIEF_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION, parseBrief, parsePersistedBrief, parseProductionSeriesContext, parseVoiceDoesNotFitConflict } from "./contracts.js";
 export type {
+  ProductionArticleReadStatus,
+  ProductionArticleSourceSnapshot,
   ProductionBrief,
   ProductionDirectorDirection,
   ProductionDirectorProfileId,
@@ -98,8 +100,9 @@ export type {
   AssetSemanticRanking,
   CodexAssetSemanticRankerOptions,
 } from "./asset-semantic-ranker.js";
-export { CodexVisualReviewAgent, FallbackVisualReviewAgent, IndependentDualVisualReviewAgent, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport } from "./codex-visual-review.js";
-export type { CodexVisualReviewAgentOptions, FallbackVisualReviewAgentOptions, IndependentDualVisualReviewAgentOptions, IndependentVisualReviewExecution, VisualReviewAgent, VisualReviewAgentInput, VisualReviewExecution, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport, VisualReviewScope } from "./codex-visual-review.js";
+export { assertCurrentVisualReviewContract, CodexVisualReviewAgent, FallbackVisualReviewAgent, IndependentDualVisualReviewAgent, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, claimEvidenceSufficient, VISUAL_REVIEW_PASS_MIN_CONFIDENCE, VISUAL_REVIEW_PASS_MIN_SCORE, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport, visualReviewBlocksContinuation } from "./codex-visual-review.js";
+export { visualReviewFindingKey } from "./production-pipeline.js";
+export type { CodexVisualReviewAgentOptions, FallbackVisualReviewAgentOptions, IndependentDualVisualReviewAgentOptions, IndependentVisualReviewExecution, IndependentVisualReviewFailure, VisualReviewAgent, VisualReviewAgentInput, VisualReviewExecution, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport, VisualReviewScope } from "./codex-visual-review.js";
 export { FallbackCreativeTreatmentAgent, FallbackScreenwriterAgent, FallbackVisualDirectorAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
 export type { FallbackCreativeTreatmentAgentOptions, FallbackScreenwriterAgentOptions, FallbackVisualDirectorAgentOptions } from "./fallback-role-agents.js";
 export {
@@ -111,6 +114,40 @@ export {
   parseCreativeTreatment,
 } from "./creative-treatment.js";
 export type { CreativeTreatment } from "./creative-treatment.js";
+export {
+  CREATIVE_REVIEW_FEATURE,
+  CREATIVE_REVIEW_VERSION,
+  confirmCreativeDraft,
+  contentSha256,
+  creativeReviewGate,
+  initialCreativeReviewState,
+  parseCreativeDiscussionResult,
+  parseCreativeReviewConfirmResume,
+  parseCreativeReviewResume,
+  publishCreativeDraft,
+  recordCreativeDiscussion,
+  applyCreativeReviewDeterministicCommand,
+  creativeReturnTargets,
+  returnCreativeReviewToStage,
+} from "./creative-review.js";
+export type {
+  CreativeDraftRef,
+  CreativeReviewConfirmResume,
+  CreativeReviewResume,
+  CreativeReviewReturnResume,
+  CreativeDiscussionResult,
+  CreativeDiscussionSelection,
+  CreativeReviewGate,
+  CreativeReviewPhase,
+  CreativeReviewState,
+  CreativeStage,
+  CreativeStageConfirmation,
+  CreativeStageReviewState,
+} from "./creative-review.js";
+export { runCreativeDiscussionTask } from "./codex-creative-discussion.js";
+export type { CreativeDiscussionAgent, CreativeDiscussionAgentInput } from "./codex-creative-discussion.js";
+export { assessTreatmentReadiness } from "./treatment-readiness.js";
+export type { TreatmentReadiness } from "./treatment-readiness.js";
 export {
   CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION,
   CodexCreativeTreatmentAgent,
@@ -212,8 +249,11 @@ export type {
   DispatchedProductionRun,
   ProductionPaidNodeSummary,
   ProductionPaidNodeReconciliationDraft,
+  ProductionCreativeReviewConfirmationDraft,
+  ProductionCreativeReviewCommandDraft,
   ProductionPaidOperationItemSummary,
   ProductionPipelineOptions,
+  ProductionNarrationRevisionDraft,
   ProductionReworkImpactSummary,
   ProductionProviderRuntimeMetadata,
   ProductionRunListener,

@@ -11,6 +11,8 @@ import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { CreativeTreatment } from "./creative-treatment.js";
 import type { CreativeTreatmentAgent, CreativeTreatmentAgentInput } from "./codex-creative-treatment.js";
 import type { VisualDirectorAgent, VisualDirectorAgentInput } from "./visual-director.js";
+import type { CreativeDiscussionAgentInput } from "./codex-creative-discussion.js";
+import type { CreativeDiscussionResult } from "./creative-review.js";
 
 interface RoleCandidate<TAgent> {
   agent: TAgent;
@@ -104,6 +106,19 @@ export class FallbackScreenwriterAgent implements ScreenwriterAgent {
         : agent.draft(candidateInput).then((output) => ({ output })),
     );
   }
+
+  async discussDetailed(input: CreativeDiscussionAgentInput): Promise<CodexTaskExecution<CreativeDiscussionResult>> {
+    const boundedInput = withStageAdmissionDeadline(input, this.stageAdmissionWindowMs, this.now);
+    return runCandidates(
+      this.options.candidates,
+      input.selectedModelId,
+      boundedInput,
+      (agent, candidateInput) => {
+        if (!agent.discussDetailed) throw new Error("Screenwriter discussion is not supported by this candidate.");
+        return agent.discussDetailed(candidateInput);
+      },
+    ) as Promise<CodexTaskExecution<CreativeDiscussionResult>>;
+  }
 }
 
 // 前期构思的模型候选路由：与编剧/导演同一 runCandidates 合同——selectedModelId 只改变候选顺序，
@@ -151,6 +166,19 @@ export class FallbackCreativeTreatmentAgent implements CreativeTreatmentAgent {
         })),
     ) as CodexTaskExecution<CreativeTreatment>;
   }
+
+  async discussDetailed(input: CreativeDiscussionAgentInput): Promise<CodexTaskExecution<CreativeDiscussionResult>> {
+    const boundedInput = withStageAdmissionDeadline(input, this.stageAdmissionWindowMs, this.now);
+    return runCandidates(
+      this.options.candidates,
+      input.selectedModelId,
+      boundedInput,
+      (agent, candidateInput) => {
+        if (!agent.discussDetailed) throw new Error("Treatment discussion is not supported by this candidate.");
+        return agent.discussDetailed(candidateInput);
+      },
+    ) as Promise<CodexTaskExecution<CreativeDiscussionResult>>;
+  }
 }
 
 export class FallbackVisualDirectorAgent implements VisualDirectorAgent {
@@ -181,6 +209,19 @@ export class FallbackVisualDirectorAgent implements VisualDirectorAgent {
         ? agent.planDetailed(candidateInput)
         : agent.plan(candidateInput).then((output) => ({ output })),
     );
+  }
+
+  async discussDetailed(input: CreativeDiscussionAgentInput): Promise<CodexTaskExecution<CreativeDiscussionResult>> {
+    const boundedInput = withStageAdmissionDeadline(input, this.stageAdmissionWindowMs, this.now);
+    return runCandidates(
+      this.options.candidates,
+      input.selectedModelId,
+      boundedInput,
+      (agent, candidateInput) => {
+        if (!agent.discussDetailed) throw new Error("Director discussion is not supported by this candidate.");
+        return agent.discussDetailed(candidateInput);
+      },
+    ) as Promise<CodexTaskExecution<CreativeDiscussionResult>>;
   }
 }
 

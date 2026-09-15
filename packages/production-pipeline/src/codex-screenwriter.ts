@@ -1,13 +1,14 @@
 import { isDeepStrictEqual } from "node:util";
-import type { ProductionBlueprint } from "@video-factory/template-core";
 import { CodexBridgeClient, requestOptionsForDeadline, type CodexTaskExecution } from "./codex-chat.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
-import type { ProductionReworkFinding, ProductionSeriesContext, ProductionVisualPlan } from "./contracts.js";
+import type { ProductionArticleSourceSnapshot, ProductionReworkFinding, ProductionSeriesContext, ProductionVisualPlan } from "./contracts.js";
 import type { DurationRange } from "./executable-timeline.js";
 import type { CreativeTreatment } from "./creative-treatment.js";
 import type { PlanningIssue } from "./creative-planning.js";
 import { summarizeProductionCapabilities, type ProductionCapabilities } from "./production-capabilities.js";
 import { assertGeneratedVisualDoesNotClaimEvidence } from "./visual-evidence-boundary.js";
+import { runCreativeDiscussionTask, type CreativeDiscussionAgentInput } from "./codex-creative-discussion.js";
+import type { CreativeDiscussionResult } from "./creative-review.js";
 
 export type ScriptVisualStrategy = "stock" | "image" | "generated" | "local";
 
@@ -43,18 +44,23 @@ export interface ScreenwriterAgentInput {
     platform: string;
     durationSeconds: number;
     durationRange?: DurationRange;
-    templateBlueprint?: ProductionBlueprint;
     editorial?: {
       verdict: "produce_video" | "produce_image_story";
       reasons: string[];
       guardrails: string[];
     };
     visualProof?: string;
+    visualIntent?: string;
     visualPlan?: ProductionVisualPlan;
     seriesContext?: ProductionSeriesContext;
+    articleSources?: ProductionArticleSourceSnapshot[];
     creativeTreatment?: CreativeTreatment;
     planningIssues?: PlanningIssue[];
     productionCapabilities?: ProductionCapabilities;
+    voiceTiming?: {
+      rate: number;
+      pauseScale: number;
+    };
     rework?: {
       sourceRunId: string;
       instruction: string;
@@ -69,6 +75,8 @@ export interface ScreenwriterAgentInput {
   agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
   agentLoopCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
   wallClockDeadlineAtMs?: number;
+  /** R11 创作确认：初稿只生成；确认时只审传入的当前稿。 */
+  creativeReviewExecution?: { mode: "draft" } | { mode: "check"; candidate: ScriptDraft };
 }
 
 export interface ScreenwriterAgent {
@@ -76,6 +84,7 @@ export interface ScreenwriterAgent {
   modelId?: string;
   draft(input: ScreenwriterAgentInput): Promise<unknown>;
   draftDetailed?(input: ScreenwriterAgentInput): Promise<CodexTaskExecution<unknown>>;
+  discussDetailed?(input: CreativeDiscussionAgentInput): Promise<CodexTaskExecution<CreativeDiscussionResult>>;
 }
 
 export interface CodexScreenwriterAgentOptions {
@@ -94,7 +103,7 @@ export interface CodexScreenwriterAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_SCREENWRITER_TIMEOUT_MS = 660_000;
 const DEFAULT_SCREENWRITER_MAX_ATTEMPTS = 2;
-export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v17|role-audit-v5|script-validator-v5|visual-plan-v2|production-capabilities-v2|canon-facts-v2";
+export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v20|role-audit-v8|script-validator-v5|visual-plan-v2|production-capabilities-v3|voice-timing-v1|creative-treatment-v2|canon-facts-v2|article-sources-v1";
 
 // id 固定为 codex-screenwriter-v1：brief.providers.script 持久化该 id，registry 按 id 匹配 provider。
 export class CodexScreenwriterAgent implements ScreenwriterAgent {
@@ -152,12 +161,16 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
         "前两秒有具体吸引点，前六秒有与本片承诺相符的部分兑现；后段有推进，结尾不另起承诺。",
         "脚本动作、旁白、屏幕文字、声音提示与时长协调，可见成功条件具体；不靠加速或凑镜头塞内容。",
         "素材/编辑要求符合 productionCapabilities；同母片源区间方案允许在覆盖可证的前提下交导演落实，独立生成不能冒充同一对象或真实实验。",
-        "durationRange 优先，模板必需职责、visualPlan 和系列约束一致；冲突不能通过静默跳过或捏造能力解决。",
+        "durationRange 优先，visualPlan、用户要求和系列约束一致；冲突不能通过静默跳过或捏造能力解决。",
         "canonFacts 必须是 0-8 条已建立事实；没有新增事实时为空数组，不能用计划或推测凑数；事实阈值与条件不因 hook 或总结被改成绝对断言。",
         "rework 的范围、findingId 与人工指令准确，未受影响内容保留，不宣称已经复验。",
         "修订复核上轮问题，不破坏已有兑现与能力约束；新的 blocking 有可引用依据而不是更换个人偏好。",
       ],
-      maxIterations: this.maxReviewIterations,
+      maxIterations: input.creativeReviewExecution ? 1 : this.maxReviewIterations,
+      ...(input.creativeReviewExecution?.mode === "draft" ? { deferAudit: true } : {}),
+      ...(input.creativeReviewExecution?.mode === "check"
+        ? { initialCandidate: input.creativeReviewExecution.candidate }
+        : {}),
       produce: (revision, { requestId, session, requestOptions, preparedOperation }) => preparedOperation
         ? this.client.observePrepared(preparedOperation, requestOptions)
         : this.client.runTaskDetailed("script-draft", {
@@ -181,6 +194,11 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
     });
   }
 
+  async discussDetailed(input: CreativeDiscussionAgentInput): Promise<CodexTaskExecution<CreativeDiscussionResult>> {
+    this.assertSelectedModel(input.selectedModelId);
+    return runCreativeDiscussionTask(this.client, input);
+  }
+
   private assertSelectedModel(selectedModelId: string | undefined): void {
     if (selectedModelId && selectedModelId !== this.modelId) {
       throw new Error(`Selected model '${selectedModelId}' is not available for screenwriting.`);
@@ -201,7 +219,6 @@ function screenwriterAuditContext(
   brief: ScreenwriterAgentInput["brief"],
   candidate: ScriptDraft,
 ): Record<string, unknown> {
-  const template = brief.templateBlueprint;
   const series = brief.seriesContext;
   const durationRange = effectiveScriptDurationRange(brief.durationSeconds, brief.durationRange);
   const totalDurationSeconds = candidate.scenes.reduce((total, scene) => total + scene.duration, 0);
@@ -225,10 +242,13 @@ function screenwriterAuditContext(
       nicheSlug: brief.nicheSlug,
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
+      ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
       ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
       ...(brief.creativeTreatment ? { creativeTreatment: brief.creativeTreatment } : {}),
       ...(brief.planningIssues ? { planningIssues: brief.planningIssues } : {}),
+      ...(brief.articleSources?.length ? { articleSources: brief.articleSources } : {}),
       productionCapabilities: brief.productionCapabilities ?? summarizeProductionCapabilities([]),
+      ...(brief.voiceTiming ? { voiceTiming: brief.voiceTiming } : {}),
       ...(reworkForAudit ? { rework: reworkForAudit } : {}),
     },
     currentRoleContract: {
@@ -257,20 +277,7 @@ function screenwriterAuditContext(
         continuousActionRule: "连续动作优先在同一母片内完成；跨 scene 方案必须由导演用可执行的源区间关系落地。",
       },
       productionCapabilities: brief.productionCapabilities ?? summarizeProductionCapabilities([]),
-      ...(template ? {
-        template: {
-          automationLevel: template.automationLevel,
-          storyStructure: template.storyStructure.map(({ id, purpose, required }) => ({ id, purpose, required })),
-          shotSlots: template.shotSlots.map(({ id, beatId, purpose, durationSeconds, allowedCapabilities }) => ({
-            id,
-            beatId,
-            purpose,
-            durationSeconds,
-            allowedCapabilities,
-          })),
-          qualityRules: template.qualityRules.map(({ label, dimension, required, threshold }) => ({ label, dimension, required, threshold })),
-        },
-      } : {}),
+      ...(brief.voiceTiming ? { voiceTiming: brief.voiceTiming } : {}),
     },
     downstreamBoundary: "只审查脚本是否给下游提供可执行意图；不得要求尚未执行的素材、配音、渲染或审片结果作为当前节点通过证据。",
     ...(series ? {

@@ -819,7 +819,7 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.equal(inputs[0]?.brief.title, brief.title);
     assert.equal(inputs[0]?.brief.platform, brief.platform);
     assert.equal(inputs[0]?.brief.durationSeconds, brief.durationSeconds);
-    assert.deepEqual(inputs[0]?.brief.templateBlueprint, templateSnapshot.resolvedBlueprint);
+    assert.equal("templateGuidance" in (inputs[0]?.brief ?? {}), false);
 
     const scriptArtifact = run.artifacts.find((artifact) => artifact.kind === "script");
     assert.ok(scriptArtifact?.uri);

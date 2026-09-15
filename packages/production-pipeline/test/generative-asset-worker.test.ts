@@ -79,6 +79,17 @@ describe("GenerativeAssetWorkerClient", () => {
     );
   });
 
+  it("treats null optional director references as absent at the asset execution boundary", async () => {
+    const response = await runCraftedAssetPlan({
+      directorShot: {
+        reuseFromScenePosition: null,
+        referenceFromScenePosition: null,
+      },
+    });
+
+    assert.equal(response.status, "succeeded");
+  });
+
   for (const routed of [false, true]) {
     it(`stops after a rejected pilot, preserves paid media and routes findings to rework (${routed ? "director" : "direct"})`, async () => {
       const harness = await pilotHarness(routed, "revise");
@@ -93,6 +104,13 @@ describe("GenerativeAssetWorkerClient", () => {
       assert.equal((result.output?.sourceVisualReview as VisualReviewReport).findings[0]?.scenePosition, 1);
       assert.ok(result.artifacts.some((artifact) => artifact.kind === "media_asset"));
       assert.ok(result.artifacts.some((artifact) => artifact.kind === "review_report"));
+      const ledgerName = (await readdir(path.join(harness.root, ".generation-operations")))[0]!;
+      const ledger = JSON.parse(await readFile(path.join(harness.root, ".generation-operations", ledgerName), "utf8"));
+      assert.deepEqual(
+        ledger.items.map((item: { state: string }) => item.state).sort(),
+        ["materialized", "terminal_failed", "terminal_failed"],
+        "a terminal operation must release every item that never crossed the provider boundary",
+      );
 
       const repeated = await harness.worker.run({ ...harness.request, outputDir: path.join(harness.root, "attempt-2") });
       assert.equal(repeated.status, "rejected");
@@ -109,6 +127,39 @@ describe("GenerativeAssetWorkerClient", () => {
       assert.equal(result.diagnostics?.actualCostCny, 6);
       const plan = JSON.parse(await readFile(String(result.output?.assetPlanPath), "utf8"));
       assert.deepEqual(plan.scene_assets.map((asset: { asset_id: string }) => asset.asset_id), ["task-1", "task-2", "task-3"]);
+    });
+
+    // 回归：模型按合同诚实记录"未能核验"的项时，不得让试片闸门永久停掉付费生成。
+    // 该发现是 info 级、nextAction 为 inspect_existing_media（先查看已有素材，非返工），
+    // 且五项评分与 confidence 均过门槛；宿主归一化会把 recommendation 降为 revise，
+    // 但放行判据必须依据报告实质内容，而不是这个被粗粒度降级过的字段。
+    it(`keeps paying for the remaining clips when the pilot only reports an advisory not_observed finding (${routed ? "director" : "direct"})`, async () => {
+      const harness = await pilotHarness(routed, "advisory");
+      const result = await harness.worker.run(harness.request);
+      assert.equal(result.status, "succeeded",
+        "not_observed 是证据合同规定的咨询项，不是需要返工的缺陷，不应否决后续付费生成");
+      assert.deepEqual(harness.events, ["generate-1", "review-1", "generate-2", "generate-3"]);
+      assert.equal(result.diagnostics?.actualCostCny, 6);
+      const report = result.output?.sourceVisualReview as VisualReviewReport;
+      assert.deepEqual(
+        report.findings.map((finding) => [finding.evidenceStatus, finding.severity, finding.nextAction]),
+        [["not_observed", "info", "inspect_existing_media"]],
+        "咨询性发现必须原样保留在试片报告里供操作员复核",
+      );
+    });
+
+    it(`still stops paid generation when an advisory finding falls below the pilot quality bar (${routed ? "director" : "direct"})`, async () => {
+      const lowScore = await pilotHarness(routed, "advisory_low_score");
+      const lowScoreResult = await lowScore.worker.run(lowScore.request);
+      assert.equal(lowScoreResult.status, "rejected", "单项评分跌破 75 时不得因为发现是 info 级就放行");
+      assert.deepEqual(lowScore.events, ["generate-1", "review-1"]);
+      assert.equal(lowScoreResult.diagnostics?.actualCostCny, 2);
+
+      const lowConfidence = await pilotHarness(routed, "advisory_low_confidence");
+      const lowConfidenceResult = await lowConfidence.worker.run(lowConfidence.request);
+      assert.equal(lowConfidenceResult.status, "rejected", "confidence 跌破 0.7 时不得因为发现是 info 级就放行");
+      assert.deepEqual(lowConfidence.events, ["generate-1", "review-1"]);
+      assert.equal(lowConfidenceResult.diagnostics?.actualCostCny, 2);
     });
   }
 
@@ -2217,10 +2268,13 @@ describe("GenerativeAssetWorkerClient", () => {
       }],
     });
 
-    await assert.rejects(
-      () => subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 2, 5)),
-      /estimated cost.*7.*authorized maximum.*5/i,
-    );
+    const response = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 2, 5));
+    assert.equal(response.status, "failed");
+    assert.equal(response.error?.code, "ASSET_AUTHORIZATION_INSUFFICIENT");
+    assert.match(response.error?.message ?? "", /estimated cost.*7.*authorized maximum.*5/i);
+    assert.equal(response.diagnostics?.providerOutcomeKnown, true);
+    assert.equal(response.diagnostics?.meteredAttemptCount, 0);
+    assert.equal(response.diagnostics?.actualCostCny, 0);
     assert.equal(called, false);
   });
 
@@ -3387,10 +3441,19 @@ describe("GenerativeAssetWorkerClient", () => {
       }],
     });
 
-    await assert.rejects(
-      () => subject.run(routedWorkerRequest(scriptPath, directorPlanPath, path.join(root, "attempt-1"), 2, 6)),
-      /estimated cost.*7.*authorized maximum.*6/i,
+    const response = await subject.run(
+      routedWorkerRequest(scriptPath, directorPlanPath, path.join(root, "attempt-1"), 2, 6),
     );
+    assert.equal(response.status, "failed");
+    assert.equal(response.error?.code, "ASSET_AUTHORIZATION_INSUFFICIENT");
+    assert.match(response.error?.message ?? "", /estimated cost.*7.*authorized maximum.*6/i);
+    assert.deepEqual(response.diagnostics, {
+      providerOutcomeKnown: true,
+      meteredAttemptCount: 0,
+      meteredFailedAttemptCount: 0,
+      actualCostCny: 0,
+      actualCostSource: "configured_rate",
+    });
     assert.equal(called, false);
   });
 
@@ -4177,7 +4240,12 @@ describe("GenerativeAssetWorkerClient", () => {
   });
 });
 
-async function pilotHarness(routed: boolean, initialVerdict: "approve" | "revise" | "unavailable", unavailable = false, mixed = false) {
+async function pilotHarness(
+  routed: boolean,
+  initialVerdict: "approve" | "advisory" | "advisory_low_score" | "advisory_low_confidence" | "revise" | "unavailable",
+  unavailable = false,
+  mixed = false,
+) {
   const root = await mkdtemp(path.join(tmpdir(), "vf-pilot-"));
   const scriptPath = path.join(root, "script.json");
   const directorPlanPath = path.join(root, "director.json");
@@ -4201,13 +4269,25 @@ async function pilotHarness(routed: boolean, initialVerdict: "approve" | "revise
       const plan = JSON.parse(await readFile(input.assetPlanPath!, "utf8"));
       assert.ok(plan.scene_assets.find((asset: { scene_position: number }) => asset.scene_position === position).local_path);
       if (verdict === "unavailable") throw new Error("review service unavailable");
+      // advisory：模型按证据合同诚实记录"未能核验"的项——info 级、要求先查看已有素材而非返工，
+      // 五项评分与 confidence 均过门槛。宿主归一化仍会把 recommendation 降为 revise。
+      const advisory = verdict === "advisory" || verdict === "advisory_low_score" || verdict === "advisory_low_confidence";
       return {
         version: "video-factory/visual-review-v1", summary: "试片结果",
-        scores: { composition: 94, continuity: 94, pacing: 94, legibility: 94, safety: 94 },
-        confidence: 0.95, recommendation: verdict,
-        findings: verdict === "approve" ? [] : [{
+        scores: {
+          composition: 94, continuity: 94, legibility: 94, safety: 94,
+          pacing: verdict === "advisory_low_score" ? 74 : 94,
+        },
+        confidence: verdict === "advisory_low_confidence" ? 0.6 : 0.95,
+        recommendation: verdict === "revise" ? "revise" : "approve",
+        findings: verdict === "approve" ? [] : [advisory ? {
           timecodeMs: 0, startTimecodeMs: 0, endTimecodeMs: 0,
-          scenePosition: position, targetNodeId: "assets", evidenceStatus: "failed",
+          scenePosition: position, targetNodeId: "assets", claimType: "static", evidenceStatus: "not_observed",
+          evidenceFrameSha256: null, nextAction: "inspect_existing_media", category: "continuity", severity: "info",
+          description: "稀疏抽帧没有覆盖动作结果", suggestion: "先查看已有素材，不据此要求重做此镜头",
+        } : {
+          timecodeMs: 0, startTimecodeMs: 0, endTimecodeMs: 0,
+          scenePosition: position, targetNodeId: "assets", claimType: "static", evidenceStatus: "failed",
           evidenceFrameSha256: null, nextAction: "rework_asset", category: "legibility", severity: "critical",
           description: "生成了水印", suggestion: "移除画面水印后重做此镜头",
         }],

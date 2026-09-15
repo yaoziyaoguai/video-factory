@@ -1,5 +1,5 @@
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   TASK_BINDING_VERSION,
   parseBrokerBinding,
@@ -13,20 +13,21 @@ import {
 
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
 export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
-  "topic-ideas": "16df6ddc097508f91530d4df20dc2643bd849bde0971524567a345f0138b5b58",
+  "topic-ideas": "6e954dfd3b07ac84170800b3d0d29d5399c3692c5d771196c2846e4173e165fe",
   "series-roadmap": "19b961d58dcc4e87dbc7c4e710766b417e57f89f565ad07b776fb54017874b3f",
-  "creative-treatment": "583dea22aae4391cac720d70e444f9d5f2936f1f991ad6683e491f757e11da03",
-  "director-plan": "51f57d086c6fc9187d541b972bdc5a25fc9d9d90ee23496c2ce20ef7d36274a9",
-  "script-draft": "a084c1da68d2be39ffc4cc85445e67b684e2a1014d1144b4d6eb58bc9a35ed8a",
+  "creative-treatment": "b7df171497e45b714f3a3064b33ef93faee0e7f48724ac83589ca1d6dd10c3b4",
+  "director-plan": "4c2bbab843fed18658ee8d5345ac81694a18f10e0dd45b362f782bbe4640c299",
+  "script-draft": "e2f8ac99ff8acc72b998641e1bd2653add4b939cccd4074105c64ab84146e9c1",
   "publish-copy": "db27873c44bb30623d5fceb6e5d3811912b32aeea3762fc7d18f3cb9cd58e9bd",
   "asset-rank": "c52416dc97cbd09ff747fa48f69fe65caa9a4c43fe5f1e3d3325dbb8031d5ba1",
   "reference-grammar": "49a25cf42265929fa0bc244967acc7f36e53c7de2546957798a6f1631e447ca7",
-  "visual-review": "3461a6524c9113a7793a91b63a696cd77edf6db369c0078cae996023b9f0b7d2",
-  "role-audit": "1e32f55a94f0b69ef530200ecb888431ec0ea1b60cb2c6c172dc4195f2838169",
+  "visual-review": "ef6bb583f730bab5e071b56238c4ff01a87155bcc6d7b6330ec5db8044a8ff46",
+  "role-audit": "cb6c74ee00b1d40aebd2fdbb676e6a43e048011bc33d864ae44ebc60873495d6",
+  "creative-discussion": "d1b6d26789c65330c306e82205141c00b108c5f6c3a3d39a3ce5724c85b0b2a4",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。
-export const CODEX_TASK_KINDS = ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"] as const;
+export const CODEX_TASK_KINDS = ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion"] as const;
 export type CodexTaskKind = (typeof CODEX_TASK_KINDS)[number];
 
 interface ModelCandidateAttemptBase {
@@ -71,6 +72,14 @@ export interface CodexTaskTrace {
   totalTokens?: number;
   reasoningTokens?: number;
   retryCount?: number;
+  modelAttemptCount?: number;
+  structuredRepairCount?: number;
+  requestPayloadBytes?: number;
+  promptBytes?: number;
+  imageCount?: number;
+  imageBytes?: number;
+  imageSetSha256?: string;
+  imageMappingSha256?: string;
 }
 
 export interface CodexTaskSession {
@@ -129,6 +138,16 @@ export interface ModelProviderFailureDetails {
   fieldPath?: string;
   taskKind?: CodexTaskKind;
   accepted?: boolean;
+  executionLayer?: "cli" | "provider_transport";
+  processExitCode?: number;
+  providerErrorCode?: "invalid_json_schema" | "invalid_request_error" | "unsupported_parameter";
+  schemaKeyword?: "uniqueItems" | "required" | "additionalProperties";
+  networkCode?: string;
+  headersReceived?: boolean;
+  localExecutionEnded?: boolean;
+  remoteQueryable?: boolean;
+  modelAttemptCount?: number;
+  structuredRepairCount?: number;
 }
 
 export interface RoleAuditIssue {
@@ -146,11 +165,27 @@ export interface RoleAudit {
   issues: RoleAuditIssue[];
   repairInstructions: string[];
   planningDisposition?: RoleAuditPlanningDisposition | null;
+  hostReadinessReview?: {
+    misclassifiedIssueIds: string[];
+  } | null;
 }
 
 export interface RoleAuditPlanningDisposition {
   action: "revise_here" | "needs_source" | "needs_user";
   issueIndexes: number[];
+}
+
+export interface AgentLoopHostPlanningReadiness {
+  status: "ready" | "revise_here" | "needs_source";
+  issues: Array<{
+    id: string;
+    target: "script" | "director" | "source" | "user";
+    beatIds: string[];
+    scenePositions: number[];
+    reason: string;
+    requiredChange: string;
+    evidenceArtifactIds: string[];
+  }>;
 }
 
 export interface AgentLoopIterationTrace {
@@ -160,6 +195,7 @@ export interface AgentLoopIterationTrace {
   candidateTrace?: CodexTaskTrace;
   auditTrace?: CodexTaskTrace;
   audit: RoleAudit;
+  hostReadiness?: AgentLoopHostPlanningReadiness;
 }
 
 export interface AgentLoopPendingCandidateTrace {
@@ -518,10 +554,17 @@ export class CodexBridgeClient {
       }
       if (observation.kind === "running" || observation.kind === "accepted_unknown") {
         operation.taskFact = observation.kind;
+        if (observation.kind === "accepted_unknown" && observation.localExecutionEnded) {
+          throw new CodexBridgeError(
+            "The local execution ended but the remote result remains unknown; automatic observation has stopped.",
+            false, "uncertain", undefined, "model_provider_no_output", observation.failureDetails,
+          );
+        }
         await this.sleep(this.pollIntervalMs);
         continue;
       }
       if (observation.kind === "not_accepted") {
+        if (observation.error) throw observation.error;
         throw new CodexBridgeError(
           `Codex bridge proved task '${operation.requestId}' was not accepted.`,
           true,
@@ -638,7 +681,28 @@ export class CodexBridgeClient {
                 expectedContractDigest,
                 expectedBinding,
               );
-              resolve({ kind: "completed", execution: parseEnvelope(raw, session?.key, expectedContractDigest, operation) });
+              const replayRecord = JSON.parse(raw) as Record<string, unknown>;
+              if (replayRecord.ok !== true) {
+                // 200 也可能是重放已终结的失败信封（state=completed_failure）。按成功信封解析
+                // 会抛出 ok/output 缺失，把原始 reasonCode/fieldPath 诊断换成通用错误。
+                if (operation) validateResponseIdentity(replayRecord, operation);
+                if (replayRecord.state === "completed_failure") {
+                  reject(completedFailureError((replayRecord.outcome ?? {}) as Record<string, unknown>));
+                  return;
+                }
+                reject(new CodexBridgeError("Codex bridge response envelope is missing ok/output.", false));
+                return;
+              }
+              resolve({
+                kind: "completed",
+                execution: parseEnvelope(
+                  raw,
+                  session?.key,
+                  expectedContractDigest,
+                  operation,
+                  (JSON.parse(body) as Record<string, unknown>).payload,
+                ),
+              });
             } catch (error) {
               reject(error);
             }
@@ -696,7 +760,11 @@ export class CodexBridgeClient {
               if (record.state === "running" || record.state === "accepted_unknown") {
                 try {
                   validateResponseIdentity(record, operation);
-                  resolve({ kind: record.state });
+                  resolve(record.state === "running" ? { kind: "running" } : {
+                    kind: "accepted_unknown",
+                    localExecutionEnded: typeof record.localExecutionEndedAt === "string" && Number.isFinite(Date.parse(record.localExecutionEndedAt)),
+                    failureDetails: bridgeFailureDetails(raw),
+                  });
                 } catch (error) {
                   reject(error);
                 }
@@ -705,7 +773,7 @@ export class CodexBridgeClient {
               if (record.state === "not_accepted") {
                 try {
                   validateResponseIdentity(record, operation);
-                  resolve({ kind: "not_accepted" });
+                  resolve({ kind: "not_accepted", ...(record.status === 503 ? { error: mapFailureResponse(503, raw) } : {}) });
                 } catch (error) {
                   reject(error);
                 }
@@ -779,8 +847,8 @@ export class CodexBridgeClient {
 
 type QueryObservation =
   | { kind: "running" }
-  | { kind: "accepted_unknown" }
-  | { kind: "not_accepted" }
+  | { kind: "accepted_unknown"; localExecutionEnded?: boolean; failureDetails?: ModelProviderFailureDetails | undefined }
+  | { kind: "not_accepted"; error?: CodexBridgeError }
   | { kind: "conflict" }
   | { kind: "query_failure" }
   | { kind: "completed"; status: number; raw: string };
@@ -878,6 +946,7 @@ function parseEnvelope(
   sessionKey?: string,
   expectedContractDigest?: string,
   operation?: CodexPreparedOperation,
+  submittedPayload?: unknown,
 ): CodexTaskExecution {
   const envelope = parseJsonOrThrow(raw, "Codex bridge returned a non-JSON response body.");
   if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) {
@@ -895,7 +964,11 @@ function parseEnvelope(
     throw new CodexBridgeError("Codex bridge response session handle is invalid.", false);
   }
   const output = parseJsonOrThrow(stripCodeFence(record.output), "Codex bridge output is not valid JSON.");
-  const trace = record.trace === undefined ? undefined : parseTrace(record.trace);
+  const parsedTrace = record.trace === undefined ? undefined : parseTrace(record.trace);
+  const requestPayload = operation?.envelope.payload ?? submittedPayload;
+  const trace = parsedTrace && requestPayload !== undefined
+    ? { ...parsedTrace, ...requestDiagnostics(requestPayload, parsedTrace.prompt) }
+    : parsedTrace;
   if (operation && (!trace
     || trace.taskKind !== operation.kind
     || trace.providerId !== operation.binding.providerId
@@ -918,6 +991,50 @@ function parseEnvelope(
     ...(sessionKey && typeof record.sessionHandle === "string"
       ? { session: { key: sessionKey, handle: record.sessionHandle } }
       : {}),
+  };
+}
+
+function requestDiagnostics(
+  payload: unknown,
+  prompt: string,
+): Pick<CodexTaskTrace, "requestPayloadBytes" | "promptBytes" | "imageCount" | "imageBytes" | "imageSetSha256" | "imageMappingSha256"> {
+  const base = {
+    requestPayloadBytes: Buffer.byteLength(JSON.stringify(payload), "utf8"),
+    promptBytes: Buffer.byteLength(prompt, "utf8"),
+  };
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return base;
+  const record = payload as Record<string, unknown>;
+  const images = [record.frames, record.images, record.thumbnails]
+    .find((value): value is unknown[] => Array.isArray(value));
+  if (!images?.length) return base;
+  const normalized = images.flatMap((value, index) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+    const image = value as Record<string, unknown>;
+    const jpegBase64 = typeof image.jpegBase64 === "string" ? image.jpegBase64 : undefined;
+    if (!jpegBase64) return [];
+    const sha256 = typeof image.sha256 === "string" && /^[a-f0-9]{64}$/.test(image.sha256)
+      ? image.sha256
+      : createHash("sha256").update(Buffer.from(jpegBase64, "base64")).digest("hex");
+    return [{
+      bytes: Buffer.from(jpegBase64, "base64").byteLength,
+      sha256,
+      mapping: {
+        index,
+        ...(Number.isInteger(image.imageIndex) ? { imageIndex: image.imageIndex } : {}),
+        ...(Number.isInteger(image.scenePosition) ? { scenePosition: image.scenePosition } : {}),
+        ...(Number.isInteger(image.timecodeMs) ? { timecodeMs: image.timecodeMs } : {}),
+        ...(Number.isInteger(image.sourceTimecodeMs) ? { sourceTimecodeMs: image.sourceTimecodeMs } : {}),
+        ...(typeof image.phase === "string" ? { phase: image.phase } : {}),
+      },
+    }];
+  });
+  if (!normalized.length) return base;
+  return {
+    ...base,
+    imageCount: normalized.length,
+    imageBytes: normalized.reduce((total, image) => total + image.bytes, 0),
+    imageSetSha256: createHash("sha256").update(JSON.stringify(normalized.map((image) => image.sha256))).digest("hex"),
+    imageMappingSha256: createHash("sha256").update(JSON.stringify(normalized.map((image) => image.mapping))).digest("hex"),
   };
 }
 
@@ -1132,6 +1249,8 @@ function parseTrace(value: unknown): CodexTaskTrace {
   const totalTokens = optionalTokenCount(trace.totalTokens, "totalTokens");
   const reasoningTokens = optionalTokenCount(trace.reasoningTokens, "reasoningTokens");
   const retryCount = optionalTokenCount(trace.retryCount, "retryCount");
+  const modelAttemptCount = optionalTokenCount(trace.modelAttemptCount, "modelAttemptCount");
+  const structuredRepairCount = optionalTokenCount(trace.structuredRepairCount, "structuredRepairCount");
   if (trace.requestIdHash !== undefined
     && (typeof trace.requestIdHash !== "string" || !/^[a-f0-9]{64}$/.test(trace.requestIdHash))) {
     throw new CodexBridgeError("Codex bridge trace requestIdHash is invalid.", false);
@@ -1177,6 +1296,8 @@ function parseTrace(value: unknown): CodexTaskTrace {
     ...(totalTokens !== undefined ? { totalTokens } : {}),
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
     ...(retryCount !== undefined ? { retryCount } : {}),
+    ...(modelAttemptCount !== undefined ? { modelAttemptCount } : {}),
+    ...(structuredRepairCount !== undefined ? { structuredRepairCount } : {}),
   };
 }
 
@@ -1279,7 +1400,12 @@ function isCodexTaskKind(value: string): value is CodexTaskKind {
 }
 
 function errorDetail(raw: string): string {
-  const detail = raw.trim().slice(0, 160);
+  let message = raw;
+  try {
+    const parsed = JSON.parse(raw) as { error?: unknown };
+    if (typeof parsed.error === "string") message = parsed.error;
+  } catch { /* 非 JSON 错误仍保留有界诊断。 */ }
+  const detail = message.trim().slice(0, 160);
   return detail ? ` ${detail}` : "";
 }
 
@@ -1324,6 +1450,8 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       || !isOptionalTokenCount(details.completionTokens)
       || !isOptionalTokenCount(details.totalTokens)
       || !isOptionalTokenCount(details.reasoningTokens)
+      || !isOptionalTokenCount(details.modelAttemptCount)
+      || !isOptionalTokenCount(details.structuredRepairCount)
       || (details.fieldPath !== undefined && !isSafeFieldPath(details.fieldPath))
       || (details.taskKind !== undefined && !isCodexTaskKind(String(details.taskKind)))
       || (details.accepted !== undefined && typeof details.accepted !== "boolean")) {
@@ -1345,6 +1473,16 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       ...(typeof details.fieldPath === "string" ? { fieldPath: details.fieldPath } : {}),
       ...(typeof details.taskKind === "string" ? { taskKind: details.taskKind as CodexTaskKind } : {}),
       ...(typeof details.accepted === "boolean" ? { accepted: details.accepted } : {}),
+      ...(details.executionLayer === "cli" || details.executionLayer === "provider_transport" ? { executionLayer: details.executionLayer } : {}),
+      ...(Number.isInteger(details.processExitCode) && Number(details.processExitCode) >= 0 && Number(details.processExitCode) <= 255 ? { processExitCode: Number(details.processExitCode) } : {}),
+      ...(["invalid_json_schema", "invalid_request_error", "unsupported_parameter"].includes(String(details.providerErrorCode)) ? { providerErrorCode: details.providerErrorCode as ModelProviderFailureDetails["providerErrorCode"] & string } : {}),
+      ...(["uniqueItems", "required", "additionalProperties"].includes(String(details.schemaKeyword)) ? { schemaKeyword: details.schemaKeyword as ModelProviderFailureDetails["schemaKeyword"] & string } : {}),
+      ...(["ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"].includes(String(details.networkCode)) ? { networkCode: String(details.networkCode) } : {}),
+      ...(typeof details.headersReceived === "boolean" ? { headersReceived: details.headersReceived } : {}),
+      ...(typeof details.localExecutionEnded === "boolean" ? { localExecutionEnded: details.localExecutionEnded } : {}),
+      ...(typeof details.remoteQueryable === "boolean" ? { remoteQueryable: details.remoteQueryable } : {}),
+      ...(typeof details.modelAttemptCount === "number" ? { modelAttemptCount: details.modelAttemptCount } : {}),
+      ...(typeof details.structuredRepairCount === "number" ? { structuredRepairCount: details.structuredRepairCount } : {}),
     };
   } catch {
     return undefined;
@@ -1354,7 +1492,7 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
 function isSafeFieldPath(value: unknown): value is string {
   return typeof value === "string"
     && value.length <= 240
-    && /^(?:request|payload)(?:\.[A-Za-z][A-Za-z0-9_]*|\[\d+\])+$/.test(value);
+    && /^(?:request|payload|output)(?:\.[A-Za-z][A-Za-z0-9_]*|\[\d+\])+$/.test(value);
 }
 
 function isOptionalTokenCount(value: unknown): boolean {
@@ -1375,7 +1513,13 @@ function creatorMessageFor(
   statusCode: number | undefined,
   failureKind: CodexBridgeFailureKind | undefined,
 ): string {
+  if (stage === "not_accepted" && statusCode === 503 && message.includes("backlog is full")) {
+    return "模型服务的等待队列已满，本次任务尚未执行。当前稿已保留，请等已有任务完成后再重试。";
+  }
   if (stage === "uncertain") {
+    if (details?.localExecutionEnded || /local execution ended/i.test(message)) {
+      return "本地调用已结束，但远端结果未知，已停止自动等待。当前稿与原请求已保留，请核对原任务；不能通过换模型或重复提交来重试。";
+    }
     if (/still running after the wait deadline/i.test(message)) {
       return "原模型任务仍在处理中，当前进度已保留；可以稍后再次查询，不会重新提交。";
     }
@@ -1392,6 +1536,26 @@ function creatorMessageFor(
     return "请求身份与已有任务记录冲突，已停止自动执行；原有任务不受影响。请查看诊断信息。";
   }
   switch (details?.category) {
+    case "invalid_output": {
+      const reasons: Record<string, string> = {
+        duplicate_scene_position: "分镜编号重复",
+        reference_reuse_conflict: "同一镜头不能同时设为母片复用和参考图生成",
+        reference_must_be_earlier: "参考图必须来自前面的镜头",
+        reference_requires_image: "参考图生成目前只支持图片镜头",
+        // 视觉审片：评分/confidence/证据状态与 recommendation 必须自洽，且每条问题的
+        // 证据状态决定它能要求的下一步；这七条是审片输出最常见的拦截原因。
+        visual_approval_score: "审片结论为通过，但五项评分中有低于 75 的项",
+        visual_approval_confidence: "审片结论为通过，但置信度低于 0.7",
+        visual_approval_unresolved_evidence: "审片结论为通过，但仍有 failed 或 not_observed 的问题未解决",
+        visual_finding_time_range: "问题的起止时间范围没有包含它自己的时间点",
+        visual_failed_rework: "判定为 failed 的问题没有给出可执行的返修方向（需为上游重规划或素材返工）",
+        visual_unobserved_inspection: "判定为 not_observed 的问题没有要求先补查已有素材",
+        visual_nonfailing_rework: "未判定失败的问题却要求返修",
+      };
+      return `模型输出未通过制作规则：${reasons[details.reasonCode] ?? "输出结构或语义不符合合同"}${details.fieldPath ? `（${details.fieldPath}）` : ""}。已保留当前进度，请先修正方案或对应规则，不要反复重试。`;
+    }
+    case "invalid_request":
+      return `模型请求合同需要修正${details.providerErrorCode ? `（${details.providerErrorCode}${details.schemaKeyword ? `：${details.schemaKeyword}` : ""}）` : ""}；当前稿已保留，请检查制作分工中的模型配置和诊断，不要反复重试。`;
     case "rate_limited":
       return "模型请求过多，请稍后重试或选择其他模型。";
     case "timeout":

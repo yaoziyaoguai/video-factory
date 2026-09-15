@@ -523,7 +523,7 @@ describe("validateVisualDirectorPlan", () => {
     }
   });
 
-  it("requires motion deliveries to describe at least two timed states", () => {
+  it("accepts one full-duration timed state for motion deliveries", () => {
     for (const [deliveryType, providerId, generative] of [
       ["stock_video", "pexels-stock-v1", false],
       ["generated_video", "seedance-video-v1", true],
@@ -533,7 +533,7 @@ describe("validateVisualDirectorPlan", () => {
         deliveryType,
         temporalBeats: beats([0, 5, "一个没有动作变化的笼统描述。"]),
       };
-      assert.throws(() => validateVisualDirectorPlan(plan([moving]), {
+      assert.doesNotThrow(() => validateVisualDirectorPlan(plan([moving]), {
         scenePositions: [1],
         sceneDurations: { 1: 5 },
         allowedProviderIds: [providerId],
@@ -541,7 +541,7 @@ describe("validateVisualDirectorPlan", () => {
         providerDeliveryTypes: { [providerId]: [deliveryType] },
         estimatedCnyPerClip: generative ? { [providerId]: 1 } : {},
         economics: generative ? { ...economics, allowMeteredProviders: true } : economics,
-      }), /at least two timed beats/);
+      }));
     }
   });
 

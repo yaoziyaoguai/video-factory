@@ -12,7 +12,7 @@ import {
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import { pendingRoleAgentOperation } from "./role-agent-checkpoint.js";
 
-export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v13|role-audit-v3|visual-review-validator-v4|evidence-state-v2|pilot-scope-v2";
+export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v15|role-audit-v3|visual-review-validator-v6|evidence-state-v2|pilot-scope-v2|claim-evidence-capability-v1|review-contract-stamp-v1";
 
 export interface VisualReviewFramePayload {
   timecodeMs: number;
@@ -89,12 +89,27 @@ export type VisualReviewExecution = CodexTaskExecution<VisualReviewReport> & {
   independentReviews?: IndependentVisualReviewExecution[];
 };
 
+/** 主张需要的证据类别。见 VisualReviewFinding.claimType 的说明。 */
+export type VisualReviewClaimType = "static" | "motion" | "non_visual";
+
 export interface VisualReviewFinding {
   timecodeMs: number;
   startTimecodeMs: number;
   endTimecodeMs: number;
   scenePosition?: number;
   targetNodeId?: "script" | "visual-direction" | "assets";
+  /**
+   * 这条主张要靠哪一类证据才能判定：
+   * - static：画面某一刻的状态（构图、可读性、某物是否出现）；
+   * - motion：随时间的变化（摇曳、连续推进、渐变、逐帧流畅）；
+   * - non_visual：根本不落在画面里（配音、节奏、旁白与字幕稿是否一致）。
+   *
+   * 抽帧证据能判定 static，判不了 motion——稀疏静帧之间"看起来差不多"既不能推出运动没发生，
+   * 也不能推出运动发生了；更判不了 non_visual，因为再多帧也采不到声音。判错方向的代价是不对称的：
+   * 把没看清写成"作品不成立"会让操作员去返修一个其实合格的镜头，反之只是漏报。所以证据能力
+   * 不足时不许记 failed，这跟"放低标准"是两件事——它约束的是"凭什么下结论"，不是"允许多差"。
+   */
+  claimType: VisualReviewClaimType;
   evidenceStatus: "satisfied" | "failed" | "not_observed" | "not_applicable";
   evidenceFrameSha256: string | null;
   nextAction: "inspect_existing_media" | "replan_upstream" | "rework_asset" | "none";
@@ -104,6 +119,11 @@ export interface VisualReviewFinding {
   suggestion: string;
   reviewSources?: Array<{ providerId: string; modelId: string }>;
 }
+
+// 审片通过门槛：五项评分下限与置信度下限。提示词判据第 9 条以同一组数字向模型声明，
+// 归一化与试片放行都必须引用这里，避免两处门槛各自漂移。
+export const VISUAL_REVIEW_PASS_MIN_SCORE = 75;
+export const VISUAL_REVIEW_PASS_MIN_CONFIDENCE = 0.7;
 
 export interface VisualReviewReport {
   version: "video-factory/visual-review-v1";
@@ -137,6 +157,14 @@ export interface VisualReviewScope {
     auditCompleted?: boolean;
   }>;
   current?: boolean;
+  /**
+   * 产出这份报告时的审片合同版本。报告是"按某套规则裁出来的结论"，规则换了，
+   * 旧结论就不再等价于新结论：合同收紧后（例如加入主张的证据能力约束），旧报告会
+   * 缺新字段、通不过当前的校验。没有这个标记，消费方只能抛一条"某字段非法"的原始
+   * 校验错误——它既不说明原因，也不告诉操作员该做什么。有这个标记，消费方就能把
+   * "这是升级前产出的旧报告"与"这份报告真的坏了"分开说，并给出对应动作。
+   */
+  reviewContractVersion?: string;
 }
 
 export interface VisualReviewAgent {
@@ -326,7 +354,7 @@ export class IndependentDualVisualReviewAgent implements VisualReviewAgent {
 
   async reviewDetailed(input: VisualReviewAgentInput): Promise<VisualReviewExecution> {
     if (input.reviewStage === "source_assets") {
-      return runVisualReviewAgent(this.options.sourceAgent ?? this.options.primary, input);
+      return this.independentSourceReview(input);
     }
     const preparedMedia = input.preparedMedia ?? await this.options.media.prepare(input);
     const evidenceSnapshotId = visualEvidenceSnapshotId(preparedMedia);
@@ -347,14 +375,9 @@ export class IndependentDualVisualReviewAgent implements VisualReviewAgent {
       // 或共同快照；分支执行前后对共同快照做完整性核对。
       const branchMedia = structuredClone(preparedMedia);
       const execution = await runVisualReviewAgent(agent, {
-        ...input,
+        ...independentReviewBranchInput(input, agent),
         preparedMedia: branchMedia,
         evidenceSnapshotId,
-        selectedModelId: agent.modelId,
-        ...(input.requestId ? { requestId: `${input.requestId}:${agent.id}` } : {}),
-        ...(input.agentLoopCheckpointForModel
-          ? { agentLoopCheckpoint: input.agentLoopCheckpointForModel(agent.modelId) }
-          : {}),
       });
       if (visualEvidenceSnapshotId(preparedMedia) !== evidenceSnapshotId) {
         throw new Error("Shared visual review evidence was mutated during an independent review branch.");
@@ -441,6 +464,7 @@ export class IndependentDualVisualReviewAgent implements VisualReviewAgent {
           providerId: independentReviews[1]?.providerId ?? agents[1]!.id,
           modelId: independentReviews[1]?.modelId ?? agents[1]!.modelId,
           error: new Error("最终审片的两个分支落到了同一个实际 Provider 或模型，不能作为独立双审。"),
+          kind: "not_independent",
         },
       ], independentReviews);
     }
@@ -451,6 +475,51 @@ export class IndependentDualVisualReviewAgent implements VisualReviewAgent {
       ...(preparedMedia.sampling ? { sampling: preparedMedia.sampling } : {}),
       attemptedModelIds: independentReviews.map((review) => review.modelId),
       independentReviews,
+    };
+  }
+
+  /**
+   * 试片复审：与成片终审同一套独立性要求。
+   *
+   * 试片是"要不要继续为同方案其余镜头付费"的闸门，闸门本身不能比被它守的东西更弱——
+   * 单个模型的误判在这里的代价是不对称的：它说可以用，钱就花出去了；它说不可以用，
+   * 代价是一次重报价（素材不重买）。所以两个分支都必须跑完，任一分支没跑出来就不放行，
+   * 任一分支判阻断就阻断（mergeIndependentVisualReviews 取的就是保守侧）。
+   * 证据能力按素材方案自己采的帧判：试片请求带的是 assetPlanPath 与试片镜号，每个分支
+   * 各自采这一镜的帧并据此校验，规则与成片终审同源。独立性在此之外还要两个不同的实际
+   * 模型身份——同一模型的两份回答不算两次复审。
+   */
+  private async independentSourceReview(input: VisualReviewAgentInput): Promise<VisualReviewExecution> {
+    const agents = [this.options.sourceAgent ?? this.options.primary, this.options.secondary];
+    const settled = await Promise.allSettled(
+      agents.map((agent) => runVisualReviewAgent(agent, independentReviewBranchInput(input, agent))),
+    );
+    const failures = settled.flatMap((result, index) => result.status === "rejected"
+      ? [{ providerId: agents[index]!.id, modelId: agents[index]!.modelId, error: result.reason }]
+      : []);
+    const reviews = settled.flatMap((result, index): IndependentVisualReviewExecution[] => result.status !== "fulfilled"
+      ? []
+      : [{
+          providerId: result.value.executedProviderId ?? result.value.trace?.providerId ?? agents[index]!.id,
+          modelId: result.value.executedModelId ?? result.value.trace?.modelId ?? agents[index]!.modelId,
+          output: result.value.output,
+          ...(result.value.trace ? { trace: result.value.trace } : {}),
+          ...(result.value.agentLoop ? { agentLoop: result.value.agentLoop } : {}),
+        }]);
+    if (failures.length) throw new IndependentVisualReviewError(failures, reviews, "source_assets");
+    if (new Set(reviews.map((review) => review.providerId)).size !== 2
+      || new Set(reviews.map((review) => review.modelId)).size !== 2) {
+      throw new IndependentVisualReviewError([{
+        providerId: reviews[1]?.providerId ?? agents[1]!.id,
+        modelId: reviews[1]?.modelId ?? agents[1]!.modelId,
+        error: new Error("试片的两个审查分支落到了同一个实际 Provider 或模型，不能作为独立复审。"),
+        kind: "not_independent",
+      }], reviews, "source_assets");
+    }
+    return {
+      output: mergeIndependentVisualReviews(reviews),
+      attemptedModelIds: reviews.map((review) => review.modelId),
+      independentReviews: reviews,
     };
   }
 }
@@ -500,13 +569,33 @@ function cachedIndependentVisualReview(
   }
 }
 
+export interface IndependentVisualReviewFailure {
+  providerId: string;
+  modelId: string;
+  error: unknown;
+  // 两分支落到同一实际身份是配置事实，不是模型出了错。两者混在一起报出去，
+  // 操作员会去重试一个重试多少次都不会变的配置。
+  kind?: "model_failure" | "not_independent";
+}
+
 export class IndependentVisualReviewError extends Error {
   constructor(
-    readonly failures: Array<{ providerId: string; modelId: string; error: unknown }>,
+    readonly failures: IndependentVisualReviewFailure[],
     readonly completedReviews: IndependentVisualReviewExecution[] = [],
+    // 试片与成片走同一套独立性检查，但操作员看到的是两种不同的处境：
+    // 一个还没花钱，一个已经花过了。错误消息必须说清是哪一种。
+    stage: "rendered_video" | "source_assets" = "rendered_video",
   ) {
+    const stageLabel = stage === "source_assets" ? "试片双模型复审" : "最终双模型审片";
+    const notIndependent = failures.filter((failure) => failure.kind === "not_independent");
     super(
-      `最终双模型审片尚未完成：${failures.map((failure) => `${failure.modelId} ${publicModelFailure(failure.error)}`).join("；")}。重试只会继续未完成的模型分支。`,
+      notIndependent.length > 0
+        ? `${stageLabel}无法成立：`
+          + `${notIndependent.map((failure) => failure.error instanceof Error ? failure.error.message : "两个分支不是两个独立模型。").join("；")}`
+          + "这是审片配置问题而非模型调用故障，重试不会让两个分支变得独立。"
+        : `${stageLabel}尚未完成：`
+          + `${failures.map((failure) => `${failure.modelId} ${publicModelFailure(failure.error)}`).join("；")}。`
+          + "重试只会继续未完成的模型分支。",
       failures.at(-1)?.error instanceof Error ? { cause: failures.at(-1)!.error } : undefined,
     );
     this.name = "IndependentVisualReviewError";
@@ -547,6 +636,7 @@ function deduplicateVisualReviewFindings(findings: VisualReviewFinding[]): Visua
       endTimecodeMs: finding.endTimecodeMs,
       scenePosition: finding.scenePosition,
       targetNodeId: finding.targetNodeId,
+      claimType: finding.claimType,
       evidenceStatus: finding.evidenceStatus,
       evidenceFrameSha256: finding.evidenceFrameSha256,
       category: finding.category,
@@ -624,10 +714,15 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
       : observeProducerTask;
     const execution = await runRoleAgentLoop<VisualReviewReport>({
       role: "视觉审片员",
-      contractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+      // 审片合同必须锁定当次证据快照：节点声明的输入只有素材方案与脚本路径，路径不变而帧
+      // 被重新生成时，检查点身份与物理请求身份都会沿用旧值——既会回放绑定旧证据的结论，
+      // 也会与历史任务撞身份被代理按 binding_conflict 拒绝。快照变化即视为合同变化，
+      // 从新身份重新审片（与 visual-review 的 |cycle: 采用同一约定）。
+      contractVersion: `${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}|evidence:${evidenceSnapshotId}`,
       criteria: [
         "每条问题必须由对应时间码的画面证据支持；scene_sequence 的相邻时间点可以支持可见状态推进与近似保持时长，稀疏关键帧看不到的声音或连续运动不得当作已证事实",
         "逐项核对脚本可见动作、导演成功条件、镜头时长与渲染清单，不得只凭整体观感打分",
+        "约、建议或参考时间只描述期望节拍，不是硬下限；只有明确的最迟、至少、不得或用户锁定要求才是阻断边界。画面已满足全部阻断边界并兑现叙事效果时，不得仅因偏离参考时间判 failed",
         "核心主体、物体或动作对象与对应镜头要求不符时必须判定返修；环境相似不能代替目标物体，并须定位到具体镜头与 assets 或 visual-direction",
         "先区分真实来源原生文字、正式 editorial_card、render manifest 明确的后期文字，以及生成伪标签/乱码/水印/内部术语；前三类按准确性与可读性审查，后一类必须阻断",
         "模糊不可读且与核心内容无关的痕迹只能标为 not_observed 并补查已有素材，不得凭猜测直接要求付费返工",
@@ -635,6 +730,7 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
         "当 reviewContext.pilotScenePositions 存在时，只审这些已生成镜头的主体、动作、构图与禁文字条件；其余镜头尚未付费生成，不得把它们的缺帧判为缺陷，也不得宣称全片连续性或整体节奏已经通过",
         "构图、连续性、节奏、可读性和安全五项评分必须与 findings 的 evidenceStatus、严重程度及 recommendation 自洽；通过门槛为五项均不低于 75 且 confidence 不低于 0.7",
         "每条 finding 必须给出镜号、证据帧或时间范围和下一步；failed 才能进入上游重规划或素材返工，not_observed 只能先补查已有素材",
+        "每条 finding 必须用 claimType 声明这条主张要靠哪类证据判定：static 是某一刻的画面状态（构图、可读性、某物是否出现），motion 是随时间的变化（摇曳、连续推进、渐变、逐帧流畅），non_visual 是根本不落在画面里的东西（配音、节奏、旁白与字幕稿是否一致）。抽帧能判定 static，判不了 motion——稀疏静帧之间看起来相近既不能推出运动没发生，也不能推出运动发生了；更判不了 non_visual，采多少帧也采不到声音。motion 与 non_visual 的 failed 只在证据确实够时才允许：motion 需要该镜头被采了超过三帧的连续序列，或者该镜头在采样窗口内逐字节完全相同（画面确实根本没动）；non_visual 需要你手上真有画面之外的证据。否则一律记 not_observed 并走 inspect_existing_media——不要把「我的采样不够」写成「作品不成立」",
         "核心论证依赖同一人物、物件或空间，而当前 Provider 无参考图、母片复用等能力无法保证跨镜一致时，必须把方案缺陷指向 visual-direction 或 script 并使用 replan_upstream；上游免责声明不能将其降级为 satisfied，也不得只指向 assets 重复付费",
         "抽样覆盖不足、缺帧或上下文缺失必须降低 confidence 并明确证据边界，不得虚构画面细节",
         "审片报告只判断当前成片并给出可执行修复建议；不得擅自改写脚本、导演方案或掩盖需要人工终审的问题",
@@ -788,6 +884,27 @@ async function runVisualReviewAgent(
     : { output: await agent.review(input) };
 }
 
+/**
+ * 一条独立审查分支的输入。
+ *
+ * 必须剥掉共享的 agentLoopCheckpoint：它不带模型身份，两个分支拿到同一个文件就会
+ * 读到对方保存的循环状态，"独立"只剩名义。分支只认按自己模型算出的那个检查点。
+ */
+function independentReviewBranchInput(
+  input: VisualReviewAgentInput,
+  agent: VisualReviewAgent,
+): VisualReviewAgentInput {
+  const { agentLoopCheckpoint: _sharedCheckpoint, ...rest } = input;
+  return {
+    ...rest,
+    selectedModelId: agent.modelId,
+    ...(input.agentLoopCheckpointForModel
+      ? { agentLoopCheckpoint: input.agentLoopCheckpointForModel(agent.modelId) }
+      : {}),
+    ...(input.requestId ? { requestId: `${input.requestId}:${agent.id}` } : {}),
+  };
+}
+
 function orderVisualReviewCandidates(
   candidates: Array<{ agent: VisualReviewAgent; label?: string; providerId: string }>,
   selectedModelId: string | undefined,
@@ -874,10 +991,10 @@ async function buildReviewContext(
         ? ["opening", "middle", "closing"]
         : sampling.mode === "hook_and_scene_midpoints" ? ["hook", "midpoint"] : ["keyframe"],
       evidenceBoundary: sampling.mode === "scene_triplets"
-        ? "Triplets can show state progression; audio and frame-to-frame smoothness are reviewed separately."
+        ? "Triplets can show state progression; non-visual claims (audio, pacing, narration-vs-caption wording) are outside this evidence entirely. Motion claims (swaying, continuous advance, gradual change) may only be failed when a scene's sampled frames are byte-identical."
         : sampling.mode === "scene_sequence"
-          ? "Dense ordered samples can support visible state progression and approximate hold timing; frames between samples, audio, and absolute motion smoothness are reviewed separately."
-        : "Sparse samples do not prove per-scene state progression, audio, or frame-to-frame smoothness.",
+          ? "Dense ordered samples can support visible state progression and approximate hold timing; frames between samples and non-visual claims (audio, pacing, narration-vs-caption wording) are outside this evidence. A motion claim may be failed only when the scene has more than three sampled frames or its sampled frames are byte-identical."
+        : "Sparse samples do not prove per-scene state progression or frame-to-frame smoothness, and non-visual claims (audio, pacing, narration-vs-caption wording) are outside this evidence entirely. Motion and non-visual claims cannot be failed on this evidence; record them as not_observed.",
     } } : {}),
     ...(script ? { script: compactScript(script) } : {}),
     ...(directorPlan ? { directorPlan: compactDirectorPlan(directorPlan) } : {}),
@@ -961,6 +1078,33 @@ export function validateVisualReviewReport(
   return validateVisualReviewReportWithLimit(value, durationMs, scenePositions, evidenceFrames, 50);
 }
 
+/**
+ * 消费一份落盘报告之前，先确认它是哪一版合同裁出来的。
+ *
+ * 报告是制品，会跨构建存活：一次升级之后，旧运行里那份报告仍然是"当前有效版本"，
+ * 但它的结论是按更早的合同、更早的证据要求下的。直接拿它继续做下游决定（例如据此
+ * 返修某一镜），等于把旧规则下的结论当新规则下的结论执行——合同收紧时尤其危险，
+ * 因为旧报告恰恰可能缺少新规则要求的那部分证据。
+ *
+ * 所以这里在跑当前校验之前先拦一道，并说清原因和动作。否则操作员看到的是一条
+ * "某字段非法"的原始校验错误：既看不出是升级造成的，也不知道该补查。
+ */
+export function assertCurrentVisualReviewContract(storedReport: unknown): void {
+  const scope = typeof storedReport === "object" && storedReport !== null && !Array.isArray(storedReport)
+    && typeof (storedReport as { reviewScope?: unknown }).reviewScope === "object"
+    && (storedReport as { reviewScope?: unknown }).reviewScope !== null
+    ? (storedReport as { reviewScope: Record<string, unknown> }).reviewScope
+    : undefined;
+  const storedContract = typeof scope?.reviewContractVersion === "string" ? scope.reviewContractVersion : undefined;
+  if (storedContract === VISUAL_REVIEW_AGENT_CONTRACT_VERSION) return;
+  throw new Error(
+    "这份视觉审片报告是更早的审片合同裁出来的"
+    + `（${storedContract ?? "早于合同标记"}，现在的合同是 ${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}），`
+    + "它的结论不满足现在对证据的要求，不能直接据此继续。"
+    + "请先补查成片（重新做一次双模型审片），再按补查后的结论继续。",
+  );
+}
+
 export function validateAggregatedVisualReviewReport(
   value: unknown,
   durationMs: number,
@@ -994,6 +1138,18 @@ function validateVisualReviewReportWithLimit(
     safety: score(scores.safety, "safety"),
   };
   if (!Array.isArray(report.findings) || report.findings.length > maxFindings) throw new Error("Visual review findings are invalid.");
+  // 按镜头聚合证据帧的 sha：判断一条 motion 主张有没有资格记 failed 时要知道
+  // "这个镜头到底被采了几帧、这几帧是不是逐字节一样"。
+  const sceneFrameShas = new Map<number, string[]>();
+  for (const frame of evidenceFrames ?? []) {
+    if (frame.scenePosition === undefined) continue;
+    sceneFrameShas.set(frame.scenePosition, [...(sceneFrameShas.get(frame.scenePosition) ?? []), frame.sha256]);
+  }
+  // 全片级采样（scene_change_keyframes）的帧不带镜号，无法把帧归到镜头；此时 motion 规则
+  // 退化为不判（见 assertFindingEvidenceContract 对 undefined 的处理），而不是把"归不了类"
+  // 当成"没有证据"来拒绝模型。
+  const sceneFrameAttributionAvailable = evidenceFrames !== undefined
+    && evidenceFrames.every((frame) => frame.scenePosition !== undefined);
   const findings = report.findings.map((item, index): VisualReviewFinding => {
     const finding = record(item, `visual review finding ${index}`);
     const timecodeMs = finding.timecodeMs;
@@ -1042,13 +1198,21 @@ function validateVisualReviewReportWithLimit(
         throw new Error("Visual review finding evidence frame is invalid.");
       }
     }
-    assertFindingEvidenceContract(evidenceStatus, severity, nextAction);
+    const claimType = enumValue(finding.claimType, ["static", "motion", "non_visual"] as const, "claimType");
+    assertFindingEvidenceContract(
+      claimType,
+      evidenceStatus,
+      severity,
+      nextAction,
+      sceneFrameAttributionAvailable ? sceneFrameShas.get(Number(scenePosition)) ?? [] : undefined,
+    );
     return {
       timecodeMs: Number(timecodeMs),
       startTimecodeMs: Number(startTimecodeMs),
       endTimecodeMs: Number(endTimecodeMs),
       scenePosition: Number(scenePosition),
       targetNodeId,
+      claimType,
       evidenceStatus,
       evidenceFrameSha256,
       nextAction,
@@ -1086,17 +1250,57 @@ function normalizeRecommendation(
   if (
     requested === "revise"
     || findings.some((finding) => finding.evidenceStatus === "failed" || finding.evidenceStatus === "not_observed")
-    || minimumScore < 75
-    || confidence < 0.7
+    || minimumScore < VISUAL_REVIEW_PASS_MIN_SCORE
+    || confidence < VISUAL_REVIEW_PASS_MIN_CONFIDENCE
   ) return "revise";
   return "approve";
 }
 
+/** 下游"是否继续"闸门的放行判据：试片是否继续付费生成、源素材预检是否继续走配音与渲染。
+ *  只看报告的实质质量信号——明确否决、需要返工的缺陷（非 info 级）、五项评分或置信度未达门槛。
+ *  不能依赖归一化后的 recommendation：它会把 not_observed 一并降为 revise，而 not_observed 按
+ *  证据合同是"先查看已有素材"的咨询项（info + inspect_existing_media），并非需要返工的缺陷。
+ *  这类发现仍原样保留在报告与产物里，交由操作员复核。成片终审不在本判据范围内。 */
+export function visualReviewBlocksContinuation(report: VisualReviewReport): boolean {
+  return report.recommendation === "reject"
+    || report.findings.some((finding) => finding.severity !== "info")
+    || Math.min(...Object.values(report.scores)) < VISUAL_REVIEW_PASS_MIN_SCORE
+    || report.confidence < VISUAL_REVIEW_PASS_MIN_CONFIDENCE;
+}
+
+/** 判 motion 主张 failed 需要的最低证据能力：要么产品真的采了一段序列（同镜超过三帧），
+ *  要么被采样窗口内的画面逐字节完全相同（"画面根本没动"是静帧唯一能证成的运动结论）。 */
+const MOTION_CLAIM_SEQUENCE_FRAME_COUNT = 3;
+
+/**
+ * 这一批采样帧有没有资格判定该类主张的 failed。
+ * 规则按主张类型分派，不按题材分派——任何视频类型下，静帧都只能判定某一刻的画面状态。
+ */
+export function claimEvidenceSufficient(
+  claimType: VisualReviewClaimType,
+  sceneFrameShas: readonly string[],
+): boolean {
+  if (claimType === "static") return true;
+  if (claimType === "non_visual") return false;
+  if (sceneFrameShas.length > MOTION_CLAIM_SEQUENCE_FRAME_COUNT) return true;
+  return sceneFrameShas.length > 1 && new Set(sceneFrameShas).size === 1;
+}
+
 function assertFindingEvidenceContract(
+  claimType: VisualReviewClaimType,
   status: VisualReviewFinding["evidenceStatus"],
   severity: VisualReviewFinding["severity"],
   nextAction: VisualReviewFinding["nextAction"],
+  sceneFrameShas: readonly string[] | undefined,
 ): void {
+  // 只有在拿得到证据帧时才能判"这条主张有没有资格记 failed"。重读已落盘报告
+  // （返修定位、节点输出归一化）不带帧，此时放行：那些报告在写出时已经过带帧的校验，
+  // 重读不该变成第二道更严的门。
+  if (status === "failed" && sceneFrameShas && !claimEvidenceSufficient(claimType, sceneFrameShas)) {
+    throw new Error(
+      `Visual review cannot fail a ${claimType} claim on the sampled frames; record not_observed with inspect_existing_media, or supply evidence of the kind the claim needs.`,
+    );
+  }
   if (status === "failed") {
     if (severity === "info" || (nextAction !== "replan_upstream" && nextAction !== "rework_asset")) {
       throw new Error("Visual review failed evidence must describe actionable rework.");

@@ -341,6 +341,9 @@ export class WorkflowRunner {
     if (!waitingNode) {
       throw new Error(`Unknown intervention '${decision.interventionId}'.`);
     }
+    if (waitingNode.intervention?.kind === "creative_review") {
+      throw new Error("Creative review cannot be approved through the generic decision endpoint; use the stage confirmation command.");
+    }
 
     run.decisions.push({
       ...decision,
@@ -383,6 +386,84 @@ export class WorkflowRunner {
 
     await this.checkpoint?.(run);
     return this.continueRun(definition, run, context);
+  }
+
+  async continueWaitingNode<TInitialInput>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+    nodeId: string,
+    continuationMetadata?: Record<string, unknown>,
+  ): Promise<WorkflowRun<TInitialInput>> {
+    validateWorkflowDefinition(definition);
+    if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
+      throw new Error("Workflow definition does not match the persisted run.");
+    }
+    const previousNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId);
+    if (previousRun.status !== "needs_human"
+      || previousNode?.status !== "needs_human"
+      || previousNode.intervention?.kind !== "creative_review") {
+      throw new Error(`Node '${nodeId}' is not waiting for a creative review continuation.`);
+    }
+
+    const run = cloneWorkflowRun(previousRun);
+    const nodeRun = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId)!;
+    nodeRun.status = "pending";
+    nodeRun.artifactIds = [];
+    nodeRun.qualityGateResults = [];
+    if (continuationMetadata) {
+      nodeRun.output = {
+        ...(previousNode.output && typeof previousNode.output === "object" ? structuredClone(previousNode.output) : {}),
+        continuationOperation: structuredClone(continuationMetadata),
+      };
+    } else {
+      delete nodeRun.output;
+    }
+    delete nodeRun.finishedAt;
+    delete nodeRun.error;
+    delete nodeRun.intervention;
+    delete nodeRun.executionReceipt;
+    delete nodeRun.spendPlan;
+    delete nodeRun.spendAuthorizationId;
+    delete nodeRun.operationRequestId;
+    delete nodeRun.interrupted;
+    run.interventions = run.interventions.filter((intervention) => intervention.nodeId !== nodeId);
+
+    const outputs = new Map<string, unknown>();
+    for (const completed of run.nodeRuns) {
+      if (completed.nodeId !== nodeId && completed.status === "succeeded" && completed.output !== undefined) {
+        outputs.set(completed.nodeId, completed.output);
+      }
+    }
+    const context = new InMemoryWorkflowContext(
+      run.id,
+      definition.id,
+      run.initialInput,
+      this.providers,
+      this.clock,
+      this.idFactory,
+      run.artifacts,
+      outputs,
+      run.decisions,
+    );
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
+    run.revision += 1;
+    run.status = "running";
+    delete run.finishedAt;
+    await this.checkpoint?.(run);
+    const result = await this.continueRun(definition, run, context);
+    const completedNode = result.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+    if (continuationMetadata && completedNode?.output && typeof completedNode.output === "object") {
+      const output = completedNode.output as Record<string, unknown>;
+      if (output.continuationOperation) {
+        output.continuationOperation = {
+          ...continuationMetadata,
+          status: completedNode.status === "failed" ? "failed" : "completed",
+          finishedAt: this.clock(),
+        };
+        await this.checkpoint?.(result);
+      }
+    }
+    return result;
   }
 
   applyNodeOverride<TInitialInput, TOutput = unknown>(
@@ -1486,6 +1567,25 @@ function validateResumeRequest<TInitialInput>(
   if (!allowedActions.includes(decision.action)) {
     throw new Error(`Intervention '${decision.interventionId}' does not allow action '${decision.action}'.`);
   }
+  validateReviewDispositions(decision.reviewDispositions);
+}
+
+// 逐条表态是人工裁决的留痕，所以它的完整性由核心把关，而不是靠各调用方自觉。
+function validateReviewDispositions(dispositions: HumanDecisionDraft["reviewDispositions"]): void {
+  if (dispositions === undefined) return;
+  if (dispositions.length === 0) throw new Error("Review dispositions must not be empty when supplied.");
+  if (new Set(dispositions.map((disposition) => disposition.itemKey)).size !== dispositions.length) {
+    throw new Error("Review dispositions must reference distinct items.");
+  }
+  for (const disposition of dispositions) {
+    if (!disposition.itemKey.trim()) throw new Error("Review disposition item key is required.");
+    if (disposition.decision !== "accept" && disposition.decision !== "reject") {
+      throw new Error("Review disposition decision must be accept or reject.");
+    }
+    if (disposition.decision === "reject" && !disposition.reason?.trim()) {
+      throw new Error("Rejecting a reviewed item requires a written reason.");
+    }
+  }
 }
 
 function cloneWorkflowRun<TInitialInput>(run: WorkflowRun<TInitialInput>): WorkflowRun<TInitialInput> {
@@ -1511,6 +1611,9 @@ function cloneWorkflowRun<TInitialInput>(run: WorkflowRun<TInitialInput>): Workf
           ...nodeRun.spendPlan,
           inputVersionIds: [...nodeRun.spendPlan.inputVersionIds],
           ...(nodeRun.spendPlan.items ? { items: nodeRun.spendPlan.items.map((item) => ({ ...item })) } : {}),
+          ...(nodeRun.spendPlan.excludedItems
+            ? { excludedItems: nodeRun.spendPlan.excludedItems.map((item) => ({ ...item })) }
+            : {}),
         };
       }
       if (nodeRun.outputState) {
@@ -1701,6 +1804,7 @@ function createSpendPlan(
     maxCostCny: quote.maxCostCny,
     maxAttempts: provider.maxAttempts,
     ...(quote.items ? { items: quote.items.map((item) => ({ ...item })) } : {}),
+    ...(quote.excludedItems ? { excludedItems: quote.excludedItems.map((item) => ({ ...item })) } : {}),
     createdAt: context.now(),
   };
 }
@@ -1719,6 +1823,7 @@ async function resolveSpendQuote<TInput>(
     estimatedCostCny: roundSpendMoney(quote.estimatedCostCny),
     maxCostCny: roundSpendMoney(quote.maxCostCny),
     ...(quote.items ? { items: quote.items.map((item) => ({ ...item, estimatedCostCny: roundSpendMoney(item.estimatedCostCny) })) } : {}),
+    ...(quote.excludedItems ? { excludedItems: quote.excludedItems.map((item) => ({ ...item })) } : {}),
     ...(quote.requiresAuthorization === false ? { requiresAuthorization: false } : {}),
   };
 }
@@ -1765,8 +1870,25 @@ function spendPlanMatchesExecution(
     && plan.maxCostCny === quote.maxCostCny
     && plan.maxAttempts === provider.maxAttempts
     && spendQuoteItemsMatch(plan.items, quote.items)
+    && spendExcludedItemsMatch(plan.excludedItems, quote.excludedItems)
     && plan.inputVersionIds.length === inputVersionIds.length
     && plan.inputVersionIds.every((versionId, index) => versionId === inputVersionIds[index]);
+}
+
+// 免收费清单也是操作员看过的报价内容，组成变了就必须重新确认，不能沿用旧 plan 的说明。
+function spendExcludedItemsMatch(
+  left: SpendPlan["excludedItems"],
+  right: SpendQuote["excludedItems"],
+): boolean {
+  if (!left && !right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((item, index) => {
+    const candidate = right[index];
+    return candidate !== undefined
+      && item.id === candidate.id
+      && item.label === candidate.label
+      && item.note === candidate.note;
+  });
 }
 
 function spendQuoteItemsMatch(left: SpendQuote["items"], right: SpendQuote["items"]): boolean {
@@ -1872,6 +1994,7 @@ function validateSpendQuote(quote: SpendQuote): void {
     if (quote.estimatedCostCny !== 0 || quote.maxCostCny !== 0 || quote.items !== undefined) {
       throw new Error("A no-spend quote must contain exactly zero cost and no charge items.");
     }
+    validateSpendExcludedItems(quote.excludedItems);
     return;
   }
   if (!isFiniteNonNegative(quote.estimatedCostCny) || !isFinitePositive(quote.maxCostCny)) {
@@ -1880,6 +2003,7 @@ function validateSpendQuote(quote: SpendQuote): void {
   if (quote.estimatedCostCny > quote.maxCostCny) {
     throw new Error("Spend quote estimated cost exceeds its maximum cost.");
   }
+  validateSpendExcludedItems(quote.excludedItems);
   if (!quote.items) return;
   if (quote.items.length === 0 || quote.items.length > 100) {
     throw new Error("Spend quote items must contain between 1 and 100 entries.");
@@ -1895,6 +2019,22 @@ function validateSpendQuote(quote: SpendQuote): void {
   const itemTotal = quote.items.reduce((sum, item) => sum + item.estimatedCostCny, 0);
   if (Math.round(itemTotal * 100) !== Math.round(quote.estimatedCostCny * 100)) {
     throw new Error("Spend quote item total does not match the estimated cost.");
+  }
+}
+
+function validateSpendExcludedItems(items: SpendQuote["excludedItems"]): void {
+  if (items === undefined) return;
+  if (items.length === 0 || items.length > 100) {
+    throw new Error("Spend quote excluded items must contain between 1 and 100 entries.");
+  }
+  if (new Set(items.map((item) => item.id)).size !== items.length) {
+    throw new Error("Spend quote excluded items must have unique item ids.");
+  }
+  for (const item of items) {
+    // id/label/note 都是给操作员看的说明字段，缺任何一个都会让"为什么这镜头不花钱"重新变得不可读。
+    if (!item.id.trim() || !item.label.trim() || !item.note.trim()) {
+      throw new Error("Spend quote excluded item is incomplete.");
+    }
   }
 }
 

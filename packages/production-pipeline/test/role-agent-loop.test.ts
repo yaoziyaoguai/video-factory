@@ -1,8 +1,55 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CodexBridgeError, RoleAgentLoopError, runRoleAgentLoop, validateRoleAudit } from "../src/index.js";
+import type { ModelProviderFailureCategory } from "../src/codex-chat.js";
 
 describe("role agent loop audit boundary", () => {
+  it("rejects more than 16 audit criteria before submitting a model task", async () => {
+    let modelCalls = 0;
+    await assert.rejects(() => runRoleAgentLoop({
+      role: "视觉审片员",
+      contractVersion: "visual-review-contract",
+      criteria: Array.from({ length: 17 }, (_, index) => `审片标准 ${index + 1}`),
+      maxIterations: 1,
+      produce: async () => {
+        modelCalls += 1;
+        return { output: { title: "不应调用" } };
+      },
+      audit: async () => {
+        modelCalls += 1;
+        return { output: passingAudit() };
+      },
+      validate: titleCandidate,
+    }), /must contain 1 to 16 non-empty rules/);
+    assert.equal(modelCalls, 0);
+  });
+
+  it("does not count queue rejection as audit execution and preserves the producer on retry", async () => {
+    let stored: unknown;
+    let rejectAudit = true;
+    let produces = 0;
+    const execute = () => runRoleAgentLoop({
+      role: "编剧", contractVersion: "audit-queue", criteria: ["清楚"], maxIterations: 1,
+      checkpoint: { key: "audit-queue", load: async () => stored, save: async (value) => { stored = structuredClone(value); } },
+      produce: async () => { produces++; return { output: { title: "保留的稿件" } }; },
+      audit: async () => {
+        if (rejectAudit) throw new CodexBridgeError("Codex broker backlog is full.", true, "not_accepted", 503);
+        return { output: passingAudit() };
+      },
+      validate: titleCandidate,
+    });
+    await assert.rejects(execute, (error: unknown) => {
+      assert.ok(error instanceof RoleAgentLoopError);
+      assert.equal(error.agentLoop.producerModelCallCount, 1);
+      assert.equal(error.agentLoop.auditModelCallCount, 0);
+      return true;
+    });
+    rejectAudit = false;
+    const result = await execute();
+    assert.equal(produces, 1);
+    assert.equal(result.agentLoop?.producerModelCallCount, 1);
+    assert.equal(result.agentLoop?.auditModelCallCount, 1);
+  });
   const producerHandle = `vfs_${"p".repeat(32)}`;
   const auditHandle = `vfs_${"a".repeat(32)}`;
 
@@ -377,6 +424,54 @@ describe("role agent loop audit boundary", () => {
     assert.notEqual(submitted[1], originalRequestId, "the terminal physical request id must never be reused");
     assert.equal(result.agentLoop?.producerModelCallCount, 2);
     assert.equal(result.agentLoop?.iterations.length, 1, "terminal infrastructure failure does not spend a quality audit round");
+  });
+
+  // 失败文案不得自相矛盾：语义/合同类失败必须先修正，不能同时告诉运营方"可直接重试"。
+  it("only tells the operator to retry unchanged when the failure is retryable without a correction", async () => {
+    const cases: Array<{ category: ModelProviderFailureCategory; reasonCode: string; fieldPath: string | undefined; retryAsIs: boolean; expected: RegExp }> = [
+      { category: "invalid_output", reasonCode: "visual_failed_rework", fieldPath: "output.findings[1].nextAction", retryAsIs: false, expected: /可执行的返修方向/ },
+      { category: "invalid_output", reasonCode: "visual_approval_score", fieldPath: "output.recommendation", retryAsIs: false, expected: /五项评分中有低于 75 的项/ },
+      { category: "invalid_request", reasonCode: "invalid_request_error", fieldPath: "input.images", retryAsIs: false, expected: /请求合同需要修正/ },
+      { category: "rate_limited", reasonCode: "1308", fieldPath: undefined, retryAsIs: true, expected: /稍后重试/ },
+    ];
+    for (const { category, reasonCode, fieldPath, retryAsIs, expected } of cases) {
+      let stored: unknown;
+      const failure = await runRoleAgentLoop<{ title: string }>({
+        role: "编剧",
+        contractVersion: `screenwriter-retry-copy-${reasonCode}`,
+        criteria: ["标题具体"],
+        maxIterations: 3,
+        checkpoint: {
+          key: `retry-copy-${reasonCode}`,
+          load: async () => stored,
+          save: async (value: unknown) => { stored = structuredClone(value); },
+        },
+        produce: async () => {
+          // 与 completedFailureError 的真实构造一致：failureKind 只承载 provider 侧
+          // 瞬态/无输出两类，语义类信息一律走 failureDetails。
+          throw new CodexBridgeError("bridge completed with failure", false, "completed_failure", 422, undefined, {
+            category,
+            reasonCode,
+            providerId: "zai-bigmodel-api",
+            modelId: "glm-5.3-flash",
+            ...(fieldPath ? { fieldPath } : {}),
+            queueWaitMs: 0,
+            providerWaitMs: 989_138,
+          });
+        },
+        audit: async () => ({ output: passingAudit() }),
+        validate: titleCandidate,
+      }).then(() => null, (error: unknown) => error as Error);
+
+      assert.ok(failure, `${reasonCode} must fail the loop`);
+      assert.match(failure.message, /尚未消耗质量审计轮次/);
+      assert.match(failure.message, expected);
+      assert.equal(
+        /可直接重试/.test(failure.message),
+        retryAsIs,
+        `${reasonCode} retry hint must match whether a plain retry can succeed`,
+      );
+    }
   });
 
   it("consumes a produce recovery grant on the verified request and stops on the next completed failure", async () => {
@@ -1117,7 +1212,7 @@ describe("role agent loop audit boundary", () => {
 
     assert.deepEqual(result.output, { title: "旧检查点候选" });
     assert.equal(produceCalls, 0);
-    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v8");
+    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v9");
   });
 
   it("migrates v5 checkpoints so historical infrastructure failures do not exhaust semantic rounds", async () => {
@@ -1158,7 +1253,7 @@ describe("role agent loop audit boundary", () => {
     });
 
     assert.deepEqual(result.output, { title: "保留的导演候选" });
-    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v8");
+    assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v9");
   });
 
   it("audits an existing human candidate before asking the producer to repair it", async () => {
@@ -1244,6 +1339,59 @@ describe("role agent loop audit boundary", () => {
     assert.equal(auditCalls, 1, "restart must replay the persisted halt without another audit");
   });
 
+  it("stops on host readiness after preserving a passing independent audit and replays without new calls", async () => {
+    let stored: unknown;
+    let produceCalls = 0;
+    let auditCalls = 0;
+    const execute = () => runRoleAgentLoop<{ title: string }>({
+      role: "前期构思师",
+      planningRole: true,
+      contractVersion: "creative-treatment-v2",
+      criteria: ["构思质量与制作前提分别核对"],
+      maxIterations: 3,
+      checkpoint: {
+        key: "host-needs-source",
+        load: async () => stored,
+        save: async (value) => { stored = structuredClone(value); },
+      },
+      assessPlanningReadiness: () => ({
+        status: "needs_source",
+        issues: [{
+          id: "missing-private-record",
+          target: "source",
+          beatIds: ["evidence"],
+          scenePositions: [],
+          reason: "用户要求展示专属真实记录，但当前没有绑定材料。",
+          requiredChange: "上传真实记录，或明确改为不声称实证的示意表达。",
+          evidenceArtifactIds: [],
+        }],
+      }),
+      produce: async () => {
+        produceCalls += 1;
+        return { output: { title: "构思本身完整" } };
+      },
+      audit: async ({ hostReadiness }) => {
+        auditCalls += 1;
+        assert.equal(hostReadiness?.status, "needs_source");
+        return { output: { ...passingAudit(), planningDisposition: null } };
+      },
+      validate: titleCandidate,
+    });
+
+    let halt: unknown;
+    await assert.rejects(execute, (error: unknown) => {
+      halt = error;
+      return error instanceof Error && error.name === "RoleAgentPlanningHaltError";
+    });
+    assert.equal(produceCalls, 1);
+    assert.equal(auditCalls, 1);
+    assert.equal(halt instanceof RoleAgentLoopError ? halt.agentLoop.iterations[0]?.audit.verdict : undefined, "pass");
+    assert.equal(halt instanceof RoleAgentLoopError ? halt.agentLoop.iterations[0]?.hostReadiness?.status : undefined, "needs_source");
+    await assert.rejects(execute, (error: unknown) => error instanceof Error && error.name === "RoleAgentPlanningHaltError");
+    assert.equal(produceCalls, 1);
+    assert.equal(auditCalls, 1);
+  });
+
   it("requires explicit and valid planning dispositions only for planning roles", () => {
     assert.throws(
       () => validateRoleAudit(passingAudit(), { planningRole: true }),
@@ -1261,6 +1409,267 @@ describe("role agent loop audit boundary", () => {
       () => validateRoleAudit({ ...repairingAudit(), planningDisposition: { action: "needs_source", issueIndexes: [0] } }),
       /Non-planning role audits cannot route/,
     );
+  });
+
+  it("lets an independent audit send a misclassified source issue back to the same role without bypassing revalidation", async () => {
+    let produceCalls = 0;
+    const result = await runRoleAgentLoop<{ title: string }>({
+      role: "导演前期构思",
+      contractVersion: "treatment-host-correction-v1",
+      criteria: ["示意路线符合当前能力"],
+      planningRole: true,
+      maxIterations: 2,
+      produce: async (revision) => {
+        produceCalls += 1;
+        assert.equal(produceCalls === 1 ? revision : undefined, undefined);
+        if (produceCalls === 2) {
+          assert.match(JSON.stringify(revision), /改用已允许的生成路线/);
+          assert.doesNotMatch(JSON.stringify(revision), /上传专属真实材料/);
+        }
+        return { output: { title: produceCalls === 1 ? "误选图库" : "改用生成" } };
+      },
+      assessPlanningReadiness: (candidate) => candidate.title === "误选图库"
+        ? {
+          status: "needs_source",
+          issues: [{
+            id: "route-1",
+            target: "source",
+            beatIds: ["beat-1"],
+            scenePositions: [],
+            reason: "纯示意被候选错误标成必须补图库来源。",
+            requiredChange: "请用户上传专属真实材料。",
+            evidenceArtifactIds: [],
+          }],
+        }
+        : { status: "ready", issues: [] },
+      audit: async ({ iteration }) => ({ output: iteration === 1 ? {
+        ...repairingAudit(),
+        issues: [{
+          severity: "blocking" as const,
+          criterion: "示意路线",
+          evidence: "这不是事实取证镜头。",
+          repairInstruction: "改用已允许的生成路线。",
+        }],
+        repairInstructions: ["改用已允许的生成路线。"],
+        planningDisposition: { action: "revise_here", issueIndexes: [0] },
+        hostReadinessReview: { misclassifiedIssueIds: ["route-1"] },
+      } : { ...passingAudit(), planningDisposition: null } }),
+      validate: titleCandidate,
+    });
+
+    assert.equal(result.output.title, "改用生成");
+    assert.equal(produceCalls, 2);
+    assert.equal(result.agentLoop?.iterations[0]?.hostReadiness?.status, "needs_source");
+    assert.deepEqual(result.agentLoop?.iterations[0]?.audit.hostReadinessReview?.misclassifiedIssueIds, ["route-1"]);
+  });
+
+  it("does not let a partial or unknown host correction hide a real source blocker", async () => {
+    const readiness = {
+      status: "needs_source" as const,
+      issues: ["source-1", "source-2"].map((id) => ({
+        id,
+        target: "source" as const,
+        beatIds: ["beat-1"],
+        scenePositions: [],
+        reason: `${id} 仍缺用户专属事实材料。`,
+        requiredChange: "补齐真实来源。",
+        evidenceArtifactIds: [],
+      })),
+    };
+    await assert.rejects(
+      runRoleAgentLoop<{ title: string }>({
+        role: "导演前期构思",
+        contractVersion: "treatment-host-partial-v1",
+        criteria: ["真实来源完整"],
+        planningRole: true,
+        maxIterations: 2,
+        produce: async () => ({ output: { title: "仍需实证" } }),
+        assessPlanningReadiness: () => readiness,
+        audit: async () => ({ output: {
+          ...repairingAudit(),
+          planningDisposition: { action: "revise_here", issueIndexes: [0] },
+          hostReadinessReview: { misclassifiedIssueIds: ["source-1"] },
+        } }),
+        validate: titleCandidate,
+      }),
+      (error: unknown) => error instanceof Error && error.name === "RoleAgentPlanningHaltError",
+    );
+    assert.throws(() => validateRoleAudit({
+      ...repairingAudit(),
+      planningDisposition: { action: "revise_here", issueIndexes: [0] },
+      hostReadinessReview: { misclassifiedIssueIds: ["not-present"] },
+    }, { planningRole: true, hostReadiness: readiness }), /unknown host issue/);
+  });
+
+  it("can persist a validated draft without running its independent audit", async () => {
+    let saved: unknown;
+    let produceCalls = 0;
+    let auditCalls = 0;
+    const checkpoint = {
+      key: "draft-before-confirmation",
+      load: async () => saved,
+      save: async (value: unknown) => { saved = structuredClone(value); },
+    };
+    const options = {
+      role: "导演前期构思",
+      contractVersion: "draft-before-confirmation-v1",
+      criteria: ["当前草稿可在确认时独立检查"],
+      maxIterations: 1,
+      deferAudit: true,
+      checkpoint,
+      produce: async () => {
+        produceCalls += 1;
+        return { output: { title: "等待用户讨论的初稿" } };
+      },
+      audit: async () => {
+        auditCalls += 1;
+        return { output: passingAudit() };
+      },
+      validate: titleCandidate,
+    };
+
+    const first = await runRoleAgentLoop(options);
+    const restored = await runRoleAgentLoop(options);
+
+    assert.equal(first.output.title, "等待用户讨论的初稿");
+    assert.equal(restored.output.title, first.output.title);
+    assert.equal(produceCalls, 1);
+    assert.equal(auditCalls, 0);
+    assert.equal((saved as { pendingCandidate?: unknown }).pendingCandidate !== undefined, true);
+  });
+
+  // 审片候选由外部证据校验（报告绑定产出当时那批证据帧），而证据快照不在 contractDigest 里。
+  // 证据被重新生成后旧结论不再成立：恢复时必须重跑这一轮，不能回放旧结论，
+  // 也不能把校验错误当成本轮结果抛给上层去冒充服务故障。
+  function evidenceBoundLoop() {
+    let saved: unknown;
+    let evidence = "旧证据帧";
+    let produceCalls = 0;
+    let auditCalls = 0;
+    const produceRequestIds: string[] = [];
+    const execute = () => runRoleAgentLoop<{ title: string }>({
+      role: "视觉审片员",
+      contractVersion: "visual-review-evidence",
+      criteria: ["每条问题必须由对应时间码的画面证据支持"],
+      maxIterations: 1,
+      checkpoint: {
+        key: "evidence-bound-candidate",
+        load: async () => saved,
+        save: async (value: unknown) => { saved = structuredClone(value); },
+      },
+      produce: async (_revision, operation) => {
+        produceCalls += 1;
+        produceRequestIds.push(operation.requestId);
+        return { output: { title: `审片结论-${evidence}` } };
+      },
+      audit: async () => {
+        auditCalls += 1;
+        return { output: passingAudit() };
+      },
+      validate: (value) => {
+        const candidate = titleCandidate(value);
+        if (candidate.title !== `审片结论-${evidence}`) {
+          throw new Error("Visual review finding evidence frame is invalid.");
+        }
+        return candidate;
+      },
+    });
+    return {
+      execute,
+      useNewEvidence: () => { evidence = "新证据帧"; },
+      stored: () => saved as Record<string, unknown>,
+      counts: () => ({ produceCalls, auditCalls }),
+      produceRequestIds: () => [...produceRequestIds],
+    };
+  }
+
+  it("re-runs a restored candidate whose evidence was regenerated instead of replaying it", async () => {
+    const loop = evidenceBoundLoop();
+    const first = await loop.execute();
+    assert.equal(first.output.title, "审片结论-旧证据帧");
+    assert.equal(loop.counts().produceCalls, 1);
+
+    loop.useNewEvidence();
+    const second = await loop.execute();
+    assert.equal(second.output.title, "审片结论-新证据帧");
+    assert.deepEqual(loop.counts(), { produceCalls: 2, auditCalls: 2 });
+    assert.equal(second.agentLoop?.status, "passed");
+    // 重跑要开新 cycle，物理请求身份必须随之改变，否则会与已结清的历史任务撞身份。
+    assert.equal(loop.stored().cycle, 1);
+    const [firstRequestId, secondRequestId] = loop.produceRequestIds();
+    assert.notEqual(secondRequestId, firstRequestId);
+  });
+
+  it("keeps an accepted pending operation instead of restarting past it", async () => {
+    const loop = evidenceBoundLoop();
+    await loop.execute();
+    loop.useNewEvidence();
+    const stored = loop.stored();
+    stored.pendingOperation = {
+      phase: "audit",
+      iteration: 2,
+      operationKey: "0:2:audit",
+      generation: 0,
+      contractDigest: stored.contractDigest,
+      operation: {
+        version: "video-factory/codex-prepared-operation-v1",
+        requestId: "agent-pending-audit",
+        kind: "role-audit",
+        envelope: { requestId: "agent-pending-audit", kind: "role-audit", payload: {} },
+        serializedEnvelope: '{"payload":{}}',
+        binding: {},
+        brokerBinding: {},
+        route: { socketPath: "/tmp/not-connected.sock" },
+      },
+    };
+
+    await assert.rejects(loop.execute(), /Visual review finding evidence frame is invalid\./);
+    assert.equal(loop.counts().produceCalls, 1);
+  });
+
+  it("issues a new request identity after the broker reports an identity conflict", async () => {
+    let saved: unknown;
+    let conflicted = true;
+    const requestIds: string[] = [];
+    const execute = () => runRoleAgentLoop<{ title: string }>({
+      role: "视觉审片员",
+      contractVersion: "identity-conflict",
+      criteria: ["同一身份冲突不得让后续重试永久撞同一条记录"],
+      maxIterations: 1,
+      checkpoint: {
+        key: "identity-conflict",
+        load: async () => saved,
+        save: async (value: unknown) => { saved = structuredClone(value); },
+      },
+      produce: async (_revision, operation) => {
+        requestIds.push(operation.requestId);
+        if (conflicted) {
+          throw new CodexBridgeError(
+            "Codex requestId is already bound to different task data.",
+            false,
+            "conflict",
+            409,
+            "binding_conflict",
+          );
+        }
+        return { output: { title: "重跑后的审片结论" } };
+      },
+      audit: async () => ({ output: passingAudit() }),
+      validate: titleCandidate,
+    });
+
+    await assert.rejects(execute(), (error: unknown) => {
+      assert.ok(error instanceof RoleAgentLoopError);
+      assert.match(error.message, /请求身份与已有任务记录冲突/);
+      assert.ok(error.sourceError instanceof CodexBridgeError);
+      assert.equal(error.sourceError.failureKind, "binding_conflict");
+      return true;
+    });
+    conflicted = false;
+    const result = await execute();
+    assert.equal(result.output.title, "重跑后的审片结论");
+    assert.equal(requestIds.length, 2);
+    assert.notEqual(requestIds[1], requestIds[0]);
   });
 });
 
@@ -1297,6 +1706,7 @@ function passingAudit() {
     summary: "可以进入下游",
     issues: [],
     repairInstructions: [],
+    hostReadinessReview: null,
   } as const;
 }
 
@@ -1308,5 +1718,6 @@ function repairingAudit() {
     summary: "仍需修改",
     issues: [{ severity: "blocking", criterion: "标题具体", evidence: "仍然抽象", repairInstruction: "改成具体动作" }],
     repairInstructions: ["改成具体动作"],
+    hostReadinessReview: null,
   } as const;
 }

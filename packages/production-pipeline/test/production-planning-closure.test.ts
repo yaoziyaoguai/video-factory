@@ -9,14 +9,18 @@ import {
   ProductionPipeline,
   type CreativeTreatment,
   type CreativeTreatmentAgent,
+  type CreativeTreatmentAgentInput,
+  type ProductionArticleSourceSnapshot,
   type ProductionBrief,
   type ProductionPipelineOptions,
   type ScreenwriterAgent,
+  type ScreenwriterAgentInput,
   type VisualAssetProviderCapability,
   type VisualDirectorAgent,
   type VisualDirectorAgentInput,
   type WorkerResponse,
 } from "../src/index.js";
+import { summarizeJointPlanningExecution } from "../src/production-pipeline.js";
 
 // ---------------------------------------------------------------------------
 // B4-REMAINDER：joint-v1 规划编辑合同的行为测试。
@@ -89,8 +93,17 @@ interface ClosureSpies {
   treatmentTitles: string[];
   treatmentModelCalls: string[];
   treatmentCheckpointPresent: boolean[];
+  treatmentInputs?: Array<{ visualIntent?: string; reworkInstruction?: string }>;
+  treatmentAuditCalls?: number;
+  treatmentSources?: unknown[][];
   screenwriterCalls: string[];
+  screenwriterSources?: unknown[][];
+  screenwriterAuditCalls?: number;
+  screenwriterCheckpointPairs?: string[][];
   directorCalls: number;
+  directorSources?: unknown[][];
+  directorAuditCalls?: number;
+  directorCheckpointPairs?: string[][];
   searchCalls: number;
   rankCalls: number;
   /** 排序角色实际收到的请求：断言真实语义意图进入 ranker 输入，而非只有 artifact id。 */
@@ -99,9 +112,60 @@ interface ClosureSpies {
   rankCheckpoints: Array<{ key?: string }>;
 }
 
+function passingCreativeReviewExecution<T>(
+  output: T,
+  role: string,
+  contractVersion: string,
+  taskKind: "creative-treatment" | "script-draft" | "director-plan",
+  modelId: string,
+) {
+  return {
+    output,
+    trace: {
+      taskKind,
+      promptVersion: "v1",
+      prompt: "fixture role execution",
+      providerId: "fixture-role",
+      modelId,
+    },
+    agentLoop: {
+      version: "video-factory/agent-loop-v1" as const,
+      role,
+      contractVersion,
+      criteria: ["fixture independent review"],
+      status: "passed" as const,
+      maxIterations: 1,
+      producerModelCallCount: 0,
+      auditModelCallCount: 1,
+      iterations: [{
+        iteration: 1,
+        candidate: output,
+        candidateHash: createHash("sha256").update(JSON.stringify(output)).digest("hex"),
+        auditTrace: {
+          taskKind: "role-audit" as const,
+          promptVersion: "v1",
+          prompt: "fixture independent review",
+          providerId: "fixture-audit",
+          modelId: `${modelId}-audit`,
+        },
+        audit: {
+          version: "video-factory/role-audit-v1" as const,
+          verdict: "pass" as const,
+          score: 92,
+          summary: "当前版本可以确认。",
+          issues: [],
+          repairInstructions: [],
+          planningDisposition: null,
+          hostReadinessReview: null,
+        },
+      }],
+    },
+  };
+}
+
 function legalTreatment(title: string): CreativeTreatment {
   return {
-    version: "video-factory/creative-treatment-v1",
+    version: "video-factory/creative-treatment-v2",
     viewerPromise: "看完能避开三个决策坑",
     hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
     progression: [
@@ -131,10 +195,29 @@ function closureTreatmentAgents(
         spies.treatmentTitles.push(input.brief.title);
         return legalTreatment(input.brief.title);
       },
-      treatDetailed: async (input: { brief: { title: string }; agentLoopCheckpoint?: unknown }) => {
+      treatDetailed: async (input: CreativeTreatmentAgentInput) => {
+        if (input.creativeReviewExecution?.mode === "check") {
+          spies.treatmentAuditCalls = (spies.treatmentAuditCalls ?? 0) + 1;
+          return passingCreativeReviewExecution(
+            input.creativeReviewExecution.candidate,
+            "导演前期构思",
+            "fixture-treatment-contract-v1",
+            "creative-treatment",
+            modelId,
+          );
+        }
         spies.treatmentModelCalls.push(modelId);
         spies.treatmentTitles.push(input.brief.title);
+        spies.treatmentSources?.push(structuredClone(input.suppliedSources));
         spies.treatmentCheckpointPresent.push(input.agentLoopCheckpoint !== undefined);
+        spies.treatmentInputs?.push({
+          ...("visualIntent" in input.brief && typeof input.brief.visualIntent === "string"
+            ? { visualIntent: input.brief.visualIntent }
+            : {}),
+          ...("reworkInstruction" in input.brief && typeof input.brief.reworkInstruction === "string"
+            ? { reworkInstruction: input.brief.reworkInstruction }
+            : {}),
+        });
         if (options.failFirstCandidate && modelId === "treatment-model-a") {
           // 确证发生在受理之前的瞬时 Provider 故障：按既有 fallback 合同允许切换候选。
           throw new CodexBridgeError("treatment model a connection failed", true, "not_accepted");
@@ -162,8 +245,26 @@ function closureScreenwriter(spies: ClosureSpies): ScreenwriterAgent {
     draft: async () => {
       throw new Error("closure fixtures must run through draftDetailed for trace evidence");
     },
-    draftDetailed: async (input: { brief: { title: string }; selectedModelId?: string }) => {
+    draftDetailed: async (input: ScreenwriterAgentInput) => {
+      if (input.creativeReviewExecution?.mode === "check") {
+        spies.screenwriterAuditCalls = (spies.screenwriterAuditCalls ?? 0) + 1;
+        return passingCreativeReviewExecution(
+          input.creativeReviewExecution.candidate,
+          "编剧",
+          "fixture-screenwriter-contract-v1",
+          "script-draft",
+          input.selectedModelId ?? "screenwriter-binding-model",
+        );
+      }
       spies.screenwriterCalls.push(input.brief.title);
+      spies.screenwriterSources?.push(structuredClone(input.brief.articleSources ?? []));
+      if (spies.screenwriterCheckpointPairs) {
+        assert.ok(input.agentLoopCheckpointForModel);
+        spies.screenwriterCheckpointPairs.push([
+          input.agentLoopCheckpointForModel("screenwriter-model-a").key,
+          input.agentLoopCheckpointForModel("screenwriter-model-b").key,
+        ]);
+      }
       return {
         output: {
           viewerPromise: "看完能避开三个决策坑",
@@ -195,7 +296,25 @@ function closureDirector(spies: ClosureSpies): VisualDirectorAgent {
     id: "api-visual-director-v1",
     modelId: "director-binding-model",
     plan: async (input: VisualDirectorAgentInput) => {
+      if (input.creativeReviewExecution?.mode === "check") {
+        spies.directorAuditCalls = (spies.directorAuditCalls ?? 0) + 1;
+        return passingCreativeReviewExecution(
+          input.creativeReviewExecution.candidate,
+          "视觉导演",
+          "fixture-director-contract-v1",
+          "director-plan",
+          input.selectedModelId ?? "director-binding-model",
+        ) as never;
+      }
       spies.directorCalls += 1;
+      spies.directorSources?.push(structuredClone(input.brief.articleSources ?? []));
+      if (spies.directorCheckpointPairs) {
+        assert.ok(input.agentLoopCheckpointForModel);
+        spies.directorCheckpointPairs.push([
+          input.agentLoopCheckpointForModel("director-model-a").key,
+          input.agentLoopCheckpointForModel("director-model-b").key,
+        ]);
+      }
       return {
         version: "video-factory/director-plan-v1",
         requestedProfileId: input.brief.requestedProfileId,
@@ -229,7 +348,7 @@ const CLOSURE_ASSET_PROVIDERS: VisualAssetProviderCapability[] = [
   { id: "local-editorial-v1", label: "本地编辑卡片", billing: "free", modes: ["本地"], deliveryTypes: ["editorial_card"] },
 ];
 
-function closureBrief(overrides: { models?: Record<string, string>; title?: string; assetSemanticRank?: boolean } = {}): ProductionBrief {
+function closureBrief(overrides: { models?: Record<string, string>; title?: string; assetSemanticRank?: boolean; creativeReview?: boolean } = {}): ProductionBrief {
   return {
     protocolVersion: "video-factory/brief-v1",
     title: overrides.title ?? "joint-v1 规划编辑闭环",
@@ -254,6 +373,7 @@ function closureBrief(overrides: { models?: Record<string, string>; title?: stri
       referenceGrammar: false,
       executablePlan: true,
       creativePlanning: "joint-v1",
+      ...(overrides.creativeReview ? { creativeReview: "user-confirmed-v1" as const } : {}),
     },
     director: {
       profileId: "auto",
@@ -330,6 +450,204 @@ async function jointPlanningEditTokens(
 }
 
 describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
+  it("carries adopted article evidence through every planning role and invalidates all dependent stages when it changes", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-article-evidence-planning-"));
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], treatmentSources: [],
+      screenwriterCalls: [], screenwriterSources: [], directorCalls: 0, directorSources: [],
+      searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const pipeline = newClosurePipeline(workspaceRoot, spies);
+    const source: ProductionArticleSourceSnapshot = {
+      sourceId: "source-report",
+      originalUrl: "https://news.example/report",
+      finalUrl: "https://news.example/report",
+      pageTitle: "公开报告",
+      fetchedAt: "2026-09-14T08:00:00.000Z",
+      contentSha256: "a".repeat(64),
+      extractorVersion: "readability-v1",
+      readStatus: "read",
+      paragraphs: [{ id: "p1", text: "报告正文中的可核对事实。" }],
+      truncated: false,
+    };
+    const first = await pipeline.start({ ...closureBrief(), articleSources: [source] });
+    assert.equal(spies.treatmentSources?.[0]?.[0] && (spies.treatmentSources[0]![0] as { sourceId: string }).sourceId, source.sourceId);
+    assert.deepEqual(spies.screenwriterSources?.[0], [source]);
+    assert.deepEqual(spies.directorSources?.[0], [source]);
+
+    const current = await effectivePlanningInput(pipeline, first.id);
+    const updatedSource = {
+      ...source,
+      contentSha256: "b".repeat(64),
+      paragraphs: [{ id: "p1", text: "刷新后正文中的另一项可核对事实。" }],
+    };
+    await pipeline.applyNodeInputOverride(first.id, {
+      nodeId: "creative-planning",
+      actor: "producer",
+      ...await jointPlanningEditTokens(pipeline, first.id),
+      input: { brief: { ...current.brief, articleSources: [updatedSource] } },
+    });
+    await pipeline.resumeStale(first.id);
+
+    assert.equal(spies.treatmentSources?.length, 2);
+    assert.deepEqual(spies.screenwriterSources?.[1], [updatedSource]);
+    assert.deepEqual(spies.directorSources?.[1], [updatedSource]);
+  });
+
+  it("lets only one of two concurrent confirmation command ids advance the current gate", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-creative-confirm-race-"));
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const pipeline = newClosurePipeline(workspaceRoot, spies);
+    const run = await pipeline.start(closureBrief({ creativeReview: true }));
+    const gate = run.nodeRuns.find((node) => node.nodeId === "creative-planning")?.intervention?.continuation;
+    assert.ok(gate);
+    const common = {
+      actor: "creator",
+      expectedRunRevision: run.revision,
+      expectedReviewRevision: gate.reviewRevision,
+      stage: gate.stage,
+      baseDraftSha256: gate.draftSha256,
+    };
+    const outcomes = await Promise.allSettled([
+      pipeline.confirmCreativeReview(run.id, { ...common, commandId: "confirm-race-a" }),
+      pipeline.confirmCreativeReview(run.id, { ...common, commandId: "confirm-race-b" }),
+    ]);
+    assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
+    assert.equal(outcomes.filter((outcome) => outcome.status === "rejected").length, 1);
+    assert.deepEqual(spies.screenwriterCalls, ["joint-v1 规划编辑闭环"]);
+  });
+
+  it("projects three durable creative review waits and rejects generic approval", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-creative-review-pipeline-"));
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const pipeline = newClosurePipeline(workspaceRoot, spies);
+    let run = await pipeline.start(closureBrief({ creativeReview: true }));
+    assert.equal(run.workflowVersion, "1.7.0");
+    assert.equal(run.status, "needs_human");
+    assert.deepEqual(spies.screenwriterCalls, []);
+    assert.equal(spies.directorCalls, 0);
+
+    const waiting = () => {
+      const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning");
+      assert.equal(
+        node?.intervention?.kind,
+        "creative_review",
+        `expected creative review gate, got ${JSON.stringify({ status: run.status, node })}`,
+      );
+      assert.ok(node?.intervention?.continuation);
+      return node.intervention.continuation;
+    };
+    await assert.rejects(
+      () => pipeline.decide(run.id, {
+        interventionId: run.nodeRuns.find((node) => node.nodeId === "creative-planning")!.intervention!.id,
+        action: "approve",
+        actor: "creator",
+        expectedRunRevision: run.revision,
+      }),
+      /generic decision endpoint|stage confirmation command/,
+    );
+
+    const confirm = async (commandId: string) => {
+      const gate = waiting();
+      const command = {
+        commandId,
+        actor: "creator",
+        expectedRunRevision: run.revision,
+        expectedReviewRevision: gate.reviewRevision,
+        stage: gate.stage,
+        baseDraftSha256: gate.draftSha256,
+      };
+      run = await pipeline.confirmCreativeReview(run.id, command);
+      return command;
+    };
+    const treatmentCommand = await confirm("confirm-treatment");
+    assert.equal(waiting().stage, "script");
+    assert.deepEqual(spies.screenwriterCalls, ["joint-v1 规划编辑闭环"]);
+    assert.equal(spies.directorCalls, 0);
+    const revisionAfterTreatment = run.revision;
+    const replayed = await pipeline.confirmCreativeReview(run.id, treatmentCommand);
+    assert.equal(replayed.revision, revisionAfterTreatment);
+    assert.deepEqual(spies.screenwriterCalls, ["joint-v1 规划编辑闭环"]);
+    await assert.rejects(
+      () => pipeline.confirmCreativeReview(run.id, { ...treatmentCommand, actor: "different-actor" }),
+      /already used with different content/,
+    );
+
+    await confirm("confirm-script");
+    assert.equal(waiting().stage, "director");
+    assert.equal(spies.directorCalls, 1);
+
+    await confirm("confirm-director");
+    assert.notEqual(run.nodeRuns.find((node) => node.nodeId === "creative-planning")?.status, "needs_human");
+    assert.equal(spies.treatmentTitles.length, 1);
+    assert.equal(spies.treatmentAuditCalls, 1);
+    assert.equal(spies.screenwriterCalls.length, 1);
+    assert.equal(spies.screenwriterAuditCalls, 1);
+    assert.equal(spies.directorCalls, 1);
+    assert.equal(spies.directorAuditCalls, 1);
+  });
+  it("feeds visual intent and script-owned rework into treatment identity and execution", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-treatment-rework-identity-"));
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], treatmentInputs: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const pipeline = newClosurePipeline(workspaceRoot, spies);
+    const initialInstruction = "把原实证承诺改为明确标注的概念示意，不声称普遍结论。";
+    const brief = {
+      ...closureBrief(),
+      visualIntent: "使用三幅无字生成静帧解释构图变化。",
+      rework: {
+        sourceRunId: "source-run-not-required-before-assets",
+        sourceRunRevision: 1,
+        nodeInstructions: {
+          script: initialInstruction,
+          visualDirection: "保持无字静帧路线。",
+          assets: "只生成方案明确要求的静帧。",
+        },
+        findings: [],
+      },
+    } as ProductionBrief;
+
+    const run = await pipeline.start(brief);
+    assert.equal(run.status, "needs_human", "the fixture pauses after planning when its source run is absent");
+    assert.deepEqual(spies.treatmentInputs, [{
+      visualIntent: brief.visualIntent,
+      reworkInstruction: initialInstruction,
+    }]);
+
+    const current = await effectivePlanningInput(pipeline, run.id);
+    const nextInstruction = "保留概念示意，并删去任何需要真实受试者数据的承诺。";
+    await pipeline.applyNodeInputOverride(run.id, {
+      nodeId: "creative-planning",
+      actor: "producer",
+      ...await jointPlanningEditTokens(pipeline, run.id),
+      input: {
+        brief: {
+          ...(current.brief as ProductionBrief),
+          rework: {
+            ...(current.brief as ProductionBrief).rework!,
+            nodeInstructions: {
+              ...(current.brief as ProductionBrief).rework!.nodeInstructions,
+              script: nextInstruction,
+            },
+          },
+        },
+      },
+    });
+    await pipeline.resumeStale(run.id);
+    assert.deepEqual(spies.treatmentInputs, [
+      { visualIntent: brief.visualIntent, reworkInstruction: initialInstruction },
+      { visualIntent: brief.visualIntent, reworkInstruction: nextInstruction },
+    ], "changing treatment-owned rework must invalidate the treatment stage instead of carrying the old candidate");
+  });
+
   it("feeds the edited planning input (request.brief) into the next planning execution", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-closure-request-brief-"));
     const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
@@ -359,14 +677,14 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
     );
   });
 
-  it("keeps the valid treatment when only script-stage input changes", async () => {
+  it("strips a legacy template snapshot without invalidating accepted planning", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-closure-script-edit-"));
     const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
     const pipeline = newClosurePipeline(workspaceRoot, spies);
     const run = await pipeline.start(closureBrief());
     assert.equal(run.status, "needs_human");
 
-    // 模板快照进入编剧/导演合同，但不进入构思合同；只失效编剧及其下游导演。
+    // 模板已暂停参与新制作；旧字段只在新执行边界剥离，不能改变任何角色身份。
     const original = await effectivePlanningInput(pipeline, run.id);
     assert.equal(original.brief.templateSnapshot, undefined);
     await pipeline.applyNodeInputOverride(run.id, {
@@ -378,12 +696,27 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
     const resumed = await pipeline.resumeStale(run.id);
     assert.equal(resumed.status, "needs_human", JSON.stringify(resumed.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
 
-    assert.equal(spies.treatmentTitles.length, 1, "a script-stage edit must not re-run the valid treatment");
-    assert.equal(spies.screenwriterCalls.length, 2, "the script stage must re-run with the edited input");
-    assert.equal(spies.directorCalls, 2, "the director stage must re-run downstream of the script edit");
-    // 新规划正式产物存在且绑定当前输出版本。
+    assert.equal(spies.treatmentTitles.length, 1, "a retired template field must not change the treatment identity");
+    assert.equal(spies.screenwriterCalls.length, 1, "a retired template field must not rerun the script stage");
+    assert.equal(spies.directorCalls, 1, "a retired template field must not rerun the director stage");
     const formal = resumed.artifacts.filter((artifact) => artifact.producer?.nodeId === "creative-planning" && artifact.kind === "script");
-    assert.equal(formal.length, 2, "both planning executions register their own formal script artifacts");
+    assert.equal(formal.length, 1, "the accepted planning artifact remains the only effective production artifact");
+  });
+
+  it("isolates joint script and director role checkpoints by the actual selected model", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-closure-role-model-checkpoints-"));
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], screenwriterCheckpointPairs: [], directorCalls: 0, directorCheckpointPairs: [],
+      searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const pipeline = newClosurePipeline(workspaceRoot, spies);
+    const run = await pipeline.start(closureBrief());
+    assert.equal(run.status, "needs_human");
+    assert.equal(spies.screenwriterCheckpointPairs?.length, 1);
+    assert.notEqual(spies.screenwriterCheckpointPairs?.[0]?.[0], spies.screenwriterCheckpointPairs?.[0]?.[1]);
+    assert.equal(spies.directorCheckpointPairs?.length, 1);
+    assert.notEqual(spies.directorCheckpointPairs?.[0]?.[0], spies.directorCheckpointPairs?.[0]?.[1]);
   });
 
   it("keeps the valid treatment and script when only the director model changes", async () => {
@@ -1323,6 +1656,127 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
       "the quote boundary must fail closed before any new worker execution",
     );
   });
+
+  it("revises narration without evicting the script its commit-registered executable plan references", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-narration-revision-joint-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const workerCalls: string[] = [];
+    const countingWorker = new ClosureWorker();
+    const originalWorkerRun = countingWorker.run.bind(countingWorker);
+    countingWorker.run = async (request: Record<string, unknown>) => {
+      workerCalls.push(String(request.capability));
+      return originalWorkerRun(request);
+    };
+    const pipeline = new ProductionPipeline({
+      workspaceRoot,
+      worker: countingWorker,
+      treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureDirector(spies),
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    const waiting = await pipeline.start(closureBrief());
+    assert.equal(waiting.status, "needs_human", JSON.stringify(waiting.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
+
+    const planningBefore = waiting.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    const planningVersionBefore = planningBefore.outputState!.versions.find(
+      (version) => version.id === planningBefore.outputState!.effectiveVersionId,
+    )!;
+    const outputBefore = planningVersionBefore.output as Record<string, unknown>;
+    const scriptArtifactBefore = waiting.artifacts.find((artifact) => (
+      planningVersionBefore.artifactIds.includes(artifact.id)
+      && artifact.kind === "script"
+      && artifact.uri === outputBefore.scriptPath
+    ));
+    assert.ok(scriptArtifactBefore, "the joint route must register its current script artifact");
+    const planPathBefore = String(outputBefore.executablePlanPath);
+    const planBefore = JSON.parse(await readFile(planPathBefore, "utf8")) as { cuts: unknown[]; totalFrames: number };
+    const planArtifactBefore = waiting.artifacts.find((artifact) => (
+      planningVersionBefore.artifactIds.includes(artifact.id)
+      && artifact.kind === "executable_plan"
+      && artifact.uri === planPathBefore
+    ));
+    assert.ok(planArtifactBefore, "the joint route must register its current executable plan artifact");
+    // 原稿的磁盘字节：方案已经引用、规划 commit 已经登记的证据，人工改字不得改写它。
+    const originalScriptBytes = await readFile(scriptArtifactBefore.uri!);
+    const versionIdsBefore = [...planningVersionBefore.artifactIds];
+    // 画面是这条路径里唯一不该动的东西。
+    const mediaBefore = waiting.artifacts.filter((artifact) => artifact.kind === "media_asset").map((artifact) => artifact.id);
+    const assetPrepareBefore = workerCalls.filter((capability) => capability === "asset.prepare").length;
+    const callsBeforeRevision = workerCalls.length;
+
+    const revised = await pipeline.requestNarrationRevision(waiting.id, {
+      expectedRunRevision: waiting.revision,
+      scenePosition: 2,
+      narration: "改过的第二段旁白",
+      actor: "director",
+      note: "第二段口播改得更直白。",
+    });
+
+    assert.equal(
+      revised.status,
+      "needs_human",
+      JSON.stringify(revised.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))),
+    );
+
+    // joint 的可执行方案按 artifact id 引用脚本，且引用集受"必须同属规划节点当前接受版本"
+    // 与"同属一次规划 commit"两道约束；方案本身又是那次 commit 已登记的证据快照。所以人工
+    // 改字既不能把原稿踢出当前版本（方案会引用一份不在版本内的脚本 → 消费方案时 fail closed，
+    // 这正是生产里复现的失败），也不能重绑方案（commit 文件里记的是原稿 id，重绑会让方案不再
+    // 指向 commit 登记的那一份）。正确形态是：方案与其证据原封不动，改出来的新稿另立一件。
+    const planningAfter = revised.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    const planningVersionAfter = planningAfter.outputState!.versions.find(
+      (version) => version.id === planningAfter.outputState!.effectiveVersionId,
+    )!;
+    const currentArtifacts = revised.artifacts.filter((artifact) => planningVersionAfter.artifactIds.includes(artifact.id));
+    const plansAfter = currentArtifacts.filter((artifact) => artifact.kind === "executable_plan");
+    assert.equal(plansAfter.length, 1, "the accepted planning version must still hold exactly one executable plan");
+    assert.equal(plansAfter[0]!.id, planArtifactBefore.id, "the plan is commit-registered evidence and must not be replaced");
+    assert.equal(plansAfter[0]!.uri, planPathBefore);
+    // 版本成员只增不减：既有证据（含原稿）全部留在当前接受版本里。
+    const versionIdsAfter = new Set(planningVersionAfter.artifactIds);
+    for (const artifactId of versionIdsBefore) {
+      assert.ok(versionIdsAfter.has(artifactId), `narration revision dropped version member '${artifactId}'`);
+    }
+    assert.equal(
+      planningVersionAfter.artifactIds.length,
+      versionIdsBefore.length + 2,
+      "the revision must add exactly the revised script and the revision request",
+    );
+    const originalScriptAfter = currentArtifacts.find((artifact) => artifact.id === scriptArtifactBefore.id);
+    assert.ok(originalScriptAfter, "the revised script must not evict the script the plan references");
+    assert.deepEqual(await readFile(originalScriptAfter.uri!), originalScriptBytes);
+
+    // 方案仍然引用原稿，且时长/镜头一个字段都没动——所以既不重编译也不重买画面。
+    const planAfter = JSON.parse(await readFile(plansAfter[0]!.uri!, "utf8")) as { scriptArtifactId: string; cuts: unknown[]; totalFrames: number };
+    assert.equal(planAfter.scriptArtifactId, scriptArtifactBefore.id);
+    assert.deepEqual(planAfter.cuts, planBefore.cuts);
+    assert.equal(planAfter.totalFrames, planBefore.totalFrames);
+
+    // 下游读的是当前接受版本的 scriptPath：新文字必须落在那里，而不是只躺在版本成员里。
+    const revisedScriptAfter = currentArtifacts.find((artifact) => (
+      artifact.kind === "script"
+      && artifact.uri === (planningVersionAfter.output as Record<string, unknown>).scriptPath
+      && artifact.id !== scriptArtifactBefore.id
+    ));
+    assert.ok(revisedScriptAfter, "the revised script must be the one the accepted version points at");
+    assert.ok((revisedScriptAfter.parentArtifactIds ?? []).includes(scriptArtifactBefore.id));
+    assert.equal(revisedScriptAfter.provenance?.providerId, "human-narration-revision-v1");
+    const revisedScript = JSON.parse(await readFile(revisedScriptAfter.uri!, "utf8")) as { scenes: Array<{ narration: string }> };
+    assert.equal(revisedScript.scenes[1]?.narration, "改过的第二段旁白");
+    assert.equal(revisedScript.scenes[0]?.narration, "第1段旁白内容");
+
+    // 只有读这一行字的下游重跑；画面既没有重新准备，也没有换过任何一份媒体产物。
+    assert.deepEqual(
+      workerCalls.slice(callsBeforeRevision),
+      ["voice.synthesize", "video.render", "quality.review"],
+    );
+    assert.equal(workerCalls.filter((capability) => capability === "asset.prepare").length, assetPrepareBefore);
+    assert.deepEqual(
+      revised.artifacts.filter((artifact) => artifact.kind === "media_asset").map((artifact) => artifact.id),
+      mediaBefore,
+    );
+  });
 });
 
 // 读取 assets 节点当前生效输入（用于制造一次“只失效素材、不重跑规划”的编辑）。
@@ -1397,5 +1851,181 @@ describe("same-digest replay fails closed when stage inputs drift (B-FIX)", () =
     const planningError = retried.nodeRuns.find((node) => node.nodeId === "creative-planning")?.error ?? "";
     assert.match(planningError, /cannot resume this thread/i);
     assert.equal(spies.directorCalls, 1, "the drifted thread must not silently replay or re-run planning");
+  });
+});
+
+describe("joint planning physical execution summary (Revision 9)", () => {
+  it("aggregates every role checkpoint by physical request identity without double-counting repairs or unknown work", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-planning-summary-"));
+    const runId = "run-summary-fixture";
+    const operationRequestId = "creative-planning-operation-1";
+    const directory = path.join(workspaceRoot, "runs", runId, "nodes", "creative-planning", "agent-loop-checkpoints");
+    await mkdir(directory, { recursive: true });
+
+    const requestId = (
+      key: string,
+      contractDigest: string,
+      cycle: number,
+      iteration: number,
+      phase: "produce" | "audit",
+      generation: number,
+    ) => `agent-${createHash("sha256").update(JSON.stringify({
+      scope: key,
+      contractDigest,
+      cycle,
+      iteration,
+      phase,
+      generation,
+    })).digest("hex")}`;
+    const checkpoint = (
+      name: string,
+      produceGeneration: number,
+      auditGeneration: number,
+      structuredRepairModelCallCount: number,
+      durations: { produce: number; audit: number; validation: number },
+      retriedRequestIds: string[],
+      ownerOperationRequestId = operationRequestId,
+    ) => {
+      const key = `scope-${name}`;
+      const contractDigest = createHash("sha256").update(`contract-${name}`).digest("hex");
+      const cycle = 1;
+      const attemptedRequestIds = [
+        ...Array.from({ length: produceGeneration + 1 }, (_, generation) => requestId(key, contractDigest, cycle, 1, "produce", generation)),
+        ...Array.from({ length: auditGeneration + 1 }, (_, generation) => requestId(key, contractDigest, cycle, 1, "audit", generation)),
+      ];
+      return {
+        version: "video-factory/agent-loop-checkpoint-v9",
+        key,
+        contractDigest,
+        cycle,
+        maxIterations: 3,
+        recoveryOwner: { runId, nodeId: "creative-planning", workflowOperationRequestId: ownerOperationRequestId },
+        operationGenerations: { "1:1:produce": produceGeneration, "1:1:audit": auditGeneration } as Record<string, number>,
+        attemptedRequestIds,
+        requestOwners: Object.fromEntries(attemptedRequestIds.map((requestId) => [requestId, ownerOperationRequestId])),
+        phaseAttempts: { produce: produceGeneration + 1, audit: auditGeneration + 1 },
+        unacceptedPhaseAttempts: { produce: 0, audit: 0 },
+        structuredRepairModelCallCount,
+        phaseDurationsMs: { produce: durations.produce, audit: durations.audit },
+        validationMs: durations.validation,
+        retriedRequestIds,
+      };
+    };
+
+    // 去身份化等价于已复现的三角色 4 + 5 + 5 次物理调用，结构修复分别为 0 + 1 + 2。
+    const fixtures = [
+      checkpoint("treatment", 1, 1, 0, { produce: 4_000, audit: 5_000, validation: 10 }, []),
+      checkpoint("script", 2, 1, 1, { produce: 6_000, audit: 7_000, validation: 20 }, []),
+      checkpoint("director", 0, 3, 2, { produce: 8_000, audit: 9_000, validation: 30 }, []),
+    ];
+    fixtures[0]!.retriedRequestIds = [fixtures[0]!.attemptedRequestIds[1]!];
+    fixtures[1]!.retriedRequestIds = [fixtures[1]!.attemptedRequestIds[2]!];
+    await Promise.all(fixtures.map((value, index) => writeFile(
+      path.join(directory, `role-${index + 1}.json`),
+      `${JSON.stringify(value, null, 2)}\n`,
+    )));
+
+    // 已受理但执行事实未知的请求必须单列，不能硬记为 0 或 1 次已证实执行。
+    const unknown = checkpoint("unknown", 0, -1, 0, { produce: 1_000, audit: 0, validation: 0 }, []);
+    const unknownRequestId = unknown.attemptedRequestIds[0]!;
+    (unknown as Record<string, unknown>).pendingOperation = {
+      phase: "produce",
+      operation: { requestId: unknownRequestId, taskFact: "accepted_unknown" },
+    };
+    await writeFile(path.join(directory, "unknown.json"), `${JSON.stringify(unknown, null, 2)}\n`);
+    const previousCheckpoint = checkpoint(
+      "previous",
+      0,
+      0,
+      1,
+      { produce: 2_000, audit: 3_000, validation: 40 },
+      [],
+      "creative-planning-operation-previous",
+    );
+    // 正常首次调用不会产生 generation override；汇总仍须从 attempted request 识别 generation=0。
+    previousCheckpoint.operationGenerations = {};
+    previousCheckpoint.retriedRequestIds = [previousCheckpoint.attemptedRequestIds[0]!];
+    await writeFile(path.join(directory, "previous.json"), `${JSON.stringify(previousCheckpoint, null, 2)}\n`);
+
+    const discussionDirectory = path.join(workspaceRoot, "runs", runId, "nodes", "creative-planning", "discussion-executions");
+    await mkdir(discussionDirectory, { recursive: true });
+    const discussionReceipt = (
+      name: string,
+      requestId: string,
+      state: "completed" | "completed_failure" | "accepted_unknown" | "not_accepted",
+      ownerOperationRequestId = operationRequestId,
+      providerWaitMs?: number,
+    ) => writeFile(path.join(discussionDirectory, `${name}.json`), `${JSON.stringify({
+      version: "video-factory/creative-discussion-execution-v1",
+      workflowOperationRequestId: ownerOperationRequestId,
+      commandId: `command-${name}`,
+      requestId,
+      stage: "treatment",
+      state,
+      ...(providerWaitMs === undefined ? {} : { providerWaitMs }),
+    }, null, 2)}\n`);
+    await Promise.all([
+      discussionReceipt("explain", "discussion-explain", "completed", operationRequestId, 1_500),
+      discussionReceipt("revise-failed", "discussion-revise", "completed_failure", operationRequestId, 2_500),
+      discussionReceipt("unknown", "discussion-unknown", "accepted_unknown", operationRequestId, 9_999),
+      discussionReceipt("not-accepted", "discussion-not-accepted", "not_accepted", operationRequestId, 8_888),
+      discussionReceipt("explain-duplicate", "discussion-explain", "completed", operationRequestId, 1_500),
+      discussionReceipt("previous", "discussion-previous", "completed", "creative-planning-operation-previous", 700),
+    ]);
+
+    assert.deepEqual(
+      await summarizeJointPlanningExecution(path.join(workspaceRoot, "runs"), runId, operationRequestId),
+      {
+        modelCallCount: 16,
+        producerModelCallCount: 6,
+        auditModelCallCount: 8,
+        discussionModelCallCount: 2,
+        structuredRepairModelCallCount: 3,
+        retryCount: 2,
+        unknownModelExecutionCount: 2,
+        producerMs: 19_000,
+        auditMs: 21_000,
+        discussionMs: 4_000,
+        loopValidationMs: 60,
+        previousModelCallCount: 3,
+        previousProducerModelCallCount: 1,
+        previousAuditModelCallCount: 1,
+        previousDiscussionModelCallCount: 1,
+        previousStructuredRepairModelCallCount: 1,
+        previousRetryCount: 1,
+        previousUnknownModelExecutionCount: 0,
+        previousProducerMs: 2_000,
+        previousAuditMs: 3_000,
+        previousDiscussionMs: 700,
+        previousLoopValidationMs: 40,
+      },
+    );
+    assert.deepEqual(
+      await summarizeJointPlanningExecution(path.join(workspaceRoot, "runs"), runId, operationRequestId),
+      await summarizeJointPlanningExecution(path.join(workspaceRoot, "runs"), runId, operationRequestId),
+      "reading or polling the same execution evidence must not change any call or timing count",
+    );
+    const noModelOperation = await summarizeJointPlanningExecution(path.join(workspaceRoot, "runs"), runId, "other-operation");
+    assert.equal(noModelOperation?.modelCallCount, 0, "adopt/undo must not claim new model calls");
+    assert.equal(noModelOperation?.previousModelCallCount, 19, "adopt/undo must preserve prior run totals");
+    await writeFile(path.join(directory, "duplicate.json"), JSON.stringify(fixtures[0]));
+    const duplicate = await summarizeJointPlanningExecution(path.join(workspaceRoot, "runs"), runId, operationRequestId);
+    assert.equal(duplicate?.producerMs, 19_000, "the same checkpoint evidence must not double time");
+    assert.equal(duplicate?.auditMs, 21_000);
+    assert.equal(duplicate?.loopValidationMs, 60);
+
+    // 同一个角色 checkpoint 可跨恢复操作包含不同 owner。调用按物理 request 精确归属；
+    // 整个 checkpoint 的聚合耗时无法安全拆分时，两边都不能把整段时间据为己有。
+    await writeFile(path.join(directory, "duplicate.json"), "{}\n");
+    const mixedOwnerCheckpoint = structuredClone(fixtures[0]!);
+    mixedOwnerCheckpoint.requestOwners[mixedOwnerCheckpoint.attemptedRequestIds[0]!] = "creative-planning-operation-previous";
+    await writeFile(path.join(directory, "role-1.json"), `${JSON.stringify(mixedOwnerCheckpoint, null, 2)}\n`);
+    const mixed = await summarizeJointPlanningExecution(path.join(workspaceRoot, "runs"), runId, operationRequestId);
+    assert.equal(mixed?.modelCallCount, 15);
+    assert.equal(mixed?.producerModelCallCount, 5);
+    assert.equal(mixed?.previousModelCallCount, 4);
+    assert.equal(mixed?.previousProducerModelCallCount, 2);
+    assert.equal(mixed?.producerMs, 15_000, "mixed-owner checkpoint duration must not be claimed by the current operation");
+    assert.equal(mixed?.previousProducerMs, 2_000, "mixed-owner checkpoint duration must not be claimed by history either");
   });
 });

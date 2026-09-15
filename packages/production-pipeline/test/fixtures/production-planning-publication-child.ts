@@ -2,7 +2,7 @@ import { appendFileSync } from "node:fs";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { CodexBridgeError, ProductionPipeline, type CreativeTreatment, type CreativeTreatmentAgent, type ProductionBrief, type ProductionPipelineOptions, type ScreenwriterAgent, type VisualAssetProviderCapability, type VisualDirectorAgent, type VisualDirectorAgentInput, type WorkerResponse } from "../../src/index.js";
+import { CodexBridgeError, FallbackVisualDirectorAgent, ProductionPipeline, type CreativeTreatment, type CreativeTreatmentAgent, type ProductionBrief, type ProductionPipelineOptions, type ScreenwriterAgent, type VisualAssetProviderCapability, type VisualDirectorAgent, type VisualDirectorAgentInput, type WorkerResponse } from "../../src/index.js";
 
 // ---------------------------------------------------------------------------
 // B4-R4 真实子进程崩溃夹具：由 production-planning-publication.test.ts 以独立进程运行。
@@ -47,7 +47,7 @@ async function recordSideEffect(file: string, entry: string): Promise<void> {
 
 function legalTreatment(title: string): CreativeTreatment {
   return {
-    version: "video-factory/creative-treatment-v1",
+    version: "video-factory/creative-treatment-v2",
     viewerPromise: "看完能避开三个决策坑",
     hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
     progression: [
@@ -166,14 +166,14 @@ function childAgents(args: ChildArgs): Pick<ProductionPipelineOptions, "treatmen
       };
     },
   } as ScreenwriterAgent;
-  const directorAgent: VisualDirectorAgent = {
+  const createDirectorAgent = (modelId: string): VisualDirectorAgent => ({
     id: "api-visual-director-v1",
-    modelId: "director-model-one",
+    modelId,
     plan: async () => {
       throw new Error("publication fixtures must run through planDetailed");
     },
     planDetailed: async (input: VisualDirectorAgentInput) => {
-      await recordSideEffect(args.sideEffectFile, "director");
+      await recordSideEffect(args.sideEffectFile, `director:${modelId}`);
       return {
         output: {
           version: "video-factory/director-plan-v1",
@@ -200,10 +200,16 @@ function childAgents(args: ChildArgs): Pick<ProductionPipelineOptions, "treatmen
             estimatedCostCny: 0,
           })),
         },
-        trace: { taskKind: "director-plan" as const, promptVersion: "v1", prompt: "fixture", providerId: "openai", modelId: "director-model-one" },
+        trace: { taskKind: "director-plan" as const, promptVersion: "v1", prompt: "fixture", providerId: "openai", modelId },
       };
     },
-  } as VisualDirectorAgent;
+  });
+  const directorAgent = new FallbackVisualDirectorAgent({
+    candidates: ["director-model-one", "director-model-two"].map((modelId) => ({
+      providerId: "openai",
+      agent: createDirectorAgent(modelId),
+    })),
+  });
   return { treatmentAgents, screenwriterAgent, directorAgent };
 }
 
@@ -235,28 +241,42 @@ function childBrief(): ProductionBrief {
     director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
     economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
     voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
-  } as unknown as ProductionBrief;
-}
-
-function scriptStageTemplateSnapshot() {
-  return {
-    templateId: "publication-seed-template",
-    templateVersion: 1,
-    resolvedAt: "2026-09-13T00:00:00.000Z",
-    resolvedBlueprint: {
+    seriesContext: {
+      seriesId: "series-publication",
+      episodeId: "episode-publication-1",
+      seriesName: "恢复测试系列",
+      seriesRevision: 1,
+      episodeNumber: 1,
+      seasonNumber: 1,
+      canonBaseRevision: 0,
+      premise: "每集提供一个可执行清单。",
+      audience: "内容创作者",
       platform: "douyin",
-      durationSeconds: 24,
-      automationLevel: "assisted",
-      storyStructure: [{ id: "explain", label: "解释", purpose: "逐步解释", required: true }],
-      shotSlots: [{ id: "shot-explain", beatId: "explain", purpose: "展示动作", durationSeconds: 24, allowedCapabilities: ["asset.prepare"], manualReplacement: true }],
-      visualSystem: { composition: "一个镜头一个概念", colorIntent: "自然底色", subtitleDensity: "medium", pacing: "measured" },
-      soundSystem: { voiceIntent: "自然", pace: "medium", musicIntent: "轻盈" },
-      qualityRules: [{ id: "facts", label: "事实准确", dimension: "factual", required: true, threshold: 80 }],
-      capabilityRequirements: [{ capability: "script.draft", required: true }],
+      track: "publication-recovery",
+      arc: "从问题走向稳定方法",
+      episode: {
+        updatedAt: "2026-09-13T00:00:00.000Z",
+        pillar: "恢复边界",
+        title: "第一集",
+        viewerPromise: "看完能避开三个决策坑",
+        hook: "先看最常见的失败",
+        payoff: "得到低风险决策清单",
+        planning: {
+          source: "agent",
+          role: "系列总编",
+          auditRole: "独立质量审计 Agent",
+          auditStatus: "passed",
+          auditIterations: 1,
+          providerId: "openai",
+          modelId: "fixture-model",
+          promptVersion: "fixture-v1",
+        },
+      },
+      bible: { rules: ["保持事实边界"], recurringElements: [], forbiddenChanges: [] },
+      canon: { revision: 0, facts: [] },
+      continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: ["下一集复核效果"], canonChecks: [] },
     },
-    sourceLayers: [{ layer: "template", sourceId: "publication-seed-template@1", appliedFields: ["storyStructure"] }],
-    fieldSources: { storyStructure: "template" },
-  } as const;
+  } as unknown as ProductionBrief;
 }
 
 function buildPipeline(args: ChildArgs): ProductionPipeline {
@@ -378,21 +398,21 @@ async function main(): Promise<void> {
     // 播种 checkpoint 落盘后、执行记录写盘前被杀。
     if (run.status !== "needs_human") throw new Error(`seed baseline run failed: ${run.status}`);
     const current = await pipeline.loadPersisted(args.runId);
-    const planning = current.nodeRuns.find((node) => node.nodeId === "creative-planning");
-    const version = planning?.inputState?.versions.find((candidate) => candidate.id === planning?.inputState?.effectiveVersionId);
-    if (!version || !planning?.inputState) throw new Error("planning input version missing for the seed crash window");
-    await pipeline.applyNodeInputOverride(args.runId, {
-      nodeId: "creative-planning",
-      actor: "producer",
-      expectedRunRevision: current.revision,
-      expectedVersionId: planning.inputState.effectiveVersionId,
-      // 模板快照进入编剧/导演合同但不影响构思阶段：构思（含 fallback 后的候选 B
-      // provenance）会被播种进新 thread，其模型来源必须随 checkpoint 存活。
-      input: { brief: {
-        ...((version.value as { brief: Record<string, unknown> }).brief),
-        templateSnapshot: scriptStageTemplateSnapshot(),
-      } },
-    });
+    // 切换导演模型会开启新的规划输入版本：构思与编剧输入未变，应从旧 thread 播种；
+    // 导演模型身份已变，必须在 afterSeed 崩溃恢复后由新模型重新执行。
+    await pipeline.applyNodeExecutionConfiguration(
+      args.runId,
+      "creative-planning",
+      {
+        ...current.initialInput,
+        models: {
+          ...current.initialInput.models,
+          "api-visual-director-v1": "director-model-two",
+        },
+      },
+      "producer",
+      current.revision,
+    );
     await pipeline.resumeStale(args.runId);
     return;
   }

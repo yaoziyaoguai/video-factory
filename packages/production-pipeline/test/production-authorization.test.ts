@@ -503,6 +503,37 @@ describe("foldProductionSpendLedger", () => {
     assert.deepEqual(Object.keys(folded.attemptsByAsset), []);
   });
 
+  it("releases unsubmitted prepared reservations after their operation reached a terminal receipt", () => {
+    const folded = foldProductionSpendLedger([
+      {
+        operationId: "operation-rejected",
+        itemRequestId: "paid-item-rejected-before-submit",
+        quoteItemId: "scene-1",
+        state: "prepared",
+        estimatedCostCny: 5.5,
+      },
+      {
+        operationId: "operation-failed",
+        itemRequestId: "paid-item-failed-before-submit",
+        quoteItemId: "scene-1",
+        state: "prepared",
+        estimatedCostCny: 5.5,
+      },
+      {
+        operationId: "operation-active",
+        itemRequestId: "paid-item-active-reservation",
+        quoteItemId: "scene-2",
+        state: "prepared",
+        estimatedCostCny: 3,
+      },
+    ], {
+      terminalOperationIds: new Set(["operation-rejected", "operation-failed"]),
+    });
+
+    assert.equal(folded.reservedCents, 300);
+    assert.deepEqual(Object.keys(folded.attemptsByAsset), []);
+  });
+
 });
 
 describe("assessProductionSpendPlan whole-plan amounts", () => {
@@ -620,7 +651,7 @@ describe("production authorization host acceptance", () => {
           id: "codex-creative-treatment-v1",
           modelId: "treatment-model-a",
           treat: async () => ({
-            version: "video-factory/creative-treatment-v1",
+            version: "video-factory/creative-treatment-v2",
             viewerPromise: "看完能记住三个要点",
             hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
             progression: [
@@ -747,7 +778,7 @@ describe("scope-covered spend approval auto-continues", () => {
         id: "codex-creative-treatment-v1",
         modelId: "treatment-model-a",
         treat: async () => ({
-          version: "video-factory/creative-treatment-v1",
+          version: "video-factory/creative-treatment-v2",
           viewerPromise: "看完能记住三个要点",
           hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
           progression: [
@@ -904,6 +935,65 @@ describe("scope-covered spend approval auto-continues", () => {
     const persisted = await pipeline.show(run.id);
     assert.notEqual(persisted.status, "awaiting_spend_approval");
   });
+
+  for (const evidence of ["terminal-unsubmitted", "active-unsubmitted", "terminal-submitted"] as const) {
+    it(`evaluates persisted operation reservations through host continuation: ${evidence}`, async () => {
+      const workspaceRoot = await mkdtemp(join(tmpdir(), "vf-scope-reservations-"));
+      const { pipeline, run } = await meteredAwaitingRun(workspaceRoot);
+      const plan = run.nodeRuns.find((node) => node.nodeId === "assets")!.spendPlan!;
+      const scope = await scopeForCurrentQuote(pipeline, run.id, {
+        approvedAmountCents: Math.round(plan.maxCostCny * 100),
+      });
+      const operationId = `${run.id}-previous-assets-operation`;
+      const directory = join(workspaceRoot, "runs", run.id, "nodes", "assets", ".generation-operations");
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "previous.json"), JSON.stringify({
+        version: "video-factory/paid-operation-v2",
+        operationId,
+        completed: false,
+        items: [{
+          itemRequestId: "previous-scene-1",
+          quoteItemId: "scene-1",
+          inputFingerprint: "a".repeat(64),
+          sourceFingerprint: "b".repeat(64),
+          scenePosition: 1,
+          executorProviderId: "ai-shot-router-v1",
+          providerId: "seedance-video-v1",
+          modelId: "seedance-v1",
+          state: evidence === "terminal-submitted" ? "submitted" : "prepared",
+          estimatedCostCny: 2.4,
+          parameters: {},
+          ...(evidence === "terminal-submitted" ? { taskId: "accepted-provider-task" } : {}),
+        }],
+      }));
+      // 重启前落盘的终态回执是依据；仅存在账本或已受理任务都不能释放占用。
+      if (evidence !== "active-unsubmitted") {
+        const runPath = join(workspaceRoot, "runs", run.id, "run.json");
+        await writeFile(runPath, JSON.stringify({
+          ...run,
+          executionReceipts: [...(run.executionReceipts ?? []), {
+            nodeId: "assets", role: "素材导演", capability: "asset.prepare",
+            providerId: "ai-shot-router-v1", transport: "local_process", billing: "metered",
+            status: "rejected", requestId: operationId,
+            startedAt: run.startedAt, finishedAt: run.startedAt,
+          }],
+        }));
+      }
+      const continued = await pipeline.acceptProductionAuthorization(run.id, scope);
+      if (evidence === "terminal-unsubmitted") {
+        assert.notEqual(continued.status, "awaiting_spend_approval");
+        assert.equal(continued.spendAuthorizations?.length, 1);
+        assert.equal(continued.spendAuthorizations[0]!.derivedFromScopeId, scope.id);
+        assert.equal(continued.spendAuthorizations[0]!.itemCreateBudgets?.["scene-1"], 2);
+        const replayed = await pipeline.resumeCoveredSpendApproval(run.id);
+        assert.equal(replayed.spendAuthorizations?.length, 1, "a replay must not issue a second credential");
+      } else {
+        assert.equal(continued.status, "awaiting_spend_approval");
+        assert.equal(continued.spendAuthorizations?.length ?? 0, 0);
+        assert.equal(continued.nodeRuns.find((node) => node.nodeId === "assets")?.spendAssessment?.additionalCents, 240);
+      }
+    });
+  }
 
   it("keeps waiting when the scope still carries the legacy per-item intent hash", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "vf-c1-legacy-intent-"));

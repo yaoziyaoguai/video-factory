@@ -50,6 +50,7 @@ export function fileRoleAgentLoopCheckpoint(
   let activeFilePath = filePath;
   return {
     key,
+    ...(options.recoveryOwner ? { executionOwnerId: options.recoveryOwner.workflowOperationRequestId } : {}),
     ...(options.restartExhausted !== undefined ? { restartExhausted: options.restartExhausted } : {}),
     ...(options.resumeCompletedFailure !== undefined ? { resumeCompletedFailure: options.resumeCompletedFailure } : {}),
     ...(options.resumeCompletedFailureRequestId !== undefined
@@ -114,7 +115,9 @@ async function ownedPendingCheckpoints(
     const candidatePath = path.join(directory, name);
     try {
       const value = JSON.parse(await readFile(candidatePath, "utf8")) as unknown;
-      if (!isRecord(value) || value.version !== "video-factory/agent-loop-checkpoint-v8") continue;
+      if (!isRecord(value)
+        || (value.version !== "video-factory/agent-loop-checkpoint-v8"
+          && value.version !== "video-factory/agent-loop-checkpoint-v9")) continue;
       const recoveryOwner = value.recoveryOwner;
       if (!isRecord(recoveryOwner)
         || recoveryOwner.runId !== owner.runId

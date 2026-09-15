@@ -18,6 +18,12 @@ export interface ProductionCapabilities {
     sourceRangeReuse: boolean;
     staticEditorialCard: boolean;
   };
+  audio: {
+    narration: boolean;
+    pauseControl: "punctuation" | "text_hint" | "unsupported";
+    musicTrack: boolean;
+    soundEffectsTrack: boolean;
+  };
 }
 
 export function summarizeProductionCapabilities(
@@ -26,6 +32,7 @@ export function summarizeProductionCapabilities(
       supportsReferenceImage?: boolean;
     }
   >,
+  voiceProviderId?: string,
 ): ProductionCapabilities {
   return {
     assetProviders: providers.map((provider) => ({
@@ -42,6 +49,14 @@ export function summarizeProductionCapabilities(
     editing: {
       sourceRangeReuse: true,
       staticEditorialCard: providers.some((provider) => provider.deliveryTypes.includes("editorial_card")),
+    },
+    audio: {
+      narration: Boolean(voiceProviderId),
+      pauseControl: voiceProviderId === "macos-say-v1"
+        ? "punctuation"
+        : voiceProviderId === "minimax-tts-v1" ? "text_hint" : "unsupported",
+      musicTrack: false,
+      soundEffectsTrack: false,
     },
   };
 }

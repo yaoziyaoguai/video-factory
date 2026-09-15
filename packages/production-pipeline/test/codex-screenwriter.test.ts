@@ -155,6 +155,20 @@ describe("CodexScreenwriterAgent", () => {
     };
     input.brief.visualProof = visualProof;
     input.brief.visualPlan = visualPlan;
+    input.brief.voiceTiming = { rate: 187, pauseScale: 1.15 };
+    const articleSources = [{
+      sourceId: "source-report",
+      originalUrl: "https://news.example/report",
+      finalUrl: "https://news.example/report",
+      pageTitle: "公开报告",
+      fetchedAt: "2026-09-14T08:00:00.000Z",
+      contentSha256: "a".repeat(64),
+      extractorVersion: "readability-v1",
+      readStatus: "read" as const,
+      paragraphs: [{ id: "p1", text: "正文中的可核对事实。" }],
+      truncated: false,
+    }];
+    input.brief.articleSources = articleSources;
     const first = validDraft();
     const repaired = validDraft();
     repaired.scenes[0]!.narration = "别眨眼，先看结果。";
@@ -165,6 +179,7 @@ describe("CodexScreenwriterAgent", () => {
       summary: "开头不够具体。",
       issues: [{ severity: "blocking", criterion: "前两秒钩子", evidence: "首句只有说明", repairInstruction: "先展示具体结果" }],
       repairInstructions: ["重写第一镜旁白并保持事实边界"],
+      hostReadinessReview: null,
     };
     const passAudit = {
       version: "video-factory/role-audit-v1",
@@ -173,6 +188,7 @@ describe("CodexScreenwriterAgent", () => {
       summary: "合同可执行。",
       issues: [],
       repairInstructions: [],
+      hostReadinessReview: null,
     };
     const producerClient = new SequencedCodexClient(
       [first, repaired],
@@ -229,6 +245,8 @@ describe("CodexScreenwriterAgent", () => {
     const firstProducerPayload = producerClient.calls[0]!.payload as { brief: ScreenwriterAgentInput["brief"] };
     assert.equal(firstProducerPayload.brief.visualProof, visualProof);
     assert.deepEqual(firstProducerPayload.brief.visualPlan, visualPlan);
+    assert.deepEqual(firstProducerPayload.brief.voiceTiming, { rate: 187, pauseScale: 1.15 });
+    assert.deepEqual(firstProducerPayload.brief.articleSources, articleSources);
     const auditContext = firstAuditPayload.context as Record<string, unknown>;
     assert.equal("brief" in auditContext, false);
     assert.deepEqual(auditContext.roleScope, {
@@ -242,9 +260,12 @@ describe("CodexScreenwriterAgent", () => {
       nicheSlug: "life-avoidance",
       visualProof,
       visualPlan,
+      articleSources,
+      voiceTiming: { rate: 187, pauseScale: 1.15 },
       productionCapabilities: {
         assetProviders: [],
         editing: { sourceRangeReuse: true, staticEditorialCard: false },
+        audio: { narration: false, pauseControl: "unsupported", musicTrack: false, soundEffectsTrack: false },
       },
     });
     assert.deepEqual((auditClient.calls[1]!.payload as Record<string, unknown>).previousAudit, repairAudit);
@@ -504,6 +525,7 @@ describe("CodexScreenwriterAgent", () => {
         productionCapabilities: {
           assetProviders: [],
           editing: { sourceRangeReuse: true, staticEditorialCard: false },
+          audio: { narration: false, pauseControl: "unsupported", musicTrack: false, soundEffectsTrack: false },
         },
       },
     });

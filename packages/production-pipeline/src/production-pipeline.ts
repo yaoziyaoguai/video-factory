@@ -3,7 +3,6 @@ import * as nodeFs from "node:fs";
 import { copyFile, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { parseProductionBlueprint } from "@video-factory/template-core";
 import { check as checkFileLock, lock as lockFile } from "proper-lockfile";
 import {
   NodeVersionConflictError,
@@ -14,6 +13,7 @@ import {
   type ApprovalPolicy,
   type Capability,
   type HumanDecisionDraft,
+  type HumanReviewDisposition,
   type NodeInputOverrideDraft,
   type NodeRun,
   type NodeOverrideDraft,
@@ -25,6 +25,7 @@ import {
   type NodeExecutionResult,
   type Provider,
   type SpendAuthorizationDraft,
+  type SpendExcludedItem,
   type SpendQuote,
   type WorkflowContext,
   type WorkflowDefinition,
@@ -41,7 +42,7 @@ import {
   type AssetSemanticRanking,
 } from "./asset-semantic-ranker.js";
 import { REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION, fallbackShotGrammar, validateShotGrammar, type ReferenceGrammarAgent, type ReferenceGrammarExecution, type ShotGrammar } from "./reference-grammar.js";
-import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, type AgentLoopTrace, type CodexTaskExecution, type CodexTaskKind, type CodexTaskTrace, type ModelCandidateAttempt } from "./codex-chat.js";
+import { CodexBridgeError, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, type AgentLoopTrace, type CodexTaskExecution, type CodexTaskKind, type CodexTaskTrace, type ModelCandidateAttempt, type RoleAudit } from "./codex-chat.js";
 import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
 import { RoleAgentLoopError } from "./role-agent-loop.js";
 import {
@@ -51,6 +52,7 @@ import {
   inspectPaidAssetLedger,
   paidAssetLedgerLeaves,
   paidAssetSourceFingerprint,
+  requiredGeneratedAssetDurationSecondsByRoot,
   reworkAffectedScenePositions,
   type PaidAssetLedgerItemSummary,
   type VideoGenerationRuntimeProfile,
@@ -65,7 +67,7 @@ import {
   type ExecutableProductionPlan,
 } from "./executable-production-plan.js";
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
-import { IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport, type IndependentVisualReviewExecution, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewReport, type VisualReviewScope } from "./codex-visual-review.js";
+import { assertCurrentVisualReviewContract, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport, visualReviewBlocksContinuation, type IndependentVisualReviewExecution, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewFinding, type VisualReviewReport, type VisualReviewScope } from "./codex-visual-review.js";
 import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, parseVoiceDoesNotFitConflict, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
 import { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
 import type { WorkerResponse } from "./python-worker-client.js";
@@ -77,8 +79,9 @@ import {
   type VisualDirectorPlan,
 } from "./visual-director.js";
 import type { CreativeTreatmentAgent, CreativeTreatmentAgentInput } from "./codex-creative-treatment.js";
-import { CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION } from "./codex-creative-treatment.js";
+import { CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION, creativeTreatmentSeriesContext } from "./codex-creative-treatment.js";
 import { CREATIVE_TREATMENT_PROVIDER_ID } from "./creative-treatment.js";
+import { contentSha256, parseCreativeReviewResume, type CreativeDiscussionResult, type CreativeReviewConfirmResume, type CreativeReviewResume, type CreativeReviewState, type CreativeStage } from "./creative-review.js";
 import { PRODUCTION_AUTHORIZATION_VERSION, assessProductionSpendPlan, canonicalProductionAssetIntentDigest, canonicalQualityContractDigest, foldProductionSpendLedger, parseProductionAuthorizationScope, resolveProductionSpendDecision, scopeCoversSpendPlan, type ProductionAuthorizationScope, type ProductionSpendPlanAssessment } from "./production-authorization.js";
 import {
   AUTOMATIC_CANDIDATE_SEMANTIC_MINIMUM,
@@ -88,6 +91,7 @@ import {
   rankingSemanticIntent,
   runCreativePlanning,
   type CreativePlanningGraph,
+  type CreativePlanningContext,
   type CreativePlanningInput,
   type CreativePlanningPorts,
   type PlanningGraphState,
@@ -168,6 +172,23 @@ export interface ProductionSceneRevisionDraft {
   note: string;
 }
 
+/**
+ * 只改一镜的旁白与字幕文字。
+ *
+ * 画面已经付过钱，而字幕/旁白是脚本里的一行字：改字不该让任何一帧画面重新生成。
+ * 所以这条路径只让下游的配音、渲染与复审重跑，画面与画面预检按原样保留。
+ * 代价是脚本是配音与字幕共同的来源——改了字配音必须重合成，这条路径不是零成本。
+ */
+export interface ProductionNarrationRevisionDraft {
+  expectedRunRevision: number;
+  /** 要改的那一镜在成片里的镜位（1 起）。 */
+  scenePosition: number;
+  /** 这一镜新的旁白/字幕文字。 */
+  narration: string;
+  actor: string;
+  note: string;
+}
+
 export interface ProductionVoiceTimingRevisionDraft {
   expectedRunRevision: number;
   interventionId: string;
@@ -191,6 +212,40 @@ export interface ProductionPaidNodeReconciliationDraft {
   actor?: string;
   note?: string;
   actualCostCny?: number;
+}
+
+export interface ProductionCreativeReviewConfirmationDraft {
+  commandId: string;
+  actor: string;
+  expectedRunRevision: number;
+  expectedReviewRevision: number;
+  stage: CreativeStage;
+  baseDraftSha256: string;
+}
+
+export type ProductionCreativeReviewCommandDraft = {
+  commandId: string;
+  actor: string;
+  expectedRunRevision: number;
+  expectedReviewRevision: number;
+  stage: CreativeStage;
+  baseDraftSha256: string;
+} & (
+  | { action: "confirm" }
+  | { action: "discuss"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
+  | { action: "adopt_proposal"; proposalId: string }
+  | { action: "undo_draft" }
+  | { action: "return_to_stage"; targetStage: CreativeStage; acknowledgeImpact: true }
+);
+
+interface PersistedTransitionReplay {
+  replay: WorkflowRun<ProductionBrief>;
+}
+
+function isPersistedTransitionReplay(
+  value: WorkflowRun<ProductionBrief> | PersistedTransitionReplay,
+): value is PersistedTransitionReplay {
+  return "replay" in value;
 }
 
 export interface ProductionPaidOperationItemSummary {
@@ -517,6 +572,7 @@ export function productionWorkflowVersion(
   brief: Pick<ProductionBrief, "providers" | "workflowFeatures" | "director" | "durationRange">,
 ): string {
   // joint-v1 共同创作规划是独立拓扑：恢复与审计必须能把它与旧规划链区分开。
+  if (brief.workflowFeatures?.creativeReview === "user-confirmed-v1") return "1.7.0";
   if (usesJointCreativePlanning(brief)) return "1.6.1";
   const minorVersion = brief.providers.visualReview
     ? brief.workflowFeatures?.referenceGrammar
@@ -754,6 +810,14 @@ export class ProductionPipeline {
     let recovered = 0;
     for (const run of interrupted) {
       if (await this.hasFreshExecutionLease(run.id, leaseStaleAfterMs)) continue;
+      const creativeRecoveryRequest = run.nodeRuns.some((node) => (
+        node.nodeId === "creative-planning" && (node.status === "running" || node.status === "pending")
+      ))
+        ? [...(run.creativeReviewOperations ?? [])].reverse().find((operation) => (
+            (operation.status === "running" || operation.status === "unknown")
+            && isObjectRecord(operation.request)
+          ))?.request
+        : undefined;
       let recoveryLease: ExecutionLeaseHandle | undefined;
       try {
         recoveryLease = await this.acquireExecutionLease(run.id);
@@ -805,6 +869,18 @@ export class ProductionPipeline {
         await this.releaseExecutionLease(recoveryLease);
       }
       recovered += 1;
+      if (creativeRecoveryRequest) {
+        try {
+          const dispatched = await this.dispatchCreativeReviewCommand(
+            run.id,
+            creativeRecoveryRequest as unknown as ProductionCreativeReviewCommandDraft,
+          );
+          void dispatched.completion.catch(() => undefined);
+        } catch {
+          // 已把原 run 如实标为 interrupted/failed；恢复证据损坏或当前配置不再可用时保持
+          // 可诊断失败，不构造新 commandId，也不阻断其它历史 run 的启动恢复。
+        }
+      }
     }
     return recovered;
   }
@@ -944,17 +1020,18 @@ export class ProductionPipeline {
       if (!activeInterventionNode || activeInterventionNode.status !== "needs_human") {
         throw new Error(`Intervention '${decision.interventionId}' is not active for run '${runId}'.`);
       }
+      if (activeInterventionNode.intervention?.kind === "creative_review") {
+        throw new Error(
+          "Creative review cannot use the generic decision endpoint; use the stage confirmation command.",
+        );
+      }
       const currentReviewEvidenceId = finalReviewEvidenceId(activeInterventionNode);
       if (decision.reviewEvidenceId !== currentReviewEvidenceId) {
         throw new Error("Human decision is not bound to the current review evidence.");
       }
       if (decision.action === "approve" && activeInterventionNode?.nodeId === "final-review") {
         assertPersistedFinalApprovalReady(previous, brief, activeInterventionNode);
-        if (brief.providers.visualReview
-          && visualReviewRecommendation(currentVisualReviewDelivery(previous)) !== "approve"
-          && !decision.note?.trim()) {
-          throw new Error("Approving against the visual-review recommendation requires a reason.");
-        }
+        assertFinalReviewDispositions(currentVisualReviewDelivery(previous), decision.reviewDispositions);
       }
       const registry = this.createRegistry(brief);
       const runner = new WorkflowRunner({
@@ -965,6 +1042,218 @@ export class ProductionPipeline {
         shouldPause: () => this.consumePauseRequest(runId),
       });
       return runner.resume(this.createWorkflow(brief, decision), withExecutableBrief(previous, brief), decision);
+    }, listener);
+  }
+
+  async confirmCreativeReview(
+    runId: string,
+    draft: ProductionCreativeReviewConfirmationDraft,
+  ): Promise<WorkflowRun<ProductionBrief>> {
+    const dispatched = await this.dispatchCreativeReviewCommand(runId, { ...draft, action: "confirm" });
+    return dispatched.completion;
+  }
+
+  async dispatchCreativeReviewConfirmation(
+    runId: string,
+    draft: ProductionCreativeReviewConfirmationDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    return this.dispatchCreativeReviewCommand(runId, { ...draft, action: "confirm" }, listener);
+  }
+
+  async dispatchCreativeReviewCommand(
+    runId: string,
+    draft: ProductionCreativeReviewCommandDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
+      const normalizedActor = draft.actor.trim();
+      const normalizedCommandId = draft.commandId.trim();
+      const requestDigest = contentSha256({ ...draft, commandId: normalizedCommandId, actor: normalizedActor });
+      const existingOperation = previous.creativeReviewOperations?.find(
+        (operation) => operation.commandId === normalizedCommandId,
+      );
+      if (existingOperation) {
+        if (existingOperation.requestDigest !== requestDigest) {
+          throw new Error(`Creative review command '${normalizedCommandId}' was already used with different content.`);
+        }
+        if ((existingOperation.status !== "running" && existingOperation.status !== "unknown")
+          || existingOperation.resume === undefined) {
+          return { replay: previous };
+        }
+        const resume = parseCreativeReviewResume(existingOperation.resume);
+        if (resume.commandId !== existingOperation.commandId
+          || resume.stage !== existingOperation.stage
+          || resume.action !== existingOperation.action) {
+          throw new Error(`Creative review command '${normalizedCommandId}' has inconsistent recovery evidence.`);
+        }
+        const brief = parsePersistedBrief(previous.initialInput);
+        const node = previous.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning");
+        if (!node) throw new Error("Creative review recovery cannot find the creative-planning node.");
+      const recoveryIntervention: NonNullable<NodeRun["intervention"]> = {
+          id: node.intervention?.id ?? `creative-review-recovery-${normalizedCommandId}`,
+          nodeId: "creative-planning",
+          kind: "creative_review" as const,
+          reason: "正在恢复同一条创作讨论或确认命令。",
+          requiredAction: "approve" as const,
+        options: ["approve", "request_changes"],
+          createdAt: existingOperation.acceptedAt,
+          continuation: {
+            stage: resume.stage,
+            reviewRevision: resume.expectedReviewRevision,
+            draftSha256: resume.baseDraftSha256,
+          },
+        };
+        const recoveryBase: WorkflowRun<ProductionBrief> = {
+          ...previous,
+          status: "needs_human",
+          nodeRuns: previous.nodeRuns.map((candidate) => candidate.nodeId === "creative-planning"
+            ? {
+                ...candidate,
+                status: "needs_human",
+                intervention: recoveryIntervention,
+                ...(candidate.output === undefined ? {} : { output: candidate.output }),
+              }
+            : candidate),
+          interventions: [
+            ...previous.interventions.filter((intervention) => intervention.nodeId !== "creative-planning"),
+            recoveryIntervention,
+          ],
+        };
+        delete recoveryBase.finishedAt;
+        const runner = new WorkflowRunner({
+          providers: this.createRegistry(brief),
+          clock: this.clock,
+          idFactory: this.idFactory,
+          checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+          shouldPause: () => this.consumePauseRequest(runId),
+        });
+        const result = await runner.continueWaitingNode(
+          this.createWorkflow(brief, undefined, { creativeReviewResume: resume }),
+          withExecutableBrief(recoveryBase, brief),
+          "creative-planning",
+          {
+            commandId: normalizedCommandId,
+            action: resume.action,
+            requestDigest,
+            status: "running",
+            acceptedAt: existingOperation.acceptedAt,
+          },
+        );
+        result.creativeReviewOperations = (result.creativeReviewOperations ?? []).map((operation) => (
+          operation.commandId === normalizedCommandId
+            ? {
+                ...operation,
+                status: result.status === "failed" ? "failed" as const : "completed" as const,
+                finishedAt: this.clock(),
+              }
+            : operation
+        ));
+        await checkpoint(result);
+        return result;
+      }
+      if (!Number.isSafeInteger(draft.expectedRunRevision) || draft.expectedRunRevision !== previous.revision) {
+        throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
+      }
+      if (!normalizedCommandId || !normalizedActor) {
+        throw new Error("Creative review confirmation requires commandId and actor.");
+      }
+      const node = previous.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning");
+      const continuation = node?.intervention?.continuation;
+      if (previous.status !== "needs_human"
+        || node?.status !== "needs_human"
+        || node.intervention?.kind !== "creative_review"
+        || !continuation) {
+        throw new Error(`Run '${runId}' is not waiting for a creative review confirmation.`);
+      }
+      if (continuation.stage !== draft.stage
+        || continuation.reviewRevision !== draft.expectedReviewRevision
+        || continuation.draftSha256 !== draft.baseDraftSha256) {
+        throw new Error("Creative review confirmation is stale or belongs to another stage draft.");
+      }
+      const brief = parsePersistedBrief(previous.initialInput);
+      if (brief.workflowFeatures?.creativeReview !== "user-confirmed-v1") {
+        throw new Error("This run does not use the user-confirmed creative review workflow.");
+      }
+      const common = {
+        stage: draft.stage,
+        commandId: normalizedCommandId,
+        actor: normalizedActor,
+        baseDraftSha256: draft.baseDraftSha256,
+        expectedReviewRevision: draft.expectedReviewRevision,
+      };
+      const resume: CreativeReviewResume = draft.action === "confirm"
+        ? {
+          action: "confirm",
+          ...common,
+          checkIdentity: contentSha256({
+            runId,
+            stage: draft.stage,
+            draftSha256: draft.baseDraftSha256,
+            reviewRevision: draft.expectedReviewRevision,
+            contract: "creative-review-confirm-v1",
+          }),
+          confirmedAt: this.clock(),
+        }
+        : draft.action === "discuss"
+          ? {
+            action: "discuss",
+            ...common,
+            message: draft.message,
+            ...(draft.selection ? { selection: draft.selection } : {}),
+          }
+          : draft.action === "adopt_proposal"
+            ? { action: "adopt_proposal", ...common, proposalId: draft.proposalId }
+            : draft.action === "undo_draft"
+              ? { action: "undo_draft", ...common }
+              : { action: "return_to_stage", ...common, targetStage: draft.targetStage, acknowledgeImpact: true };
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.consumePauseRequest(runId),
+      });
+      const acceptedAt = this.clock();
+      const acceptedRun: WorkflowRun<ProductionBrief> = {
+        ...previous,
+        creativeReviewOperations: [
+          ...(previous.creativeReviewOperations ?? []),
+          {
+            commandId: normalizedCommandId,
+            requestDigest,
+            action: draft.action,
+            stage: draft.stage,
+            status: "running",
+            acceptedAt,
+            request: structuredClone({ ...draft, commandId: normalizedCommandId, actor: normalizedActor }),
+            resume: structuredClone(resume),
+          },
+        ],
+      };
+      const result = await runner.continueWaitingNode(
+        this.createWorkflow(brief, undefined, { creativeReviewResume: resume }),
+        withExecutableBrief(acceptedRun, brief),
+        "creative-planning",
+        {
+          commandId: normalizedCommandId,
+          action: draft.action,
+          requestDigest,
+          status: "running",
+          acceptedAt,
+        },
+      );
+      result.creativeReviewOperations = (result.creativeReviewOperations ?? []).map((operation) => (
+        operation.commandId === normalizedCommandId
+          ? {
+            ...operation,
+            status: result.status === "failed" ? "failed" as const : "completed" as const,
+            finishedAt: this.clock(),
+          }
+          : operation
+      ));
+      await checkpoint(result);
+      return result;
     }, listener);
   }
 
@@ -1193,12 +1482,29 @@ export class ProductionPipeline {
         throw new StaleRunRevisionError(runId, override.expectedRunRevision, previous.revision);
       }
       await verifyNodeInputOverrideBoundary(this.store.runDirectory(runId), override);
+      await assertNoUnresolvedPlanningTask(this.store.runDirectory(runId), previous);
+      // joint-v1 的 planning input 中包含当前有效 brief。人工调整声音节奏、用户要求或
+      // 系列事实时，不能只把新值留在节点 override、而让 initialInput 继续成为另一份旧配置。
+      // 这里先用同一个正式 merge/parse 边界得到唯一有效 brief，再同时交给工作流定义和
+      // 持久化 run；阶段 identity 会据此只复用真正未受影响的上游。
+      const effectiveBrief = override.nodeId === "creative-planning"
+        && isObjectRecord(override.input)
+        && isObjectRecord(override.input.brief)
+        ? mergeCurrentBrief(override.input.brief, brief)
+        : brief;
+      const effectivePrevious = effectiveBrief === brief
+        ? previous
+        : { ...previous, initialInput: effectiveBrief };
       const runner = new WorkflowRunner({
-        providers: this.createRegistry(brief),
+        providers: this.createRegistry(effectiveBrief),
         clock: this.clock,
         idFactory: this.idFactory,
       });
-      return runner.applyNodeInputOverride(this.createWorkflow(brief), withExecutableBrief(previous, brief), override);
+      return runner.applyNodeInputOverride(
+        this.createWorkflow(effectiveBrief),
+        withExecutableBrief(effectivePrevious, effectiveBrief),
+        override,
+      );
     });
   }
 
@@ -1257,8 +1563,10 @@ export class ProductionPipeline {
       if (!Number.isInteger(reviewDurationMs) || reviewDurationMs <= 0) {
         throw new Error("Current visual-review duration is invalid.");
       }
+      const storedReportValue = JSON.parse(await readFile(reviewArtifact.uri!, "utf8"));
+      assertCurrentVisualReviewContract(storedReportValue);
       const storedReport = validateAggregatedVisualReviewReport(
-        JSON.parse(await readFile(reviewArtifact.uri!, "utf8")),
+        storedReportValue,
         reviewDurationMs,
       );
       if (draft.findingIndex >= storedReport.findings.length) {
@@ -1401,6 +1709,180 @@ export class ProductionPipeline {
     return this.dispatchResumeStale(runId, listener);
   }
 
+  async requestNarrationRevision(
+    runId: string,
+    draft: ProductionNarrationRevisionDraft,
+  ): Promise<WorkflowRun<ProductionBrief>> {
+    const dispatched = await this.dispatchNarrationRevision(runId, draft);
+    return dispatched.completion;
+  }
+
+  async dispatchNarrationRevision(
+    runId: string,
+    draft: ProductionNarrationRevisionDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    await this.runPersistedTransition(runId, async (previous) => {
+      if (previous.revision !== draft.expectedRunRevision) {
+        throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
+      }
+      if (previous.status !== "needs_human") {
+        throw new Error(`Run '${runId}' is not waiting for human review.`);
+      }
+      if (!draft.actor.trim() || !draft.note.trim()) {
+        throw new Error("Narration revision actor and note are required.");
+      }
+      if (!Number.isInteger(draft.scenePosition) || draft.scenePosition < 1) {
+        throw new Error("Narration revision scene position is invalid.");
+      }
+      const narration = draft.narration.trim();
+      if (!narration) {
+        throw new Error("Narration revision text must not be empty.");
+      }
+      if (narration.length > 600 || /[\u0000-\u001f\u007f]/.test(narration)) {
+        throw new Error("Narration revision text is not a valid single line of narration.");
+      }
+
+      const brief = parsePersistedBrief(previous.initialInput);
+      const definition = this.createWorkflow(brief);
+      const finalIntervention = previous.nodeRuns.find((node) => node.nodeId === "final-review")?.intervention;
+      if (!finalIntervention) throw new Error("Narration revision requires an active final-review intervention.");
+
+      // 脚本是配音与字幕共同的来源。改字要落在脚本上，否则下游仍会读到旧文字；
+      // 但画面（assets）与画面预检不受这一行字影响，因此从失效清单里排除。
+      const joint = usesJointCreativePlanning(brief);
+      const planningNodeId = joint ? "creative-planning" : "script";
+      const planningNodeRun = previous.nodeRuns.find((node) => node.nodeId === planningNodeId);
+      const planningVersion = planningNodeRun?.outputState?.versions.find(
+        (version) => version.id === planningNodeRun.outputState?.effectiveVersionId,
+      );
+      if (!planningVersion) throw new Error(`Narration revision requires the current '${planningNodeId}' output version.`);
+      const planningOutput = requireOutputRecord(
+        planningVersion.output ?? planningNodeRun?.output,
+        `${planningNodeId} output`,
+      );
+      const scriptPath = requiredOutputString(planningOutput, "scriptPath");
+      // 认产物看的是"它是不是这个节点写在 scriptPath 上的那一份"，而不是它的 kind：
+      // AI 编剧产出的 kind 是 script，模板与 Python worker 拓扑下是 script_draft，两种都要能改。
+      const scriptArtifact = previous.artifacts.find((artifact) => (
+        planningVersion.artifactIds.includes(artifact.id)
+        && artifact.uri === scriptPath
+        && artifact.producer?.nodeId === planningNodeId
+      ));
+      if (!scriptArtifact) throw new Error("Narration revision requires the current script artifact.");
+      await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), scriptArtifact);
+      const script = requireOutputRecord(
+        JSON.parse(await readFile(scriptPath, "utf8")),
+        "script",
+      );
+      if (!Array.isArray(script.scenes)) throw new Error("Narration revision requires a script with scenes.");
+      const sceneIndex = script.scenes.findIndex((scene) => (
+        typeof scene === "object" && scene !== null && !Array.isArray(scene)
+        && Number((scene as Record<string, unknown>).position) === draft.scenePosition
+      ));
+      if (sceneIndex < 0) {
+        throw new Error(`Narration revision scene ${draft.scenePosition} is no longer in the current script.`);
+      }
+      const revisedScript = {
+        ...script,
+        // 第 1 镜的旁白同时是脚本的 hook 字段；只改旁白不改它，脚本会自相矛盾。
+        ...(sceneIndex === 0 ? { hook: narration } : {}),
+        scenes: script.scenes.map((scene, index) => (
+          index === sceneIndex ? { ...requireOutputRecord(scene, `script scene ${index + 1}`), narration } : scene
+        )),
+      };
+      const revisionDirectory = path.join(
+        this.runsRoot,
+        runId,
+        "nodes",
+        planningNodeId,
+        "revisions",
+        `revision-${previous.revision + 1}`,
+      );
+      await mkdir(revisionDirectory, { recursive: true });
+      const revisedScriptPath = path.join(revisionDirectory, "script.json");
+      const revisedScriptContent = `${JSON.stringify(revisedScript, null, 2)}\n`;
+      await writeTextAtomically(revisedScriptPath, revisedScriptContent);
+      const revisionRequest = {
+        version: "video-factory/narration-revision-v1",
+        scenePosition: draft.scenePosition,
+        actor: draft.actor.trim(),
+        note: draft.note.trim(),
+      };
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+      });
+      // 失效范围是"读这一行字的下游"，收窄到配音以后：画面没变，重新买画面是纯浪费。
+      // 计划里允许改文字的前提是别的一切照旧，所以镜位之外的字段一个都没动。
+      const invasiveNodeIds = [
+        "voice",
+        "render",
+        "technical-review",
+        "visual-review",
+        "final-review",
+        "publish-package",
+      // 按图里有没有这个节点来过滤，而不是按"跑没跑过"：还没轮到的下游（如 publish-package）
+      // 同样是这一行字的下游，漏掉它会让失效集不闭合。
+      ].filter((nodeId) => productionNodeIds(brief).includes(nodeId));
+      const revised = runner.applyNodeRevision(definition, withExecutableBrief(previous, brief), {
+        nodeId: planningNodeId,
+        actor: draft.actor.trim(),
+        output: {
+          ...planningOutput,
+          scriptPath: revisedScriptPath,
+        },
+        artifacts: [
+          fileArtifact(
+            // 沿用被改那一份的 kind：下游按本拓扑的既有约定认脚本，这里不该另发明一种。
+            scriptArtifact.kind,
+            revisedScriptPath,
+            revisedScriptContent,
+            "application/json",
+            scriptArtifact.schemaVersion ?? "video-factory/script-draft-v1",
+            planningNodeId,
+            // 父级是被改的那一版原稿：如实记录"这行字从哪一版改来"，不冒充任何 Provider 产物。
+            [scriptArtifact.id],
+            "human-narration-revision-v1",
+            "Creator-edited narration and caption text; no Provider call was made for the visuals.",
+            scriptArtifact.producer?.attempt ?? 1,
+          ),
+          jsonArtifact(
+            "narration_revision_request",
+            revisionRequest,
+            "video-factory/narration-revision-v1",
+            planningNodeId,
+            [scriptArtifact.id],
+          ),
+        ],
+        // 被替换掉的原稿是否留在版本里，两种拓扑的答案不同：
+        // legacy 的脚本节点只有脚本本身，直接换掉即可；
+        // joint 的可执行方案按 artifact id 引用脚本，而方案的引用集受"必须同属规划节点当前
+        // 接受版本"的约束（verifyExecutablePlanReferenceClosure）。方案是那次规划 commit 的
+        // 证据快照——commit 文件里记的引用 id 与磁盘字节都要求方案继续指向原稿，方案本身也
+        // 不该被人工改字动到。所以 joint 下原稿必须留在版本里：丢掉它，方案就引用了一份不在
+        // 版本内的脚本，assets/voice 一消费方案就 fail closed（这正是生产里复现的失败）。
+        // 人工改出来的新稿件另立一件，下游按 output.scriptPath 读新文字；方案的时长与镜位
+        // 一个字段都没动，所以既不重编译、也不产生任何 Provider 调用与费用。
+        retainedArtifactIds: planningVersion.artifactIds.filter((artifactId) => (
+          joint || artifactId !== scriptArtifact.id
+        )),
+        invalidateDescendantNodeIds: invasiveNodeIds,
+        expectedVersionId: planningVersion.id,
+        schemaVersion: planningVersion.schemaVersion,
+        decision: {
+          interventionId: finalIntervention.id,
+          action: "request_changes",
+          actor: draft.actor.trim(),
+          note: draft.note.trim(),
+        },
+      });
+      return revised;
+    });
+    return this.dispatchResumeStale(runId, listener);
+  }
+
   async applyNodeExecutionConfiguration(
     runId: string,
     nodeId: string,
@@ -1420,6 +1902,7 @@ export class ProductionPipeline {
         throw new StaleRunRevisionError(runId, expectedRunRevision, previous.revision);
       }
       const nextBrief = parseBrief(nextBriefInput);
+      await assertNoUnresolvedPlanningTask(this.store.runDirectory(runId), previous);
       const runner = new WorkflowRunner({
         providers: this.createRegistry(nextBrief),
         clock: this.clock,
@@ -1675,6 +2158,7 @@ export class ProductionPipeline {
         && operationId
         && draft.nodeId === "assets"
         && isTrustedPreSubmissionAssetRejection(previousNode, items)
+        && items.length > 0
       ) {
         await this.assertExecutionLease(lease);
         await markPaidAssetPreSubmissionRejections(nodeDirectory, operationId);
@@ -1718,7 +2202,10 @@ export class ProductionPipeline {
           throw new PaidOperationManualReconciliationError(draft.nodeId, items);
         }
         if (draft.nodeId === "assets") {
-          if (items.length === 0) throw new PaidOperationManualReconciliationError(draft.nodeId, items);
+          const trustedPreSubmissionRejection = isTrustedPreSubmissionAssetRejection(previousNode, items);
+          if (items.length === 0 && !trustedPreSubmissionRejection) {
+            throw new PaidOperationManualReconciliationError(draft.nodeId, items);
+          }
           const missingTaskItems = items.filter((item) => (
             (item.state === "submitted" || item.state === "unknown") && !item.taskId
           ));
@@ -1744,6 +2231,7 @@ export class ProductionPipeline {
             || item.state === "provider_succeeded"
             || item.state === "unknown"
           )) || items.every((item) => item.state === "materialized");
+          if (trustedPreSubmissionRejection && items.length === 0) resumeOriginalOperation = false;
         } else if (draft.nodeId === "voice") {
           if (!voiceOperation || !canResumePaidVoiceOperation(voiceOperation)) {
             throw new PaidOperationManualReconciliationError(draft.nodeId, []);
@@ -2228,7 +2716,9 @@ export class ProductionPipeline {
           }
           return run;
         }
-        const foldedLedger = foldProductionSpendLedger(ledgerSnapshot ?? []);
+        const foldedLedger = foldProductionSpendLedger(ledgerSnapshot ?? [], {
+          terminalOperationIds: terminalPaidOperationIds(run, plan.nodeId),
+        });
         // 逐素材剩余 create 预算（scope 用户批准的每素材上限 - ledger 已用次数）。
         // 全覆盖评估保证每个新 create 项至少剩 1 次；预算随子凭证下发，由 worker 在
         // create 边界执行——收窄发生在预留层，不改动必须与报价计划逐字段一致的凭证。
@@ -2358,8 +2848,11 @@ export class ProductionPipeline {
           return { ...rest, state: "terminal_failed" as const };
         })
       : ledgerItems;
-    const requiresManualReconciliation = paidAssetOperationNeedsManualReconciliation(effectiveItems);
-    const resumeOriginalOperation = canResumePaidAssetOperation(effectiveItems);
+    const trustedPreSubmissionRejection = isTrustedPreSubmissionAssetRejection(node, ledgerItems);
+    const requiresManualReconciliation = trustedPreSubmissionRejection
+      ? false
+      : paidAssetOperationNeedsManualReconciliation(effectiveItems);
+    const resumeOriginalOperation = effectiveItems.length > 0 && canResumePaidAssetOperation(effectiveItems);
     return {
       nodeId,
       operationId,
@@ -2454,7 +2947,9 @@ export class ProductionPipeline {
     if (values.runId !== runId || values.inputDigest !== inputDigest) return undefined;
 
     const completedStages = new Set(stageIds.filter((stage) => planningStageArtifactPresent(stage, values)));
-    const runningStage = cursor.find((node) => (stageIds as readonly string[]).includes(node));
+    const cursorStage = cursor.map((node) => node.endsWith("_review") ? node.slice(0, -7) : node)
+      .find((node) => (stageIds as readonly string[]).includes(node)) as PlanningStageId | undefined;
+    const runningStage = planningNode.status === "running" ? cursorStage : undefined;
     const structuredIssueByStage = new Map<PlanningStageId, string>();
     for (const issue of Array.isArray(values.issues) ? values.issues : []) {
       if (!isObjectRecord(issue)) continue;
@@ -2483,8 +2978,11 @@ export class ProductionPipeline {
     // ——发布没有成立，必须在正式方案阶段暴露可行动失败，而不是全绿。
     const commitVerificationFailed = publicationVerified
       && Object.values(planningCommitted).every((ids) => !(ids && ids.length > 0));
+    const reviewStage = values.creativeReview?.activeStage;
+    const stoppedReviewStage = reviewStage && values.creativeReview?.stages[reviewStage].currentDraft
+      && values.creativeReview.stages[reviewStage].phase !== "confirmed" ? reviewStage : undefined;
     const failedStage: PlanningStageId | undefined = planningNode.status === "failed"
-      ? stageIds.find((stage) => structuredIssueByStage.has(stage))
+      ? stoppedReviewStage ?? cursorStage ?? stageIds.find((stage) => structuredIssueByStage.has(stage))
         ?? stageIds.find((stage) => !completedStages.has(stage))
         ?? (completedStages.size === stageIds.length ? "compile" : undefined)
       : commitVerificationFailed
@@ -2793,7 +3291,7 @@ export class ProductionPipeline {
     transition: (
       previous: WorkflowRun<ProductionBrief>,
       checkpoint: (run: WorkflowRun<ProductionBrief>) => Promise<void>,
-    ) => Promise<WorkflowRun<ProductionBrief>>,
+    ) => Promise<WorkflowRun<ProductionBrief> | PersistedTransitionReplay>,
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun> {
     const lease = await this.acquireExecutionLease(runId);
@@ -2825,7 +3323,13 @@ export class ProductionPipeline {
       resolveCheckpoint();
     };
     const completion = transition(previous, checkpoint).then(
-      async (run) => {
+      async (result) => {
+        if (isPersistedTransitionReplay(result)) {
+          resolveCheckpoint();
+          await this.releaseExecutionLease(lease);
+          return result.replay;
+        }
+        const run = result;
         if (!persisted) {
           await this.assertExecutionLease(lease);
           await this.store.save(run, previous.revision);
@@ -2912,6 +3416,7 @@ export class ProductionPipeline {
       resumeCompletedTextTaskNodeId?: string;
       resumeCompletedTextTaskRequestId?: string;
       recoverTextTask?: { nodeId: string; workflowOperationRequestId: string };
+      creativeReviewResume?: CreativeReviewResume;
     } = {},
   ): WorkflowDefinition {
     const resumeCompletedTextTaskNodeId = options.resumeCompletedTextTaskNodeId;
@@ -3030,6 +3535,7 @@ export class ProductionPipeline {
           resumeCompletedTextTaskNodeId,
           resumeCompletedTextTaskRequestId,
           options.recoverTextTask,
+          options.creativeReviewResume,
         )]
         : [
             ...(brief.director ? [directorNode(brief, this.options, this.runsRoot, withSourceRunSnapshot)] : []),
@@ -3535,6 +4041,28 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
       const sceneDurations = await readScriptSceneDurations(scriptPath);
       const directorPlan = requireOutputRecord(JSON.parse(await readFile(directorPlanPath, "utf8")), "director plan");
       if (!Array.isArray(directorPlan.shots)) throw new Error("Director plan shots must be an array before quoting assets.");
+      const quoteShots = directorPlan.shots.map((entry, index) => {
+        const shot = requireOutputRecord(entry, `director plan shot ${index + 1}`);
+        const scenePosition = Number(shot.scenePosition);
+        if (!Number.isInteger(scenePosition) || scenePosition < 1) {
+          throw new Error(`Director plan shot ${index + 1} has an invalid scene position.`);
+        }
+        const sourceInSeconds = shot.sourceInSeconds === undefined ? 0 : Number(shot.sourceInSeconds);
+        const reuseFromScenePosition = typeof shot.reuseFromScenePosition === "number"
+          ? shot.reuseFromScenePosition
+          : undefined;
+        return {
+          shot,
+          scenePosition,
+          sourceInSeconds,
+          ...(reuseFromScenePosition !== undefined ? { reuseFromScenePosition } : {}),
+          query: typeof shot.query === "string" ? shot.query : "",
+        };
+      });
+      const requiredDurationByRoot = requiredGeneratedAssetDurationSecondsByRoot(
+        [...sceneDurations].map(([position, duration]) => ({ position, duration })),
+        quoteShots,
+      );
       const carriedScenePositions = new Set(await inspectReworkCarriedAssetScenePositions({
         runsRoot: this.runsRoot,
         input,
@@ -3542,23 +4070,30 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
         currentDirectorPlan: directorPlan,
         modelSelections,
       }));
-      const items = directorPlan.shots.flatMap((entry, index) => {
-        const shot = requireOutputRecord(entry, `director plan shot ${index + 1}`);
+      const excludedNotes = new Map<number, string>();
+      const pricedItems: Array<{ scenePosition: number; item: NonNullable<SpendQuote["items"]>[number] }> = [];
+      const items = quoteShots.flatMap(({ shot, scenePosition, reuseFromScenePosition }) => {
         const directorEstimatedCostCny = Number(shot.estimatedCostCny);
         if (!Number.isFinite(directorEstimatedCostCny) || directorEstimatedCostCny < 0) {
-          throw new Error(`Director plan shot ${index + 1} has an invalid server cost.`);
+          throw new Error(`Director plan shot ${scenePosition} has an invalid server cost.`);
         }
-        const scenePosition = Number(shot.scenePosition);
-        if (!Number.isInteger(scenePosition) || scenePosition < 1) {
-          throw new Error(`Director plan shot ${index + 1} has an invalid scene position.`);
-        }
-        const reuseFromScenePosition = typeof shot.reuseFromScenePosition === "number"
-          ? shot.reuseFromScenePosition
-          : undefined;
-        if (carriedScenePositions.has(scenePosition) || assetReuseSourceScenePosition({
+        // 报价只列付费条目，因此"不花钱的镜头"必须在确认页上单独交代：否则操作员无法
+        // 区分"这镜头免费"和"这镜头被漏算"，只能靠事后追问。
+        const reuseSourceScenePosition = assetReuseSourceScenePosition({
           ...(reuseFromScenePosition !== undefined ? { reuseFromScenePosition } : {}),
           query: typeof shot.query === "string" ? shot.query : "",
-        }) !== undefined || directorEstimatedCostCny === 0) return [];
+        });
+        const excludedNote = carriedScenePositions.has(scenePosition)
+          ? "沿用返修前已生成的画面，不重复购买"
+          : reuseSourceScenePosition !== undefined
+            ? `复用镜头 ${reuseSourceScenePosition} 的画面，不重复购买`
+            : directorEstimatedCostCny === 0
+              ? "免费素材，不需要购买"
+              : undefined;
+        if (excludedNote !== undefined) {
+          excludedNotes.set(scenePosition, excludedNote);
+          return [];
+        }
         const providerId = requiredOutputString(shot, "preferredProviderId");
         const modelId = modelSelections[providerId];
         if (!modelId) throw new Error(`Paid asset provider '${providerId}' has no resolved model for quoting.`);
@@ -3566,7 +4101,8 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
         if (sceneDuration === undefined) {
           throw new Error(`Director plan shot ${scenePosition} has no matching script scene for quoting.`);
         }
-        return [{
+        const requiredDuration = requiredDurationByRoot.get(scenePosition) ?? sceneDuration;
+        const item = {
           id: `scene-${scenePosition}`,
           label: `镜头 ${scenePosition}`,
           providerId,
@@ -3574,10 +4110,12 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
           estimatedCostCny: this.assetEstimatedCostCny(
             providerId,
             modelId,
-            sceneDuration,
+            requiredDuration,
             directorEstimatedCostCny,
           ),
-        }];
+        };
+        pricedItems.push({ scenePosition, item });
+        return [item];
       });
       const reconciledItems = await this.incrementalAssetQuoteItems(
         items,
@@ -3587,14 +4125,20 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
       if (reconciledItems.reconciliationRequired) {
         return { estimatedCostCny: 0, maxCostCny: 0, requiresAuthorization: false };
       }
+      for (const { scenePosition, item } of pricedItems) {
+        if (!reconciledItems.items.some((candidate) => candidate.id === item.id)) {
+          excludedNotes.set(scenePosition, "本 run 已有可用画面，不重复购买");
+        }
+      }
       if (reconciledItems.items.length === 0) {
-        return { estimatedCostCny: 0, maxCostCny: 0, requiresAuthorization: false };
+        return { estimatedCostCny: 0, maxCostCny: 0, requiresAuthorization: false, ...excludedItemsField(excludedNotes) };
       }
       const estimatedCostCny = roundCurrency(reconciledItems.items.reduce((sum, item) => sum + item.estimatedCostCny, 0));
       return {
         estimatedCostCny,
         maxCostCny: roundCurrency(estimatedCostCny * this.maxAttempts),
         items: reconciledItems.items,
+        ...excludedItemsField(excludedNotes),
       };
     }
 
@@ -3602,14 +4146,20 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
     const sceneDurations = await readScriptSceneDurations(scriptPath);
     const script = requireOutputRecord(JSON.parse(await readFile(scriptPath, "utf8")), "script");
     if (!Array.isArray(script.scenes)) throw new Error("Script scenes must be an array before quoting assets.");
+    const excludedNotes = new Map<number, string>();
+    const pricedItems: Array<{ scenePosition: number; item: NonNullable<SpendQuote["items"]>[number] }> = [];
     const items = script.scenes.flatMap((entry, index) => {
       const scene = requireOutputRecord(entry, `script scene ${index + 1}`);
-      if (scene.visual_strategy === "local") return [];
       const scenePosition = Number(scene.position);
+      if (scene.visual_strategy === "local") {
+        if (!Number.isInteger(scenePosition) || scenePosition < 1) throw new Error(`Script scene ${index + 1} has an invalid position.`);
+        excludedNotes.set(scenePosition, "免费素材，不需要购买");
+        return [];
+      }
       if (!Number.isInteger(scenePosition) || scenePosition < 1) throw new Error(`Script scene ${index + 1} has an invalid position.`);
       const sceneDuration = sceneDurations.get(scenePosition);
       if (sceneDuration === undefined) throw new Error(`Script scene ${index + 1} has no valid duration.`);
-      return [{
+      const item = {
         id: `scene-${scenePosition}`,
         label: `镜头 ${scenePosition}`,
         providerId: this.id,
@@ -3620,17 +4170,28 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
           sceneDuration,
           this.estimatedCostCny,
         ),
-      }];
+      };
+      pricedItems.push({ scenePosition, item });
+      return [item];
     });
     const reconciledItems = await this.incrementalAssetQuoteItems(items, [scriptPath], context);
-    if (reconciledItems.reconciliationRequired || reconciledItems.items.length === 0) {
+    if (reconciledItems.reconciliationRequired) {
       return { estimatedCostCny: 0, maxCostCny: 0, requiresAuthorization: false };
+    }
+    for (const { scenePosition, item } of pricedItems) {
+      if (!reconciledItems.items.some((candidate) => candidate.id === item.id)) {
+        excludedNotes.set(scenePosition, "本 run 已有可用画面，不重复购买");
+      }
+    }
+    if (reconciledItems.items.length === 0) {
+      return { estimatedCostCny: 0, maxCostCny: 0, requiresAuthorization: false, ...excludedItemsField(excludedNotes) };
     }
     const estimatedCostCny = roundCurrency(reconciledItems.items.reduce((sum, item) => sum + item.estimatedCostCny, 0));
     return {
       estimatedCostCny,
       maxCostCny: roundCurrency(estimatedCostCny * this.maxAttempts),
       items: reconciledItems.items,
+      ...excludedItemsField(excludedNotes),
     };
   }
 
@@ -3811,6 +4372,11 @@ function videoPricingProfile(
   };
 }
 
+// 回执里的 promptPack 是"这份输出由哪版合同产生"的证据。它必须与 codex-broker 中
+// visual-review 任务定义的 version 一致（apps/codex-broker/src/task-definitions.ts）；
+// 两个 workspace 之间没有依赖，只能靠这处常量对齐，改 broker 合同时必须同步这里。
+const VISUAL_REVIEW_PROMPT_PACK = "video-factory/visual-review-v18";
+
 class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, CodexTaskExecution<unknown>> {
   readonly capability: Capability = "storyboard.plan";
   readonly label = "Codex 视觉导演";
@@ -3892,7 +4458,7 @@ class VisualReviewProvider implements Provider<VisualReviewAgentInput, VisualRev
   get billing(): ProductionProviderRuntimeMetadata["billing"] { return this.metadata?.billing ?? "subscription"; }
   get approvalPolicy(): ApprovalPolicy { return this.metadata?.approvalPolicy ?? "none"; }
   get configurationSource(): ExecutionConfigurationSource { return "system_default"; }
-  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: "video-factory/visual-review-v14", agentLoopMaxIterations: 3, independentAudit: true }; }
+  get parameters(): Record<string, ExecutionParameterValue> { return { sampleMode: "runtime_verified", promptPack: VISUAL_REVIEW_PROMPT_PACK, agentLoopMaxIterations: 3, independentAudit: true }; }
   get estimatedCostCny(): number { return this.metadata?.estimatedCostCny ?? 0; }
   get maxCostCny(): number { return roundCurrency((this.metadata?.estimatedCostCny ?? 0) * this.maxAttempts); }
   get maxAttempts(): number { return Math.max(3, this.metadata?.maxAttempts ?? 3); }
@@ -4456,7 +5022,7 @@ function jointPlanningPackagingEntry(context: WorkflowContext): Array<{ nodeId: 
 // joint-v1 规划输入身份：brief 的 durable 领域字段（剔除运行期 taskContractDigests）加上
 // 已接受的参考语法内容。身份变化进入新 thread，不得命中旧图结果。
 function jointPlanningInputDigest(brief: ProductionBrief, referenceGrammar: ShotGrammar | undefined): string {
-  return createHash("sha256").update(JSON.stringify({
+  return createHash("sha256").update(stablePlanningDigestJson({
     brief,
     ...(referenceGrammar ? { referenceGrammar } : {}),
   })).digest("hex");
@@ -4479,6 +5045,8 @@ function treatmentStageInputIdentity(
   referenceGrammar: ShotGrammar | undefined,
 ): unknown {
   const lockedViewerPromise = acceptedViewerPromise(brief);
+  const seriesContext = creativeTreatmentSeriesContext(brief.seriesContext);
+  const reworkInstruction = brief.rework?.nodeInstructions.script.trim();
   return {
     brief: {
       title: brief.title,
@@ -4487,13 +5055,18 @@ function treatmentStageInputIdentity(
       nicheSlug: brief.nicheSlug,
       platform: brief.platform,
       durationSeconds: brief.durationSeconds,
+      ...(brief.budgetIntentionCny !== undefined ? { budgetIntentionCny: brief.budgetIntentionCny } : {}),
       ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
+      ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
       ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
+      ...(reworkInstruction ? { reworkInstruction } : {}),
       ...(lockedViewerPromise ? { lockedViewerPromise } : {}),
+      ...(seriesContext ? { seriesContext } : {}),
       productionCapabilities: productionCapabilitiesFor(brief, options),
     },
+    suppliedSources: treatmentSuppliedSources(brief),
     // 参考语法是构思的实际输入（风格/结构参考）：内容变化必须重做构思阶段。
     ...(referenceGrammar ? { referenceGrammar } : {}),
     providerId: bindings.find((binding) => binding.agent.modelId === brief.models?.[CREATIVE_TREATMENT_PROVIDER_ID])?.providerId
@@ -4501,6 +5074,24 @@ function treatmentStageInputIdentity(
     selectedModelId: brief.models?.[CREATIVE_TREATMENT_PROVIDER_ID] ?? bindings[0]?.agent.modelId,
     contractVersion: CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION,
   };
+}
+
+// 构思角色只把已经读到正文的来源视为事实输入。执行、阶段身份和 checkpoint 共用
+// 同一投影，避免来源更新后继续复用旧稿，也避免 title_only/blocked 被当成正文证据。
+function treatmentSuppliedSources(
+  brief: Pick<ProductionBrief, "articleSources">,
+): CreativeTreatmentAgentInput["suppliedSources"] {
+  return (brief.articleSources ?? [])
+    .filter((source) => source.readStatus === "read" || source.readStatus === "partial")
+    .map((source) => ({
+      sourceId: source.sourceId,
+      label: source.pageTitle || source.finalUrl,
+      note: [
+        `来源：${source.finalUrl}`,
+        `读取状态：${source.readStatus}${source.truncated ? "（摘录已截断）" : ""}`,
+        ...source.paragraphs.map((paragraph) => `${paragraph.id}：${paragraph.text}`),
+      ].join("\n"),
+    }));
 }
 
 // 已接受的观众承诺：系列上下文承载宿主锁定的本集承诺。没有系列上下文时不构造承诺，
@@ -4563,7 +5154,10 @@ function productionCapabilitiesFor(
   brief: ProductionBrief,
   options: ProductionPipelineOptions,
 ): ProductionCapabilities {
-  return summarizeProductionCapabilities(brief.director ? directorAssetProviderInputs(brief, options) : []);
+  return summarizeProductionCapabilities(
+    brief.director ? directorAssetProviderInputs(brief, options) : [],
+    brief.providers.voice,
+  );
 }
 
 // 导演阶段的实际输入投影：导演 brief 的 brief 侧字段、参考语法、素材路由完整投影、
@@ -4584,13 +5178,17 @@ function directorStageInputIdentity(
       audience: brief.audience,
       platform: brief.platform,
       durationSeconds: brief.durationSeconds,
+      ...(brief.budgetIntentionCny !== undefined ? { budgetIntentionCny: brief.budgetIntentionCny } : {}),
       ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
       ...(brief.director ? { requestedProfileId: brief.director.profileId } : {}),
-      ...(brief.templateSnapshot ? { templateSnapshot: brief.templateSnapshot } : {}),
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
+      ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
       ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
       ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
+      ...(brief.articleSources?.length ? { articleSources: brief.articleSources } : {}),
+      voiceTiming: voiceTimingFor(brief),
+      productionCapabilities: productionCapabilitiesFor(brief, options),
     },
     referenceGrammar: referenceGrammar ?? null,
     assetProviders: directorAssetProviderInputs(brief, options),
@@ -4885,6 +5483,7 @@ async function seedJointPlanningThread(options: {
   const carriedStageInputIdentities: Partial<Record<PlanningStageId, string>> = {};
   let asNode: string | undefined;
   let scriptCarried = false;
+  let directorCarried = false;
   const carriedProviderSource = prior.providerTraces ?? {};
   if (priorValues.treatmentArtifact && prior.stageInputs.treatment === options.stageInputs.treatment) {
     values.treatmentArtifact = priorValues.treatmentArtifact;
@@ -4908,10 +5507,88 @@ async function seedJointPlanningThread(options: {
         if (carriedProviderSource.director) carriedProviderTraces.director = carriedProviderSource.director;
         carriedStageInputIdentities.director = prior.stageInputs.director;
         asNode = "director";
+        directorCarried = true;
       }
     }
   }
   if (!asNode) return undefined;
+  const sameRun = (options.priorRunId ?? options.runId) === options.runId;
+  const priorReview = priorValues.creativeReview;
+  const carriedStages: CreativeStage[] = ["treatment", ...(scriptCarried ? ["script" as const] : []), ...(directorCarried ? ["director" as const] : [])];
+  const unconfirmedStage = sameRun && options.planningInput.creativeReview && priorReview
+    ? carriedStages.find((stage) => !confirmedCreativeReviewStage(priorReview, stage,
+      stage === "treatment" ? priorValues.treatmentArtifact : stage === "script" ? priorValues.scriptArtifact : priorValues.directorPlan))
+    : undefined;
+  if (unconfirmedStage && priorReview) {
+    const state = priorReview.stages[unconfirmedStage];
+    const artifact = unconfirmedStage === "treatment" ? priorValues.treatmentArtifact
+      : unconfirmedStage === "script" ? priorValues.scriptArtifact : priorValues.directorPlan;
+    // 同 run 的工作稿不需要冒充已确认才能保存；但必须仍与未改变的阶段输入和产物精确绑定。
+    if (!artifact || !state.currentDraft || state.currentDocument === null
+      || state.currentDraft.artifactId !== artifact.artifactId
+      || state.currentDraft.sha256 !== contentSha256(artifact.output)
+      || state.currentDraft.sha256 !== contentSha256(state.currentDocument)
+      || state.phase === "confirmed") return undefined;
+    const keepIndex = carriedStages.indexOf(unconfirmedStage);
+    for (const stage of carriedStages.slice(keepIndex + 1)) {
+      delete values[stage === "script" ? "scriptArtifact" : "directorPlan"];
+      delete (values.artifactIds as Record<string, unknown>)[stage];
+      delete carriedTraces[stage];
+      delete carriedProviderTraces[stage];
+      delete carriedStageInputIdentities[stage];
+    }
+    scriptCarried = unconfirmedStage !== "treatment" && scriptCarried;
+    directorCarried = unconfirmedStage === "director" && directorCarried;
+    values.creativeReview = carriedCreativeReviewState(priorReview, unconfirmedStage);
+    asNode = `${unconfirmedStage}_review`;
+  } else if (options.planningInput.creativeReview) {
+    const priorReview = priorValues.creativeReview;
+    // 跨 run 只能继承已经由用户确认、且仍精确绑定当前携带产物的上游阶段。单有产物文件
+    // 不等于用户已经确认；确认链无法证明时宁可不播种，从首个不确定阶段重新生成和确认。
+    if (!confirmedCreativeReviewStage(priorReview, "treatment", priorValues.treatmentArtifact)) {
+      return undefined;
+    }
+    let lastConfirmedStage: CreativeStage = "treatment";
+    if (scriptCarried) {
+      if (!confirmedCreativeReviewStage(priorReview, "script", priorValues.scriptArtifact)) {
+        delete values.scriptArtifact;
+        values.artifactIds = { treatment: [priorValues.treatmentArtifact!.artifactId] };
+        delete carriedTraces.script;
+        delete carriedProviderTraces.script;
+        delete carriedStageInputIdentities.script;
+        scriptCarried = false;
+        directorCarried = false;
+        asNode = "treatment_review";
+      } else {
+        lastConfirmedStage = "script";
+      }
+    }
+    if (!scriptCarried) {
+      delete values.directorPlan;
+      delete carriedTraces.director;
+      delete carriedProviderTraces.director;
+      delete carriedStageInputIdentities.director;
+    } else if (directorCarried && !options.libraryRoute) {
+      if (confirmedCreativeReviewStage(priorReview, "director", priorValues.directorPlan)) {
+        lastConfirmedStage = "director";
+        asNode = "director_review";
+      } else {
+        delete values.directorPlan;
+        const artifactIds = values.artifactIds as Record<string, unknown>;
+        delete artifactIds.director;
+        delete carriedTraces.director;
+        delete carriedProviderTraces.director;
+        delete carriedStageInputIdentities.director;
+        directorCarried = false;
+        asNode = "script_review";
+      }
+    } else if (asNode === "script") {
+      asNode = "script_review";
+    } else if (asNode === "treatment") {
+      asNode = "treatment_review";
+    }
+    values.creativeReview = carriedCreativeReviewState(priorReview!, lastConfirmedStage);
+  }
   // ranker 身份必须显式匹配才携带排序证据：前驱记录缺失 rank 身份（旧格式/身份未知）与
   // 身份不一致同等对待——只携带候选，游标停在 director 之后由图路由真实重排。这与同
   // digest 恢复守卫对"身份未知"的定义一致：不默认兼容。
@@ -4964,6 +5641,54 @@ async function seedJointPlanningThread(options: {
     providerTraces: carriedProviderTraces,
     ...(carriedCandidateInventoryPath !== undefined ? { candidateInventoryPath: carriedCandidateInventoryPath } : {}),
   };
+}
+
+function confirmedCreativeReviewStage(
+  review: CreativeReviewState | undefined,
+  stage: CreativeStage,
+  artifact: { artifactId: string; output: unknown } | null | undefined,
+): boolean {
+  if (!review || !artifact) return false;
+  const state = review.stages[stage];
+  const draft = state.currentDraft;
+  const confirmation = state.confirmation;
+  const check = state.checkResult;
+  const artifactSha256 = contentSha256(artifact.output);
+  return state.phase === "confirmed"
+    && draft !== null
+    && draft.artifactId === artifact.artifactId
+    && draft.sha256 === artifactSha256
+    && confirmation !== null
+    && confirmation.draftSha256 === draft.sha256
+    && confirmation.stageInputDigest === draft.stageInputDigest
+    && check !== null
+    && check.verdict === "pass"
+    && check.draftSha256 === draft.sha256
+    && check.checkIdentity === confirmation.checkIdentity;
+}
+
+function carriedCreativeReviewState(
+  prior: CreativeReviewState,
+  lastConfirmedStage: CreativeStage,
+): CreativeReviewState {
+  const review = structuredClone(prior);
+  const order: CreativeStage[] = ["treatment", "script", "director"];
+  const lastIndex = order.indexOf(lastConfirmedStage);
+  for (let index = lastIndex + 1; index < order.length; index += 1) {
+    const stage = order[index]!;
+    const state = review.stages[stage];
+    // 旧 run 的下游稿只作为历史留存，不能在新 run 中继续冒充当前稿或已确认状态。
+    if (state.currentDraft) state.previousDraft = state.currentDraft;
+    if (state.currentDocument !== null) state.previousDocument = state.currentDocument;
+    state.currentDraft = null;
+    state.currentDocument = null;
+    state.confirmation = null;
+    state.checkResult = null;
+    state.proposals = [];
+    state.phase = "drafting";
+  }
+  review.activeStage = lastConfirmedStage;
+  return review;
 }
 
 // 构思生效模型：用户选择（brief.models 的构思能力键）优先，且必须命中真实候选；
@@ -5312,6 +6037,19 @@ type ProductionScopeQuoteAssessment =
     assessment?: ProductionSpendPlanAssessment;
   };
 
+function terminalPaidOperationIds(
+  run: WorkflowRun<ProductionBrief>,
+  nodeId: string,
+): ReadonlySet<string> {
+  return new Set((run.executionReceipts ?? []).flatMap((receipt) => (
+    receipt.nodeId === nodeId
+      && (receipt.status === "failed" || receipt.status === "rejected")
+      && receipt.requestId
+      ? [receipt.requestId]
+      : []
+  )));
+}
+
 async function assessProductionScopePendingQuote(options: {
   scope: ProductionAuthorizationScope;
   run: WorkflowRun<ProductionBrief>;
@@ -5351,7 +6089,10 @@ async function assessProductionScopePendingQuote(options: {
   if (canonicalQualityContractDigest(qualityContractProjection(effectiveBrief)) !== options.scope.qualityContractDigest) {
     return { covered: false, kind: "quality_contract" };
   }
-  const spendState = foldProductionSpendLedger(options.paidItems as Parameters<typeof foldProductionSpendLedger>[0]);
+  const spendState = foldProductionSpendLedger(
+    options.paidItems as Parameters<typeof foldProductionSpendLedger>[0],
+    { terminalOperationIds: terminalPaidOperationIds(options.run, options.spendPlan.nodeId) },
+  );
   const attemptsByAsset = spendState.attemptsByAsset;
   const quoteItems = options.spendPlan.items ?? [];
   if (quoteItems.length === 0) return { covered: false, kind: "empty_quote" };
@@ -5451,6 +6192,47 @@ function createInspectionPlanningGraph(
   return createCreativePlanningGraph({ ports, checkpointer: store.saver });
 }
 
+function planningReviewCheckpointIdentity(context: CreativePlanningContext): Record<string, unknown> {
+  const execution = context.creativeReviewExecution;
+  if (!execution) return { mode: "legacy" };
+  const candidate = execution.mode === "check"
+    ? execution.stage === "treatment"
+      ? context.treatment?.output
+      : execution.stage === "script"
+        ? context.script?.output
+        : context.integratedPlan?.output ?? context.directorPlan?.output
+    : undefined;
+  return {
+    mode: execution.mode,
+    ...(execution.mode === "check" ? { stage: execution.stage, candidateSha256: contentSha256(candidate) } : {}),
+  };
+}
+
+function planningReviewCheckResult(
+  context: CreativePlanningContext,
+  execution: CodexTaskExecution<unknown>,
+): { reviewCheck?: { audit: RoleAudit; checkIdentity: string } } {
+  if (context.creativeReviewExecution?.mode !== "check") return {};
+  const audit = execution.agentLoop?.iterations.at(-1)?.audit;
+  const agentLoop = execution.agentLoop;
+  if (!audit || audit.verdict !== "pass" || !agentLoop) {
+    throw new Error(`Creative review '${context.creativeReviewExecution.stage}' check completed without a passing audit.`);
+  }
+  return {
+    reviewCheck: {
+      audit: structuredClone(audit),
+      checkIdentity: contentSha256({
+        runId: context.runId,
+        inputDigest: context.inputDigest,
+        stage: context.creativeReviewExecution.stage,
+        candidateSha256: contentSha256(execution.output),
+        auditModelId: agentLoop.iterations.at(-1)?.auditTrace?.modelId ?? "unknown",
+        contractVersion: agentLoop.contractVersion,
+      }),
+    },
+  };
+}
+
 // joint-v1 创作规划节点：旧四段规划链（构思/稿件/导演/编译，含图库候选与排序）收敛为一个
 // 顶层节点，内部完全复用 B3 固定拓扑图与 SQLite checkpoint。角色调用沿用旧节点的真实
 // agent、provider 注册表与合同校验；任一角色失败让本节点失败，绝不回退旧规划链。
@@ -5462,6 +6244,7 @@ function creativePlanningNode(
   resumeCompletedTextTaskNodeId?: string,
   resumeCompletedTextTaskRequestId?: string,
   recoverTextTask?: { nodeId: string; workflowOperationRequestId: string },
+  creativeReviewResume?: CreativeReviewResume,
 ): NodeDefinition {
   const treatmentBindings = options.treatmentAgents ?? [];
   const libraryRoute = brief.workflowFeatures?.assetSemanticRank === true;
@@ -5693,8 +6476,10 @@ function creativePlanningNode(
       try {
         // 端口适配：图内角色调用沿用旧节点的真实 agent、provider 注册表与合同校验。
         const ports: CreativePlanningPorts = {
-          treatment: async () => {
+          treatment: async (planningContext) => {
             const lockedViewerPromise = acceptedViewerPromise(currentBrief);
+            const seriesContext = creativeTreatmentSeriesContext(currentBrief.seriesContext);
+            const reworkInstruction = currentBrief.rework?.nodeInstructions.script.trim();
             const treatmentBrief: CreativeTreatmentAgentInput["brief"] = {
               title: currentBrief.title,
               angle: currentBrief.angle,
@@ -5702,18 +6487,27 @@ function creativePlanningNode(
               nicheSlug: currentBrief.nicheSlug,
               platform: currentBrief.platform,
               durationSeconds: currentBrief.durationSeconds,
+              ...(currentBrief.budgetIntentionCny !== undefined ? { budgetIntentionCny: currentBrief.budgetIntentionCny } : {}),
               durationRange,
               ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
               ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
+              ...(currentBrief.visualIntent ? { visualIntent: currentBrief.visualIntent } : {}),
+              ...(reworkInstruction ? { reworkInstruction } : {}),
               ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
               // 用户/系列已接受的承诺进入构思的真实输入：宿主锁定它，模型输出被覆盖对齐。
               ...(lockedViewerPromise ? { lockedViewerPromise } : {}),
+              ...(seriesContext ? { seriesContext } : {}),
               productionCapabilities: productionCapabilitiesFor(currentBrief, options),
             };
             const treatmentInput: CreativeTreatmentAgentInput = {
               brief: treatmentBrief,
-              suppliedSources: [],
+              suppliedSources: treatmentSuppliedSources(currentBrief),
               planningMode: true,
+              ...(planningContext.creativeReviewExecution?.mode === "draft"
+                ? { creativeReviewExecution: { mode: "draft" as const } }
+                : planningContext.creativeReviewExecution?.mode === "check" && planningContext.treatment
+                  ? { creativeReviewExecution: { mode: "check" as const, candidate: planningContext.treatment.output } }
+                  : {}),
               // 参考语法是风格/结构参考（不冒充事实证据），与剧本/导演共用同一已接受语法。
               ...(referenceGrammar ? { referenceGrammar } : {}),
               // 与 script/director/rank 同一边界：构思角色经 role-agent-loop 落 v7 checkpoint，
@@ -5723,7 +6517,15 @@ function creativePlanningNode(
                 runsRoot,
                 context.runId,
                 "creative-planning",
-                { stage: "treatment", brief: treatmentBrief, ...(referenceGrammar ? { referenceGrammar } : {}) },
+                {
+                  stage: "treatment",
+                  brief: treatmentBrief,
+                  suppliedSources: treatmentSuppliedSources(currentBrief),
+                  ...(referenceGrammar ? { referenceGrammar } : {}),
+                  ...(planningContext.creativeReviewExecution
+                    ? { creativeReviewExecution: planningReviewCheckpointIdentity(planningContext) }
+                    : {}),
+                },
                 CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION,
                 undefined,
                 context.operationRequestId,
@@ -5735,7 +6537,15 @@ function creativePlanningNode(
                 runsRoot,
                 context.runId,
                 "creative-planning",
-                { stage: "treatment", brief: treatmentBrief, ...(referenceGrammar ? { referenceGrammar } : {}) },
+                {
+                  stage: "treatment",
+                  brief: treatmentBrief,
+                  suppliedSources: treatmentSuppliedSources(currentBrief),
+                  ...(referenceGrammar ? { referenceGrammar } : {}),
+                  ...(planningContext.creativeReviewExecution
+                    ? { creativeReviewExecution: planningReviewCheckpointIdentity(planningContext) }
+                    : {}),
+                },
                 CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION,
                 modelId,
                 context.operationRequestId,
@@ -5753,7 +6563,11 @@ function creativePlanningNode(
               providerTraces.treatment = treatmentExecution.trace.providerId;
               await recordExecutionTraces();
             }
-            return { artifactId: planningArtifactId("creative-treatment", treatmentExecution.output), output: treatmentExecution.output };
+            return {
+              artifactId: planningArtifactId("creative-treatment", treatmentExecution.output),
+              output: treatmentExecution.output,
+              ...planningReviewCheckResult(planningContext, treatmentExecution),
+            };
           },
           screenwriter: async (planningContext) => {
             const provider = context.resolveProvider<ScreenwriterAgentInput, CodexTaskExecution<unknown>>({
@@ -5764,19 +6578,43 @@ function creativePlanningNode(
               ...screenwriterBrief(currentBrief, options),
               ...(planningContext.treatment ? { creativeTreatment: planningContext.treatment.output } : {}),
               ...(planningContext.issues.length ? { planningIssues: planningContext.issues } : {}),
+              ...(currentBrief.articleSources?.length ? { articleSources: currentBrief.articleSources } : {}),
               productionCapabilities: productionCapabilitiesFor(currentBrief, options),
+            };
+            const selectedScriptModelId = currentBrief.models?.[currentBrief.providers.script];
+            const scriptCheckpointInput = {
+              stage: "script",
+              brief: requestBrief,
+              treatmentArtifactId: planningContext.treatment?.artifactId,
             };
             const execution = await provider.run({
               brief: requestBrief,
               planningMode: true,
-              ...(currentBrief.models?.[currentBrief.providers.script] ? { selectedModelId: currentBrief.models[currentBrief.providers.script] } : {}),
+              ...(planningContext.creativeReviewExecution?.mode === "draft"
+                ? { creativeReviewExecution: { mode: "draft" as const } }
+                : planningContext.creativeReviewExecution?.mode === "check" && planningContext.script
+                  ? { creativeReviewExecution: { mode: "check" as const, candidate: planningContext.script.output } }
+                  : {}),
+              ...(selectedScriptModelId ? { selectedModelId: selectedScriptModelId } : {}),
               agentLoopCheckpoint: nodeAgentLoopCheckpoint(
                 runsRoot,
                 context.runId,
                 "creative-planning",
-                { stage: "script", brief: requestBrief, treatmentArtifactId: planningContext.treatment?.artifactId },
+                { ...scriptCheckpointInput, creativeReviewExecution: planningReviewCheckpointIdentity(planningContext) },
                 SCREENWRITER_AGENT_CONTRACT_VERSION,
                 undefined,
+                context.operationRequestId,
+                resumeCompletedTextTaskNodeId,
+                resumeCompletedTextTaskRequestId,
+                recoverTextTask?.nodeId === "creative-planning" ? recoverTextTask.workflowOperationRequestId : undefined,
+              ),
+              agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
+                runsRoot,
+                context.runId,
+                "creative-planning",
+                { ...scriptCheckpointInput, creativeReviewExecution: planningReviewCheckpointIdentity(planningContext) },
+                SCREENWRITER_AGENT_CONTRACT_VERSION,
+                modelId,
                 context.operationRequestId,
                 resumeCompletedTextTaskNodeId,
                 resumeCompletedTextTaskRequestId,
@@ -5793,7 +6631,11 @@ function creativePlanningNode(
               ...(requestBrief.durationRange ? { durationRange: requestBrief.durationRange } : {}),
               requireCanonFacts: Boolean(requestBrief.seriesContext),
             });
-            return { artifactId: planningArtifactId("script-draft", draft), output: draft };
+            return {
+              artifactId: planningArtifactId("script-draft", draft),
+              output: draft,
+              ...planningReviewCheckResult(planningContext, execution),
+            };
           },
           director: async (planningContext) => {
             const script = planningContext.script;
@@ -5817,6 +6659,14 @@ function creativePlanningNode(
               ...(feedback.note ? { note: feedback.note } : {}),
             }));
             const directorEconomics = { allowMeteredProviders: currentBrief.economics.allowMeteredProviders };
+            const scopedPlanningScenePositions = [...new Set(planningContext.issues.flatMap((issue) => (
+              issue.scenePositions.length > 0
+                ? issue.scenePositions
+                : issue.availabilityBlocker?.impactScope.scenePositions ?? []
+            )))].sort((left, right) => left - right);
+            const planningAffectedScenePositions = scopedPlanningScenePositions.length > 0
+              ? scopedPlanningScenePositions
+              : scenes.map((scene) => scene.position);
             // joint-v1 的导演阶段与旧 visual-direction 节点同一 rework 消费合同：返工意见、
             // 影响范围与上一版方案进入导演 brief；A5 的“输入未变不重跑”由阶段输入身份
             // （directorStageInputIdentity 含 rework 投影）与闭包播种承担。
@@ -5837,16 +6687,19 @@ function creativePlanningNode(
               audience: currentBrief.audience,
               platform: currentBrief.platform,
               durationSeconds: currentBrief.durationSeconds,
+              ...(currentBrief.budgetIntentionCny !== undefined ? { budgetIntentionCny: currentBrief.budgetIntentionCny } : {}),
               durationRange,
               ...(viewerPromise ? { viewerPromise } : {}),
               ...(narrativeArc ? { narrativeArc } : {}),
               requestedProfileId: currentDirection.profileId,
-              ...(currentBrief.templateSnapshot ? { templateBlueprint: currentBrief.templateSnapshot.resolvedBlueprint } : {}),
               ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
               ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
+              ...(currentBrief.visualIntent ? { visualIntent: currentBrief.visualIntent } : {}),
               ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
+              voiceTiming: voiceTimingFor(currentBrief),
               ...(referenceGrammar ? { referenceGrammar } : {}),
               ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
+              ...(currentBrief.articleSources?.length ? { articleSources: currentBrief.articleSources } : {}),
               ...(currentBrief.rework ? {
                 rework: {
                   sourceRunId: currentBrief.rework.sourceRunId,
@@ -5863,7 +6716,28 @@ function creativePlanningNode(
               } : {}),
               ...(planningContext.treatment ? { creativeTreatment: planningContext.treatment.output } : {}),
               ...(planningContext.issues.length ? { planningIssues: planningContext.issues } : {}),
-              productionCapabilities: summarizeProductionCapabilities(assetProviders),
+              ...(planningContext.directorPlan && planningContext.issues.length ? {
+                planningRevision: {
+                  previousPlan: planningContext.directorPlan.output,
+                  previousPlanDigest: createHash("sha256").update(JSON.stringify(planningContext.directorPlan.output)).digest("hex"),
+                  affectedScenePositions: planningAffectedScenePositions,
+                  availabilityHistory: planningContext.availabilityHistory.slice(-12),
+                },
+              } : {}),
+              productionCapabilities: summarizeProductionCapabilities(assetProviders, currentBrief.providers.voice),
+            };
+            const selectedDirectorModelId = currentBrief.models?.[currentBrief.providers.director ?? ""]
+              ?? provider.modelId
+              ?? "codex-default";
+            const directorCheckpointInput = {
+              stage: "director",
+              brief: producerBrief,
+              scenes,
+              assetProviders,
+              economics: directorEconomics,
+              ...(referenceGrammar ? { referenceGrammar } : {}),
+              ...(costFeedback?.length ? { costFeedback } : {}),
+              ...(planningContext.issues.length ? { issues: planningContext.issues } : {}),
             };
             const execution = await provider.run({
               brief: producerBrief,
@@ -5871,24 +6745,32 @@ function creativePlanningNode(
               assetProviders,
               economics: directorEconomics,
               planningMode: true,
-              selectedModelId: currentBrief.models?.[currentBrief.providers.director ?? ""] ?? provider.modelId ?? "codex-default",
+              ...(planningContext.creativeReviewExecution?.mode === "draft"
+                ? { creativeReviewExecution: { mode: "draft" as const } }
+                : planningContext.creativeReviewExecution?.mode === "check" && planningContext.directorPlan
+                  ? { creativeReviewExecution: { mode: "check" as const, candidate: planningContext.integratedPlan?.output ?? planningContext.directorPlan.output } }
+                  : {}),
+              selectedModelId: selectedDirectorModelId,
               ...(costFeedback?.length ? { costFeedback } : {}),
               agentLoopCheckpoint: nodeAgentLoopCheckpoint(
                 runsRoot,
                 context.runId,
                 "creative-planning",
-                {
-                  stage: "director",
-                  brief: producerBrief,
-                  scenes,
-                  assetProviders,
-                  economics: directorEconomics,
-                  ...(referenceGrammar ? { referenceGrammar } : {}),
-                  ...(costFeedback?.length ? { costFeedback } : {}),
-                  ...(planningContext.issues.length ? { issues: planningContext.issues } : {}),
-                },
+                { ...directorCheckpointInput, creativeReviewExecution: planningReviewCheckpointIdentity(planningContext) },
                 VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
                 undefined,
+                context.operationRequestId,
+                resumeCompletedTextTaskNodeId,
+                resumeCompletedTextTaskRequestId,
+                recoverTextTask?.nodeId === "creative-planning" ? recoverTextTask.workflowOperationRequestId : undefined,
+              ),
+              agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
+                runsRoot,
+                context.runId,
+                "creative-planning",
+                { ...directorCheckpointInput, creativeReviewExecution: planningReviewCheckpointIdentity(planningContext) },
+                VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
+                modelId,
                 context.operationRequestId,
                 resumeCompletedTextTaskNodeId,
                 resumeCompletedTextTaskRequestId,
@@ -5907,7 +6789,77 @@ function creativePlanningNode(
               options.providerRuntimeMetadata ?? [],
               viewerPromise,
             ));
-            return { artifactId: planningArtifactId("director-plan", plan), output: plan };
+            return {
+              artifactId: planningArtifactId("director-plan", plan),
+              output: plan,
+              ...planningReviewCheckResult(planningContext, execution),
+            };
+          },
+          discuss: async (discussion) => {
+            const selectedModelId = discussion.stage === "treatment"
+              ? currentBrief.models?.[CREATIVE_TREATMENT_PROVIDER_ID]
+              : discussion.stage === "script"
+                ? currentBrief.models?.[currentBrief.providers.script]
+                : currentBrief.models?.[currentDirectorProviderId];
+            const agent = discussion.stage === "treatment"
+              ? treatmentAgent
+              : discussion.stage === "script"
+                ? options.screenwriterAgent
+                : options.directorAgent;
+            if (!agent?.discussDetailed) {
+              throw new Error(`Creative discussion is not configured for the '${discussion.stage}' role.`);
+            }
+            const requestId = `creative-discussion-${contentSha256({ runId: context.runId, commandId: discussion.commandId }).slice(0, 32)}`;
+            let execution: CodexTaskExecution<CreativeDiscussionResult>;
+            try {
+              execution = await agent.discussDetailed({
+                stage: discussion.stage,
+                currentDocument: discussion.currentDocument,
+                context: {
+                  effectiveUserInstructions: discussion.effectiveUserInstructions,
+                  ...(currentBrief.budgetIntentionCny !== undefined ? { budgetIntentionCny: currentBrief.budgetIntentionCny, budgetMeaning: "用户费用偏好，不是硬上限或付款授权" } : {}),
+                  upstreamConfirmed: discussion.upstreamDocuments,
+                  productionCapabilities: productionCapabilitiesFor(currentBrief, options),
+                  voiceTiming: voiceTimingFor(currentBrief),
+                  ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
+                  ...(currentBrief.visualIntent ? { visualIntent: currentBrief.visualIntent } : {}),
+                  ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
+                  ...(currentBrief.articleSources?.length ? { articleSources: currentBrief.articleSources } : {}),
+                },
+                message: discussion.message,
+                ...(discussion.selection ? { selection: discussion.selection } : {}),
+                recentMessages: discussion.recentMessages,
+                ...(selectedModelId ? { selectedModelId } : {}),
+                requestId,
+              });
+              await recordCreativeDiscussionExecution(runsRoot, context.runId, {
+                workflowOperationRequestId: context.operationRequestId,
+                commandId: discussion.commandId,
+                requestId,
+                stage: discussion.stage,
+                state: "completed",
+                ...(execution.trace ? { trace: execution.trace } : {}),
+              });
+            } catch (error) {
+              await recordCreativeDiscussionExecution(runsRoot, context.runId, {
+                workflowOperationRequestId: context.operationRequestId,
+                commandId: discussion.commandId,
+                requestId,
+                stage: discussion.stage,
+                state: error instanceof CodexBridgeError && error.stage === "uncertain"
+                  ? "accepted_unknown"
+                  : error instanceof CodexBridgeError && (error.stage === "not_accepted" || error.stage === "rejected")
+                    ? "not_accepted"
+                    : "completed_failure",
+              });
+              throw error;
+            }
+            if (execution.trace?.modelId) {
+              modelTraces[discussion.stage] = execution.trace.modelId;
+              providerTraces[discussion.stage] = execution.trace.providerId;
+              await recordExecutionTraces();
+            }
+            return execution.output;
           },
           ...(libraryRoute ? libraryPorts : {}),
           compile: executablePlanCompilePort,
@@ -5931,8 +6883,8 @@ function creativePlanningNode(
           Object.assign(modelTraces, existingValues.carriedModelTraces ?? {});
           Object.assign(providerTraces, existingValues.carriedProviderTraces ?? {});
           // 线索 B 守卫：同 digest 重放前比对执行记录的阶段输入身份与当前计算值——素材目录
-          // 或运行环境在 digest 不变的情况下变化（重启换目录条目等），旧 thread 的导演方案
-          // 基于不同真实输入构建，不得静默重放；fail closed，由用户修改输入开新 thread。
+          // 或运行环境在 digest 不变的情况下变化（重启换目录条目等），旧 thread 的产物基于
+          // 不同真实输入构建，不得静默重放；fail closed，由用户修改输入开新 thread。
           const recorded = existingHistory.find((entry) => entry.inputDigest === inputDigest);
           if (recorded && (
             recorded.stageInputs.treatment !== stageInputs.treatment
@@ -6021,7 +6973,14 @@ function creativePlanningNode(
             store,
             runId: context.runId,
             inputDigest,
-            planningInput: { runId: context.runId, inputDigest, durationRange },
+            planningInput: {
+              runId: context.runId,
+              inputDigest,
+              durationRange,
+              ...(currentBrief.workflowFeatures?.creativeReview
+                ? { creativeReview: currentBrief.workflowFeatures.creativeReview }
+                : {}),
+            },
             libraryRoute,
             prior,
             ...(priorRunId ? { priorRunId } : {}),
@@ -6041,10 +7000,100 @@ function creativePlanningNode(
         // 已执行阶段的 trace 不因中途失败丢失（端口完成时还会逐阶段合并写回）。
         await recordExecutionTraces();
         const outcome = await runCreativePlanning(graph, {
-          input: { runId: context.runId, inputDigest, durationRange },
+          input: {
+            runId: context.runId,
+            inputDigest,
+            durationRange,
+            ...(currentBrief.workflowFeatures?.creativeReview
+              ? { creativeReview: currentBrief.workflowFeatures.creativeReview }
+              : {}),
+          },
           threadId: store.threadId(context.runId, inputDigest),
+          ...(creativeReviewResume ? { resume: creativeReviewResume } : {}),
         });
-        if (outcome.status !== "completed") {
+        if (outcome.status === "waiting_user") {
+          const finalState = ((await graph.getState(threadConfig))?.values ?? {}) as Partial<PlanningGraphState>;
+          const stage = outcome.gate.stage;
+          const draft = stage === "treatment"
+            ? finalState.treatmentArtifact
+            : stage === "script"
+              ? finalState.scriptArtifact
+              : finalState.integratedPlan ?? finalState.directorPlan;
+          if (!draft || draft.artifactId !== outcome.gate.draft.artifactId) {
+            throw new Error(`Creative review '${stage}' draft is missing from the planning checkpoint.`);
+          }
+          const content = `${JSON.stringify(draft.output, null, 2)}\n`;
+          const draftPath = path.join(attempt.directory, `${stage}-draft-r${outcome.gate.draft.revision}.json`);
+          await writeTextAtomically(draftPath, content);
+          const registered = context.addArtifact(fileArtifact(
+            "creative_draft",
+            draftPath,
+            content,
+            "application/json",
+            `video-factory/${stage}-draft-v1`,
+            "creative-planning",
+            context.artifacts.filter((artifact) => artifact.producer?.nodeId === "brief").map((artifact) => artifact.id),
+            providerTraces[stage] ?? currentBrief.providers.script,
+            "Unconfirmed creative draft for user discussion; not executable and not a spend approval.",
+            attempt.attempt,
+            `${inputDigest}:${stage}:${outcome.gate.draft.sha256}`,
+          ));
+          await recordExecutionTraces();
+          const summary = await summarizeJointPlanningExecution(runsRoot, context.runId, context.operationRequestId);
+          const blockingIssues = outcome.state.issues.map((issue) => ({
+            target: issue.target,
+            scenePositions: [...issue.scenePositions],
+            reason: issue.reason,
+            requiredChange: issue.requiredChange,
+          }));
+          return {
+            status: "needs_human",
+            output: {
+              creativeReview: outcome.state.creativeReview,
+              blockingIssues,
+              draftArtifactId: registered.id,
+              stage,
+              ...(creativeReviewResume ? {
+                creativeReviewOperation: {
+                  commandId: creativeReviewResume.commandId,
+                  action: creativeReviewResume.action,
+                  status: "completed",
+                },
+              } : {}),
+            },
+            preRegisteredArtifactIds: [registered.id],
+            intervention: {
+              kind: "creative_review",
+              reason: stage === "treatment"
+                ? "导演方案已生成，等你确认。你可以直接继续，也可以先聊聊想改的地方。"
+                : stage === "script"
+                  ? "脚本草稿已生成，等你确认。"
+                  : blockingIssues.length > 0
+                    ? "当前分镜方案需要你决定：素材条件无法满足已确认的画面路线，系统已保留方案且不会自动改写。"
+                    : "分镜与画面方案已生成，等你确认。",
+              requiredAction: "approve",
+              options: ["approve", "request_changes"],
+              artifactIds: [registered.id],
+              continuation: {
+                stage,
+                reviewRevision: outcome.gate.reviewRevision,
+                draftSha256: outcome.gate.draft.sha256,
+              },
+            },
+            receipt: {
+              providerId: treatmentAgent.id,
+              providerLabel: "joint-v1 创作规划",
+              modelId: modelTraces[stage] ?? "unknown",
+              transport: "unix_socket",
+              billing: "subscription",
+              configurationSource: "system_default",
+              parameters: { planningRoute: libraryRoute ? "library" : "fixed", waitingStage: stage, ...(summary ?? {}) },
+              estimatedCostCny: 0,
+              requestId: context.nextId("creative-planning-waiting"),
+            },
+          };
+        }
+        if (outcome.status === "halted") {
           throw new Error(`Joint creative planning stopped (${outcome.halt.reason}): ${outcome.halt.detail} 不回退旧规划流程。`);
         }
         // 完成态只携带 executable plan：稿件/导演方案/候选/排序从终态 checkpoint 读取，
@@ -6075,7 +7124,7 @@ function creativePlanningNode(
       } catch (error) {
         if (error instanceof RoleAgentLoopError) {
           const trace = error.lastTrace;
-          return failedAgentLoopNodeResult({
+          const failed = await failedAgentLoopNodeResult({
             error,
             attemptDirectory: attempt.directory,
             nodeId: "creative-planning",
@@ -6092,8 +7141,31 @@ function creativePlanningNode(
             },
             providerLabel: "joint-v1 创作规划",
           });
+          const summary = await summarizeJointPlanningExecution(runsRoot, context.runId, context.operationRequestId);
+          if (summary && failed.receipt) {
+            failed.receipt.parameters = { ...(failed.receipt.parameters ?? {}), ...summary };
+          }
+          return failed;
         }
-        throw error;
+        const summary = await summarizeJointPlanningExecution(runsRoot, context.runId, context.operationRequestId);
+        return {
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+          receipt: {
+            providerId: currentBrief.providers.script,
+            providerLabel: "joint-v1 创作规划",
+            modelId: modelTraces.treatment ?? modelTraces.script ?? modelTraces.director ?? "unknown",
+            transport: "unix_socket",
+            billing: "subscription",
+            configurationSource: "system_default",
+            parameters: {
+              planningRoute: libraryRoute ? "library" : "fixed",
+              ...(summary ?? {}),
+            },
+            estimatedCostCny: 0,
+            requestId: context.nextId("creative-planning-failure"),
+          },
+        };
       } finally {
         store.close();
       }
@@ -6115,6 +7187,11 @@ function creativePlanningNode(
         : [];
       // 规划节点 receipt 的实际模型：只用真实执行 trace；来源缺失时显式 unknown，
       // 不用首选配置或角色默认模型冒充实际执行来源。
+      const planningExecutionSummary = await summarizeJointPlanningExecution(
+        runsRoot,
+        context.runId,
+        context.operationRequestId,
+      );
       const planningReceipt = {
         providerId: treatmentAgent.id,
         providerLabel: "joint-v1 创作规划",
@@ -6122,7 +7199,10 @@ function creativePlanningNode(
         transport: "unix_socket" as const,
         billing: "subscription" as const,
         configurationSource: "system_default" as const,
-        parameters: { planningRoute: libraryRoute ? "library" : "fixed" },
+        parameters: {
+          planningRoute: libraryRoute ? "library" : "fixed",
+          ...(planningExecutionSummary ?? {}),
+        },
         estimatedCostCny: 0,
         requestId: context.nextId("creative-planning"),
       };
@@ -6534,11 +7614,18 @@ function creativePlanningNode(
       options.planningFailpoints?.afterCommit?.();
       return {
         status: "succeeded",
-        output: {
-          scriptPath,
-          directorPlanPath,
-          executablePlanPath,
-          canonFacts: scriptArtifact.output.canonFacts ?? [],
+          output: {
+            scriptPath,
+            directorPlanPath,
+            executablePlanPath,
+            canonFacts: scriptArtifact.output.canonFacts ?? [],
+            ...(creativeReviewResume ? {
+              creativeReviewOperation: {
+                commandId: creativeReviewResume.commandId,
+                action: creativeReviewResume.action,
+                status: "completed",
+              },
+            } : {}),
           ...(candidatePaths ? { ...candidatePaths, candidateInventoryPath: committedCandidateInventoryPath() } : {}),
         },
         preRegisteredArtifactIds: [
@@ -6667,11 +7754,12 @@ function directorNode(
         ...(viewerPromise ? { viewerPromise } : {}),
         ...(narrativeArc ? { narrativeArc } : {}),
         requestedProfileId: currentDirection.profileId,
-        ...(currentBrief.templateSnapshot ? { templateBlueprint: currentBrief.templateSnapshot.resolvedBlueprint } : {}),
         ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
         ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
+        ...(currentBrief.visualIntent ? { visualIntent: currentBrief.visualIntent } : {}),
         ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
-        productionCapabilities: summarizeProductionCapabilities(assetProviders),
+        voiceTiming: voiceTimingFor(currentBrief),
+        productionCapabilities: summarizeProductionCapabilities(assetProviders, currentBrief.providers.voice),
         ...(referenceGrammar ? { referenceGrammar } : {}),
         ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
         ...(currentBrief.rework ? {
@@ -7127,9 +8215,9 @@ function directorReuseIdentity(brief: ProductionBrief): Record<string, unknown> 
     platform: brief.platform,
     durationSeconds: brief.durationSeconds,
     durationRange: brief.durationRange,
-    templateBlueprint: brief.templateSnapshot?.resolvedBlueprint,
     editorial: brief.editorial,
     visualProof: brief.visualProof,
+    visualIntent: brief.visualIntent,
     visualPlan: brief.visualPlan,
     seriesContext: brief.seriesContext,
     direction: brief.director,
@@ -7746,13 +8834,15 @@ function screenwriterBrief(
     durationSeconds: brief.durationSeconds,
     productionCapabilities: options
       ? productionCapabilitiesFor(brief, options)
-      : summarizeProductionCapabilities([]),
+      : summarizeProductionCapabilities([], brief.providers.voice),
+    voiceTiming: voiceTimingFor(brief),
     ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
-    ...(brief.templateSnapshot ? { templateBlueprint: brief.templateSnapshot.resolvedBlueprint } : {}),
     ...(brief.editorial ? { editorial: brief.editorial } : {}),
     ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
+    ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
     ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
     ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
+    ...(brief.articleSources?.length ? { articleSources: brief.articleSources } : {}),
     ...(rework ? {
       rework: {
         sourceRunId: rework.sourceRunId,
@@ -7769,8 +8859,16 @@ function screenwriterBrief(
   };
 }
 
+function voiceTimingFor(brief: ProductionBrief): { rate: number; pauseScale: number } {
+  return {
+    rate: brief.voiceDirection.rate,
+    pauseScale: brief.voiceDirection.pauseScale,
+  };
+}
+
 function modelFacingReworkFinding(finding: ProductionReworkFinding): ProductionReworkFinding {
-  // 模型只接收提出修改所需的事实；帧哈希、审片版本和调用身份留在内部证据链中。
+  // 模型只接收 Broker 公共合同允许、且提出修改所需的事实；责任归属、动作、帧哈希、
+  // 审片版本和调用身份留在宿主证据链中，不能把内部扩展字段送进严格输入合同。
   return {
     findingId: finding.findingId,
     timecodeMs: finding.timecodeMs,
@@ -7779,9 +8877,6 @@ function modelFacingReworkFinding(finding: ProductionReworkFinding): ProductionR
     description: finding.description,
     suggestion: finding.suggestion,
     targetNodeIds: [...finding.targetNodeIds],
-    ...(finding.primaryOwnerNodeId ? { primaryOwnerNodeId: finding.primaryOwnerNodeId } : {}),
-    ...(finding.affectedNodeIds ? { affectedNodeIds: [...finding.affectedNodeIds] } : {}),
-    ...(finding.action ? { action: finding.action } : {}),
   };
 }
 
@@ -7810,9 +8905,6 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
   if (rawBrief.durationRange !== undefined) {
     brief.durationRange = parseScriptDurationRange(rawBrief.durationRange, durationSeconds);
   }
-  if (rawBrief.templateBlueprint !== undefined) {
-    brief.templateBlueprint = parseProductionBlueprint(rawBrief.templateBlueprint);
-  }
   if (rawBrief.editorial !== undefined) {
     const editorial = requireOutputRecord(rawBrief.editorial, "script input editorial");
     if (editorial.verdict !== "produce_video" && editorial.verdict !== "produce_image_story") {
@@ -7826,6 +8918,11 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
   }
   if (rawBrief.visualProof !== undefined) {
     brief.visualProof = requiredOutputString(rawBrief, "visualProof");
+  }
+  if (rawBrief.visualIntent !== undefined) {
+    const visualIntent = requiredOutputString(rawBrief, "visualIntent");
+    if (visualIntent.length > 1000) throw new Error("script input brief.visualIntent must contain at most 1000 characters.");
+    brief.visualIntent = visualIntent;
   }
   if (rawBrief.visualPlan !== undefined) {
     const visualPlan = parseProductionVisualPlan(rawBrief.visualPlan);
@@ -8024,6 +9121,7 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
             providerId: execution.executedProviderId ?? execution.trace?.providerId ?? provider.id,
             modelId: execution.executedModelId ?? execution.trace?.modelId ?? provider.modelId ?? provider.id,
           }],
+          reviewContractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
         },
       };
       const reportPath = path.join(attempt.directory, "source_visual_review.json");
@@ -8061,9 +9159,11 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
         ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, provider.label ?? "生成画面预检", "subscription", execution.agentLoop, provider.configurationSource) } : {}),
         artifacts: [reportArtifact, traceArtifact, loopArtifact].filter((artifact): artifact is ArtifactDraft => Boolean(artifact)),
       };
-      return report.recommendation === "approve" && report.findings.every((finding) => finding.severity === "info")
-        ? { ...result, status: "succeeded" }
-        : { ...result, status: "rejected", error: sourceAssetReviewFailureMessage(report) };
+      // 与试片闸门同一判据：源素材预检的咨询性发现（not_observed）不阻断配音与渲染，
+      // 只有实质缺陷或评分/置信度未达门槛才判 rejected。
+      return visualReviewBlocksContinuation(report)
+        ? { ...result, status: "rejected", error: sourceAssetReviewFailureMessage(report) }
+        : { ...result, status: "succeeded" };
     },
     validateOverride: (output) => validatePathOutput(output, "sourceVisualReviewPath", "asset-source-review"),
   };
@@ -8320,6 +9420,7 @@ function visualReviewNode(
           scenePositions,
           timelineDurationMs: execution.inspectedDurationMs ?? planDurationMs,
           actualModels: actualModelProofs,
+          reviewContractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
         },
         ...(independentReviews ? { independentReviews } : {}),
       };
@@ -8835,6 +9936,9 @@ function validateVoiceNodeInput(input: unknown): Record<string, unknown> {
   }
   return {
     scriptPath: requiredOutputString(value, "scriptPath"),
+    ...(value.executablePlanPath !== undefined
+      ? { executablePlanPath: requiredOutputString(value, "executablePlanPath") }
+      : {}),
     voice,
     rate,
     pause_scale: pauseScale,
@@ -8924,6 +10028,20 @@ function assertProductionVisualReviewReady(
 
 function roundCurrency(value: number): number {
   return Math.round(value * 10_000) / 10_000;
+}
+
+// 免收费镜头分两批收集（路由阶段排除的、复用已有画面后由增量报价剔除的），收集顺序不
+// 等于镜头顺序；这里按镜头号排好并收成可展开的字段，避免确认页上的清单乱序。
+// 免收费镜头分两批收集（路由阶段排除的、复用已有画面后由增量报价剔除的），收集顺序因此
+// 不等于镜头顺序。这里按镜号归并再排序，确认页上的清单顺序才与镜头顺序一致——排序键是
+// 镜号本身，不是 id 的拼写，换任何 id 生成方式都不影响。
+function excludedItemsField(notes: ReadonlyMap<number, string>): { excludedItems?: SpendExcludedItem[] } {
+  if (notes.size === 0) return {};
+  return {
+    excludedItems: [...notes.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([scenePosition, note]) => ({ id: `scene-${scenePosition}`, label: `镜头 ${scenePosition}`, note })),
+  };
 }
 
 function workerResponseToNodeResult(
@@ -9085,6 +10203,364 @@ function optionalNonNegativeInteger(value: unknown, field: string): number | und
   return Number(value);
 }
 
+async function assertNoUnresolvedPlanningTask(runDirectory: string, run: WorkflowRun<ProductionBrief>): Promise<void> {
+  const node = run.nodeRuns.find((entry) => entry.nodeId === "creative-planning");
+  if (!node?.operationRequestId) return;
+  const directory = path.join(runDirectory, "nodes", node.nodeId, "agent-loop-checkpoints");
+  let names: string[];
+  try { names = await readdir(directory); }
+  catch (error) { if (hasCode(error, "ENOENT")) return; throw error; }
+  for (const name of names.filter((entry) => entry.endsWith(".json"))) {
+    const value: unknown = JSON.parse(await readFile(path.join(directory, name), "utf8"));
+    if (!isObjectRecord(value) || !isObjectRecord(value.recoveryOwner)
+      || value.recoveryOwner.runId !== run.id || value.recoveryOwner.nodeId !== node.nodeId
+      || value.recoveryOwner.workflowOperationRequestId !== node.operationRequestId
+      || !isObjectRecord(value.pendingOperation) || !isObjectRecord(value.pendingOperation.operation)) continue;
+    const failure = isObjectRecord(value.failure) ? value.failure : undefined;
+    if (failure && ["completed_failure", "not_accepted", "rejected", "conflict"].includes(String(failure.stage))) continue;
+    // beforeSubmit 保存的快照可能仍是 not_submitted，后续 uncertain 才是最新事实。
+    if (failure?.stage === "uncertain" || value.pendingOperation.operation.taskFact !== "not_submitted") {
+      throw new Error("原模型任务的结果尚未明确，请先查询原任务；不能通过修改配置或方案重新提交。");
+    }
+  }
+}
+
+export async function summarizeJointPlanningExecution(
+  runsRoot: string,
+  runId: string,
+  workflowOperationRequestId: string | undefined,
+): Promise<Record<string, number> | undefined> {
+  if (!workflowOperationRequestId) return undefined;
+  const directory = path.join(runsRoot, runId, "nodes", "creative-planning", "agent-loop-checkpoints");
+  let names: string[];
+  try {
+    names = (await readdir(directory)).filter((name) => name.endsWith(".json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") names = [];
+    else throw error;
+  }
+  const checkpoints: Record<string, unknown>[] = [];
+  for (const name of names) {
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(path.join(directory, name), "utf8"));
+    } catch {
+      continue;
+    }
+    if (!isObjectRecord(value)
+      || (value.version !== "video-factory/agent-loop-checkpoint-v8"
+        && value.version !== "video-factory/agent-loop-checkpoint-v9")
+      || !isObjectRecord(value.recoveryOwner)
+      || value.recoveryOwner.runId !== runId
+      || value.recoveryOwner.nodeId !== "creative-planning") continue;
+    checkpoints.push(value);
+  }
+  const discussionReceipts = await readCreativeDiscussionExecutions(runsRoot, runId);
+  // 同一 checkpoint 会跨操作恢复；先按物理 requestId 的首次归属全局去重，再分本次/历史。
+  // 没有 requestOwners 的旧记录不能证明属于本次，宁可列入历史也不虚增当前调用。
+  const current = summarizePlanningCheckpoints(
+    checkpoints,
+    discussionReceipts.filter((value) => value.workflowOperationRequestId === workflowOperationRequestId),
+    workflowOperationRequestId,
+    false,
+  );
+  const previous = summarizePlanningCheckpoints(
+    checkpoints,
+    discussionReceipts.filter((value) => value.workflowOperationRequestId !== workflowOperationRequestId),
+    workflowOperationRequestId,
+    true,
+  );
+  if (!current && !previous) return undefined;
+  return {
+    ...(current ?? Object.fromEntries(Object.keys(previous!).map((key) => [key, 0]))),
+    ...(previous ? {
+      previousModelCallCount: previous.modelCallCount,
+      previousProducerModelCallCount: previous.producerModelCallCount,
+      previousAuditModelCallCount: previous.auditModelCallCount,
+      previousDiscussionModelCallCount: previous.discussionModelCallCount,
+      previousStructuredRepairModelCallCount: previous.structuredRepairModelCallCount,
+      previousRetryCount: previous.retryCount,
+      previousUnknownModelExecutionCount: previous.unknownModelExecutionCount,
+      previousProducerMs: previous.producerMs,
+      previousAuditMs: previous.auditMs,
+      previousDiscussionMs: previous.discussionMs,
+      previousLoopValidationMs: previous.loopValidationMs,
+    } : {}),
+  };
+}
+
+function summarizePlanningCheckpoints(
+  checkpoints: readonly Record<string, unknown>[],
+  discussionReceipts: readonly CreativeDiscussionExecutionRecord[] = [],
+  currentOperationRequestId?: string,
+  previous = false,
+): Record<string, number> | undefined {
+  if (checkpoints.length === 0 && discussionReceipts.length === 0) return undefined;
+  const producerRequestIds = new Set<string>();
+  const auditRequestIds = new Set<string>();
+  const unknownRequestIds = new Set<string>();
+  const retryRequestIds = new Set<string>();
+  const discussionRequestIds = new Set<string>();
+  let legacyProducerModelCallCount = 0;
+  let legacyAuditModelCallCount = 0;
+  let internalProducerModelCallCount = 0;
+  let internalAuditModelCallCount = 0;
+  let structuredRepairModelCallCount = 0;
+  let producerMs = 0;
+  let auditMs = 0;
+  let validationMs = 0;
+  let discussionMs = 0;
+  const seenCheckpointEvidence = new Set<string>();
+  for (const value of checkpoints) {
+    // 同一落盘证据可能存在重复副本，不能重复累计耗时和修复次数。
+    const evidenceIdentity = JSON.stringify(value);
+    if (seenCheckpointEvidence.has(evidenceIdentity)) continue;
+    seenCheckpointEvidence.add(evidenceIdentity);
+    const phaseAttempts = isObjectRecord(value.phaseAttempts) ? value.phaseAttempts : {};
+    const unaccepted = isObjectRecord(value.unacceptedPhaseAttempts) ? value.unacceptedPhaseAttempts : {};
+    const durations = isObjectRecord(value.phaseDurationsMs) ? value.phaseDurationsMs : {};
+    const attemptedRequestIds = new Set(Array.isArray(value.attemptedRequestIds)
+      ? value.attemptedRequestIds.filter((entry): entry is string => typeof entry === "string")
+      : []);
+    const allMapped = planningCheckpointRequestPhases(value, attemptedRequestIds);
+    const requestOwners = isObjectRecord(value.requestOwners) ? value.requestOwners : {};
+    const belongs = (requestId: string): boolean => {
+      const owner = typeof requestOwners[requestId] === "string" ? requestOwners[requestId] : undefined;
+      return previous ? owner !== currentOperationRequestId : owner === currentOperationRequestId;
+    };
+    const mapped = currentOperationRequestId
+      ? allMapped.filter((request) => belongs(request.requestId))
+      : allMapped;
+    const completed = Array.isArray(value.completed) ? value.completed : [];
+    for (const item of completed) {
+      if (!isObjectRecord(item) || !Number.isSafeInteger(item.iteration)) continue;
+      const iteration = Number(item.iteration);
+      const producerRequest = allMapped.filter((request) => request.phase === "produce" && request.iteration === iteration).at(-1);
+      const auditRequest = allMapped.filter((request) => request.phase === "audit" && request.iteration === iteration).at(-1);
+      if (producerRequest && (currentOperationRequestId === undefined || belongs(producerRequest.requestId)) && isObjectRecord(item.candidateTrace)) {
+        internalProducerModelCallCount += Math.max(0, safeCount(item.candidateTrace.modelAttemptCount) - 1);
+      }
+      if (auditRequest && (currentOperationRequestId === undefined || belongs(auditRequest.requestId)) && isObjectRecord(item.auditTrace)) {
+        internalAuditModelCallCount += Math.max(0, safeCount(item.auditTrace.modelAttemptCount) - 1);
+      }
+    }
+    if (isObjectRecord(value.pendingCandidate) && Number.isSafeInteger(value.pendingCandidate.iteration)
+      && isObjectRecord(value.pendingCandidate.candidateTrace)) {
+      const iteration = Number(value.pendingCandidate.iteration);
+      const request = allMapped.filter((entry) => entry.phase === "produce" && entry.iteration === iteration).at(-1);
+      if (request && (currentOperationRequestId === undefined || belongs(request.requestId))) {
+        internalProducerModelCallCount += Math.max(0, safeCount(value.pendingCandidate.candidateTrace.modelAttemptCount) - 1);
+      }
+    }
+    const pending = isObjectRecord(value.pendingOperation) && isObjectRecord(value.pendingOperation.operation)
+      ? value.pendingOperation.operation
+      : undefined;
+    for (const request of mapped) {
+      if (pending?.requestId === request.requestId && pending.taskFact === "accepted_unknown") {
+        unknownRequestIds.add(request.requestId);
+      } else if (request.phase === "produce") {
+        producerRequestIds.add(request.requestId);
+      } else {
+        auditRequestIds.add(request.requestId);
+      }
+    }
+    const mappedProduce = mapped.filter((request) => request.phase === "produce").length;
+    const mappedAudit = mapped.filter((request) => request.phase === "audit").length;
+    const legacyBucket = currentOperationRequestId === undefined || previous;
+    if (legacyBucket && Object.keys(requestOwners).length === 0) {
+      legacyProducerModelCallCount += Math.max(0,
+        safeCount(phaseAttempts.produce) - safeCount(unaccepted.produce) - allMapped.filter((request) => request.phase === "produce").length,
+      );
+      legacyAuditModelCallCount += Math.max(0,
+        safeCount(phaseAttempts.audit) - safeCount(unaccepted.audit) - allMapped.filter((request) => request.phase === "audit").length,
+      );
+    }
+    const allOwnersMatchBucket = allMapped.length > 0 && allMapped.every((request) => belongs(request.requestId));
+    if (currentOperationRequestId === undefined || allOwnersMatchBucket) {
+      structuredRepairModelCallCount += safeCount(value.structuredRepairModelCallCount);
+    }
+    if (Array.isArray(value.retriedRequestIds)) {
+      value.retriedRequestIds.forEach((entry) => {
+        if (typeof entry === "string"
+          && (currentOperationRequestId === undefined || belongs(entry))) retryRequestIds.add(entry);
+      });
+    }
+    if (currentOperationRequestId === undefined || allOwnersMatchBucket) {
+      producerMs += safeCount(durations.produce);
+      auditMs += safeCount(durations.audit);
+      validationMs += safeCount(value.validationMs);
+    }
+  }
+  const discussionReceiptsByRequest = new Map<string, CreativeDiscussionExecutionRecord>();
+  for (const receipt of discussionReceipts) {
+    const existing = discussionReceiptsByRequest.get(receipt.requestId);
+    if (!existing) {
+      discussionReceiptsByRequest.set(receipt.requestId, receipt);
+      continue;
+    }
+    const statePriority = (state: CreativeDiscussionExecutionRecord["state"]) => (
+      state === "completed" || state === "completed_failure" ? 2 : state === "accepted_unknown" ? 1 : 0
+    );
+    discussionReceiptsByRequest.set(receipt.requestId, {
+      ...(statePriority(receipt.state) > statePriority(existing.state) ? receipt : existing),
+      queueWaitMs: Math.max(safeCount(existing.queueWaitMs), safeCount(receipt.queueWaitMs)),
+      providerWaitMs: Math.max(safeCount(existing.providerWaitMs), safeCount(receipt.providerWaitMs)),
+      validationMs: Math.max(safeCount(existing.validationMs), safeCount(receipt.validationMs)),
+    });
+  }
+  for (const receipt of discussionReceiptsByRequest.values()) {
+    if (receipt.state === "accepted_unknown") {
+      unknownRequestIds.add(receipt.requestId);
+      continue;
+    }
+    if (receipt.state === "not_accepted") continue;
+    discussionRequestIds.add(receipt.requestId);
+    discussionMs += safeCount(receipt.providerWaitMs);
+    validationMs += safeCount(receipt.validationMs);
+  }
+  const producerModelCallCount = producerRequestIds.size + legacyProducerModelCallCount + internalProducerModelCallCount;
+  const auditModelCallCount = auditRequestIds.size + legacyAuditModelCallCount + internalAuditModelCallCount;
+  const discussionModelCallCount = discussionRequestIds.size;
+  return {
+    modelCallCount: producerModelCallCount + auditModelCallCount + discussionModelCallCount,
+    producerModelCallCount,
+    auditModelCallCount,
+    discussionModelCallCount,
+    structuredRepairModelCallCount,
+    retryCount: retryRequestIds.size,
+    unknownModelExecutionCount: unknownRequestIds.size,
+    producerMs,
+    auditMs,
+    discussionMs,
+    loopValidationMs: validationMs,
+  };
+}
+
+interface CreativeDiscussionExecutionRecord {
+  version: "video-factory/creative-discussion-execution-v1";
+  workflowOperationRequestId: string;
+  commandId: string;
+  requestId: string;
+  stage: CreativeStage;
+  state: "completed" | "completed_failure" | "accepted_unknown" | "not_accepted";
+  queueWaitMs?: number;
+  providerWaitMs?: number;
+  validationMs?: number;
+}
+
+async function recordCreativeDiscussionExecution(
+  runsRoot: string,
+  runId: string,
+  input: Omit<CreativeDiscussionExecutionRecord, "version" | "workflowOperationRequestId"> & {
+    workflowOperationRequestId: string | undefined;
+    trace?: CodexTaskTrace;
+  },
+): Promise<void> {
+  if (!input.workflowOperationRequestId) return;
+  const directory = path.join(runsRoot, runId, "nodes", "creative-planning", "discussion-executions");
+  await mkdir(directory, { recursive: true });
+  const filePath = path.join(directory, `${createHash("sha256").update(input.requestId).digest("hex")}.json`);
+  const value: CreativeDiscussionExecutionRecord = {
+    version: "video-factory/creative-discussion-execution-v1",
+    workflowOperationRequestId: input.workflowOperationRequestId,
+    commandId: input.commandId,
+    requestId: input.requestId,
+    stage: input.stage,
+    state: input.state,
+    ...(input.trace?.queueWaitMs !== undefined ? { queueWaitMs: input.trace.queueWaitMs } : {}),
+    ...(input.trace?.providerWaitMs !== undefined ? { providerWaitMs: input.trace.providerWaitMs } : {}),
+    ...(input.trace?.validationMs !== undefined ? { validationMs: input.trace.validationMs } : {}),
+  };
+  await writeTextAtomically(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function readCreativeDiscussionExecutions(
+  runsRoot: string,
+  runId: string,
+): Promise<CreativeDiscussionExecutionRecord[]> {
+  const directory = path.join(runsRoot, runId, "nodes", "creative-planning", "discussion-executions");
+  let names: string[];
+  try {
+    names = (await readdir(directory)).filter((name) => name.endsWith(".json"));
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return [];
+    throw error;
+  }
+  const records: CreativeDiscussionExecutionRecord[] = [];
+  for (const name of names) {
+    try {
+      const value = JSON.parse(await readFile(path.join(directory, name), "utf8")) as Partial<CreativeDiscussionExecutionRecord>;
+      if (value.version !== "video-factory/creative-discussion-execution-v1"
+        || typeof value.workflowOperationRequestId !== "string"
+        || typeof value.commandId !== "string"
+        || typeof value.requestId !== "string"
+        || !["treatment", "script", "director"].includes(String(value.stage))
+        || !["completed", "completed_failure", "accepted_unknown", "not_accepted"].includes(String(value.state))) continue;
+      records.push(value as CreativeDiscussionExecutionRecord);
+    } catch {
+      // 损坏的可观测性记录不能改变生产状态；忽略它，避免编造调用数。
+    }
+  }
+  return records;
+}
+
+function planningCheckpointRequestPhases(
+  checkpoint: Record<string, unknown>,
+  attemptedRequestIds: ReadonlySet<string>,
+): Array<{ requestId: string; phase: "produce" | "audit"; iteration: number }> {
+  if (typeof checkpoint.key !== "string"
+    || typeof checkpoint.contractDigest !== "string"
+    || !Number.isSafeInteger(checkpoint.cycle)
+    || !isObjectRecord(checkpoint.operationGenerations)) return [];
+  const cycle = Number(checkpoint.cycle);
+  const operationKeys = new Set(Object.entries(checkpoint.operationGenerations)
+    .filter(([, generation]) => Number.isSafeInteger(generation) && Number(generation) >= 0)
+    .map(([operationKey]) => operationKey));
+  const configuredMaxIterations = Number.isSafeInteger(checkpoint.maxIterations)
+    && Number(checkpoint.maxIterations) >= 1
+    && Number(checkpoint.maxIterations) <= 3
+    ? Number(checkpoint.maxIterations)
+    : 0;
+  const persistedMaxIteration = Math.max(0, ...[...operationKeys].map((operationKey) => {
+    const match = /^(\d+):(\d+):(produce|audit)$/.exec(operationKey);
+    return match ? Number(match[2]) : 0;
+  }));
+  // generation=0 是正常首次调用，不会写进 operationGenerations；必须主动枚举，
+  // 再由 attemptedRequestIds 证明它是否真的提交过。
+  const maxIterations = Math.max(configuredMaxIterations, persistedMaxIteration);
+  for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+    operationKeys.add(`${cycle}:${iteration}:produce`);
+    operationKeys.add(`${cycle}:${iteration}:audit`);
+  }
+  const requests: Array<{ requestId: string; phase: "produce" | "audit"; iteration: number }> = [];
+  for (const operationKey of operationKeys) {
+    const match = /^(\d+):(\d+):(produce|audit)$/.exec(operationKey);
+    if (!match || Number(match[1]) !== cycle) continue;
+    const iteration = Number(match[2]);
+    const phase = match[3] as "produce" | "audit";
+    const persistedGeneration = checkpoint.operationGenerations[operationKey];
+    const maxGeneration = Number.isSafeInteger(persistedGeneration) && Number(persistedGeneration) >= 0
+      ? Number(persistedGeneration)
+      : 0;
+    for (let generation = 0; generation <= maxGeneration; generation += 1) {
+      const requestId = `agent-${createHash("sha256").update(JSON.stringify({
+        scope: checkpoint.key,
+        contractDigest: checkpoint.contractDigest,
+        cycle,
+        iteration,
+        phase,
+        generation,
+      })).digest("hex")}`;
+      if (attemptedRequestIds.has(requestId)) requests.push({ requestId, phase, iteration });
+    }
+  }
+  return requests;
+}
+
+function safeCount(value: unknown): number {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+}
+
 function modelTraceReceipt(
   trace: CodexTaskTrace,
   providerLabel: string,
@@ -9109,6 +10585,15 @@ function modelTraceReceipt(
       ...(trace.firstOutputEventMs !== undefined ? { firstOutputEventMs: trace.firstOutputEventMs } : {}),
       ...(trace.toolMs !== undefined ? { toolMs: trace.toolMs } : {}),
       ...(trace.validationMs !== undefined ? { providerValidationMs: trace.validationMs } : {}),
+      brokerTaskCount: 1,
+      ...(trace.modelAttemptCount !== undefined ? { modelExecutionCount: trace.modelAttemptCount } : {}),
+      ...(trace.structuredRepairCount !== undefined ? { brokerStructuredRepairCount: trace.structuredRepairCount } : {}),
+      ...(trace.requestPayloadBytes !== undefined ? { requestPayloadBytes: trace.requestPayloadBytes } : {}),
+      ...(trace.promptBytes !== undefined ? { promptBytes: trace.promptBytes } : {}),
+      ...(trace.imageCount !== undefined ? { evidenceImageCount: trace.imageCount } : {}),
+      ...(trace.imageBytes !== undefined ? { evidenceImageBytes: trace.imageBytes } : {}),
+      ...(trace.imageSetSha256 !== undefined ? { evidenceImageSetSha256: trace.imageSetSha256 } : {}),
+      ...(trace.imageMappingSha256 !== undefined ? { evidenceImageMappingSha256: trace.imageMappingSha256 } : {}),
       ...(loop ? {
         agentLoop: loop.status,
         agentLoopIterations: loop.iterations.length,
@@ -9358,13 +10843,31 @@ function assertDualVisualReviewReady(reviewedDelivery: unknown, brief: Productio
     || new Set(scope.actualModels.map((model) => model.auditContractDigest)).size !== 1) {
     throw new Error("Final visual-review branches did not use the same producer and audit contracts.");
   }
-  if (brief.taskContractDigests?.["visual-review"] !== REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["visual-review"]
-    || brief.taskContractDigests?.["role-audit"] !== REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["role-audit"]
-    || scope.actualModels.some((model) => (
-      model.producerContractDigest !== brief.taskContractDigests?.["visual-review"]
-      || model.auditContractDigest !== brief.taskContractDigests?.["role-audit"]
-    ))) {
-    throw new Error("Final visual-review evidence does not match the task contracts frozen for this run.");
+  // 证据必须由**当前**这套审片合同产出：结论是按某套判据裁出来的，判据换了，旧结论就不再等价。
+  //
+  // 比对的基准是当前要求的合同，不是 run 建立时冻结在 brief 里的那一份。冻结值做闸门会把升级前
+  // 建立的 run 永久锁死，而且锁得没有出路：流水线自己会用当前合同重跑审片节点（补查），重跑出来
+  // 的证据摘要必然是当前合同的，与冻结值再也不可能相等——于是这个 run 既不能发布，也没有任何
+  // 操作能改变这一点，而拒绝文案还说不出该做什么。冻结值仍留在 brief 里作为来源记录，只在下面
+  // 的文案里用于说明"这个制作建于更早的合同"。
+  const requiredProducerContract = REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["visual-review"];
+  const requiredAuditContract = REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["role-audit"];
+  const staleContractModels = scope.actualModels.filter((model) => (
+    model.producerContractDigest !== requiredProducerContract
+    || model.auditContractDigest !== requiredAuditContract
+  ));
+  if (staleContractModels.length > 0) {
+    const origin = brief.taskContractDigests?.["visual-review"] === requiredProducerContract
+      ? ""
+      : "（这个制作建立时用的是更早的审片合同）";
+    throw new Error(
+      `这份双模型审片证据是更早的审片合同产出的${origin}：`
+      + staleContractModels
+        .map((model) => `${model.providerId}/${model.modelId} 用 ${String(model.producerContractDigest).slice(0, 12)}…`)
+        .join("、")
+      + `，当前要求 ${requiredProducerContract.slice(0, 12)}…。不能用它发布成片。`
+      + "请先补查现有成片，让两个模型按当前合同重新审一遍，再走终审；补查只重跑审片，不会重买画面或配音。",
+    );
   }
   if (!Array.isArray(report.independentReviews) || report.independentReviews.length !== 2) {
     throw new Error("Final publication requires both independent visual-review reports.");
@@ -9402,6 +10905,19 @@ function assertPublishEvidenceReady(context: WorkflowContext, brief: ProductionB
     if (finalReview.reviewEvidenceId !== scope.evidenceId) {
       throw new Error("Final approval is not bound to the current visual evidence digest.");
     }
+    // 逐条表态是这次批准的签字，发布时要能指着它对上"被批准的那份证据"。缺了它，
+    // 批准就退化成一句无法复核的"我看过了"。
+    //
+    // 但签字只在"这轮终审确实要求人工批准"时才该存在：manual 模式每轮都要人批；
+    // automatic 模式只有在审片判定阻断时才会升级给人（见 final-review 的 execute），
+    // 判定通过时流程自动走完，此时没有也不该有签字——那是设计好的免人工路径，不是丢证据。
+    const approval = [...context.decisions].reverse().find((candidate) => (
+      candidate.action === "approve" && candidate.reviewEvidenceId === scope.evidenceId
+    ));
+    if (!approval && brief.reviewMode === "manual") {
+      throw new Error("Final publication requires a recorded operator decision for the current evidence.");
+    }
+    if (approval) assertFinalReviewDispositions(context.outputs.get("visual-review"), approval.reviewDispositions);
   }
 }
 
@@ -9494,6 +11010,61 @@ function visualReviewRecommendation(input: unknown): VisualReviewReport["recomme
   return recommendation === "approve" || recommendation === "revise" || recommendation === "reject"
     ? recommendation
     : undefined;
+}
+
+/**
+ * 操作员逐条表态的持久键。只用主张内容算摘要，不含版本号、证据 id 与数组下标——
+ * 前两者一重跑审片就变，后者换个顺序就串位。代价是模型换一种措辞描述同一处问题时
+ * 会被当成新的一条，需要重新表态；这个代价是可见的（界面上会显示还未表态），
+ * 比"表态悄悄绑到另一条问题上"安全。
+ */
+export function visualReviewFindingKey(finding: VisualReviewFinding): string {
+  return createHash("sha256").update(JSON.stringify({
+    timecodeMs: finding.timecodeMs,
+    startTimecodeMs: finding.startTimecodeMs,
+    endTimecodeMs: finding.endTimecodeMs,
+    scenePosition: finding.scenePosition,
+    targetNodeId: finding.targetNodeId,
+    claimType: finding.claimType,
+    evidenceStatus: finding.evidenceStatus,
+    evidenceFrameSha256: finding.evidenceFrameSha256,
+    nextAction: finding.nextAction,
+    category: finding.category,
+    severity: finding.severity,
+    description: finding.description,
+    suggestion: finding.suggestion,
+  })).digest("hex");
+}
+
+function currentVisualReviewFindings(delivery: unknown): VisualReviewFinding[] {
+  if (typeof delivery !== "object" || delivery === null || Array.isArray(delivery)) return [];
+  const report = (delivery as Record<string, unknown>).report;
+  if (typeof report !== "object" || report === null || Array.isArray(report)) return [];
+  const findings = (report as Record<string, unknown>).findings;
+  return Array.isArray(findings) ? findings as VisualReviewFinding[] : [];
+}
+
+/**
+ * 审片只给建议，最终裁决在操作员，所以"批准"这句话必须落到每一条建议上：
+ * 每一条都要有表态，且没有任何一条是被采纳的——采纳意味着还要返修，此时批准自相矛盾。
+ * 没有审片结论（未接入视觉审片、或审片没提出问题）时不做要求。
+ */
+function assertFinalReviewDispositions(delivery: unknown, dispositions: HumanReviewDisposition[] | undefined): void {
+  const findings = currentVisualReviewFindings(delivery);
+  if (findings.length === 0) return;
+  const byKey = new Map((dispositions ?? []).map((disposition) => [disposition.itemKey, disposition]));
+  const undecided = findings.filter((finding) => !byKey.has(visualReviewFindingKey(finding)));
+  if (undecided.length > 0) {
+    throw new Error(
+      `批准前需要对全部 ${findings.length} 条审片结论逐条表态，当前还有 ${undecided.length} 条未表态。`,
+    );
+  }
+  const accepted = findings.filter((finding) => byKey.get(visualReviewFindingKey(finding))?.decision === "accept");
+  if (accepted.length > 0) {
+    throw new Error(
+      `有 ${accepted.length} 条你已采纳的审片结论尚未返修，不能批准发布；请先按它们返修，或改为不采纳并写明理由。`,
+    );
+  }
 }
 
 function visualReviewEvidenceId(context: WorkflowContext, artifactIds: string[]): string {
@@ -11290,11 +12861,12 @@ async function markPaidAssetItemCharged(
 }
 
 function isTrustedPreSubmissionAssetRejection(
-  node: Pick<WorkflowRun<ProductionBrief>["nodeRuns"][number], "executionReceipt">,
+  node: Pick<WorkflowRun<ProductionBrief>["nodeRuns"][number],
+    "error" | "executionReceipt" | "operationRequestId" | "spendAuthorizationId" | "spendPlan">,
   items: readonly PaidAssetLedgerItemSummary[],
 ): boolean {
   const receipt = node.executionReceipt;
-  return receipt?.billing === "metered"
+  const currentReceiptEvidence = receipt?.billing === "metered"
     && receipt.meteredAttemptCount === 0
     && (receipt.meteredFailedAttemptCount ?? 0) === 0
     && (receipt.actualCostCny ?? 0) === 0
@@ -11302,6 +12874,31 @@ function isTrustedPreSubmissionAssetRejection(
     && items.every((item) => item.state === "prepared"
       || item.state === "terminal_failed"
       || item.state === "unknown" && !item.taskId);
+  if (currentReceiptEvidence) return true;
+
+  // 早期 R11 版本在本地预算预检失败时尚未创建 operation ledger，也没有把 worker
+  // 的零调用诊断投影到 receipt。只有精确匹配该预检错误、授权身份和金额，且 ledger
+  // 确实为空时才允许重新报价；其它缺 ledger 的失败继续要求人工核账。
+  if (items.length !== 0
+    || receipt?.billing !== "metered"
+    || receipt.status !== "failed"
+    || !node.operationRequestId
+    || !node.spendPlan
+    || !node.spendAuthorizationId
+    || receipt.spendAuthorizationId !== node.spendAuthorizationId
+    || receipt.meteredAttemptCount !== undefined
+    || receipt.meteredFailedAttemptCount !== undefined
+    || receipt.actualCostCny !== undefined) return false;
+  const match = /^Estimated cost ¥(\d+(?:\.\d{1,2})?) exceeds the authorized maximum ¥(\d+(?:\.\d{1,2})?)\.$/.exec(node.error ?? "");
+  if (!match) return false;
+  const estimatedCostCny = Number(match[1]);
+  const authorizedMaximumCny = Number(match[2]);
+  return Number.isFinite(estimatedCostCny)
+    && Number.isFinite(authorizedMaximumCny)
+    && estimatedCostCny > authorizedMaximumCny
+    && roundCurrency(node.spendPlan.maxCostCny) === roundCurrency(authorizedMaximumCny)
+    && receipt.authorizedCostCny !== undefined
+    && roundCurrency(receipt.authorizedCostCny) === roundCurrency(authorizedMaximumCny);
 }
 
 async function markPaidAssetPreSubmissionRejections(nodeDirectory: string, operationId: string): Promise<void> {

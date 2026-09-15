@@ -3700,6 +3700,53 @@ describe("WorkflowRunner", () => {
       /does not allow action 'reject'/,
     );
   });
+
+  it("validates per-item review dispositions before recording a decision", async () => {
+    const definition: WorkflowDefinition = {
+      id: "final-review-dispositions",
+      name: "Final review dispositions",
+      version: "1.0.0",
+      nodes: [{
+        id: "final-review",
+        label: "Final review",
+        capability: "quality.review",
+        mode: "manual",
+        execute: () => ({
+          status: "needs_human",
+          intervention: {
+            reason: "Approve the final render.",
+            requiredAction: "approve",
+            options: ["approve", "reject"],
+          },
+        }),
+      }],
+    };
+    const runner = new WorkflowRunner();
+    const paused = await runner.run(definition, {});
+    const interventionId = paused.interventions[0]!.id;
+    const approve = (reviewDispositions: unknown) => runner.resume(definition, paused, {
+      interventionId,
+      action: "approve",
+      actor: "director",
+      reviewDispositions,
+    } as Parameters<WorkflowRunner["resume"]>[2]);
+
+    const itemKey = "a".repeat(64);
+    // 送了一份却没有内容，是"我表态了"的假象，不同于"没有需要表态的条目"。
+    await assert.rejects(() => approve([]), /must not be empty/);
+    await assert.rejects(
+      () => approve([{ itemKey, decision: "reject", reason: "维持现状" }, { itemKey, decision: "reject", reason: "维持现状" }]),
+      /distinct items/,
+    );
+    await assert.rejects(() => approve([{ itemKey: "  ", decision: "reject", reason: "维持现状" }]), /item key is required/);
+    await assert.rejects(() => approve([{ itemKey, decision: "maybe" }]), /must be accept or reject/);
+    // 不采纳 = 维持现状，必须写明凭什么维持，否则事后无法复核。
+    await assert.rejects(() => approve([{ itemKey, decision: "reject" }]), /requires a written reason/);
+    await assert.rejects(() => approve([{ itemKey, decision: "reject", reason: "   " }]), /requires a written reason/);
+
+    const accepted = await approve([{ itemKey, decision: "accept" }]);
+    assert.deepEqual(accepted.decisions[0]?.reviewDispositions, [{ itemKey, decision: "accept" }]);
+  });
 });
 
 describe("Topic Intelligence", () => {

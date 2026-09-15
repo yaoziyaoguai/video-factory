@@ -20,6 +20,7 @@ import type {
 } from "./image-generation.js";
 import { ProviderRequestRejectedError } from "./provider-request-error.js";
 import type { AssetPilotReviewer } from "./asset-pilot-review.js";
+import { visualReviewBlocksContinuation } from "./codex-visual-review.js";
 import { quantizeDurationsToFrames } from "./executable-timeline.js";
 
 interface WorkerClient {
@@ -359,7 +360,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       throw new Error("Paid asset execution requires a positive spend authorization.");
     }
     if (estimatedCost > maxCostCny) {
-      throw new Error(`Estimated cost ¥${estimatedCost} exceeds the authorized maximum ¥${maxCostCny}.`);
+      return insufficientAssetAuthorizationFailure(request, estimatedCost, maxCostCny);
     }
     await mkdir(outputDir, { recursive: true });
     const directPlanPath = path.join(outputDir, "direct_generation_plan.json");
@@ -555,6 +556,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     await writeJsonAtomically(planPath, plan);
     await writeJobs(jobsPath, jobs);
     if (ledgerPath && openedLedger) {
+      if (failedJob) closeUnsubmittedItemsAfterTerminalOperation(openedLedger.ledger, failedJob.error);
       openedLedger.ledger.completed = openedLedger.ledger.items.every((item) => item.state === "materialized");
       await writeGenerationLedger(ledgerPath, openedLedger.ledger);
     }
@@ -641,38 +643,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     assertExactScenePositions("Director plan", routedShots.map((shot) => shot.scenePosition), scenes);
     const modelSelections = optionalStringRecord(parameters.modelSelections, "modelSelections");
     const byScenePosition = new Map(routedShots.map((route) => [route.scenePosition, route]));
-    const rootByScenePosition = new Map<number, RoutedShot>();
-    for (const route of routedShots) {
-      const visited = new Set<number>([route.scenePosition]);
-      let current = route;
-      while (true) {
-        const reuseFrom = assetReuseSourceScenePosition(current);
-        if (reuseFrom === undefined) {
-          rootByScenePosition.set(route.scenePosition, current);
-          break;
-        }
-        const source = byScenePosition.get(reuseFrom);
-        if (reuseFrom >= current.scenePosition || !source || visited.has(reuseFrom)) {
-          throw new Error(`Scene ${current.scenePosition} must reuse an earlier director scene, received ${reuseFrom}.`);
-        }
-        visited.add(reuseFrom);
-        current = source;
-      }
-    }
-    const timelineScenes = [...scenes].sort((left, right) => left.position - right.position);
-    const frameCountsByScenePosition = new Map(
-      quantizeDurationsToFrames(timelineScenes.map((scene) => scene.duration))
-        .map((frameCount, index) => [timelineScenes[index]!.position, frameCount] as const),
-    );
-    const requiredFramesByRoot = new Map<number, number>();
-    for (const route of routedShots) {
-      const root = rootByScenePosition.get(route.scenePosition)!;
-      const requiredFrames = Math.round(route.sourceInSeconds * 30) + frameCountsByScenePosition.get(route.scenePosition)!;
-      requiredFramesByRoot.set(
-        root.scenePosition,
-        Math.max(requiredFramesByRoot.get(root.scenePosition) ?? 0, requiredFrames),
-      );
-    }
+    const requiredDurationByRoot = requiredGeneratedAssetDurationSecondsByRoot(scenes, routedShots);
     const generatedRoutes = routedShots.flatMap((route) => {
       const reuseFrom = assetReuseSourceScenePosition(route);
       const referenceFrom = route.referenceFromScenePosition;
@@ -714,9 +685,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         throw new Error(`Provider '${providerId}' is not configured.`);
       }
       const compiledPrompt = compileGenerationPrompt(providerId, route, scene);
-      const requiredUseDurationSeconds = (
-        requiredFramesByRoot.get(route.scenePosition) ?? frameCountsByScenePosition.get(route.scenePosition)!
-      ) / 30;
+      const requiredUseDurationSeconds = requiredDurationByRoot.get(route.scenePosition)!;
       const requestScene = binding.mediaType === "video"
         ? { ...scene, duration: requiredUseDurationSeconds }
         : scene;
@@ -785,7 +754,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       throw new Error("Paid asset execution requires a positive spend authorization.");
     }
     if (estimatedCost > maxCostCny) {
-      throw new Error(`Estimated cost ¥${estimatedCost} exceeds the authorized maximum ¥${maxCostCny}.`);
+      return insufficientAssetAuthorizationFailure(request, estimatedCost, maxCostCny);
     }
 
     const baseline = await this.options.fallback.run(structuredClone(request));
@@ -1026,6 +995,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     await writeJsonAtomically(planPath, plan);
     await writeJobs(jobsPath, jobs);
     if (ledgerPath && openedLedger) {
+      if (failedJob) closeUnsubmittedItemsAfterTerminalOperation(openedLedger.ledger, failedJob.error);
       openedLedger.ledger.completed = openedLedger.ledger.items.every((item) => item.state === "materialized");
       await writeGenerationLedger(ledgerPath, openedLedger.ledger);
     }
@@ -1152,7 +1122,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         "Pilot source review before subsequent paid generation.", item.scenePosition));
       const report = result.execution.output;
       plan.sourceVisualReview = report;
-      if (report.recommendation !== "approve" || report.findings.some((finding) => finding.severity !== "info")) {
+      // 本闸门只为"是否继续为同方案其余镜头付费"负责，放行判据见 visualReviewBlocksContinuation：
+      // 提示词要求模型诚实记录无法核验项，若把该咨询项当作阻断条件，任何未覆盖项都会永久停掉付费生成。
+      if (visualReviewBlocksContinuation(report)) {
         job.pilotReview = "rejected";
         throw new AssetPilotReviewError(`镜头 ${item.scenePosition} 试片未通过，已停止后续付费生成。已保留试片与审查报告。${report.summary} ${report.findings.map((finding) => finding.suggestion).join(" ")} 请调整对应方案后重新报价；已生成素材不会自动重买。`);
       }
@@ -1631,6 +1603,31 @@ function zeroMeteredAttemptFailure(response: WorkerResponse): WorkerResponse {
   };
 }
 
+function insufficientAssetAuthorizationFailure(
+  request: Record<string, unknown>,
+  estimatedCostCny: number,
+  authorizedMaximumCny: number,
+): WorkerResponse {
+  return {
+    protocolVersion: "video-factory/worker-v1",
+    commandId: requiredString(request.commandId, "commandId"),
+    status: "failed",
+    artifacts: [],
+    error: {
+      code: "ASSET_AUTHORIZATION_INSUFFICIENT",
+      message: `Estimated cost ¥${estimatedCostCny} exceeds the authorized maximum ¥${authorizedMaximumCny}.`,
+    },
+    // 失败发生在本地预算预检，任何媒体 Provider create 都尚未执行。
+    diagnostics: {
+      providerOutcomeKnown: true,
+      meteredAttemptCount: 0,
+      meteredFailedAttemptCount: 0,
+      actualCostCny: 0,
+      actualCostSource: "configured_rate",
+    },
+  };
+}
+
 export function estimateVideoGenerationCostCny(
   sceneDurationSeconds: number,
   estimatedCnyPerClip: number,
@@ -1856,9 +1853,13 @@ function configuredCost(jobs: GenerationJob[]): number {
 }
 
 export function assetReuseSourceScenePosition(
-  route: { reuseFromScenePosition?: number; query: string },
+  route: { reuseFromScenePosition?: number | null; query: string },
 ): number | undefined {
-  if (route.reuseFromScenePosition !== undefined) return route.reuseFromScenePosition;
+  // 模型 JSON Schema 用 null 表示“没有复用根”。它必须与字段缺失同义，否则根镜头会在
+  // 可执行计划编译时被误判成非法复用；真正的数字仍交给各业务边界校验范围和先后关系。
+  if (route.reuseFromScenePosition !== undefined && route.reuseFromScenePosition !== null) {
+    return route.reuseFromScenePosition;
+  }
   const match = /^REUSE_ONLY\s+scene\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/i.exec(route.query);
   if (!match) return undefined;
   const token = match[1]?.toLowerCase() ?? "";
@@ -1875,6 +1876,58 @@ export function assetReuseSourceScenePosition(
     ten: 10,
   };
   return /^\d+$/.test(token) ? Number(token) : words[token];
+}
+
+/**
+ * 计算每条独立母片必须覆盖的完整源区间。报价和执行必须共用这一个口径：复用镜头虽然
+ * 不会新增购买，但它的 sourceIn + cut 时长可能要求母片生成得更长。
+ */
+export function requiredGeneratedAssetDurationSecondsByRoot(
+  scenes: readonly { position: number; duration: number }[],
+  routes: readonly {
+    scenePosition: number;
+    sourceInSeconds?: number;
+    reuseFromScenePosition?: number;
+    query: string;
+  }[],
+): Map<number, number> {
+  const sceneByPosition = new Map(scenes.map((scene) => [scene.position, scene] as const));
+  const routeByPosition = new Map(routes.map((route) => [route.scenePosition, route] as const));
+  if (sceneByPosition.size !== scenes.length || routeByPosition.size !== routes.length) {
+    throw new Error("Script scenes and director routes must have unique positions.");
+  }
+  const orderedScenes = [...scenes].sort((left, right) => left.position - right.position);
+  const frameCountsByScenePosition = new Map(
+    quantizeDurationsToFrames(orderedScenes.map((scene) => scene.duration))
+      .map((frameCount, index) => [orderedScenes[index]!.position, frameCount] as const),
+  );
+  const durationByRoot = new Map<number, number>();
+  for (const route of routes) {
+    const frameCount = frameCountsByScenePosition.get(route.scenePosition);
+    if (frameCount === undefined) {
+      throw new Error(`Director scene ${route.scenePosition} has no matching script scene.`);
+    }
+    const sourceInSeconds = route.sourceInSeconds ?? 0;
+    if (!Number.isFinite(sourceInSeconds) || sourceInSeconds < 0) {
+      throw new Error(`Director scene ${route.scenePosition} has an invalid sourceInSeconds.`);
+    }
+    const visited = new Set<number>([route.scenePosition]);
+    let root = route;
+    while (true) {
+      const reuseFrom = assetReuseSourceScenePosition(root);
+      if (reuseFrom === undefined) break;
+      const source = routeByPosition.get(reuseFrom);
+      if (reuseFrom >= root.scenePosition || !source || visited.has(reuseFrom)) {
+        throw new Error(`Scene ${root.scenePosition} must reuse an earlier director scene, received ${reuseFrom}.`);
+      }
+      visited.add(reuseFrom);
+      root = source;
+    }
+    const requiredFrames = Math.round(sourceInSeconds * 30) + frameCount;
+    const currentFrames = Math.round((durationByRoot.get(root.scenePosition) ?? 0) * 30);
+    durationByRoot.set(root.scenePosition, Math.max(currentFrames, requiredFrames) / 30);
+  }
+  return durationByRoot;
 }
 
 function retainedFinalAssetArtifacts(
@@ -2054,10 +2107,10 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
       throw new Error(`Director shot ${index + 1} sourceInSeconds must be 0 for static media.`);
     }
     const preferredProviderId = requiredString(shot.preferredProviderId, `Director shot ${index + 1} preferredProviderId`);
-    const reuseFromScenePosition = shot.reuseFromScenePosition === undefined
+    const reuseFromScenePosition = shot.reuseFromScenePosition === undefined || shot.reuseFromScenePosition === null
       ? undefined
       : boundedInteger(shot.reuseFromScenePosition, `Director shot ${index + 1} reuseFromScenePosition`, 1, 10_000);
-    const referenceFromScenePosition = shot.referenceFromScenePosition === undefined
+    const referenceFromScenePosition = shot.referenceFromScenePosition === undefined || shot.referenceFromScenePosition === null
       ? undefined
       : boundedInteger(shot.referenceFromScenePosition, `Director shot ${index + 1} referenceFromScenePosition`, 1, 10_000);
     return {
@@ -3189,6 +3242,19 @@ function isExistingPaidTask(item: PaidAssetOperationItem | undefined): boolean {
     || item?.state === "provider_succeeded"
     || item?.state === "materialized"
   );
+}
+
+function closeUnsubmittedItemsAfterTerminalOperation(
+  ledger: PaidAssetOperationLedger,
+  failure: string | undefined,
+): void {
+  for (const item of ledger.items) {
+    if (item.state !== "prepared") continue;
+    item.state = "terminal_failed";
+    item.error = `Operation ended before provider submission${failure ? `: ${failure}` : "."}`;
+    delete item.actualCostCny;
+    delete item.actualCostSource;
+  }
 }
 
 function acceptedResultFromLedger(item: PaidAssetOperationItem): { taskId: string; url: string } {

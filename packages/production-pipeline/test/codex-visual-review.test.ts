@@ -10,7 +10,10 @@ import {
   IndependentDualVisualReviewAgent,
   IndependentVisualReviewError,
   RoleAgentLoopError,
+  VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
   VisualReviewFallbackError,
+  assertCurrentVisualReviewContract,
+  claimEvidenceSufficient,
   runRoleAgentLoop,
   validateVisualReviewReport,
   type CodexPreparedOperation,
@@ -21,6 +24,7 @@ import {
   type VisualReviewAgentInput,
   type VisualReviewMediaPayload,
   type VisualReviewReport,
+  visualReviewBlocksContinuation,
 } from "../src/index.js";
 
 const media: VisualReviewMediaPayload = {
@@ -39,6 +43,15 @@ const sourceRangeMedia: VisualReviewMediaPayload = {
   ],
 };
 
+// 同一批镜头重新出帧后的证据：时长与镜位不变，帧内容与哈希已更新。
+const regeneratedMedia: VisualReviewMediaPayload = {
+  durationMs: 6_000,
+  frames: [
+    { ...media.frames[0]!, sha256: "c".repeat(64) },
+    media.frames[1]!,
+  ],
+};
+
 const report = {
   version: "video-factory/visual-review-v1",
   summary: "画面整体稳定，第二镜字幕略密。",
@@ -49,7 +62,7 @@ const report = {
     endTimecodeMs: 3_500,
     scenePosition: 1,
     targetNodeId: "assets",
-    evidenceStatus: "failed",
+    claimType: "static", evidenceStatus: "failed",
     evidenceFrameSha256: "b".repeat(64),
     nextAction: "rework_asset",
     category: "legibility",
@@ -60,6 +73,9 @@ const report = {
   confidence: 0.86,
   recommendation: "revise",
 } as const;
+
+/** report 是 as const 的只读夹具；需要传可变报告的用例用它的副本。 */
+const mutableReport: VisualReviewReport = { ...report, findings: report.findings.map((finding) => ({ ...finding })) };
 
 const passingAudit = {
   version: "video-factory/role-audit-v1",
@@ -165,10 +181,115 @@ describe("CodexVisualReviewAgent", () => {
     ]);
   });
 
+  it("reviews a paid pilot with both independent models instead of one", async () => {
+    const calls: string[] = [];
+    const reviewer = (id: string, modelId: string, output: VisualReviewReport): VisualReviewAgent => ({
+      id,
+      modelId,
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async (input) => {
+        calls.push(id);
+        assert.equal(input.reviewStage, "source_assets");
+        assert.equal(Object.hasOwn(input, "preparedMedia"), false);
+        return { output, executedProviderId: id, executedModelId: modelId };
+      },
+    });
+    const lenientPilot: VisualReviewReport = {
+      ...mutableReport,
+      summary: "Codex 认为试片可用。",
+      scores: { composition: 92, continuity: 90, pacing: 88, legibility: 91, safety: 96 },
+      findings: [],
+      confidence: 0.93,
+      recommendation: "approve",
+    };
+    const strictPilot: VisualReviewReport = {
+      ...mutableReport,
+      summary: "GLM 认为试片灯位不连续。",
+      scores: { ...mutableReport.scores, continuity: 60 },
+    };
+    const subject = new IndependentDualVisualReviewAgent({
+      primary: reviewer("glm-visual-review-v1", "glm-5.3-flash", lenientPilot),
+      secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol", strictPilot),
+      media: { prepare: async () => { throw new Error("A pilot review has no sampled sequence to prepare."); } },
+    });
+
+    const execution = await subject.reviewDetailed({
+      runRoot: "/run",
+      assetPlanPath: "/run/assets.json",
+      reviewStage: "source_assets",
+      scenePositions: [3],
+    });
+
+    assert.equal(calls.length, 2);
+    assert.deepEqual(new Set(calls), new Set(["glm-visual-review-v1", "codex-visual-review-v1"]));
+    // 闸门取保守侧：一个模型说不可以用，试片就不为后续付费放行。
+    assert.equal(execution.output.scores.continuity, 60);
+    assert.equal(visualReviewBlocksContinuation(execution.output), true);
+    assert.equal(execution.output.findings.some((finding) => finding.description === "字幕行数偏多。"), true);
+    assert.deepEqual(execution.independentReviews?.map(({ providerId, modelId }) => ({ providerId, modelId })), [
+      { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" },
+      { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol" },
+    ]);
+  });
+
+  it("refuses to clear a paid pilot when only one of the two branches reported", async () => {
+    const subject = new IndependentDualVisualReviewAgent({
+      primary: {
+        id: "glm-visual-review-v1",
+        modelId: "glm-5.3-flash",
+        review: async () => mutableReport,
+      },
+      secondary: {
+        id: "codex-visual-review-v1",
+        modelId: "gpt-5.6-sol",
+        review: async () => { throw new Error("Codex 审片暂不可用。"); },
+      },
+      media: { prepare: async () => media },
+    });
+
+    await assert.rejects(
+      () => subject.reviewDetailed({ runRoot: "/run", reviewStage: "source_assets", scenePositions: [3] }),
+      (error: unknown) => {
+        assert.ok(error instanceof IndependentVisualReviewError);
+        // 失败分支要指名道姓，且已跑完的那一支必须带着结果留下——重试时它不该被再跑一遍。
+        assert.equal(error.completedReviews.length, 1);
+        assert.equal(error.completedReviews[0]?.modelId, "glm-5.3-flash");
+        assert.equal(error.failures.length, 1);
+        assert.equal(error.failures[0]?.modelId, "gpt-5.6-sol");
+        assert.match(String((error.failures[0]?.error as Error).message), /Codex 审片暂不可用/);
+        return /试片双模型复审尚未完成.*gpt-5\.6-sol/.test(error.message);
+      },
+    );
+  });
+
+  it("refuses a pilot cleared by two nominal branches of the same actual model", async () => {
+    // 两个分支各自按自己的名义身份回话，但落到同一个实际模型。
+    const sameIdentity = new IndependentDualVisualReviewAgent({
+      primary: {
+        id: "glm-visual-review-v1",
+        modelId: "glm-5.3-flash",
+        review: async () => mutableReport,
+        reviewDetailed: async () => ({ output: mutableReport, executedProviderId: "glm-visual-review-v1", executedModelId: "glm-5.3-flash" }),
+      },
+      secondary: {
+        id: "codex-visual-review-v1",
+        modelId: "gpt-5.6-sol",
+        review: async () => mutableReport,
+        reviewDetailed: async () => ({ output: mutableReport, executedProviderId: "glm-visual-review-v1", executedModelId: "glm-5.3-flash" }),
+      },
+      media: { prepare: async () => media },
+    });
+
+    await assert.rejects(
+      () => sameIdentity.reviewDetailed({ runRoot: "/run", reviewStage: "source_assets", scenePositions: [3] }),
+      /不能作为独立复审/,
+    );
+  });
+
   it("preserves more than fifty distinct findings across the two independent reviews", async () => {
     const findingsFor = (prefix: string) => Array.from({ length: 26 }, (_, index) => ({
       ...report.findings[0],
-      evidenceStatus: "satisfied" as const,
+      claimType: "static" as const, evidenceStatus: "satisfied" as const,
       nextAction: "none" as const,
       severity: "info" as const,
       description: `${prefix} 独立发现 ${index + 1}`,
@@ -577,6 +698,10 @@ describe("CodexVisualReviewAgent", () => {
     assert.match(
       (calls[1]?.payload.criteria as string[]).join("\n"),
       /同一人物、物件或空间.*Provider.*无法保证.*visual-direction 或 script.*replan_upstream/,
+    );
+    assert.match(
+      (calls[1]?.payload.criteria as string[]).join("\n"),
+      /约、建议或参考时间.*不是硬下限.*明确的最迟、至少、不得或用户锁定要求/,
     );
     assert.match(
       JSON.stringify(calls[1]?.payload.context),
@@ -1306,7 +1431,7 @@ describe("CodexVisualReviewAgent", () => {
       findings: [{
         ...report.findings[0],
         severity: "info",
-        evidenceStatus: "not_observed",
+        claimType: "static", evidenceStatus: "not_observed",
         evidenceFrameSha256: null,
         nextAction: "inspect_existing_media",
         description: "稀疏抽帧没有覆盖动作结果。",
@@ -1345,6 +1470,118 @@ describe("CodexVisualReviewAgent", () => {
       confidence: 0.9,
       recommendation: "approve",
     }, 6_000).recommendation, "approve");
+  });
+
+  // 证据能力规则按主张类型分派，不按题材分派：静帧只能判定某一刻的画面状态，
+  // 与片子是口播、教程还是分镜叙事无关。这里逐类核对边界，并确认规则不会反过来误伤 static。
+  it("bounds failed claims by what the sampled evidence can actually settle", () => {
+    const sparseFrames = media.frames;
+    const frozenFrames = [
+      { timecodeMs: 2_000, sha256: "d".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+      { timecodeMs: 2_500, sha256: "d".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+      { timecodeMs: 3_000, sha256: "d".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+    ];
+    const sequenceFrames = [
+      { timecodeMs: 2_000, sha256: "e".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+      { timecodeMs: 2_500, sha256: "f".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+      { timecodeMs: 3_000, sha256: "b".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+      { timecodeMs: 3_500, sha256: "1".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+    ];
+    const failing = (overrides: Record<string, unknown>, sha: string) => ({
+      ...report,
+      findings: [{ ...report.findings[0], evidenceFrameSha256: sha, ...overrides }],
+    });
+
+    assert.equal(claimEvidenceSufficient("static", ["a", "b"]), true);
+    assert.equal(claimEvidenceSufficient("motion", ["a", "b"]), false);
+    assert.equal(claimEvidenceSufficient("motion", ["d", "d", "d"]), true);
+    assert.equal(claimEvidenceSufficient("motion", ["e", "f", "b", "1"]), true);
+    assert.equal(claimEvidenceSufficient("non_visual", ["e", "f", "b", "1"]), false);
+
+    assert.throws(
+      () => validateVisualReviewReport(
+        failing({ claimType: "motion", evidenceStatus: "failed", severity: "warning", nextAction: "rework_asset" }, "b".repeat(64)),
+        6_000, [1], sparseFrames,
+      ),
+      /cannot fail a motion claim/,
+    );
+    assert.doesNotThrow(() => validateVisualReviewReport(
+      failing({ claimType: "motion", evidenceStatus: "failed", severity: "warning", nextAction: "rework_asset" }, "d".repeat(64)),
+      6_000, [1], frozenFrames,
+    ));
+    assert.doesNotThrow(() => validateVisualReviewReport(
+      failing({ claimType: "motion", evidenceStatus: "failed", severity: "warning", nextAction: "rework_asset" }, "b".repeat(64)),
+      6_000, [1], sequenceFrames,
+    ));
+    // 采多少帧都采不到声音，所以 non_visual 的 failed 不因帧数增加而变得合法。
+    assert.throws(
+      () => validateVisualReviewReport(
+        failing({ claimType: "non_visual", evidenceStatus: "failed", severity: "warning", nextAction: "rework_asset" }, "b".repeat(64)),
+        6_000, [1], sequenceFrames,
+      ),
+      /cannot fail a non_visual claim/,
+    );
+    const unobserved = validateVisualReviewReport(
+      failing({ claimType: "non_visual", evidenceStatus: "not_observed", severity: "info", nextAction: "inspect_existing_media", evidenceFrameSha256: null }, "b".repeat(64)),
+      6_000, [1], sparseFrames,
+    );
+    assert.equal(unobserved.findings[0]?.claimType, "non_visual");
+    assert.equal(unobserved.findings[0]?.nextAction, "inspect_existing_media");
+    assert.doesNotThrow(() => validateVisualReviewReport(
+      failing({ claimType: "static", evidenceStatus: "failed", severity: "warning", nextAction: "rework_asset" }, "b".repeat(64)),
+      6_000, [1], sparseFrames,
+    ));
+  });
+
+  // 下游"是否继续"闸门（试片付费、源素材预检）的放行判据。
+  // 关键区分：归一化会把 not_observed 降为 revise，但它是证据合同规定的咨询项
+  // （info + inspect_existing_media = 先查看已有素材，不是返工），不得阻断下游；
+  // 而真正的缺陷与未达门槛的评分/置信度必须继续阻断。
+  describe("visualReviewBlocksContinuation", () => {
+    const clean = {
+      ...report,
+      scores: { composition: 94, continuity: 94, pacing: 94, legibility: 94, safety: 94 },
+      findings: [],
+      confidence: 0.95,
+      recommendation: "approve",
+    } satisfies VisualReviewReport;
+
+    const advisory = validateVisualReviewReport({
+      ...report,
+      scores: { composition: 94, continuity: 94, pacing: 94, legibility: 94, safety: 94 },
+      findings: [{
+        timecodeMs: 0, startTimecodeMs: 0, endTimecodeMs: 0,
+        scenePosition: 1, targetNodeId: "assets", claimType: "static", evidenceStatus: "not_observed",
+        evidenceFrameSha256: null, nextAction: "inspect_existing_media", category: "continuity", severity: "info",
+        description: "稀疏抽帧没有覆盖动作结果。", suggestion: "先查看已有素材，不据此重做此镜头。",
+      }],
+      confidence: 0.95,
+      recommendation: "approve",
+    }, 6_000, [1], media.frames);
+
+    it("does not block on a clean approval or on an advisory not_observed finding", () => {
+      assert.equal(visualReviewBlocksContinuation(clean), false);
+      assert.equal(advisory.recommendation, "revise", "归一化仍按 fail-closed 把 not_observed 降为 revise");
+      assert.equal(visualReviewBlocksContinuation(advisory), false,
+        "咨询项不是缺陷，不得阻断下游继续（这正是试片闸门此前的死锁）");
+    });
+
+    it("still blocks on defects, rejection, and scores or confidence below the pass bar", () => {
+      assert.equal(visualReviewBlocksContinuation({ ...clean, recommendation: "reject" }), true,
+        "模型明确否决时必须阻断");
+      assert.equal(visualReviewBlocksContinuation({
+        ...clean,
+        findings: [...report.findings],
+        recommendation: "revise",
+      }), true, "需要返工的缺陷（warning 级 failed 证据）必须阻断");
+      assert.equal(visualReviewBlocksContinuation({
+        ...clean,
+        scores: { ...clean.scores, pacing: 74 },
+        recommendation: "revise",
+      }), true, "单项评分跌破 75 必须阻断");
+      assert.equal(visualReviewBlocksContinuation({ ...clean, confidence: 0.6, recommendation: "revise" }), true,
+        "confidence 跌破 0.7 必须阻断");
+    });
   });
 
   it("resumes a saved visual-review request without preprocessing the same media again", async () => {
@@ -1402,6 +1639,92 @@ describe("CodexVisualReviewAgent", () => {
     assert.equal(observed.length, 1);
     assert.equal(mediaCalls, 1);
     assert.match(execution.evidenceSnapshotId ?? "", /^[a-f0-9]{64}$/);
+  });
+
+  it("reviews regenerated evidence under a new identity instead of reusing the previous one", async () => {
+    let stored: unknown;
+    let mediaVersion = 0;
+    const requestIds: string[] = [];
+    const checkpoint = {
+      key: "visual-review-evidence",
+      load: async () => stored,
+      save: async (value: unknown) => { stored = structuredClone(value); },
+    };
+    const client = {
+      runTask: async () => report,
+      runTaskDetailed: async (kind: CodexTaskKind, _payload: unknown, requestId?: string): Promise<CodexTaskExecution> => {
+        if (kind === "visual-review") {
+          requestIds.push(requestId!);
+          return { output: report };
+        }
+        return { output: passingAudit };
+      },
+    };
+    const agent = new CodexVisualReviewAgent({
+      client,
+      // 帧被重新生成：证据快照变化，但节点声明的输入路径完全不变。
+      media: { prepare: async () => (mediaVersion === 0 ? media : regeneratedMedia) },
+    });
+    const input = { videoPath: "/run/final.mp4", runRoot: "/run", agentLoopCheckpoint: checkpoint };
+
+    const first = await agent.reviewDetailed(input);
+    mediaVersion = 1;
+    const second = await agent.reviewDetailed(input);
+    const third = await agent.reviewDetailed(input);
+
+    assert.equal(first.agentLoop?.status, "passed");
+    assert.equal(second.agentLoop?.status, "passed");
+    // 合同锁定当次证据快照，否则证据换了身份不换，物理请求会与历史任务撞 binding_conflict。
+    assert.ok(first.agentLoop?.contractVersion.endsWith(`|evidence:${first.evidenceSnapshotId}`));
+    assert.notEqual(second.evidenceSnapshotId, first.evidenceSnapshotId);
+    assert.equal(requestIds.length, 2);
+    assert.notEqual(requestIds[1], requestIds[0]);
+    // 证据未变时必须回放已通过的结论，不能每次都重开身份造成重复付费。
+    assert.equal(third.agentLoop?.status, "passed");
+    assert.equal(requestIds.length, 2);
+  });
+});
+
+// 报告是制品，会跨构建存活。升级收紧审片合同之后，旧运行里那份报告仍是"当前有效
+// 版本"，但它的结论是按旧要求下的。此处保证消费方拿到的是"原因 + 动作"，而不是一条
+// 操作员无法据以行动的字段校验错误。
+describe("assertCurrentVisualReviewContract", () => {
+  const stamped = (reviewContractVersion?: string) => ({
+    version: "video-factory/visual-review-v1",
+    findings: [],
+    reviewScope: {
+      reviewStage: "rendered_video",
+      ...(reviewContractVersion === undefined ? {} : { reviewContractVersion }),
+    },
+  });
+
+  it("accepts a report produced under the current contract", () => {
+    assert.doesNotThrow(() => assertCurrentVisualReviewContract(stamped(VISUAL_REVIEW_AGENT_CONTRACT_VERSION)));
+  });
+
+  it("refuses an older report with the reason and the action", () => {
+    for (const value of [stamped(), stamped("visual-review-v15|claim-evidence-capability-v0")]) {
+      assert.throws(
+        () => assertCurrentVisualReviewContract(value),
+        (error: unknown) => error instanceof Error
+          && /更早的审片合同裁出来的/.test(error.message)
+          && error.message.includes(VISUAL_REVIEW_AGENT_CONTRACT_VERSION)
+          && /请先补查成片/.test(error.message),
+      );
+    }
+    // 没有标记的报告要能被认出是"早于合同标记"，而不是被当成某一份具体合同。
+    assert.throws(() => assertCurrentVisualReviewContract(stamped()), /早于合同标记/);
+    // 有标记但不是当前合同的，要报出它自己那一版，便于判断升级跨度。
+    assert.throws(
+      () => assertCurrentVisualReviewContract(stamped("visual-review-v15|claim-evidence-capability-v0")),
+      /claim-evidence-capability-v0/,
+    );
+  });
+
+  it("refuses a report whose scope is missing or malformed instead of reading it as current", () => {
+    for (const value of [undefined, null, "report", [], {}, { reviewScope: null }, { reviewScope: 7 }]) {
+      assert.throws(() => assertCurrentVisualReviewContract(value), /更早的审片合同裁出来的/);
+    }
   });
 });
 

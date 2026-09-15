@@ -122,16 +122,34 @@ export interface ArtifactDraft<TData = unknown> {
 export type HumanDecisionAction = "approve" | "request_changes" | "reject";
 
 export interface HumanInterventionDraft {
+  kind?: "creative_review";
   reason: string;
   requiredAction: HumanDecisionAction;
   options?: HumanDecisionAction[];
   artifactIds?: string[];
+  continuation?: {
+    stage: "treatment" | "script" | "director";
+    reviewRevision: number;
+    draftSha256: string;
+  };
 }
 
 export interface HumanIntervention extends HumanInterventionDraft {
   id: string;
   nodeId: string;
   createdAt: string;
+}
+
+/**
+ * 人工对审片结论的逐条表态。采纳（accept）表示认可这条判断、要按它返修；
+ * 不采纳（reject）表示维持现状不改，因此必须写明理由——不写理由的"我不认可"
+ * 事后无法复核，等于把审片结论直接丢掉。
+ */
+export interface HumanReviewDisposition {
+  /** 指向被表态的那一条问题。由问题内容算出，不含版本号与数组下标，重跑审片后同一问题仍是同一个键。 */
+  itemKey: string;
+  decision: "accept" | "reject";
+  reason?: string;
 }
 
 export interface HumanDecisionDraft {
@@ -141,6 +159,8 @@ export interface HumanDecisionDraft {
   note?: string;
   expectedRunRevision?: number;
   reviewEvidenceId?: string | null;
+  /** 逐条表态，成片终审用它取代"整片一句理由"的粗表态。未表态的问题不属于任何一侧，由调用方决定是否必须覆盖。 */
+  reviewDispositions?: HumanReviewDisposition[];
 }
 
 export interface HumanDecision extends HumanDecisionDraft {
@@ -289,6 +309,7 @@ export interface SpendPlan {
   maxCostCny: number;
   maxAttempts: number;
   items?: SpendQuoteItem[];
+  excludedItems?: SpendExcludedItem[];
   createdAt: string;
 }
 
@@ -300,10 +321,21 @@ export interface SpendQuoteItem {
   estimatedCostCny: number;
 }
 
+// 报价只列需要付费的条目，因此"不花钱的部分"在确认页上原本完全不出现——操作员看到
+// 「制作内容」写整片、清单却少几行时，无法区分"这几镜头免费"与"这几镜头被漏掉了"。
+// 这个字段只承载知情信息，不参与任何计费、授权或额度计算。
+export interface SpendExcludedItem {
+  id: string;
+  label: string;
+  /** 面向操作员的免收费理由，例如「复用镜头 1 的画面，不重复购买」。 */
+  note: string;
+}
+
 export interface SpendQuote {
   estimatedCostCny: number;
   maxCostCny: number;
   items?: SpendQuoteItem[];
+  excludedItems?: SpendExcludedItem[];
   // 只有解析后的当前输入明确不产生任何计费调用时，Provider 才能声明这一轮无需人工授权。
   requiresAuthorization?: boolean;
 }
@@ -434,6 +466,22 @@ export interface WorkflowRun<TInitialInput = unknown> {
   executionReceipts?: NodeExecutionReceipt[];
   spendAuthorizations?: SpendAuthorization[];
   consumedSpendAuthorizationIds?: string[];
+  /**
+   * 创作讨论命令的持久化幂等账本。它只记录命令身份和终态，不复制创作正文；
+   * 正文与消息仍由 creative-planning checkpoint 作为唯一权威。
+   */
+  creativeReviewOperations?: Array<{
+    commandId: string;
+    requestDigest: string;
+    action: "discuss" | "adopt_proposal" | "undo_draft" | "confirm" | "return_to_stage";
+    stage: "treatment" | "script" | "director";
+    status: "running" | "completed" | "failed" | "unknown";
+    acceptedAt: string;
+    finishedAt?: string;
+    /** 原始用户命令与图恢复输入；用于进程重启后观察/续接同一物理请求。 */
+    request?: Record<string, unknown>;
+    resume?: unknown;
+  }>;
 }
 
 export interface WorkflowContext<TInitialInput = unknown> {

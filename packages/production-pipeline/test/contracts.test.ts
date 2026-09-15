@@ -27,6 +27,19 @@ const validBrief = {
 } as const;
 
 describe("ProductionBrief", () => {
+  it("round-trips budget intention without creating authorization or swallowing invalid inputs", () => {
+    for (const value of [undefined, 0, 35, 35.25, 100_000]) {
+      const input = { ...validBrief, ...(value !== undefined ? { budgetIntentionCny: value } : {}) };
+      const parsed = pipeline.parseBrief(input);
+      assert.equal(parsed.budgetIntentionCny, value);
+      assert.equal(pipeline.parseBrief(JSON.parse(JSON.stringify(parsed))).budgetIntentionCny, value);
+      assert.equal(parsed.economics.allowMeteredProviders, false);
+      assert.equal(parsed.economics.maxCostCny, undefined);
+    }
+    for (const value of [-1, NaN, Infinity, "35", null, 100_001]) {
+      assert.throws(() => pipeline.parseBrief({ ...validBrief, budgetIntentionCny: value }), /budgetIntentionCny/);
+    }
+  });
   it("accepts a versioned brief and preserves explicit provider bindings", () => {
     const parseBrief = (pipeline as { parseBrief?: (value: unknown) => unknown }).parseBrief;
     assert.equal(typeof parseBrief, "function");
@@ -44,6 +57,21 @@ describe("ProductionBrief", () => {
     });
   });
 
+  it("strips retired template inputs but rejects every other unknown top-level field", () => {
+    const parsed = pipeline.parseBrief({
+      ...validBrief,
+      template: { templateId: "retired-template" },
+      templateSnapshot: { templateId: "retired-template", templateVersion: 3 },
+    });
+
+    assert.equal("template" in parsed, false);
+    assert.equal("templateSnapshot" in parsed, false);
+    assert.throws(
+      () => pipeline.parseBrief({ ...validBrief, misspelledVoiceDirection: true }),
+      /misspelledVoiceDirection.*not allowed/,
+    );
+  });
+
   it("preserves an explicit duration range without inventing one for persisted legacy briefs", () => {
     const ranged = pipeline.parseBrief({
       ...validBrief,
@@ -53,6 +81,16 @@ describe("ProductionBrief", () => {
 
     assert.deepEqual(ranged.durationRange, { minSeconds: 20, maxSeconds: 34 });
     assert.equal(pipeline.parsePersistedBrief(validBrief).durationRange, undefined);
+  });
+
+  it("preserves a bounded visual intent, omits blanks, and rejects silent truncation", () => {
+    const exact = "画".repeat(1000);
+    assert.equal(pipeline.parseBrief({ ...validBrief, visualIntent: `  ${exact}  ` }).visualIntent, exact);
+    assert.equal(pipeline.parseBrief({ ...validBrief, visualIntent: "   " }).visualIntent, undefined);
+    assert.throws(
+      () => pipeline.parseBrief({ ...validBrief, visualIntent: "画".repeat(1001) }),
+      /visualIntent.*1000/,
+    );
   });
 
   it("fails closed when the executable-plan workflow omits its planning inputs", () => {

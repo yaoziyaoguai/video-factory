@@ -85,6 +85,8 @@ export interface ProductionSpendRequest {
 }
 
 export interface ProductionLedgerItem {
+  /** 所属付费操作；用于在宿主已确认该操作终止时释放尚未提交的预留。 */
+  operationId?: string;
   itemRequestId: string;
   quoteItemId: string;
   state: "prepared" | "submitted" | "provider_succeeded" | "materialized" | "terminal_failed" | "unknown";
@@ -95,7 +97,8 @@ export interface ProductionLedgerItem {
 }
 
 function sameLedgerItemFact(left: ProductionLedgerItem, right: ProductionLedgerItem): boolean {
-  return left.itemRequestId === right.itemRequestId
+  return left.operationId === right.operationId
+    && left.itemRequestId === right.itemRequestId
     && left.quoteItemId === right.quoteItemId
     && left.state === right.state
     && left.estimatedCostCny === right.estimatedCostCny
@@ -118,7 +121,10 @@ function checkedAddCents(sum: number, addend: number): number {
  * 生成失败不证明未收费：已有受理 task（taskId）但未定价的 terminal 请求按组内最高报价保守占用；
  * 只有明确未受理（无 task、无实际费用）的 terminal 请求才不占用、不计次。
  */
-export function foldProductionSpendLedger(items: readonly ProductionLedgerItem[]): ProductionSpendState {
+export function foldProductionSpendLedger(
+  items: readonly ProductionLedgerItem[],
+  options: { terminalOperationIds?: ReadonlySet<string> } = {},
+): ProductionSpendState {
   const byId = new Map<string, ProductionLedgerItem>();
   for (const item of items) {
     const existing = byId.get(item.itemRequestId);
@@ -172,8 +178,11 @@ export function foldProductionSpendLedger(items: readonly ProductionLedgerItem[]
       || (hasTerminalFailure && acceptedTask)) {
       // 已受理未结清（含受理后失败但计费未定）：按最高报价保守占用，不归零。
       reservedCents = checkedAddCents(reservedCents, maxEstimateCents);
-    } else if (states.has("prepared")) {
-      // 预留已持久化但尚未受理：占用预留，不算 create。
+    } else if (group.some((item) => item.state === "prepared"
+      && (!item.operationId || !options.terminalOperationIds?.has(item.operationId)))) {
+      // 活跃操作的预留已持久化但尚未受理：占用预留，不算 create。
+      // 已有失败/拒绝终态回执的操作不可能再提交其 prepared 项，必须释放；只有
+      // submitted/provider_succeeded/unknown 等真正越过 Provider 边界的状态继续保守占用。
       reservedCents = checkedAddCents(reservedCents, maxEstimateCents);
     }
     // 明确未受理（terminal_failed 且无 task、无实际费用）不占用也不计次；

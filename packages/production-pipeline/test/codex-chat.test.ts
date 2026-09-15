@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import http from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -167,7 +168,56 @@ describe("CodexBridgeClient", () => {
 
       const result = await client.runTaskDetailed("script-draft", { brief: {} });
 
-      assert.deepEqual(result, { output: { scenes: [] }, trace });
+      assert.deepEqual(result, {
+        output: { scenes: [] },
+        trace: {
+          ...trace,
+          requestPayloadBytes: Buffer.byteLength(JSON.stringify({ brief: {} })),
+          promptBytes: Buffer.byteLength(trace.prompt),
+        },
+      });
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("records bounded visual request bytes and immutable image-set diagnostics without retaining image data", async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+    const sha256 = "a".repeat(64);
+    const payload = {
+      durationMs: 1_000,
+      frames: [{ imageIndex: 1, scenePosition: 2, timecodeMs: 500, sha256, jpegBase64: jpeg.toString("base64") }],
+    };
+    const prompt = "visual review prompt";
+    const bridge = await startBridge((_request, response) => {
+      respondWithJson(response, 200, {
+        ok: true,
+        output: JSON.stringify({ recommendation: "approve" }),
+        trace: {
+          taskKind: "visual-review",
+          promptVersion: "visual-review-v1",
+          contractDigest: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS["visual-review"],
+          prompt,
+          providerId: "openai",
+          modelId: "gpt-5.6-sol",
+        },
+      });
+    });
+    try {
+      const result = await new CodexBridgeClient({ socketPath: bridge.socketPath }).runTaskDetailed("visual-review", payload);
+      assert.equal(result.trace?.requestPayloadBytes, Buffer.byteLength(JSON.stringify(payload)));
+      assert.equal(result.trace?.promptBytes, Buffer.byteLength(prompt));
+      assert.equal(result.trace?.imageCount, 1);
+      assert.equal(result.trace?.imageBytes, jpeg.byteLength);
+      assert.equal(
+        result.trace?.imageSetSha256,
+        createHash("sha256").update(JSON.stringify([sha256])).digest("hex"),
+      );
+      assert.equal(
+        result.trace?.imageMappingSha256,
+        createHash("sha256").update(JSON.stringify([{ index: 0, imageIndex: 1, scenePosition: 2, timecodeMs: 500 }])).digest("hex"),
+      );
+      assert.equal("jpegBase64" in (result.trace ?? {}), false);
     } finally {
       await bridge.close();
     }
@@ -491,6 +541,58 @@ describe("CodexBridgeClient", () => {
     }
   });
 
+  // 视觉审片的七条跨字段规则各自有专门的诊断 reasonCode；创作者文案必须把它翻译成
+  // 可执行的说明，而不是退化成“输出结构或语义不符合合同”，否则运营方无法判断该改什么。
+  it("translates every visual-review reason code into an actionable creator message without replaying", async () => {
+    const cases = [
+      { reasonCode: "visual_approval_score", fieldPath: "output.recommendation", expected: /五项评分中有低于 75 的项/ },
+      { reasonCode: "visual_approval_confidence", fieldPath: "output.recommendation", expected: /置信度低于 0\.7/ },
+      { reasonCode: "visual_approval_unresolved_evidence", fieldPath: "output.recommendation", expected: /仍有 failed 或 not_observed 的问题未解决/ },
+      { reasonCode: "visual_finding_time_range", fieldPath: "output.findings[0].timecodeMs", expected: /起止时间范围没有包含它自己的时间点/ },
+      { reasonCode: "visual_failed_rework", fieldPath: "output.findings[1].nextAction", expected: /可执行的返修方向/ },
+      { reasonCode: "visual_unobserved_inspection", fieldPath: "output.findings[2].nextAction", expected: /没有要求先补查已有素材/ },
+      { reasonCode: "visual_nonfailing_rework", fieldPath: "output.findings[3].nextAction", expected: /未判定失败的问题却要求返修/ },
+    ];
+    for (const { reasonCode, fieldPath, expected } of cases) {
+      const bridge = await startBridge((_request, response) => {
+        respondWithJson(response, 422, {
+          error: "visual review output rejected by cross-field rules",
+          failureKind: "task_semantics",
+          failureDetails: {
+            category: "invalid_output",
+            reasonCode,
+            fieldPath,
+            providerId: "zai-bigmodel-api",
+            modelId: "glm-5.3-flash",
+            queueWaitMs: 0,
+            providerWaitMs: 989_138,
+            finishReason: "stop",
+            promptTokens: 24_036,
+            completionTokens: 38_311,
+            totalTokens: 62_347,
+            reasoningTokens: 36_514,
+          },
+        });
+      });
+      try {
+        const client = new CodexBridgeClient({ socketPath: bridge.socketPath, maxAttempts: 3, sleep: async () => {} });
+        await assert.rejects(() => client.runTask("visual-review", {}), (error: unknown) => {
+          assert.ok(error instanceof CodexBridgeError, `${reasonCode} should surface as a bridge error`);
+          assert.equal(error.transient, false);
+          assert.equal(error.stage, "completed_failure");
+          assert.match(error.creatorMessage, expected);
+          assert.match(error.creatorMessage, new RegExp(fieldPath.replace(/[[\].]/g, "\\$&")));
+          assert.doesNotMatch(error.creatorMessage, new RegExp(reasonCode));
+          assert.doesNotMatch(error.creatorMessage, /Agent|Codex bridge|host-only broker|socket/i);
+          return true;
+        });
+        assert.equal(bridge.requests.length, 1, `${reasonCode} must not be replayed`);
+      } finally {
+        await bridge.close();
+      }
+    }
+  });
+
   it("preserves a completed no-output classification without replaying the request", async () => {
     const bridge = await startBridge((_request, response) => {
       respondWithJson(response, 422, {
@@ -509,6 +611,92 @@ describe("CodexBridgeClient", () => {
         return true;
       });
       assert.equal(bridge.requests.length, 1);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("preserves the stored diagnostic when a durable completed failure is replayed as a 200 envelope", async () => {
+    let operation: Awaited<ReturnType<CodexBridgeClient["prepareTask"]>> | undefined;
+    const bridge = await startBridge((request, response) => {
+      if (request.url === "/health") {
+        respondWithJson(response, 200, {
+          protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+          taskBindingVersion: "video-factory/task-binding-v1",
+          storeId: `vfs_store_${"d".repeat(32)}`,
+          providerId: "zai-bigmodel-api",
+          modelId: "glm-5.3-flash",
+          taskModels: { "visual-review": "glm-5.3-flash" },
+        });
+        return;
+      }
+      // Broker 重放已终结的失败时返回 200 + state=completed_failure + outcome。
+      respondWithJson(response, 200, {
+        state: "completed_failure",
+        ok: false,
+        requestId: operation?.requestId,
+        binding: operation?.binding,
+        outcome: {
+          ok: false,
+          status: 422,
+          message: "the model result did not satisfy its output contract.",
+          failureDetails: {
+            category: "invalid_output",
+            reasonCode: "visual_approval_score",
+            fieldPath: "output.recommendation",
+            taskKind: "visual-review",
+            providerId: "zai-bigmodel-api",
+            modelId: "glm-5.3-flash",
+            queueWaitMs: 0,
+            providerWaitMs: 989_138,
+            modelAttemptCount: 1,
+            structuredRepairCount: 0,
+          },
+        },
+      });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, maxAttempts: 3, sleep: async () => {} });
+
+      await assert.rejects(
+        () => client.runTask("visual-review", { durationMs: 3000, frames: [] }, "replay-completed-failure", {
+          beforeSubmit: async (prepared) => { operation = prepared; },
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof CodexBridgeError);
+          assert.equal(error.transient, false);
+          assert.equal(error.stage, "completed_failure");
+          assert.equal(error.statusCode, 422);
+          assert.equal(error.failureDetails?.reasonCode, "visual_approval_score");
+          assert.equal(error.failureDetails?.fieldPath, "output.recommendation");
+          assert.equal(error.failureDetails?.taskKind, "visual-review");
+          assert.equal(error.failureDetails?.providerWaitMs, 989_138);
+          assert.doesNotMatch(error.message, /missing ok\/output/);
+          return true;
+        },
+      );
+      // 重放只读回原 durable 终态，不得再次提交或执行。
+      assert.equal(bridge.requests.filter((request) => request.method === "POST").length, 1);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("still rejects a 200 envelope that has neither ok nor a completed failure state", async () => {
+    const bridge = await startBridge((_request, response) => {
+      respondWithJson(response, 200, { state: "running" });
+    });
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, maxAttempts: 1, sleep: async () => {} });
+
+      await assert.rejects(() => client.runTask("script-draft", {}, "malformed-200"), (error: unknown) => {
+        assert.ok(error instanceof CodexBridgeError);
+        // POST 已送达但回包无法解释：保守保持 uncertain，不得当成已终结的失败。
+        assert.equal(error.stage, "uncertain");
+        assert.equal(error.statusCode, undefined);
+        assert.match(error.message, /missing ok\/output/);
+        return true;
+      });
     } finally {
       await bridge.close();
     }

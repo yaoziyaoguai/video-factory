@@ -354,7 +354,7 @@ function jointPlanningAgents(
           spies.treatmentGrammarSeen.push(input.referenceGrammar !== undefined);
           if (failure.treatment) throw new Error("构思审计失败：三轮未通过");
           return {
-            version: "video-factory/creative-treatment-v1",
+            version: "video-factory/creative-treatment-v2",
             viewerPromise: "看完能避开三个决策坑",
             hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
             progression: [

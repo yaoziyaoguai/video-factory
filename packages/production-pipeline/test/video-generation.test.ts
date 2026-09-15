@@ -674,7 +674,7 @@ describe("metered video generation adapters", () => {
           { prompt: "测试超时状态", durationSeconds: 5, ratio: "16:9" },
           (event) => { progress.push(event.status); },
         ),
-        /timed out/,
+        /(?:timed out|exceeded the polling deadline)/,
       );
       assert.equal(progress.at(-1), "unknown", testCase.label);
     }

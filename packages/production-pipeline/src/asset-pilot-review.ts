@@ -37,7 +37,18 @@ export class SourceAssetPilotReviewer implements AssetPilotReviewer {
   constructor(private readonly agents: VisualReviewAgent[]) {}
 
   assertAvailable(providerId?: string): void {
-    this.agent(providerId);
+    const agent = this.agent(providerId);
+    // 试片是付费闸门，所以"服务已连接"必须按它实际需要的审查强度判定：声明双审的
+    // 审查器若只有同一个实际模型的两个名义分支，就不算独立复审，宁可现在拒绝动手，
+    // 也不要等素材生成完才在复审里发现。
+    const reviewers = agent.finalReviewConfiguration?.mode === "dual"
+      ? agent.finalReviewConfiguration.reviewers
+      : [];
+    if (reviewers.length > 0
+      && (new Set(reviewers.map((reviewer) => reviewer.providerId)).size !== reviewers.length
+        || new Set(reviewers.map((reviewer) => reviewer.modelId)).size !== reviewers.length)) {
+      throw new Error("试片复审需要两个不同的视觉审片模型，当前两个分支是同一个 Provider 或模型。");
+    }
   }
 
   private agent(providerId?: string): VisualReviewAgent {
@@ -49,7 +60,8 @@ export class SourceAssetPilotReviewer implements AssetPilotReviewer {
   async review(input: AssetPilotReviewInput): Promise<AssetPilotReviewResult> {
     const agent = this.agent(input.reviewProviderId);
     const key = createHash("sha256").update(JSON.stringify({
-      version: `asset-pilot-v2|${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}`,
+      // v3：试片改为两个独立模型复审。旧的单模型试片结论不能当双审结论复用。
+      version: `asset-pilot-v3|${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}`,
       scenePosition: input.scenePosition,
       inputFingerprint: input.inputFingerprint,
       mediaSha256: input.mediaSha256,
@@ -92,10 +104,14 @@ export class SourceAssetPilotReviewer implements AssetPilotReviewer {
         scenePositions: [input.scenePosition],
         timelineDurationMs: execution.inspectedDurationMs
           ?? Math.max(1, ...report.findings.map((finding) => finding.endTimecodeMs)),
-        actualModels: [{
-          providerId: execution.executedProviderId ?? execution.trace?.providerId ?? agent.id,
-          modelId: execution.executedModelId ?? execution.trace?.modelId ?? input.reviewModelId ?? agent.modelId,
-        }],
+        // 复审的每个分支都要留名：只记一个模型等于把"谁参与了这次放行"藏起来。
+        actualModels: execution.independentReviews?.length
+          ? execution.independentReviews.map(({ providerId, modelId }) => ({ providerId, modelId }))
+          : [{
+              providerId: execution.executedProviderId ?? execution.trace?.providerId ?? agent.id,
+              modelId: execution.executedModelId ?? execution.trace?.modelId ?? input.reviewModelId ?? agent.modelId,
+            }],
+        reviewContractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
       },
     };
     if (!cached) await writeJson(cachePath, execution);

@@ -192,9 +192,12 @@ describe("joint-v1 planning publication crash recovery (real child processes)", 
       assert.equal(recovery.report.status, "needs_human", JSON.stringify(recovery.report.nodeStatuses));
       const after = await readSideEffects(sideEffectFile);
       assert.equal(countRoleCalls(after, "treatment:"), 2, "the seeded treatment must not re-run during recovery");
-      // 编剧/导演身份随编辑变化：各自真实重跑一次（恢复进程内）。
-      assert.equal(countRoleCalls(after, "screenwriter"), 2);
-      assert.equal(countRoleCalls(after, "director"), 2);
+      // 构思和编剧输入身份未变，由 seed 恢复且不重跑；导演模型切换后只重跑导演。
+      assert.equal(countRoleCalls(after, "screenwriter"), 1);
+      assert.deepEqual(
+        after.filter((entry) => entry.startsWith("director:")),
+        ["director:director-model-one", "director:director-model-two"],
+      );
 
       assert.equal(
         recovery.report.treatmentProvenance?.providerId,

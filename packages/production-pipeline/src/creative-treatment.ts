@@ -1,4 +1,4 @@
-export const CREATIVE_TREATMENT_VERSION = "video-factory/creative-treatment-v1" as const;
+export const CREATIVE_TREATMENT_VERSION = "video-factory/creative-treatment-v2" as const;
 export const CREATIVE_TREATMENT_TASK_KIND = "creative-treatment" as const;
 // capability 标识：Studio provider catalog 通过该常量识别构思能力；目录卡片仅在构思接入正式生产图时登记。
 export const CREATIVE_TREATMENT_CAPABILITY = "creative.treatment" as const;
@@ -13,7 +13,7 @@ const MAX_EVIDENCE_REQUIREMENTS = 24;
 const MAX_FEASIBILITY_QUESTIONS = 24;
 
 export interface CreativeTreatment {
-  version: "video-factory/creative-treatment-v1";
+  version: "video-factory/creative-treatment-v2";
   viewerPromise: string;
   hook: { narrationIntent: string; visualIntent: string };
   progression: Array<{ beatId: string; purpose: string; viewerGain: string }>;
@@ -25,6 +25,9 @@ export interface CreativeTreatment {
     claim: string;
     requirement: "factual_support" | "illustration_only";
     suppliedSourceIds: string[];
+    critical: boolean;
+    acquisition: "supplied" | "pipeline_retrievable" | "external_required" | "not_needed";
+    retrievalProviderId: string | null;
   }>;
   feasibilityQuestions: Array<{ beatId: string; question: string }>;
 }
@@ -68,6 +71,26 @@ export function parseCreativeTreatment(
       }
       const requirement = requirementValue(entry.requirement, `Creative treatment evidenceRequirements[${index}].requirement`);
       const supplied = stringArray(entry.suppliedSourceIds, `Creative treatment evidenceRequirements[${index}].suppliedSourceIds`);
+      if (typeof entry.critical !== "boolean") {
+        throw new Error(`Creative treatment evidenceRequirements[${index}].critical must be a boolean.`);
+      }
+      const acquisition = acquisitionValue(
+        entry.acquisition,
+        `Creative treatment evidenceRequirements[${index}].acquisition`,
+      );
+      const retrievalProviderId = nullableProviderId(
+        entry.retrievalProviderId,
+        `Creative treatment evidenceRequirements[${index}].retrievalProviderId`,
+      );
+      if (acquisition === "pipeline_retrievable" && retrievalProviderId === null) {
+        throw new Error(`Creative treatment evidenceRequirements[${index}].retrievalProviderId is required for pipeline_retrievable.`);
+      }
+      if (acquisition !== "pipeline_retrievable" && retrievalProviderId !== null) {
+        throw new Error(`Creative treatment evidenceRequirements[${index}].retrievalProviderId must be null unless acquisition is pipeline_retrievable.`);
+      }
+      if (requirement === "factual_support" && acquisition === "not_needed") {
+        throw new Error(`Creative treatment evidenceRequirements[${index}] cannot mark factual_support as not_needed.`);
+      }
       for (const sourceId of supplied) {
         if (!allowedSourceIds.has(sourceId)) {
           throw new Error(
@@ -75,7 +98,15 @@ export function parseCreativeTreatment(
           );
         }
       }
-      return { beatId, claim: text(entry.claim, `Creative treatment evidenceRequirements[${index}].claim`), requirement, suppliedSourceIds: supplied };
+      return {
+        beatId,
+        claim: text(entry.claim, `Creative treatment evidenceRequirements[${index}].claim`),
+        requirement,
+        suppliedSourceIds: supplied,
+        critical: entry.critical,
+        acquisition,
+        retrievalProviderId,
+      };
     },
     beatIds,
   );
@@ -154,6 +185,27 @@ function requirementValue(value: unknown, field: string): "factual_support" | "i
     throw new Error(`${field} must be factual_support or illustration_only.`);
   }
   return value;
+}
+
+function acquisitionValue(
+  value: unknown,
+  field: string,
+): CreativeTreatment["evidenceRequirements"][number]["acquisition"] {
+  if (value !== "supplied"
+    && value !== "pipeline_retrievable"
+    && value !== "external_required"
+    && value !== "not_needed") {
+    throw new Error(`${field} is invalid.`);
+  }
+  return value;
+}
+
+function nullableProviderId(value: unknown, field: string): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.trim())) {
+    throw new Error(`${field} must be null or a valid provider id.`);
+  }
+  return value.trim();
 }
 
 function stringArray(value: unknown, field: string): string[] {

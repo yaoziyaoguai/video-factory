@@ -15,6 +15,8 @@ import {
 } from "./visual-director.js";
 import { runRoleAgentLoop, type RoleAgentValidationContext } from "./role-agent-loop.js";
 import { summarizeProductionCapabilities } from "./production-capabilities.js";
+import { runCreativeDiscussionTask, type CreativeDiscussionAgentInput } from "./codex-creative-discussion.js";
+import type { CreativeDiscussionResult } from "./creative-review.js";
 
 export interface CodexVisualDirectorAgentOptions {
   client?: CodexBridgeClient;
@@ -32,7 +34,7 @@ export interface CodexVisualDirectorAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
-export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v31|role-audit-v5|director-validator-v6|visual-plan-v2|production-capabilities-v2|planning-disposition-v1";
+export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v35|role-audit-v8|director-validator-v7|visual-plan-v2|production-capabilities-v3|voice-timing-v1|planning-disposition-v1|article-sources-v1";
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
 export class CodexVisualDirectorAgent implements VisualDirectorAgent {
@@ -72,6 +74,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
       agentLoopCheckpoint: _checkpoint,
       selectedModelId: _selectedModelId,
       planningMode: _planningMode,
+      creativeReviewExecution: _creativeReviewExecution,
       wallClockDeadlineAtMs,
       ...directorInput
     } = input;
@@ -89,6 +92,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
       agentLoopCheckpoint,
       selectedModelId: _selectedModelId,
       planningMode,
+      creativeReviewExecution: _creativeReviewExecution,
       wallClockDeadlineAtMs,
       ...directorInput
     } = input;
@@ -109,10 +113,15 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
         "真正的跨镜身份与因果要求有执行依据，独立生成和免责声明不能伪装保证；否定句中的词语不构成肯定要求。",
         "事实证据、生成示意、正式卡片与后期文字职责分清，不混入伪标签、内部说明、虚构库存或未声明能力。",
         "选择池内 Provider 只形成报价；质量满足后降本，无费用硬上限、提前审批要求、漏镜头或失败卡片兜底。",
-        "模板、参考语法、系列规则和上游 planningIssues 得到落实，不能要求逐字重复或擅自改变已接受收益。",
-        "rework 同时落实 visualDirectionInstruction 与 assetInstruction，仅修改授权范围并继承其余镜头；没有新审片证据不能标 verified。",
+        "参考语法、系列规则、用户要求和上游 planningIssues 得到落实，不能要求逐字重复或擅自改变已接受收益。",
+        "planningRevision 存在时，以 previousPlan 为修订基线，只改 affectedScenePositions 及必要依赖；其余镜头保持不变，已证实不可得的图库路线不得无新证据复活。",
+        "rework 同时落实 visualDirectionInstruction 与 assetInstruction，仅修改授权范围并继承其余镜头；未受影响镜头由宿主逐字继承，候选无法改写其任何字段，不得要求方案为它们新增或改写字段；没有新审片证据不能标 verified。",
       ],
-      maxIterations: this.maxReviewIterations,
+      maxIterations: input.creativeReviewExecution ? 1 : this.maxReviewIterations,
+      ...(input.creativeReviewExecution?.mode === "draft" ? { deferAudit: true } : {}),
+      ...(input.creativeReviewExecution?.mode === "check"
+        ? { initialCandidate: input.creativeReviewExecution.candidate }
+        : {}),
       produce: (revision, { requestId, session, requestOptions, preparedOperation }) => preparedOperation
         ? this.client.observePrepared(preparedOperation, requestOptions)
         : this.client.runTaskDetailed("director-plan", {
@@ -125,7 +134,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
         role,
         iteration,
         criteria,
-        context: visualDirectorAuditContext(normalizedDirectorInput, candidate),
+        context: visualDirectorAuditContext(normalizedDirectorInput, candidate, directorInput.brief.rework),
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
@@ -136,6 +145,11 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
     });
   }
 
+  async discussDetailed(input: CreativeDiscussionAgentInput): Promise<CodexTaskExecution<CreativeDiscussionResult>> {
+    this.assertSelectedModel(input.selectedModelId);
+    return runCreativeDiscussionTask(this.client, input);
+  }
+
   private assertSelectedModel(selectedModelId: string | undefined): void {
     if (selectedModelId && selectedModelId !== this.modelId) {
       throw new Error(`Selected model '${selectedModelId}' is not available for visual direction.`);
@@ -144,7 +158,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
 }
 
 function directorInputForModel(
-  input: Omit<VisualDirectorAgentInput, "agentLoopCheckpoint" | "selectedModelId" | "wallClockDeadlineAtMs">,
+  input: Omit<VisualDirectorAgentInput, "agentLoopCheckpoint" | "selectedModelId" | "wallClockDeadlineAtMs" | "creativeReviewExecution">,
 ): typeof input {
   const rework = input.brief.rework;
   const normalizedInput = {
@@ -194,7 +208,9 @@ function validateDirectorCandidate(
   const validation = validationFor(input);
   const rework = input.brief.rework;
   if (!rework?.previousDirectorPlan || rework.affectedScenePositions === undefined) {
-    return validateVisualDirectorPlan(value, validation);
+    const plan = validateVisualDirectorPlan(value, validation);
+    assertPlanningRevisionScope(plan, input.brief.planningRevision);
+    return plan;
   }
   // scoped rework 先合并再校验：存在结构化 affected 集合时直接合并，
   // 不再以中文是否包含“保留未受影响”作为保留开关；即将被替换的旧 shot
@@ -208,6 +224,22 @@ function validateDirectorCandidate(
     validation.scenePositions,
   );
   return validateVisualDirectorPlan(merged, validation);
+}
+
+function assertPlanningRevisionScope(
+  plan: VisualDirectorPlan,
+  revision: VisualDirectorAgentInput["brief"]["planningRevision"],
+): void {
+  if (!revision) return;
+  const affected = new Set(revision.affectedScenePositions);
+  const previous = new Map(revision.previousPlan.shots.map((shot) => [shot.scenePosition, shot]));
+  for (const shot of plan.shots) {
+    if (affected.has(shot.scenePosition)) continue;
+    const baseline = previous.get(shot.scenePosition);
+    if (!baseline || JSON.stringify(shot) !== JSON.stringify(baseline)) {
+      throw new Error(`Director planning revision changed unaffected scene ${shot.scenePosition}.`);
+    }
+  }
 }
 
 // scoped merge 前建立 previous 到 current execution configuration 的差异闭包：
@@ -402,11 +434,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function visualDirectorAuditContext(
   input: Omit<VisualDirectorAgentInput, "agentLoopCheckpoint">,
   candidate: VisualDirectorPlan,
+  // 未经 directorInputForModel 收窄的原始 rework：生产模型只拿受影响镜头的基线，
+  // 审计若同样只拿收窄后的 brief.rework，就没有任何基线可以核对“其余镜头逐字继承”，
+  // 只能拿上游 scenes[].visualStrategy 反推既有路线——那是素材获取建议，
+  // 可能已被上一版导演方案取代，于是把逐字继承的镜头误判成擅自换成付费生成路线。
+  sourceRework?: VisualDirectorAgentInput["brief"]["rework"],
 ): Record<string, unknown> {
   const { brief } = input;
-  const template = brief.templateBlueprint;
   const reference = brief.referenceGrammar;
   const series = brief.seriesContext;
+  const reworkBaseline = sourceRework?.affectedScenePositions === undefined
+    ? undefined
+    : sourceRework.previousDirectorPlan;
   const reworkForAudit = brief.rework ? {
     sourceRunId: brief.rework.sourceRunId,
     visualDirectionInstruction: brief.rework.visualDirectionInstruction,
@@ -415,6 +454,7 @@ function visualDirectorAuditContext(
     ...(brief.rework.affectedScenePositions !== undefined
       ? { affectedScenePositions: brief.rework.affectedScenePositions }
       : {}),
+    ...(reworkBaseline ? { previousDirectorPlan: reworkBaseline } : {}),
   } : undefined;
   const selectedDirectorProfile = VISUAL_DIRECTOR_PROFILES.find(({ id }) => id === candidate.resolvedProfileId);
   if (!selectedDirectorProfile) throw new Error(`Director profile '${candidate.resolvedProfileId}' is unavailable.`);
@@ -436,34 +476,16 @@ function visualDirectorAuditContext(
         requestedProfileId: brief.requestedProfileId,
         ...(brief.editorial ? { editorial: brief.editorial } : {}),
         ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
+        ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
         ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
         ...(brief.creativeTreatment ? { creativeTreatment: brief.creativeTreatment } : {}),
         ...(brief.planningIssues ? { planningIssues: brief.planningIssues } : {}),
+        ...(brief.articleSources?.length ? { articleSources: brief.articleSources } : {}),
         productionCapabilities: brief.productionCapabilities,
+        ...(brief.voiceTiming ? { voiceTiming: brief.voiceTiming } : {}),
         ...(reworkForAudit ? { rework: reworkForAudit } : {}),
         ...(brief.rework ? {
           verificationBoundary: "findingId 仅追踪修改要求；只有后续视觉审片的新报告批准后才算 verified，当前导演审计不得宣称已复验。",
-        } : {}),
-        ...(template ? {
-          template: {
-            automationLevel: template.automationLevel,
-            storyStructure: template.storyStructure.map(({ id, purpose, required }) => ({ id, purpose, required })),
-            shotSlots: template.shotSlots.map(({ id, beatId, purpose, durationSeconds, allowedCapabilities }) => ({
-              id,
-              beatId,
-              purpose,
-              durationSeconds,
-              allowedCapabilities,
-            })),
-            visualSystem: template.visualSystem,
-            soundSystem: template.soundSystem,
-            qualityRules: template.qualityRules.map(({ label, dimension, required, threshold }) => ({
-              label,
-              dimension,
-              required,
-              threshold,
-            })),
-          },
         } : {}),
         ...(reference ? {
           referenceGrammar: {
@@ -584,6 +606,8 @@ function visualDirectorAuditContext(
           findingOwnership: "findings 只包含分配给 visual-direction 的 findingId；assetInstruction 无需额外 findingId 即属于本次人工授权范围。",
           affectedScenePositions: brief.rework.affectedScenePositions ?? [],
           preservationRule: "保留真正未受两类指令影响的镜头；不得为了恢复上一版而撤销 assetInstruction 要求的改动。",
+          preservedShotAuthority: "未受影响镜头的全部字段由宿主在合并时逐字取自 previousDirectorPlan，候选无法改写；当 assetInstruction 对这类镜头提出补查、调看或核验类素材阶段要求时，该要求不在本方案的可执行范围内，不得要求候选为它们新增或改写字段（含 referenceRequirements 与验收条件）。方案文本本身不产生购买：付费调用一律由下游人工费用确认控制。若候选实际为未受影响镜头安排了新的付费生成、丢弃其既有母片，或直接与补查要求相冲突，仍必须阻断。",
+          baselineAuthority: "核对继承关系时以 brief.rework.previousDirectorPlan 为唯一基线：未受影响镜头与基线逐字相同即表示继承成立。上游 scenes[].visualStrategy 只是素材获取建议，可能已被上一版导演方案取代，不能据此反推既有路线或要求恢复旧路线；受影响镜头依授权改变 Provider 或交付类型不构成越权。",
           verificationBoundary: "当前导演与独立审计只能确认方案已落实要求，不得宣称后续视觉审片已经验证通过。",
         },
       } : {}),
