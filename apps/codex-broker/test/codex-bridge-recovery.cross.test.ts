@@ -4,7 +4,7 @@
 // executor 严格调用一次；权威 not_accepted 才允许有界重试。
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtemp, rm, unlink } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -23,6 +23,7 @@ import { taskContractDescriptorFor } from "../src/task-definitions.js";
 class ScriptedExecutor extends CodexExecutor {
   readonly calls: string[] = [];
   private readonly resolvers: Array<() => void> = [];
+  private readonly callWaiters: Array<{ count: number; settle: () => void }> = [];
 
   constructor() {
     super({ workspaceRoot: "/nonexistent-codex-broker" });
@@ -36,8 +37,31 @@ class ScriptedExecutor extends CodexExecutor {
     this.resolvers[index]?.();
   }
 
+  // 按真实开始事件同步：受理落盘与 executor 启动之间存在调度窗口，
+  // 固定 sleep 会在这个窗口内读到 calls=0。这里等真实调用，并保留有界失败。
+  waitForCallCount(count: number, timeoutMs = 5_000): Promise<void> {
+    if (this.calls.length >= count) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`executor was not called ${count} time(s) within ${timeoutMs}ms (actual ${this.calls.length}).`));
+      }, timeoutMs);
+      this.callWaiters.push({ count, settle: () => { clearTimeout(timer); resolve(); } });
+    });
+  }
+
+  private settleCallWaiters(): void {
+    for (let index = this.callWaiters.length - 1; index >= 0; index -= 1) {
+      const waiter = this.callWaiters[index]!;
+      if (this.calls.length >= waiter.count) {
+        this.callWaiters.splice(index, 1);
+        waiter.settle();
+      }
+    }
+  }
+
   async runTask(task: ValidatedTask, options?: CodexExecutionOptions): Promise<CodexExecutionResult> {
     this.calls.push(task.kind);
+    this.settleCallWaiters();
     await this.gate();
     return {
       output: "{\"ideas\":[]}",
@@ -92,6 +116,34 @@ function topicBody(requestId: string): string {
   });
 }
 
+// 等 durable record 真正到达终态：读已落盘的权威状态，而不是猜一个毫秒数。
+// requestId 省略时匹配本目录内的任意记录（每个用例使用独立的临时 idempotency 目录）。
+async function waitForDurableState(
+  directory: string,
+  requestId: string | undefined,
+  state: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const idempotencyDirectory = path.join(directory, "idempotency");
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      for (const name of await readdir(idempotencyDirectory)) {
+        if (!name.endsWith(".json")) continue;
+        const record = JSON.parse(await readFile(path.join(idempotencyDirectory, name), "utf8")) as
+          { requestId?: unknown; state?: unknown };
+        if ((requestId === undefined || record.requestId === requestId) && record.state === state) return;
+      }
+    } catch {
+      // record 尚未落盘：继续有界观察。
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`durable record '${requestId ?? "*"}' did not reach '${state}' within ${timeoutMs}ms.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 describe("CodexBridgeClient × CodexBrokerServer durable recovery", () => {
   it("polls the accepted task to completion without resubmitting it", async () => {
     const executor = new ScriptedExecutor();
@@ -107,7 +159,7 @@ describe("CodexBridgeClient × CodexBrokerServer durable recovery", () => {
       const pending = client.runTaskDetailed("topic-ideas", {
         signals: [{ id: "signal-1", platform: "douyin", rank: 1, title: "恢复测试信号" }],
       }, "recovery-poll-1");
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await executor.waitForCallCount(1);
       assert.equal(executor.calls.length, 1, "executor must run exactly once while the client waits");
       executor.release(0);
       const execution = await pending;
@@ -134,9 +186,10 @@ describe("CodexBridgeClient × CodexBrokerServer durable recovery", () => {
       // 第一次调用在任务被 durable 受理后因等待截止而失败（accepted/unknown）。
       const firstOutcome = client.runTaskDetailed("topic-ideas", payload, "recovery-lost-1", undefined, { timeoutMs: 40 });
       await assert.rejects(() => firstOutcome, (error: unknown) => error instanceof CodexBridgeError);
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      // release 必须发生在真实启动之后，否则 resolvers[0] 尚不存在，executor 会永远挂在 gate 上。
+      await executor.waitForCallCount(1);
       executor.release(0);
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await waitForDurableState(broker.directory, "recovery-lost-1", "completed");
       assert.equal(executor.calls.length, 1);
 
       // 恢复 = 同 requestId 重新提交：durable completed 直接重放，不产生第二次执行。
@@ -398,10 +451,11 @@ describe("CodexBridgeClient × CodexBrokerServer durable recovery", () => {
       for (const field of ["requestId", "kind", "envelope", "serializedEnvelope", "binding", "brokerBinding", "route"]) {
         assert.ok(field in interrupted.pendingOperation.operation, `pending operation must persist ${field}`);
       }
+      await executor.waitForCallCount(1);
       assert.equal(executor.calls.length, 1);
 
       executor.release(0);
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      await waitForDurableState(broker.directory, undefined, "completed");
       const restartedClient = new CodexBridgeClient({ socketPath: broker.socketPath, timeoutMs: 2_000, pollIntervalMs: 10 });
       const reversedFallback = fallbackClient(restartedClient, unusedBackup, true);
       const result = await execute(reversedFallback);

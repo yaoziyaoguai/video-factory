@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 import {
   CodexExecutor,
   CodexExecutorError,
+  CODEX_BRIDGE_PROTOCOL_VERSION,
   buildContinuationPrompt,
   buildTaskPrompt,
   buildCodexExecCommand,
@@ -129,6 +130,22 @@ function seriesRoadmapRequest(): { protocolVersion: string; kind: string; expect
   };
 }
 
+function verifiedArticleSource(): Record<string, unknown> {
+  return {
+    sourceId: "source-report",
+    originalUrl: "https://news.example/report",
+    finalUrl: "https://news.example/report",
+    pageTitle: "公开报告",
+    fetchedAt: "2026-09-14T08:00:00.000Z",
+    publishedAt: "2026-09-14T07:00:00.000Z",
+    contentSha256: "a".repeat(64),
+    extractorVersion: "readability-v1",
+    readStatus: "read",
+    paragraphs: [{ id: "p1", text: "这项事实只出现在正文，不在标题里。" }],
+    truncated: false,
+  };
+}
+
 function directorRequest(): { protocolVersion: string; kind: string; expectedContractDigest: string; payload: Record<string, unknown> } {
   return {
     protocolVersion: "video-factory/codex-bridge-v2",
@@ -139,6 +156,7 @@ function directorRequest(): { protocolVersion: string; kind: string; expectedCon
       brief: {
         title: "下班后的城市",
         requestedProfileId: "auto",
+        articleSources: [verifiedArticleSource()],
         productionCapabilities: {
           assetProviders: [{
             id: "local-editorial-v1",
@@ -148,6 +166,7 @@ function directorRequest(): { protocolVersion: string; kind: string; expectedCon
             constraints: [],
           }],
           editing: { sourceRangeReuse: true, staticEditorialCard: true },
+          audio: { narration: true, pauseControl: "punctuation", musicTrack: false, soundEffectsTrack: false },
         },
       },
       scenes: [{ position: 1, narration: "夜晚开始了", duration: 5, visualPrompt: "雨夜城市", visualStrategy: "local" }],
@@ -176,15 +195,11 @@ function scriptRequest(): { protocolVersion: string; kind: string; expectedContr
         nicheSlug: "life-avoidance",
         platform: "douyin",
         durationSeconds: 24,
+        articleSources: [verifiedArticleSource()],
         productionCapabilities: {
           assetProviders: [],
           editing: { sourceRangeReuse: true, staticEditorialCard: false },
-        },
-        templateBlueprint: {
-          storyStructure: [{ id: "hook", label: "开场", purpose: "两秒内建立问题", required: true }],
-          visualSystem: { composition: "主体清晰", pacing: "measured" },
-          soundSystem: { voiceIntent: "可信", pace: "medium" },
-          costPolicy: { currency: "CNY", maxCost: 0, maxPaidShots: 0 },
+          audio: { narration: true, pauseControl: "punctuation", musicTrack: false, soundEffectsTrack: false },
         },
         visualProof: "同一只苹果的三个切面在相同光线下并列展示颜色变化。",
         visualPlan: {
@@ -272,6 +287,16 @@ function roleAuditRequest(jpeg?: Buffer): { protocolVersion: string; kind: strin
   };
 }
 
+it("accepts up to 16 role-audit criteria and rejects larger payloads", () => {
+  const atLimit = roleAuditRequest();
+  atLimit.payload.criteria = Array.from({ length: 16 }, (_, index) => `审计标准 ${index + 1}`);
+  assert.equal(parseTaskRequest(atLimit).kind, "role-audit");
+
+  const overLimit = roleAuditRequest();
+  overLimit.payload.criteria = Array.from({ length: 17 }, (_, index) => `审计标准 ${index + 1}`);
+  assert.throws(() => parseTaskRequest(overLimit), /must contain 1 to 16 entries/);
+});
+
 function assetRankRequest(jpeg = jpegOfSize(8)): { protocolVersion: string; kind: string; expectedContractDigest: string; payload: Record<string, unknown> } {
   return {
     protocolVersion: "video-factory/codex-bridge-v2",
@@ -325,6 +350,7 @@ function visualReviewOutput(): Record<string, unknown> {
       endTimecodeMs: 0,
       scenePosition: 1,
       targetNodeId: "assets",
+      claimType: "static",
       evidenceStatus: "failed",
       evidenceFrameSha256: createHash("sha256")
         .update(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]))
@@ -432,17 +458,32 @@ describe("parseTaskRequest", () => {
   });
 
   it("accepts a bounded visual-review frame and retains decoded JPEG bytes", () => {
-    const task = parseTaskRequest(visualReviewRequest(), codexExecutorProfileFor("openai").identity);
+    const request = visualReviewRequest();
+    (request.payload.frames as Array<Record<string, unknown>>)[0]!.sourceTimecodeMs = 4_000;
+    const task = parseTaskRequest(request, codexExecutorProfileFor("openai").identity);
     assert.equal(task.kind, "visual-review");
     if (task.kind !== "visual-review") throw new Error("expected visual-review task");
     assert.equal(task.payload.durationMs, 10_000);
     assert.equal(task.payload.frames[0]?.timecodeMs, 0);
+    assert.equal(task.payload.frames[0]?.sourceTimecodeMs, 4_000);
     assert.equal(task.payload.frames[0]?.sha256.length, 64);
     assert.deepEqual(
       task.payload.frames[0]?.jpeg,
       Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]),
     );
     assert.equal("jpegBase64" in task.payload.frames[0]!, false);
+  });
+
+  it("accepts the source timecode attached to role-audit image evidence", () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]);
+    const request = roleAuditRequest(jpeg);
+    (request.payload.images as Array<Record<string, unknown>>)[0]!.timecodeMs = 2_000;
+    (request.payload.images as Array<Record<string, unknown>>)[0]!.sourceTimecodeMs = 6_500;
+
+    const task = parseTaskRequest(request, codexExecutorProfileFor("openai").identity);
+    assert.equal(task.kind, "role-audit");
+    if (task.kind !== "role-audit") throw new Error("expected role-audit task");
+    assert.equal(task.payload.images[0]?.sourceTimecodeMs, 6_500);
   });
 
   it("allows visual-review on both isolated profiles and enforces every frame boundary before execution", async () => {
@@ -512,6 +553,7 @@ describe("parseTaskRequest", () => {
     assert.deepEqual(director.payload.scenes, [{ position: 1, narration: "夜晚开始了", duration: 5, visualPrompt: "雨夜城市", visualStrategy: "local" }]);
     assert.deepEqual(director.payload.assetProviders, [{ id: "local-editorial-v1", label: "本地", deliveryTypes: ["editorial_card"], estimatedCnyPerClip: 0 }]);
     assert.deepEqual(director.payload.costFeedback, directorRequest().payload.costFeedback);
+    assert.deepEqual((director.payload.brief as Record<string, unknown>).articleSources, [verifiedArticleSource()]);
     assert.match(buildTaskPrompt(director), /优先尝试免费图库/);
     assert.doesNotMatch(buildTaskPrompt(director), /maxPaidShots|maxCostCny|recipeId/);
 
@@ -524,10 +566,27 @@ describe("parseTaskRequest", () => {
       guardrails: ["不要虚构现场画面"],
     });
     const expectedScriptBrief = structuredClone(scriptRequest().payload.brief) as Record<string, unknown>;
-    delete (expectedScriptBrief.templateBlueprint as Record<string, unknown>).costPolicy;
     assert.deepEqual(script.payload.brief, expectedScriptBrief);
-    assert.equal("costPolicy" in (script.payload.brief.templateBlueprint ?? {}), false);
+    assert.equal(script.payload.brief.templateGuidance, undefined);
     assert.doesNotMatch(buildTaskPrompt(script), /costPolicy|maxPaidShots|maxCost/);
+
+    for (const request of [scriptRequest(), directorRequest()]) {
+      const articleSources = ((request.payload.brief as Record<string, unknown>).articleSources as Array<Record<string, unknown>>);
+      articleSources[0]!.paragraphs = [{ id: "missing", text: "伪造段落" }];
+      articleSources[0]!.unexpected = true;
+      await assert.rejects(
+        async () => parseTaskRequest(request),
+        (error: unknown) => assertTerminal(error, /unexpected is not allowed/),
+      );
+    }
+
+    const inconsistentSource = scriptRequest();
+    const inconsistentArticle = (((inconsistentSource.payload.brief as Record<string, unknown>).articleSources as Array<Record<string, unknown>>)[0]!);
+    inconsistentArticle.readStatus = "title_only";
+    await assert.rejects(
+      async () => parseTaskRequest(inconsistentSource),
+      (error: unknown) => assertTerminal(error, /body evidence does not match readStatus/),
+    );
 
     const reworkInput = scriptRequest();
     (reworkInput.payload.brief as Record<string, unknown>).rework = {
@@ -637,6 +696,88 @@ describe("parseTaskRequest", () => {
     assert.deepEqual(greenlight.payload.targetEpisode?.inheritedFromPrevious, ["第 1 集已经验证工具可用"]);
     assert.match(buildTaskPrompt(greenlight), /fromPrevious 是创作者拥有的输入/);
     assert.match(buildTaskPrompt(greenlight), /第 1 集已经验证工具可用/);
+  });
+
+  it("accepts a bounded creative discussion payload and rejects fields outside its contract", async () => {
+    const payload = {
+      stage: "treatment",
+      currentDocument: legalCreativeTreatmentOutput(),
+      context: {
+        effectiveUserInstructions: ["不要把生成画面冒充事实证据"],
+        upstreamConfirmed: {},
+        productionCapabilities: { assetProviders: ["pexels-stock-v1"] },
+      },
+      message: "为什么用这个开场？请给我一个更直接的备选。",
+      selection: { kind: "beat", ids: ["question"], scenePositions: [] },
+      recentMessages: [
+        { role: "user", text: "我希望开头先给结论。" },
+        { role: "assistant", text: "可以先给判断，再解释依据。" },
+      ],
+    };
+    const task = parseTaskRequest({
+      protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+      kind: "creative-discussion",
+      payload,
+      expectedContractDigest: taskContractDescriptorFor("creative-discussion").digest,
+    });
+
+    assert.equal(task.kind, "creative-discussion");
+    if (task.kind !== "creative-discussion") throw new Error("expected creative-discussion task");
+    assert.deepEqual(task.payload, payload);
+    assert.match(buildTaskPrompt(task), /为什么用这个开场/);
+    assert.match(buildTaskPrompt(task), /最近.*讨论|recentMessages/);
+
+    const directorDocument = validDirectorPlanOutput();
+    (directorDocument.visualBible as Record<string, unknown>).viewerPromise = "看见匆忙中一直存在的日常细节";
+    const canonicalShot = (directorDocument.shots as Array<Record<string, unknown>>)[0]!;
+    delete canonicalShot.reuseFromScenePosition;
+    delete canonicalShot.referenceFromScenePosition;
+    const directorDiscussion = parseTaskRequest({
+      protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+      kind: "creative-discussion",
+      payload: {
+        ...payload,
+        stage: "director",
+        currentDocument: directorDocument,
+      },
+      expectedContractDigest: taskContractDescriptorFor("creative-discussion").digest,
+    });
+    assert.equal(directorDiscussion.kind, "creative-discussion");
+
+    await assert.rejects(
+      async () => parseTaskRequest({
+        protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+        kind: "creative-discussion",
+        payload: { ...payload, model: "gpt-5.6-sol" },
+        expectedContractDigest: taskContractDescriptorFor("creative-discussion").digest,
+      }),
+      /payload\.model is not allowed/,
+    );
+    await assert.rejects(
+      async () => parseTaskRequest({
+        protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+        kind: "creative-discussion",
+        payload: { ...payload, message: "x".repeat(4_001) },
+        expectedContractDigest: taskContractDescriptorFor("creative-discussion").digest,
+      }),
+      /payload\.message exceeds 4000 characters/,
+    );
+  });
+
+  it("rejects retired template guidance on every new planning-role request", async () => {
+    const requests = [
+      creativeTreatmentContractRequest(),
+      scriptRequest(),
+      directorRequest(),
+    ];
+    for (const request of requests) {
+      const brief = (request.payload.brief ?? {}) as Record<string, unknown>;
+      request.payload.brief = { ...brief, templateGuidance: { storyStructure: [] } };
+      await assert.rejects(
+        async () => parseTaskRequest(request),
+        /payload\.brief\.templateGuidance is not allowed/,
+      );
+    }
   });
 
   it("builds isolated repair prompts without replaying the original producer input", () => {
@@ -1012,6 +1153,7 @@ describe("CodexExecutor.runTask", () => {
           issues: [],
           repairInstructions: [],
           planningDisposition: null,
+          hostReadinessReview: null,
         }), "utf8");
         child.stdout.end();
         child.stderr.end();
@@ -1076,6 +1218,24 @@ describe("CodexExecutor.runTask", () => {
     );
   });
 
+  it("accepts bounded treatment rework guidance and rejects adjacent unknown fields", async () => {
+    const request = creativeTreatmentContractRequest();
+    const brief = request.payload.brief as Record<string, unknown>;
+    brief.reworkInstruction = "改为概念示意，不再要求用户补充专属实验材料。";
+
+    const task = parseTaskRequest(request, codexExecutorProfileFor("openai").identity);
+    assert.equal(task.kind, "creative-treatment");
+    if (task.kind !== "creative-treatment") throw new Error("expected creative-treatment task");
+    assert.equal(task.payload.brief.reworkInstruction, brief.reworkInstruction);
+
+    const forbidden = creativeTreatmentContractRequest();
+    (forbidden.payload.brief as Record<string, unknown>).reworkInstructions = [brief.reworkInstruction];
+    await assert.rejects(
+      async () => parseTaskRequest(forbidden, codexExecutorProfileFor("openai").identity),
+      (error: unknown) => assertTerminal(error, /payload\.brief\.reworkInstructions is not allowed/),
+    );
+  });
+
   it("enforces the creative-treatment contract digest handshake before execution", async () => {
     const identity = codexExecutorProfileFor("openai").identity;
     assert.equal(parseTaskRequest(creativeTreatmentContractRequest(), identity).kind, "creative-treatment");
@@ -1122,7 +1282,7 @@ describe("CodexExecutor.runTask", () => {
 
     assert.equal(JSON.parse(result.output).viewerPromise, "学会识别资料支持的结论边界");
     assert.equal(result.trace?.taskKind, "creative-treatment");
-    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v3");
+    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v5");
 
     const noSources = creativeTreatmentContractRequest();
     noSources.payload.suppliedSources = [];
@@ -1130,6 +1290,130 @@ describe("CodexExecutor.runTask", () => {
       async () => executor.runTask(parseTaskRequest(noSources, executor.identity)),
       (error: unknown) => assertTerminal(error, /suppliedSourceIds/),
     );
+  });
+
+  it("preserves safe director semantic diagnostics without returning generated content", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-director-diagnostic-"));
+    const output = validDirectorPlanOutput();
+    const shots = output.shots as Array<Record<string, unknown>>;
+    shots[0]!.referenceFromScenePosition = 1;
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      spawnFn: fakeSpawn(async ({ child, lastMessagePath }) => {
+        await writeFile(lastMessagePath, JSON.stringify(output), "utf8");
+        child.stdout.end(); child.stderr.end(); child.emit("close", 0, null);
+      }),
+    });
+    await assert.rejects(executor.runTask(parseTaskRequest(directorRequest(), executor.identity)), (error: unknown) => {
+      assert.ok(error instanceof CodexExecutorError);
+      assert.equal(error.details?.reasonCode, "reference_must_be_earlier");
+      assert.equal(error.details?.fieldPath, "output.shots[0].referenceFromScenePosition");
+      assert.equal(error.details?.taskKind, "director-plan");
+      assert.ok(!JSON.stringify(error.details).includes("自然侧光"));
+      return true;
+    });
+  });
+
+  it("repairs one semantically invalid director candidate within one logical broker task", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-director-repair-"));
+    const request = directorRequest();
+    (request.payload.scenes as Array<Record<string, unknown>>).push({
+      position: 2,
+      narration: "抬头看看窗外。",
+      duration: 4,
+      visualPrompt: "窗外城市",
+      visualStrategy: "local",
+    });
+    const invalid = validDirectorPlanOutput();
+    const invalidShots = invalid.shots as Array<Record<string, unknown>>;
+    invalidShots.push({ ...invalidShots[0], scenePosition: 1, narrativeRole: "payoff" });
+    const repaired = structuredClone(invalid);
+    (repaired.shots as Array<Record<string, unknown>>)[1]!.scenePosition = 2;
+    let calls = 0;
+    let repairPrompt = "";
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      spawnFn: fakeSpawn(async ({ child, lastMessagePath }) => {
+        calls += 1;
+        if (calls === 2) repairPrompt = Buffer.concat(child.stdinChunks).toString("utf8");
+        await writeFile(lastMessagePath, JSON.stringify(calls === 1 ? invalid : repaired), "utf8");
+        child.stdout.end(); child.stderr.end(); child.emit("close", 0, null);
+      }),
+    });
+
+    const result = await executor.runTask(parseTaskRequest(request, executor.identity));
+
+    assert.equal(calls, 2);
+    assert.match(repairPrompt, /duplicate_scene_position/);
+    assert.match(repairPrompt, /output\.shots\[1\]\.scenePosition/);
+    assert.deepEqual(JSON.parse(result.output), repaired);
+    assert.equal(result.trace?.modelAttemptCount, 2);
+    assert.equal(result.trace?.structuredRepairCount, 1);
+  });
+
+  it("stops after one director semantic repair when the repaired output is still invalid", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-director-repair-limit-"));
+    const request = directorRequest();
+    (request.payload.scenes as Array<Record<string, unknown>>).push({
+      position: 2,
+      narration: "抬头看看窗外。",
+      duration: 4,
+      visualPrompt: "窗外城市",
+      visualStrategy: "local",
+    });
+    const invalid = validDirectorPlanOutput();
+    const invalidShots = invalid.shots as Array<Record<string, unknown>>;
+    invalidShots.push({ ...invalidShots[0], scenePosition: 1, narrativeRole: "payoff" });
+    let calls = 0;
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      spawnFn: fakeSpawn(async ({ child, lastMessagePath }) => {
+        calls += 1;
+        await writeFile(lastMessagePath, JSON.stringify(invalid), "utf8");
+        child.stdout.end(); child.stderr.end(); child.emit("close", 0, null);
+      }),
+    });
+
+    await assert.rejects(
+      executor.runTask(parseTaskRequest(request, executor.identity)),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.details?.reasonCode, "duplicate_scene_position");
+        assert.equal(error.details?.modelAttemptCount, 2);
+        assert.equal(error.details?.structuredRepairCount, 1);
+        return true;
+      },
+    );
+    assert.equal(calls, 2, "one accepted task may execute at most one structured repair");
+  });
+
+  it("shares one repair budget across director schema then semantic failures", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-director-shared-repair-limit-"));
+    const request = directorRequest();
+    (request.payload.scenes as Array<Record<string, unknown>>).push({ position: 2, narration: "第二镜", duration: 4 });
+    const schemaInvalid = validDirectorPlanOutput() as Record<string, unknown>;
+    delete schemaInvalid.version;
+    const semanticInvalid = validDirectorPlanOutput();
+    const shots = semanticInvalid.shots as Array<Record<string, unknown>>;
+    shots.push({ ...shots[0], scenePosition: 1, narrativeRole: "payoff" });
+    let calls = 0;
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      spawnFn: fakeSpawn(async ({ child, lastMessagePath }) => {
+        calls += 1;
+        await writeFile(lastMessagePath, JSON.stringify(calls === 1 ? schemaInvalid : semanticInvalid), "utf8");
+        child.stdout.end(); child.stderr.end(); child.emit("close", 0, null);
+      }),
+    });
+
+    await assert.rejects(executor.runTask(parseTaskRequest(request, executor.identity)), (error: unknown) => {
+      assert.ok(error instanceof CodexExecutorError);
+      assert.equal(error.details?.reasonCode, "duplicate_scene_position");
+      assert.equal(error.details?.modelAttemptCount, 2);
+      assert.equal(error.details?.structuredRepairCount, 1);
+      return true;
+    });
+    assert.equal(calls, 2);
   });
 
   it("rejects the shared ghost-beat fixture at the semantic boundary", async () => {
@@ -1297,6 +1581,7 @@ describe("CodexExecutor.runTask", () => {
             issues: [],
             repairInstructions: [],
             planningDisposition: null,
+            hostReadinessReview: null,
           }), "utf8");
           child.stdout.end();
           child.stderr.end();
@@ -1518,7 +1803,6 @@ describe("CodexExecutor.runTask", () => {
     assert.ok(prompt.includes("你是中文短视频创意编剧。"));
     const dataSection = prompt.split("<<<TASK_DATA\n")[1]!.split("\nTASK_DATA>>>")[0]!;
     const expectedBrief = structuredClone(scriptRequest().payload.brief) as Record<string, unknown>;
-    delete (expectedBrief.templateBlueprint as Record<string, unknown>).costPolicy;
     assert.deepEqual(JSON.parse(dataSection), { brief: expectedBrief });
   });
 
@@ -1696,6 +1980,27 @@ describe("CodexExecutor.runTask", () => {
     }
   });
 
+  it("retains only allowlisted rejection evidence, not hostile upstream text", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-safe-rejection-"));
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      spawnFn: fakeSpawn(({ child }) => {
+        child.stderr.end("Authorization: Bearer secret /Users/private/file https://example.com/?token=secret");
+        child.stdout.end(JSON.stringify({ type: "turn.failed", error: { message: "invalid_json_schema: uniqueItems is not permitted. sk-secret-long-value-1234567890" } }));
+        child.emit("close", 1, null);
+      }),
+    });
+    await assert.rejects(() => executor.runTask(parseTaskRequest(topicRequest())), (error: unknown) => {
+      assert.ok(error instanceof CodexExecutorError);
+      assert.equal(error.details?.executionLayer, "cli");
+      assert.equal(error.details?.processExitCode, 1);
+      assert.equal(error.details?.providerErrorCode, "invalid_json_schema");
+      assert.equal(error.details?.schemaKeyword, "uniqueItems");
+      assert.doesNotMatch(JSON.stringify(error.details), /secret|Users|example\.com|Authorization/);
+      return true;
+    });
+  });
+
   it("preserves confirmed provider throttling and capacity exits as transient failures", async () => {
     const diagnostics = [
       "HTTP 429 Too Many Requests",
@@ -1855,7 +2160,10 @@ describe("CodexExecutor.runTask", () => {
     await assert.rejects(() => executor.runTask(parseTaskRequest(topicRequest())), (error: unknown) => {
       assert.ok(error instanceof CodexExecutorError);
       assert.equal(error.transient, true);
-      assert.match(error.message, /timed out after 40ms/);
+      const timeoutMs = Number(error.message.match(/timed out after (\d+)ms/)?.[1]);
+      assert.equal(Number.isFinite(timeoutMs) && timeoutMs > 0 && timeoutMs <= 40, true);
+      assert.equal(error.details?.modelAttemptCount, 1);
+      assert.equal(error.details?.structuredRepairCount, 0);
       return true;
     });
     assert.deepEqual(killedPids, [4242]);

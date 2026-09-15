@@ -148,8 +148,9 @@ describe("durable broker owner and shutdown lifecycle", () => {
       const replay = await startControlledBroker(1_000, fixture.directory, fixture.records, "queued-replay.sock");
       try {
         const response = await request(replay.socketPath, "POST", "/v1/tasks", queuedBody);
-        assert.equal(response.status, 409);
+        assert.equal(response.status, queuedRecord.outcome.status);
         assert.equal(JSON.parse(response.body).state, "not_accepted");
+        assert.equal(JSON.parse(response.body).error, queuedRecord.outcome.message);
         assert.equal(replay.calls.length, 0);
       } finally {
         await replay.server.close();

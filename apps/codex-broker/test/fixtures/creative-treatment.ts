@@ -17,6 +17,7 @@ export function creativeTreatmentRequest(): { protocolVersion: string; kind: str
         productionCapabilities: {
           assetProviders: [],
           editing: { sourceRangeReuse: true, staticEditorialCard: false },
+          audio: { narration: true, pauseControl: "punctuation", musicTrack: false, soundEffectsTrack: false },
         },
       },
       suppliedSources: [{ sourceId: "source-1", label: "原始报道" }],
@@ -26,7 +27,7 @@ export function creativeTreatmentRequest(): { protocolVersion: string; kind: str
 
 export function legalCreativeTreatmentOutput(): Record<string, unknown> {
   return {
-    version: "video-factory/creative-treatment-v1",
+    version: "video-factory/creative-treatment-v2",
     viewerPromise: "学会识别资料支持的结论边界",
     hook: { narrationIntent: "提出一个具体判断", visualIntent: "展示原始资料的关键差异" },
     progression: [
@@ -37,7 +38,7 @@ export function legalCreativeTreatmentOutput(): Record<string, unknown> {
     payoff: "给出有条件的结论及下一步",
     visualPrinciples: ["来源画面优先"],
     soundPrinciples: ["自然语速、清楚停顿"],
-    evidenceRequirements: [{ beatId: "evidence", claim: "原材料中的陈述", requirement: "factual_support", suppliedSourceIds: ["source-1"] }],
+    evidenceRequirements: [{ beatId: "evidence", claim: "原材料中的陈述", requirement: "factual_support", suppliedSourceIds: ["source-1"], critical: true, acquisition: "supplied", retrievalProviderId: null }],
     feasibilityQuestions: [{ beatId: "evidence", question: "来源画面是否可读且有使用依据" }],
   };
 }
@@ -47,7 +48,7 @@ export function legalCreativeTreatmentOutput(): Record<string, unknown> {
 export function ghostBeatCreativeTreatmentOutput(): Record<string, unknown> {
   return {
     ...legalCreativeTreatmentOutput(),
-    evidenceRequirements: [{ beatId: "ghost-beat", claim: "原材料中的陈述", requirement: "factual_support", suppliedSourceIds: ["source-1"] }],
+    evidenceRequirements: [{ beatId: "ghost-beat", claim: "原材料中的陈述", requirement: "factual_support", suppliedSourceIds: ["source-1"], critical: true, acquisition: "supplied", retrievalProviderId: null }],
   };
 }
 

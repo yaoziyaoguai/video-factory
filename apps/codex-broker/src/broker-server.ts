@@ -443,7 +443,8 @@ export class CodexBrokerServer {
         return;
       }
       if (durable.kind === "not_accepted") {
-        this.sendTaskFact(response, 409, requestId, "not_accepted", durable.binding);
+        this.sendTaskFact(response, durable.outcome && !durable.outcome.ok ? durable.outcome.status : 409,
+          requestId, "not_accepted", durable.binding, undefined, undefined, durable.outcome);
         return;
       }
       let sessionId: string | undefined;
@@ -548,12 +549,12 @@ export class CodexBrokerServer {
       return;
     }
     if (record.state === "not_accepted") {
-      this.sendTaskFact(response, 200, requestId, "not_accepted", record.binding);
+      this.sendTaskFact(response, 200, requestId, "not_accepted", record.binding, undefined, undefined, record.outcome);
       return;
     }
     if (record.state === "accepted") {
-      const state = this.idempotentTasks.has(requestId) ? "running" : "accepted_unknown";
-      this.sendTaskFact(response, 200, requestId, state, record.binding, this.backgroundFailures.get(requestId));
+      const state = !record.uncertainty && this.idempotentTasks.has(requestId) ? "running" : "accepted_unknown";
+      this.sendTaskFact(response, 200, requestId, state, record.binding, this.backgroundFailures.get(requestId), record.uncertainty);
       return;
     }
     // completed 用 200 信封返回原始 outcome：查询永远不把任务事实伪装成查询层 HTTP 错误。
@@ -577,7 +578,7 @@ export class CodexBrokerServer {
     requestId: string,
     binding: DurableTaskBinding,
     legacyDigest: string,
-  ): Promise<{ kind: "conflict" } | { kind: "running" | "accepted_unknown" | "not_accepted"; binding: DurableTaskBinding } | { kind: "completed"; record: CompletedIdempotencyRecord; binding: DurableTaskBinding } | { kind: "absent" }> {
+  ): Promise<{ kind: "conflict" } | { kind: "running" | "accepted_unknown" | "not_accepted"; binding: DurableTaskBinding; outcome?: TaskOutcome } | { kind: "completed"; record: CompletedIdempotencyRecord; binding: DurableTaskBinding } | { kind: "absent" }> {
     if (!this.options.idempotencyDirectory) return { kind: "absent" };
     const record = await readIdempotencyRecord(this.durableRecordPath(requestId));
     if (!record) return { kind: "absent" };
@@ -590,7 +591,7 @@ export class CodexBrokerServer {
     }
     if (!sameTaskBinding(record.binding, binding)) return { kind: "conflict" };
     if (record.state === "completed") return { kind: "completed", record, binding: record.binding };
-    if (record.state === "not_accepted") return { kind: "not_accepted", binding: record.binding };
+    if (record.state === "not_accepted") return { kind: "not_accepted", binding: record.binding, outcome: record.outcome };
     return {
       kind: this.idempotentTasks.has(requestId) ? "running" : "accepted_unknown",
       binding: record.binding,
@@ -665,7 +666,14 @@ export class CodexBrokerServer {
       return outcome;
     }
     if (!outcome.ok && outcome.outcomeUncertain) {
-      // 结果未知：accepted record 保持原状，查询继续返回 running/unknown。
+      // 本地执行结束不等于远端失败；保存诊断供原身份查询，绝不写 completed 或解锁重投。
+      await writeIdempotencyRecord(recordPath, {
+        version: 3, requestId, digest, binding, state: "accepted",
+        uncertainty: {
+          localExecutionEndedAt: new Date().toISOString(),
+          ...(outcome.failureDetails ? { failureDetails: outcome.failureDetails } : {}),
+        },
+      });
       return outcome;
     }
     const completion = this.prepareSessionCompletion(task.kind, session, sessionId, outcome);
@@ -717,6 +725,8 @@ export class CodexBrokerServer {
     state: "running" | "accepted_unknown" | "not_accepted",
     binding: DurableTaskBinding,
     observationError?: string,
+    uncertainty?: { localExecutionEndedAt: string; failureDetails?: CodexExecutorFailureDetails },
+    rejectedOutcome?: TaskOutcome,
   ): void {
     this.sendJson(response, status, {
       accepted: state !== "not_accepted",
@@ -724,6 +734,11 @@ export class CodexBrokerServer {
       state,
       binding,
       ...(observationError ? { observationError } : {}),
+      ...(uncertainty ? { localExecutionEndedAt: uncertainty.localExecutionEndedAt, failureDetails: uncertainty.failureDetails } : {}),
+      ...(rejectedOutcome && !rejectedOutcome.ok ? {
+        status: rejectedOutcome.status, error: rejectedOutcome.message,
+        failureKind: rejectedOutcome.failureKind, failureDetails: rejectedOutcome.failureDetails,
+      } : {}),
     });
   }
 
@@ -952,7 +967,7 @@ type IdempotencyRecord =
   | { version: 1; requestId: string; digest: string; state: "accepted" }
   | { version: 1; requestId: string; digest: string; state: "completed"; outcome: TaskOutcome }
   | { version: 2; requestId: string; digest: string; state: "completed"; outcome: TaskOutcome; sessionRecord?: SessionRecord }
-  | { version: 3; requestId: string; digest: string; binding: DurableTaskBinding; state: "accepted" }
+  | { version: 3; requestId: string; digest: string; binding: DurableTaskBinding; state: "accepted"; uncertainty?: { localExecutionEndedAt: string; failureDetails?: CodexExecutorFailureDetails } }
   | { version: 3; requestId: string; digest: string; binding: DurableTaskBinding; state: "not_accepted"; outcome: TaskOutcome }
   | { version: 3; requestId: string; digest: string; binding: DurableTaskBinding; state: "completed"; outcome: TaskOutcome; sessionRecord?: SessionRecord };
 

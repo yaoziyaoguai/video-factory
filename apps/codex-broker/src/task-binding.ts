@@ -171,6 +171,6 @@ function isDigest(value: unknown): value is string {
 function isTaskKind(value: unknown): value is BrokerTaskKind {
   return typeof value === "string" && [
     "topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft",
-    "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit",
+    "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion",
   ].includes(value);
 }

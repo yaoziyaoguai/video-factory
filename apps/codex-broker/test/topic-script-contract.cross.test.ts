@@ -12,8 +12,14 @@ import {
   type CodexTaskKind,
 } from "../../../packages/production-pipeline/src/codex-chat.js";
 import { CodexCreativeTreatmentAgent } from "../../../packages/production-pipeline/src/codex-creative-treatment.js";
+import { parseCreativeTreatment } from "../../../packages/production-pipeline/src/creative-treatment.js";
 import { CodexScreenwriterAgent } from "../../../packages/production-pipeline/src/codex-screenwriter.js";
 import { CodexVisualDirectorAgent } from "../../../packages/production-pipeline/src/codex-visual-director.js";
+import {
+  CodexVisualReviewAgent,
+  type VisualReviewMediaPayload,
+  type VisualReviewReport,
+} from "../../../packages/production-pipeline/src/codex-visual-review.js";
 import {
   summarizeProductionCapabilities,
   type ProductionCapabilities,
@@ -144,16 +150,14 @@ describe("script-draft cross-process contract (planning chain brief × Broker pa
       platform: "douyin",
       durationSeconds: 24,
       durationRange: { minSeconds: 20, maxSeconds: 34 },
-      creativeTreatment: {
-        version: "video-factory/creative-treatment-v1",
-        viewerPromise: "看清楚哪些习惯真的在耗电",
-        beats: [],
-      },
+      visualIntent: "用通用生活画面解释机制，不冒充用户实测。",
+      creativeTreatment: legalCreativeTreatmentOutput(),
       planningIssues: [{ severity: "advisory", detail: "补齐第三条来源后可加强结论" }],
       visualPlan: { strategy: "桌面实测特写", beats: [] },
       productionCapabilities: {
         assetProviders: [],
         editing: { sourceRangeReuse: true, staticEditorialCard: false },
+        audio: { narration: true, pauseControl: "punctuation", musicTrack: false, soundEffectsTrack: false },
       },
     };
     const task = parseTaskRequest(envelope("script-draft", { brief }, {
@@ -162,6 +166,8 @@ describe("script-draft cross-process contract (planning chain brief × Broker pa
     assert.equal(task.kind, "script-draft");
     const record = task.payload as unknown as { brief: Record<string, unknown> };
     assert.deepEqual(record.brief.durationRange, { minSeconds: 20, maxSeconds: 34 });
+    assert.equal(record.brief.visualIntent, "用通用生活画面解释机制，不冒充用户实测。");
+    assert.equal(record.brief.templateGuidance, undefined);
     assert.ok(record.brief.creativeTreatment);
     assert.ok(record.brief.planningIssues);
   });
@@ -173,6 +179,7 @@ describe("script-draft cross-process contract (planning chain brief × Broker pa
       productionCapabilities: {
         assetProviders: [],
         editing: { sourceRangeReuse: true, staticEditorialCard: false },
+        audio: { narration: true, pauseControl: "punctuation", musicTrack: false, soundEffectsTrack: false },
       },
     };
     assert.throws(
@@ -254,9 +261,10 @@ describe("creative-treatment adapter × Broker parser", () => {
   it("accepts the actual reference-grammar request, validation repair, and matching audit capability snapshot", async () => {
     const client = new ParsingTreatmentClient();
     const agent = new CodexCreativeTreatmentAgent({ client, maxReviewIterations: 1 });
-    const productionCapabilities = {
+    const productionCapabilities: ProductionCapabilities = {
       assetProviders: [],
       editing: { sourceRangeReuse: true, staticEditorialCard: false },
+      audio: { narration: true, pauseControl: "punctuation", musicTrack: false, soundEffectsTrack: false },
     };
     await agent.treatDetailed({
       brief: {
@@ -267,6 +275,25 @@ describe("creative-treatment adapter × Broker parser", () => {
         platform: "douyin",
         durationSeconds: 30,
         durationRange: { minSeconds: 24, maxSeconds: 40 },
+        visualIntent: "以来源截图和通用示意解释核对方法。",
+        seriesContext: {
+          seriesName: "下班实验室",
+          seasonNumber: 1,
+          episodeNumber: 3,
+          premise: "每集完成一次可复现验证",
+          track: "after-work-lab",
+          arc: "从偶然成功走向稳定方法",
+          episode: {
+            pillar: "真实实验",
+            title: "第三集",
+            viewerPromise: "看懂失败发生在哪一步",
+            hook: "先展示反常结果",
+            payoff: "给出可复现检查表",
+          },
+          bible: { rules: ["结论必须来自本集实际内容"], recurringElements: [], forbiddenChanges: [] },
+          canon: { revision: 2, facts: [] },
+          continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: [], canonChecks: [] },
+        },
         productionCapabilities,
       },
       suppliedSources: [{ sourceId: "source-1", label: "原始报道" }],
@@ -307,8 +334,269 @@ describe("creative-treatment adapter × Broker parser", () => {
     };
     assert.equal((initial.referenceGrammar as { evidenceStatus?: string }).evidenceStatus, "style_structure_reference");
     assert.equal((repaired.revision as { mode?: string }).mode, "validation-repair");
+    assert.equal((initial.brief as { visualIntent?: string }).visualIntent, "以来源截图和通用示意解释核对方法。");
+    assert.equal(
+      ((initial.brief as { seriesContext?: { episode?: { viewerPromise?: string } } }).seriesContext?.episode?.viewerPromise),
+      "看懂失败发生在哪一步",
+    );
+    assert.equal((initial.brief as { templateGuidance?: unknown }).templateGuidance, undefined);
     assert.deepEqual((initial.brief as { productionCapabilities: unknown }).productionCapabilities, productionCapabilities);
+    assert.equal(audit.context.upstreamFacts.visualIntent, "以来源截图和通用示意解释核对方法。");
+    assert.equal(audit.context.upstreamFacts.templateGuidance, undefined);
     assert.deepEqual(audit.context.upstreamFacts.productionCapabilities, productionCapabilities);
+  });
+});
+
+class ParsingRepairClient extends CodexBridgeClient {
+  readonly calls: Array<ReturnType<typeof parseTaskRequest>> = [];
+  private producerCalls = 0;
+
+  constructor(
+    private readonly producerKind: "script-draft" | "director-plan",
+    private readonly validCandidate: Record<string, unknown>,
+  ) {
+    super({ socketPath: "/nonexistent/formal-planning-repair.sock", sleep: async () => undefined });
+  }
+
+  override async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
+    const task = parseTaskRequest(envelope(kind, payload, {
+      expectedContractDigest: taskContractDescriptorFor(kind).digest,
+    }), CORE_IDENTITY);
+    this.calls.push(task);
+    if (kind === this.producerKind) {
+      this.producerCalls += 1;
+      return { output: this.producerCalls === 1 ? {} : structuredClone(this.validCandidate) };
+    }
+    if (kind === "role-audit") {
+      return {
+        output: {
+          version: "video-factory/role-audit-v1",
+          verdict: "pass",
+          score: 95,
+          summary: "正式输入、候选与下游边界一致。",
+          issues: [],
+          repairInstructions: [],
+          planningDisposition: null,
+          hostReadinessReview: null,
+        },
+      };
+    }
+    throw new Error(`Unexpected task ${kind}`);
+  }
+}
+
+const stockCapabilities: ProductionCapabilities = {
+  assetProviders: [{
+    id: "pexels-stock-v1",
+    deliveryTypes: ["stock_video", "stock_image"],
+    supportsReferenceImage: false,
+    strengths: ["通用纪实素材"],
+    constraints: ["不能证明用户专属实验"],
+  }],
+  editing: { sourceRangeReuse: true, staticEditorialCard: false },
+  audio: { narration: true, pauseControl: "punctuation", musicTrack: false, soundEffectsTrack: false },
+};
+
+function validScriptCandidate(): Record<string, unknown> {
+  return {
+    viewerPromise: "学会识别资料支持的结论边界",
+    narrativeArc: "先提出核对问题，再解释来源边界，最后给出行动方法。",
+    canonFacts: [],
+    scenes: [1, 2, 3].map((position) => ({
+      position,
+      narration: `第 ${position} 段解释一个核对步骤。`,
+      duration: 8,
+      visual_strategy: "stock",
+      visual_prompt: `第 ${position} 段通用生活示意画面`,
+      visible_action: "人物查看资料并做标记",
+      success_criteria: ["动作清楚可见"],
+      failure_conditions: ["画面出现无法核实的实验结果"],
+      search_terms: ["person checking document vertical video"],
+    })),
+  };
+}
+
+function validDirectorCandidate(): Record<string, unknown> {
+  return {
+    version: "video-factory/director-plan-v1",
+    requestedProfileId: "auto",
+    resolvedProfileId: "documentary-observer",
+    profileRationale: "通用纪实画面适合解释核对方法。",
+    visualBible: {
+      viewerPromise: "学会识别资料支持的结论边界",
+      narrativeApproach: "按动作推进核对步骤",
+      motif: "纸面标记与手机资料",
+      pacing: "稳定清楚",
+      composition: "主体与资料同屏",
+      camera: "轻微推进",
+      color: "自然色",
+      continuity: "同一人物与桌面环境",
+      transitionGrammar: "按动作方向切换",
+      sound: "环境声克制",
+      antiPatterns: ["无关空镜", "无法核实的实验画面"],
+    },
+    shots: [1, 2, 3].map((scenePosition) => ({
+      scenePosition,
+      narrativeRole: "解释核对步骤",
+      authenticityPolicy: "illustrative",
+      preferredProviderId: "pexels-stock-v1",
+      deliveryType: "stock_video",
+      alternativeProviderIds: [],
+      subject: "查看资料的普通人",
+      environment: "自然光桌面",
+      visibleAction: "人物查看资料并做标记",
+      temporalBeats: [{ startSeconds: 0, endSeconds: 8, action: "查看资料并完成一处标记" }],
+      sourceInSeconds: 0,
+      shotSize: "中近景",
+      camera: "稳定轻推",
+      lighting: "自然柔光",
+      negativeConstraints: ["不出现品牌水印", "不冒充实测"],
+      referenceRequirements: [],
+      successCriteria: ["动作清楚可见"],
+      query: "person checking document vertical video",
+      generationPrompt: "自然光桌面前查看资料并做标记的纪实竖屏画面",
+      rationale: "通用纪实素材足以承担机制示意。",
+      continuityNote: "保持人物与桌面视觉连续。",
+      confidence: 0.8,
+      estimatedCostCny: 0,
+    })),
+  };
+}
+
+describe("script/director adapters × Broker parser", () => {
+  it("accepts the actual producer, validation repair, and audit requests with the revision 9 brief", async () => {
+    const creativeTreatment = parseCreativeTreatment(legalCreativeTreatmentOutput(), ["source-1"]);
+    const commonBrief = {
+      title: "资料结论怎么核对",
+      angle: "用通用示意解释核对方法",
+      audience: "刚开始独立生活的观众",
+      platform: "douyin",
+      durationSeconds: 24,
+      durationRange: { minSeconds: 20, maxSeconds: 34 },
+      visualProof: "不能把示意画面说成用户实测。",
+      visualIntent: "用自然生活画面解释核对动作。",
+      creativeTreatment,
+      planningIssues: [{
+        id: "planning-issue-1",
+        target: "director" as const,
+        beatIds: ["evidence"],
+        scenePositions: [2],
+        reason: "素材只承担机制示意。",
+        requiredChange: "导演不得把通用素材描述成用户实测。",
+        evidenceArtifactIds: [],
+      }],
+      productionCapabilities: stockCapabilities,
+    };
+
+    const scriptClient = new ParsingRepairClient("script-draft", validScriptCandidate());
+    await new CodexScreenwriterAgent({ client: scriptClient, maxReviewIterations: 1 }).draftDetailed({
+      brief: { ...commonBrief, nicheSlug: "evidence-basics" },
+      planningMode: true,
+    });
+    assert.deepEqual(scriptClient.calls.map((call) => call.kind), ["script-draft", "script-draft", "role-audit"]);
+
+    const directorClient = new ParsingRepairClient("director-plan", validDirectorCandidate());
+    await new CodexVisualDirectorAgent({ client: directorClient, maxReviewIterations: 1 }).planDetailed({
+      brief: { ...commonBrief, requestedProfileId: "auto" },
+      scenes: (validScriptCandidate().scenes as Array<Record<string, unknown>>).map((scene) => ({
+        position: scene.position as number,
+        narration: scene.narration as string,
+        duration: scene.duration as number,
+        visualPrompt: scene.visual_prompt as string,
+        visualStrategy: "stock" as const,
+        visibleAction: scene.visible_action as string,
+        successCriteria: scene.success_criteria as string[],
+        failureConditions: scene.failure_conditions as string[],
+        searchTerms: scene.search_terms as string[],
+      })),
+      assetProviders: [{
+        id: "pexels-stock-v1",
+        label: "Pexels 图库",
+        billing: "free",
+        modes: ["图库检索"],
+        deliveryTypes: ["stock_video", "stock_image"],
+        supportsReferenceImage: false,
+        strengths: ["通用纪实素材"],
+        constraints: ["不能证明用户专属实验"],
+        estimatedCnyPerClip: 0,
+      }],
+      economics: { allowMeteredProviders: false },
+      planningMode: true,
+    });
+    assert.deepEqual(directorClient.calls.map((call) => call.kind), ["director-plan", "director-plan", "role-audit"]);
+
+    for (const calls of [scriptClient.calls, directorClient.calls]) {
+      const initial = calls[0]!.payload as unknown as { brief: Record<string, unknown> };
+      const repaired = calls[1]!.payload as unknown as { revision: { mode?: string } };
+      const audit = calls[2]!.payload as unknown as { context: { upstreamFacts: Record<string, unknown> } };
+      assert.equal(initial.brief.visualIntent, commonBrief.visualIntent);
+      assert.equal(initial.brief.templateGuidance, undefined);
+      assert.deepEqual(initial.brief.creativeTreatment, commonBrief.creativeTreatment);
+      assert.deepEqual(initial.brief.planningIssues, commonBrief.planningIssues);
+      assert.equal(repaired.revision.mode, "validation-repair");
+      assert.ok(audit.context.upstreamFacts);
+    }
+  });
+});
+
+describe("visual-review adapter × Broker parser", () => {
+  it("accepts the complete production visual-review audit criteria", async () => {
+    const identity = {
+      ...CORE_IDENTITY,
+      taskKinds: [...CORE_IDENTITY.taskKinds, "visual-review"],
+    } as const;
+    const media: VisualReviewMediaPayload = {
+      durationMs: 1_000,
+      frames: [{
+        timecodeMs: 500,
+        sourceTimecodeMs: 500,
+        sha256: "eb881b6abf48739ee3e6c9d97aa6a7fe7f5eca9af4c6e7f012a4dbb49b3437ab",
+        jpegBase64: "/9j/4AAA/9k=",
+        scenePosition: 1,
+        phase: "middle",
+      }],
+    };
+    const report: VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "当前证据范围内画面满足硬性要求。",
+      scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 90 },
+      findings: [],
+      confidence: 0.9,
+      recommendation: "approve",
+    };
+    const audit = {
+      version: "video-factory/role-audit-v1",
+      verdict: "pass",
+      score: 95,
+      summary: "报告与画面证据和硬性要求一致。",
+      issues: [],
+      repairInstructions: [],
+      planningDisposition: null,
+      hostReadinessReview: null,
+    };
+    const parsedKinds: CodexTaskKind[] = [];
+    const client = new class extends CodexBridgeClient {
+      constructor() {
+        super({ socketPath: "/nonexistent/visual-review-contract.sock", sleep: async () => undefined });
+      }
+
+      override async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
+        const parsed = parseTaskRequest(envelope(kind, payload, {
+          expectedContractDigest: taskContractDescriptorFor(kind).digest,
+        }), identity);
+        parsedKinds.push(parsed.kind);
+        return { output: kind === "visual-review" ? report : audit };
+      }
+    }();
+
+    const result = await new CodexVisualReviewAgent({
+      client,
+      media: { prepare: async () => media },
+      maxReviewIterations: 1,
+    }).reviewDetailed({ runRoot: "/run", preparedMedia: media });
+
+    assert.equal(result.output.recommendation, "approve");
+    assert.deepEqual(parsedKinds, ["visual-review", "role-audit"]);
   });
 });
 

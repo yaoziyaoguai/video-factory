@@ -6,6 +6,8 @@ import {
   BROKER_TASK_KINDS,
   COMMON_ROLE_PREAMBLE,
   outputSchemaFor,
+  providerOutputSchemaFor,
+  outputSchemaValidationErrorFor,
   outputValidationErrorFor,
   taskContractDescriptorFor,
   taskPromptFor,
@@ -70,7 +72,7 @@ function validDirectorPlan() {
 
 function validCreativeTreatment(): Record<string, unknown> {
   return {
-    version: "video-factory/creative-treatment-v1",
+    version: "video-factory/creative-treatment-v2",
     viewerPromise: "学会识别资料支持的结论边界",
     hook: { narrationIntent: "提出一个具体判断", visualIntent: "展示原始资料的关键差异" },
     progression: [
@@ -81,7 +83,15 @@ function validCreativeTreatment(): Record<string, unknown> {
     payoff: "给出有条件的结论及下一步",
     visualPrinciples: ["来源画面优先"],
     soundPrinciples: ["自然语速、清楚停顿"],
-    evidenceRequirements: [{ beatId: "evidence", claim: "原材料中的陈述", requirement: "factual_support", suppliedSourceIds: ["source-1"] }],
+    evidenceRequirements: [{
+      beatId: "evidence",
+      claim: "原材料中的陈述",
+      requirement: "factual_support",
+      suppliedSourceIds: ["source-1"],
+      critical: true,
+      acquisition: "supplied",
+      retrievalProviderId: null,
+    }],
     feasibilityQuestions: [{ beatId: "evidence", question: "来源画面是否可读且有使用依据" }],
   };
 }
@@ -113,6 +123,16 @@ describe("broker-owned task definitions", () => {
       assert.equal(REQUIRED_CODEX_TASK_CONTRACT_DIGESTS[kind], taskContractDescriptorFor(kind).digest);
     }
   });
+  it("publishes source timecodes in both visual evidence input contracts", () => {
+    const visualReview = taskContractDescriptorFor("visual-review").inputContract as { frameFields?: string[] };
+    const roleAudit = taskContractDescriptorFor("role-audit").inputContract as {
+      criteriaMaxItems?: number;
+      imageFields?: string[];
+    };
+    assert.equal(visualReview.frameFields?.includes("sourceTimecodeMs"), true);
+    assert.equal(roleAudit.imageFields?.includes("sourceTimecodeMs"), true);
+    assert.equal(roleAudit.criteriaMaxItems, 16);
+  });
   it("pins protocol v2 and owns prompts for every allowed task kind", () => {
     assert.equal(CODEX_BRIDGE_PROTOCOL_VERSION, "video-factory/codex-bridge-v2");
     assert.deepEqual(BROKER_TASK_KINDS, [
@@ -126,6 +146,7 @@ describe("broker-owned task definitions", () => {
       "reference-grammar",
       "visual-review",
       "role-audit",
+      "creative-discussion",
     ]);
     for (const kind of BROKER_TASK_KINDS) {
       assert.equal(
@@ -146,7 +167,7 @@ describe("broker-owned task definitions", () => {
     assert.match(taskPromptFor("visual-review").directive, /视觉审片/);
     assert.match(taskPromptFor("role-audit").directive, /独立审计当前角色候选/);
     assert.match(taskPromptFor("role-audit").directive, /没有依据的审美偏好不能阻断/);
-    assert.match(taskPromptFor("role-audit").directive, /不得要求前期构思已拿到素材/);
+    assert.match(taskPromptFor("role-audit").directive, /前期不要求已经下载普通图库或生成付费画面/);
     assert.match(taskPromptFor("role-audit").directive, /previousAudit/);
     assert.match(taskPromptFor("role-audit").directive, /不要求凭空增加库存、服务商或后期功能/);
     assert.match(taskPromptFor("director-plan").directive, /assetProviders 是本轮可用于规划与报价的池/);
@@ -187,8 +208,8 @@ describe("broker-owned task definitions", () => {
       [
         "video-factory/topic-editor-v8",
         "video-factory/series-showrunner-v2",
-        "video-factory/treatment-director-v3",
-        "video-factory/screenwriter-v16",
+        "video-factory/treatment-director-v5",
+        "video-factory/screenwriter-v17",
         "video-factory/director-v28",
       ],
     );
@@ -198,8 +219,8 @@ describe("broker-owned task definitions", () => {
         "video-factory/publish-editor-v3",
         "video-factory/asset-rank-v4",
         "video-factory/reference-grammar-v3",
-        "video-factory/visual-review-v14",
-        "video-factory/role-audit-v5",
+        "video-factory/visual-review-v18",
+        "video-factory/role-audit-v8",
       ],
     );
 
@@ -234,10 +255,19 @@ describe("broker-owned task definitions", () => {
       /"startTimecodeMs".*"evidenceStatus":"not_observed".*"evidenceFrameSha256":null.*"nextAction":"inspect_existing_media"/,
     );
     assert.match(review.outputRules.join("\n"), /scenePosition.*targetNodeId/);
+    assert.match(review.outputRules.join("\n"), /startTimecodeMs <= timecodeMs <= endTimecodeMs/);
+    assert.match(review.outputRules.join("\n"), /evidenceStatus=failed.*severity.*warning.*critical.*nextAction.*replan_upstream.*rework_asset/);
+    assert.match(review.outputRules.join("\n"), /evidenceStatus=not_observed.*severity.*info.*nextAction.*inspect_existing_media/);
+    assert.match(review.outputRules.join("\n"), /evidenceStatus=satisfied.*not_applicable.*severity.*info.*nextAction.*none/);
     assert.doesNotMatch(script.directive, /costPolicy/);
     assert.match(director.outputRules.join("\n"), /不要逐字复述脚本/);
     assert.match(director.outputRules.join("\n"), /每个标量字段最多一句/);
     assert.match(review.directive, /scene_triplets.*opening.*middle.*closing/);
+    // 证据能力规则必须按主张类型声明，且覆盖"画面之外的东西"这一类，否则模型只能靠题材猜。
+    assert.match(review.directive, /claimType 声明这条主张要靠哪类证据判定：static.*motion.*non_visual/);
+    assert.match(review.directive, /更判不了 non_visual，采多少帧也采不到声音/);
+    assert.match(review.outputRules.join("\n"), /claimType 只能是 static、motion 或 non_visual/);
+    assert.match(review.outputRules.join("\n"), /claimType=non_visual 的 finding 不可能靠抽帧证成/);
     assert.ok(script.examples.some((example) => /反例/.test(example)));
     assert.ok(director.examples.some((example) => /startSeconds.*endSeconds.*action/.test(example)));
   });
@@ -248,7 +278,7 @@ describe("broker-owned task definitions", () => {
     assert.match(topic.directive, /榜单排名和热度不能证明报道中的具体结论/);
     assert.match(topic.directive, /每个顶层 signals 项是归并后的 canonical topic/);
     assert.match(topic.directive, /relatedSignals 只是关联报道/);
-    assert.match(topic.directive, /signalId 原样引用顶层 id/);
+    assert.match(topic.directive, /signalId.*原样引用顶层 id/);
     assert.match(topic.directive, /来源数量门槛由下游/);
     assert.match(topic.directive, /来源不足但内容和视觉价值成立的角度可以保留/);
     assert.match(topic.directive, /全部输入均无内容或视觉价值时才返回空 ideas/);
@@ -267,7 +297,8 @@ describe("broker-owned task definitions", () => {
       ["asset-rank", ["version", "source", "providerId", "modelId", "summary", "scenes"]],
       ["reference-grammar", ["version", "summary", "durationMs", "pacing", "composition", "camera", "color", "transitions", "sound", "beats", "reusableRules", "avoidCopying", "confidence"]],
       ["visual-review", ["version", "summary", "scores", "findings", "confidence", "recommendation"]],
-      ["role-audit", ["version", "verdict", "score", "summary", "issues", "repairInstructions", "planningDisposition"]],
+      ["role-audit", ["version", "verdict", "score", "summary", "issues", "repairInstructions", "planningDisposition", "hostReadinessReview"]],
+      ["creative-discussion", ["stage", "intent", "reply", "changeSummary", "treatment", "script", "director", "upstreamRequest"]],
     ] as const);
 
     for (const kind of BROKER_TASK_KINDS) {
@@ -281,6 +312,29 @@ describe("broker-owned task definitions", () => {
     for (const kind of BROKER_TASK_KINDS) {
       assertStrictObjectRequirements(outputSchemaFor(kind), kind);
     }
+  });
+
+  it("projects unsupported uniqueness only at the provider boundary without mutating the domain schema", () => {
+    for (const kind of BROKER_TASK_KINDS) {
+      const before = JSON.stringify(outputSchemaFor(kind));
+      const projected = providerOutputSchemaFor(kind);
+      assert.equal(JSON.stringify(projected).includes('"uniqueItems"'), false, kind);
+      assertStrictObjectRequirements(projected, kind);
+      assert.equal(JSON.stringify(outputSchemaFor(kind)), before);
+      const removeUnique = (value: unknown): unknown => Array.isArray(value)
+        ? value.map(removeUnique)
+        : value && typeof value === "object"
+          ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "uniqueItems").map(([key, entry]) => [key, removeUnique(entry)]))
+          : value;
+      assert.deepEqual(projected, removeUnique(outputSchemaFor(kind)));
+    }
+    assert.ok(JSON.stringify(outputSchemaFor("topic-ideas")).includes('"uniqueItems":true'));
+    assert.ok(JSON.stringify(outputSchemaFor("role-audit")).includes('"uniqueItems":true'));
+    assert.match(outputSchemaValidationErrorFor("role-audit", {
+      version: "video-factory/role-audit-v1", verdict: "pass", score: 95, summary: "检查完成",
+      issues: [], repairInstructions: [], planningDisposition: null,
+      hostReadinessReview: { misclassifiedIssueIds: ["issue-1", "issue-1"] },
+    }) ?? "", /unique|duplicate|match any/i);
   });
 
   it("requires inspectable shot intent instead of accepting generic scene prose", () => {
@@ -378,7 +432,7 @@ describe("broker-owned task definitions", () => {
           endTimecodeMs: 500,
           scenePosition: 1,
           targetNodeId: "assets",
-          evidenceStatus: "failed",
+          claimType: "static", evidenceStatus: "failed",
           evidenceFrameSha256: "a".repeat(64),
           nextAction: "rework_asset",
           category: "unknown",
@@ -400,7 +454,7 @@ describe("broker-owned task definitions", () => {
         endTimecodeMs: 500,
         scenePosition: 1,
         targetNodeId: "assets",
-        evidenceStatus: "failed",
+        claimType: "static", evidenceStatus: "failed",
         evidenceFrameSha256: "not-a-sha256",
         nextAction: "rework_asset",
         category: "continuity",
@@ -425,7 +479,7 @@ describe("broker-owned task definitions", () => {
         endTimecodeMs: 500,
         scenePosition: 1,
         targetNodeId: "assets",
-        evidenceStatus: "failed",
+        claimType: "static", evidenceStatus: "failed",
         evidenceFrameSha256: "a".repeat(64),
         nextAction: "rework_asset",
         category: "continuity",
@@ -440,7 +494,7 @@ describe("broker-owned task definitions", () => {
         timecodeMs: 100,
         startTimecodeMs: 0,
         endTimecodeMs: 500,
-        evidenceStatus: "failed",
+        claimType: "static", evidenceStatus: "failed",
         evidenceFrameSha256: "a".repeat(64),
         nextAction: "rework_asset",
         category: "other",
@@ -459,7 +513,7 @@ describe("broker-owned task definitions", () => {
         endTimecodeMs: 500,
         scenePosition: 1,
         targetNodeId: "script",
-        evidenceStatus: "failed",
+        claimType: "static", evidenceStatus: "failed",
         evidenceFrameSha256: "a".repeat(64),
         nextAction: "replan_upstream",
         category: "pacing",
@@ -515,6 +569,8 @@ describe("broker-owned task definitions", () => {
         painPoint: "下班后仍然疲惫",
         hook: "钩子",
         rationale: "理由",
+        facts: [],
+        uncertainties: ["尚未读取正文"],
         visualProof: "拍摄下班后用工具整理日程前后的可见对比，来自可复现实拍，动作变化比文字描述更直观。",
         visualPlan: {
           strategy: "同一本纸质时间账本贯穿前后对照。",
@@ -540,6 +596,15 @@ describe("broker-owned task definitions", () => {
     }), "string");
     assert.equal(typeof outputValidationErrorFor("topic-ideas", {
       ideas: [{ ...valid.ideas[0], monetization: 101 }],
+    }), "string");
+    assert.equal(outputValidationErrorFor("topic-ideas", {
+      ideas: [{ ...valid.ideas[0], facts: [{ statement: "正文事实", sourceId: "signal-1", paragraphIds: ["p1"], uncertainty: null }] }],
+    }), undefined);
+    assert.equal(typeof outputValidationErrorFor("topic-ideas", {
+      ideas: [{ ...valid.ideas[0], facts: [{ statement: "正文事实", sourceId: "signal-1", paragraphIds: ["p1", "p1"], uncertainty: null }] }],
+    }), "string");
+    assert.equal(typeof outputValidationErrorFor("topic-ideas", {
+      ideas: [{ ...valid.ideas[0], facts: [{ statement: "正文事实", sourceId: "signal-1", paragraphIds: ["p1"] }] }],
     }), "string");
     assert.equal(typeof outputValidationErrorFor("topic-ideas", {
       ideas: [{ ...valid.ideas[0], visualProof: undefined }],
@@ -571,11 +636,16 @@ describe("broker-owned task definitions", () => {
 
   it("pins the creative-treatment prompt pack and enforces beat-reference semantics", () => {
     const prompt = taskPromptFor("creative-treatment");
-    assert.equal(prompt.version, "video-factory/treatment-director-v3");
+    assert.equal(prompt.version, "video-factory/treatment-director-v5");
     assert.match(prompt.directive, /不输出完整逐镜分镜.*不报价.*不声称画面或配音已完成/);
     assert.match(prompt.directive, /lockedViewerPromise.*保持其实际收益与事实边界/);
     assert.match(prompt.directive, /suppliedSourceIds 只能引用 suppliedSources 中的 id/);
+    assert.match(prompt.directive, /现实事实、因果、实验结果、数字或具体事件/);
+    assert.match(prompt.directive, /主观观察、创作启发、构图选择.*illustration_only.*not_needed/);
+    assert.match(prompt.directive, /示意不能证明普遍结论.*不自动升级为外部来源要求/);
+    assert.match(taskPromptFor("role-audit").directive, /边界声明.*不能单独作为 factual_support.*external_required/);
     assert.match(prompt.outputRules.join("\n"), /progression 输出 1 到 12 项，beatId 唯一/);
+    assert.match(prompt.outputRules.join("\n"), /reworkInstruction/);
 
     const valid = validCreativeTreatment();
     assert.equal(outputValidationErrorFor("creative-treatment", valid), undefined);
@@ -597,7 +667,7 @@ describe("broker-owned task definitions", () => {
     assert.match(outputValidationErrorFor("creative-treatment", blankPromise) ?? "", /viewerPromise/);
 
     const wrongVersion = structuredClone(valid);
-    wrongVersion.version = "video-factory/creative-treatment-v2";
+    wrongVersion.version = "video-factory/creative-treatment-v1";
     assert.match(outputValidationErrorFor("creative-treatment", wrongVersion) ?? "", /version/);
   });
 
@@ -618,7 +688,7 @@ describe("broker-owned task definitions", () => {
   it("pins the creative-treatment semantic rules version that owns the whitespace contract", () => {
     assert.equal(
       taskContractDescriptorFor("creative-treatment").semanticRulesVersion,
-      "creative-treatment-semantics-v6|production-capabilities-v2|visual-plan-v2",
+      "creative-treatment-semantics-v10|production-capabilities-v3|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
     );
   });
 });

@@ -271,6 +271,7 @@ function scriptTaskBody(label: string): string {
         productionCapabilities: {
           assetProviders: [],
           editing: { sourceRangeReuse: true, staticEditorialCard: false },
+          audio: { narration: true, pauseControl: "punctuation", musicTrack: false, soundEffectsTrack: false },
         },
       },
     },
@@ -454,6 +455,8 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       });
       assert.equal(query.status, 200);
       assert.equal(JSON.parse(query.body).state, "accepted_unknown");
+      assert.ok(Number.isFinite(Date.parse(JSON.parse(query.body).localExecutionEndedAt)));
+      assert.equal(JSON.parse(query.body).failureDetails.reasonCode, "response_stream_interrupted");
 
       const replay = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
       assert.equal(replay.status, 202);

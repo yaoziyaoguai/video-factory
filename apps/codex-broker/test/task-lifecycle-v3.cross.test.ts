@@ -14,9 +14,11 @@ import {
   type CodexPreparedOperation,
 } from "../../../packages/production-pipeline/src/codex-chat.js";
 import { CodexAssetSemanticRanker } from "../../../packages/production-pipeline/src/asset-semantic-ranker.js";
+import { runRoleAgentLoop, RoleAgentLoopError } from "../../../packages/production-pipeline/src/role-agent-loop.js";
 import { isModelProviderFailure } from "../../../packages/production-pipeline/src/model-fallback.js";
 import { formatTopicStrategy } from "../../studio/src/server/topic-ideas-payload.js";
 import { CodexBrokerServer } from "../src/broker-server.js";
+import { CodexExecutorError } from "../src/codex-executor.js";
 import { taskContractDescriptorFor } from "../src/task-definitions.js";
 
 const contract = taskContractDescriptorFor("topic-ideas");
@@ -24,6 +26,95 @@ const payload = { signals: [{ id: "signal-1", platform: "test", rank: 1, title: 
 const threadId = "11111111-2222-3333-4444-555555555555";
 
 describe("durable task lifecycle v3", () => {
+  for (const legacyPending of [false, true]) it(`preserves queue rejection and later retry without session rebuild (legacy pending=${legacyPending})`, async (t) => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fixture = await setup(t, async () => { await gate; return success(); }, 1, 1);
+    const active = await request(fixture.socketPath, "POST", "/v1/tasks", await fixture.body("holding-queue"));
+    await waitFor(() => fixture.calls.length === 1);
+    const queued = await request(fixture.socketPath, "POST", "/v1/tasks", await fixture.body("queued-holder"));
+    await delay(20);
+    let stored: unknown;
+    const requestIds: string[] = [];
+    let firstPrepared: CodexPreparedOperation | undefined;
+    const execute = () => runRoleAgentLoop({
+      role: "选题", contractVersion: "queue-retry-v1", criteria: ["真实来源"], maxIterations: 1, deferAudit: true,
+      checkpoint: { key: "queue-retry", load: async () => stored, save: async (value) => { stored = structuredClone(value); } },
+      produce: async (_revision, operation) => {
+        requestIds.push(operation.requestId);
+        return operation.preparedOperation
+          ? fixture.client.observePrepared(operation.preparedOperation)
+          : fixture.client.runTaskDetailed("topic-ideas", payload, operation.requestId, operation.session, {
+            ...operation.requestOptions,
+            beforeSubmit: async (prepared) => {
+              firstPrepared ??= structuredClone(prepared);
+              await operation.requestOptions.beforeSubmit?.(prepared);
+            },
+          });
+      },
+      audit: async () => { throw new Error("not expected"); },
+      validate: (value) => value,
+    });
+    try {
+      await assert.rejects(execute, (error: unknown) => {
+        assert.ok(error instanceof RoleAgentLoopError);
+        assert.equal(error.agentLoop.modelCallCount, 0);
+        assert.ok(error.sourceError instanceof CodexBridgeError);
+        assert.equal(error.sourceError.stage, "not_accepted");
+        assert.equal(error.sourceError.statusCode, 503);
+        assert.match(error.sourceError.message, /backlog/);
+        return true;
+      });
+      assert.equal(requestIds.length, 1);
+    } finally { release(); }
+    await fixture.complete(active);
+    await fixture.complete(queued);
+    if (legacyPending) {
+      const checkpoint = stored as Record<string, unknown>;
+      checkpoint.operationGenerations = {};
+      checkpoint.pendingOperation = {
+        phase: "produce", iteration: 1, operationKey: "0:1:produce", generation: 0,
+        operation: firstPrepared,
+      };
+    }
+    const result = await execute();
+    assert.deepEqual(result.output, { ideas: [] });
+    assert.equal(requestIds.length, legacyPending ? 3 : 2);
+    assert.notEqual(requestIds[0], requestIds.at(-1));
+    assert.equal(fixture.calls.length, 3, "only holders and later successful role reached executor");
+    const rejected = JSON.parse(await readFile(recordPath(fixture.records, requestIds[0]!), "utf8"));
+    assert.equal(rejected.state, "not_accepted");
+    const replay = await request(fixture.socketPath, "POST", "/v1/tasks", JSON.stringify(firstPrepared!.envelope));
+    assert.equal(replay.status, 503, "same rejected identity must replay the original queue rejection");
+    assert.match(replay.body, /backlog/);
+    assert.equal(fixture.calls.length, 3);
+  });
+  it("stops observing a locally ended unknown request and preserves its diagnosis and immutable identity", async (t) => {
+    const fixture = await setup(t, async () => { throw new CodexExecutorError("unsafe upstream text", false, {
+      outcomeUncertain: true,
+      details: { category: "network", reasonCode: "connection_failed", providerId: "openai", modelId: "gpt-5.6-sol",
+        localExecutionEnded: true, remoteQueryable: false, headersReceived: true, networkCode: "ECONNRESET" },
+    }); });
+    const start = Date.now();
+    let prepared: CodexPreparedOperation | undefined;
+    const check = (error: unknown) => {
+      assert.ok(error instanceof CodexBridgeError);
+      assert.equal(error.stage, "uncertain");
+      assert.equal(error.transient, false);
+      assert.equal(error.failureDetails?.networkCode, "ECONNRESET");
+      assert.match(error.creatorMessage, /停止自动等待/);
+      return true;
+    };
+    await assert.rejects(() => fixture.client.runTaskDetailed("topic-ideas", payload, "ended-unknown", undefined,
+      { timeoutMs: 10_000, beforeSubmit: async (operation) => { prepared = operation; } }), check);
+    assert.ok(Date.now() - start < 5_000, "must not wait the whole task deadline after local execution ended");
+    await assert.rejects(() => fixture.client.observePrepared(prepared!, { timeoutMs: 10_000 }), check);
+    const record = JSON.parse(await readFile(recordPath(fixture.records, "ended-unknown"), "utf8"));
+    assert.equal(record.state, "accepted");
+    assert.equal(record.outcome, undefined);
+    assert.equal(record.uncertainty.failureDetails.remoteQueryable, false);
+    assert.equal(fixture.calls.length, 1);
+  });
   it("A01/A07 preserves output, trace, and session and rematerializes a missing registry", async (t) => {
     const fixture = await setup(t);
     let prepared: CodexPreparedOperation | undefined;
@@ -287,6 +378,7 @@ async function setup(
   t: { after(action: () => Promise<unknown> | unknown): void },
   run?: () => Promise<ReturnType<typeof success>>,
   concurrency = 1,
+  maxBacklog = 32,
 ) {
   const directory = await mkdtemp(path.join(tmpdir(), "vf-lifecycle-v3-"));
   const socketPath = path.join(directory, "worker.sock");
@@ -300,7 +392,7 @@ async function setup(
       return run ? run() : success();
     },
   };
-  const broker = new CodexBrokerServer({ socketPath, executor: executor as never, idempotencyDirectory: records, sessionDirectory: sessions, concurrency, maxBacklog: 32 });
+  const broker = new CodexBrokerServer({ socketPath, executor: executor as never, idempotencyDirectory: records, sessionDirectory: sessions, concurrency, maxBacklog });
   await broker.start();
   t.after(async () => { await broker.close(); await rm(directory, { recursive: true, force: true }); });
   const client = new CodexBridgeClient({ socketPath, timeoutMs: 2_000, pollIntervalMs: 10, maxAttempts: 1 });

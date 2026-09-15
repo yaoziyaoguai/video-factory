@@ -33,6 +33,7 @@ function scriptDraftTask() {
         productionCapabilities: {
           assetProviders: [],
           editing: { sourceRangeReuse: true, staticEditorialCard: false },
+          audio: { narration: true, pauseControl: "punctuation", musicTrack: false, soundEffectsTrack: false },
         },
       },
     },
@@ -80,6 +81,7 @@ function directorPlanTask() {
             constraints: ["不能保证精确人物身份"],
           }],
           editing: { sourceRangeReuse: true, staticEditorialCard: false },
+          audio: { narration: true, pauseControl: "punctuation", musicTrack: false, soundEffectsTrack: false },
         },
       },
       scenes: [{ position: 1, narration: "先放下手机。", duration: 4 }],
@@ -183,7 +185,7 @@ function validReport(): Record<string, unknown> {
       endTimecodeMs: 0,
       scenePosition: 1,
       targetNodeId: "assets",
-      evidenceStatus: "failed",
+      claimType: "static", evidenceStatus: "failed",
       evidenceFrameSha256: createHash("sha256")
         .update(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]))
         .digest("hex"),
@@ -250,6 +252,7 @@ function validRoleAudit(): Record<string, unknown> {
     issues: [],
     repairInstructions: [],
     planningDisposition: null,
+    hostReadinessReview: null,
   };
 }
 
@@ -439,6 +442,8 @@ describe("ZaiCodePlanExecutor", () => {
           completionTokens: 65_536,
           totalTokens: 67_536,
           reasoningTokens: 61_000,
+          modelAttemptCount: 1,
+          structuredRepairCount: 0,
         });
         return true;
       },
@@ -466,7 +471,8 @@ describe("ZaiCodePlanExecutor", () => {
 
     assert.equal(calls, 2);
     assert.deepEqual(JSON.parse(result.output), validReport());
-    assert.equal((result.trace as typeof result.trace & { retryCount?: number })?.retryCount, 1);
+    assert.equal(result.trace?.modelAttemptCount, 2);
+    assert.equal(result.trace?.structuredRepairCount, 1);
     const retryMessages = requestBodies[1]?.messages as Array<{ content: Array<Record<string, unknown>> }>;
     assert.match(String(retryMessages[0]?.content[0]?.text), /output\.version is required/);
     assert.match(String(retryMessages[0]?.content[0]?.text), /不得改变 scores、confidence、recommendation/);
@@ -578,6 +584,100 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(result.trace?.taskKind, "director-plan");
   });
 
+  it("repairs one semantically invalid director candidate inside the accepted broker task", async () => {
+    const task = directorPlanTask();
+    if (task.kind !== "director-plan") throw new Error("expected director-plan task");
+    task.payload.scenes.push({ position: 2, narration: "抬头看看窗外。", duration: 4 });
+    const invalid = validDirectorPlan();
+    const invalidShots = invalid.shots as Array<Record<string, unknown>>;
+    invalidShots.push({ ...invalidShots[0], scenePosition: 1, narrativeRole: "payoff" });
+    const repaired = structuredClone(invalid);
+    (repaired.shots as Array<Record<string, unknown>>)[1]!.scenePosition = 2;
+    let calls = 0;
+    let repairPrompt = "";
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async (_input, init) => {
+        calls += 1;
+        if (calls === 2) {
+          const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+          repairPrompt = body.messages[0]!.content;
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(calls === 1 ? invalid : repaired) } }],
+        }), { status: 200 });
+      },
+    });
+
+    const result = await executor.runTask(task);
+
+    assert.equal(calls, 2);
+    assert.match(repairPrompt, /duplicate_scene_position/);
+    assert.match(repairPrompt, /output\.shots\[1\]\.scenePosition/);
+    assert.deepEqual(JSON.parse(result.output), repaired);
+  });
+
+  it("stops after one director semantic repair when the repaired output is still invalid", async () => {
+    const task = directorPlanTask();
+    if (task.kind !== "director-plan") throw new Error("expected director-plan task");
+    task.payload.scenes.push({ position: 2, narration: "抬头看看窗外。", duration: 4 });
+    const invalid = validDirectorPlan();
+    const invalidShots = invalid.shots as Array<Record<string, unknown>>;
+    invalidShots.push({ ...invalidShots[0], scenePosition: 1, narrativeRole: "payoff" });
+    let calls = 0;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(invalid) } }],
+        }), { status: 200 });
+      },
+    });
+
+    await assert.rejects(
+      () => executor.runTask(task),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.details?.reasonCode, "duplicate_scene_position");
+        assert.equal(error.details?.modelAttemptCount, 2);
+        assert.equal(error.details?.structuredRepairCount, 1);
+        return true;
+      },
+    );
+    assert.equal(calls, 2, "one accepted task may execute at most one structured repair");
+  });
+
+  it("shares one repair budget across director semantic then schema failures", async () => {
+    const task = directorPlanTask();
+    if (task.kind !== "director-plan") throw new Error("expected director-plan task");
+    task.payload.scenes.push({ position: 2, narration: "第二镜", duration: 4 });
+    const semanticInvalid = validDirectorPlan();
+    const shots = semanticInvalid.shots as Array<Record<string, unknown>>;
+    shots.push({ ...shots[0], scenePosition: 1, narrativeRole: "payoff" });
+    const schemaInvalid = structuredClone(semanticInvalid) as Record<string, unknown>;
+    delete schemaInvalid.version;
+    let calls = 0;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(calls === 1 ? semanticInvalid : schemaInvalid) } }],
+        }), { status: 200 });
+      },
+    });
+
+    await assert.rejects(() => executor.runTask(task), (error: unknown) => {
+      assert.ok(error instanceof CodexExecutorError);
+      assert.equal(error.details?.reasonCode, "task_schema");
+      assert.equal(error.details?.modelAttemptCount, 2);
+      assert.equal(error.details?.structuredRepairCount, 1);
+      return true;
+    });
+    assert.equal(calls, 2);
+  });
+
   it("sends a role audit without images to Coding Plan with the text model", async () => {
     let capturedUrl = "";
     let capturedBody: Record<string, unknown> | undefined;
@@ -629,7 +729,7 @@ describe("ZaiCodePlanExecutor", () => {
     assert.match(capturedPrompt, /source-1/);
     assert.deepEqual(JSON.parse(result.output), output);
     assert.equal(result.trace?.taskKind, "creative-treatment");
-    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v3");
+    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v5");
 
     await assert.rejects(
       async () => executor.runTask(creativeTreatmentTask([])),
@@ -963,6 +1063,8 @@ describe("ZaiCodePlanExecutor", () => {
           providerId: "zai-bigmodel-api",
           modelId: "glm-5.3",
           providerWaitMs: 37,
+          modelAttemptCount: 1,
+          structuredRepairCount: 0,
         });
         const serialized = JSON.stringify(error.details);
         assert.doesNotMatch(serialized, new RegExp(API_KEY));
@@ -1039,6 +1141,13 @@ describe("ZaiCodePlanExecutor", () => {
           providerId: "zai-bigmodel-api",
           modelId: "glm-5.3",
           providerWaitMs: 300_051,
+          executionLayer: "provider_transport",
+          networkCode: "UND_ERR_HEADERS_TIMEOUT",
+          headersReceived: false,
+          localExecutionEnded: true,
+          remoteQueryable: false,
+          modelAttemptCount: 1,
+          structuredRepairCount: 0,
         });
         assert.doesNotMatch(error.message, new RegExp(API_KEY));
         assert.doesNotMatch(JSON.stringify(error.details), /headers timeout leaked/);
@@ -1161,7 +1270,7 @@ describe("ZaiCodePlanExecutor", () => {
       endTimecodeMs: 10_001,
       scenePosition: 1,
       targetNodeId: "assets",
-      evidenceStatus: "failed",
+      claimType: "static", evidenceStatus: "failed",
       evidenceFrameSha256: createHash("sha256")
         .update(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]))
         .digest("hex"),
