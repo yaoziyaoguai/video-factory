@@ -10,26 +10,54 @@ const execFile = promisify(execFileCallback);
 const MAX_REVIEW_FRAMES = 24;
 const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_TOTAL_BYTES = 5 * 1024 * 1024;
+const REVIEW_MEDIA_TIMEOUT_MS = 10 * 60 * 1000;
+// 子进程 stderr 只保留尾部用于定位；完整内容走服务端日志，不进错误消息。
+const MAX_LOGGED_CHILD_STDERR = 4_000;
+
+export interface ReviewMediaPrepareInput {
+  videoPath?: string;
+  assetPlanPath?: string;
+  runRoot: string;
+  renderManifestPath?: string;
+  scenePositions?: number[];
+  scriptPath?: string;
+  executablePlanPath?: string;
+}
 
 export interface PythonReviewMediaPreprocessorOptions {
   repositoryRoot: string;
   pythonPath: string;
   pythonCommand: string;
   environment?: NodeJS.ProcessEnv;
+  /** 子进程失败的原始细节（可能含本地绝对路径）只允许走这里，绝不能进错误消息。 */
+  logChildFailure?: (message: string) => void;
 }
 
 export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreprocessor {
+  // 双分支复审会并发请求同一份素材证据。同一份证据只需预处理一次：各跑一次既白付一倍
+  // ffmpeg，又让两个临时目录去抢同一个发布目标（Python 侧 os.replace 交错时以
+  // "Directory not empty" 失败，且这个失败会伪装成模型调用失败）。只合并同时进行的
+  // 相同请求，落地即删，不做跨次缓存——素材变了必须重新采帧。
+  private readonly inFlight = new Map<string, Promise<VisualReviewMediaPayload>>();
+
   constructor(private readonly options: PythonReviewMediaPreprocessorOptions) {}
 
-  async prepare(input: {
-    videoPath?: string;
-    assetPlanPath?: string;
-    runRoot: string;
-    renderManifestPath?: string;
-    scenePositions?: number[];
-    scriptPath?: string;
-    executablePlanPath?: string;
-  }): Promise<VisualReviewMediaPayload> {
+  async prepare(input: ReviewMediaPrepareInput): Promise<VisualReviewMediaPayload> {
+    const key = mediaPreparationKey(input);
+    let pending = this.inFlight.get(key);
+    if (!pending) {
+      pending = this.prepareFresh(input);
+      this.inFlight.set(key, pending);
+    }
+    try {
+      // 每个调用方拿自己的副本：分支内的原地改写不能泄漏给另一分支，也不能改写共同快照。
+      return structuredClone(await pending);
+    } finally {
+      if (this.inFlight.get(key) === pending) this.inFlight.delete(key);
+    }
+  }
+
+  private async prepareFresh(input: ReviewMediaPrepareInput): Promise<VisualReviewMediaPayload> {
     const command = [
       "-m", "video_factory.review_media",
       ...(input.assetPlanPath ? ["--asset-plan", input.assetPlanPath] : ["--video", requiredVideoPath(input.videoPath)]),
@@ -45,11 +73,14 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
       ({ stdout } = await execFile(this.options.pythonCommand, command, {
         cwd: this.options.repositoryRoot,
         env: buildStudioChildEnvironment(this.options.environment ?? process.env, { PYTHONPATH: this.options.pythonPath }),
-        timeout: 10 * 60 * 1000,
+        timeout: REVIEW_MEDIA_TIMEOUT_MS,
         maxBuffer: 64 * 1024,
       }));
-    } catch {
-      throw new Error("Visual-review media preprocessing failed. The source video and local paths were not sent to the client.");
+    } catch (error) {
+      // 这里曾经是裸 catch：退出码和 stderr 全丢，对外只剩一句"调用失败"，排查只能靠猜。
+      // 子进程文本可能含本地绝对路径，所以只送服务端日志；错误消息里不带任何子进程产物。
+      (this.options.logChildFailure ?? defaultChildFailureLog)(describeChildFailure(this.options.pythonCommand, error));
+      throw new Error(`Visual-review media preprocessing failed (${childFailureReason(error)}). The source video and local paths were not sent to the client.`);
     }
     const response = parseRecord(JSON.parse(stdout.trim()) as unknown, "review media response");
     if (typeof response.manifestPath !== "string") throw new Error("Review media response is missing manifestPath.");
@@ -107,6 +138,46 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
 function requiredVideoPath(value: string | undefined): string {
   if (!value) throw new Error("Visual-review preprocessing requires a video or asset plan.");
   return value;
+}
+
+/**
+ * 预处理身份。命令里出现的每个字段都会改变产出的证据，所以全部入键：只要有一个不同就
+ * 各跑各的。宁可少合并也不能把两份不同证据当成一份发出去。
+ */
+function mediaPreparationKey(input: ReviewMediaPrepareInput): string {
+  return JSON.stringify([
+    input.runRoot,
+    input.assetPlanPath ?? null,
+    input.videoPath ?? null,
+    input.renderManifestPath ?? null,
+    input.scenePositions ?? null,
+    input.scriptPath ?? null,
+    input.executablePlanPath ?? null,
+  ]);
+}
+
+function childFailureReason(error: unknown): string {
+  const failure = error as { killed?: unknown; signal?: unknown; code?: unknown };
+  if (failure.killed === true) return `timed out after ${REVIEW_MEDIA_TIMEOUT_MS / 1000}s`;
+  if (typeof failure.signal === "string") return `terminated by ${failure.signal}`;
+  if (typeof failure.code === "number") return `exit code ${failure.code}`;
+  if (typeof failure.code === "string") return `could not start the preprocessor (${failure.code})`;
+  return "no exit status";
+}
+
+function describeChildFailure(pythonCommand: string, error: unknown): string {
+  const failure = error as { stderr?: unknown };
+  const stderr = typeof failure.stderr === "string" ? failure.stderr.trim() : "";
+  const tail = stderr.length > MAX_LOGGED_CHILD_STDERR ? stderr.slice(-MAX_LOGGED_CHILD_STDERR) : stderr;
+  return [
+    `[review-media] preprocessing child failed: ${childFailureReason(error)}`,
+    `command: ${path.basename(pythonCommand)}`,
+    `stderr: ${tail || "(empty)"}`,
+  ].join("\n");
+}
+
+function defaultChildFailureLog(message: string): void {
+  console.error(message);
 }
 
 function parseSampling(

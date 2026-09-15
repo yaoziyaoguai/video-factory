@@ -23,6 +23,7 @@ interface Harness {
   videoPath: string;
   manifestPath: string;
   capturePath: string;
+  runsPath: string;
   preprocessor: PythonReviewMediaPreprocessor;
 }
 
@@ -362,6 +363,110 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
       await rm(harness.root, { recursive: true, force: true });
     }
   });
+
+  it("runs one child process for concurrent identical requests and hands each caller its own copy", async () => {
+    const harness = await createHarness();
+    try {
+      const jpeg = makeJpeg(64);
+      await writeFrame(harness, "review_media/frame.jpg", jpeg);
+      await writeManifest(
+        harness,
+        [{ ...frame("review_media/frame.jpg", 250, jpeg), scenePosition: 3, phase: "midpoint" }],
+        1_000,
+        { mode: "hook_and_scene_midpoints", sceneCount: 6 },
+      );
+      const input = {
+        assetPlanPath: path.join(harness.runRoot, "asset_plan.json"),
+        runRoot: harness.runRoot,
+        scenePositions: [3],
+      };
+
+      // 试片双分支复审正是这样并发要同一份证据：以前两个子进程会同时发布同一个目录，
+      // 一个以 "Directory not empty" 失败，再被报成模型调用失败。
+      const [left, right] = await Promise.all([
+        harness.preprocessor.prepare(input),
+        harness.preprocessor.prepare(input),
+      ]);
+
+      assert.equal(await childRunCount(harness), 1, "并发相同请求只应跑一次预处理");
+      assert.deepEqual(left, right);
+      assert.notEqual(left, right);
+      assert.notEqual(left.frames, right.frames);
+      left.frames[0]!.timecodeMs = 9_999;
+      assert.equal(right.frames[0]?.timecodeMs, 250, "一个分支不得改写另一个分支的证据");
+    } finally {
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
+  it("neither shares evidence across different inputs nor caches it after settling", async () => {
+    const harness = await createHarness();
+    try {
+      const jpeg = makeJpeg(64);
+      await writeFrame(harness, "review_media/frame.jpg", jpeg);
+      await writeManifest(
+        harness,
+        [{ ...frame("review_media/frame.jpg", 250, jpeg), scenePosition: 3, phase: "midpoint" }],
+        1_000,
+        { mode: "hook_and_scene_midpoints", sceneCount: 6 },
+      );
+      const assetPlanPath = path.join(harness.runRoot, "asset_plan.json");
+      const scoped = { assetPlanPath, runRoot: harness.runRoot, scenePositions: [3] };
+      const whole = { assetPlanPath, runRoot: harness.runRoot };
+
+      const [scopedResult, wholeResult] = await Promise.all([
+        harness.preprocessor.prepare(scoped),
+        harness.preprocessor.prepare(whole),
+      ]);
+
+      assert.equal(await childRunCount(harness), 2, "不同预处理身份必须各跑一次");
+      assert.deepEqual(scopedResult.sampling?.coveredScenePositions, [3]);
+      assert.deepEqual(wholeResult.sampling?.missingScenePositions, [1, 2, 4, 5, 6]);
+
+      await harness.preprocessor.prepare(scoped);
+      assert.equal(await childRunCount(harness), 3, "预处理结果不得跨请求复用");
+    } finally {
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
+  it("classifies the failure for the operator and keeps the child's real reason on the server", async () => {
+    const harness = await createHarness();
+    const logged: string[] = [];
+    const commandPath = path.join(harness.root, "failing-python-fixture");
+    try {
+      await writeFile(commandPath, "#!/bin/sh\nprintf '%s\\n' \"$SENSITIVE_FIXTURE_VALUE $1\" >&2\nexit 23\n");
+      await chmod(commandPath, 0o700);
+      harness.preprocessor = createPreprocessor(
+        harness,
+        harness.manifestPath,
+        commandPath,
+        (message) => logged.push(message),
+      );
+
+      const input = { videoPath: harness.videoPath, runRoot: harness.runRoot };
+      const settled = await Promise.allSettled([
+        harness.preprocessor.prepare(input),
+        harness.preprocessor.prepare(input),
+      ]);
+
+      for (const result of settled) {
+        assert.equal(result.status, "rejected");
+        if (result.status !== "rejected") continue;
+        const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        assert.match(message, /exit code 23/);
+        assert.match(message, /were not sent to the client/);
+        assert.equal(message.includes(harness.root), false);
+        assert.equal(message.includes("must-not-appear-in-errors"), false);
+      }
+      assert.equal(logged.length, 1, "并发相同请求只应触发一次子进程");
+      assert.match(logged[0]!, /exit code 23/);
+      assert.match(logged[0]!, /must-not-appear-in-errors -m/);
+      assert.match(logged[0]!, /command: failing-python-fixture/);
+    } finally {
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
 });
 
 async function createHarness(): Promise<Harness> {
@@ -370,12 +475,14 @@ async function createHarness(): Promise<Harness> {
   const reviewRoot = path.join(runRoot, "review_media");
   const manifestPath = path.join(reviewRoot, "manifest.json");
   const capturePath = path.join(root, "captured-arguments.txt");
+  const runsPath = path.join(root, "child-runs.txt");
   const commandPath = path.join(root, "python-fixture");
   await mkdir(reviewRoot, { recursive: true });
   await writeFile(
     commandPath,
     [
       "#!/bin/sh",
+      'printf "run\\n" >> "$RUNS_PATH"',
       ': > "$CAPTURE_PATH"',
       'for argument in "$@"; do printf "%s\\n" "$argument" >> "$CAPTURE_PATH"; done',
       'printf \'{"manifestPath":"%s"}\\n\' "$MANIFEST_PATH"',
@@ -389,13 +496,19 @@ async function createHarness(): Promise<Harness> {
     videoPath: path.join(runRoot, "render", "sensitive-video-name.mp4"),
     manifestPath,
     capturePath,
+    runsPath,
     preprocessor: undefined as unknown as PythonReviewMediaPreprocessor,
   };
   harness.preprocessor = createPreprocessor(harness, manifestPath, commandPath);
   return harness;
 }
 
-function createPreprocessor(harness: Harness, manifestPath: string, commandPath?: string): PythonReviewMediaPreprocessor {
+function createPreprocessor(
+  harness: Harness,
+  manifestPath: string,
+  commandPath?: string,
+  logChildFailure?: (message: string) => void,
+): PythonReviewMediaPreprocessor {
   return new PythonReviewMediaPreprocessor({
     repositoryRoot: harness.root,
     pythonPath: path.join(harness.root, "python-src"),
@@ -403,9 +516,20 @@ function createPreprocessor(harness: Harness, manifestPath: string, commandPath?
     environment: {
       MANIFEST_PATH: manifestPath,
       CAPTURE_PATH: harness.capturePath,
+      RUNS_PATH: harness.runsPath,
       SENSITIVE_FIXTURE_VALUE: "must-not-appear-in-errors",
     },
+    ...(logChildFailure ? { logChildFailure } : {}),
   });
+}
+
+async function childRunCount(harness: Harness): Promise<number> {
+  try {
+    return (await readFile(harness.runsPath, "utf8")).trim().split("\n").filter(Boolean).length;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
+  }
 }
 
 async function writeManifest(
