@@ -78,6 +78,9 @@ export class OpportunityStudio {
         ...(input.verification ? { verification: structuredClone(input.verification) } : {}),
         ...(input.editorialDecision ? { editorialDecision: structuredClone(input.editorialDecision) } : {}),
         ...(input.visualProof ? { visualProof: input.visualProof } : {}),
+        ...(input.articleSources?.length ? { articleSources: structuredClone(input.articleSources) } : {}),
+        ...(input.articleFacts?.length ? { articleFacts: structuredClone(input.articleFacts) } : {}),
+        ...(input.articleUncertainties?.length ? { articleUncertainties: [...input.articleUncertainties] } : {}),
         visualPlan,
       }));
     } catch (error) {
@@ -154,6 +157,9 @@ function toOpportunity(record: OpportunityRecord): StudioOpportunity {
       ? { ...record.scoreProvenance }
       : { source: "历史记录 · topic-intelligence-v1", scoredAt: record.createdAt },
     evidence: record.candidate.evidence.map((signal) => ({ ...signal })),
+    ...(record.articleSources?.length ? { articleSources: structuredClone(record.articleSources) } : {}),
+    ...(record.articleFacts?.length ? { articleFacts: structuredClone(record.articleFacts) } : {}),
+    ...(record.articleUncertainties?.length ? { articleUncertainties: [...record.articleUncertainties] } : {}),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     ...(record.origin ? { origin: record.origin } : {}),

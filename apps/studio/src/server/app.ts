@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import Fastify, { type FastifyInstance } from "fastify";
 import { parseProductionTemplate } from "@video-factory/template-core";
+import { CodexBridgeError, RoleAgentLoopError } from "@video-factory/production-pipeline";
 import { StudioAuthenticator, type StudioAuthOptions } from "./auth.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-service.js";
 import { StudioVoicePreviewUnavailableError } from "./local-capabilities.js";
@@ -21,7 +22,9 @@ import {
   parseStudioOpportunityInput,
   parseStudioOpportunityStatusInput,
   parseStudioDecisionInput,
+  parseStudioCreativeReviewCommandInput,
   parseStudioSceneRevisionInput,
+  parseStudioNarrationRevisionInput,
   parseStudioVisualReinspectionInput,
   parseStudioPublishInput,
   parseStudioVoicePreviewInput,
@@ -37,6 +40,10 @@ import {
   type StudioCostDashboard,
   type StudioCostRunDetail,
   type StudioDecisionInput,
+  type StudioCreativeReviewCommandInput,
+  type StudioCreativeReviewCommandReceipt,
+  type StudioCreativeReviewSnapshot,
+  type StudioNarrationRevisionInput,
   type StudioSceneRevisionInput,
   type StudioVisualReinspectionInput,
   type StudioHealth,
@@ -136,7 +143,11 @@ export interface StudioServicePort {
   uploadReferenceVideo?(input: { label: string; mimeType: string; bytes: Buffer }): Promise<StudioReferenceVideo>;
   deleteReferenceVideo?(uploadId: string): Promise<void>;
   decide(runId: string, input: StudioDecisionInput, actor: string): Promise<StudioRunDetail>;
+  creativeReview?(runId: string): Promise<StudioCreativeReviewSnapshot | undefined>;
+  commandCreativeReview?(runId: string, input: StudioCreativeReviewCommandInput, actor: string): Promise<StudioCreativeReviewCommandReceipt>;
+  creativeReviewCommand?(runId: string, commandId: string): Promise<StudioCreativeReviewCommandReceipt | undefined>;
   requestSceneRevision(runId: string, input: StudioSceneRevisionInput, actor: string): Promise<StudioRunDetail>;
+  requestNarrationRevision(runId: string, input: StudioNarrationRevisionInput, actor: string): Promise<StudioRunDetail>;
   reinspectVisualReview(runId: string, input: StudioVisualReinspectionInput): Promise<StudioRunDetail>;
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
@@ -452,6 +463,33 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     return run;
   });
 
+  app.get<{ Params: { runId: string } }>("/api/runs/:runId/creative-review", async (request, reply) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    if (!options.service.creativeReview) return reply.code(404).send({ error: "当前服务不支持创作讨论。" });
+    const review = await options.service.creativeReview(request.params.runId);
+    return review ?? reply.code(404).send({ error: "这条制作当前没有等待讨论的创作方案。" });
+  });
+
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/creative-review/commands", async (request, reply) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    const input = parseStudioCreativeReviewCommandInput(request.body);
+    if (!options.service.commandCreativeReview) return reply.code(409).send({ error: "当前服务不支持创作讨论操作。" });
+    const receipt = await options.service.commandCreativeReview(
+      request.params.runId,
+      input,
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+    return reply.code(202).send(receipt);
+  });
+
+  app.get<{ Params: { runId: string; commandId: string } }>("/api/runs/:runId/creative-review/commands/:commandId", async (request, reply) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.commandId, "操作编号");
+    if (!options.service.creativeReviewCommand) return reply.code(404).send({ error: "当前服务不支持创作操作查询。" });
+    const operation = await options.service.creativeReviewCommand(request.params.runId, request.params.commandId);
+    return operation ?? reply.code(404).send({ error: "没有找到这条创作操作。" });
+  });
+
   app.get<{ Params: { runId: string } }>("/api/runs/:runId/rework-draft", async (request, reply) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     const draft = await options.service.reworkDraft(request.params.runId);
@@ -628,6 +666,15 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     );
   });
 
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/narration-revisions", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    return options.service.requestNarrationRevision(
+      request.params.runId,
+      parseStudioNarrationRevisionInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
   app.get<{ Params: { runId: string } }>("/api/runs/:runId/publishing/readiness", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     return options.service.publishReadiness(request.params.runId);
@@ -748,6 +795,20 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     }
     if (error instanceof StudioVoicePreviewUnavailableError) {
       void reply.code(503).send({ error: error.message });
+      return;
+    }
+    const modelFailure = error instanceof RoleAgentLoopError ? error.agentLoop.failure : undefined;
+    const bridgeError = error instanceof CodexBridgeError ? error : modelFailure
+      ? new CodexBridgeError("Model operation failed.", false, modelFailure.stage, modelFailure.statusCode, modelFailure.failureKind, modelFailure.details)
+      : undefined;
+    if (bridgeError) {
+      const model = bridgeError.failureDetails?.modelId;
+      const modelLabel = model && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(model) ? `（${model}）` : "";
+      void reply.code(502).send({
+        error: `模型生成或复核${modelLabel}未完成。${bridgeError.creatorMessage} 原候选和已保存方案仍保留；请到创作设置 → 制作分工查看。`,
+        failureStage: bridgeError.stage,
+        configurationUrl: "/resources#production-roles",
+      });
       return;
     }
     app.log.error(error);

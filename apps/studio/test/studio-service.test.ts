@@ -76,6 +76,8 @@ const brief: ProductionBrief = {
     assetSemanticRank: false,
     referenceGrammar: false,
     executablePlan: true,
+    creativePlanning: "joint-v1",
+    creativeReview: "user-confirmed-v1",
   },
   director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
 };
@@ -452,7 +454,7 @@ describe("StudioService", () => {
     const run: WorkflowRun<ProductionBrief> = {
       ...base,
       initialInput: {
-        ...brief,
+        ...legacyBrief,
         rework: {
           sourceRunId: "run-source",
           sourceRunRevision: 4,
@@ -533,7 +535,7 @@ describe("StudioService", () => {
       status: "rejected",
       revision: 12,
       initialInput: {
-        ...brief,
+        ...legacyBrief,
         runPurpose: "test",
         visualProof: "四个具体镜头共同兑现同一个可见证据。",
         visualPlan: {
@@ -584,8 +586,8 @@ describe("StudioService", () => {
           qualityGateResults: [],
           output: { report: { findings: [
             { timecodeMs: 4_000, startTimecodeMs: 4_000, endTimecodeMs: 4_000, scenePosition: 2, targetNodeIds: ["script"], evidenceStatus: "failed", evidenceFrameSha256: "a".repeat(64), nextAction: "replan_upstream", severity: "warning", category: "factual_accuracy", description: "第二镜数字错误。", suggestion: "改成已核验数据。" },
-            { timecodeMs: 8_000, startTimecodeMs: 8_000, endTimecodeMs: 8_000, scenePosition: 3, targetNodeId: "assets", evidenceStatus: "failed", evidenceFrameSha256: "b".repeat(64), nextAction: "rework_asset", severity: "warning", category: "typography", description: "文字遮挡主体。", suggestion: "换用无字母片。" },
-            { timecodeMs: 12_000, startTimecodeMs: 12_000, endTimecodeMs: 12_000, scenePosition: 4, targetNodeId: "visual-direction", evidenceStatus: "failed", evidenceFrameSha256: "c".repeat(64), nextAction: "replan_upstream", severity: "warning", category: "composition", description: "主体被裁切到画面边缘。", suggestion: "换成主体完整居中的镜头。" },
+            { timecodeMs: 8_000, startTimecodeMs: 8_000, endTimecodeMs: 8_000, scenePosition: 3, targetNodeId: "assets", claimType: "static", evidenceStatus: "failed", evidenceFrameSha256: "b".repeat(64), nextAction: "rework_asset", severity: "warning", category: "typography", description: "文字遮挡主体。", suggestion: "换用无字母片。" },
+            { timecodeMs: 12_000, startTimecodeMs: 12_000, endTimecodeMs: 12_000, scenePosition: 4, targetNodeId: "visual-direction", claimType: "static", evidenceStatus: "failed", evidenceFrameSha256: "c".repeat(64), nextAction: "replan_upstream", severity: "warning", category: "composition", description: "主体被裁切到画面边缘。", suggestion: "换成主体完整居中的镜头。" },
           ] } },
         },
       ],
@@ -613,6 +615,7 @@ describe("StudioService", () => {
       ],
     };
     const service = new StudioService({ workspaceRoot, pipeline: new FakePipeline(rejectedRun), commandAvailable: allCommandsAvailable, environment: {} });
+    rejectedRun.initialInput.budgetIntentionCny = 35;
 
     const draft = await service.reworkDraft("run-1");
     const sameDraft = await service.reworkDraft("run-1");
@@ -621,6 +624,7 @@ describe("StudioService", () => {
     assert.equal(draft?.input.director?.profileId, "documentary-observer");
     assert.equal(draft?.input.models?.["seedance-video-v1"], "doubao-seedance-2-5-260628");
     assert.equal(draft?.input.runPurpose, "test");
+    assert.equal(draft?.input.budgetIntentionCny, 35);
     assert.equal(draft?.input.visualProof, "四个具体镜头共同兑现同一个可见证据。");
     assert.equal(draft?.input.visualPlan?.strategy, "沿用上一版四镜证据链，只重做审片指出的镜头。");
     assert.deepEqual(
@@ -885,7 +889,7 @@ describe("StudioService", () => {
               endTimecodeMs: 8_200,
               scenePosition: 3,
               targetNodeId: "assets",
-              evidenceStatus: "failed",
+              claimType: "static", evidenceStatus: "failed",
               evidenceFrameSha256: "c".repeat(64),
               nextAction: "rework_asset",
               category: "text_interference",
@@ -896,7 +900,7 @@ describe("StudioService", () => {
               timecodeMs: 600,
               scenePosition: 1,
               targetNodeId: "assets",
-              evidenceStatus: "not_observed",
+              claimType: "static", evidenceStatus: "not_observed",
               category: "other",
               severity: "warning",
               description: "稀疏抽帧不足以证明完整运动。",
@@ -949,7 +953,7 @@ describe("StudioService", () => {
         endTimecodeMs: 1_100,
         scenePosition: 1,
         targetNodeId: "assets",
-        evidenceStatus: "failed",
+        claimType: "static", evidenceStatus: "failed",
         evidenceFrameSha256: null,
         nextAction: "rework_asset",
         category: "composition",
@@ -1432,11 +1436,11 @@ describe("StudioService", () => {
       /可执行制作方案|executablePlan/,
     );
     await assert.rejects(
-      () => production.start({ ...brief, runPurpose: "production", durationRange: undefined, providers, director, workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true } }),
+      () => production.start({ ...brief, runPurpose: "production", durationRange: undefined, providers, director, workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1" } }),
       /时长范围|durationRange/,
     );
     await assert.rejects(
-      () => production.start({ ...brief, runPurpose: "production", durationRange: { minSeconds: 20, maxSeconds: 34 }, director: undefined, workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true } }),
+      () => production.start({ ...brief, runPurpose: "production", durationRange: { minSeconds: 20, maxSeconds: 34 }, director: undefined, workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1" } }),
       /导演|director/,
     );
     assert.equal(pipeline.dispatchCount, 0);
@@ -1578,7 +1582,7 @@ describe("StudioService", () => {
     assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /镜头 3/);
   });
 
-  it("reuses the rejected run's immutable template snapshot when the rework keeps that version", async () => {
+  it("keeps a historical template snapshot readable but strips it from a new rework", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rework-template-snapshot-"));
     const historicalSnapshot: NonNullable<ProductionBrief["templateSnapshot"]> = {
       templateId: "knowledge-explainer",
@@ -1646,7 +1650,7 @@ describe("StudioService", () => {
     });
 
     assert.equal(currentTemplateResolveCalls, 0);
-    assert.deepEqual((pipeline.lastInput as ProductionBrief).templateSnapshot, historicalSnapshot);
+    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot, undefined);
   });
 
   it("requires two distinct production visual reviewers and role audit before Studio dispatch", async () => {
@@ -1656,7 +1660,7 @@ describe("StudioService", () => {
       { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" as const },
       { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "external" as const },
       { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" as const },
-      { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑画面", available: true, kind: "local" as const },
+      { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑画面", available: true, kind: "local" as const, deliveryTypes: ["editorial_card" as const] },
       { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" as const },
       { id: "python-ffmpeg-v1", capability: "video.render", label: "本地渲染", available: true, kind: "local" as const },
       { id: "python-technical-review-v1", capability: "quality.review", label: "机器质检", available: true, kind: "local" as const },
@@ -1708,7 +1712,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
-  it("rejects a production template whose shot slots have no executable visual source", async () => {
+  it("allows an executable generation source to adapt a template's suggested stock slot", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-template-source-preflight-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const production = new ProductionStudio({
@@ -1747,7 +1751,7 @@ describe("StudioService", () => {
       }),
     });
 
-    await assert.rejects(() => production.start({
+    await production.start({
       ...brief,
       runPurpose: "production",
       providers: {
@@ -1761,8 +1765,41 @@ describe("StudioService", () => {
       },
       director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
-    }), /当前素材池无法执行模板中的 1 个镜头.*素材库/);
-    assert.equal(pipeline.dispatchCount, 0);
+    });
+    assert.equal(pipeline.dispatchCount, 1);
+  });
+
+  it("rejects a direct production request with no executable visual delivery type even without a template snapshot", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-no-visual-source-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const production = new ProductionStudio({
+      workspaceRoot,
+      pipeline,
+      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive", "runs.json")),
+      listProviders: async () => [
+        { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" },
+        { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "external" },
+        { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
+        { id: "opaque-asset-v1", capability: "asset.prepare", label: "未声明交付类型的来源", available: true, kind: "external", deliveryTypes: [] },
+        { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" },
+        { id: "python-ffmpeg-v1", capability: "video.render", label: "本地渲染", available: true, kind: "local" },
+        { id: "python-technical-review-v1", capability: "quality.review", label: "机器质检", available: true, kind: "local" },
+        { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 审片", available: true, kind: "external", defaultModelId: "glm-5.3-flash" },
+        { id: "codex-visual-review-v1", capability: "quality.review.visual", label: "Codex 审片", available: true, kind: "external", defaultModelId: "gpt-5.6-sol" },
+        { id: "codex-role-auditor-v1", capability: "role.audit", label: "独立质量复核", available: true, kind: "external" },
+      ],
+    });
+
+    await assert.rejects(
+      () => production.start({
+        ...brief,
+        runPurpose: "production",
+        providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+        director: { profileId: "auto", assetProviderIds: ["opaque-asset-v1"] },
+      }),
+      /当前素材池没有任何可用画面来源/,
+    );
+    assert.equal(pipeline.dispatchCount, 0, "the server boundary must stop before dispatch even when the client is bypassed");
   });
 
   it("prefills actionable generation changes after a content-safety failure", async () => {
@@ -1806,9 +1843,10 @@ describe("StudioService", () => {
         audit: { verdict: "repair", score: 68, summary: "开场钩子仍需具体。" },
       }],
       pendingCandidate: { iteration: 2, candidate: { secretPrompt: "不应出现在进度接口" } },
+      recoveryOwner: { runId: "run-1", nodeId: "script", workflowOperationRequestId: "operation-progress-v3" },
     }), "utf8");
 
-    assert.deepEqual(await loadAgentLoopProgress(workspaceRoot, "run-1", "script"), {
+    assert.deepEqual(await loadAgentLoopProgress(workspaceRoot, "run-1", "script", "operation-progress-v3"), {
       iteration: 2,
       maxIterations: 3,
       completedIterations: 1,
@@ -1924,6 +1962,15 @@ describe("StudioService", () => {
     assert.doesNotMatch(JSON.stringify(detail), /private-request-id|private prompt|worker\.sock/);
     await assert.rejects(() => service.retryFailedNode("run-1", "script"), /请先查询原任务/);
     assert.equal(pipeline.lastRetriedNodeId, undefined);
+    const checkpointPath = path.join(directory, `${checkpointKey}.json`);
+    const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+    checkpoint.status = "running";
+    checkpoint.pendingOperation.operation.taskFact = "not_submitted";
+    await writeFile(checkpointPath, JSON.stringify(checkpoint), "utf8");
+    pipeline.run.status = "running";
+    pipeline.run.nodeRuns.at(-1)!.status = "running";
+    assert.equal((await service.getRun("run-1"))?.taskRecovery, undefined,
+      "normal in-flight execution without an observation failure is not a recovery incident");
   });
 
   it("queries and concurrently retrieves one completed original text task without resubmitting it", async () => {
@@ -1951,7 +1998,7 @@ describe("StudioService", () => {
         "runs",
         "run-1",
         "nodes",
-        "script",
+        "creative-planning",
         "agent-loop-checkpoints",
         `${"d".repeat(64)}.json`,
       ), "utf8")) as Record<string, unknown>;
@@ -1969,7 +2016,7 @@ describe("StudioService", () => {
         "runs",
         "run-1",
         "nodes",
-        "script",
+        "creative-planning",
         "agent-loop-checkpoints",
         `${"d".repeat(64)}.json`,
       ), "utf8")) as Record<string, unknown>;
@@ -1985,7 +2032,7 @@ describe("StudioService", () => {
       assert.equal(first.status, "running");
       assert.equal(second.status, "running");
       assert.equal(pipeline.retryDispatchCount, 1);
-      assert.equal(pipeline.lastRetriedNodeId, "script");
+      assert.equal(pipeline.lastRetriedNodeId, "creative-planning");
       assert.equal(bridge.posts, 0);
     } finally {
       await bridge.close();
@@ -2039,7 +2086,7 @@ describe("StudioService", () => {
 
       await assert.rejects(() => service.queryOriginalTextTask("run-1"), /制作方案已更新/);
       await assert.rejects(
-        () => readFile(path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "text-task-recovery.json"), "utf8"),
+        () => readFile(path.join(workspaceRoot, "runs", "run-1", "nodes", "creative-planning", "text-task-recovery.json"), "utf8"),
         (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "ENOENT",
       );
       assert.equal(pipeline.retryDispatchCount, 0);
@@ -2067,12 +2114,40 @@ describe("StudioService", () => {
       const queried = await service.queryOriginalTextTask("run-1");
       assert.equal(queried.taskRecovery?.taskState, "not_accepted");
       assert.deepEqual(queried.taskRecovery?.allowedActions, ["query_original_task", "retry_failed_step"]);
-      const retried = await service.retryFailedNode("run-1", "script");
+      const retried = await service.retryFailedNode("run-1", "creative-planning");
       assert.equal(retried.status, "running");
       assert.equal(pipeline.retryDispatchCount, 1);
       assert.equal(bridge.posts, 0);
     } finally {
       await bridge.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not project a known failed not-submitted operation as accepted_unknown", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-known-not-submitted-"));
+    try {
+      const bridge = await startTextRecoveryBridge(undefined, "query_failure");
+      const operation = await new CodexBridgeClient({ socketPath: bridge.socketPath }).prepareTask(
+        "script-draft",
+        { brief: { title: "已知未提交的脚本请求" } },
+        "studio-recovery-known-not-submitted",
+      );
+      await bridge.close();
+      const notSubmittedOperation = { ...operation, taskFact: "not_submitted" as const };
+      await writePendingTextCheckpoint(workspaceRoot, notSubmittedOperation, {
+        failedOperationRequestIds: { "0:1:produce": notSubmittedOperation.requestId },
+      });
+      const pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "failed"));
+      const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+      const detail = await service.getRun("run-1");
+      assert.equal(detail?.taskRecovery, undefined, "a terminal local non-submission is not an original task to observe");
+      const retried = await service.retryFailedNode("run-1", "creative-planning");
+      assert.equal(retried.status, "running");
+      assert.equal(pipeline.retryDispatchCount, 1);
+      assert.equal(pipeline.lastRetriedNodeId, "creative-planning");
+    } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
   });
@@ -2097,7 +2172,7 @@ describe("StudioService", () => {
       assert.match(queried.taskRecovery?.terminalError ?? "", /暂时不可用|稍后重试/);
       assert.equal(bridge.posts, 0, "querying a terminal result must remain GET-only");
 
-      const retried = await service.retryFailedNode("run-1", "script");
+      const retried = await service.retryFailedNode("run-1", "creative-planning");
       assert.equal(retried.status, "running");
       assert.deepEqual(pipeline.lastRetryOptions, {
         recoverOriginalTextTask: true,
@@ -2279,9 +2354,10 @@ describe("StudioService", () => {
       completed: [],
       pendingCandidate: { iteration: 1, candidate: { secretPrompt: "不应出现在进度接口" } },
       sessions: { produce: { key: "private-session-key", handle: `vfs_${"p".repeat(32)}` } },
+      recoveryOwner: { runId: "run-v4", nodeId: "script", workflowOperationRequestId: "operation-progress-v4" },
     }), "utf8");
 
-    assert.deepEqual(await loadAgentLoopProgress(workspaceRoot, "run-v4", "script"), {
+    assert.deepEqual(await loadAgentLoopProgress(workspaceRoot, "run-v4", "script", "operation-progress-v4"), {
       iteration: 1,
       maxIterations: 3,
       completedIterations: 0,
@@ -2310,9 +2386,10 @@ describe("StudioService", () => {
         validationError: "private validation detail",
       },
       sessions: { produce: { key: "private-session-key", handle: `vfs_${"p".repeat(32)}` } },
+      recoveryOwner: { runId: "run-v6", nodeId: "visual-direction", workflowOperationRequestId: "operation-progress-v6" },
     }), "utf8");
 
-    assert.deepEqual(await loadAgentLoopProgress(workspaceRoot, "run-v6", "visual-direction"), {
+    assert.deepEqual(await loadAgentLoopProgress(workspaceRoot, "run-v6", "visual-direction", "operation-progress-v6"), {
       iteration: 2,
       maxIterations: 3,
       completedIterations: 1,
@@ -2707,6 +2784,7 @@ describe("StudioService", () => {
       status: "running",
       completed: [{ iteration: 1, audit: { verdict: "repair", score: 70, summary: "开场需要更具体。" } }],
       pendingCandidate: { iteration: 2, candidate: { title: "第二轮脚本" } },
+      recoveryOwner: { runId: "run-1", nodeId: "script", workflowOperationRequestId: "operation-live-script" },
     }), "utf8");
     const run = waitingRun(workspaceRoot);
     run.status = "running";
@@ -2715,6 +2793,7 @@ describe("StudioService", () => {
       nodeId: "script",
       role: "编剧",
       status: "running",
+      operationRequestId: "operation-live-script",
       startedAt: "2026-08-21T10:00:10.000Z",
       artifactIds: [],
       qualityGateResults: [],
@@ -2736,6 +2815,7 @@ describe("StudioService", () => {
   it("maps the effective render and publish-package versions instead of historical artifacts", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const run = waitingRun(workspaceRoot);
+    run.initialInput = { ...run.initialInput, visualIntent: "用无字示意画面呈现前后变化，不声称实测。" };
     const newVideoPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "render", "attempt-2", "final.mp4");
     const oldPackagePath = path.join(workspaceRoot, "runs", "run-1", "publish", "attempt-1", "publish_package.json");
     const newPackagePath = path.join(workspaceRoot, "runs", "run-1", "publish", "attempt-2", "publish_package.json");
@@ -2809,7 +2889,7 @@ describe("StudioService", () => {
     assert.deepEqual(detail?.creativeSummary, {
       audience: brief.audience,
       openingPromise: brief.angle,
-      requiredVisual: `用画面证明“${brief.angle}”`,
+      requiredVisual: "用无字示意画面呈现前后变化，不声称实测。",
       payoff: `围绕“${brief.title}”给出明确答案或可执行判断`,
     });
   });
@@ -2892,10 +2972,11 @@ describe("StudioService", () => {
     await pipeline.listener?.(pipeline.run);
 
     assert.deepEqual(result, { runId: "run-1", status: "running" });
-    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot?.templateId, "knowledge-explainer");
-    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot?.resolvedBlueprint.platform, "douyin");
-    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot?.resolvedBlueprint.durationSeconds, 24);
-    assert.equal("costPolicy" in ((pipeline.lastInput as ProductionBrief).templateSnapshot?.resolvedBlueprint ?? {}), false);
+    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot, undefined);
+    // 旧客户端仍传模板时也不能重启模板生产路径，用户明确要求保持原样。
+    await service.startRun({ ...brief, template: { templateId: "unavailable-template" } });
+    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot, undefined);
+    assert.equal((pipeline.lastInput as ProductionBrief).angle, brief.angle);
     assert.deepEqual(snapshots, ["needs_human"]);
     await assert.rejects(
       () => service.startRun({
@@ -2904,6 +2985,133 @@ describe("StudioService", () => {
       }),
       /需要连接 Pexels 图库服务/,
     );
+  });
+
+  it("does not trust article source snapshots supplied by the run client", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-forged-article-source-"));
+    const opportunityStore = new JsonOpportunityStore(path.join(workspaceRoot, "opportunities.json"));
+    await opportunityStore.create({
+      title: opportunityInput.title,
+      candidate: {
+        id: "manual-source-1",
+        platform: opportunityInput.platform,
+        track: opportunityInput.track,
+        audience: opportunityInput.audience,
+        painPoint: opportunityInput.painPoint,
+        hook: opportunityInput.hook,
+        status: "shortlisted",
+        evidence: opportunityInput.evidence,
+        score: { ...opportunityInput.scores, final: 84 },
+      },
+      origin: "manual",
+      category: "lifestyle",
+      createdAt: "2026-09-14T08:00:00.000Z",
+      updatedAt: "2026-09-14T08:00:00.000Z",
+    });
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      opportunities: opportunityStore,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+
+    await service.startRun({
+      ...brief,
+      workflowFeatures: {
+        ...brief.workflowFeatures,
+        creativePlanning: "joint-v1",
+        creativeReview: "user-confirmed-v1",
+      },
+      creationContext: { origin: "manual", opportunityId: "manual-source-1" },
+      articleSources: [{
+        sourceId: "forged-source",
+        originalUrl: "https://attacker.example/story",
+        finalUrl: "https://attacker.example/story",
+        pageTitle: "伪造正文",
+        fetchedAt: "2026-09-14T08:00:00.000Z",
+        contentSha256: "a".repeat(64),
+        extractorVersion: "forged-v1",
+        readStatus: "read",
+        truncated: false,
+        paragraphs: [{ id: "p1", text: "客户端声称已经核实的内容。" }],
+      }],
+    });
+
+    assert.equal((pipeline.lastInput as ProductionBrief).articleSources, undefined);
+  });
+
+  it("binds the adopted trend article snapshot into the production brief and ignores a client replacement", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-adopted-article-source-"));
+    const trustedSources = [{
+      sourceId: "source-report",
+      originalUrl: "https://source-a.example/report",
+      finalUrl: "https://source-a.example/report",
+      pageTitle: "公开报告",
+      fetchedAt: "2026-09-14T08:00:00.000Z",
+      contentSha256: "a".repeat(64),
+      extractorVersion: "readability-v1",
+      readStatus: "read" as const,
+      paragraphs: [{ id: "p1", text: "正文中披露了标题未包含的事实。" }],
+      truncated: false,
+    }];
+    const trendCandidate = {
+      id: "trend-with-article",
+      title: "报告正文披露的新变化",
+      platform: "douyin",
+      track: "public-update",
+      audience: "希望快速理解报告的普通观众",
+      painPoint: "只看标题无法理解关键变化",
+      hook: "标题没写出的关键变化是什么？",
+      rationale: "用原文段落解释一项可核对变化。",
+      providerId: "api-topic-editor-v1",
+      generatedAt: "2026-09-14T08:01:00.000Z",
+      evidence: [
+        { source: "来源甲", platform: "douyin", keyword: "报告", strength: 90, evidenceUrl: "https://source-a.example/report" },
+        { source: "来源乙", platform: "douyin", keyword: "复核", strength: 82, evidenceUrl: "https://source-b.example/notice" },
+      ],
+      articleSources: trustedSources,
+      articleFacts: [{ statement: "正文事实", sourceId: "source-report", paragraphIds: ["p1"] }],
+      articleUncertainties: [],
+      score: {
+        audienceReach: 86,
+        visualFeasibility: 82,
+        productionCostEfficiency: 84,
+        novelty: 76,
+        monetization: 50,
+        seriesPotential: 70,
+        complianceRisk: 16,
+        final: 79,
+      },
+      editorialDecision: {
+        verdict: "produce_video" as const,
+        score: 88,
+        reasons: ["正文事实可核对。"],
+        guardrails: ["只使用已引用段落。"],
+      },
+    };
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+      trendAgent: { listCandidates: async () => [trendCandidate] },
+    });
+
+    const candidate = (await service.listCandidateInbox({ origins: ["trend"] })).items[0]!;
+    const opportunity = await service.adoptCandidate(candidate.id, { origin: "trend", verificationConfirmed: true });
+    assert.deepEqual(opportunity.articleSources, trustedSources);
+
+    await service.startRun({
+      ...brief,
+      workflowFeatures: { ...brief.workflowFeatures, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1" },
+      creationContext: { origin: "trend", opportunityId: opportunity.id },
+      articleSources: [{ ...trustedSources[0]!, sourceId: "client-replacement", paragraphs: [{ id: "p1", text: "客户端替换内容" }] }],
+    });
+
+    assert.deepEqual((pipeline.lastInput as ProductionBrief).articleSources, trustedSources);
   });
 
   it("rechecks adopted trend opportunities against the current source standard before production", async () => {
@@ -2945,7 +3153,7 @@ describe("StudioService", () => {
 
     const [historical] = await service.listOpportunities("trend");
     assert.equal(historical?.verification?.status, "blocked");
-    assert.equal(historical?.editorialDecision?.verdict, "skip");
+    assert.equal(historical?.editorialDecision?.verdict, "produce_video");
     await assert.rejects(
       () => service.startRun({
         ...brief,
@@ -2965,7 +3173,7 @@ describe("StudioService", () => {
     assert.equal((await service.listOpportunities("trend"))[0]?.verification?.status, "ready");
   });
 
-  it("stops recommending a built-in template after it is deleted from the published catalog", async () => {
+  it("keeps opportunity production independent from the paused template catalog", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-deleted-recommendation-"));
     const candidate = {
       id: "public-update-1",
@@ -3014,7 +3222,7 @@ describe("StudioService", () => {
 
     const trendInbox = await service.listCandidateInbox({ origins: ["trend"] });
     const beforeDeletion = trendInbox.items[0];
-    assert.equal(beforeDeletion?.editorialDecision.recommendedTemplate?.id, "photo-story");
+    assert.equal(beforeDeletion?.editorialDecision.recommendedTemplate, undefined);
     assert.deepEqual(trendInbox.topicGeneration, {
       generationId: "generation-service-1",
       generatedAt: "2026-09-07T08:00:00.000Z",
@@ -3033,12 +3241,8 @@ describe("StudioService", () => {
     assert.equal(afterDeletion?.editorialDecision.verdict, "produce_image_story");
     assert.equal(afterDeletion?.editorialDecision.recommendedTemplate, undefined);
     assert.equal((await service.templateExperiments()).some((item) => item.templateId === "photo-story"), false);
-    // 模板下线后不能默默无模板开工：采用在服务端失败关闭，也不产生机会。
-    await assert.rejects(
-      () => service.adoptCandidate(afterDeletion!.id, { origin: "trend", verificationConfirmed: true }),
-      /推荐的生产模板当前不可用/,
-    );
-    assert.deepEqual(await service.listOpportunities("trend"), []);
+    await service.adoptCandidate(afterDeletion!.id, { origin: "trend", verificationConfirmed: true });
+    assert.equal((await service.listOpportunities("trend")).length, 1);
   });
 
   it("rebuilds trusted series context from the adopted opportunity before dispatch", async () => {
@@ -3965,7 +4169,13 @@ describe("StudioService", () => {
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
       director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
-      workflowFeatures: { assetSemanticRank: false, referenceGrammar: true, executablePlan: true },
+      workflowFeatures: {
+        assetSemanticRank: false,
+        referenceGrammar: true,
+        executablePlan: true,
+        creativePlanning: "joint-v1",
+        creativeReview: "user-confirmed-v1",
+      },
       referenceVideo: { uploadId: uploaded.uploadId, label: uploaded.label },
     };
 
@@ -4292,7 +4502,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
-  it("resolves model choices from the template, then an explicit run override", async () => {
+  it("ignores paused template model defaults and honors an explicit run override", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const environment = {
@@ -4327,8 +4537,8 @@ describe("StudioService", () => {
     };
 
     await service.startRun(paidBrief);
-    assert.equal((pipeline.lastInput as ProductionBrief).models?.["seedance-video-v1"], "doubao-seedance-2-0-fast-260128");
-    assert.equal((pipeline.lastInput as ProductionBrief).modelSelectionSources?.["seedance-video-v1"], "template_default");
+    assert.equal((pipeline.lastInput as ProductionBrief).models?.["seedance-video-v1"], undefined);
+    assert.equal((pipeline.lastInput as ProductionBrief).modelSelectionSources?.["seedance-video-v1"], undefined);
 
     await service.startRun({
       ...paidBrief,
@@ -4389,7 +4599,7 @@ describe("StudioService", () => {
     assert.deepEqual(pipeline.run.initialInput.director?.assetProviderIds, ["local-editorial-v1"]);
     assert.equal(pipeline.run.initialInput.models?.["retired-asset-source-v1"], undefined);
     assert.equal(pipeline.run.initialInput.modelSelectionSources?.["retired-asset-source-v1"], undefined);
-    assert.equal(pipeline.lastExecutionConfigurationNodeId, "visual-direction");
+    assert.equal(pipeline.lastExecutionConfigurationNodeId, "creative-planning");
   });
 
   it("resumes from assets when only the model of an unchanged asset source changes", async () => {
@@ -4465,7 +4675,7 @@ describe("StudioService", () => {
     }, "vfqa");
 
     assert.equal(pipeline.run.initialInput.models?.["seedance-video-v1"], "doubao-seedance-1-5-pro-251215");
-    assert.equal(pipeline.lastExecutionConfigurationNodeId, "visual-direction");
+    assert.equal(pipeline.lastExecutionConfigurationNodeId, "creative-planning");
   });
 
   it("rejects an invalid explicit model instead of silently replacing it with the global default", async () => {
@@ -5744,7 +5954,7 @@ function textRecoveryRun(workspaceRoot: string, status: "failed" | "paused"): Wo
   const run = executableWaitingRun(workspaceRoot);
   run.status = status;
   run.nodeRuns.push({
-    nodeId: "script",
+    nodeId: "creative-planning",
     status: "failed",
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
@@ -5759,9 +5969,13 @@ function textRecoveryRun(workspaceRoot: string, status: "failed" | "paused"): Wo
 async function writePendingTextCheckpoint(
   workspaceRoot: string,
   operation: CodexPreparedOperation,
-  options: { checkpointKey?: string; workflowOperationRequestId?: string } = {},
+  options: {
+    checkpointKey?: string;
+    workflowOperationRequestId?: string;
+    failedOperationRequestIds?: Record<string, string>;
+  } = {},
 ): Promise<void> {
-  const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "agent-loop-checkpoints");
+  const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "creative-planning", "agent-loop-checkpoints");
   const checkpointKey = options.checkpointKey ?? "d".repeat(64);
   await mkdir(directory, { recursive: true });
   await writeFile(path.join(directory, `${checkpointKey}.json`), JSON.stringify({
@@ -5774,10 +5988,16 @@ async function writePendingTextCheckpoint(
     status: "failed",
     completed: [],
     operationGenerations: { "0:1:produce": 0 },
+    ...(options.failedOperationRequestIds
+      ? {
+        failedOperationRequestIds: options.failedOperationRequestIds,
+        failure: { stage: "not_accepted", failureKind: "model_provider_transient" },
+      }
+      : {}),
     phaseAttempts: { produce: 1, audit: 0 },
     recoveryOwner: {
       runId: "run-1",
-      nodeId: "script",
+      nodeId: "creative-planning",
       workflowOperationRequestId: options.workflowOperationRequestId ?? "script-workflow-operation-current",
     },
     pendingOperation: {

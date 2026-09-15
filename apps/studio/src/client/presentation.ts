@@ -291,23 +291,7 @@ export function opportunityProductionBlockReason(
   if (opportunity.editorialDecision?.verdict === "skip") {
     return opportunity.editorialDecision.reasons[0] ?? "当前选题不建议进入制作。";
   }
-  // produce 候选必须绑定当前生产目录中的推荐模板；目录变化后先等模板恢复或刷新重算。
-  if (opportunity.editorialDecision
-    && (opportunity.editorialDecision.verdict === "produce_video"
-      || opportunity.editorialDecision.verdict === "produce_image_story")
-    && !opportunity.editorialDecision.recommendedTemplate) {
-    return "推荐的生产模板当前不可用，请刷新重算或到模板目录确认后再开始制作。";
-  }
   return undefined;
-}
-
-// produce 候选必须绑定当前生产目录中的推荐模板，否则在候选阶段就不可采用。
-export function candidateTemplateUnavailable(
-  candidate: Pick<StudioCandidateInboxItem, "editorialDecision">,
-): boolean {
-  const verdict = candidate.editorialDecision.verdict;
-  return (verdict === "produce_video" || verdict === "produce_image_story")
-    && !candidate.editorialDecision.recommendedTemplate;
 }
 
 export function reasoningEffortLabel(value: unknown): string {

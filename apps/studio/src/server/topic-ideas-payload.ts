@@ -55,6 +55,19 @@ function modelSignal(item: TrendModelSignal): Record<string, unknown> {
       ...(related.url ? { url: related.url } : {}),
       collectedAt: related.collectedAt,
     })),
+    ...(item.articleSources?.length ? { articleSources: item.articleSources.map((source) => ({
+      sourceId: source.sourceId,
+      originalUrl: source.originalUrl,
+      finalUrl: source.finalUrl,
+      pageTitle: source.pageTitle,
+      fetchedAt: source.fetchedAt,
+      contentSha256: source.contentSha256 ?? null,
+      extractorVersion: source.extractorVersion,
+      readStatus: source.readStatus,
+      reason: source.reason ?? null,
+      paragraphs: source.paragraphs,
+      truncated: source.truncated,
+    })) } : {}),
   };
 }
 

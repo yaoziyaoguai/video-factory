@@ -89,6 +89,44 @@ interface ReworkSpies {
   directorInputs: VisualDirectorAgentInput[];
 }
 
+function passingCreativeReviewExecution<T>(
+  output: T,
+  role: string,
+  taskKind: "creative-treatment" | "script-draft" | "director-plan",
+  modelId: string,
+) {
+  return {
+    output,
+    trace: { taskKind, promptVersion: "v1", prompt: "fixture review", providerId: "fixture-role", modelId },
+    agentLoop: {
+      version: "video-factory/agent-loop-v1" as const,
+      role,
+      contractVersion: "fixture-review-v1",
+      criteria: ["fixture independent review"],
+      status: "passed" as const,
+      maxIterations: 1,
+      producerModelCallCount: 0,
+      auditModelCallCount: 1,
+      iterations: [{
+        iteration: 1,
+        candidate: output,
+        candidateHash: createHash("sha256").update(JSON.stringify(output)).digest("hex"),
+        auditTrace: { taskKind: "role-audit" as const, promptVersion: "v1", prompt: "fixture review", providerId: "fixture-audit", modelId: `${modelId}-audit` },
+        audit: {
+          version: "video-factory/role-audit-v1" as const,
+          verdict: "pass" as const,
+          score: 92,
+          summary: "当前版本可以确认。",
+          issues: [],
+          repairInstructions: [],
+          planningDisposition: null,
+          hostReadinessReview: null,
+        },
+      }],
+    },
+  };
+}
+
 function jointReworkAgents(spies: ReworkSpies): Pick<ProductionPipelineOptions, "treatmentAgents" | "screenwriterAgent" | "directorAgent"> {
   const treatment: CreativeTreatmentAgent = {
     id: "codex-creative-treatment-v1",
@@ -96,7 +134,7 @@ function jointReworkAgents(spies: ReworkSpies): Pick<ProductionPipelineOptions, 
     treat: async () => {
       spies.treatmentCalls += 1;
       return {
-        version: "video-factory/creative-treatment-v1",
+        version: "video-factory/creative-treatment-v2",
         viewerPromise: "看完能避开三个决策坑",
         hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
         progression: [
@@ -110,60 +148,83 @@ function jointReworkAgents(spies: ReworkSpies): Pick<ProductionPipelineOptions, 
         feasibilityQuestions: [],
       };
     },
+    treatDetailed: async (input) => {
+      if (input.creativeReviewExecution?.mode === "check") {
+        return passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "导演前期构思", "creative-treatment", "treatment-model-a");
+      }
+      return {
+        output: await treatment.treat(input),
+        trace: { taskKind: "creative-treatment" as const, promptVersion: "v1", prompt: "fixture", providerId: "openai", modelId: "treatment-model-a" },
+      };
+    },
+  };
+  const draftScript = async (input: { brief: { rework?: { instruction?: string } } }) => {
+    spies.screenwriterBodies.push(input.brief.rework?.instruction ?? "(无返工指令)");
+    return {
+      viewerPromise: "看完能避开三个决策坑",
+      narrativeArc: "问题-方法-清单",
+      canonFacts: ["步骤可执行"],
+      scenes: [1, 2, 3].map((position) => ({
+        position,
+        narration: `第${position}段旁白内容`,
+        duration: 8,
+        visual_strategy: "generated",
+        visual_prompt: `第${position}个真实生活动作`,
+        search_terms: [`生活动作 ${position}`],
+      })),
+    };
+  };
+  const planDirector = async (input: VisualDirectorAgentInput) => {
+    spies.directorInputs.push(input);
+    return {
+      version: "video-factory/director-plan-v1" as const,
+      requestedProfileId: input.brief.requestedProfileId,
+      resolvedProfileId: "documentary-observer",
+      profileRationale: "用真实动作解释。",
+      visualBible: {
+        narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
+        camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
+      },
+      shots: input.scenes.map((scene) => ({
+        scenePosition: scene.position,
+        narrativeRole: "解释",
+        authenticityPolicy: "illustrative" as const,
+        preferredProviderId: "local-editorial-v1",
+        deliveryType: "editorial_card" as const,
+        alternativeProviderIds: [],
+        temporalBeats: [`[0s-4s] 建立动作`, `[4s-8s] 完成动作`],
+        query: `editorial-${scene.position}`,
+        generationPrompt: `第${scene.position}个真实生活动作`,
+        rationale: "本地说明卡可以执行。",
+        continuityNote: "保持自然色。",
+        confidence: 0.8,
+        estimatedCostCny: 0,
+      })),
+    };
   };
   return {
     treatmentAgents: [{ providerId: "openai", agent: treatment }],
     screenwriterAgent: {
       id: "codex-screenwriter-v1",
       modelId: "screenwriter-model-one",
-      draft: async (input: { brief: { rework?: { instruction?: string } } }) => {
-        spies.screenwriterBodies.push(input.brief.rework?.instruction ?? "(无返工指令)");
-        return {
-          viewerPromise: "看完能避开三个决策坑",
-          narrativeArc: "问题-方法-清单",
-          canonFacts: ["步骤可执行"],
-          scenes: [1, 2, 3].map((position) => ({
-            position,
-            narration: `第${position}段旁白内容`,
-            duration: 8,
-            visual_strategy: "generated",
-            visual_prompt: `第${position}个真实生活动作`,
-            search_terms: [`生活动作 ${position}`],
-          })),
-        };
-      },
+      draft: draftScript,
+      draftDetailed: async (input) => input.creativeReviewExecution?.mode === "check"
+        ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "编剧", "script-draft", "screenwriter-model-one")
+        : {
+            output: await draftScript(input),
+            trace: { taskKind: "script-draft" as const, promptVersion: "v1", prompt: "fixture", providerId: "openai", modelId: "screenwriter-model-one" },
+          },
     } as ScreenwriterAgent,
     directorAgent: {
       id: "api-visual-director-v1",
       modelId: "director-model-one",
-      plan: async (input: VisualDirectorAgentInput) => {
-        spies.directorInputs.push(input);
-        return {
-          version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer",
-          profileRationale: "用真实动作解释。",
-          visualBible: {
-            narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
-            camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
+      plan: planDirector,
+      planDetailed: async (input) => input.creativeReviewExecution?.mode === "check"
+        ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "视觉导演", "director-plan", "director-model-one")
+        : {
+            output: await planDirector(input),
+            trace: { taskKind: "director-plan" as const, promptVersion: "v1", prompt: "fixture", providerId: "openai", modelId: "director-model-one" },
           },
-          shots: input.scenes.map((scene) => ({
-            scenePosition: scene.position,
-            narrativeRole: "解释",
-            authenticityPolicy: "illustrative",
-            preferredProviderId: "local-editorial-v1",
-            deliveryType: "editorial_card",
-            alternativeProviderIds: [],
-            temporalBeats: [`[0s-4s] 建立动作`, `[4s-8s] 完成动作`],
-            query: `editorial-${scene.position}`,
-            generationPrompt: `第${scene.position}个真实生活动作`,
-            rationale: "本地说明卡可以执行。",
-            continuityNote: "保持自然色。",
-            confidence: 0.8,
-            estimatedCostCny: 0,
-          })),
-        };
-      },
     } as VisualDirectorAgent,
   };
 }
@@ -192,7 +253,7 @@ function jointReworkBrief(): ProductionBrief {
       render: "python-ffmpeg-v1",
       technicalReview: "python-technical-review-v1",
     },
-    workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1" },
+    workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1" },
     director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
     economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
     voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
@@ -220,8 +281,29 @@ function newJointReworkStudio(
   return { studio, pipeline };
 }
 
+async function confirmCreativeStages(
+  pipeline: ProductionPipeline,
+  initial: Awaited<ReturnType<ProductionPipeline["start"]>>,
+): Promise<Awaited<ReturnType<ProductionPipeline["start"]>>> {
+  let run = initial;
+  for (let index = 0; index < 3; index += 1) {
+    const intervention = run.nodeRuns.find((node) => node.nodeId === "creative-planning")?.intervention;
+    if (run.status !== "needs_human" || intervention?.kind !== "creative_review" || !intervention.continuation) break;
+    const gate = intervention.continuation;
+    run = await pipeline.confirmCreativeReview(run.id, {
+      commandId: `confirm-${gate.stage}-${index + 1}`,
+      actor: "producer",
+      expectedRunRevision: run.revision,
+      expectedReviewRevision: gate.reviewRevision,
+      stage: gate.stage,
+      baseDraftSha256: gate.draftSha256,
+    });
+  }
+  return run;
+}
+
 async function rejectedJointRun(harness: { studio: ProductionStudio; pipeline: ProductionPipeline }): Promise<string> {
-  const run = await harness.pipeline.start(jointReworkBrief());
+  const run = await confirmCreativeStages(harness.pipeline, await harness.pipeline.start(jointReworkBrief()));
   assert.equal(run.status, "needs_human", JSON.stringify(run.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
   const intervention = run.interventions.find((candidate) => candidate.nodeId === "final-review");
   assert.ok(intervention, "the manual review run must end at a final-review intervention");
@@ -263,7 +345,7 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     const draft = await harness.studio.reworkDraft(runId);
     assert.ok(draft);
 
-    const reworkRun = await harness.pipeline.start(draft.input as ProductionBrief);
+    const reworkRun = await confirmCreativeStages(harness.pipeline, await harness.pipeline.start(draft.input as ProductionBrief));
     assert.equal(reworkRun.status, "needs_human", JSON.stringify(reworkRun.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
     const reworkScreenwriterBodies = spies.screenwriterBodies.slice(1);
     const reworkTreatmentCalls = spies.treatmentCalls - 1;
@@ -276,6 +358,11 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     assert.ok(directorInput.brief.rework, "the joint director stage must receive the rework context");
     assert.match(directorInput.brief.rework.visualDirectionInstruction, /导演方案|底稿|重做/);
     assert.ok(directorInput.brief.rework.previousDirectorPlan, "the director stage must see the previous plan for bounded revision");
+    const publicFindingKeys = new Set(["category", "description", "findingId", "scenePosition", "suggestion", "targetNodeIds", "timecodeMs"]);
+    assert.ok(
+      directorInput.brief.rework.findings.every((finding) => Object.keys(finding).every((key) => publicFindingKeys.has(key))),
+      "every model-facing rework finding must match the Broker's strict public contract",
+    );
     assert.equal(reworkTreatmentCalls, 0, "unaffected treatment must be inherited across runs for media/director-only rework");
   });
 
@@ -340,6 +427,12 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
           }),
         };
       },
+      planDetailed: async (input) => input.creativeReviewExecution?.mode === "check"
+        ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "视觉导演", "director-plan", "director-model-one")
+        : {
+            output: await meteredDirector.plan(input),
+            trace: { taskKind: "director-plan" as const, promptVersion: "v1", prompt: "fixture", providerId: "openai", modelId: "director-model-one" },
+          },
     };
     const pipeline = new ProductionPipeline({
       workspaceRoot,
@@ -357,12 +450,12 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
       listProviders: async () => ([] as StudioProvider[]),
     });
 
-    const paused = await pipeline.start({
+    const paused = await confirmCreativeStages(pipeline, await pipeline.start({
       ...jointReworkBrief(),
       providers: { ...jointReworkBrief().providers, assets: "ai-shot-router-v1" },
       director: { profileId: "auto", assetProviderIds: ["seedance-video-v1", "pexels-stock-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
-    } as ProductionBrief);
+    } as ProductionBrief));
     const firstPlan = paused.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
     assert.ok(firstPlan, JSON.stringify({ status: paused.status, nodes: paused.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error })) }));
     assert.equal(paused.status, "awaiting_spend_approval");
@@ -378,7 +471,13 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     });
     assert.equal(rejected.status, "stale");
 
-    const replanned = await pipeline.resumeStale(paused.id);
+    const awaitingReplanReview = await pipeline.resumeStale(paused.id);
+    assert.equal(awaitingReplanReview.status, "needs_human", "the changed director plan must be shown to the user before a new quote");
+    assert.equal(
+      awaitingReplanReview.nodeRuns.find((node) => node.nodeId === "creative-planning")?.intervention?.continuation?.stage,
+      "director",
+    );
+    const replanned = await confirmCreativeStages(pipeline, awaitingReplanReview);
     assert.equal(replanned.status, "awaiting_spend_approval", JSON.stringify(replanned.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
     const nextPlan = replanned.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
     assert.ok(nextPlan);

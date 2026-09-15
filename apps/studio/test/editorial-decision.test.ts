@@ -73,7 +73,7 @@ describe("editorial production decision", () => {
       });
 
       assert.equal(decision.verdict, "produce_video", input.title);
-      assert.equal(decision.recommendedTemplate?.id, "product-demo", input.title);
+      assert.equal(decision.recommendedTemplate, undefined, input.title);
     }
   });
 
@@ -88,7 +88,7 @@ describe("editorial production decision", () => {
     });
 
     assert.equal(decision.verdict, "produce_image_story");
-    assert.equal(decision.recommendedTemplate?.id, "photo-story");
+    assert.equal(decision.recommendedTemplate, undefined);
   });
 
   it("keeps the format recommendation visible while a high-risk trend remains source-blocked", () => {
@@ -108,7 +108,7 @@ describe("editorial production decision", () => {
 
     assert.equal(decision.verdict, "produce_image_story");
     assert.equal(decision.score > 0, true);
-    assert.equal(decision.recommendedTemplate?.id, "photo-story");
+    assert.equal(decision.recommendedTemplate, undefined);
     assert.match(decision.guardrails.join(" "), /高风险热点至少需要 2 个独立来源/);
   });
 
@@ -126,18 +126,17 @@ describe("editorial production decision", () => {
 
     assert.equal(decision.verdict, "produce_video");
     assert.equal(decision.score > 0, true);
-    // 系列入口不再直接锁死人物短纪录：时效型系列选题与热点同样落到事实短片。
-    assert.equal(decision.recommendedTemplate?.id, "trend-fact-brief");
+    assert.equal(decision.recommendedTemplate, undefined);
     assert.match(decision.guardrails.join(" "), /本集关键结论还没有可核验来源/);
   });
 
   it("rejects a vague trend before production even when its aggregate scores are high", () => {
     const decision = decideEditorialFormat({
       ...base,
-      audience: "所有人",
-      painPoint: "想变好",
-      hook: "聊聊 AI",
-    evidence: [],
+      audience: "",
+      painPoint: "",
+      hook: "",
+      evidence: [],
     });
 
     assert.equal(decision.verdict, "skip");
@@ -180,9 +179,9 @@ describe("editorial production decision", () => {
     const vague = decideEditorialFormat({
       ...base,
       origin: "series",
-      audience: "所有人",
-      painPoint: "想变好",
-      hook: "聊聊 AI",
+      audience: "",
+      painPoint: "",
+      hook: "",
       evidence: [],
     });
     const risky = decideEditorialFormat({
@@ -209,7 +208,7 @@ describe("editorial production decision", () => {
     assert.equal(belowVideoGate.verdict, "skip");
   });
 
-  it("keeps qualified series candidates on the shared video gate and selects a template by shape", () => {
+  it("keeps qualified series candidates on the shared video gate without locking a template by shape", () => {
     const decision = decideEditorialFormat({
       ...base,
       origin: "series",
@@ -238,13 +237,13 @@ describe("editorial production decision", () => {
     });
 
     assert.equal(decision.verdict, "produce_video");
-    assert.equal(decision.recommendedTemplate?.id, "product-demo");
+    assert.equal(decision.recommendedTemplate, undefined);
     assert.equal(comparison.verdict, "produce_video");
-    assert.equal(comparison.recommendedTemplate?.id, "ranked-comparison");
+    assert.equal(comparison.recommendedTemplate, undefined);
     assert.equal(observational.verdict, "produce_video");
-    assert.equal(observational.recommendedTemplate?.id, "human-mini-doc");
+    assert.equal(observational.recommendedTemplate, undefined);
     assert.equal(technology.verdict, "produce_video");
-    assert.equal(technology.recommendedTemplate?.id, "knowledge-explainer");
+    assert.equal(technology.recommendedTemplate, undefined);
   });
 
   it("requires every viral-video gate to clear its exact boundary", () => {
@@ -274,19 +273,35 @@ describe("editorial production decision", () => {
       ...passing,
       title: "AI 与普通工作的关系",
       score: { ...passing.score, visualFeasibility: 77 },
-    }).verdict, "skip");
+    }).verdict, "produce_video");
   });
 
-  it("maps each motion-video shape to a concrete production template", () => {
+  it("does not change a semantic recommendation because of punctuation or numeral style", () => {
+    const poetic = {
+      ...base,
+      title: "把回家的路，拍成一封寄给未来的信",
+      hook: "熟悉的归途总被忽略，想重新感受生活中安静的陪伴",
+    };
+    const variants = [
+      poetic,
+      { ...poetic, hook: `${poetic.hook}？` },
+      { ...poetic, title: poetic.title.replace("一封", "1封") },
+    ].map((input) => decideEditorialFormat(input));
+
+    assert.deepEqual(variants.map((decision) => decision.verdict), ["produce_video", "produce_video", "produce_video"]);
+    assert.equal(new Set(variants.map((decision) => decision.score)).size, 1);
+  });
+
+  it("keeps motion-video shape detection without imposing a production template", () => {
     const productDemo = decideEditorialFormat({ ...base, title: "实测 AI 如何整理一份会议记录", freshness: "evergreen" });
     const liveBrief = decideEditorialFormat({ ...base, title: "AI 助手进入普通人的工作", freshness: "live" });
     const miniDoc = decideEditorialFormat({ ...base, title: "乡村青年返乡后的真实工作", category: "agriculture-rural", freshness: "evergreen" });
     const explainer = decideEditorialFormat({ ...base, title: "为什么 AI 会改变普通人的工作分工", freshness: "evergreen" });
 
-    assert.equal(productDemo.recommendedTemplate?.id, "product-demo");
-    assert.equal(liveBrief.recommendedTemplate?.id, "trend-fact-brief");
-    assert.equal(miniDoc.recommendedTemplate?.id, "human-mini-doc");
-    assert.equal(explainer.recommendedTemplate?.id, "knowledge-explainer");
+    for (const decision of [productDemo, liveBrief, miniDoc, explainer]) {
+      assert.equal(decision.verdict, "produce_video");
+      assert.equal(decision.recommendedTemplate, undefined);
+    }
   });
 
   it("omits a recommendation when the preferred template is not currently published", () => {
@@ -299,7 +314,7 @@ describe("editorial production decision", () => {
     assert.equal(decision.recommendedTemplate, undefined);
   });
 
-  it("keeps a comparison topic's audience, hook, value, evidence, template, shots, and sound in one intent", () => {
+  it("keeps a comparison topic's audience, hook, value, and evidence in one intent without a template", () => {
     const comparison = {
       ...base,
       title: "两款 AI 会议助手横评：谁真能省下 30 分钟返工",
@@ -315,16 +330,9 @@ describe("editorial production decision", () => {
     };
 
     const decision = decideEditorialFormat(comparison);
-    const template = BUILTIN_TEMPLATES.find((candidate) => candidate.id === decision.recommendedTemplate?.id);
-
     assert.equal(decision.verdict, "produce_video");
-    assert.equal(decision.recommendedTemplate?.id, "ranked-comparison");
+    assert.equal(decision.recommendedTemplate, undefined);
     assert.match(decision.reasons.join(" "), /项目经理|返工半小时/);
     assert.match(decision.guardrails.join(" "), /同一段录音|同条件测试录像|原始会议纪要/);
-    assert.equal(template?.storyStructure[0]?.id, "stakes");
-    assert.match(template?.storyStructure[0]?.purpose ?? "", /选错|损失|必要性/);
-    assert.match(template?.shotSlots[0]?.purpose ?? "", /展示选错代价/);
-    assert.equal(template?.shotSlots.every((slot) => /展示|公布|完成|放大|揭示|匹配|给出|结束/.test(slot.purpose)), true);
-    assert.match(template?.soundSystem.voiceIntent ?? "", /公平|条件式判断|先说标准/);
   });
 });

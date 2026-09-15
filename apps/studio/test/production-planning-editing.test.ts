@@ -78,6 +78,7 @@ interface EditingSpies {
   treatmentCalls: string[];
   screenwriterCalls: string[];
   directorCalls: number;
+  directorModels: string[];
 }
 
 function editingAgents(spies: EditingSpies): Pick<ProductionPipelineOptions, "treatmentAgents" | "screenwriterAgent" | "directorAgent"> {
@@ -91,7 +92,7 @@ function editingAgents(spies: EditingSpies): Pick<ProductionPipelineOptions, "tr
           treat: async (input: { brief: { title: string } }) => {
             spies.treatmentCalls.push(input.brief.title);
             return {
-              version: "video-factory/creative-treatment-v1",
+              version: "video-factory/creative-treatment-v2",
               viewerPromise: "看完能避开三个决策坑",
               hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
               progression: [
@@ -115,7 +116,7 @@ function editingAgents(spies: EditingSpies): Pick<ProductionPipelineOptions, "tr
           treat: async (input: { brief: { title: string } }) => {
             spies.treatmentCalls.push(`${input.brief.title}::model-b`);
             return {
-              version: "video-factory/creative-treatment-v1",
+              version: "video-factory/creative-treatment-v2",
               viewerPromise: "看完能避开三个决策坑",
               hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
               progression: [
@@ -157,6 +158,7 @@ function editingAgents(spies: EditingSpies): Pick<ProductionPipelineOptions, "tr
       modelId: "director-model-one",
       plan: async (input: VisualDirectorAgentInput) => {
         spies.directorCalls += 1;
+        spies.directorModels.push(input.selectedModelId ?? "director-model-one");
         return {
           version: "video-factory/director-plan-v1",
           requestedProfileId: input.brief.requestedProfileId,
@@ -295,7 +297,7 @@ async function mutateRunJson(runId: string, workspaceRoot: string, mutate: (payl
 describe("planningStageId editing API (B4-REMAINDER)", () => {
   it("accepts planningStageId only on creative-planning and only for whitelisted stages", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-http-"));
-    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0 };
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };
     const harness = newEditingStudio(workspaceRoot, spies);
     const runId = await startJointRun(harness);
     const planningInput = await effectivePlanningInputValue(harness.studio, runId);
@@ -392,7 +394,7 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
 
   it("routes stage-scoped model changes to the matching provider binding", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-model-"));
-    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0 };
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };
     const harness = newEditingStudio(workspaceRoot, spies);
     const runId = await startJointRun(harness);
 
@@ -435,9 +437,69 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
     assert.equal(treatmentStage.effectiveModelId, "treatment-model-b");
   });
 
+  it("uses a saved director model on the next formal run while preserving completed treatment and script", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-model-route-"));
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };
+    const harness = newEditingStudio(workspaceRoot, spies);
+    const runId = await startJointRun(harness);
+    assert.deepEqual(spies.directorModels, ["director-model-one"]);
+    assert.equal(spies.treatmentCalls.length, 1);
+    assert.equal(spies.screenwriterCalls.length, 1);
+
+    await harness.studio.applyNodeExecutionConfiguration(runId, "creative-planning", {
+      ...await planningEditTokens(harness.studio, runId),
+      planningStageId: "director",
+      modelSelections: { "api-visual-director-v1": "director-model-two" },
+    }, "producer");
+    const stale = await harness.pipeline.loadPersisted(runId);
+    assert.equal(stale.status, "stale");
+
+    const resumed = await harness.pipeline.resumeStale(runId);
+    assert.equal(resumed.status, "needs_human", JSON.stringify(resumed.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
+    assert.equal(spies.treatmentCalls.length, 1, "changing only the director model must reuse the completed treatment");
+    assert.equal(spies.screenwriterCalls.length, 1, "changing only the director model must reuse the completed script");
+    assert.deepEqual(spies.directorModels, ["director-model-one", "director-model-two"], "the resumed formal director request must consume the saved model");
+    const stages = (await harness.studio.get(runId))?.planningStages;
+    assert.equal(stages?.find((stage) => stage.id === "treatment")?.status, "completed");
+    assert.equal(stages?.find((stage) => stage.id === "script")?.status, "completed");
+    assert.equal(
+      stages?.find((stage) => stage.id === "director")?.effectiveModelId,
+      "unknown",
+      "the fixture has no returned execution trace, so the UI must not turn the configured model into claimed provenance",
+    );
+  });
+
+  it("uses a saved script model on the next formal run while preserving only the completed treatment", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-script-model-route-"));
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };
+    const harness = newEditingStudio(workspaceRoot, spies);
+    const runId = await startJointRun(harness);
+    assert.deepEqual(spies.screenwriterCalls, ["screenwriter-model-one"]);
+    assert.equal(spies.treatmentCalls.length, 1);
+    assert.equal(spies.directorCalls, 1);
+
+    await harness.studio.applyNodeExecutionConfiguration(runId, "creative-planning", {
+      ...await planningEditTokens(harness.studio, runId),
+      planningStageId: "script",
+      modelSelections: { "codex-screenwriter-v1": "screenwriter-model-two" },
+    }, "producer");
+    const stale = await harness.pipeline.loadPersisted(runId);
+    assert.equal(stale.status, "stale");
+
+    const resumed = await harness.pipeline.resumeStale(runId);
+    assert.equal(resumed.status, "needs_human", JSON.stringify(resumed.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
+    assert.equal(spies.treatmentCalls.length, 1, "changing only the script model must reuse the completed treatment");
+    assert.deepEqual(
+      spies.screenwriterCalls,
+      ["screenwriter-model-one", "screenwriter-model-two"],
+      "the resumed formal script request must consume the saved model",
+    );
+    assert.equal(spies.directorCalls, 2, "the director must rerun from the new accepted script");
+  });
+
   it("keeps the safety contract for planning edits: no overwrite while running or with uncertain paid outcomes", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-safety-"));
-    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0 };
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };
     const harness = newEditingStudio(workspaceRoot, spies);
     const runId = await startJointRun(harness);
     const planningInput = await effectivePlanningInputValue(harness.studio, runId);
@@ -481,7 +543,7 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
 
   it("routes joint asset-source adjustments back to the creative-planning node", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-assets-route-"));
-    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0 };
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };
     const harness = newEditingStudio(workspaceRoot, spies);
     const runId = await startJointRun(harness);
     const tokens = await planningEditTokens(harness.studio, runId);
@@ -500,7 +562,7 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
 
   it("rejects a stale caller revision at the locked mutation point with zero state change", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-locked-"));
-    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0 };
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };
     const harness = newEditingStudio(workspaceRoot, spies);
     const runId = await startJointRun(harness);
     const staleTokens = await planningEditTokens(harness.studio, runId);
@@ -545,7 +607,7 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
 
   it("revalidates caller tokens at the locked point after both requests passed the service precheck", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-barrier-"));
-    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0 };
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };
     const harness = newEditingStudio(workspaceRoot, spies);
     const runId = await startJointRun(harness);
     const planningInput = await effectivePlanningInputValue(harness.studio, runId);

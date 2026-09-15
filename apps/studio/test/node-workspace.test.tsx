@@ -179,9 +179,20 @@ describe("node production workspaces", () => {
           providerValidationMs: 7,
           producerMs: 12_600,
           auditMs: 8_200,
+          discussionMs: 3_100,
           loopValidationMs: 14,
-          modelCallCount: 2,
+          modelCallCount: 5,
+          producerModelCallCount: 2,
+          auditModelCallCount: 1,
+          discussionModelCallCount: 2,
+          previousModelCallCount: 6,
+          previousDiscussionModelCallCount: 3,
+          previousStructuredRepairModelCallCount: 1,
           retryCount: 1,
+          requestPayloadBytes: 2_048,
+          promptBytes: 1_024,
+          evidenceImageCount: 2,
+          evidenceImageBytes: 4_096,
         },
         startedAt: "2026-08-27T00:00:00.000Z",
         finishedAt: "2026-08-27T00:00:21.000Z",
@@ -203,12 +214,22 @@ describe("node production workspaces", () => {
     expect(screen.getByText("步骤总耗时").parentElement).toHaveTextContent("21 秒");
     expect(screen.getByText("排队等待").parentElement).toHaveTextContent("不到 1 秒");
     expect(screen.getByText("Provider 执行").parentElement).toHaveTextContent("12 秒");
-    expect(screen.getByText("本地处理").parentElement).toHaveTextContent("8.4 秒");
+    expect(screen.getByText("未细分等待 / 处理").parentElement).toHaveTextContent("8.4 秒");
     expect(screen.queryByText("首次响应")).not.toBeInTheDocument();
-    expect(screen.queryByText("内容生成累计")).not.toBeInTheDocument();
-    expect(screen.queryByText("独立复核累计")).not.toBeInTheDocument();
-    expect(screen.getByText("模型调用").parentElement).toHaveTextContent("2 次");
-    expect(screen.getByText("自动重试").parentElement).toHaveTextContent("1 次");
+    expect(screen.getByText("内容生成累计").parentElement).toHaveTextContent("13 秒");
+    expect(screen.getByText("确认时独立复核累计").parentElement).toHaveTextContent("8.2 秒");
+    expect(screen.getByText("创作讨论累计").parentElement).toHaveTextContent("3.1 秒");
+    expect(screen.getByText("本次已证实模型执行").parentElement).toHaveTextContent("5 次");
+    expect(screen.getByText("内容生成调用").parentElement).toHaveTextContent("2 次");
+    expect(screen.getByText("确认时独立复核").parentElement).toHaveTextContent("1 次");
+    expect(screen.getByText("创作讨论").parentElement).toHaveTextContent("2 次");
+    expect(screen.getByText("此前执行累计").parentElement).toHaveTextContent("6 次");
+    expect(screen.getByText("此前创作讨论").parentElement).toHaveTextContent("3 次");
+    expect(screen.getByText("此前结构修复").parentElement).toHaveTextContent("1 次");
+    expect(screen.getByText("任务恢复重试").parentElement).toHaveTextContent("1 次");
+    expect(screen.getByText("发送数据").parentElement).toHaveTextContent("2.0 KB");
+    expect(screen.getByText("模型指令").parentElement).toHaveTextContent("1.0 KB");
+    expect(screen.getByText("视觉证据").parentElement).toHaveTextContent("2 张 · 4.0 KB");
     expect(screen.queryByText(/Prompt Pack|screenwriter-v2/)).not.toBeInTheDocument();
   });
 
@@ -237,10 +258,9 @@ describe("node production workspaces", () => {
     await userEvent.click(screen.getByText("这一步为什么用了这些时间"));
     expect(screen.getByText("排队等待").parentElement).toHaveTextContent("8.0 秒");
     expect(screen.getByText("Provider 执行").parentElement).toHaveTextContent("12 秒");
-    expect(screen.getByText("本地处理与候选切换").parentElement).toHaveTextContent("2 分 40 秒");
+    expect(screen.getByText("未细分等待 / 处理").parentElement).toHaveTextContent("2 分 40 秒");
     expect(screen.getByText("候选切换").parentElement).toHaveTextContent("1 次");
-    expect(screen.getByText("最终模型调用").parentElement).toHaveTextContent("2 次");
-    expect(screen.queryByText(/^模型调用$/)).not.toBeInTheDocument();
+    expect(screen.getByText("本次已证实模型执行").parentElement).toHaveTextContent("2 次");
   });
 
   it("lets a paused node replace an unavailable inherited provider", async () => {

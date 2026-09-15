@@ -6,7 +6,6 @@ import type {
   StudioEditorialDecision,
   StudioOpportunityEvidence,
   StudioOpportunityScore,
-  StudioTemplateRecommendation,
   StudioTopicCategory,
 } from "../shared/api.js";
 
@@ -41,17 +40,12 @@ const PUBLIC_UPDATE_ACTOR_PATTERN = /(?:警方|法院|检察院|政府|官方|�
 const PUBLIC_EVENT_CONTEXT_PATTERN = /社会事件|公共安全|外交|国际|战争|灾害|伤亡|遇难|失联|地震|台风|暴雨|救灾/;
 const EVERYDAY_CONTEXT_PATTERN = /亲子|孩子|家长|家庭|厨房|做饭|居家|同事|沟通|相处/;
 const GUIDANCE_METHOD_PATTERN = /如何|怎么|三步|方法|教程|化解|避免|预防|防止|检查/;
-const ACTION_PATTERN = /实测|实验|挑战|教程|对比|体验|探店|旅行|美食|运动|比赛|改造|制作|开箱|测评|操作|演示|工作流|三步|一天/;
-const COMPARISON_PATTERN = /对比|横评|测评|谁更适合|怎么选|选哪个|\bA\s*(?:还是|vs\.?)\s*B\b/i;
-const HOOK_PATTERN = /[？?]|\d|为什么|如何|到底|能不能|不是.+而是|别.+先|实测|对比|横评|省下|少花|多赚|变化/;
-const GENERIC_AUDIENCE_PATTERN = /^(所有人|大家|普通人|用户|年轻人|成年人)$/;
-const GENERIC_TOPIC_PATTERN = /^(?:(?:今天|今日|本周|最新|实时|全网|平台)?(?:热搜|热点|话题|新闻|资讯|消息|榜单|大事)(?:来了|来袭|更新|速递|盘点|汇总|上榜|第一)?)$/;
 
 export function decideEditorialFormat(
   input: EditorialDecisionInput,
-  publishedTemplates: readonly EditorialTemplateOption[],
+  _publishedTemplates: readonly EditorialTemplateOption[],
 ): StudioEditorialDecision {
-  const decision = decideProductionPotential(input, publishedTemplates);
+  const decision = decideProductionPotential(input);
   // 规则保底候选的所有结论都没有经过选题总编：无论走哪个分支，都要如实标记等待评估，
   // 避免把"尚未评估"投影成"总编评分 0 · 暂不生产"。
   const marked = input.providerId === "trend-heuristic-v1"
@@ -69,7 +63,6 @@ export function decideEditorialFormat(
 
 function decideProductionPotential(
   input: EditorialDecisionInput,
-  publishedTemplates: readonly EditorialTemplateOption[],
 ): StudioEditorialDecision {
   const readinessIssues = viralReadinessIssues(input);
   if (readinessIssues.length > 0) {
@@ -90,18 +83,8 @@ function decideProductionPotential(
     };
   }
 
-  const visualPlanText = [
-    input.visualProof,
-    input.visualPlan?.strategy,
-    ...(input.visualPlan?.beats.flatMap((beat) => [beat.role, beat.description, beat.searchQuery]) ?? []),
-  ].filter(Boolean).join(" ");
   const topicText = `${input.title} ${input.track}`;
-  const productionIntentText = `${topicText} ${visualPlanText}`;
   const staticUpdate = isPublicStaticUpdate(input, topicText);
-  const comparison = COMPARISON_PATTERN.test(productionIntentText);
-  const hasAction = comparison
-    || ACTION_PATTERN.test(productionIntentText)
-    || isEverydayGuidance(productionIntentText);
   const videoValue = Math.round(
     input.score.visualFeasibility * 0.34
     + input.score.novelty * 0.2
@@ -109,7 +92,6 @@ function decideProductionPotential(
     + input.score.productionCostEfficiency * 0.16
     + input.score.seriesPotential * 0.12
     - input.score.complianceRisk * 0.22
-    + (hasAction ? 8 : 0)
     - (staticUpdate ? 12 : 0),
   );
 
@@ -122,12 +104,6 @@ function decideProductionPotential(
         guardrails: ["等待出现新的事实、独特解释角度或可验证的视觉材料后再评估。"],
       };
     }
-    const recommendedTemplate = templateRecommendation(
-      publishedTemplates,
-      "photo-story",
-      "来源画面与数据证据驱动的图解视频",
-      "公共议题缺少可安全生成的连续现场，采用来源画面、数据和少量获授权实景更可信。",
-    );
     return {
       verdict: "produce_image_story",
       score: clamp(Math.max(45, videoValue)),
@@ -138,16 +114,14 @@ function decideProductionPotential(
         "只使用原始来源截图、获授权素材、数据卡和明确标注的示意画面。",
         "不得用 AI 生成画面虚构现场、当事人行为或未被证实的细节。",
       ],
-      ...(recommendedTemplate ? { recommendedTemplate } : {}),
     };
   }
 
   const clearsVideoGate = input.score.audienceReach >= 60
     && input.score.visualFeasibility >= 68
     && input.score.novelty >= 55
-    && input.score.complianceRisk <= 45
-    && (hasAction || input.score.visualFeasibility >= 78);
-  if (videoValue < 60 || !clearsVideoGate) {
+    && input.score.complianceRisk <= 45;
+  if (!clearsVideoGate) {
     return {
       verdict: "skip",
       score: clamp(videoValue),
@@ -156,40 +130,15 @@ function decideProductionPotential(
     };
   }
 
-  const recommendedTemplate = recommendMotionTemplate(input, hasAction, comparison, publishedTemplates);
   const audience = input.audience!.trim();
   const painPoint = input.painPoint!.trim();
   const evidenceSources = (input.evidence ?? []).map((item) => item.source.trim()).filter(Boolean).join("、") || "补齐后的原始来源";
   return {
     verdict: "produce_video",
     score: clamp(videoValue),
-    reasons: [hasAction
-      ? `面向${audience}，用可见行动解决“${painPoint}”，视频能提供文字无法替代的观看价值。`
-      : `面向${audience}，围绕“${painPoint}”的画面可行性和创作增量达到视频生产门槛。`],
+    reasons: [`面向${audience}，围绕“${painPoint}”的画面可行性和创作增量达到视频生产门槛。`],
     guardrails: [`前两秒兑现钩子“${input.hook!.trim()}”；事实与结果必须回到${evidenceSources}，热度本身不能替代内容价值。`],
-    ...(recommendedTemplate ? { recommendedTemplate } : {}),
   };
-}
-
-function recommendMotionTemplate(
-  input: EditorialDecisionInput,
-  hasAction: boolean,
-  comparison: boolean,
-  publishedTemplates: readonly EditorialTemplateOption[],
-): StudioTemplateRecommendation | undefined {
-  if (comparison) {
-    return templateRecommendation(publishedTemplates, "ranked-comparison", "统一标准、同条件测试与条件结论构成的横评视频", "题材的核心承诺是帮助观众做选择，必须先公开标准，再用同条件证据给出分人群结论。");
-  }
-  if (hasAction) {
-    return templateRecommendation(publishedTemplates, "product-demo", "问题、关键动作与结果证据构成的实测视频", "题材的观看价值来自过程和结果，必须让观众看见真实操作而不是听口播描述。");
-  }
-  if (input.category === "society" || input.freshness === "live") {
-    return templateRecommendation(publishedTemplates, "trend-fact-brief", "事实钩子、证据语境与影响判断构成的热点短片", "时效型选题需要先建立可核验事实，再用画面解释它为何与观众相关。");
-  }
-  if (input.category === "local-culture" || input.category === "parenting" || input.category === "agriculture-rural") {
-    return templateRecommendation(publishedTemplates, "human-mini-doc", "人物行动、环境细节与真实阻力驱动的观察短片", "这类题材的差异化来自具体人物和现场关系，微纪录比通用解说更有记忆点。");
-  }
-  return templateRecommendation(publishedTemplates, "knowledge-explainer", "问题、因果模型与生活验证构成的解释视频", "题材需要把抽象信息变成可理解、可复述且可验证的因果链。");
 }
 
 function isPublicStaticUpdate(input: EditorialDecisionInput, topicText: string): boolean {
@@ -207,24 +156,12 @@ function viralReadinessIssues(input: EditorialDecisionInput): string[] {
   const audience = input.audience?.trim() ?? "";
   const painPoint = input.painPoint?.trim() ?? "";
   const hook = input.hook?.trim() ?? "";
-  const title = input.title.trim().replace(/[\s\p{P}\p{S}]+/gu, "");
   const issues: string[] = [];
-  if (!title || GENERIC_TOPIC_PATTERN.test(title)) issues.push("标题没有形成可判断的具体问题");
-  if (!audience || GENERIC_AUDIENCE_PATTERN.test(audience)) issues.push("受众仍然过于宽泛");
-  if (painPoint.length < 8) issues.push("痛点或具体收益不清楚");
-  if (!hook || !HOOK_PATTERN.test(hook)) issues.push("开场没有足够具体的停留理由");
+  if (!input.title.trim()) issues.push("标题为空");
+  if (!audience) issues.push("受众为空");
+  if (!painPoint) issues.push("观看收益为空");
+  if (!hook) issues.push("开场承诺为空");
   return issues;
-}
-
-function templateRecommendation(
-  publishedTemplates: readonly EditorialTemplateOption[],
-  id: string,
-  format: string,
-  rationale: string,
-): StudioTemplateRecommendation | undefined {
-  const template = publishedTemplates.find((candidate) => candidate.id === id);
-  if (!template) return undefined;
-  return { id, name: template.name, format, rationale };
 }
 
 function clamp(value: number): number {

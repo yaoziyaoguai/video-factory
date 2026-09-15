@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   CodexBridgeClient,
   CodexBridgeError,
+  IndependentVisualReviewError,
   type CodexTaskExecution,
   type CodexTaskKind,
 } from "@video-factory/production-pipeline";
@@ -280,18 +281,26 @@ describe("buildRoleAgentAssembly", () => {
       environment: {},
     });
 
-    const execution = await result.visualReviewAgents[0]?.reviewDetailed?.({
-      videoPath: "/run/final.mp4",
-      runRoot: "/run",
-      reviewStage: "source_assets",
-    });
-
-    assert.ok(execution);
+    // 试片是"要不要继续为同方案其余镜头付费"的闸门，所以它和成片终审一样要求两个分支
+    // 落在两个不同的实际身份上。GLM 掉线时备份确实顶上了，但两个分支于是都成了 gpt-review：
+    // 闸门宁可不开，也不能拿同一个模型的两份回答当成两次独立复审。
+    await assert.rejects(
+      () => result.visualReviewAgents[0]!.reviewDetailed!({
+        videoPath: "/run/final.mp4",
+        runRoot: "/run",
+        reviewStage: "source_assets",
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof IndependentVisualReviewError);
+        // 操作员要能看出这是试片而不是成片终审：一个还没花钱，一个已经花过了。
+        assert.match(error.message, /试片双模型复审无法成立/);
+        assert.deepEqual(error.failures.map((failure) => failure.kind), ["not_independent"]);
+        return true;
+      },
+    );
     assert.deepEqual(zai.calls, ["visual-review"]);
-    assert.deepEqual(openai.calls, ["visual-review", "role-audit"]);
-    assert.equal(execution.executedModelId, "gpt-review");
-    assert.equal(execution.fallbackFromProviderId, "zai-bigmodel-api");
-    assert.deepEqual(execution.attemptedModelIds, ["glm-review", "gpt-review"]);
+    // 两个分支都跑完了：GLM 那一路掉线后由 Codex 顶上，Codex 那一路本来就是 Codex。
+    assert.deepEqual(openai.calls, ["visual-review", "role-audit", "visual-review", "role-audit"]);
   });
 
   it("runs both configured models for the final review while preprocessing evidence once", async () => {

@@ -255,7 +255,7 @@ describe("CandidateInboxStudio", () => {
     const [listed] = (await inbox.list({ origins: ["series"] })).items;
 
     assert.equal(listed?.editorialDecision.verdict, "produce_image_story");
-    assert.equal(listed?.editorialDecision.recommendedTemplate?.id, "photo-story");
+    assert.equal(listed?.editorialDecision.recommendedTemplate, undefined);
     assert.notEqual(listed?.editorialDecision.reasons[0], "旧路线图固定建议视频。");
   });
 
@@ -546,20 +546,12 @@ describe("CandidateInboxStudio", () => {
     assert.match(listed.items.find((item) => item.id === highRisk.id)?.editorialDecision.guardrails[0] ?? "", /开工门槛/);
     assert.equal(listed.items.find((item) => item.id === review.id)?.verification.status, "review_required");
     assert.equal(listed.items.find((item) => item.id === review.id)?.editorialDecision.verdict, "produce_image_story");
-    assert.deepEqual(
-      listed.items.find((item) => item.id === review.id)?.editorialDecision.recommendedTemplate,
-      {
-        id: "photo-story",
-        name: "证据图解",
-        format: "来源画面与数据证据驱动的图解视频",
-        rationale: "公共议题缺少可安全生成的连续现场，采用来源画面、数据和少量获授权实景更可信。",
-      },
-    );
+    assert.equal(listed.items.find((item) => item.id === review.id)?.editorialDecision.recommendedTemplate, undefined);
     await assert.rejects(() => inbox.adopt(highRisk.id, { origin: "trend", verificationConfirmed: true }), /至少 2 个不同域名的有效原始来源链接/);
     await assert.rejects(() => inbox.adopt(review.id, { origin: "trend" }), /确认核验/);
     const adopted = await inbox.adopt(review.id, { origin: "trend", verificationConfirmed: true });
     assert.equal(adopted.verification?.status, "verified");
-    assert.equal(adopted.editorialDecision?.recommendedTemplate?.id, "photo-story");
+    assert.equal(adopted.editorialDecision?.recommendedTemplate, undefined);
   });
 
   it("does not treat two aggregators carrying the same publisher link as independent evidence", async () => {
@@ -774,9 +766,9 @@ describe("CandidateInboxStudio", () => {
     const [blocked] = (await inbox.list({ origins: ["trend"] })).items;
     assert.equal(blocked?.verification.status, "blocked");
     assert.equal(blocked?.verification.independentSources, 1);
-    // 补充前 BLOCKED 不可采用；但创作方向不因门禁消失，仍带补齐后建议采用的模板。
+    // 补充前 BLOCKED 不可采用；但创作方向不因门禁消失，也不通过模板锁定制作方式。
     await assert.rejects(() => inbox.adopt("trend-supplement", { origin: "trend" }), /至少 2 个不同域名/);
-    assert.equal(blocked?.editorialDecision.recommendedTemplate?.id, "product-demo");
+    assert.equal(blocked?.editorialDecision.recommendedTemplate, undefined);
     assert.match(blocked?.editorialDecision.guardrails[0] ?? "", /开工门槛/);
 
     const supplemented = await inbox.supplementTrendCandidateSources("trend-supplement", {
@@ -1105,7 +1097,7 @@ describe("CandidateInboxStudio", () => {
       BUILTIN_TEMPLATES,
       new Date("2026-09-07T09:00:00.000Z"),
     );
-    assert.equal(reviewed.editorialDecision?.recommendedTemplate?.id, "knowledge-explainer");
+    assert.equal(reviewed.editorialDecision?.recommendedTemplate, undefined);
   });
 
   it("can adopt a candidate the user saw just before a background trend refresh", async () => {
@@ -1124,23 +1116,15 @@ describe("CandidateInboxStudio", () => {
     });
 
     const [visibleCandidate] = (await inbox.list({ origins: ["trend"] })).items;
-    assert.equal(visibleCandidate?.editorialDecision.recommendedTemplate?.id, "product-demo");
+    assert.equal(visibleCandidate?.editorialDecision.recommendedTemplate, undefined);
     currentCandidates = [{ ...trendCandidate, id: "trend-after-refresh", title: "刷新后的另一条候选" }];
     publishedTemplates = BUILTIN_TEMPLATES.filter((template) => template.id !== "product-demo");
 
-    // 推荐模板在目录里被下线后，采用必须失败关闭，不能默默无模板开工。
-    await assert.rejects(
-      () => inbox.adopt(visibleCandidate!.id, { origin: "trend" }),
-      /推荐的生产模板当前不可用/,
-    );
-    assert.deepEqual(await opportunities.list(), []);
-
-    // 目录恢复后，同一条被记住的候选仍可按原记忆采用（不因后台刷新丢失）。
-    publishedTemplates = BUILTIN_TEMPLATES;
+    // 模板目录变化不再阻断采用；同一条被记住的候选仍可按原记忆采用。
     const adopted = await inbox.adopt(visibleCandidate!.id, { origin: "trend" });
 
     assert.equal(adopted.id, trendCandidate.id);
-    assert.equal(adopted.editorialDecision?.recommendedTemplate?.id, "product-demo");
+    assert.equal(adopted.editorialDecision?.recommendedTemplate, undefined);
     await assert.rejects(() => inbox.adopt(visibleCandidate!.id, { origin: "trend" }), /已被采用|已经失效/);
   });
 
@@ -1372,7 +1356,7 @@ describe("CandidateInboxStudio", () => {
     });
     assert.equal(recovered.verification.status, "review_required");
     assert.equal(recovered.verification.independentSources, 2);
-    assert.notEqual(recovered.editorialDecision.recommendedTemplate, undefined);
+    assert.equal(recovered.editorialDecision.recommendedTemplate, undefined);
 
     // 补充来源持久化在单集计划上：重新打开存储仍可读到（路线图 URL 留档保存，只在门禁计算时排除）。
     const persisted = (await new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) }).list())[0];

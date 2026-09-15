@@ -1,4 +1,5 @@
 import type { ProductionBlueprintPatch, ProductionTemplateInput } from "@video-factory/template-core";
+import type { ProductionArticleSourceSnapshot } from "@video-factory/production-pipeline";
 
 export type StudioRunStatus =
   | "pending"
@@ -105,6 +106,15 @@ export const DEFAULT_STUDIO_PRODUCTION_DEFAULTS: StudioProductionDefaults = {
   reviewMode: "manual",
   platform: "douyin",
   durationSeconds: 24,
+};
+
+// 出厂配音默认值。它只代表"没人选过"，不代表操作员的选择：
+// 服务端在没有 settings 文件时把它交给创作对话框，对话框据此判断要不要让位给已配置的云端配音。
+export const DEFAULT_STUDIO_VOICE_DIRECTION: StudioVoiceDirection = {
+  profileId: "macos:Tingting",
+  rate: 185,
+  pauseScale: 1,
+  masteringPreset: "natural",
 };
 
 export const DEFAULT_STUDIO_TOPIC_STRATEGY: StudioTopicStrategy = {
@@ -288,6 +298,9 @@ export interface StudioTrendCandidate {
   };
   generatedAt: string;
   evidence: StudioOpportunityEvidence[];
+  articleSources?: ProductionArticleSourceSnapshot[];
+  articleFacts?: StudioArticleFact[];
+  articleUncertainties?: string[];
   score: StudioOpportunityScore;
   visualPlan?: StudioVisualPlan;
   category?: StudioTopicCategory;
@@ -321,6 +334,11 @@ export interface StudioTopicGenerationReceipt {
   modelId?: string;
   failureCategory?: "model_unavailable" | "accepted_unknown" | "contract_rejected" | "model_error";
   failureReason?: string;
+  modelCandidateCount?: number;
+  unknownSignalCount?: number;
+  invalidSourceBindingCount?: number;
+  duplicateAngleCount?: number;
+  preferenceExcludedCount?: number;
 }
 
 export interface StudioCandidateInboxItem extends StudioTrendCandidate {
@@ -548,6 +566,13 @@ export interface StudioOpportunityEvidence {
   collectedAt?: string;
 }
 
+export interface StudioArticleFact {
+  statement: string;
+  sourceId: string;
+  paragraphIds: string[];
+  uncertainty?: string;
+}
+
 export interface StudioOpportunityScore {
   audienceReach: number;
   visualFeasibility: number;
@@ -576,6 +601,9 @@ export interface StudioOpportunity {
   score: StudioOpportunityScore;
   scoreProvenance: StudioOpportunityScoreProvenance;
   evidence: StudioOpportunityEvidence[];
+  articleSources?: ProductionArticleSourceSnapshot[];
+  articleFacts?: StudioArticleFact[];
+  articleUncertainties?: string[];
   createdAt: string;
   updatedAt: string;
   origin?: "manual" | StudioCandidateOrigin;
@@ -597,6 +625,10 @@ export interface StudioOpportunityInput {
   painPoint: string;
   hook: string;
   evidence: StudioOpportunityEvidence[];
+  /** 仅候选采用服务内部传入；通用人工录入不会获得可信正文快照。 */
+  articleSources?: ProductionArticleSourceSnapshot[];
+  articleFacts?: StudioArticleFact[];
+  articleUncertainties?: string[];
   scores: Omit<StudioOpportunityScore, "final">;
   candidateId?: string;
   origin?: "manual" | StudioCandidateOrigin;
@@ -1025,6 +1057,12 @@ export interface StudioProductionQuote {
       allowedModels: Array<{ providerId: string; modelId: string }>;
       maxCreateAttempts: number;
     }>;
+    /**
+     * 需要付费的镜头之外的镜头，以及它们为什么不需要付费。只用于让操作员看清
+     * 「制作内容」覆盖的整片与清单条数之间的差额，不参与任何授权额度计算。
+     * 历史报价没有这个字段。
+     */
+    excludedAssets?: Array<{ id: string; label: string; note: string }>;
     uncertainty: string[];
   };
   fundingRequestId?: string;
@@ -1128,9 +1166,158 @@ export interface StudioArtifact {
 export interface StudioIntervention {
   id: string;
   nodeId: string;
+  kind?: "creative_review";
   reason: string;
   options: Array<"approve" | "request_changes" | "reject">;
   createdAt: string;
+  continuation?: {
+    stage: StudioPlanningEditableStage;
+    reviewRevision: number;
+    draftSha256: string;
+  };
+}
+
+export interface StudioCreativeReviewSnapshot {
+  runId: string;
+  runRevision: number;
+  stage: StudioPlanningEditableStage;
+  reviewRevision: number;
+  draftSha256: string;
+  draftArtifactId: string;
+  draftContentUrl?: string;
+  phase: "waiting_user" | "checking";
+  allowedActions: Array<"discuss" | "adopt_proposal" | "undo_draft" | "confirm" | "return_to_stage">;
+  returnTargets: Array<{
+    stage: StudioPlanningEditableStage;
+    label: string;
+    impact: string;
+  }>;
+  draft: unknown;
+  previousDraft?: unknown;
+  messages: Array<{ id: string; role: "user" | "assistant"; text: string; commandId: string }>;
+  proposals: Array<{ proposalId: string; baseDraftSha256: string; document: unknown; changeSummary: string[] }>;
+  effectiveUserInstructions: Array<{ commandId: string; message: string }>;
+  blockingIssues: Array<{
+    target: "script" | "director" | "source" | "user";
+    scenePositions: number[];
+    reason: string;
+    requiredChange: string;
+  }>;
+  checkResult?: {
+    verdict: "pass" | "repair";
+    score: number;
+    summary: string;
+    issues: Array<{ severity: "advisory" | "blocking"; criterion: string; evidence: string; repairInstruction: string }>;
+  };
+}
+
+type StudioCreativeReviewCommandBase = {
+  commandId: string;
+  expectedRunRevision: number;
+  expectedReviewRevision: number;
+  stage: StudioPlanningEditableStage;
+  baseDraftSha256: string;
+};
+
+export type StudioCreativeReviewCommandInput = StudioCreativeReviewCommandBase & (
+  // 独立复核是"提议"而非"否决"：repair 时人仍可继续，但必须显式承担（与 return_to_stage 的 acknowledgeImpact 同模式）。
+  | { action: "confirm"; acknowledgeRepair?: boolean }
+  | { action: "discuss"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
+  | { action: "adopt_proposal"; proposalId: string }
+  | { action: "undo_draft" }
+  | { action: "return_to_stage"; targetStage: StudioPlanningEditableStage; acknowledgeImpact: true }
+);
+
+export type StudioCreativeReviewConfirmInput = StudioCreativeReviewCommandInput & { action: "confirm" };
+
+export interface StudioCreativeReviewCommandReceipt {
+  commandId: string;
+  status: "running" | "completed" | "failed" | "unknown";
+  observationUrl: string;
+}
+
+export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCreativeReviewCommandInput {
+  const input = requiredObject(value, "创作操作");
+  const commonFields = ["action", "commandId", "expectedRunRevision", "expectedReviewRevision", "stage", "baseDraftSha256"];
+  const actionFields = input.action === "discuss"
+    ? ["message", "selection"]
+    : input.action === "adopt_proposal"
+      ? ["proposalId"]
+      : input.action === "return_to_stage"
+        ? ["targetStage", "acknowledgeImpact"]
+      : [];
+  const allowed = new Set([...commonFields, ...actionFields]);
+  const unknown = Object.keys(input).find((key) => !allowed.has(key));
+  if (unknown) throw new StudioInputError(`创作操作不支持字段“${unknown}”。`);
+  if (!["confirm", "discuss", "adopt_proposal", "undo_draft", "return_to_stage"].includes(String(input.action))) {
+    throw new StudioInputError("创作操作类型不正确。");
+  }
+  const commandId = requiredTrimmedString(input.commandId, "操作编号");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(commandId)) throw new StudioInputError("操作编号格式不正确。");
+  const expectedRunRevision = nonNegativeInteger(input.expectedRunRevision, "制作版本");
+  const expectedReviewRevision = nonNegativeInteger(input.expectedReviewRevision, "方案版本");
+  if (!STUDIO_PLANNING_EDITABLE_STAGES.includes(input.stage as StudioPlanningEditableStage)) {
+    throw new StudioInputError("创作确认阶段不正确。");
+  }
+  const baseDraftSha256 = requiredTrimmedString(input.baseDraftSha256, "方案摘要");
+  if (!/^[a-f0-9]{64}$/.test(baseDraftSha256)) throw new StudioInputError("方案摘要格式不正确。");
+  const common: StudioCreativeReviewCommandBase = {
+    commandId,
+    expectedRunRevision,
+    expectedReviewRevision,
+    stage: input.stage as StudioPlanningEditableStage,
+    baseDraftSha256,
+  };
+  if (input.action === "discuss") {
+    const message = requiredTrimmedString(input.message, "讨论内容");
+    if (message.length > 4_000) throw new StudioInputError("讨论内容不能超过 4000 个字符。");
+    return {
+      action: "discuss",
+      ...common,
+      message,
+      ...(input.selection === undefined ? {} : { selection: parseStudioCreativeSelection(input.selection) }),
+    };
+  }
+  if (input.action === "adopt_proposal") {
+    return { action: "adopt_proposal", ...common, proposalId: requiredTrimmedString(input.proposalId, "备选方案编号") };
+  }
+  if (input.action === "undo_draft") return { action: "undo_draft", ...common };
+  if (input.action === "return_to_stage") {
+    if (!STUDIO_PLANNING_EDITABLE_STAGES.includes(input.targetStage as StudioPlanningEditableStage)) {
+      throw new StudioInputError("返回的创作阶段不正确。");
+    }
+    if (input.acknowledgeImpact !== true) throw new StudioInputError("请先确认返回上游会使后续方案失效。");
+    return { action: "return_to_stage", ...common, targetStage: input.targetStage as StudioPlanningEditableStage, acknowledgeImpact: true };
+  }
+  return { action: "confirm", ...common, ...(input.acknowledgeRepair === true ? { acknowledgeRepair: true } : {}) };
+}
+
+export function parseStudioCreativeReviewConfirmInput(value: unknown): StudioCreativeReviewConfirmInput {
+  const parsed = parseStudioCreativeReviewCommandInput(value);
+  if (parsed.action !== "confirm") throw new StudioInputError("当前调用需要确认当前方案操作。");
+  return parsed;
+}
+
+function parseStudioCreativeSelection(value: unknown): { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } {
+  const selection = requiredObject(value, "讨论范围");
+  const unknown = Object.keys(selection).find((key) => !["kind", "ids", "scenePositions"].includes(key));
+  if (unknown) throw new StudioInputError(`讨论范围不支持字段“${unknown}”。`);
+  if (selection.kind !== "document" && selection.kind !== "beat" && selection.kind !== "scene") {
+    throw new StudioInputError("讨论范围类型不正确。");
+  }
+  if (!Array.isArray(selection.ids) || selection.ids.length > 24
+    || selection.ids.some((id) => typeof id !== "string" || !id.trim() || id.length > 128)) {
+    throw new StudioInputError("讨论范围的段落编号不正确。");
+  }
+  if (!Array.isArray(selection.scenePositions) || selection.scenePositions.length > 24
+    || selection.scenePositions.some((position) => !Number.isInteger(position) || Number(position) < 1)) {
+    throw new StudioInputError("讨论范围的镜头编号不正确。");
+  }
+  return {
+    kind: selection.kind,
+    ids: selection.ids.map((id) => String(id).trim()),
+    scenePositions: selection.scenePositions.map(Number),
+  };
 }
 
 export interface StudioDecision {
@@ -1388,6 +1575,8 @@ export interface StudioReworkFinding {
   startTimecodeMs?: number;
   endTimecodeMs?: number;
   scenePosition?: number;
+  /** 这条问题要靠哪类证据判定；缺失表示旧版报告，不代表 static。 */
+  claimType?: "static" | "motion" | "non_visual";
   evidenceStatus?: "satisfied" | "failed" | "not_observed" | "not_applicable";
   evidenceFrameSha256?: string | null;
   nextAction?: "inspect_existing_media" | "replan_upstream" | "rework_asset" | "none";
@@ -1467,6 +1656,7 @@ export interface StudioProductionInput {
     guardrails: string[];
   };
   visualProof?: string;
+  visualIntent?: string;
   visualPlan?: StudioVisualPlan;
   seriesContext?: StudioSeriesProductionContext;
   creationContext?: {
@@ -1491,6 +1681,8 @@ export interface StudioProductionInput {
     executablePlan?: boolean;
     /** 新制作显式写入 "joint-v1"（共同创作规划）；历史 run 不补标记。 */
     creativePlanning?: "joint-v1";
+    /** 导演方案、脚本、分镜逐阶段由用户确认后才继续。 */
+    creativeReview?: "user-confirmed-v1";
   };
   referenceVideo?: {
     uploadId: string;
@@ -1522,6 +1714,10 @@ export function assertStudioExecutableProductionInput(value: unknown): void {
     || (workflowFeatures as Record<string, unknown>).executablePlan !== true) {
     throw new StudioInputError("新建制作必须启用可执行制作方案（workflowFeatures.executablePlan=true）。");
   }
+  if ((workflowFeatures as Record<string, unknown>).creativePlanning !== "joint-v1"
+    || (workflowFeatures as Record<string, unknown>).creativeReview !== "user-confirmed-v1") {
+    throw new StudioInputError("新建制作必须启用逐阶段讨论与确认，不能自动跳过导演方案、脚本或分镜确认。");
+  }
   if (typeof input.durationRange !== "object" || input.durationRange === null || Array.isArray(input.durationRange)) {
     throw new StudioInputError("新建制作必须填写可编辑的成片时长范围。");
   }
@@ -1539,11 +1735,24 @@ export interface StudioReferenceVideo {
   createdAt: string;
 }
 
+/**
+ * 操作员对某一条审片结论的表态。
+ *
+ * itemKey 由服务端按 finding 内容算好后随成片一起下发，界面只负责原样回传——
+ * 界面自己算键、或改用数组下标，都会在报告条目顺序变化时把表态落到别的条目上。
+ */
+export interface StudioReviewDisposition {
+  itemKey: string;
+  decision: "accept" | "reject";
+  reason?: string;
+}
+
 interface StudioDecisionInputBase {
   expectedRunRevision: number;
   interventionId: string;
   reviewEvidenceId: string | null;
   note?: string;
+  reviewDispositions?: StudioReviewDisposition[];
 }
 
 export type StudioDecisionInput = StudioDecisionInputBase & (
@@ -1569,11 +1778,23 @@ export interface StudioSceneRevisionInput {
   note: string;
 }
 
+/**
+ * 只改一镜的文字。
+ *
+ * 画面已经付过钱，而旁白与字幕是脚本里的一行字——改字不该让任何一帧画面重新生成。
+ * 代价是脚本同时是配音的输入：这条路径会重跑配音，配音按字符计费。
+ */
+export interface StudioNarrationRevisionInput {
+  expectedRunRevision: number;
+  scenePosition: number;
+  narration: string;
+  note: string;
+}
+
 export interface StudioVisualReinspectionInput {
   expectedRunRevision: number;
   reviewEvidenceId: string;
 }
-
 export type StudioPublishPlatformId = "douyin" | "toutiao" | "kuaishou" | "bilibili" | "xiaohongshu";
 
 export interface StudioPublishTarget {
@@ -1969,9 +2190,53 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
     ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}),
   };
   if (input.action === "request_changes") {
+    if (input.reviewDispositions !== undefined) {
+      throw new StudioInputError("只有批准成片时才需要逐条表态。");
+    }
     return { ...parsed, action: "request_changes", voiceTiming: voiceTiming! };
   }
-  return { ...parsed, action: input.action };
+  const reviewDispositions = parseReviewDispositions(input.reviewDispositions, input.action);
+  return {
+    ...parsed,
+    action: input.action,
+    ...(reviewDispositions ? { reviewDispositions } : {}),
+  };
+}
+
+function parseReviewDispositions(
+  value: unknown,
+  action: "approve" | "reject",
+): StudioReviewDisposition[] | undefined {
+  if (value === undefined) return undefined;
+  if (action !== "approve") throw new StudioInputError("只有批准成片时才需要逐条表态。");
+  if (!Array.isArray(value)) throw new StudioInputError("逐条表态格式不正确。");
+  if (value.length === 0) throw new StudioInputError("逐条表态不能是空列表。");
+  const dispositions = value.map((entry, index): StudioReviewDisposition => {
+    const label = `第 ${index + 1} 条表态`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new StudioInputError(`${label}格式不正确。`);
+    }
+    const record = entry as Record<string, unknown>;
+    if (record.decision !== "accept" && record.decision !== "reject") {
+      throw new StudioInputError(`${label}必须选择采纳或不采纳。`);
+    }
+    const itemKey = requiredTrimmedString(record.itemKey, `${label}的条目编号`);
+    if (!/^[a-f0-9]{64}$/.test(itemKey)) throw new StudioInputError(`${label}的条目编号格式不正确。`);
+    if (record.reason !== undefined && typeof record.reason !== "string") {
+      throw new StudioInputError(`${label}的理由必须是文字。`);
+    }
+    const reason = typeof record.reason === "string" ? record.reason.trim() : "";
+    // 采纳的含义就是"照这条结论返修"，返修指令本身就是那条结论，不需要再附理由；
+    // 不采纳才是"我看了、我不同意"，那时候理由才是留痕的关键。
+    if (record.decision === "accept") return { itemKey, decision: "accept" };
+    if (!reason) throw new StudioInputError(`${label}不采纳时必须写明理由。`);
+    if (reason.length > 500) throw new StudioInputError(`${label}的理由不能超过 500 个字符。`);
+    return { itemKey, decision: "reject", reason };
+  });
+  if (new Set(dispositions.map((disposition) => disposition.itemKey)).size !== dispositions.length) {
+    throw new StudioInputError("同一条审片结论只能表态一次。");
+  }
+  return dispositions;
 }
 
 export function parseStudioSceneRevisionInput(value: unknown): StudioSceneRevisionInput {
@@ -1990,6 +2255,29 @@ export function parseStudioSceneRevisionInput(value: unknown): StudioSceneRevisi
     reviewArtifactId: requiredTrimmedString(input.reviewArtifactId, "审片报告"),
     findingIndex: Number(input.findingIndex),
     reuseFromScenePosition: positiveInteger(input.reuseFromScenePosition, "替换来源镜头"),
+    note,
+  };
+}
+
+export function parseStudioNarrationRevisionInput(value: unknown): StudioNarrationRevisionInput {
+  const input = requiredObject(value, "旁白字幕返修请求");
+  if (!Number.isSafeInteger(input.expectedRunRevision) || Number(input.expectedRunRevision) < 0) {
+    throw new StudioInputError("制作版本必须是非负整数。");
+  }
+  const narration = requiredTrimmedString(input.narration, "旁白字幕");
+  // 上限按"一句话"来定：放宽会让操作员把整篇稿子塞进一镜，收紧了拦不住真正要改的长句。
+  if (narration.length > 600) throw new StudioInputError("单镜旁白字幕不能超过 600 个字符。");
+  // 旁白是一句口播、字幕是一行字：换行在成片里没有对应语义，配音会把它读成两段，
+  // 与其让它在渲染时才显出怪样子，不如在这里就说清它只能是一行。
+  if (/[\r\n\u2028\u2029]/.test(narration)) {
+    throw new StudioInputError("单镜旁白字幕只能是一行，不能包含换行。");
+  }
+  const note = requiredTrimmedString(input.note, "修改说明");
+  if (note.length > 2_000) throw new StudioInputError("修改说明不能超过 2000 个字符。");
+  return {
+    expectedRunRevision: Number(input.expectedRunRevision),
+    scenePosition: positiveInteger(input.scenePosition, "镜头位置"),
+    narration,
     note,
   };
 }
@@ -2365,6 +2653,13 @@ function boundedRange(value: unknown, label: string, minimum: number, maximum: n
 function positiveInteger(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
     throw new StudioInputError(`${label}必须是正整数。`);
+  }
+  return value;
+}
+
+function nonNegativeInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new StudioInputError(`${label}必须是非负整数。`);
   }
   return value;
 }

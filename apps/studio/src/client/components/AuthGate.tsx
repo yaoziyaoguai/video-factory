@@ -48,6 +48,12 @@ export function AuthGate({ children }: { children: (studio: AuthenticatedStudio)
     username: session.username,
     logout: async () => {
       await studioApi.logout();
+      for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+        const key = window.localStorage.key(index);
+        if (key?.startsWith("vf:creative-draft:") || key?.startsWith("vf:creative-command:")) {
+          window.localStorage.removeItem(key);
+        }
+      }
       setSession({ enabled: true, authenticated: false });
     },
   });

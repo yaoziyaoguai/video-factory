@@ -62,4 +62,32 @@ describe("AuthGate", () => {
 
     expect(await screen.findByRole("heading", { name: "回到创作现场" })).toBeInTheDocument();
   });
+
+  it("clears only local creative drafts and pending commands after logout succeeds", async () => {
+    const values = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        clear: () => values.clear(),
+        get length() { return values.size; },
+        getItem: (key: string) => values.get(key) ?? null,
+        key: (index: number) => Array.from(values.keys())[index] ?? null,
+        removeItem: (key: string) => values.delete(key),
+        setItem: (key: string, value: string) => values.set(key, value),
+      },
+    });
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "authSession").mockResolvedValue({ enabled: true, authenticated: true, username: "owner" });
+    vi.spyOn(studioApi, "logout").mockResolvedValue(undefined);
+    window.localStorage.setItem("vf:creative-draft:run-1:script", "未发送草稿");
+    window.localStorage.setItem("vf:creative-command:run-1:script", "待观察命令");
+    window.localStorage.setItem("vf:unrelated", "保留");
+    render(<AuthGate>{({ logout }) => <button type="button" onClick={() => void logout?.()}>退出</button>}</AuthGate>);
+
+    await user.click(await screen.findByRole("button", { name: "退出" }));
+    expect(await screen.findByRole("heading", { name: "回到创作现场" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("vf:creative-draft:run-1:script")).toBeNull();
+    expect(window.localStorage.getItem("vf:creative-command:run-1:script")).toBeNull();
+    expect(window.localStorage.getItem("vf:unrelated")).toBe("保留");
+  });
 });

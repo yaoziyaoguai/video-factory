@@ -10,21 +10,15 @@ export interface VisualSourceCompatibilityIssue {
 }
 
 export function visualSourceCompatibilityIssue(
-  template: TemplateWithShotSlots | undefined,
+  _template: TemplateWithShotSlots | undefined,
   sources: VisualSource[],
 ): VisualSourceCompatibilityIssue | undefined {
-  if (!template) return undefined;
   const available = new Set(sources.flatMap((source) => capabilitiesFor(source.deliveryTypes ?? [])));
-  const missingSlots = template.shotSlots.filter((slot) => (
-    !slot.allowedCapabilities.some((capability) => available.has(capability))
-  ));
-  if (missingSlots.length === 0) return undefined;
-  const missingCapabilities = [...new Set(missingSlots.flatMap((slot) => slot.allowedCapabilities))];
-  const requirementLabels = missingCapabilities.map(capabilityLabel);
+  if (available.has("asset.prepare")) return undefined;
   return {
-    missingSlotCount: missingSlots.length,
-    missingCapabilities,
-    message: `当前素材池无法执行模板中的 ${missingSlots.length} 个镜头（缺少：${requirementLabels.join("、")}）。请启用与这些镜头匹配的画面来源，或更换模板。`,
+    missingSlotCount: 0,
+    missingCapabilities: ["asset.prepare"],
+    message: "当前素材池没有任何可用画面来源。请至少启用一种真实可执行的图库、生成或正式卡片来源。",
   };
 }
 
@@ -36,13 +30,4 @@ function capabilitiesFor(deliveryTypes: NonNullable<StudioProvider["deliveryType
   if (deliveryTypes.includes("generated_video")) capabilities.add("asset.generate.video");
   if (deliveryTypes.some((type) => type === "generated_image" || type === "generated_video")) capabilities.add("asset.generate");
   return [...capabilities];
-}
-
-function capabilityLabel(capability: string): string {
-  if (capability === "asset.search") return "素材库";
-  if (capability === "asset.generate.image") return "图片生成";
-  if (capability === "asset.generate.video") return "视频生成";
-  if (capability === "asset.generate") return "AI 生成画面";
-  if (capability === "asset.prepare") return "任一画面来源";
-  return capability;
 }

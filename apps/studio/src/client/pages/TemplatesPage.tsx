@@ -145,7 +145,7 @@ export function TemplatesPage() {
       setTemplates((current) => current.some((candidate) => candidate.id === result.template.id)
         ? current
         : [...current, result.template]);
-      setNotice(`“${result.template.name}”已恢复到生产目录。`);
+      setNotice(`“${result.template.name}”已恢复到模板资料库；仍暂停用于制作。`);
     } catch (caught) {
       setNotice(`恢复失败：${errorMessage(caught)}`);
     } finally {
@@ -172,7 +172,7 @@ export function TemplatesPage() {
       setCreateName("");
       setCreateDescription("");
       setCreateOpen(false);
-      setNotice("空白模板已经建立。先调整故事结构与视听方向，再保存或发布。");
+      setNotice("空白模板已经建立。它只保存在资料库中，不会影响当前制作。");
     } catch (caught) {
       setNotice(`创建失败：${errorMessage(caught)}`);
     } finally {
@@ -219,7 +219,7 @@ export function TemplatesPage() {
       setDraft(result.template);
       setSavedDraft(JSON.stringify(result.template));
       setTemplates((current) => current.map((template) => template.id === result.template.id ? result.template : template));
-      setNotice("新版本已发布；已有项目继续使用自己的运行快照。");
+      setNotice("新版本已保存到模板资料库；当前新制作和返工仍不会套用模板。");
     } catch (caught) {
       setNotice(draftSaved
         ? `草稿已保存，发布未完成：${errorMessage(caught)}`
@@ -242,7 +242,7 @@ export function TemplatesPage() {
   return (
     <main className="page template-studio-page">
       <header className="page-header template-page-header">
-        <div><p className="eyebrow">成片方法</p><h1>模板工坊</h1><p className="page-summary">把经过验证的讲述方式、镜头安排与质量规则保存成下一次可以直接使用的视频模板。</p></div>
+        <div><p className="eyebrow">成片方法</p><h1>模板工坊</h1><p className="page-summary">模板已暂停用于制作。这里保留历史资料和编辑功能；新制作与返工按你的要求规划，不自动套模板。</p></div>
         <div className="template-header-actions">
           <button className="icon-button" type="button" onClick={refreshTemplates} disabled={loading} title="刷新模板"><RefreshCw size={18} aria-hidden="true" /></button>
           <button className="button button-primary" type="button" onClick={() => { if (confirmDiscard()) setCreateOpen(true); }}><Plus size={17} aria-hidden="true" />新建空白模板</button>
@@ -382,14 +382,14 @@ export function TemplatesPage() {
       {publishConfirmOpen && draft?.status === "draft" ? <div className="dialog-backdrop" role="presentation">
         <section className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="publish-template-title">
           <header className="dialog-header"><div><p className="eyebrow">模板发布</p><h2 id="publish-template-title">确认发布“{draft.name}”</h2></div><button className="icon-button" type="button" aria-label="关闭" disabled={saving} onClick={() => setPublishConfirmOpen(false)}><X size={18} aria-hidden="true" /></button></header>
-          <p>发布后，这一版会出现在新制作的模板选择中；已有项目仍使用各自保存的运行快照。{dirty ? "当前未保存修改会先保存，再一起发布。" : ""}</p>
+          <p>发布仅保存到模板资料库，目前不会用于新制作或返工；历史快照保持原样。{dirty ? "当前未保存修改会先保存，再一起发布。" : ""}</p>
           <footer className="dialog-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => setPublishConfirmOpen(false)}>返回检查</button><button className="button button-primary" type="button" disabled={saving} onClick={() => { setPublishConfirmOpen(false); void publishDraft(); }}><Send size={16} aria-hidden="true" />确认发布</button></footer>
         </section>
       </div> : null}
       {deleteConfirmOpen && draft ? <div className="dialog-backdrop" role="presentation">
         <section className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-template-title">
           <header className="dialog-header"><div><p className="eyebrow">删除模板</p><h2 id="delete-template-title">确认删除“{draft.name}”</h2></div><button className="icon-button" type="button" aria-label="关闭" disabled={saving} onClick={() => setDeleteConfirmOpen(false)}><X size={18} aria-hidden="true" /></button></header>
-          <p>{draft.builtIn ? "删除后它会从生产目录隐藏，之后仍可明确恢复。" : "删除后它不会再用于新的制作；已经开始的项目仍保留当时的模板快照。"}</p>
+          <p>{draft.builtIn ? "删除后它会从模板资料库隐藏，之后仍可明确恢复。" : "删除后将从模板资料库移除；历史制作仍保留当时的只读快照。"}</p>
           <footer className="dialog-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => setDeleteConfirmOpen(false)}>取消</button><button className="button button-danger" type="button" disabled={saving} onClick={() => void deleteSelected()}>{saving ? "正在删除..." : "确认删除"}</button></footer>
         </section>
       </div> : null}

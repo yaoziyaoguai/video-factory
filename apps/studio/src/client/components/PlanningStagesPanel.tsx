@@ -1,5 +1,5 @@
-import { CircleAlert, Cpu, FilePenLine, RefreshCw } from "lucide-react";
-import { useState } from "react";
+import { CircleAlert, Cpu, FilePenLine, RefreshCw, Save } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { StudioNodeExecutionConfigurationDraft, StudioPlanningEditableStage, StudioPlanningStage, StudioProvider } from "../../shared/api.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 
@@ -18,6 +18,7 @@ interface PlanningStagesPanelProps {
   onEditStageInput: (stageId: StudioPlanningStage["id"]) => void;
   /** 面板只构造草稿；wire DTO 的并发基线由宿主在用户点击时补齐。 */
   onConfigureStage: (input: StudioNodeExecutionConfigurationDraft) => Promise<void>;
+  onPendingChange?: (pending: boolean) => void;
 }
 
 const STAGE_LABELS: Record<StudioPlanningStage["id"], string> = {
@@ -49,19 +50,35 @@ function planningStageProvider(providers: StudioProvider[], stageId: StudioPlann
   return providers.find((provider) => provider.capability === capability && provider.available);
 }
 
-export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditStageInput, onConfigureStage }: PlanningStagesPanelProps) {
+export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditStageInput, onConfigureStage, onPendingChange }: PlanningStagesPanelProps) {
   const [stageModelDrafts, setStageModelDrafts] = useState<Record<string, string>>({});
   const [stageError, setStageError] = useState<string>();
+  const [savingStageId, setSavingStageId] = useState<StudioPlanningEditableStage>();
+  const hasPendingModelDraft = stages.some((stage) => isEditablePlanningStage(stage.id)
+    && Boolean(stageModelDrafts[stage.id])
+    && stageModelDrafts[stage.id] !== stage.effectiveModelId);
+
+  useEffect(() => {
+    onPendingChange?.(hasPendingModelDraft);
+  }, [hasPendingModelDraft, onPendingChange]);
 
   async function changeStageModel(stageId: StudioPlanningEditableStage, providerId: string, modelId: string) {
     setStageError(undefined);
+    setSavingStageId(stageId);
     try {
       await onConfigureStage({
         planningStageId: stageId,
         modelSelections: { [providerId]: modelId || null },
       });
+      setStageModelDrafts((current) => {
+        const next = { ...current };
+        delete next[stageId];
+        return next;
+      });
     } catch (caught) {
       setStageError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSavingStageId(undefined);
     }
   }
 
@@ -107,16 +124,26 @@ export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditS
                     value={draftModel || stage.effectiveModelId || provider.defaultModelId || ""}
                     onChange={(event) => {
                       setStageModelDrafts((current) => ({ ...current, [stage.id]: event.target.value }));
-                      if (isEditablePlanningStage(stage.id)) {
-                        void changeStageModel(stage.id, provider.id, event.target.value);
-                      }
+                      setStageError(undefined);
                     }}
                   >
                     {models.map((model) => (
                       <option key={model.id} value={model.id}>{model.label}{model.recommended ? "（推荐）" : ""}</option>
                     ))}
                   </select>
-                  <small><RefreshCw aria-hidden="true" size={12} /> 换模型后会重新执行这一阶段开始的后续部分。</small>
+                  <small><RefreshCw aria-hidden="true" size={12} /> 选择只是草稿；保存后才会重新执行这一阶段开始的后续部分。</small>
+                  <button
+                    className="button button-secondary"
+                    type="button"
+                    disabled={!draftModel || draftModel === stage.effectiveModelId || savingStageId === stage.id}
+                    onClick={() => {
+                      if (isEditablePlanningStage(stage.id)) {
+                        void changeStageModel(stage.id, provider.id, draftModel);
+                      }
+                    }}
+                  >
+                    <Save aria-hidden="true" size={14} />{savingStageId === stage.id ? "保存中…" : "保存模型"}
+                  </button>
                 </label>
               ) : null}
             </li>

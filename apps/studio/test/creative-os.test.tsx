@@ -398,7 +398,7 @@ describe("Creative OS", () => {
     expect(screen.getByText("用户补充 · 不作为热度信号")).toBeInTheDocument();
   });
 
-  it("supplements a blocked historical trend and refreshes its score and shot-plan state", async () => {
+  it("supplements a blocked historical trend and refreshes its score without promoting a fallback shot plan", async () => {
     const user = userEvent.setup();
     const blocked = sourceBlockedOpportunity("historical-source-gap", "历史热点补来源测试");
     const ready: StudioOpportunity = {
@@ -438,7 +438,7 @@ describe("Creative OS", () => {
     await user.click(screen.getByRole("button", { name: "保存来源（1 条）" }));
 
     await waitFor(() => expect(supplement).toHaveBeenCalledWith(blocked.id, { evidenceUrls: ["https://news.example.org/report"] }));
-    expect(await screen.findByRole("heading", { name: "可执行镜头计划" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "可参考的镜头方向" })).toBeInTheDocument();
     expect(screen.getByLabelText(/机会总分/)).toHaveTextContent("机会分");
     expect(screen.getByRole("button", { name: "新建制作" })).toBeEnabled();
   });
@@ -495,7 +495,7 @@ describe("Creative OS", () => {
     expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(8);
     expect(screen.getByRole("heading", { name: opportunity.title })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "待制作选题" })).toBeInTheDocument();
-    expect(screen.getByText("问题、因果模型与生活验证构成的解释视频")).toBeInTheDocument();
+    expect(screen.queryByText("问题、因果模型与生活验证构成的解释视频")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /科技 5/ }));
     expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(5);
@@ -1156,7 +1156,7 @@ describe("Creative OS", () => {
     }} />);
 
     const shotBoard = screen.getByRole("region", { name: "镜头方向示意" });
-    expect(within(shotBoard).getByText("推荐模板 · 证据图解")).toBeInTheDocument();
+    expect(within(shotBoard).queryByText("推荐模板 · 证据图解")).not.toBeInTheDocument();
     expect(within(shotBoard).queryByText("视觉方案 · A01")).not.toBeInTheDocument();
     // 已保存计划是规范真相：含合法省略号的描述不得被展示层重算替换。
     expect(shotBoard).toHaveTextContent("已保存的视觉方案。");
@@ -1364,8 +1364,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("button", { name: `查看${underSourced.title}` })).toBeInTheDocument();
   });
 
-  it("keeps candidates without a live recommended template out of adoption with a distinct reason", async () => {
-    const user = userEvent.setup();
+  it("allows an editorial candidate without a live recommended template to enter production", () => {
     const templateGone = {
       ...candidate(61, "technology"),
       editorialDecision: {
@@ -1396,13 +1395,9 @@ describe("Creative OS", () => {
       onImport={vi.fn()}
     /></MemoryRouter>);
 
-    // 推荐模板不在生产目录时，候选不进入可采用分组，也提供独立的阻断原因。
-    expect(screen.getByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /查看未入选（1 条）/ }));
-    await user.click(screen.getByRole("button", { name: `查看${templateGone.title}` }));
-    expect(screen.getByText("推荐模板暂不可用 · 暂不可采用")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: `采用候选 ${templateGone.title}` })).toBeDisabled();
-    expect(screen.getByRole("button", { name: `采用候选 ${templateGone.title}` })).toHaveTextContent("推荐模板暂不可用");
+    expect(screen.queryByRole("heading", { name: "这轮没有可采用的热点建议" })).not.toBeInTheDocument();
+    expect(screen.queryByText("推荐模板暂不可用 · 暂不可采用")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `采用候选 ${templateGone.title}` })).toBeEnabled();
   });
 
   it("words source supplements and provider tooltips in creator language", async () => {
@@ -2114,6 +2109,32 @@ describe("Creative OS", () => {
     expect(await screen.findByText("没有匹配的制作记录、选题机会、模板或功能。换一个更短的关键词试试。")).toBeInTheDocument();
   });
 
+  it("opens actual voice settings from every voice search synonym on the same resources page", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 0, templates: [] });
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSources").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSignals").mockResolvedValue([]);
+    vi.spyOn(studioApi, "localCapabilities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "voices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
+    vi.spyOn(studioApi, "settings").mockResolvedValue({ voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" }, defaultRecipeId: "economy-daily", roleProviderDefaults: {}, modelDefaults: {}, topicStrategy: { customInstruction: "" }, productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 } });
+    render(<MemoryRouter initialEntries={["/resources#production-roles"]}><AppShell><ResourcesPage /></AppShell></MemoryRouter>);
+    for (const word of ["声音", "配音", "音色", "语速", "停顿"]) {
+      await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
+      await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), word);
+      const link = (await screen.findAllByRole("link")).find((item) => item.getAttribute("href") === "/resources#voice-casting");
+      expect(link).toBeDefined();
+      await user.click(link!);
+      await waitFor(() => expect(document.getElementById("voice-casting")).toHaveAttribute("data-active", "true"));
+    }
+  });
+
   it("links missing director capabilities straight to the production-roles section", () => {
     const partialProviders = providers.filter((provider) => provider.capability !== "script.draft" && provider.capability !== "voice.synthesize");
     render(<MemoryRouter><DirectorPanel opportunity={opportunity} providers={partialProviders} onProduce={vi.fn()} /></MemoryRouter>);
@@ -2375,7 +2396,7 @@ describe("Creative OS", () => {
     expect(updateStatus).not.toHaveBeenCalled();
   });
 
-  it("submits the same deterministic visual plan it previewed when the opportunity has none saved", async () => {
+  it("shows an unsaved visual suggestion without submitting it as a user requirement", async () => {
     const user = userEvent.setup();
     const planless: StudioOpportunity = { ...opportunity };
     delete planless.visualPlan;
@@ -2402,14 +2423,15 @@ describe("Creative OS", () => {
     const start = vi.spyOn(studioApi, "start").mockResolvedValue({ runId: "run-visual-plan-1" } as Awaited<ReturnType<typeof studioApi.start>>);
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
+    expect(await screen.findByText("可参考的镜头方向")).toBeInTheDocument();
+    expect(screen.getByText(planVisualDirection(opportunity).strategy)).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: "新建制作" }));
     await user.click(screen.getByRole("button", { name: "开始制作" }));
 
     await waitFor(() => expect(start).toHaveBeenCalledOnce());
-    // 预览的确定性 fallback 必须原样进入开工 payload，而不是提交侧丢失计划。
-    const submitted = start.mock.calls[0]![0] as { visualPlan?: { strategy: string; beats: unknown[] } };
-    expect(submitted.visualPlan?.strategy).toBe(planVisualDirection(opportunity).strategy);
-    expect(submitted.visualPlan?.beats.length).toBeGreaterThan(0);
+    // 自动预览只是建议；用户没有填写或采用时，不能升级成正式创作要求。
+    expect(start.mock.calls[0]![0]).not.toHaveProperty("visualPlan");
+    expect(start.mock.calls[0]![0]).not.toHaveProperty("visualIntent");
   });
 
   it("keeps scoring out of the creator form and records an optional reference", async () => {
@@ -2626,7 +2648,9 @@ describe("Creative OS", () => {
     const reviewMetric = within(screen.getByLabelText("制作统计")).getByText("等你审片").closest("article");
     expect(within(reviewMetric!).getByText("1")).toBeInTheDocument();
     expect(screen.getByText("画面出现 1 次问题")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "哪种讲法更容易过审" })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("历史模板记录（暂停用于新制作）"));
+    expect(screen.getByRole("link", { name: "查看模板资料" })).toHaveAttribute("href", "/templates");
+    expect(screen.queryByRole("link", { name: "调整模板" })).not.toBeInTheDocument();
     expect(screen.getByText("82 分")).toBeInTheDocument();
     expect(screen.getByText("75%")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "还不能判断是否成为爆款" })).toBeInTheDocument();

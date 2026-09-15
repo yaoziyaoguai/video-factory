@@ -31,6 +31,7 @@ interface NodeWorkspaceProps {
   pauseRequested?: boolean;
   /** joint-v1 创作规划节点的真实阶段投影；其他节点不传。 */
   planningStages?: StudioPlanningStage[];
+  onPendingPlanningConfigurationChange?: (pending: boolean) => void;
   onRequestPause?: () => Promise<void>;
   onOverride: (nodeId: string, input: StudioNodeOverrideInput) => Promise<void>;
   onInputOverride?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
@@ -39,7 +40,7 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, busy, readOnly = false, pauseBusy = false, pauseRequested = false, planningStages, onRequestPause, onOverride, onInputOverride = async () => undefined, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, busy, readOnly = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
   const shouldOpenForAttention = node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
@@ -472,13 +473,19 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             providers={providers}
             busy={busy}
             readOnly={readOnly || runStatus === "running"}
+            {...(onPendingPlanningConfigurationChange ? { onPendingChange: onPendingPlanningConfigurationChange } : {})}
             onEditStageInput={beginPlanningStageInputEdit}
             onConfigureStage={async (input) => {
               setError(undefined);
               try {
-                await onConfigure(node.id, { ...input, expectedRunRevision: runRevision });
+                await onConfigure(node.id, {
+                  ...input,
+                  expectedRunRevision: runRevision,
+                  ...(terminal ? { confirmTerminalEdit: true } : {}),
+                });
               } catch (caught) {
                 setError(caught instanceof Error ? caught.message : String(caught));
+                throw caught;
               }
             }}
           />
@@ -539,6 +546,13 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
                       <dd>¥{asset.estimatedCostCny.toFixed(2)} · 最多 {asset.maxCreateAttempts} 次 · {asset.allowedModels.map((model) => providerModelLabel(providers.find((provider) => provider.id === model.providerId), model.modelId) ?? model.modelId).join("、")}</dd>
                     </div>
                   ))}
+                  {pendingQuote.quote.scopeSummary.excludedAssets?.map((asset) => (
+                    <div key={asset.id}>
+                      <dt>{asset.label}</dt>
+                      <dd>¥0.00 · {asset.note}</dd>
+                    </div>
+                  ))}
+                  {pendingQuote.quote.scopeSummary.excludedAssets?.length ? <div><dt>本片镜数</dt><dd>付费 {pendingQuote.quote.scopeSummary.assets.length} 个 · 免收费 {pendingQuote.quote.scopeSummary.excludedAssets.length} 个 · 合计 {pendingQuote.quote.scopeSummary.assets.length + pendingQuote.quote.scopeSummary.excludedAssets.length} 个</dd></div> : null}
                   {pendingQuote.quote.scopeSummary.uncertainty.map((note) => <div key={note}><dt>不确定项</dt><dd>{note}</dd></div>)}
                 </dl>
                 <small>确认后本次制作会自动继续，范围内的有限修复不再逐项打扰；授权额是上限，不是目标。</small>
@@ -658,6 +672,8 @@ function agentLoopPhaseLabel(progress: NonNullable<StudioNode["agentLoopProgress
           ? "三轮复核未通过"
           : progress.phase === "halted"
             ? "发现当前角色无法解决的前提，已停住"
+          : progress.phase === "failed"
+            ? "模型调用已停止，请查看失败原因"
           : "AI 创作中";
   return `第 ${progress.iteration} / ${progress.maxIterations} 轮 · ${phase}`;
 }
@@ -1166,9 +1182,29 @@ function executionTimingDetails(
   const queueWaitMs = timingParameter(parameters.queueWaitMs);
   const providerWaitMs = timingParameter(parameters.providerWaitMs);
   const modelCallCount = nonNegativeIntegerParameter(parameters.modelCallCount);
+  const brokerTaskCount = nonNegativeIntegerParameter(parameters.brokerTaskCount);
+  const modelExecutionCount = nonNegativeIntegerParameter(parameters.modelExecutionCount);
+  const brokerStructuredRepairCount = nonNegativeIntegerParameter(parameters.brokerStructuredRepairCount);
+  const producerModelCallCount = nonNegativeIntegerParameter(parameters.producerModelCallCount);
+  const auditModelCallCount = nonNegativeIntegerParameter(parameters.auditModelCallCount);
+  const discussionModelCallCount = nonNegativeIntegerParameter(parameters.discussionModelCallCount);
   const retryCount = nonNegativeIntegerParameter(parameters.retryCount);
+  const structuredRepairModelCallCount = nonNegativeIntegerParameter(parameters.structuredRepairModelCallCount);
+  const unknownModelExecutionCount = nonNegativeIntegerParameter(parameters.unknownModelExecutionCount);
+  const previousModelCallCount = nonNegativeIntegerParameter(parameters.previousModelCallCount);
+  const previousDiscussionModelCallCount = nonNegativeIntegerParameter(parameters.previousDiscussionModelCallCount);
+  const previousStructuredRepairModelCallCount = nonNegativeIntegerParameter(parameters.previousStructuredRepairModelCallCount);
+  const previousUnknownModelExecutionCount = nonNegativeIntegerParameter(parameters.previousUnknownModelExecutionCount);
+  const producerMs = timingParameter(parameters.producerMs);
+  const auditMs = timingParameter(parameters.auditMs);
+  const discussionMs = timingParameter(parameters.discussionMs);
+  const validationMs = timingParameter(parameters.loopValidationMs);
+  const requestPayloadBytes = nonNegativeIntegerParameter(parameters.requestPayloadBytes);
+  const promptBytes = nonNegativeIntegerParameter(parameters.promptBytes);
+  const evidenceImageCount = nonNegativeIntegerParameter(parameters.evidenceImageCount);
+  const evidenceImageBytes = nonNegativeIntegerParameter(parameters.evidenceImageBytes);
   const fallbackCandidateCount = Math.max(0, (receipt.actualModelIds?.length ?? 1) - 1);
-  const localProcessingMs = totalMs !== undefined
+  const unclassifiedMs = totalMs !== undefined
     && queueWaitMs !== undefined
     && providerWaitMs !== undefined
     && queueWaitMs + providerWaitMs <= totalMs
@@ -1176,29 +1212,73 @@ function executionTimingDetails(
     : undefined;
   if (queueWaitMs === undefined
     && providerWaitMs === undefined
-    && localProcessingMs === undefined
+    && unclassifiedMs === undefined
     && modelCallCount === undefined
+    && brokerTaskCount === undefined
+    && modelExecutionCount === undefined
     && retryCount === undefined
+    && structuredRepairModelCallCount === undefined
+    && unknownModelExecutionCount === undefined
+    && previousModelCallCount === undefined
     && fallbackCandidateCount === 0) return undefined;
 
   const items = [
     totalMs === undefined ? undefined : { label: "步骤总耗时", value: formatDuration(totalMs) },
     queueWaitMs === undefined ? undefined : { label: "排队等待", value: formatDuration(queueWaitMs) },
     providerWaitMs === undefined ? undefined : { label: "Provider 执行", value: formatDuration(providerWaitMs) },
-    localProcessingMs === undefined
+    unclassifiedMs === undefined
       ? undefined
-      : { label: fallbackCandidateCount > 0 ? "本地处理与候选切换" : "本地处理", value: formatDuration(localProcessingMs) },
+      : { label: "未细分等待 / 处理", value: formatDuration(unclassifiedMs) },
+    producerMs === undefined ? undefined : { label: "内容生成累计", value: formatDuration(producerMs) },
+    auditMs === undefined ? undefined : { label: "确认时独立复核累计", value: formatDuration(auditMs) },
+    discussionMs === undefined ? undefined : { label: "创作讨论累计", value: formatDuration(discussionMs) },
+    validationMs === undefined ? undefined : { label: "结构与合同校验", value: formatDuration(validationMs) },
     fallbackCandidateCount > 0 ? { label: "候选切换", value: `${fallbackCandidateCount} 次` } : undefined,
-    modelCallCount === undefined ? undefined : { label: fallbackCandidateCount > 0 ? "最终模型调用" : "模型调用", value: `${modelCallCount} 次` },
-    retryCount === undefined ? undefined : { label: "自动重试", value: `${retryCount} 次` },
+    modelCallCount === undefined ? undefined : { label: "本次已证实模型执行", value: `${modelCallCount} 次` },
+    brokerTaskCount === undefined ? undefined : { label: "Broker 任务", value: `${brokerTaskCount} 次` },
+    modelExecutionCount === undefined ? undefined : { label: "任务内模型执行", value: `${modelExecutionCount} 次` },
+    brokerStructuredRepairCount === undefined || brokerStructuredRepairCount === 0
+      ? undefined
+      : { label: "任务内结构修正", value: `${brokerStructuredRepairCount} 次` },
+    producerModelCallCount === undefined ? undefined : { label: "内容生成调用", value: `${producerModelCallCount} 次` },
+    auditModelCallCount === undefined ? undefined : { label: "确认时独立复核", value: `${auditModelCallCount} 次` },
+    discussionModelCallCount === undefined ? undefined : { label: "创作讨论", value: `${discussionModelCallCount} 次` },
+    structuredRepairModelCallCount === undefined ? undefined : { label: "其中结构修复", value: `${structuredRepairModelCallCount} 次` },
+    unknownModelExecutionCount === undefined || unknownModelExecutionCount === 0 ? undefined : { label: "执行情况待确认", value: `${unknownModelExecutionCount} 次` },
+    previousModelCallCount === undefined ? undefined : { label: "此前执行累计", value: `${previousModelCallCount} 次` },
+    previousDiscussionModelCallCount === undefined
+      ? undefined
+      : { label: "此前创作讨论", value: `${previousDiscussionModelCallCount} 次` },
+    previousStructuredRepairModelCallCount === undefined || previousStructuredRepairModelCallCount === 0
+      ? undefined
+      : { label: "此前结构修复", value: `${previousStructuredRepairModelCallCount} 次` },
+    previousUnknownModelExecutionCount === undefined || previousUnknownModelExecutionCount === 0
+      ? undefined
+      : { label: "此前待确认执行", value: `${previousUnknownModelExecutionCount} 次` },
+    retryCount === undefined ? undefined : { label: "任务恢复重试", value: `${retryCount} 次` },
+    requestPayloadBytes === undefined ? undefined : { label: "发送数据", value: formatBytes(requestPayloadBytes) },
+    promptBytes === undefined ? undefined : { label: "模型指令", value: formatBytes(promptBytes) },
+    evidenceImageCount === undefined ? undefined : {
+      label: "视觉证据",
+      value: `${evidenceImageCount} 张${evidenceImageBytes === undefined ? "" : ` · ${formatBytes(evidenceImageBytes)}`}`,
+    },
   ].filter((item): item is { label: string; value: string } => item !== undefined);
   const summary = [
     totalMs === undefined ? undefined : `共 ${formatDuration(totalMs)}`,
     fallbackCandidateCount > 0 ? `${fallbackCandidateCount} 次候选切换` : undefined,
-    modelCallCount === undefined ? undefined : `${modelCallCount} 次${fallbackCandidateCount > 0 ? "最终" : ""}模型调用`,
-    retryCount && retryCount > 0 ? `${retryCount} 次自动重试` : undefined,
+    modelCallCount === undefined ? undefined : `本次 ${modelCallCount} 次已证实模型执行`,
+    previousModelCallCount === undefined ? undefined : `此前累计 ${previousModelCallCount} 次`,
+    structuredRepairModelCallCount ? `${structuredRepairModelCallCount} 次结构修复` : undefined,
+    unknownModelExecutionCount ? `${unknownModelExecutionCount} 次执行待确认` : undefined,
+    retryCount && retryCount > 0 ? `${retryCount} 次任务恢复重试` : undefined,
   ].filter(Boolean).join(" · ");
   return { summary: summary || "可查看各阶段耗时", items };
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function timingParameter(value: unknown): number | undefined {

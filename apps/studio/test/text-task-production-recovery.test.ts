@@ -154,6 +154,8 @@ class ControlledExecutor implements BrokerTaskExecutor {
   };
   readonly submissions: Array<{ kind: string; requestId: string }> = [];
   private firstStarted = false;
+  private signalFirstStarted!: () => void;
+  private readonly firstStartedGate = new Promise<void>((resolve) => { this.signalFirstStarted = resolve; });
   private firstOutcome: "completed_success" | "completed_failure" | undefined;
   private releaseFirst!: () => void;
   private readonly firstGate = new Promise<void>((resolve) => { this.releaseFirst = resolve; });
@@ -163,13 +165,26 @@ class ControlledExecutor implements BrokerTaskExecutor {
     this.releaseFirst();
   }
 
+  waitForFirstStarted(): Promise<void> {
+    return this.firstStartedGate;
+  }
+
   async runTask(task: ValidatedTask): Promise<CodexExecutionResult> {
     this.submissions.push({ kind: task.kind, requestId: `${task.kind}-${this.submissions.length + 1}` });
     if (!this.firstStarted) {
       this.firstStarted = true;
+      this.signalFirstStarted();
       await this.firstGate;
       if (this.firstOutcome === "completed_failure") {
-        throw new CodexExecutorError("Provider unavailable", true, { failureKind: "model_provider_transient" });
+        throw new CodexExecutorError("Provider unavailable", true, {
+          failureKind: "model_provider_transient",
+          details: {
+            category: "timeout",
+            reasonCode: "provider_timeout",
+            providerId: "openai",
+            modelId: "integration-model",
+          },
+        });
       }
     }
     return {
@@ -214,7 +229,7 @@ class PlanningHaltExecutor implements BrokerTaskExecutor {
 function treatment(counter: { calls: number }): CreativeTreatment {
   counter.calls += 1;
   return {
-    version: "video-factory/creative-treatment-v1",
+    version: "video-factory/creative-treatment-v2",
     viewerPromise: "看完能理解三个动作",
     hook: { narrationIntent: "直接提出问题", visualIntent: "真实动作开场" },
     progression: [1, 2, 3].map((index) => ({ beatId: `beat-${index}`, purpose: "推进", viewerGain: "理解动作" })),
@@ -392,6 +407,77 @@ async function movePendingToOldContractFile(workspaceRoot: string, runId: string
 }
 
 describe("formal text-task recovery through Studio and joint-v1 pipeline", () => {
+  it("settles a first-produce terminal failure through the real socket and releases the run", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-f05-"));
+    const broker = await brokerFixture(workspaceRoot);
+    const client = new TrackingClient({ socketPath: broker.socketPath, timeoutMs: 3_000, maxAttempts: 1, pollIntervalMs: 10 });
+    const treatmentCounter = { calls: 0 };
+    const worker = new RecoveryWorker();
+    try {
+      broker.executor.completeFirst("completed_failure");
+      const currentPipeline = pipeline(workspaceRoot, client, treatmentCounter, undefined, worker);
+      const dispatched = await currentPipeline.dispatch(brief());
+      const failed = await dispatched.completion;
+      assert.equal(dispatched.runId, failed.id);
+
+      assert.equal(failed.status, "failed");
+      assert.equal(treatmentCounter.calls, 1);
+      assert.deepEqual(broker.executor.submissions.map((entry) => entry.kind), ["script-draft"]);
+      assert.deepEqual(worker.calls, []);
+      const planningNode = failed.nodeRuns.find((node) => node.nodeId === "creative-planning");
+      assert.equal(planningNode?.status, "failed");
+      assert.match(planningNode?.error ?? "", /模型调用超时/);
+      assert.match(planningNode?.error ?? "", /failureKind=model_provider_transient/);
+      assert.equal(planningNode?.executionReceipt?.parameters?.modelCallCount, 1, "the accepted first produce is a proven physical model execution even without a candidate trace");
+      assert.equal(planningNode?.executionReceipt?.parameters?.producerModelCallCount, 1);
+      assert.equal(planningNode?.executionReceipt?.parameters?.auditModelCallCount, 0);
+      assert.equal(planningNode?.executionReceipt?.parameters?.unknownModelExecutionCount, 0);
+      await assert.rejects(
+        () => readFile(path.join(workspaceRoot, "runs", failed.id, "run.lock"), "utf8"),
+        (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT",
+      );
+
+      const checkpointDirectory = path.join(workspaceRoot, "runs", failed.id, "nodes", "creative-planning", "agent-loop-checkpoints");
+      const checkpoints = await Promise.all((await readdir(checkpointDirectory)).filter((name) => name.endsWith(".json")).map(async (name) => (
+        JSON.parse(await readFile(path.join(checkpointDirectory, name), "utf8")) as Record<string, unknown>
+      )));
+      const scriptCheckpoint = checkpoints.find((checkpoint) => checkpoint.role === "编剧");
+      assert.equal(scriptCheckpoint?.status, "failed");
+      const failure = scriptCheckpoint?.failure as { details?: { queueWaitMs?: number } } | undefined;
+      assert.ok(Number.isInteger(failure?.details?.queueWaitMs) && failure!.details!.queueWaitMs! >= 0);
+      assert.deepEqual({
+        ...(scriptCheckpoint?.failure as Record<string, unknown>),
+        details: {
+          ...((scriptCheckpoint?.failure as { details?: Record<string, unknown> } | undefined)?.details ?? {}),
+          queueWaitMs: "measured",
+        },
+      }, {
+        stage: "completed_failure",
+        statusCode: 422,
+        failureKind: "model_provider_transient",
+        details: {
+          category: "timeout",
+          reasonCode: "provider_timeout",
+          providerId: "openai",
+          modelId: "integration-model",
+          queueWaitMs: "measured",
+        },
+      });
+
+      const studio = new StudioService({ workspaceRoot, pipeline: currentPipeline, commandAvailable: async () => true, environment: {} });
+      const detail = await studio.getRun(failed.id);
+      assert.equal(detail?.status, "failed");
+      assert.equal(detail?.failure?.retryable, true);
+      assert.match(detail?.failure?.technicalDetail ?? "", /failureKind=model_provider_transient/);
+      assert.equal(detail?.planningStages?.find((stage) => stage.id === "treatment")?.status, "completed");
+      assert.equal(detail?.planningStages?.find((stage) => stage.id === "script")?.status, "failed");
+      assert.match(detail?.planningStages?.find((stage) => stage.id === "script")?.issue ?? "", /模型调用超时/);
+    } finally {
+      await broker.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("preserves a redacted Broker field diagnostic through the real node and Studio reload", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-formal-contract-diagnostic-"));
     const executor = new PlanningHaltExecutor();
@@ -488,6 +574,10 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
       assert.deepEqual(executor.submissions, ["script-draft", "role-audit"]);
       assert.deepEqual(worker.calls, []);
       assert.equal(failed.artifacts.some((artifact) => artifact.kind === "script"), false);
+      const planningReceipt = failed.nodeRuns.find((node) => node.nodeId === "creative-planning")?.executionReceipt;
+      assert.equal(planningReceipt?.parameters?.modelCallCount, 2);
+      assert.equal(planningReceipt?.parameters?.producerModelCallCount, 1);
+      assert.equal(planningReceipt?.parameters?.auditModelCallCount, 1);
 
       const rebuiltPipeline = pipeline(workspaceRoot, client, treatmentCounter, undefined, worker);
       const studio = new StudioService({
@@ -522,11 +612,19 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
           pollIntervalMs: 10,
         });
         const firstPipeline = pipeline(workspaceRoot, interrupting, treatmentCounter);
-        const failed = await firstPipeline.start(brief());
+        const initialDispatch = await firstPipeline.dispatch(brief());
+        await broker.executor.waitForFirstStarted();
+        const failed = await initialDispatch.completion;
         assert.equal(failed.status, "failed");
         assert.equal(treatmentCounter.calls, 1);
         const originalRequestId = interrupting.submissions[0]?.requestId;
         assert.ok(originalRequestId, JSON.stringify(failed.nodeRuns.map((node) => ({ nodeId: node.nodeId, status: node.status, error: node.error }))));
+        await assert.rejects(
+          firstPipeline.applyNodeExecutionConfiguration(failed.id, "creative-planning", brief(), "owner", failed.revision),
+          /原模型任务.*查询/,
+        );
+        assert.equal((await firstPipeline.loadPersisted(failed.id)).revision, failed.revision);
+        assert.equal(interrupting.submissions.length, 1, "configuration edits must not escape the original unknown request");
         await movePendingToOldContractFile(workspaceRoot, failed.id);
 
         broker.executor.completeFirst(terminalState);
@@ -557,7 +655,14 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
           listProviders: async () => [],
         });
         let queried = await studio.queryOriginalTextTask(failed.id);
-        for (let attempt = 0; queried.taskRecovery?.taskState === "running" && attempt < 50; attempt += 1) {
+        // accepted_unknown 也是"还没落定"：broker 此刻只是还没观察到终态，
+        // 只等 running 会在负载高时提前退出，把还没落定的任务当成结论。
+        const terminalTaskStates = ["completed_success", "completed_failure", "not_accepted", "conflict"];
+        for (
+          let attempt = 0;
+          !terminalTaskStates.includes(queried.taskRecovery?.taskState ?? "") && attempt < 50;
+          attempt += 1
+        ) {
           await new Promise((resolve) => setTimeout(resolve, 10));
           queried = await studio.queryOriginalTextTask(failed.id);
         }

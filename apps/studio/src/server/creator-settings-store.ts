@@ -10,6 +10,7 @@ import type {
 import {
   DEFAULT_STUDIO_PRODUCTION_DEFAULTS,
   DEFAULT_STUDIO_TOPIC_STRATEGY,
+  DEFAULT_STUDIO_VOICE_DIRECTION,
 } from "../shared/api.js";
 
 const PRODUCTION_ROLE_KEYS = new Set<StudioProductionRoleBindingKey>([
@@ -34,12 +35,7 @@ interface CreatorSettingsFile {
 }
 
 export const DEFAULT_CREATOR_SETTINGS: StudioCreatorSettings = {
-  voiceDirection: {
-    profileId: "macos:Tingting",
-    rate: 185,
-    pauseScale: 1,
-    masteringPreset: "natural",
-  },
+  voiceDirection: { ...DEFAULT_STUDIO_VOICE_DIRECTION },
   voiceDirectionCustomized: false,
   defaultRecipeId: "economy-daily",
   roleProviderDefaults: {},

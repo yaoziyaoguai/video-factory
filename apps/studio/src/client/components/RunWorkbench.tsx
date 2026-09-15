@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Check, Clock3, Download, Pause, Play, RotateCcw, Send, X, XCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { StudioCostRunDetail, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioDecisionInput, StudioNarrationRevisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { creatorFacingTechnicalText, platformLabel, providerLabel, catalogModelLabel, sourceAssetReviewBreakdown } from "../presentation.js";
@@ -13,6 +13,9 @@ interface RunWorkbenchProps {
   decisionPending: boolean;
   onDecision: (input: StudioDecisionInput) => Promise<void>;
   onRequestSceneRevision?: (input: StudioSceneRevisionInput) => Promise<void>;
+  onRequestNarrationRevision?: (input: StudioNarrationRevisionInput) => Promise<void>;
+  /** 取这一镜当前的旁白/字幕原文；改字要看得到原文，否则只能凭记忆重打一遍。 */
+  onLoadSceneNarration?: (scenePosition: number) => Promise<string>;
   onReinspectVisualReview?: (input: StudioVisualReinspectionInput) => Promise<void>;
   onOpenPublish?: () => void;
   onRestart?: () => void;
@@ -35,13 +38,15 @@ interface RunWorkbenchProps {
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onRequestSceneRevision, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
-  const [approvalOverrideNote, setApprovalOverrideNote] = useState("");
+  const [approvalNote, setApprovalNote] = useState("");
+  const [reviewDecisions, setReviewDecisions] = useState<Record<string, { decision: "accept" | "reject"; reason: string }>>({});
   const [replanningVoice, setReplanningVoice] = useState(false);
   const [voiceDurationSeconds, setVoiceDurationSeconds] = useState("");
+  const [hasPendingPlanningConfiguration, setHasPendingPlanningConfiguration] = useState(false);
   const [decisionSnapshot, setDecisionSnapshot] = useState<Pick<StudioDecisionInput, "expectedRunRevision" | "interventionId" | "reviewEvidenceId">>();
   const previewRef = useRef<HTMLVideoElement>(null);
   const closeRejectDecision = () => {
@@ -71,6 +76,18 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const visualReview = visualReviewDecision(run);
   const voiceTiming = voiceTimingConflict(run);
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
+  const reviewItems = visualReview?.reviewItems ?? [];
+  const undisposedReviewItems = reviewItems.filter((item) => item.itemKey && !reviewDecisions[item.itemKey]);
+  const acceptedReviewItems = reviewItems.filter((item) => item.itemKey && reviewDecisions[item.itemKey]?.decision === "accept");
+  const unexplainedReviewItems = reviewItems.filter((item) => (
+    item.itemKey && reviewDecisions[item.itemKey]?.decision === "reject" && !reviewDecisions[item.itemKey]?.reason.trim()
+  ));
+  const setReviewDecision = (itemKey: string, decision: "accept" | "reject") => {
+    setReviewDecisions((previous) => ({ ...previous, [itemKey]: { decision, reason: previous[itemKey]?.reason ?? "" } }));
+  };
+  const setReviewReason = (itemKey: string, reason: string) => {
+    setReviewDecisions((previous) => ({ ...previous, [itemKey]: { decision: previous[itemKey]?.decision ?? "reject", reason } }));
+  };
   const assetVersionId = run.nodes.find((node) => node.id === "assets")?.outputState?.effectiveVersionId;
   const isCostReplan = run.status === "stale" && hasDirectorCostFeedback(run);
   const sourceAssetFailure = run.failure && isSourceAssetReviewFailure(run.failure)
@@ -111,6 +128,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
     acceptedPlanDigest={run.productionPlanDigest ?? ""}
     readOnly={readOnly}
     {...(node.id === "creative-planning" && run.planningStages ? { planningStages: run.planningStages } : {})}
+    {...(node.id === "creative-planning" ? { onPendingPlanningConfigurationChange: setHasPendingPlanningConfiguration } : {})}
     pauseBusy={pausePending}
     pauseRequested={run.pauseRequested === true}
     {...(onRequestPause ? { onRequestPause } : {})}
@@ -126,7 +144,8 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
       setApproving(false);
       setRejecting(false);
       setRejectNote("");
-      setApprovalOverrideNote("");
+      setApprovalNote("");
+      setReviewDecisions({});
       setReplanningVoice(false);
       setVoiceDurationSeconds("");
       setDecisionSnapshot(undefined);
@@ -227,7 +246,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
             <dl>
               <div><dt>给谁看</dt><dd>{run.creativeSummary.audience}</dd></div>
               <div><dt>开头承诺</dt><dd>{run.creativeSummary.openingPromise}</dd></div>
-              <div><dt>必须看到</dt><dd>{run.creativeSummary.requiredVisual}</dd></div>
+              <div><dt>画面方向参考</dt><dd>{run.creativeSummary.requiredVisual}</dd></div>
               <div><dt>结尾收益</dt><dd>{run.creativeSummary.payoff}</dd></div>
             </dl>
           </details> : null}
@@ -263,7 +282,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               /> : null}
               {onRestart ? <button className="button button-primary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
             </section>
-          ) : run.activeIntervention ? (
+          ) : run.activeIntervention?.kind !== "creative_review" && run.activeIntervention ? (
             <section className="intervention-panel">
               <div className="attention-heading">
                 <AlertTriangle aria-hidden="true" size={18} />
@@ -297,6 +316,13 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                         findingIndex: finding.findingIndex,
                         ...input,
                       })}
+                      {...(onLoadSceneNarration ? { onLoadNarration: onLoadSceneNarration } : {})}
+                      {...(onRequestNarrationRevision ? {
+                        onSubmitNarration: (input) => onRequestNarrationRevision({
+                          expectedRunRevision: run.revision,
+                          ...input,
+                        }),
+                      } : {})}
                     />)}
                   </div>
                   : null}
@@ -313,7 +339,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                     <RotateCcw aria-hidden="true" size={17} />补查现有成片（不重买素材）
                   </button>
                 ) : null}
-                <p className="agent-review-guidance">待补查项只会重新审查当前成片，不会重新购买画面或配音。已确认缺陷才进入调整方案；批准则会覆盖视觉审片建议并生成发布包。</p>
+                <p className="agent-review-guidance">补查会重跑整轮审片、不会重新购买画面或配音，因此<strong>其它镜头（包括上一轮已通过的镜头）的结论也可能变化</strong>；判定与上一轮不同的条目会标出「判定变动」，并给出两轮原文。批准前你要对本轮每一条结论逐条表态：采纳的必须先返修，不采纳的要写明理由。</p>
               </div> : null}
               <div className="decision-actions">
                 {voiceTiming ? <>
@@ -396,7 +422,8 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               /> : null}
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />准备各平台发布包</button> : null}
               {run.status === "succeeded" && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
-              {(run.status === "failed" || run.status === "rejected") && (run.failure?.retryable !== false || run.taskRecovery?.allowedActions.includes("retry_failed_step")) && !hasUncertainPaidOutcome(run) && (!run.taskRecovery || run.taskRecovery.allowedActions.includes("retry_failed_step")) && onRetryFailedNode && retryableNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{sourceAssetFailure && run.status === "rejected" ? "重新检查已有试片" : run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤"}</button> : null}
+              {hasPendingPlanningConfiguration && (run.status === "failed" || run.status === "rejected") ? <p className="run-failure-summary">模型选择尚未保存。请先保存模型，或恢复为当前模型后再重试。</p> : null}
+              {(run.status === "failed" || run.status === "rejected") && (run.failure?.retryable !== false || run.taskRecovery?.allowedActions.includes("retry_failed_step")) && !hasUncertainPaidOutcome(run) && (!run.taskRecovery || run.taskRecovery.allowedActions.includes("retry_failed_step")) && onRetryFailedNode && retryableNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending || hasPendingPlanningConfiguration} onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{sourceAssetFailure && run.status === "rejected" ? "重新检查已有试片" : run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤"}</button> : null}
               {(run.status === "failed" || run.status === "rejected") && !hasUncertainPaidOutcome(run) && (!run.taskRecovery || run.taskRecovery.allowedActions.includes("adjust_plan")) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
               {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />{isCostReplan ? "按降本意见重新规划并报价" : "按人工版本继续生成"}</button> : null}
               {run.status === "paused" && onResumePaused ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onResumePaused()}><Play aria-hidden="true" size={16} />继续自动制作</button> : null}
@@ -483,26 +510,94 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
         <div className="dialog-backdrop" role="presentation">
           <section ref={approveDialogRef} className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="approve-title" tabIndex={-1}>
             <header className="dialog-header">
-              <div><p className="eyebrow">最终决定</p><h2 id="approve-title">{visualReviewRequiresRevision ? "确认覆盖审片建议" : "确认批准成片"}</h2></div>
+              <div><p className="eyebrow">最终决定</p><h2 id="approve-title">{reviewItems.length > 0 ? "逐条表态后批准成片" : "确认批准成片"}</h2></div>
               <button className="icon-button" type="button" onClick={closeApproveDecision} disabled={decisionPending} title="关闭"><X aria-hidden="true" size={19} /></button>
             </header>
-            <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p><strong>{visualReviewRequiresRevision ? "视觉审片建议先修改；继续批准属于人工覆盖。" : "批准后将生成发布包。"}</strong><span>这会结束人工终审；请确认已经完整观看画面、字幕并听过声音。</span></p></div>
-            {visualReviewRequiresRevision ? <label className="field field-wide decision-override-field">
-              <span>覆盖原因</span>
-              <textarea value={approvalOverrideNote} onChange={(event) => setApprovalOverrideNote(event.target.value)} placeholder="说明为何当前版本仍可发布" rows={3} data-dialog-initial-focus />
-            </label> : null}
+            <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p><strong>{reviewItems.length > 0
+              ? `审片提出 ${reviewItems.length} 条结论，请逐条看过并表态。`
+              : "批准后将生成发布包。"}</strong><span>这会结束人工终审；请确认已经完整观看画面、字幕并听过声音。</span></p></div>
+            {/* 逐条表态管的是审片结论。机器质检是判过或不过的闸门——它不通过时流程走不到终审，
+                所以这里没有它的条目，操作员不必怀疑自己漏签了什么。 */}
+            <p className="review-disposition-note">技术质检不适用逐条表态：它由机器判定通过或不过，没过就到不了这一步，不在这里逐条签。</p>
+            {reviewItems.length > 0 ? <div className="review-disposition-list">
+              <p className="review-disposition-guide">采纳=你要按这条结论返修，本轮就不能批准；不采纳=你看过并认为可以维持现状，需要写明理由留痕。</p>
+              {reviewItems.map((item, index) => {
+                const itemKey = item.itemKey!;
+                const choice = reviewDecisions[itemKey];
+                const previousReason = reviewItems
+                  .slice(0, index)
+                  .map((candidate) => candidate.itemKey ? reviewDecisions[candidate.itemKey]?.reason.trim() : undefined)
+                  .filter((reason): reason is string => Boolean(reason))
+                  .at(-1);
+                return <article className={`review-disposition-item is-${choice?.decision ?? "undecided"}`} key={itemKey}>
+                  <header>
+                    <strong>{item.scenePosition ? `镜头 ${item.scenePosition}` : `第 ${index + 1} 条`} · {reviewItemTimecode(item)}</strong>
+                    <span>{reviewEvidenceStatusLabel(item)}</span>
+                  </header>
+                  <p>{creatorFacingTechnicalText(item.description)}</p>
+                  <small>{creatorFacingTechnicalText(item.suggestion)}</small>
+                  <FindingVerdictChange finding={item} />
+                  <div className="review-disposition-choices">
+                    <button
+                      className="button button-ghost"
+                      type="button"
+                      aria-pressed={choice?.decision === "reject"}
+                      onClick={() => setReviewDecision(itemKey, "reject")}
+                    >不采纳，维持现状</button>
+                    <button
+                      className="button button-ghost"
+                      type="button"
+                      aria-pressed={choice?.decision === "accept"}
+                      onClick={() => setReviewDecision(itemKey, "accept")}
+                    >采纳，先返修</button>
+                  </div>
+                  {choice?.decision === "accept" ? <p className="review-disposition-hint" role="status">已采纳：这条结论需要先返修，本轮不能批准。</p> : null}
+                  {choice?.decision === "reject" ? <label className="field field-wide">
+                    <span>不采纳理由</span>
+                    <textarea
+                      value={choice.reason}
+                      onChange={(event) => setReviewReason(itemKey, event.target.value)}
+                      placeholder="写明你核对后的判断，例如：已逐帧看过，这里是有意为之"
+                      rows={2}
+                      maxLength={500}
+                      {...(index === 0 ? { "data-dialog-initial-focus": true } : {})}
+                    />
+                    {previousReason ? <button className="button button-ghost" type="button" onClick={() => setReviewReason(itemKey, previousReason)}>与上一条相同</button> : null}
+                  </label> : null}
+                </article>;
+              })}
+            </div> : null}
+            <label className="field field-wide decision-override-field">
+              <span>批准备注（选填）</span>
+              <textarea value={approvalNote} onChange={(event) => setApprovalNote(event.target.value)} placeholder="想补充的整体判断" rows={2} />
+            </label>
+            {reviewItems.length > 0 && (undisposedReviewItems.length > 0 || acceptedReviewItems.length > 0) ? <p className="review-disposition-blocker" role="status">
+              {undisposedReviewItems.length > 0 ? `还有 ${undisposedReviewItems.length} 条没有表态。` : ""}
+              {acceptedReviewItems.length > 0 ? `其中 ${acceptedReviewItems.length} 条已采纳、还等着返修。` : ""}
+            </p> : null}
             <footer className="dialog-actions">
               <button className="button button-ghost" type="button" onClick={closeApproveDecision} disabled={decisionPending}>再看一遍</button>
               <button
                 className="button button-primary"
                 type="button"
-                disabled={decisionPending || !decisionSnapshot || (visualReviewRequiresRevision && !approvalOverrideNote.trim())}
+                disabled={decisionPending || !decisionSnapshot
+                  || undisposedReviewItems.length > 0
+                  || acceptedReviewItems.length > 0
+                  || unexplainedReviewItems.length > 0}
                 onClick={() => decisionSnapshot && void onDecision({
                   action: "approve",
                   ...decisionSnapshot,
-                  ...(visualReviewRequiresRevision ? { note: `覆盖视觉审片建议：${approvalOverrideNote.trim()}` } : {}),
+                  ...(approvalNote.trim() ? { note: approvalNote.trim() } : {}),
+                  ...(reviewItems.length > 0 ? {
+                    reviewDispositions: reviewItems.map((item) => {
+                      const choice = reviewDecisions[item.itemKey!]!;
+                      return choice.decision === "accept"
+                        ? { itemKey: item.itemKey!, decision: "accept" as const }
+                        : { itemKey: item.itemKey!, decision: "reject" as const, reason: choice.reason.trim() };
+                    }),
+                  } : {}),
                 })}
-              ><Check aria-hidden="true" size={17} />{decisionPending ? "正在批准..." : visualReviewRequiresRevision ? "确认覆盖建议并生成发布包" : "确认批准并生成发布包"}</button>
+              ><Check aria-hidden="true" size={17} />{decisionPending ? "正在批准..." : reviewItems.length > 0 ? "逐条表态已完成，生成发布包" : "确认批准并生成发布包"}</button>
             </footer>
           </section>
         </div>
@@ -795,6 +890,8 @@ interface VisualReviewDecision {
   pendingInspectionCount: number;
   infoCount: number;
   findings: VisualReviewFinding[];
+  /** 报告里的全部结论，含只作提示与暂无法判定的条目；逐条表态覆盖的是这一整份。 */
+  reviewItems: VisualReviewFinding[];
   reviewArtifactId?: string;
   evidenceId?: string;
   independentReviews: VisualReviewBranch[];
@@ -812,6 +909,8 @@ interface VisualReviewBranch {
 
 interface VisualReviewFinding {
   findingIndex: number;
+  /** 服务端按结论内容算出的稳定条目编号；逐条表态时原样回传。 */
+  itemKey?: string;
   timecodeMs: number;
   scenePosition?: number;
   targetNodeId?: "script" | "visual-direction" | "assets";
@@ -821,6 +920,16 @@ interface VisualReviewFinding {
   evidenceStatus?: "satisfied" | "failed" | "not_observed" | "not_applicable";
   severity?: "info" | "warning" | "critical";
   nextAction?: "inspect_existing_media" | "replan_upstream" | "rework_asset" | "none";
+  /** 与上一轮补查相比：本条是本轮新提出的，还是同一位置但判定变了。 */
+  reviewChange?: "new" | "changed";
+  previousVerdict?: VisualReviewVerdictSnapshot;
+}
+
+/** 上一轮对同一位置的原文，用来和本轮逐字对照。 */
+interface VisualReviewVerdictSnapshot {
+  statusLabel: string;
+  description: string;
+  suggestion: string;
 }
 
 const VISUAL_SCORE_LABELS: Record<string, string> = {
@@ -830,6 +939,71 @@ const VISUAL_SCORE_LABELS: Record<string, string> = {
   legibility: "可读性",
   safety: "安全性",
 };
+
+/**
+ * 一条结论的"判定"：模型对同一处画面给出的结论性字段。
+ * 描述文字换个说法但结论没变，不算判定变动——标出来的必须是结论真的变了。
+ */
+function visualReviewFindingVerdict(finding: {
+  category: string;
+  evidenceStatus?: string;
+  severity?: string;
+  nextAction?: string;
+}): string {
+  return [finding.category, finding.evidenceStatus ?? "", finding.severity ?? "", finding.nextAction ?? ""].join("|");
+}
+
+function reviewEvidenceStatusText(raw: Record<string, unknown>): string {
+  if (raw.evidenceStatus === "not_observed") return "抽帧看不出来，需要人眼确认";
+  if (raw.evidenceStatus === "not_applicable") return "不适用画面判定";
+  if (raw.evidenceStatus === "satisfied") return "模型判定符合要求";
+  if (raw.severity === "info") return "提示";
+  return raw.severity === "critical" ? "确认缺陷（严重）" : "确认缺陷";
+}
+
+/**
+ * 上一轮审片对同一处画面的结论，按"镜位 + 时间点"索引。
+ *
+ * 用位置而不是内容摘要做锚：判定变了的条目，其内容摘要本来就会变，按摘要匹配等于
+ * 永远匹配不上——那样"判定变动"只会标注新增条目，恰好漏掉真正需要对照的那些。
+ */
+function previousRenderedReviewIndex(
+  node: StudioRunDetail["nodes"][number],
+): Map<string, { verdict: string; snapshot: VisualReviewVerdictSnapshot }> {
+  const versions = node.outputState?.versions ?? [];
+  const effectiveIndex = versions.findIndex((version) => version.id === node.outputState?.effectiveVersionId);
+  const previousReport = versions
+    .slice(0, effectiveIndex < 0 ? 0 : effectiveIndex)
+    .reverse()
+    .map((version) => (isRecord(version.output) && isRecord(version.output.report) ? version.output.report : undefined))
+    .find((report) => isRecord(report)
+      && isRecord(report.reviewScope)
+      && report.reviewScope.reviewStage === "rendered_video");
+  const index = new Map<string, { verdict: string; snapshot: VisualReviewVerdictSnapshot }>();
+  if (!previousReport || !Array.isArray(previousReport.findings)) return index;
+  for (const value of previousReport.findings) {
+    if (!isRecord(value)) continue;
+    const scenePosition = Number(value.scenePosition);
+    const timecodeMs = Number(value.timecodeMs);
+    if (!Number.isInteger(scenePosition) || scenePosition < 1 || !Number.isInteger(timecodeMs) || timecodeMs < 0) continue;
+    const anchor = `${scenePosition}:${timecodeMs}`;
+    if (index.has(anchor)) continue;
+    index.set(anchor, {
+      verdict: visualReviewFindingVerdict({
+        category: typeof value.category === "string" ? value.category : "other",
+        ...(typeof value.evidenceStatus === "string" ? { evidenceStatus: value.evidenceStatus } : {}),
+        ...(typeof value.severity === "string" ? { severity: value.severity } : {}),
+        ...(typeof value.nextAction === "string" ? { nextAction: value.nextAction } : {}),
+      }),
+      snapshot: {
+        statusLabel: reviewEvidenceStatusText(value),
+        description: typeof value.description === "string" ? value.description : "上一轮没有留下问题说明。",
+        suggestion: typeof value.suggestion === "string" ? value.suggestion : "上一轮没有留下修改建议。",
+      },
+    });
+  }
+  return index;
+}
 
 function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | undefined {
   const node = run.nodes.find((item) => item.id === "visual-review");
@@ -846,6 +1020,7 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
     .map(([key, value]) => ({ key, label: VISUAL_SCORE_LABELS[key] ?? key, value }))
     .sort((left, right) => left.value - right.value)
     .slice(0, 2) : [];
+  const previousReviewIndex = previousRenderedReviewIndex(node);
   const findings = Array.isArray(report.findings) ? report.findings.flatMap((value, findingIndex): VisualReviewFinding[] => {
     if (!isRecord(value) || !Number.isInteger(value.timecodeMs) || Number(value.timecodeMs) < 0) return [];
     const scenePosition = Number(value.scenePosition);
@@ -863,8 +1038,17 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
       ...(value.severity === "info" || value.severity === "warning" || value.severity === "critical" ? { severity: value.severity } : {}),
       ...(value.nextAction === "inspect_existing_media" || value.nextAction === "replan_upstream" || value.nextAction === "rework_asset" || value.nextAction === "none"
         ? { nextAction: value.nextAction } : {}),
+      ...(typeof value.itemKey === "string" && /^[a-f0-9]{64}$/.test(value.itemKey) ? { itemKey: value.itemKey } : {}),
     }];
   }) : [];
+  // 第二遍：标出与上一轮相比判定变了的条目，并把上一轮原文带上供逐字对照。
+  const reviewedFindings = findings.map((finding): VisualReviewFinding => {
+    if (!finding.scenePosition) return finding;
+    const previous = previousReviewIndex.get(`${finding.scenePosition}:${finding.timecodeMs}`);
+    if (!previous) return previousReviewIndex.size > 0 ? { ...finding, reviewChange: "new" } : finding;
+    if (previous.verdict === visualReviewFindingVerdict(finding)) return finding;
+    return { ...finding, reviewChange: "changed", previousVerdict: previous.snapshot };
+  });
   const effectiveVersion = node.outputState?.versions.find((version) => version.id === node.outputState?.effectiveVersionId);
   const reviewArtifactId = effectiveVersion?.artifactIds.find((artifactId) => (
     run.artifacts.some((artifact) => artifact.id === artifactId && artifact.kind === "review_report" && artifact.producerNodeId === "visual-review")
@@ -894,10 +1078,11 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
     recommendation: report.recommendation,
     confidence,
     summary: typeof report.summary === "string" && report.summary.trim() ? report.summary.trim() : "视觉审片发现需要人工确认的问题。",
-    findingCount: findings.filter((finding) => finding.evidenceStatus === "failed" && finding.severity !== "info").length,
-    pendingInspectionCount: findings.filter((finding) => finding.evidenceStatus === "not_observed").length,
-    infoCount: findings.filter((finding) => finding.severity === "info" && finding.evidenceStatus !== "not_observed").length,
-    findings: findings.filter((finding) => finding.evidenceStatus === "failed" && finding.severity !== "info"),
+    findingCount: reviewedFindings.filter((finding) => finding.evidenceStatus === "failed" && finding.severity !== "info").length,
+    pendingInspectionCount: reviewedFindings.filter((finding) => finding.evidenceStatus === "not_observed").length,
+    infoCount: reviewedFindings.filter((finding) => finding.severity === "info" && finding.evidenceStatus !== "not_observed").length,
+    findings: reviewedFindings.filter((finding) => finding.evidenceStatus === "failed" && finding.severity !== "info"),
+    reviewItems: reviewedFindings.filter((finding) => finding.itemKey !== undefined),
     ...(reviewArtifactId ? { reviewArtifactId } : {}),
     ...(typeof reviewScope?.evidenceId === "string" ? { evidenceId: reviewScope.evidenceId } : {}),
     independentReviews,
@@ -911,11 +1096,110 @@ function visualReviewRecommendationLabel(value: VisualReviewDecision["recommenda
   return "不通过";
 }
 
-function SceneRevisionFinding({ finding, busy, onSeek, onSubmit }: {
+/** 判定变动的条目：本轮结论与上一轮原文并排给出，避免只报"变了"却让人无处对照。 */
+function FindingVerdictChange({ finding }: { finding: VisualReviewFinding }) {
+  if (!finding.reviewChange) return null;
+  const label = finding.reviewChange === "changed" ? "判定变动" : "本轮新提出";
+  return <div className={`finding-verdict-change is-${finding.reviewChange}`}>
+    <strong>{label}</strong>
+    {finding.previousVerdict ? <dl>
+      <div><dt>上一轮</dt><dd>{finding.previousVerdict.statusLabel}：{creatorFacingTechnicalText(finding.previousVerdict.description)}</dd></div>
+      <div><dt>本轮</dt><dd>{reviewEvidenceStatusLabel(finding)}：{creatorFacingTechnicalText(finding.description)}</dd></div>
+    </dl> : <p>上一轮没有在这个位置提出结论。</p>}
+  </div>;
+}
+
+function reviewItemTimecode(finding: VisualReviewFinding): string {
+  const seconds = Math.floor(finding.timecodeMs / 1_000);
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** 逐条表态时每条结论的处境：模型确认有问题、抽帧看不出来、只是提示，还是判不了。 */
+function reviewEvidenceStatusLabel(finding: VisualReviewFinding): string {
+  if (finding.evidenceStatus === "not_observed") return "抽帧看不出来，需要人眼确认";
+  if (finding.evidenceStatus === "not_applicable") return "不适用画面判定";
+  if (finding.evidenceStatus === "satisfied") return "模型判定符合要求";
+  if (finding.severity === "info") return "提示";
+  return finding.severity === "critical" ? "确认缺陷（严重）" : "确认缺陷";
+}
+
+/**
+ * 改这一镜的字幕与旁白。
+ *
+ * 旁白和字幕是脚本里同一行字（成片字幕与配音都从它来），所以改字要改在脚本上。画面不重新生成，
+ * 但配音必须按新文字重合成——云端配音按字数计费，操作员按下之前就得知道这笔钱可能要花。
+ */
+function SceneNarrationRevision({ scenePosition, busy, onLoad, onSubmit }: {
+  scenePosition: number;
+  busy: boolean;
+  onLoad: (scenePosition: number) => Promise<string>;
+  onSubmit: (input: Pick<StudioNarrationRevisionInput, "scenePosition" | "narration" | "note">) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [original, setOriginal] = useState<string>();
+  const [narration, setNarration] = useState("");
+  const [note, setNote] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string>();
+  const openEditor = async () => {
+    setOpen(true);
+    if (original !== undefined || loading) return;
+    setLoading(true);
+    setLoadError(undefined);
+    try {
+      const loaded = await onLoad(scenePosition);
+      setOriginal(loaded);
+      setNarration(loaded);
+    } catch (caught) {
+      setLoadError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setLoading(false);
+    }
+  };
+  if (!open) return <button className="scene-narration-open" type="button" disabled={busy} onClick={() => void openEditor()}>
+    改这一镜的字幕/旁白
+  </button>;
+  // 文字没变就没必要重做：配音会按字数重新计费，白花这笔钱不该只靠操作员自己发现。
+  const unchanged = original !== undefined && narration.trim() === original.trim();
+  return <div className="scene-revision-controls scene-narration-revision">
+    <p className="scene-narration-cost">只改字，画面不重新生成、也不重新购买。配音与字幕同源，会按新文字重合成（用云端配音时按字数计费），随后重新渲染并复审。</p>
+    {loadError ? <p className="scene-narration-error">取不到原文：{loadError}</p> : null}
+    <label className="field field-wide">
+      <span>镜头 {scenePosition} 的旁白/字幕</span>
+      <textarea
+        aria-label={`镜头 ${scenePosition} 的旁白字幕`}
+        value={narration}
+        onChange={(event) => setNarration(event.target.value)}
+        rows={3}
+        maxLength={600}
+        disabled={loading}
+        placeholder={loading ? "正在读取原文……" : undefined}
+      />
+    </label>
+    <label className="field field-wide">
+      <span>这一镜的修改说明</span>
+      <textarea value={note} onChange={(event) => setNote(event.target.value)} rows={2} maxLength={2_000} />
+    </label>
+    {unchanged ? <small>文字和现在一样，改完不会产生任何变化。</small> : null}
+    <div className="scene-narration-actions">
+      <button
+        className="button button-secondary"
+        type="button"
+        disabled={busy || loading || unchanged || !narration.trim() || !note.trim()}
+        onClick={() => void onSubmit({ scenePosition, narration: narration.trim(), note: note.trim() })}
+      >按新文字重做配音与字幕</button>
+      <button className="button button-ghost" type="button" disabled={busy} onClick={() => setOpen(false)}>收起</button>
+    </div>
+  </div>;
+}
+
+function SceneRevisionFinding({ finding, busy, onSeek, onSubmit, onLoadNarration, onSubmitNarration }: {
   finding: VisualReviewFinding;
   busy: boolean;
   onSeek: () => void;
   onSubmit: (input: Pick<StudioSceneRevisionInput, "reuseFromScenePosition" | "note">) => Promise<void>;
+  onLoadNarration?: (scenePosition: number) => Promise<string>;
+  onSubmitNarration?: (input: Pick<StudioNarrationRevisionInput, "scenePosition" | "narration" | "note">) => Promise<void>;
 }) {
   const [sourcePosition, setSourcePosition] = useState("");
   const [note, setNote] = useState("");
@@ -931,6 +1215,7 @@ function SceneRevisionFinding({ finding, busy, onSeek, onSubmit }: {
     </button>
     <p>{creatorFacingTechnicalText(finding.description)}</p>
     <small>{creatorFacingTechnicalText(finding.suggestion)}</small>
+    <FindingVerdictChange finding={finding} />
     {finding.nextAction === "replan_upstream" ? <small>这项问题需要先调整{finding.targetNodeId === "script" ? "脚本" : "导演方案"}，不能用任意旧素材替代。</small> : null}
     {sourceOptions.length > 0 ? <div className="scene-revision-controls">
       <label className="field">
@@ -951,6 +1236,18 @@ function SceneRevisionFinding({ finding, busy, onSeek, onSubmit }: {
         onClick={() => void onSubmit({ reuseFromScenePosition: Number(sourcePosition), note: note.trim() })}
       >替换后重新审片</button>
     </div> : null}
+    {/* 这一镜的字是操作员能直接改的东西，所以只要有镜位就给入口——包括结论指向素材的那些。
+        「画面没兑现这句话」这类缺陷本来就有两个修法：改画面，或者改承诺。哪边才是问题由操作员
+        判断，宿主替它选边就是把一条真实缺陷推回给一条只换画面的路。改错了字不会变成悄悄放行：
+        复审会按新文字重判这一镜。 */}
+    {finding.scenePosition && onLoadNarration && onSubmitNarration
+      ? <SceneNarrationRevision
+        scenePosition={finding.scenePosition}
+        busy={busy}
+        onLoad={onLoadNarration}
+        onSubmit={onSubmitNarration}
+      />
+      : null}
   </article>;
 }
 
@@ -1073,6 +1370,7 @@ function runStateMessage(run: StudioRunDetail): string {
     return safeRunError(run.nodes.find((node) => node.status === "failed")?.error);
   }
   if (run.status === "awaiting_spend_approval") return "即将生成付费图片或视频，请先检查前面的内容、模型和本次报价。";
+  if (run.status === "needs_human") return "正在等待你的意见或确认；你可以继续讨论，确认后才会进入下一步。";
   if (run.status === "approval_invalidated") return "输入、模型、报价或重试次数发生了变化，之前的费用确认已失效，请重新检查。";
   if (run.status === "stale" && hasDirectorCostFeedback(run)) {
     return "你已把上一份画面报价退回导演，降本意见已经保存。继续后会先调整方案，再给你一份新报价。";

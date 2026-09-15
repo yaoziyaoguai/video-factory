@@ -14,6 +14,10 @@ import type {
   StudioCostDashboard,
   StudioCostRunDetail,
   StudioDecisionInput,
+  StudioCreativeReviewConfirmInput,
+  StudioCreativeReviewCommandInput,
+  StudioCreativeReviewCommandReceipt,
+  StudioCreativeReviewSnapshot,
   StudioHealth,
   StudioLocalCapability,
   StudioOpportunity,
@@ -30,6 +34,7 @@ import type {
   StudioPublishTarget,
   StudioRunDetail,
   StudioRunSummary,
+  StudioNarrationRevisionInput,
   StudioSceneRevisionInput,
   StudioVisualReinspectionInput,
   StudioSeries,
@@ -189,7 +194,7 @@ export class StudioService {
       series: this.series,
       opportunities: this.opportunities,
       topicStrategy: async () => (await this.creatorSettings.get()).topicStrategy,
-      publishedTemplates,
+      publishedTemplates: async () => [],
       now,
     });
     this.resourceGovernance = new ResourceGovernanceStudio(
@@ -215,13 +220,6 @@ export class StudioService {
       archiveStore: options.runArchive ?? new JsonRunArchiveStore(path.join(options.workspaceRoot, "archive", "runs.json")),
       now,
       loadRejectedVisualResources: (runId) => this.resourceGovernance.rejectedVisualItems(runId),
-      resolveTemplateSnapshot: async (input, brief) => {
-        const rawTemplate = isRecord(input) ? input.template : undefined;
-        return this.templates.resolveForRun({
-          ...brief,
-          ...(rawTemplate !== undefined ? { template: rawTemplate } : {}),
-        });
-      },
     });
     this.costs = new CostStudio(() => options.pipeline.list());
     this.publishing = new PublishingStudio({
@@ -319,15 +317,14 @@ export class StudioService {
   }
   async supplementOpportunitySources(opportunityId: string, input: StudioCandidateSourcesInput): Promise<StudioOpportunity> {
     // 补充后不另存派生决策：用列表同一条 reviewTrendOpportunityAgainstCurrentPolicy 链重算返回。
-    const [updated, settings, templates] = await Promise.all([
+    const [updated, settings] = await Promise.all([
       this.opportunities.appendEvidence(opportunityId, input),
       this.creatorSettings.get(),
-      this.templates.list(),
     ]);
     return reviewTrendOpportunityAgainstCurrentPolicy(
       updated,
       settings.topicStrategy.sourcePolicy,
-      templates.productionTemplates,
+      [],
     );
   }
 
@@ -359,15 +356,14 @@ export class StudioService {
   }
 
   async listOpportunities(origin?: "trend" | "series" | "manual"): Promise<StudioOpportunity[]> {
-    const [opportunities, settings, templates] = await Promise.all([
+    const [opportunities, settings] = await Promise.all([
       this.opportunities.list(),
       this.creatorSettings.get(),
-      this.templates.list(),
     ]);
     const currentOpportunities = opportunities.map((item) => reviewTrendOpportunityAgainstCurrentPolicy(
       item,
       settings.topicStrategy.sourcePolicy,
-      templates.productionTemplates,
+      [],
     ));
     return origin
       ? currentOpportunities.filter((item) => origin === "manual" ? item.origin === "manual" || item.origin === undefined : item.origin === origin)
@@ -376,11 +372,11 @@ export class StudioService {
   async getOpportunity(opportunityId: string): Promise<StudioOpportunity | undefined> {
     const opportunity = await this.opportunities.get(opportunityId);
     if (!opportunity) return undefined;
-    const [settings, templates] = await Promise.all([this.creatorSettings.get(), this.templates.list()]);
+    const settings = await this.creatorSettings.get();
     return reviewTrendOpportunityAgainstCurrentPolicy(
       opportunity,
       settings.topicStrategy.sourcePolicy,
-      templates.productionTemplates,
+      [],
     );
   }
   createOpportunity(input: StudioOpportunityInput): Promise<StudioOpportunity> {
@@ -432,7 +428,10 @@ export class StudioService {
       if (existing?.creationOrigin === "series" || existing?.seriesId) await this.reconcileSeriesRuns();
       return replay;
     }
-    const configuredInput = await this.withCreatorDefaults(input);
+    const configuredInputWithClientFields = await this.withCreatorDefaults(input);
+    const configuredInput = isRecord(configuredInputWithClientFields)
+      ? withoutClientArticleSources(configuredInputWithClientFields)
+      : configuredInputWithClientFields;
     await this.assertOpportunityReadyForProduction(configuredInput);
     if (isRecord(configuredInput) && isRecord(configuredInput.creationContext)
       && configuredInput.creationContext.origin === "series") {
@@ -454,6 +453,18 @@ export class StudioService {
           seriesContext: { ...seriesContext, productionReservationId: reservationId },
         }
       : configuredInput;
+    if (isRecord(trustedInput) && isRecord(trustedInput.creationContext)) {
+      const trustedOpportunityId = typeof trustedInput.creationContext.opportunityId === "string"
+        ? trustedInput.creationContext.opportunityId
+        : "";
+      const trustedOpportunity = trustedOpportunityId ? await this.opportunities.get(trustedOpportunityId) : undefined;
+      trustedInput = {
+        ...trustedInput,
+        ...(trustedOpportunity?.articleSources?.length
+          ? { articleSources: structuredClone(trustedOpportunity.articleSources) }
+          : {}),
+      };
+    }
     if (seriesContext && reservationId && opportunityId) {
       await this.series.reserveRun(seriesContext, opportunityId, reservationId);
     }
@@ -631,8 +642,23 @@ export class StudioService {
   decide(runId: string, input: StudioDecisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.decide(runId, input, actor);
   }
+  creativeReview(runId: string): Promise<StudioCreativeReviewSnapshot | undefined> {
+    return this.production.creativeReview(runId);
+  }
+  confirmCreativeReview(runId: string, input: StudioCreativeReviewConfirmInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    return this.withLease(runId, async () => this.production.confirmCreativeReview(runId, input, actor));
+  }
+  commandCreativeReview(runId: string, input: StudioCreativeReviewCommandInput, actor = "studio-owner"): Promise<StudioCreativeReviewCommandReceipt> {
+    return this.withLease(runId, async () => this.production.commandCreativeReview(runId, input, actor));
+  }
+  creativeReviewCommand(runId: string, commandId: string): Promise<StudioCreativeReviewCommandReceipt | undefined> {
+    return this.production.creativeReviewCommand(runId, commandId);
+  }
   requestSceneRevision(runId: string, input: StudioSceneRevisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.requestSceneRevision(runId, input, actor);
+  }
+  requestNarrationRevision(runId: string, input: StudioNarrationRevisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    return this.production.requestNarrationRevision(runId, input, actor);
   }
   reinspectVisualReview(runId: string, input: StudioVisualReinspectionInput): Promise<StudioRunDetail> {
     return this.production.reinspectVisualReview(runId, input);
@@ -894,6 +920,12 @@ function boundedCanonText(value: unknown): string | undefined {
 
 function isTemplateInputError(message: string): boolean {
   return /^(template |id |version |status |name |description |category |platforms |durationSeconds |automationLevel|storyStructure|shotSlots|visualSystem|soundSystem|qualityRules|capabilityRequirements|costPolicy)|Template '.+' (was not found|already exists|already has an editable draft)|A published built-in template|Built-in template|Only a draft template|Draft template/.test(message);
+}
+
+function withoutClientArticleSources(input: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = { ...input };
+  delete sanitized.articleSources;
+  return sanitized;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

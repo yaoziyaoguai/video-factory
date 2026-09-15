@@ -119,7 +119,7 @@ export async function readCodexProviderSettings(
     profileId: "openai",
     providerId: "openai",
     ...(configuredModelId ? { modelId: configuredModelId } : {}),
-    taskKinds: ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
+    taskKinds: ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion"],
   }, options);
 }
 
@@ -130,7 +130,7 @@ export async function readZaiCodexProviderSettings(
   return readProviderSettings(resolveZaiCodexSocketPath(environment), {
     profileId: "zai",
     providerId: "zai-bigmodel-api",
-    taskKinds: ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
+    taskKinds: ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion"],
   }, options);
 }
 

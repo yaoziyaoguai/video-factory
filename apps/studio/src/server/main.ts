@@ -29,6 +29,7 @@ import { buildRoleAgentAssembly } from "./role-agent-assembly.js";
 import { CodexSeriesPlanningAgent } from "./series-planning-agent.js";
 import { StudioService } from "./studio-service.js";
 import { TrendGateway } from "./trend-gateway.js";
+import { TrendArticleReader } from "./trend-article-reader.js";
 import { CodexTopicIdeaModel, TrendOpportunityAgent } from "./trend-opportunity-agent.js";
 
 const repositoryRoot = await findRepositoryRoot(process.cwd());
@@ -159,6 +160,7 @@ const service = new StudioService({
   ...(auditedTaskClient && auditedTaskReady("topic-ideas") ? {
     trendAgent: new TrendOpportunityAgent({
       signals: new TrendGateway({ environment: process.env }),
+      articleReader: new TrendArticleReader({ cacheRoot: path.join(workspaceRoot, "cache", "trend-articles") }),
       model: new CodexTopicIdeaModel(
         auditedTaskClient,
         3,

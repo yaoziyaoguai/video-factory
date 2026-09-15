@@ -87,6 +87,8 @@ describe("TrendOpportunityAgent", () => {
         painPoint: "工具很多，却没有减少疲惫",
         hook: "真正偷走你下班时间的，可能不是加班。",
         rationale: "适合做低成本生活实验。",
+        facts: [],
+        uncertainties: ["尚未读取原文"],
         visualProof: "用同一本时间账本呈现调整前后的差异。",
         visualPlan: {
           strategy: "用同一本时间账本贯穿前后对比。",
@@ -157,6 +159,91 @@ describe("TrendOpportunityAgent", () => {
     assert.match(auditPayload.context.downstreamBoundary, /来源不足.*保留为可补源候选/);
   });
 
+  it("lets the independent editor audit repair unsupported facts with the full article context", async () => {
+    const articleSource = {
+      sourceId: "signal-ai",
+      originalUrl: "https://example.com/ai",
+      finalUrl: "https://example.com/ai",
+      pageTitle: "AI 时间实验",
+      fetchedAt: "2026-08-24T08:02:00.000Z",
+      contentSha256: "a".repeat(64),
+      extractorVersion: "readability-v1",
+      readStatus: "read" as const,
+      paragraphs: [{ id: "p1", text: "参与者记录了调整前后的日程差异，但正文没有效率提升比例。" }],
+      truncated: false,
+    };
+    const unsafeIdea = {
+      signalId: "signal-ai",
+      title: "AI 时间管理让效率提升 90%",
+      track: "ai-daily-life",
+      audience: "普通上班族",
+      painPoint: "工具很多却没有减少疲惫",
+      hook: "效率提升 90%。",
+      rationale: "用实验解释变化。",
+      facts: [],
+      uncertainties: [],
+      visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
+      novelty: 80,
+      seriesPotential: 80,
+      monetization: 60,
+    };
+    const safeIdea = {
+      ...unsafeIdea,
+      title: "下班后的 AI 时间账本",
+      hook: "同一页日程，调整前后到底差在哪里？",
+    };
+    class RepairingClient extends CodexBridgeClient {
+      readonly calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
+      private topicCalls = 0;
+      private auditCalls = 0;
+
+      constructor() {
+        super({ socketPath: "/nonexistent/vf-codex.sock", sleep: async () => {} });
+      }
+
+      async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
+        this.calls.push({ kind, payload });
+        if (kind === "topic-ideas") {
+          this.topicCalls += 1;
+          return { output: { ideas: [this.topicCalls === 1 ? unsafeIdea : safeIdea] } };
+        }
+        this.auditCalls += 1;
+        return { output: this.auditCalls === 1 ? {
+          version: "video-factory/role-audit-v1",
+          verdict: "repair",
+          score: 55,
+          summary: "候选添加了正文不支持的比例。",
+          issues: [{
+            severity: "blocking",
+            criterion: "事实必须由正文支持",
+            evidence: "90% 未出现在任何可读段落。",
+            repairInstruction: "删除比例断言，保留可验证的前后对照角度。",
+          }],
+          repairInstructions: ["删除比例断言，保留可验证的前后对照角度。"],
+        } : {
+          version: "video-factory/role-audit-v1",
+          verdict: "pass",
+          score: 91,
+          summary: "修订后事实边界清楚。",
+          issues: [],
+          repairInstructions: [],
+        } };
+      }
+    }
+    const client = new RepairingClient();
+    const ideas = await new CodexTopicIdeaModel(client).generate([{ ...signals[0]!, relatedSignals: [], articleSources: [articleSource] }]);
+
+    assert.equal(ideas[0]?.title, safeIdea.title);
+    assert.equal(client.calls.filter((call) => call.kind === "topic-ideas").length, 2);
+    assert.equal(client.calls.filter((call) => call.kind === "role-audit").length, 2);
+    const firstAudit = client.calls.find((call) => call.kind === "role-audit")?.payload as {
+      candidate: { ideas: Array<{ hook: string }> };
+      context: { upstreamFacts: { signals: Array<{ articleSources: Array<{ paragraphs: Array<{ text: string }> }> }> } };
+    };
+    assert.equal(firstAudit.candidate.ideas[0]?.hook, unsafeIdea.hook);
+    assert.match(firstAudit.context.upstreamFacts.signals[0]!.articleSources[0]!.paragraphs[0]!.text, /没有效率提升比例/);
+  });
+
   it("serializes related reports under the canonical signal instead of flattening secondary ids", async () => {
     const related = {
       id: "signal-ai-independent",
@@ -176,6 +263,8 @@ describe("TrendOpportunityAgent", () => {
         painPoint: "工具很多，却没有减少疲惫",
         hook: "先看它是否真的节省时间。",
         rationale: "适合做低成本生活实验。",
+        facts: [],
+        uncertainties: ["尚未读取原文"],
         visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
         novelty: 85,
         seriesPotential: 88,
@@ -210,6 +299,8 @@ describe("TrendOpportunityAgent", () => {
         painPoint: "工具很多，却没有减少疲惫",
         hook: "真正偷走你下班时间的，可能不是加班。",
         rationale: "适合做低成本生活实验。",
+        facts: [],
+        uncertainties: ["尚未读取原文"],
         visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
         novelty: 85,
         seriesPotential: 88,
@@ -248,6 +339,8 @@ describe("TrendOpportunityAgent", () => {
         painPoint: "工具很多，却没有减少疲惫",
         hook: "先看它是否真的节省时间。",
         rationale: "适合做低成本生活实验。",
+        facts: [],
+        uncertainties: ["尚未读取原文"],
         visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
         novelty: 85,
         seriesPotential: 88,
@@ -273,6 +366,8 @@ describe("TrendOpportunityAgent", () => {
         painPoint: "工具很多，却没有减少疲惫",
         hook: "真正偷走你下班时间的，可能不是加班。",
         rationale: "适合做低成本生活实验。",
+        facts: [],
+        uncertainties: ["尚未读取原文"],
         visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
         novelty: 85,
         seriesPotential: 88,
@@ -713,7 +808,7 @@ describe("TrendOpportunityAgent", () => {
 
     assert.equal(candidate?.providerId, "trend-heuristic-v1");
     assert.equal(decision.verdict, "skip");
-    assert.match(decision.reasons.join(" "), /标题没有形成可判断的具体问题/);
+    assert.match(decision.reasons.join(" "), /规则保底候选.*没有经过选题总编/);
   });
 
   it("treats a legally empty model shortlist as no recommendation without a second call or rule backfill", async () => {
@@ -742,6 +837,11 @@ describe("TrendOpportunityAgent", () => {
       source: "editor-model",
       candidateCount: 0,
       providerId: "api-topic-editor-v1",
+      modelCandidateCount: 0,
+      unknownSignalCount: 0,
+      invalidSourceBindingCount: 0,
+      duplicateAngleCount: 0,
+      preferenceExcludedCount: 0,
     });
   });
 
@@ -889,9 +989,7 @@ describe("TrendOpportunityAgent", () => {
     assert.match(candidates[0]?.title ?? "", /3步/);
   });
 
-  it("blocks an unsupported factual premise even when it hides behind a question mark", async () => {
-    // CG-05：高风险事件里"断言 + 问句"的组合——"救援已经结束"是新增事实，不能因
-    // 同句带问号就整体豁免；必须回退到只引用原始信号的保守核验问句。
+  it("does not override an independently reviewed question because of assertion-like wording", async () => {
     const model: TrendIdeaModel = {
       id: "api-topic-editor-v1",
       generate: async () => [{
@@ -922,13 +1020,11 @@ describe("TrendOpportunityAgent", () => {
       now: () => new Date("2026-08-24T08:05:00.000Z"),
     });
     const candidates = await agent.listCandidates();
-    assert.equal(candidates.length, 1, "the high-risk idea degrades to a grounded question instead of disappearing");
-    const title = candidates[0]?.title ?? "";
-    assert.doesNotMatch(title, /已经结束/, "the fabricated premise must not survive grounding");
-    assert.doesNotMatch(candidates[0]?.rationale ?? "", /救援已经结束/);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0]?.title, "救援已经结束，为何还要持续关注？");
   });
 
-  it("rejects model ideas that add unsupported numbers, quotes, or interview claims", async () => {
+  it("does not lexically reject independently reviewed numbers, quotes, or attribution words", async () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => signals },
       model: {
@@ -950,12 +1046,12 @@ describe("TrendOpportunityAgent", () => {
 
     const candidates = await agent.listCandidates();
 
-    // 含原信号没有的数字、引语或采访假设的 idea 被拒绝，不再用机械标题顶替后绕过复核。
-    assert.deepEqual(candidates, []);
-    assert.equal(candidates.some((candidate) => candidate.providerId === "trend-heuristic-v1"), false);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0]?.title, "AI 时间管理让效率提升 90%");
+    assert.equal(candidates[0]?.providerId, "api-topic-editor-v1");
   });
 
-  it("rejects unsupported factual numbers hidden inside the visual plan", async () => {
+  it("does not re-audit a reviewed visual plan with a host-side number regex", async () => {
     const agent = new TrendOpportunityAgent({
       signals: { listSignals: async () => [signals[0]!] },
       model: {
@@ -987,10 +1083,11 @@ describe("TrendOpportunityAgent", () => {
       },
     });
 
-    assert.deepEqual(await agent.listCandidates(), []);
+    const [candidate] = await agent.listCandidates();
+    assert.match(candidate?.visualPlan?.beats[0]?.description ?? "", /20 分钟/);
   });
 
-  it("rejects unsupported acronyms and clickbait claims in model titles", async () => {
+  it("does not reject a reviewed title merely because it contains new acronyms or clickbait words", async () => {
     const sportsSignal: StudioTrendSignal = {
       id: "signal-sports",
       sourceId: "dailyhot",
@@ -1020,11 +1117,11 @@ describe("TrendOpportunityAgent", () => {
 
     const candidates = await agent.listCandidates();
 
-    // 新增英文专名与 clickbait 属于事实越界，整个 idea 被拒绝而不是被机械改写。
-    assert.deepEqual(candidates, []);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0]?.title, "2026冠军内幕：AI训练赛数据的秘密");
   });
 
-  it("never exposes model-added facts for high-risk public events", async () => {
+  it("does not replace a passing independent review with a second host-side high-risk rewrite", async () => {
     const conflictSignal: StudioTrendSignal = {
       id: "signal-conflict",
       sourceId: "dailyhot",
@@ -1067,11 +1164,9 @@ describe("TrendOpportunityAgent", () => {
 
     const [candidate] = await agent.listCandidates();
 
-    assert.equal(candidate?.title, "以军空袭叙引发美以冲突：目前有哪些信息能够被可靠来源确认？");
-    assert.doesNotMatch(candidate?.title ?? "", /伤亡数据/);
-    assert.doesNotMatch(candidate?.hook ?? "", /伤亡数据/);
-    assert.match(candidate?.rationale ?? "", /未采用模型扩写/);
-    assert.doesNotMatch(JSON.stringify(candidate?.visualPlan), /invented-casualty-chart|伤亡数字/);
+    assert.equal(candidate?.title, "以军空袭叙引发冲突，平民伤亡数据未公开");
+    assert.equal(candidate?.hook, "平民伤亡数据仍未公开。");
+    assert.match(JSON.stringify(candidate?.visualPlan), /invented-casualty-chart/);
   });
 
   it("keeps a grounded editorial question for a high-risk event instead of replacing it just for being sensitive", async () => {
@@ -1234,7 +1329,7 @@ describe("TrendOpportunityAgent", () => {
     assert.doesNotMatch(candidate?.visualProof ?? "", /…$/);
   });
 
-  it("treats a public figure death as source-grounded high-risk news", async () => {
+  it("keeps the reviewed public-figure angle instead of applying a host-side wording rewrite", async () => {
     const deathSignal: StudioTrendSignal = {
       id: "signal-public-figure-death",
       sourceId: "dailyhot",
@@ -1265,10 +1360,9 @@ describe("TrendOpportunityAgent", () => {
 
     const [candidate] = await agent.listCandidates();
 
-    assert.equal(candidate?.title, "全国政协副主席陈武逝世：目前有哪些信息已得到可靠来源确认？");
-    assert.doesNotMatch(candidate?.hook ?? "", /病危|传言/);
-    assert.doesNotMatch(candidate?.rationale ?? "", /病危|传言/);
-    assert.match(candidate?.rationale ?? "", /未采用模型扩写/);
+    assert.equal(candidate?.title, "全国政协副主席陈武逝世，网络曾传其病危");
+    assert.match(candidate?.hook ?? "", /病危/);
+    assert.match(candidate?.rationale ?? "", /病危/);
   });
 
   it("preserves an all-zero model scorecard", async () => {
@@ -1322,5 +1416,86 @@ describe("TrendOpportunityAgent", () => {
 
     assert.equal(candidate?.track, "ai-daily-life");
     assert.match(candidate?.track ?? "", /^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+  });
+
+  it("accepts a factual number found only in a cited article paragraph and persists its citation", async () => {
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => [signals[0]!] },
+      articleReader: { readMany: async () => [{
+        sourceId: "signal-ai",
+        originalUrl: "https://example.com/ai",
+        finalUrl: "https://example.com/ai",
+        pageTitle: "AI 时间实验",
+        fetchedAt: "2026-08-24T08:02:00.000Z",
+        contentSha256: "a".repeat(64),
+        extractorVersion: "readability-v1",
+        readStatus: "read",
+        paragraphs: [{ id: "p1", text: "参与者在一周实验中平均减少了 37 分钟的重复安排。" }],
+        truncated: false,
+      }] },
+      model: {
+        id: "api-topic-editor-v1",
+        generate: async () => [{
+          signalId: "signal-ai",
+          title: "AI 时间账本里的 37 分钟",
+          track: "ai-daily-life",
+          audience: "普通上班族",
+          painPoint: "重复安排消耗下班时间",
+          hook: "一周后，时间账本少了 37 分钟重复安排。",
+          rationale: "正文记录了可核对的实验结果。",
+          facts: [{ statement: "平均减少 37 分钟重复安排", sourceId: "signal-ai", paragraphIds: ["p1"] }],
+          uncertainties: ["样本规模仍需核验"],
+          visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
+          novelty: 80,
+          seriesPotential: 70,
+          monetization: 60,
+        }],
+      },
+    });
+
+    const [candidate] = await agent.listCandidates();
+
+    assert.equal(candidate?.title, "AI 时间账本里的 37 分钟");
+    assert.deepEqual(candidate?.articleFacts, [{ statement: "平均减少 37 分钟重复安排", sourceId: "signal-ai", paragraphIds: ["p1"] }]);
+    assert.deepEqual(candidate?.articleUncertainties, ["样本规模仍需核验"]);
+  });
+
+  it("rejects facts that cite a missing paragraph or a title-only source", async () => {
+    const baseIdea = {
+      signalId: "signal-ai",
+      title: "AI 时间账本的实验结论",
+      track: "ai-daily-life",
+      audience: "普通上班族",
+      painPoint: "重复安排消耗下班时间",
+      hook: "先看正文记录了什么。",
+      rationale: "结论必须可追溯。",
+      uncertainties: [],
+      visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
+      novelty: 80,
+      seriesPotential: 70,
+      monetization: 60,
+    };
+    for (const readStatus of ["read", "title_only"] as const) {
+      const agent = new TrendOpportunityAgent({
+        signals: { listSignals: async () => [signals[0]!] },
+        articleReader: { readMany: async () => [{
+          sourceId: "signal-ai",
+          originalUrl: "https://example.com/ai",
+          finalUrl: "https://example.com/ai",
+          pageTitle: "AI 时间实验",
+          fetchedAt: "2026-08-24T08:02:00.000Z",
+          ...(readStatus === "read" ? { contentSha256: "a".repeat(64) } : {}),
+          extractorVersion: "readability-v1",
+          readStatus,
+          paragraphs: readStatus === "read" ? [{ id: "p1", text: "可引用正文。" }] : [],
+          truncated: false,
+        }] },
+        model: { id: "api-topic-editor-v1", generate: async () => [{
+          ...baseIdea,
+          facts: [{ statement: "不存在的事实", sourceId: "signal-ai", paragraphIds: ["p99"] }],
+        }] },
+      });
+      assert.deepEqual(await agent.listCandidates(), []);
+    }
   });
 });

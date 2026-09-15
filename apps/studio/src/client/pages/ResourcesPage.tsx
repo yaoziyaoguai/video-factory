@@ -145,6 +145,15 @@ export function ResourcesPage() {
     return () => window.removeEventListener("hashchange", syncSection);
   }, []);
 
+  useEffect(() => {
+    const sectionId = resourceSectionFromHash(location.hash);
+    setActiveSection(sectionId);
+    if (!location.hash) return;
+    const section = document.getElementById(sectionId);
+    section?.setAttribute("tabindex", "-1");
+    section?.focus({ preventScroll: true });
+  }, [location.hash]);
+
   // 携带 hash 直达时把键盘焦点落到该分区，而不是停留在页面顶部。
   useEffect(() => {
     if (arrivalSectionRef.current === "creation-defaults") return;

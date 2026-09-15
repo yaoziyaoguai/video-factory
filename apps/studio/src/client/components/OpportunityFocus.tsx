@@ -10,9 +10,9 @@ interface OpportunityFocusProps {
 
 export function OpportunityFocus({ opportunity, onSupplementSources }: OpportunityFocusProps) {
   const sourceBlocked = opportunity.verification?.status === "blocked";
-  // 展示与开工提交共用同一个 resolved plan：已保存计划永远是规范真相。
+  // 没有已保存方案时这里只展示创作参考；NewRunDialog 不会把它悄悄提交成用户要求。
   const visualPlan = resolveOpportunityVisualPlan(opportunity);
-  const recommendedTemplate = opportunity.editorialDecision?.recommendedTemplate?.name;
+  const hasSavedVisualPlan = opportunity.visualPlan !== undefined;
   return (
     <section className="opportunity-focus" aria-labelledby="opportunity-title" data-tour="opportunity-focus">
       <header className="focus-heading">
@@ -42,7 +42,7 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
 
       <section className="visual-contact-sheet visual-plan" aria-label="镜头方向示意" data-tour="visual-direction">
           <header className="contact-sheet-heading">
-            <div><span>{recommendedTemplate ? `推荐模板 · ${recommendedTemplate}` : "镜头方向预览"}</span><h2>{sourceBlocked ? "补齐来源后的镜头方向" : "可执行镜头计划"}</h2></div>
+            <div><span>镜头方向预览</span><h2>{sourceBlocked ? "补齐来源后的镜头方向" : hasSavedVisualPlan ? "已保存的镜头方向" : "可参考的镜头方向"}</h2></div>
             <p>{visualPlan.strategy}</p>
           </header>
           <div className="visual-beat-list">
@@ -97,9 +97,19 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
             </article>
           ))}
         </div>
+        {opportunity.articleSources?.length ? <div className="candidate-score-explainer candidate-article-reading">
+          <strong>原文阅读</strong>
+          {opportunity.articleSources.map((source) => <p key={source.sourceId}>{articleReadStatusLabel(source.readStatus)} · {source.pageTitle || source.finalUrl}{source.readStatus === "failed" ? "。读取服务未能完成，不代表文章没有事实依据。" : null}</p>)}
+          {opportunity.articleFacts?.map((fact, index) => <p key={`${fact.sourceId}-${index}`}>已读事实：{fact.statement}（{fact.paragraphIds.join("、")}）</p>)}
+          {opportunity.articleUncertainties?.map((uncertainty, index) => <p key={index}>仍待核验：{uncertainty}</p>)}
+        </div> : null}
       </section>
     </section>
   );
+}
+
+function articleReadStatusLabel(status: NonNullable<StudioOpportunity["articleSources"]>[number]["readStatus"]): string {
+  return { read: "已读取正文", partial: "已读取部分正文", title_only: "仅有标题", blocked: "原文受限", failed: "原文读取失败" }[status];
 }
 
 function visualSourceLabel(source: StudioVisualSource): string {

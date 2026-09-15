@@ -110,7 +110,7 @@ function quoteAgents(): { treatmentAgents: Array<{ providerId: string; agent: Cr
         id: TREATMENT_PROVIDER_ID,
         modelId: "treatment-model-a",
         treat: async () => ({
-          version: "video-factory/creative-treatment-v1",
+          version: "video-factory/creative-treatment-v2",
           viewerPromise: "看完能记住三个要点",
           hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
           progression: [
@@ -257,6 +257,9 @@ describe("C2 production quotes and authorization commands", () => {
     assert.equal(quote.acceptedPlanDigest, draft.planDigest);
     assert.equal(quote.maximumCostCny, 15);
     assert.ok(quote.estimatedCostCny > 0, "the quote must carry the estimated media cost");
+    assert.deepEqual(quote.scopeSummary.assets[0]?.allowedModels, [
+      { providerId: "seedance-video-v1", modelId: "seedance-v1" },
+    ], "the same executable model must appear only once even when several shots use it");
 
     // 篡改 acceptedPlanDigest → 400。
     await assert.rejects(

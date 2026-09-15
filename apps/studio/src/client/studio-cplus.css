@@ -679,6 +679,31 @@ body:has(.studio-v3) {
 .studio-v3 .decision-dialog .button-primary { color: #ffffff; background: var(--action); border-color: var(--action); }
 .studio-v3 .decision-dialog .button-primary:hover:not(:disabled) { background: #0948c8; border-color: #0948c8; }
 
+/* 逐条表态：一份审片报告可能有十几条结论，列表自己滚动，标题与按钮留在视野内。 */
+.studio-v3 .review-disposition-list { display: grid; gap: 10px; max-height: 46vh; margin: 0 22px 6px; padding-right: 4px; overflow-y: auto; }
+.studio-v3 .review-disposition-guide { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.studio-v3 .review-disposition-note { margin: 0; padding: 8px 10px; border-left: 3px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.6; }
+.studio-v3 .review-disposition-item { display: grid; gap: 7px; padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-soft); }
+.studio-v3 .review-disposition-item.is-accept { border-color: #d9b45a; background: #fffaf0; }
+.studio-v3 .review-disposition-item.is-reject { border-color: #bcd3bd; background: #f6fbf6; }
+.studio-v3 .review-disposition-item > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.studio-v3 .review-disposition-item > header strong { color: var(--ink); font-size: 13px; }
+.studio-v3 .review-disposition-item > header span { color: var(--muted); font-size: 11px; font-weight: 750; }
+.studio-v3 .review-disposition-item p { margin: 0; font-size: 13px; line-height: 1.55; }
+.studio-v3 .review-disposition-item small { color: var(--muted); line-height: 1.5; }
+.studio-v3 .review-disposition-choices { display: flex; flex-wrap: wrap; gap: 7px; }
+.studio-v3 .review-disposition-choices .button[aria-pressed="true"] { color: var(--action); background: #eef3ff; border-color: var(--action); }
+.studio-v3 .review-disposition-hint { color: #8a6d1f; font-size: 12px; }
+.studio-v3 .review-disposition-blocker { margin: 0; padding: 0 22px 14px; color: #a3521f; font-size: 12px; font-weight: 750; }
+/* 判定变动：把上一轮原文和本轮结论并排摆出来，操作员不用去翻历史版本。 */
+.studio-v3 .finding-verdict-change { display: grid; gap: 5px; padding: 8px 10px; border: 1px dashed #d3b46a; border-radius: 8px; background: #fffcf2; }
+.studio-v3 .finding-verdict-change > strong { color: #8a6d1f; font-size: 11px; font-weight: 800; }
+.studio-v3 .finding-verdict-change > p { margin: 0; color: var(--muted); font-size: 12px; }
+.studio-v3 .finding-verdict-change dl { display: grid; gap: 4px; margin: 0; }
+.studio-v3 .finding-verdict-change dl > div { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 6px; }
+.studio-v3 .finding-verdict-change dt { color: var(--muted); font-size: 11px; font-weight: 800; }
+.studio-v3 .finding-verdict-change dd { margin: 0; color: var(--ink); font-size: 12px; line-height: 1.55; }
+
 .studio-v3 .production-strip {
   position: relative;
   grid-template-columns: auto minmax(0, 1fr) auto auto;

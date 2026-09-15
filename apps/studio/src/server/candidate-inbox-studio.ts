@@ -189,12 +189,6 @@ export class CandidateInboxStudio {
     if (candidate.editorialDecision.verdict === "skip") {
       throw new StudioConflictError(candidate.editorialDecision.reasons[0] ?? "这条候选当前不值得进入生产。");
     }
-    // 与客户端 isAdoptableCandidate 同口径：produce 候选必须绑定当前生产目录中的推荐模板，
-    // 避免后续默认落到目录第一个模板。
-    if ((candidate.editorialDecision.verdict === "produce_video" || candidate.editorialDecision.verdict === "produce_image_story")
-      && !candidate.editorialDecision.recommendedTemplate) {
-      throw new StudioConflictError("推荐的生产模板当前不可用，不能采用这条候选；请刷新候选或到模板目录确认。");
-    }
     if (candidate.seriesSequence?.status === "blocked") {
       throw new StudioConflictError(`请先完成第 ${candidate.seriesSequence.blockedByEpisodeNumber} 集，再推进当前单集。`);
     }
@@ -213,6 +207,9 @@ export class CandidateInboxStudio {
       painPoint: candidate.painPoint,
       hook: candidate.hook,
       evidence: candidate.evidence,
+      ...(candidate.articleSources?.length ? { articleSources: structuredClone(candidate.articleSources) } : {}),
+      ...(candidate.articleFacts?.length ? { articleFacts: structuredClone(candidate.articleFacts) } : {}),
+      ...(candidate.articleUncertainties?.length ? { articleUncertainties: [...candidate.articleUncertainties] } : {}),
       scores,
       verification: candidate.verification.status === "review_required"
         ? { ...candidate.verification, status: "verified", reasons: ["已由创作者查看原始证据并确认核验。"] }

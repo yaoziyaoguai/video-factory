@@ -1,14 +1,30 @@
 import { AlertCircle, ArrowLeft, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { StudioCostRunDetail, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioReworkDraft, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioCreativeReviewCommandInput, StudioCreativeReviewSnapshot, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioReworkDraft, StudioRunDetail, StudioNarrationRevisionInput, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { studioApi, subscribeToRun } from "../api.js";
+import { currentScriptArtifact, sceneNarrationText } from "../scene-narration.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 import { RunWorkbench } from "../components/RunWorkbench.js";
+import { CreativeDiscussionPanel } from "../components/CreativeDiscussionPanel.js";
 import { MultiPlatformPublishDialog } from "../components/MultiPlatformPublishDialog.js";
 
 export function preferRunSnapshot(current: StudioRunDetail | undefined, next: StudioRunDetail): StudioRunDetail {
-  return !current || next.revision >= current.revision ? next : current;
+  if (!current || next.revision > current.revision) return next;
+  if (next.revision < current.revision) return current;
+  // SSE 是轻量状态通知；同 revision 下不能用它抹掉 GET 详情里才有的规划与恢复证据。
+  return {
+    ...next,
+    ...(next.planningStages === undefined && current.planningStages !== undefined
+      ? { planningStages: current.planningStages }
+      : {}),
+    ...(next.taskRecovery === undefined && current.taskRecovery !== undefined
+      ? { taskRecovery: current.taskRecovery }
+      : {}),
+    ...(next.productionPlanDigest === undefined && current.productionPlanDigest !== undefined
+      ? { productionPlanDigest: current.productionPlanDigest }
+      : {}),
+  };
 }
 
 export function RunPage() {
@@ -32,6 +48,21 @@ export function RunPage() {
   const [pausePending, setPausePending] = useState(false);
   const [paidNodeSummary, setPaidNodeSummary] = useState<StudioPaidNodeSummary>();
   const [paidOperationError, setPaidOperationError] = useState<string>();
+  const [creativeReview, setCreativeReview] = useState<StudioCreativeReviewSnapshot>();
+  const [creativeCommandPending, setCreativeCommandPending] = useState(false);
+  const creativeReviewRequest = useRef(0);
+  const authoritativeRunRequest = useRef(0);
+  const currentRunId = useRef(runId);
+  currentRunId.current = runId;
+  useEffect(() => {
+    currentRunId.current = runId;
+    setCreativeCommandPending(false);
+    return () => {
+      currentRunId.current = "";
+      creativeReviewRequest.current += 1;
+      authoritativeRunRequest.current += 1;
+    };
+  }, [runId]);
   const costRefreshTimer = useRef<number | undefined>(undefined);
   const snapshotRefreshPending = useRef(false);
   const paidSummaryRequest = useRef(0);
@@ -70,18 +101,31 @@ export function RunPage() {
     }
   }, [runId]);
 
-  const refreshRunSnapshot = useCallback(async () => {
+  const refreshRunSnapshot = useCallback(async (surfaceError = false) => {
     if (snapshotRefreshPending.current) return;
     snapshotRefreshPending.current = true;
+    const requestId = ++authoritativeRunRequest.current;
     try {
       const nextRun = await studioApi.run(runId);
+      if (currentRunId.current !== runId || requestId !== authoritativeRunRequest.current) return;
       setRun((current) => preferRunSnapshot(current, nextRun));
-    } catch {
-      // SSE 的断线提示负责告知连接问题；心跳补偿读取不重复制造错误横幅。
+    } catch (caught) {
+      // 心跳补偿仍保持安静；终态事件关闭 SSE 后若权威详情读取失败，必须让用户知道可以重读，
+      // 不能继续展示可能缺少诊断的轻量事件快照。
+      if (surfaceError && currentRunId.current === runId) {
+        setError(`最终状态详情读取失败：${caught instanceof Error ? caught.message : String(caught)}。请刷新页面重读，不会重新执行模型或付费任务。`);
+      }
     } finally {
       snapshotRefreshPending.current = false;
     }
   }, [runId]);
+
+  useEffect(() => {
+    if (!run || !isTerminal(run.status)) return;
+    // 终态事件会关闭 SSE；关闭前立即补读一次权威详情，避免诊断只在手动刷新后出现。
+    void refreshRunSnapshot(true);
+    void refreshCosts();
+  }, [runId, isTerminal(run?.status), refreshRunSnapshot, refreshCosts]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -105,6 +149,21 @@ export function RunPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (run?.activeIntervention?.kind !== "creative_review") {
+      setCreativeReview(undefined);
+      return;
+    }
+    let active = true;
+    const requestId = ++creativeReviewRequest.current;
+    void studioApi.creativeReview(runId).then((snapshot) => {
+      if (active && requestId === creativeReviewRequest.current) setCreativeReview(snapshot);
+    }).catch((caught) => {
+      if (active) setError(`创作方案读取失败：${caught instanceof Error ? caught.message : String(caught)}`);
+    });
+    return () => { active = false; };
+  }, [runId, run]);
 
   useEffect(() => {
     void refreshPaidNode(uncertainPaidNodeId);
@@ -153,6 +212,44 @@ export function RunPage() {
     }
   }
 
+  async function commandCreativeReview(input: StudioCreativeReviewCommandInput) {
+    setCreativeCommandPending(true);
+    setError(undefined);
+    try {
+      // POST 响应丢失也只观察同一 commandId；不把受理当成完成，不另造请求身份。
+      try { await studioApi.commandCreativeReview(runId, input); } catch (submitError) {
+        try { await studioApi.creativeReviewCommand(runId, input.commandId); } catch { throw submitError; }
+      }
+      const observe = async () => {
+        for (let attempt = 0; attempt < 900; attempt += 1) {
+          if (currentRunId.current !== runId) throw new Error("已离开原作品；操作仍保留在原作品中，请返回查询。");
+          const operation = await studioApi.creativeReviewCommand(runId, input.commandId);
+          if (operation.status === "running" || operation.status === "unknown") {
+            await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+            continue;
+          }
+          const requestId = ++creativeReviewRequest.current;
+          const nextRun = await studioApi.run(runId);
+          const review = nextRun.activeIntervention?.kind === "creative_review"
+            ? await studioApi.creativeReview(runId) : undefined;
+          if (currentRunId.current !== runId) throw new Error("已离开原作品；请返回查看操作结果。");
+          if (requestId === creativeReviewRequest.current) setCreativeReview(review);
+          setRun((current) => preferRunSnapshot(current, nextRun));
+          if (operation.status === "failed") {
+            throw Object.assign(new Error("这次创作操作未成功，当前稿已保留。请查看失败原因和恢复选项；不会自动重复生成。"), { commandCompleted: true });
+          }
+          return;
+        }
+        throw new Error("原创作任务仍在处理。请稍后查询，不要重复生成。");
+      };
+      await observe();
+    } catch (caught) {
+      throw caught;
+    } finally {
+      if (currentRunId.current === runId) setCreativeCommandPending(false);
+    }
+  }
+
   async function requestSceneRevision(input: StudioSceneRevisionInput) {
     setDecisionPending(true);
     setError(undefined);
@@ -165,6 +262,27 @@ export function RunPage() {
     } finally {
       setDecisionPending(false);
     }
+  }
+
+  async function requestNarrationRevision(input: StudioNarrationRevisionInput) {
+    setDecisionPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await withMutationProgress(() => studioApi.requestNarrationRevision(runId, input));
+      setRun((current) => preferRunSnapshot(current, nextRun));
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setDecisionPending(false);
+    }
+  }
+
+  async function loadSceneNarration(scenePosition: number): Promise<string> {
+    // 脚本是旁白与字幕共同的来源。按当前有效版本取交付，改的才是屏幕上正在放的那一版。
+    const artifact = run ? currentScriptArtifact(run) : undefined;
+    if (!artifact?.contentUrl) throw new Error("当前制作没有可读的脚本交付，取不到这一镜的原文。");
+    return sceneNarrationText(await studioApi.resourceJson(artifact.contentUrl), scenePosition);
   }
 
   async function reinspectVisualReview(input: StudioVisualReinspectionInput) {
@@ -438,7 +556,8 @@ export function RunPage() {
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
       {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
       {paidOperationError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{paidOperationError}</div> : null}
-      <RunWorkbench run={run} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onQueryOriginalTextTask={queryOriginalTextTask} onRetrieveOriginalTextTask={retrieveOriginalTextTask} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
+      {creativeReview ? <CreativeDiscussionPanel review={creativeReview} busy={creativeCommandPending || creativeReview.phase === "checking"} onCommand={commandCreativeReview} /> : null}
+      <RunWorkbench run={run} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onRequestNarrationRevision={requestNarrationRevision} onLoadSceneNarration={loadSceneNarration} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onQueryOriginalTextTask={queryOriginalTextTask} onRetrieveOriginalTextTask={retrieveOriginalTextTask} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
       <NewRunDialog
         open={restarting}

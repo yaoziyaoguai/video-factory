@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { TopicCandidate } from "@video-factory/workflow-core";
-import type { StudioCandidateOrigin, StudioCandidateVerification, StudioEditorialDecision, StudioTopicCategory, StudioVisualPlan } from "../shared/api.js";
+import type { ProductionArticleSourceSnapshot } from "@video-factory/production-pipeline";
+import type { StudioArticleFact, StudioCandidateOrigin, StudioCandidateVerification, StudioEditorialDecision, StudioTopicCategory, StudioVisualPlan } from "../shared/api.js";
 
 export interface OpportunityRecord {
   title: string;
@@ -22,6 +23,9 @@ export interface OpportunityRecord {
   editorialDecision?: StudioEditorialDecision;
   visualProof?: string;
   visualPlan?: StudioVisualPlan;
+  articleSources?: ProductionArticleSourceSnapshot[];
+  articleFacts?: StudioArticleFact[];
+  articleUncertainties?: string[];
 }
 
 export interface StudioOpportunityRepository {

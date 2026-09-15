@@ -9,7 +9,7 @@
     "dev:client": "vite --host 127.0.0.1",
     "dev:server": "STUDIO_DEV=1 tsx watch src/server/main.ts",
     "start": "node dist/server/server/main.js",
-    "test": "vitest run && node --import tsx --test test/api-contract.test.ts test/auth.test.ts test/candidate-inbox.test.ts test/codex-provider-settings.test.ts test/cost-studio.test.ts test/creator-settings-store.test.ts test/editorial-decision.test.ts test/local-capabilities.test.ts test/opportunity-store.test.ts test/production-authorization-api.test.ts test/production-joint-rework.test.ts test/production-planning-editing.test.ts test/production-planning-stages.test.ts test/production-worker.test.ts test/publishing-studio.test.ts test/reference-video-store.test.ts test/resource-governance-studio.test.ts test/review-media-preprocessor.test.ts test/role-agent-assembly.test.ts test/series-planner.test.ts test/series-planning-agent.test.ts test/series-store.test.ts test/server.test.ts test/studio-service.test.ts test/template-catalog.test.ts test/template-store.test.ts test/text-task-production-recovery.test.ts test/text-task-recovery-receipt.cross.test.ts test/topic-taxonomy.test.ts test/trend-gateway.test.ts test/trend-opportunity-agent.test.ts test/trend-studio.test.ts test/visual-plan.test.ts",
+    "test": "vitest run && node --import tsx --test test/api-contract.test.ts test/auth.test.ts test/candidate-inbox.test.ts test/codex-provider-settings.test.ts test/cost-studio.test.ts test/creator-settings-store.test.ts test/editorial-decision.test.ts test/local-capabilities.test.ts test/opportunity-store.test.ts test/production-authorization-api.test.ts test/production-joint-rework.test.ts test/production-planning-editing.test.ts test/production-planning-stages.test.ts test/production-worker.test.ts test/publishing-studio.test.ts test/reference-video-store.test.ts test/resource-governance-studio.test.ts test/review-media-preprocessor.test.ts test/role-agent-assembly.test.ts test/series-planner.test.ts test/series-planning-agent.test.ts test/series-store.test.ts test/server.test.ts test/studio-service.test.ts test/template-catalog.test.ts test/template-store.test.ts test/text-task-production-recovery.test.ts test/text-task-recovery-receipt.cross.test.ts test/topic-taxonomy.test.ts test/trend-article-reader.test.ts test/trend-gateway.test.ts test/trend-opportunity-agent.test.ts test/trend-studio.test.ts test/visual-plan.test.ts",
     "typecheck": "tsc -p tsconfig.server.json && tsc -p tsconfig.client.json"
   },
   "dependencies": {
@@ -17,11 +17,13 @@
     "@fontsource-variable/manrope": "^5.3.0",
     "@fontsource-variable/noto-sans-sc": "^5.3.0",
     "@fontsource-variable/noto-serif-sc": "^5.3.0",
+    "@mozilla/readability": "^0.6.0",
     "@video-factory/production-pipeline": "0.1.0",
     "@video-factory/template-core": "0.1.0",
     "@video-factory/workflow-core": "0.1.0",
     "driver.js": "^1.8.0",
     "fastify": "^5.12.1",
+    "jsdom": "^29.1.1",
     "lucide-react": "^1.33.0",
     "proper-lockfile": "^4.1.2",
     "react": "^19.2.8",
@@ -32,12 +34,12 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.5",
+    "@types/jsdom": "^21.1.7",
     "@types/proper-lockfile": "^4.1.4",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.1.4",
     "concurrently": "^10.0.5",
-    "jsdom": "^29.0.0",
     "vite": "^8.2.2",
     "vitest": "^4.1.11"
   }

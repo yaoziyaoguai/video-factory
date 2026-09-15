@@ -61,6 +61,9 @@ export function VoiceStudio({
     && preset.pauseScale === direction.pauseScale
     && preset.masteringPreset === direction.masteringPreset);
   const selectedOutsideFilter = filter !== "recommended" && selected && !voiceMatchesFilter(selected, filter);
+  const pauseSupported = selected?.engine !== "kokoro";
+  const rateLabel = selected?.engine === "minimax" ? "相对语速" : "语速";
+  const rateValue = selected?.engine === "minimax" ? `档位 ${direction.rate}` : `${direction.rate} 字/分`;
 
   useEffect(() => setDirection(value), [value]);
   useEffect(() => {
@@ -81,7 +84,7 @@ export function VoiceStudio({
     if (loading) return;
     const selectionAvailable = voices.some((voice) => voice.id === direction.profileId);
     onSelectionAvailabilityChange?.(selectionAvailable);
-    if (!selectionAvailable && voices[0] && !preserveUnavailableSelection) {
+    if (!direction.profileId && voices[0] && !preserveUnavailableSelection) {
       const compatibleVoice = selectedPreset?.preferredProfileIds
         .map((profileId) => voices.find((voice) => voice.id === profileId))
         .find((voice) => voice !== undefined) ?? voices[0];
@@ -90,10 +93,16 @@ export function VoiceStudio({
   }, [direction.profileId, loading, preserveUnavailableSelection, selectedPreset, voices]);
 
   function update(next: StudioVoiceDirection, profile = voices.find((voice) => voice.id === next.profileId), userInitiated = true) {
+    if (!profile) {
+      setError("当前演员不可用，请先选择一个可用演员；原声音配置尚未更改。");
+      onSelectionAvailabilityChange?.(false);
+      return;
+    }
+    setError(undefined);
     if (userInitiated) onUserChange?.();
     setDirection(next);
     onSelectionAvailabilityChange?.(Boolean(profile));
-    onChange(next, profile?.providerId ?? "macos-say-v1");
+    onChange(next, profile.providerId);
   }
 
   async function preview(profile: StudioVoiceProfile) {
@@ -172,31 +181,32 @@ export function VoiceStudio({
 
           <div className="voice-direction">
             <div className="voice-preset-picker" aria-label="内容声音方案">
-              <header><strong>内容声音方案</strong><small>已按常见短视频内容校准语速、停顿与响度</small></header>
+              <header><strong>内容声音方案</strong><small>节奏建议，可调整；不会更换已选演员</small></header>
               <div>{VOICE_PRESETS.map((preset) => <button
                 key={preset.id}
                 type="button"
                 aria-pressed={selectedPreset?.id === preset.id}
                 onClick={() => {
-                  const recommendedVoice = preset.preferredProfileIds
-                    .map((profileId) => voices.find((voice) => voice.id === profileId))
-                    .find((voice) => voice !== undefined) ?? selected;
                   update({
                     ...direction,
-                    profileId: recommendedVoice?.id ?? direction.profileId,
                     rate: preset.rate,
                     pauseScale: preset.pauseScale,
                     masteringPreset: preset.masteringPreset,
-                  }, recommendedVoice);
+                  }, selected);
                 }}
               ><strong>{preset.label}</strong><small>{preset.description}</small></button>)}</div>
             </div>
             <button className="voice-advanced-toggle" type="button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((current) => !current)}>
-              <span>高级微调</span><small>{direction.rate} 字/分 · 停顿 {direction.pauseScale.toFixed(1)}× · {masteringPresetLabel(direction.masteringPreset)}</small><ChevronDown aria-hidden="true" size={16} />
+              <span>高级微调</span><small>{rateValue} · {pauseSupported ? `停顿 ${direction.pauseScale.toFixed(1)}×` : "当前音色不执行停顿微调"} · {masteringPresetLabel(direction.masteringPreset)}</small><ChevronDown aria-hidden="true" size={16} />
             </button>
+            {selected ? <p className="voice-filter-note">
+              当前演员：{selected.label} · {selected.providerId} · {selected.engine === "macos" ? "本机配音，无服务调用费" : selected.engine === "minimax" ? "MiniMax 服务，按量自动执行并记账" : "已配置配音服务，费用以服务配置为准"}。
+              {selected.engine === "minimax" ? "语速为相对档位，不保证精准字/分。" : null}
+              {pauseSupported ? "停顿设置参与配音。" : "当前演员不执行停顿微调。"}声音质感由本地后处理执行。
+            </p> : null}
             {advancedOpen ? <div className="voice-advanced-controls">
             <div className="voice-slider">
-              <span><strong>语速</strong><output>{direction.rate} 字/分</output></span>
+              <span><strong>{rateLabel}</strong><output>{rateValue}</output></span>
               <div className="voice-slider-control">
                 <button type="button" aria-label="降低语速" disabled={direction.rate <= 120} onClick={() => update({ ...direction, rate: Math.max(120, direction.rate - 5) }, selected)}><Minus aria-hidden="true" size={14} /></button>
                 <input aria-label="语速" type="range" min="120" max="260" step="5" value={direction.rate} onChange={(event) => update({ ...direction, rate: Number(event.target.value) }, selected)} />
@@ -204,12 +214,13 @@ export function VoiceStudio({
               </div>
             </div>
             <div className="voice-slider">
-              <span><strong>停顿</strong><output>{direction.pauseScale.toFixed(1)}×</output></span>
+              <span><strong>停顿</strong><output>{pauseSupported ? `${direction.pauseScale.toFixed(1)}×` : "当前未执行"}</output></span>
               <div className="voice-slider-control">
-                <button type="button" aria-label="减少停顿" disabled={direction.pauseScale <= 0.5} onClick={() => update({ ...direction, pauseScale: Math.max(0.5, Number((direction.pauseScale - 0.1).toFixed(1))) }, selected)}><Minus aria-hidden="true" size={14} /></button>
-                <input aria-label="停顿" type="range" min="0.5" max="2" step="0.1" value={direction.pauseScale} onChange={(event) => update({ ...direction, pauseScale: Number(event.target.value) }, selected)} />
-                <button type="button" aria-label="增加停顿" disabled={direction.pauseScale >= 2} onClick={() => update({ ...direction, pauseScale: Math.min(2, Number((direction.pauseScale + 0.1).toFixed(1))) }, selected)}><Plus aria-hidden="true" size={14} /></button>
+                <button type="button" aria-label="减少停顿" disabled={!pauseSupported || direction.pauseScale <= 0.5} onClick={() => update({ ...direction, pauseScale: Math.max(0.5, Number((direction.pauseScale - 0.1).toFixed(1))) }, selected)}><Minus aria-hidden="true" size={14} /></button>
+                <input aria-label="停顿" aria-describedby={!pauseSupported ? "voice-pause-support-note" : undefined} disabled={!pauseSupported} type="range" min="0.5" max="2" step="0.1" value={direction.pauseScale} onChange={(event) => update({ ...direction, pauseScale: Number(event.target.value) }, selected)} />
+                <button type="button" aria-label="增加停顿" disabled={!pauseSupported || direction.pauseScale >= 2} onClick={() => update({ ...direction, pauseScale: Math.min(2, Number((direction.pauseScale + 0.1).toFixed(1))) }, selected)}><Plus aria-hidden="true" size={14} /></button>
               </div>
+              {!pauseSupported ? <small id="voice-pause-support-note">Kokoro 当前不会执行停顿强度设置；数值会保留，切换到支持的声音后再生效。</small> : null}
             </div>
             <fieldset className="segmented-control mastering-control">
               <legend>声音质感</legend>

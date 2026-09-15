@@ -194,6 +194,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     startRun: async () => ({ runId: "run-2", status: "running" }),
     decide: async (_runId, input) => runDetail(input.action === "approve" ? "succeeded" : "rejected"),
     requestSceneRevision: async () => runDetail("needs_human"),
+    requestNarrationRevision: async () => runDetail("needs_human"),
     applyNodeOverride: async () => runDetail("stale"),
     applyNodeInputOverride: async () => runDetail("stale"),
     applyNodeExecutionConfiguration: async () => runDetail("stale"),
@@ -1372,7 +1373,11 @@ describe("Studio API", () => {
       payload: {
         title: "第二条视频",
         durationRange: { minSeconds: 20, maxSeconds: 34 },
-        workflowFeatures: { executablePlan: true },
+        workflowFeatures: {
+          executablePlan: true,
+          creativePlanning: "joint-v1",
+          creativeReview: "user-confirmed-v1",
+        },
         director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
       },
     });
@@ -1592,6 +1597,47 @@ describe("Studio API", () => {
       reuseFromScenePosition: 1,
       note: "第二镜复用第一镜母片。",
     });
+    await app.close();
+  });
+
+  it("accepts a single-scene narration revision request and rejects one that is not a single line", async () => {
+    let received: unknown;
+    const app = buildStudioApp({ service: fakeService({
+      requestNarrationRevision: async (_runId, input) => {
+        received = input;
+        return runDetail("needs_human");
+      },
+    }) });
+
+    const accepted = await app.inject({
+      method: "POST",
+      url: "/api/runs/run-1/narration-revisions",
+      payload: {
+        expectedRunRevision: 3,
+        scenePosition: 2,
+        narration: "改过的第二幕",
+        note: "第二幕口播改得更直白。",
+      },
+    });
+    assert.equal(accepted.statusCode, 200);
+    assert.deepEqual(received, {
+      expectedRunRevision: 3,
+      scenePosition: 2,
+      narration: "改过的第二幕",
+      note: "第二幕口播改得更直白。",
+    });
+
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/api/runs/run-1/narration-revisions",
+      payload: {
+        expectedRunRevision: 3,
+        scenePosition: 2,
+        narration: "第一行\n第二行",
+        note: "旁白只能是一行。",
+      },
+    });
+    assert.equal(rejected.statusCode, 400);
     await app.close();
   });
 

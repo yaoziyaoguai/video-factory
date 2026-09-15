@@ -512,6 +512,10 @@ a { color: inherit; }
 .scene-revision-finding small { color: #786b50; line-height: 1.5; }
 .scene-finding-seek { justify-self: start; padding: 0; border: 0; background: transparent; color: #6e5521; font-weight: 750; cursor: pointer; }
 .scene-revision-controls { display: grid; gap: 8px; }
+.scene-narration-open { justify-self: start; padding: 0; border: 0; background: transparent; color: #6e5521; font-size: 12px; font-weight: 750; text-decoration: underline; cursor: pointer; }
+.scene-narration-cost { margin: 0; padding: 7px 9px; border-left: 3px solid #dfcf9b; background: rgb(255 255 255 / 55%); color: #786b50; font-size: 12px; line-height: 1.6; }
+.scene-narration-error { margin: 0; color: #8d2f27; font-size: 12px; line-height: 1.5; }
+.scene-narration-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .decision-override-field { padding: 0 22px 18px; }
 .decision-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
 .run-state-panel { border-bottom: 1px solid var(--line); }

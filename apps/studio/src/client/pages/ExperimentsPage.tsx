@@ -15,6 +15,7 @@ export function ExperimentsPage() {
   const [costLoading, setCostLoading] = useState(false);
   const [templates, setTemplates] = useState<StudioTemplateExperimentScorecard[]>([]);
   const [templateError, setTemplateError] = useState<string>();
+  const historicalTemplates = templates.filter((template) => template.sampleSize > 0);
   const load = useCallback(async () => {
     setLoading(true);
     setError(undefined);
@@ -73,7 +74,7 @@ export function ExperimentsPage() {
 
   return (
     <main className="page experiments-page">
-      <header className="page-header"><div><p className="eyebrow">内容学习</p><h1>制作复盘</h1><p className="page-summary">先看哪些模板更容易过审、哪里反复返工，再决定下一条怎么改。平台数据接入后，再用完播、互动和涨粉判断爆款表现。</p></div></header>
+      <header className="page-header"><div><p className="eyebrow">内容学习</p><h1>制作复盘</h1><p className="page-summary">先看作品的终审结果、返工原因与制作阻塞，再决定下一条怎么改。平台数据接入后，再用完播、互动和涨粉判断传播表现。</p></div></header>
       {loading ? <div className="region-loading">正在读取制作记录...</div> : error ? (
         <div className="page-error" role="alert"><AlertCircle aria-hidden="true" size={18} /><span><strong>制作统计未知</strong>{error}</span><button className="icon-button" type="button" onClick={() => void load()} title="重试"><RefreshCw aria-hidden="true" size={17} /></button></div>
       ) : <><section className="metric-strip experiment-metric-strip" aria-label="制作统计" data-tour="experiment-metrics">
@@ -85,14 +86,15 @@ export function ExperimentsPage() {
       <section className="learning-focus" aria-labelledby="learning-focus-title">
         <header className="section-heading"><div><p className="eyebrow">下一轮行动</p><h2 id="learning-focus-title">这一轮最该改什么</h2></div><span>来自真实制作记录</span></header>
         <div className="learning-focus-grid">
-          <article><strong>{stats.rejected ? `${stats.rejected} 条成片被打回` : "先积累终审样本"}</strong><p>{stats.rejected ? "返工时沿用可用母片，只重做审片明确指出的镜头，并检查建议是否真正进入脚本、导演和画面节点。" : "完成终审后，系统才能比较通过率、返工次数和模板表现。"}</p></article>
-          <article><strong>{bottleneck ? `${runNodeLabel(bottleneck[0])}出现 ${bottleneck[1]} 次问题` : "当前没有集中故障步骤"}</strong><p>{bottleneck ? "先解决重复出现的制作阻塞，再扩大选题和模板实验，避免把技术失败误当作内容失败。" : "继续用不同模板完成小样本，优先比较钩子兑现、视觉连续性和终审结果。"}</p></article>
+          <article><strong>{stats.rejected ? `${stats.rejected} 条成片被打回` : "先积累终审样本"}</strong><p>{stats.rejected ? "返工时沿用可用母片，只重做审片明确指出的镜头，并检查建议是否真正进入脚本、导演和画面节点。" : "完成终审后，才有依据比较作品通过情况与具体返工原因。"}</p></article>
+          <article><strong>{bottleneck ? `${runNodeLabel(bottleneck[0])}出现 ${bottleneck[1]} 次问题` : "当前没有集中故障步骤"}</strong><p>{bottleneck ? "先解决重复出现的制作阻塞，避免把技术失败误当作内容失败。" : "先完成作品并审片，关注开头承诺是否兑现、视觉连续性与观众能否看懂；无样本不推断效果。"}</p></article>
         </div>
       </section>
-      <section className="template-learning" aria-labelledby="template-learning-title">
-        <header className="section-heading"><div><p className="eyebrow">模板表现</p><h2 id="template-learning-title">哪种讲法更容易过审</h2></div><Link to="/templates">调整模板</Link></header>
+      {historicalTemplates.length > 0 || templateError ? <details className="template-learning" aria-labelledby="template-learning-title">
+        <summary id="template-learning-title">历史模板记录（暂停用于新制作）</summary>
+        <Link to="/templates">查看模板资料</Link>
         {templateError ? <p className="learning-inline-error">模板表现读取失败：{templateError}</p> : <div className="template-learning-grid">
-          {templates.length ? templates.map((template) => <article key={template.templateId}>
+          {historicalTemplates.map((template) => <article key={template.templateId}>
             <header><strong>{template.templateName}</strong><span>{template.sampleSize} 条样本</span></header>
             <dl>
               <div><dt>终审通过</dt><dd>{percentLabel(template.metrics.finalApprovalRate)}</dd></div>
@@ -100,9 +102,9 @@ export function ExperimentsPage() {
               <div><dt>成片完成率</dt><dd>{percentLabel(template.metrics.narrativeCompleteness)}</dd></div>
               <div><dt>人工修订</dt><dd>{template.metrics.manualEditCount} 次</dd></div>
             </dl>
-          </article>) : <p className="learning-empty">还没有可比较的模板样本。完成第一条成片后，这里会开始累计真实结果。</p>}
+          </article>)}
         </div>}
-      </section>
+      </details> : null}
       <section className="recent-learning-runs" aria-labelledby="recent-learning-title">
         <header className="section-heading"><div><p className="eyebrow">最近结果</p><h2 id="recent-learning-title">从具体作品继续改</h2></div><Link to="/projects">查看全部</Link></header>
         <div>{recentLearningRuns.length ? recentLearningRuns.map((run) => <Link to={`/projects/${run.id}`} key={run.id}><span><strong>{run.title}</strong><small>{runNodeLabel(run.currentNodeId)} · {new Date(run.finishedAt ?? run.startedAt).toLocaleDateString("zh-CN")}</small></span><b>{runOutcomeLabel(run)}</b></Link>) : <p>还没有可以复盘的制作结果。</p>}</div>
@@ -111,7 +113,7 @@ export function ExperimentsPage() {
         <span><BarChart3 aria-hidden="true" size={24} /></span>
         <p className="eyebrow">平台结果连接器</p>
         <h2 id="analytics-empty-title">还不能判断是否成为爆款</h2>
-        <p>播放、完播、互动和涨粉尚未接入，所以这里不会编造“爆款分”。当前先用过审、返工和模板质量改进制作，平台导出或授权连接器接入后再补齐传播表现。</p>
+        <p>播放、完播、互动和涨粉尚未接入，所以这里不会编造“爆款分”。当前根据终审和具体返工意见改进内容，制作故障另行处理；终审通过不等于已经成为爆款。</p>
       </section>
       <details className="secondary-cost-details" onToggle={(event) => {
         if (event.currentTarget.open && !costs && !costLoading) void loadCosts();

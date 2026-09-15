@@ -15,7 +15,6 @@ import type {
   StudioSeriesEpisodePlanInput,
 } from "../../shared/api.js";
 import { studioApi } from "../api.js";
-import { resolveOpportunityVisualPlan } from "../../shared/visual-plan.js";
 import { DirectorPanel } from "../components/DirectorPanel.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 import { OpportunityDialog } from "../components/OpportunityDialog.js";
@@ -25,7 +24,7 @@ import { ProductionStrip } from "../components/ProductionStrip.js";
 import { SeriesDialog } from "../components/SeriesDialog.js";
 import { SourceSupplementDialog } from "../components/SourceSupplementDialog.js";
 import { TopicEntryWorkspace } from "../components/TopicEntryWorkspace.js";
-import { opportunityProductionBlockReason, candidateTemplateUnavailable } from "../presentation.js";
+import { opportunityProductionBlockReason } from "../presentation.js";
 
 export function TodayPage() {
   const navigate = useNavigate();
@@ -557,17 +556,13 @@ export function TodayPage() {
           : selected.platform,
         durationSeconds: creatorSettings?.productionDefaults.durationSeconds ?? 24,
         ...(selected.visualProof ? { visualProof: selected.visualProof } : {}),
-        // 开工 payload 与预览共用同一个 resolved plan：缺失计划时预览 fallback 也进入提交。
-        visualPlan: resolveOpportunityVisualPlan(selected),
+        ...(selected.visualPlan ? { visualPlan: selected.visualPlan } : {}),
         ...(selected.editorialDecision?.verdict !== "skip" && selected.editorialDecision ? {
           editorial: {
             verdict: selected.editorialDecision.verdict,
             reasons: selected.editorialDecision.reasons,
             guardrails: selected.editorialDecision.guardrails,
           },
-          ...(selected.editorialDecision.recommendedTemplate ? {
-            template: { templateId: selected.editorialDecision.recommendedTemplate.id },
-          } : {}),
         } : {}),
         creationContext: {
           origin: selected.origin === "trend" || selected.origin === "series" ? selected.origin : "manual",
@@ -610,8 +605,7 @@ function isProductionPlatform(platform: string): boolean {
 function isAdoptableCandidate(candidate: StudioCandidateInboxItem): boolean {
   return candidate.editorialDecision.verdict !== "skip"
     && candidate.verification.status !== "blocked"
-    && candidate.seriesSequence?.status !== "blocked"
-    && !candidateTemplateUnavailable(candidate);
+    && candidate.seriesSequence?.status !== "blocked";
 }
 
 function isPendingProduction(

@@ -16,17 +16,14 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { defaultStudioDurationRange, type StudioCreatorSettings, type StudioProductionInput, type StudioProvider, type StudioReferenceVideo, type StudioReworkDraft, type StudioReworkFinding, type StudioTemplate } from "../../shared/api.js";
+import { defaultStudioDurationRange, DEFAULT_STUDIO_VOICE_DIRECTION, type StudioCreatorSettings, type StudioProductionInput, type StudioProvider, type StudioReferenceVideo, type StudioReworkDraft, type StudioReworkFinding } from "../../shared/api.js";
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
-import { applyTemplateVoiceRecommendation } from "../../shared/template-voice-recommendation.js";
-import { planVisualDirection, recommendTemplateForBrief, resolveExecutableVisualPlan } from "../../shared/visual-plan.js";
 import { visualSourceCompatibilityIssue } from "../../shared/visual-source-compatibility.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { VoiceStudio } from "./VoiceStudio.js";
 import { studioApi } from "../api.js";
 import { creatorFacingTechnicalText, providerLabel } from "../presentation.js";
-import { TemplateGallery } from "../templates/TemplateGallery.js";
 
 interface NewRunDialogProps {
   open: boolean;
@@ -130,6 +127,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     initialValues?.durationRange ?? defaultStudioDurationRange(initialValues?.durationSeconds ?? 24)
   ));
   const durationRangeTouched = useRef(false);
+  const visualIntentTouched = useRef(false);
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([]);
   const [modelSelections, setModelSelections] = useState<Record<string, string>>({});
   const [voiceDirection, setVoiceDirection] = useState<StudioProductionInput["voiceDirection"]>(() => defaultVoiceDirection(providers));
@@ -137,9 +135,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [semanticRankEnabled, setSemanticRankEnabled] = useState(true);
   const [referenceVideo, setReferenceVideo] = useState<ReferenceVideoSelection>();
   const releasedReferenceId = useRef<string | undefined>(undefined);
-  const voiceTouched = useRef(false);
-  const templateTouched = useRef(false);
-  const templateAddedEditorialSource = useRef(false);
   const formScrollRef = useRef<HTMLDivElement>(null);
   const assetSourcePoolRef = useRef<HTMLElement>(null);
   const scrollToAssetSourcesOnOpen = useRef(false);
@@ -153,30 +148,18 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   }));
   const [visualBriefValues, setVisualBriefValues] = useState(() => ({
     visualProof: initialValues?.visualProof ?? "",
-    strategy: initialValues?.visualPlan?.strategy ?? "",
+    strategy: initialValues?.visualIntent ?? "",
   }));
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [inheritedSettingsOpen, setInheritedSettingsOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
-  const [templates, setTemplates] = useState<StudioTemplate[]>([]);
-  const [templatesLoaded, setTemplatesLoaded] = useState(false);
-  const [templateLoading, setTemplateLoading] = useState(false);
-  const [selectedTemplateId, setSelectedTemplateId] = useState(
-    initialValues?.template?.templateId
-      ?? (initialValues?.editorial?.verdict === "produce_image_story"
-        ? "photo-story"
-        : initialValues?.editorial ? "" : recommendTemplateForBrief({ title: initialValues?.title ?? "", hook: initialValues?.angle ?? "" })),
-  );
-  const [templateReplacementConfirmed, setTemplateReplacementConfirmed] = useState(false);
-  const [templateError, setTemplateError] = useState<string>();
   const [voiceSelectionAvailable, setVoiceSelectionAvailable] = useState<boolean>();
   const [rework, setRework] = useState<StudioProductionInput["rework"]>(() => creatorFacingRework(
     initialValues?.rework,
     requiredAffectedScenePositions,
   ));
   const initializedForOpen = useRef(false);
-  const initializationRevision = useRef(0);
   const dialogRef = useDialogFocus<HTMLElement>(open, onClose, submitting);
   const activeCapability = CAPABILITIES.find((item) => item.key === activeKey) ?? CAPABILITIES[1]!;
   const groupedReworkFindings = useMemo(() => groupReworkFindingsByScene(rework?.findings), [rework?.findings]);
@@ -198,16 +181,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const selectedAssetSources = assetSources.filter((provider) => assetProviderIds.includes(provider.id));
   const selectedMeteredSources = selectedAssetSources.filter((provider) => provider.billing === "metered");
   const selectedRecipe = RECIPES.find((recipe) => recipe.id === recipeId) ?? RECIPES[0]!;
-  const selectedTemplate = templates.find((template) => template.id === selectedTemplateId);
-  const visualSourceIssue = visualSourceCompatibilityIssue(selectedTemplate, selectedAssetSources);
-  const templateSelectionMissing = templatesLoaded && !selectedTemplate;
-  const inheritedTemplateAvailable = !initialValues?.rework || !initialValues.template
-    || templates.some((template) => (
-      template.id === initialValues.template?.templateId
-      && template.status === "published"
-    ));
+  const visualSourceIssue = visualSourceCompatibilityIssue(undefined, selectedAssetSources);
   const effectiveModelId = (provider: StudioProvider) => modelSelections[provider.id]
-    ?? selectedTemplate?.modelDefaults?.[provider.id]
     ?? provider.defaultModelId;
   const finalReviewProviders = ["glm-visual-review-v1", "codex-visual-review-v1"].map((providerId) => (
     providers.find((provider) => provider.id === providerId
@@ -252,20 +227,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const inheritedSelectionIssues = useMemo<InheritedSelectionIssue[]>(() => {
     if (!initialValues?.rework) return [];
     const issues: InheritedSelectionIssue[] = [];
-    if (templatesLoaded && (
-      !templates.some((template) => template.id === selectedTemplateId && template.status === "published")
-      || (!templateReplacementConfirmed && !inheritedTemplateAvailable)
-    )) {
-      issues.push({
-        id: "template",
-        label: "视频模板",
-        value: initialValues.template?.templateVersion === undefined
-          ? "上一版模板"
-          : `上一版模板 v${initialValues.template.templateVersion}`,
-        reason: "上一版模板或对应版本当前已不是可用的正式模板",
-        action: "请在视频模板中明确选择替代模板",
-      });
-    }
     for (const item of CAPABILITIES) {
       const providerId = bindings[item.key];
       if (!providerId && item.optional) continue;
@@ -339,7 +300,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       });
     }
     return issues;
-  }, [assetProviderIds, bindings, inheritedTemplateAvailable, initialValues?.rework, initialValues?.template?.templateVersion, modelSelections, providers, selectedRecipe.allowMeteredProviders, selectedTemplateId, templateReplacementConfirmed, templates, templatesLoaded, voiceDirection.profileId, voiceSelectionAvailable]);
+  }, [assetProviderIds, bindings, initialValues?.rework, modelSelections, providers, selectedRecipe.allowMeteredProviders, voiceSelectionAvailable]);
   const missingCapabilities = CAPABILITIES.filter((item) => {
     return !item.optional
       && !providers.some((provider) => provider.capability === item.capability && provider.available && provider.kind !== "test");
@@ -358,59 +319,21 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     : "/resources#visual-providers";
   const productionBlocked = missingProductionRoles.length > 0
     || inheritedSelectionIssues.length > 0
-    || templateSelectionMissing
     || visualSourceIssue !== undefined;
   const creativeSummary = {
     audience: briefSummaryValues.audience || "待填写目标受众",
     openingPromise: initialValues?.seriesContext?.episode.hook ?? (briefSummaryValues.angle || "待填写开头承诺"),
-    requiredVisual: visualBriefValues.visualProof || visualBriefValues.strategy || (briefSummaryValues.angle ? `用画面证明“${briefSummaryValues.angle}”` : "待明确必须看到的画面证据"),
+    requiredVisual: visualBriefValues.visualProof || visualBriefValues.strategy || (briefSummaryValues.angle ? `需要呈现的核心画面：“${briefSummaryValues.angle}”` : "待明确需要呈现的核心画面"),
     payoff: initialValues?.seriesContext?.episode.payoff
       ?? (briefSummaryValues.title ? `围绕“${briefSummaryValues.title}”给出明确答案或可执行判断` : "待填写观众最终收获"),
   };
 
-  async function readTemplateCatalog(revision: number, requestedTemplateId: string, preserveCurrentChoices: boolean) {
-    setTemplateLoading(true);
-    setTemplateError(undefined);
-    try {
-      const catalog = await studioApi.templates();
-      if (initializationRevision.current !== revision) return;
-      const published = (catalog.productionTemplates ?? catalog.templates).filter((template) => template.status === "published");
-      const availableTemplates = published;
-      if (availableTemplates.length === 0) throw new Error("模板目录中没有可用模板。");
-      setTemplates(availableTemplates);
-      if (initialValues?.rework) {
-        setSelectedTemplateId(requestedTemplateId);
-      } else {
-        const resolvedTemplate = availableTemplates.find((template) => template.id === requestedTemplateId)
-          ?? (!initialValues?.template && !initialValues?.editorial
-            ? availableTemplates.find((template) => template.id === "knowledge-explainer")
-            : undefined);
-        setSelectedTemplateId(resolvedTemplate?.id ?? "");
-        if (resolvedTemplate && !preserveCurrentChoices && !initialValues?.voiceDirection && !creatorVoiceWasCustomized(creatorSettings) && !voiceTouched.current) {
-          applyUntouchedTemplateVoice(resolvedTemplate);
-        }
-      }
-      setTemplatesLoaded(true);
-    } catch (caught) {
-      if (initializationRevision.current !== revision) return;
-      setTemplatesLoaded(false);
-      setTemplateError(`无法读取模板目录：${caught instanceof Error ? caught.message : String(caught)}`);
-    } finally {
-      if (initializationRevision.current === revision) setTemplateLoading(false);
-    }
-  }
-
   useEffect(() => {
     if (!open) {
       initializedForOpen.current = false;
-      initializationRevision.current += 1;
       initialScrollResetPending.current = false;
       setAdvancedOpen(false);
       setInheritedSettingsOpen(false);
-      setTemplates([]);
-      setTemplatesLoaded(false);
-      setTemplateLoading(false);
-      setTemplateError(undefined);
       return;
     }
     if (!initialDataReady) return;
@@ -418,11 +341,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     initializedForOpen.current = true;
     initialScrollResetPending.current = true;
     if (formScrollRef.current) formScrollRef.current.scrollTop = 0;
-    voiceTouched.current = false;
-    templateTouched.current = false;
     durationRangeTouched.current = false;
-    const revision = ++initializationRevision.current;
-    const initialVoiceDirection = initialValues?.voiceDirection ?? creatorSettings?.voiceDirection ?? defaultVoiceDirection(providers);
+    const initialVoiceDirection = initialValues?.voiceDirection
+      ?? (creatorSettings && !creatorVoiceIsShippedDefault(creatorSettings) ? creatorSettings.voiceDirection : undefined)
+      ?? defaultVoiceDirection(providers);
     const requestedVoiceProvider = providerForVoiceProfile(initialVoiceDirection.profileId);
     const readyVoiceProvider = providers.find((provider) => {
       return provider.id === requestedVoiceProvider && provider.capability === "voice.synthesize" && provider.available && provider.kind !== "test";
@@ -441,15 +363,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       : initialValues?.economics?.recipeId ?? creatorSettings?.defaultRecipeId);
     const recipe = RECIPES.find((item) => item.id === initialRecipe) ?? RECIPES[0]!;
     const initialProfile = initialValues?.director?.profileId ?? creatorSettings?.productionDefaults?.directorProfileId ?? "auto";
-    const requestedTemplateId = initialValues?.template?.templateId
-      ?? (imageStory
-        ? "photo-story"
-        : initialValues?.editorial
-          ? ""
-          : recommendTemplateForBrief({ title: initialValues?.title ?? "", hook: initialValues?.angle ?? "" }));
     const inheritedOrRecommendedSourceIds = initialValues?.director?.assetProviderIds
       ?? sourceIdsForRecipe(recipe, providers, creatorSettings?.defaultAssetProviderId);
-    const sourceIds = requestedTemplateId === "photo-story"
+    const sourceIds = imageStory
       ? includeLocalEditorialSource(inheritedOrRecommendedSourceIds, providers)
       : inheritedOrRecommendedSourceIds;
     setBindings(initialBindings);
@@ -461,9 +377,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setDurationSeconds(initialDurationSeconds);
     setDurationRange(initialValues?.durationRange ?? defaultStudioDurationRange(initialDurationSeconds));
     setAssetProviderIds(sourceIds);
-    // 只有用户或入口明确指定的模型才属于本次覆盖。全局/模板默认值由服务端按优先级解析。
+    // 只有用户或入口明确指定的模型才属于本次覆盖。全局默认值由服务端按优先级解析。
     setModelSelections({ ...(initialValues?.models ?? {}) });
     setVoiceDirection(resolvedVoiceDirection);
+    setBudgetIntention(String(initialValues?.budgetIntentionCny ?? ""));
     setSemanticRankEnabled(initialValues?.workflowFeatures?.assetSemanticRank ?? Boolean(initialBindings.director));
     setReferenceVideo(inheritedReferenceVideo ? { ...inheritedReferenceVideo, inheritedFromRework: true } : undefined);
     setBriefSummaryValues({
@@ -473,8 +390,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     });
     setVisualBriefValues({
       visualProof: initialValues?.visualProof ?? "",
-      strategy: initialValues?.visualPlan?.strategy ?? "",
+      strategy: initialValues?.visualIntent ?? "",
     });
+    visualIntentTouched.current = false;
     setReferenceUploading(false);
     setReferenceError(undefined);
     setActiveKey("assets");
@@ -482,25 +400,15 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     scrollToAssetSourcesOnOpen.current = false;
     setInheritedSettingsOpen(false);
     setError(undefined);
-    setSelectedTemplateId(requestedTemplateId);
-    setTemplateError(undefined);
-    setTemplateLoading(false);
     setVoiceSelectionAvailable(undefined);
     setRework(creatorFacingRework(initialValues?.rework, requiredAffectedScenePositions));
-    setTemplateReplacementConfirmed(false);
-    templateAddedEditorialSource.current = requestedTemplateId === "photo-story"
-      && !inheritedOrRecommendedSourceIds.includes("local-editorial-v1")
-      && sourceIds.includes("local-editorial-v1");
-    setTemplates([]);
-    setTemplatesLoaded(false);
-    void readTemplateCatalog(revision, requestedTemplateId, false);
   }, [creatorSettings, defaults, imageStory, inheritedReferenceVideo, initialDataReady, initialValues, open, providers, requiredAffectedScenePositions]);
 
   useLayoutEffect(() => {
-    if (!open || !initialScrollResetPending.current || (!templatesLoaded && !templateError)) return;
+    if (!open || !initialScrollResetPending.current || !initializedForOpen.current) return;
     if (formScrollRef.current) formScrollRef.current.scrollTop = 0;
     initialScrollResetPending.current = false;
-  }, [open, templateError, templatesLoaded]);
+  }, [open, initialDataReady]);
 
   useEffect(() => {
     if (!open || !advancedOpen || !inheritedSettingsOpen || !scrollToAssetSourcesOnOpen.current) return;
@@ -550,12 +458,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     const recipe = RECIPES.find((item) => item.id === nextId) ?? RECIPES[0]!;
     if (imageStory && recipe.allowMeteredProviders) return;
     const baseSourceIds = sourceIdsForRecipe(recipe, providers);
-    const sourceIds = selectedTemplateId === "photo-story"
+    const sourceIds = imageStory
       ? includeLocalEditorialSource(baseSourceIds, providers)
       : baseSourceIds;
-    templateAddedEditorialSource.current = selectedTemplateId === "photo-story"
-      && !baseSourceIds.includes("local-editorial-v1")
-      && sourceIds.includes("local-editorial-v1");
     setRecipeId(nextId);
     setBindings((current) => ({ ...current, assets: "ai-shot-router-v1" }));
     setAssetProviderIds(sourceIds);
@@ -588,39 +493,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     openAssetSourceControls();
   }
 
-  function selectTemplate(template: StudioTemplate, userInitiated = true) {
-    if (userInitiated) templateTouched.current = true;
-    setSelectedTemplateId(template.id);
-    setTemplateReplacementConfirmed(Boolean(initialValues?.rework));
-    setDurationSeconds(template.durationSeconds);
-    if (!initialValues?.rework && !durationRangeTouched.current) {
-      setDurationRange(defaultStudioDurationRange(template.durationSeconds));
-    }
-    setAssetProviderIds((current) => {
-      if (template.id === "photo-story") {
-        const next = includeLocalEditorialSource(current, providers);
-        templateAddedEditorialSource.current = !current.includes("local-editorial-v1") && next.includes("local-editorial-v1");
-        return next;
-      }
-      if (templateAddedEditorialSource.current) {
-        templateAddedEditorialSource.current = false;
-        return current.filter((id) => id !== "local-editorial-v1");
-      }
-      return current;
-    });
-    if (!initialValues?.rework && !initialValues?.voiceDirection && !creatorVoiceWasCustomized(creatorSettings) && !voiceTouched.current) {
-      applyUntouchedTemplateVoice(template);
-    }
-  }
-
-  function recommendUntouchedTemplate(title: string, hook: string) {
-    if (initialValues?.editorial || initialValues?.rework || initialValues?.template || templateTouched.current) return;
-    const recommendedId = recommendTemplateForBrief({ title, hook });
-    if (recommendedId === selectedTemplateId) return;
-    const template = templates.find((candidate) => candidate.id === recommendedId);
-    if (template) selectTemplate(template, false);
-  }
-
   function changeSuggestedDuration(nextDurationSeconds: number) {
     setDurationSeconds(nextDurationSeconds);
     if (durationRange && !durationRangeTouched.current) {
@@ -639,19 +511,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setDurationSeconds((current) => Math.min(next.maxSeconds, Math.max(next.minSeconds, current)));
   }
 
-  function applyUntouchedTemplateVoice(template: StudioTemplate) {
-    const recommendation = applyTemplateVoiceRecommendation(template, voiceDirection);
-    setVoiceDirection(recommendation);
-    setBindings((current) => ({ ...current, voice: providerForVoiceProfile(recommendation.profileId) }));
-  }
-
   function toggleAssetProvider(provider: StudioProvider) {
     if (!provider.available || (provider.billing === "metered" && !selectedRecipe.allowMeteredProviders)) return;
-    if (provider.id === "local-editorial-v1" && selectedTemplateId === "photo-story") return;
+    if (provider.id === "local-editorial-v1" && imageStory) return;
     setAssetProviderIds((current) => {
-      if (current.includes(provider.id)) {
-        return current.length === 1 ? current : current.filter((id) => id !== provider.id);
-      }
+      if (current.includes(provider.id)) return current.filter((id) => id !== provider.id);
       return [...current, provider.id];
     });
   }
@@ -701,13 +565,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       if (!isProductionPlatform(platform)) {
         throw new Error("请选择目标平台后再开始制作。");
       }
-      if (!templatesLoaded || !templates.some((template) => template.id === selectedTemplateId && template.status === "published")) {
-        throw new Error(templateError ?? "模板目录尚未加载完成，请稍后重试。");
-      }
       if (!dualFinalReviewAvailable || !visualReviewProvider) {
         throw new Error("正式制作必须由 GLM 与 Codex 使用两个不同模型独立审片；请先在创作设置中恢复两种审片和独立质量复核能力。");
       }
-      const selectedTemplate = templates.find((template) => template.id === selectedTemplateId)!;
       const providersForRun: StudioProductionInput["providers"] = { ...effectiveBindings };
       providersForRun.visualReview = visualReviewProvider.id;
       const selectedProviderIds = new Set([
@@ -717,24 +577,33 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       const modelsForRun = Object.fromEntries(Object.entries(modelSelections).filter(([providerId, modelId]) => {
         return selectedProviderIds.has(providerId) && Boolean(modelId);
       }));
+      const scriptProviderId = providersForRun.script;
+      const selectedScriptModelId = scriptProviderId ? modelSelections[scriptProviderId] : undefined;
+      const treatmentProvider = providers.find((provider) => (
+        provider.id === "codex-creative-treatment-v1"
+        && provider.capability === "creative.treatment"
+        && provider.available
+        && provider.kind !== "test"
+      ));
+      if (scriptProviderId === "codex-screenwriter-v1"
+        && selectedScriptModelId
+        && treatmentProvider
+        && selectableModelsForCapability(treatmentProvider.modelProfiles, treatmentProvider.capability)
+          .some((model) => model.id === selectedScriptModelId)) {
+        modelsForRun[treatmentProvider.id] = selectedScriptModelId;
+      }
       const visualProof = visualBriefValues.visualProof.trim();
-      const visualPlanStrategy = visualBriefValues.strategy.trim();
-      const visualPlan = visualPlanStrategy
-        ? {
-            ...(initialValues?.visualPlan ?? planVisualDirection({
-              title: requiredString(data, "title"),
-              hook: requiredString(data, "angle"),
-            })),
-            strategy: visualPlanStrategy,
-          }
-        : initialValues?.visualPlan;
-      const executableVisualPlan = visualPlan
-        ? resolveExecutableVisualPlan(visualPlan, {
-            stock: selectedAssetSources.some((provider) => provider.deliveryTypes?.some((type) => type === "stock_video" || type === "stock_image")),
-            generated: selectedAssetSources.some((provider) => provider.deliveryTypes?.some((type) => type === "generated_video" || type === "generated_image")),
-            editorialCard: selectedAssetSources.some((provider) => provider.deliveryTypes?.includes("editorial_card")),
-          })
-        : undefined;
+      const visualIntent = visualBriefValues.strategy.trim();
+      const inheritedVisualIntent = initialValues?.visualIntent?.trim();
+      const inheritedVisualPlanStrategy = initialValues?.visualPlan?.strategy.trim();
+      const preserveInheritedVisualPlan = Boolean(initialValues?.visualPlan)
+        && !visualIntentTouched.current
+        && (!inheritedVisualIntent || inheritedVisualIntent === inheritedVisualPlanStrategy);
+      if (visualIntent.length > 1000) throw new Error("画面呈现想法不能超过 1000 个字符。");
+      const budgetIntentionCny = budgetIntention.trim() ? Number(budgetIntention) : undefined;
+      if (budgetIntentionCny !== undefined && (!Number.isFinite(budgetIntentionCny) || budgetIntentionCny < 0 || budgetIntentionCny > 100_000)) {
+        throw new Error("预算意向请输入 0 到 100000 元的有效金额，或留空；这不是付款授权。");
+      }
       await onSubmit({
         protocolVersion: "video-factory/brief-v1",
         title: requiredString(data, "title"),
@@ -748,48 +617,28 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         runPurpose: initialValues?.runPurpose ?? "production",
         ...(editorial ? { editorial } : {}),
         ...(visualProof ? { visualProof } : {}),
-        ...(executableVisualPlan ? { visualPlan: executableVisualPlan } : {}),
+        ...(visualIntent ? { visualIntent } : {}),
+        ...(preserveInheritedVisualPlan ? { visualPlan: initialValues!.visualPlan } : {}),
         ...(initialValues?.seriesContext ? { seriesContext: initialValues.seriesContext } : {}),
         ...(initialValues?.creationContext ? { creationContext: initialValues.creationContext } : {}),
         ...(rework ? { rework } : {}),
         voiceDirection,
-        template: {
-          templateId: selectedTemplateId,
-          ...(initialValues?.template?.templateId === selectedTemplateId
-            && initialValues.template.templateVersion !== undefined
-            && !templateReplacementConfirmed
-            && inheritedTemplateAvailable
-            ? { templateVersion: initialValues.template.templateVersion }
-            : {}),
-          runOverrides: {
-            durationSeconds,
-            ...(initialValues?.template?.templateId === selectedTemplateId
-              && initialValues.template.templateVersion !== undefined
-              && !templateReplacementConfirmed
-              && inheritedTemplateAvailable
-              ? {}
-              : { automationLevel: selectedTemplate.automationLevel }),
-          },
-        },
         providers: providersForRun,
         models: modelsForRun,
         workflowFeatures: {
           assetSemanticRank: effectiveSemanticRank,
           referenceGrammar: Boolean(referenceVideo),
           executablePlan: true,
-          // 新制作走 joint-v1 共同创作规划；返工沿用 initialValues 继承的来源规划形态。
-          ...(rework && initialValues?.workflowFeatures?.creativePlanning !== "joint-v1"
-            ? {}
-            : { creativePlanning: "joint-v1" as const }),
+          // 所有新制作和返工都走同一套逐阶段讨论/确认链；历史 run 只读，不由这里补确认。
+          creativePlanning: "joint-v1" as const,
+          creativeReview: "user-confirmed-v1" as const,
         },
         ...(referenceVideo && isUploadedReferenceVideo(referenceVideo)
           ? { referenceVideo: { uploadId: referenceVideo.uploadId, label: referenceVideo.label } }
           : {}),
         director: { profileId: directorProfileId, assetProviderIds },
         economics,
-        ...(budgetIntention.trim() && Number.isFinite(Number(budgetIntention)) && Number(budgetIntention) > 0
-          ? { budgetIntentionCny: Number(budgetIntention) }
-          : {}),
+        ...(budgetIntentionCny !== undefined ? { budgetIntentionCny } : {}),
       });
       if (referenceVideo && isUploadedReferenceVideo(referenceVideo)) releasedReferenceId.current = referenceVideo.uploadId;
       setReferenceVideo(undefined);
@@ -872,7 +721,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               </li>)}</ul>
               {inheritedSelectionIssues.some((issue) => issue.id.startsWith("source-")) ? <button className="button button-ghost" type="button" onClick={() => {
                 const sourceIds = sourceIdsForRecipe(selectedRecipe, providers);
-                setAssetProviderIds(selectedTemplateId === "photo-story"
+                setAssetProviderIds(imageStory
                   ? includeLocalEditorialSource(sourceIds, providers)
                   : sourceIds);
                 openAssetSourceControls();
@@ -906,7 +755,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               <div className="rework-instruction-grid">
                 <label className="field">
                   <span>脚本修改要求</span>
-                  <textarea required value={creatorFacingTechnicalText(rework.nodeInstructions.script)} onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, script: event.target.value } } : current)} />
+                  <textarea value={creatorFacingTechnicalText(rework.nodeInstructions.script)} placeholder="留空表示沿用上一版脚本，不重跑编剧" onChange={(event) => setRework((current) => current ? { ...current, nodeInstructions: { ...current.nodeInstructions, script: event.target.value } } : current)} />
                 </label>
                 <label className="field">
                   <span>导演方案修改要求</span>
@@ -919,13 +768,16 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               </div>
               <p className="rework-boundary-note">{reworkBaselineSummary(rework)}</p>
               <ul className="rework-boundary-note">
-                <li>{rework.previousScript ? "脚本：以上一版脚本为修改基线，并按审片反馈调整。" : "脚本：上一版脚本未产出，本轮需要重新生成脚本。"}</li>
+                <li>{rework.previousScript
+                  ? rework.nodeInstructions.script.trim()
+                    ? "脚本：以上一版脚本为修改基线，并按审片反馈调整。"
+                    : "脚本：沿用上一版脚本，本轮不重跑编剧。"
+                  : "脚本：上一版脚本未产出，本轮需要重新生成脚本。"}</li>
                 <li>{rework.previousDirectorPlan ? "导演：以上一版导演方案为修改基线，按反馈复核所列镜头。" : "导演：上一版导演方案未产出，本轮需要重新规划画面方案。"}</li>
-                {inheritedNodeIds?.includes("template") ? <li>模板：已带入上一版模板快照，可在继承设置中沿用或更换。</li> : null}
                 <li>声音：声音设置已预填；脚本文字变化时，配音可能重新生成。</li>
                 <li>报价：下一轮会对实际需要重新生成的图片和视频逐项报价；最终项目和金额以费用确认页为准。</li>
               </ul>
-              {inheritedNodeIds && inheritedNodeIds.length > 0 ? <p className="rework-boundary-note">已带入上一版基线资料：{inheritedNodeIds.map((nodeId) => REWORK_BASELINE_NODE_LABELS[nodeId] ?? nodeId).join("、")}；这些资料用于对照和预填，不代表声音成品或素材母片已经复用，也不代表免费。</p> : null}
+              {inheritedNodeIds && inheritedNodeIds.length > 0 ? <p className="rework-boundary-note">已带入上一版基线资料：{inheritedNodeIds.filter((nodeId) => nodeId !== "template").map((nodeId) => REWORK_BASELINE_NODE_LABELS[nodeId] ?? nodeId).join("、")}；这些资料用于对照和预填，不代表声音成品或素材母片已经复用，也不代表免费。</p> : null}
             </section> : null}
             {rework ? <div className={inheritedSettingsOpen ? "advanced-production is-open" : "advanced-production"}>
               <button className="advanced-production-toggle" type="button" aria-expanded={inheritedSettingsOpen} onClick={() => setInheritedSettingsOpen((current) => !current)}>
@@ -933,31 +785,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               </button>
             </div> : null}
             <div hidden={Boolean(rework) && !inheritedSettingsOpen}>
-            <section className="template-picker-section" aria-labelledby="template-picker-title">
-              <div className="compact-section-heading">
-                <div><span>00</span><h3 id="template-picker-title">视频模板</h3></div>
-                <small>模板决定这条视频怎么讲，不锁死模型和素材</small>
-              </div>
-              {templates.length > 0 && (!rework || inheritedSettingsOpen) ? (
-                <TemplateGallery
-                  templates={templates}
-                  selectedId={selectedTemplateId}
-                  onSelect={selectTemplate}
-                />
-              ) : (
-                <div className="template-loading" role={templateError ? "alert" : "status"} aria-live={templateError ? "assertive" : "polite"}>
-                  <strong>{selectedTemplateId === "photo-story" ? "证据图解" : "正在准备推荐模板"}</strong>
-                  <span>{templateError ?? (templateLoading ? "正在读取模板目录..." : "模板目录尚未读取。")}</span>
-                  {templateError ? <button
-                    className="button button-ghost"
-                    type="button"
-                    disabled={templateLoading}
-                    onClick={() => void readTemplateCatalog(initializationRevision.current, selectedTemplateId, true)}
-                  >{templateLoading ? "正在重新读取..." : "重新读取模板"}</button> : null}
-                </div>
-              )}
-              {!initialValues?.rework && templateSelectionMissing ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />推荐模板当前不可用，请明确选择一个可用模板后再开始制作。</p> : null}
-            </section>
             <section className="brief-section" aria-labelledby="brief-section-title">
               <div className="compact-section-heading">
                 <div><span>01</span><h3 id="brief-section-title">内容简报</h3></div>
@@ -969,7 +796,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   <input name="title" required data-dialog-initial-focus={rework ? undefined : true} defaultValue={initialValues?.title ?? ""} placeholder="一句能让人停下来的具体承诺" onChange={(event) => {
                     const title = event.target.value;
                     setBriefSummaryValues((current) => ({ ...current, title }));
-                    recommendUntouchedTemplate(title, briefSummaryValues.angle);
                   }} />
                 </label>
                 <label className="field field-wide">
@@ -977,7 +803,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   <input name="angle" required defaultValue={initialValues?.angle ?? ""} placeholder="这条视频用什么独特角度讲清问题" onChange={(event) => {
                     const angle = event.target.value;
                     setBriefSummaryValues((current) => ({ ...current, angle }));
-                    recommendUntouchedTemplate(briefSummaryValues.title, angle);
                   }} />
                 </label>
                 <label className="field">
@@ -1023,11 +848,18 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <label className="field field-wide">
                   <span>视觉论证方式（可选）</span>
                   <textarea
+                    aria-label="视觉论证方式（可选）"
                     rows={3}
                     value={visualBriefValues.strategy}
                     placeholder="例如：用同一主体贯穿全片，先展示问题，再用过程和结果兑现开头承诺"
-                    onChange={(event) => setVisualBriefValues((current) => ({ ...current, strategy: event.target.value }))}
+                    onChange={(event) => {
+                      visualIntentTouched.current = true;
+                      setVisualBriefValues((current) => ({ ...current, strategy: event.target.value }));
+                    }}
                   />
+                  {initialValues?.visualPlan && !visualBriefValues.strategy.trim() ? (
+                    <small>可参考的方向：{initialValues.visualPlan.strategy}。只有你填写或明确采用后，才会成为制作要求。</small>
+                  ) : null}
                 </label>
               </div>
               <CreativeSummary summary={creativeSummary} />
@@ -1293,8 +1125,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                     const checked = assetProviderIds.includes(provider.id);
                     const disabled = !provider.available
                       || (provider.billing === "metered" && !selectedRecipe.allowMeteredProviders)
-                      || (provider.id === "local-editorial-v1" && selectedTemplateId === "photo-story")
-                      || (checked && assetProviderIds.length === 1);
+                      || (provider.id === "local-editorial-v1" && imageStory);
                     return <label key={provider.id} className={checked ? "asset-source-option is-selected" : "asset-source-option"}>
                       <input
                         type="checkbox"
@@ -1334,7 +1165,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               value={voiceDirection}
               preserveUnavailableSelection={Boolean(initialValues?.rework)}
               onSelectionAvailabilityChange={setVoiceSelectionAvailable}
-              onUserChange={() => { voiceTouched.current = true; }}
               onChange={(next, providerId) => {
                 setVoiceDirection(next);
                 setBindings((current) => ({ ...current, voice: providerId }));
@@ -1381,7 +1211,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
             <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
             <button className="button button-primary" type="button" onClick={(event) => {
               if (event.currentTarget.form?.reportValidity()) void submit(event.currentTarget.form);
-            }} disabled={submitting || referenceUploading || !templatesLoaded || productionBlocked} data-tour="production-start">
+            }} disabled={submitting || referenceUploading || productionBlocked} data-tour="production-start">
               <Check aria-hidden="true" size={17} />
               {submitting ? "正在创建..." : "开始制作"}
             </button>
@@ -1400,7 +1230,7 @@ function CreativeSummary({ summary }: {
     <dl>
       <div><dt>给谁看</dt><dd>{summary.audience}</dd></div>
       <div><dt>开头承诺</dt><dd>{summary.openingPromise}</dd></div>
-      <div><dt>必须看到</dt><dd>{summary.requiredVisual}</dd></div>
+      <div><dt>画面方向参考</dt><dd>{summary.requiredVisual}</dd></div>
       <div><dt>结尾收益</dt><dd>{summary.payoff}</dd></div>
     </dl>
   </section>;
@@ -1413,22 +1243,20 @@ function productionStepLabel(capability: string): string {
 function defaultVoiceDirection(providers: StudioProvider[]): StudioProductionInput["voiceDirection"] {
   const profileId = providers.some((provider) => provider.id === "minimax-tts-v1" && provider.available)
     ? "minimax:Chinese (Mandarin)_News_Anchor"
-    : "macos:Tingting";
-  return {
-    profileId,
-    rate: 185,
-    pauseScale: 1,
-    masteringPreset: "natural",
-  };
+    : DEFAULT_STUDIO_VOICE_DIRECTION.profileId;
+  return { ...DEFAULT_STUDIO_VOICE_DIRECTION, profileId };
 }
 
-function creatorVoiceWasCustomized(settings?: StudioCreatorSettings): boolean {
-  if (!settings) return false;
-  if (settings.voiceDirectionCustomized !== undefined) return settings.voiceDirectionCustomized;
-  return settings.voiceDirection.profileId !== "macos:Tingting"
-    || settings.voiceDirection.rate !== 185
-    || settings.voiceDirection.pauseScale !== 1
-    || settings.voiceDirection.masteringPreset !== "natural";
+// 出厂默认的 macOS 音色只说明"操作员没选过"：设置里还是这个出厂值且未被标记为自定义时，
+// 让位给 defaultVoiceDirection 的可用性默认，否则已配置的云端配音永远不会被自动选中。
+// 任何与出厂值不同的取值（例如已改成 macos:Meijia）或自定义标记都仍然优先。
+function creatorVoiceIsShippedDefault(settings: StudioCreatorSettings): boolean {
+  if (settings.voiceDirectionCustomized !== false) return false;
+  const current = settings.voiceDirection;
+  return current.profileId === DEFAULT_STUDIO_VOICE_DIRECTION.profileId
+    && current.rate === DEFAULT_STUDIO_VOICE_DIRECTION.rate
+    && current.pauseScale === DEFAULT_STUDIO_VOICE_DIRECTION.pauseScale
+    && current.masteringPreset === DEFAULT_STUDIO_VOICE_DIRECTION.masteringPreset;
 }
 
 function providerDefaults(
@@ -1653,6 +1481,7 @@ function defaultReworkScenePositions(
   }
   let hasUnlocatedVisualFinding = false;
   for (const finding of rework.findings ?? []) {
+    if (isInspectionOnlyReworkFinding(finding)) continue;
     if (!isLegalScenePosition(finding.scenePosition) || !knownPositions.has(finding.scenePosition)) {
       // 只有真正指向导演/素材的未定位 finding 才能把画面返工扩大到全片；
       // 脚本或其他节点的全片问题不改变画面镜头选择，显式空范围因此得以保留。
@@ -1684,6 +1513,7 @@ function requiredScenePositionsForRework(
   }
   let hasUnlocatedRequiredFinding = false;
   for (const finding of rework.findings ?? []) {
+    if (isInspectionOnlyReworkFinding(finding)) continue;
     const targetsVisualWork = finding.targetNodeIds.some((nodeId) => nodeId === "visual-direction" || nodeId === "assets");
     const targetsLocatedScriptWork = finding.targetNodeIds.includes("script") && finding.scenePosition !== undefined;
     if (!targetsVisualWork && !targetsLocatedScriptWork) continue;
@@ -1696,6 +1526,14 @@ function requiredScenePositionsForRework(
   return hasUnlocatedRequiredFinding
     ? [...fullScenePositions]
     : fullScenePositions.filter((position) => required.has(position));
+}
+
+// "先补查已有素材"只要求核对既有母片，不构成重新规划或重新购买的授权。它必须与
+// 服务端的范围推荐（production-studio 的 recommendedReworkScenePositions）和执行层的
+// 投影过滤保持同一口径：否则该镜头会被当成重生成意图，既丢失上一版母片的继承，
+// 又让执行层在"不得新购买"和"无既有素材绑定语法"之间无解。
+function isInspectionOnlyReworkFinding(finding: StudioReworkFinding): boolean {
+  return finding.action === "inspect_existing_media";
 }
 
 function toggleReworkScene(

@@ -29,7 +29,7 @@ import type {
   StudioSeriesEpisodePlanInput,
   StudioTopicCategory,
 } from "../../shared/api.js";
-import { creatorFacingTechnicalText, reasoningEffortLabel, candidateTemplateUnavailable } from "../presentation.js";
+import { creatorFacingTechnicalText, reasoningEffortLabel } from "../presentation.js";
 import { platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
 import { CandidateVerificationDialog } from "./CandidateVerificationDialog.js";
 import { SeriesEpisodeDialog } from "./SeriesEpisodeDialog.js";
@@ -290,14 +290,9 @@ function SeriesRoadmap({
   // 序列解锁与来源门禁是两道独立的阻断：补齐原始来源解决后者，不能也不应跳过前者。
   const sourceBlocked = selectedEpisode?.status === "planned"
     && selectedCandidate?.verification.status === "blocked";
-  const templateBlocked = selectedEpisode?.status === "planned"
-    && selectedCandidate !== undefined
-    && !sourceBlocked
-    && candidateTemplateUnavailable(selectedCandidate);
   const mayAdopt = selectedEpisode?.status === "planned"
     && selectedCandidate?.seriesSequence?.status === "ready"
-    && !sourceBlocked
-    && !templateBlocked;
+    && !sourceBlocked;
   const needsGreenlight = selectedEpisode?.planning.auditStatus !== "passed";
   const auditAvailabilityPending = needsGreenlight && seriesAuditReady === undefined;
   const auditUnavailable = needsGreenlight && seriesAuditReady === false;
@@ -385,11 +380,10 @@ function SeriesRoadmap({
             {auditUnavailable ? <p className="series-lock-note"><ShieldAlert aria-hidden="true" size={15} />开拍前独立质量复核尚未就绪。<Link to="/resources#production-roles">去配置系列主理人</Link></p> : null}
             {blockedBy ? <p className="series-lock-note"><LockKeyhole aria-hidden="true" size={15} />第 {blockedBy} 集尚未定版；完成审片后，本集会自动继承最新已确认内容再解锁。</p> : null}
             {sourceBlocked && selectedCandidate ? <p className="series-lock-note" role="alert"><ShieldAlert aria-hidden="true" size={15} />{selectedCandidate.verification.reasons[0]}</p> : null}
-            {templateBlocked && selectedCandidate ? <p className="series-lock-note" role="alert"><ShieldAlert aria-hidden="true" size={15} />总编推荐的模板不在当前生产目录里，本集暂不能开拍；请刷新候选或到模板目录确认。</p> : null}
             {selectedEpisode.status === "planned" ? (
               <div className="series-episode-actions">
                 <button className="button button-secondary" type="button" disabled={adoptingId !== undefined} onClick={() => setEditing(true)}><PencilLine aria-hidden="true" size={16} />编辑路线图</button>
-                <button className="button button-primary" type="button" disabled={!mayAdopt || adoptingId !== undefined || auditAvailabilityPending || auditUnavailable || unsupportedProductionPlatform} onClick={() => selectedCandidate && void onAdopt(selectedCandidate)}>{adoptingId === selectedEpisode.id ? "正在复核..." : unsupportedProductionPlatform ? "请先迁移到支持的平台" : blockedBy ? `完成第 ${blockedBy} 集后解锁` : sourceBlocked ? "等待补充原始来源" : templateBlocked ? "推荐模板暂不可用" : auditAvailabilityPending ? "正在确认复核能力" : auditUnavailable ? "开拍前复核未就绪" : needsGreenlight ? "先复核，再进入制作" : "采用本集并进入制作"}<ArrowRight aria-hidden="true" size={16} /></button>
+                <button className="button button-primary" type="button" disabled={!mayAdopt || adoptingId !== undefined || auditAvailabilityPending || auditUnavailable || unsupportedProductionPlatform} onClick={() => selectedCandidate && void onAdopt(selectedCandidate)}>{adoptingId === selectedEpisode.id ? "正在复核..." : unsupportedProductionPlatform ? "请先迁移到支持的平台" : blockedBy ? `完成第 ${blockedBy} 集后解锁` : sourceBlocked ? "等待补充原始来源"  : auditAvailabilityPending ? "正在确认复核能力" : auditUnavailable ? "开拍前复核未就绪" : needsGreenlight ? "先复核，再进入制作" : "采用本集并进入制作"}<ArrowRight aria-hidden="true" size={16} /></button>
                 {sourceBlocked && selectedCandidate && onSupplementSources ? (
                   <button className="button button-secondary" type="button" disabled={adoptingId !== undefined} onClick={() => onSupplementSources(selectedCandidate)}><ShieldAlert aria-hidden="true" size={16} />补充原始来源</button>
                 ) : null}
@@ -521,8 +515,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
   const sourceBlocked = item.verification.status === "blocked";
   // 规则保底候选未经总编评估：内容潜力继续作为参考分展示，不把“尚未评估”投影成“总编评分 0”。
   const pendingEditor = item.editorialDecision.pendingEditorReview === true;
-  const templateUnavailable = !skipped && candidateTemplateUnavailable(item);
-  const blocked = sourceBlocked || skipped || templateUnavailable;
+  const blocked = sourceBlocked || skipped;
   // 系列与热点共用同一个“补充原始来源”恢复动作；补齐后由服务端重算门禁与建议。
   const canSupplementSources = sourceBlocked && onSupplementSources !== undefined;
   // 内容潜力（信号强度与制作可行性）与当前开工状态分开呈现：来源被阻断不等于选题质量为零。
@@ -545,14 +538,6 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
             : `${verdictLabel} · ${item.editorialDecision.score} 分`}</strong>
         <p>{item.editorialDecision.reasons[0]}</p>
         <small>{item.editorialDecision.guardrails[0]}</small>
-        {item.editorialDecision.recommendedTemplate ? (
-          <div className="candidate-template-recommendation">
-            <span>{sourceBlocked ? "补齐后建议采用" : "推荐形态"}</span>
-            <strong>{item.editorialDecision.recommendedTemplate.name}</strong>
-            <p>{item.editorialDecision.recommendedTemplate.format}</p>
-            <small>{item.editorialDecision.recommendedTemplate.rationale}</small>
-          </div>
-        ) : null}
       </div>
       <div className="candidate-meta">
         <span><Clock3 aria-hidden="true" size={13} />{item.freshness === "live" ? "实时" : item.freshness === "today" ? "今日" : "常青"}</span>
@@ -574,37 +559,49 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
           : "总分综合内容机会与制作可行性；风险分越低越安全。证据强度表示当前信号热度或排名，不等同于事实可信度。"}</p>
       </details>
       <div className="candidate-evidence"><span>来源线索</span>{item.evidence.slice(0, 2).map((evidence, index) => evidence.evidenceUrl ? <a key={`${item.id}-${index}`} href={evidence.evidenceUrl} target="_blank" rel="noreferrer"><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong><small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${evidence.source} · 榜单热度或排名信号 ${evidence.strength}`}</small></a> : <div key={`${item.id}-${index}`}><strong>{evidence.keyword}</strong><small>{evidence.source} · 榜单热度或排名信号 {evidence.strength}</small></div>)}</div>
+      {item.origin === "trend" && item.articleSources?.length ? <details className="candidate-score-explainer candidate-article-reading">
+        <summary>原文阅读与事实依据</summary>
+        <div>{item.articleSources.map((source) => <span key={source.sourceId}>{articleReadStatusLabel(source.readStatus)} · {source.pageTitle || source.finalUrl}{source.readStatus === "failed" ? "。读取服务未能完成，不代表文章没有事实依据。" : null}</span>)}</div>
+        {item.articleFacts?.map((fact, index) => <p key={`${fact.sourceId}-${index}`}>已读事实：{fact.statement} <small>（{fact.sourceId} · {fact.paragraphIds.join("、")}）</small></p>)}
+        {item.articleUncertainties?.map((uncertainty, index) => <p key={index}>仍待核验：{uncertainty}</p>)}
+        {!item.articleFacts?.length ? <p>当前没有可作为正文事实引用的内容；标题和热度只用于选题线索。</p> : null}
+      </details> : null}
       <div className={`candidate-verification is-${item.verification.status}`}><ShieldAlert aria-hidden="true" size={15} /><span><strong>{sourceBlocked
         ? "待补来源 · 暂不可采用"
         : skipped
           ? pendingEditor
             ? "待总编评估 · 暂不可采用"
             : "内容暂不推荐 · 暂不可采用"
-          : templateUnavailable
-            ? "推荐模板暂不可用 · 暂不可采用"
-            : item.verification.status === "review_required"
+          : item.verification.status === "review_required"
               ? "采用前需要你核验"
               : "可进入制作区"}</strong><small>{sourceBlocked
         ? item.verification.reasons[0]
         : skipped
           ? item.editorialDecision.reasons[0]
-          : templateUnavailable
-            ? "总编推荐的模板不在当前生产目录里；请刷新候选，或到模板目录确认后再采用。"
-            : item.verification.reasons[0]}</small></span><output>{item.evidence.length} 条来源线索 · {item.verification.independentSources} 个有效来源域名（需 {item.verification.requiredSources} 个）</output></div>
+          : item.verification.reasons[0]}</small></span><output>{item.evidence.length} 条来源线索 · {item.verification.independentSources} 个有效来源域名（需 {item.verification.requiredSources} 个）</output></div>
       {canSupplementSources ? (
         <button className="button button-primary candidate-adopt" type="button" aria-label={`补充来源 ${item.title}`} disabled={disabled} onClick={() => onSupplementSources?.(item)}>保存来源并重新评估<ArrowRight aria-hidden="true" size={16} /></button>
       ) : (
-        <button className="button button-primary candidate-adopt" data-tour="candidate-adopt" type="button" aria-label={`采用候选 ${item.title}`} disabled={disabled || blocked} onClick={() => void onAdopt()}>{adopting ? "正在采用..." : skipped ? (pendingEditor ? "等待总编评估" : "当前不建议生产") : templateUnavailable ? "推荐模板暂不可用" : item.verification.status === "blocked" ? "等待补充来源" : item.verification.status === "review_required" ? "核验后采用" : "采用到制作区"}<ArrowRight aria-hidden="true" size={16} /></button>
+        <button className="button button-primary candidate-adopt" data-tour="candidate-adopt" type="button" aria-label={`采用候选 ${item.title}`} disabled={disabled || blocked} onClick={() => void onAdopt()}>{adopting ? "正在采用..." : skipped ? (pendingEditor ? "等待总编评估" : "当前不建议生产")  : item.verification.status === "blocked" ? "等待补充来源" : item.verification.status === "review_required" ? "核验后采用" : "采用到制作区"}<ArrowRight aria-hidden="true" size={16} /></button>
       )}
     </article>
   );
 }
 
+function articleReadStatusLabel(status: NonNullable<StudioCandidateInboxItem["articleSources"]>[number]["readStatus"]): string {
+  return {
+    read: "已读取正文",
+    partial: "已读取部分正文",
+    title_only: "仅有标题",
+    blocked: "原文受限",
+    failed: "原文读取失败",
+  }[status];
+}
+
 function isShortlisted(item: StudioCandidateInboxItem): boolean {
   return item.editorialDecision.verdict !== "skip"
     && item.verification.status !== "blocked"
-    && item.seriesSequence?.status !== "blocked"
-    && !candidateTemplateUnavailable(item);
+    && item.seriesSequence?.status !== "blocked";
 }
 
 function isNotSelected(item: StudioCandidateInboxItem): boolean {

@@ -302,11 +302,12 @@ function AccountMenu({ username, onLogout, compact = false }: { username: string
 }
 
 const SEARCH_DESTINATIONS = [
+  { to: "/resources#voice-casting", label: "声音演员与配音设置", description: "选择声音演员，调整语速、停顿与音色", keywords: "声音 配音 音色 演员 语速 停顿", icon: Settings2 },
   { to: "/", label: "创作台", description: "继续作品或开始新视频", keywords: "首页 工作台", icon: Radar },
   { to: "/topics", label: "选题中心", description: "热点、系列与自主选题", keywords: "新闻 趋势 灵感", icon: Sparkles },
   { to: "/projects", label: "制作记录", description: "查看、继续、归档或恢复制作", keywords: "项目 视频 成片", icon: Layers3 },
   { to: "/assets", label: "素材库", description: "检索画面、声音与授权记录", keywords: "媒体 资产 来源", icon: Images },
-  { to: "/templates", label: "模板工坊", description: "选择或创建视频模板", keywords: "栏目 风格", icon: LayoutTemplate },
+  { to: "/templates", label: "模板工坊", description: "管理暂不参与制作的模板资料", keywords: "栏目 风格", icon: LayoutTemplate },
   { to: "/resources", label: "创作设置", description: "模型、素材、费用与发布平台", keywords: "总配置 API 方舟 MiniMax Codex", icon: Settings2 },
   { to: "/experiments", label: "制作复盘", description: "查看质量与费用表现", keywords: "数据 统计", icon: ChartNoAxesCombined },
 ] as const;

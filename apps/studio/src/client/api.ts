@@ -1,7 +1,12 @@
 import type {
   StartRunResponse,
   StudioDecisionInput,
+  StudioCreativeReviewConfirmInput,
+  StudioCreativeReviewCommandInput,
+  StudioCreativeReviewCommandReceipt,
+  StudioCreativeReviewSnapshot,
   StudioSceneRevisionInput,
+  StudioNarrationRevisionInput,
   StudioVisualReinspectionInput,
   StudioCandidateInbox,
   StudioCandidateAdoptionInput,
@@ -235,9 +240,27 @@ export const studioApi = {
   costs: () => requestJson<StudioCostDashboard>("/api/costs"),
   runCosts: (runId: string) => requestJson<StudioCostRunDetail>(`/api/runs/${encodeURIComponent(runId)}/costs`),
   run: (runId: string) => requestJson<StudioRunDetail>(`/api/runs/${encodeURIComponent(runId)}`),
+  creativeReview: (runId: string) => requestJson<StudioCreativeReviewSnapshot>(
+    `/api/runs/${encodeURIComponent(runId)}/creative-review`,
+  ),
+  commandCreativeReview: (runId: string, input: StudioCreativeReviewCommandInput) => requestJson<StudioCreativeReviewCommandReceipt>(
+    `/api/runs/${encodeURIComponent(runId)}/creative-review/commands`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  confirmCreativeReview: (runId: string, input: StudioCreativeReviewConfirmInput) => requestJson<StudioCreativeReviewCommandReceipt>(
+    `/api/runs/${encodeURIComponent(runId)}/creative-review/commands`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  creativeReviewCommand: (runId: string, commandId: string) => requestJson<StudioCreativeReviewCommandReceipt>(
+    `/api/runs/${encodeURIComponent(runId)}/creative-review/commands/${encodeURIComponent(commandId)}`,
+  ),
   reworkDraft: (runId: string) => requestJson<StudioReworkDraft>(`/api/runs/${encodeURIComponent(runId)}/rework-draft`),
   reinspectVisualReview: (runId: string, input: StudioVisualReinspectionInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/reinspect-visual-review`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  requestNarrationRevision: (runId: string, input: StudioNarrationRevisionInput) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/narration-revisions`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
   uploadReferenceVideo: (file: File) => requestJson<StudioReferenceVideo>("/api/reference-videos", {

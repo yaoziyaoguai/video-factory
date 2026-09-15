@@ -9,6 +9,7 @@ import {
 } from "@video-factory/production-pipeline";
 import { scoreTopicCandidate } from "@video-factory/workflow-core";
 import type {
+  StudioArticleFact,
   StudioTrendCandidate,
   StudioTrendSignal,
   StudioTrendSignalQuery,
@@ -21,8 +22,9 @@ import { parseStudioVisualPlan } from "../shared/api.js";
 import { planVisualDirection } from "../shared/visual-plan.js";
 import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
 import { topicIdeasModelPayload } from "./topic-ideas-payload.js";
+import type { TrendArticleReader, TrendArticleSnapshot } from "./trend-article-reader.js";
 
-const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v7|role-audit-v3|topic-ideas-validator-v5|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v2|angle-identity-v1";
+const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v9|role-audit-v3|topic-ideas-validator-v7|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v2|angle-identity-v1|cited-facts-v2";
 
 export interface TrendSignalPort {
   listSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
@@ -36,6 +38,8 @@ export interface TrendModelIdea {
   painPoint: string;
   hook: string;
   rationale: string;
+  facts?: StudioArticleFact[];
+  uncertainties?: string[];
   visualProof?: string;
   visualPlan?: StudioVisualPlan;
   visualFeasibility?: number;
@@ -47,6 +51,7 @@ export interface TrendModelIdea {
 
 export interface TrendModelSignal extends StudioTrendSignal {
   relatedSignals: StudioTrendSignal[];
+  articleSources?: TrendArticleSnapshot[];
 }
 
 export interface TrendIdeaModel {
@@ -60,6 +65,7 @@ export interface TrendOpportunityAgentOptions {
   model?: TrendIdeaModel;
   now?: () => Date;
   strategy?: () => Promise<StudioTopicStrategy>;
+  articleReader?: Pick<TrendArticleReader, "readMany">;
 }
 
 export interface TrendCandidateGenerationOptions {
@@ -87,6 +93,23 @@ export class TrendOpportunityAgent {
       ...group[0]!,
       relatedSignals: group.slice(1),
     }));
+    const articleSourcesBySignalId = new Map<string, TrendArticleSnapshot[]>();
+    if (this.options.articleReader) {
+      const selectedUrls = signalGroups.slice(0, 8).flatMap((group) => group
+        .filter((signal) => Boolean(signal.url))
+        .filter((signal, index, items) => items.findIndex((item) => item.url === signal.url) === index)
+        .slice(0, 2)
+        .map((signal) => ({ sourceId: signal.id, url: signal.url!, title: signal.title })));
+      const articles = await this.options.articleReader.readMany(selectedUrls);
+      for (const signal of modelSignals) {
+        const ids = new Set([signal.id, ...signal.relatedSignals.map((related) => related.id)]);
+        const articleSources = articles.filter((article) => ids.has(article.sourceId));
+        if (articleSources.length) {
+          signal.articleSources = articleSources;
+          articleSourcesBySignalId.set(signal.id, articleSources);
+        }
+      }
+    }
     let modelFallbackDiagnostic: RuleFallbackDiagnostic | undefined;
     if (this.options.model) {
       try {
@@ -95,13 +118,25 @@ export class TrendOpportunityAgent {
         // 只有重复角度才去重——不能按 signalId 吞掉同事件的其他角度。
         const modelCandidates: StudioTrendCandidate[] = [];
         const angleKeys = new Set<string>();
+        let unknownSignalCount = 0;
+        let invalidSourceBindingCount = 0;
+        let duplicateAngleCount = 0;
         for (const idea of ideas) {
           const group = signalGroups.find((items) => items[0]?.id === idea.signalId);
-          if (!group) continue;
-          const candidate = this.fromModelIdea(idea, group);
-          if (!candidate) continue;
+          if (!group) {
+            unknownSignalCount += 1;
+            continue;
+          }
+          const candidate = this.fromModelIdea(idea, group, articleSourcesBySignalId.get(idea.signalId));
+          if (!candidate) {
+            invalidSourceBindingCount += 1;
+            continue;
+          }
           const key = editorialAngleKey(candidate);
-          if (angleKeys.has(key)) continue;
+          if (angleKeys.has(key)) {
+            duplicateAngleCount += 1;
+            continue;
+          }
           angleKeys.add(key);
           modelCandidates.push(candidate);
         }
@@ -121,6 +156,13 @@ export class TrendOpportunityAgent {
           candidateCount: selected.length,
           providerId: identity?.providerId ?? this.options.model.id,
           ...(identity?.modelId ? { modelId: identity.modelId } : {}),
+          modelCandidateCount: ideas.length,
+          unknownSignalCount,
+          invalidSourceBindingCount,
+          duplicateAngleCount,
+          preferenceExcludedCount: modelCandidates.length - modelCandidates.filter(
+            (candidate) => !matchesExcludedDirection(candidate, strategy),
+          ).length,
         };
         return selected;
       } catch (error) {
@@ -131,7 +173,7 @@ export class TrendOpportunityAgent {
     const fallback = this.options.model ? modelFallbackDiagnostic : undefined;
     const selected = selectCandidatePortfolio(
       [],
-      signalGroups.map((group) => this.fromSignal(group, strategy, fallback))
+      signalGroups.map((group) => this.fromSignal(group, strategy, fallback, articleSourcesBySignalId.get(group[0]!.id)))
         .filter((candidate) => !matchesExcludedDirection(candidate, strategy))
         .sort(compareCandidates),
       TREND_CANDIDATE_LIMIT,
@@ -155,16 +197,22 @@ export class TrendOpportunityAgent {
     return this.lastReceipt ? structuredClone(this.lastReceipt) : undefined;
   }
 
-  private fromModelIdea(idea: TrendModelIdea, signals: StudioTrendSignal[]): StudioTrendCandidate | null {
+  private fromModelIdea(
+    idea: TrendModelIdea,
+    signals: StudioTrendSignal[],
+    articleSources?: TrendArticleSnapshot[],
+  ): StudioTrendCandidate | null {
     const signal = signals[0]!;
-    const grounded = groundModelIdea(idea, signals);
-    // 含原始信号不支持的数字、引语、英文专名或 clickbait 的 idea 被拒绝，
-    // 不用机械标题顶替后绕过独立复核。
+    const grounded = groundModelIdea(idea, signals, articleSources);
+    // 宿主只执行可确定验证的来源绑定；事实是否被正文支持由已经完成的独立总编复核判断。
     if (!grounded) return null;
     const scores = [idea.novelty, idea.seriesPotential, idea.monetization].map(normalizePercent);
     return this.buildCandidate({
       signal,
       relatedSignals: signals,
+      ...(articleSources?.length ? { articleSources } : {}),
+      ...(grounded.facts?.length ? { articleFacts: grounded.facts } : {}),
+      ...(grounded.uncertainties?.length ? { articleUncertainties: grounded.uncertainties } : {}),
       title: grounded.title,
       track: grounded.track,
       audience: grounded.audience,
@@ -190,6 +238,7 @@ export class TrendOpportunityAgent {
     signals: StudioTrendSignal[],
     strategy?: StudioTopicStrategy,
     fallback?: RuleFallbackDiagnostic,
+    articleSources?: TrendArticleSnapshot[],
   ): StudioTrendCandidate {
     const signal = signals[0]!;
     const risk = complianceRisk(signal.title);
@@ -197,6 +246,7 @@ export class TrendOpportunityAgent {
     return this.buildCandidate({
       signal,
       relatedSignals: signals,
+      ...(articleSources?.length ? { articleSources } : {}),
       title: risk >= 60 ? groundedEditorialTitle(signal.title, track) : signal.title,
       track,
       audience: strategy?.targetAudience?.trim() || audienceFor(track),
@@ -222,6 +272,9 @@ export class TrendOpportunityAgent {
   private buildCandidate(input: {
     signal: StudioTrendSignal;
     relatedSignals: StudioTrendSignal[];
+    articleSources?: TrendArticleSnapshot[];
+    articleFacts?: StudioArticleFact[];
+    articleUncertainties?: string[];
     title: string;
     track: string;
     audience: string;
@@ -278,12 +331,16 @@ export class TrendOpportunityAgent {
       providerId: input.providerId,
       generatedAt: this.now().toISOString(),
       evidence: candidate.evidence,
+      ...(input.articleSources?.length ? { articleSources: structuredClone(input.articleSources) } : {}),
+      ...(input.articleFacts?.length ? { articleFacts: structuredClone(input.articleFacts) } : {}),
+      ...(input.articleUncertainties?.length ? { articleUncertainties: [...input.articleUncertainties] } : {}),
       score: candidate.score,
       category: classifyTopicCategory(title, input.track, input.relatedSignals.map((item) => item.title)),
       visualPlan: structuredClone(input.visualPlan ?? planVisualDirection({ title, hook })),
     };
   }
 }
+
 
 async function generateModelIdeas(model: TrendIdeaModel, signals: TrendModelSignal[], strategy?: StudioTopicStrategy, generationNonce?: string): Promise<TrendModelIdea[]> {
   try {
@@ -317,7 +374,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
       role: "选题总编",
       contractVersion: TOPIC_EDITOR_AGENT_CONTRACT_VERSION,
       criteria: [
-        "每个选题都可追溯到一个输入热点，不增加原信号没有的事实、数字、引语或因果",
+        "逐项审查 title、hook、rationale、facts、visualProof 与 visualPlan：事实、数字、引语和因果须由可读正文支持；创作标签、假设演算、受众描述和明确的不确定表达无需原文逐字出现",
         "角度对普通观众有明确收益，且不是对热搜标题的简单改写",
         "视觉可表现性、证据可得性、制作成本、合规风险和系列潜力得到实际权衡",
         "钩子能在两秒内建立具体问题或反差，但不夸张、不消费灾害伤亡或政治突发",
@@ -339,7 +396,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         criteria,
         context: {
           roleScope: {
-            owns: ["ideas.signalId", "ideas.track", "ideas.title", "ideas.audience", "ideas.painPoint", "ideas.hook", "ideas.rationale", "ideas.visualProof", "ideas.visualPlan", "ideas scores"],
+            owns: ["ideas.signalId", "ideas.track", "ideas.title", "ideas.audience", "ideas.painPoint", "ideas.hook", "ideas.rationale", "ideas.facts", "ideas.uncertainties", "ideas.visualProof", "ideas.visualPlan", "ideas scores"],
             doesNotOwn: ["热点原始事实", "新闻核验结果", "脚本与成片"],
           },
           upstreamFacts: request,
@@ -350,6 +407,9 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
             everyIdeaMustReferenceOneSignal: true,
             everyIdeaMustExplainVisibleEvidence: true,
             everyIdeaMustProvideSpecificVisualPlan: true,
+            everyFactMustCiteReadableArticleParagraphs: true,
+            reviewAllCandidateFieldsForUnsupportedFactualClaims: true,
+            creativeFramingDoesNotRequireVerbatimSourceText: true,
             scoresAreIntegersFromZeroToOneHundred: true,
             sourceGateAppliedDownstream: true,
             sourceBlockedIdeasRemainVisibleForSupplement: true,
@@ -395,6 +455,13 @@ function parseModelIdea(value: unknown): TrendModelIdea[] {
   const item = value as Record<string, unknown>;
   const textKeys = ["signalId", "title", "track", "audience", "painPoint", "hook", "rationale"] as const;
   if (textKeys.some((key) => typeof item[key] !== "string" || !(item[key] as string).trim())) return [];
+  if (!Array.isArray(item.facts) || !Array.isArray(item.uncertainties) || item.facts.length > 24 || item.uncertainties.length > 24) return [];
+  const facts = item.facts.flatMap(parseArticleFact);
+  if (facts.length !== item.facts.length) return [];
+  const uncertainties = item.uncertainties
+    .filter((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()) && entry.trim().length <= 500)
+    .map((entry) => entry.trim());
+  if (uncertainties.length !== item.uncertainties.length) return [];
   // C3/CG-07：角色合同声明 everyIdeaMustProvideSpecificVisualPlan 与 0–100 整数评分，
   // 解析器必须真实执行——缺失的视觉方案不能在通过审计后由展示层默认补齐。
   if (item.visualPlan === undefined) return [];
@@ -418,11 +485,34 @@ function parseModelIdea(value: unknown): TrendModelIdea[] {
     painPoint: item.painPoint as string,
     hook: item.hook as string,
     rationale: item.rationale as string,
+    facts,
+    uncertainties,
     ...(typeof item.visualProof === "string" && item.visualProof.trim() ? { visualProof: item.visualProof } : {}),
     visualPlan,
     ...(item.visualFeasibility !== undefined ? { visualFeasibility: number(item.visualFeasibility) } : {}),
     ...(item.productionCostEfficiency !== undefined ? { productionCostEfficiency: number(item.productionCostEfficiency) } : {}),
     ...scores,
+  }];
+}
+
+function parseArticleFact(value: unknown): StudioArticleFact[] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+  const item = value as Record<string, unknown>;
+  if (Object.keys(item).some((key) => !["statement", "sourceId", "paragraphIds", "uncertainty"].includes(key))) return [];
+  if (typeof item.statement !== "string" || !item.statement.trim() || item.statement.trim().length > 500) return [];
+  if (typeof item.sourceId !== "string" || !item.sourceId.trim() || item.sourceId.trim().length > 128) return [];
+  if (!Array.isArray(item.paragraphIds) || item.paragraphIds.length === 0 || item.paragraphIds.length > 16) return [];
+  const paragraphIds = item.paragraphIds
+    .filter((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()) && entry.trim().length <= 64)
+    .map((entry) => entry.trim());
+  if (paragraphIds.length !== item.paragraphIds.length || new Set(paragraphIds).size !== paragraphIds.length) return [];
+  if (item.uncertainty !== undefined && item.uncertainty !== null
+    && (typeof item.uncertainty !== "string" || !item.uncertainty.trim() || item.uncertainty.trim().length > 500)) return [];
+  return [{
+    statement: item.statement.trim(),
+    sourceId: item.sourceId.trim(),
+    paragraphIds,
+    ...(typeof item.uncertainty === "string" ? { uncertainty: item.uncertainty.trim() } : {}),
   }];
 }
 
@@ -509,32 +599,27 @@ function normalizePercent(value: number): number {
   return Math.min(100, Math.max(0, value));
 }
 
-// 独立复核通过后只做字段级 claim 校验：
-// - 高风险公共事件不再仅因“敏感/高风险”被整组替换；风险标签与来源门禁在下游继续把关，
-//   只有实际无法被来源支持的 claim 才退回只基于原信号的核验问句；
-// - 其余题材含原信号不支持的数字、引语、英文专名或 clickbait 的 idea 直接拒绝，
-//   不用机械标题顶替后绕过复核。
-function groundModelIdea(idea: TrendModelIdea, signals: StudioTrendSignal[]): TrendModelIdea | null {
+// 模型候选已经经过独立总编复核；宿主只核对机器可证明的来源身份和正文段落引用。
+// 引号、英文、数字与归因动词本身不代表虚构，不能在复核通过后再用词面规则推翻语义判断。
+function groundModelIdea(
+  idea: TrendModelIdea,
+  signals: StudioTrendSignal[],
+  articleSources: TrendArticleSnapshot[] | undefined,
+): TrendModelIdea | null {
   const signal = signals[0]!;
-  const sourceText = signals.map((item) => item.title).join("；");
-  const sourceNumbers = new Set(numberTokens(sourceText));
-  const riskLevel = topicRiskLevel(signal.title);
-  // duration 是执行节拍，不参与事实校验；strategy 与 description 仍可能夹带“省下 20 分钟”一类无来源主张。
-  const visualPlanClaims = idea.visualPlan
-    ? [idea.visualPlan.strategy, ...idea.visualPlan.beats.map((beat) => beat.description)]
-    : [];
-  // 非高风险题材允许"3 步""5 招"一类创作结构数量（CG-05）；高风险新闻里的数字一律按事实处理。
-  const allowStructuralQuantities = riskLevel !== "high";
-  const bodyUnsafe = [idea.audience, idea.painPoint, idea.hook, idea.rationale, idea.visualProof ?? "", ...visualPlanClaims]
-    .some((value) => unsupportedClaim(value, sourceText, sourceNumbers, allowStructuralQuantities)
-      || (riskLevel === "high" && unsupportedHighRiskAssertion(value, sourceText)));
-  const titleUnsafe = unsupportedClaim(idea.title, sourceText, sourceNumbers, allowStructuralQuantities)
-    || (riskLevel === "high" && unsupportedHighRiskAssertion(idea.title, sourceText))
-    || !isEditoriallyDistinct(idea.title, signal.title);
-  if (bodyUnsafe || titleUnsafe) {
-    if (riskLevel !== "high") return null;
-    return conservativeHighRiskIdea(idea, signal);
+  const readableSources = new Map((articleSources ?? [])
+    .filter((source) => source.readStatus === "read" || source.readStatus === "partial")
+    .map((source) => [source.sourceId, source]));
+  for (const fact of idea.facts ?? []) {
+    const source = readableSources.get(fact.sourceId);
+    if (!source) return null;
+    const paragraphs = new Map(source.paragraphs.map((paragraph) => [paragraph.id, paragraph.text]));
+    for (const paragraphId of fact.paragraphIds) {
+      const paragraph = paragraphs.get(paragraphId);
+      if (!paragraph) return null;
+    }
   }
+  if (!isEditoriallyDistinct(idea.title, signal.title)) return null;
   return {
     ...idea,
     track: normalizeTrack(idea.track, signal.title),
@@ -544,21 +629,6 @@ function groundModelIdea(idea: TrendModelIdea, signals: StudioTrendSignal[]): Tr
     hook: clean(idea.hook, `先核验“${signal.title}”中真正影响普通人的部分。`),
     rationale: clean(idea.rationale, `模型提出“${idea.title}”角度；进入选题池前仍需人工核验。`, RATIONALE_TEXT_LIMIT),
     visualProof: clean(idea.visualProof ?? "", "", VISUAL_PROOF_TEXT_LIMIT),
-  };
-}
-
-// 高风险热点仍保留选题价值，但绝不保留模型新增事实；回退结果只引用原始信号并明确要求核验。
-function conservativeHighRiskIdea(idea: TrendModelIdea, signal: StudioTrendSignal): TrendModelIdea {
-  const { visualPlan: _unsafeVisualPlan, ...safeIdea } = idea;
-  return {
-    ...safeIdea,
-    track: normalizeTrack(idea.track, signal.title),
-    title: groundedEditorialTitle(signal.title, idea.track),
-    audience: "关注这一热点与日常生活关系的中文短视频用户",
-    painPoint: "热点结论很多，但缺少只基于现有证据的解释",
-    hook: `${signal.title}正在上榜。先不猜结论，只看哪些问题能够被证据支持？`,
-    rationale: "该热点涉及高风险公共事件；系统未采用模型扩写，只保留基于原始信号的核验问题。",
-    visualProof: "",
   };
 }
 
@@ -686,78 +756,8 @@ function groundedEditorialTitle(sourceTitle: string, track: string): string {
   return `${sourceTitle}：它与普通人的关系该如何核验？`;
 }
 
-function unsupportedClaim(
-  value: string,
-  sourceTitle: string,
-  sourceNumbers: Set<string>,
-  allowStructuralQuantities = false,
-): boolean {
-  // C3/CG-05：数字分两类——事件事实数值必须来自原始信号；"3 步""5 招"一类描述视频
-  // 自身组织的方法计数是创作结构，不要求热点标题逐字提供。豁免仅在非高风险题材启用
-  // （高风险新闻里的数字一律按事实处理），且只认封闭的结构量词集合。
-  const unsupportedNumber = numberTokens(value).some((token) => (
-    !sourceNumbers.has(token)
-    && !(allowStructuralQuantities && isStructuralQuantity(value, token))
-  ));
-  const unsupportedAttribution = /透露|表示|宣称|宣布|数据显示|官方数据|调查显示|研究表明|合理估算|据报道|训练日程|内部消息|独家|采访素材/.test(value);
-  // 给原信号词组加中文/英文引号不算虚构；只有引住来源里不存在的内容才视为新增引语。
-  const unsupportedQuote = quotedSegments(value).some((segment) => !containsPhrase(sourceTitle, segment));
-  const sourceTerms = new Set(latinTokens(sourceTitle));
-  const unsupportedLatinTerm = latinTokens(value).some((token) => !sourceTerms.has(token));
-  const unsupportedClickbait = /内幕|秘密|曝光|真相|首次披露/.test(value) && !/内幕|秘密|曝光|真相|首次披露/.test(sourceTitle);
-  return unsupportedNumber || unsupportedAttribution || unsupportedQuote || unsupportedLatinTerm || unsupportedClickbait;
-}
-
-const STRUCTURAL_QUANTITY_PATTERN = /(?:步|招|种方法|个方法|个技巧|条建议|个习惯)/;
-
-function isStructuralQuantity(value: string, token: string): boolean {
-  if (!/^\d{1,2}$/.test(token)) return false;
-  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`${escaped}\\s*${STRUCTURAL_QUANTITY_PATTERN.source}`).test(value);
-}
-
-// 高风险题材还要拦住没有数字、引语等明显特征的中文新增事实。
-// 新增问题、核验角度和观看框架可以保留；带有确定性事实标记且引入来源外实体/状态的陈述必须回退。
-// 高风险题材还要拦住没有数字、引语等明显特征的中文新增事实。
-// C3/CG-05：按子句检查——问句子句（核验问题、观看角度）是合法创作内容；但陈述子句
-// 里的新增事实断言不能因为同一句里带问号就整体豁免（"救援已经结束，为何还要关注？"）。
-// 新增问题与核验框架仍允许；只有带确定性事实标记且引入来源外实体的陈述才回退。
-function unsupportedHighRiskAssertion(value: string, sourceText: string): boolean {
-  const normalized = value.trim();
-  if (!normalized || containsPhrase(sourceText, normalized)) return false;
-  const sourceTerms = meaningfulTopicTerms(sourceText);
-  return splitAssertionClauses(normalized).some((clause) => {
-    // 疑问子句是核验问题，不是事实断言。
-    if (/[？?]/.test(clause) || /(为什么|为何|如何|哪些|什么|是否|能否|该不该|怎么)/.test(clause)) return false;
-    if (!/(?:已经|早已|曾|正在|将要|导致|造成|升级|伤亡|病危|传言|网传|网络|数据|未公开|未披露|未确认|已确认|证实|公布|披露)/.test(clause)) return false;
-    return [...meaningfulTopicTerms(clause)].some((term) => !sourceTerms.has(term) && !HIGH_RISK_EDITORIAL_TERMS.has(term));
-  });
-}
-
-function splitAssertionClauses(value: string): string[] {
-  return value.split(/[。！？!?，、；\n]+/).map((part) => part.trim()).filter(Boolean);
-}
-
-const HIGH_RISK_EDITORIAL_TERMS = new Set([
-  "关注", "核验", "来源", "可靠", "信息", "事实", "问题", "普通人", "观众", "用户", "追踪", "梳理", "解释", "看点",
-]);
-
-function quotedSegments(value: string): string[] {
-  return [...value.matchAll(/[“"]([^“”"]{1,80})[“”]|'([^']{1,80})'/g)]
-    .map((match) => match[1] ?? match[2] ?? "")
-    .filter(Boolean);
-}
-
-function containsPhrase(source: string, phrase: string): boolean {
-  return normalizeTopicText(source).includes(normalizeTopicText(phrase));
-}
-
 function numberTokens(value: string): string[] {
   return value.match(/\d+(?:\.\d+)?%?/g) ?? [];
-}
-
-function latinTokens(value: string): string[] {
-  return (value.match(/[A-Za-z][A-Za-z0-9-]*/g) ?? []).map((token) => token.toUpperCase());
 }
 
 function platformLabel(platform: string): string {

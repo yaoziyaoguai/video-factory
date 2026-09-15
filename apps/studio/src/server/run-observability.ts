@@ -11,7 +11,7 @@ import type {
 } from "../shared/api.js";
 
 const PHASES: Array<{ id: StudioRunPhaseId; label: string; nodeIds: string[] }> = [
-  { id: "planning", label: "策划定稿", nodeIds: ["brief", "script", "reference-grammar", "visual-direction"] },
+  { id: "planning", label: "策划定稿", nodeIds: ["brief", "creative-planning", "script", "reference-grammar", "visual-direction"] },
   { id: "assets", label: "素材筹备", nodeIds: ["asset-candidates", "asset-semantic-rank", "assets", "asset-source-review"] },
   { id: "composition", label: "声音与剪辑", nodeIds: ["voice", "render"] },
   { id: "review", label: "审片质检", nodeIds: ["technical-review", "visual-review", "final-review"] },
@@ -20,6 +20,7 @@ const PHASES: Array<{ id: StudioRunPhaseId; label: string; nodeIds: string[] }> 
 
 const NODE_ACTIONS: Record<string, string> = {
   brief: "正在核对题目、观众与生产约束",
+  "creative-planning": "正在准备当前创作阶段，完成后等待你讨论和确认",
   script: "编剧正在根据独立复核意见修改脚本，最多 3 轮",
   "reference-grammar": "正在提炼参考片的节奏、构图与镜头运动",
   "visual-direction": "正在统一叙事节奏、镜头语法与视觉规则",

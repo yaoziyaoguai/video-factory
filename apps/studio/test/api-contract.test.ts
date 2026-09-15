@@ -6,6 +6,7 @@ import {
   parseStudioCreatorSettingsPatch,
   parseStudioOpportunityInput,
   parseStudioOpportunityStatusInput,
+  parseStudioNarrationRevisionInput,
   parseStudioPublishInput,
   parseStudioSeriesInput,
   parseStudioDecisionInput,
@@ -50,6 +51,51 @@ describe("run intervention API contracts", () => {
         voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
       }), /只有调整方案时/);
     }
+  });
+
+  it("requires a written reason on every rejected review item before an approval", () => {
+    const base = {
+      action: "approve" as const,
+      expectedRunRevision: 4,
+      interventionId: "final-review-1",
+      reviewEvidenceId: "a".repeat(64),
+    };
+    const itemKey = "b".repeat(64);
+    assert.deepEqual(parseStudioDecisionInput({
+      ...base,
+      reviewDispositions: [{ itemKey, decision: "reject", reason: " 已逐帧核对，这里是有意为之 " }],
+    }), {
+      ...base,
+      reviewDispositions: [{ itemKey, decision: "reject", reason: "已逐帧核对，这里是有意为之" }],
+    });
+    // 采纳就是"照这条结论返修"，理由由结论本身给出，不再要求另写一段。
+    assert.deepEqual(parseStudioDecisionInput({
+      ...base,
+      reviewDispositions: [{ itemKey, decision: "accept" }],
+    }).reviewDispositions, [{ itemKey, decision: "accept" }]);
+    assert.throws(() => parseStudioDecisionInput({ ...base, reviewDispositions: [] }), /不能是空列表/);
+    assert.throws(() => parseStudioDecisionInput({
+      ...base,
+      reviewDispositions: [{ itemKey, decision: "reject" }],
+    }), /必须写明理由/);
+    assert.throws(() => parseStudioDecisionInput({
+      ...base,
+      reviewDispositions: [{ itemKey, decision: "reject", reason: "   " }],
+    }), /必须写明理由/);
+    assert.throws(() => parseStudioDecisionInput({
+      ...base,
+      reviewDispositions: [{ itemKey: "not-a-digest", decision: "reject", reason: "看过" }],
+    }), /条目编号格式不正确/);
+    assert.throws(() => parseStudioDecisionInput({
+      ...base,
+      reviewDispositions: [{ itemKey, decision: "reject", reason: "看过" }, { itemKey, decision: "reject", reason: "再看" }],
+    }), /只能表态一次/);
+    // 打回不需要逐条表态：那不是一份放行签字。
+    assert.throws(() => parseStudioDecisionInput({
+      ...base,
+      action: "reject",
+      reviewDispositions: [{ itemKey, decision: "reject", reason: "看过" }],
+    }), /只有批准成片时/);
   });
 });
 
@@ -343,6 +389,63 @@ describe("voice preview API contracts", () => {
         masteringPreset: "natural",
       }),
       (error: unknown) => error instanceof StudioInputError && /180/.test(error.message),
+    );
+  });
+
+});
+
+describe("scene narration revision API contracts", () => {
+  it("accepts one scene's narration rewrite and rejects text that is not a single line", () => {
+    assert.deepEqual(
+      parseStudioNarrationRevisionInput({
+        expectedRunRevision: 7,
+        scenePosition: 2,
+        narration: "  改过的第二幕  ",
+        note: "  第二幕口播改得更直白。  ",
+      }),
+      {
+        expectedRunRevision: 7,
+        scenePosition: 2,
+        narration: "改过的第二幕",
+        note: "第二幕口播改得更直白。",
+      },
+    );
+
+    assert.throws(
+      () => parseStudioNarrationRevisionInput({
+        expectedRunRevision: 7,
+        scenePosition: 2,
+        narration: "   ",
+        note: "空文字不能提交。",
+      }),
+      (error: unknown) => error instanceof StudioInputError,
+    );
+    assert.throws(
+      () => parseStudioNarrationRevisionInput({
+        expectedRunRevision: 7,
+        scenePosition: 2,
+        narration: "字".repeat(601),
+        note: "超长文字不能提交。",
+      }),
+      (error: unknown) => error instanceof StudioInputError && /600/.test(error.message),
+    );
+    assert.throws(
+      () => parseStudioNarrationRevisionInput({
+        expectedRunRevision: 7,
+        scenePosition: 2,
+        narration: "第一行\n第二行",
+        note: "旁白是一行口播，不能塞换行。",
+      }),
+      (error: unknown) => error instanceof StudioInputError,
+    );
+    assert.throws(
+      () => parseStudioNarrationRevisionInput({
+        expectedRunRevision: 7,
+        scenePosition: 0,
+        narration: "改过的第二幕",
+        note: "镜位从 1 起。",
+      }),
+      (error: unknown) => error instanceof StudioInputError,
     );
   });
 });
