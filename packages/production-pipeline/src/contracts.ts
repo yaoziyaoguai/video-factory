@@ -200,6 +200,11 @@ export interface ProductionReworkFinding {
   category: string;
   description: string;
   suggestion: string;
+  /**
+   * 审片意见指名真实节点时一并指名的那一段。重做代价依次收窄，所以它随意见一起持久化，
+   * 不能在编译返工计划时丢掉——丢了就只剩一句笼统的"方案有问题"。
+   */
+  planningStageId?: "treatment" | "script" | "director";
   targetNodeIds: Array<"script" | "visual-direction" | "assets">;
   primaryOwnerNodeId?: "script" | "visual-direction" | "assets";
   affectedNodeIds?: Array<"script" | "visual-direction" | "assets">;
@@ -851,6 +856,8 @@ export function parseProductionReworkFindings(
     const actualModels = finding.actualModels === undefined
       ? undefined
       : parseReworkActualModels(finding.actualModels, `${itemField}.actualModels`);
+    const planningStageId = optionalEnum(finding.planningStageId,
+      ["treatment", "script", "director"] as const, `${itemField}.planningStageId`);
     const primaryOwnerNodeId = optionalEnum(
       finding.primaryOwnerNodeId,
       ["script", "visual-direction", "assets"] as const,
@@ -880,6 +887,7 @@ export function parseProductionReworkFindings(
       category: boundedReworkText(finding.category, `${itemField}.category`, 120),
       description: boundedReworkText(finding.description, `${itemField}.description`),
       suggestion: boundedReworkText(finding.suggestion, `${itemField}.suggestion`),
+      ...(planningStageId ? { planningStageId } : {}),
       targetNodeIds,
       ...(primaryOwnerNodeId ? { primaryOwnerNodeId } : {}),
       ...(affectedNodeIds ? { affectedNodeIds } : {}),

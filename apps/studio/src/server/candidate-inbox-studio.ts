@@ -21,6 +21,9 @@ import { decideEditorialFormat, type EditorialTemplateOption } from "./editorial
 export interface CandidateInboxStudioOptions {
   trends: {
     listCandidates(): Promise<StudioTrendCandidate[]>;
+    /** 非阻塞快照：HTTP 读取用它，冷缓存时不等待生成。缺省时退回 listCandidates。 */
+    snapshotCandidates?(): Promise<StudioTrendCandidate[]>;
+    isRefreshing?(): boolean;
     appendCandidateSources?(candidateId: string, evidenceUrls: string[]): Promise<StudioTrendCandidate>;
   };
   series: Pick<SeriesStudio, "listCandidates" | "productionContextFor" | "advanceEpisode" | "appendEpisodeSources">;
@@ -41,11 +44,17 @@ export class CandidateInboxStudio {
     this.now = options.now ?? (() => new Date());
   }
 
-  async list(query: StudioCandidateInboxQuery): Promise<StudioCandidateInbox> {
+  // awaitTrendGeneration=false 只用于收件箱读取：拿当前缓存快照，不等待生成。
+  // 采用与补充来源仍走默认的阻塞读取，避免在候选尚未落盘时误判"候选已失效"。
+  async list(query: StudioCandidateInboxQuery, options: { awaitTrendGeneration?: boolean } = {}): Promise<StudioCandidateInbox> {
     const includeTrends = !query.origins?.length || query.origins.includes("trend");
     const includeSeries = !query.origins?.length || query.origins.includes("series");
+    const snapshotCandidates = this.options.trends.snapshotCandidates;
+    const readTrends = options.awaitTrendGeneration === false && snapshotCandidates
+      ? () => snapshotCandidates.call(this.options.trends)
+      : () => this.options.trends.listCandidates();
     const [trendCandidates, seriesCandidates, adoptedOpportunities, topicStrategy, publishedTemplates] = await Promise.all([
-      includeTrends ? this.options.trends.listCandidates() : Promise.resolve([]),
+      includeTrends ? readTrends() : Promise.resolve([]),
       includeSeries ? this.options.series.listCandidates() : Promise.resolve([]),
       this.options.opportunities.list(),
       includeTrends ? this.options.topicStrategy?.().catch(() => undefined) : Promise.resolve(undefined),
@@ -85,7 +94,13 @@ export class CandidateInboxStudio {
         || right.editorialDecision.score - left.editorialDecision.score
         || left.title.localeCompare(right.title, "zh-CN"));
     const limit = Math.max(1, Math.min(200, Math.floor(query.limit ?? 100)));
-    return { items: filtered.slice(0, limit), facets, generatedAt: this.now().toISOString() };
+    return {
+      items: filtered.slice(0, limit),
+      facets,
+      generatedAt: this.now().toISOString(),
+      // 空收件箱有两种真相：真的没有候选，还是正在生成。客户端靠这个标记决定是否继续轮询。
+      refreshing: includeTrends && (this.options.trends.isRefreshing?.() ?? false),
+    };
   }
 
   // 候选人工补充来源的唯一入口：由 origin 决定写入热点缓存还是系列单集计划。

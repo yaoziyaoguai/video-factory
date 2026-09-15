@@ -37,6 +37,15 @@ export interface RoleAgentAssembly {
   treatmentAgents: Array<{ agent: CodexCreativeTreatmentAgent; providerId: "openai" | "zai-bigmodel-api" }>;
 }
 
+/**
+ * 一个 broker 上该角色可以实际跑到的模型：它自己的默认模型，加上它在 /health 公告的已审核候选表。
+ * 默认模型始终在列表里，哪怕候选表还没有它——broker 会把"请求的模型就是我自己"归一化成没有覆盖，
+ * 所以这条路径不需要候选表；而候选表里的每个模型都会成为一个真的能把模型送上线路的候选 agent。
+ */
+function offeredModels(settings: CodexProviderSettings, defaultModelId: string): string[] {
+  return [...new Set([defaultModelId, ...(settings.modelCandidates ?? [])].filter((modelId) => modelId.trim()))];
+}
+
 export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleAgentAssembly {
   const { codexSettings, zaiCodexSettings, codexClient, zaiCodexClient } = options;
   const codexModelId = codexSettings.modelId || options.environment.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
@@ -65,22 +74,27 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
 
   const screenwriterAvailability = auditedRoleCandidateAvailability(codexSettings, zaiCodexSettings, "script-draft");
   const codexScreenwriter = codexClient && screenwriterAvailability.codex
-    ? new CodexScreenwriterAgent({
-        client: codexClient,
-        modelId: codexModelFor("script-draft"),
-        sessionMode: "stateless",
-      })
-    : undefined;
+    ? offeredModels(codexSettings, codexModelFor("script-draft")).map((modelId) => ({
+        agent: new CodexScreenwriterAgent({
+          client: codexClient,
+          modelId,
+          sessionMode: "stateless",
+        }),
+        providerId: "openai" as const,
+      }))
+    : [];
   const glmScreenwriter = zaiCodexClient && screenwriterAvailability.zai
-    ? new CodexScreenwriterAgent({
-        client: zaiCodexClient,
-        auditClient: zaiCodexClient,
-        modelId: zaiModelFor("script-draft"),
-        sessionMode: "stateless",
-      })
-    : undefined;
-  const screenwriterCandidates = [codexScreenwriter, glmScreenwriter]
-    .filter((agent): agent is CodexScreenwriterAgent => Boolean(agent));
+    ? offeredModels(zaiCodexSettings, zaiModelFor("script-draft")).map((modelId) => ({
+        agent: new CodexScreenwriterAgent({
+          client: zaiCodexClient,
+          auditClient: zaiCodexClient,
+          modelId,
+          sessionMode: "stateless",
+        }),
+        providerId: "zai-bigmodel-api" as const,
+      }))
+    : [];
+  const screenwriterCandidates = [...codexScreenwriter, ...glmScreenwriter];
 
   const treatmentAvailability = auditedRoleCandidateAvailability(codexSettings, zaiCodexSettings, "creative-treatment");
   const codexTreatment = codexClient && treatmentAvailability.codex
@@ -128,12 +142,7 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
 
   return {
     ...(screenwriterCandidates.length > 0 ? {
-      screenwriterAgent: new FallbackScreenwriterAgent({
-        candidates: screenwriterCandidates.map((agent) => ({
-          agent,
-          providerId: agent === codexScreenwriter ? "openai" : "zai-bigmodel-api",
-        })),
-      }),
+      screenwriterAgent: new FallbackScreenwriterAgent({ candidates: screenwriterCandidates }),
     } : {}),
     ...(directorCandidates.length > 0 ? {
       directorAgent: new FallbackVisualDirectorAgent({

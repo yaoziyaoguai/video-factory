@@ -200,7 +200,16 @@ function inbox(items: StudioCandidateInboxItem[]) {
       },
     },
     generatedAt: "2026-08-24T09:00:00.000Z",
+    refreshing: false,
   };
+}
+
+// TodayPage 同时渲染待制作区的热点机会板和候选收件箱，两块会用同一批候选的标题与来源文案。
+// 收件箱自身的断言必须限定在收件箱容器内，否则会被机会板里的同名文本命中。
+function withinTrendInbox() {
+  const surface = document.querySelector('[data-tour="topic-inbox"]');
+  if (!surface) throw new Error("trend inbox surface is not rendered");
+  return within(surface as HTMLElement);
 }
 
 let restoreScrollIntoView: (() => void) | undefined;
@@ -1844,7 +1853,7 @@ describe("Creative OS", () => {
     const supplementSources = screen.getByRole("button", { name: `补充来源 ${blockedCandidate.title}` });
     expect(supplementSources).toBeEnabled();
     expect(screen.queryByRole("button", { name: `采用候选 ${blockedCandidate.title}` })).not.toBeInTheDocument();
-    expect(screen.getByText(/至少需要 2 个独立来源/)).toBeInTheDocument();
+    expect(withinTrendInbox().getByText(/至少需要 2 个独立来源/)).toBeInTheDocument();
     await user.click(supplementSources);
     expect(screen.getByRole("dialog", { name: "补齐可核验的原始来源" })).toBeInTheDocument();
   });
@@ -2299,12 +2308,12 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([first, second]));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findAllByText("同名信号")).toHaveLength(2);
+    expect(await withinTrendInbox().findAllByText("同名信号")).toHaveLength(2);
     await user.click(screen.getByRole("button", { name: `查看${second.title}` }));
 
-    expect(screen.queryByText("同名信号")).not.toBeInTheDocument();
-    expect(screen.getByText("当前证据一")).toBeInTheDocument();
-    expect(screen.getByText("当前证据二")).toBeInTheDocument();
+    expect(withinTrendInbox().queryByText("同名信号")).not.toBeInTheDocument();
+    expect(withinTrendInbox().getByText("当前证据一")).toBeInTheDocument();
+    expect(withinTrendInbox().getByText("当前证据二")).toBeInTheDocument();
   });
 
   it("shows an actionable error when adopting an agent candidate fails", async () => {

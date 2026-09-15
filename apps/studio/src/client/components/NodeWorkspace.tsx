@@ -670,6 +670,8 @@ function agentLoopPhaseLabel(progress: NonNullable<StudioNode["agentLoopProgress
         ? "独立复核已通过"
         : progress.phase === "exhausted"
           ? "三轮复核未通过"
+          : progress.phase === "awaiting_user"
+            ? "自动修订轮次已用尽，这一版与复核意见交给你裁决"
           : progress.phase === "halted"
             ? "发现当前角色无法解决的前提，已停住"
           : progress.phase === "failed"

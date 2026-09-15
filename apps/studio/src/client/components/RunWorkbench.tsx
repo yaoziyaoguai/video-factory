@@ -78,6 +78,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const visualReview = visualReviewDecision(run);
   const voiceTiming = voiceTimingConflict(run);
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
+  const flawedReviewBranches = (visualReview?.independentReviews ?? []).filter((branch) => branch.auditVerdict === "repair");
   const reviewItems = visualReview?.reviewItems ?? [];
   const undisposedReviewItems = reviewItems.filter((item) => item.itemKey && !reviewDecisions[item.itemKey]);
   const acceptedReviewItems = reviewItems.filter((item) => item.itemKey && reviewDecisions[item.itemKey]?.decision === "accept");
@@ -260,10 +261,14 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               <span>综合结论 · {visualReviewRecommendationLabel(visualReview.recommendation)}</span>
               <p>{creatorFacingTechnicalText(visualReview.summary)}</p>
             </div>
+            {flawedReviewBranches.length > 0 ? <p className="review-audit-caveat" role="note">
+              <strong>有 {flawedReviewBranches.length} 份意见自己的独立审计没通过</strong>
+              <span>{flawedReviewBranches.map((branch) => `${providerLabel(branch.providerId) ?? branch.providerId} · ${catalogModelLabel(providers, branch.modelId) ?? branch.modelId}`).join("、")}。审计查的是这份审片报告本身站不站得住，所以它说明的是"这些意见有瑕疵、请重点核对"，不是"作品有问题"。审计只出建议，作品能不能发由你定。</span>
+            </p> : null}
             <div className="independent-review-list">
               {visualReview.independentReviews.map((review) => <article key={`${review.providerId}:${review.modelId}`}>
                 <header><strong>{providerLabel(review.providerId) ?? review.providerId}</strong><span>{visualReviewRecommendationLabel(review.recommendation)}</span></header>
-                <small>{catalogModelLabel(providers, review.modelId) ?? review.modelId}{review.score !== undefined ? ` · ${review.score} 分` : ""}{` · ${review.findingCount} 项问题`}</small>
+                <small>{catalogModelLabel(providers, review.modelId) ?? review.modelId}{review.score !== undefined ? ` · ${review.score} 分` : ""}{` · ${review.findingCount} 项问题`}{review.auditVerdict === "repair" ? " · 独立审计未通过" : ""}</small>
                 <p>{creatorFacingTechnicalText(review.summary)}</p>
               </article>)}
               {visualReview.independentReviews.length < 2 ? <p role="status">缺少 {2 - visualReview.independentReviews.length} 个可验证的独立审片结果，请重新审查当前成片。</p> : null}
@@ -919,6 +924,8 @@ interface VisualReviewBranch {
   summary: string;
   score?: number;
   findingCount: number;
+  /** 这一分支自己的独立审计投了什么票；repair 表示这份意见本身有瑕疵，不代表作品有问题。 */
+  auditVerdict?: "pass" | "repair";
 }
 
 interface VisualReviewFinding {
@@ -1068,6 +1075,16 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
     run.artifacts.some((artifact) => artifact.id === artifactId && artifact.kind === "review_report" && artifact.producerNodeId === "visual-review")
   ));
   const reviewScope = isRecord(report.reviewScope) ? report.reviewScope : undefined;
+  // 各分支独立审计的投票，按 providerId+modelId 认领。审计查的是"这份审片报告本身站不站得住"，
+  // 与作品好坏是两件事：auditVerdict 为 repair 时这份意见的结论需要用户重点核对，但它不是判决。
+  const branchAuditVerdicts = new Map<string, "pass" | "repair">();
+  if (Array.isArray(reviewScope?.actualModels)) {
+    for (const model of reviewScope.actualModels) {
+      if (!isRecord(model) || typeof model.providerId !== "string" || typeof model.modelId !== "string") continue;
+      if (model.auditVerdict !== "pass" && model.auditVerdict !== "repair") continue;
+      branchAuditVerdicts.set(`${model.providerId} ${model.modelId}`, model.auditVerdict);
+    }
+  }
   const independentReviews = Array.isArray(report.independentReviews)
     ? report.independentReviews.flatMap((value): VisualReviewBranch[] => {
         if (!isRecord(value) || typeof value.providerId !== "string" || typeof value.modelId !== "string" || !isRecord(value.report)) return [];
@@ -1076,6 +1093,7 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
         const branchScores = isRecord(branch.scores)
           ? Object.values(branch.scores).filter((score): score is number => typeof score === "number" && Number.isFinite(score))
           : [];
+        const auditVerdict = branchAuditVerdicts.get(`${value.providerId} ${value.modelId}`);
         return [{
           providerId: value.providerId,
           modelId: value.modelId,
@@ -1085,6 +1103,7 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
           findingCount: Array.isArray(branch.findings) ? branch.findings.filter((finding) => (
             isRecord(finding) && finding.evidenceStatus === "failed" && finding.severity !== "info"
           )).length : 0,
+          ...(auditVerdict ? { auditVerdict } : {}),
         }];
       })
     : [];

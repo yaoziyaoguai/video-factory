@@ -174,7 +174,7 @@ interface PersistedLoopState {
   role: string;
   maxIterations: number;
   cycle: number;
-  status: "running" | "passed" | "exhausted" | "failed";
+  status: "running" | "passed" | "awaiting_user" | "exhausted" | "failed";
   completed: PersistedLoopIteration[];
   pendingCandidate?: PersistedLoopCandidate;
   validationFailure?: PersistedValidationFailure;
@@ -279,8 +279,9 @@ export async function runRoleAgentLoop<TOutput>(
   if (persistedPlanningHalt) {
     throw planningHaltError(options, state, iterations, persistedPlanningHalt);
   }
-  if (state.status === "passed") {
-    return completedExecution(options, state, iterations);
+  if (state.status === "passed" || state.status === "awaiting_user") {
+    // awaiting_user 表示上一轮已经审完并停在用户面前；恢复时原样交还，不重跑审计。
+    return completedExecution(options, state, iterations, state.status);
   }
 
   const lastCompleted = state.completed.at(-1);
@@ -510,19 +511,19 @@ export async function runRoleAgentLoop<TOutput>(
       await persistCheckpoint(options, state);
       return completedExecution(options, state, iterations);
     }
+    if (iteration === options.maxIterations) {
+      // 自动重做轮次用尽仍未通过。审计只出建议，不改判成败：候选、审计与全部轮次都留在
+      // checkpoint 里，原地停在用户面前由他裁决——直接采用，或带着建议去跟生产模型谈下一版。
+      state.status = "awaiting_user";
+      await persistCheckpoint(options, state);
+      return completedExecution(options, state, iterations, "awaiting_user");
+    }
     await persistCheckpoint(options, state);
     revision = { candidate, audit };
   }
 
-  const finalAudit = iterations.at(-1)?.audit;
-  state.status = "exhausted";
-  throw await failedLoopError(
-    new Error(`${options.role}经过 ${options.maxIterations} 轮修改后仍未通过独立审计。${finalAudit ? ` ${finalAudit.summary}` : ""}`),
-    options,
-    state,
-    iterations,
-    state.completed.at(-1)?.candidateTrace,
-  );
+  // 上界保证循环至少跑一轮，且每条路径都在轮内返回；落到这里说明 maxIterations 被改坏了。
+  throw new Error("Agent loop finished without a terminal result.");
 }
 
 async function resumePendingAudit<TOutput>(
@@ -705,7 +706,8 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
       && loadedVersion !== "video-factory/agent-loop-checkpoint-v9")
     || candidate.role !== options.role
     || candidate.maxIterations !== options.maxIterations
-    || (candidate.status !== "running" && candidate.status !== "passed" && candidate.status !== "exhausted" && candidate.status !== "failed")
+    || (candidate.status !== "running" && candidate.status !== "passed" && candidate.status !== "awaiting_user"
+      && candidate.status !== "exhausted" && candidate.status !== "failed")
     || !Number.isInteger(candidate.cycle) || Number(candidate.cycle) < 0
     || !Array.isArray(candidate.completed)
     || !isRequestState(candidate.operationGenerations, "number")
@@ -879,9 +881,12 @@ function completedExecution<TOutput>(
   options: RoleAgentLoopOptions<TOutput>,
   state: PersistedLoopState,
   iterations: AgentLoopTrace["iterations"],
+  status: "passed" | "awaiting_user" = "passed",
 ): CodexTaskExecution<TOutput> {
   const final = state.completed.at(-1);
-  if (!final || final.audit.verdict !== "pass") throw new Error("Agent loop checkpoint has no passing result.");
+  if (!final || (status === "passed" && final.audit.verdict !== "pass")) {
+    throw new Error("Agent loop checkpoint has no passing result.");
+  }
   const finalTrace = final.candidateTrace ?? final.auditTrace;
   const { producerModelCallCount, auditModelCallCount } = actualPhaseModelCallCounts(state);
   return {
@@ -892,7 +897,7 @@ function completedExecution<TOutput>(
       role: options.role,
       contractVersion: options.contractVersion,
       criteria: [...options.criteria],
-      status: "passed",
+      status,
       maxIterations: options.maxIterations,
       modelCallCount: producerModelCallCount + auditModelCallCount,
       producerModelCallCount,

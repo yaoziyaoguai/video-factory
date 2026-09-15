@@ -1550,7 +1550,7 @@ describe("CodexVisualDirectorAgent", () => {
     await assert.rejects(() => agent.plan(input), /generated visual as real-world evidence/);
   });
 
-  it("lets the independent audit block unsupported identity continuity instead of keyword-rejecting the plan", async () => {
+  it("lets the independent audit name unsupported identity continuity instead of keyword-rejecting the plan", async () => {
     const input = directorInput();
     input.scenes = [1, 2].map((position) => ({
       position,
@@ -1607,7 +1607,12 @@ describe("CodexVisualDirectorAgent", () => {
       sessionMode: "stateless",
     });
 
-    await assert.rejects(() => agent.planDetailed({ ...input, selectedModelId: "glm-5.3" }), /仍未通过独立审计/);
+    // 方案没有被关键词过滤器拦下（它会误伤"不承诺精确身份"的否定句），而是走完了 producer，
+    // 由独立审计指名问题。审计只出建议，不替用户判成败：候选与这条 repair 结论一起交还给用户。
+    const stopped = await agent.planDetailed({ ...input, selectedModelId: "glm-5.3" });
+    assert.equal(stopped.agentLoop?.status, "awaiting_user");
+    assert.equal(stopped.agentLoop?.iterations.at(-1)?.audit.verdict, "repair");
+    assert.match(stopped.agentLoop?.iterations.at(-1)?.audit.summary ?? "", /同一人物与物件/);
     assert.deepEqual(producerClient.calls.map(({ kind }) => kind), ["director-plan"]);
     assert.deepEqual(auditClient.calls.map(({ kind }) => kind), ["role-audit"]);
   });

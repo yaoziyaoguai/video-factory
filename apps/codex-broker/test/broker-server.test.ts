@@ -18,6 +18,7 @@ import {
   type ValidatedTask,
 } from "../src/codex-executor.js";
 import { BROKER_TASK_KINDS, taskContractDescriptorFor } from "../src/task-definitions.js";
+import { TASK_BINDING_VERSION } from "../src/task-binding.js";
 
 class ScriptedExecutor extends CodexExecutor {
   readonly calls: ValidatedTask[] = [];
@@ -25,8 +26,13 @@ class ScriptedExecutor extends CodexExecutor {
   constructor(
     private readonly script: (task: ValidatedTask, options?: CodexExecutionOptions) => CodexExecutionResult | Promise<CodexExecutionResult>,
     profile?: CodexExecutorProfile,
+    candidates?: readonly string[],
   ) {
-    super({ workspaceRoot: "/nonexistent-codex-broker", ...(profile !== undefined ? { profile } : {}) });
+    super({
+      workspaceRoot: "/nonexistent-codex-broker",
+      ...(profile !== undefined ? { profile } : {}),
+      ...(candidates !== undefined ? { modelCandidates: candidates } : {}),
+    });
   }
 
   async runTask(task: ValidatedTask, options: CodexExecutionOptions = {}): Promise<CodexExecutionResult> {
@@ -42,7 +48,9 @@ class ScriptedExecutor extends CodexExecutor {
           contractDigest: task.expectedContractDigest,
           prompt: "test",
           providerId: this.identity.providerId,
-          modelId: modelIdForTask(this.identity, task),
+          // 与真实执行器同源：覆盖优先，否则回落身份。用身份默认值会让"按请求换模型"看起来
+          // 像是执行器返回了别的绑定。
+          modelId: options.model ?? modelIdForTask(this.identity, task),
           ...result.trace,
         },
       };
@@ -75,6 +83,7 @@ interface BrokerSpec {
   shutdownTimeoutMs?: number;
   now?: () => Date;
   profile?: CodexExecutorProfile;
+  modelCandidates?: readonly string[];
   durableIdempotency?: boolean;
   durableSessions?: boolean;
 }
@@ -87,6 +96,7 @@ async function startBroker(spec: BrokerSpec = {}): Promise<BrokerHandle> {
     executor: new ScriptedExecutor(
       spec.script ?? (() => ({ output: "{\"ideas\":[]}" })),
       spec.profile,
+      spec.modelCandidates,
     ),
     ...(spec.concurrency !== undefined ? { concurrency: spec.concurrency } : {}),
     ...(spec.maxBacklog !== undefined ? { maxBacklog: spec.maxBacklog } : {}),
@@ -298,6 +308,26 @@ function visualReviewTaskBody(): string {
         sha256,
         jpegBase64: jpeg.toString("base64"),
       })),
+    },
+  });
+}
+
+// 请求通过信封里的 brokerBinding.modelId 声明它要用哪个模型；这里按真实客户端的形状构造，
+// 即先读 /health 拿身份，再把身份里的 modelId 换成自己选的那个。
+function topicTaskBodyWithModel(label: string, identity: Record<string, unknown>, modelId: string): string {
+  return JSON.stringify({
+    protocolVersion: "video-factory/codex-bridge-v2",
+    requestId: `topic-${label.replace(/[^A-Za-z0-9._:-]/g, "-")}`,
+    kind: "topic-ideas",
+    payload: {
+      signals: [{ id: "signal-1", platform: "douyin", rank: 1, title: `热点 ${label}` }],
+    },
+    expectedContractDigest: taskContractDescriptorFor("topic-ideas").digest,
+    brokerBinding: {
+      version: TASK_BINDING_VERSION,
+      storeId: identity.storeId,
+      providerId: identity.providerId,
+      modelId,
     },
   });
 }
@@ -1349,5 +1379,132 @@ describe("CodexBrokerServer lifecycle", () => {
     });
     await server.close();
     await server.close();
+  });
+});
+
+describe("CodexBrokerServer reviewed model overrides", () => {
+  const REVIEWED = ["gpt-5.6-sol", "gpt-6-astra"];
+
+  it("announces the reviewed candidate table only when one is configured", async () => {
+    const withoutTable = await startBroker({ script: () => ({ output: "{}" }) });
+    const withTable = await startBroker({ modelCandidates: REVIEWED, script: () => ({ output: "{}" }) });
+    try {
+      // 未配置候选表的健康响应必须逐字段不变：既有部署不该因为这个能力而被改动。
+      assert.equal("modelCandidates" in await healthReport(withoutTable.socketPath), false);
+      assert.deepEqual((await healthReport(withTable.socketPath)).modelCandidates, REVIEWED);
+    } finally {
+      await withoutTable.close();
+      await withTable.close();
+    }
+  });
+
+  it("runs a reviewed candidate model and echoes it in the result binding", async () => {
+    const broker = await startBroker({ modelCandidates: REVIEWED, script: () => ({ output: "{\"ideas\":[]}" }) });
+    try {
+      const identity = await healthReport(broker.socketPath);
+      const response = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: topicTaskBodyWithModel("override-ok", identity, "gpt-6-astra"),
+      });
+
+      assert.equal(response.status, 200);
+      const envelope = JSON.parse(response.body) as { ok: boolean; trace: { modelId: string } };
+      assert.equal(envelope.ok, true);
+      assert.equal(envelope.trace.modelId, "gpt-6-astra");
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("rejects an unreviewed model before acceptance and never runs the task", async () => {
+    let calls = 0;
+    const broker = await startBroker({
+      modelCandidates: REVIEWED,
+      script: () => {
+        calls += 1;
+        return { output: "{\"ideas\":[]}" };
+      },
+    });
+    try {
+      const identity = await healthReport(broker.socketPath);
+      const response = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: topicTaskBodyWithModel("override-bad", identity, "gpt-9-unreviewed"),
+      });
+
+      // 400 而不是受理后的 422：客户端必须能用修正后的模型重试同一个 requestId。
+      assert.equal(response.status, 400);
+      assert.equal((JSON.parse(response.body) as { failureKind: string }).failureKind, "contract_rejected");
+      assert.equal(calls, 0);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("rejects every model override when the broker has no candidate table", async () => {
+    const broker = await startBroker({
+      // 安全默认：没有候选表就等于没有可覆盖的模型，包括看起来"合理"的模型名。
+      script: () => ({ output: "{\"ideas\":[]}" }),
+    });
+    try {
+      const identity = await healthReport(broker.socketPath);
+      const response = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: topicTaskBodyWithModel("override-closed", identity, "gpt-6-astra"),
+      });
+
+      assert.equal(response.status, 400);
+      assert.equal((JSON.parse(response.body) as { failureKind: string }).failureKind, "contract_rejected");
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("keeps accepting a request that declares the broker default model", async () => {
+    const broker = await startBroker({ modelCandidates: REVIEWED, script: () => ({ output: "{\"ideas\":[]}" }) });
+    try {
+      const identity = await healthReport(broker.socketPath);
+      const response = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: topicTaskBodyWithModel("override-default", identity, "codex-default"),
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal((JSON.parse(response.body) as { trace: { modelId: string } }).trace.modelId, "codex-default");
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("pins the chosen model into the durable binding so a replay cannot silently switch it", async () => {
+    const broker = await startBroker({
+      durableIdempotency: true,
+      modelCandidates: REVIEWED,
+      script: () => ({ output: "{\"ideas\":[]}" }),
+    });
+    try {
+      const identity = await healthReport(broker.socketPath);
+      const astra = await postTaskAwaitOutcome(
+        broker.socketPath,
+        topicTaskBodyWithModel("durable-model", identity, "gpt-6-astra"),
+      );
+      assert.equal(astra.status, 200);
+      assert.equal(JSON.parse(astra.body).ok, true);
+
+      // 同一 requestId 换个已审核模型重放＝另一个执行，必须冲突而不是复用旧结果。
+      const switched = await brokerRequest(broker.socketPath, {
+        method: "POST",
+        path: "/v1/tasks",
+        body: topicTaskBodyWithModel("durable-model", identity, "gpt-5.6-sol"),
+      });
+      assert.equal(switched.status, 409);
+      assert.equal((JSON.parse(switched.body) as { failureKind: string }).failureKind, "binding_conflict");
+    } finally {
+      await broker.close();
+    }
   });
 });

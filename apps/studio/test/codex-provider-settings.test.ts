@@ -454,6 +454,33 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.equal(screenwriter?.modelProfiles?.[0]?.id, "gpt-5.6-sol");
   });
 
+  it("offers every reviewed broker model to roles that can switch per request, and only the default elsewhere", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      {
+        available: true,
+        reason: "",
+        modelId: "gpt-5.6-sol",
+        taskKinds: ["script-draft", "director-plan", "role-audit"],
+        modelCandidates: ["gpt-5.6-sol", "gpt-6-astra"],
+      },
+    );
+
+    // script-draft 已接入"按请求换模型"：候选表里的每个模型都能真的送上线路，所以全部列出；
+    // 末尾的 glm-5.3 是每个角色都有的跨 broker 候选，此处没有 ZAI broker，所以它不可用。
+    const screenwriter = providers.find((provider) => provider.id === "codex-screenwriter-v1");
+    assert.deepEqual(
+      screenwriter?.modelProfiles?.map((model) => [model.id, model.recommended]),
+      [["gpt-5.6-sol", true], ["gpt-6-astra", false], ["glm-5.3", false]],
+    );
+    assert.equal(screenwriter?.defaultModelId, "gpt-5.6-sol");
+
+    // 其余角色还没有按请求换模型的能力，展开候选表只会列出选中必然报错的选项。
+    const director = providers.find((provider) => provider.id === "api-visual-director-v1");
+    assert.deepEqual(director?.modelProfiles?.map((model) => model.id), ["gpt-5.6-sol", "glm-5.3"]);
+  });
+
   it("shows the role-specific production and audit models reported by the broker", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },

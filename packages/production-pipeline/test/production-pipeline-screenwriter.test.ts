@@ -511,6 +511,8 @@ describe("ProductionPipeline codex screenwriter", () => {
     const checkpointKeys: string[] = [];
     const requestIds: string[] = [];
     let modelCalls = 0;
+    let auditCalls = 0;
+    let repairing = true;
     const agent: ScreenwriterAgent = {
       id: "codex-screenwriter-v1",
       draft: async () => scriptDraft,
@@ -522,46 +524,54 @@ describe("ProductionPipeline codex screenwriter", () => {
           role: "编剧",
           contractVersion: "retry-cycle-test-v1",
           criteria: ["前两秒建立具体钩子"],
-          maxIterations: 1,
+          maxIterations: 2,
           checkpoint,
           produce: async (_revision, { requestId }) => {
             modelCalls += 1;
             requestIds.push(requestId);
+            // 每轮都交回同一份草稿。审计说 repair 不再让节点失败——那是人的裁决——所以循环真正
+            // 耗尽的路径是"按建议重做后内容没有变化"：模型没带来任何新东西，重试也就无从谈起。
             return { output: scriptDraft };
           },
-          audit: async () => ({
-            output: modelCalls === 1
-              ? {
-                  version: "video-factory/role-audit-v1",
-                  verdict: "repair",
-                  score: 70,
-                  summary: "仍需修订。",
-                  issues: [{ severity: "blocking", criterion: "钩子", evidence: "开场偏慢", repairInstruction: "重写开场" }],
-                  repairInstructions: ["重写开场"],
-                }
-              : {
-                  version: "video-factory/role-audit-v1",
-                  verdict: "pass",
-                  score: 92,
-                  summary: "可以继续。",
-                  issues: [],
-                  repairInstructions: [],
-                },
-          }),
+          audit: async () => {
+            auditCalls += 1;
+            return {
+              output: repairing
+                ? {
+                    version: "video-factory/role-audit-v1",
+                    verdict: "repair",
+                    score: 70,
+                    summary: "仍需修订。",
+                    issues: [{ severity: "blocking", criterion: "钩子", evidence: "开场偏慢", repairInstruction: "重写开场" }],
+                    repairInstructions: ["重写开场"],
+                  }
+                : {
+                    version: "video-factory/role-audit-v1",
+                    verdict: "pass",
+                    score: 92,
+                    summary: "可以继续。",
+                    issues: [],
+                    repairInstructions: [],
+                  },
+            };
+          },
           validate: (value) => value as ScriptDraft,
         });
       },
     };
     const subject = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent });
     const failed = await subject.start(brief);
+    repairing = false;
 
     assert.equal(failed.status, "failed");
     const retried = await subject.retryFailedNode(failed.id, "script");
 
-    assert.equal(modelCalls, 2);
+    // 第一轮两次产出、一次审计（第二轮在审计前就因内容没变而终止），重试后是新 cycle 的又一次产出。
+    assert.equal(modelCalls, 3);
+    assert.equal(auditCalls, 2);
     assert.equal(checkpointKeys.length, 2);
     assert.equal(checkpointKeys[0], checkpointKeys[1]);
-    assert.notEqual(requestIds[0], requestIds[1]);
+    assert.notEqual(requestIds[0], requestIds[2]);
     assert.notEqual(retried.status, "failed");
   });
 

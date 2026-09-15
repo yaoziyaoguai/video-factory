@@ -495,6 +495,9 @@ a { color: inherit; }
 .independent-review-list article > header strong { min-width: 0; font-size: 12px; }
 .independent-review-list article > header span { flex: 0 0 auto; color: var(--blue); font-size: 10px; font-weight: 800; }
 .independent-review-list article > small { color: var(--muted); font-size: 10px; }
+.review-audit-caveat { display: grid; gap: 3px; margin: 0; padding: 9px 11px; background: var(--yellow-soft); border-left: 3px solid var(--yellow); }
+.review-audit-caveat strong { color: var(--ink); font-size: 11px; }
+.review-audit-caveat span { color: var(--muted); font-size: 10px; line-height: 1.55; }
 .intervention-panel, .run-state-panel, .detail-section { padding: 18px; }
 .intervention-panel { background: var(--yellow-soft); border-bottom: 1px solid #dfcf7c; }
 .attention-heading { display: flex; align-items: center; gap: 8px; color: #7a4a05; }
@@ -1022,6 +1025,8 @@ h1, h2, .creative-stage blockquote, .brand strong { font-family: "Manrope Variab
 .agent-loop-progress span { color: var(--muted); }
 .agent-loop-progress.is-auditing { color: #315f9f; background: #edf3f8; border-left-color: #5b7fa8; }
 .agent-loop-progress.is-exhausted { color: #a54236; background: #edf4ff; border-left-color: #da6555; }
+/* 不是失败也不是通过：自动修订用尽，停在用户面前。用待办色，避免读成"作品有问题"或"已通过"。 */
+.agent-loop-progress.is-awaiting_user { color: #7a5a12; background: #fdf6e3; border-left-color: #d9a72b; }
 
 .provider-ledger { border-top: 1px solid var(--line); }
 .provider-ledger-row { display: grid; min-height: 76px; grid-template-columns: 38px minmax(230px, 1.2fr) minmax(180px, .8fr) 56px 68px 24px; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }

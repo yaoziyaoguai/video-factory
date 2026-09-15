@@ -140,7 +140,9 @@ class BrokerTaskQueue {
           ...next.executionOptions,
           signal: next.controller.signal,
         });
-        const expectedModelId = modelIdForTask(this.executor.identity, next.task);
+        // 期望模型与 executor 同源：请求覆盖优先，否则回落 broker 身份。用身份默认值去比对一个
+        // 已被覆盖的执行结果，会把每一次合法的按请求换模型都误判成 binding_mismatch。
+        const expectedModelId = next.executionOptions.model ?? modelIdForTask(this.executor.identity, next.task);
         if (next.task.expectedContractDigest && result.trace?.contractDigest !== next.task.expectedContractDigest) {
           throw new CodexExecutorError("Executor returned a result for a different task contract.", false, {
             details: {
@@ -305,6 +307,10 @@ export class CodexBrokerServer {
           .map((kind) => [kind, taskContractDescriptorFor(kind).digest]),
       ),
       ...this.options.executor.identity,
+      // 只在确实配置了候选表时才公告，未启用覆盖的 broker 健康响应逐字节不变。
+      ...(modelCandidatesOf(this.options.executor).length > 0
+        ? { modelCandidates: modelCandidatesOf(this.options.executor) }
+        : {}),
       active: this.queue.active(),
       queued: this.queue.queued(),
       capacity: this.concurrency,
@@ -379,6 +385,19 @@ export class CodexBrokerServer {
       this.sendJson(response, 400, { error: "Codex task requestId is required." });
       return;
     }
+    // 模型覆盖必须在受理之前校验：放在队列之后，非法模型会变成 422 completed_failure，
+    // 即任务"已受理"，客户端再也不能用修正后的模型重试同一个 requestId。
+    const defaultModelId = modelIdForTask(this.options.executor.identity, task);
+    const requestedModel = requestedTaskModel(parsed);
+    const model = requestedModel === undefined || requestedModel === defaultModelId ? undefined : requestedModel;
+    if (model !== undefined && !modelCandidatesOf(this.options.executor).includes(model)) {
+      this.sendJson(response, 400, {
+        error: `Codex request asked for model '${model}', which is outside the reviewed candidate set.`,
+        failureKind: "contract_rejected",
+      });
+      return;
+    }
+    const executionOptions: CodexExecutionOptions = model === undefined ? {} : { model };
     const digestSubject = {
       identity: this.options.executor.identity,
       task,
@@ -399,7 +418,7 @@ export class CodexBrokerServer {
         this.sendJson(response, 400, { error: error instanceof Error ? error.message : "Codex broker binding is invalid.", failureKind: "contract_rejected" });
         return;
       }
-      const modelId = modelIdForTask(this.options.executor.identity, task);
+      const modelId = model ?? defaultModelId;
       const actualBrokerBinding = {
         version: TASK_BINDING_VERSION,
         storeId: this.storeId,
@@ -456,7 +475,7 @@ export class CodexBrokerServer {
         return;
       }
       try {
-        const accepted = await this.acceptDurableTask(requestId, digest, binding, task, session, sessionId);
+        const accepted = await this.acceptDurableTask(requestId, digest, binding, task, session, sessionId, executionOptions);
         if (accepted === "conflict") {
           this.sendBindingConflict(response);
           return;
@@ -483,6 +502,7 @@ export class CodexBrokerServer {
     try {
       outcome = await this.withSessionLock(session, async () => {
         const submission = this.queue.submit(task, {
+          ...executionOptions,
           ...(sessionId ? { sessionId } : {}),
           persistSession: session !== undefined,
         });
@@ -607,6 +627,7 @@ export class CodexBrokerServer {
     task: ValidatedTask,
     session: TaskSessionRequest | undefined,
     sessionId: string | undefined,
+    executionOptions: CodexExecutionOptions,
   ): Promise<"accepted" | "conflict"> {
     const active = this.idempotentTasks.get(requestId);
     if (active) {
@@ -629,7 +650,7 @@ export class CodexBrokerServer {
       }
       await writeIdempotencyRecord(recordPath, { version: 3, requestId, digest, binding, state: "accepted" });
       const outcome = this.withSessionLock(session, () =>
-        this.executeDurableTask(recordPath, requestId, digest, binding, task, session, sessionId));
+        this.executeDurableTask(recordPath, requestId, digest, binding, task, session, sessionId, executionOptions));
       entry.outcome = outcome;
       this.trackBackgroundTask(requestId, outcome);
     })();
@@ -655,8 +676,10 @@ export class CodexBrokerServer {
     task: ValidatedTask,
     session: TaskSessionRequest | undefined,
     sessionId: string | undefined,
+    executionOptions: CodexExecutionOptions,
   ): Promise<TaskOutcome> {
     const outcome = await this.queue.submit(task, {
+      ...executionOptions,
       ...(sessionId ? { sessionId } : {}),
       persistSession: session !== undefined,
     }).outcome;
@@ -994,6 +1017,23 @@ function taskRequestId(value: unknown): string | undefined {
   return typeof requestId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestId)
     ? requestId
     : undefined;
+}
+
+/**
+ * 请求通过信封里的 brokerBinding.modelId 声明它希望本次任务使用哪个模型。
+ * 这里只负责读取，形状校验仍由 expectedBrokerBinding 在原位置负责——把校验提前会顺带
+ * 改变非 durable 路径对畸形 binding 的既有行为，那不是这次需求要动的东西。
+ */
+function requestedTaskModel(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const binding = (value as { brokerBinding?: unknown }).brokerBinding;
+  if (typeof binding !== "object" || binding === null || Array.isArray(binding)) return undefined;
+  const modelId = (binding as { modelId?: unknown }).modelId;
+  return typeof modelId === "string" ? modelId : undefined;
+}
+
+function modelCandidatesOf(executor: BrokerTaskExecutor): readonly string[] {
+  return executor.modelCandidates ?? [];
 }
 
 function taskSessionRequest(value: unknown): TaskSessionRequest | undefined {

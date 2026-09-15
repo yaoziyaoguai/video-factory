@@ -27,9 +27,21 @@ export type CodexCatalogAvailability = Pick<CodexProviderSettings, "available" |
   taskKinds?: readonly string[];
   modelId?: string;
   taskModels?: Record<string, string>;
+  /** broker 公告的已审核候选模型；空或缺省表示它不接受任何按请求的模型覆盖。 */
+  modelCandidates?: string[];
 };
 
 type AssetDeliveryType = NonNullable<StudioProvider["deliveryTypes"]>[number];
+
+/**
+ * 已经接上"按请求换模型"的角色：这些角色的候选 agent 是按 broker 公告的候选表逐个建出来的，
+ * 选中哪一个都能真的把模型送上线路。
+ *
+ * 其余角色仍然是一个 broker 一个候选 agent。对它们展开候选表会把一批"选中就报
+ * Selected model '…' is not available for this role."的选项列进界面——比不列更糟。
+ * 接完一个角色就往这里加一个，加满即删掉这个集合。
+ */
+const MODEL_SWITCH_TASK_KINDS = new Set<string>(["script-draft"]);
 
 const ASSET_PROVIDER_DELIVERY_TYPES = {
   "local-editorial-v1": ["editorial_card"],
@@ -81,21 +93,34 @@ export function buildProviderCatalog(
     taskKind: string,
     taskType: "text" | "visual-review" = "text",
     runtimeAvailable = true,
-  ) => [textModelProfile(
-    modelForTask(taskKind),
-    modelForTask(taskKind) === "codex-default" ? "由 Codex 运行时决定" : modelForTask(taskKind),
-    "codex-broker",
-    "openai",
-    codex.available,
-    modelForTask(taskKind) === "codex-default"
-      ? "Codex broker 尚未报告具体模型；首次调用后会记录实际模型。"
-      : "服务器 Codex broker 针对此角色实际使用的模型；切换需要更新运行时配置并重启 broker。",
-  )].map((model) => ({
-    ...model,
-    providerId,
-    available: runtimeAvailable && supportsTask(codex, taskKind),
-    taskTypes: [taskType],
-  }));
+  ) => {
+    const defaultModelId = modelForTask(taskKind);
+    // broker 公告的候选表里每个模型都是一个真正能选用的模型：选了它就随请求声明给 broker，
+    // broker 用它跑。默认模型始终在列表里，即使候选表还没收录它——broker 会把"请求的模型就是我"
+    // 归一化成没有覆盖。公告为空时列表退化成只有默认模型那一项，与候选表引入之前完全一致。
+    const selectable = [...new Set([
+      defaultModelId,
+      ...(MODEL_SWITCH_TASK_KINDS.has(taskKind) ? codex.modelCandidates ?? [] : []),
+    ].filter((modelId) => modelId.trim()))];
+    return selectable.map((modelId) => ({
+      ...textModelProfile(
+        modelId,
+        modelId === "codex-default" ? "由 Codex 运行时决定" : modelId,
+        "codex-broker",
+        "openai",
+        codex.available,
+        modelId === "codex-default"
+          ? "Codex broker 尚未报告具体模型；首次调用后会记录实际模型。"
+          : MODEL_SWITCH_TASK_KINDS.has(taskKind)
+            ? "服务器 Codex broker 已审核的模型；可在本次制作或单个节点上直接选用，不需要重启 broker。"
+            : "服务器 Codex broker 针对此角色实际使用的模型；切换需要更新运行时配置并重启 broker。",
+      ),
+      recommended: modelId === defaultModelId,
+      providerId,
+      available: runtimeAvailable && supportsTask(codex, taskKind),
+      taskTypes: [taskType],
+    }));
+  };
   const codexRequirement = (taskKind: string) => providerTaskRequirement(resolveCodexSocketPath(environment).requirement, codex, taskKind);
   const zaiCodex = zaiCodexAvailability ?? { available: false, reason: "尚未完成独立 broker 协议健康检查。" };
   const zaiCodexRequirementFor = (taskKind: string) => providerTaskRequirement(resolveZaiCodexSocketPath(environment).requirement, zaiCodex, taskKind);
@@ -116,7 +141,8 @@ export function buildProviderCatalog(
   ) => [
     ...codexProfiles(providerId, taskKind, taskType, runtimeAvailable && codexAuditAvailable).map((model) => ({
       ...model,
-      recommended: codexRoleAvailable(taskKind),
+      // 只有 broker 的默认模型是推荐项；候选表里的其他模型是可选项，标成推荐会变成两个"默认"。
+      recommended: model.recommended && codexRoleAvailable(taskKind),
     })),
     {
       ...textModelProfile(

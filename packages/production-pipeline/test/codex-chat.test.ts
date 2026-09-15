@@ -915,3 +915,125 @@ describe("CodexBridgeClient", () => {
     }
   });
 });
+
+describe("CodexBridgeClient reviewed model override", () => {
+  const STORE_ID = `vfs_store_${"a".repeat(32)}`;
+  const REVIEWED = ["gpt-5.6-sol", "gpt-6-astra"];
+
+  function healthReport(candidates?: readonly string[]): Record<string, unknown> {
+    return {
+      protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+      taskBindingVersion: "video-factory/task-binding-v1",
+      storeId: STORE_ID,
+      providerId: "openai",
+      modelId: "gpt-5.6-sol",
+      ...(candidates ? { modelCandidates: candidates } : {}),
+    };
+  }
+
+  /** 健康探测总是先于提交，所以把 /health 的回包和 POST 的终止响应分开给。 */
+  async function startOverrideBridge(candidates?: readonly string[]): Promise<BridgeServer> {
+    return startBridge((request, response) => {
+      if (request.url === "/health") {
+        respondWithJson(response, 200, healthReport(candidates));
+        return;
+      }
+      // 只关心提交上去的信封，用可终结的失败把流程停在这里。
+      respondWithJson(response, 400, { error: "stop after capturing the envelope" });
+    });
+  }
+
+  it("declares the chosen model in the submitted envelope binding", async () => {
+    const bridge = await startOverrideBridge(REVIEWED);
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
+      await assert.rejects(
+        client.runTask("director-plan", { scenes: [] }, "model-override", { model: "gpt-6-astra" }),
+      );
+
+      const posted = bridge.requests.filter((request) => request.method === "POST");
+      assert.equal(posted.length, 1);
+      assert.deepEqual(posted[0]!.body.brokerBinding, {
+        version: "video-factory/task-binding-v1",
+        storeId: STORE_ID,
+        providerId: "openai",
+        modelId: "gpt-6-astra",
+      });
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("refuses an unreviewed model before submitting anything", async () => {
+    const bridge = await startOverrideBridge(REVIEWED);
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
+      await assert.rejects(
+        client.runTask("director-plan", { scenes: [] }, "model-unreviewed", { model: "gpt-9-unreviewed" }),
+        (error: unknown) => {
+          assert.ok(error instanceof CodexBridgeError);
+          assert.equal(error.failureKind, "contract_rejected");
+          assert.match(error.message, /does not offer model/);
+          return true;
+        },
+      );
+
+      // 关键：一个模型都没提交出去，所以没有产生"已受理但模型不对"的任务。
+      assert.deepEqual(bridge.requests.map((request) => request.method), ["GET"]);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("refuses any model when the broker announces no candidates", async () => {
+    const bridge = await startOverrideBridge();
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
+      await assert.rejects(
+        client.runTask("director-plan", { scenes: [] }, "model-no-table", { model: "gpt-6-astra" }),
+        /does not offer model/,
+      );
+      assert.deepEqual(bridge.requests.map((request) => request.method), ["GET"]);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("keeps the bare envelope when no model is requested", async () => {
+    const bridge = await startOverrideBridge(REVIEWED);
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
+      await assert.rejects(client.runTask("director-plan", { scenes: [] }, "model-absent"));
+
+      // 不选模型时不该多出一次健康探测，也不该凭空声明绑定。
+      const posted = bridge.requests.filter((request) => request.method === "POST");
+      assert.equal(posted.length, 1);
+      assert.equal("brokerBinding" in posted[0]!.body, false);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("accepts an explicit request for the broker's own model even with an empty table", async () => {
+    // 每个模型一个候选 agent 之后，agent 会把自己的模型 id 作为请求模型传下来——包括
+    // broker 的默认模型。候选表为空（生产默认）时这一步必须仍然放行，否则升级会在
+    // 什么都没改的情况下让每一次任务都失败在提交前。
+    const bridge = await startOverrideBridge();
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, sleep: async () => {} });
+      await assert.rejects(client.runTask("director-plan", { scenes: [] }, "model-default", { model: "gpt-5.6-sol" }));
+
+      // 归一化成"没有覆盖"：声明的就是 broker 自己的模型，broker 侧同样会当作没有覆盖。
+      const posted = bridge.requests.filter((request) => request.method === "POST");
+      assert.equal(posted.length, 1);
+      assert.deepEqual(posted[0]!.body.brokerBinding, {
+        version: "video-factory/task-binding-v1",
+        storeId: STORE_ID,
+        providerId: "openai",
+        modelId: "gpt-5.6-sol",
+      });
+    } finally {
+      await bridge.close();
+    }
+  });
+});

@@ -8,6 +8,7 @@ import {
   buildTaskPrompt,
   codexExecutorProfileFor,
   modelIdForTask,
+  reviewedModelOverride,
   unreferencedCreativeTreatmentSourceId,
   type BrokerTaskExecutor,
   type CodexExecutionOptions,
@@ -55,6 +56,12 @@ export interface ZaiCodePlanExecutorOptions {
 
 export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
   readonly identity: CodexExecutorIdentity;
+  /**
+   * zai 的候选表默认就是这套系统实际在用的两个模型：文本 glm-5.3 与视觉 glm-5.3-flash。
+   * 与 openai 那侧不同，这里不需要 fail closed 的空表：这两个 id 本来就已经是各自任务类型的
+   * 默认值，列出来不引入任何新的模型、也不引入任何新的花费面，只是让用户能在两者之间换。
+   */
+  readonly modelCandidates: readonly string[];
   private readonly apiKey: string;
   private readonly fetchFn: typeof fetch;
   private readonly dispatcher: Dispatcher;
@@ -69,6 +76,8 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     const environment = options.env ?? process.env;
     this.textModelId = environment.ZAI_TEXT_MODEL_ID?.trim() || DEFAULT_ZAI_TEXT_MODEL_ID;
     this.visualModelId = environment.ZAI_VISUAL_REVIEW_MODEL_ID?.trim() || DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID;
+    // 去重：两个环境变量指向同一个模型时，候选表里不该出现两遍。
+    this.modelCandidates = [...new Set([this.textModelId, this.visualModelId])];
     this.identity = {
       ...codexExecutorProfileFor("zai", undefined, this.textModelId).identity,
       modelId: this.textModelId,
@@ -100,6 +109,17 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     task: ValidatedTask,
     options: CodexExecutionOptions = {},
   ): Promise<CodexExecutionResult> {
+    // 覆盖参数先于任何资源获取校验：这里的 throw 不会经过下面的 finally，
+    // 放在 setTimeout 之后就意味着每拒绝一次请求都留下一个永远不会被清理的定时器。
+    const modelId = options.model === undefined
+      ? modelIdForTask(this.identity, task)
+      : reviewedModelOverride(options.model, this.modelCandidates);
+    // glm-5.3* 在 zaiReasoningEffort 里被钉死在 max，所以这里不接受强度覆盖：
+    // 收下一个不会生效的值，就是在界面上骗用户。
+    if (options.effort !== undefined) {
+      throw new CodexExecutorError("The zai profile pins reasoning effort per model; effort overrides are not supported.", false);
+    }
+    const reasoningEffort = zaiReasoningEffort(modelId, this.effort);
     const platform = task.kind === "publish-copy" ? task.payload.platform : undefined;
     const taskPrompt = taskPromptFor(task.kind, platform);
     const contractDescriptor = taskContractDescriptorFor(task.kind);
@@ -115,8 +135,6 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     if (options.signal?.aborted) abort();
     const timeout = setTimeout(() => controller.abort(new Error("timeout")), this.timeoutMs);
     const images = taskImages(task);
-    const modelId = modelIdForTask(this.identity, task);
-    const reasoningEffort = zaiReasoningEffort(modelId, this.effort);
     const requestStartedAt = this.now();
     let responseHeadersReceived = false;
     let modelAttemptCount = 0;

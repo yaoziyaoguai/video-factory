@@ -185,6 +185,7 @@ function validReport(): Record<string, unknown> {
       endTimecodeMs: 0,
       scenePosition: 1,
       targetNodeId: "assets",
+      planningStageId: null,
       claimType: "static", evidenceStatus: "failed",
       evidenceFrameSha256: createHash("sha256")
         .update(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]))
@@ -536,7 +537,10 @@ describe("ZaiCodePlanExecutor", () => {
     const invalid = validReport();
     delete (invalid as Partial<typeof invalid>).version;
     const changed = validReport();
-    (changed.findings as Array<Record<string, unknown>>)[0]!.targetNodeId = "script";
+    // 改成指向方案（并指明重做哪一段），输出本身仍然合法：被拒必须是因为格式修复动了语义，
+    // 不是因为改出了非法取值。
+    (changed.findings as Array<Record<string, unknown>>)[0]!.targetNodeId = "creative-planning";
+    (changed.findings as Array<Record<string, unknown>>)[0]!.planningStageId = "script";
     let calls = 0;
     const executor = new ZaiCodePlanExecutor({
       env: { ZAI_BIGMODEL_API_KEY: API_KEY },
@@ -1271,6 +1275,7 @@ describe("ZaiCodePlanExecutor", () => {
       endTimecodeMs: 10_001,
       scenePosition: 1,
       targetNodeId: "assets",
+      planningStageId: null,
       claimType: "static", evidenceStatus: "failed",
       evidenceFrameSha256: createHash("sha256")
         .update(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]))
@@ -1522,5 +1527,72 @@ describe("ZaiCodePlanExecutor", () => {
         return true;
       },
     );
+  });
+});
+
+describe("ZaiCodePlanExecutor reviewed model override", () => {
+  it("announces exactly the two glm models this system runs", () => {
+    const executor = new ZaiCodePlanExecutor({ env: { ZAI_BIGMODEL_API_KEY: API_KEY } });
+    assert.deepEqual(executor.modelCandidates, ["glm-5.3", "glm-5.3-flash"]);
+
+    // 两个环境变量指向同一个模型时，候选表里不该出现两遍。
+    const collapsed = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY, ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3" },
+    });
+    assert.deepEqual(collapsed.modelCandidates, ["glm-5.3"]);
+  });
+
+  it("runs a text task on the visual model when the request asks for it", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async (_input, init) => {
+        capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(validScriptDraft()) } }],
+        }), { status: 200 });
+      },
+    });
+
+    // script-draft 默认走 glm-5.3；覆盖成视觉模型必须同时改请求体和 trace。
+    const result = await executor.runTask(scriptDraftTask(), { model: "glm-5.3-flash" });
+
+    assert.equal(capturedBody?.model, "glm-5.3-flash");
+    assert.equal(result.trace?.modelId, "glm-5.3-flash");
+  });
+
+  it("rejects an unreviewed model instead of sending it upstream", async () => {
+    let calls = 0;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => {
+        calls += 1;
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    await assert.rejects(
+      executor.runTask(scriptDraftTask(), { model: "glm-9-unreviewed" }),
+      /is not in the reviewed model candidates/,
+    );
+    assert.equal(calls, 0);
+  });
+
+  it("refuses an effort override because glm-5.3 pins its own effort", async () => {
+    let calls = 0;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => {
+        calls += 1;
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    // glm-5.3* 在 zaiReasoningEffort 里被钉死在 max：收下一个不会生效的值就是骗用户。
+    await assert.rejects(
+      executor.runTask(scriptDraftTask(), { effort: "low" }),
+      /pins reasoning effort per model/,
+    );
+    assert.equal(calls, 0);
   });
 });

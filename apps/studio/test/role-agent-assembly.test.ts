@@ -6,6 +6,7 @@ import {
   IndependentVisualReviewError,
   type CodexTaskExecution,
   type CodexTaskKind,
+  type CodexTaskRequestOptions,
 } from "@video-factory/production-pipeline";
 import type { CodexProviderSettings } from "../src/server/codex-provider-settings.js";
 import { buildRoleAgentAssembly } from "../src/server/role-agent-assembly.js";
@@ -22,6 +23,8 @@ const reviewMedia = {
 class ControlledCodexClient extends CodexBridgeClient {
   readonly calls: CodexTaskKind[] = [];
   readonly sessions: Array<CodexTaskExecution["session"]> = [];
+  /** 每次调用实际带上的请求选项；模型选择是否真的走上线路，只能在这里看出来。 */
+  readonly requestOptions: CodexTaskRequestOptions[] = [];
 
   constructor(
     private readonly providerId: string,
@@ -36,9 +39,11 @@ class ControlledCodexClient extends CodexBridgeClient {
     _payload: unknown,
     _requestId = "assembly-test",
     _session?: CodexTaskExecution["session"],
+    requestOptions: CodexTaskRequestOptions = {},
   ): Promise<CodexTaskExecution> {
     this.calls.push(kind);
     this.sessions.push(_session);
+    this.requestOptions.push(requestOptions);
     return {
       output: this.respond(kind),
       trace: {
@@ -132,6 +137,38 @@ describe("buildRoleAgentAssembly", () => {
     assert.equal(result.screenwriterAgent?.modelId, "gpt-writer");
     assert.equal(result.directorAgent?.modelId, "gpt-director");
     assert.deepEqual(result.visualReviewAgents.map((agent) => agent.modelId), ["glm-review", "gpt-review"]);
+  });
+
+  it("routes the selected reviewed model onto the wire and keeps the broker default when nothing is selected", async () => {
+    const openai = new ControlledCodexClient("openai", "gpt-5.6-sol", (kind) => (
+      kind === "script-draft" ? validDraft() : passingAudit
+    ));
+    const result = buildRoleAgentAssembly({
+      codexSettings: {
+        ...settings("openai", ["script-draft", "role-audit"], { "script-draft": "gpt-5.6-sol" }),
+        modelCandidates: ["gpt-5.6-sol", "gpt-6-astra"],
+      },
+      zaiCodexSettings: unavailable,
+      codexClient: openai,
+      reviewMedia,
+      environment: {},
+    });
+    const brief = {
+      title: "下班后的三个真实动作",
+      angle: "验证按节点选择模型",
+      audience: "普通上班族",
+      nicheSlug: "assembly-model-switch",
+      platform: "douyin",
+      durationSeconds: 24,
+    };
+
+    await result.screenwriterAgent?.draftDetailed?.({ brief, selectedModelId: "gpt-6-astra" });
+    assert.equal(openai.requestOptions[0]?.model, "gpt-6-astra");
+
+    // 没有选择时走 broker 的默认模型，"请求的模型就是我"由 broker 归一化成没有覆盖。
+    openai.requestOptions.length = 0;
+    await result.screenwriterAgent?.draftDetailed?.({ brief });
+    assert.equal(openai.requestOptions[0]?.model, "gpt-5.6-sol");
   });
 
   it("assembles treatment producers for both brokers and fails closed without the task contract", () => {

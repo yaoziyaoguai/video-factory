@@ -15,6 +15,7 @@ import {
   buildCodexExecCommand,
   codexExecutorProfileFor,
   parseTaskRequest,
+  type CodexExecutionResult,
   type RoleAuditPayload,
   type SpawnedProcess,
 } from "../src/codex-executor.js";
@@ -350,6 +351,7 @@ function visualReviewOutput(): Record<string, unknown> {
       endTimecodeMs: 0,
       scenePosition: 1,
       targetNodeId: "assets",
+      planningStageId: null,
       claimType: "static",
       evidenceStatus: "failed",
       evidenceFrameSha256: createHash("sha256")
@@ -1130,6 +1132,93 @@ describe("role audit continuation contract", () => {
       validationError: "invalid",
     };
     assert.throws(() => parseTaskRequest(request), /must be JSON serializable/);
+  });
+});
+
+describe("CodexExecutor reviewed model and effort overrides", () => {
+  // 覆盖是"按请求换模型"的唯一通道，所以每条失败路径都必须 fail closed：
+  // 静默回落到默认模型会让用户以为换了模型，而记录里写着另一个。
+  const REVIEWED = ["gpt-5.6-sol", "gpt-6-astra"];
+
+  async function runWithOverride(options: { model?: string; effort?: string; candidates?: readonly string[] }): Promise<{
+    args: readonly string[];
+    result: CodexExecutionResult;
+  }> {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-override-"));
+    let receivedArgs: readonly string[] = [];
+    const executor = new CodexExecutor({
+      workspaceRoot,
+      model: "gpt-5.6-sol",
+      auditModel: "gpt-5.6-sol",
+      effort: "xhigh",
+      auditEffort: "xhigh",
+      ...(options.candidates !== undefined ? { modelCandidates: options.candidates } : {}),
+      spawnFn: fakeSpawn(async ({ child, lastMessagePath, args }) => {
+        receivedArgs = args;
+        await writeFile(lastMessagePath, JSON.stringify({ ideas: [] }), "utf8");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("close", 0, null);
+      }),
+    });
+    const result = await executor.runTask(parseTaskRequest(topicRequest()), {
+      ...(options.model !== undefined ? { model: options.model } : {}),
+      ...(options.effort !== undefined ? { effort: options.effort } : {}),
+    });
+    assert.deepEqual(await readdir(workspaceRoot), []);
+    return { args: receivedArgs, result };
+  }
+
+  it("runs a reviewed candidate model and reports it in the trace", async () => {
+    const { args, result } = await runWithOverride({ model: "gpt-6-astra", candidates: REVIEWED });
+
+    assert.deepEqual(flagValues(args, "--model"), ["gpt-6-astra"]);
+    assert.equal(result.trace?.modelId, "gpt-6-astra");
+  });
+
+  it("rejects a model outside the reviewed candidate table instead of falling back", async () => {
+    await assert.rejects(
+      runWithOverride({ model: "gpt-9-unreviewed", candidates: REVIEWED }),
+      /is not in the reviewed model candidates/,
+    );
+  });
+
+  it("rejects every override when the candidate table is empty", async () => {
+    await assert.rejects(
+      runWithOverride({ model: "gpt-6-astra" }),
+      /is not in the reviewed model candidates/,
+    );
+  });
+
+  it("rejects a model id that would be parsed as a CLI flag", async () => {
+    // "--model -oops" 会被 codex 当作另一个 flag，等于把 argv 交给请求方拼装。
+    await assert.rejects(
+      runWithOverride({ model: "-oops", candidates: ["-oops"] }),
+      /not a valid model id/,
+    );
+  });
+
+  it("accepts each of the five reasoning efforts", async () => {
+    for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
+      const { args, result } = await runWithOverride({ effort, candidates: REVIEWED });
+      assert.ok(flagValues(args, "--config").includes(`model_reasoning_effort=${effort}`), effort);
+      assert.equal(result.trace?.reasoningEffort, effort);
+    }
+  });
+
+  it("rejects an effort outside the reviewed values", async () => {
+    await assert.rejects(
+      runWithOverride({ effort: "unlimited", candidates: REVIEWED }),
+      /is not a reviewed value/,
+    );
+  });
+
+  it("keeps the broker default when no override is requested", async () => {
+    const { args, result } = await runWithOverride({ candidates: REVIEWED });
+
+    assert.deepEqual(flagValues(args, "--model"), ["gpt-5.6-sol"]);
+    assert.ok(flagValues(args, "--config").includes("model_reasoning_effort=xhigh"));
+    assert.equal(result.trace?.modelId, "gpt-5.6-sol");
   });
 });
 

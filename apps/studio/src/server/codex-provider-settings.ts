@@ -2,7 +2,7 @@ import http from "node:http";
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import type { Stats } from "node:fs";
-import { CODEX_BRIDGE_PROTOCOL_VERSION, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS } from "@video-factory/production-pipeline";
+import { CODEX_BRIDGE_PROTOCOL_VERSION, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, brokerModelCandidates } from "@video-factory/production-pipeline";
 
 export const DEFAULT_CODEX_SOCKET_PATH = "/run/video-factory-codex/worker.sock";
 export const DEFAULT_ZAI_CODEX_SOCKET_PATH = "/run/video-factory-zai-codex/worker.sock";
@@ -35,6 +35,11 @@ export interface CodexProviderSettings {
   taskKinds: string[];
   taskModels?: Record<string, string>;
   taskModelRoutes?: Record<string, CodexTaskModelRoute>;
+  /**
+   * broker 公告的已审核候选模型。空数组（或未公告）表示该 broker 不接受任何按请求的模型覆盖，
+   * 界面就不该把别的模型列成可选项——列出来只会让用户选到一个必然被拒绝的模型。
+   */
+  modelCandidates?: string[];
 }
 
 interface CodexTaskModelRoute {
@@ -70,6 +75,7 @@ interface CodexSocketProbeResult {
   modelId?: string;
   taskModels?: Record<string, string>;
   taskModelRoutes?: Record<string, CodexTaskModelRoute>;
+  modelCandidates?: string[];
 }
 
 interface CodexHealthIdentity {
@@ -162,6 +168,7 @@ async function readProviderSettings(
     taskKinds: available ? [...result.taskKinds] : [],
     ...(available && result.taskModels ? { taskModels: result.taskModels } : {}),
     ...(available && result.taskModelRoutes ? { taskModelRoutes: result.taskModelRoutes } : {}),
+    ...(available && result.modelCandidates ? { modelCandidates: result.modelCandidates } : {}),
   };
 }
 
@@ -201,22 +208,12 @@ function probeCodexHealth(
 ): Promise<CodexSocketProbeResult> {
   return new Promise((resolve) => {
     let settled = false;
-    const settle = (
-      status: CodexSocketStatus,
-      taskKinds: string[] = [],
-      modelId?: string,
-      taskModels?: Record<string, string>,
-      taskModelRoutes?: Record<string, CodexTaskModelRoute>,
-    ): void => {
+    // 用对象而不是继续加位置参数：taskModels / taskModelRoutes / modelCandidates 都是可选的
+    // Record 形状，位置对了类型也对，一次手滑就能把两张表静默换位。
+    const settle = (status: CodexSocketStatus, details: Omit<CodexSocketProbeResult, "status"> = { taskKinds: [] }): void => {
       if (settled) return;
       settled = true;
-      resolve({
-        status,
-        taskKinds,
-        ...(modelId ? { modelId } : {}),
-        ...(taskModels ? { taskModels } : {}),
-        ...(taskModelRoutes ? { taskModelRoutes } : {}),
-      });
+      resolve({ status, ...details });
     };
     const request = http.request({
       socketPath,
@@ -272,12 +269,18 @@ function probeCodexHealth(
             settle("protocol_mismatch");
             return;
           }
+          // 候选表形状非法不该让 broker 变成不可用：它是"能不能换模型"的能力公告，
+          // 不是任务能不能跑的前提。只把这一项丢掉，其余健康结论照旧。
+          const modelCandidates = brokerModelCandidates(body);
           settle(
             expectedIdentity && !matchesIdentity(body, expectedIdentity) ? "identity_mismatch" : "ready",
-            taskKinds,
-            body.modelId.trim(),
-            taskModels,
-            taskModelRoutes,
+            {
+              taskKinds,
+              modelId: body.modelId.trim(),
+              ...(taskModels ? { taskModels } : {}),
+              ...(taskModelRoutes ? { taskModelRoutes } : {}),
+              ...(modelCandidates.length > 0 ? { modelCandidates } : {}),
+            },
           );
         } catch {
           settle("protocol_mismatch");

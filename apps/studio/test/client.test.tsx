@@ -3305,6 +3305,51 @@ describe("Studio client", () => {
     expect(screen.getByText("审片反馈将预填到：脚本、导演方案、画面素材。")).toBeInTheDocument();
   });
 
+  it("shows which planning stage a finding says to redo, and stays silent when the finding does not name one", async () => {
+    const nodeInstructions = { script: "重写论证。", visualDirection: "复核构图。", assets: "替换素材。" };
+    const previousScript = { scenes: [1, 2].map((position) => ({ position })) };
+
+    const planningStageFinding = renderReworkDialog({
+      sourceRunId: "run-planning-stage",
+      sourceRunRevision: 2,
+      nodeInstructions,
+      findings: [{
+        findingId: "vf-stage-00000000001",
+        timecodeMs: 6_000,
+        scenePosition: 1,
+        category: "continuity",
+        description: "跨镜论证依赖同一人物，当前路由兑现不了。",
+        suggestion: "改用可复用的母片，或重写为无需同一主体的叙事。",
+        targetNodeIds: ["visual-direction"] as Array<"visual-direction">,
+        planningStageId: "director",
+      }],
+      previousScript,
+    });
+    expect(await screen.findByRole("heading", { name: "调整方案后重新制作" })).toBeInTheDocument();
+    // 意见指名了要重做哪一段就照它说；说成笼统的"方案有问题"会让人从最上游重做，代价是整轮素材白买。
+    expect(screen.getByText(/方案 · 分镜与可执行性 ·/)).toBeInTheDocument();
+    planningStageFinding.unmount();
+
+    renderReworkDialog({
+      sourceRunId: "run-asset-only-stage",
+      sourceRunRevision: 2,
+      nodeInstructions,
+      findings: [{
+        findingId: "vf-stage-00000000002",
+        timecodeMs: 6_000,
+        scenePosition: 1,
+        category: "composition",
+        description: "第一镜主体缺失。",
+        suggestion: "换一条命中主体的素材。",
+        targetNodeIds: ["assets"] as Array<"assets">,
+      }],
+      previousScript,
+    });
+    expect(await screen.findByRole("heading", { name: "调整方案后重新制作" })).toBeInTheDocument();
+    // 素材问题本来就不落在方案里，界面不替它猜一段出来。
+    expect(screen.queryByText(/方案 · /)).not.toBeInTheDocument();
+  });
+
   it("focuses the change-scope panel first in rework mode and still focuses the title for a fresh production", async () => {
     const reworkRender = render(<NewRunDialog
       open
@@ -3737,6 +3782,62 @@ describe("Studio client", () => {
         { itemKey: infoItemKey, decision: "reject", reason: "节奏符合本次发布要求" },
       ],
     });
+  });
+
+  it("labels a review branch whose own audit did not pass without calling the work failed", () => {
+    // 分支审计判 repair，说的是"这份审片报告本身站不住"，不是"作品不行"。发布闸门因此不再拦它，
+    // 但界面必须如实说出来——否则用户会拿着一条没过质检的意见去返修一个其实没问题的镜头。
+    const run: StudioRunDetail = {
+      ...runDetail,
+      nodes: [
+        ...runDetail.nodes.filter((node) => node.id !== "final-review"),
+        {
+          id: "visual-review",
+          label: "视觉审片",
+          role: "视觉审片员",
+          status: "succeeded",
+          artifactIds: [],
+          qualityGateResults: [],
+          output: { report: {
+            recommendation: "approve",
+            confidence: 0.82,
+            summary: "两个模型都认为成片可用。",
+            scores: { composition: 80, continuity: 78 },
+            findings: [],
+            reviewScope: {
+              evidenceId: "a".repeat(64),
+              actualModels: [
+                { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash", auditVerdict: "pass" },
+                { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol", auditVerdict: "repair" },
+              ],
+            },
+            independentReviews: [{
+              providerId: "glm-visual-review-v1",
+              modelId: "glm-5.3-flash",
+              report: { recommendation: "approve", summary: "GLM 认为可以发布。", scores: { composition: 80 } },
+            }, {
+              providerId: "codex-visual-review-v1",
+              modelId: "gpt-5.6-sol",
+              report: { recommendation: "approve", summary: "Codex 认为可以发布。", scores: { composition: 76 } },
+            }],
+          } },
+        },
+        runDetail.nodes.find((node) => node.id === "final-review")!,
+      ],
+    };
+
+    render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={vi.fn()} />);
+
+    const dualReview = screen.getByRole("region", { name: "双模型审片结果" });
+    const caveat = within(dualReview).getByRole("note");
+    expect(within(caveat).getByText("有 1 份意见自己的独立审计没通过")).toBeInTheDocument();
+    expect(caveat).toHaveTextContent("AI 视觉审片 · gpt-5.6-sol");
+    // 说清审计查的是什么，避免被读成对作品的判决。
+    expect(caveat).toHaveTextContent("这份审片报告本身站不站得住");
+    expect(caveat).toHaveTextContent("作品能不能发由你定");
+    // 逐分支标注：只有没过质检的那条被点名，另一条不受牵连。
+    expect(within(dualReview).getByText(/gpt-5\.6-sol · 76 分 · 0 项问题 · 独立审计未通过/)).toBeInTheDocument();
+    expect(within(dualReview).getByText(/glm-5\.3-flash · 80 分 · 0 项问题/).textContent).toBe("glm-5.3-flash · 80 分 · 0 项问题");
   });
 
   it("keeps an older workflow read-only and offers a new production instead of broken review actions", async () => {

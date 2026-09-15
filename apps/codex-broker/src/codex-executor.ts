@@ -467,6 +467,34 @@ export type SpawnFunction = (
   options: { cwd: string; env: NodeJS.ProcessEnv; stdio: "pipe"; detached: boolean },
 ) => SpawnedProcess;
 
+/**
+ * broker 允许的推理强度。runtime-config 校验环境变量时复用这一份，
+ * 两处各写一份会在漂移时让"环境变量放行的值"和"请求放行的值"不一致。
+ */
+export const ALLOWED_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+
+/**
+ * 模型名会作为独立 argv 元素进入 `codex exec --model`。首字符限定为字母数字，
+ * 是为了挡住 "-" 开头的取值被 CLI 当作 flag 解析（参数注入）。
+ */
+export function isReviewableModelId(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+}
+
+/**
+ * 请求方指定的模型需要两道校验：字符集（同上）与已审核候选表
+ * （挡住"任意模型、任意花费"——模型选择直接决定计费）。
+ */
+export function reviewedModelOverride(value: string, candidates: readonly string[]): string {
+  if (!isReviewableModelId(value)) {
+    throw new CodexExecutorError("Codex model override is not a valid model id.", false);
+  }
+  if (!candidates.includes(value)) {
+    throw new CodexExecutorError(`Codex model '${value}' is not in the reviewed model candidates.`, false);
+  }
+  return value;
+}
+
 export interface CodexExecutorOptions {
   workspaceRoot: string;
   profile?: CodexExecutorProfile;
@@ -475,6 +503,8 @@ export interface CodexExecutorOptions {
   auditModel?: string;
   effort?: string;
   auditEffort?: string;
+  /** 运营方声明的已审核模型候选：请求只能在这些模型里覆盖，空表表示不允许任何覆盖。 */
+  modelCandidates?: readonly string[];
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   maxPromptBytes?: number;
@@ -488,6 +518,13 @@ export interface CodexExecutionOptions {
   signal?: AbortSignal;
   sessionId?: string;
   persistSession?: boolean;
+  /**
+   * 单次任务对模型与推理强度的覆盖，让上层可以把用户在界面上选的模型传下来。
+   * 只接受已审核候选表内的模型和 runtime-config 允许的强度值；不合法直接失败，不静默回退到默认模型——
+   * 否则用户以为换了模型，记录里却写着另一个。
+   */
+  model?: string;
+  effort?: string;
 }
 
 export interface CodexExecutionResult {
@@ -498,6 +535,12 @@ export interface CodexExecutionResult {
 
 export interface BrokerTaskExecutor {
   readonly identity: CodexExecutorIdentity;
+  /**
+   * 请求方可以按任务覆盖模型，但只能覆盖到这张已审核候选表内的模型。缺省或空表即禁止任何覆盖。
+   * 放在 executor 上是因为它是唯一有权声明"哪些模型被审核过"的一方：broker 需要在受理请求之前
+   * 就用这份表校验，否则非法模型会变成受理后失败，客户端再也不能用修正后的模型重试。
+   */
+  readonly modelCandidates?: readonly string[];
   runTask(task: ValidatedTask, options?: CodexExecutionOptions): Promise<CodexExecutionResult>;
 }
 
@@ -796,6 +839,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
   private readonly auditModel: string | undefined;
   private readonly effort: string | undefined;
   private readonly auditEffort: string | undefined;
+  readonly modelCandidates: readonly string[];
   private readonly env: NodeJS.ProcessEnv;
   private readonly timeoutMs: number;
   private readonly maxPromptBytes: number;
@@ -812,6 +856,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
     this.auditModel = options.auditModel ?? this.model;
     this.effort = options.effort;
     this.auditEffort = options.auditEffort ?? options.effort;
+    this.modelCandidates = options.modelCandidates ?? [];
     this.env = options.env ?? process.env;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxPromptBytes = options.maxPromptBytes ?? DEFAULT_MAX_PROMPT_BYTES;
@@ -848,8 +893,8 @@ export class CodexExecutor implements BrokerTaskExecutor {
     const initialPrompt = options.sessionId
       ? buildContinuationPrompt(task, taskPrompt)
       : buildTaskPrompt(task, taskPrompt);
-    const reasoningEffort = this.effortFor(task.kind);
-    const model = this.modelFor(task.kind);
+    const reasoningEffort = this.effortFor(task.kind, options.effort);
+    const model = this.modelFor(task.kind, options.model);
     if (Buffer.byteLength(initialPrompt, "utf8") > this.maxPromptBytes) {
       throw new CodexExecutorError(`Codex prompt exceeds ${this.maxPromptBytes} bytes.`, false);
     }
@@ -980,6 +1025,9 @@ export class CodexExecutor implements BrokerTaskExecutor {
       fieldPath?: string;
     };
   }> {
+    // 与 runTask 同源解析：请求覆盖优先，缺省回落到 broker 配置。
+    const model = this.modelFor(task.kind, options.model);
+    const reasoningEffort = this.effortFor(task.kind, options.effort);
     const workspaceDir = path.join(taskDir, "workspace");
     const lastMessagePath = path.join(taskDir, "last-message.txt");
     const schemaPath = path.join(taskDir, "output-schema.json");
@@ -995,8 +1043,8 @@ export class CodexExecutor implements BrokerTaskExecutor {
       schemaPath,
       profile: this.profile,
       imagePaths,
-      ...(this.modelFor(task.kind) !== undefined ? { model: this.modelFor(task.kind)! } : {}),
-      ...(this.effortFor(task.kind) !== undefined ? { effort: this.effortFor(task.kind)! } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(reasoningEffort !== undefined ? { effort: reasoningEffort } : {}),
       ...(this.identity.profileId === "openai" ? { serviceTier: "priority" as const } : {}),
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
       persistSession: options.persistSession === true,
@@ -1016,7 +1064,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
       category,
       reasonCode,
       providerId: this.identity.providerId,
-      modelId: this.modelFor(task.kind) ?? this.identity.modelId,
+      modelId: model ?? this.identity.modelId,
       providerWaitMs: elapsedMilliseconds(providerStartedAt, this.now()),
       ...extra,
     });
@@ -1178,11 +1226,18 @@ export class CodexExecutor implements BrokerTaskExecutor {
     };
   }
 
-  private effortFor(kind: BrokerTaskKind): string | undefined {
-    return kind === "role-audit" || kind === "visual-review" || kind === "series-roadmap" ? this.auditEffort : this.effort;
+  private effortFor(kind: BrokerTaskKind, override?: string): string | undefined {
+    if (override === undefined) {
+      return kind === "role-audit" || kind === "visual-review" || kind === "series-roadmap" ? this.auditEffort : this.effort;
+    }
+    if (!ALLOWED_REASONING_EFFORTS.has(override)) {
+      throw new CodexExecutorError(`Codex reasoning effort '${override}' is not a reviewed value.`, false);
+    }
+    return override;
   }
 
-  private modelFor(kind: BrokerTaskKind): string | undefined {
+  private modelFor(kind: BrokerTaskKind, override?: string): string | undefined {
+    if (override !== undefined) return reviewedModelOverride(override, this.modelCandidates);
     return kind === "role-audit" || kind === "visual-review" || kind === "series-roadmap"
       ? this.auditModel
       : this.model;

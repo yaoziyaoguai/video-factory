@@ -56,6 +56,22 @@ describe("brokerRuntimeConfigFromEnv", () => {
     assert.equal(config.auditModel, "gpt-5.6-sol");
   });
 
+  it("reads the reviewed model candidate table and defaults to forbidding overrides", () => {
+    // 安全默认：没配候选表就等于没有可覆盖的模型，而不是"随便什么模型都能用"。
+    assert.deepEqual(brokerRuntimeConfigFromEnv({}).modelCandidates, []);
+    assert.deepEqual(
+      brokerRuntimeConfigFromEnv({ VIDEO_FACTORY_CODEX_MODEL_CANDIDATES: "gpt-5.6-sol, gpt-6-astra" }).modelCandidates,
+      ["gpt-5.6-sol", "gpt-6-astra"],
+    );
+  });
+
+  it("rejects a candidate table containing a model id that could be read as a CLI flag", () => {
+    assert.throws(
+      () => brokerRuntimeConfigFromEnv({ VIDEO_FACTORY_CODEX_MODEL_CANDIDATES: "gpt-5.6-sol,--config" }),
+      /contains an invalid model id: '--config'/,
+    );
+  });
+
   it("rejects unknown profiles and a ZAI profile without its environment key", async () => {
     await assert.rejects(
       async () => brokerRuntimeConfigFromEnv({ VIDEO_FACTORY_CODEX_PROFILE: "arbitrary" }),

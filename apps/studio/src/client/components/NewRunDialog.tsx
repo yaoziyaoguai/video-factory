@@ -737,7 +737,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 {groupedReworkFindings.sceneGroups.map((group) => <article className="rework-finding" key={`scene-${group.scenePosition}`}>
                   <header><strong>第 {group.scenePosition} 镜</strong><span>{group.findings.length} 个问题</span></header>
                   {group.findings.map((sceneFinding) => <div className="rework-finding-item" key={sceneFinding.findingId}>
-                    <p>{reworkFindingCategoryLabel(sceneFinding.category)} · {formatTimecode(sceneFinding.timecodeMs)}</p>
+                    <p>{reworkFindingCategoryLabel(sceneFinding.category)} · {reworkFindingStageLabel(sceneFinding) ? `${reworkFindingStageLabel(sceneFinding)} · ` : ""}{formatTimecode(sceneFinding.timecodeMs)}</p>
                     <p>{creatorFacingTechnicalText(sceneFinding.description)}</p>
                     <small>建议：{creatorFacingTechnicalText(sceneFinding.suggestion)}</small>
                   </div>)}
@@ -745,7 +745,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 {groupedReworkFindings.wholeFilmFindings.length > 0 ? <article className="rework-finding" key="rework-whole-film">
                   <header><strong>全片问题</strong><span>{groupedReworkFindings.wholeFilmFindings.length} 个问题</span></header>
                   {groupedReworkFindings.wholeFilmFindings.map((sceneFinding) => <div className="rework-finding-item" key={sceneFinding.findingId}>
-                    <p>{reworkFindingCategoryLabel(sceneFinding.category)} · {formatTimecode(sceneFinding.timecodeMs)}</p>
+                    <p>{reworkFindingCategoryLabel(sceneFinding.category)} · {reworkFindingStageLabel(sceneFinding) ? `${reworkFindingStageLabel(sceneFinding)} · ` : ""}{formatTimecode(sceneFinding.timecodeMs)}</p>
                     <p>{creatorFacingTechnicalText(sceneFinding.description)}</p>
                     <small>建议：{creatorFacingTechnicalText(sceneFinding.suggestion)}</small>
                   </div>)}
@@ -1630,6 +1630,18 @@ const REWORK_FINDING_TARGET_NODE_LABELS: Record<string, string> = {
   "visual-direction": "导演方案",
   assets: "画面素材",
 };
+
+/**
+ * 意见指名了要重做方案的哪一段，就照它说的显示哪一段。
+ * 没指名时返回空串——素材问题本来就不落在方案里，旧合同的意见也没说过，两种都不该由界面替它猜。
+ */
+function reworkFindingStageLabel(finding: StudioReworkFinding): string {
+  const stage = finding.planningStageId;
+  if (stage === "treatment") return "方案 · 承诺与方向";
+  if (stage === "script") return "方案 · 事实与论证";
+  if (stage === "director") return "方案 · 分镜与可执行性";
+  return "";
+}
 
 // 展示的影响步骤只来自去重后 findings 的 targetNodeIds 并集；不从 category、描述或关键词推断。
 function reworkFindingTargetStepLabels(grouped: GroupedReworkFindings): string[] {

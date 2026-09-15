@@ -15,7 +15,9 @@ import type {
   StudioSeriesEpisodePlanInput,
 } from "../../shared/api.js";
 import { studioApi } from "../api.js";
+import { CandidateVerificationDialog } from "../components/CandidateVerificationDialog.js";
 import { DirectorPanel } from "../components/DirectorPanel.js";
+import { HotTopicBoard } from "../components/HotTopicBoard.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 import { OpportunityDialog } from "../components/OpportunityDialog.js";
 import { OpportunityFocus } from "../components/OpportunityFocus.js";
@@ -61,6 +63,7 @@ export function TodayPage() {
   const [seriesError, setSeriesError] = useState<string>();
   const [candidateActionError, setCandidateActionError] = useState<string>();
   const [adoptingCandidateId, setAdoptingCandidateId] = useState<string>();
+  const [boardVerificationCandidate, setBoardVerificationCandidate] = useState<StudioCandidateInboxItem>();
   const [nextStepNotice, setNextStepNotice] = useState<string>();
   const [nextStepNoticeAction, setNextStepNoticeAction] = useState<{ to: string; label: string }>();
   // 提示统一入口：不带跳转动作的提示会清掉旧链接，避免“去查看”指向过期目标。
@@ -75,15 +78,37 @@ export function TodayPage() {
   const [sourceSupplementError, setSourceSupplementError] = useState<string>();
   const [trendRefreshFinishedAt, setTrendRefreshFinishedAt] = useState<string>();
   const [trendRefreshPending, setTrendRefreshPending] = useState(false);
+  const [trendRefreshing, setTrendRefreshing] = useState(false);
   const adoptedSectionRef = useRef<HTMLElement>(null);
   const trendLoadingRef = useRef(false);
   const trendRefreshPollRef = useRef<number | undefined>(undefined);
+  const trendGenerationPollRef = useRef<number | undefined>(undefined);
 
   const updateTrendInbox = useCallback((next: StudioCandidateInbox) => {
     const scoped = onlyOrigin(next, "trend");
     setTrendInbox(scoped);
+    setTrendRefreshing(scoped.refreshing);
     return scoped;
   }, []);
+
+  // 收件箱读取不再等待生成：冷缓存时服务端先返回空快照并标记 refreshing。
+  // 这里持续重读，直到后台生成落地，否则界面会停在"暂无候选"而实际仍在生成。
+  const scheduleTrendGenerationPoll = useCallback(function poll(attempt: number) {
+    if (trendGenerationPollRef.current !== undefined) window.clearTimeout(trendGenerationPollRef.current);
+    const step = async () => {
+      try {
+        const next = updateTrendInbox(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }));
+        if (next.refreshing && attempt < TREND_GENERATION_POLL_LIMIT) {
+          scheduleTrendGenerationPoll(attempt + 1);
+          return;
+        }
+        setTrendError(undefined);
+      } catch {
+        if (attempt < TREND_GENERATION_POLL_LIMIT) scheduleTrendGenerationPoll(attempt + 1);
+      }
+    };
+    trendGenerationPollRef.current = window.setTimeout(() => void step(), trendRefreshPollDelay(attempt));
+  }, [updateTrendInbox]);
 
   const scheduleTrendRefreshPoll = useCallback((refreshId: string) => {
     if (trendRefreshPollRef.current !== undefined) window.clearTimeout(trendRefreshPollRef.current);
@@ -117,17 +142,20 @@ export function TodayPage() {
         }
       }
       if (attempt >= 39) {
+        // 刷新状态轮询放弃后，改由收件箱轮询继续等到生成真正落地，避免这里放弃就彻底停更。
         announceNotice("热点更新仍未完成，当前缓存可以继续使用；稍后可再次查看或手动刷新。");
         setTrendRefreshPending(false);
+        scheduleTrendGenerationPoll(0);
         return;
       }
       trendRefreshPollRef.current = window.setTimeout(() => void poll(attempt + 1, nextFailures), trendRefreshPollDelay(attempt));
     };
     trendRefreshPollRef.current = window.setTimeout(() => void poll(0), trendRefreshPollDelay(0));
-  }, [updateTrendInbox]);
+  }, [scheduleTrendGenerationPoll, updateTrendInbox]);
 
   useEffect(() => () => {
     if (trendRefreshPollRef.current !== undefined) window.clearTimeout(trendRefreshPollRef.current);
+    if (trendGenerationPollRef.current !== undefined) window.clearTimeout(trendGenerationPollRef.current);
   }, []);
 
   const loadTrendInbox = useCallback(async (forceRefresh = false) => {
@@ -149,7 +177,9 @@ export function TodayPage() {
           throw refreshError;
         }
       }
-      updateTrendInbox(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }));
+      const scoped = updateTrendInbox(await studioApi.candidateInbox({ origins: ["trend"], limit: 100 }));
+      // 手动刷新时刷新状态轮询已经在等同一批生成，不重复起第二条轮询。
+      if (scoped.refreshing && !forceRefresh) scheduleTrendGenerationPoll(0);
     } catch (caught) {
       setTrendError(errorMessage(caught));
     } finally {
@@ -378,6 +408,15 @@ export function TodayPage() {
     }
   }
 
+  // 待制作区的方向按钮：需要人工核验的方向先弹核验弹窗，其余直接采用。
+  async function adoptDirection(candidate: StudioCandidateInboxItem) {
+    if (candidate.verification.status === "review_required") {
+      setBoardVerificationCandidate(candidate);
+      return;
+    }
+    await adoptCandidate(candidate);
+  }
+
   async function createSeries(input: StudioSeriesInput) {
     const created = await studioApi.createSeries(input);
     setSeries((current) => [created, ...current]);
@@ -487,7 +526,7 @@ export function TodayPage() {
           <button className="button button-secondary" type="button" onClick={() => void retrySettings()}><RefreshCw aria-hidden="true" size={16} />重新读取</button>
         </div>
       ) : null}
-      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} trendRefreshPending={trendRefreshPending} sourceBlockedOpportunities={sourceBlockedOpportunities} onFocusSourceBlocked={focusSourceBlockedOpportunity} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
+      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} trendRefreshPending={trendRefreshPending} trendRefreshing={trendRefreshing} sourceBlockedOpportunities={sourceBlockedOpportunities} onFocusSourceBlocked={focusSourceBlockedOpportunity} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
       {candidateActionError ? <div className="inline-error topic-action-error" role="alert"><AlertCircle aria-hidden="true" size={18} />{candidateActionError}</div> : null}
       {nextStepNotice ? <div className="next-step-notice" role="status"><CheckCircle2 aria-hidden="true" size={18} /><strong>{nextStepNotice}</strong>{nextStepNoticeAction ? <Link className="button button-secondary" to={nextStepNoticeAction.to}>{nextStepNoticeAction.label}</Link> : null}<button type="button" onClick={() => { setNextStepNotice(undefined); setNextStepNoticeAction(undefined); }} aria-label="关闭下一步提示">知道了</button></div> : null}
 
@@ -508,6 +547,14 @@ export function TodayPage() {
             ? `${startableOpportunities.length} 条已进入待制作区${blockedOpportunityCount > 0 ? ` · ${blockedTrendCountText(sourceBlockedCount, otherBlockedCount)}` : ""}`
             : `${startableOpportunities.length} 条`}</span>}
         </header>
+        {entryMode === "trend" ? (
+          <HotTopicBoard
+            candidates={(trendInbox?.items ?? []).filter((item) => !opportunities.some((adopted) => adopted.id === item.id))}
+            {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})}
+            onAdopt={adoptDirection}
+            onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })}
+          />
+        ) : null}
         {opportunitiesLoading ? <div className="today-loading"><RadioTower aria-hidden="true" size={22} />正在读取制作机会...</div> : opportunitiesError ? (
           <div className="source-error-state" role="alert"><AlertCircle aria-hidden="true" size={22} /><div><p className="eyebrow">制作机会不可用</p><h2>机会读取失败</h2><p>{opportunitiesError}</p></div><button className="button button-secondary" type="button" onClick={() => void load()}><RefreshCw aria-hidden="true" size={16} />重试</button></div>
         ) : selected ? (
@@ -544,6 +591,16 @@ export function TodayPage() {
           setSourceSupplementError(undefined);
         }}
         onSubmit={submitSupplementSources}
+      />
+      <CandidateVerificationDialog
+        {...(boardVerificationCandidate ? { candidate: boardVerificationCandidate } : {})}
+        pending={boardVerificationCandidate?.id === adoptingCandidateId}
+        onClose={() => setBoardVerificationCandidate(undefined)}
+        onConfirm={async () => {
+          if (!boardVerificationCandidate) return;
+          await adoptCandidate(boardVerificationCandidate, true);
+          setBoardVerificationCandidate(undefined);
+        }}
       />
       <SeriesDialog open={seriesDialogOpen} onClose={() => setSeriesDialogOpen(false)} onSubmit={createSeries} />
       <NewRunDialog open={productionDialogOpen} providers={providers} initialDataReady={!providersLoading && !settingsLoading && !settingsError} {...(creatorSettings ? { creatorSettings } : {})} {...(settingsError ? { settingsError } : {})} onRetrySettings={() => void retrySettings()} {...(selected ? { initialValues: {
@@ -640,6 +697,9 @@ function onlyOrigin(inbox: StudioCandidateInbox, origin: StudioCandidateInboxIte
   const items = inbox.items.filter((item) => item.origin === origin);
   return { ...inbox, items, facets: buildInboxFacets(items) };
 }
+
+// 生成可能持续十几分钟；轮询上限只用来兜底，不用于提前判定"没有候选"。
+const TREND_GENERATION_POLL_LIMIT = 120;
 
 function buildInboxFacets(items: StudioCandidateInboxItem[]): StudioCandidateInbox["facets"] {
   const facets: StudioCandidateInbox["facets"] = { total: items.length, origins: {}, categories: {}, platforms: {}, verdicts: {} };

@@ -20,7 +20,7 @@ it("preserves each visual semantic rejection through the real executor, durable 
   const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]);
   const finding = {
     timecodeMs: 1000, startTimecodeMs: 0, endTimecodeMs: 2000, scenePosition: 1,
-    targetNodeId: "assets", claimType: "static", evidenceStatus: "failed", evidenceFrameSha256: null,
+    targetNodeId: "assets", planningStageId: null, claimType: "static", evidenceStatus: "failed", evidenceFrameSha256: null,
     nextAction: "rework_asset", category: "continuity", severity: "warning",
     description: "PRIVATE_GENERATED_DESCRIPTION", suggestion: "PRIVATE_GENERATED_SUGGESTION",
   };

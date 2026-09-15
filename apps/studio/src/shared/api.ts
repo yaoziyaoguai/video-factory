@@ -122,7 +122,10 @@ export const DEFAULT_STUDIO_TOPIC_STRATEGY: StudioTopicStrategy = {
   targetAudience: "希望快速理解新事物，但反感标题党和空泛说教的中文短视频用户。",
   preferredDirections: "真实生活影响\n可实证的方法或变化\n有清楚反差、过程或结论\n能发展成系列",
   excludedDirections: "只有热度、没有新角度\n无法找到可靠画面或事实来源\n消费灾难、伤亡或未经证实的争议\n只能靠大段说明卡讲清",
-  sourcePolicy: "primary_or_two_independent",
+  // 默认档位必须与热点管道的能力匹配：canonical signal group 里同一事件在不同平台
+  // 指向同一篇文章，独立域名恒为 1，"两个域名"档等于永远不放行任何候选。
+  // 一档原文链接 + 高风险人工核验保留了"不把标题当事实"的意图，需要更强佐证可在资源页调回严格档。
+  sourcePolicy: "traceable_source",
   customInstruction: "优先考虑 24–45 秒内能兑现观众承诺的题材。",
 };
 
@@ -378,6 +381,8 @@ export interface StudioCandidateInbox {
   facets: StudioCandidateInboxFacets;
   generatedAt: string;
   topicGeneration?: StudioTopicGenerationReceipt;
+  /** 热点候选正在后台生成：此时 items 是缓存快照，可能为空但仍在推进。 */
+  refreshing: boolean;
 }
 
 export type StudioSeriesStatus = "active" | "paused";
@@ -895,7 +900,8 @@ export interface StudioAgentLoopProgress {
   auditModelCallCount?: number;
   structuredRepairModelCallCount?: number;
   /** "failed"：角色调用终态失败（含 Provider/基础设施故障），不是审计轮次耗尽。 */
-  phase: "producing" | "auditing" | "repairing" | "passed" | "exhausted" | "failed" | "halted";
+  /** "awaiting_user"：自动重做轮次用尽仍未通过审计，候选与那轮审计已停在用户面前等裁决。 */
+  phase: "producing" | "auditing" | "repairing" | "passed" | "exhausted" | "awaiting_user" | "failed" | "halted";
   latestAudit?: {
     verdict: "pass" | "repair";
     score: number;
@@ -1583,6 +1589,12 @@ export interface StudioReworkFinding {
   category: string;
   description: string;
   suggestion: string;
+  /**
+   * 审片意见指名真实节点的同时指名的那一段：这条方案问题出在 treatment、script 还是 director。
+   * 重做代价依次收窄，所以它是意见的一部分，不能被抹成一句笼统的"方案有问题"。
+   * 缺失表示旧合同产出的意见或本就不是方案问题（targetNodeIds 只含 assets）。
+   */
+  planningStageId?: "treatment" | "script" | "director";
   targetNodeIds: Array<"script" | "visual-direction" | "assets">;
   primaryOwnerNodeId?: "script" | "visual-direction" | "assets";
   affectedNodeIds?: Array<"script" | "visual-direction" | "assets">;

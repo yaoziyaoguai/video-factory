@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { CodexBridgeClient, requestOptionsForDeadline, type CodexTaskExecution } from "./codex-chat.js";
+import { CodexBridgeClient, requestOptionsForDeadline, type CodexTaskExecution, type CodexTaskRequestOptions } from "./codex-chat.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { ProductionArticleSourceSnapshot, ProductionReworkFinding, ProductionSeriesContext, ProductionVisualPlan } from "./contracts.js";
 import type { DurationRange } from "./executable-timeline.js";
@@ -143,7 +143,7 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
       "script-draft",
       { brief: screenwriterBriefForModel(input.brief) },
       undefined,
-      requestOptionsForDeadline(input.wallClockDeadlineAtMs),
+      { ...requestOptionsForDeadline(input.wallClockDeadlineAtMs), ...this.requestModel },
     );
     return validateScreenwriterCandidate(rawDraft, input, { iteration: 1, repair: false });
   }
@@ -176,7 +176,9 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
         : this.client.runTaskDetailed("script-draft", {
         brief: screenwriterBriefForModel(input.brief),
         ...(revision ? { revision } : {}),
-      }, requestId, this.sessionMode === "stateless" ? undefined : session, { ...requestOptionsForDeadline(input.wallClockDeadlineAtMs), ...requestOptions }),
+      }, requestId, this.sessionMode === "stateless" ? undefined : session, { ...requestOptionsForDeadline(input.wallClockDeadlineAtMs), ...this.requestModel, ...requestOptions }),
+      // 审计刻意不带 requestModel：生产模型换成候选表里的另一个之后，独立复核仍应由 broker 的
+      // 默认审计模型完成，否则"生产与复核用同一个模型"这件事会被换模型顺手破坏掉。
       audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, requestOptions, preparedOperation }) => preparedOperation
         ? auditClient.observePrepared(preparedOperation, requestOptions)
         : auditClient.runTaskDetailed("role-audit", {
@@ -203,6 +205,14 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
     if (selectedModelId && selectedModelId !== this.modelId) {
       throw new Error(`Selected model '${selectedModelId}' is not available for screenwriting.`);
     }
+  }
+
+  // 每个 (broker, 模型) 一个候选 agent，所以 agent 的 modelId 就是本次任务要在该 broker 上跑的模型，
+  // 必须随请求声明出去。不声明的话 broker 跑的是它自己的默认模型，而收据上的 modelId 只是一句自述：
+  // 没有任何东西会拿它和 broker 回执里的实际模型对账。
+  // 请求的模型等于 broker 默认模型时，客户端会归一化成"没有覆盖"，所以这里的声明对现状是零影响。
+  private get requestModel(): CodexTaskRequestOptions {
+    return this.modelId ? { model: this.modelId } : {};
   }
 }
 

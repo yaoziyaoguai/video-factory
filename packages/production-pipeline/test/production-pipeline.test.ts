@@ -804,7 +804,7 @@ describe("ProductionPipeline", () => {
     assert.ok(failed.artifacts.some((artifact) => artifact.kind === "model_trace" && artifact.provenance.model === "glm-5.3-flash"));
   });
 
-  it("stops after source assets fail the free visual gate and never starts voice or render", async () => {
+  it("stops before voice and render when source assets fail the free visual gate, and hands the verdict to the user", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-source-asset-gate-"));
     class SourceAssetWorker extends FakeWorker {
       override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
@@ -932,17 +932,21 @@ describe("ProductionPipeline", () => {
       director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
     });
 
-    assert.equal(run.status, "rejected");
+    assert.equal(run.status, "needs_human");
     assert.equal(run.nodeRuns.find((node) => node.nodeId === "assets")?.status, "succeeded");
-    assert.equal(run.nodeRuns.find((node) => node.nodeId === "asset-source-review")?.status, "rejected");
-    assert.equal(run.nodeRuns.find((node) => node.nodeId === "asset-source-review")?.outcomeUncertain, undefined);
+    const sourceReview = run.nodeRuns.find((node) => node.nodeId === "asset-source-review");
+    assert.equal(sourceReview?.status, "needs_human");
+    assert.equal(sourceReview?.outcomeUncertain, undefined);
     assert.equal(run.nodeRuns.some((node) => node.nodeId === "voice"), false);
     assert.equal(run.nodeRuns.some((node) => node.nodeId === "render"), false);
     assert.deepEqual(worker.calls.map((call) => call.capability), ["script.draft", "asset.prepare"]);
     assert.equal(reviewInputs.length, 1);
     assert.equal(reviewInputs[0]?.reviewStage, "source_assets");
     assert.match(reviewInputs[0]?.assetPlanPath ?? "", /asset_plan\.json$/);
-    assert.match(run.nodeRuns.find((node) => node.nodeId === "asset-source-review")?.error ?? "", /不会自动再次调用付费画面模型/);
+    // 预检是意见不是判决：它能把作品停在配音与渲染之前，但不能替用户宣布这个作品不行。
+    assert.equal(sourceReview?.intervention?.requiredAction, "approve");
+    assert.deepEqual(sourceReview?.intervention?.options, ["approve", "request_changes", "reject"]);
+    assert.match(sourceReview?.intervention?.reason ?? "", /不会自动再次调用付费画面模型/);
     const sourceReviewOutput = run.nodeRuns.find((node) => node.nodeId === "asset-source-review")?.output as {
       report?: pipeline.VisualReviewReport;
     };

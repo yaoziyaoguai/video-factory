@@ -5,6 +5,7 @@ import json
 import mimetypes
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict
 
@@ -760,6 +761,9 @@ def main() -> int:
             raise WorkerProtocolError("Worker request must be a JSON object")
         response = handle_request(request)
     except Exception as error:
+        # 协议要求失败也返回 exit 0，且 error.message 只有一行；完整调用栈只经 stderr 送出，
+        # 否则 ffmpeg 与素材准备的真实失败原因在 run.json 里不可复原。
+        traceback.print_exc(file=sys.stderr)
         response = {
             "protocolVersion": WORKER_PROTOCOL_VERSION,
             "commandId": request.get("commandId") if isinstance(request, dict) else None,

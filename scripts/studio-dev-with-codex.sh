@@ -16,6 +16,9 @@ zai_workspace_root=${VIDEO_FACTORY_ZAI_CODEX_WORKSPACE_ROOT:-"$zai_runtime_root/
 zai_env_file=${ZAI_BIGMODEL_ENV_FILE:-"$repository_root/.local/secrets/zai-bigmodel.env"}
 # 本地与生产 unit 统一 1200s（20 分钟）deadline；xhigh/max 强推理候选在旧 300s/600s 默认下无法完成。
 codex_timeout_ms=${VIDEO_FACTORY_CODEX_TIMEOUT_MS:-1200000}
+# 已审核的模型候选表：界面上能按节点指定的模型只能是这张表里的（首个即 broker 默认模型）。
+# 留空则完全禁止按请求换模型——所以这里是启用的地方，不是可选的装饰。
+codex_model_candidates=${VIDEO_FACTORY_CODEX_MODEL_CANDIDATES:-gpt-5.6-sol,gpt-6-astra}
 zai_broker_pid=""
 
 if [[ -z "$codex_bin" ]]; then
@@ -49,6 +52,7 @@ CODEX_HOME="$codex_home" \
 VIDEO_FACTORY_CODEX_SOCKET_PATH="$socket_path" \
 VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="$workspace_root" \
 VIDEO_FACTORY_CODEX_TIMEOUT_MS="$codex_timeout_ms" \
+VIDEO_FACTORY_CODEX_MODEL_CANDIDATES="$codex_model_candidates" \
 CODEX_BIN="$codex_bin" \
 npm run start --workspace @video-factory/codex-broker &
 broker_pid=$!

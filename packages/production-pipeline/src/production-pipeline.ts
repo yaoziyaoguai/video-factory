@@ -9412,15 +9412,27 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
         parentArtifactIds,
       });
       const output = { sourceVisualReviewPath: reportPath, report };
+      const artifacts = [reportArtifact, traceArtifact, loopArtifact]
+        .filter((artifact): artifact is ArtifactDraft => Boolean(artifact));
       const result = {
         output,
         ...(execution.trace ? { receipt: modelTraceReceipt(execution.trace, provider.label ?? "生成画面预检", "subscription", execution.agentLoop, provider.configurationSource) } : {}),
-        artifacts: [reportArtifact, traceArtifact, loopArtifact].filter((artifact): artifact is ArtifactDraft => Boolean(artifact)),
+        artifacts,
       };
       // 与试片闸门同一判据：源素材预检的咨询性发现（not_observed）不阻断配音与渲染，
-      // 只有实质缺陷或评分/置信度未达门槛才判 rejected。
+      // 只有实质缺陷或评分/置信度未达门槛才交回用户。预检是意见不是判决——它能拦下自己，
+      // 但不能替用户宣布这个作品不行。
       return visualReviewBlocksContinuation(report)
-        ? { ...result, status: "rejected", error: sourceAssetReviewFailureMessage(report) }
+        ? {
+          ...result,
+          status: "needs_human",
+          intervention: {
+            reason: sourceAssetReviewFailureMessage(report),
+            requiredAction: "approve",
+            options: ["approve", "request_changes", "reject"],
+            artifactIds: parentArtifactIds,
+          },
+        }
         : { ...result, status: "succeeded" };
     },
     validateOverride: (output) => validatePathOutput(output, "sourceVisualReviewPath", "asset-source-review"),
@@ -9464,10 +9476,11 @@ function sourceAssetReviewFailureMessage(report: VisualReviewReport): string {
     `${finding.scenePosition ? `镜头 ${finding.scenePosition}` : "未定位镜头"}：${finding.description}`
   ));
   return [
-    "源素材视觉预检未通过，系统已在配音和渲染前停止，不会自动再次调用付费画面模型。",
+    "源素材视觉预检未通过，系统已在配音和渲染前停下，不会自动再次调用付费画面模型。",
     report.summary,
     ...findings,
-    "请调整导演方案或画面 Provider，重新报价并确认后再生成。",
+    "请调整导演方案或画面 Provider，重新报价并确认后再生成；",
+    "如果你认为预检判断有误，也可以直接通过，让配音与渲染继续——已生成的素材不会因此重买。",
   ].filter(Boolean).join(" ");
 }
 
@@ -11060,12 +11073,17 @@ function visualReviewModelProof(
   const auditDigests = [...new Set(iterations.flatMap((iteration) => (
     iteration.auditTrace?.contractDigest ? [iteration.auditTrace.contractDigest] : []
   )))];
-  const producerCompleted = review.agentLoop?.status === "passed"
+  // "跑完了"指的是这一分支按合同产出了完整的取证链，不是它的审计投了赞成票。
+  // 审计没通过只说明这份意见本身有瑕疵——那要如实标出来给用户看（auditVerdict），
+  // 但不能替他决定作品能不能发。
+  const loopCompleted = review.agentLoop?.status === "passed" || review.agentLoop?.status === "awaiting_user";
+  const producerCompleted = loopCompleted
     && iterations.length > 0
     && iterations.every((iteration) => Boolean(iteration.candidateTrace?.contractDigest));
-  const auditCompleted = review.agentLoop?.status === "passed"
+  const auditCompleted = loopCompleted
     && iterations.length > 0
     && iterations.every((iteration) => Boolean(iteration.auditTrace?.contractDigest));
+  const auditVerdict = review.agentLoop?.iterations.at(-1)?.audit.verdict;
   return {
     providerId: review.providerId,
     modelId: review.modelId,
@@ -11074,6 +11092,7 @@ function visualReviewModelProof(
     ...(auditDigests.length === 1 ? { auditContractDigest: auditDigests[0] } : {}),
     producerCompleted,
     auditCompleted,
+    ...(auditVerdict ? { auditVerdict } : {}),
   };
 }
 
@@ -11283,6 +11302,9 @@ export function visualReviewFindingKey(finding: VisualReviewFinding): string {
     endTimecodeMs: finding.endTimecodeMs,
     scenePosition: finding.scenePosition,
     targetNodeId: finding.targetNodeId,
+    // 要重做哪一段是这条主张的一部分：同一条问题指向 treatment 还是 director，
+    // 代价差一整轮素材重做。不把它算进键，改段就会被当成同一条沿用旧表态。
+    planningStageId: finding.planningStageId,
     claimType: finding.claimType,
     evidenceStatus: finding.evidenceStatus,
     evidenceFrameSha256: finding.evidenceFrameSha256,

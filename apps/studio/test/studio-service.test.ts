@@ -1858,6 +1858,39 @@ describe("StudioService", () => {
     });
   });
 
+  it("shows a handover to the user as its own phase instead of dropping the checkpoint", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-awaiting-user-progress-"));
+    const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "agent-loop-checkpoints");
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "handover.json"), JSON.stringify({
+      version: "video-factory/agent-loop-checkpoint-v9",
+      maxIterations: 3,
+      status: "awaiting_user",
+      completed: [1, 2, 3].map((iteration) => ({
+        iteration,
+        audit: {
+          verdict: "repair",
+          score: 60 + iteration,
+          summary: `第 ${iteration} 版仍未兑现开场承诺。`,
+        },
+      })),
+      recoveryOwner: { runId: "run-1", nodeId: "script", workflowOperationRequestId: "operation-awaiting-user" },
+    }), "utf8");
+
+    // 三轮自动重做都没过审计不是作品失败：这一版和审计意见都停在用户面前，界面必须看得见它，
+    // 否则用户只会看到一个"成功了"的节点，而那句"要改哪里"就此消失。
+    assert.deepEqual(await loadAgentLoopProgress(workspaceRoot, "run-1", "script", "operation-awaiting-user"), {
+      iteration: 3,
+      maxIterations: 3,
+      completedIterations: 3,
+      producerModelCallCount: 3,
+      auditModelCallCount: 3,
+      structuredRepairModelCallCount: 0,
+      phase: "awaiting_user",
+      latestAudit: { verdict: "repair", score: 63, summary: "第 3 版仍未兑现开场承诺。" },
+    });
+  });
+
   it("does not expose an active agent-loop checkpoint after its node has failed", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-failed-agent-progress-"));
     const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "agent-loop-checkpoints");
@@ -3100,6 +3133,9 @@ describe("StudioService", () => {
       trendAgent: { listCandidates: async () => [trendCandidate] },
     });
 
+    // 收件箱读取不再等待生成：这里先走一次阻塞读取把候选落盘，模拟"生成已完成"的状态，
+    // 否则读到的是冷缓存快照（空集合 + refreshing）。
+    await service.listTrendCandidates();
     const candidate = (await service.listCandidateInbox({ origins: ["trend"] })).items[0]!;
     const opportunity = await service.adoptCandidate(candidate.id, { origin: "trend", verificationConfirmed: true });
     assert.deepEqual(opportunity.articleSources, trustedSources);
@@ -3150,6 +3186,9 @@ describe("StudioService", () => {
       commandAvailable: allCommandsAvailable,
       environment: {},
     });
+    // 这条断言验证的是"旧记录会被当前更严的标准重新拦下"，与默认档是哪一档无关：
+    // 显式钉住严格档，默认档调整时这条测试才不会被静默改写成空断言。
+    await service.updateCreatorSettings({ topicStrategy: { sourcePolicy: "primary_or_two_independent" } });
 
     const [historical] = await service.listOpportunities("trend");
     assert.equal(historical?.verification?.status, "blocked");
@@ -3220,6 +3259,8 @@ describe("StudioService", () => {
       },
     });
 
+    // 同上：先完成一次生成，收件箱读取才拿得到候选与生成回执。
+    await service.listTrendCandidates();
     const trendInbox = await service.listCandidateInbox({ origins: ["trend"] });
     const beforeDeletion = trendInbox.items[0];
     assert.equal(beforeDeletion?.editorialDecision.recommendedTemplate, undefined);

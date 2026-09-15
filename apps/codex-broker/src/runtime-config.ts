@@ -1,10 +1,11 @@
 import {
+  ALLOWED_REASONING_EFFORTS,
   codexExecutorProfileFor,
+  isReviewableModelId,
   type CodexExecutorProfile,
   type CodexExecutorProfileId,
 } from "./codex-executor.js";
 
-const ALLOWED_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const DEFAULT_PRODUCTION_MODEL = "gpt-5.6-sol";
 const DEFAULT_DEEP_REVIEW_MODEL = "gpt-5.6-sol";
 
@@ -16,6 +17,7 @@ export interface BrokerRuntimeConfig {
   effort: string;
   auditModel?: string;
   auditEffort: string;
+  modelCandidates: string[];
   timeoutMs: number;
   concurrency: number;
   maxBacklog: number;
@@ -38,11 +40,11 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
     throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
   }
   const effort = optionalText(env, "VIDEO_FACTORY_CODEX_EFFORT") ?? (profileId === "zai" ? "max" : "xhigh");
-  if (!ALLOWED_EFFORTS.has(effort)) {
+  if (!ALLOWED_REASONING_EFFORTS.has(effort)) {
     throw new Error("VIDEO_FACTORY_CODEX_EFFORT must be one of low|medium|high|xhigh|max.");
   }
   const auditEffort = optionalText(env, "VIDEO_FACTORY_CODEX_AUDIT_EFFORT") ?? "xhigh";
-  if (!ALLOWED_EFFORTS.has(auditEffort)) {
+  if (!ALLOWED_REASONING_EFFORTS.has(auditEffort)) {
     throw new Error("VIDEO_FACTORY_CODEX_AUDIT_EFFORT must be one of low|medium|high|xhigh|max.");
   }
 
@@ -54,11 +56,28 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
     effort,
     ...(configuredAuditModel ? { auditModel: configuredAuditModel } : {}),
     auditEffort,
+    modelCandidates: readModelCandidates(env),
     // 600s 仍可能掐断 xhigh/max 级强推理候选；默认放宽到 20 分钟，与 ZAI 生产 unit 的 1200000ms 对齐。
     timeoutMs: readInteger(env, "VIDEO_FACTORY_CODEX_TIMEOUT_MS", 1_200_000, 1_000, 3_600_000),
     concurrency: readInteger(env, "VIDEO_FACTORY_CODEX_CONCURRENCY", 1, 1, 8),
     maxBacklog: readInteger(env, "VIDEO_FACTORY_CODEX_MAX_BACKLOG", 1, 1, 1_000),
   };
+}
+
+/**
+ * 上层可以按任务覆盖模型，但只能覆盖到这张已审核候选表内的模型。留空即不允许任何覆盖，
+ * 这是安全默认：请求方不应能凭空引入一个未审核、计费未知的模型。
+ */
+function readModelCandidates(env: NodeJS.ProcessEnv): string[] {
+  const raw = optionalText(env, "VIDEO_FACTORY_CODEX_MODEL_CANDIDATES");
+  if (raw === undefined) return [];
+  const candidates = raw.split(",").map((value) => value.trim()).filter(Boolean);
+  for (const candidate of candidates) {
+    if (!isReviewableModelId(candidate)) {
+      throw new Error(`VIDEO_FACTORY_CODEX_MODEL_CANDIDATES contains an invalid model id: '${candidate}'.`);
+    }
+  }
+  return candidates;
 }
 
 function readProfileId(env: NodeJS.ProcessEnv): CodexExecutorProfileId {

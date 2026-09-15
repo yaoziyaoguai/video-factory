@@ -99,6 +99,16 @@ export function parseBrokerBinding(value: unknown, kind: CodexTaskKind, payload:
   };
 }
 
+/**
+ * broker 在 /health 里公告的已审核候选模型：请求方只能在这张表里选，选的模型随信封的
+ * brokerBinding.modelId 送给 broker，broker 会独立再校验一遍。这里读出来只是为了让
+ * "这个模型不在候选表里"在提交前就以可读的方式暴露出来——客户端不是安全边界。
+ */
+export function brokerModelCandidates(value: unknown): string[] {
+  if (!isRecord(value) || !Array.isArray(value.modelCandidates)) return [];
+  return value.modelCandidates.filter((entry): entry is string => typeof entry === "string");
+}
+
 function parseTaskModelRoutes(value: unknown): Partial<Record<CodexTaskKind, { withoutImages: string; withImages: string }>> | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) return undefined;

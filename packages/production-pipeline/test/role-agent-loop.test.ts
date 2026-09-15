@@ -825,7 +825,7 @@ describe("role agent loop audit boundary", () => {
     assert.equal(result.agentLoop?.modelCallCount, 4);
   });
 
-  it("keeps an exhausted checkpoint terminal until the caller supplies a new key", async () => {
+  it("stops an exhausted checkpoint at the user instead of failing it, until the caller supplies a new key", async () => {
     let stored: unknown;
     let produceCalls = 0;
     let auditCalls = 0;
@@ -854,11 +854,17 @@ describe("role agent loop audit boundary", () => {
       validate: titleCandidate,
     });
 
-    await assert.rejects(execute, /仍未通过独立审计/);
+    // 三轮自动重做都没过审计，作品也不算失败：第三版连审计一起交还给用户裁决。
+    const stopped = await execute();
+    assert.equal(stopped.agentLoop?.status, "awaiting_user");
+    assert.deepEqual(stopped.output, { title: "候选 3" });
     assert.equal(produceCalls, 3);
     assert.equal(auditCalls, 3);
 
-    await assert.rejects(execute, /仍未通过独立审计/);
+    // 同一个 key 上它已是终态：不会背着用户又去重做一轮。
+    const again = await execute();
+    assert.equal(again.agentLoop?.status, "awaiting_user");
+    assert.deepEqual(again.output, { title: "候选 3" });
     assert.equal(produceCalls, 3);
     assert.equal(auditCalls, 3);
 

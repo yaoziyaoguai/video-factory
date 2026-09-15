@@ -29,6 +29,7 @@ export function createBrokerExecutor(
     effort: config.effort,
     ...(config.auditModel ? { auditModel: config.auditModel } : {}),
     auditEffort: config.auditEffort,
+    modelCandidates: config.modelCandidates,
     timeoutMs: config.timeoutMs,
   });
 }

@@ -419,6 +419,40 @@ describe("TrendStudio", () => {
     }
   });
 
+  it("answers a cold-cache snapshot immediately instead of blocking on generation", async () => {
+    // 收件箱读取接口不能等待一次完整生成：冷缓存时先返回空快照 + refreshing，
+    // 客户端据此继续轮询；生成在后台推进，落地后同一次读取就能看到候选。
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-snapshot-trend-"));
+    const cachePath = path.join(root, "candidates.json");
+    const generated = [{ id: "trend-generated", title: "本轮生成的热点" }] as StudioTrendCandidate[];
+    let resolveGeneration: ((value: StudioTrendCandidate[]) => void) | undefined;
+    try {
+      const studio = new TrendStudio({
+        repositoryRoot: "/repo",
+        cachePath,
+        environment: {},
+        now: () => new Date("2026-08-24T08:00:00.000Z"),
+        trendGateway: { listServices: async () => [], listSignals: async () => [] },
+        trendAgent: { listCandidates: () => new Promise((resolve) => { resolveGeneration = resolve; }) },
+      });
+
+      assert.deepEqual(await studio.snapshotCandidates(), []);
+      assert.equal(studio.isRefreshing(), true, "冷缓存快照必须报告后台生成仍在进行");
+      assert.ok(resolveGeneration, "冷缓存快照必须已在后台启动一次生成");
+
+      resolveGeneration(generated);
+      let current: StudioTrendCandidate[] = [];
+      for (let attempt = 0; attempt < 20 && current.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        current = await studio.snapshotCandidates();
+      }
+      assert.deepEqual(current, generated);
+      assert.equal(studio.isRefreshing(), false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("persists a valid empty shortlist instead of reviving the previous candidates", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-empty-trend-refresh-"));
     const cachePath = path.join(root, "candidates.json");

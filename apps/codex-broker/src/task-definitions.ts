@@ -228,7 +228,7 @@ const VISUAL_REVIEW_DIRECTIVE = [
   "读取 renderConform：按实际 scale-to-fill 与 center crop 后的可用画面判断，不能只因源比例不同要求重新生成；必要主体、动作或文字安全区确实会丢失时才判缺陷。",
   "没有可听音轨时，音效、声音质量、口型同步和混音写未覆盖，不能宣称通过，也不能仅因未提供音轨自动返修。静帧不证明逐帧流畅，技术与声音检查有各自责任。",
   "每条 finding 的 scenePosition、时间区间和 timecodeMs 必须落在本次证据映射内。非空 evidenceFrameSha256 原样引用同镜、同时间码且位于该区间的唯一输入帧；无合适证据时填 null，绝不自造。",
-  "先归因再建议：方案本身不可执行、事实承诺错误或跨镜论证依赖不受支持的同一对象，指向 script/visual-direction，使用 replan_upstream；方案可执行而单次素材未命中，才指向 assets 并 rework_asset。",
+  "先归因再建议：方案本身不可执行、事实承诺错误或跨镜论证依赖不受支持的同一对象，指向 creative-planning，并用 planningStageId 指明要重做的那一段（treatment 承诺与方向、script 事实与论证、director 分镜与可执行性），使用 replan_upstream；方案可执行而单次素材未命中，才指向 assets 并 rework_asset。指向 assets 时 planningStageId 填 null：那不是方案的问题。",
   "“不承诺精确身份”不能豁免实际依赖同一人物、物件或空间的论证；但不得因否定句里出现“同一人物”就认定作品要求身份一致。判断整段叙事与可见画面。",
   "not_observed 只走 inspect_existing_media，不进入重买清单；failed 按实际责任走 replan_upstream/rework_asset。satisfied/not_applicable 为 info 且 nextAction=none。不用重复生成独立素材碰运气解决方案缺陷。",
   "保留当前审批门槛：五项评分均至少 75、confidence 至少 0.7，并且没有 failed 或 not_observed finding，才允许 approve。当前核心成功条件未确认时不能批准；不通过也不能据此自动扩大付费范围。",
@@ -407,7 +407,8 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
       outputRules: [
         "顶层必须完整包含 version、summary、scores、findings、confidence、recommendation；version 必须固定为 video-factory/visual-review-v1。",
         "scores 必须完整包含 composition、continuity、pacing、legibility、safety，不得省略字段或增加字段。",
-        "findings 中每项必须完整包含 timecodeMs、startTimecodeMs、endTimecodeMs、scenePosition、targetNodeId、claimType、evidenceStatus、evidenceFrameSha256、nextAction、category、severity、description、suggestion；targetNodeId 只能是 script、assets 或 visual-direction；claimType 只能是 static、motion 或 non_visual。",
+        "findings 中每项必须完整包含 timecodeMs、startTimecodeMs、endTimecodeMs、scenePosition、targetNodeId、claimType、evidenceStatus、evidenceFrameSha256、nextAction、category、severity、description、suggestion；targetNodeId 只能是 creative-planning 或 assets；claimType 只能是 static、motion 或 non_visual。",
+        "targetNodeId=creative-planning 时必须同时给出 planningStageId，取值只能是 treatment、script 或 director——它指明这个方案问题出在哪一段、要从哪一段重做：treatment 是承诺与方向，script 是事实与论证，director 是分镜与可执行性。targetNodeId=assets 时 planningStageId 必须为 null：那不是方案的问题，重做方案会白花钱。",
         "claimType=motion 的 finding 记 failed 只在两种情形下合法：该镜头被采了超过三帧的连续序列，或该镜头在采样窗口内的画面逐字节完全相同。claimType=non_visual 的 finding 不可能靠抽帧证成，记 failed 需要画面之外的证据。其余情形必须记 not_observed 并用 inspect_existing_media；用稀疏静帧判定运动没有发生、或用抽帧判定配音有问题，都会被拒绝。",
         "evidenceStatus 只能是 satisfied、failed、not_observed、not_applicable；nextAction 只能是 inspect_existing_media、replan_upstream、rework_asset、none。",
         "finding.category 只能是 composition、continuity、pacing、legibility、safety、other；severity 只能是 info、warning、critical。",
@@ -840,7 +841,7 @@ const VISUAL_REVIEW_OUTPUT_SCHEMA = {
       items: {
         type: "object",
         required: [
-          "timecodeMs", "startTimecodeMs", "endTimecodeMs", "scenePosition", "targetNodeId",
+          "timecodeMs", "startTimecodeMs", "endTimecodeMs", "scenePosition", "targetNodeId", "planningStageId",
           "claimType", "evidenceStatus", "evidenceFrameSha256", "nextAction", "category", "severity", "description", "suggestion",
         ],
         additionalProperties: false,
@@ -849,7 +850,8 @@ const VISUAL_REVIEW_OUTPUT_SCHEMA = {
           startTimecodeMs: { type: "integer", minimum: 0 },
           endTimecodeMs: { type: "integer", minimum: 0 },
           scenePosition: { type: "integer", minimum: 1 },
-          targetNodeId: { type: "string", enum: ["script", "assets", "visual-direction"] },
+          targetNodeId: { type: "string", enum: ["creative-planning", "assets"] },
+          planningStageId: { type: ["string", "null"], enum: ["treatment", "script", "director", null] },
           claimType: { type: "string", enum: ["static", "motion", "non_visual"] },
           evidenceStatus: { type: "string", enum: ["satisfied", "failed", "not_observed", "not_applicable"] },
           evidenceFrameSha256: { type: ["string", "null"], pattern: "^[a-f0-9]{64}$" },

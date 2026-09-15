@@ -3041,7 +3041,7 @@ export async function loadAgentLoopProgress(
     if (active.length === 1) return active[0]?.progress;
     if (active.length > 1) return undefined;
     const stopped = owned.filter((candidate) => candidate.progress
-      && ["passed", "failed", "exhausted", "halted"].includes(candidate.progress.phase));
+      && ["passed", "failed", "exhausted", "awaiting_user", "halted"].includes(candidate.progress.phase));
     return stopped.length === 1 ? stopped[0]?.progress : undefined;
   } catch (error) {
     if (hasCode(error, "ENOENT")) return undefined;
@@ -3081,7 +3081,8 @@ function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undef
     : 0;
   const status = value.status;
   if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 3) return undefined;
-  if (status !== "running" && status !== "passed" && status !== "exhausted" && status !== "failed") return undefined;
+  if (status !== "running" && status !== "passed" && status !== "exhausted"
+    && status !== "awaiting_user" && status !== "failed") return undefined;
   const pending = isRecord(value.pendingCandidate) ? Number(value.pendingCandidate.iteration) : undefined;
   const iteration = Number.isInteger(pending)
     ? Math.min(maxIterations, Math.max(1, Number(pending)))
@@ -3105,15 +3106,17 @@ function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undef
   // 通过审计"分开呈现，不误报为 audit exhausted。
   const phase: StudioAgentLoopProgress["phase"] = status === "passed"
     ? "passed"
-    : status === "exhausted"
-      ? "exhausted"
-      : status === "failed"
-        ? planningDisposition ? "halted" : "failed"
-        : pending !== undefined
-          ? "auditing"
-          : completed.length > 0
-            ? "repairing"
-            : "producing";
+    : status === "awaiting_user"
+      ? "awaiting_user"
+      : status === "exhausted"
+        ? "exhausted"
+        : status === "failed"
+          ? planningDisposition ? "halted" : "failed"
+          : pending !== undefined
+            ? "auditing"
+            : completed.length > 0
+              ? "repairing"
+              : "producing";
   return {
     ...(role ? { role } : {}),
     iteration,
@@ -3133,6 +3136,7 @@ function agentLoopActionLabel(role: string, progress: StudioAgentLoopProgress): 
   if (progress.phase === "repairing") return `${prefix}：按上一轮审计修订`;
   if (progress.phase === "passed") return `${prefix}：独立审计已通过`;
   if (progress.phase === "exhausted") return `${prefix}：三轮审计未通过`;
+  if (progress.phase === "awaiting_user") return `${prefix}：审计建议已附上，交给你裁决`;
   if (progress.phase === "halted") return `${prefix}：已识别外部前提，等待调整方案`;
   if (progress.phase === "failed") return `${prefix}：模型调用已停止，请查看失败原因与恢复选项`;
   return `${prefix}：正在生成候选交付`;
@@ -3727,9 +3731,10 @@ function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
       : "重新设计该镜头并验证修改结果。";
     const category = typeof value.category === "string" && value.category.trim() ? value.category.trim() : "other";
     const scenePosition = Number(value.scenePosition);
+    const planningStageId = isPlanningStageId(value.planningStageId) ? value.planningStageId : undefined;
     const explicitTargets = Array.isArray(value.targetNodeIds)
       ? [...new Set(value.targetNodeIds.filter(isReworkTargetNodeId))]
-      : isReworkTargetNodeId(value.targetNodeId) ? [value.targetNodeId] : [];
+      : reworkRoutingTargetsForReview(value.targetNodeId, planningStageId);
     const inferredScriptOwner = /叙事|旁白|文案|narrative|script|voice/i.test(`${category} ${description} ${suggestion}`);
     const primaryOwnerNodeId: StudioReworkFinding["targetNodeIds"][number] = explicitTargets[0]
       ?? (inferredScriptOwner ? "script" : "visual-direction");
@@ -3781,6 +3786,7 @@ function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
       primaryOwnerNodeId,
       affectedNodeIds,
       action,
+      ...(planningStageId ? { planningStageId } : {}),
       sourceReviewStage,
       sourceReviewNodeId: nodeId,
       sourceReviewVersionId: versionId,
@@ -3830,6 +3836,35 @@ function affectedReworkNodes(options: {
 
 function isReworkTargetNodeId(value: unknown): value is StudioReworkFinding["targetNodeIds"][number] {
   return value === "script" || value === "visual-direction" || value === "assets";
+}
+
+function isPlanningStageId(value: unknown): value is NonNullable<StudioReworkFinding["planningStageId"]> {
+  return value === "treatment" || value === "script" || value === "director";
+}
+
+/**
+ * 审片意见指名的节点 → 返工上下文实际组织指令用的三个切片。
+ *
+ * 意见指名的是真实节点（creative-planning / assets）与真实段落（treatment / script / director），
+ * 而 nodeInstructions 仍按 script / visual-direction / assets 三段分发。映射是收窄且单向的：
+ * 段落决定重做哪一段，切片只决定把指令交给谁——treatment 与 script 都落进 script 切片，
+ * 所以这里没有引入任何新的重做范围，只是把意见说的话原样转达。
+ *
+ * 旧合同产出的报告只给两段式取值，语义与之一一对应：script → script，visual-direction → director。
+ * 认不出的取值返回空，交给下面的启发式兜底——与这个函数原本对未知取值的行为一致。
+ */
+function reworkRoutingTargetsForReview(
+  targetNodeId: unknown,
+  planningStageId: unknown,
+): StudioReworkFinding["targetNodeIds"] {
+  if (targetNodeId === "assets") return ["assets"];
+  if (targetNodeId === "script") return ["script"];
+  if (targetNodeId === "visual-direction") return ["visual-direction"];
+  if (targetNodeId === "creative-planning") {
+    if (!isPlanningStageId(planningStageId)) return [];
+    return planningStageId === "director" ? ["visual-direction"] : ["script"];
+  }
+  return [];
 }
 
 function isVisualReviewEvidenceStatus(value: unknown): value is NonNullable<StudioReworkFinding["evidenceStatus"]> {
@@ -4001,6 +4036,16 @@ function reworkScenePositionsFromText(value: string): number[] {
   return [...positions].sort((left, right) => left - right);
 }
 
+/**
+ * 创作规划三段的说法。审片意见与人工回退（return_to_stage）共用同一套 ID，
+ * 这里只负责把它翻成生产者看得懂的中文：说要重做哪一段，不说"方案有问题"。
+ */
+const REWORK_PLANNING_STAGE_LABELS = {
+  treatment: "方案 · 承诺与方向段",
+  script: "方案 · 事实与论证段",
+  director: "方案 · 分镜与可执行性段",
+} as const;
+
 function buildReworkNodeInstructions(
   findings: StudioReworkFinding[],
   rejectionReason?: string,
@@ -4016,6 +4061,9 @@ function buildReworkNodeInstructions(
           ? `镜头 ${finding.scenePosition}`
           : `镜头 ${finding.scenePosition} · ${formatReworkTimecode(finding.timecodeMs)}`
         : formatReworkTimecode(finding.timecodeMs);
+      // 审片意见指名了要重做哪一段，就把它带到指令里：模型只知道"方案有问题"时会从最上游
+      // 重做，把没被点名的段落一起推翻，代价是整轮素材白买。
+      const stage = finding.planningStageId ? `${REWORK_PLANNING_STAGE_LABELS[finding.planningStageId]} · ` : "";
       const action = nodeId === "assets"
         ? finding.action === "inspect_existing_media"
           ? "先补查已有素材，不进入新购买"
@@ -4025,7 +4073,7 @@ function buildReworkNodeInstructions(
         : finding.action === "inspect_existing_media"
           ? "核对已有证据后再决定是否修改"
           : "按建议修改方案";
-      return `- ${location}：${finding.description}；下一步：${action}；建议：${finding.suggestion}`;
+      return `- ${stage}${location}：${finding.description}；下一步：${action}；建议：${finding.suggestion}`;
     });
   const scriptLines = linesFor("script");
   const visualLines = linesFor("visual-direction");

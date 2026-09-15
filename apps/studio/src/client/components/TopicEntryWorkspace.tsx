@@ -62,6 +62,8 @@ interface TopicEntryWorkspaceProps {
   onManual: () => void;
   onImport: () => void;
   trendRefreshPending?: boolean;
+  /** 热点候选正在后台生成：此时收件箱里的 items 只是缓存快照，空集合并不等于"没有候选"。 */
+  trendRefreshing?: boolean;
   sourceBlockedOpportunities?: StudioOpportunity[];
   onFocusSourceBlocked?: (opportunityId: string) => void;
 }
@@ -99,6 +101,9 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const selectedSeries = props.series.find((item) => item.id === props.selectedSeriesId) ?? props.series[0];
   const candidateMode = mode === "trend" || mode === "series" ? mode : "trend";
   const modeLoading = props.loading[candidateMode] === true;
+  // 读取已返回但生成仍在后台推进：这期间必须继续显示"正在生成"，不能落到空结果文案。
+  const modeGenerating = candidateMode === "trend" && props.trendRefreshing === true;
+  const modeBusy = modeLoading || modeGenerating;
   const modeError = props.error?.[candidateMode];
   const sourceBlockedOpportunities = props.sourceBlockedOpportunities ?? [];
 
@@ -136,7 +141,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             </div>
             {mode === "trend" ? (
               <div className="trend-refresh-status" aria-label="热点更新状态">
-                <span><i aria-hidden="true" />{modeLoading ? (modeItems.length > 0 ? "正在更新，当前仍可使用" : "正在读取") : "每日缓存"}</span>
+                <span><i aria-hidden="true" />{modeBusy ? (modeItems.length > 0 ? "正在更新，当前仍可使用" : "正在生成今日提案") : "每日缓存"}</span>
                 <small>{trendStatusText(props.trendMeta)}</small>
                 <button className="icon-button" type="button" aria-label="立即刷新热点" title="立即刷新热点" disabled={modeLoading || props.trendRefreshPending === true} onClick={props.onRefreshTrends}><RefreshCw aria-hidden="true" size={16} /></button>
               </div>
@@ -151,8 +156,8 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
           {modeError && modeItems.length > 0 ? <div className="candidate-cache-warning" role="status"><AlertCircle aria-hidden="true" size={17} /><span>本次更新失败，继续展示上次缓存：{modeError}</span></div> : null}
           {modeError && modeItems.length === 0 ? (
             <div className="candidate-error" role="alert"><AlertCircle aria-hidden="true" size={20} /><div><strong>{mode === "trend" ? "热点候选暂时不可用" : "系列候选暂时不可用"}</strong><span>{modeError}</span></div><button className="button button-secondary" type="button" onClick={() => props.onRetry(candidateMode)}><RefreshCw aria-hidden="true" size={15} />重试</button></div>
-          ) : modeLoading && modeItems.length === 0 ? (
-            <div className="candidate-loading"><RadioTower aria-hidden="true" size={24} /><div><h2>{mode === "trend" ? "正在生成今日提案" : "正在读取系列选题"}</h2><p>{mode === "trend" ? "AI 选题总编正在分析热点并形成提案，通常需要 1–3 分钟；系列和自定义创作仍可立即使用。" : "系列策划通常几秒内就会出现。"}</p></div>{mode === "trend" ? <button className="button button-secondary" type="button" onClick={props.onManual}>录入自己的选题</button> : null}</div>
+          ) : modeBusy && modeItems.length === 0 ? (
+            <div className="candidate-loading"><RadioTower aria-hidden="true" size={24} /><div><h2>{mode === "trend" ? "正在生成今日提案" : "正在读取系列选题"}</h2><p>{mode === "trend" ? "AI 选题总编正在分析热点并形成提案，通常需要几分钟；页面会自动更新，系列和自定义创作仍可立即使用。" : "系列策划通常几秒内就会出现。"}</p></div>{mode === "trend" ? <button className="button button-secondary" type="button" onClick={props.onManual}>录入自己的选题</button> : null}</div>
           ) : mode === "series" && props.series.length === 0 ? (
             <div className="series-empty"><LibraryBig aria-hidden="true" size={28} /><div><h3>先创建一个可持续的系列</h3><p>定义受众、栏目承诺和内容支柱后，系统会给出连续编号的下一集候选。</p></div><button className="button button-primary" type="button" onClick={props.onCreateSeries}>创建第一个系列</button></div>
           ) : mode === "trend" && shortlistCount === 0 && deskView === "shortlist" ? (

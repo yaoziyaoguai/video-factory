@@ -12,7 +12,7 @@ import {
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import { pendingRoleAgentOperation } from "./role-agent-checkpoint.js";
 
-export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v15|role-audit-v3|visual-review-validator-v6|evidence-state-v2|pilot-scope-v2|claim-evidence-capability-v1|review-contract-stamp-v1";
+export const VISUAL_REVIEW_AGENT_CONTRACT_VERSION = "visual-review-v15|role-audit-v3|visual-review-validator-v6|evidence-state-v2|pilot-scope-v2|claim-evidence-capability-v1|review-contract-stamp-v1|review-target-node-v1";
 
 export interface VisualReviewFramePayload {
   timecodeMs: number;
@@ -97,7 +97,12 @@ export interface VisualReviewFinding {
   startTimecodeMs: number;
   endTimecodeMs: number;
   scenePosition?: number;
-  targetNodeId?: "script" | "visual-direction" | "assets";
+  targetNodeId?: "creative-planning" | "assets";
+  /**
+   * targetNodeId=creative-planning 时，这个方案问题出在哪一段、要从哪一段重做。
+   * 取值与人工回退（return_to_stage）的 targetStage 同一套词汇，意见与补救因此能直接对齐。
+   */
+  planningStageId?: "treatment" | "script" | "director";
   /**
    * 这条主张要靠哪一类证据才能判定：
    * - static：画面某一刻的状态（构图、可读性、某物是否出现）；
@@ -155,6 +160,11 @@ export interface VisualReviewScope {
     auditContractDigest?: string;
     producerCompleted?: boolean;
     auditCompleted?: boolean;
+    /**
+     * 这一分支自己的独立审计最后投了什么票。审片是意见，审计也是意见：auditVerdict 不是
+     * "pass" 只说明这份审片报告本身有瑕疵，消费方必须如实展示，不能据此宣布作品成败。
+     */
+    auditVerdict?: "pass" | "repair";
   }>;
   current?: boolean;
   /**
@@ -723,7 +733,7 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
         "每条问题必须由对应时间码的画面证据支持；scene_sequence 的相邻时间点可以支持可见状态推进与近似保持时长，稀疏关键帧看不到的声音或连续运动不得当作已证事实",
         "逐项核对脚本可见动作、导演成功条件、镜头时长与渲染清单，不得只凭整体观感打分",
         "约、建议或参考时间只描述期望节拍，不是硬下限；只有明确的最迟、至少、不得或用户锁定要求才是阻断边界。画面已满足全部阻断边界并兑现叙事效果时，不得仅因偏离参考时间判 failed",
-        "核心主体、物体或动作对象与对应镜头要求不符时必须判定返修；环境相似不能代替目标物体，并须定位到具体镜头与 assets 或 visual-direction",
+        "核心主体、物体或动作对象与对应镜头要求不符时必须判定返修；环境相似不能代替目标物体，并须定位到具体镜头与 assets 或 creative-planning",
         "先区分真实来源原生文字、正式 editorial_card、render manifest 明确的后期文字，以及生成伪标签/乱码/水印/内部术语；前三类按准确性与可读性审查，后一类必须阻断",
         "模糊不可读且与核心内容无关的痕迹只能标为 not_observed 并补查已有素材，不得凭猜测直接要求付费返工",
         "当 reviewContext.reviewStage=source_assets 时，画面尚未叠加主字幕或 AIGC 披露；正式 editorial_card 和可追溯来源原生文字可以存在，生成伪文字、水印、比例标记或内部工作流术语必须阻断进入渲染",
@@ -731,7 +741,7 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
         "构图、连续性、节奏、可读性和安全五项评分必须与 findings 的 evidenceStatus、严重程度及 recommendation 自洽；通过门槛为五项均不低于 75 且 confidence 不低于 0.7",
         "每条 finding 必须给出镜号、证据帧或时间范围和下一步；failed 才能进入上游重规划或素材返工，not_observed 只能先补查已有素材",
         "每条 finding 必须用 claimType 声明这条主张要靠哪类证据判定：static 是某一刻的画面状态（构图、可读性、某物是否出现），motion 是随时间的变化（摇曳、连续推进、渐变、逐帧流畅），non_visual 是根本不落在画面里的东西（配音、节奏、旁白与字幕稿是否一致）。抽帧能判定 static，判不了 motion——稀疏静帧之间看起来相近既不能推出运动没发生，也不能推出运动发生了；更判不了 non_visual，采多少帧也采不到声音。motion 与 non_visual 的 failed 只在证据确实够时才允许：motion 需要该镜头被采了超过三帧的连续序列，或者该镜头在采样窗口内逐字节完全相同（画面确实根本没动）；non_visual 需要你手上真有画面之外的证据。否则一律记 not_observed 并走 inspect_existing_media——不要把「我的采样不够」写成「作品不成立」",
-        "核心论证依赖同一人物、物件或空间，而当前 Provider 无参考图、母片复用等能力无法保证跨镜一致时，必须把方案缺陷指向 visual-direction 或 script 并使用 replan_upstream；上游免责声明不能将其降级为 satisfied，也不得只指向 assets 重复付费",
+        "核心论证依赖同一人物、物件或空间，而当前 Provider 无参考图、母片复用等能力无法保证跨镜一致时，必须把方案缺陷指向 creative-planning 并给出 planningStageId（treatment/script/director）使用 replan_upstream；上游免责声明不能将其降级为 satisfied，也不得只指向 assets 重复付费",
         "抽样覆盖不足、缺帧或上下文缺失必须降低 confidence 并明确证据边界，不得虚构画面细节",
         "审片报告只判断当前成片并给出可执行修复建议；不得擅自改写脚本、导演方案或掩盖需要人工终审的问题",
       ],
@@ -861,7 +871,7 @@ function visualReviewAuditContext(payload: VisualReviewMediaPayload): Record<str
       owns: ["summary", "scores", "findings", "confidence", "recommendation"],
       doesNotOwn: ["脚本内容", "导演方案", "素材选择", "配音", "渲染产物"],
     },
-    currentRoleContract: "必须区分上游方案不可执行与单次素材偶发未命中。上游免责声明不能把不可执行方案变成可执行方案；前者必须回流 script 或 visual-direction 并 replan_upstream，不得只指向 assets 重复付费。",
+    currentRoleContract: "必须区分上游方案不可执行与单次素材偶发未命中。上游免责声明不能把不可执行方案变成可执行方案；前者必须回流 creative-planning 并用 planningStageId 指明 treatment、script 或 director 并 replan_upstream，不得只指向 assets 重复付费。",
     evidence: {
       durationMs: payload.durationMs,
       frames: payload.frames.map(({ jpegBase64: _jpegBase64, ...frame }) => frame),
@@ -1170,7 +1180,19 @@ function validateVisualReviewReportWithLimit(
     if (scenePositions && !scenePositions.includes(Number(scenePosition))) {
       throw new Error("试片报告包含未检查镜头的问题，请重新检查当前试片。");
     }
-    const targetNodeId = enumValue(finding.targetNodeId, ["script", "visual-direction", "assets"] as const, "targetNodeId");
+    const targetNodeId = enumValue(finding.targetNodeId, ["creative-planning", "assets"] as const, "targetNodeId");
+    // 方案问题的"哪一段"必须由意见自己指名：treatment/script/director 的重做代价与失效范围依次收窄，
+    // 由宿主猜段会把整个方案连同素材一起重做，那是拿用户的钱替模型补一句它没说的话。
+    // 结构化输出要求每个声明字段都必填，所以"这不是方案问题"由 null 表达，而不是省略字段。
+    const planningStageId = finding.planningStageId === undefined || finding.planningStageId === null
+      ? undefined
+      : enumValue(finding.planningStageId, ["treatment", "script", "director"] as const, "planningStageId");
+    if (targetNodeId === "creative-planning" && planningStageId === undefined) {
+      throw new Error("指向方案的问题必须指明要重做哪一段（planningStageId：treatment、script 或 director）。");
+    }
+    if (targetNodeId === "assets" && planningStageId !== undefined) {
+      throw new Error("指向素材的问题不能带 planningStageId：这不是方案的问题，重做方案会白花钱。");
+    }
     const evidenceStatus = enumValue(
       finding.evidenceStatus,
       ["satisfied", "failed", "not_observed", "not_applicable"] as const,
@@ -1212,6 +1234,7 @@ function validateVisualReviewReportWithLimit(
       endTimecodeMs: Number(endTimecodeMs),
       scenePosition: Number(scenePosition),
       targetNodeId,
+      ...(planningStageId ? { planningStageId } : {}),
       claimType,
       evidenceStatus,
       evidenceFrameSha256,

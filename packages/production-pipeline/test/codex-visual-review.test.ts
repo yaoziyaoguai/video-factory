@@ -697,7 +697,7 @@ describe("CodexVisualReviewAgent", () => {
     assert.match((calls[1]?.payload.criteria as string[]).join("\n"), /真实来源原生文字.*生成伪标签\/乱码\/水印\/内部术语/);
     assert.match(
       (calls[1]?.payload.criteria as string[]).join("\n"),
-      /同一人物、物件或空间.*Provider.*无法保证.*visual-direction 或 script.*replan_upstream/,
+      /同一人物、物件或空间.*Provider.*无法保证.*creative-planning.*planningStageId.*replan_upstream/,
     );
     assert.match(
       (calls[1]?.payload.criteria as string[]).join("\n"),
@@ -1372,9 +1372,25 @@ describe("CodexVisualReviewAgent", () => {
     assert.equal(localized.findings[0]?.targetNodeId, "assets");
     const scriptFinding = validateVisualReviewReport({
       ...report,
-      findings: [{ ...report.findings[0], targetNodeId: "script", nextAction: "replan_upstream" }],
+      findings: [{ ...report.findings[0], targetNodeId: "creative-planning", planningStageId: "script", nextAction: "replan_upstream" }],
     }, 6_000);
-    assert.equal(scriptFinding.findings[0]?.targetNodeId, "script");
+    assert.equal(scriptFinding.findings[0]?.targetNodeId, "creative-planning");
+    // 要重做哪一段是意见自己说的话，宿主不能替它猜：猜宽了会把没被点名的段落连同素材一起重做。
+    assert.equal(scriptFinding.findings[0]?.planningStageId, "script");
+    assert.throws(
+      () => validateVisualReviewReport({
+        ...report,
+        findings: [{ ...report.findings[0], targetNodeId: "creative-planning", nextAction: "replan_upstream" }],
+      }, 6_000),
+      /必须指明要重做哪一段/,
+    );
+    assert.throws(
+      () => validateVisualReviewReport({
+        ...report,
+        findings: [{ ...report.findings[0], targetNodeId: "assets", planningStageId: "director" }],
+      }, 6_000),
+      /不能带 planningStageId/,
+    );
     assert.throws(
       () => validateVisualReviewReport({
         ...report,

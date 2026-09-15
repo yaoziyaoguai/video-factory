@@ -149,6 +149,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
       items: [],
       facets: { total: 0, origins: {}, categories: {}, platforms: {}, verdicts: {} },
       generatedAt: "2026-08-24T09:00:00.000Z",
+      refreshing: false,
     }),
     adoptCandidate: async () => {
       throw new Error("not configured");
@@ -1043,6 +1044,7 @@ describe("Studio API", () => {
         items: [],
         facets: { total: 0, origins: {}, categories: {}, platforms: {}, verdicts: {} },
         generatedAt: "2026-08-24T09:00:00.000Z",
+        refreshing: false,
       };
     };
     service.adoptCandidate = async (candidateId) => {

@@ -94,6 +94,25 @@ export class TrendStudio {
     return this.startCandidateLoad(Boolean(options.forceRefresh));
   }
 
+  // 收件箱读取路径专用：只返回当前缓存快照，绝不等待一次完整生成。
+  // 冷缓存时后台启动生成并立即返回空集合，调用方用 isRefreshing() 决定是否轮询；
+  // 缓存过期时先返回旧缓存，把刷新放后台——读取接口不能因为生成耗时变成十分之一小时的空转。
+  async snapshotCandidates(): Promise<StudioTrendCandidate[]> {
+    if (this.options.cachePath) await this.hydrateCache();
+    if (this.sourceSupplementsPath()) await this.hydrateSupplements();
+    const now = this.options.now().getTime();
+    const stale = !this.candidateCache || this.candidateCache.expiresAt <= now;
+    if (stale && !this.candidateLoading && now >= this.nextAutomaticRefreshAt) {
+      this.nextAutomaticRefreshAt = now + AUTOMATIC_REFRESH_RETRY_MS;
+      void this.startCandidateLoad(false).catch(() => undefined);
+    }
+    return this.candidateCache ? this.mergeCandidateSupplements(this.candidateCache.values) : [];
+  }
+
+  isRefreshing(): boolean {
+    return Boolean(this.candidateLoading || this.queuedRefresh);
+  }
+
   async requestCandidateRefresh(): Promise<StudioTrendRefreshReceipt> {
     if (this.options.cachePath) await this.hydrateCache();
     const active = this.activeRefreshId ? this.candidateRefreshes.get(this.activeRefreshId) : undefined;

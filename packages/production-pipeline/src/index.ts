@@ -67,6 +67,7 @@ export {
   CodexBridgeError,
 } from "./codex-chat.js";
 export type { CodexBridgeClientOptions, CodexPreparedOperation, CodexTaskExecution, CodexTaskKind, CodexTaskRequestOptions, CodexTaskSession, CodexTaskTrace, ModelCandidateAttempt } from "./codex-chat.js";
+export { brokerModelCandidates } from "./codex-task-binding.js";
 export type { AgentLoopTrace, AgentLoopIterationTrace, RoleAudit, RoleAuditIssue } from "./codex-chat.js";
 export { RoleAgentLoopError, runRoleAgentLoop, validateRoleAudit } from "./role-agent-loop.js";
 export { fallbackRequestId, isModelProviderFailure, publicModelFailure } from "./model-fallback.js";

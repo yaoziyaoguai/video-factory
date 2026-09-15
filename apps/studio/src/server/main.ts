@@ -142,6 +142,7 @@ const service = new StudioService({
     taskKinds: codexSettings.taskKinds,
     modelId: codexSettings.modelId,
     ...(codexSettings.taskModels ? { taskModels: codexSettings.taskModels } : {}),
+    ...(codexSettings.modelCandidates ? { modelCandidates: codexSettings.modelCandidates } : {}),
   },
   zaiCodexAvailability: {
     available: zaiCodexSettings.available,
@@ -149,6 +150,7 @@ const service = new StudioService({
     taskKinds: zaiCodexSettings.taskKinds,
     modelId: zaiCodexSettings.modelId,
     ...(zaiCodexSettings.taskModels ? { taskModels: zaiCodexSettings.taskModels } : {}),
+    ...(zaiCodexSettings.modelCandidates ? { modelCandidates: zaiCodexSettings.modelCandidates } : {}),
   },
   ...(auditedTaskClient && auditedTaskReady("series-roadmap") ? {
     seriesPlanningAgent: new CodexSeriesPlanningAgent(

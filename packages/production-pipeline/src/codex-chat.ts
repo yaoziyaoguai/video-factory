@@ -2,6 +2,7 @@ import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import {
   TASK_BINDING_VERSION,
+  brokerModelCandidates,
   parseBrokerBinding,
   parseTaskBinding,
   sameTaskBinding,
@@ -21,7 +22,7 @@ export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
   "publish-copy": "db27873c44bb30623d5fceb6e5d3811912b32aeea3762fc7d18f3cb9cd58e9bd",
   "asset-rank": "c52416dc97cbd09ff747fa48f69fe65caa9a4c43fe5f1e3d3325dbb8031d5ba1",
   "reference-grammar": "49a25cf42265929fa0bc244967acc7f36e53c7de2546957798a6f1631e447ca7",
-  "visual-review": "ef6bb583f730bab5e071b56238c4ff01a87155bcc6d7b6330ec5db8044a8ff46",
+  "visual-review": "3b4fdb92daaf787d10df51b2325c61ba2eb6e979927a560132a8733daff46b38",
   "role-audit": "cb6c74ee00b1d40aebd2fdbb676e6a43e048011bc33d864ae44ebc60873495d6",
   "creative-discussion": "d1b6d26789c65330c306e82205141c00b108c5f6c3a3d39a3ce5724c85b0b2a4",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
@@ -90,6 +91,12 @@ export interface CodexTaskSession {
 export interface CodexTaskRequestOptions {
   timeoutMs?: number;
   beforeSubmit?: (operation: CodexPreparedOperation) => Promise<void>;
+  /**
+   * 本次任务要用的模型，必须是 broker 在 /health 里公告的已审核候选之一。
+   * 它随信封的 brokerBinding.modelId 声明给 broker，而不是另开一个字段——模型本来
+   * 就是任务绑定的一部分，绕开绑定另说一套会让 durable 重放看不出模型被换过。
+   */
+  model?: string;
 }
 
 export interface CodexPreparedOperation {
@@ -210,7 +217,9 @@ export interface AgentLoopTrace {
   role: string;
   contractVersion: string;
   criteria: string[];
-  status: "passed" | "failed";
+  // awaiting_user：产出与那一轮自动审计都已完成，循环停在用户面前等裁决。
+  // 它既不是"通过"（审计没判 pass），也不是"失败"（没有任何东西坏掉）。
+  status: "passed" | "awaiting_user" | "failed";
   maxIterations: number;
   modelCallCount?: number;
   producerModelCallCount?: number;
@@ -335,8 +344,18 @@ export class CodexBridgeClient {
       : positiveRequestTimeout(requestOptions.timeoutMs);
     const deadlineAtMs = Date.now() + requestTimeoutMs;
     const baseEnvelope = taskEnvelope(kind, payload, requestId, session, expectedContractDigest);
-    let prepared = requestOptions.beforeSubmit
-      ? await this.prepareOperation(kind, payload, requestId, session, expectedContractDigest, Math.max(1, deadlineAtMs - Date.now()))
+    // 指定模型时也必须走 prepared 路径：模型是通过信封里的 brokerBinding 声明的，裸信封
+    // 不声明模型，broker 会当作没有覆盖——用户以为换了模型，实际跑的还是默认模型。
+    let prepared = requestOptions.beforeSubmit || requestOptions.model !== undefined
+      ? await this.prepareOperation(
+        kind,
+        payload,
+        requestId,
+        session,
+        expectedContractDigest,
+        Math.max(1, deadlineAtMs - Date.now()),
+        requestOptions.model,
+      )
       : undefined;
     if (prepared && requestOptions.beforeSubmit) await requestOptions.beforeSubmit(structuredClone(prepared));
     let acceptedOperation: CodexPreparedOperation | undefined;
@@ -375,6 +394,9 @@ export class CodexBridgeClient {
                 session,
                 expectedContractDigest,
                 Math.max(1, deadlineAtMs - Date.now()),
+                // 丢包后重建的绑定必须带上同一个模型：不重建就等于换了一个绑定，
+                // 查询原任务会被 broker 判成 conflict。
+                requestOptions.model,
               );
               prepared.taskFact = "possibly_submitted";
               return await this.awaitOutcome(prepared, session?.key, expectedContractDigest, deadlineAtMs);
@@ -485,8 +507,9 @@ export class CodexBridgeClient {
     session: CodexTaskSession | undefined,
     expectedContractDigest: string | undefined,
     timeoutMs: number,
+    model?: string,
   ): Promise<CodexPreparedOperation> {
-    const brokerBinding = await this.readBrokerBinding(kind, payload, timeoutMs);
+    const brokerBinding = await this.readBrokerBinding(kind, payload, timeoutMs, model);
     const envelope = taskEnvelope(kind, payload, requestId, session, expectedContractDigest, brokerBinding);
     const serializedEnvelope = JSON.stringify(envelope);
     return {
@@ -509,8 +532,9 @@ export class CodexBridgeClient {
     session: CodexTaskSession | undefined,
     expectedContractDigest: string | undefined,
     timeoutMs: number,
+    model?: string,
   ): Promise<CodexPreparedOperation> {
-    const brokerBinding = await this.readBrokerBinding(kind, envelope.payload, timeoutMs);
+    const brokerBinding = await this.readBrokerBinding(kind, envelope.payload, timeoutMs, model);
     const serializedEnvelope = JSON.stringify(envelope);
     return {
       version: "video-factory/codex-prepared-operation-v1",
@@ -803,7 +827,12 @@ export class CodexBridgeClient {
     });
   }
 
-  private readBrokerBinding(kind: CodexTaskKind, payload: unknown, timeoutMs: number): Promise<CodexBrokerBinding> {
+  private readBrokerBinding(
+    kind: CodexTaskKind,
+    payload: unknown,
+    timeoutMs: number,
+    modelOverride?: string,
+  ): Promise<CodexBrokerBinding> {
     return new Promise((resolve, reject) => {
       const request = http.request({
         socketPath: this.options.socketPath,
@@ -829,7 +858,26 @@ export class CodexBridgeClient {
             return;
           }
           try {
-            resolve(parseBrokerBinding(JSON.parse(Buffer.concat(chunks).toString("utf8")), kind, payload));
+            const report = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            const binding = parseBrokerBinding(report, kind, payload);
+            // "要的就是 broker 自己的模型"不是覆盖，必须先归一化再查候选表：broker 侧同样先归一化，
+            // 两边不一致就会出现候选表为空的 broker 拒绝一次对自己默认模型的显式请求。
+            if (modelOverride === undefined || modelOverride === binding.modelId) {
+              resolve(binding);
+              return;
+            }
+            const candidates = brokerModelCandidates(report);
+            if (!candidates.includes(modelOverride)) {
+              reject(new CodexBridgeError(
+                `Codex broker does not offer model '${modelOverride}' as a reviewed candidate.`,
+                false,
+                "rejected",
+                400,
+                "contract_rejected",
+              ));
+              return;
+            }
+            resolve({ ...binding, modelId: modelOverride });
           } catch (error) {
             reject(new CodexBridgeError(error instanceof Error ? error.message : "Codex broker identity is invalid.", false, "conflict"));
           }

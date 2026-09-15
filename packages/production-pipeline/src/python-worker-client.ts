@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { WORKER_PROTOCOL_VERSION } from "./contracts.js";
 
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
+const MAX_LOGGED_CHILD_STDERR = 8_000;
 
 export interface PythonWorkerClientOptions {
   command: string[];
@@ -92,12 +93,13 @@ export class PythonWorkerClient {
       });
       child.on("close", (code) => {
         clearTimeout(timer);
+        logWorkerStderr(stderr, request, code);
         if (timedOut) {
-          reject(new Error(`Python worker timed out after ${this.options.timeoutMs}ms.`));
+          reject(new Error(`Python worker timed out after ${this.options.timeoutMs}ms.${stderrTail(stderr)}`));
           return;
         }
         if (outputExceeded) {
-          reject(new Error(`Python worker output exceeded ${MAX_OUTPUT_BYTES} bytes.`));
+          reject(new Error(`Python worker output exceeded ${MAX_OUTPUT_BYTES} bytes.${stderrTail(stderr)}`));
           return;
         }
         if (code !== 0) {
@@ -235,6 +237,23 @@ function optionalArtifactText(value: unknown, label: string): string | undefined
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stderrTail(stderr: string): string {
+  const trimmed = stderr.trim();
+  if (!trimmed) return "";
+  const tail = trimmed.length > MAX_LOGGED_CHILD_STDERR ? trimmed.slice(-MAX_LOGGED_CHILD_STDERR) : trimmed;
+  return `\n--- worker stderr (tail) ---\n${tail}`;
+}
+
+// worker.py 以 exit 0 + status:"failed" 表达协议内失败，响应里只有一行 error.message；
+// 完整调用栈只走 stderr，所以这里无条件转发到服务端日志，避免深层失败不可复原。
+function logWorkerStderr(stderr: string, request: Record<string, unknown>, code: number | null): void {
+  if (!stderr.trim()) return;
+  const context = [request.capability, request.runId, request.nodeRunId, `attempt-${String(request.attempt)}`]
+    .map((part) => String(part))
+    .join(" / ");
+  console.error(`[python-worker] ${context} exited with code ${String(code)}${stderrTail(stderr)}`);
 }
 
 function killProcessTree(pid: number | undefined): void {
