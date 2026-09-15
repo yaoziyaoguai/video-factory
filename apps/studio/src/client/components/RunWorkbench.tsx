@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Check, Clock3, Download, Pause, Play, RotateCcw, Send, X, XCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { StudioCostRunDetail, StudioDecisionInput, StudioNarrationRevisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
+import type { StudioCostRunDetail, StudioDecisionInput, StudioNarrationRevisionInput, StudioSceneResourceRevisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { creatorFacingTechnicalText, platformLabel, providerLabel, catalogModelLabel, sourceAssetReviewBreakdown } from "../presentation.js";
@@ -13,6 +13,8 @@ interface RunWorkbenchProps {
   decisionPending: boolean;
   onDecision: (input: StudioDecisionInput) => Promise<void>;
   onRequestSceneRevision?: (input: StudioSceneRevisionInput) => Promise<void>;
+  /** 重取某一镜的素材：在这一镜已通过语义筛选的候选里改选下一名，画面换一版。 */
+  onRequestSceneResourceRevision?: (input: StudioSceneResourceRevisionInput) => Promise<void>;
   onRequestNarrationRevision?: (input: StudioNarrationRevisionInput) => Promise<void>;
   /** 取这一镜当前的旁白/字幕原文；改字要看得到原文，否则只能凭记忆重打一遍。 */
   onLoadSceneNarration?: (scenePosition: number) => Promise<string>;
@@ -38,7 +40,7 @@ interface RunWorkbenchProps {
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
@@ -316,6 +318,14 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                         findingIndex: finding.findingIndex,
                         ...input,
                       })}
+                      {...(onRequestSceneResourceRevision ? {
+                        onReselectAsset: (input) => onRequestSceneResourceRevision({
+                          expectedRunRevision: run.revision,
+                          reviewArtifactId: visualReview.reviewArtifactId!,
+                          findingIndex: finding.findingIndex,
+                          ...input,
+                        }),
+                      } : {})}
                       {...(onLoadSceneNarration ? { onLoadNarration: onLoadSceneNarration } : {})}
                       {...(onRequestNarrationRevision ? {
                         onSubmitNarration: (input) => onRequestNarrationRevision({
@@ -1197,16 +1207,18 @@ function SceneNarrationRevision({ scenePosition, busy, onLoad, onSubmit }: {
   </div>;
 }
 
-function SceneRevisionFinding({ finding, busy, onSeek, onSubmit, onLoadNarration, onSubmitNarration }: {
+function SceneRevisionFinding({ finding, busy, onSeek, onSubmit, onReselectAsset, onLoadNarration, onSubmitNarration }: {
   finding: VisualReviewFinding;
   busy: boolean;
   onSeek: () => void;
   onSubmit: (input: Pick<StudioSceneRevisionInput, "reuseFromScenePosition" | "note">) => Promise<void>;
+  onReselectAsset?: (input: Pick<StudioSceneResourceRevisionInput, "note">) => Promise<void>;
   onLoadNarration?: (scenePosition: number) => Promise<string>;
   onSubmitNarration?: (input: Pick<StudioNarrationRevisionInput, "scenePosition" | "narration" | "note">) => Promise<void>;
 }) {
   const [sourcePosition, setSourcePosition] = useState("");
   const [note, setNote] = useState("");
+  const [reselectNote, setReselectNote] = useState("");
   const canReplaceAsset = finding.targetNodeId === "assets" && finding.nextAction === "rework_asset";
   const sourceOptions = canReplaceAsset && finding.scenePosition
     ? Array.from({ length: Math.max(0, finding.scenePosition - 1) }, (_, index) => index + 1)
@@ -1221,6 +1233,22 @@ function SceneRevisionFinding({ finding, busy, onSeek, onSubmit, onLoadNarration
     <small>{creatorFacingTechnicalText(finding.suggestion)}</small>
     <FindingVerdictChange finding={finding} />
     {finding.nextAction === "replan_upstream" ? <small>这项问题需要先调整{finding.targetNodeId === "script" ? "脚本" : "导演方案"}，不能用任意旧素材替代。</small> : null}
+    {/* 「换素材」和「用已有镜头替换」是两件事：前者换的是这一镜画面的来源，
+        后者是干脆不拍这一镜、借一个更早镜头的画面。原来只有后者，
+        于是"这一镜素材本身不合格"根本没有对应的动作可点。 */}
+    {canReplaceAsset && finding.scenePosition && onReselectAsset ? <div className="scene-revision-controls">
+      <p className="field-wide">换一版这一镜的画面：在这一镜<strong>已通过语义筛选</strong>的候选里改选下一名。其它镜头的方案一个字段都不动，已经付过钱的分镜不会重买；换不到第二个合格候选时会明确拦住，而不是随便塞一个。</p>
+      <label className="field field-wide">
+        <span>重取说明</span>
+        <textarea value={reselectNote} onChange={(event) => setReselectNote(event.target.value)} rows={2} maxLength={2_000} placeholder="说明这一镜画面为什么必须换" />
+      </label>
+      <button
+        className="button button-secondary"
+        type="button"
+        disabled={busy || !reselectNote.trim()}
+        onClick={() => void onReselectAsset({ note: reselectNote.trim() })}
+      >换一版这一镜素材</button>
+    </div> : null}
     {sourceOptions.length > 0 ? <div className="scene-revision-controls">
       <label className="field">
         <span>用已有镜头替换</span>

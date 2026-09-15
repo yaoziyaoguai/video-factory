@@ -6,6 +6,7 @@ import type {
   StudioCreativeReviewCommandReceipt,
   StudioCreativeReviewSnapshot,
   StudioSceneRevisionInput,
+  StudioSceneResourceRevisionInput,
   StudioNarrationRevisionInput,
   StudioVisualReinspectionInput,
   StudioCandidateInbox,
@@ -257,6 +258,10 @@ export const studioApi = {
   reworkDraft: (runId: string) => requestJson<StudioReworkDraft>(`/api/runs/${encodeURIComponent(runId)}/rework-draft`),
   reinspectVisualReview: (runId: string, input: StudioVisualReinspectionInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/reinspect-visual-review`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  requestSceneResourceRevision: (runId: string, input: StudioSceneResourceRevisionInput) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/scene-resource-revisions`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
   requestNarrationRevision: (runId: string, input: StudioNarrationRevisionInput) => requestJson<StudioRunDetail>(

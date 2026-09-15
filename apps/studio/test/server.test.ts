@@ -195,6 +195,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     decide: async (_runId, input) => runDetail(input.action === "approve" ? "succeeded" : "rejected"),
     requestSceneRevision: async () => runDetail("needs_human"),
     requestNarrationRevision: async () => runDetail("needs_human"),
+    requestSceneResourceRevision: async () => runDetail("needs_human"),
     applyNodeOverride: async () => runDetail("stale"),
     applyNodeInputOverride: async () => runDetail("stale"),
     applyNodeExecutionConfiguration: async () => runDetail("stale"),
@@ -1636,6 +1637,43 @@ describe("Studio API", () => {
         narration: "第一行\n第二行",
         note: "旁白只能是一行。",
       },
+    });
+    assert.equal(rejected.statusCode, 400);
+    await app.close();
+  });
+
+  it("accepts a single-scene asset reselection request and rejects a reasonless one", async () => {
+    let received: unknown;
+    const app = buildStudioApp({ service: fakeService({
+      requestSceneResourceRevision: async (_runId, input) => {
+        received = input;
+        return runDetail("needs_human");
+      },
+    }) });
+
+    const accepted = await app.inject({
+      method: "POST",
+      url: "/api/runs/run-1/scene-resource-revisions",
+      payload: {
+        expectedRunRevision: 16,
+        reviewArtifactId: "review-1",
+        findingIndex: 8,
+        note: "杯口上方看不到蒸汽，换一版画面。",
+      },
+    });
+    assert.equal(accepted.statusCode, 200);
+    // 镜位不在请求里：它由服务端从那条审片结论解出来，客户端说了不算。
+    assert.deepEqual(received, {
+      expectedRunRevision: 16,
+      reviewArtifactId: "review-1",
+      findingIndex: 8,
+      note: "杯口上方看不到蒸汽，换一版画面。",
+    });
+
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/api/runs/run-1/scene-resource-revisions",
+      payload: { expectedRunRevision: 16, reviewArtifactId: "review-1", findingIndex: 8, note: "  " },
     });
     assert.equal(rejected.statusCode, 400);
     await app.close();

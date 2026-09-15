@@ -25,6 +25,7 @@ import {
   parseStudioCreativeReviewCommandInput,
   parseStudioSceneRevisionInput,
   parseStudioNarrationRevisionInput,
+  parseStudioSceneResourceRevisionInput,
   parseStudioVisualReinspectionInput,
   parseStudioPublishInput,
   parseStudioVoicePreviewInput,
@@ -45,6 +46,7 @@ import {
   type StudioCreativeReviewSnapshot,
   type StudioNarrationRevisionInput,
   type StudioSceneRevisionInput,
+  type StudioSceneResourceRevisionInput,
   type StudioVisualReinspectionInput,
   type StudioHealth,
   type StudioLocalCapability,
@@ -148,6 +150,7 @@ export interface StudioServicePort {
   creativeReviewCommand?(runId: string, commandId: string): Promise<StudioCreativeReviewCommandReceipt | undefined>;
   requestSceneRevision(runId: string, input: StudioSceneRevisionInput, actor: string): Promise<StudioRunDetail>;
   requestNarrationRevision(runId: string, input: StudioNarrationRevisionInput, actor: string): Promise<StudioRunDetail>;
+  requestSceneResourceRevision(runId: string, input: StudioSceneResourceRevisionInput, actor: string): Promise<StudioRunDetail>;
   reinspectVisualReview(runId: string, input: StudioVisualReinspectionInput): Promise<StudioRunDetail>;
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
@@ -671,6 +674,15 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     return options.service.requestNarrationRevision(
       request.params.runId,
       parseStudioNarrationRevisionInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/scene-resource-revisions", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    return options.service.requestSceneResourceRevision(
+      request.params.runId,
+      parseStudioSceneResourceRevisionInput(request.body),
       trustedStudioActor(auth, request.headers.cookie),
     );
   });

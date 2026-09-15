@@ -33,6 +33,7 @@ import {
   type ProductionPaidNodeSummary,
   type ProductionRunListener,
   type ProductionSceneRevisionDraft,
+  type ProductionSceneResourceRevisionDraft,
   type ProductionSpendRejectionDraft,
   type ProductionVoiceTimingRevisionDraft,
   type ProductionVisualReinspectionDraft,
@@ -74,6 +75,7 @@ import {
   type StudioRunDetail,
   type StudioRunSummary,
   type StudioNarrationRevisionInput,
+  type StudioSceneResourceRevisionInput,
   type StudioSceneRevisionInput,
   type StudioSpendRejectionInput,
 } from "../shared/api.js";
@@ -125,6 +127,11 @@ export interface StudioPipelinePort {
   dispatchNarrationRevision?(
     runId: string,
     draft: ProductionNarrationRevisionDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun>;
+  dispatchSceneResourceRevision?(
+    runId: string,
+    draft: ProductionSceneResourceRevisionDraft,
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun>;
   dispatchVisualReinspection?(
@@ -1695,6 +1702,49 @@ export class ProductionStudio {
         || (error instanceof Error && /locked by another writer/.test(error.message))
       ) {
         throw new StudioConflictError("这条制作已被其他操作更新，请刷新页面后重试。");
+      }
+      throw error;
+    }
+  }
+
+  async requestSceneResourceRevision(
+    runId: string,
+    input: StudioSceneResourceRevisionInput,
+    actor: string,
+  ): Promise<StudioRunDetail> {
+    const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
+    if (current.status !== "needs_human") {
+      throw new StudioConflictError("这条制作当前不在人工终审阶段。");
+    }
+    if (!this.options.pipeline.dispatchSceneResourceRevision) {
+      throw new StudioConflictError("当前制作引擎不支持重取单镜素材。");
+    }
+    try {
+      const dispatched = await this.options.pipeline.dispatchSceneResourceRevision(
+        runId,
+        { ...input, actor },
+        (run) => this.publish(this.toDetail(run)),
+      );
+      return await this.dispatchedDetail(dispatched);
+    } catch (error) {
+      if (
+        error instanceof StaleRunRevisionError
+        || error instanceof NodeVersionConflictError
+        || (error instanceof Error && /locked by another writer/.test(error.message))
+      ) {
+        throw new StudioConflictError("这条制作已被其他操作更新，请刷新页面后重试。");
+      }
+      // 这一镜的候选里已经没有第二个合格素材：这条路径宁可不换，也不塞一个会被素材节点
+      // 挡掉的候选。换不动时要说清楚还能做什么，而不是把引擎的英文报错丢给创作者。
+      if (error instanceof Error && /no second qualified candidate/.test(error.message)) {
+        throw new StudioConflictError(
+          "这一镜已经没有第二个合格素材可以换了。这条路径只在已通过语义筛选的候选之间换，不会为了过关塞一个次品；"
+          + "请改用「用已有镜头替换」借一个更早镜头的画面，或回到方案里调整这一镜的拍摄要求。",
+        );
+      }
+      if (error instanceof Error && /asks for the scene asset itself to be reworked/.test(error.message)) {
+        throw new StudioConflictError("这条审片结论要改的不是画面素材，请用结论旁边对应的返工入口。");
       }
       throw error;
     }

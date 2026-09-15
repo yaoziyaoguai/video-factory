@@ -36,6 +36,7 @@ import type {
   StudioRunSummary,
   StudioNarrationRevisionInput,
   StudioSceneRevisionInput,
+  StudioSceneResourceRevisionInput,
   StudioVisualReinspectionInput,
   StudioSeries,
   StudioSeriesInput,
@@ -659,6 +660,9 @@ export class StudioService {
   }
   requestNarrationRevision(runId: string, input: StudioNarrationRevisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.requestNarrationRevision(runId, input, actor);
+  }
+  requestSceneResourceRevision(runId: string, input: StudioSceneResourceRevisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    return this.production.requestSceneResourceRevision(runId, input, actor);
   }
   reinspectVisualReview(runId: string, input: StudioVisualReinspectionInput): Promise<StudioRunDetail> {
     return this.production.reinspectVisualReview(runId, input);

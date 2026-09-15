@@ -1779,6 +1779,22 @@ export interface StudioSceneRevisionInput {
 }
 
 /**
+ * 重新取用某一镜的素材。
+ *
+ * 与"复用更早的镜头"相反：这一镜的素材自身不合格，画面必须换掉，而不是借别的镜头的画面。
+ * 检索在规划阶段就完成了，候选清单与语义排序是那次规划的证据快照；所以这条路径不改画面方案，
+ * 只把这一镜候选里**下一名合格候选**提到首位，让素材节点重跑时改取它。合格门槛沿用素材节点
+ * 自己那一套，改选换不出一个系统本来就不会用的候选；一镜没有第二个合格候选时明确失败。
+ * 代价是画面要重渲、其后审片要重跑；其它镜头一个字段都没动，已付费的分镜按输入指纹原样带过，不计费。
+ */
+export interface StudioSceneResourceRevisionInput {
+  expectedRunRevision: number;
+  reviewArtifactId: string;
+  findingIndex: number;
+  note: string;
+}
+
+/**
  * 只改一镜的文字。
  *
  * 画面已经付过钱，而旁白与字幕是脚本里的一行字——改字不该让任何一帧画面重新生成。
@@ -2255,6 +2271,21 @@ export function parseStudioSceneRevisionInput(value: unknown): StudioSceneRevisi
     reviewArtifactId: requiredTrimmedString(input.reviewArtifactId, "审片报告"),
     findingIndex: Number(input.findingIndex),
     reuseFromScenePosition: positiveInteger(input.reuseFromScenePosition, "替换来源镜头"),
+    note,
+  };
+}
+
+export function parseStudioSceneResourceRevisionInput(value: unknown): StudioSceneResourceRevisionInput {
+  const input = requiredObject(value, "重取素材请求");
+  if (!Number.isSafeInteger(input.expectedRunRevision) || Number(input.expectedRunRevision) < 0) {
+    throw new StudioInputError("制作版本必须是非负整数。");
+  }
+  const note = requiredTrimmedString(input.note, "重取说明");
+  if (note.length > 2_000) throw new StudioInputError("重取说明不能超过 2000 个字符。");
+  return {
+    expectedRunRevision: Number(input.expectedRunRevision),
+    reviewArtifactId: requiredTrimmedString(input.reviewArtifactId, "审片报告"),
+    findingIndex: nonNegativeInteger(input.findingIndex, "审片条目"),
     note,
   };
 }

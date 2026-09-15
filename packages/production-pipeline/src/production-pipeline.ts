@@ -173,6 +173,24 @@ export interface ProductionSceneRevisionDraft {
 }
 
 /**
+ * 重新取用某一镜的素材。
+ *
+ * 与"复用更早镜头"相反：这一镜的素材本身被判不合格，画面必须换掉，而不是借别的镜头的画面。
+ * 检索发生在规划阶段，候选清单与语义排序是那次规划的证据快照，所以这条路径不改画面方案，
+ * 只把这一镜候选清单里**下一名合格候选**提到首位，让素材节点重跑时改取它。
+ * 因此其它镜头的输入逐字未动：已付费的分镜按输入指纹原样带过，不产生新的 Provider 调用。
+ * 合格门槛与素材节点完全一致（锁定候选，或语义分达到阈值），改选不会放宽它；
+ * 这一镜若没有第二个合格候选，这条路径明确失败而不是硬塞一个次品。
+ */
+export interface ProductionSceneResourceRevisionDraft {
+  expectedRunRevision: number;
+  reviewArtifactId: string;
+  findingIndex: number;
+  actor: string;
+  note: string;
+}
+
+/**
  * 只改一镜的旁白与字幕文字。
  *
  * 画面已经付过钱，而字幕/旁白是脚本里的一行字：改字不该让任何一帧画面重新生成。
@@ -1697,6 +1715,210 @@ export class ProductionPipeline {
         ],
         expectedVersionId: draft.expectedAssetVersionId,
         schemaVersion: assetVersion.schemaVersion,
+        decision: {
+          interventionId: finalIntervention.id,
+          action: "request_changes",
+          actor: draft.actor.trim(),
+          note: draft.note.trim(),
+        },
+      });
+      return revised;
+    });
+    return this.dispatchResumeStale(runId, listener);
+  }
+
+  async requestSceneResourceRevision(
+    runId: string,
+    draft: ProductionSceneResourceRevisionDraft,
+  ): Promise<WorkflowRun<ProductionBrief>> {
+    const dispatched = await this.dispatchSceneResourceRevision(runId, draft);
+    return dispatched.completion;
+  }
+
+  async dispatchSceneResourceRevision(
+    runId: string,
+    draft: ProductionSceneResourceRevisionDraft,
+    listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    await this.runPersistedTransition(runId, async (previous) => {
+      if (previous.revision !== draft.expectedRunRevision) {
+        throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
+      }
+      if (previous.status !== "needs_human") {
+        throw new Error(`Run '${runId}' is not waiting for human review.`);
+      }
+      if (!draft.actor.trim() || !draft.note.trim()) {
+        throw new Error("Scene resource revision actor and note are required.");
+      }
+      if (!Number.isInteger(draft.findingIndex) || draft.findingIndex < 0) {
+        throw new Error("Scene resource revision finding index is invalid.");
+      }
+
+      const brief = parsePersistedBrief(previous.initialInput);
+      const definition = this.createWorkflow(brief);
+      const finalIntervention = previous.nodeRuns.find((node) => node.nodeId === "final-review")?.intervention;
+      if (!finalIntervention) throw new Error("Scene resource revision requires an active final-review intervention.");
+      const visualReviewNodeRun = previous.nodeRuns.find((node) => node.nodeId === "visual-review");
+      const visualReviewVersion = visualReviewNodeRun?.outputState?.versions.find(
+        (version) => version.id === visualReviewNodeRun.outputState?.effectiveVersionId,
+      );
+      const reviewArtifact = previous.artifacts.find((artifact) => artifact.id === draft.reviewArtifactId);
+      if (
+        !visualReviewVersion?.artifactIds.includes(draft.reviewArtifactId)
+        || reviewArtifact?.kind !== "review_report"
+        || reviewArtifact.producer?.nodeId !== "visual-review"
+      ) {
+        throw new Error("Scene resource revision requires a current visual-review report artifact.");
+      }
+      await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), reviewArtifact);
+      const reviewOutput = requireOutputRecord(
+        visualReviewVersion.output ?? visualReviewNodeRun?.output,
+        "visual review output",
+      );
+      const reviewDurationMs = Number(reviewOutput.durationMs);
+      if (!Number.isInteger(reviewDurationMs) || reviewDurationMs <= 0) {
+        throw new Error("Current visual-review duration is invalid.");
+      }
+      const storedReportValue = JSON.parse(await readFile(reviewArtifact.uri!, "utf8"));
+      assertCurrentVisualReviewContract(storedReportValue);
+      const storedReport = validateAggregatedVisualReviewReport(storedReportValue, reviewDurationMs);
+      if (draft.findingIndex >= storedReport.findings.length) {
+        throw new Error("Scene resource revision finding is no longer current.");
+      }
+
+      const renderNodeRun = previous.nodeRuns.find((node) => node.nodeId === "render");
+      const renderVersion = renderNodeRun?.outputState?.versions.find(
+        (version) => version.id === renderNodeRun.outputState?.effectiveVersionId,
+      );
+      const renderOutput = requireOutputRecord(renderVersion?.output ?? renderNodeRun?.output, "render output");
+      const renderManifestPath = requiredOutputString(renderOutput, "renderManifestPath");
+      const renderManifestArtifact = previous.artifacts.find((artifact) => (
+        renderVersion?.artifactIds.includes(artifact.id)
+        && artifact.kind === "render_manifest"
+        && artifact.uri === renderManifestPath
+        && artifact.producer?.nodeId === "render"
+      ));
+      if (!renderManifestArtifact) {
+        throw new Error("Scene resource revision requires the current render manifest artifact.");
+      }
+      await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), renderManifestArtifact);
+      const localizedReport = await localizeVisualReviewReport(storedReport, renderManifestPath, reviewDurationMs);
+      const finding = localizedReport.findings[draft.findingIndex]!;
+      // 这条路径只处理"画面本身不合格"。审片把不合格指向别的节点（配音、时长）时，
+      // 换素材既不是它要的动作，也解释不了它的结论。
+      if (finding.targetNodeId !== "assets" || finding.nextAction !== "rework_asset") {
+        throw new Error("Scene resource revision requires a finding that asks for the scene asset itself to be reworked.");
+      }
+      const scenePosition = finding.scenePosition;
+      if (typeof scenePosition !== "number" || !Number.isInteger(scenePosition) || scenePosition < 1) {
+        throw new Error("Scene resource revision finding is not localized to a scene.");
+      }
+
+      const joint = usesJointCreativePlanning(brief);
+      const planningNodeId = joint ? "creative-planning" : "visual-direction";
+      const planningNodeRun = previous.nodeRuns.find((node) => node.nodeId === planningNodeId);
+      const planningVersion = planningNodeRun?.outputState?.versions.find(
+        (version) => version.id === planningNodeRun.outputState?.effectiveVersionId,
+      );
+      if (!planningVersion) {
+        throw new Error(`Scene resource revision requires the current '${planningNodeId}' output version.`);
+      }
+      const planningOutput = requireOutputRecord(
+        planningVersion.output ?? planningNodeRun?.output,
+        `${planningNodeId} output`,
+      );
+      const rankingPath = requiredOutputString(planningOutput, "candidateRankingPath");
+      const rankingArtifact = previous.artifacts.find((artifact) => (
+        planningVersion.artifactIds.includes(artifact.id)
+        && artifact.uri === rankingPath
+        && artifact.producer?.nodeId === planningNodeId
+      ));
+      if (!rankingArtifact) {
+        throw new Error("Scene resource revision requires the current candidate ranking artifact.");
+      }
+      await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), rankingArtifact);
+      const ranking = requireOutputRecord(
+        JSON.parse(await readFile(rankingArtifact.uri!, "utf8")),
+        "candidate ranking",
+      );
+      const advance = advanceSceneCandidateRanking(ranking, scenePosition);
+      const revisionDirectory = path.join(
+        this.runsRoot,
+        runId,
+        "nodes",
+        planningNodeId,
+        "revisions",
+        `revision-${previous.revision + 1}`,
+      );
+      await mkdir(revisionDirectory, { recursive: true });
+      const revisedRankingPath = path.join(revisionDirectory, "candidate_ranking.json");
+      const revisedRankingContent = `${JSON.stringify(advance.ranking, null, 2)}\n`;
+      await writeTextAtomically(revisedRankingPath, revisedRankingContent);
+      const revisionRequest = {
+        version: "video-factory/scene-resource-revision-v1",
+        reviewArtifactId: draft.reviewArtifactId,
+        findingIndex: draft.findingIndex,
+        scenePosition,
+        replacedProvider: advance.replaced.provider,
+        replacedAssetId: advance.replaced.assetId,
+        replacementProvider: advance.replacement.provider,
+        replacementAssetId: advance.replacement.assetId,
+        actor: draft.actor.trim(),
+        note: draft.note.trim(),
+      };
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+      });
+      // 失效从素材节点起：画面要换，素材必须重取，其下游全部作废。
+      // 但改动只落在排序上——其它镜头的检索意图与候选一个字段都没动，
+      // 已付费分镜的输入指纹因此不变，重跑时按原样带过，不产生新的 Provider 调用。
+      const invasiveNodeIds = [
+        "assets",
+        "asset-source-review",
+        "voice",
+        "render",
+        "technical-review",
+        "visual-review",
+        "final-review",
+        "publish-package",
+      ].filter((nodeId) => productionNodeIds(brief).includes(nodeId));
+      const revised = runner.applyNodeRevision(definition, withExecutableBrief(previous, brief), {
+        nodeId: planningNodeId,
+        actor: draft.actor.trim(),
+        output: {
+          ...planningOutput,
+          candidateRankingPath: revisedRankingPath,
+        },
+        artifacts: [
+          fileArtifact(
+            // 沿用被改那一份的 kind：素材节点按本拓扑的既有约定认排序，这里不该另发明一种。
+            rankingArtifact.kind,
+            revisedRankingPath,
+            revisedRankingContent,
+            "application/json",
+            rankingArtifact.schemaVersion ?? "video-factory/asset-ranking-v1",
+            planningNodeId,
+            [rankingArtifact.id, draft.reviewArtifactId],
+            "human-scene-resource-revision-v1",
+            "Creator-requested reselection among this scene's already-reviewed candidates; no new Provider call was made.",
+            rankingArtifact.producer?.attempt ?? 1,
+          ),
+          jsonArtifact(
+            "scene_resource_revision_request",
+            revisionRequest,
+            "video-factory/scene-resource-revision-v1",
+            planningNodeId,
+            [rankingArtifact.id, draft.reviewArtifactId],
+          ),
+        ],
+        // 原排序留在版本里：候选搜索与排序是那次规划的证据快照，人工改选是另立一件，
+        // 与被改的那一版并列可查，而不是把原稿覆盖掉。
+        retainedArtifactIds: planningVersion.artifactIds,
+        invalidateDescendantNodeIds: invasiveNodeIds,
+        expectedVersionId: planningVersion.id,
+        schemaVersion: planningVersion.schemaVersion,
         decision: {
           interventionId: finalIntervention.id,
           action: "request_changes",
@@ -11129,6 +11351,99 @@ async function localizeVisualReviewReport(
       }
       return finding;
     }),
+  };
+}
+
+/**
+ * 素材节点认的语义合格线，与 Python 侧 `stock_assets.MIN_MODEL_SEMANTIC_SCORE` 同值。
+ * 两边必须一致：这里判断"还有没有合格候选可换"，那边决定"换过去的候选会不会被筛掉"。
+ */
+const MIN_STOCK_CANDIDATE_SEMANTIC_SCORE = 40;
+
+interface RankedStockCandidate {
+  entry: Record<string, unknown>;
+  index: number;
+  provider: string;
+  assetId: string;
+  rank: number;
+  locked: boolean;
+  semanticScore: number;
+}
+
+/**
+ * 把某一镜的下一名合格候选提到首位，返回改过的排序与这次换用的两端身份。
+ *
+ * 素材节点按排序依次取第一个能下载的候选，所以"换素材"就是改排序，不必动检索。
+ * 合格门槛与素材节点逐条对齐：排序来自模型时按语义分，否则只有锁定候选算数——
+ * 这条路径只在这个集合内部换，换不出一个系统本来就不会用的候选。
+ */
+export function advanceSceneCandidateRanking(
+  ranking: Record<string, unknown>,
+  scenePosition: number,
+): {
+  ranking: Record<string, unknown>;
+  replaced: { provider: string; assetId: string };
+  replacement: { provider: string; assetId: string };
+} {
+  const scenes = Array.isArray(ranking.scenes) ? ranking.scenes : undefined;
+  if (!scenes) throw new Error("Candidate ranking scenes must be an array.");
+  const scoresVerified = ranking.source === "model";
+  const sceneIndex = scenes.findIndex((value) => (
+    typeof value === "object" && value !== null && !Array.isArray(value)
+    && Number((value as Record<string, unknown>).scenePosition) === scenePosition
+  ));
+  if (sceneIndex < 0) throw new Error(`Candidate ranking has no entry for scene ${scenePosition}.`);
+  const scene = requireOutputRecord(scenes[sceneIndex], `candidate ranking scene ${scenePosition}`);
+  const candidates = Array.isArray(scene.candidates) ? scene.candidates : undefined;
+  if (!candidates) throw new Error(`Candidate ranking scene ${scenePosition} has no candidates.`);
+  const ordered: RankedStockCandidate[] = [];
+  candidates.forEach((value, index) => {
+    const entry = requireOutputRecord(value, `candidate ranking entry ${index}`);
+    const provider = typeof entry.provider === "string" ? entry.provider.trim() : "";
+    const assetId = typeof entry.assetId === "string" ? entry.assetId.trim() : "";
+    if (!provider || !assetId) return;
+    const rank = Number(entry.rank);
+    const locked = entry.locked === true;
+    const semanticScore = scoresVerified ? Number(entry.semanticScore ?? 0) : 0;
+    if (!locked && semanticScore < MIN_STOCK_CANDIDATE_SEMANTIC_SCORE) return;
+    ordered.push({
+      entry,
+      index,
+      provider,
+      assetId,
+      rank: Number.isFinite(rank) ? rank : Number.MAX_SAFE_INTEGER,
+      locked,
+      semanticScore,
+    });
+  });
+  ordered.sort((left, right) => (Number(right.locked) - Number(left.locked)) || (left.rank - right.rank));
+  if (ordered.length < 2) {
+    throw new Error(
+      `Scene ${scenePosition} has no second qualified candidate to switch to; `
+      + "rewrite this scene's narration or adjust the plan instead of taking an unreviewed asset.",
+    );
+  }
+  const replaced = ordered[0]!;
+  const replacement = ordered[1]!;
+  // 把换上的候选与其余候选按新次序重排名次，而不是只对调两个数值：
+  // 名次重复时对调等于没换，而名次是素材节点唯一的取舍依据。
+  const resequenced = [replacement, replaced, ...ordered.slice(2)];
+  const baseRank = replaced.rank;
+  const ranks = new Map(resequenced.map((item, offset) => [item.index, baseRank + offset]));
+  const revisedCandidates = candidates.map((value, index) => {
+    const rank = ranks.get(index);
+    if (rank === undefined) return value;
+    return { ...requireOutputRecord(value, `candidate ranking entry ${index}`), rank };
+  });
+  return {
+    ranking: {
+      ...ranking,
+      scenes: scenes.map((value, index) => (
+        index === sceneIndex ? { ...scene, candidates: revisedCandidates } : value
+      )),
+    },
+    replaced: { provider: replaced.provider, assetId: replaced.assetId },
+    replacement: { provider: replacement.provider, assetId: replacement.assetId },
   };
 }
 
