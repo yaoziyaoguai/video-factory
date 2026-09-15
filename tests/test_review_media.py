@@ -58,11 +58,17 @@ class ReviewMediaTest(unittest.TestCase):
                 manifest = json.loads(prepare_asset_review_media(
                     plan, root, executable_plan_path=executable_plan_path
                 ).read_text(encoding="utf-8"))
-            self.assertEqual(extracted, [(4, 24, 7000), (4, 24, 14000), (4, 24, 21000)])
-            self.assertEqual(
-                [frame["sourceTimecodeMs"] for frame in manifest["frames"]],
-                [7000, 14000, 21000],
-            )
+            # 只有这一场，整笔帧预算都归它；每一次取帧都必须绑定在可执行剪辑的源区间上。
+            self.assertEqual(len(extracted), 24)
+            self.assertEqual({(start, end) for start, end, _ in extracted}, {(4, 24)})
+            timecodes = [frame["sourceTimecodeMs"] for frame in manifest["frames"]]
+            self.assertEqual([timestamp for _, _, timestamp in extracted], timecodes)
+            self.assertEqual(timecodes, [
+                4417, 5250, 6083, 6917, 7750, 8583, 9417, 10250, 11083, 11917, 12750, 13583,
+                14417, 15250, 16083, 16917, 17750, 18583, 19417, 20250, 21083, 21917, 22750, 23583,
+            ])
+            self.assertEqual(timecodes, sorted(set(timecodes)))
+            self.assertEqual(manifest["sampling"]["mode"], "scene_sequence")
 
             plan.write_text(json.dumps({"scene_assets": [{
                 **scene_asset, "asset_key": "stale-master",
@@ -110,10 +116,24 @@ class ReviewMediaTest(unittest.TestCase):
                 manifest = json.loads(prepare_asset_review_media(plan, root).read_text(encoding="utf-8"))
 
             self.assertEqual(manifest["durationMs"], 2000)
-            self.assertEqual(extracted, [(4, 6, 4300), (4, 6, 5000), (4, 6, 5700)])
+            self.assertEqual(len(extracted), 24)
+            self.assertEqual({(start, end) for start, end, _ in extracted}, {(4, 6)})
             self.assertEqual(
-                [(frame["timestampMs"], frame["sourceTimecodeMs"]) for frame in manifest["frames"]],
-                [(300, 4300), (1000, 5000), (1700, 5700)],
+                [timestamp for _, _, timestamp in extracted],
+                [4042, 4125, 4208, 4292, 4375, 4458, 4542, 4625, 4708, 4792, 4875, 4958,
+                 5042, 5125, 5208, 5292, 5375, 5458, 5542, 5625, 5708, 5792, 5875, 5958],
+            )
+            timestamps = [frame["timestampMs"] for frame in manifest["frames"]]
+            timecodes = [frame["sourceTimecodeMs"] for frame in manifest["frames"]]
+            self.assertEqual(timecodes, [timestamp for _, _, timestamp in extracted])
+            self.assertEqual(timestamps, [
+                42, 125, 208, 292, 375, 458, 542, 625, 708, 792, 875, 958,
+                1042, 1125, 1208, 1292, 1375, 1458, 1542, 1625, 1708, 1792, 1875, 1958,
+            ])
+            # 两个时间码必须同时记录，并且差值恒等于这一场的源入点。
+            self.assertEqual(
+                [timecode - timestamp for timestamp, timecode in zip(timestamps, timecodes)],
+                [4000] * 24,
             )
 
     def test_source_review_extracts_only_frames_inside_the_selected_color_range(self):
@@ -133,7 +153,13 @@ class ReviewMediaTest(unittest.TestCase):
 
             manifest = json.loads(prepare_asset_review_media(plan, root).read_text(encoding="utf-8"))
 
-            self.assertEqual([frame["sourceTimecodeMs"] for frame in manifest["frames"]], [2300, 3000, 3700])
+            timecodes = [frame["sourceTimecodeMs"] for frame in manifest["frames"]]
+            self.assertEqual(timecodes, [
+                2042, 2125, 2208, 2292, 2375, 2458, 2542, 2625, 2708, 2792, 2875, 2958,
+                3042, 3125, 3208, 3292, 3375, 3458, 3542, 3625, 3708, 3792, 3875, 3958,
+            ])
+            # green 段是源 2.0 至 4.0 秒；采样点一个都不能越出这段可选范围。
+            self.assertTrue(all(2000 <= timecode < 4000 for timecode in timecodes))
             for frame in manifest["frames"]:
                 with Image.open(root / frame["path"]) as image:
                     red, green, blue = image.convert("RGB").resize((1, 1)).getpixel((0, 0))
@@ -200,8 +226,15 @@ class ReviewMediaTest(unittest.TestCase):
                 "video_factory.review_media._extract_frame_from_range", side_effect=extract
             ):
                 manifest = json.loads(prepare_asset_review_media(plan, root, script_path=script).read_text(encoding="utf-8"))
+            # 剪辑只用 2 秒，plan 里写的 10 秒不得成为采样范围的一部分。
             self.assertEqual(manifest["durationMs"], 2000)
-            self.assertEqual(timestamps, [300, 1000, 1700])
+            self.assertEqual(timestamps, [
+                42, 125, 208, 292, 375, 458, 542, 625, 708, 792, 875, 958,
+                1042, 1125, 1208, 1292, 1375, 1458, 1542, 1625, 1708, 1792, 1875, 1958,
+            ])
+            self.assertEqual(timestamps, sorted(set(timestamps)))
+            self.assertGreaterEqual(timestamps[0], 0)
+            self.assertLess(timestamps[-1], manifest["durationMs"])
 
     def test_pilot_video_uses_the_full_frame_budget_as_an_ordered_sequence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -241,6 +274,53 @@ class ReviewMediaTest(unittest.TestCase):
             self.assertEqual(manifest["frames"][0]["phase"], "opening")
             self.assertTrue(all(frame["phase"] == "middle" for frame in manifest["frames"][1:-1]))
             self.assertEqual(manifest["frames"][-1]["phase"], "closing")
+
+    def test_full_source_review_spends_the_whole_frame_budget_as_an_ordered_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "master.mp4"
+            video.write_bytes(b"test video")
+            plan = root / "asset_plan.json"
+            # 与真实主片同形：5 场、按 30fps 编译的帧数、总时长 24 秒。
+            plan.write_text(json.dumps({"scene_assets": [
+                {
+                    "scene_position": position,
+                    "duration_frames": duration_frames,
+                    "media_type": "video",
+                    "local_path": str(video),
+                }
+                for position, duration_frames in enumerate([135, 45, 135, 180, 225], start=1)
+            ]}), encoding="utf-8")
+
+            def extract(_video, _source_start, _source_end, timestamp, target):
+                Image.new("RGB", (320, 480), "blue").save(target, format="JPEG")
+
+            with patch("video_factory.review_media._probe_video", return_value={"duration": 10}), patch(
+                "video_factory.review_media._extract_frame_from_range", side_effect=extract
+            ):
+                manifest = json.loads(prepare_asset_review_media(plan, root).read_text(encoding="utf-8"))
+
+            frames = manifest["frames"]
+            self.assertEqual(len(frames), 24)
+            # 全片预检与试片共用同一套审片合同，预算不能只花一半：稀疏到采不到场内的
+            # 动作窗口时，审片只能报 not_observed，预检会在配音与渲染前停住主角片。
+            durations_ms = {position: round(frames_count * 1000 / 30) for position, frames_count in
+                            enumerate([135, 45, 135, 180, 225], start=1)}
+            for position in range(1, 6):
+                scene = sorted(
+                    (frame for frame in frames if frame["scenePosition"] == position),
+                    key=lambda frame: frame["sourceTimecodeMs"],
+                )
+                self.assertGreaterEqual(len(scene), 3, f"scene {position} lost its coarse coverage")
+                self.assertEqual(scene[0]["phase"], "opening")
+                self.assertEqual(scene[-1]["phase"], "closing")
+                # 场首到场尾之间不得留下超过 1/3 场长的空白窗口。
+                edges = [0, *(frame["sourceTimecodeMs"] for frame in scene), durations_ms[position]]
+                widest = max(right - left for left, right in zip(edges, edges[1:]))
+                self.assertLessEqual(
+                    widest, durations_ms[position] // 3, f"scene {position} still has a blind window"
+                )
+            self.assertEqual(manifest["sampling"]["mode"], "scene_sequence")
 
     def test_pilot_reviews_only_selected_materialized_scene_and_preserves_its_position(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -256,28 +256,17 @@ def prepare_asset_review_media(
     sample_counts = [1] * len(normalized_assets)
     remaining = max_frames - len(normalized_assets)
     video_indexes = [index for index, asset in enumerate(normalized_assets) if asset["mediaType"] == "video"]
-    if pilot_review:
-        while remaining > 0 and video_indexes:
-            advanced = False
-            for index in video_indexes:
-                if remaining == 0:
-                    break
-                if sample_counts[index] >= normalized_assets[index]["durationMs"]:
-                    continue
-                sample_counts[index] += 1
-                remaining -= 1
-                advanced = True
-            if not advanced:
+    # 全片预检与试片花的是同一笔帧预算，合同也一样：只要还有额度就逐场轮转补齐。
+    # 之前全片预检固定只加两轮（每场 3 帧），场内的动作窗口一个采样点都落不到，
+    # 审片只能如实报 not_observed，预检就会在配音与渲染前停住整条主片。
+    while remaining > 0 and video_indexes:
+        for index in video_indexes:
+            if remaining == 0:
                 break
-    else:
-        for _round in range(2):
-            for index in video_indexes:
-                if remaining == 0:
-                    break
-                sample_counts[index] += 1
-                remaining -= 1
+            sample_counts[index] += 1
+            remaining -= 1
 
-    sequence_sampling = pilot_review and any(count > 3 for count in sample_counts)
+    sequence_sampling = any(count > 3 for count in sample_counts)
 
     total_duration_ms = sum(asset["durationMs"] for asset in normalized_assets)
     output_dir = root / "asset_review_media"
