@@ -1,9 +1,0 @@
-{
-  "action": "discuss",
-  "commandId": "d2e8aa02-4b44-4788-bca9-c65ee6b6cd61",
-  "expectedRunRevision": 1,
-  "expectedReviewRevision": 2,
-  "stage": "treatment",
-  "baseDraftSha256": "2996c19cc652dfedb7acdac7fee4ea686c47a4a23cbbe5d8db14a76c952ecbe1",
-  "message": "按独立复核的修复指令处理这条阻断项。我作为操作员决定：本片不承诺使用同期环境声。\n\n理由：这条内容是创作边界声明（不拿别处的音效冒充现场记录），按角色指令它属于 soundPrinciples，\n不是 factual_support，也不应升级成 external_required 的核心依赖。流水线确实无法取得可核验的对应原片同期声。\n\n请这样改：\n1. 删除 evidenceRequirements 中 beatId=half_pause、claim 以「若画面中的脚步、车流或街区声被呈现为同期声」开头的那一条；\n2. 把「不虚构可听见的环境声」的边界并入 soundPrinciples，明确本片声音只用旁白与停顿节奏，不出现可听的环境同期声；\n3. 保留其余 beat、观众承诺、事实边界与已合格的声音原则不变，不要扩大改动范围。"
-}

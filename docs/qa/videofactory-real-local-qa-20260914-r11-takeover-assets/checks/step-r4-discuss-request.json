@@ -1,9 +1,0 @@
-{
-  "action": "discuss",
-  "commandId": "4c807cd1-0673-42e5-9805-29f558fd4627",
-  "expectedRunRevision": 3,
-  "expectedReviewRevision": 4,
-  "stage": "treatment",
-  "baseDraftSha256": "f2e884c664938743d5cf6d4f41e1cf40bde0df6d2bd21f206d6b1c572fd94817",
-  "message": "按独立复核的修复指令处理。复核给了二选一，我作为操作员明确选 B：接受\"纯旁白与停顿\"的声音方案，\n同时要求把\"这是对上游输入的偏离\"写在稿面上，而不是悄悄删掉上游要求。\n\n事实依据（已核实，不是推测）：\n1. 本片 providers.voice = macos-say-v1，只有旁白 TTS；currentRoleContract 已声明 musicTrack=false、soundEffectsTrack=false。\n2. 渲染器只把旁白音轨（或静音）接入成片，素材片源自带音频从不进入渲染。\n   因此复核给的 A 分支\"保留并核验素材原始同期声\"在当前流水线不可实现，不成立。\n\n请这样改（只改必要处，不要扩大范围）：\n1. 在 soundPrinciples 中保留\"本片不产出可听的环境同期声，也不以另配的脚步、车流或街区音效冒充现场记录\"的边界；\n2. 并在同一处明确写出：这是对上游 brief.visualPlan.strategy 中\"同期环境声\"一项的已知偏离，原因是流水线只支持旁白音轨。\n   偏离必须让读者在稿面上看得见，不能靠删除上游要求来消除冲突；\n3. 不得因此新增任何 external_required 依赖，也不得把该边界写成 factual_support；\n4. 其余 beat、观众承诺、视觉原则、事实边界保持不变。"
-}

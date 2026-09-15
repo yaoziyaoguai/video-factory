@@ -1,9 +1,0 @@
-=== 授权前 ===
-  run=awaiting_spend_approval revision=19
-  metered ¥17.00｜收据 2 笔｜已消耗授权 2 份
-  素材 attempt=attempt-2｜审片 attempt=attempt-4
-
-  当前需要处理: 现在需要你：确认画面
-  费用确认原文: 执行前费用确认 预计 ¥17.00，最高 ¥17.00 · 最多 1 次 镜头 1 · Seedance 视频生成 · Seedance 2.0 Mini · ¥5.00 镜头 2 · Seedance 视频生成 · Seedance 2.0 Mini · ¥5.00 镜头 3 · MiniMax 视频生成 · MiniMax H3 · ¥2.00 镜头 6 · Seedance 视频生成 · Seedance 2.0 Mini · ¥5.00 部分镜头的重试次数已达到你批准的上限，无法继续自动修复。 已批准 ¥17.00 已发生/在途 ¥17.00 本次方案最高需要 ¥17.00 既有成果已保留；追加只覆盖当前方案所需，授权额仍是上限。也可以调整方案，或先不继续。 调整方案 暂不继续
-  授权按钮数=0
-  没有可点的授权按钮，停止。
