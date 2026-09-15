@@ -3691,7 +3691,7 @@ describe("Studio client", () => {
     expect(screen.getAllByText("画面语义与导演方案不一致，应进入 人工补充素材 后再审。").length).toBeGreaterThan(0);
     expect(screen.queryByText(/manualReplacement/i)).not.toBeInTheDocument();
     expect(screen.getByText((_, element) => element?.textContent === "连续性 41")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "修改后再审" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "终止制作" })).toBeInTheDocument();
     const dualReview = screen.getByRole("region", { name: "双模型审片结果" });
     expect(within(dualReview).getByText("两者查看同一份成片证据")).toBeInTheDocument();
     expect(within(dualReview).getByText("GLM 发现开场画面没有兑现承诺。")).toBeInTheDocument();
@@ -4188,8 +4188,8 @@ describe("Studio client", () => {
     const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);
     const { rerender } = render(<RunWorkbench run={runDetail} decisionPending={false} onDecision={onDecision} />);
-    await user.click(screen.getByRole("button", { name: "打回" }));
-    expect(screen.getByRole("dialog", { name: "打回这条视频" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "终止制作" }));
+    expect(screen.getByRole("dialog", { name: "终止这条视频的制作" })).toBeInTheDocument();
 
     const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
     rerender(<RunWorkbench
@@ -4208,7 +4208,7 @@ describe("Studio client", () => {
       onDecision={onDecision}
     />);
 
-    expect(screen.queryByRole("dialog", { name: "打回这条视频" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "终止这条视频的制作" })).not.toBeInTheDocument();
     expect(screen.getByText("字幕需要精简")).toBeInTheDocument();
   });
 

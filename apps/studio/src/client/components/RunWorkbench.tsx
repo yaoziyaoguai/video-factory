@@ -350,8 +350,11 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                     <XCircle aria-hidden="true" size={17} />终止制作
                   </button>
                 </> : visualReviewRequiresRevision ? <>
-                  <button className="button button-primary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
-                    <RotateCcw aria-hidden="true" size={17} />修改后再审
+                  {/* 这一支原来写「修改后再审」，但它提交的是 reject——一个把这条视频当场终止的终态，
+                      没有任何返修会因此发生。想返修的人会点它，然后拿到一条停止制作的视频。
+                      现在按它的实际后果说话；要返修请用下面每条结论旁的返工入口。 */}
+                  <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
+                    <XCircle aria-hidden="true" size={17} />终止制作
                   </button>
                   <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("approve")}>
                     <Check aria-hidden="true" size={17} />仍要批准（说明理由）
@@ -366,7 +369,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                     <Check aria-hidden="true" size={17} />批准进入发布包
                   </button>
                   <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
-                    <XCircle aria-hidden="true" size={17} />打回
+                    <XCircle aria-hidden="true" size={17} />终止制作
                   </button>
                 </>}
               </div>
@@ -485,12 +488,13 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
         <div className="dialog-backdrop" role="presentation">
           <section ref={rejectDialogRef} className="reject-dialog" role="dialog" aria-modal="true" aria-labelledby="reject-title" tabIndex={-1}>
             <header className="dialog-header">
-              <div><p className="eyebrow">需要修改</p><h2 id="reject-title">打回这条视频</h2></div>
+              <div><p className="eyebrow">终态操作</p><h2 id="reject-title">终止这条视频的制作</h2></div>
               <button className="icon-button" type="button" onClick={closeRejectDecision} title="关闭"><X aria-hidden="true" size={19} /></button>
             </header>
+            <p className="agent-review-guidance">终止是终态：这条视频会停止制作，<strong>不会自动返修</strong>，也不会产出发布包。若只是某一镜不合适，请关掉这个窗口，用审片结论旁边的返工入口（换一版素材 / 改这一镜旁白 / 用已有镜头替换）处理。</p>
             <label className="field field-wide">
-              <span>打回原因</span>
-              <textarea value={rejectNote} onChange={(event) => setRejectNote(event.target.value)} placeholder="说明具体画面、节奏或内容问题" rows={4} data-dialog-initial-focus />
+              <span>终止原因</span>
+              <textarea value={rejectNote} onChange={(event) => setRejectNote(event.target.value)} placeholder="说明为什么这条视频不值得继续制作" rows={4} data-dialog-initial-focus />
             </label>
             <footer className="dialog-actions">
               <button className="button button-ghost" type="button" onClick={closeRejectDecision}>取消</button>
@@ -500,7 +504,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 disabled={!rejectNote.trim() || decisionPending || !decisionSnapshot}
                   onClick={() => decisionSnapshot && void onDecision({ action: "reject", note: rejectNote.trim(), ...decisionSnapshot })}
               >
-                <RotateCcw aria-hidden="true" size={17} />确认打回
+                <XCircle aria-hidden="true" size={17} />确认终止
               </button>
             </footer>
           </section>
