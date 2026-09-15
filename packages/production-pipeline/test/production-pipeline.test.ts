@@ -180,6 +180,84 @@ async function uncertainPaidVoiceFixture(prefix: string) {
   return { subject, worker, failed, failedVoice };
 }
 
+/** 让每一镜都成为 AI 导演选定的付费生成镜头，报价才有条目可谈。 */
+function generatedShotDirector(): pipeline.VisualDirectorAgent {
+  return {
+    id: "api-visual-director-v1",
+    plan: async (input) => ({
+      version: "video-factory/director-plan-v1",
+      requestedProfileId: "auto",
+      resolvedProfileId: "geometric-control",
+      profileRationale: "解释型内容需要统一、可控的生成镜头。",
+      visualBible: {
+        narrativeApproach: "用具体动作解释每一步。",
+        pacing: "均匀推进",
+        composition: "稳定中近景",
+        camera: "克制移动",
+        color: "自然暖色",
+        continuity: "保持同一时间与空间",
+        sound: "环境声优先",
+      },
+      shots: input.scenes.map((scene) => ({
+        scenePosition: scene.position,
+        narrativeRole: "解释",
+        authenticityPolicy: "illustrative",
+        preferredProviderId: "seedance-video-v1",
+        deliveryType: "generated_video",
+        alternativeProviderIds: [],
+        temporalBeats: [
+          `[0s-${scene.duration / 2}s] 建立主体`,
+          `[${scene.duration / 2}s-${scene.duration}s] 完成动作`,
+        ],
+        query: scene.visualPrompt,
+        generationPrompt: scene.visualPrompt,
+        rationale: "生成能力可以交付这个解释镜头。",
+        continuityNote: "保持同一色温。",
+        confidence: 0.8,
+        estimatedCostCny: 0,
+      })),
+    }),
+  };
+}
+
+function meteredSeedanceProvider(): pipeline.VisualAssetProviderCapability {
+  return {
+    id: "seedance-video-v1",
+    label: "Seedance",
+    billing: "metered",
+    modes: ["文生视频"],
+    deliveryTypes: ["generated_video"],
+    estimatedCnyPerClip: 2.4,
+    generative: true,
+  };
+}
+
+function seedanceRuntimeMetadata(): pipeline.ProductionProviderRuntimeMetadata {
+  return {
+    id: "seedance-video-v1",
+    label: "Seedance",
+    modelId: "seedance-v1",
+    transport: "http_api",
+    billing: "metered",
+    estimatedCostCny: 2.4,
+    maxAttempts: 1,
+  };
+}
+
+/**
+ * 素材执行器替身：只多回答一件事——哪些素材键本次执行不会新增花费。
+ * 其余能力沿用 FakeWorker，所以这条路径上"报价是否与执行一致"只由这一个信号决定。
+ */
+class ForecastingAssetWorker extends FakeWorker {
+  constructor(private readonly reusableQuoteItemIds: string[]) {
+    super();
+  }
+
+  async forecastPaidAssetSpend(): Promise<{ reusableQuoteItemIds: string[]; createCostCny: number }> {
+    return { reusableQuoteItemIds: this.reusableQuoteItemIds, createCostCny: 0 };
+  }
+}
+
 class GeneratedScriptWorker extends FakeWorker {
   override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
     const response = await super.run(request);
@@ -7761,6 +7839,63 @@ describe("ProductionPipeline", () => {
       { id: "scene-2", label: "镜头 2", providerId: "seedance-video-v1", modelId: "seedance-v1", estimatedCostCny: 2.4 },
     ]);
     assert.equal(Number.isFinite(plan.maxCostCny) && plan.maxCostCny > 0, true);
+  });
+
+  // 报价按脚本指纹判断复用：脚本因某一镜改动而换字节时，其余镜头的付费请求逐字未变，
+  // 却会被重新算成待买，撞上次数上限后闸门要求"改方案"——而执行期其实一分钱都不会花。
+  // 素材执行器能按逐条请求身份证明复用，宿主的报价必须采信这份证明。
+  it("quotes only the paid scenes the asset executor cannot prove it will reuse", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-spend-forecast-quote-"));
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new ForecastingAssetWorker(["scene-1"]),
+      directorAgent: generatedShotDirector(),
+      assetProviders: [meteredSeedanceProvider()],
+      providerRuntimeMetadata: [seedanceRuntimeMetadata()],
+    });
+
+    const paused = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    });
+
+    assert.equal(paused.status, "awaiting_spend_approval");
+    const plan = paused.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
+    assert.ok(plan);
+    assert.deepEqual(plan.items, [
+      { id: "scene-2", label: "镜头 2", providerId: "seedance-video-v1", modelId: "seedance-v1", estimatedCostCny: 2.4 },
+    ]);
+    assert.equal(plan.estimatedCostCny, 2.4);
+  });
+
+  it("runs a metered assets node without an approval when every paid scene is provably reused", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-spend-forecast-free-"));
+    const worker = new ForecastingAssetWorker(["scene-1", "scene-2"]);
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+      directorAgent: generatedShotDirector(),
+      assetProviders: [meteredSeedanceProvider()],
+      providerRuntimeMetadata: [seedanceRuntimeMetadata()],
+    });
+
+    const run = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    });
+
+    // 没有东西要买，就不该停在授权上：这正是操作员遇到的假阳性阻断。
+    assert.equal(run.status, "needs_human");
+    const assets = run.nodeRuns.find((node) => node.nodeId === "assets");
+    assert.notEqual(assets?.status, "awaiting_spend_approval");
+    assert.equal(assets?.spendPlan, undefined);
+    const paidCall = worker.calls.find((call) => call.capability === "asset.prepare");
+    assert.ok(paidCall);
+    assert.equal((paidCall.parameters as Record<string, unknown>).maxCostCny, 0);
   });
 
   it("quotes only changed paid scenes when a rework can carry the current source master", async () => {

@@ -3001,6 +3001,56 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.deepEqual(plan.generation.actualModelIds, ["seedance-video-v1"]);
   });
 
+  // 花费报价与执行期必须认同同一件事。换素材会改动脚本文件的字节，但其余镜头的已解析请求
+  // 逐字未变——按脚本指纹判断复用会把它们全部重新算成待买，正是操作员遇到的假阳性阻断。
+  // 这条用例证明预测只认请求身份，不认"脚本文件变没变"。
+  it("forecasts zero new spend for a paid scene whose resolved request identity did not change", async () => {
+    const harness = await routedSpendForecastHarness();
+    const first = await harness.subject.run(routedWorkerRequest(
+      harness.scriptPath, harness.directorPlanPath, path.join(harness.nodeDirectory, "attempt-1"), 1, 8,
+    ));
+    assert.equal(first.status, "succeeded");
+    assert.equal(harness.creates.count, 1);
+
+    // 只改免费镜头的检索描述：付费镜 scene 2 的路由与已解析请求一个字节都没动。
+    await harness.writeScript("换一个免费图库检索词");
+
+    const forecast = await harness.forecast();
+    assert.ok(forecast, "预测不可用时必须退回保守报价，但这条用例要求它可用");
+    assert.deepEqual(forecast.reusableQuoteItemIds, ["scene-2"]);
+    assert.equal(forecast.createCostCny, 0);
+
+    // 执行期要与预测一致：换一个操作 id 重跑，不得再调用一次付费适配器。
+    const second = await harness.subject.run({
+      ...routedWorkerRequest(
+        harness.scriptPath, harness.directorPlanPath, path.join(harness.nodeDirectory, "attempt-2"), 1, 8,
+      ),
+      commandId: "command-routed-second",
+    });
+    assert.equal(second.status, "succeeded");
+    assert.equal(harness.creates.count, 1);
+    assert.equal(second.diagnostics?.actualCostCny, 0);
+    assert.equal(second.diagnostics?.meteredAttemptCount, 0);
+  });
+
+  // 反向用例：付费镜自己的请求身份变了，就必须重新计价——预测不能因为"台账里有这一镜"就免单。
+  it("keeps a paid scene in the spend quote once its resolved request identity changes", async () => {
+    const harness = await routedSpendForecastHarness();
+    const first = await harness.subject.run(routedWorkerRequest(
+      harness.scriptPath, harness.directorPlanPath, path.join(harness.nodeDirectory, "attempt-1"), 1, 8,
+    ));
+    assert.equal(first.status, "succeeded");
+    assert.equal(harness.creates.count, 1);
+
+    // 改这一镜的导演执行描述：编译后的提示词与输入指纹随之改变。
+    await harness.writeDirectorPlan("中式早餐特写；镜头更贴近杯口");
+
+    const forecast = await harness.forecast();
+    assert.ok(forecast, "预测不可用时必须退回保守报价，但这条用例要求它可用");
+    assert.deepEqual(forecast.reusableQuoteItemIds, []);
+    assert.equal(forecast.createCostCny, 3.5);
+  });
+
   it("rejects a successful asset plan that does not exactly cover the script scenes", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-incomplete-plan-"));
     const scriptPath = path.join(root, "script.json");
@@ -4512,6 +4562,87 @@ function routedWorkerRequest(
       maxCostCny,
     },
     outputDir,
+  };
+}
+
+/**
+ * 花费报价预测的确定性场景：一个免费镜 + 一个付费生成镜，台账目录与生产一致
+ * （outputDir 是 <node>/attempt-N，节点台账在 <node>/.generation-operations）。
+ * writeScript 改免费镜字节，writeDirectorPlan 改付费镜的执行描述——两者对报价的含义不同。
+ */
+async function routedSpendForecastHarness() {
+  const root = await mkdtemp(path.join(tmpdir(), "vf-spend-forecast-"));
+  const scriptPath = path.join(root, "script.json");
+  const directorPlanPath = path.join(root, "director_plan.json");
+  const nodeDirectory = path.join(root, "nodes", "assets");
+  const creates = { count: 0 };
+  const scriptOf = (stockPrompt: string) => ({ scenes: [
+    { position: 1, duration: 5, visual_strategy: "stock", visual_prompt: stockPrompt },
+    { position: 2, duration: 5, visual_strategy: "generated", visual_prompt: "热气升起的食物特写" },
+  ] });
+  const directorPlanOf = (generationPrompt: string) => ({
+    version: "video-factory/director-plan-v1",
+    shots: [{
+      scenePosition: 1,
+      preferredProviderId: "pexels-stock-v1",
+      alternativeProviderIds: ["local-editorial-v1"],
+      query: "Chinese breakfast street food vertical",
+      generationPrompt: "",
+    }, {
+      scenePosition: 2,
+      preferredProviderId: "seedance-video-v1",
+      alternativeProviderIds: ["local-editorial-v1"],
+      query: "",
+      generationPrompt,
+      subject: "刚出锅的中式早餐",
+      environment: "清晨街边摊位",
+      visibleAction: "白色蒸汽从食物表面持续上升",
+      temporalBeats: [
+        { startSeconds: 0, endSeconds: 2, action: "镜头贴近食物表面" },
+        { startSeconds: 2, endSeconds: 5, action: "蒸汽上升并掠过侧逆光" },
+      ],
+      sourceInSeconds: 0,
+      shotSize: "微距特写",
+      camera: "缓慢推进后保持稳定",
+      lighting: "暖色自然侧逆光",
+      negativeConstraints: ["不出现文字水印"],
+      successCriteria: ["蒸汽持续可见"],
+    }],
+  });
+  await writeFile(scriptPath, JSON.stringify(scriptOf("城市早餐摊")));
+  await writeFile(directorPlanPath, JSON.stringify(directorPlanOf("中式早餐特写")));
+  const subject = new GenerativeAssetWorkerClient({
+    fallback: new LocalAssetWorker(),
+    adapters: [{
+      estimatedCnyPerClip: 3.5,
+      adapter: {
+        providerId: "seedance-video-v1",
+        generate: async () => {
+          creates.count += 1;
+          return {
+            providerId: "seedance-video-v1",
+            taskId: `task-forecast-${creates.count}`,
+            videoUrl: `https://example.com/forecast-${creates.count}.mp4`,
+          };
+        },
+      },
+    }],
+    resolveHost: resolvePublicHost,
+    fetch: async () => new Response("routed-video", { headers: { "content-type": "video/mp4" } }),
+  });
+  return {
+    subject,
+    scriptPath,
+    directorPlanPath,
+    nodeDirectory,
+    creates,
+    writeScript: (stockPrompt: string) => writeFile(scriptPath, JSON.stringify(scriptOf(stockPrompt))),
+    writeDirectorPlan: (generationPrompt: string) => writeFile(directorPlanPath, JSON.stringify(directorPlanOf(generationPrompt))),
+    forecast: () => subject.forecastPaidAssetSpend({
+      input: { scriptPath, directorPlanPath },
+      parameters: { providerId: "ai-shot-router-v1", provider: "ai-router" },
+      nodeDirectory,
+    }),
   };
 }
 

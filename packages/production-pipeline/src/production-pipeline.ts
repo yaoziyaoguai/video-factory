@@ -55,6 +55,8 @@ import {
   requiredGeneratedAssetDurationSecondsByRoot,
   reworkAffectedScenePositions,
   type PaidAssetLedgerItemSummary,
+  type PaidAssetSpendForecast,
+  type PaidAssetSpendForecastRequest,
   type VideoGenerationRuntimeProfile,
 } from "./generative-asset-worker.js";
 import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
@@ -102,6 +104,11 @@ import { summarizeProductionCapabilities, type ProductionCapabilities } from "./
 
 interface WorkerClient {
   run(request: Record<string, unknown>): Promise<WorkerResponse>;
+  /**
+   * 可选的花费报价预测：素材执行器据此声明"哪些素材键本次不会新增花费"。
+   * 不具备该能力的 worker（远端/旧实现）由宿主退回按脚本指纹的保守报价。
+   */
+  forecastPaidAssetSpend?(request: PaidAssetSpendForecastRequest): Promise<PaidAssetSpendForecast | undefined>;
 }
 
 const SCREENWRITER_PRODUCER_REQUEST_SCHEMA_VERSION = "video-factory/screenwriter-producer-request-v1";
@@ -4251,6 +4258,26 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
       : 1;
   }
 
+  /**
+   * 花费报价前先问执行器：这次还会不会真的向 provider 买新素材。
+   * 报价只按脚本指纹判断复用，任何脚本字节变化（例如"换一版这一镜素材"）都会让全部付费镜头
+   * 重新计入报价，于是四个一分钱都不用花的镜头被算成 ¥17 并撞上次数上限，闸门要求改方案——
+   * 而执行期其实全部按请求身份携带复用。这里把执行期的判据前移到报价，闸门才与事实一致。
+   */
+  private async forecastReusableAssetQuoteItemIds(
+    input: Record<string, unknown>,
+    context: WorkflowContext,
+  ): Promise<ReadonlySet<string>> {
+    const forecast = this.worker.forecastPaidAssetSpend;
+    if (!forecast) return new Set();
+    const result = await forecast.call(this.worker, {
+      input,
+      parameters: { ...this.config.parameters, providerId: this.id },
+      nodeDirectory: path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId),
+    }).catch(() => undefined);
+    return new Set(result?.reusableQuoteItemIds ?? []);
+  }
+
   async quoteSpend(input: Record<string, unknown>, context: WorkflowContext): Promise<SpendQuote> {
     await verifyExecutablePlanInput(input, context, this.runsRoot);
     if (this.capability !== "asset.prepare") {
@@ -4343,6 +4370,7 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
         items,
         [scriptPath, directorPlanPath],
         context,
+        await this.forecastReusableAssetQuoteItemIds(input, context),
       );
       if (reconciledItems.reconciliationRequired) {
         return { estimatedCostCny: 0, maxCostCny: 0, requiresAuthorization: false };
@@ -4421,6 +4449,11 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
     items: NonNullable<SpendQuote["items"]>,
     sourcePaths: string[],
     context: WorkflowContext,
+    /**
+     * 执行器按逐素材请求身份证明"本次不会新增花费"的素材键。它覆盖 sourceFingerprint 口径
+     * 覆盖不到的情形：脚本因某一镜改动而换字节时，其余镜头的付费请求逐字未变、本就不该重买。
+     */
+    provenReusableItemIds: ReadonlySet<string> = new Set(),
   ): Promise<{ items: NonNullable<SpendQuote["items"]>; reconciliationRequired: boolean }> {
     const sourceFingerprint = await paidAssetSourceFingerprint(sourcePaths);
     const ledgerItems = paidAssetLedgerLeaves(await inspectPaidAssetLedger(
@@ -4436,10 +4469,13 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
       && candidate.providerId === item.providerId
       && candidate.modelId === item.modelId
     ));
-    const reusableIds = new Set(items.filter((item) => matches(item).some((candidate) => (
-      candidate.state === "materialized" && reusableMaterializedItemIds.has(candidate.itemRequestId)
-      || candidate.state === "provider_succeeded" && Boolean(candidate.taskId) && Boolean(candidate.resultUrl)
-    ))).map((item) => item.id));
+    const reusableIds = new Set(items.filter((item) => (
+      provenReusableItemIds.has(item.id)
+      || matches(item).some((candidate) => (
+        candidate.state === "materialized" && reusableMaterializedItemIds.has(candidate.itemRequestId)
+        || candidate.state === "provider_succeeded" && Boolean(candidate.taskId) && Boolean(candidate.resultUrl)
+      ))
+    )).map((item) => item.id));
     const reconciliationRequired = items.some((item) => !reusableIds.has(item.id) && matches(item).some((candidate) => (
       candidate.state === "submitted"
       || candidate.state === "unknown"

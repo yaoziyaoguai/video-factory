@@ -239,6 +239,34 @@ export interface ResolvedAssetExecutionRequest {
   executionDigest: string;
 }
 
+/** 逐镜路由解析出的付费素材条目：执行期与花费报价预测共用的中间形态。 */
+interface DirectorGeneratedRoute {
+  route: RoutedShot;
+  scene: ScriptScene;
+  providerId: string;
+  modelId?: string;
+  binding: ResolvedAssetBinding;
+  requiredUseDurationSeconds: number;
+  resolvedRequest: ResolvedAssetExecutionRequest;
+}
+
+/**
+ * 花费报价预测的入参：nodeDirectory 让预测读到该节点历次操作的付费台账，
+ * 从而判断"这一镜会不会按输入身份被携带复用"。
+ */
+export interface PaidAssetSpendForecastRequest {
+  input: Record<string, unknown>;
+  parameters: Record<string, unknown>;
+  nodeDirectory: string;
+}
+
+export interface PaidAssetSpendForecast {
+  /** 本次执行不会新增花费的素材键（quoteItemId）。 */
+  reusableQuoteItemIds: string[];
+  /** 本次执行按台账推算的新增花费（元），口径与执行期的 createCostCny 相同。 */
+  createCostCny: number;
+}
+
 const KNOWN_METERED_ASSET_PROVIDERS = new Set([
   "seedream-image-v1",
   "seedance-video-v1",
@@ -352,7 +380,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       sourceFingerprint,
     ));
     const preparedOperation = scenes.length
-      ? await preparePaidAssetOperation(outputDir, operationId, baseItems)
+      ? await preparePaidAssetOperation(path.dirname(outputDir), operationId, baseItems)
       : undefined;
     const priorCreateAttemptsByQuoteItem = preparedOperation?.priorCreateAttemptsByQuoteItem ?? {};
     const estimatedCost = preparedOperation?.createCostCny ?? 0;
@@ -625,23 +653,29 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     };
   }
 
-  private async runDirectorRoutes(
-    request: Record<string, unknown>,
-    parameters: Record<string, unknown>,
-  ): Promise<WorkerResponse> {
-    const input = requiredRecord(request.input, "Worker input");
-    const scriptPath = requiredString(input.scriptPath, "scriptPath");
-    const directorPlanPath = requiredString(input.directorPlanPath, "directorPlanPath");
-    const outputDir = requiredString(request.outputDir, "outputDir");
-    const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0, 100_000);
-    const itemCreateBudgets = optionalNumberRecord(parameters.itemCreateBudgets, "itemCreateBudgets");
-    const script = requiredRecord(JSON.parse(await readFile(scriptPath, "utf8")), "Script");
+  /**
+   * 逐镜路由到付费素材请求的唯一构造点。执行期与花费报价预测都必须走这里：
+   * 报价要判断"这一镜会不会被携带复用"，只能拿执行期同一份已解析请求去比对，
+   * 各自算一遍迟早会分叉（一边说不用买、一边真去买）。
+   */
+  private async planDirectorRoutes(options: {
+    scriptPath: string;
+    directorPlanPath: string;
+    modelSelections: Record<string, string>;
+  }): Promise<{
+    script: Record<string, unknown>;
+    scenes: ScriptScene[];
+    directorPlan: Record<string, unknown>;
+    routedShots: RoutedShot[];
+    generatedRoutes: DirectorGeneratedRoute[];
+  }> {
+    const script = requiredRecord(JSON.parse(await readFile(options.scriptPath, "utf8")), "Script");
     const scenes = parseScenes(script.scenes);
     const sceneByPosition = new Map(scenes.map((scene) => [scene.position, scene]));
-    const directorPlan = requiredRecord(JSON.parse(await readFile(directorPlanPath, "utf8")), "Director plan");
+    const directorPlan = requiredRecord(JSON.parse(await readFile(options.directorPlanPath, "utf8")), "Director plan");
     const routedShots = parseRoutedShots(directorPlan.shots);
     assertExactScenePositions("Director plan", routedShots.map((shot) => shot.scenePosition), scenes);
-    const modelSelections = optionalStringRecord(parameters.modelSelections, "modelSelections");
+    const modelSelections = options.modelSelections;
     const byScenePosition = new Map(routedShots.map((route) => [route.scenePosition, route]));
     const requiredDurationByRoot = requiredGeneratedAssetDurationSecondsByRoot(scenes, routedShots);
     const generatedRoutes = routedShots.flatMap((route) => {
@@ -705,6 +739,83 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         ),
       }];
     }).sort((left, right) => left.scene.position - right.scene.position);
+    return { script, scenes, directorPlan, routedShots, generatedRoutes };
+  }
+
+  /**
+   * 花费报价预测：回答"这次执行到底会不会向 provider 发起新的付费 create"。
+   * 与执行期共用 planDirectorRoutes 与 preparePaidAssetOperation，因此结论与执行一致；
+   * 计价只读——不落账、不下载、不调用 provider。任何无法证明可复用的条目都留在报价里
+   * （fail closed：宁可多问一次授权，也不在报价里少算钱）。
+   * 预测用的操作 id 是合成值，因此本次操作自己的历史台账也会参与比对：对一次新的节点执行，
+   * 这正是执行期会发生的事。
+   */
+  async forecastPaidAssetSpend(request: PaidAssetSpendForecastRequest): Promise<PaidAssetSpendForecast | undefined> {
+    if (optionalString(request.parameters.providerId) !== "ai-shot-router-v1") return undefined;
+    const scriptPath = optionalString(request.input.scriptPath);
+    const directorPlanPath = optionalString(request.input.directorPlanPath);
+    if (!scriptPath || !directorPlanPath) return undefined;
+    const operationId = "spend-forecast";
+    try {
+      const modelSelections = optionalStringRecord(request.parameters.modelSelections, "modelSelections");
+      const { script, directorPlan, generatedRoutes } = await this.planDirectorRoutes({
+        scriptPath,
+        directorPlanPath,
+        modelSelections,
+      });
+      if (generatedRoutes.length === 0) return { reusableQuoteItemIds: [], createCostCny: 0 };
+      const sourceFingerprint = await paidAssetSourceFingerprint([scriptPath, directorPlanPath]);
+      const baseItems = generatedRoutes.map(({ scene, binding, resolvedRequest }) => createPaidAssetOperationItem(
+        operationId,
+        scene,
+        "ai-shot-router-v1",
+        resolvedRequest,
+        binding,
+        sourceFingerprint,
+      ));
+      const reworkCarryForwardItems = await findReworkCarryForwardItems({
+        ...(this.options.runsRoot ? { runsRoot: this.options.runsRoot } : {}),
+        input: request.input,
+        currentScript: script,
+        currentDirectorPlan: directorPlan,
+        modelSelections: Object.fromEntries(generatedRoutes.map(({ providerId, binding }) => (
+          [providerId, binding.modelId ?? providerId]
+        ))),
+      });
+      const prepared = await preparePaidAssetOperation(
+        request.nodeDirectory,
+        operationId,
+        baseItems,
+        reworkCarryForwardItems,
+      );
+      return {
+        reusableQuoteItemIds: prepared.items
+          .filter((item) => prepared.existing || item.carriedForwardFromItemRequestId !== undefined)
+          .map((item) => item.quoteItemId),
+        createCostCny: prepared.createCostCny,
+      };
+    } catch {
+      // 预测本身不可得时退回原有报价口径，由花费闸门照常向操作员要授权。
+      return undefined;
+    }
+  }
+
+  private async runDirectorRoutes(
+    request: Record<string, unknown>,
+    parameters: Record<string, unknown>,
+  ): Promise<WorkerResponse> {
+    const input = requiredRecord(request.input, "Worker input");
+    const scriptPath = requiredString(input.scriptPath, "scriptPath");
+    const directorPlanPath = requiredString(input.directorPlanPath, "directorPlanPath");
+    const outputDir = requiredString(request.outputDir, "outputDir");
+    const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0, 100_000);
+    const itemCreateBudgets = optionalNumberRecord(parameters.itemCreateBudgets, "itemCreateBudgets");
+    const modelSelections = optionalStringRecord(parameters.modelSelections, "modelSelections");
+    const { script, scenes, directorPlan, routedShots, generatedRoutes } = await this.planDirectorRoutes({
+      scriptPath,
+      directorPlanPath,
+      modelSelections,
+    });
     const generatedRouteByPosition = new Map(generatedRoutes.map((entry) => [entry.scene.position, entry]));
     if (generatedRoutes.length) {
       const unavailableReview = this.pilotReviewUnavailable(request, parameters);
@@ -746,7 +857,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       ))),
     });
     const preparedOperation = generatedRoutes.length
-      ? await preparePaidAssetOperation(outputDir, operationId, baseItems, reworkCarryForwardItems)
+      ? await preparePaidAssetOperation(path.dirname(outputDir), operationId, baseItems, reworkCarryForwardItems)
       : undefined;
     const priorCreateAttemptsByQuoteItem = preparedOperation?.priorCreateAttemptsByQuoteItem ?? {};
     const estimatedCost = preparedOperation?.createCostCny ?? 0;
@@ -2633,7 +2744,7 @@ function createPaidAssetOperationItem(
 }
 
 async function preparePaidAssetOperation(
-  outputDir: string,
+  nodeDirectory: string,
   operationId: string,
   items: PaidAssetOperationItem[],
   reworkCarryForwardItems: PaidAssetOperationItem[] = [],
@@ -2645,7 +2756,9 @@ async function preparePaidAssetOperation(
   /** 历史 create 计数（按素材键）：跨操作叶子条目中真实发生 create 的次数（携带不计数）。 */
   priorCreateAttemptsByQuoteItem: Record<string, number>;
 }> {
-  const ledgerPath = generationLedgerPath(outputDir, operationId);
+  const ledgerPath = generationLedgerPathIn(nodeDirectory, operationId);
+  // 历次操作的台账都在同一个 .generation-operations 目录里：携带复用正是靠与它们比对。
+  const operationsDirectory = path.dirname(ledgerPath);
   try {
     const persisted = parsePaidAssetOperationLedger(JSON.parse(await readFile(ledgerPath, "utf8")), operationId);
     if (!paidOperationInputsMatch(persisted.items, items)) {
@@ -2656,16 +2769,38 @@ async function preparePaidAssetOperation(
       items: persisted.items,
       existing: true,
       createCostCny: 0,
-      priorCreateAttemptsByQuoteItem: await countPriorCreateAttempts(path.dirname(ledgerPath), operationId),
+      priorCreateAttemptsByQuoteItem: await countPriorCreateAttempts(operationsDirectory, operationId),
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 
-  const previousItems = paidAssetLedgerLeaves(
-    await previousPaidAssetItems(path.dirname(ledgerPath), operationId),
-  );
+  const previousItems = paidAssetLedgerLeaves(await previousPaidAssetItems(operationsDirectory, operationId));
   const priorCreateAttemptsByQuoteItem = countLocalCreateAttempts(previousItems);
+  const carriedItems = await carryForwardPaidAssetItems(operationId, items, previousItems, reworkCarryForwardItems);
+  return {
+    ledgerPath,
+    items: carriedItems,
+    existing: false,
+    createCostCny: roundMoney(carriedItems.reduce(
+      (sum, item) => sum + (item.carriedForwardFromItemRequestId ? 0 : item.estimatedCostCny),
+      0,
+    )),
+    priorCreateAttemptsByQuoteItem,
+  };
+}
+
+/**
+ * 携带复用的唯一判据：执行期落账与花费报价预测共用这一份实现。
+ * 判据只认素材请求身份（inputFingerprint）或可证明的引用链身份，不认"脚本文件没变过"——
+ * 单镜改素材会让脚本字节变化，但其余镜头的请求身份逐字未变，那些镜头本来就不该再买一次。
+ */
+async function carryForwardPaidAssetItems(
+  operationId: string,
+  items: readonly PaidAssetOperationItem[],
+  previousItems: readonly PaidAssetOperationItem[],
+  reworkCarryForwardItems: readonly PaidAssetOperationItem[] = [],
+): Promise<PaidAssetOperationItem[]> {
   const carriedItems: PaidAssetOperationItem[] = [];
   for (const item of items) {
     const previousCandidates = previousItems.filter((candidate) => (
@@ -2716,16 +2851,7 @@ async function preparePaidAssetOperation(
     }
     carriedItems.push(item);
   }
-  return {
-    ledgerPath,
-    items: carriedItems,
-    existing: false,
-    createCostCny: roundMoney(carriedItems.reduce(
-      (sum, item) => sum + (item.carriedForwardFromItemRequestId ? 0 : item.estimatedCostCny),
-      0,
-    )),
-    priorCreateAttemptsByQuoteItem,
-  };
+  return carriedItems;
 }
 
 /** 叶子条目内的 create 事实计数：携带条目是复用不计数，未携带且已发生 create 的计一次。 */
@@ -3320,8 +3446,9 @@ async function writeGenerationLedger(pathname: string, ledger: PaidAssetOperatio
   await writeJsonAtomically(pathname, ledger);
 }
 
-function generationLedgerPath(outputDir: string, operationId: string): string {
-  return path.join(path.dirname(outputDir), ".generation-operations", `${createHash("sha256").update(operationId).digest("hex")}.json`);
+/** 台账按节点（而非按 attempt）存放：跨 attempt 的携带复用正是靠同一目录的历史叶子比对。 */
+function generationLedgerPathIn(nodeDirectory: string, operationId: string): string {
+  return path.join(nodeDirectory, ".generation-operations", `${createHash("sha256").update(operationId).digest("hex")}.json`);
 }
 
 async function writeJsonAtomically(pathname: string, value: unknown): Promise<void> {
