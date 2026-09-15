@@ -24,9 +24,9 @@
     "typecheck:broker": "npm run typecheck --workspace @video-factory/codex-broker",
     "test": "npm run typecheck && npm run test:ts && npm run test:broker && npm run studio:test && npm run build && npm run test:package",
     "test:broker": "npm run build:pipeline && npm run test --workspace @video-factory/codex-broker",
-    "test:package": "node --test packages/*/test/*.test.mjs",
+    "test:package": "node --test --test-timeout=300000 packages/*/test/*.test.mjs",
     "test:e2e": "npm run build:core && VIDEO_FACTORY_E2E=1 node --test --import tsx packages/production-pipeline/test/e2e.real.test.ts",
-    "test:ts": "npm run build:core && node --test --import tsx packages/*/test/*.test.ts"
+    "test:ts": "npm run build:core && node --test --test-timeout=300000 --import tsx packages/*/test/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

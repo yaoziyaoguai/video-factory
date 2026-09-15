@@ -380,7 +380,8 @@ async function brokerWithExecutor(workspaceRoot: string, executor: BrokerTaskExe
 }
 
 async function waitForStopped(runPipeline: ProductionPipeline, runId: string) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  // 同上：等待预算按墙钟计，否则整门禁并发时固定的 100 次轮询撑不住流水线落定所需的时间。
+  for (const deadline = Date.now() + 30_000; Date.now() < deadline; ) {
     const run = await runPipeline.show(runId);
     if (run.status !== "running") return run;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -658,11 +659,10 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
         // accepted_unknown 也是"还没落定"：broker 此刻只是还没观察到终态，
         // 只等 running 会在负载高时提前退出，把还没落定的任务当成结论。
         const terminalTaskStates = ["completed_success", "completed_failure", "not_accepted", "conflict"];
-        for (
-          let attempt = 0;
-          !terminalTaskStates.includes(queried.taskRecovery?.taskState ?? "") && attempt < 50;
-          attempt += 1
-        ) {
+        // 按墙钟计预算：整门禁并发时每次查询都要等多出来的磁盘与 CPU 争用，
+        // 固定次数在负载下会缩水成几秒，从而把"还没落定"误判成结论。
+        for (const deadline = Date.now() + 30_000; Date.now() < deadline; ) {
+          if (terminalTaskStates.includes(queried.taskRecovery?.taskState ?? "")) break;
           await new Promise((resolve) => setTimeout(resolve, 10));
           queried = await studio.queryOriginalTextTask(failed.id);
         }
